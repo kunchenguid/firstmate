@@ -61,6 +61,11 @@
 #   escalated_epoch=
 #   surfaced_session=       live session token that last surfaced this
 #                           escalation; empty until then
+#   escalation_dismissed_epoch=
+#                           when a later session found the operator's keyed
+#                           close of this escalation; once set, the record is
+#                           neither reminded nor rescanned. Cleared when the
+#                           record escalates
 #   escalation_closed_epoch=
 #                           when the durable status decision opened by that
 #                           escalation was closed again (see the escalation
@@ -351,6 +356,7 @@ recovery_turn_seen_busy=0
 recovery_turn_completed_epoch=
 escalated_epoch=
 surfaced_session=
+escalation_dismissed_epoch=
 resolved_epoch=
 resolved_via=
 wrong_home_hits=0
@@ -1148,42 +1154,31 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
   return "$rc"
 }
 
-# The decision key of <escalation-line> while the parent status fold still
-# holds that exact decision open, else empty.
-_fm_pending_reply_open_escalation_key() {  # <status-file> <escalation-line>
-  local key note open_line open_key open_note
-  key=$(_fm_decision_key "$2") || return 0
-  note=$(status_line_note "$2")
-  while IFS= read -r open_line; do
-    [ -n "$open_line" ] || continue
-    open_key=${open_line%%$'\t'*}
-    [ "$open_key" = "$key" ] || continue
-    open_note=${open_line#*$'\t'}
-    open_note=${open_note#*$'\t'}
-    [ "$open_note" = "$note" ] || continue
-    printf '%s' "$key"
-    return 0
-  done <<EOF
-$(status_open_decisions "$1")
-EOF
-}
-
-# 0 when the escalation published for <record> is no longer open in the parent
-# status log, as after an operator fm-send --resolve-key pending-reply-<corr>.
-# The record itself stays escalated because only a correlated reply resolves it.
+# 0 when the operator dismissed this record's escalation: the parent channel
+# holds the resolved [key=pending-reply-<corr>] close fm-send --resolve-key
+# writes, after the escalation opened under that key. Nothing else dismisses,
+# so a legacy unkeyed escalation, any other resolved line, or a terminal line
+# that clears the whole fold leaves it unresolved and visible.
 fm_pending_reply_escalation_dismissed() {  # <record-path>
-  local rec=$1 parent_status escalation
+  local rec=$1 parent_status key line untimed seen=''
+  [ -z "$(fm_pending_reply_get "$rec" escalation_dismissed_epoch)" ] || return 0
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
-  [ -n "$parent_status" ] || return 1
-  escalation=$(fm_pending_reply_escalation_line "$parent_status" "$rec" \
-    "$(fm_pending_reply_get "$rec" corr_id)")
-  [ -n "$escalation" ] || return 1
-  [ -z "$(_fm_pending_reply_open_escalation_key "$parent_status" "$escalation")" ]
+  [ -n "$parent_status" ] && [ -f "$parent_status" ] || return 1
+  key=$(fm_pending_reply_escalation_key "$(fm_pending_reply_get "$rec" corr_id)")
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *"[key=$key]"*) ;; *) continue ;; esac
+    _fm_status_untimed "$line" untimed
+    case "$untimed" in
+      "blocked [key=$key]: "*) seen=open ;;
+      "resolved [key=$key]: pending-reply-resolved: "*) [ -z "$seen" ] || seen=dismissed ;;
+    esac
+  done < "$parent_status"
+  [ "$seen" = dismissed ]
 }
 
 _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
-  local state=$1 corr=$2 rec escalated closed parent_status escalation key=''
-  local now close_line close_rc _task _via
+  local state=$1 corr=$2 rec escalated closed parent_status escalation key note
+  local open_line open_key open_note now close_line close_rc _task _via
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || return 0
@@ -1195,21 +1190,31 @@ _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
   [ -n "$parent_status" ] || return 1
   escalation=$(fm_pending_reply_escalation_line "$parent_status" "$rec" "$corr")
   if [ -n "$escalation" ]; then
-    key=$(_fm_pending_reply_open_escalation_key "$parent_status" "$escalation")
-  fi
-  if [ -n "$key" ]; then
-    # This close is the home's own bookkeeping, written by the same resolve
-    # or tick that already consumed the reply, so it uses the guarded
-    # self-announced append (bin/fm-wake-lib.sh, sourced by this function's
-    # wrappers) and does not wake the home that wrote it; the escalation
-    # OPEN above stays a plain append because a new blocker must wake.
-    _task=$(fm_pending_reply_get "$rec" task_id)
-    _via=$(fm_pending_reply_get "$rec" resolved_via)
-    close_line="resolved [key=${key}]: $(fm_pending_reply_resolved_note "$_task" "$corr" "$_via")"
-    close_rc=0
-    fm_wake_status_append_self_announced "${parent_status%/*}" "$parent_status" "$close_line" \
-      2>/dev/null || close_rc=$?
-    [ "$close_rc" -ne 2 ] || return 1
+    key=$(_fm_decision_key "$escalation") || key=''
+    note=$(status_line_note "$escalation")
+    while IFS= read -r open_line; do
+      [ -n "$open_line" ] || continue
+      open_key=${open_line%%$'\t'*}
+      [ "$open_key" = "$key" ] || continue
+      open_note=${open_line#*$'\t'}
+      open_note=${open_note#*$'\t'}
+      [ "$open_note" = "$note" ] || continue
+      # This close is the home's own bookkeeping, written by the same resolve
+      # or tick that already consumed the reply, so it uses the guarded
+      # self-announced append (bin/fm-wake-lib.sh, sourced by this function's
+      # wrappers) and does not wake the home that wrote it; the escalation
+      # OPEN above stays a plain append because a new blocker must wake.
+      _task=$(fm_pending_reply_get "$rec" task_id)
+      _via=$(fm_pending_reply_get "$rec" resolved_via)
+      close_line="resolved [key=${key}]: $(fm_pending_reply_resolved_note "$_task" "$corr" "$_via")"
+      close_rc=0
+      fm_wake_status_append_self_announced "${parent_status%/*}" "$parent_status" "$close_line" \
+        2>/dev/null || close_rc=$?
+      [ "$close_rc" -ne 2 ] || return 1
+      break
+    done <<EOF
+$(status_open_decisions "$parent_status")
+EOF
   fi
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalation_closed_epoch "$now"
@@ -1298,6 +1303,7 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1
   fm_pending_reply_set "$rec" phase escalated || return 1
+  fm_pending_reply_set "$rec" escalation_dismissed_epoch '' || return 1
   # This session already receives the status wake. A later session reminds.
   fm_pending_reply_set "$rec" surfaced_session "$(fm_pending_reply_session_token "$state")" || return 1
   return 0
@@ -1445,14 +1451,19 @@ fm_pending_reply_remind_escalated() {  # <state-dir>
     [ -f "$rec" ] || continue
     case "$(basename "$rec")" in .*) continue ;; esac
     [ "$(fm_pending_reply_get "$rec" phase)" = escalated ] || continue
-    fm_pending_reply_escalation_dismissed "$rec" && continue
+    [ -z "$(fm_pending_reply_get "$rec" escalation_dismissed_epoch)" ] || continue
     open+=("$rec")
   done
   [ "${#open[@]}" -gt 0 ] || return 0
   token=$(fm_pending_reply_session_token "$state")
   [ -n "$token" ] || return 0
   for rec in "${open[@]}"; do
-    [ "$(fm_pending_reply_get "$rec" surfaced_session)" = "$token" ] || recs+=("$rec")
+    [ "$(fm_pending_reply_get "$rec" surfaced_session)" != "$token" ] || continue
+    if fm_pending_reply_escalation_dismissed "$rec"; then
+      fm_pending_reply_set "$rec" escalation_dismissed_epoch "$(fm_pending_reply_now)" || return 1
+      continue
+    fi
+    recs+=("$rec")
   done
   [ "${#recs[@]}" -gt 0 ] || return 0
   STATE=$state
