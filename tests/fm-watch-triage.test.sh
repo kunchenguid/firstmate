@@ -6120,6 +6120,44 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
+# The bug this regression covers: a due recheck (above) used to fire without
+# ever writing back to the task's OWN status log, so the original
+# `paused: ... until <time>` line stayed the newest event forever and a fresh
+# read of the log could not tell "still within the original wait" from
+# "already rechecked, awaiting a fresh look". handle_paused_stale now advances
+# that log with an idempotent `paused:` recheck note. This must hold three
+# things at once: the note becomes the newest event and keeps the wait
+# classified as paused (so the resurface cadence itself keeps working, see the
+# test above), the note never duplicates across repeated due polls, and
+# appending it never leaks into an unrelated ordinary "signal:" wake merely
+# because the status file's on-disk signature changed underneath it.
+test_paused_until_recheck_advances_the_task_status_log() {
+  local dir state statusf note_count
+  dir=$(paused_until_fixture until-recheck-note "$(( $(date +%s) - 30 ))" 60); state="$dir/state"
+  statusf="$state/until.status"
+  until_watch "$dir" 999
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "the due recheck did not fire"; }
+  grep -F 'recheck fired' "$statusf" >/dev/null \
+    || fail "the due recheck did not advance the task's own status log: $(cat "$statusf")"
+  last_status_line "$statusf" | grep -F 'recheck fired' >/dev/null \
+    || fail "the recheck note is not the newest status event: $(cat "$statusf")"
+  status_is_paused_or_captain_held "$(last_status_line "$statusf")" \
+    || fail "the recheck note broke pause classification for the still-ongoing wait"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the due recheck"
+
+  : > "$dir/watch.out"
+  until_watch "$dir" 999
+  if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
+    reap "$UNTIL_PID"
+    fail "the recheck note itself was re-surfaced or duplicated: $(cat "$dir/watch.out")"
+  fi
+  reap "$UNTIL_PID"
+  [ ! -s "$dir/watch.out" ] || fail "a stable recheck note produced an unexpected wake: $(cat "$dir/watch.out")"
+  note_count=$(grep -c -F 'recheck fired' "$statusf")
+  [ "$note_count" -eq 1 ] || fail "the recheck note duplicated across polls ($note_count copies): $(cat "$statusf")"
+  pass "a due recheck advances the task's own status log exactly once, without duplicating or leaking into an unrelated signal wake"
+}
+
 # CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2
 # churn-deferral regression. The rest of this file is not a 3.2 snapshot suite.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -6261,3 +6299,4 @@ test_afk_one_shot_never_hands_off_captain_held_under_away_record
 test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
 test_paused_until_that_passed_is_rechecked_before_the_cadence
+test_paused_until_recheck_advances_the_task_status_log
