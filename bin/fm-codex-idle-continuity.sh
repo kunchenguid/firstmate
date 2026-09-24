@@ -19,6 +19,13 @@
 # first one in the turn does not start a supervisor. A live supervisor is
 # left in place. This script never prints on the spawn path: the guard's
 # stdout and stderr are the hook output.
+#
+# The supervisor owns only the idle gap. bin/fm-watch-checkpoint.sh runs
+# `--handover` before it starts a watcher: that stops this home's supervisor,
+# matched by its recorded pid identity, and waits for the watcher lock to be
+# free, so the turn's checkpoint owns supervision until the next allowing
+# stop starts a fresh supervisor. An arm cycle that ends because another
+# owner took or ended the watcher is a handover, not a failure.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,6 +64,29 @@ reclaim_stale_lock() {
   supervisor_live && return 1
   rm -rf "$LOCK"
   return 0
+}
+
+stop_home_supervisor() {
+  local pid identity i
+  [ -f "$LOCK/pid" ] || return 0
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  IFS= read -r pid < "$LOCK/pid" || return 0
+  IFS= read -r identity < "$LOCK/pid-identity" || return 0
+  fm_pid_alive "$pid" || return 0
+  [ "$(fm_pid_identity "$pid" 2>/dev/null)" = "$identity" ] || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 150 ] && fm_pid_alive "$pid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  i=0
+  while [ "$i" -lt 50 ] && fm_pid_alive "$(cat "$STATE/.watch.lock/pid" 2>/dev/null)"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! fm_pid_alive "$pid" && ! fm_pid_alive "$(cat "$STATE/.watch.lock/pid" 2>/dev/null)"
 }
 
 ensure_supervisor() {  # <session-id>
@@ -100,12 +130,31 @@ actionable_text() {
   awk '/^(signal:|stale:|check:|heartbeat(:|$))/'
 }
 
+handed_over() {
+  awk '/^watcher: attached / { found = 1 }
+    /^watcher: FAILED - watcher cycle exited [0-9]+ / { if ($7 + 0 > 128) found = 1 }
+    END { exit !found }'
+}
+
+end_supervision() {
+  if [ -n "${arm_pid:-}" ]; then
+    kill -TERM "$arm_pid" 2>/dev/null || true
+    wait "$arm_pid" 2>/dev/null || true
+  fi
+  "$ARM" --stop >/dev/null 2>&1 || true
+  rm -rf "$LOCK"
+  exit 0
+}
+
 supervise() {
-  local owner arm_pid text fails=0
+  local owner arm_pid='' text fails=0
   IFS= read -r owner < "$LOCK/owner" || exit 0
   case "$owner" in ''|*[!0-9]*) exit 0 ;; esac
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  fm_pid_identity "$$" > "$LOCK/pid-identity" || { rm -rf "$LOCK"; exit 0; }
   printf '%s\n' "$$" > "$LOCK/pid"
-  trap '"$ARM" --stop >/dev/null 2>&1 || true; rm -rf "$LOCK"; exit 0' TERM INT
+  trap end_supervision TERM INT
   # shellcheck source=bin/fm-supervision-lib.sh
   . "$SCRIPT_DIR/fm-supervision-lib.sh"
   while kill -0 "$owner" 2>/dev/null; do
@@ -122,24 +171,26 @@ supervise() {
       sleep 0.5
     done
     wait "$arm_pid" || true
+    arm_pid=
     text=$(actionable_text < "$LOCK/arm.out" || true)
     if [ -n "$text" ]; then
       fails=0
       queue_text "$text" || true
       continue
     fi
-    fails=$((fails + 1))
-    [ "$fails" -lt 3 ] || break
+    if ! handed_over < "$LOCK/arm.out"; then
+      fails=$((fails + 1))
+      [ "$fails" -lt 3 ] || break
+    fi
     sleep 1
   done
-  "$ARM" --stop >/dev/null 2>&1 || true
-  rm -rf "$LOCK"
+  end_supervision
 }
 
-if [ "${1:-}" = "--supervise" ]; then
-  supervise
-  exit 0
-fi
+case "${1:-}" in
+  --supervise) supervise ;;
+  --handover) stop_home_supervisor; exit $? ;;
+esac
 
 PAYLOAD=$(cat 2>/dev/null || true)
 [ -n "$PAYLOAD" ] || exit 0

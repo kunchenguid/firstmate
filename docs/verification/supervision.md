@@ -514,7 +514,9 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 On 2026-09-24 with codex-cli 0.154.0, `bash tests/fm-codex-idle-continuity.test.sh` kept a single-shot source at one run and `OWNER none` while nothing was supervising, then recorded a second run and a queued actionable close only after an allowing stop with a live owner pid.
 `FM_CODEX_LIVE_E2E=1 tests/fm-codex-idle-continuity-live-e2e.test.sh` printed `ok - codex-cli 0.154.0 Stop re-armed an ownerless source across the idle boundary`.
 Codex's hook documentation for that version parses `async` and does not run asynchronous command hooks, so the supervisor is detached with `setsid --fork` and the Stop hook returns.
-The foreground checkpoint guard above is unchanged.
+`bash tests/fm-codex-idle-continuity.test.sh` also ran three turns in a row: each `bin/fm-watch-checkpoint.sh` stopped the idle supervisor and ended as a quiet bounded checkpoint instead of `watcher: already running`, and each following allowing stop started a fresh supervisor that owned the watcher again.
+A supervisor whose arm attached to a checkpoint's watcher re-armed its own watcher after that checkpoint ended.
+Against an arm that reported only attached closes or signal exits, the supervisor kept running past five cycles, because an exit it did not cause is a handover rather than a failure, and it still stopped after three `watcher: FAILED - no live watcher` closes.
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 

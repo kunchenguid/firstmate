@@ -78,7 +78,7 @@ Every other direct `FM_GUARD_GRACE` reader (`bin/fm-guard.sh`, the strict-watche
 
 - Claude registers two `Stop` hooks in `.claude/settings.json`, both anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
 - Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to `bin/fm-codex-idle-continuity.sh`, which forwards it to the shared guard.
-  On the allowing stop that hook also detaches one supervisor that runs `bin/fm-watch-arm.sh` until the Codex process exits.
+  On the allowing stop that hook also detaches one supervisor that runs `bin/fm-watch-arm.sh` until the next `bin/fm-watch-checkpoint.sh` takes over or the Codex process exits.
   The script header owns that idle path.
 - OpenCode listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.

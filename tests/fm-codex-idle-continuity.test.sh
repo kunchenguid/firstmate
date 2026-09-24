@@ -16,7 +16,7 @@ SRC="$TMP_ROOT/source.sh"
 QUEUE_BIN="$TMP_ROOT/queue.sh"
 CONT="$ROOT/bin/fm-codex-idle-continuity.sh"
 
-fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
+fail() { [ -z "${owner:-}" ] || kill "$owner" 2>/dev/null; printf 'not ok - %s\n' "$1" >&2; exit 1; }
 
 mkdir -p "$HOME_DIR/bin" "$HOME_DIR/state"
 git init -q "$HOME_DIR"
@@ -81,3 +81,126 @@ done
 wait "$owner" 2>/dev/null || true
 
 printf 'ok - codex idle continuity re-arms a single-shot source only for a live owner\n'
+
+# Later turns: a perpetual source keeps supervision needed without actionable
+# closes, so only handovers end the supervisor's arm cycles below.
+TURNS="$TMP_ROOT/turns"
+TSTATE="$TURNS/state"
+TLOCK="$TSTATE/.codex-idle-continuity.lock"
+PERPETUAL="$TMP_ROOT/perpetual.sh"
+mkdir -p "$TURNS/bin" "$TSTATE"
+git init -q "$TURNS"
+: > "$TURNS/AGENTS.md"
+printf '#!/bin/sh\nexec sleep 600\n' > "$PERPETUAL"
+chmod +x "$PERPETUAL"
+fm_test_track_procevent_home "$TURNS"
+FM_HOME="$TURNS" "$ROOT/bin/fm-procevent.sh" register lavish forever -- "$PERPETUAL" >/dev/null \
+  || fail "could not register the perpetual source"
+
+export FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=3
+
+wait_until() {  # <tries of 0.2s> <command...>
+  local tries=$1 i=0
+  shift
+  while [ "$i" -lt "$tries" ]; do
+    "$@" && return 0
+    sleep 0.2
+    i=$((i + 1))
+  done
+  return 1
+}
+pid_in_live() { local pid; pid=$(cat "$1" 2>/dev/null) && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; }
+supervisor_up() { pid_in_live "$TLOCK/pid"; }
+watcher_up() { pid_in_live "$TSTATE/.watch.lock/pid"; }
+supervisor_owns_watcher() {
+  supervisor_up && watcher_up \
+    && [ "$(ps -o ppid= -p "$(ps -o ppid= -p "$(cat "$TSTATE/.watch.lock/pid")" | tr -d ' ')" | tr -d ' ')" = "$(cat "$TLOCK/pid")" ]
+}
+allowing_stop() {
+  printf '%s' "$payload" | FM_ROOT_OVERRIDE="$TURNS" FM_HOME="$TURNS" \
+    FM_CODEX_IDLE_OWNER_PID="$owner" FM_CODEX_IDLE_QUEUE="$QUEUE_BIN" \
+    "$CONT" >/dev/null || fail "allowing stop failed"
+}
+checkpoint() {  # <seconds>; sets CP_RC
+  CP_RC=0
+  FM_ROOT_OVERRIDE="$TURNS" FM_HOME="$TURNS" "$ROOT/bin/fm-watch-checkpoint.sh" --seconds "$1" \
+    >"$TMP_ROOT/cp.out" 2>"$TMP_ROOT/cp.err" || CP_RC=$?
+}
+
+sleep 600 &
+owner=$!
+allowing_stop
+wait_until 50 supervisor_owns_watcher || fail "the first idle boundary did not start a supervised watcher"
+for turn in 1 2 3; do
+  checkpoint 2
+  case "$CP_RC" in 0|124) ;; *) fail "turn $turn checkpoint did not own its watcher (rc=$CP_RC): $(cat "$TMP_ROOT/cp.out" "$TMP_ROOT/cp.err")" ;; esac
+  [ ! -d "$TLOCK" ] || fail "turn $turn checkpoint left the idle supervisor running"
+  allowing_stop
+  wait_until 50 supervisor_owns_watcher || fail "turn $turn idle boundary did not restore continuity"
+done
+printf 'ok - each new turn checkpoint takes over from the idle supervisor and the next stop restores it\n'
+
+FM_ROOT_OVERRIDE="$TURNS" FM_HOME="$TURNS" "$CONT" --handover </dev/null || fail "handover of a live supervisor failed"
+[ ! -d "$TLOCK" ] || fail "handover left the idle supervisor running"
+checkpoint 4 &
+cp_pid=$!
+wait_until 50 watcher_up || fail "the checkpoint's watcher never took the lock"
+allowing_stop
+wait "$cp_pid"
+wait_until 50 supervisor_owns_watcher || fail "the supervisor attached to a checkpoint watcher did not re-arm after it closed"
+printf 'ok - a supervisor attached to a checkpoint watcher re-arms its own after the checkpoint ends\n'
+
+kill "$owner" 2>/dev/null || true
+wait_until 50 test ! -d "$TLOCK" || fail "supervisor survived its Codex owner"
+wait "$owner" 2>/dev/null || true
+
+# The failure budget, against an arm that reports only the documented status
+# lines: closes of a watcher another owner held never end continuity, while
+# closes with no watcher at all still do after three tries.
+STUB="$TMP_ROOT/stub"
+SSTATE="$STUB/state"
+SLOCK="$SSTATE/.codex-idle-continuity.lock"
+mkdir -p "$STUB/bin" "$SSTATE"
+git init -q "$STUB"
+: > "$STUB/AGENTS.md"
+: > "$SSTATE/demo.meta"
+for f in "$ROOT"/bin/*; do ln -s "$f" "$STUB/bin/${f##*/}"; done
+rm "$STUB/bin/fm-watch-arm.sh"
+cat > "$STUB/bin/fm-watch-arm.sh" <<EOF
+#!/bin/sh
+[ "\${1:-}" = --stop ] && exit 0
+printf 'x\n' >> '$STUB/arms'
+case "\$(cat '$STUB/mode')" in
+  handover) printf 'watcher: attached pid=1 (beacon 0s)\nwatcher: FAILED - cycle ended without an actionable reason\n' ;;
+  taken) printf 'watcher: started pid=1 (beacon fresh)\nwatcher: FAILED - watcher cycle exited 143 without an actionable reason\n' ;;
+  broken) printf 'watcher: FAILED - no live watcher with a fresh beacon\n' ;;
+esac
+exit 1
+EOF
+chmod +x "$STUB/bin/fm-watch-arm.sh"
+arms() { wc -l < "$STUB/arms" 2>/dev/null | tr -d ' ' || printf '0\n'; }
+stub_stop() {
+  printf '%s' "$payload" | FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" \
+    FM_CODEX_IDLE_OWNER_PID="$owner" "$STUB/bin/fm-codex-idle-continuity.sh" >/dev/null 2>&1 || true
+}
+at_least_arms() { [ "$(arms)" -ge "$1" ]; }
+
+sleep 600 &
+owner=$!
+for mode in handover taken; do
+  printf '%s\n' "$mode" > "$STUB/mode"
+  : > "$STUB/arms"
+  stub_stop
+  wait_until 75 at_least_arms 5 || fail "$mode closes ended idle continuity after $(arms) arm cycles"
+  pid_in_live "$SLOCK/pid" || fail "$mode closes stopped the supervisor"
+  FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" "$STUB/bin/fm-codex-idle-continuity.sh" --handover </dev/null \
+    || fail "handover of the $mode supervisor failed"
+done
+printf 'broken\n' > "$STUB/mode"
+: > "$STUB/arms"
+stub_stop
+wait_until 75 test ! -d "$SLOCK" || fail "arm failures with no watcher never ended the supervisor"
+[ "$(arms)" -eq 3 ] || fail "the supervisor gave up after $(arms) failed arms instead of 3"
+kill "$owner" 2>/dev/null || true
+wait "$owner" 2>/dev/null || true
+printf 'ok - handover closes never spend the failure budget, and real arm failures still do\n'
