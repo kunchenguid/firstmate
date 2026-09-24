@@ -80,6 +80,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 NM_TIMEOUT=${FM_FLOW_SNAPSHOT_NM_TIMEOUT:-10}
 GH_TIMEOUT=${FM_FLOW_SNAPSHOT_GH_TIMEOUT:-20}
+# Whole seconds or the default, the same guard every sibling collector applies.
+# A non-numeric value reaches `timeout` as its duration argument, where it fails
+# the call rather than the parse, so every read would report as unreadable.
+case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
+case "$GH_TIMEOUT" in ''|*[!0-9]*) GH_TIMEOUT=20 ;; esac
 
 WANT_CI=1
 ONLY_TASK=
@@ -209,10 +214,18 @@ TOON_AWK_PRELUDE='
     }
     # An optional column the running build does not declare reads as empty
     # rather than as whichever value happens to sit at that position.
+    #
+    # Control bytes are escaped, not just quotes and backslashes: a JSON string
+    # cannot carry one literally, and the pipeline fills last_activity with the
+    # tail of an agent log line, which is exactly where a tab arrives when a step
+    # logged diff context or any tab-separated output. One such cell made the
+    # whole document unparseable.
     function field(name,   v) {
       if (!col[name] || col[name] > n) return ""
       v = f[col[name]]
       gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v)
+      gsub(/\t/, "\\t", v); gsub(/\r/, "\\r", v); gsub(/\n/, "\\n", v)
+      gsub(/[\001-\010\013\014\016-\037]/, "", v)
       return v
     }
     # A row of the block being read, decided by INDENTATION rather than by its
@@ -475,18 +488,26 @@ row_common() {  # <task-json>
   [ "$FM_ROW_MODEL" != default ] || FM_ROW_MODEL=
   FM_ROW_EFFORT=$(fm_meta_get "$FM_ROW_META" effort)
   [ "$FM_ROW_EFFORT" != default ] || FM_ROW_EFFORT=
-  # The crew's current state as bin/fm-fleet-snapshot.sh published it, which is
-  # that document's own parse of bin/fm-crew-state.sh: generation-pinned, with
-  # the captured record and status overrides this reader does not have. Reading
-  # it again here would be a second parser of one line grammar and a second
-  # answer that can disagree with the fleet document inside a single frame.
-  FM_ROW_STATE=$(printf '%s' "$task" | jq -c '
+}
+
+# The crew's current state as bin/fm-fleet-snapshot.sh published it, which is
+# that document's own parse of bin/fm-crew-state.sh: generation-pinned, with the
+# captured record and status overrides this reader does not have. Reading it
+# again here would be a second parser of one line grammar and a second answer
+# that can disagree with the fleet document inside a single frame.
+#
+# Resolved by the one builder that carries it rather than in row_common, whose
+# job is the fields BOTH builders read: a pipeline agent states `state:null` and
+# never consults this, so computing it there spent a jq process per ship task on
+# a value nothing read.
+row_state() {  # <task-json>
+  printf '%s' "$1" | jq -c '
     if (.current_state | type) == "object" and ((.current_state.state // "") != "")
     then {ok: true, value: .current_state.state, source: (.current_state.source // ""),
           detail: (.current_state.detail // ""), reason: ""}
     else {ok: false, value: "", source: "", detail: "",
           reason: "the fleet snapshot published no current state for this task"}
-    end')
+    end'
 }
 
 agent_json() {  # <task-json>
@@ -735,9 +756,10 @@ agent_json() {  # <task-json>
 # leaving the renderer to infer it from the kind string. Its one substantive
 # fact is the state, which row_common takes from the fleet document.
 compact_json() {  # <task-json>
-  local task=$1
+  local task=$1 state
 
   row_common "$task"
+  state=$(row_state "$task")
 
   jq -n \
     --arg id "$FM_ROW_ID" \
@@ -755,7 +777,7 @@ compact_json() {  # <task-json>
     --arg now_iso "$NOW_ISO" \
     --argjson now_epoch "$NOW_EPOCH" \
     --argjson endpoint_alive "$FM_ROW_ENDPOINT_ALIVE" \
-    --argjson state "$FM_ROW_STATE" \
+    --argjson state "$state" \
     --argjson pr_num "$FM_ROW_PR_NUMBER" \
     --argjson ci "$CI_EMPTY" \
     '{

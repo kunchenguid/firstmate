@@ -186,7 +186,7 @@ run:
     test,completed,"two, commas, here",1,5,176257
     lint,completed,"he said \"go, then stop\"",1,7,999
   active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
-    review,running,2m30s,30s,"9s ago: log: still going","4242",second
+    review,running,2m30s,30s,"9s ago: log: col	valdone","4242",second
 TOON
 
 # The repository's own captured output from this emitter, served unchanged. The
@@ -533,9 +533,19 @@ assert_equals "0" \
 assert_equals "150000" \
   "$(agent ship-wide '[.active_steps[] | select(.step == "review")][0].active_ms')" \
   "a block carrying an extra column still reads its elapsed from the right one"
-assert_equals "9s ago: log: still going" \
-  "$(agent ship-wide '[.active_steps[] | select(.step == "review")][0].last_activity')" \
-  "and every column after the new one keeps its own name's value"
+# A JSON string cannot carry a control byte literally, and the pipeline fills
+# this cell with the tail of an agent log line, so one tab from a step that
+# logged tab-separated output made the whole document unparseable and this
+# agent's record collapsed to the placeholder. Asserted on the emitted JSON
+# rather than on the decoded value, because comparing embedded control bytes in
+# shell is what made the first version of this check unreadable.
+CTRL_CELL=$(agent ship-wide '[.active_steps[] | select(.step == "review")][0] | tojson')
+assert_contains "$CTRL_CELL" '\t' \
+  "a tab in a cell reaches the wire escaped rather than as a raw control byte"
+assert_contains "$CTRL_CELL" '\r' \
+  "and so does a carriage return"
+assert_contains "$CTRL_CELL" 'done' \
+  "with the cell's readable text intact either side of it"
 assert_equals "4242" \
   "$(agent ship-wide '[.active_steps[] | select(.step == "review")][0].agent_pid')" \
   "the process id is not the column that used to sit at its index"
