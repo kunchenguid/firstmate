@@ -139,6 +139,11 @@ def away_posture_operation():
 
 
 
+
+class AfkBodyFetchError(Exception):
+    pass
+
+
 def afk_record_field(name):
     contract = os.path.join(os.path.dirname(__file__), 'fm-afk-contract.sh')
     env = os.environ.copy()
@@ -198,6 +203,7 @@ def afk_email_context():
     if configured.returncode != 0 or not recipient:
         return None, True, False
     return recipient, True, False
+
 
 
 
@@ -331,6 +337,7 @@ def plain_body(msg):
 
 
 
+
         charset = part.get_content_charset() or 'utf-8'
         try:
             chunks.append(payload.decode(charset, 'replace'))
@@ -340,6 +347,7 @@ def plain_body(msg):
     if msg is not None:
         collect(msg)
     return '\n'.join(chunks)
+
 
 
 
@@ -634,7 +642,6 @@ def cmd_poll_list():
 
 
         afk_messages = []
-        afk_body_budget = MAX_AFK_BATCH_BODY_BYTES
         turn_path = os.environ.get('FM_MAIL_TURN', '')
         next_turn = None
         if cap == 1 and new_candidates and retry_candidates:
@@ -758,6 +765,7 @@ def cmd_poll_list():
                 out.append((uid, idate, fr, subj, 'degraded'))
                 new_emitted += 1
                 continue
+
 
 
 

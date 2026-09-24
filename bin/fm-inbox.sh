@@ -36,6 +36,7 @@
 
 
 
+
 #   fm-inbox.sh drain [--ack <id>...]
 #
 # `note --request-id` is the idempotent capture path: a repeat of the same
@@ -96,6 +97,7 @@
 
 
 
+
 #
 # Environment:
 #   FM_HOME              operational home whose state/ and data/ are used.
@@ -103,6 +105,7 @@
 # PRIVACY: `say` sends your audio and `ask` sends your question to Bedrock.
 # `note`, `announce`, `reply`, `receipts`, `ready`, `status`, `list`, `show`,
 # `identity` and `drain` make no network call at all.
+
 
 
 
@@ -1146,6 +1149,7 @@ PY
 
 
 
+
 cmd_list() {
   [ -d "$INBOX" ] || { printf '(inbox empty)\n'; return 0; }
   local any=0
@@ -1192,6 +1196,7 @@ case "${1:-}" in
   list)     shift; cmd_list ;;
   show)     shift; cmd_show "$@" ;;
   identity) shift; cmd_identity "$@" ;;
+
 
 
 
