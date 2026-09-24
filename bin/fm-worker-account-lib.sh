@@ -23,7 +23,8 @@
 # one absolute path to an existing readable, searchable directory. A home that
 # authenticates Claude only through environment credentials (Bedrock, Vertex,
 # Foundry, an API key, or an OAuth token) is refused until the file names
-# ordinary or a directory. There is no selection that keeps those credentials.
+# ordinary or a directory whose stored login is signed in, because the sign-in
+# check scrubs those credentials. There is no selection that keeps them.
 # Firstmate never copies credentials or changes a global login.
 #
 # A Pi root can hold several provider identities, so config/pi-account names
@@ -114,7 +115,7 @@ fm_worker_account_read() {
 # not pinnable. An absent pin file refuses: a Claude or Pi launch needs an
 # explicit selection. On refusal prints one error naming the file and returns 1.
 fm_worker_account_resolve() {
-  local harness=$1 config=$2 file cfg token rc declared root fallback
+  local harness=$1 config=$2 file cfg token rc declared root fallback want
   file=$(fm_worker_account_file "$harness") || return 0
   cfg="$config/$file"
   token=$(fm_worker_account_read "$harness" "$cfg")
@@ -124,10 +125,16 @@ fm_worker_account_resolve() {
   3)
     # shellcheck disable=SC2088  # The fallbacks are literal text for the refusal.
     case "$harness" in
-    claude) fallback='~/.claude with CLAUDE_CONFIG_DIR unset' ;;
-    *) fallback='~/.pi/agent' ;;
+    claude)
+      fallback='~/.claude with CLAUDE_CONFIG_DIR unset'
+      want="'ordinary' or one absolute account directory"
+      ;;
+    *)
+      fallback='~/.pi/agent'
+      want="'ordinary' or one absolute account directory on line 1 and the providers this home may spend on line 2"
+      ;;
     esac
-    echo "error: config/$file is absent, so this $harness launch has no explicit account selection: create $cfg with 'ordinary' or one absolute account directory (see docs/configuration.md \"Worker account pin\"); Firstmate does not spend an ambient or $fallback login when that file is absent" >&2
+    echo "error: config/$file is absent, so this $harness launch has no explicit account selection: create $cfg with $want (see docs/configuration.md \"Worker account pin\"); Firstmate does not spend an ambient or $fallback login when that file is absent" >&2
     return 1
     ;;
   4) return 1 ;;

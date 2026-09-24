@@ -137,6 +137,7 @@ test_absent_account_refuses_claude_and_pi() {
   out=$(spawn_ship acct-absent-pi --model gpt-5.5); rc=$?
   expect_code 1 "$rc" "a Pi spawn with no account file should refuse: $out"
   assert_refused_before_launch acct-absent-pi "$out" "config/pi-account is absent"
+  assert_contains "$out" "the providers this home may spend on line 2" "the Pi refusal should name the provider line the file needs"
   assert_contains "$out" "does not spend an ambient" "the Pi refusal should say the ambient login is not spent"
   pass "an absent account file refuses Claude and Pi launches"
 }

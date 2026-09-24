@@ -402,7 +402,7 @@ The [Claude adapter reference](../.agents/skills/harness-adapters/references/har
 ## Worker account pin (config/claude-account, config/pi-account)
 
 A home that mixes accounts for one runner, such as a work login and a personal one, can pin the account its own Claude and Pi workers launch on.
-A Claude, Pi, or Pi-signed launch with neither file refuses and names the file to create.
+A Claude, Pi, or Pi-signed launch without its own runner's file refuses and names the file to create, even when the other runner's file exists.
 `ordinary` is how a home explicitly selects the vendor default.
 An absent file is not that selection, and Firstmate does not spend an ambient login in its place.
 Both files are local and gitignored.
@@ -428,7 +428,8 @@ The check runs with only `HOME`, `PATH`, `TMPDIR`, `USER`, `LOGNAME`, and the pi
 A pinned Claude launch also unsets the environment credentials Claude ranks above a stored login, such as `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and the Bedrock and Vertex switches ([authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence)).
 Pi ranks a root's stored logins above environment variables, so a pinned Pi launch unsets nothing.
 Writing `ordinary` is that explicit selection of the vendor default, and it still unsets those environment credentials so they cannot outrank the selected login.
-A home that authenticates Claude only through environment credentials, such as Bedrock, Vertex, Foundry, `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN`, is refused until `config/claude-account` names `ordinary` or an absolute config directory.
+A home that authenticates Claude only through environment credentials, such as Bedrock, Vertex, Foundry, `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN`, is refused until `config/claude-account` names `ordinary` or an absolute config directory and that selected root holds a signed-in stored login.
+The sign-in check scrubs those credentials, so writing `ordinary` alone does not unblock a home with no stored login.
 That file has no value that keeps those credentials, and every accepted selection still unsets them.
 
 A malformed file, a root that is not a readable directory, or a signed-out account refuses the launch and names the file to fix; Firstmate never falls back to the ambient account and never changes a global login or copies a credential.
