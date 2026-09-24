@@ -596,6 +596,101 @@ test_sole_slot_record_still_tears_down() {
   pass "fm-teardown: a task that solely holds its slot still returns it"
 }
 
+# A home reached through a symlinked spelling (the /home -> /nobackup NFS
+# layout) must resolve to the same state directory as its physical path, so a
+# task's single record is never read twice and reported as its own collision.
+run_case_through_home() {  # <case> <id> <home>
+  local dir=$1 id=$2 home=$3
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" --force
+}
+
+test_symlinked_home_spelling_still_tears_down_its_sole_slot() {
+  local dir id=symlink-home-task
+
+  dir=$(make_case slot-symlinked-home)
+  mark_case_as_treehouse_pool "$dir"
+  ln -s "$dir/home" "$dir/home-alias"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  run_case_through_home "$dir" "$id" "$dir/home-alias" \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown through a symlinked home spelling failed: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "symlinked-home teardown left the task record"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "symlinked-home teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
+  pass "fm-teardown: a home reached through a symlinked path is not its own slot collision"
+}
+
+test_symlinked_home_spelling_still_refuses_a_real_collision() {
+  local dir id=symlink-stale other=symlink-live rc
+
+  dir=$(make_case slot-symlinked-home-collision)
+  mark_case_as_treehouse_pool "$dir"
+  ln -s "$dir/home" "$dir/home-alias"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  set +e
+  run_case_through_home "$dir" "$id" "$dir/home-alias" \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "teardown through a symlinked home spelling returned a contested slot"
+  assert_present "$dir/home/state/$id.meta" "contested symlinked-home teardown removed the stale record"
+  assert_present "$dir/home/state/$other.meta" "contested symlinked-home teardown removed the live record"
+  assert_present "$dir/worktree/sentinel" "contested symlinked-home teardown reset the shared slot"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "contested symlinked-home teardown reached the runtime: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$other" \
+    "contested symlinked-home refusal should name the other task"
+  pass "fm-teardown: a genuine slot collision still refuses through a symlinked home spelling"
+}
+
+# Resolving spellings must collapse only the SAME directory: a registered
+# Firstmate home reached through a symlinked path is a different home, and its
+# records must still be scanned for the slot this task would return.
+test_symlinked_registered_home_still_refuses_a_cross_home_collision() {
+  local dir id=symlink-reg-stale other=symlink-reg-live second_home rc
+
+  dir=$(make_case slot-symlinked-registration)
+  mark_case_as_treehouse_pool "$dir"
+  second_home="$dir/secondmate-home"
+  mkdir -p "$second_home/state" "$second_home/data"
+  ln -s "$second_home" "$dir/secondmate-alias"
+  printf '%s\n' "- mate - fixture (home: $dir/secondmate-alias; scope: test; projects: project; added 2026-01-01)" \
+    > "$dir/home/data/secondmates.md"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$second_home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] \
+    || fail "teardown returned a slot held by a home registered through a symlinked path"
+  assert_present "$dir/home/state/$id.meta" "symlinked-registration collision removed the stale record"
+  assert_present "$second_home/state/$other.meta" "symlinked-registration collision removed the live record"
+  assert_present "$dir/worktree/sentinel" "symlinked-registration collision reset the shared slot"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "symlinked-registration collision reached the runtime: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$other" \
+    "symlinked-registration refusal should name the task holding the slot"
+  pass "fm-teardown: a home registered through a symlinked path is still scanned for slot collisions"
+}
+
 test_recorded_endpoint_that_changed_directory_still_tears_down() {
   local dir id=moved-task
 
@@ -1385,6 +1480,9 @@ test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
+test_symlinked_home_spelling_still_tears_down_its_sole_slot
+test_symlinked_home_spelling_still_refuses_a_real_collision
+test_symlinked_registered_home_still_refuses_a_cross_home_collision
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down

@@ -87,6 +87,11 @@
 # this home or any locally registered Firstmate home may name the same live path
 # in its worktree= or home=. One live path with two task records is the reuse
 # collision itself, whichever record is stale.
+# Records are matched by identity - the state directory's physical path plus the
+# record's own name - never by the spelling each was reached through, so one home
+# reached through two equivalent paths (a symlinked /home spelling beside its
+# physical target) stays ONE record instead of reading as a task colliding with
+# itself; require_exclusive_worktree_slot_record owns that comparison.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -2241,10 +2246,30 @@ teardown_live_slot_path() {
   canonical_existing_dir "$WT"
 }
 
+# One entry per state DIRECTORY, keyed by that directory's physical path so a
+# home reached through two equivalent spellings - a symlinked path such as
+# /home/<user>/work next to its physical /nobackup/<user>/work target - is
+# collected once instead of twice. TREEHOUSE_OWNER_STATE_KEYS[i] is the
+# canonical key of TREEHOUSE_OWNER_STATES[i], so the record scan below can name
+# each record it finds by identity rather than by the spelling it was reached
+# through. A directory that cannot be resolved keys as its literal path: it has
+# no records to scan anyway, and dropping it would silently narrow the scan.
+add_treehouse_owner_state() {  # <state-dir>
+  local state_dir=$1 key existing
+  key=$(canonical_existing_dir "$state_dir") || key=$state_dir
+  for existing in "${TREEHOUSE_OWNER_STATE_KEYS[@]+"${TREEHOUSE_OWNER_STATE_KEYS[@]}"}"; do
+    [ "$existing" != "$key" ] || return 0
+  done
+  TREEHOUSE_OWNER_STATES+=("$state_dir")
+  TREEHOUSE_OWNER_STATE_KEYS+=("$key")
+}
+
 collect_local_firstmate_states() {
   local record_state=$1 root home reg line child known existing i=0
   local -a homes
-  TREEHOUSE_OWNER_STATES=("$record_state")
+  TREEHOUSE_OWNER_STATES=()
+  TREEHOUSE_OWNER_STATE_KEYS=()
+  add_treehouse_owner_state "$record_state"
   root=$(fm_firstmate_root_home "$FM_HOME") || {
     echo "REFUSED: cannot resolve the root Firstmate home; nothing was changed" >&2
     return 1
@@ -2253,11 +2278,7 @@ collect_local_firstmate_states() {
   while [ "$i" -lt "${#homes[@]}" ]; do
     home=${homes[$i]}
     i=$((i + 1))
-    known=0
-    for existing in "${TREEHOUSE_OWNER_STATES[@]}"; do
-      [ "$existing" != "$home/state" ] || known=1
-    done
-    [ "$known" = 1 ] || TREEHOUSE_OWNER_STATES+=("$home/state")
+    add_treehouse_owner_state "$home/state"
     reg="$home/data/secondmates.md"
     [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
     [ -f "$reg" ] && [ ! -L "$reg" ] || {
@@ -2287,15 +2308,38 @@ collect_local_firstmate_states() {
   done
 }
 
+# The identity of a task record: its state directory's physical path plus the
+# record's own file name. Only the directory is resolved, so two records in one
+# directory, and one record name in two genuinely different directories, stay
+# distinct identities - the reuse collision this scan exists to catch. A record
+# whose directory cannot be resolved keys as its literal path, which can only
+# make the comparison stricter.
+task_record_identity() {  # <meta-path>
+  local record=$1 dir key
+  [ -n "$record" ] || return 1
+  dir=${record%/*}
+  [ "$dir" != "$record" ] || dir=.
+  key=$(canonical_existing_dir "$dir") || key=$dir
+  printf '%s/%s\n' "$key" "${record##*/}"
+}
+
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
-  local slot state_dir other other_id field other_path other_slot
+  local slot state_dir state_key other other_id field other_path other_slot
+  local record_identity i
   slot=$(canonical_existing_dir "$worktree") || return 0
+  # Compare records by identity, not by the path spelling each was reached
+  # through: a home reached through a symlinked spelling would otherwise read
+  # its own single record as a second task holding the same slot and refuse the
+  # task as a collision with itself.
+  record_identity=$(task_record_identity "$record_meta") || record_identity=$record_meta
   collect_local_firstmate_states "$record_state" || return 1
-  for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
+  for ((i = 0; i < ${#TREEHOUSE_OWNER_STATES[@]}; i++)); do
+    state_dir=${TREEHOUSE_OWNER_STATES[$i]}
+    state_key=${TREEHOUSE_OWNER_STATE_KEYS[$i]}
     for other in "$state_dir"/*.meta; do
       [ -f "$other" ] && [ ! -L "$other" ] || continue
-      [ "$other" != "$record_meta" ] || continue
+      [ "$state_key/${other##*/}" != "$record_identity" ] || continue
       other_id=$(basename "$other" .meta)
       for field in worktree home; do
         other_path=$(fm_meta_get "$other" "$field")
