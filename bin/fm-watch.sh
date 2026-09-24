@@ -1760,6 +1760,13 @@ task_captain_call_open() {  # <task>
   [ -n "$task" ] || return 1
   CAPTAIN_CALL_IDENTITY=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" \
     open "$task" --identity --include-parked 2>/dev/null) || return 1
+  case "$CAPTAIN_CALL_IDENTITY" in
+    parked:*)
+      case "$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null)" in
+        'state: parked '*'source: run-step'*) CAPTAIN_CALL_IDENTITY=; return 1 ;;
+      esac
+      ;;
+  esac
   return 0
 }
 
@@ -2949,9 +2956,15 @@ EOF
             printf '%s' "$h" > "$sf"
             triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $w"
           elif [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w" || exit 1
-            printf '%s' "$h" > "$sf"
-            wake "stale: $w"
+            STALE_WAIT_DECLARATION=
+            if captain_call_stale_bound "$key" "$task" && [[ "$CAPTAIN_CALL_IDENTITY" = parked:* ]]; then
+              printf '%s' "$h" > "$sf"
+            else
+              fm_wake_append stale "$w" "stale: $w" || exit 1
+              stale_wait_record "$key"
+              printf '%s' "$h" > "$sf"
+              wake "stale: $w"
+            fi
           fi
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's latest status event is captain-relevant - but that alone is not
