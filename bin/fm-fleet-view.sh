@@ -65,12 +65,23 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
   "Home: \(.fm_home)",
   "",
   "## Under Way",
-  (if (.tasks | length) == 0 then
-    "No live task metadata found."
+  (if ([.tasks[] | select(.retained_record != true)] | length) == 0 then
+    (if (.tasks | length) == 0 then "No live task metadata found."
+     else "No tasks currently classified as under way." end)
    else
     "| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |",
     "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-    (.tasks[] | task_row(.))
+    (.tasks[] | select(.retained_record != true) | task_row(.))
+   end),
+  "",
+  "## Retained execution records",
+  "Closed backlog items; endpoint and local-copy cleanup are not confirmed by closure.",
+  (if ([.tasks[] | select(.retained_record == true)] | length) == 0 then
+    "No retained closed records."
+   else
+    "| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    (.tasks[] | select(.retained_record == true) | task_row(.))
    end),
   "",
   "## Queued",

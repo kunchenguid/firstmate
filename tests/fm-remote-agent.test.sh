@@ -1278,6 +1278,57 @@ test_cancellation_and_retirement_authority() {
   pass "legacy version state remains readable through adoption, reconciliation, cancellation, and safe retirement"
 }
 
+# Exercise the real backlog CLI, including a close that landed before its
+# caller saw an error. Retry must preserve evidence and never resurrect work.
+test_retirement_pairs_backlog_and_preserves_failed_close() {
+  local home fakebin id=ida-close out real_tasks mode
+  command -v tasks-axi >/dev/null 2>&1 || { printf 'skip: remote backlog pairing needs tasks-axi\n'; return; }
+  real_tasks=$(command -v tasks-axi)
+  for mode in closed held interrupted; do
+    home=$(new_home "retire-$mode"); fakebin=$(make_fake_bytedcli "$home")
+    write_ida_config "$home"; new_task "$home" "$id"
+    printf 'backend = "markdown"\n' > "$home/.tasks.toml"
+    printf '# Tasks\n\n## In flight\n\n- [ ] %s - Remote research (kind: scout) (since 2026-09-24)\n\n## Queued\n\n## Done\n' "$id" > "$home/data/backlog.md"
+    : > "$home/sessions.tsv"
+    FM_IDA_FAKE_MODE=success dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail "retirement fixture dispatch failed"
+    wait_phase "$home" "$id" terminal-success || fail "retirement fixture did not complete"
+    printf 'decisions_reviewed=1\ndecision_keys=\n' >> "$home/state/$id.meta"
+    if [ "$mode" = held ]; then
+      TASKS_AXI_BACKEND=markdown tasks-axi hold "$id" --file "$home/data/backlog.md" --kind captain --reason 'Pending independent acceptance' >/dev/null || fail "hold fixture failed"
+    elif [ "$mode" = interrupted ]; then
+      cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+"${FM_REAL_TASKS:?}" "$@" || exit $?
+if [ "$1" = done ] && [ -f "${FM_CLOSE_INTERRUPT:?}" ]; then
+  rm "$FM_CLOSE_INTERRUPT"
+  exit 1
+fi
+SH
+      chmod +x "$fakebin/tasks-axi"
+      : > "$home/interrupt"
+      PATH="$fakebin:$BASE_PATH" TASKS_AXI_BACKEND=markdown FM_REAL_TASKS="$real_tasks" FM_CLOSE_INTERRUPT="$home/interrupt" FM_HOME="$home" \
+        "$RETIRE" "$id" > "$home/retire.out" 2> "$home/retire.err" && fail "lost close acknowledgement reported success"
+      assert_present "$home/state/$id.meta" "failed close lost execution metadata"
+      assert_present "$(state_file "$home" "$id")" "failed close lost terminal state"
+      assert_present "$home/data/$id/report.md" "failed close lost report"
+      assert_grep 'execution evidence retained' "$home/retire.err" "failed close lacked actionable diagnostic"
+    fi
+    PATH="$fakebin:$BASE_PATH" TASKS_AXI_BACKEND=markdown FM_REAL_TASKS="$real_tasks" FM_CLOSE_INTERRUPT="$home/interrupt" FM_HOME="$home" \
+      "$RETIRE" "$id" >/dev/null || fail "remote retirement/retry failed for $mode"
+    out=$(TASKS_AXI_BACKEND=markdown tasks-axi show "$id" --file "$home/data/backlog.md" --full)
+    if [ "$mode" = held ]; then
+      assert_contains "$out" 'state: queued' "retirement closed an independent captain call"
+      assert_contains "$out" 'hold_kind: captain' "retirement lost captain hold"
+    else
+      assert_contains "$out" 'state: done' "retirement left a stale in-flight row"
+    fi
+    assert_present "$home/data/$id/report.md" "retirement lost durable report"
+    assert_absent "$home/state/$id.meta" "retirement retained execution metadata"
+    assert_contains "$out" "data/$id/report.md" "retirement lost report link"
+  done
+  pass "remote retirement pairs closed/held backlog state and retries interrupted close without losing evidence"
+}
+
 test_aime_compatibility_and_local_unchanged() {
   local home fakebin out rc=0
   home=$(new_home compatibility); fakebin=$(make_fake_bytedcli "$home")
@@ -1375,6 +1426,7 @@ test_artifact_store_idempotency
 test_abandon_after_authoritative_zero_match
 test_pre_submission_unavailable_recovers_without_duplicate
 test_cancellation_and_retirement_authority
+test_retirement_pairs_backlog_and_preserves_failed_close
 test_aime_compatibility_and_local_unchanged
 test_remote_aime_dispatch_metadata
 printf '# fm-remote-agent.test.sh: all assertions passed\n'

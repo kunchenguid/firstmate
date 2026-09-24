@@ -10,6 +10,7 @@
 #   fm-remote-agent-ida.sh cancel <task-id> --authorize-provider-cancel
 #   fm-remote-agent-ida.sh abandon <task-id> --authorize-abandon
 #   fm-remote-agent-ida.sh retire <task-id>
+# Retirement's paired backlog transition is owned by fm-backlog-transition-lib.sh.
 #
 # New dispatches require config/ida-remote-agent, whose schema is owned by
 # fm-ida-remote-lib.sh, and always use region=sg. `dispatch` durably records the
@@ -53,6 +54,11 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-remote-agent-lib.sh"
 # shellcheck source=bin/fm-ida-remote-lib.sh
 . "$SCRIPT_DIR/fm-ida-remote-lib.sh"
+
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,/^set -u$/p' "$0" | sed 's/^# \{0,1\}//; $d'; exit 2; }
@@ -346,12 +352,15 @@ cmd_abandon() (
 )
 
 cmd_retire() {
-  local id=${1-} report source lock
+  local id=${1-} report source lock meta_lock
   [ "$#" -eq 1 ] || usage
   lock=$(fm_remote_task_lock_path "$id")
   (
     fm_lock_acquire_wait "$lock" || die "cannot lock iDA task"
     trap 'fm_lock_release "$lock"' EXIT
+    meta_lock=$(fm_meta_lock_path "$STATE/$id.meta") || die "cannot resolve task meta lock"
+    fm_lock_acquire_wait "$meta_lock" || die "cannot lock task metadata"
+    trap 'fm_lock_release "$meta_lock"; fm_lock_release "$lock"' EXIT
     fm_ida_state_load "$id" || die "iDA task state is missing or invalid"
     case "$REMOTE_STATE_PHASE" in terminal-success|terminal-failure|terminal-cancelled) ;; *) die "iDA task is not safely terminal: phase=$REMOTE_STATE_PHASE" ;; esac
     report=$(fm_remote_report_path "$id") || die "cannot resolve report path"
@@ -359,6 +368,8 @@ cmd_retire() {
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-decision-hold.sh" verify "$id" >/dev/null || die "iDA task decision completion gate has not passed"
     source=$(fm_remote_source_id ida "$id")
     "$SCRIPT_DIR/fm-procevent.sh" retire "$source" >/dev/null || die "cannot retire iDA process-event source"
+    fm_backlog_remote_retire "$CONFIG" "$DATA" "$id" \
+      || die "remote retirement backlog transition failed; execution evidence retained: $FM_BACKLOG_TRANSITION_ERROR"
     rm -f -- "$STATE/$id.meta" "$STATE/$id.status" "$STATE/$id.turn-ended" "$STATE/.$id.open-decisions-cursor"
     rm -rf -- "$(fm_remote_task_dir "$id")"
     printf 'retired: %s report=data/%s/report.md\n' "$id" "$id"

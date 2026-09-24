@@ -17,6 +17,11 @@
 #                        open captain call (bin/fm-captain-hold.sh `open`), so
 #                        cleanup never retires the captain's own question
 #   bin/fm-bootstrap.sh  replays whatever a crash left behind, THIS HOME ONLY.
+# Remote retirement closes (or retains) the backlog before removing its terminal
+# provider record, through fm_backlog_remote_retire. Its caller holds both the
+# provider lock and the task meta lock after terminal/report/decision preflight.
+# A failed close preserves the complete execution record for retry; a crash after
+# close can retain a terminal record but never an in-flight row without evidence.
 # bin/fm-fleet-snapshot.sh's classifier and bin/fm-secondmate-reconcile.sh's
 # cross-home nudge stay defense in depth, not the primary mechanism.
 #
@@ -896,6 +901,28 @@ fm_backlog_atomic_transition() {
     retain) fm_backlog_retain_transition "$@" ;;
     *) FM_BACKLOG_TRANSITION_ERROR="unknown backlog atomic transition $operation"; return 2 ;;
   esac
+}
+
+# Remote executors have no local worktree or destructive endpoint teardown.
+# Close first while all replay evidence still exists; never infer acceptance
+# or discard authority from a status line or report body here.
+fm_backlog_remote_retire() {  # <config-dir> <data-dir> <id>
+  local config=$1 data=$2 id=$3 rc=0
+  fm_backlog_transition_applies "$config" "$data" scout || rc=$?
+  case "$rc" in
+    0) ;;
+    1) printf 'notice: remote retirement skips automatic backlog transition: %s\n' "$FM_BACKLOG_TRANSITION_SKIP" >&2; return 0 ;;
+    *) return "$rc" ;;
+  esac
+  fm_backlog_row_probe "$data" "$id" || {
+    FM_BACKLOG_TRANSITION_ERROR=$FM_BACKLOG_ROW_ERROR
+    return 1
+  }
+  if [ "${FM_BACKLOG_ROW_STATE%% *}" != "done" ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
+    fm_backlog_retain "$data" "$id" --report "data/$id/report.md"
+  else
+    fm_backlog_done "$data" "$id" --report "data/$id/report.md"
+  fi
 }
 
 fm_backlog_close_marker_path() {  # <state-dir> <id>

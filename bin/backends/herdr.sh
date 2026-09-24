@@ -3523,15 +3523,18 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
 # lingering `working` registration over a shell-only pane (an agent killed
 # mid-turn, issue #4115) reads `unknown`, never busy, so the recovery classifier
 # cannot report a shell-only pane as working. Only the busy case pays the extra
-# process read; idle and unknown are never trusted as busy by any consumer.
+# process read; an unreadable process view also reads unknown, never proof of
+# work. Idle and unknown are never trusted as busy by any consumer.
 fm_backend_herdr_busy_state() {  # <target>
   local verdict
   fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
   verdict=$(fm_backend_herdr_classify_agent_status \
     "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
-  if [ "$verdict" = busy ] \
-    && [ "$(fm_backend_herdr_pane_process_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = shell ]; then
-    verdict=unknown
+  if [ "$verdict" = busy ]; then
+    case "$(fm_backend_herdr_pane_process_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
+      agent|other) ;;
+      *) verdict=unknown ;;
+    esac
   fi
   printf '%s' "$verdict"
 }

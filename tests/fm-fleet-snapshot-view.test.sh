@@ -132,6 +132,35 @@ EOF
     "mode=ship"
 }
 
+test_closed_records_are_retained_without_hiding_work_or_decisions() {
+  local home fakebin out view bearings
+  home=$(make_home closed-records); write_fixture "$home"; fakebin=$(make_fakebin "$home")
+  fm_write_meta "$home/state/done-task.meta" "window=firstmate:fm-done-task" \
+    "worktree=$home/projects/retained" "kind=scout" "harness=codex"
+  printf 'needs-decision [key=keep-evidence]: unresolved ownership\ndone: explicitly stopped\n' > "$home/state/done-task.status"
+  # A closed backlog is not enough to hide positive current work.
+  sed '/^- \[ \] ship-task -/d' "$home/data/backlog.md" > "$home/data/backlog.tmp"
+  mv "$home/data/backlog.tmp" "$home/data/backlog.md"
+  printf -- '- [x] ship-task - Closed while still working (kind: ship) (done 2026-09-24)\n' >> "$home/data/backlog.md"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    (.tasks[] | select(.id == "done-task") | .retained_record == true and .hints.pending_decision == true)
+    and (.tasks[] | select(.id == "ship-task") | .retained_record == false and .current_state.state == "working")
+  ' >/dev/null || fail "closed retention hid active work or an unresolved decision: $out"
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$VIEW")
+  assert_contains "$view" '## Retained execution records' "retained resources lack a visible section"
+  assert_not_contains "${view%%## Retained execution records*}" '| done-task |' "closed record counted as underway"
+  assert_contains "${view#*## Retained execution records}" '| done-task |' "closed record disappeared"
+  bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-bearings-snapshot.sh" --json)
+  printf '%s' "$bearings" | jq -e '
+    (.in_flight | any(.id == "done-task") | not)
+    and (.in_flight | any(.id == "ship-task"))
+    and (.retained_records | any(.id == "done-task"))
+    and (.retained_records[] | select(.id == "done-task") | .open_decisions | any(.key == "keep-evidence"))
+  ' >/dev/null || fail "bearings lost the closed record, working contradiction, or decision: $bearings"
+  pass "closed records stay visible separately while active work and unresolved decisions retain attention"
+}
+
 test_empty_fleet_json() {
   local home out view
   home=$(make_home empty)
@@ -1062,4 +1091,5 @@ test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
+test_closed_records_are_retained_without_hiding_work_or_decisions
 test_view_renders_dead_secondmate_agent_status

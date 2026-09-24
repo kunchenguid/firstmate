@@ -1914,7 +1914,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
 
   # Phase B: backdate the idle timer past the threshold; the next run escalates.
-  # (The subsequent-sight timer path does not re-read the crew state.)
+  # The subsequent-sight timer path rechecks work before escalation.
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -1963,9 +1963,31 @@ test_nonterminal_stale_not_working_surfaced() {
   grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the immediate stale wake"
   grep -F "possible wedge" "$out" >/dev/null && fail "an immediate stopped-crew stale was mislabeled a wedge"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor was not advanced on surface"
-  [ ! -e "$state/.stale-since-$key" ] || fail "stale-since timer should not be set when surfacing immediately"
+  [ "$(cat "$state/.stale-since-$key")" = surfaced ] || fail "non-working stale must retain its surfaced classification, not a timer"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the immediate stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "immediate stale wake was not queued"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first stopped-worker wake"
+  # Re-arm beyond a short wedge threshold. The same unknown shell must stay
+  # reported once rather than become a freshly repaired working timer.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "unchanged stopped worker re-escalated after re-arm"; }
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "unchanged stopped worker started a wedge timer"; }
+  reap "$pid"
+  [ ! -s "$state/.wake-queue" ] || fail "stopped worker queued a duplicate wake"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the no-repeat watcher stop"
+  # A formerly working verdict with an expired timer must surface the state
+  # change once, then converge to the same no-repeat classification.
+  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a cached working verdict hid the newly stopped worker"; }
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "worker exit must surface for inspection: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null && fail "cached work still generated an active-worker escalation"
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
@@ -3603,8 +3625,11 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
 }
 
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
+  local FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case nonterminal-stale-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-quiet-timer"
   printf 'idle building output' > "$capture_file"
@@ -3658,8 +3683,11 @@ test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
 # loaded runner it outlives a fixed liveness budget, and a round reaped before it
 # finished reports a lost deferral instead of the deferral under test.
 test_wedge_escalation_deferred_while_worktree_is_written() {
+  local FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid wt back
   dir=$(make_case wedge-worktree-writes); state="$dir/state"; fakebin="$dir/fakebin"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-writing"; wt="$dir/wt"
   mkdir -p "$wt/src"
@@ -3673,8 +3701,8 @@ test_wedge_escalation_deferred_while_worktree_is_written() {
   printf '1\n' > "$state/.count-$key"
   # Already-classified hash with an idle window that opened 500s ago, so the very
   # first stale poll lands straight on the at-threshold wedge branch (this repeat
-  # path never re-reads crew state, so the worktree evidence is the only input
-  # that can change the outcome).
+  # path rechecks the same positive work verdict; worktree evidence is the
+  # only input varied between these two rounds).
   printf '%s' "$pane_hash" > "$state/.stale-$key"
   back=$(( $(date +%s) - 500 ))
   echo "$back" > "$state/.stale-since-$key"
@@ -3726,8 +3754,11 @@ test_wedge_escalation_deferred_while_worktree_is_written() {
 # and re-surfaces once per PAUSE_RESURFACE_SECS - the same bounded cadence a
 # declared pause uses - labeled as a recheck rather than a wedge.
 test_write_deferral_resurfaces_on_the_bounded_cadence() {
+  local FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid wt back
   dir=$(make_case wedge-worktree-resurface); state="$dir/state"; fakebin="$dir/fakebin"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
   window="test:fm-churn"; wt="$dir/wt"
   mkdir -p "$wt/src"
@@ -3821,8 +3852,11 @@ test_secondmate_home_supervision_churn_is_not_write_evidence() {
 # repaired: a long-finished chain would make the first deferral of the new window
 # re-surface immediately instead of after a fresh window.
 test_timer_repair_drops_a_finished_write_deferral_chain() {
+  local FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
   local dir state fakebin out capture_file window key pane_hash sig pid wt back
   dir=$(make_case wedge-write-chain-timer-repair); state="$dir/state"; fakebin="$dir/fakebin"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-chain-repair"; wt="$dir/wt"
   mkdir -p "$wt/src"

@@ -916,19 +916,29 @@ clear_write_tracking() {  # <window-key>
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
+# escalates once STALE_ESCALATE_SECS have elapsed. Recheck current work only
+# when repairing or expiring the timer; a cached working verdict cannot keep
+# escalating an exited worker. `surfaced` records a non-working stale already
+# reported for this hash and survives watcher re-arms without starting a timer.
+# Shared by
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
 # The worktree write probe runs ONLY here, inside the at-threshold branch that is
 # about to escalate: at most one bounded walk per window per STALE_ESCALATE_SECS,
 # never per poll.
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> [fresh-busy]
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason
+  local fresh_busy=${6:-0}
   since=$(cat "$since_file" 2>/dev/null || true)
+  if [ "$since" = surfaced ] && [ "$fresh_busy" = 1 ]; then since=; fi
   case "$since" in
+    surfaced) return 0 ;;
     ''|*[!0-9]*)
+      if [ "$fresh_busy" != 1 ] && ! crew_is_provably_working "$task"; then
+        surface_nonterminal_stale "$win" "$(cat "$STATE/.stale-$(window_key "$win")" 2>/dev/null || true)"
+        return 0
+      fi
       # Publish the repaired timer only after its old write-deferral chain is
       # gone, so observers cannot mistake a new idle window for the old chain.
       clear_write_tracking "$(window_key "$win")"
@@ -938,6 +948,10 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        if [ "$fresh_busy" != 1 ] && ! crew_is_provably_working "$task"; then
+          surface_nonterminal_stale "$win" "$(cat "$STATE/.stale-$(window_key "$win")" 2>/dev/null || true)"
+          return 0
+        fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0
@@ -1090,7 +1104,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
-  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task"
+  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task" 1
   return 1
 }
 
@@ -1333,6 +1347,9 @@ surface_nonterminal_stale() {  # <window> <hash>
   fi
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
+  if [ "$declared" -ne 0 ] && [ "$bounded" -ne 0 ]; then
+    printf 'surfaced\n' > "$STATE/.stale-since-$key"
+  fi
   clear_write_tracking "$key"
   if [ "$declared" -eq 0 ]; then
     : > "$STATE/.paused-$key"

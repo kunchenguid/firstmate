@@ -108,6 +108,7 @@ Do not delete a nonterminal cloud record, claim cancellation, or create a replac
 Terminal tasks retire through `bin/fm-task-retire.sh` only after task state binds a private single-link report and the ordinary captain-hold completion gate passes.
 A previously recorded `result-unavailable` task can cross that boundary only through the adapter's idempotent stopped terminal-unavailable preparation using its preserved authoritative observation or one bounded fresh readback and an already existing safe report.
 Retirement preserves the report and private quarantined capture evidence while removing volatile cloud state.
+The shared retirement procedure in [`cloud-research-worker`](../.agents/skills/cloud-research-worker/SKILL.md#retirement) owns backlog consistency and retry handling for that removal.
 
 Document mode does not activate the local Feishu document integration.
 AIME creates the requested document and returns its canonical URL, identity, and revision.

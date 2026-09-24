@@ -5,8 +5,10 @@
 #   fm-task-retire.sh <task-id> [fm-teardown arguments...]
 #
 # Legacy/local tasks delegate unchanged to fm-teardown.sh.
-# Remote tasks use provider-specific terminal/report/decision/source preflight
-# and never invoke local endpoint or worktree teardown. Legacy AIME
+# Remote tasks use provider-specific terminal/report/decision/source preflight,
+# pair backlog closure or retention before volatile-record removal, and preserve
+# the complete execution record when that transition cannot be confirmed.
+# They never invoke local endpoint or worktree teardown. Legacy AIME
 # executor=cloud-worker records remain supported without migration.
 set -u
 

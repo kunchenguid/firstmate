@@ -64,6 +64,9 @@
 #     supervision rather than this snapshot path.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
+#     retained_record separates a closed backlog row with no current working
+#     evidence from active inventory. It is not proof of endpoint cleanup or
+#     successful acceptance; endpoint evidence and open decisions stay visible.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
@@ -2059,7 +2062,8 @@ jq -n \
      fm_home:$fm_home,
      roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:$projects},
      backlog:$backlog,
-     tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
+     tasks:($tasks | map(. + {backlog:backlog_by_id(.id)}
+       | . + {retained_record:(.backlog.state == "done" and .current_state.state != "working")})),
      main_inventory:$main_inventory,
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
      secondmate_current:$secondmate_current,

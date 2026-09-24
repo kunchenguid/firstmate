@@ -134,5 +134,6 @@ A successful close response is only a request acknowledgement; do not claim canc
 Before retirement, require semantic acceptance of the report against the durable research goal, a provider-terminal state, a private single-link `data/<id>/report.md` bound by task state, a retired provider source, and the ordinary captain-hold completion gate.
 Once those conditions hold, retire completed research automatically without another routine approval.
 Retire through `bin/fm-task-retire.sh` so local tasks continue through `fm-teardown.sh` while remote tasks use provider-specific safety checks.
+For remote tasks, that boundary closes the backlog row, or preserves an independent captain hold, before deleting volatile execution records; if the backlog transition cannot be confirmed, keep all execution evidence and retry the same retirement instead of cleaning up by hand.
 Preserve the durable report and any provider-owned quarantine evidence.
 Never delete an ambiguous or nonterminal record, treat interruption as provider cancellation, bypass an open captain decision, or auto-resume explicitly cancelled or archived work.
