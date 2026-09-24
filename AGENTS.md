@@ -607,7 +607,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `bits-development` - load before beginning delivery for deployable ByteDance-internal BITS/PPE code, creating, reusing, or updating a BITS Dev Task, attaching projects, binding MRs or Change Cards, or triggering or monitoring BITS PPE, E2E, self-test, or quick-run pipelines.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
-- `technical-design-docs` - load before creating or materially revising an implementation-ready technical design or reviewable technical-solution research document.
+- `readable-documents` - load before creating or materially revising a substantial reader-facing technical document, including a design, solution study, explanation, guide, tutorial, reference, or report, and when repairing one that is hard to understand, too abstract, poorly structured, or missing clear examples or visuals.
 - `magibook-pyspark` - load before creating, reusing, checking, initializing, waiting on, or running a MagiBook PySpark analysis, writing a MagiBook init or query Cell, or orchestrating query Cells; it owns the inspect-ensure-wait-query lifecycle, the single-SparkContext safety model, and bounded query fan-out, while region defaults and cluster identifiers stay with the captain-preference owner.
 
 ## 14. Relay
