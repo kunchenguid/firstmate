@@ -1305,6 +1305,15 @@ remove_grok_turnend_auth() {
   rm -f -- "$path"
 }
 
+stop_jcode_bridge() {  # <state-dir> <id>
+  # jcode's busy wiring is a background PROCESS (bin/fm-jcode-busy-bridge.sh),
+  # not a file the harness reads, so teardown must STOP it. An orphaned bridge
+  # would keep polling the daemon forever and, worse, could publish against a
+  # task id a later spawn reuses. Stopped BEFORE retire_busy_state so it cannot
+  # write a record back after retirement.
+  fm_control_stop_jcode_bridge "$1" "$2"
+}
+
 remove_kimi_turnend_auth() {
   local state_dir=$1 id=$2 token_path token='' path
   token_path=$(fm_control_harness_turnend_token_path kimi "$state_dir" "$id") || return 1
@@ -3198,6 +3207,7 @@ cleanup_firstmate_home_children() {
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id" || return 1
     remove_kimi_turnend_auth "$sub_state" "$child_id" || return 1
+    stop_jcode_bridge "$sub_state" "$child_id" || return 1
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
     child_busy_gen=$(meta_value "$child_meta" busy_gen)
     if [ -z "$child_busy_gen" ]; then
@@ -3628,6 +3638,7 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
+stop_jcode_bridge "$STATE" "$ID" || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
@@ -3662,7 +3673,7 @@ status_retire_presentation_task "$STATE" "$ID" || exit 1
 fm_wake_queue_prune_task "$STATE" "$ID" "$T" 2>/dev/null || true
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
-  "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
+  "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.jcode-bridge.pid" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \

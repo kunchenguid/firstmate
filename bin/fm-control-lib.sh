@@ -63,7 +63,7 @@ fm_control_verb_allowed() {  # <verb>
 # section 4's verified-adapter list; an unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harnesses() {
-  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin
+  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin jcode
 }
 
 fm_control_harness_supported() {  # <harness>
@@ -90,6 +90,7 @@ fm_control_harness_family() {  # <recorded-harness>
     omp) printf 'omp' ;;
     agy) printf 'agy' ;;
     devin) printf 'devin' ;;
+    jcode) printf 'jcode' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -105,15 +106,16 @@ fm_control_harness_family() {  # <recorded-harness>
 
 # Which task kinds an adapter is verified to run. muse, gemini, rovo, agy, and devin
 # are crewmate/scout adapters only: none has a primary supervision protocol,
-# and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
-# plane asks this BEFORE it stops anything, so an incompatible relaunch target is
-# refused while the current agent is still running rather than after it has
-# been stopped.
+# and bin/fm-spawn.sh refuses a --secondmate launch on any of them. jcode is
+# verified as a primary but not as a secondmate, so it is refused the same way.
+# The control plane asks this BEFORE it stops anything, so an incompatible
+# relaunch target is refused while the current agent is still running rather
+# than after it has been stopped.
 fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    muse|gemini|rovo|agy|devin) [ "$kind" != secondmate ] || return 1 ;;
+    muse|gemini|rovo|agy|devin|jcode) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }
@@ -131,7 +133,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
     claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin) printf 'Escape' ;;
-    grok) printf 'C-c' ;;
+    grok|jcode) printf 'C-c' ;;
     *) return 1 ;;
   esac
 }
@@ -141,7 +143,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode|devin) printf '2' ;;
-    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) printf '1' ;;
+    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|jcode) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -205,7 +207,7 @@ fm_control_interrupt_hazard_signal() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|jcode) ;;
     *) return 1 ;;
   esac
 }
@@ -220,7 +222,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # rovo's TUI prints "Agent cancelled" on Escape, but for parity with
     # claude/cursor this stays 'none': the ack is a rendered string, not a
     # recorded state source, and rovo has no busy wiring to confirm against.
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|jcode) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -229,7 +231,7 @@ fm_control_interrupt_ack_source() {  # <harness>
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
     claude|opencode|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
-    codex|pi|pi-signed|omp|gemini|agy|devin) printf '/quit' ;;
+    codex|pi|pi-signed|omp|gemini|agy|devin|jcode) printf '/quit' ;;
     *) return 1 ;;
   esac
 }
@@ -328,6 +330,30 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target>
   esac
 }
 
+# Stop a task's jcode busy bridge (bin/fm-jcode-busy-bridge.sh) and remove its
+# pidfile. jcode's busy wiring is a PROCESS, so retiring it means stopping it,
+# not only deleting the file. Only a process that IS a busy bridge is ever
+# signalled, so a recycled pid belonging to something unrelated survives.
+fm_control_stop_jcode_bridge() {  # <state-dir> <id>
+  local pidfile="${1-}/${2-}.jcode-bridge.pid" pid tries=0
+  [ -f "$pidfile" ] || return 0
+  pid=$(head -n 1 "$pidfile" 2>/dev/null)
+  case "$pid" in
+    ''|*[!0-9]*) rm -f -- "$pidfile"; return 0 ;;
+  esac
+  if ps -o args= -p "$pid" 2>/dev/null | grep -q "fm-jcode-busy-bridge.sh"; then
+    kill "$pid" 2>/dev/null || true
+    while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 50 ]; do
+      sleep 0.1
+      tries=$((tries + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  fi
+  rm -f -- "$pidfile"
+}
+
 # The per-task wiring artifacts a harness leaves behind, so a relaunch that
 # changes harness (or re-arms the same one with a fresh busy generation) can
 # clear the previous incarnation's wiring instead of leaving a stale hook
@@ -342,6 +368,11 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
     pi|pi-signed) printf '%s\n' "$state/$id.pi-ext.ts" ;;
     omp) printf '%s\n' "$state/$id.omp-ext.ts" ;;
+    # jcode's busy wiring is a background PROCESS (bin/fm-jcode-busy-bridge.sh),
+    # not a config file the harness reads. Its pidfile names the process a
+    # relaunch stops (fm_control_stop_jcode_bridge), so a superseded
+    # incarnation's bridge cannot outlive its gen.
+    jcode) printf '%s\n' "$state/$id.jcode-bridge.pid" ;;
     grok)
       printf '%s\n' "$wt/.fm-grok-turnend"
       printf '%s\n' "$state/$id.grok-turnend-token"

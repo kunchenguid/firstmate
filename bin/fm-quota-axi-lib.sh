@@ -169,6 +169,12 @@ fm_quota_provider_for_harness() {
     codex)        printf 'codex\n' ;;
     opencode)     printf 'codex\n' ;;
     pi|pi-signed) printf 'pi\n' ;;
+    # jcode authenticates with Claude OAuth and `jcode usage` reports the SAME
+    # rolling 5-hour / 7-day subscription windows claude draws on (verified
+    # 2026-09-09, with `Extra usage: disabled`). It must share claude's quota
+    # family or a jcode crewmate would silently spend the plan twice over in
+    # the accounting.
+    jcode)        printf 'claude\n' ;;
     grok)         printf 'grok\n' ;;
     kimi)         printf 'kimi\n' ;;
     cursor)       printf 'cursor\n' ;;

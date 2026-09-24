@@ -160,7 +160,11 @@ check_harness_idle_cursorless() {  # <name> <version> <target>
 }
 
 # --- 1. Every installed verified harness must reach a proven-empty composer --
-for h in claude codex opencode pi grok kimi muse; do
+# jcode is included because its numbered prompt (`1>`) and right-hand row
+# furniture are exactly the vendor-rendered signals this guard exists to prove:
+# unrecognized, they made every jcode composer read `unknown`, which stopped
+# the guarded exit and relaunch paths from ever acting on a jcode worker.
+for h in claude codex opencode pi grok kimi muse jcode; do
   if command -v "$h" >/dev/null 2>&1; then
     check_harness_idle_empty "$h" "$h"
   else

@@ -1142,6 +1142,9 @@ codex harness ultra is refused^{"default":{"harness":"codex","model":"codex-nati
 pi max effort is accepted^{"rules":[{"when":"deep coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"max","provider":"codex"}}]}^empty^
 pi-signed max effort is accepted^{"rules":[{"when":"signed coding","use":{"harness":"pi-signed","model":"openai-codex/gpt-5.6-sol","effort":"max","provider":"codex"}}]}^empty^
 muse shared efforts are accepted^{"rules":[{"when":"muse low","use":{"harness":"muse","effort":"low"}},{"when":"muse medium","use":{"harness":"muse","effort":"medium"}},{"when":"muse high","use":{"harness":"muse","effort":"high"}},{"when":"muse xhigh","use":{"harness":"muse","effort":"xhigh"}},{"when":"muse max","use":{"harness":"muse","effort":"max"}}]}^empty^
+jcode efforts are accepted^{"rules":[{"when":"jcode none","use":{"harness":"jcode","effort":"none"}},{"when":"jcode minimal","use":{"harness":"jcode","effort":"minimal"}},{"when":"jcode max","use":{"harness":"jcode","effort":"max"}}]}^empty^
+jcode swarm effort is flagged^{"rules":[{"when":"jcode fan out","use":{"harness":"jcode","effort":"swarm"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: jcode:swarm
+jcode swarm-deep effort is flagged^{"default":{"harness":"jcode","effort":"swarm-deep"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: jcode:swarm-deep
 unsupported muse ultra effort is flagged^{"rules":[{"when":"muse ultra","use":{"harness":"muse","effort":"ultra"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: muse:ultra
 agy model profile is accepted^{"rules":[{"when":"agy work","use":{"harness":"agy","model":"gemini-3.8-flash-high"}}]}^empty^
 gemini profile with explicit provider is accepted^{"rules":[{"when":"gemini work","use":{"harness":"gemini","model":"gemini-3.8-flash-high","provider":"google"}}]}^empty^

@@ -142,6 +142,15 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   cy=$(fm_tmux_composer_cursor_row "$target") || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   pane=$(fm_tmux_composer_capture "$target") || { printf 'unknown'; return 0; }
+  # jcode's numbered prompt (`1>`) and right-hand row furniture make every
+  # jcode composer unreadable to the shared resolvers, which costs the guarded
+  # exit and relaunch paths entirely (bin/fm-composer-lib.sh owns the full
+  # rationale and both rewrites). Normalize the pane for a pane structurally
+  # identified as jcode, exactly as the Cursor reclassification below is gated
+  # on Cursor's own process identity, so no other harness's shape is touched.
+  if fm_tmux_pane_is_jcode "$target"; then
+    pane=$(fm_composer_jcode_normalize_screen <<< "$pane")
+  fi
   verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy")
   if [ "$verdict" = need-identity ]; then
     if ! identity=$(fm_tmux_composer_identity "$target") || [ -z "$identity" ]; then
@@ -183,6 +192,27 @@ fm_tmux_pane_is_cursor() {  # <target>
     args=${args#"${args%%[![:space:]]*}"}
     argv0=${args%%[[:space:]]*}
     fm_cursor_process_matches "$comm" '' "$argv0" && return 0
+  done <<EOF
+$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
+EOF
+  return 1
+}
+
+# fm_tmux_pane_is_jcode: the same structural foreground-process identity test,
+# for jcode. jcode is a single Rust binary whose live process name is exactly
+# `jcode` (bin/fm-harness.sh records that fact and matches it anchored for the
+# same reason), so the basename comparison here is exact and no unrelated
+# command can claim the harness.
+fm_tmux_pane_is_jcode() {  # <target>
+  local target=$1 tty pid pgid tpgid comm
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  case "$tty" in /dev/*) ;; *) return 1 ;; esac
+  while read -r pid pgid tpgid comm; do
+    [ -n "$comm" ] || continue
+    [ "$pgid" = "$tpgid" ] || continue
+    case "$(basename -- "$comm")" in
+      jcode) return 0 ;;
+    esac
   done <<EOF
 $(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
 EOF

@@ -418,6 +418,15 @@ FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
 # agy-regex fold in bin/fm-busy-lib.sh.
 FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT='esc[[:space:]]+to[[:space:]]+cancel'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
+# jcode renders a braille spinner glyph at the head of its in-flight status row
+# (`⠼ 1s · ↑38 ↓200 · https`, `⠸ sending context… 9s`) and DROPS the glyph the
+# instant the turn ends, leaving a bare summary row (`  6.2s · 107.4 tps · ↑91 ↓36`).
+# The glyph is therefore the whole discriminator; the trailing seconds/`sending`
+# alternation keeps an unrelated braille glyph elsewhere on screen from matching.
+# Verified live 2026-09-09 on v0.84.0 against 4 in-flight and 5 settled rows.
+# DELIVERY guard only - jcode's recorded worker state comes from the daemon
+# session fold in bin/fm-busy-lib.sh (jcode-debug), never from this row.
+FM_DELIVERY_JCODE_BUSY_REGEX_DEFAULT='^[[:space:]]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏][[:space:]]+([0-9]+(\.[0-9]+)?s|sending)'
 
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex
@@ -435,6 +444,7 @@ fm_busy_lines_match() {  # [harness]
       grok) regex=$FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT ;;
       agy) regex=$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
+      jcode) regex=$FM_DELIVERY_JCODE_BUSY_REGEX_DEFAULT ;;
       cursor) regex=$FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_DELIVERY_BUSY_REGEX_DEFAULT ;;
       *)
@@ -455,6 +465,171 @@ fm_busy_lines_match() {  # [harness]
 # literal and no entry is ever exposed to pathname expansion.
 FM_COMPOSER_AGENT_PROMPT_GLYPHS=$(printf '%s\n' '❯' '›' '⟩' '→' '❭')
 FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
+
+# jcode NUMBERS its composer prompt: the row reads `1>`, `2>`, `3>` - the turn
+# index, then a bare `>`. That `>` is a SHELL glyph, so on jcode's borderless
+# composer row the dead-shell rule correctly refuses to read it as an agent
+# composer and every jcode pane classifies `unknown`, empty or typed alike
+# (verified live, jcode v0.86.0 through tmux at widths 40-200).
+#
+# `unknown` is the right default for an unrecognized `>` row and must stay
+# that way fleet-wide. But it is not free here: bin/fm-control.sh refuses to
+# type an exit command unless the composer is PROVEN empty, so a jcode agent
+# can never be stopped through the guarded path, and fm-spawn.sh --relaunch
+# then refuses too because the endpoint still reads alive. Observed
+# 2026-09-23: two stalled jcode workers were unrecoverable that way and the
+# agent processes had to be terminated directly.
+#
+# So the turn index is stripped ONLY for a pane structurally identified as
+# jcode, exactly as the Cursor cursor-parking reclassification in
+# bin/fm-tmux-lib.sh is gated on Cursor's own process identity. The shared
+# resolvers are untouched, so no other harness's dead-shell rule is weakened:
+# a `>` row on any unidentified pane still reads `unknown`.
+#
+# The LEADING DIGITS are what make this safe, and they are why the rewrite
+# targets an AGENT glyph rather than the bare shell `>`. A dead shell prompt is
+# `>`, `$`, `%`, or `#` alone; it is never `1>`. So a numbered prompt is
+# positive proof of jcode's composer in exactly the way the dead-shell rule
+# demands, and rewriting it to a bare `>` would be wrong twice over - it would
+# still read `unknown`, and it would assert the one shape the rule forbids.
+# A row with no digits is left alone, so a genuine dead shell on a jcode pane
+# (the agent exited, leaving the shell) still reads `unknown` and still refuses
+# the lifecycle action. An already-submitted row reads `1<>` and holds no
+# pending text either, so the optional `<` is accepted.
+FM_COMPOSER_JCODE_PROMPT_RE='^[0-9]+<?>'
+
+# The agent glyph a normalized jcode prompt becomes. Taken from the shared
+# agent set rather than respelled, so this cannot drift from the resolvers
+# that consume it.
+FM_COMPOSER_JCODE_AGENT_GLYPH=$(printf '%s\n' "$FM_COMPOSER_AGENT_PROMPT_GLYPHS" | head -n1)
+
+# fm_composer_strip_jcode_turn_index_var: rewrite <varname>'s jcode turn index
+# into the agent glyph the shared classifier already knows. A row that does not
+# carry one is left exactly as it was, so this is a no-op on every other shape
+# even when it is reached.
+# A STYLED capture colours the turn index separately from the `>`, so the row's
+# real leading bytes are SGR escapes and the digits are interleaved with more of
+# them (`ESC[..m3ESC[..m> `). The prompt is therefore matched against the row
+# with its escapes removed, and the rewrite is applied by consuming the same
+# leading run from the styled row escape-by-escape. Escapes are preserved
+# rather than dropped so the caller's downstream ghost stripping still sees the
+# styling it depends on.
+fm_composer_strip_jcode_turn_index_var() {  # <varname>
+  local __fmjc_name=$1 __fmjc_text=${!1} __fmjc_esc __fmjc_plain
+  local __fmjc_keep='' __fmjc_rest __fmjc_ch
+  __fmjc_esc=$(printf '\033')
+  __fmjc_plain=$(printf '%s' "$__fmjc_text" | fm_composer_strip_ansi)
+  __fmjc_plain=${__fmjc_plain#"${__fmjc_plain%%[![:space:]]*}"}
+  printf '%s' "$__fmjc_plain" | grep -qE "$FM_COMPOSER_JCODE_PROMPT_RE" || return 0
+  # Walk the styled row, dropping only the prompt's own plain characters and
+  # keeping every escape sequence and leading space exactly where it was.
+  __fmjc_rest=$__fmjc_text
+  while [ -n "$__fmjc_rest" ]; do
+    __fmjc_ch=${__fmjc_rest%"${__fmjc_rest#?}"}
+    if [ "$__fmjc_ch" = "$__fmjc_esc" ]; then
+      local __fmjc_seq=${__fmjc_rest%%[[:alpha:]]*}
+      local __fmjc_len=$(( ${#__fmjc_seq} + 1 ))
+      __fmjc_keep=$__fmjc_keep${__fmjc_rest:0:__fmjc_len}
+      __fmjc_rest=${__fmjc_rest:__fmjc_len}
+      continue
+    fi
+    case "$__fmjc_ch" in
+      [[:space:]]) __fmjc_keep=$__fmjc_keep$__fmjc_ch ;;
+      [0-9]|'<') ;;
+      '>')
+        printf -v "$__fmjc_name" '%s%s%s' \
+          "$__fmjc_keep" "$FM_COMPOSER_JCODE_AGENT_GLYPH" "${__fmjc_rest#?}"
+        return 0
+        ;;
+      *) return 0 ;;
+    esac
+    __fmjc_rest=${__fmjc_rest#?}
+  done
+}
+
+# jcode draws composer FURNITURE at the far right of that same row, separated
+# from the composer by a run of spaces: a context meter (`16k/1.0M ▱▱▱▱▱▱ 2%`)
+# and/or a lone private-use-area status glyph. It is not typed text - it is
+# present on an empty composer and unchanged by typing (verified live, jcode
+# v0.86.0). Left in place it makes every jcode composer read `pending`, which
+# is the same unrecoverable refusal by another route.
+#
+# Both forms are anchored to the row's TAIL and demand at least TWO spaces
+# before them, so typed text separated by a single space is never eaten.
+# The meter's bar cells are matched as a literal alternation rather than a
+# range, for the reason FM_OMP_SPINNER_FRAMES_RE records.
+FM_COMPOSER_JCODE_METER_RE='[[:space:]][[:space:]]+[0-9]+(\.[0-9]+)?[kKmM]?/[0-9]+(\.[0-9]+)?[kKmM]?[[:space:]]+(▱|▰)+[[:space:]]+[0-9]+%[[:space:]]*$'
+
+# fm_composer_strip_jcode_pua_tail: drop a trailing private-use-area glyph
+# (U+F0000..U+FFFFD, UTF-8 F3 B0..BF 80..BF 80..BF) and the run of spaces
+# before it. Byte-walked under LC_ALL=C for the same reason
+# fm_composer_strip_braille is: a grep/sed range between multibyte endpoints is
+# not portable. Reads stdin, prints the line without that tail.
+fm_composer_strip_jcode_pua_tail() {
+  LC_ALL=C awk '
+    {
+      line = $0
+      n = length(line)
+      # A trailing run of spaces is furniture separation, never content.
+      while (n > 0 && substr(line, n, 1) == " ") n--
+      if (n >= 4) {
+        b1 = substr(line, n - 3, 1); b2 = substr(line, n - 2, 1)
+        b3 = substr(line, n - 1, 1); b4 = substr(line, n, 1)
+        if (b1 == "\363" && b2 >= "\260" && b2 <= "\277" \
+            && b3 >= "\200" && b3 <= "\277" && b4 >= "\200" && b4 <= "\277") {
+          n -= 4
+          spaces = 0
+          while (n > 0 && substr(line, n, 1) == " ") { n--; spaces++ }
+          # Two spaces is the separation rule; one is ordinary typed spacing.
+          if (spaces >= 2) { print substr(line, 1, n); next }
+        }
+      }
+      print line
+    }
+  '
+}
+
+# A STYLED row colours that furniture, so its real trailing bytes are SGR
+# escapes and the furniture itself sits behind more of them. Both rewrites are
+# therefore applied to the row with its escapes removed. The result is used as
+# the row's content because the furniture is the row's TAIL: dropping it drops
+# the styling that only ever applied to it, and the row's typed content keeps
+# whatever preceded it. A row carrying no furniture is returned untouched, with
+# its styling intact.
+fm_composer_strip_jcode_tail_var() {  # <varname>
+  local __fmjt_name=$1 __fmjt_text=${!1} __fmjt_plain __fmjt_cut
+  __fmjt_plain=$(printf '%s' "$__fmjt_text" | fm_composer_strip_ansi)
+  __fmjt_cut=$(printf '%s\n' "$__fmjt_plain" | fm_composer_strip_jcode_pua_tail)
+  if [[ $__fmjt_cut =~ $FM_COMPOSER_JCODE_METER_RE ]]; then
+    __fmjt_cut=${__fmjt_cut%"${BASH_REMATCH[0]}"}
+  fi
+  # Nothing matched: keep the original row, styling and all.
+  [ "$__fmjt_cut" != "$__fmjt_plain" ] || return 0
+  printf -v "$__fmjt_name" '%s' "$__fmjt_cut"
+}
+
+# fm_composer_jcode_row_normalize_var: both jcode rewrites, in the one order
+# that is correct (tail furniture first, then the leading turn index), for a
+# caller that has already established the pane is jcode.
+fm_composer_jcode_row_normalize_var() {  # <varname>
+  fm_composer_strip_jcode_tail_var "$1"
+  fm_composer_strip_jcode_turn_index_var "$1"
+}
+
+# fm_composer_jcode_normalize_screen: the whole-screen entry point an adapter
+# calls once it has structurally identified the pane as jcode. Reads a captured
+# screen on stdin and prints it with every jcode composer row normalized, so
+# the shared classifier below sees a shape it already owns and no jcode
+# knowledge leaks into any backend. Styling is preserved: the rewrite only
+# touches a row's leading prompt bytes and its trailing furniture, both of
+# which sit outside the SGR runs that carry the row's typed content.
+fm_composer_jcode_normalize_screen() {
+  local row
+  while IFS= read -r row; do
+    fm_composer_jcode_row_normalize_var row
+    printf '%s\n' "$row"
+  done
+}
 
 # The ONE fleet-wide idle-placeholder set: composer text a harness renders in
 # an EMPTY composer that a plain capture cannot tell from typed text. Grok's

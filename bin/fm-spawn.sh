@@ -1362,6 +1362,9 @@ clear_relaunch_harness_wiring() {
   # unrecognized value resolves to no adapter, which is also the case in which
   # no wiring was armed to begin with.
   harness=$(fm_control_harness_family "$harness") || harness=
+  if [ "$harness" = jcode ]; then
+    fm_control_stop_jcode_bridge "$state" "$id" || return 1
+  fi
   token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
   token=
   if [ -n "$token_path" ] && [ -f "$token_path" ]; then
@@ -2082,6 +2085,14 @@ launch_template() {
   # Its turn-end signal is a globally configured Stop hook plus a guarded
   # per-task worktree token, so no launch placeholder belongs here.
   kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    # jcode: NO positional brief is possible (v0.84.0 parses a positional as a
+    # subcommand and exposes no --prompt), so the brief arrives through the typed
+    # pointer in bin/fm-jcode-seed.sh, exactly as kimi's and rovo's do. --provider
+    # claude pins the verified subscription path that bin/fm-quota-choose.sh maps
+    # jcode onto; change one and the other must change with it. --no-update keeps
+    # a crewmate from restarting itself into a new binary mid-task. No effort
+    # placeholder: jcode has no launch-time effort flag, only /effort.
+    jcode) printf '%s' '__JCODEBIN__ --provider claude --no-update __MODELFLAG__' ;;
   # muse (Muse Code): a positional prompt starts the supervised interactive
   # session. --yolo is the single flag that makes a crewmate pane viable: muse
   # ships approval prompts AND a filesystem/network sandbox ON by default
@@ -2203,6 +2214,13 @@ esac
 # docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
 if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  exit 1
+fi
+
+# jcode is verified as a primary (docs/supervision-protocols/jcode.md) and for
+# crewmate/scout work, but running a secondmate on it has never been verified.
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = jcode ]; then
+  echo "error: jcode is verified as a primary and for crewmate/scout work, but is not verified as a secondmate, so it cannot run one. Select a harness verified for secondmates." >&2
   exit 1
 fi
 
@@ -2444,7 +2462,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | jcode)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
@@ -2576,6 +2594,29 @@ case "$LAUNCH" in
   ROVO_BIN=$(resolve_rovo_binary) || exit 1
   LAUNCH=${LAUNCH//__ROVOBIN__/$(shell_quote "$ROVO_BIN")}
   ;;
+  *__JCODEBIN__*)
+    # The pane is created by a long-lived tmux/herdr daemon that does not inherit
+    # firstmate's PATH, and jcode installs to ~/.local/bin, so a bare `jcode` can
+    # resolve to nothing in the crewmate's shell. Resolve it here and launch the
+    # absolute path, the same reason kimi and rovo resolve theirs.
+    JCODE_BIN=$(command -v jcode 2>/dev/null)
+    if [ -z "$JCODE_BIN" ] && [ -x "$HOME/.local/bin/jcode" ]; then
+      JCODE_BIN="$HOME/.local/bin/jcode"
+    fi
+    if [ -z "$JCODE_BIN" ]; then
+      echo "error: jcode executable not found on PATH or in ~/.local/bin; install it or select a different verified harness" >&2
+      exit 1
+    fi
+    LAUNCH=${LAUNCH//__JCODEBIN__/$(shell_quote "$JCODE_BIN")}
+    # Refuse before anything launches: a jcode home that would open its
+    # onboarding wizard or run unsupervised swarm/ambient work must never
+    # reach a pane. Static checks only; the live daemon probe runs after the
+    # launch, because only the launch starts the daemon.
+    if ! "$FM_ROOT/bin/fm-jcode-preflight.sh" --static >/dev/null; then
+      echo "error: jcode preflight refused the spawn of $ID; run bin/fm-jcode-preflight.sh --static for the reason" >&2
+      exit 1
+    fi
+    ;;
 esac
 
 json_escape() {
@@ -4213,7 +4254,7 @@ if [ "$KIND" != secondmate ]; then
     ;;
   esac
   case "$HARNESS" in
-  claude* | opencode* | pi | pi-signed | omp)
+  claude* | opencode* | pi | pi-signed | omp | jcode)
     BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
       echo "error: failed to arm the busy-state contract for $ID" >&2
       exit 1
@@ -5100,6 +5141,32 @@ if [ "$HARNESS" = agy ]; then
     else
       agy_spawn_fail "agy never showed its folder-trust dialog on an unregistered worktree in window $T, so the brief could not be confirmed to run there"
     fi
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = jcode ]; then
+  # jcode cannot take its brief as a positional: verified 2026-09-09 on v0.84.0,
+  # a positional parses as a SUBCOMMAND and there is no --prompt flag. It uses
+  # the typed-pointer path kimi and rovo already established above, for the same
+  # reason. Unlike those two, delivery here is PROVEN from the daemon's own
+  # is_processing rather than a timed wait (bin/fm-jcode-seed.sh).
+  if ! "$FM_ROOT/bin/fm-jcode-preflight.sh" >/dev/null; then
+    echo "error: jcode preflight refused the spawn of $ID; run bin/fm-jcode-preflight.sh for the reason" >&2
+    exit 1
+  fi
+  # The busy bridge must be live BEFORE the brief starts a turn, or the opening
+  # turn-start is missed and the task never records the idle that closes it.
+  # It carries this incarnation's gen, so a superseded bridge fails closed.
+  nohup "$FM_ROOT/bin/fm-jcode-busy-bridge.sh" "$STATE_REAL" "$ID"     --gen "$BUSY_GEN" --working-dir "$WT" >/dev/null 2>&1 &
+  if [ -n "$EFFORT" ] && [ "$EFFORT" != default ]; then
+    JCODE_SEED_STATUS=0
+    "$FM_ROOT/bin/fm-jcode-seed.sh" "$BACKEND" "$T" "$WT" "$BRIEF_REAL"       --effort "$EFFORT" >/dev/null || JCODE_SEED_STATUS=$?
+  else
+    JCODE_SEED_STATUS=0
+    "$FM_ROOT/bin/fm-jcode-seed.sh" "$BACKEND" "$T" "$WT" "$BRIEF_REAL"       >/dev/null || JCODE_SEED_STATUS=$?
+  fi
+  if [ "$JCODE_SEED_STATUS" -ne 0 ]; then
+    echo "error: jcode brief delivery was not confirmed for $ID in window $T; the crewmate has no instruction and must not be left running" >&2
     exit 1
   fi
 fi
