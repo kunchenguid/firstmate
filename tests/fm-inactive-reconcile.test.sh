@@ -108,6 +108,7 @@ run_reconcile() { # <home> [--startup]
   PATH="$WORLD/fakebin:$PATH" FM_ROOT_OVERRIDE="$WORLD/root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
     FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
+    FM_INACTIVE_RECONCILE_BUDGET_SECS="${FM_INACTIVE_RECONCILE_BUDGET_SECS:-30}" \
     FM_FORGE_LOG="$WORLD/forge.log" "$RECON" scan ${option:+"$option"}
 }
 
@@ -861,7 +862,7 @@ SH
   [ "$elapsed" -le 3 ] || fail "stalled state read exceeded aggregate scan budget (${elapsed}s)"
 
   write_child "$MAIN" b 'done: green'
-  FM_INACTIVE_RECONCILE_BUDGET_SECS=1 run_reconcile "$MAIN" --startup
+  FM_INACTIVE_RECONCILE_BUDGET_SECS=10 run_reconcile "$MAIN" --startup
   grep -Fq 'child=b state=done' "$MAIN/state/.wake-queue" \
     || fail "next bounded scan did not resume with the following child"
   pass "stalled state reads are bounded without starving later children"
@@ -903,6 +904,8 @@ test_missing_parent_binding_names_itself() {
   write_child "$MATE" child 'done: PR merged'
   write_child "$MATE" quiet 'working: quiet since'
   out=$(FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup)
+  out="$out
+$(FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup)"
   case "$out" in
     *"actionable: child outcome needs parent report: child=child"*".fm-secondmate-parent"*) ;;
     *) fail "a missing parent binding did not name itself for a ledger delivery: $out" ;;

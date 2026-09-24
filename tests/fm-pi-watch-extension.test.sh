@@ -468,6 +468,10 @@ const failNow = (message) => {
 };
 let tool = null;
 const prompts = [];
+let resolveDelivery;
+const delivery = new Promise((resolve) => {
+  resolveDelivery = resolve;
+});
 const pi = {
   on() {},
   registerCommand() {},
@@ -477,6 +481,7 @@ const pi = {
   sendUserMessage: async (message) => {
     prompts.push(message);
     writeFileSync(process.env.FM_ARM_LOG, "delivery\n", { flag: "a" });
+    resolveDelivery();
   },
   events: { on() {}, emit() {} },
 };
@@ -485,7 +490,13 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("initial-arm", {}, undefined, undefined, {});
-await new Promise((resolve) => setTimeout(resolve, 1200));
+await Promise.race([
+  delivery,
+  new Promise((resolve) => setTimeout(() => {
+    failNow("wake delivery did not finish within 15 seconds");
+    resolve();
+  }, 15000)),
+]);
 const rows = existsSync(process.env.FM_ARM_LOG)
   ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
   : [];
