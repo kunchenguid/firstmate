@@ -26,7 +26,7 @@ The narration is hidden only from the live transcript presentation, and remains 
 The operational inputs Calm classifies remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
 While a turn runs, Calm also keeps those Firstmate inputs out of Pi's queued-message listing, and the captain's own queued messages stay listed.
 Escape and the dequeue key return only the captain's queued messages to the editor; hidden Firstmate inputs stay queued in their original order and are never shown as raw text or dropped.
-When Escape stops a run with Firstmate inputs still queued, Calm starts one new turn to deliver them and shows the one-line notice `Firstmate supervision continues in a new turn.`
+When Escape, or navigating the session tree, stops a run with Firstmate inputs still queued, Calm starts one new turn to deliver them and shows the one-line notice `Firstmate supervision continues in a new turn.`
 Inputs held behind a running compaction stay there until Pi sends them after compaction, so they start and announce no turn of their own.
 The session-start nudge remains on its existing non-displayed custom-message path.
 

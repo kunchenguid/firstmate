@@ -648,7 +648,24 @@ visibility.setCalmPresentation(true);
   check(restored === 1 && host.editorText === captainText, `dequeue restored ${restored}: ${JSON.stringify(host.editorText)}`);
   check(JSON.stringify(session.followUp) === JSON.stringify([watcherOne]), `dequeue lost the notification: ${JSON.stringify(session.followUp)}`);
   await settle();
-  check(session.prompts.length === 0 && host.statuses.length === 0, "a dequeue without abort started or announced a turn");
+  check(session.prompts.length === 0 && host.statuses.length === 0, "a dequeue while the run is still active started or announced a turn");
+}
+
+// 2b. Navigating the session tree during a run restores without abort, then aborts the run:
+//     the hidden notification is still delivered exactly once in a new turn.
+{
+  const session = makeSession();
+  const host = makeHost(session);
+  session.followUp.push(captainText, watcherOne);
+  host.updatePendingMessagesDisplay();
+  host.restoreQueuedMessagesToEditor();
+  await session.abort();
+  assertNoOperationalText(host.editorText, "editor after tree navigation");
+  check(host.editorText === captainText, `tree navigation restored ${JSON.stringify(host.editorText)}`);
+  await settle();
+  check(JSON.stringify(session.prompts) === JSON.stringify([watcherOne]), `tree navigation continuation prompt was ${JSON.stringify(session.prompts)}`);
+  check(JSON.stringify(session.followUp) === "[]", `tree navigation left the notification queued: ${JSON.stringify(session.followUp)}`);
+  check(JSON.stringify(host.statuses) === JSON.stringify([layout.CALM_SUPERVISION_CONTINUES_NOTICE]), `tree navigation notice: ${JSON.stringify(host.statuses)}`);
 }
 
 // 3. A row already hidden stays hidden on Escape even if the classifier cannot answer again.

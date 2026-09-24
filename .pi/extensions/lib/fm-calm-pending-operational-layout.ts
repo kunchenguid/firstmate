@@ -18,10 +18,12 @@
 // gets no queued-row hiding at all and one warning; its rows and Escape stay stock.
 // See https://github.com/kunchenguid/firstmate/issues/1588.
 //
-// Pi 0.87.1 stops its run loop once Escape requests an abort, so a queue that still holds
-// messages when the aborted run settles is not delivered until something else starts a
-// turn. After an abort that kept notifications in Pi's agent queue, this adapter waits for
-// the session to settle and starts that turn itself with one generic status line. A
+// Pi 0.87.1 stops its run loop once a restore is followed by an abort (Escape, or navigating
+// the session tree during a run), so a queue that still holds messages when the aborted run
+// settles is not delivered until something else starts a turn. After any restore that kept
+// notifications in Pi's agent queue, this adapter waits for the session to settle and, if it
+// is idle with messages still queued, starts that turn itself with one generic status line.
+// A run that keeps going drains the queue itself, so nothing starts after a plain dequeue. A
 // notification kept only in the compaction queue is flushed by Pi when compaction ends, so
 // it neither counts toward that turn nor announces one.
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
@@ -259,14 +261,14 @@ export function installCalmPendingOperationalLayout(): void {
       return originalRestoreQueuedMessagesToEditor.call(this, options);
     } finally {
       restoring = undefined;
-      if (options?.abort && current.keptInAgentQueue > 0) continueAfterAbort(this, session);
+      if (current.keptInAgentQueue > 0) continueWhenSettled(this, session);
     }
   };
 
-  // Delivers what the aborted run left queued. Messages already in the queue cannot start a
+  // Delivers what a settled run left queued. Messages already in the queue cannot start a
   // turn by themselves, so the first is taken out and sent as the turn's prompt and the rest
   // are put back behind it: steering first, then follow-ups, the order Pi delivers them in.
-  function continueAfterAbort(host: PendingRowsHost, session: RetainingSession): void {
+  function continueWhenSettled(host: PendingRowsHost, session: RetainingSession): void {
     session
       .waitForIdle()
       .then(() => {
