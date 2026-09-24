@@ -183,8 +183,11 @@
 # the task's last status line - and on a 0 bounds repeated alarms from new pane
 # hashes for the decision.
 # `--include-parked` widens the positive verdict to a not-Done row held with
-# hold kind `parked`, a desk disposition that is not a captain call. Only the watcher's stale bound asks
-# for it; every closer keeps the captain-only meaning above.
+# hold kind `parked`, a desk disposition that is not a captain call. Only the
+# watcher's stale bound asks for it; every closer keeps the captain-only meaning
+# above. A raw `tasks-axi unhold` followed by `tasks-axi hold --kind parked`
+# bypasses the occurrence tracking provided by `park`, so the re-park's first
+# stale sight may be absorbed within the four-hour re-surface window.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
