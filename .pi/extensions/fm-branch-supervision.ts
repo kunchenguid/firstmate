@@ -656,8 +656,9 @@ export default function (pi: ExtensionAPI) {
   let processing: ProcessingState | null = null;
   let queuedProcessingContent: string | null = null;
   let processingOpenedThisRun = false;
-  // An autonomous processing request has no new user question to answer.
-  // Keep its prose silent until its listed outcomes have been acknowledged;
+  // A re-presented processing request has no new user question to answer:
+  // the first presentation already carried the visible response. Keep a
+  // retry's prose silent until its listed outcomes have been acknowledged;
   // tools still run, and a real user message always restores ordinary output.
   let silentProcessingThrough: number | null = null;
   let userMessageThisTurn = false;
@@ -1710,7 +1711,7 @@ ${context.command}
     ) {
       // message_start covers both an idle custom prompt and a follow-up
       // consumed inside an existing run; neither needs before_agent_start.
-      silentProcessingThrough = userMessageThisTurn ? null : processing?.through ?? null;
+      silentProcessingThrough = !userMessageThisTurn && processing && processing.triggered > 1 ? processing.through : null;
       queuedProcessingContent = null;
     }
   });

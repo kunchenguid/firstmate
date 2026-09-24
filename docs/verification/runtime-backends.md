@@ -2079,7 +2079,7 @@ FM_PI_BRANCH_LIVE_E2E=1 npm exec --yes --package=typescript@5.9.3 -- bin/fm-test
 ```
 
 ```text
-ok - real Pi SDK 0.86.0 hides unacknowledged processing replies while streaming and after reopen, preserves user finals, and keeps outcomes retryable
+ok - real Pi SDK 0.86.0 keeps the first processing response, hides retry replies while streaming and after reopen, preserves user finals, and keeps outcomes retryable
 ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.86.0
 ```
 

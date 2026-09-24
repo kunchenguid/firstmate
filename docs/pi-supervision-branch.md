@@ -429,7 +429,8 @@ Nothing else advances that marker.
 An unrelated reply, an empty reply, or a reply that paraphrases the outcome leaves the sequence unprocessed.
 The extension presents the current unprocessed sequence set again at the next main run boundary and at every session start.
 
-Until an autonomous processing request's listed outcomes are acknowledged, its assistant prose is removed before persistence.
+The first presentation of a sequence set is an ordinary turn whose response stays visible, including prose alongside `fm_branch_processed`.
+From the second triggered presentation of that same set on, until its listed outcomes are acknowledged, the retry's assistant prose is removed before persistence.
 Tool calls, their signed reasoning, and usage accounting are preserved.
 Pi's Markdown transformer API additionally keeps that prose hidden while streaming on versions that expose it.
 Successful acknowledgement releases subsequent assistant output, and a real user message restores ordinary output immediately, including when a processing request rides that prompt.

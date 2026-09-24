@@ -1355,26 +1355,35 @@ if (request.options.triggerTurn !== true || request.options.deliverAs !== "follo
 if (!request.message.content.includes(`[seq ${seq}, recorded 0m ago] task-d: ${decision}`)) throw new Error(`the request lost its key or summary: ${request.message.content}`);
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error(`delivery did not leave seq ${seq} unprocessed: ${unprocessedSeqs()}`);
 
-// Both autonomous attempts answer with stale prose instead of acknowledging.
-// Exercise Pi's public message replacement and Markdown transformer surfaces:
-// hidden replies must stay absent from both streaming and persisted finals.
+// The first presentation carries the one visible response for this outcome,
+// even when it forgets to acknowledge.
 await runOf(async () => {
-  if (render("Acknowledged.") !== "" || render("prior reasoning", true, "assistant-thinking") !== "") {
-    throw new Error("an autonomous processing reply leaked while streaming");
+  if (render("Captain, task-d needs your call.") !== "Captain, task-d needs your call.") {
+    throw new Error("the first processing presentation hid its response while streaming");
+  }
+  await finish("Captain, task-d needs your call.");
+});
+if (visibleFinals().at(-1) !== "Captain, task-d needs your call.") throw new Error("the first processing presentation lost its final");
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("an unacknowledged answer advanced the processed marker");
+if (requests().length !== 2 || requests()[1].options.triggerTurn !== true) throw new Error("the first re-presentation must open its own turn");
+if (!requests()[1].message.content.includes(`[seq ${seq}, recorded 0m ago] task-d: ${decision}`)) throw new Error("the re-presentation changed the outcome");
+// The hidden retry answers with stale prose instead of acknowledging.
+// Exercise Pi's public message replacement and Markdown transformer surfaces:
+// retry replies must stay absent from both streaming and persisted finals.
+await runOf(async () => {
+  if (render("Captain, task-d needs your call.") !== "" || render("prior reasoning", true, "assistant-thinking") !== "") {
+    throw new Error("a processing retry reply leaked while streaming");
   }
   if (render(priorResult, false) !== priorResult || render("A question", true, "user") !== "A question") {
     throw new Error("silencing a retry hid an earlier final or a user message");
   }
-  await finish("Acknowledged.");
-});
-if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("an unrelated answer advanced the processed marker");
-if (requests().length !== 2 || requests()[1].options.triggerTurn !== true) throw new Error("the first re-presentation must open its own turn");
-if (!requests()[1].message.content.includes(`[seq ${seq}, recorded 0m ago] task-d: ${decision}`)) throw new Error("the re-presentation changed the outcome");
-await runOf(async () => {
+  await finish("Captain, task-d needs your call.");
   await finish(priorResult);
   await finish("");
 });
-if (JSON.stringify(visibleFinals()) !== JSON.stringify([priorResult])) throw new Error(`hidden retries exposed additional finals: ${JSON.stringify(visibleFinals())}`);
+if (JSON.stringify(visibleFinals()) !== JSON.stringify([priorResult, "Captain, task-d needs your call."])) {
+  throw new Error(`hidden retries exposed additional finals: ${JSON.stringify(visibleFinals())}`);
+}
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("a repeated or empty answer advanced the processed marker");
 if (requests().length !== 3) throw new Error(`an unrelated answer did not re-present the outcome: ${requests().length} requests`);
 if (requests()[2].options.deliverAs !== "nextTurn" || requests()[2].options.triggerTurn) {
@@ -1400,13 +1409,23 @@ if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcom
   throw new Error("re-presentation duplicated the visible entry");
 }
 
+const call = { type: "toolCall", id: "ack-call", name: "fm_branch_processed", arguments: { through: seq } };
+const thinking = { type: "thinking", thinking: "reasoning for the tool", thinkingSignature: "provider-signature" };
+// The replacement's first presentation keeps prose sent alongside the
+// acknowledgement call; this run's call is left unexecuted.
+await runOf(async () => {
+  const firstWithTool = await finish("Captain, task-d still needs your call.", [thinking, call]);
+  if (firstWithTool.content.length !== 3 || firstWithTool.content[0].text !== "Captain, task-d still needs your call.") {
+    throw new Error("the first presentation dropped prose sent alongside its acknowledgement");
+  }
+});
+if (visibleFinals().at(-1) !== "Captain, task-d still needs your call.") throw new Error("the first presentation after replacement lost its final");
+if (requests().length !== 6 || requests()[5].options.triggerTurn !== true) throw new Error("the replacement did not retry the unacknowledged outcome");
 await fire("agent_start", {});
 await fire("turn_start", {});
 await consumeRequest();
 await finish("stale after reload");
 if (visibleFinals().includes("stale after reload")) throw new Error("session replacement lost retry suppression");
-const call = { type: "toolCall", id: "ack-call", name: "fm_branch_processed", arguments: { through: seq } };
-const thinking = { type: "thinking", thinking: "reasoning for the tool", thinkingSignature: "provider-signature" };
 const withTool = await finish("stale prose alongside a tool", [thinking, call]);
 if (withTool.content.length !== 2 || withTool.content[0] !== thinking || withTool.content[1] !== call) {
   throw new Error("suppression lost the acknowledgement tool call or its signed reasoning, or retained prose");
@@ -1525,8 +1544,8 @@ await finish("The busy user answer");
 if (visibleFinals().at(-1) !== "The busy user answer") throw new Error("queueing a retry hid an in-flight user answer");
 await fire("turn_start", {});
 await consumeRequest();
-await finish("The busy user answer");
-if (visibleFinals().filter((text) => text === "The busy user answer").length !== 1) throw new Error("a consumed busy follow-up duplicated the user final");
+await finish("Captain, task-g needs your call.");
+if (visibleFinals().at(-1) !== "Captain, task-g needs your call.") throw new Error("a consumed busy follow-up hid its first presentation");
 // User steering in that same turn must immediately recover ordinary output.
 await fire("message_start", { message: { role: "user", content: "A steering question" } });
 await finish("The steering answer");
