@@ -15,6 +15,11 @@
 #   T6: a non-payload fm-on call with an OPEN stdin pipe completes instead of
 #       wedging staging, and a payload caller with --stdin still delivers its
 #       bytes through the worker.
+#   A job whose command leaves a daemonized descendant holding the job's stdout
+#       still publishes its result and frees its home's lane, so later callers
+#       are not held open behind it.
+#   A record whose staging caller died without running any cleanup is cancelled
+#       by the worker instead of executing for nobody.
 #   Stage litter older than the reap age does not survive a worker pass while
 #   fresh staging does.
 set -u
@@ -79,6 +84,26 @@ printf 'started\n' > "$1"
 sleep "$3"
 printf 'finished\n' > "$2"
 SH
+# Exits at once but leaves a descendant in its own session - the shape a
+# daemonized agent runtime or multiplexer server leaves behind - which escapes
+# the job's process group while still holding the job's stdout and stderr. It
+# stops itself at the suite's blocking-stub ceiling so an escaped one is
+# bounded on its own.
+cat > "$REMOTE_ROOT/bin/fm-leaked-descendant-job.sh" <<SH
+#!/bin/bash
+printf 'command output\\n'
+perl -MPOSIX -e 'POSIX::setsid(); sleep $FM_TEST_STUB_MAX_BLOCK_SECONDS' &
+exit 0
+SH
+cat > "$REMOTE_ROOT/bin/fm-volume-job.sh" <<'SH'
+#!/bin/bash
+set -e
+head -c 4194304 < /dev/zero
+head -c 4194304 < /dev/zero >&2
+printf 'ready\n' > "$1"
+while [ ! -f "$2" ]; do sleep 0.1; done
+exit 23
+SH
 cat > "$REMOTE_ROOT/bin/fm-stdin-probe.sh" <<'SH'
 #!/bin/bash
 while IFS= read -r line || [ -n "$line" ]; do printf 'stdin=%s\n' "$line"; done
@@ -115,6 +140,7 @@ export FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
 export FM_REMOTE_JOB_QUEUE_TIMEOUT=60
 export FM_REMOTE_JOB_TIMEOUT=30
 export FM_REMOTE_JOB_STAGE_REAP_SECONDS=1
+export FM_REMOTE_JOB_OUTPUT_DRAIN_SECONDS=2
 # shellcheck source=bin/fm-remote-job-lib.sh
 . "$ROOT/bin/fm-remote-job-lib.sh"
 
@@ -407,6 +433,102 @@ fm_on --stdin ios fm-stdin-probe.sh < "$TMP_ROOT/payload" > "$TMP_ROOT/payload-o
 assert_grep 'stdin=payload byte one' "$TMP_ROOT/payload-out" "--stdin did not deliver the payload"
 assert_grep 'stdin=payload byte two' "$TMP_ROOT/payload-out" "--stdin lost part of the payload"
 pass "--stdin still delivers a payload caller's bytes"
+
+# A descendant that escaped the job's process group while holding the job's
+# output must not wedge the lane. Before the output drain was bounded the
+# record stayed running for good, its home's queue never drained again, and
+# every later caller held its transport open until its own deadline - which is
+# how a remote host ran out of SSH sessions.
+LEAK_BEGAN=$(date +%s)
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$HOME_B" fm-leaked-descendant-job.sh \
+  < /dev/null > /dev/null
+LEAK_JOB=$FM_REMOTE_JOB_ID
+CAPTURE_PIDS=
+for _ in $(seq 1 100); do
+  LEAK_LANE=$(cat "$STATE_ROOT/jobs/$LEAK_JOB/.claim/supervisor" 2>/dev/null || true)
+  if [ -n "$LEAK_LANE" ]; then
+    CAPTURE_PIDS=$(ps -axo pid=,ppid=,comm= | awk -v lane="$LEAK_LANE" '
+      { parent[$1]=$2; command[$1]=$3 }
+      END { for (pid in parent) if (command[pid] ~ /(^|\/)cat$/ &&
+        (parent[pid] == lane || parent[parent[pid]] == lane)) print pid }')
+    [ -z "$CAPTURE_PIDS" ] || break
+  fi
+  sleep 0.05
+done
+[ -n "$CAPTURE_PIDS" ] || fail "the escaped-writer fixture never exposed its capture processes"
+wait_for_state "$LEAK_JOB" 'done' \
+  || fail "a job whose descendant held its output never published a result"
+LEAK_ELAPSED=$(( $(date +%s) - LEAK_BEGAN ))
+[ "$LEAK_ELAPSED" -le 10 ] || fail "the leaked-descendant job took ${LEAK_ELAPSED}s to publish"
+assert_grep 'command output' "$STATE_ROOT/jobs/$LEAK_JOB/stdout" \
+  "the bounded output drain lost the command's own output"
+for pid in $CAPTURE_PIDS; do
+  kill -0 "$pid" 2>/dev/null && fail "capture process $pid survived result publication"
+done
+fm_remote_job_reap "$ACCOUNT_HOME" "$LEAK_JOB" || true
+LEAK_FOLLOW_BEGAN=$(date +%s)
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$HOME_B" fm-touch-job.sh \
+  "$TMP_ROOT/leak-follow" < /dev/null > /dev/null
+LEAK_FOLLOW=$FM_REMOTE_JOB_ID
+wait_for_state "$LEAK_FOLLOW" 'done' \
+  || fail "the lane stayed busy behind the leaked descendant"
+LEAK_FOLLOW_ELAPSED=$(( $(date +%s) - LEAK_FOLLOW_BEGAN ))
+[ "$LEAK_FOLLOW_ELAPSED" -le 10 ] \
+  || fail "the next job for that home waited ${LEAK_FOLLOW_ELAPSED}s behind the leaked descendant"
+assert_present "$TMP_ROOT/leak-follow" "the follow-up job never ran"
+fm_remote_job_reap "$ACCOUNT_HOME" "$LEAK_FOLLOW" || true
+pass "a job whose descendant holds its output still publishes and frees its lane"
+
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$HOME_B" fm-volume-job.sh   "$TMP_ROOT/volume-ready" "$TMP_ROOT/volume-release" < /dev/null > /dev/null
+VOLUME_JOB=$FM_REMOTE_JOB_ID
+for _ in $(seq 1 200); do
+  [ ! -f "$TMP_ROOT/volume-ready" ] || break
+  sleep 0.05
+done
+assert_present "$TMP_ROOT/volume-ready" "output beyond the bound blocked or killed the writer"
+for stream in stdout stderr; do
+  VOLUME_BYTES=$(wc -c < "$STATE_ROOT/jobs/$VOLUME_JOB/$stream" | tr -d ' ')
+  [ "$VOLUME_BYTES" -eq "$FM_REMOTE_JOB_MAX_BYTES" ] || fail "$stream was not bounded during execution: $VOLUME_BYTES"
+done
+printf 'release\n' > "$TMP_ROOT/volume-release"
+wait_for_state "$VOLUME_JOB" "done" || fail "the verbose job did not publish"
+[ "$(cat "$STATE_ROOT/jobs/$VOLUME_JOB/exit")" = 23 ] || fail "output bounding changed the verbose job's exit status"
+fm_remote_job_reap "$ACCOUNT_HOME" "$VOLUME_JOB" || fail "the verbose job could not be reaped"
+pass "streaming capture stays bounded while excess output drains without blocking"
+
+# A caller killed outright runs no cleanup of its own, so the worker must read
+# the identity the record carries and cancel the job itself.
+ABANDON_START="$TMP_ROOT/abandoned-start"
+ABANDON_FINISH="$TMP_ROOT/abandoned-finish"
+# shellcheck disable=SC2016 # Expansion is deliberately deferred to the child shell.
+env FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  FM_REMOTE_JOB_QUEUE_TIMEOUT="$FM_REMOTE_JOB_QUEUE_TIMEOUT" \
+  FM_REMOTE_JOB_TIMEOUT="$FM_REMOTE_JOB_TIMEOUT" \
+  bash -c '
+    . "$1/bin/fm-remote-job-lib.sh"
+    fm_remote_job_stage "$2" "$3" "$4" fm-two-phase-job.sh "$5" "$6" 20 < /dev/null > /dev/null
+    while :; do sleep 1; done
+  ' _ "$ROOT" "$ACCOUNT_HOME" "$REMOTE_ROOT" "$HOME_A" "$ABANDON_START" "$ABANDON_FINISH" &
+ABANDON_CALLER=$!
+for _ in $(seq 1 300); do
+  [ -f "$ABANDON_START" ] && break
+  sleep 0.05
+done
+assert_present "$ABANDON_START" "the abandoned-caller fixture never started"
+kill -KILL "$ABANDON_CALLER" 2>/dev/null || true
+wait "$ABANDON_CALLER" 2>/dev/null || true
+ABANDON_BEGAN=$(date +%s)
+for _ in $(seq 1 300); do
+  ls "$STATE_ROOT"/jobs/job-* >/dev/null 2>&1 || break
+  sleep 0.05
+done
+ABANDON_ELAPSED=$(( $(date +%s) - ABANDON_BEGAN ))
+ls "$STATE_ROOT"/jobs/job-* >/dev/null 2>&1 \
+  && fail "a record whose staging caller was killed outright survived"
+[ "$ABANDON_ELAPSED" -le 10 ] || fail "abandoned-caller cancellation took ${ABANDON_ELAPSED}s"
+sleep 2
+assert_absent "$ABANDON_FINISH" "a job whose caller was killed outright ran to completion"
+pass "a record whose staging caller died without cleanup is cancelled by the worker"
 
 # Stage litter: an abandoned .stage.* older than the reap age does not survive
 # a worker pass, while staging owned by this live process is left alone even if

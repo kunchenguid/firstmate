@@ -8,11 +8,14 @@
 # runtime PATH.
 #
 # A published job directory is mode 0700 and contains root, home, argv
-# (NUL-delimited), stdin, seq, stdout, stderr, queue_deadline, timeout, and
-# state; deadline and exit are added as execution advances, cancel is an
-# optional caller-cancellation marker, and .claim may hold owner, owner_start,
+# (NUL-delimited), stdin, seq, stdout, stderr, queue_deadline, timeout, state,
+# and the .owner-pid/.owner-start pair identifying the process that staged it;
+# deadline and exit are added as execution advances, cancel is an optional
+# caller-cancellation marker, and .claim may hold owner, owner_start,
 # supervisor, supervisor_start, group, group_start, and armed records while
 # work executes.
+# The owner pair persists for the record's whole life; the cancellation contract
+# below owns why.
 # Stage writes state=queued last. seq is a queue-wide monotonic staging
 # sequence reserved atomically by its persistent .seq-claims directory; the
 # counter is only a forward-moving allocation hint. If the bounded hint walk
@@ -49,9 +52,21 @@
 # the finalized record because no result consumer remains. fm_remote_job_wait
 # honors an optional FM_REMOTE_JOB_DISCONNECT_PROBE function name. When set,
 # the probe runs about once per second; a failure cancels the job and fails
-# the wait. The staging entrypoint arms it with a parent-liveness probe so an
-# ssh channel
-# that dies without delivering a signal still cancels the abandoned job.
+# the wait. The staging entrypoint arms it with a parent-liveness probe so a
+# dedicated ssh connection whose death reparents it still cancels the abandoned
+# job.
+#
+# A caller cannot be relied on to do any of that for itself, which is why the
+# record keeps its staging process's .owner-pid/.owner-start pair for its whole
+# life. A caller killed outright, or lost with its host, runs no cancellation at
+# all, so the worker reads that recorded identity through
+# fm_remote_job_caller_abandoned and cancels the record itself rather than
+# executing - or queueing - it for nobody. The recorded start time is what makes
+# that safe against pid reuse, and a record with no owner pair, one staged by an
+# older library, is never abandoned. A channel closing on a multiplexed
+# connection reaches neither cover, because the sshd session process serving it
+# keeps running for its other channels and the caller stays alive; that job is
+# bounded by its deadline instead.
 # Abandoned .stage.* staging litter older than
 # FM_REMOTE_JOB_STAGE_REAP_SECONDS is reaped by the worker's stale sweep.
 #
@@ -91,6 +106,8 @@ FM_REMOTE_JOB_WAIT_GRACE=${FM_REMOTE_JOB_WAIT_GRACE:-30}
 FM_REMOTE_JOB_POLL_SECONDS=${FM_REMOTE_JOB_POLL_SECONDS:-0.05}
 FM_REMOTE_JOB_REAP_SECONDS=${FM_REMOTE_JOB_REAP_SECONDS:-3600}
 FM_REMOTE_JOB_STAGE_REAP_SECONDS=${FM_REMOTE_JOB_STAGE_REAP_SECONDS:-600}
+FM_REMOTE_JOB_OUTPUT_DRAIN_SECONDS=${FM_REMOTE_JOB_OUTPUT_DRAIN_SECONDS:-5}
+FM_REMOTE_JOB_LANE_GRACE_SECONDS=${FM_REMOTE_JOB_LANE_GRACE_SECONDS:-30}
 FM_REMOTE_JOB_SEQ_CLAIM_REAP_SECONDS=86400
 FM_REMOTE_JOB_SEQ_CLAIM_REAP_INTERVAL=3600
 # shellcheck disable=SC2034 # Shared protocol constant consumed by the worker and sourcing callers.
@@ -573,7 +590,6 @@ fm_remote_job_next_seq() { # [stage-dir destination]
           rm -f -- "$stage/state" "$stage/seq"
           return 1
         fi
-        rm -f -- "$destination/.owner-pid" "$destination/.owner-start" || true
       fi
       printf '%s\n' "$value"
       return 0
@@ -761,7 +777,11 @@ fm_remote_job_path_mtime() { # <path>
   if [ "$(uname -s 2>/dev/null || true)" = Darwin ]; then /usr/bin/stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
 }
 
-fm_remote_job_stage_owner_alive() { # <stage-dir>
+# Whether the process that staged <record-dir> is still the live process it was.
+# Both a .stage.* directory and a published job record carry the same pair, so
+# the same predicate answers "is this staging litter" and "has this job's caller
+# gone away".
+fm_remote_job_record_owner_alive() { # <record-dir>
   local stage=$1 pid recorded_start actual_start
   pid=$(fm_remote_job_read_single_line "$stage/.owner-pid" 64 2>/dev/null) || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
@@ -769,6 +789,14 @@ fm_remote_job_stage_owner_alive() { # <stage-dir>
   recorded_start=$(fm_remote_job_read_single_line "$stage/.owner-start" 256 2>/dev/null) || return 1
   actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
   [ "$recorded_start" = "$actual_start" ]
+}
+
+# A published record whose recorded caller is provably gone; this file's header
+# owns the contract.
+fm_remote_job_caller_abandoned() { # <job-dir>
+  local job=$1
+  [ -f "$job/.owner-pid" ] && [ ! -L "$job/.owner-pid" ] || return 1
+  ! fm_remote_job_record_owner_alive "$job"
 }
 
 fm_remote_job_reap_stale() { # <account-home>
@@ -813,7 +841,7 @@ fm_remote_job_reap_stale() { # <account-home>
   # longer the process that created it and the stage has exceeded the age bound.
   for stage in "$FM_REMOTE_JOB_JOBS"/.stage.*; do
     [ -d "$stage" ] && [ ! -L "$stage" ] || continue
-    fm_remote_job_stage_owner_alive "$stage" && continue
+    fm_remote_job_record_owner_alive "$stage" && continue
     mtime=$(fm_remote_job_path_mtime "$stage" 2>/dev/null || true)
     case "$mtime" in ''|*[!0-9]*) continue ;; esac
     [ $((now - mtime)) -ge "$FM_REMOTE_JOB_STAGE_REAP_SECONDS" ] || continue
@@ -909,6 +937,126 @@ fm_remote_job_process_start() {
   [ -n "$value" ] || return 1
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
   printf '%s\n' "$value"
+}
+
+fm_remote_job_read_process_id() { # <file>
+  local file=$1 pid
+  fm_remote_job_regular_bounded "$file" 64 || return 1
+  pid=$(tr -d '\n' < "$file")
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pid" -gt 1 ] || return 1
+  printf '%s\n' "$pid"
+}
+
+fm_remote_job_process_or_group_alive() { # process|group <pid>
+  case "$1" in
+    process) kill -0 "$2" 2>/dev/null ;;
+    group) kill -0 -- "-$2" 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_remote_job_signal_process_or_group() { # process|group <signal> <pid>
+  case "$1" in
+    process) kill "-$2" "$3" 2>/dev/null || true ;;
+    group) kill "-$2" -- "-$3" 2>/dev/null || true ;;
+  esac
+}
+
+fm_remote_job_supervisor_identity_status() { # <job-dir> <pid>
+  local job=$1 pid=$2 recorded_start actual_start
+  recorded_start=$(fm_remote_job_read_single_line "$job/.claim/supervisor_start" 256 2>/dev/null) || return 2
+  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
+    fm_remote_job_process_or_group_alive process "$pid" && return 2
+    return 1
+  }
+  [ "$recorded_start" = "$actual_start" ] && return 0
+  return 1
+}
+
+# A leaderless live group still belongs to the recorded execution: its PGID
+# cannot be reused while any old member survives, so it remains safe to signal.
+# A live leader whose start identity mismatches proves PID reuse and makes the
+# recorded group stale; an unreadable live leader stays indeterminate so the
+# stop loop retries rather than signaling or declaring the group dead.
+fm_remote_job_group_identity_status() { # <job-dir> <pid>
+  local job=$1 pid=$2 recorded_start actual_start file="$1/.claim/group_start"
+  [ -e "$file" ] || [ -L "$file" ] || return 3
+  recorded_start=$(fm_remote_job_read_single_line "$file" 256 2>/dev/null) || return 2
+  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
+    kill -0 "$pid" 2>/dev/null && return 2
+    fm_remote_job_process_or_group_alive group "$pid" && return 0
+    return 1
+  }
+  [ "$recorded_start" = "$actual_start" ] && return 0
+  return 1
+}
+
+fm_remote_job_recorded_execution_alive() { # <job-dir> process|group <pid>
+  local job=$1 kind=$2 pid=$3 identity_status
+  if [ "$kind" = process ]; then
+    fm_remote_job_supervisor_identity_status "$job" "$pid"
+    identity_status=$?
+    case "$identity_status" in
+      0) ;;
+      1) return 1 ;;
+      2) fm_remote_job_process_or_group_alive process "$pid"; return ;;
+    esac
+  else
+    fm_remote_job_group_identity_status "$job" "$pid"
+    identity_status=$?
+    case "$identity_status" in
+      0|3) ;;
+      1) return 1 ;;
+      2) fm_remote_job_process_or_group_alive group "$pid"; return ;;
+    esac
+  fi
+  fm_remote_job_process_or_group_alive "$kind" "$pid"
+}
+
+fm_remote_job_signal_recorded_execution() { # <job-dir> process|group <signal> <pid>
+  local job=$1 kind=$2 signal=$3 pid=$4 identity_status
+  if [ "$kind" = process ]; then
+    fm_remote_job_supervisor_identity_status "$job" "$pid" || return 0
+  else
+    fm_remote_job_group_identity_status "$job" "$pid"
+    identity_status=$?
+    case "$identity_status" in 0|3) ;; *) return 0 ;; esac
+  fi
+  fm_remote_job_signal_process_or_group "$kind" "$signal" "$pid"
+}
+
+fm_remote_job_stop_recorded_execution() { # <job-dir>
+  local job=$1 kind file pid attempt still_alive
+  for kind in process group; do
+    case "$kind" in process) file="$job/.claim/supervisor" ;; group) file="$job/.claim/group" ;; esac
+    [ ! -e "$file" ] && [ ! -L "$file" ] && continue
+    [ ! -L "$file" ] || return 1
+    pid=$(fm_remote_job_read_process_id "$file") || return 1
+    fm_remote_job_signal_recorded_execution "$job" "$kind" TERM "$pid"
+    fm_remote_job_signal_recorded_execution "$job" "$kind" KILL "$pid"
+    wait "$pid" 2>/dev/null || true
+  done
+  attempt=0
+  while [ "$attempt" -lt 100 ]; do
+    attempt=$((attempt + 1))
+    still_alive=0
+    for kind in process group; do
+      case "$kind" in process) file="$job/.claim/supervisor" ;; group) file="$job/.claim/group" ;; esac
+      [ -e "$file" ] || continue
+      pid=$(fm_remote_job_read_process_id "$file") || return 1
+      if fm_remote_job_recorded_execution_alive "$job" "$kind" "$pid"; then
+        still_alive=1
+        fm_remote_job_signal_recorded_execution "$job" "$kind" TERM "$pid"
+        fm_remote_job_signal_recorded_execution "$job" "$kind" KILL "$pid"
+      fi
+    done
+    [ "$still_alive" -eq 1 ] || break
+    sleep 0.01
+  done
+  [ "$still_alive" -eq 0 ] || return 1
+  rm -f -- "$job/.claim/supervisor" "$job/.claim/supervisor_start" \
+    "$job/.claim/group" "$job/.claim/group_start" "$job/.claim/armed"
 }
 
 fm_remote_job_process_command() {

@@ -22,6 +22,14 @@
 # its recorded command group, leaving interrupted records for the replacement
 # worker's orphan recovery.
 #
+# A lane is bounded in age as well as in what it may run. Its command group is
+# bounded by the job deadline, and output readers receive TERM after
+# FM_REMOTE_JOB_OUTPUT_DRAIN_SECONDS of draining, then KILL one second later
+# if still present. A lane still alive FM_REMOTE_JOB_LANE_GRACE_SECONDS past
+# the deadline is stopped outright.
+# These bounds prevent an escaped descendant holding an output pipe from
+# blocking the home's queue and keeping later callers' SSH sessions open.
+#
 # The worker is abandoned when its configured FM_ROOT stops being a genuine
 # Firstmate checkout - the state a pruned no-mistakes gate worktree, a returned
 # pooled worktree, or a removed test fixture root leaves behind. It can never
@@ -59,6 +67,7 @@ FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}
 
 WORKER_LOCK=
 WORKER_LOCK_HELD=0
+WORKER_ACCOUNT_HOME=
 WORKER_RELEASE_OWNERSHIP=1
 WORKER_SUPERVISED_PID=
 WORKER_PREEMPTIBLE=0
@@ -68,6 +77,8 @@ WORKER_LANE_HOMES=()
 WORKER_LANE_PIDS=()
 WORKER_LANE_STARTS=()
 WORKER_LANE_JOBS=()
+WORKER_LANE_SCAN_AT=0
+WORKER_ABANDON_SCAN_AT=0
 
 worker_error() { printf 'remote-job-worker: %s\n' "$1" >&2; }
 
@@ -145,8 +156,8 @@ worker_quarantined_execution_stopped() { # <account-home>
       case "$kind" in process) file="$job/.claim/supervisor" ;; group) file="$job/.claim/group" ;; esac
       [ ! -e "$file" ] && [ ! -L "$file" ] && continue
       [ ! -L "$file" ] || return 1
-      pid=$(worker_read_process_id "$file") || return 1
-      worker_recorded_execution_alive "$job" "$kind" "$pid" && return 1
+      pid=$(fm_remote_job_read_process_id "$file") || return 1
+      fm_remote_job_recorded_execution_alive "$job" "$kind" "$pid" && return 1
     done
   done
 }
@@ -235,126 +246,6 @@ worker_code_root_abandoned() {
   return 0
 }
 
-worker_read_process_id() { # <file>
-  local file=$1 pid
-  fm_remote_job_regular_bounded "$file" 64 || return 1
-  pid=$(tr -d '\n' < "$file")
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$pid" -gt 1 ] || return 1
-  printf '%s\n' "$pid"
-}
-
-worker_process_or_group_alive() { # process|group <pid>
-  case "$1" in
-    process) kill -0 "$2" 2>/dev/null ;;
-    group) kill -0 -- "-$2" 2>/dev/null ;;
-    *) return 1 ;;
-  esac
-}
-
-worker_signal_process_or_group() { # process|group <signal> <pid>
-  case "$1" in
-    process) kill "-$2" "$3" 2>/dev/null || true ;;
-    group) kill "-$2" -- "-$3" 2>/dev/null || true ;;
-  esac
-}
-
-worker_supervisor_identity_status() { # <job-dir> <pid>
-  local job=$1 pid=$2 recorded_start actual_start
-  recorded_start=$(fm_remote_job_read_single_line "$job/.claim/supervisor_start" 256 2>/dev/null) || return 2
-  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
-    worker_process_or_group_alive process "$pid" && return 2
-    return 1
-  }
-  [ "$recorded_start" = "$actual_start" ] && return 0
-  return 1
-}
-
-# A leaderless live group still belongs to the recorded execution: its PGID
-# cannot be reused while any old member survives, so it remains safe to signal.
-# A live leader whose start identity mismatches proves PID reuse and makes the
-# recorded group stale; an unreadable live leader stays indeterminate so the
-# stop loop retries rather than signaling or declaring the group dead.
-worker_group_identity_status() { # <job-dir> <pid>
-  local job=$1 pid=$2 recorded_start actual_start file="$1/.claim/group_start"
-  [ -e "$file" ] || [ -L "$file" ] || return 3
-  recorded_start=$(fm_remote_job_read_single_line "$file" 256 2>/dev/null) || return 2
-  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
-    kill -0 "$pid" 2>/dev/null && return 2
-    worker_process_or_group_alive group "$pid" && return 0
-    return 1
-  }
-  [ "$recorded_start" = "$actual_start" ] && return 0
-  return 1
-}
-
-worker_recorded_execution_alive() { # <job-dir> process|group <pid>
-  local job=$1 kind=$2 pid=$3 identity_status
-  if [ "$kind" = process ]; then
-    worker_supervisor_identity_status "$job" "$pid"
-    identity_status=$?
-    case "$identity_status" in
-      0) ;;
-      1) return 1 ;;
-      2) worker_process_or_group_alive process "$pid"; return ;;
-    esac
-  else
-    worker_group_identity_status "$job" "$pid"
-    identity_status=$?
-    case "$identity_status" in
-      0|3) ;;
-      1) return 1 ;;
-      2) worker_process_or_group_alive group "$pid"; return ;;
-    esac
-  fi
-  worker_process_or_group_alive "$kind" "$pid"
-}
-
-worker_signal_recorded_execution() { # <job-dir> process|group <signal> <pid>
-  local job=$1 kind=$2 signal=$3 pid=$4 identity_status
-  if [ "$kind" = process ]; then
-    worker_supervisor_identity_status "$job" "$pid" || return 0
-  else
-    worker_group_identity_status "$job" "$pid"
-    identity_status=$?
-    case "$identity_status" in 0|3) ;; *) return 0 ;; esac
-  fi
-  worker_signal_process_or_group "$kind" "$signal" "$pid"
-}
-
-worker_stop_recorded_execution() { # <job-dir>
-  local job=$1 kind file pid attempt still_alive
-  for kind in process group; do
-    case "$kind" in process) file="$job/.claim/supervisor" ;; group) file="$job/.claim/group" ;; esac
-    [ ! -e "$file" ] && [ ! -L "$file" ] && continue
-    [ ! -L "$file" ] || return 1
-    pid=$(worker_read_process_id "$file") || return 1
-    worker_signal_recorded_execution "$job" "$kind" TERM "$pid"
-    worker_signal_recorded_execution "$job" "$kind" KILL "$pid"
-    wait "$pid" 2>/dev/null || true
-  done
-  attempt=0
-  while [ "$attempt" -lt 100 ]; do
-    attempt=$((attempt + 1))
-    still_alive=0
-    for kind in process group; do
-      case "$kind" in process) file="$job/.claim/supervisor" ;; group) file="$job/.claim/group" ;; esac
-      [ -e "$file" ] || continue
-      pid=$(worker_read_process_id "$file") || return 1
-      if worker_recorded_execution_alive "$job" "$kind" "$pid"; then
-        still_alive=1
-        worker_signal_recorded_execution "$job" "$kind" TERM "$pid"
-        worker_signal_recorded_execution "$job" "$kind" KILL "$pid"
-      fi
-    done
-    [ "$still_alive" -eq 1 ] || break
-    sleep 0.01
-  done
-  [ "$still_alive" -eq 0 ] || return 1
-  rm -f -- "$job/.claim/supervisor" "$job/.claim/supervisor_start" \
-    "$job/.claim/group" "$job/.claim/group_start" "$job/.claim/armed"
-}
-
 # Stop every tracked lane process and its recorded command execution. The lane
 # is signalled first so it cannot dispatch further work, then the job's
 # recorded supervisor and group are verified stopped; a job interrupted here
@@ -377,7 +268,7 @@ worker_stop_active_execution() {
     if worker_lane_identity_matches "$pid" "$start"; then kill -KILL "$pid" 2>/dev/null || true; fi
     wait "$pid" 2>/dev/null || true
     if [ -d "$job" ] && [ ! -L "$job" ]; then
-      worker_stop_recorded_execution "$job" || failed=1
+      fm_remote_job_stop_recorded_execution "$job" || failed=1
     fi
     i=$((i + 1))
   done
@@ -482,7 +373,7 @@ worker_clear_dead_claim() { # <job-dir>
 # crashed single-process worker's job always has.
 worker_reclaim_running_job() { # <job-dir>
   local job=$1 file state
-  worker_stop_recorded_execution "$job" || return 1
+  fm_remote_job_stop_recorded_execution "$job" || return 1
   state=$(fm_remote_job_read_state "$job" 2>/dev/null) || return 1
   worker_clear_dead_claim "$job" || return 1
   [ "$state" = 'done' ] && return 0
@@ -519,6 +410,12 @@ worker_publish_result() { # <job-dir> <exit>
   case "$exit_status" in ''|*[!0-9]*) exit_status=125 ;; esac
   [ "$exit_status" -le 255 ] || exit_status=125
   for tmp in stdout stderr; do
+    fm_remote_job_regular_bounded "$job/$tmp" "$FM_REMOTE_JOB_MAX_BYTES" && continue
+    # Only a stream that actually exceeded the bound is rewritten, and only here,
+    # where publication already had to measure it. Measuring again in the caller
+    # would have cost a second read of both streams on every job to answer a
+    # question that is almost always no.
+    worker_bound_capture_file "$job/$tmp" || return 1
     fm_remote_job_regular_bounded "$job/$tmp" "$FM_REMOTE_JOB_MAX_BYTES" || return 1
   done
   tmp=$(umask 077; mktemp "$job/.exit.XXXXXX") || return 1
@@ -553,18 +450,18 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
   group_pid=$!
   set +m
   group_start=$(fm_remote_job_process_start "$group_pid") || {
-    worker_signal_process_or_group group KILL "$group_pid"
+    fm_remote_job_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     return 125
   }
   group_tmp=$(umask 077; mktemp "$job/.claim/.group.XXXXXX") || {
-    worker_signal_process_or_group group KILL "$group_pid"
+    fm_remote_job_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     return 125
   }
   group_start_tmp=$(umask 077; mktemp "$job/.claim/.group_start.XXXXXX") || {
     rm -f -- "$group_tmp"
-    worker_signal_process_or_group group KILL "$group_pid"
+    fm_remote_job_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     return 125
   }
@@ -574,52 +471,55 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
     || ! mv -f -- "$group_start_tmp" "$group_start_file" \
     || ! mv -f -- "$group_tmp" "$group_file"; then
     rm -f -- "$group_tmp" "$group_start_tmp" "$group_file" "$group_start_file"
-    worker_signal_process_or_group group KILL "$group_pid"
+    fm_remote_job_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     return 125
   fi
   tmp=$(umask 077; mktemp "$job/.claim/.armed.XXXXXX") || {
-    worker_signal_process_or_group group KILL "$group_pid"
+    fm_remote_job_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     rm -f -- "$group_file" "$group_start_file"
     return 125
   }
   if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$armed_file"; then
     rm -f -- "$tmp"
-    worker_signal_process_or_group group KILL "$group_pid"
+    fm_remote_job_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     rm -f -- "$group_file" "$group_start_file"
     return 125
   fi
   deadline=$((SECONDS + timeout))
   next_check=$((SECONDS + 1))
-  while worker_process_or_group_alive group "$group_pid"; do
+  while fm_remote_job_process_or_group_alive group "$group_pid"; do
     if [ "$SECONDS" -ge "$deadline" ]; then
-      worker_signal_process_or_group group TERM "$group_pid"
-      worker_signal_process_or_group group KILL "$group_pid"
+      fm_remote_job_signal_process_or_group group TERM "$group_pid"
+      fm_remote_job_signal_process_or_group group KILL "$group_pid"
       timed_out=1
       break
     fi
     if [ "$SECONDS" -ge "$next_check" ]; then
+      if [ -n "$WORKER_ACCOUNT_HOME" ] && fm_remote_job_caller_abandoned "$job"; then
+        fm_remote_job_cancel "$WORKER_ACCOUNT_HOME" "${job##*/}" 2>/dev/null || true
+      fi
       if fm_remote_job_cancelled "$job"; then
-        worker_signal_process_or_group group TERM "$group_pid"
+        fm_remote_job_signal_process_or_group group TERM "$group_pid"
         attempt=0
-        while worker_process_or_group_alive group "$group_pid" && [ "$attempt" -lt 20 ]; do
+        while fm_remote_job_process_or_group_alive group "$group_pid" && [ "$attempt" -lt 20 ]; do
           attempt=$((attempt + 1))
           sleep 0.05
         done
-        worker_signal_process_or_group group KILL "$group_pid"
+        fm_remote_job_signal_process_or_group group KILL "$group_pid"
         cancelled=1
         break
       fi
       if [ "$WORKER_PREEMPTIBLE" -eq 1 ] && worker_preempting_waiter_exists "$WORKER_LANE_HOME"; then
-        worker_signal_process_or_group group TERM "$group_pid"
+        fm_remote_job_signal_process_or_group group TERM "$group_pid"
         attempt=0
-        while worker_process_or_group_alive group "$group_pid" && [ "$attempt" -lt 20 ]; do
+        while fm_remote_job_process_or_group_alive group "$group_pid" && [ "$attempt" -lt 20 ]; do
           attempt=$((attempt + 1))
           sleep 0.05
         done
-        worker_signal_process_or_group group KILL "$group_pid"
+        fm_remote_job_signal_process_or_group group KILL "$group_pid"
         WORKER_PREEMPTED=1
         break
       fi
@@ -668,12 +568,63 @@ worker_cleanup_output_capture() { # <job-dir> <stdout-reader> <stderr-reader>
   rm -f -- "$job/.stdout.pipe" "$job/.stderr.pipe"
 }
 
-worker_capture_output() { # <fifo> <destination>
-  local fifo=$1 destination=$2
+# Wait for both output readers with the bounded shutdown owned by the header. The
+# command's own process group is already dead by the time this runs, so EOF is
+# immediate unless a descendant escaped that group - a daemonized agent runtime
+# or multiplexer server - and still holds the job's stdout or stderr. An
+# unbounded wait would prevent publication and keep the home's lane occupied.
+# Whatever was captured before the bound is what the record publishes.
+worker_drain_output_capture() { # <stdout-reader> <stderr-reader>
+  local stdout_reader=$1 stderr_reader=$2 watchdog
   {
-    head -c "$FM_REMOTE_JOB_MAX_BYTES"
-    cat >/dev/null
-  } < "$fifo" > "$destination"
+    sleep "$FM_REMOTE_JOB_OUTPUT_DRAIN_SECONDS"
+    kill -TERM "$stdout_reader" "$stderr_reader" 2>/dev/null || true
+    sleep 1
+    kill -KILL "$stdout_reader" "$stderr_reader" 2>/dev/null || true
+  } &
+  watchdog=$!
+  wait "$stdout_reader" 2>/dev/null || true
+  wait "$stderr_reader" 2>/dev/null || true
+  kill -KILL "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+}
+
+# Use write-through cat so stopping capture preserves short output. The copy's
+# file-size limit bounds storage to the next KiB; keeping the FIFO open while
+# switching to a discard reader lets excess output drain without blocking the
+# writer. The signal trap stops and reaps the copy before the reader exits.
+worker_capture_output() {
+  local fifo=$1 destination=$2 copy_pid
+  exec 3< "$fifo"
+  trap 'kill -TERM "$copy_pid" 2>/dev/null || true; wait "$copy_pid" 2>/dev/null || true; exit 0' TERM INT HUP
+  (
+    unset POSIXLY_CORRECT
+    set +o posix
+    ulimit -c 0
+    ulimit -f "$(( (FM_REMOTE_JOB_MAX_BYTES + 1023) / 1024 ))" || exit 1
+    exec cat <&3 > "$destination"
+  ) 2>/dev/null &
+  copy_pid=$!
+  wait "$copy_pid" 2>/dev/null || true
+  trap - TERM INT HUP
+  exec cat <&3 > /dev/null
+}
+
+# Re-establish the record's byte bound on a captured stream. Publication refuses
+# an over-bound file; this backstop trims the capture limit's KiB rounding to
+# the exact byte bound. Called only for an over-bound stream at publication.
+worker_bound_capture_file() { # <file>
+  local file=$1 bytes tmp
+  [ -f "$file" ] && [ ! -L "$file" ] || return 0
+  bytes=$(LC_ALL=C wc -c < "$file" 2>/dev/null | tr -d ' ') || return 0
+  case "$bytes" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$bytes" -gt "$FM_REMOTE_JOB_MAX_BYTES" ] || return 0
+  tmp=$(umask 077; mktemp "$file.XXXXXX") || return 1
+  if ! head -c "$FM_REMOTE_JOB_MAX_BYTES" "$file" > "$tmp" || ! chmod 600 "$tmp" \
+    || ! mv -f -- "$tmp" "$file"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 worker_run_job() { # <account-home> <job-dir>
@@ -766,8 +717,7 @@ worker_run_job() { # <account-home> <job-dir>
     "$command_path" "${argv[@]:1}" < "$job/stdin" > "$stdout_pipe" 2> "$stderr_pipe"
   rc=$?
   WORKER_PREEMPTIBLE=0
-  wait "$stdout_reader"
-  wait "$stderr_reader"
+  worker_drain_output_capture "$stdout_reader" "$stderr_reader"
   rm -f -- "$stdout_pipe" "$stderr_pipe"
   set -e
   if [ "$WORKER_PREEMPTED" -eq 1 ]; then
@@ -833,6 +783,37 @@ worker_reap_finished_lanes() {
     WORKER_LANE_STARTS+=("${live_starts[$i]}")
     WORKER_LANE_JOBS+=("${live_jobs[$i]}")
     i=$((i + 1))
+  done
+}
+
+# A lane that outlived its job's own deadline by the lane grace is stopped, so
+# no lane can outlive the work it was started for whatever wedges inside it.
+# Stopping the lane process is the whole action: the next reap drops it from the
+# tracked set and the serving scan then reclaims its record through the same
+# orphan recovery a crashed worker's job gets.
+worker_stop_overrun_lanes() {
+  local i=0 count=${#WORKER_LANE_PIDS[@]} pid start job deadline now
+  # The serving loop calls this on every poll, so it does nothing at all while
+  # no lane is tracked and at most once a second otherwise. Both guards read
+  # only shell state: a scan of its own on every poll would have cost several
+  # forks twenty times a second for a deadline that moves once a second.
+  [ "$count" -gt 0 ] || return 0
+  [ "$SECONDS" -ge "$WORKER_LANE_SCAN_AT" ] || return 0
+  WORKER_LANE_SCAN_AT=$((SECONDS + 1))
+  now=$(date +%s)
+  while [ "$i" -lt "$count" ]; do
+    pid=${WORKER_LANE_PIDS[$i]}
+    start=${WORKER_LANE_STARTS[$i]}
+    job=${WORKER_LANE_JOBS[$i]}
+    i=$((i + 1))
+    worker_lane_identity_matches "$pid" "$start" || continue
+    [ -d "$job" ] && [ ! -L "$job" ] || continue
+    deadline=$(fm_remote_job_read_number "$job" deadline 2>/dev/null || true)
+    case "$deadline" in ''|*[!0-9]*) continue ;; esac
+    [ "$now" -ge $((deadline + FM_REMOTE_JOB_LANE_GRACE_SECONDS)) ] || continue
+    worker_error "lane for ${job##*/} outlived its deadline; stopping it"
+    kill -TERM "$pid" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
   done
 }
 
@@ -909,7 +890,7 @@ worker_lane_execute() { # <account-home> <job-dir>
 # has always run in.
 worker_start_lane() { # <job-dir> <home>
   local job=$1 home=$2 lane_pid lane_start
-  "$SCRIPT_DIR/fm-remote-job-worker.sh" --lane "${job##*/}" &
+  "$SCRIPT_DIR/fm-remote-job-worker.sh" --lane "${job##*/}" "$FM_REMOTE_JOB_STATE" &
   lane_pid=$!
   lane_start=$(fm_remote_job_process_start "$lane_pid" 2>/dev/null || true)
   WORKER_LANE_HOMES+=("$home")
@@ -918,10 +899,12 @@ worker_start_lane() { # <job-dir> <home>
   WORKER_LANE_JOBS+=("$job")
 }
 
-worker_lane_main() { # <job-id>
+worker_lane_main() {
   local account_home job
   fm_remote_job_safe_id "$1" || { worker_error "invalid lane job id"; exit 2; }
+  FM_REMOTE_JOB_STATE_ROOT=$2
   account_home=$(worker_account_home) || { worker_error "cannot resolve account home"; exit 1; }
+  WORKER_ACCOUNT_HOME=$account_home
   FM_ROOT=$(fm_remote_job_canonical_existing_dir "$FM_ROOT") || { worker_error "configured FM_ROOT is unsafe"; exit 1; }
   fm_remote_job_prepare_state "$account_home" || { worker_error "$FM_REMOTE_JOB_ERROR"; exit 1; }
   job=$(fm_remote_job_job_dir "$1" 2>/dev/null) || exit 0
@@ -930,8 +913,18 @@ worker_lane_main() { # <job-id>
 
 worker_process_once() { # <account-home>
   local account_home=$1 job id state queue_deadline home seq candidates=''
-  local reserved_index reserved_count home_reserved
+  local reserved_index reserved_count home_reserved check_abandoned=0
   local reserved_homes=()
+  # Reading a record's caller identity costs several forks, so a queued record
+  # is tested for an abandoned caller at most once a second rather than on every
+  # poll. A record queued behind a busy lane would otherwise pay that scan
+  # twenty times a second for an answer that cannot change faster than the
+  # clock this gate reads.
+  if [ "$SECONDS" -ge "$WORKER_ABANDON_SCAN_AT" ]; then
+    check_abandoned=1
+    WORKER_ABANDON_SCAN_AT=$((SECONDS + 1))
+  fi
+  worker_stop_overrun_lanes
   worker_reap_finished_lanes
   for job in "$FM_REMOTE_JOB_JOBS"/job-*; do
     [ -d "$job" ] && [ ! -L "$job" ] || continue
@@ -949,6 +942,9 @@ worker_process_once() { # <account-home>
             [ -n "$home" ] && reserved_homes+=("$home")
           fi
           continue
+        fi
+        if [ "$check_abandoned" -eq 1 ] && fm_remote_job_caller_abandoned "$job"; then
+          fm_remote_job_cancel "$account_home" "$id" 2>/dev/null || true
         fi
         if fm_remote_job_cancelled "$job"; then
           worker_finalize_cancelled "$account_home" "$job" || true
@@ -1000,6 +996,7 @@ worker_process_once() { # <account-home>
 main() {
   local account_home lock_status
   account_home=$(worker_account_home) || { worker_error "cannot resolve account home"; exit 1; }
+  WORKER_ACCOUNT_HOME=$account_home
   FM_ROOT=$(fm_remote_job_canonical_existing_dir "$FM_ROOT") || { worker_error "configured FM_ROOT is unsafe"; exit 1; }
   [ -f "$FM_ROOT/AGENTS.md" ] && [ ! -L "$FM_ROOT/AGENTS.md" ] || { worker_error "FM_ROOT is not a Firstmate checkout"; exit 1; }
   fm_remote_job_prepare_state "$account_home" || { worker_error "$FM_REMOTE_JOB_ERROR"; exit 1; }
@@ -1114,8 +1111,8 @@ case "${1:-}" in
     main
     ;;
   --lane)
-    [ "$#" -eq 2 ] || { worker_error "unexpected worker arguments"; exit 2; }
-    worker_lane_main "$2"
+    [ "$#" -eq 3 ] || { worker_error "unexpected worker arguments"; exit 2; }
+    worker_lane_main "$2" "$3"
     ;;
   '')
     if [ "$(fm_remote_job_platform)" = linux ]; then worker_supervise_linux; else main; fi
