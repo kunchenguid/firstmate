@@ -220,6 +220,7 @@ bin/fm-spawn.sh <id> --secondmate
 
 Use the recorded `home=` in meta.
 If meta is missing but `data/secondmates.md` still registers the secondmate, respawn from the registry entry and its persistent home.
+The locked session-start liveness sweep performs exactly this recovery for every secondmate registered in `data/secondmates.md`, including one with no `state/<id>.meta` record or a record with no endpoint; when it cannot relaunch one, it names that secondmate as an explicit `SECONDMATE_LIVENESS:` gap line rather than passing over it.
 For a remote route, the same command probes and relaunches only on the configured host.
 An SSH transport failure or unreadable remote endpoint remains unknown and must be reconciled on that host; never launch a local replacement.
 `stuck-crewmate-recovery`'s remote-secondmate note owns why the endpoint-dead and send-failed verdicts that seem to justify this are themselves unreliable.

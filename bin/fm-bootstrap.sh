@@ -20,7 +20,7 @@
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
-#                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
+#                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>|gap: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate home is fast-forwarded, its target is
@@ -48,6 +48,11 @@
 #          fm_backend_agent_state: skipped distinguishes an existing ambiguous
 #          process, an unreadable target, and an unverified backend; respawn
 #          failed names whether the endpoint was missing or agent-less.
+#          The sweep accounts for every secondmate registered in
+#          data/secondmates.md, not only those with a state/<id>.meta record: a
+#          registered secondmate with no record, or a record with no endpoint,
+#          is relaunched from the registry, and one that cannot be recovered is
+#          named with an explicit `gap:` line rather than omitted.
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
@@ -683,61 +688,130 @@ report_relaunch() {  # <id> <cause> <where>
   echo "BOOTSTRAP_INFO: secondmate $1 relaunched after $2 ($3)"
 }
 
+# Registered secondmate ids from data/secondmates.md, in file order. The
+# registry is the durable authority for WHICH secondmates exist; state/<id>.meta
+# is only the endpoint record for one that is currently running.
+secondmate_registered_ids() {  # <registry>
+  local reg=$1 line id
+  [ -f "$reg" ] && [ ! -L "$reg" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      '- '*) ;;
+      *) continue ;;
+    esac
+    id=${line#- }
+    id=${id%% *}
+    case "$id" in '' | *[!A-Za-z0-9._-]*) continue ;; esac
+    printf '%s\n' "$id"
+  done < "$reg"
+}
+
+# Every id the sweep must account for: registered secondmates first, then any
+# kind=secondmate endpoint record not already covered. The caller deduplicates,
+# so a running registered secondmate is probed exactly once.
+secondmate_liveness_ids() {  # <state> <registry>
+  local state=$1 registry=$2 meta id
+  secondmate_registered_ids "$registry"
+  [ -d "$state" ] || return 0
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] || continue
+    grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
+    id=$(basename "$meta" .meta)
+    printf '%s\n' "$id"
+  done
+}
+
 secondmate_liveness_sweep() {
-  # Idempotent secondmate liveness guarantee - SESSION START ONLY. The detailed
-  # state machine and its only recovery-authorizing states are owned by
-  # fm_backend_agent_state. A missing tmux pane is not enough: tmux must prove
-  # the window or session absent. This preserves duplicate prevention for
+  # Idempotent secondmate liveness guarantee - SESSION START ONLY. Every
+  # REGISTERED secondmate is accounted for: the walk covers data/secondmates.md
+  # plus state/<id>.meta, never only the meta records, so a secondmate whose
+  # record is missing or incomplete is recovered rather than silently passed
+  # over. The detailed state machine and its recovery-authorizing states are
+  # owned by fm_backend_agent_state. A missing tmux pane is not enough: tmux must
+  # prove the window or session absent. This preserves duplicate prevention for
   # existing ambiguous processes and every transiently unreadable target while
   # adding the missing-session path the original bare-shell and Herdr-husk sweep
   # lacked.
-  # A meta with no window remains owned by secondmate-provisioning recovery.
-  # Secondmate homes never contain kind=secondmate meta, so this is naturally a
-  # primary-only no-op there. Mid-session liveness remains explicitly out of
-  # scope and requires a separate periodic signal.
+  # A registered secondmate with no record, or a record with no endpoint, is a
+  # recoverable state handled by secondmate_liveness_recover_from_registry; one
+  # that cannot be recovered is named as an explicit `gap:` line rather than
+  # omitted.
+  # Secondmate homes never contain kind=secondmate meta AND never register
+  # secondmates, so this is naturally a primary-only no-op there. Mid-session
+  # liveness remains explicitly out of scope and requires a separate periodic
+  # signal.
   [ -d "$STATE" ] || return 0
-  local meta id remote_host label __fm_timing_stamp parallel=0
+  local meta id remote_host label parallel=0
   SECONDMATE_RESPAWNED_IDS=""
   if bootstrap_parallel_begin; then
     parallel=1
   fi
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
-    # Identity for the timing record is read here, in the loop, so the per-meta
-    # body below keeps its single-exit-per-outcome shape.
-    id=$(basename "$meta" .meta)
-    remote_host=$(fm_meta_get "$meta" remote_host)
-    label=$id
-    [ -z "$remote_host" ] || label="$id@$remote_host"
-    if [ "$parallel" -eq 1 ]; then
-      bootstrap_parallel_spawn secondmate_liveness_one_timed "$meta" "$id" "$label"
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    meta="$STATE/$id.meta"
+    if [ -f "$meta" ]; then
+      grep -q '^kind=secondmate$' "$meta" 2>/dev/null || meta=
     else
-      secondmate_liveness_one_timed "$meta" "$id" "$label"
+      meta=
     fi
-  done
+    label=$id
+    if [ -n "$meta" ]; then
+      remote_host=$(fm_meta_get "$meta" remote_host)
+      [ -z "$remote_host" ] || label="$id@$remote_host"
+    fi
+    if [ "$parallel" -eq 1 ]; then
+      bootstrap_parallel_spawn secondmate_liveness_one_timed "$id" "$meta" "$label"
+    else
+      secondmate_liveness_one_timed "$id" "$meta" "$label"
+    fi
+  done < <(secondmate_liveness_ids "$STATE" "$DATA/secondmates.md" | awk '!seen[$0]++')
   [ "$parallel" -eq 0 ] || bootstrap_parallel_finish
   return 0
 }
 
-secondmate_liveness_one_timed() {  # <meta> <id> <label>
-  local meta=$1 id=$2 label=$3 __fm_timing_stamp
+secondmate_liveness_one_timed() {  # <id> <meta|empty> <label>
+  local id=$1 meta=$2 label=$3 __fm_timing_stamp
   __fm_timing_stamp=$(fm_timing_now_ms)
   secondmate_liveness_one "$meta" "$id"
   fm_timing_record secondmate liveness "$__fm_timing_stamp" "$label"
+}
+
+# Relaunch a registered secondmate whose endpoint record is missing or
+# incomplete, from the durable registry entry and its persistent home. Success is
+# silent by default (a BOOTSTRAP_INFO fact under FM_BOOTSTRAP_VERBOSE_FACTS); a
+# refusal is an explicit named gap so the secondmate is never quietly omitted.
+secondmate_liveness_recover_from_registry() {  # <id> <cause>
+  local id=$1 cause=$2 out reason
+  if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+    secondmate_note_respawned "$id"
+    report_relaunch "$id" "$cause" "registry"
+  else
+    reason=$(printf '%s\n' "$out" | awk '/error:/ { print; exit }')
+    [ -n "$reason" ] || reason=$(first_line "$out")
+    echo "SECONDMATE_LIVENESS: secondmate $id: gap: $cause and relaunch from registry failed: $reason"
+  fi
 }
 
 # One secondmate's liveness check. Split out of the sweep so each is individually
 # timed; every `return` here was a `continue` in the loop and means exactly the
 # same thing - move on to the next secondmate. Respawned ids are recorded through
 # secondmate_note_respawned so a concurrent sweep can collect them after wait.
-secondmate_liveness_one() {  # <meta> <id>
+secondmate_liveness_one() {  # <meta|empty> <id>
   local meta=$1 id=$2
   local window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
-  window=$(fm_meta_get "$meta" window)
-  [ -n "$window" ] || return 0
+  if [ -z "$meta" ]; then
+    secondmate_liveness_recover_from_registry "$id" "no task record"
+    return 0
+  fi
   harness=$(fm_meta_get "$meta" harness)
   remote_host=$(fm_meta_get "$meta" remote_host)
+  if [ -z "$remote_host" ]; then
+    window=$(fm_meta_get "$meta" window)
+    if [ -z "$window" ]; then
+      secondmate_liveness_recover_from_registry "$id" "task record has no recorded endpoint"
+      return 0
+    fi
+  fi
   if [ -n "$remote_host" ]; then
     remote_rc=0
     fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" || remote_rc=$?

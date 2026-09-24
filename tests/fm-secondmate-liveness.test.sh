@@ -347,6 +347,16 @@ add_sm_home() {
   } > "$w/home/state/$id.meta"
 }
 
+# register_sm <w> <id>: append a well-formed local registry entry for the home
+# add_sm_home seeded. The registry is the durable "which secondmates exist"
+# authority, so the sweep must account for this id even with no state record.
+register_sm() {
+  local w=$1 id=$2
+  mkdir -p "$w/home/data"
+  printf -- '- %s - liveness fixture (home: %s; scope: fixture work; projects: alpha; added 2026-09-20)\n' \
+    "$id" "$w/$id" >> "$w/home/data/secondmates.md"
+}
+
 run_bootstrap() {  # <fakebin> <home> <pane-cmd> <call-log> [extra env...] -> stdout
   local fb=$1 home=$2 cmd=$3 log=$4; shift 4
   PATH="$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$home" \
@@ -542,6 +552,105 @@ test_sweep_noop_with_no_secondmate_meta() {
   pass "sweep: a silent no-op with no kind=secondmate meta present (a secondmate home's own natural scoping)"
 }
 
+test_sweep_recovers_registered_secondmate_without_meta() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-registry-no-meta)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  rm -f "$w/home/state/sm1.meta"
+  register_sm "$w" sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: gap:" \
+    "a registered secondmate with no metadata record must be recovered, never reported as a gap"
+  assert_contains "$(cat "$log")" "new-window" \
+    "a registered secondmate with no state record should be relaunched from the registry"
+  pass "sweep: a registered secondmate with no metadata record is recovered, not silently passed over"
+}
+
+test_sweep_recovers_registered_secondmate_with_endpointless_record() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-registry-no-endpoint)
+  add_sm_home "$w" sm1 ""
+  register_sm "$w" sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: gap:" \
+    "a record with no endpoint is a recoverable state, not a gap"
+  assert_contains "$(cat "$log")" "new-window" \
+    "a secondmate whose record has no endpoint should be relaunched from the registry"
+  pass "sweep: a record with no recorded endpoint is recovered rather than skipped"
+}
+
+test_sweep_reports_gap_when_registered_secondmate_cannot_relaunch() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-registry-relaunch-failure)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  rm -f "$w/home/state/sm1.meta"
+  register_sm "$w" sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log" FM_TEST_FAIL_NEW_WINDOW=1)
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: gap: no task record and relaunch from registry failed" \
+    "an unrecoverable registered secondmate must be reported as an explicit named gap"
+  pass "sweep: an unrecoverable registered secondmate is named as a gap instead of omitted"
+}
+
+test_sweep_reports_gap_when_registered_secondmate_home_is_unseeded() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-registry-unseeded-home)
+  mkdir -p "$w/home/data"
+  printf -- '- sm1 - liveness fixture (home: %s; scope: fixture work; projects: alpha; added 2026-09-20)\n' \
+    "$w/sm1" > "$w/home/data/secondmates.md"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: gap: no task record and relaunch from registry failed" \
+    "a registered secondmate whose home is not a seeded secondmate home must be named as a gap"
+  pass "sweep: a registered secondmate that cannot be relaunched is named, never dropped"
+}
+
+test_sweep_deduplicates_registered_secondmate_with_record() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-registry-dedup)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  register_sm "$w" sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" claude "$log")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" \
+    "an already-live registered secondmate should be accounted for silently"
+  [ ! -s "$log" ] || fail "a registered secondmate with a live record must be probed exactly once and never touched: $(cat "$log")"
+  pass "sweep: a registered id with a live record is probed once, never re-launched"
+}
+
+test_sweep_recovers_unregistered_meta_record() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-meta-unregistered)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS:" \
+    "a meta record absent from the registry must still be probed and recovered silently"
+  assert_contains "$(cat "$log")" "new-window" \
+    "a kind=secondmate record not present in the registry must remain recoverable"
+  pass "sweep: a state record outside the registry is still accounted for and recovered"
+}
+
 test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
@@ -557,5 +666,11 @@ test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only
 test_sweep_noop_with_no_secondmate_meta
+test_sweep_recovers_registered_secondmate_without_meta
+test_sweep_recovers_registered_secondmate_with_endpointless_record
+test_sweep_reports_gap_when_registered_secondmate_cannot_relaunch
+test_sweep_reports_gap_when_registered_secondmate_home_is_unseeded
+test_sweep_deduplicates_registered_secondmate_with_record
+test_sweep_recovers_unregistered_meta_record
 
 echo "# all fm-secondmate-liveness tests passed"
