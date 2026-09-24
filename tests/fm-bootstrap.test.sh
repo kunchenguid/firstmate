@@ -85,6 +85,19 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
+  cat > "$fakebin/security" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_FAKE_SECURITY_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_SECURITY_LOG"
+case "${FM_FAKE_KEYCHAIN_ITEM:-}" in
+  1|metadata-only) ;;
+  *) exit 44 ;;
+esac
+[ "$*" != 'find-generic-password -s typesafe-api-key' ] || { printf '%s\n' 'keychain: "login.keychain-db"'; exit 0; }
+[ "$*" = 'find-generic-password -s typesafe-api-key -w' ] || exit 2
+[ "$FM_FAKE_KEYCHAIN_ITEM" = 1 ] || exit 36
+printf '%s\n' 'keychain-test-key'
+SH
+  chmod +x "$fakebin/security"
   add_tasks_axi "$fakebin" "0.2.6"
   add_quota_axi "$fakebin"
   printf '%s\n' "$fakebin"
@@ -1226,6 +1239,20 @@ ROWS
   [ -z "$out" ] || fail "typed resolution should add verified Gemini crewmate routing, got: $out"
 
   rm -f "$case_dir/home/.env"
+  : > "$case_dir/security.log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_KEYCHAIN_ITEM=1 FM_FAKE_SECURITY_LOG="$case_dir/security.log" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "a Keychain-only typed key should add verified Gemini crewmate routing, got: $out"
+  [ -s "$case_dir/security.log" ] || fail "bootstrap never checked the Keychain"
+  if grep -Fxv 'find-generic-password -s typesafe-api-key -w' "$case_dir/security.log" >/dev/null; then
+    fail "bootstrap must apply the resolver's readable-secret Keychain query, got: $(cat "$case_dir/security.log")"
+  fi
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_KEYCHAIN_ITEM=metadata-only FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: gemini' ] \
+    || fail "a Keychain item whose secret is unreadable must leave typed resolution off, got: $out"
+
   : > "$case_dir/child-env.log"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     TYPESAFE_API_KEY=test-key FM_TEST_CHILD_ENV_LOG="$case_dir/child-env.log" \
@@ -1234,6 +1261,15 @@ ROWS
   child_env=$(cat "$case_dir/child-env.log")
   [ -n "$child_env" ] || fail "bootstrap child environment probe did not run"
   assert_not_contains "$child_env" 'secret-present' "bootstrap children never inherit the typesafe key"
+
+  printf '%s\n' '{"rules":[{"when":"hard design","approval":"firstmate","use":{"harness":"claude"}}]}' > "$case_dir/home/config/crew-dispatch.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "a missing Keychain item must leave resolver fields inert, got: $out"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_KEYCHAIN_ITEM=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - approval must be "captain" when present' ] \
+    || fail "a Keychain-only typed key must activate resolver-field validation, got: $out"
   pass "bootstrap gates resolver fields and additive harnesses on the typed key"
 }
 

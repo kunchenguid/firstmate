@@ -4,9 +4,9 @@
 # Drives the public argv and environment interface with a fake curl on PATH
 # that records argv, the request body it read from stdin, and the header it
 # read from file descriptor 3, and answers with a canned typesafe.ai response.
-# A fake quota-axi serves the selected schema-5 fixture. No case touches the
-# network, and the absent-key case proves the tool makes no call
-# at all.
+# A fake quota-axi serves the selected schema-5 fixture. A fake security keeps
+# every Keychain case isolated from the machine Keychain. No case touches the
+# network, and the absent-key case proves the tool makes no call at all.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -17,15 +17,19 @@ TMP_ROOT=$(fm_test_tmproot fm-dispatch-resolve)
 HOME_DIR="$TMP_ROOT/home"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 NO_CURL_BIN="$TMP_ROOT/no-curl-bin"
+NO_SECURITY_BIN="$TMP_ROOT/no-security-bin"
 LOG="$TMP_ROOT/log"
 BRIEF="$TMP_ROOT/brief.md"
 BASE_RULES="$TMP_ROOT/rules.json"
 RULES="$HOME_DIR/config/crew-dispatch.json"
 QUOTA="$TMP_ROOT/quota.json"
 BASE_PATH=$PATH
-mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN"
+mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN" "$NO_SECURITY_BIN"
 for command_name in bash chmod cp dirname jq mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
+done
+for command_name in bash dirname; do
+  ln -s "$(command -v "$command_name")" "$NO_SECURITY_BIN/$command_name"
 done
 
 cat > "$BRIEF" <<'MD'
@@ -150,8 +154,23 @@ cat "${QUOTA_AXI_FIXTURE:?}"
 SH
 chmod +x "$FAKEBIN/quota-axi"
 
+cat > "$FAKEBIN/security" <<'SH'
+#!/usr/bin/env bash
+# Fake security: reads a test fixture only when its generic-password query is exact.
+set -u
+printf '%s\n' "$*" >> "${FAKE_SECURITY_LOG:?}"
+[ "$#" -eq 4 ] || exit 2
+[ "$1" = find-generic-password ] || exit 2
+[ "$2" = -s ] || exit 2
+[ "$4" = -w ] || exit 2
+[ -n "${FAKE_SECURITY_SECRET_FILE:-}" ] || exit 44
+[ -r "$FAKE_SECURITY_SECRET_FILE" ] || exit 44
+cat "$FAKE_SECURITY_SECRET_FILE"
+SH
+chmod +x "$FAKEBIN/security"
+
 RESPONSE="$TMP_ROOT/response.json"
-export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE" QUOTA_AXI_CALLS="$LOG/quota-axi.calls" QUOTA_AXI_FIXTURE="$QUOTA" CHILD_ENV_LOG="$LOG/child-env"
+export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE" QUOTA_AXI_CALLS="$LOG/quota-axi.calls" QUOTA_AXI_FIXTURE="$QUOTA" CHILD_ENV_LOG="$LOG/child-env" FAKE_SECURITY_LOG="$LOG/security.argv"
 
 reset_log() {
   rm -rf "$LOG"
@@ -180,6 +199,16 @@ run_without_curl() {
   printf -v "$__err" '%s' "$(cat "$TMP_ROOT/stderr")"
 }
 
+run_without_security() {
+  local __exit=$1 __out=$2 __err=$3 _out _code
+  shift 3
+  _out=$(PATH="$NO_SECURITY_BIN" FM_HOME="$HOME_DIR" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
+  _code=$?
+  printf -v "$__exit" '%s' "$_code"
+  printf -v "$__out" '%s' "$_out"
+  printf -v "$__err" '%s' "$(cat "$TMP_ROOT/stderr")"
+}
+
 KEY='test-key-9f1c2d3e-never-on-argv'
 code='' out='' err=''
 
@@ -189,21 +218,41 @@ write_response "$RESPONSE" rule_4 0.9
 run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "absent key exits 0"
 assert_equals '' "$out" "absent key prints nothing on stdout"
-assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and' "absent key explains itself on stderr"
+assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment,' "absent key explains itself on stderr"
 assert_absent "$LOG/argv" "absent key never calls curl"
 assert_absent "$LOG/quota-axi.calls" "absent key never reads quota-axi"
-pass "absent key is off: one stderr line, exit 0, no network call"
+assert_equals 'find-generic-password -s typesafe-api-key -w' "$(cat "$LOG/security.argv")" "missing Keychain item is queried by its fixed service"
+pass "missing Keychain item is off: one stderr line, exit 0, no network call"
+
+# --- Keychain is the final opt-in source, and unavailable security is absent ---
+SECURITY_SECRET="$TMP_ROOT/security-secret"
+printf '%s' "$KEY" > "$SECURITY_SECRET"
+reset_log
+FAKE_SECURITY_SECRET_FILE="$SECURITY_SECRET" run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "Keychain key resolves"
+assert_contains "$out" '  status: clear' "Keychain key produces a clear result"
+assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "Keychain key reaches curl on the fd header"
+assert_equals 'find-generic-password -s typesafe-api-key -w' "$(cat "$LOG/security.argv")" "Keychain query passes only the fixed service on argv"
+assert_not_contains "$(cat "$LOG/security.argv")" "$KEY" "Keychain key never appears on security argv"
+reset_log
+run_without_security code out err "$BRIEF" --project pager
+expect_code 0 "$code" "missing security exits 0"
+assert_equals '' "$out" "missing security prints nothing on stdout"
+assert_contains "$err" 'dispatch-resolve: off' "missing security keeps the resolver off"
+pass "Keychain fallback resolves only through the stub; missing security is off"
 
 # --- .env key, and the environment wins over it ------------------------------
 printf '%s\n' '# local secrets' 'FMX_PAIRING_TOKEN=abc' "export TYPESAFE_API_KEY=\"$KEY\"" > "$HOME_DIR/.env"
 reset_log
-run code out err "$BRIEF" --project pager
+FAKE_SECURITY_SECRET_FILE="$SECURITY_SECRET" run code out err "$BRIEF" --project pager
 expect_code 0 "$code" ".env key resolves"
 assert_contains "$out" '  status: clear' ".env key produces a clear result"
 assert_contains "$(cat "$LOG/header")" "Authorization: Bearer $KEY" ".env key reaches curl on the fd header"
+assert_absent "$LOG/security.argv" ".env key wins before Keychain lookup"
 reset_log
-TYPESAFE_API_KEY=env-wins run code out err "$BRIEF" --project pager
+TYPESAFE_API_KEY=env-wins FAKE_SECURITY_SECRET_FILE="$SECURITY_SECRET" run code out err "$BRIEF" --project pager
 assert_equals 'Authorization: Bearer env-wins' "$(cat "$LOG/header")" "environment key wins over .env"
+assert_absent "$LOG/security.argv" "environment key wins before Keychain lookup"
 rm -f "$HOME_DIR/.env"
 OVERRIDE_CONFIG="$TMP_ROOT/override-config"
 mkdir -p "$OVERRIDE_CONFIG"
@@ -211,7 +260,7 @@ cp "$BASE_RULES" "$OVERRIDE_CONFIG/crew-dispatch.json"
 reset_log
 TYPESAFE_API_KEY=$KEY FM_CONFIG_OVERRIDE="$OVERRIDE_CONFIG" run code out err "$BRIEF" --project pager
 assert_contains "$out" '  status: clear' "FM_CONFIG_OVERRIDE selects the canonical rules directory"
-pass "TYPESAFE_API_KEY= in .env activates the tool; environment and config overrides work"
+pass "TYPESAFE_API_KEY= in .env activates the tool; environment and .env win over Keychain"
 
 # --- clear: request shape, secret handling, argmax --------------------------
 reset_log
