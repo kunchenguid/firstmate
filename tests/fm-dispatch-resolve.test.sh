@@ -815,6 +815,15 @@ printf '%s\n' '{"model":"jev","answers":{}}' > "$RESPONSE"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "a malformed answer is an error outcome"
 reset_log
+before=$(jq -s 'length' "$HOME_DIR/state/jev-decisions.jsonl")
+write_response "$RESPONSE" rule_4 0.9
+jq '.answers.rule.choice = 4' "$RESPONSE" > "$TMP_ROOT/numeric-choice.json"
+mv "$TMP_ROOT/numeric-choice.json" "$RESPONSE"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: error' "a numeric choice is an error outcome"
+assert_equals "$((before + 1))" "$(jq -s 'length' "$HOME_DIR/state/jev-decisions.jsonl")" "a malformed numeric choice writes exactly one decision"
+assert_equals 'error|number|null' "$(jq -r '[.status, (.choice | type), (.choice_when | tostring)] | join("|")' "$HOME_DIR/state/jev-decisions.jsonl" | tail -n 1)" "the decision preserves the malformed choice without inventing a rule"
+reset_log
 write_response "$RESPONSE" rule_4 0.9
 jq '.usage = "bad"' "$RESPONSE" > "$TMP_ROOT/malformed-usage.json"
 mv "$TMP_ROOT/malformed-usage.json" "$RESPONSE"

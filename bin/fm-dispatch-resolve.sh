@@ -115,7 +115,7 @@ log_decision() { # <status> <reason>
     def opt($s): if $s == "" then null else $s end;
     ($resp.answers.rule // null | if type == "object" then . else null end) as $a |
     def when_of($c):
-      if $c == null then null
+      if ($c | type) != "string" then null
       elif $c == "default" then $none
       elif ($c | test("^rule_[1-9][0-9]*$")) and $rules != null then ($rules.rules[($c | ltrimstr("rule_") | tonumber) - 1].when // null)
       else null end;
