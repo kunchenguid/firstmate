@@ -261,12 +261,194 @@ write_fixture <<'JSON'
 }
 JSON
 run_case \
-  "higher spendPriority beats more headroom after the three gates" \
-  "SELECTED=codex" \
+  "strictly more usable remaining quota beats higher spendPriority after the three gates" \
+  "SELECTED=claude" \
   "TOON" \
   "Resolve this matched dispatch profile array now. Load quota-array-dispatch and run quota-axi with no flags (default TOON) exactly once. Do not pass --json. Both profiles have comparable required task fit and the same strongest reasoning class. The authoritative catalogs already prove Claude/Sonnet and Codex/GPT models supported in their stated provider families, and their selected authentication surfaces are usable. The likely task-completion horizon is two hours with established confidence. Both candidates have known runway that supports that horizon. Return exact lines FACT=claude|headroom=80|spendPriority=-1.1111|runway_seconds=241920 and FACT=codex|headroom=20|spendPriority=-0.8333|runway_seconds=90720 to preserve candidate accounting, then an exact final line SELECTED=<claude|codex>. Do not use other vendor or model commands and do not modify files." \
   "FACT=claude|headroom=80|spendPriority=-1.1111|runway_seconds=241920" \
   "FACT=codex|headroom=20|spendPriority=-0.8333|runway_seconds=90720"
+
+write_fixture <<'JSON'
+{
+  "generatedAt": "2030-01-01T00:00:00Z",
+  "schemaVersion": 5,
+  "providers": [
+    {
+      "provider": "claude",
+      "state": { "status": "fresh", "stale": false },
+      "windows": [
+        {
+          "id": "weekly",
+          "label": "week",
+          "kind": "weekly",
+          "percentRemaining": 50,
+          "resetsAt": "2030-01-07T07:12:00Z",
+          "pace": { "status": "ahead", "reservePercentPoints": -10, "burnMultiple": 2 }
+        }
+      ],
+      "quotaSemantics": {
+        "status": "known",
+        "effectiveAvailability": [
+          {
+            "scope": "all_models",
+            "status": "known",
+            "effectivePercentRemaining": 50,
+            "boundedBy": ["weekly"],
+            "limitingWindowIds": ["weekly"],
+            "selection": { "status": "known", "spendPriority": -1.1111 },
+            "runway": {
+              "status": "projected_exhaustion",
+              "usableRunwaySeconds": 241920,
+              "projectedExhaustedAt": "2030-01-03T19:12:00Z",
+              "limitingWindowId": "weekly",
+              "projectionConfidence": "established"
+            },
+            "pace": { "status": "ahead", "aheadWindowIds": ["weekly"], "worstReservePercentPoints": -10, "worstReserveWindowId": "weekly" }
+          }
+        ]
+      }
+    },
+    {
+      "provider": "codex",
+      "state": { "status": "fresh", "stale": false },
+      "windows": [
+        {
+          "id": "weekly",
+          "label": "week",
+          "kind": "weekly",
+          "percentRemaining": 50,
+          "resetsAt": "2030-01-03T19:12:00Z",
+          "pace": { "status": "ahead", "reservePercentPoints": -20, "burnMultiple": 1.3333 }
+        }
+      ],
+      "quotaSemantics": {
+        "status": "known",
+        "effectiveAvailability": [
+          {
+            "scope": "all_models",
+            "status": "known",
+            "effectivePercentRemaining": 50,
+            "boundedBy": ["weekly"],
+            "limitingWindowIds": ["weekly"],
+            "selection": { "status": "known", "spendPriority": -0.8333 },
+            "runway": {
+              "status": "projected_exhaustion",
+              "usableRunwaySeconds": 90720,
+              "projectedExhaustedAt": "2030-01-02T01:12:00Z",
+              "limitingWindowId": "weekly",
+              "projectionConfidence": "established"
+            },
+            "pace": { "status": "ahead", "aheadWindowIds": ["weekly"], "worstReservePercentPoints": -20, "worstReserveWindowId": "weekly" }
+          }
+        ]
+      }
+    }
+  ]
+}
+JSON
+run_case \
+  "higher spendPriority ranks candidates when remaining quota is comparable" \
+  "SELECTED=codex" \
+  "TOON" \
+  "Resolve this matched dispatch profile array now. Load quota-array-dispatch and run quota-axi with no flags (default TOON) exactly once. Do not pass --json. Both profiles have comparable required task fit and the same strongest reasoning class. The authoritative catalogs already prove Claude/Sonnet and Codex/GPT models supported in their stated provider families, and their selected authentication surfaces are usable. The likely task-completion horizon is two hours with established confidence. Both candidates have known runway that supports that horizon and identical 50% remaining quota with no unstarted session window. Return exact lines FACT=claude|headroom=50|spendPriority=-1.1111|runway_seconds=241920 and FACT=codex|headroom=50|spendPriority=-0.8333|runway_seconds=90720 to preserve candidate accounting, then an exact final line SELECTED=<claude|codex>. Do not use other vendor or model commands and do not modify files." \
+  "FACT=claude|headroom=50|spendPriority=-1.1111|runway_seconds=241920" \
+  "FACT=codex|headroom=50|spendPriority=-0.8333|runway_seconds=90720"
+
+write_fixture <<'JSON'
+{
+  "generatedAt": "2030-01-01T00:00:00Z",
+  "schemaVersion": 5,
+  "providers": [
+    {
+      "provider": "claude",
+      "state": { "status": "fresh", "stale": false },
+      "windows": [
+        {
+          "id": "five_hour",
+          "label": "session",
+          "kind": "session",
+          "percentRemaining": 57,
+          "resetsAt": "2030-01-01T02:42:00Z",
+          "pace": { "status": "ahead", "reservePercentPoints": -10, "burnMultiple": 1.2 }
+        },
+        {
+          "id": "seven_day",
+          "label": "week",
+          "kind": "weekly",
+          "percentRemaining": 29,
+          "resetsAt": "2030-01-07T00:00:00Z",
+          "pace": { "status": "behind", "reservePercentPoints": 12.5, "burnMultiple": 0.85 }
+        }
+      ],
+      "quotaSemantics": {
+        "status": "known",
+        "effectiveAvailability": [
+          {
+            "scope": "all_models",
+            "status": "known",
+            "effectivePercentRemaining": 29,
+            "boundedBy": ["five_hour", "seven_day"],
+            "limitingWindowIds": ["seven_day"],
+            "selection": { "status": "known", "spendPriority": 0.8774 },
+            "runway": {
+              "status": "projected_exhaustion",
+              "usableRunwaySeconds": 9720,
+              "projectedExhaustedAt": "2030-01-01T02:42:00Z",
+              "limitingWindowId": "five_hour",
+              "projectionConfidence": "established"
+            },
+            "pace": { "status": "behind", "aheadWindowIds": ["five_hour"], "worstReservePercentPoints": 12.5, "worstReserveWindowId": "seven_day" }
+          }
+        ]
+      }
+    },
+    {
+      "provider": "agy",
+      "state": { "status": "fresh", "stale": false },
+      "windows": [
+        {
+          "id": "claude_gpt_5h",
+          "label": "Claude/GPT 5-hour",
+          "kind": "session",
+          "percentRemaining": 100,
+          "resetsAt": "2030-01-01T05:00:00Z",
+          "pace": { "status": "unknown", "reason": "missing_cycle" }
+        },
+        {
+          "id": "claude_gpt_weekly",
+          "label": "Claude/GPT weekly",
+          "kind": "weekly",
+          "percentRemaining": 100,
+          "resetsAt": "2030-01-08T00:00:00Z",
+          "pace": { "status": "unknown", "reason": "missing_cycle" }
+        }
+      ],
+      "quotaSemantics": {
+        "status": "known",
+        "effectiveAvailability": [
+          {
+            "scope": "claude_gpt",
+            "status": "known",
+            "effectivePercentRemaining": 100,
+            "boundedBy": ["claude_gpt_5h", "claude_gpt_weekly"],
+            "limitingWindowIds": ["claude_gpt_5h", "claude_gpt_weekly"],
+            "selection": { "status": "unknown", "unmeasurableWindowIds": ["claude_gpt_5h", "claude_gpt_weekly"] },
+            "runway": { "status": "unknown", "unmeasurableWindowIds": ["claude_gpt_5h", "claude_gpt_weekly"] },
+            "pace": { "status": "unknown", "unknownWindowIds": ["claude_gpt_5h", "claude_gpt_weekly"] }
+          }
+        ]
+      }
+    }
+  ]
+}
+JSON
+run_case \
+  "unstarted session window and higher remaining quota beats known spendPriority" \
+  "SELECTED=agy" \
+  "TOON" \
+  "Resolve this matched dispatch profile array now. Load quota-array-dispatch and run quota-axi with no flags (default TOON) exactly once. Do not pass --json. Both profiles have comparable required task fit and the same strongest reasoning class. The authoritative catalogs already prove Claude and Antigravity models supported in their stated provider families, and their selected authentication surfaces are usable. The likely task-completion horizon is two hours with established confidence. Claude has 29% remaining quota, five-hour at 57% with projected exhaustion in roughly 2.7h, and spendPriority 0.8774. Antigravity has 100% remaining quota on an unstarted five-hour window and weekly, with spendPriority unknown. Return exact lines FACT=claude|headroom=29|spendPriority=0.8774|runway_seconds=9720 and FACT=agy|headroom=100|spendPriority=unknown|runway=unknown, then an exact final line SELECTED=<claude|agy>. Do not use other vendor or model commands and do not modify files." \
+  "FACT=claude|headroom=29|spendPriority=0.8774|runway_seconds=9720" \
+  "FACT=agy|headroom=100|spendPriority=unknown|runway=unknown"
 
 write_fixture <<'JSON'
 {
@@ -520,5 +702,93 @@ run_case \
   "Resolve this matched dispatch profile array now. Load quota-array-dispatch and run quota-axi with no flags (default TOON) exactly once. Do not pass --json. Both profiles have comparable required task fit and the same strongest reasoning class. The authoritative catalogs already prove Claude/Sonnet and Codex/GPT models supported in their stated provider families, and their selected authentication surfaces are usable. The likely task-completion horizon is two hours with established confidence. Claude has known spendPriority of -0.8333 and runway of 2700 seconds. Codex has known spendPriority of -1.8 and runway of 15916 seconds. Return exact lines FACT=claude|spendPriority=-0.8333|runway_seconds=2700|supports_horizon=no and FACT=codex|spendPriority=-1.8|runway_seconds=15916|supports_horizon=yes to preserve candidate accounting, then an exact final line SELECTED=<claude|codex>. Do not use other vendor or model commands and do not modify files." \
   "FACT=claude|spendPriority=-0.8333|runway_seconds=2700|supports_horizon=no" \
   "FACT=codex|spendPriority=-1.8|runway_seconds=15916|supports_horizon=yes"
+
+write_fixture <<'JSON'
+{
+  "generatedAt": "2030-01-01T00:00:00Z",
+  "schemaVersion": 5,
+  "providers": [
+    {
+      "provider": "claude",
+      "state": { "status": "fresh", "stale": false },
+      "windows": [
+        {
+          "id": "five_hour",
+          "label": "session",
+          "kind": "session",
+          "percentRemaining": 5,
+          "resetsAt": "2030-01-01T02:00:00Z",
+          "pace": { "status": "ahead", "reservePercentPoints": -20, "burnMultiple": 1.5 }
+        },
+        {
+          "id": "seven_day",
+          "label": "week",
+          "kind": "weekly",
+          "percentRemaining": 5,
+          "resetsAt": "2030-01-07T00:00:00Z",
+          "pace": { "status": "behind", "reservePercentPoints": -30, "burnMultiple": 1.5 }
+        }
+      ],
+      "quotaSemantics": {
+        "status": "known",
+        "effectiveAvailability": [
+          {
+            "scope": "all_models",
+            "status": "known",
+            "effectivePercentRemaining": 5,
+            "boundedBy": ["five_hour", "seven_day"],
+            "limitingWindowIds": ["five_hour"],
+            "selection": { "status": "known", "spendPriority": -1.8 },
+            "runway": {
+              "status": "projected_exhaustion",
+              "usableRunwaySeconds": 15916,
+              "projectedExhaustedAt": "2030-01-01T04:25:16Z",
+              "limitingWindowId": "five_hour",
+              "projectionConfidence": "established"
+            },
+            "pace": { "status": "behind", "aheadWindowIds": ["five_hour"], "worstReservePercentPoints": -30, "worstReserveWindowId": "seven_day" }
+          }
+        ]
+      }
+    },
+    {
+      "provider": "agy",
+      "state": { "status": "fresh", "stale": false },
+      "windows": [
+        {
+          "id": "claude_gpt_5h",
+          "label": "Claude/GPT 5-hour",
+          "kind": "session",
+          "percentRemaining": 100,
+          "resetsAt": "2030-01-01T05:00:00Z",
+          "pace": { "status": "unknown", "reason": "missing_cycle" }
+        }
+      ],
+      "quotaSemantics": {
+        "status": "known",
+        "effectiveAvailability": [
+          {
+            "scope": "claude_gpt",
+            "status": "known",
+            "effectivePercentRemaining": 100,
+            "boundedBy": ["claude_gpt_5h"],
+            "limitingWindowIds": ["claude_gpt_5h"],
+            "selection": { "status": "unknown", "unmeasurableWindowIds": ["claude_gpt_5h"] },
+            "runway": { "status": "unknown", "unmeasurableWindowIds": ["claude_gpt_5h"] },
+            "pace": { "status": "unknown", "unknownWindowIds": ["claude_gpt_5h"] }
+          }
+        ]
+      }
+    }
+  ]
+}
+JSON
+run_case \
+  "explicit captain override is honored when captain insists despite tight quota" \
+  "SELECTED=claude" \
+  "TOON" \
+  "Resolve this matched dispatch intake now. Load quota-array-dispatch and run quota-axi with no flags (default TOON) exactly once. Do not pass --json. The task has a likely-completion horizon of two hours with established confidence. Claude/Sonnet is catalog-supported with usable authentication and known runway of 15916 seconds that supports the horizon, but has only 5% remaining quota. Antigravity has 100% remaining quota and acceptable reasoning fit. The captain explicitly requested Claude. Firstmate noted Antigravity as an abundant alternative, but the captain explicitly insisted on Claude for this task. Return exact lines FACT=claude|requested=explicit|insisted=yes|headroom=5|supports_horizon=yes and FACT=agy|alternative=recommended|headroom=100, then an exact final line SELECTED=<claude|agy>. Do not use other vendor or model commands and do not modify files." \
+  "FACT=claude|requested=explicit|insisted=yes|headroom=5|supports_horizon=yes" \
+  "FACT=agy|alternative=recommended|headroom=100"
 
 echo "# all quota-array-dispatch live behavior tests passed"
