@@ -18,6 +18,17 @@
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
+#
+# The one forge read this library performs itself is hard-bounded: a caller
+# holds task locks across it, so an unreachable or black-holed forge must
+# expire rather than park the caller.
+
+_FM_PR_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Seconds allowed for that read. A non-positive or non-numeric value is not a
+# bound (bin/fm-timeout-lib.sh), so it falls back to the default.
+FM_PR_FORGE_READ_TIMEOUT=${FM_PR_FORGE_READ_TIMEOUT:-30}
+case "$FM_PR_FORGE_READ_TIMEOUT" in ''|*[!0-9]*|0) FM_PR_FORGE_READ_TIMEOUT=30 ;; esac
 
 FM_PR_PROVIDER=
 FM_PR_URL=
@@ -274,6 +285,37 @@ fm_pr_json_draft_state() {  # <pull-request-json>
   printf '%s' "${1-}" | jq -r '
     if type == "object" and (.isDraft | type) == "boolean" then (.isDraft | tostring) else "" end
   ' 2>/dev/null || true
+}
+
+# Load the bounded-execution owner only for the forge read below. Most
+# consumers of this library never make a network call, and fm-timeout-lib.sh
+# declares `set -u` for its own hygiene, which several of them deliberately run
+# without, so the caller's setting is restored around the source.
+_fm_pr_require_timeout() {
+  local nounset=off
+  command -v fm_run_timed >/dev/null 2>&1 && return 0
+  case $- in *u*) nounset=on ;; esac
+  # shellcheck source=bin/fm-timeout-lib.sh
+  # shellcheck disable=SC1091
+  . "$_FM_PR_LIB_DIR/fm-timeout-lib.sh" || return 1
+  [ "$nounset" = on ] || set +u
+  command -v fm_run_timed >/dev/null 2>&1
+}
+
+# The one hard-bounded reading of a GitHub pull request's draft state, for a
+# caller that holds locks across it. Both dependencies are required up front,
+# the way bin/fm-pr-check.sh requires them for the same read, so a host missing
+# either makes no pointless forge call. Returns 0 only for a positive draft
+# reading: a missing dependency, an expired bound, a failed call, and an
+# unreadable or non-draft payload are all refusals.
+fm_pr_github_draft_confirmed() {  # <pull-request-url>
+  local url=${1-} draft
+  [ -n "$url" ] || return 1
+  command -v gh >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  _fm_pr_require_timeout || return 1
+  draft=$(fm_run_timed "$FM_PR_FORGE_READ_TIMEOUT" gh pr view "$url" --json isDraft 2>/dev/null) || return 1
+  [ "$(fm_pr_json_draft_state "$draft")" = true ]
 }
 
 fm_pr_file_mode() {
@@ -798,10 +840,12 @@ fm_pr_poll_registration_rerecord_device() {  # <state> <id> <template>
 # Retire only the exact pre-Gerrit GitHub poll for a confirmed draft. Its
 # registration must still bind the original file objects and hashes to the
 # canonical task metadata. Never run the old check, and never accept a legacy
-# hash from state as proof of the template. Caller holds both task locks.
-# A failed or unreadable forge lookup leaves the check rejected as usual.
+# hash from state as proof of the template. Caller holds both task locks, so
+# the draft lookup goes through the hard-bounded reader rather than waiting on
+# the forge with those locks held. A failed, refused, unreadable, or expired
+# forge lookup leaves the check rejected as usual.
 fm_pr_poll_retire_legacy_draft() {  # <state> <id> <template>
-  local state=$1 id=$2 template=$3 receipt data_identity check_identity reg_identity reg_hash url draft device
+  local state=$1 id=$2 template=$3 receipt data_identity check_identity reg_identity reg_hash url device
   fm_pr_task_id_valid "$id" || return 1
   receipt="$state/$id.pr-poll-retirement"
   [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || return 1
@@ -815,9 +859,7 @@ fm_pr_poll_retire_legacy_draft() {  # <state> <id> <template>
   reg_hash=$(fm_pr_sha256 "$state/$id.pr-poll-registration") || return 1
   device=$(fm_pr_file_device "$state") || return 1
   url=$FM_PR_REG_URL
-  command -v gh >/dev/null 2>&1 || return 1
-  draft=$(gh pr view "$url" --json isDraft 2>/dev/null) || return 1
-  [ "$(fm_pr_json_draft_state "$draft")" = true ] || return 1
+  fm_pr_github_draft_confirmed "$url" || return 1
   # The forge read may have taken time; prove that the same generation remains.
   fm_pr_poll_artifacts_content_valid "$state" "$id" "$template" legacy-github || return 1
   [ "$FM_PR_REG_PROVIDER" = github ] && [ "$FM_PR_REG_URL" = "$url" ] || return 1
