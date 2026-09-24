@@ -90,4 +90,5 @@ The exact running Stop payload selects same-process continuation on 0.2.112; 0.2
 Grok also loads Claude project settings, so Claude entries for Grok-covered events stand down under `GROK_AGENT` or `GROK_HOOK_EVENT`; that owner records the exact set and why `GROK_SESSION_ID` is excluded.
 Project-local hooks require launch-time `--trust`; without it the guard steps aside and `../../../bin/fm-guard.sh` is the next-command alarm.
 Watcher supervision remains tracked background notification around `../../../bin/fm-watch-arm.sh`, not Pi-style extension ownership.
+In a home with `config/supervision-host` the session-start block renders that background call as `../../../bin/fm-supervision-host.sh park`, with Claude's print mode as its headless engine; [`supervision-host.md`](../../../../../docs/supervision-host.md) owns the host.
 PreToolUse blocks directly, but every `$VAR` in a hook command needs inline `:-default` or Grok refuses the hook.

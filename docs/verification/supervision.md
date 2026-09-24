@@ -629,6 +629,62 @@ tests/fm-supervision-instructions.test.sh
 tests/fm-watch-arm.test.sh
 ```
 
+
+### Non-Pi primaries
+
+This supports the per-primary routing in [supervision-host.md](../supervision-host.md): with `config/supervision-host`, the Cursor, OpenCode, Grok, and Codex arm owners run the host with the Claude engine, and without it nothing changes.
+It was measured on 2026-09-24 on macOS 26.6.2 arm64 with Claude Code 2.1.281 as the engine (`sonnet`), codex-cli 0.155.1, cursor-agent 2026.09.23-86fc751, OpenCode 1.18.32, grok 1.0.41, and Claude Code 2.1.281 as primaries, and Pi 0.87.0 workers on `openai-codex/gpt-5.6-sol`, in disposable lab homes on private tmux sockets.
+omp is not installed on the measuring machine, so its routing rests on `tests/fm-omp-harness.test.sh` alone.
+OpenCode's OpenAI login on that machine rejects `gpt-5.6-sol` and has exhausted its `gpt-5.5` usage, so the OpenCode primary ran on OpenCode's free `opencode/big-pickle`.
+
+Each primary supervised the same session: an attended worker it landed itself, three gated workers, and an away window whose words pre-answered a keyed decision, named a steer, asked for a stopped worker to be told to continue, and ordered a queued item dispatched once another finished.
+The lab opened the gates, interrupted a worker mid-turn, tried a main-actor steer on a task the engine held, let the park reach its boundary under shortened bounds, and returned while an engine turn was in flight.
+
+| Case | Observed |
+| --- | --- |
+| Away entry | every primary wrote the away record and started no daemon; Codex's checkpoint reported its raised bound under `FM_CODEX_WATCH_CHECKPOINT_AWAY=900` (bound 900, limit 2130) |
+| Decision the words pre-answered | the engine answered it on all five primaries and reported `per your away instructions:`; main stayed parked |
+| Steer the words named | the engine delivered it on all five, and the finished work carries it |
+| Worker stopped mid-task | the engine told it to continue and confirmed it working again (Codex, Cursor, Grok, OpenCode) |
+| Main steer during an engine turn | `fm-send.sh` exited 6 with `task ... is leased to the branch supervision actor ... retry after that actor releases it` on all five |
+| Dispatch the words ordered with no override | the worker launched on the primary's own runtime (`codex`, `cursor`, `grok`, `claude`); on OpenCode the home's saved default dispatch profile (Pi) took precedence, as configured |
+| Boundary | main drained, acknowledged, and re-parked on every primary |
+| Return during an engine turn | the finished turn's outcome reached main: Codex and Grok through the host's hand-back line, Cursor through the queued `check: supervision-host outcome <n> ... was recorded after the captain returned` wake after the captain's message superseded the park, Claude through both, and OpenCode in the return brief |
+| Malformed engine result (Claude) | handed back as Stop-hook feedback that kept the `supervision-host:` line and named itself not a return |
+| A wake that lands between main's drain and its acknowledgement | main's acknowledgement claims only rows at or below its cutoff, so the away session can still take a later row; `tests/fm-wake-queue.test.sh` pins this, and no live run reached that window after the change |
+
+Engine turns cost $0.06 to $0.79 each; whole away windows cost $0.66 (Claude), $1.21 (Cursor), $1.64 (OpenCode), $2.51 (Grok), and $3.76 (Codex, two windows).
+An engine-dispatched Grok 1.0.41 worker stops on Grok's workspace-trust prompt for a project under `/private/tmp`; the engine held it for the captain rather than answering it.
+
+Without `config/supervision-host`, attended and away sessions on Codex, Cursor, and Grok primaries ran identically on the tree before this change (`9284978f`) and with it: the attended worker landed and was cleaned up, `/afk` started the daemon, the away finish was delivered, the return brief rendered, and nothing landed.
+The OpenCode pair could not run, because every primary turn hit the model rejection or usage limit above in both trees.
+The live guards gave the same results in both trees:
+
+| Guard | Before | After |
+| --- | --- | --- |
+| `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | ok | ok |
+| `FM_SUPERVISION_HOST_LIVE_E2E=1 tests/fm-supervision-host-live-e2e.test.sh` | ok | ok |
+| `FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh` | 7 of 7 ok | 7 of 7 ok |
+| `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | ok | ok |
+| `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | ok | ok |
+| `FM_GROK_STOP_LIVE_E2E=1 tests/fm-grok-stop-live-e2e.test.sh` (native 1.0.41, legacy 0.2.102) | `not ok - native path expected two Stop payloads, got 3` | same |
+| `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | `not ok - ... "The usage limit has been reached","statusCode":429` | same |
+
+The Grok stop guard was last verified on 0.2.112 and has drifted from Grok 1.0.41 in both trees.
+
+Deterministic entry points:
+
+```sh
+tests/fm-supervision-host.test.sh
+tests/fm-wake-queue.test.sh
+tests/fm-cursor-primary.test.sh
+tests/fm-pi-watch-extension.test.sh
+tests/fm-omp-harness.test.sh
+tests/fm-watch-checkpoint.test.sh
+tests/fm-supervision-instructions.test.sh
+tests/fm-afk-launch.test.sh
+```
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

@@ -539,7 +539,7 @@ EOF
 
   # 6. handled while away. Every outcome the away session recorded in the
   # store during the window counts as handled. On Pi the supervision branch,
-  # and on a Claude home the supervision host (docs/supervision-host.md), took
+  # and on an opted-in home the supervision host (docs/supervision-host.md), took
   # every safe actionable wake it could while main was parked; wakes it
   # declined still fell back to main. The captain rows are listed above.
   printf 'Handled while away:\n'

@@ -1602,6 +1602,44 @@ test_branch_grant_refuses_rows_already_claimed_by_main() {
   pass "branch grant cannot take a row already claimed by main"
 }
 
+# A wake that lands between main's drain and its acknowledgement was never
+# presented to main and sits above the printed cutoff, so the acknowledgement
+# must leave it unowned: an away-session grant can still take it, and main's
+# next drain still presents it. Claiming it for main instead handed every later
+# away wake back to main until main drained again.
+test_main_ack_leaves_a_row_that_arrived_after_its_drain_unclaimed() {
+  local dir state sequence generation rc
+  dir=$(make_case main-ack-leaves-late-row)
+  state="$dir/state"
+
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "first signal append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/main.out" 2> "$dir/main.err" \
+    || fail "main presentation failed"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/main.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/main.err")
+  [ "$sequence" = 1 ] || fail "main was not asked to acknowledge exactly its presented row: $(cat "$dir/main.err")"
+
+  append_wake "$state" signal "task-b.status" "signal: task-b" || fail "late signal append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    > "$dir/ack.out" 2> "$dir/ack.err" || fail "main acknowledgement failed: $(cat "$dir/ack.err")"
+  grep -Fq "$(printf '\tsignal\ttask-b.status\t')" "$state/.wake-queue" \
+    || fail "main's acknowledgement consumed a row it was never shown"
+
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" late-row || fail "branch owner activation failed"
+  rc=0
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish late-row 2 || rc=$?
+  [ "$rc" -eq 0 ] || fail "an away-session grant could not take a row main never saw: rc=$rc"
+  FM_STATE_OVERRIDE="$state" "$GRANT" release late-row || fail "branch grant release failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" deactivate "$$" late-row || fail "branch owner deactivation failed"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/main2.out" 2> "$dir/main2.err" \
+    || fail "main's next drain failed"
+  grep -Fq "$(printf '\tsignal\ttask-b.status\t')" "$dir/main2.out" \
+    || fail "main's next drain did not present the late row: $(cat "$dir/main2.out" "$dir/main2.err")"
+
+  pass "main's acknowledgement leaves a row that arrived after its drain for whichever actor takes it next"
+}
+
 test_actor_filter_precedes_same_key_deduplication() {
   local dir state main_sequence main_generation branch_sequence branch_generation
   dir=$(make_case actor-dedup-order)
@@ -2729,6 +2767,7 @@ test_main_is_never_told_to_drain_rows_only_the_branch_owns
 test_uncountable_queue_still_raises_the_pending_alarm
 test_unconsumable_rows_are_retired_instead_of_wedging_the_queue
 test_branch_grant_refuses_rows_already_claimed_by_main
+test_main_ack_leaves_a_row_that_arrived_after_its_drain_unclaimed
 test_actor_filter_precedes_same_key_deduplication
 test_main_reclaims_a_grant_whose_branch_owner_exited
 test_branch_actor_without_eligible_snapshot_refuses
