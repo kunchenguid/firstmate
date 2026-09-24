@@ -248,6 +248,16 @@ if [ -n "$BASE_BRANCH" ] && ! git check-ref-format --branch "$BASE_BRANCH" >/dev
   echo "error: task $ID has an invalid base branch '$BASE_BRANCH'" >&2
   exit 1
 fi
+if [ "$MODE" = local-only ] && [ -n "$BASE_BRANCH" ]; then
+  [ -n "$PROMOTE_PROJECT" ] && [ -d "$PROMOTE_PROJECT" ] || {
+    echo "error: cannot verify local-only base '$BASE_BRANCH' without the scout's project checkout; refusing promotion" >&2
+    exit 1
+  }
+  if ! git -C "$PROMOTE_PROJECT" rev-parse --verify --quiet "refs/heads/$BASE_BRANCH^{commit}" >/dev/null; then
+    echo "error: local-only base '$BASE_BRANCH' does not exist locally in $PROMOTE_PROJECT; refusing promotion" >&2
+    exit 1
+  fi
+fi
 if [ -n "$BASE_BRANCH" ] && [ "$BASE_BRANCH" = "$BRANCH" ]; then
   echo "error: --base-branch cannot be the crew branch ($BRANCH); choose a different --branch-name" >&2
   exit 1
