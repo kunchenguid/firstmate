@@ -756,6 +756,10 @@ test_pool_slot_teardown_under_a_noncanonical_state_spelling() {
   git -C "$pool_wt" push -q fork fm/task-x1
   git -C "$case_dir/project" fetch -q fork
   seed_backlog_in_flight "$case_dir"
+  # The case proves state-dir dedup, not backlog mechanics; manual keeps the
+  # transition gate out of a host whose tasks-axi predates the required floor.
+  mkdir -p "$case_dir/config"
+  printf '%s\n' manual > "$case_dir/config/backlog-backend"
   # The same state dir under a second spelling: drive-letter form on MSYS
   # (the production failure mode), a symlink elsewhere.
   if command -v cygpath >/dev/null 2>&1; then
