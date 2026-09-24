@@ -29,7 +29,7 @@
 # Firstmate launch and recovery writers use fm-spawn and fm-recovery.
 # Missing, malformed, mismatched or unsupported evidence stays unknown.
 #
-# Codex and TraeX managed workers use the task-bound pull reader in
+# Codex and TraeX managed non-secondmate workers use the task-bound pull reader in
 # fm-busy-transcript.py, which owns binding, verified versions and submission
 # fences. They arm an unknown record for generation ownership only; the reader
 # never trusts that seed as evidence of activity. tmux/Herdr process liveness

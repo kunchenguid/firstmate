@@ -161,7 +161,7 @@ codex exec --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-
 That installation refused daemon startup with `managed standalone Codex install not found`; its interactive TUI did not expose its turns through the app-server control socket.
 In this 2026-07-28 Codex 0.145.0 semantic-busy probe, Firstmate-written lifecycle project hooks under `<worktree>/.codex/hooks.json` fired for neither an interactive pane whose directory trust was granted nor `codex exec`, in both cases with `--dangerously-bypass-hook-trust`, while an untracked global probe fired in the same runs; Firstmate does not ship, install, recommend, or depend on that global path.
 Neither old hook discovery failures nor old daemon reachability establish a current transcript limitation.
-The 0.156.1 hook probe still omitted a closing hook on API failure, which is why current workers use the transcript.
+The 0.156.1 hook probe still omitted a closing hook on API failure, which is why current eligible workers use the transcript.
 The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
 
 Current default-TUI refresh (Linux, named Herdr lab, private mount/PID/network namespaces, no real provider or credentials):
@@ -171,6 +171,21 @@ FM_BUSY_TRANSCRIPT_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-busy-transcript-live-e
 ```
 
 The 2026-09-25 run on Herdr 0.8.0 passed all ten per-tool lifecycle assertions with Codex 0.156.1 and TraeX 0.207.1.
+The exact stable success lines were:
+
+```text
+ok - codex default TUI startup and completion
+ok - codex active turn and user interrupt
+ok - codex real tool failure and simulated API failure
+ok - codex process exit overrides a completed transcript
+ok - codex endpoint death
+ok - traex default TUI startup and completion
+ok - traex active turn and user interrupt
+ok - traex real tool failure and simulated API failure
+ok - traex process exit overrides a completed transcript
+ok - traex endpoint death
+```
+
 The guard preserves the managed TUI flags and positional operational brief; it does not use `exec`, `--no-daemon`, a remote app-server, or shared daemon configuration.
 Provider responses and HTTP 401 are simulated; tool execution, interrupt keys, vendor transcript emission, process exit and classification run for real.
 This does not verify an authenticated provider's availability or the allocator that provisions a worktree.
