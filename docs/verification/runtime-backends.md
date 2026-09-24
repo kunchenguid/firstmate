@@ -2287,3 +2287,23 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+### Replacement replay retirement (2026-09-21)
+
+The primary live guard ran on macOS 26.6 arm64 with Node v22.19.0, omp 18.2.6, and `openai-codex/gpt-6-astra`.
+It exercised a real same-process session replacement after the watcher wake turn completed, with the primary and watcher isolated inside the guard's disposable lab.
+The portable case in `tests/fm-omp-harness.test.sh` separately seeds the durable handoff and queue, proving an unconsumed wake replays once, an acknowledged wake is retired, and a cleanup refusal surfaces once without replaying the retired wake.
+
+```sh
+FM_OMP_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-omp-primary-live-e2e.test.sh
+```
+
+```text
+ok - omp omp/18.2.6: both tracked .omp/extensions loaded by auto-discovery with no -e and no trust dialog
+ok - omp omp/18.2.6: before_agent_start delivered the digest into model context and the lock names the omp process
+ok - omp omp/18.2.6: fm_watch_arm_omp started a live watcher through the extension
+ok - omp omp/18.2.6: an actionable close spawned a ledger-linked successor and woke main exactly once
+ok - omp omp/18.2.6: a handled watcher wake is retired before session replacement
+ok - omp omp/18.2.6: session_stop compelled the guard continuation (guard rc=2, then a stop_hook_active stop) and the model reached for fm_watch_arm_omp
+# omp omp/18.2.6 model=openai-codex/gpt-6-astra: every live omp primary assertion passed
+```

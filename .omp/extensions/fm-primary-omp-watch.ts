@@ -10,10 +10,10 @@
 //     accepted the follow-up" collapses to "the call returned"; consumption is
 //     still tracked at before_agent_start / message_start exactly as on Pi.
 //   - omp reports no session_shutdown reason, so EVERY shutdown with a pending
-//     actionable close persists the replacement handoff and the next owning
-//     session_start, in this process or a later one, replays it. Replaying a
-//     wake main has already drained is harmless (the queue is durable and the
-//     drain is idempotent); losing one across /new is not.
+//     actionable close persists the replacement handoff. The next owning
+//     session_start, in this process or a later one, reconciles each record
+//     against the durable wake queue: acknowledged records retire, while a
+//     record whose captured queue sequence remains is replayed.
 //   - Replacement shutdown retires the established predecessor arm before the
 //     successor arms; unlike Pi, it is not retained until a distinct active
 //     successor generation commits its own arm, so omp keeps the plain
@@ -39,11 +39,13 @@
 // The successor pipeline never waits for the model to read it: a follow-up
 // queued while main is streaming joins the running run without ever raising
 // before_agent_start, so waiting on that event stalls every later close.
-// Consumption is tracked only so a replacement can replay a follow-up omp had
-// not consumed. An idle main consumes at before_agent_start; a streaming main
-// consumes at the user message_start carrying the exact wake text; either
-// event finishes the pending record, and a still-unconsumed record rides the
-// replacement handoff.
+// Consumption is tracked so a replacement can replay a follow-up omp had not
+// consumed, while each pending record snapshots the durable queue sequences
+// that made it actionable. An idle main consumes at before_agent_start; a
+// streaming main consumes at the user message_start carrying the exact wake
+// text. Either event finishes the pending record eagerly, and a later owning
+// session also retires it when acknowledgement has removed every captured
+// queue sequence. A still-unconsumed record rides the replacement handoff.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -84,6 +86,7 @@ type PendingActionableClose = {
   token: string;
   message: string;
   predecessorArmPid: string;
+  wakeSequences?: number[];
   delivered?: true;
 };
 
@@ -131,6 +134,7 @@ const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
 const marker = `${state}/.omp-watch-extension-loaded`;
 const handoffDir = `${state}/extensions/omp-primary-watch`;
 const actionableHandoff = `${handoffDir}/session-replacement-actionable.json`;
+const wakeQueue = `${state}/.wake-queue`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
@@ -150,6 +154,7 @@ let nextGenerationId = 0;
 let nextHandoffId = 0;
 let activeGeneration: SessionGeneration | null = null;
 let replacementHandoff: PendingActionableClose[] | null = null;
+let replacementLoadCleanupFailure = "";
 type ReplacementActionableReceiver = (pending: PendingActionableClose) => void;
 type ActionableDeliveryClaim = {
   owner: SessionGeneration;
@@ -265,28 +270,68 @@ function nodeErrorCode(error: unknown): string {
     : "";
 }
 
+function queuedWakeSequences(): Set<number> | null {
+  try {
+    const content = readFileSync(wakeQueue, "utf8");
+    if (content === "") return new Set();
+    const sequences = new Set<number>();
+    for (const row of content.replace(/\n$/, "").split("\n")) {
+      const fields = row.split("\t");
+      const sequence = Number(fields[1]);
+      if (
+        fields.length < 5 ||
+        !/^[1-9][0-9]*$/.test(fields[1]) ||
+        !Number.isSafeInteger(sequence)
+      ) {
+        return null;
+      }
+      sequences.add(sequence);
+    }
+    return sequences;
+  } catch (error) {
+    return nodeErrorCode(error) === "ENOENT" ? new Set() : null;
+  }
+}
+
 function createPendingActionable(message: string, predecessorArmPid: string): PendingActionableClose {
+  const queued = queuedWakeSequences();
+  const wakeSequences = queued && queued.size > 0 ? [...queued] : undefined;
   return {
     version: 1,
     token: `${process.pid}-${Date.now()}-${++replacementCoordinator.nextTokenId}`,
     message,
     predecessorArmPid,
+    ...(wakeSequences ? { wakeSequences } : {}),
   };
 }
 
 function validatePendingActionable(value: unknown): PendingActionableClose {
   if (
     typeof value !== "object" || value === null ||
-    (value as { version?: unknown }).version !== 1 ||
-    typeof (value as { token?: unknown }).token !== "string" ||
-    !/^[0-9]+-[0-9]+-[0-9]+$/.test((value as { token: string }).token) ||
-    typeof (value as { message?: unknown }).message !== "string" ||
-    !actionableLine((value as { message: string }).message) ||
-    typeof (value as { predecessorArmPid?: unknown }).predecessorArmPid !== "string" ||
-    !/^[0-9]*$/.test((value as { predecessorArmPid: string }).predecessorArmPid) ||
-    ((value as { delivered?: unknown }).delivered !== undefined &&
-      (value as { delivered?: unknown }).delivered !== true)
+    !("version" in value) || value.version !== 1 ||
+    !("token" in value) || typeof value.token !== "string" ||
+    !/^[0-9]+-[0-9]+-[0-9]+$/.test(value.token) ||
+    !("message" in value) || typeof value.message !== "string" ||
+    !actionableLine(value.message) ||
+    !("predecessorArmPid" in value) || typeof value.predecessorArmPid !== "string" ||
+    !/^[0-9]*$/.test(value.predecessorArmPid)
   ) {
+    throw new Error(`invalid omp replacement actionable handoff at ${actionableHandoff}`);
+  }
+  const wakeSequences = "wakeSequences" in value ? value.wakeSequences : undefined;
+  if (
+    wakeSequences !== undefined &&
+    (!Array.isArray(wakeSequences) ||
+      wakeSequences.length === 0 ||
+      !wakeSequences.every(
+        (sequence) => Number.isSafeInteger(sequence) && Number(sequence) > 0,
+      ) ||
+      new Set(wakeSequences).size !== wakeSequences.length)
+  ) {
+    throw new Error(`invalid omp replacement actionable handoff at ${actionableHandoff}`);
+  }
+  const delivered = "delivered" in value ? value.delivered : undefined;
+  if (delivered !== undefined && delivered !== true) {
     throw new Error(`invalid omp replacement actionable handoff at ${actionableHandoff}`);
   }
   return value as PendingActionableClose;
@@ -295,13 +340,13 @@ function validatePendingActionable(value: unknown): PendingActionableClose {
 function validateReplacementHandoff(value: unknown): PendingActionableClose[] {
   if (
     typeof value !== "object" || value === null ||
-    (value as { version?: unknown }).version !== 2 ||
-    !Array.isArray((value as { pending?: unknown }).pending) ||
-    (value as { pending: unknown[] }).pending.length === 0
+    !("version" in value) || value.version !== 2 ||
+    !("pending" in value) || !Array.isArray(value.pending) ||
+    value.pending.length === 0
   ) {
     throw new Error(`invalid omp replacement actionable handoff at ${actionableHandoff}`);
   }
-  const pending = (value as { pending: unknown[] }).pending.map(validatePendingActionable);
+  const pending = value.pending.map(validatePendingActionable);
   if (new Set(pending.map((item) => item.token)).size !== pending.length) {
     throw new Error(`invalid omp replacement actionable handoff at ${actionableHandoff}`);
   }
@@ -332,10 +377,9 @@ function persistReplacementHandoff(pending: PendingActionableClose[]): void {
 }
 
 function loadReplacementHandoff(): PendingActionableClose[] {
+  let stored: PendingActionableClose[];
   try {
-    const pending = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
-    replacementHandoff = pending;
-    return [...pending];
+    stored = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
   } catch (error) {
     if (nodeErrorCode(error) === "ENOENT") {
       replacementHandoff = null;
@@ -343,6 +387,34 @@ function loadReplacementHandoff(): PendingActionableClose[] {
     }
     throw error;
   }
+  const queued = queuedWakeSequences();
+  if (queued === null) {
+    replacementHandoff = stored;
+    return [...stored];
+  }
+  const pending = stored.filter((item) => {
+    if (item.delivered) return false;
+    if (item.wakeSequences) {
+      return item.wakeSequences.some((sequence) => queued.has(sequence));
+    }
+    return queued.size > 0;
+  });
+  if (pending.length === stored.length) {
+    replacementHandoff = stored;
+    return [...stored];
+  }
+  try {
+    if (pending.length > 0) {
+      writeReplacementHandoff(pending);
+    } else {
+      replacementHandoff = null;
+      unlinkSync(actionableHandoff);
+    }
+  } catch (error) {
+    replacementHandoff = [...pending];
+    replacementLoadCleanupFailure = error instanceof Error ? error.message : String(error);
+  }
+  return [...pending];
 }
 
 function mergeReplacementHandoff(pending: PendingActionableClose): void {
@@ -1005,10 +1077,13 @@ export default function (pi: ExtensionAPI) {
       const detail = error instanceof Error ? error.message : String(error);
       loadFailure = `watcher: FAILED - omp extension could not load a replacement-session actionable wake\n${detail}`;
     }
+    const cleanupFailure = replacementLoadCleanupFailure;
+    replacementLoadCleanupFailure = "";
     const inProcessPending = replacementCoordinator.pending.splice(0);
     for (const actionable of [...pending, ...inProcessPending]) {
       enqueuePendingActionable(owner, actionable);
     }
+    if (cleanupFailure) surfaceCleanupFailure(owner, new Error(cleanupFailure));
     if (owner.pendingActionables.length > 0) {
       if (loadFailure) surfaceFailure(owner, loadFailure);
       const armResult = startArm(owner, owner.pendingActionables[0].predecessorArmPid);
@@ -1041,8 +1116,8 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on?.("session_shutdown", async () => {
     // omp carries no shutdown reason (verified: `reason` is undefined), so the
-    // replacement handoff is always persisted when anything is pending; a
-    // terminal quit then merely replays an already-drained wake next start.
+    // replacement handoff is always persisted when anything is pending. The
+    // next owner reconciles it against the durable queue before replay.
     if (replacementCoordinator.receiver === receiveReplacementActionable) replacementCoordinator.receiver = null;
     await stopSessionGeneration(generation, true);
   });

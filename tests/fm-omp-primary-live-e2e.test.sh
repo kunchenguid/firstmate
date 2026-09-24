@@ -11,7 +11,9 @@
 #      and the session lock names the omp process (ancestry detection);
 #   3. fm_watch_arm_omp starts a real watcher, an actionable close spawns a
 #      ledger-linked successor, and the wake arrives as one follow-up turn;
-#   4. with the successor watcher frozen until its beacon passes the lab grace,
+#   4. a handled watcher wake does not replay across a real same-process session
+#      replacement; and
+#   5. with the successor watcher frozen until its beacon passes the lab grace,
 #      the next turn end is genuinely unsupervised, so session_stop must compel
 #      the turn-end guard continuation and the model reaches for the tool.
 set -u
@@ -243,6 +245,20 @@ wait_for_agent_ends 3 360 || fail "omp did not finish the wake turn"
 arm_calls=$(tool_call_count fm_watch_arm_omp)
 [ "$arm_calls" -eq 1 ] || fail "the model re-armed from memory instead of the extension (fm_watch_arm_omp call count $arm_calls)"
 pass "omp $OMP_VERSION: an actionable close spawned a ledger-linked successor and woke main exactly once"
+
+# A handled watcher turn must retire its replacement record before OMP swaps
+# sessions. Otherwise the empty durable queue rings the historical wake again
+# as soon as the replacement takes ownership.
+handled_ends=$(agent_end_count)
+rpc_send '{"id":"replace-after-wake","type":"new_session"}'
+wait_for_log '"id":"replace-after-wake","type":"response","command":"new_session","success":true' 120 \
+  || fail "omp did not replace the handled-wake session"
+sleep 5
+[ "$(agent_end_count)" -eq "$handled_ends" ] \
+  || fail "the replacement session replayed an already handled watcher wake"
+[ ! -e "$PROJECT/state/extensions/omp-primary-watch/session-replacement-actionable.json" ] \
+  || fail "the replacement session retained an already handled watcher wake"
+pass "omp $OMP_VERSION: a handled watcher wake is retired before session replacement"
 
 # --- 3. the compelled turn-end guard continuation -------------------------------
 # Freeze the successor watcher (SIGSTOP) so its beacon goes stale past the lab

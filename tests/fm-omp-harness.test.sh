@@ -27,8 +27,9 @@
 #      a plain agent_end is idle, turn_end is a notification only.
 #   6. The turn-end guard extension compels one continuation on exit 2 and
 #      stands down when the payload already carries stop_hook_active.
-#   7. The watch extension arms through fm_watch_arm_omp and delivers an
-#      actionable close as one follow-up.
+#   7. The watch extension delivers an actionable close as one follow-up,
+#      replays an unconsumed replacement wake once, and retires handoffs whose
+#      captured durable queue rows were acknowledged.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -574,6 +575,119 @@ EOF
   pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
 }
 
+test_watch_extension_retires_handled_replacement_replays() {
+  local repo home out status
+  repo="$TMP_ROOT/watch-replay/repo"; home="$TMP_ROOT/watch-replay/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state/extensions/omp-primary-watch"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=replay-fixture\n' "$$"
+trap 'exit 0' TERM INT
+while :; do sleep 0.1; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { chmodSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const state = `${process.env.FM_HOME}/state`;
+const handoffDir = `${state}/extensions/omp-primary-watch`;
+const handoffPath = `${handoffDir}/session-replacement-actionable.json`;
+const wake = {
+  version: 1,
+  token: `${process.pid}-1-1`,
+  message: "signal: replay.status",
+  predecessorArmPid: "",
+  wakeSequences: [7],
+};
+const writeHandoff = (pending) =>
+  writeFileSync(handoffPath, `${JSON.stringify({ version: 2, pending })}\n`);
+const writeQueue = () =>
+  writeFileSync(`${state}/.wake-queue`, "1\t7\tsignal\treplay.status\tsignal: replay.status\n");
+async function waitFor(pred, label) {
+  for (let i = 0; i < 300; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+function makePi() {
+  const handlers = new Map();
+  const sent = [];
+  let tool = null;
+  const pi = {
+    on(event, handler) { handlers.set(event, handler); },
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_omp") tool = candidate;
+    },
+    sendUserMessage(message) { sent.push(message); },
+  };
+  return { pi, handlers, sent, getTool: () => tool };
+}
+
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+writeQueue();
+writeHandoff([wake]);
+const firstMod = await import(pathToFileURL(process.env.EXT).href);
+const first = makePi();
+firstMod.default(first.pi);
+await first.handlers.get("session_start")?.({}, {});
+await waitFor(() => first.sent.some((message) => message.includes(wake.message)), "first unconsumed replay");
+if (first.sent.filter((message) => message.includes(wake.message)).length !== 1) {
+  throw new Error(`an unconsumed wake did not replay exactly once: ${first.sent.join(" | ")}`);
+}
+await first.handlers.get("session_shutdown")?.({}, {});
+
+// The durable queue is the handling authority: acknowledgement removes its row.
+// A replacement must retire the matching handoff instead of ringing it again.
+unlinkSync(`${state}/.wake-queue`);
+const replacementMod = await import(`${pathToFileURL(process.env.EXT).href}?replacement=handled`);
+const replacement = makePi();
+replacementMod.default(replacement.pi);
+await replacement.handlers.get("session_start")?.({}, {});
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (replacement.sent.some((message) => message.includes(wake.message))) {
+  throw new Error(`a handled wake replayed after replacement: ${replacement.sent.join(" | ")}`);
+}
+if (existsSync(handoffPath)) {
+  throw new Error(`a handled wake stayed in the replacement handoff: ${readFileSync(handoffPath, "utf8")}`);
+}
+await replacement.handlers.get("session_shutdown")?.({}, {});
+
+// A cleanup refusal is actionable once, but never turns a retired wake back
+// into an endlessly replayed notification.
+writeHandoff([{ ...wake, token: `${process.pid}-2-2` }]);
+chmodSync(handoffDir, 0o500);
+const failureMod = await import(`${pathToFileURL(process.env.EXT).href}?replacement=cleanup-failure`);
+const failure = makePi();
+failureMod.default(failure.pi);
+await failure.handlers.get("session_start")?.({}, {});
+await waitFor(
+  () => failure.sent.some((message) => message.includes("could not clear a delivered replacement-session actionable wake")),
+  "replacement cleanup failure",
+);
+await failure.getTool().execute();
+await new Promise((resolve) => setTimeout(resolve, 700));
+if (failure.sent.some((message) => message.includes(wake.message))) {
+  throw new Error(`cleanup failure replayed a handled wake: ${failure.sent.join(" | ")}`);
+}
+if (failure.sent.filter((message) => message.includes("could not clear a delivered replacement-session actionable wake")).length !== 1) {
+  throw new Error(`cleanup failure did not surface exactly once: ${failure.sent.join(" | ")}`);
+}
+chmodSync(handoffDir, 0o700);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp replacement replay cleanup contract: $out"
+  [ -z "$out" ] || fail "omp replacement replay cleanup test printed output: $out"
+  pass ".omp watch extension: unconsumed replacement wakes replay once, handled wakes retire, and cleanup failures surface once"
+}
+
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
@@ -585,3 +699,4 @@ test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
+test_watch_extension_retires_handled_replacement_replays
