@@ -946,18 +946,28 @@ report_retained_artifact_failure() {  # <task-id> <marker-path>
 }
 
 apply_pending_retained_artifact() {  # <task-id>
-  local id=$1 marker
+  local id=$1 marker data_abs
   local -a args=()
   marker=$(fm_backlog_close_marker_path "$STATE" "$id") || return 1
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   fm_backlog_close_marker_validate "$marker" "$DATA" "$id" "$STATE" \
     || { report_retained_artifact_failure "$id" "$marker"; return 1; }
   [ "$FM_BACKLOG_CLOSE_VALIDATED_MODE" = retain ] || return 0
-  args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
+  fm_backlog_completion_args_normalize "${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}"
+  args=("${FM_BACKLOG_COMPLETION_ARGS[@]+"${FM_BACKLOG_COMPLETION_ARGS[@]}"}")
   case "${args[0]-}" in
     --pr|--report)
       fm_backlog_row_artifact_supported "$id" "${args[@]}" || return 0
       fm_backlog_mutate "$DATA" update "$id" "${args[@]}" \
+        || { report_retained_artifact_failure "$id" "$marker"; return 1; }
+      ;;
+    --note)
+      [ "${args[1]}" != "local%20main" ] || args[1]="local main"
+      if ! data_abs=$(fm_backlog_data_absolute "$DATA"); then
+        report_retained_artifact_failure "$id" "$marker"
+        return 1
+      fi
+      fm_backlog_deliverable_record "$DATA" "$data_abs" "$id" "${args[1]}" \
         || { report_retained_artifact_failure "$id" "$marker"; return 1; }
       ;;
   esac

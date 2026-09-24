@@ -1571,6 +1571,61 @@ test_completion_closes_a_local_only_ship_before_reporting_success() {
   pass "completion closes a local-only ship, with its landing note, before reporting success"
 }
 
+# tasks-axi's --pr flag takes only a GitHub pull-request URL; a confirmed
+# GitLab merge request must still close on the first attempt instead of
+# stranding state/<id>.backlog-close forever (bin/fm-backlog-transition-lib.sh
+# fm_backlog_completion_args_normalize).
+test_completion_closes_a_ship_carrying_a_gitlab_merge_request() {
+  local case_dir id mr out
+  id=atomic-close-gitlab-mr-b5
+  mr=https://gitlab.com/example/repo/-/merge_requests/227
+  case_dir=$(make_home close-gitlab-mr)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-close-gitlab-mr" \
+    "pr=$mr"
+
+  out=$(run_teardown "$case_dir" "$id") || fail "teardown failed: $out"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "teardown reported success with the item still $(row_state "$case_dir" "$id")"
+  assert_grep "$mr" "$(backlog_of "$case_dir")" \
+    "teardown closed a GitLab merge request without recording its link"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "teardown closed a GitLab merge request but left its pending-close record behind"
+  pass "completion closes a ship carrying a confirmed GitLab merge request, keeping its link"
+}
+
+test_completion_reopens_a_ship_carrying_a_gitlab_merge_request_for_the_captain() {
+  local case_dir id mr home data marker meta
+  id=atomic-retain-gitlab-mr-b5
+  mr=https://gitlab.com/example/repo/-/merge_requests/227
+  case_dir=$(make_home retain-gitlab-mr)
+  home="$(home_of "$case_dir")"
+  data="$home/data"
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+
+  marker="$home/state/$id.backlog-close"
+  meta="$home/state/$id.meta"
+  touch "$meta"
+
+  # Call the transition directly, simulating what fm-teardown would do
+  # when fm-captain-hold.sh open returns 0.
+  (
+    . "$ROOT/bin/fm-tasks-axi-lib.sh"
+    . "$ROOT/bin/fm-backlog-transition-lib.sh"
+    fm_backlog_retain_transition "$meta" "$marker" "$data" "$id" "$home/state" --pr "$mr"
+  ) || fail "fm_backlog_retain_transition failed"
+
+  [ "$(tasks-axi show "$id" --file "$data/backlog.md" | sed -n 's/^  state: *//p' | head -1)" = "queued" ] \
+    || fail "retain transition left the item at $(row_state "$case_dir" "$id")"
+  assert_grep "GitLab merge request: $mr" "$data/backlog.md" \
+    "teardown retained a GitLab merge request without recording its link in the body"
+  assert_absent "$marker" \
+    "teardown retained a GitLab merge request but left its pending-close record behind"
+  pass "completion reopens a ship carrying a confirmed GitLab merge request for the captain, keeping its link"
+}
+
 test_completion_closes_a_scout_with_its_report() {
   local case_dir id out
   id=atomic-close-b6
@@ -2028,6 +2083,54 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open() {
   assert_not_contains "$out" "endpoint or local copy may remain" \
     "recovery claimed incomplete cleanup without task metadata"
   pass "session start finishes a close an interrupted cleanup recorded but never landed"
+}
+
+# The same interrupted cleanup, but the recorded completion link is a
+# confirmed GitLab merge request rather than a GitHub pull request: before
+# fm_backlog_completion_args_normalize existed, replaying this exact record
+# retried the GitHub-only --pr flag forever and the record never cleared.
+test_recovery_replays_a_close_carrying_a_gitlab_merge_request() {
+  local case_dir id mr out
+  id=atomic-heal-gitlab-mr-b9
+  mr=https://gitlab.com/example/repo/-/merge_requests/227
+  case_dir=$(make_home heal-pending-close-gitlab-mr)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-gitlab-mr\narg=--pr\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$mr" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left an interrupted GitLab cleanup's item at $(row_state "$case_dir" "$id"): $out"
+  assert_grep "$mr" "$(backlog_of "$case_dir")" \
+    "the replayed close dropped the GitLab merge request link the cleanup had recorded"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed GitLab merge request close left its record behind"
+  assert_not_contains "$out" "endpoint or local copy may remain" \
+    "recovery claimed incomplete cleanup without task metadata"
+  pass "session start finishes a close an interrupted cleanup recorded for a GitLab merge request"
+}
+
+test_recovery_replays_a_retention_carrying_a_gitlab_merge_request() {
+  local case_dir id mr out
+  id=atomic-heal-gitlab-mr-retain-b9
+  mr=https://gitlab.com/example/repo/-/merge_requests/227
+  case_dir=$(make_home heal-pending-retain-gitlab-mr)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-gitlab-mr-retain\nmode=retain\narg=--pr\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$mr" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "queued" ] \
+    || fail "session start left an interrupted GitLab retention item at $(row_state "$case_dir" "$id"): $out"
+  assert_grep "GitLab merge request: $mr" "$(backlog_of "$case_dir")" \
+    "the replayed retention dropped the GitLab merge request link the cleanup had recorded"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed GitLab merge request retention left its record behind"
+  pass "session start finishes a retention an interrupted cleanup recorded for a GitLab merge request"
 }
 
 test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
@@ -3035,6 +3138,8 @@ test_dispatch_interruption_during_kimi_readiness_fails_before_commit
 test_dispatch_does_not_resurrect_a_row_closed_after_preflight
 test_dispatch_fails_when_its_row_vanishes_after_preflight
 test_completion_closes_a_local_only_ship_before_reporting_success
+test_completion_closes_a_ship_carrying_a_gitlab_merge_request
+test_completion_reopens_a_ship_carrying_a_gitlab_merge_request_for_the_captain
 test_completion_closes_a_scout_with_its_report
 test_completion_refuses_a_legacy_record_without_an_incarnation
 test_completion_refuses_ambiguous_incarnation_metadata
@@ -3054,6 +3159,8 @@ test_recovery_marks_an_owned_record_in_flight
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
+test_recovery_replays_a_close_carrying_a_gitlab_merge_request
+test_recovery_replays_a_retention_carrying_a_gitlab_merge_request
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning

@@ -79,6 +79,13 @@ FM_BACKLOG_CLOSE_REPLAY_RESULT=
 # shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
 
+# What a GitHub pull-request URL and a GitLab merge-request URL each look like
+# is fm-pr-lib.sh's fm_pr_url_parse alone; it is stateless plain function and
+# variable definitions with no side effect at source time, so pulling it in
+# here carries the same low cost as fm-timeout-lib.sh above.
+# shellcheck source=bin/fm-pr-lib.sh disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
+
 # Latched when a row read hits its bound. fm_backlog_row_show runs inside a
 # command substitution, so the subshell can READ this latch but cannot set it;
 # the callers that capture its status own the write.
@@ -524,6 +531,63 @@ fm_backlog_row_artifact_supported() {
   esac
 }
 
+fm_backlog_deliverable_record() {  # <authorized-data> <absolute-data> <id> <deliverable>
+  local authorized_data=$1 data=$2 id=$3 deliverable=$4
+  local out command_status line body new_body tmp
+  out=$(fm_backlog_row_show "$data" "$id" --full)
+  command_status=$?
+  [ "$command_status" -ne 124 ] || FM_BACKLOG_ROW_SHOW_WEDGED=1
+  if [ "$command_status" -ne 0 ]; then
+    FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
+    [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \
+      || FM_BACKLOG_TRANSITION_ERROR="tasks-axi show $id failed with no output"
+    return "$command_status"
+  fi
+  # The leading quote selects a JSON-encoded bare string, which is exactly the
+  # value an older JSON::PP rejects unless allow_nonref is asked for, so the
+  # decoder below requests it rather than inheriting the local default. It then
+  # writes bytes, because printing the decoded characters to a stream with no
+  # :raw layer emits a codepoint at or below U+00FF as one latin-1 byte and
+  # silently corrupts the body this rewrites.
+  body=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1 \
+    | LC_ALL=C perl -MJSON::PP -e '
+      local $/;
+      my $shown = <STDIN>;
+      $shown =~ s/\s+\z//;
+      exit 0 if $shown eq "" || $shown eq "-";
+      my $value = $shown =~ /\A"/
+        ? JSON::PP->new->utf8->allow_nonref->decode($shown) : $shown;
+      binmode STDOUT, ":raw";
+      utf8::encode($value) if utf8::is_utf8($value);
+      print $value unless $value eq "-";
+    ') || {
+    FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
+    return 1
+  }
+  line="Deliverable of the finished work: $deliverable"
+  case $'\n'"$body"$'\n' in
+    *$'\n'"$line"$'\n'*) ;;
+    *)
+      new_body=$line
+      [ -z "$body" ] || new_body=$(printf '%s\n\n%s' "$body" "$line")
+      tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-backlog-retain-body.XXXXXX") || {
+        FM_BACKLOG_TRANSITION_ERROR="cannot stage the deliverable for $id"
+        return 1
+      }
+      if ! printf '%s\n' "$new_body" > "$tmp"; then
+        rm -f -- "$tmp"
+        FM_BACKLOG_TRANSITION_ERROR="cannot stage the deliverable for $id"
+        return 1
+      fi
+      if ! fm_backlog_mutate "$authorized_data" update "$id" --body-file "$tmp"; then
+        rm -f -- "$tmp"
+        return 1
+      fi
+      rm -f -- "$tmp"
+      ;;
+  esac
+}
+
 # Keep a captain-held row open across the removal of the work record that
 # discovered it: record the finished work's deliverable as one line at the end
 # of the task body (a line already present is left alone), preserve supported
@@ -532,8 +596,8 @@ fm_backlog_row_artifact_supported() {
 # bin/fm-fleet-snapshot.sh classifies that retained hold from its structured
 # fields; only bin/fm-captain-hold.sh answer resolves the call.
 fm_backlog_retain() {  # <data-dir> <id> [flag...]
-  local data authorized_data=$1 id=$2 out command_status previous_arg=''
-  local arg deliverable='' line body new_body tmp
+  local data authorized_data=$1 id=$2 previous_arg=''
+  local arg deliverable=''
   local -a row_args=()
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_TRANSITION_ERROR="data directory cannot be resolved: $1"
@@ -558,58 +622,7 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
     previous_arg=$arg
   done
   if [ -n "$deliverable" ]; then
-    out=$(fm_backlog_row_show "$data" "$id" --full)
-    command_status=$?
-    [ "$command_status" -ne 124 ] || FM_BACKLOG_ROW_SHOW_WEDGED=1
-    if [ "$command_status" -ne 0 ]; then
-      FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
-      [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \
-        || FM_BACKLOG_TRANSITION_ERROR="tasks-axi show $id failed with no output"
-      return "$command_status"
-    fi
-    # The leading quote selects a JSON-encoded bare string, which is exactly the
-    # value an older JSON::PP rejects unless allow_nonref is asked for, so the
-    # decoder below requests it rather than inheriting the local default. It then
-    # writes bytes, because printing the decoded characters to a stream with no
-    # :raw layer emits a codepoint at or below U+00FF as one latin-1 byte and
-    # silently corrupts the body this rewrites.
-    body=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1 \
-      | LC_ALL=C perl -MJSON::PP -e '
-        local $/;
-        my $shown = <STDIN>;
-        $shown =~ s/\s+\z//;
-        exit 0 if $shown eq "" || $shown eq "-";
-        my $value = $shown =~ /\A"/
-          ? JSON::PP->new->utf8->allow_nonref->decode($shown) : $shown;
-        binmode STDOUT, ":raw";
-        utf8::encode($value) if utf8::is_utf8($value);
-        print $value unless $value eq "-";
-      ') || {
-      FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
-      return 1
-    }
-    line="Deliverable of the finished work: $deliverable"
-    case $'\n'"$body"$'\n' in
-      *$'\n'"$line"$'\n'*) ;;
-      *)
-        new_body=$line
-        [ -z "$body" ] || new_body=$(printf '%s\n\n%s' "$body" "$line")
-        tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-backlog-retain-body.XXXXXX") || {
-          FM_BACKLOG_TRANSITION_ERROR="cannot stage the deliverable for $id"
-          return 1
-        }
-        if ! printf '%s\n' "$new_body" > "$tmp"; then
-          rm -f -- "$tmp"
-          FM_BACKLOG_TRANSITION_ERROR="cannot stage the deliverable for $id"
-          return 1
-        fi
-        if ! fm_backlog_mutate "$authorized_data" update "$id" --body-file "$tmp"; then
-          rm -f -- "$tmp"
-          return 1
-        fi
-        rm -f -- "$tmp"
-        ;;
-    esac
+    fm_backlog_deliverable_record "$authorized_data" "$data" "$id" "$deliverable" || return $?
   fi
   if [ "${#row_args[@]}" -gt 0 ]; then
     fm_backlog_mutate "$authorized_data" update "$id" "${row_args[@]}" || return 1
@@ -813,11 +826,34 @@ fm_backlog_dispatch_rollback() {
   return 0
 }
 
+# tasks-axi's --pr flag accepts only a GitHub pull-request URL
+# (https://github.com/<owner>/<repo>/pull/<number>); a confirmed GitLab
+# merge-request URL is refused there. Both the ordinary close below and a
+# later replay of a stranded state/<id>.backlog-close record pass their
+# completion args through here first, so a recorded (--pr <url>) pair is
+# rewritten once, in the one place both paths share, to a note that carries
+# the identical link in the row's own body instead - a GitLab merge request
+# then completes exactly like every other completion, on the first attempt or
+# on replay. fm-pr-lib.sh's fm_pr_url_parse is the one owner of what a GitLab
+# merge-request URL looks like; a GitHub URL, or anything fm_pr_url_parse does
+# not recognize, is passed through unchanged.
+FM_BACKLOG_COMPLETION_ARGS=()
+fm_backlog_completion_args_normalize() {  # [flag...]
+  FM_BACKLOG_COMPLETION_ARGS=("$@")
+  if [ "${#FM_BACKLOG_COMPLETION_ARGS[@]}" -eq 2 ] \
+     && [ "${FM_BACKLOG_COMPLETION_ARGS[0]}" = --pr ] \
+     && fm_pr_url_parse "${FM_BACKLOG_COMPLETION_ARGS[1]}" \
+     && [ "$FM_PR_PROVIDER" = gitlab ]; then
+    FM_BACKLOG_COMPLETION_ARGS=(--note "GitLab merge request: ${FM_BACKLOG_COMPLETION_ARGS[1]}")
+  fi
+}
+
 fm_backlog_close_transition() {
   local meta=$1 marker=$2 data=$3 id=$4 state=$5
   shift 5
   [ -z "$meta" ] || fm_backlog_record_remove "$meta" "task record" "$state" || return 1
-  fm_backlog_done "$data" "$id" "$@" || return 1
+  fm_backlog_completion_args_normalize "$@"
+  fm_backlog_done "$data" "$id" "${FM_BACKLOG_COMPLETION_ARGS[@]+"${FM_BACKLOG_COMPLETION_ARGS[@]}"}" || return 1
   fm_backlog_record_remove "$marker" "pending-close record" "$state"
 }
 
@@ -827,7 +863,8 @@ fm_backlog_retain_transition() {
   local meta=$1 marker=$2 data=$3 id=$4 state=$5
   shift 5
   [ -z "$meta" ] || fm_backlog_record_remove "$meta" "task record" "$state" || return 1
-  fm_backlog_retain "$data" "$id" "$@" || return 1
+  fm_backlog_completion_args_normalize "$@"
+  fm_backlog_retain "$data" "$id" "${FM_BACKLOG_COMPLETION_ARGS[@]+"${FM_BACKLOG_COMPLETION_ARGS[@]}"}" || return 1
   fm_backlog_record_remove "$marker" "pending-close record" "$state"
 }
 
