@@ -63,8 +63,10 @@
 #                                   status` read (default 10)
 #   FM_FLOW_SNAPSHOT_GH_TIMEOUT     seconds bounding one `gh pr view` (default
 #                                   20)
-#   FM_FLOW_SNAPSHOT_NOW_EPOCH      override the clock, in epoch seconds
-#   FM_FLOW_SNAPSHOT_NOW            override the clock, as an ISO timestamp
+#   FM_FLOW_SNAPSHOT_NOW_EPOCH      override the clock, in epoch seconds. It is
+#                                   the ONLY clock input: the ISO timestamp
+#                                   beside it is derived from this, so both
+#                                   always describe the same instant
 #
 # Exit codes: 0 snapshot emitted, 1 a dependency or the fleet read failed,
 # 2 usage error. A per-agent collection failure is NOT an error: it is reported
@@ -125,8 +127,18 @@ command -v jq >/dev/null 2>&1 || { echo "fm-flow-snapshot: jq not found" >&2; ex
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 
+# One instant, one source. Two independent clock knobs let a document carry a
+# `generated` and a `generated_epoch` that described different moments.
+iso_of_epoch() {  # <epoch-seconds>
+  if [ "$(uname)" = Darwin ]; then
+    date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ
+  else
+    date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ
+  fi
+}
+
 NOW_EPOCH=${FM_FLOW_SNAPSHOT_NOW_EPOCH:-$(date -u +%s)}
-NOW_ISO=${FM_FLOW_SNAPSHOT_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
+NOW_ISO=$(iso_of_epoch "$NOW_EPOCH")
 
 # Portable mtime in epoch seconds, the repository's own idiom for it.
 path_mtime() {  # <path>

@@ -329,7 +329,6 @@ NOW_EPOCH=$((BUILT_AT + 3600))
 snapshot() {  # <flags...>
   PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
     FM_FLOW_SNAPSHOT_NOW_EPOCH="$NOW_EPOCH" \
-    FM_FLOW_SNAPSHOT_NOW=2026-09-24T07:00:00Z \
     "$SNAPSHOT" "$@"
 }
 
@@ -344,6 +343,20 @@ agent() {  # <id> <jq-filter>
 
 assert_equals "fm-flow-snapshot.v1" "$(printf '%s' "$DOC" | jq -r '.schema')" \
   "the schema id names this wire format"
+
+# One clock input, so the two stamps cannot describe different moments. The
+# expected string is a fixed oracle rather than a second derivation of the same
+# value, which would pass whatever the conversion did.
+CLOCK_DOC=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_FLOW_SNAPSHOT_NOW_EPOCH=1790000000 "$SNAPSHOT") \
+  || fail "the snapshot refused with the clock pinned"
+assert_equals "1790000000" "$(printf '%s' "$CLOCK_DOC" | jq -r '.generated_epoch')" \
+  "the one clock knob sets the epoch stamp"
+assert_equals "2026-09-21T14:13:20Z" "$(printf '%s' "$CLOCK_DOC" | jq -r '.generated')" \
+  "and the ISO stamp beside it is the same instant, derived from it"
+assert_equals "2026-09-21T14:13:20Z" \
+  "$(printf '%s' "$CLOCK_DOC" | jq -r '[.agents[]][0].collection.at')" \
+  "every stamp in the document comes from that one instant"
 
 # --- liveness is the only membership test -----------------------------------
 
