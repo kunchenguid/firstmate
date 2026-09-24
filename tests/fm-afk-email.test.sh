@@ -527,6 +527,7 @@ test_processed_marker_cannot_suppress_outcomes() {
 
 
 
+
 test_invalid_away_record_does_not_enable_email() {
   local home out
   home=$(make_home invalid-record configured)
@@ -1652,6 +1653,7 @@ test_failed_send_keeps_outcomes_queued
 test_live_email_posture_requires_runtime_config
 test_missing_outcome_store_is_empty_but_invalid_store_fails
 test_processed_marker_cannot_suppress_outcomes
+
 
 
 

@@ -243,6 +243,7 @@ def outcomes_by_seq():
 
 
 
+
         return None
     return rows
 
