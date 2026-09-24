@@ -26,9 +26,11 @@
 _FM_PR_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Seconds allowed for that read. A non-positive or non-numeric value is not a
-# bound (bin/fm-timeout-lib.sh), so it falls back to the default.
+# bound (bin/fm-timeout-lib.sh): `timeout 00` and `alarm 00` disable the
+# deadline exactly as `0` does, so every leading zero falls back to the default,
+# the same arm bin/fm-timeout-lib.sh's fm_exec_timed refuses.
 FM_PR_FORGE_READ_TIMEOUT=${FM_PR_FORGE_READ_TIMEOUT:-30}
-case "$FM_PR_FORGE_READ_TIMEOUT" in ''|*[!0-9]*|0) FM_PR_FORGE_READ_TIMEOUT=30 ;; esac
+case "$FM_PR_FORGE_READ_TIMEOUT" in ''|*[!0-9]*|0*) FM_PR_FORGE_READ_TIMEOUT=30 ;; esac
 
 FM_PR_PROVIDER=
 FM_PR_URL=

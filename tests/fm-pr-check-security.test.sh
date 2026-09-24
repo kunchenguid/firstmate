@@ -155,6 +155,7 @@ case "${1:-} ${2:-}" in
         exit 0
         ;;
       *" --json isDraft "*)
+        [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
         printf '%s\n' "{\"isDraft\":${FM_TEST_GH_DRAFT:-false}}"
         exit 0
         ;;
@@ -834,20 +835,6 @@ SH
 # Otherwise the product default applies: a tighter override silently kills a
 # correct poll on a loaded machine, and the watcher then only retries it or
 # exits on a later check's wake without the poll's result.
-# A search path with every directory that offers jq dropped, so a case can pin
-# behaviour on that dependency being genuinely unreachable no matter where the
-# host keeps it.
-path_without_jq() {  # <path>
-  local entry out=
-  local IFS=:
-  for entry in $1; do
-    [ -n "$entry" ] || continue
-    [ -x "$entry/jq" ] && continue
-    out="${out:+$out:}$entry"
-  done
-  printf '%s\n' "$out"
-}
-
 run_watcher_bounded() {
   local home=$1 fakebin=$2 check_interval=${FM_TEST_CHECK_INTERVAL:-0} watch_root=${FM_TEST_WATCH_ROOT:-$ROOT}
   local check_timeout_env=(-u FM_CHECK_TIMEOUT)
@@ -2070,7 +2057,7 @@ seed_canonical_poll() {
 # Fixture is the static PR poll immediately before Gerrit support changed its
 # bytes; the pinned historical hash proves the test is not using live source.
 test_pre_update_draft_poll_retirement() {
-  local dir state id url number rc output before base_path
+  local dir state id url number rc output before base_path jq_free_path gh_sleep forge_timeout
   dir=$(make_case pre-update-drafts)
   state="$dir/home/state"
   # Reading a draft state needs jq as well as gh, and BASE_PATH deliberately
@@ -2121,21 +2108,36 @@ test_pre_update_draft_poll_retirement() {
   fm_pr_poll_artifacts_valid "$state" draft-a "$POLL" || fail "ready poll was not currently authenticated"
   pass "three historical draft polls retire quietly without affecting live polls or ready rearming"
 
-  for id in altered ready no-jq; do
+  # A curated directory resolving everything BASE_PATH would except jq. Dropping
+  # whole directories is unsafe on a usr-merged host (tests/lib.sh), and this
+  # watcher needs bash, timeout, and the rest of BASE_PATH to run at all.
+  jq_free_path=$(fm_test_base_path_sans "$BASE_PATH" jq)
+  for id in altered ready no-jq slow; do
     dir=$(make_case "old-$id")
     state="$dir/home/state"
-    # no-jq leaves jq off the watcher's PATH; that dependency is unreachable, so
-    # the draft state can never be read and no forge call may be made at all.
+    # no-jq makes that dependency genuinely unreachable, so the draft state can
+    # never be read and no forge call may be made at all.
     [ "$id" = no-jq ] || ln -sf "$REAL_JQ" "$dir/fakebin/jq"
     write_poll_meta "$state" task-a https://github.com/o/r/pull/1
     seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$ROOT/tests/fixtures/pr-poll/pre-gerrit.sh"
     if [ "$id" = altered ]; then
       printf 'untrusted\n' >> "$state/task-a.check.sh"
     fi
+    # slow is retirable in every other respect, so only the bound can refuse it:
+    # the forge holds the draft answer well past the deadline. An unbounded read
+    # would collect that answer and retire the poll while both task locks are
+    # held, which is exactly the stall the bound exists to prevent.
+    gh_sleep=0
+    forge_timeout=30
+    if [ "$id" = slow ]; then
+      gh_sleep=5
+      forge_timeout=1
+    fi
     base_path=$BASE_PATH
-    [ "$id" != no-jq ] || BASE_PATH=$(path_without_jq "$BASE_PATH")
+    [ "$id" != no-jq ] || BASE_PATH=$jq_free_path
     set +e
     FM_TEST_GH_DRAFT=$([ "$id" = ready ] && echo false || echo true) \
+      FM_TEST_GH_SLEEP="$gh_sleep" FM_PR_FORGE_READ_TIMEOUT="$forge_timeout" \
       FM_TEST_GH_LOG="$dir/gh.log" run_watcher_bounded "$dir/home" "$dir/fakebin" \
       > "$dir/watch.out" 2> "$dir/watch.err"
     rc=$?
@@ -2143,7 +2145,7 @@ test_pre_update_draft_poll_retirement() {
     BASE_PATH=$base_path
     [ "$rc" -eq 0 ] || fail "refusal watcher failed for $id"
     grep -q 'rejected unauthenticated state checks:.*task-a.check.sh' "$dir/watch.out" \
-      || fail "unsafe, ready, or unreadable historical poll was silently retired ($id)"
+      || fail "unsafe, ready, unreadable, or unbounded historical poll was silently retired ($id)"
     [ -f "$state/task-a.check.sh" ] || fail "refusal removed the $id check"
     ! grep -q -- '--json state' "$dir/gh.log" || fail "unauthenticated bytes ran ($id)"
     case "$id" in
@@ -2156,9 +2158,12 @@ test_pre_update_draft_poll_retirement() {
       no-jq)
         ! grep -q -- '--json isDraft' "$dir/gh.log" \
           || fail "a draft read was attempted without its jq dependency" ;;
+      slow)
+        grep -q -- '--json isDraft' "$dir/gh.log" \
+          || fail "the bounded refusal never reached the forge at all" ;;
     esac
   done
-  pass "modified, ready, and jq-less historical polls retain the unauthorized-check alarm"
+  pass "modified, ready, jq-less, and past-deadline historical polls retain the unauthorized-check alarm"
 }
 
 add_stop_custom_check() {
