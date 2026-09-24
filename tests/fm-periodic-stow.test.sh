@@ -22,6 +22,7 @@ new_home() {
 run_main() { # <home> <args...>
   local home=$1
   shift
+  # shellcheck disable=SC2016 # The child shell expands its embedded script.
   env -i PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/tmp}" FM_HOME="$home" \
     bash -c 'exec -a pi node -e '\''
       const fs = require("node:fs");

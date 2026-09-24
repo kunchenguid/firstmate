@@ -89,6 +89,7 @@ STATE_DIR="$HOME_CANON/state/stow"
 STATE_FILE="$STATE_DIR/state.json"
 LOCK_FILE="$STATE_DIR/.lock"
 
+# shellcheck disable=SC2016 # jq expands $home inside this literal filter.
 state_filter='
   select(.version == 1 and .home == $home and
     (.revision | type == "number" and . >= 0 and . <= 9007199254740991 and floor == .) and
