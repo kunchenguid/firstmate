@@ -218,8 +218,12 @@ fm_nm_run_status_class() {  # <status_word>
 # unreadable rather than guessed among candidates.
 # The reader subprocess is bounded by $4 seconds (default 10), so a contended
 # database can never outlast the caller's per-read budget.
-# If that reader or inventory is unavailable, report unknown with available
-# candidate ids rather than treating the displayed window as complete.
+# If that reader or inventory is unavailable, report what could not be read
+# and why, with available candidate ids, rather than treating the displayed
+# window as complete; a read that SUCCEEDED and still settled nothing opens
+# with `could not settle` instead, so no reason claims a failure that did not
+# happen. Every reason this function prints names its own cause, because the
+# caller renders it as the whole explanation of an unreadable verdict.
 # Structural completeness applies to the whole table; semantic validation
 # applies only to the requested branch, after complete identity lookup when
 # capped. Branch names are matched exactly without a character whitelist.
@@ -299,13 +303,13 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree> [timeout_secs]
     END {
       if (!found) print "unavailable"
       else if (bad || counts != 1 || (seen+0) != (expected+0) || (seen+0) != (shown+0) || (total+0) < (shown+0))
-        print "unknown|unreadable runs table; run ids: " ids
+        print "unknown|could not read the runs table: its rows contradict its own count header; run ids: " ids
       else if ((shown+0) < (total+0)) print "incomplete|" ids
-      else if (invalid_run) print "unknown|unreadable runs table; run ids: " ids
-      else if (unknown_status) print "unknown|unrecognized run status; run ids: " ids
+      else if (invalid_run) print "unknown|could not read the runs table: a same-branch row is malformed or repeats a run id; run ids: " ids
+      else if (unknown_status) print "unknown|could not settle the run status for this branch: the runs table lists a word this reader does not recognize; run ids: " ids
       else if (first == "") print "absent"
       else if ((first_status == "running" || first_status == "pending") && live > 1)
-        print "unknown|competing live runs; run ids: " ids
+        print "unknown|could not tell which run on this branch is current: two are recorded live at once; run ids: " ids
       else print "selected|" first "|" first_status "|" ids
     }
   ')
@@ -322,20 +326,35 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
+
+class Unreadable(Exception):
+    """Names what this reader could not read, in its own voice."""
+
+
+class Unsettled(Exception):
+    """Names what this reader read whole but still could not settle."""
+
+
 branch, overview, available_ids, database = sys.argv[1:]
 ids = available_ids.split(", ") if available_ids else []
 try:
     repos = [line[6:].strip() for line in overview.splitlines() if line.startswith("repo: ")]
     if len(repos) != 1:
-        raise ValueError
+        raise Unreadable("the run overview does not name exactly one repository to look up")
     repo_path = json.loads(repos[0]) if repos[0].startswith('"') else repos[0]
     if not isinstance(repo_path, str) or not os.path.isabs(repo_path):
-        raise ValueError
-    with closing(sqlite3.connect(Path(database).as_uri() + "?mode=ro", uri=True, timeout=30)) as db:
+        raise Unreadable("the run overview's repository path is not an absolute path")
+    try:
+        connection = sqlite3.connect(Path(database).as_uri() + "?mode=ro", uri=True, timeout=30)
+    except (OSError, sqlite3.Error):
+        raise Unreadable("the no-mistakes state database %s could not be opened" % database)
+    with closing(connection) as db:
         db.execute("BEGIN")
         repo = db.execute("SELECT id FROM repos WHERE working_path = ?", (repo_path,)).fetchall()
-        if len(repo) != 1:
-            raise ValueError
+        if len(repo) > 1:
+            raise Unreadable("no-mistakes records more than one repository at %s" % repo_path)
+        if not repo:
+            raise Unreadable("no-mistakes has no repository recorded at %s" % repo_path)
         rows = db.execute(
             "SELECT id, branch, status, head_sha FROM runs WHERE repo_id = ? AND branch = ? "
             "ORDER BY created_at DESC, id DESC", (repo[0][0], branch)
@@ -345,21 +364,29 @@ try:
         if isinstance(row[0], str) and re.fullmatch(r"[A-Za-z0-9_-]+", row[0]) and row[0] not in ids:
             ids.append(row[0])
     if not displayed_ids.issubset(row[0] for row in rows):
-        raise ValueError
+        raise Unsettled("the displayed runs table names runs the state database does not have")
     for row in rows:
         if (not all(isinstance(value, str) for value in row)
                 or not re.fullmatch(r"[A-Za-z0-9_-]+", row[0]) or row[1] != branch
                 or not re.fullmatch(r"[a-z_-]+", row[2]) or not re.fullmatch(r"[a-fA-F0-9]{7,40}", row[3])):
-            raise ValueError
+            raise Unreadable("the state database's own run rows for this branch did not validate")
     print("count: %d of %d total" % (len(rows), len(rows)))
     print("runs[%d]{id,branch,status,head,pr}:" % len(rows))
     for row in rows:
         print("  " + ",".join(json.dumps(value, ensure_ascii=False) for value in row) + ',""')
-except (ValueError, OSError, sqlite3.Error):
-    print("unknown|complete same-branch run inventory unreadable; run ids: " + ", ".join(ids))
+except (Unreadable, Unsettled, ValueError, OSError, sqlite3.Error) as error:
+    if isinstance(error, Unsettled):
+        opening, reason = "could not settle", str(error)
+    elif isinstance(error, Unreadable):
+        opening, reason = "could not read", str(error)
+    else:
+        opening = "could not read"
+        reason = "the no-mistakes state database could not be read (%s)" % type(error).__name__
+    print("unknown|%s this branch's run inventory: %s; run ids: %s"
+          % (opening, reason, ", ".join(ids)))
 PY
   ); then
-    printf 'unknown|complete same-branch run inventory reader unavailable; run ids: %s\n' "$available_ids"
+    printf "unknown|could not read this branch's run inventory: the state-database reader (python3) could not be run or did not finish; run ids: %s\n" "$available_ids"
     return
   fi
   case "$inventory" in
@@ -368,7 +395,7 @@ PY
   esac
   case "$selection" in
     selected\|*|unknown\|*|absent) printf '%s\n' "$selection" ;;
-    *) printf 'unknown|complete same-branch run inventory unreadable; run ids: %s\n' "$available_ids" ;;
+    *) printf "unknown|could not read this branch's run inventory: the recovered inventory did not parse; run ids: %s\n" "$available_ids" ;;
   esac
 }
 

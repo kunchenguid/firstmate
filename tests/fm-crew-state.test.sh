@@ -1527,6 +1527,7 @@ test_terminal_passed_with_override() {
   assert_contains "$out" "source: run-step" "passed-with-override -> run-step source"
   assert_contains "$out" "run passed: PR merged" "passed-with-override run reports merged only after the PR record says merged"
   assert_not_contains "$out" "state: unknown" "passed-with-override must not fall through to unknown"
+  assert_not_contains "$out" "state: unreadable" "a readable passing outcome is never the reader reporting itself blind"
   assert_not_contains "$out" "outcome: passed-with-override" "passed-with-override must not surface as a raw unmapped outcome detail"
   pass "terminal passed-with-override run reads done like a clean pass"
 }
@@ -1544,6 +1545,7 @@ test_terminal_passed_with_skips() {
   assert_contains "$out" "run passed: PR merged" "passed-with-skips run reports merged only after the PR record says merged"
   assert_contains "$out" "publication/CI verification skipped" "passed-with-skips keeps the skip visible, unlike a clean pass"
   assert_not_contains "$out" "state: unknown" "passed-with-skips must not fall through to unknown"
+  assert_not_contains "$out" "state: unreadable" "a readable passing outcome is never the reader reporting itself blind"
   assert_not_contains "$out" "outcome: passed-with-skips" "passed-with-skips must not surface as a raw unmapped outcome detail"
   pass "terminal passed-with-skips run reads done with the skip kept visible"
 }
@@ -2197,13 +2199,13 @@ EOF
 # orphaned-monitor shape (every substantive step completed, only the ci
 # monitor failed after the daemon restarted under its merge poll) cannot be
 # recognized there. With the daemon provably down, that terminal failed
-# record is unverified evidence from a dead instrument and must read unknown,
+# record is unverified evidence from a dead instrument and must read unreadable,
 # never failed - the fleet rule from #3785. The fallback is reached while the
 # daemon is answering for another branch, so the probe proves the daemon
 # went down after that answer (a flapping daemon under incident load) - the
 # two calls are separate socket connections. With the daemon up, the same
 # record keeps its failure verdict.
-test_coarse_failed_ledger_with_daemon_down_reports_unknown() {
+test_coarse_failed_ledger_with_daemon_down_reads_unreadable() {
   reset_fakes
   local d short; d=$(new_case coarse-daemon-down-failed)
   make_repo_on_branch "$d/wt" fm/feat-coarsedown
@@ -2218,8 +2220,9 @@ test_coarse_failed_ledger_with_daemon_down_reports_unknown() {
   FM_FAKE_RUNS_LIST="  failed     fm/feat-coarsedown ${short}  2026-09-05 21:00"
   FM_FAKE_DAEMON_DOWN=1
   local out; out=$(run_crew_state "$d" feat-coarsedown)
-  assert_contains "$out" "state: unknown" "daemon down + failed ledger record -> unknown"
-  assert_contains "$out" "no-mistakes daemon unreachable; last ledger record failed - unverified" \
+  assert_contains "$out" "state: unreadable" "daemon down + failed ledger record -> unreadable"
+  assert_not_contains "$out" "state: unknown" "a dead instrument is the reader's own blindness, not a bare unknown"
+  assert_contains "$out" "could not verify this run: the no-mistakes daemon is unreachable, so its last ledger record (failed) is unverified" \
     "the unverified detail names the dead instrument"
   assert_not_contains "$out" "state: failed" "an instrument failure never reads as work failure"
   assert_contains "$out" "source: run-step" "the ledger row is still this branch's attributed run"
@@ -2229,7 +2232,7 @@ test_coarse_failed_ledger_with_daemon_down_reports_unknown() {
   out=$(run_crew_state "$d" feat-coarsedown)
   assert_contains "$out" "state: failed" "daemon up keeps the failed verdict over the failed record"
   assert_not_contains "$out" "unverified" "no unverified qualifier while the daemon answers"
-  pass "failed ledger record reads unknown only when the daemon is provably down"
+  pass "failed ledger record reads unreadable only when the daemon is provably down"
 }
 
 test_cross_branch_attribution_picks_most_recent_row() {
@@ -2393,7 +2396,8 @@ test_unknown_status_row_keeps_newest_first_precedence() {
 EOF
 )"
   out=$(run_crew_state "$d" unknownrow)
-  assert_contains "$out" "runs list status: quarantined" "the newest row's unclassifiable status is answered as-is"
+  assert_contains "$out" "reports a status this reader does not recognize (quarantined)" \
+    "the newest row's unclassifiable status is named as itself"
   assert_not_contains "$out" "state: working" "an older live row must not displace an unclassifiable newer row"
   pass "an unclassifiable status row keeps the ledger's newest-first precedence"
 }
@@ -3312,6 +3316,7 @@ test_dead_window_still_reports_terminal_run_step() {
   assert_contains "$out" "state: done" "closed pane still reports terminal run-step done"
   assert_contains "$out" "source: run-step" "closed pane does not mask the run-step"
   assert_not_contains "$out" "state: unknown" "closed pane with a run must never be unknown"
+  assert_not_contains "$out" "state: unreadable" "closed pane with a run must never read as an unreadable run"
   pass "closed pane still reports a terminal run-step"
 }
 
@@ -3329,6 +3334,7 @@ test_dead_window_still_reports_active_run_step() {
   assert_contains "$out" "state: working" "closed pane still reports active run-step"
   assert_contains "$out" "source: run-step" "closed pane does not mask the active run-step"
   assert_not_contains "$out" "state: unknown" "closed pane with an active run must never be unknown"
+  assert_not_contains "$out" "state: unreadable" "closed pane with an active run must never read as an unreadable run"
   pass "closed pane still reports an active run-step"
 }
 
@@ -4162,11 +4168,65 @@ PY
   FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
 }
 
+# Every run-step verdict this reader cannot establish is spelled `unreadable`
+# and carries its own cause. `unknown` would read as a claim about the crew -
+# a supervisor reconciling a worker before deciding it is stuck cannot tell a
+# reader that went blind from a worker whose state is genuinely unknowable, and
+# on a busy repository that verdict is routine, so the distinction has to be in
+# the word itself rather than only in the prose beside it.
+test_unreadable_run_step_names_its_own_cause() {
+  make_competing_runs_case unreadable-causes running running
+  local d=$TMP_ROOT/unreadable-causes out
+  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01OLD/')"
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unreadable' 'two live runs settle nothing about the crew'
+  assert_not_contains "$out" 'state: unknown' 'a reader that cannot settle a run says so about itself'
+  assert_contains "$out" 'source: run-step' 'the verdict still names the source it failed on'
+  assert_contains "$out" 'could not tell which run on this branch is current' \
+    'the detail opens with what could not be established'
+
+  # A different failure of the same read reports a different cause, so the two
+  # are not one indistinguishable verdict.
+  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/runs\[2\]/runs[3]/')
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unreadable' 'a table that contradicts its own header is also unreadable'
+  assert_contains "$out" 'its rows contradict its own count header' \
+    'a malformed table names the malformation, not the ambiguity'
+  assert_not_contains "$out" 'could not tell which run' \
+    'two different read failures do not share one reason'
+  pass 'an unreadable run-step verdict names the specific thing it could not read'
+}
+
+# When `no-mistakes axi` exits nonzero after printing part of its table, the
+# verdict reports both the failed call and the candidate ids the partial table
+# still named. Only ids belong in that `run ids:` list: a selection reason is a
+# sentence carrying its own `run ids:` clause, so splicing the whole reason in
+# produced one line asserting two different causes with prose inside an id list.
+test_failed_overview_call_lists_only_run_ids() {
+  make_competing_runs_case overview-call-failed running running
+  local d=$TMP_ROOT/overview-call-failed out ids
+  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01OLD/')"
+  FM_FAKE_AXI_HOME_ERROR=1
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unreadable' 'a failed inventory call cannot establish a verdict'
+  assert_contains "$out" "\`no-mistakes axi\` failed" 'the verdict names the call that failed'
+  assert_contains "$out" '01NEW' 'the partial table still names its candidate run'
+  ids=$(printf '%s\n' "$out" | grep -o 'run ids: ' | grep -c . || true)
+  [ "$ids" = 1 ] || fail "one verdict carried $ids separate run-id lists: $out"
+  ids=${out#*run ids: }
+  case "$ids" in
+    *[!A-Za-z0-9_,\ -]*) fail "the run ids field carried prose, not ids: $ids" ;;
+  esac
+  assert_not_contains "$out" 'could not tell which run on this branch is current' \
+    'one verdict must not assert a second, different cause'
+  pass 'a failed inventory call reports one cause and only run ids'
+}
+
 test_capped_competing_live_runs_report_both_ids() {
   make_capped_runs_case capped-competing running running
   local d=$TMP_ROOT/capped-competing out
   out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'a capped overview must not hide the competing live run'
+  assert_contains "$out" 'state: unreadable' 'a capped overview must not hide the competing live run'
   assert_contains "$out" '01NEW' 'capped ambiguity names the visible run'
   assert_contains "$out" '01OLD' 'capped ambiguity names the run beyond nine other branches'
   assert_not_contains "$out" '01FOREIGN' 'another repository cannot claim this branch'
@@ -4177,7 +4237,7 @@ test_capped_overview_without_branch_rows_reports_both_ids() {
   make_capped_runs_case capped-absent running pending hidden
   local d=$TMP_ROOT/capped-absent out
   out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'no visible branch rows cannot establish absence'
+  assert_contains "$out" 'state: unreadable' 'no visible branch rows cannot establish absence'
   assert_contains "$out" '01NEW' 'the newer hidden run is identified'
   assert_contains "$out" '01OLD' 'the older hidden pending run is identified'
   pass 'same-branch identity survives both runs falling outside the overview'
@@ -4280,6 +4340,7 @@ PY
   local out; out=$(run_crew_state "$d" orphan)
   assert_not_contains "$out" "unreadable" 'a branch with no run of its own is not an unreadable runs table'
   assert_not_contains "$out" "state: unknown" 'a healthy home does not report itself untrustworthy'
+  assert_not_contains "$out" "state: unreadable" 'a healthy home does not report itself blind either'
   assert_contains "$out" "state: working" 'absence of a same-branch run falls through to the pane verdict'
   assert_contains "$out" "source: pane" 'the working verdict still comes from the pane source'
   pass 'no run for this branch beside a live run elsewhere reads absent, not unreadable'
@@ -4304,8 +4365,9 @@ SH
   elapsed=$((SECONDS - started))
   unset FM_CREW_STATE_NM_TIMEOUT
   [ "$elapsed" -lt 10 ] || fail "the capped inventory reader ran unbounded for ${elapsed}s"
-  assert_contains "$out" 'state: unknown' 'an unreachable inventory reader cannot establish a verdict'
-  assert_contains "$out" 'reader unavailable' 'a killed reader reports the same unavailable reader path'
+  assert_contains "$out" 'state: unreadable' 'an unreachable inventory reader cannot establish a verdict'
+  assert_contains "$out" 'the state-database reader (python3) could not be run or did not finish' \
+    'a reader killed by the budget names the reader itself as what did not finish'
   pass 'the capped inventory reader is bounded by the crew read budget'
 }
 
@@ -4318,8 +4380,9 @@ test_capped_inventory_requires_exact_repo_path() {
   local d=$TMP_ROOT/capped-noncanonical out
   FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed "s|^repo: .*|repo: \"$d/wt/./\"|")
   out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'an unmatched repo spelling cannot establish a verdict'
-  assert_contains "$out" 'unreadable' 'an unmatched repo lookup reports the inventory unreadable'
+  assert_contains "$out" 'state: unreadable' 'an unmatched repo spelling cannot establish a verdict'
+  assert_contains "$out" 'no-mistakes has no repository recorded at' \
+    'the read failure names the path it asked for, not just an unreadable verdict'
   assert_contains "$out" '01NEW' 'an unmatched repo lookup still names the candidate run'
   assert_not_contains "$out" 'absent' 'an unmatched repo lookup never reads as a branch without runs'
   pass 'a repo spelling the inventory does not record reads unreadable'
@@ -4394,6 +4457,7 @@ EOF
   out=$(run_crew_state "$d" feat-green)
   assert_not_contains "$out" 'unreadable' 'a linked worktree reads its run through the repo line'
   assert_not_contains "$out" 'state: unknown' 'a green PR in merge monitoring is never unknown'
+  assert_not_contains "$out" 'state: unreadable' 'a green PR in merge monitoring is never an unread run'
   assert_contains "$out" 'state: done' 'a green PR in merge monitoring reads done'
   assert_contains "$out" 'source: run-step' 'the green reading comes from the selected run'
   assert_contains "$out" 'checks green: PR ready for review' 'the reading is held for the merge decision'
@@ -4444,7 +4508,7 @@ PY
         norepo) overview=$(printf '%s\n' "$overview" | sed '/^repo:/d') ;;
       esac
       out=$(FM_FAKE_AXI_HOME="$overview" run_crew_state "$d" competing)
-      assert_contains "$out" 'state: unknown' "$mode cannot fall back to a confident verdict from capped rows"
+      assert_contains "$out" 'state: unreadable' "$mode cannot fall back to a confident verdict from capped rows"
       assert_contains "$out" '01NEW' "$mode preserves the available run identity"
       if [ "$mode" = missing ]; then
         [ ! -e "$NM_HOME/state.sqlite" ] || fail 'the read-only lookup created a missing inventory'
@@ -4517,7 +4581,7 @@ test_capped_inventory_ignores_unrelated_semantics() {
   local d=$TMP_ROOT/capped-unrelated-semantics out
   FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's@01OTHER00,fm/other-0,running,[^,]*,@foreign.id,"fix/a,b",FUTURE,unresolved,@')
   out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'competing runs remain ambiguous beside unrelated metadata'
+  assert_contains "$out" 'state: unreadable' 'competing runs remain ambiguous beside unrelated metadata'
   assert_contains "$out" '01NEW' 'capped ambiguity retains the visible id'
   assert_contains "$out" '01OLD' 'R6 unrelated semantics cannot hide an id beyond the history window'
   assert_not_contains "$out" 'foreign.id' 'unrelated runs do not claim this branch'
@@ -4529,7 +4593,7 @@ test_capped_requested_semantics_do_not_hide_ids() {
   local d=$TMP_ROOT/capped-requested-semantics out
   FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's@01NEW,fm/competing,running,[^,]*,@01NEW,fm/competing,FUTURE,unresolved,@')
   out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'readable competing identities remain ambiguous'
+  assert_contains "$out" 'state: unreadable' 'readable competing identities remain ambiguous'
   assert_contains "$out" '01NEW' 'the visible requested run remains identified'
   assert_contains "$out" '01OLD' 'R6 partial requested-row semantics cannot preempt complete identity lookup'
   pass 'R6 complete identity lookup precedes partial-row semantic rejection'
@@ -4549,7 +4613,7 @@ PY
   FM_FAKE_AXI_STATUS="$(run_running "$branch" | sed 's/01RUN/01NEW/')"
   FM_FAKE_AXI_STATUS_RUN="$(run_parked "$branch" | sed 's/01RUN/01NEW/')"
   out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'quoted branch fields retain ambiguous authority'
+  assert_contains "$out" 'state: unreadable' 'quoted branch fields retain ambiguous authority'
   assert_contains "$out" '01NEW' 'the quoted requested branch retains its visible run'
   assert_contains "$out" '01OLD' 'R6 complete inventory preserves quoted branch identity and both ids'
   pass 'R6 capped inventory preserves quoted requested-branch identity'
@@ -4569,7 +4633,7 @@ test_inventory_structure_and_requested_semantics_remain_checked() {
       head) FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed '/01NEW/s/,[a-f0-9]*,""$/,unresolved,""/') ;;
     esac
     out=$(run_crew_state "$d" competing)
-    assert_contains "$out" 'state: unknown' "$mode still prevents a confident selection"
+    assert_contains "$out" 'state: unreadable' "$mode still prevents a confident selection"
     assert_contains "$out" '01NEW' "$mode preserves the available newer identity"
     assert_contains "$out" '01OLD' "$mode preserves the available older identity"
   done
@@ -4595,7 +4659,7 @@ test_complete_ambiguity_without_python_names_both_ids() {
   toolbin=$(make_no_python_toolbin "$d")
   FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01NEW/')"
   out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
-  assert_contains "$out" 'state: unknown' 'complete competing runs remain ambiguous without Python'
+  assert_contains "$out" 'state: unreadable' 'complete competing runs remain ambiguous without Python'
   assert_contains "$out" '01NEW' 'R5 complete ambiguity retains the newer id without Python'
   assert_contains "$out" '01OLD' 'complete ambiguity retains the older id without Python'
   pass 'R5 complete ambiguity without Python names both ids'
@@ -4608,7 +4672,7 @@ test_capped_without_python_preserves_available_ids() {
     d=$TMP_ROOT/no-python-capped-$placement
     toolbin=$(make_no_python_toolbin "$d")
     out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
-    assert_contains "$out" 'state: unknown' 'unreadable complete inventory must fail closed'
+    assert_contains "$out" 'state: unreadable' 'unreadable complete inventory must fail closed'
     assert_contains "$out" '01NEW' 'R5 capped lookup retains available ids without Python'
     assert_contains "$out" 'inventory' 'unknown explains that complete inventory could not be read'
     assert_not_contains "$out" '01FOREIGN' 'unreadable inventory does not invent foreign authority'
@@ -4622,7 +4686,7 @@ test_capped_without_sqlite_preserves_available_ids() {
   mkdir -p "$d/no-sqlite"
   printf 'raise ImportError("sqlite support unavailable")\n' > "$d/no-sqlite/sqlite3.py"
   out=$(PYTHONPATH="$d/no-sqlite" run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'missing SQLite support must fail closed'
+  assert_contains "$out" 'state: unreadable' 'missing SQLite support must fail closed'
   assert_contains "$out" '01NEW' 'R5 capped lookup retains available ids without SQLite support'
   assert_contains "$out" 'inventory' 'missing SQLite support leaves an explicit inventory diagnostic'
   pass 'R5 capped lookup without SQLite support preserves available ids'
@@ -4634,14 +4698,14 @@ test_live_to_terminal_inventory_disagreement_is_unknown() {
   FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01NEW/')"
   FM_FAKE_AXI_STATUS_RUN="$(run_failed fm/competing | sed 's/01RUN/01NEW/; s/failed/cancelled/')"
   out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'R1 live selection becoming terminal cannot publish a stale failure'
-  assert_contains "$out" 'status disagrees with inventory' 'the selection race is identified'
+  assert_contains "$out" 'state: unreadable' 'R1 live selection becoming terminal cannot publish a stale failure'
+  assert_contains "$out" "its own record and the inventory disagree" 'the selection race is identified'
   assert_contains "$out" '01NEW' 'the changing run remains identifiable'
   assert_not_contains "$out" 'state: failed' 'a cancelled stale selection is not a work failure'
   FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/,running,/,cancelled,/')
   FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
   out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'terminal-to-live disagreement remains rejected'
+  assert_contains "$out" 'state: unreadable' 'terminal-to-live disagreement remains rejected'
   pass 'R1 both directions of inventory liveness disagreement read unknown'
 }
 
@@ -4670,7 +4734,7 @@ test_uninitialized_busy_worker_uses_pane() {
   assert_not_contains "$out" 'source: run-step' 'an initialization error is not a run'
   FM_FAKE_AXI_STATUS='error: "database locked"'
   out=$(run_crew_state "$d" worker)
-  assert_contains "$out" 'state: unknown' 'other inventory errors must not be mistaken for no gate'
+  assert_contains "$out" 'state: unreadable' 'other inventory errors must not be mistaken for no gate'
   pass 'R2 uninitialized busy workers retain pane reporting'
 }
 
@@ -4902,6 +4966,7 @@ EOF
   assert_contains "$out" "parked at review" "the gate itself still reaches the supervisor"
   assert_contains "$out" "finding(s)" "the gate findings still reach the supervisor"
   assert_not_contains "$out" "state: unknown" "a parked run is not a dead live record"
+  assert_not_contains "$out" "state: unreadable" "a parked run is not a dead live record"
   pass "a parked gate survives a dead daemon with its findings intact"
 }
 
@@ -4959,6 +5024,7 @@ EOF
   assert_contains "$out" "state: blocked" "a first-hand socket refusal is not demoted to a generic unknown"
   assert_contains "$out" "socket refused" "the crew's own blocker reaches the supervisor"
   assert_not_contains "$out" "state: unknown" "the unverified record must not replace the blocker"
+  assert_not_contains "$out" "state: unreadable" "the unverified record must not replace the blocker with the reader's own blindness"
   pass "a socket-refused blocker survives the dead-daemon verdict"
 }
 
@@ -4991,7 +5057,7 @@ EOF
   out=$(run_crew_state "$d" feat-obanch)
   assert_contains "$out" "state: blocked" "an ordinary blocker stays blocked when the record is unverified"
   assert_contains "$out" "broken pipe" "the crew's own blocker reaches the supervisor"
-  assert_contains "$out" "daemon unreachable" "the unverified record is named as the reason"
+  assert_contains "$out" "daemon is unreachable" "the unverified record is named as the reason"
   assert_not_contains "$out" "superseded" "an unverified record never supersedes an open blocker"
   pass "an ordinary blocked tip survives the dead-daemon verdict"
 }
@@ -5022,6 +5088,7 @@ branch_sync:
   assert_contains "$out" "state: working" "a busy crew keeps reading working"
   assert_contains "$out" "source: pane" "the live pane answers, not the stale record"
   assert_not_contains "$out" "state: unknown" "an unproven record must not blank out a working crew"
+  assert_not_contains "$out" "state: unreadable" "an unproven record must not blank out a working crew"
   pass "an unproven record with a dead daemon never overrides a busy pane"
 }
 
@@ -5158,8 +5225,9 @@ EOF
   arm_idle_record "$d/state" selanchor
   out=$(run_crew_state "$d" selanchor)
   assert_not_contains "$out" "state: working" "the selected anchored route must not read working with the daemon answering down"
-  assert_contains "$out" "daemon unreachable" "the ledger anchor proved identity, so liveness is what is reported"
-  assert_not_contains "$out" "code identity unverified" "an anchored run's identity is proven, not unverified"
+  assert_contains "$out" "daemon is unreachable" "the ledger anchor proved identity, so liveness is what is reported"
+  assert_not_contains "$out" "could not tie the selected run to this task copy" \
+    "an anchored run's identity is proven, not unverified"
   assert_contains "$out" "run: 01RUN" "the verdict still names the run for a later --run read"
   pass "the selected-run anchored continuation reports the dead daemon, not an identity failure"
 }
@@ -5196,6 +5264,7 @@ EOF
   assert_contains "$out" "parked at review" "the gate reaches the supervisor on the selected route too"
   assert_contains "$out" "finding(s)" "the gate findings reach the supervisor"
   assert_not_contains "$out" "state: unknown" "a parked run is not a dead live record"
+  assert_not_contains "$out" "state: unreadable" "a parked run is not a dead live record"
   pass "the selected route keeps an anchored parked run's gate with a dead daemon"
 }
 
@@ -5228,7 +5297,7 @@ EOF
   out=$(run_crew_state "$d" seldec)
   assert_contains "$out" "state: parked" "the open decision is not hidden behind the unverified record"
   assert_contains "$out" "approve the schema change" "the crew's own decision note reaches the supervisor"
-  assert_contains "$out" "daemon unreachable" "the unverified record is named as the reason"
+  assert_contains "$out" "daemon is unreachable" "the unverified record is named as the reason"
   assert_contains "$out" "run: 01RUN" "the verdict names the run so a human can go look at it"
   assert_not_contains "$out" "superseded" "an unverified record never supersedes an open decision"
   pass "an open decision survives the dead-daemon verdict on the selected route"
@@ -5256,7 +5325,7 @@ EOF
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-cfpt
   out=$(run_crew_state "$d" feat-cfpt)
-  assert_contains "$out" "state: unknown" "an unanswered probe still degrades the terminal record"
+  assert_contains "$out" "state: unreadable" "an unanswered probe still degrades the terminal record"
   assert_not_contains "$out" "state: parked" "probe latency must not assert an open gate over a failed run"
   pass "an unanswered probe never turns a failed coarse record into a gate"
 }
@@ -5290,7 +5359,7 @@ EOF
   arm_idle_record "$d/state" selonce
   out=$(run_crew_state "$d" selonce)
   ids=$(printf '%s\n' "$out" | grep -o '01RUN' | wc -l | tr -d ' ')
-  assert_contains "$out" "daemon unreachable" "the dead instrument is still named"
+  assert_contains "$out" "daemon is unreachable" "the dead instrument is still named"
   assert_contains "$out" "01RUN" "the verdict still names the run"
   assert_equals "1" "$ids" "the run id appears exactly once"
   pass "the selected-route dead-daemon verdict names the run once"
@@ -5328,6 +5397,7 @@ EOF
     out=$(run_crew_state "$d" feat-htied)
     assert_contains "$out" "state: working" "$who: a head-tied run reads working with the daemon down"
     assert_not_contains "$out" "state: unknown" "$who: the head rule exempts a head-tied record"
+    assert_not_contains "$out" "state: unreadable" "$who: the head rule exempts a head-tied record"
     pass "a head-tied row reads working when axi names the $who run"
   done
 }
@@ -5356,7 +5426,8 @@ branch_sync:
   out=$(run_crew_state "$d" feat-chtd)
   assert_contains "$out" "state: working" "a head-tied ledger row keeps its working reading"
   assert_not_contains "$out" "state: unknown" "the head rule exempts a head-tied row whatever the record head says"
-  assert_not_contains "$out" "daemon unreachable" "the coarse route carries no dead-instrument verdict"
+  assert_not_contains "$out" "state: unreadable" "the head rule exempts a head-tied row whatever the record head says"
+  assert_not_contains "$out" "daemon is unreachable" "the coarse route carries no dead-instrument verdict"
   pass "a head-tied coarse row is exempt even when the record head diverged"
 }
 
@@ -5381,9 +5452,11 @@ EOF
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-uws
   out=$(run_crew_state "$d" feat-uws)
-  assert_contains "$out" "state: unknown" "an unrecognised word still reads unknown"
-  assert_contains "$out" "runs list status: pending" "the unrecognised word is reported as itself"
-  assert_contains "$out" "superseded (run unknown)" "a live daemon's unknown keeps the ordinary supersede note"
+  assert_contains "$out" "state: unreadable" "an unrecognised word still reads unknown"
+  assert_contains "$out" "reports a status this reader does not recognize (pending)" \
+    "the unrecognised word is reported as itself"
+  assert_contains "$out" "superseded (run unreadable)" \
+    "a live daemon's unreadable verdict keeps the ordinary supersede note"
   pass "an unrecognised ledger word keeps the ordinary supersede note"
 }
 
@@ -5406,8 +5479,9 @@ EOF
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-cpend
   out=$(run_crew_state "$d" feat-cpend)
-  assert_contains "$out" "state: unknown" "a pending ledger word is not a working claim"
-  assert_contains "$out" "runs list status: pending" "the unrecognised word is reported as itself"
+  assert_contains "$out" "state: unreadable" "a pending ledger word is not a working claim"
+  assert_contains "$out" "reports a status this reader does not recognize (pending)" \
+    "the unrecognised word is reported as itself"
   pass "a coarse pending ledger word reads unknown"
 }
 
@@ -5465,7 +5539,7 @@ EOF
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-cfs
   out=$(run_crew_state "$d" feat-cfs)
-  assert_contains "$out" "state: unknown" "a dead daemon degrades the terminal record to unknown"
+  assert_contains "$out" "state: unreadable" "a dead daemon degrades the terminal record to unknown"
   assert_contains "$out" "unverified" "the unverified record is named"
   assert_not_contains "$out" "state: parked" "a recorded terminal failure is never relabelled an open decision"
   pass "a coarse failed record with a dead daemon reads unknown"
@@ -5560,7 +5634,7 @@ EOF
   arm_idle_record "$d/state" feat-cldd
   out=$(run_crew_state "$d" feat-cldd)
   assert_contains "$out" "state: working" "a head-tied coarse row keeps its working reading"
-  assert_not_contains "$out" "daemon unreachable" "the head rule exempts a head-tied record from the dead-instrument verdict"
+  assert_not_contains "$out" "daemon is unreachable" "the head rule exempts a head-tied record from the dead-instrument verdict"
   assert_not_contains "$out" "01RUN" "the foreign crew's run id is never offered as this crew's"
   pass "a head-tied coarse live row is exempt from the dead-daemon verdict"
 }
@@ -5647,7 +5721,7 @@ test_competing_live_runs_report_unknown_with_both_ids() {
   FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
   printf 'done: old completion event\n' > "$d/state/competing.status"
   out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'two live runs cannot establish exclusive authority'
+  assert_contains "$out" 'state: unreadable' 'two live runs cannot establish exclusive authority'
   assert_contains "$out" '01NEW' 'ambiguity names the newer candidate'
   assert_contains "$out" '01OLD' 'ambiguity names the older candidate'
   pass 'competing live runs report unknown with both run ids'
@@ -5685,10 +5759,12 @@ test_unverifiable_run_selection_reports_unknown() {
         selected-error) FM_FAKE_AXI_STATUS_RUN_ERROR=1 ;;
       esac
       out=$(run_crew_state "$d" competing)
-      assert_contains "$out" 'state: unknown' "$mode selection must not assert a run state"
+      assert_contains "$out" 'state: unreadable' "$mode selection must not assert a run state"
       assert_contains "$out" '01NEW' "$mode selection preserves the replacement id"
       assert_contains "$out" '01OLD' "$mode selection preserves the original id"
-      pass "$mode run selection reports unknown with candidate ids"
+      assert_not_contains "$out" 'state: unknown' \
+        "$mode is the reader failing to read, not a claim about the crew"
+      pass "$mode run selection reports unreadable with candidate ids"
     ) || rc=1
   done
   [ "$rc" = 0 ] || fail 'unverifiable run selections'
@@ -5700,7 +5776,7 @@ test_legacy_conflicting_run_records_report_unknown() {
   FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01OLD/')"
   FM_FAKE_AXI_HOME=$FM_FAKE_AXI_STATUS
   out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'conflicting records without identities cannot prove authority'
+  assert_contains "$out" 'state: unreadable' 'conflicting records without identities cannot prove authority'
   assert_contains "$out" '01OLD' 'legacy ambiguity preserves the available run id'
   assert_contains "$out" 'unavailable' 'legacy ambiguity states that the competing id is unavailable'
   pass 'legacy conflicting run records report unknown'
@@ -5790,12 +5866,12 @@ with sqlite3.connect(sys.argv[1]) as db:
     db.execute("UPDATE runs SET status = 'running' WHERE id = ?", (sys.argv[2],))
 PY
   out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'a hidden counterfactual live competitor prevents selection'
+  assert_contains "$out" 'state: unreadable' 'a hidden counterfactual live competitor prevents selection'
   assert_contains "$out" "$newer" 'captured ambiguity retains the visible id'
   assert_contains "$out" "$older" 'captured ambiguity retains the hidden id'
   toolbin=$(make_no_python_toolbin "$d")
   out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
-  assert_contains "$out" 'state: unknown' 'missing optional lookup cannot imply exclusive authority'
+  assert_contains "$out" 'state: unreadable' 'missing optional lookup cannot imply exclusive authority'
   assert_contains "$out" "$newer" 'unavailable lookup retains the captured visible id'
   assert_contains "$out" 'inventory' 'unavailable lookup reports its evidence gap'
   pass 'captured capped inventory replays selection, ambiguity, and unavailable lookup'
@@ -5807,7 +5883,7 @@ test_captured_authority_transition() {
   FM_FAKE_AXI_STATUS=$(captured_axi_status replacement)
   FM_FAKE_AXI_STATUS_RUN=$(captured_axi_status superseded)
   out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'captured terminal output cannot validate a live selection'
+  assert_contains "$out" 'state: unreadable' 'captured terminal output cannot validate a live selection'
   assert_contains "$out" '01NEW' 'the changing selected id is preserved'
   assert_contains "$out" '01OLD' 'the other available id is preserved'
   pass 'captured status formats reject a synthetic authority transition'
@@ -5899,7 +5975,7 @@ test_terminal_failed_ci_genuine_red_stays_failed
 test_terminal_failed_ci_orphan_second_failed_step_stays_failed
 test_cross_branch_attribution_via_runs_list
 test_coarse_socket_refusal_reports_blocked
-test_coarse_failed_ledger_with_daemon_down_reports_unknown
+test_coarse_failed_ledger_with_daemon_down_reads_unreadable
 test_cross_branch_attribution_picks_most_recent_row
 test_terminal_run_keeps_newer_failure_over_live_sibling
 test_runs_list_newer_failure_outranks_older_live_row
@@ -6026,6 +6102,8 @@ test_terminal_rebased_run_is_not_attributed
 test_competing_live_runs_report_unknown_with_both_ids
 test_newer_failed_run_is_not_hidden_by_older_live_run
 test_unverifiable_run_selection_reports_unknown
+test_unreadable_run_step_names_its_own_cause
+test_failed_overview_call_lists_only_run_ids
 test_legacy_conflicting_run_records_report_unknown
 
 echo "all fm-crew-state tests passed"
