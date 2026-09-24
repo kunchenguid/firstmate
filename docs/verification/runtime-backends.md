@@ -2302,6 +2302,19 @@ ok - under the away-posture record the wake carries the verbatim read-back tail,
 
 The merge suite and the security suite dominate the wall time.
 
+### 2026-09-24 email reach for Pi away supervision
+
+The email path is configuration-gated to Pi away records with a configured mail plane and `FM_AFK_EMAIL_TO`; unconfigured and non-Pi entry keep hold-for-return behavior.
+The offline regression uses synthetic outcomes and mail plus a local fake SMTP command, and covers batching, full PR URLs, credential redaction, send-rate limiting, per-item one-use expiration, configured-sender matching, spoof rejection, and the unchanged disabled path.
+
+```sh
+bin/fm-test-run.sh tests/fm-afk-email.test.sh tests/fm-afk-contract.test.sh tests/fm-pi-branch-extension.test.sh tests/fm-branch-supervision.test.sh tests/fm-mail.test.sh tests/fm-mail-check.test.sh
+```
+
+Observed result: all six suites passed on macOS arm64; no network, real mailbox, SMTP server, or captain credentials were used.
+The extension typecheck was not run because `tsc` is not installed in this environment.
+The detailed setup and trust boundary are owned by [`afk-email.md`](../afk-email.md).
+
 ## Native Codex through Pi
 
 Verified on 2026-09-08 with Pi 0.85.1 and the installed `pi-codex-native` 0.2.1 adapter.

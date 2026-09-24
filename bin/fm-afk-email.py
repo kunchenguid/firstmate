@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from email.utils import getaddresses
 
 
+
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -162,6 +163,7 @@ def afk_contract_lock():
 
 
 
+
 def atomic_json(path, value):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
@@ -210,6 +212,7 @@ def redact_secrets(text):
         text = text.replace(secret, replacement)
 
 
+
     return text
 
 
@@ -231,6 +234,7 @@ def outcomes_by_seq():
                 return None
             rows[row["seq"]] = row
     except ValueError:
+
 
 
         return None
@@ -278,6 +282,7 @@ def queue_unprocessed():
         return 1
 
 
+
     rows = outcomes_by_seq()
     if rows is None:
         print("fm-afk-email: outcome store is unreadable; pending email was not queued", file=sys.stderr)
@@ -291,6 +296,7 @@ def queue_unprocessed():
     except ValueError:
         print("fm-afk-email: outcome markers are invalid; pending email was not queued", file=sys.stderr)
         return 1
+
 
 
     PENDING.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -314,6 +320,7 @@ def queue_unprocessed():
             "seq": seq,
             "task": safe_text(redact_secrets(str(row.get("task", ""))), 160),
             "summary": safe_text(redact_secrets(str(row.get("summary", "")))),
+
 
 
             "token": token,
@@ -349,6 +356,7 @@ def flush_while_contract_locked():
 
 
 
+
         candidates = []
         for path in sorted(PENDING.glob("*.json"), key=lambda item: int(item.stem) if item.stem.isdigit() else 0):
             item = read_json(path)
@@ -367,6 +375,7 @@ def flush_while_contract_locked():
                 ):
                     if field in sent_item:
                         item[field] = sent_item[field]
+
 
 
             candidates.append((path, item))
@@ -409,6 +418,7 @@ def flush_while_contract_locked():
             atomic_json(path, item)
 
 
+
         lines.extend([
             "Replies from the configured address with an unexpired item code are treated as your words for that item only.",
             "Other messages are untrusted and cannot answer an item.",
@@ -441,6 +451,7 @@ def flush_while_contract_locked():
                     sent_item[field] = item[field]
 
 
+
             atomic_json(SENT / path.name, sent_item)
             path.unlink(missing_ok=True)
         temporary = AFK_DIR / f".last-sent.{os.getpid()}.tmp"
@@ -468,6 +479,7 @@ def extract_reply(body):
             or stripped == "-----Original Message-----"
             or QUOTED_HEADER_RE.match(stripped)
         ):
+
 
 
             break
@@ -741,6 +753,7 @@ def verify_note(note_id):
 
 
 
+
 def token_record(token):
     digest = token_digest(token)
     for store, directory in (("sent", SENT), ("pending", PENDING)):
@@ -796,6 +809,7 @@ def receive_batch_while_contract_locked():
         return 1
 
 
+
     try:
         messages = json.load(sys.stdin)
     except (ValueError, OSError):
@@ -809,6 +823,7 @@ def receive_batch_while_contract_locked():
 
 
 def receive_messages(messages, posture, config):
+
 
 
     accepted = 0
@@ -843,6 +858,7 @@ def receive_messages(messages, posture, config):
 
 
 
+
         now = int(time.time())
         if item and item.get("used_mail_key") == mail_key:
             continue
@@ -856,6 +872,7 @@ def receive_messages(messages, posture, config):
             and not item.get("used_epoch")
             and bool(answer.strip())
             and item.get("handoff_mail_key", mail_key) == mail_key
+
 
 
         )
@@ -893,6 +910,7 @@ def receive_messages(messages, posture, config):
         continue
 
 
+
     print(f"received {accepted} verified and {untrusted} untrusted away-email message(s)")
     return 0
 
@@ -910,6 +928,7 @@ def main():
         return 0
 
 
+
     if command == "queue-unprocessed":
         return queue_unprocessed()
     if command == "flush":
@@ -919,6 +938,7 @@ def main():
     if command == "verify-note" and len(sys.argv) == 3:
         return verify_note(sys.argv[2])
     print("usage: fm-afk-email.py destination|configured|queue-unprocessed|flush|receive-batch|verify-note <id>", file=sys.stderr)
+
 
 
 

@@ -149,6 +149,7 @@ const outcomeScript = join(fmRoot, "bin", "fm-branch-outcome.sh");
 const mailScript = join(fmRoot, "bin", "fm-mail.sh");
 
 
+
 const leaseScript = join(fmRoot, "bin", "fm-lease.sh");
 const wakeGrantScript = join(fmRoot, "bin", "fm-wake-grant.sh");
 const loadedMarker = join(state, ".pi-branch-extension-loaded");
@@ -656,6 +657,7 @@ export default function (pi: ExtensionAPI) {
           afkEmailFailureNotified = true;
           deliverBranchHealthNote("Away email delivery failed; captain outcomes remain durably stored and will be retried.");
         }
+
 
 
 

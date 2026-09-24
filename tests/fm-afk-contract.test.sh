@@ -28,6 +28,7 @@ contract() {  # <home> <args...>
     FM_AFK_EMAIL_TO=johnpoyser@gmail.com FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$CONTRACT" "$@"
 
 
+
 }
 
 # A confirmed record in the retired version 1 shape, exactly as the clause

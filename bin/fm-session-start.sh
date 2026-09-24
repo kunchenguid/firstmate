@@ -951,6 +951,7 @@ if [ -f "$STATE/.afk-contract" ]; then
       "$reach_label"
   fi
 
+
   if [ -e "$STATE/.afk" ]; then
     if [ "$AFK_MODE" = quiet ]; then
       printf '; the quiet daemon owns the watcher.\n'

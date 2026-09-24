@@ -3,12 +3,14 @@
 Away email lets a Pi supervision branch send captain-facing outcomes to John Poyser's Gmail inbox and accept a reply for one specific outcome.
 
 
+
 It is an optional extension of the existing mail plane and does not change what actions the away session is authorized to take.
 Other primary harnesses retain their existing away behavior and do not claim this delivery path.
 
 ## Setup
 
 Use a dedicated sending mailbox if practical, and create an app password for it rather than using your normal account password.
+
 
 
 
@@ -26,6 +28,7 @@ FM_AFK_EMAIL_TO=johnpoyser@gmail.com
 `FM_AFK_EMAIL_TO` must be exactly `johnpoyser@gmail.com`; this fixed destination is also the only permitted reply identity.
 
 
+
 The mail plane requires implicit TLS on IMAP port 993 and SMTP port 465 by default; STARTTLS and port 587 are not supported.
 Set `FM_IMAP_PORT` or `FM_SMTP_PORT` only when your provider uses different implicit-TLS ports.
 
@@ -38,6 +41,7 @@ bin/fm-mail-check.sh arm
 Then enter `/afk` on Pi and confirm its read-back says email reach is active.
 Pi refuses `/afk` before writing or announcing an active posture if `FM_AFK_EMAIL_TO` is absent or differs from `johnpoyser@gmail.com`.
 With the exact destination but incomplete or invalid mail transport settings, away mode retains the hold-for-return behavior instead.
+
 No credential needs to be shared with Firstmate.
 
 ## Replies and limits
@@ -61,6 +65,7 @@ An authenticated owner message with a missing, invalid, expired, or already-used
 The email footer states the same safety boundary: replies never authorize destructive, irreversible, or security-sensitive actions, which still require your return or trusted-channel confirmation.
 
 Away updates are batched, with a minimum interval of one message per minute. If another batch is ready sooner, it remains queued until the interval expires.
+
 
 
 

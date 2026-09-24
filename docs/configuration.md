@@ -197,6 +197,7 @@ While away, the entry is saved, but processing waits until the away-posture reco
 When configured, Pi email reach sends the same captain-facing outcome set to the captain's mailbox through the [away-email delivery path](afk-email.md).
 
 
+
 The branch prompt's "Verdict: routine or captain" section owns the distinction between captain-facing, unsolicited routine, and unchanged-review outcomes.
 
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns main's event ownership, acknowledgement duty, and conversational treatment for merged outcomes, while the persisted entry itself owns captain visibility.
@@ -1400,6 +1401,7 @@ The mail plane (`bin/fm-mail.sh`) reads unseen IMAP messages and sends one SMTP 
 
 
 
+
 **Polling and delivery guarantees**
 Its `poll` command surfaces each eligible message as a durable `check: mail <uid>` wake, which is also what the standing received-mail check runs each watcher cycle.
 During an active or malformed Pi away posture, only mail from `johnpoyser@gmail.com` with Google's Gmail-aligned DKIM or DMARC pass is eligible; other or unauthenticated messages are silently cursor-recorded without body reads or wakes.
@@ -1426,6 +1428,7 @@ FM_MAIL_USER=   # IMAP/SMTP login
 FM_MAIL_PASS=   # IMAP/SMTP password
 FM_IMAP_HOST=   # IMAP server hostname
 FM_SMTP_HOST=   # SMTP server hostname
+FM_AFK_EMAIL_TO=   # optional captain destination; enables Pi away email only when all four mail settings above are present
 ```
 
 Pi's optional `/afk` email destination is separate from general mail transport; see [Away email on Pi](afk-email.md) for its required setting and setup gate.
@@ -1439,6 +1442,7 @@ FM_AFK_EMAIL_TO=johnpoyser@gmail.com
 `FM_IMAP_PORT` (default 993; integer 1..65535), `FM_SMTP_PORT` (default 465; integer 1..65535), `FM_MAIL_TIMEOUT` (default 20 seconds), and `FM_MAIL_POLL_MAX_WAKES` (default 20, valid 1..200) are optional.
 
 Pi away-email setup, its fixed destination, authenticated reply checks, and authority limit are documented in [Away email on Pi](afk-email.md).
+
 
 
 
