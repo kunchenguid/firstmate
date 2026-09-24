@@ -55,7 +55,7 @@ export NODE_NO_WARNINGS=1
 make_named_shells() {  # <dir> -> echoes <bindir>
   local dir=$1 name
   mkdir -p "$dir"
-  for name in omp ompd comp; do
+  for name in omp ompd comp claude; do
     ln -sf /bin/bash "$dir/$name"
   done
   printf '%s' "$dir"
@@ -81,10 +81,10 @@ test_detection_anchored_name_and_marker_precedence() {
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "FM_OMP_HARNESS under an omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
-  # ...and is inert when it leaks into a worker with no omp ancestor.
+  # ...and is inert when it leaks into a claude worker with no omp ancestor.
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
-    bash -c '"$1"; :' _ "$HARNESS")
+    "$bin/claude" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
 }
@@ -539,12 +539,14 @@ import { pathToFileURL } from "node:url";
 import { writeFileSync, existsSync, readFileSync } from "node:fs";
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const handlers = new Map(); let tool = null; let command = null; const sent = [];
+let resolveWake;
+const wakeDelivered = new Promise((resolve) => { resolveWake = resolve; });
 const pi = {
   on(e, h) { handlers.set(e, h); },
   registerCommand(n, o) { if (n === "fm-watch-arm-omp") command = o.handler; },
   registerTool(t) { tool = t; },
   // omp sendUserMessage returns synchronously, not a promise.
-  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+  sendUserMessage(m, o) { sent.push({ m, o }); resolveWake(); return undefined; },
 };
 const mod = await import(pathToFileURL(process.env.EXT).href);
 mod.default(pi);
@@ -557,7 +559,14 @@ const marker = readFileSync(`${process.env.FM_HOME}/state/.omp-watch-extension-l
 if (marker[1] !== String(process.pid)) throw new Error("loaded marker must record the session pid");
 const again = await tool.execute();
 if (!/^watcher: unchanged - omp extension already owns an arm child/.test(again.content[0].text)) throw new Error(`redundant arm was not an ownership no-op: ${again.content[0].text}`);
-await new Promise((r) => setTimeout(r, 2500));
+let wakeTimeout;
+await Promise.race([
+  wakeDelivered,
+  new Promise((_, reject) => {
+    wakeTimeout = setTimeout(() => reject(new Error("timed out waiting for the follow-up wake")), 15000);
+  }),
+]);
+clearTimeout(wakeTimeout);
 if (sent.length !== 1) throw new Error(`expected one follow-up wake, saw ${sent.length}: ${JSON.stringify(sent)}`);
 if (!sent[0].m.startsWith("⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: signal: omp-e2e done")) throw new Error(`unexpected wake text: ${sent[0].m}`);
 if (sent[0].o?.deliverAs !== "followUp") throw new Error("wake must be delivered as a follow-up");

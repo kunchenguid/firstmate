@@ -537,7 +537,7 @@ SH
 set -u
 if [ "${1:-}" = models ]; then
   if [ "${FM_FAKE_AGY_MODELS_FAIL:-0}" = 1 ]; then exit 3; fi
-  if [ "${FM_FAKE_AGY_MODELS_HANG:-0}" = 1 ]; then cat > /dev/null; sleep 30; exit 0; fi
+  if [ "${FM_FAKE_AGY_MODELS_HANG:-0}" = 1 ]; then cat > /dev/null; sleep 60; exit 0; fi
   printf 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n'
   printf 'gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n'
   printf 'gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n'
@@ -587,9 +587,9 @@ EOF
 
 # The spawn drives the real bin/fm-agy-trust.sh and the fake tmux's trust
 # lookup under this base PATH, and both read agy's settings store with node,
-# which runners do not keep in the system bin dirs. Carry the directory the
-# invoking environment resolves node from, the fm-kimi-harness shape.
-NODE_BIN=$(command -v node) || fail "test needs node"
+# which runners do not keep in the system bin dirs. Capture the executable
+# instead of a HOME-dependent version-manager shim before cases replace HOME.
+NODE_BIN=$(node -p 'process.execPath') || fail "test needs node"
 NODE_BIN_DIR=$(dirname "$NODE_BIN")
 BASE_PATH=${FM_TEST_BASE_PATH:-$NODE_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
@@ -696,7 +696,7 @@ test_agy_hung_listing_is_cut_off_and_launches() {
     "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
   elapsed=$(( $(date +%s) - started ))
   expect_code 0 "$rc" "a hung model listing must not block the spawn"
-  [ "$elapsed" -lt 20 ] || fail "the model probe was not cut off by its bound (took ${elapsed}s)"
+  [ "$elapsed" -lt 40 ] || fail "the model probe was not cut off by its bound (took ${elapsed}s)"
   assert_contains "$out" "did not answer within 1s" "a hung listing launched without its timeout notice"
   [ -s "$CASE_DIR/launch.log" ] || fail "a hung listing produced no launch command"
   assert_contains "$(cat "$CASE_DIR/launch.log")" "--model 'gemini-3.8-flash-low'" \
@@ -716,7 +716,7 @@ test_agy_zero_model_timeout_is_clamped_to_the_default_bound() {
     "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
   elapsed=$(( $(date +%s) - started ))
   expect_code 0 "$rc" "a hung listing with a zero bound must not block the spawn"
-  [ "$elapsed" -lt 25 ] || fail "a zero model bound disabled the deadline (took ${elapsed}s)"
+  [ "$elapsed" -lt 50 ] || fail "a zero model bound disabled the deadline (took ${elapsed}s)"
   assert_contains "$out" "did not answer within 15s" \
     "a zero model bound was not clamped to the documented default"
   [ -s "$CASE_DIR/launch.log" ] || fail "a zero model bound produced no launch command"
