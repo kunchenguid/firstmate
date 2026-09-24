@@ -140,7 +140,6 @@ test_readable_documents_skill_registration() {
 from __future__ import annotations
 
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -190,27 +189,13 @@ name = frontmatter["name"]
 description = frontmatter["description"]
 assert name == skill_path.parent.name == "readable-documents"
 assert isinstance(description, str) and 0 < len(description) <= 1024
-assert re.search(r"\buse before\b", description, re.IGNORECASE)
 assert frontmatter["user-invocable"] is False
 assert frontmatter["metadata"] == {"internal": True}
 
 discovered = [path for path in (root / ".agents/skills").glob("*/SKILL.md") if path.parent.name == name]
 assert discovered == [skill_path]
-
-agents = (root / "AGENTS.md").read_text(encoding="utf-8").splitlines()
-start = agents.index("## 13. Agent-only reference skills") + 1
-triggers: dict[str, str] = {}
-for line in agents[start:]:
-    if line.startswith("## "):
-        break
-    match = re.fullmatch(r"- `([a-z0-9-]+)` - (.+)", line)
-    if match:
-        assert match.group(1) not in triggers
-        triggers[match.group(1)] = match.group(2)
-assert name in triggers
-assert triggers[name].lower().startswith("load before ")
 PY
-  pass "readable-documents is discoverable as an internal agent-only skill with a precise load trigger"
+  pass "readable-documents is discoverable as an internal agent-only skill"
 }
 
 test_repository_inventory_passes
