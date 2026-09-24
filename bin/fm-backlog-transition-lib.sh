@@ -68,6 +68,9 @@ FM_BACKLOG_ROW_ERROR=
 # the row is not held.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_ROW_HOLD_KIND=
+# Set beside it: the hold's --until date gate, empty when the hold has none.
+# shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+FM_BACKLOG_ROW_HOLD_UNTIL=
 # Set by fm_backlog_close_marker_replay: closed | closed_incomplete | retained |
 # retained_incomplete | answered | stale | noop.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
@@ -314,7 +317,7 @@ fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
 }
 
 fm_backlog_row_probe() {  # <data-dir> <id>
-  local data authorized_data=$1 file id=$2 out state held blocked hold_kind command_status root
+  local data authorized_data=$1 file id=$2 out state held blocked hold_kind hold_until command_status root
   if ! data=$(fm_backlog_data_absolute "$1"); then
     FM_BACKLOG_ROW_RESULT=error
     FM_BACKLOG_ROW_STATE=
@@ -324,6 +327,7 @@ fm_backlog_row_probe() {  # <data-dir> <id>
   FM_BACKLOG_ROW_RESULT=error
   FM_BACKLOG_ROW_STATE=
   FM_BACKLOG_ROW_HOLD_KIND=
+  FM_BACKLOG_ROW_HOLD_UNTIL=
   FM_BACKLOG_ROW_ERROR=
   root=$(fm_backlog_root "$data") || {
     FM_BACKLOG_ROW_ERROR=$FM_BACKLOG_TRANSITION_ERROR
@@ -360,6 +364,7 @@ fm_backlog_row_probe() {  # <data-dir> <id>
   held=$(printf '%s\n' "$out" | sed -n 's/^  held: *//p' | head -1)
   blocked=$(printf '%s\n' "$out" | sed -n 's/^  blocked: *//p' | head -1)
   hold_kind=$(printf '%s\n' "$out" | sed -n 's/^  hold_kind: *//p' | head -1)
+  hold_until=$(printf '%s\n' "$out" | sed -n 's/^  hold_until: *//p' | head -1)
   if [ -z "$state" ]; then
     FM_BACKLOG_ROW_ERROR="tasks-axi show $id returned no state"
     return 1
@@ -369,6 +374,10 @@ fm_backlog_row_probe() {  # <data-dir> <id>
   case "$hold_kind" in
     ''|'"-"'|-) FM_BACKLOG_ROW_HOLD_KIND= ;;
     *) FM_BACKLOG_ROW_HOLD_KIND=$hold_kind ;;
+  esac
+  case "$hold_until" in
+    ''|'"-"'|-) FM_BACKLOG_ROW_HOLD_UNTIL= ;;
+    *) FM_BACKLOG_ROW_HOLD_UNTIL=$hold_until ;;
   esac
   return 0
 }

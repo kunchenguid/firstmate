@@ -30,7 +30,7 @@
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
-#   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
+#   fm-captain-hold.sh open <task-id> [--identity] [--deferred] [--distinguish-absent]
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
@@ -158,6 +158,10 @@
 # could not be established, so a caller that must never close a live call can
 # treat "cannot tell" as its own case instead of as a no. With
 # `--distinguish-absent`, an absent local task returns 3 instead of 1.
+# `--deferred` narrows the 0 to an open call whose hold still stands behind the
+# captain's own `--until` date, read from tasks-axi's live `held:` bit so the
+# date gate means exactly what `tasks-axi hold --until` says (inactive on and
+# after that date); an open call with no date, or a lapsed one, returns 1.
 # It prints nothing on these predicate results and mutates nothing, unless
 # `--identity` asks it to print this call's
 # LIFECYCLE identity, which it does on an exit 0 only. That identity - the
@@ -173,7 +177,8 @@
 # bin/fm-watch.sh asks it when an ordinary
 # crew task reaches a due stale alarm - its open backlog hold need not appear in
 # the task's last status line - and on a 0 bounds repeated alarms from new pane
-# hashes for the decision.
+# hashes for the decision; it asks `--deferred` before a captain-held recheck
+# would ring, and stays silent while the captain's deferral stands.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
@@ -1764,11 +1769,12 @@ EOF
 # A row this home does not carry is 3 when the caller requests the distinction;
 # every other read failure is a 2, printed to stderr, because a mechanical
 # closer must never read "cannot tell" as permission to close.
-command_open() {  # <task-id> [--identity] [--distinguish-absent]
-  local id='' identity=0 distinguish_absent=0 data state show shown_body
+command_open() {  # <task-id> [--identity] [--deferred] [--distinguish-absent]
+  local id='' identity=0 deferred=0 distinguish_absent=0 data state held show shown_body
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --identity) identity=1 ;;
+      --deferred) deferred=1 ;;
       --distinguish-absent) distinguish_absent=1 ;;
       -*) usage >&2; exit 2 ;;
       *)
@@ -1790,6 +1796,10 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   if fm_backlog_row_probe "$data" "$id"; then
     state=${FM_BACKLOG_ROW_STATE%% *}
     if [ "$state" != "done" ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
+      if [ "$deferred" -eq 1 ]; then
+        held=${FM_BACKLOG_ROW_STATE#* }
+        [ -n "$FM_BACKLOG_ROW_HOLD_UNTIL" ] && [ "${held%% *}" = yes ] || return 1
+      fi
       if [ "$identity" -eq 1 ]; then
         show=$(task_show "$id") || {
           printf 'fm-captain-hold: captain call %s is open but its record could not be read\n' "$id" >&2

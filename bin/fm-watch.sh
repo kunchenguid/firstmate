@@ -807,12 +807,21 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # drift apart; each caller owns its own marker and reason.
 # Returns without waking while either the absorb or the throttle is inside the
 # window; wake() itself exits the cycle, exactly as it does inline.
-resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope]
-  local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-}
+# An optional <deferral-task> is asked only once a re-surface is due: while its
+# captain call stands behind the captain's own --until date the due recheck is
+# recorded as spent instead of rung, so the backlog is read once per window and
+# the recheck resumes on the first window after the date.
+resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [deferral-task]
+  local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} defer=${6-}
   if [ -z "$scope" ] || [ ! -e "$throttle" ] \
     || [ "$(cat "$throttle" 2>/dev/null || true)" = "$scope" ]; then
     [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] || return 0
     [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
+  fi
+  if [ -n "$defer" ] && captain_call_deferred "$defer"; then
+    if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
+    triage_log "absorbed due recheck (captain call deferred to its --until date): $win"
+    return 0
   fi
   fm_wake_append stale "$win" "$reason" || exit 1
   if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
@@ -927,7 +936,7 @@ busy_turn_over_age() {  # <task>
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration
+  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration defer
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
@@ -937,15 +946,17 @@ handle_paused_stale() {  # <window> <task> <hash>
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   age=$(( $(date +%s) - mtime ))
+  defer=
   if status_is_captain_held "$(last_status_line "$statusf")"; then
     detail="captain-held, awaiting the captain"
     reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
+    defer=$task
   else
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
   declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
-  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration"
+  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$defer"
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
@@ -1164,6 +1175,14 @@ task_captain_call_open() {  # <task>
   return 0
 }
 
+# 0 while <task>'s open captain call stands behind the captain's own --until
+# date; `open --deferred` owns that reading. Asked only where a captain-held
+# recheck is about to ring, never on an ordinary poll.
+captain_call_deferred() {  # <task>
+  [ -n "$1" ] || return 1
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" open "$1" --deferred >/dev/null 2>&1
+}
+
 # The identity a re-surface throttle is bound to: the task's whole status-log
 # signature. Any new status event - a replacement wait, a fresh delivery, a
 # blocker - changes it and so starts its own window instead of inheriting the
@@ -1213,13 +1232,18 @@ stale_wait_record() {  # <window-key>
 
 # Bound a due stale alarm for an ordinary crew task held for the captain.
 # Backlog-only secondmate holds are outside this guard because the earlier gate
-# preserves their no-backlog-read hot path.
+# preserves their no-backlog-read hot path. A call the captain deferred with
+# --until is absorbed even on first sight - the deferral is the captain's own
+# statement that nothing is due before the date - and records its own throttle,
+# since no wake will, so the backlog is read once per window until the date.
 captain_call_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2
   STALE_WAIT_DECLARATION=
   task_captain_call_open "$task" || return 1
   STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
-  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && return 0
+  captain_call_deferred "$task" || return 1
+  stale_wait_record "$key"
 }
 
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
@@ -1251,7 +1275,12 @@ surface_nonterminal_stale() {  # <window> <hash>
     declared=0
     bounded=0
     STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
-    stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
+    if stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"; then
+      throttled=0
+    elif status_is_captain_held "$last" && captain_call_deferred "$task"; then
+      stale_wait_record "$key"
+      throttled=0
+    fi
   elif captain_call_stale_bound "$key" "$task"; then
     bounded=0
     throttled=0

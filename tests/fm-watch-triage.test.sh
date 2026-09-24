@@ -2421,7 +2421,7 @@ HOLD_WATCH_PID=
 hold_watch_launch() {  # <dir> <out> <capture>
   local dir=$1 out=$2 capture=$3
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-held-merge \
-    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND="${FM_HOLD_CURRENT_COMMAND:-zsh}" \
     FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
@@ -2581,6 +2581,87 @@ test_failed_wake_append_does_not_arm_the_captain_hold_throttle() {
   [ "$wakes" -eq 1 ] \
     || fail "the retry after a failed wake append produced $wakes wakes instead of one"
   pass "a wake that never reached the durable queue arms no re-surface throttle"
+}
+
+# A captain call parked with `fm-captain-hold.sh hold --until <date>` is the
+# captain's own statement that nothing about it is due before that date, so the
+# watcher's hourly captain-held recheck must stay silent until the date and then
+# resume. This is the shape the primary hits: the worker's agent has exited,
+# its last status line is the captain-held transfer, and the backlog hold
+# carries the deferral. A plain hold is the control and still re-surfaces.
+test_deferred_captain_hold_stays_silent_until_its_date() {
+  local dir state out capture statusf throttle wakes c
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (deferred captain hold)"; return 0; }
+  dir=$(make_hold_home deferred-hold 'captain-held: stopped by the captain; held for the call' hold) \
+    || fail "could not build a captain-held backlog fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  statusf="$state/held-merge.status"; throttle="$state/.paused-resurfaced-$(hold_key)"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-held-merge_status"
+  printf '%s' "$(hash_text 'idle bare shell')" > "$state/.hash-$(hold_key)"
+  printf '1\n' > "$state/.count-$(hold_key)"
+  export FM_HOLD_PAUSE_RESURFACE_SECS=240
+
+  # Control: a hold with no until-date keeps the long-cadence recheck.
+  hold_watch_surface "$dir" "$out" "$capture" 'idle bare shell' \
+    || { unset FM_HOLD_PAUSE_RESURFACE_SECS; fail "a plain captain hold did not re-surface its recheck"; }
+  grep -F "awaiting the captain" "$state/.wake-queue" >/dev/null \
+    || fail "a plain captain hold re-surfaced without the captain-held recheck: $(cat "$state/.wake-queue")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the plain hold's recheck"
+
+  # Deferred into the future: the recheck is due again, yet nothing may ring.
+  run_hold "$dir" hold held-merge --reason 'parked by the captain' --until 2999-01-01 \
+    || fail "could not defer the captain hold"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+  hold_watch_launch "$dir" "$out" "$capture"
+  c=0
+  while [ "$c" -lt 4 ]; do
+    wait_poll_cycle "$state" "$HOLD_WATCH_PID" 300 || {
+      unset FM_HOLD_PAUSE_RESURFACE_SECS
+      fail "a hold deferred to 2999-01-01 still re-rang the watcher: $(cat "$state/.wake-queue" 2>/dev/null)"
+    }
+    c=$((c + 1))
+  done
+  reap "$HOLD_WATCH_PID"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 0 ] || fail "a deferred captain hold queued $wakes recheck wake(s) before its date"
+
+  # The date passes: the ordinary recheck cadence resumes.
+  run_hold "$dir" hold held-merge --reason 'parked by the captain' --until 2000-01-01 \
+    || fail "could not move the deferral into the past"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle bare shell' \
+    || { unset FM_HOLD_PAUSE_RESURFACE_SECS; fail "a lapsed deferral did not resume the captain-held recheck"; }
+  unset FM_HOLD_PAUSE_RESURFACE_SECS
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "a lapsed deferral produced $wakes recheck wakes instead of one"
+  grep -F "awaiting the captain" "$state/.wake-queue" >/dev/null \
+    || fail "a lapsed deferral re-surfaced without the captain-held recheck: $(cat "$state/.wake-queue")"
+
+  # The same deferral bounds delivered work whose only record of the wait is the
+  # backlog hold, where even the first sight would otherwise ring.
+  dir=$(make_hold_home deferred-delivery 'done: PR https://example.invalid/pull/1 checks green' nohold) \
+    || fail "could not build a delivered-work backlog fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  run_hold "$dir" hold held-merge --reason 'parked by the captain' --until 2999-01-01 \
+    || fail "could not defer the delivered work's captain hold"
+  hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 2 \
+    || fail "deferred delivered work re-rang the watcher: $(cat "$state/.wake-queue" 2>/dev/null)"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 0 ] || fail "deferred delivered work queued $wakes stale wake(s) before its date"
+
+  # A still-live worker that declared the captain-held transfer itself.
+  dir=$(make_hold_home deferred-live 'captain-held: stopped by the captain; held for the call' nohold) \
+    || fail "could not build a live captain-held backlog fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  run_hold "$dir" hold held-merge --reason 'parked by the captain' --until 2999-01-01 \
+    || fail "could not defer the live worker's captain hold"
+  FM_HOLD_CURRENT_COMMAND=grok hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 2 \
+    || fail "a deferred live captain-held worker re-rang the watcher: $(cat "$state/.wake-queue" 2>/dev/null)"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 0 ] || fail "a deferred live captain-held worker queued $wakes stale wake(s) before its date"
+  pass "a captain hold deferred with --until stays silent until its date, then the recheck resumes"
 }
 
 # The task id is not the captain call. A task can be answered with `--release`
@@ -4714,6 +4795,7 @@ test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
+test_deferred_captain_hold_stays_silent_until_its_date
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
