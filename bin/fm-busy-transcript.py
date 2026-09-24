@@ -184,6 +184,7 @@ def observe(data):
     old = data.get("bound")
     if old:
         path = Path(old["path"])
+        require(not path.is_symlink() and path.resolve().is_relative_to(Path(data["sessions"])))
         try:
             stat = path.stat()
         except FileNotFoundError as error:

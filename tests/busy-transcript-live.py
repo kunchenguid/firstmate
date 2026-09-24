@@ -238,6 +238,16 @@ esac
             text = Path(binding['bound']['path']).read_text()
             assert 'FM_SIMULATED_401' in text and 'turn_aborted' in text
             assert 'exited with code 7' in text or 'Exit code: 7' in text or '"exit_code":7' in text or '"exit_code": 7' in text, 'tool did not execute'
+            evidence = []
+            for line in text.splitlines():
+                record = json.loads(line)
+                payload = record.get('payload', {})
+                if record.get('type') == 'event_msg' and payload.get('type') in ('task_started', 'task_complete', 'turn_aborted'):
+                    event = {key: payload[key] for key in ('type', 'turn_id', 'root_turn_id', 'started_at', 'completed_at', 'duration_ms', 'reason') if key in payload}
+                    event['error'] = bool(payload.get('error'))
+                    evidence.append({'timestamp': record['timestamp'], 'ordinal': record['ordinal'], 'payload': event})
+            print('evidence - ' + json.dumps({'tool': tool, 'session_id': binding['bound']['sid'],
+                'generation': gen, 'events': evidence, 'tool_exit_code': 7}), flush=True)
             print('ok - ' + tool + ' real tool failure and simulated API failure', flush=True)
             send('/exit' if tool == 'codex' else '/quit')
             wait('dead endpoint-gone')

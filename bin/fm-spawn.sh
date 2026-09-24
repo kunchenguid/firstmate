@@ -2729,10 +2729,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
+BUSY_GEN=
 if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
   codex | traex)
-    if [ "$RAW_LAUNCH" -eq 0 ]; then
+    if [ "$RAW_LAUNCH" -eq 0 ] && { [ "$BACKEND" = tmux ] || [ "$BACKEND" = herdr ]; }; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID" --state unknown) || exit 1
       [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
       if [ "$HARNESS" = codex ]; then
@@ -2740,6 +2741,7 @@ if [ "$KIND" != secondmate ]; then
       else
         BUSY_SESSIONS_ROOT="${TRAE_HOME:-$HOME/.trae}/cli/sessions"
       fi
+      BUSY_SESSIONS_ROOT=$(python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).resolve())' "$BUSY_SESSIONS_ROOT") || exit 1
       python3 "$FM_ROOT/bin/fm-busy-transcript.py" init "$STATE_REAL" "$ID" "$HARNESS" \
         "$WT" "$BUSY_SESSIONS_ROOT" "$BACKEND" "$T" || exit 1
     fi

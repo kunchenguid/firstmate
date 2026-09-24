@@ -188,7 +188,8 @@ fm_busy_record_read() {  # <state-dir> <id>
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown|dead plus the producing source (see header). The transcript
-# readers require structural process liveness before trusting their logs. A legacy optional capture argument is ignored; rendered output
+# readers require structural process liveness before trusting their logs.
+# A legacy optional capture argument is ignored; rendered output
 # never substitutes for the retained adapters' semantic lifecycle evidence.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5

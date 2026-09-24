@@ -36,7 +36,7 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
   # fixed valid one.
   local home=$1 wt=$2 fakebin=$3
   shift 3
-  GROK_HOME="$home/grok-home" \
+  CODEX_HOME="$home/codex-home" TRAE_HOME="$home/traex-home" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$@" --mode no-mistakes --yolo off
 }
 
@@ -159,11 +159,31 @@ test_codex_task_bound_transcript_wiring() {
   local rec id=busy-cx-1 out state
   rec=$(make_spawn_case codex-unverified codex "$id")
   read_case_record "$rec"
+  export FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "codex spawn should succeed: $out"
   state="$HOME_DIR/state"
   assert_present "$state/$id.busy-gen" "codex must mint a launch generation"
   assert_present "$state/$id.busy-session" "codex must bind its transcript source"
+  local launch
+  launch=$(grep 'FIRSTMATE_BUSY_GENERATION=' "$FM_FAKE_LAUNCH_LOG")
+  unset FM_FAKE_LAUNCH_LOG
+  cat > "$FAKEBIN_DIR/codex" <<'PY'
+#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ['FM_ARGV_LOG'], 'w') as stream:
+    json.dump({'args': sys.argv[1:], 'home': os.environ.get('CODEX_HOME')}, stream)
+PY
+  chmod +x "$FAKEBIN_DIR/codex"
+  FM_ARGV_LOG="$CASE_DIR/argv.json" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" || fail "managed Codex launch is not executable"
+  python3 - "$CASE_DIR/argv.json" "$state/$id.busy-gen" "$HOME_DIR/codex-home" <<'PY' || fail "launch binding marker or vendor home differs from the reader"
+import json, pathlib, sys
+record = json.loads(pathlib.Path(sys.argv[1]).read_text())
+gen = pathlib.Path(sys.argv[2]).read_text().strip()
+assert record['args'][-1].splitlines()[-1] == 'FIRSTMATE_BUSY_GENERATION=' + gen
+assert 'FIRSTMATE_OP: v1 launch-brief:' in record['args'][-1]
+assert record['home'] == sys.argv[3]
+PY
   assert_absent "$WT_DIR/.codex/hooks.json" "codex must not install unverified busy hooks"
   assert_contains "$out" 'spawned '"$id"' harness=codex' "codex spawn did not complete normally"
   out=$(classify codex "$id" "$state")

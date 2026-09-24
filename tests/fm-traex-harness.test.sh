@@ -177,6 +177,7 @@ EOF
 }
 
 traex_env() {
+  CODEX_HOME="$HOME_DIR/codex-home" TRAE_HOME="$HOME_DIR/traex-home" \
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \

@@ -270,7 +270,7 @@ test_source_mismatch_cross_adapter() {
   out=$(fm_busy_classify tmux w1 pi t1 "$state")
   [ "$out" = "busy pi-ext" ] || fail "Pi record was not trusted: $out"
   out=$(fm_busy_classify tmux w1 traex t1 "$state")
-  [ "$out" = "unknown source-mismatch" ] || fail "Pi record trusted by TraeX: $out"
+  [ "$out" = "unknown traex-transcript" ] || fail "Pi record trusted by TraeX: $out"
   pass "semantic records are trusted only by their adapter"
 }
 
@@ -497,8 +497,12 @@ fm_backend_send_text_submit tmux lab:w next 1 .01 .01
     reset(); expect('busy','bind before truncation'); log.write_text(''); expect('unknown','truncated bound log')
     reset(); append(complete); expect('idle','bind before prefix rewrite')
     write(records+[dict(complete,payload={'type':'task_complete','turn_id':'turn-X'})]); expect('unknown','rewritten prefix')
+    reset(); append(complete); expect('idle','bind before otherwise-valid history rewrite')
+    changed=copy.deepcopy(records);changed[2]['payload']['item']['content'][0]['text']='changed brief\nFIRSTMATE_BUSY_GENERATION='+gen
+    write(changed+[complete]);expect('unknown','same session cannot rewrite an observed prefix')
     reset(); log.write_text(log.read_text()+'{"type":'); expect('unknown','partial tail')
     reset(); log.write_text(log.read_text()+'invalid\n'); expect('unknown','corrupt record')
+    reset(); log.write_text(log.read_text()+'[]\n'); expect('unknown','wrong JSON record shape')
     reset(); other=logs/'rollout-duplicate.jsonl';other.write_bytes(log.read_bytes()); expect('unknown','ambiguous sessions')
     reset(); child=copy.deepcopy(records);child[0]['payload']['source']={'subagent':'worker'}; write(child)
     expect('unknown','child session excluded even with copied marker')
@@ -511,6 +515,8 @@ fm_backend_send_text_submit tmux lab:w next 1 .01 .01
     reset(); wrong=copy.deepcopy(records);wrong[2]['payload']['item']['content'][0]['text']='FIRSTMATE_BUSY_GENERATION=old';write(wrong)
     append(complete);expect('unknown','reused slot old launch generation')
     reset(); (state/'worker.busy-gen').write_text('replacement\n');expect('unknown','retired busy generation')
+    reset(); (state/'worker.busy-session').unlink();expect('unknown','missing binding')
+    reset(); (state/'worker.busy-gen').unlink();expect('unknown','missing generation sidecar')
     reset(); append(dict(complete,payload={'type':'task_complete','turn_id':'old-turn'}));expect('unknown','mismatched terminal turn')
     reset(); append(complete);run('python3',reader,'fence-target',state,'tmux','lab:w')
     run('python3',reader,'fence-target',state,'tmux','lab:w')
@@ -520,7 +526,7 @@ fm_backend_send_text_submit tmux lab:w next 1 .01 .01
     reset();append(complete);expect('idle','bind before unreadable submission');log.unlink()
     run('python3',reader,'fence-target',state,'tmux','lab:w');write(records+[complete])
     expect('unknown','lost watermark cannot later resurrect old idle')
-    reset();append(complete)
+    reset()
     # The classifier's liveness input is backed by a real short-lived process.
     process=subprocess.Popen(['sleep','30'])
     def classify():
@@ -530,10 +536,10 @@ fm_backend_agent_state() { if kill -0 "$probe_pid" 2>/dev/null; then printf aliv
 fm_busy_classify tmux lab:w "$2" worker "$3"
 '''
         return run('bash','-c',code,'_',root,harness,state,'unused',process.pid)
-    assert classify() == 'idle '+harness+'-transcript'
+    assert classify() == 'busy '+harness+'-transcript'
     process.terminate();process.wait()
     assert classify() == 'dead endpoint-gone'
-    print('ok - '+harness+' process exit overrides transcript completion')
+    print('ok - '+harness+' process exit overrides an open transcript turn')
 PYTEST
 }
 
