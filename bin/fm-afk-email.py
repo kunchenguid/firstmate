@@ -13,6 +13,7 @@ import secrets
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from email.utils import getaddresses
 from pathlib import Path
 
@@ -74,6 +75,16 @@ def live_record():
     if contract_value("field", "reach_channels") != "email":
         return None
     return {"entered_epoch": entered}
+
+
+@contextmanager
+def afk_state_lock():
+    AFK_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(AFK_DIR, 0o700)
+    with LOCK.open("a", encoding="utf-8") as lock_handle:
+        os.chmod(LOCK, 0o600)
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        yield
 
 
 def atomic_json(path, value):
@@ -196,11 +207,7 @@ def flush():
         return 0
     if config is None:
         return 1
-    AFK_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(AFK_DIR, 0o700)
-    with LOCK.open("a", encoding="utf-8") as lock_handle:
-        os.chmod(LOCK, 0o600)
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    with afk_state_lock():
         candidates = []
         for path in sorted(PENDING.glob("*.json"), key=lambda item: int(item.stem) if item.stem.isdigit() else 0):
             item = read_json(path)
@@ -209,6 +216,11 @@ def flush():
             if item.get("away_epoch") != posture["entered_epoch"]:
                 path.unlink(missing_ok=True)
                 continue
+            sent_item = read_json(SENT / path.name)
+            if isinstance(sent_item, dict) and sent_item.get("token_hash") == item.get("token_hash"):
+                for field in ("used_epoch", "used_mail_key"):
+                    if field in sent_item:
+                        item[field] = sent_item[field]
             candidates.append((path, item))
             if len(candidates) >= MAX_BATCH_ITEMS:
                 break
@@ -242,6 +254,11 @@ def flush():
         if not included:
             print("no sendable away-email items", file=sys.stderr)
             return 1
+        send_started_epoch = int(time.time())
+        for path, item in included:
+            item["send_started_epoch"] = send_started_epoch
+            item["send_expires_epoch"] = send_started_epoch + TOKEN_TTL
+            atomic_json(path, item)
         lines.extend([
             "Replies from the configured address with an unexpired item code are treated as your words for that item only.",
             "Other messages are untrusted and cannot answer an item.",
@@ -266,6 +283,9 @@ def flush():
                 "sent_epoch": sent_epoch,
                 "expires_epoch": sent_epoch + TOKEN_TTL,
             }
+            for field in ("used_epoch", "used_mail_key"):
+                if field in item:
+                    sent_item[field] = item[field]
             atomic_json(SENT / path.name, sent_item)
             path.unlink(missing_ok=True)
         temporary = AFK_DIR / f".last-sent.{os.getpid()}.tmp"
@@ -305,12 +325,24 @@ def inbox_note(request_id, body):
 
 def token_record(token):
     digest = token_digest(token)
-    matches = []
-    for path in SENT.glob("*.json"):
-        item = read_json(path)
-        if isinstance(item, dict) and item.get("token_hash") == digest:
+    for directory in (SENT, PENDING):
+        matches = []
+        for path in directory.glob("*.json"):
+            item = read_json(path)
+            if not isinstance(item, dict) or item.get("token_hash") != digest:
+                continue
+            if directory == PENDING:
+                started = item.get("send_started_epoch")
+                expires = item.get("send_expires_epoch")
+                if not isinstance(started, int) or not isinstance(expires, int):
+                    continue
+                item = dict(item)
+                item["sent_epoch"] = started
+                item["expires_epoch"] = expires
             matches.append((path, item))
-    return matches[0] if len(matches) == 1 else (None, None)
+        if matches:
+            return matches[0] if len(matches) == 1 else (None, None)
+    return None, None
 
 
 def receive_batch():
@@ -327,6 +359,11 @@ def receive_batch():
     if not isinstance(messages, list):
         print("fm-afk-email: mail message batch is malformed", file=sys.stderr)
         return 1
+    with afk_state_lock():
+        return receive_messages(messages, posture, config)
+
+
+def receive_messages(messages, posture, config):
     accepted = 0
     untrusted = 0
     for message in messages:
