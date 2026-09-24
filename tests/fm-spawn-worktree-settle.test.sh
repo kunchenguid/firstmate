@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regression test for the fm-spawn.sh treehouse-get worktree-detection settle
-# loop (bin/fm-spawn.sh, the `for _ in $(seq 1 60)` loop after `treehouse get`).
+# loop (bin/fm-spawn.sh, the wait loop after `treehouse get`).
 #
 # On some tmux/WSL setups a brand-new window's pane_current_path transiently
 # reports a stale, unrelated-but-real path on the very first poll, before the
@@ -19,6 +19,15 @@
 # comparing only against the project adopted it and the isolation guard then
 # refused the launch. The cases below cover both the transient and the pane
 # that never leaves the primary at all.
+#
+# The third transient is a checkout still being written. While `git worktree
+# add` populates a new slot, its `.git` link already exists and its `git reset
+# --hard` child runs inside the slot, so a pane reporting its foreground cwd
+# reads the slot as an isolated worktree from the first poll, and `git status`
+# lists every file not yet written. Adopting it then refused the launch as "not
+# clean", and on a checkout slower than the wait the abort interrupted git and
+# left a partial slot folder behind. The last cases cover a checkout that
+# finishes, one that outlasts the ordinary wait, and one that never finishes.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -44,6 +53,9 @@ case "$*" in
     [ -f "$countfile" ] && n=$(cat "$countfile")
     n=$((n + 1))
     printf '%s\n' "$n" > "$countfile"
+    if [ "$n" = "${FM_FAKE_SETTLE_AT:-}" ]; then
+      "${FM_FAKE_SETTLE_CMD:?FM_FAKE_SETTLE_CMD unset}"
+    fi
     if [ "$n" -le "${FM_FAKE_PANE_STALE_READS:-0}" ]; then
       printf '%s\n' "${FM_FAKE_PANE_STALE:-}"
     else
@@ -221,9 +233,133 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
 
+# make_checkout_case <name> <id> <shape> builds a slot whose checkout is still
+# being written, plus the script the fake pane runs to finish it. Shape `pool`
+# lays the slot out as a Treehouse pool slot that the pool state does not list
+# yet, which is how `treehouse get` leaves a new slot until its checkout is
+# done; shape `plain` is a linked worktree outside any pool carrying git's own
+# `initializing` lock. Either way the slot is missing a tracked file until the
+# finish script runs, so a spawn that adopts it early sees uncommitted work.
+make_checkout_case() {
+  local name=$1 id=$2 shape=$3 case_dir home proj wt fakebin countfile finish gitdir state=
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  countfile="$case_dir/pane-call-count"
+  finish="$case_dir/finish-checkout"
+  fakebin=$(make_settle_fakebin "$case_dir/fake")
+  fm_test_spawn_home "$home" codex
+  case "$shape" in
+    pool)
+      wt="$case_dir/pool/1/project"
+      state="$case_dir/pool/treehouse-state.json"
+      mkdir -p "$case_dir/pool/1"
+      fm_git_worktree "$proj" "$wt" "slot-$name"
+      printf '{"worktrees":[]}\n' > "$state"
+      ;;
+    plain)
+      wt="$case_dir/wt"
+      fm_git_worktree "$proj" "$wt" "wt-$name"
+      gitdir=$(git -C "$wt" rev-parse --absolute-git-dir)
+      printf 'initializing\n' > "$gitdir/locked"
+      ;;
+  esac
+  rm "$wt/README.md"
+  cat > "$finish" <<EOF
+#!/usr/bin/env bash
+git -C '$wt' checkout -- README.md
+rm -f "\$(git -C '$wt' rev-parse --absolute-git-dir)/locked"
+if [ -n '$state' ]; then
+  printf '{"worktrees":[{"name":"1","path":"%s","owner_pid":%s}]}\n' '$wt' "\$FM_FAKE_OWNER_PID" > '$state'
+fi
+EOF
+  chmod +x "$finish"
+  fm_test_spawn_brief "$home" "$id" "Exercise checkout-in-progress detection for $id."
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$finish|$fakebin|$countfile|0"
+}
+
+run_checkout_spawn() {
+  local id=$1 settle_at=$2
+  FM_FAKE_SETTLE_AT="$settle_at" FM_FAKE_SETTLE_CMD="$STALE_DIR" FM_FAKE_OWNER_PID=$$ \
+    run_settle_spawn "$id"
+}
+
+# The incident: the pane reads the new pool slot while its checkout is still
+# being written, for longer than the ordinary wait. The spawn must keep waiting
+# until Treehouse has recorded the slot as handed out, then launch from the
+# finished checkout rather than refusing it as uncommitted work.
+test_pool_slot_checkout_in_progress_is_waited_out() {
+  local rec id out status claim
+  id=settle-checkout-pool-z5
+  rec=$(make_checkout_case settle-checkout-pool "$id" pool)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(run_checkout_spawn "$id" 75)
+  status=$?
+  expect_code 0 "$status" "spawn should launch once the slot checkout finishes"$'\n'"$out"
+  assert_not_contains "$out" "is not clean" \
+    "spawn misread a checkout still being written as uncommitted work"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the finished slot"
+  claim="$(dirname "$WT_DIR")/.fm-slot-owner"
+  grep -Fxq -- "task=$id" "$claim" 2>/dev/null \
+    || fail "the finished slot was not claimed for the task"
+  [ "$(cat "$COUNTFILE")" -gt 75 ] \
+    || fail "spawn adopted the slot before its checkout finished"
+  pass "a pool slot whose checkout is still being written is waited out, past the ordinary wait"
+}
+
+# Outside a pool the same transient is recognised from git's own marker: a
+# linked worktree `git worktree add` is still checking out is locked as
+# initializing.
+test_initializing_worktree_is_waited_out() {
+  local rec id out status
+  id=settle-checkout-plain-z6
+  rec=$(make_checkout_case settle-checkout-plain "$id" plain)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(run_checkout_spawn "$id" 5)
+  status=$?
+  expect_code 0 "$status" "spawn should launch once git finishes initializing the worktree"$'\n'"$out"
+  assert_not_contains "$out" "is not clean" \
+    "spawn misread an initializing worktree as uncommitted work"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the initialized worktree"
+  pass "a worktree git is still initializing is waited out"
+}
+
+# A checkout that never finishes still ends in a refusal that names the cause,
+# and the refusal neither claims the slot nor touches its files.
+test_checkout_that_never_finishes_refuses_without_claiming() {
+  local rec id out status
+  id=settle-checkout-stuck-z7
+  rec=$(make_checkout_case settle-checkout-stuck "$id" pool)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(run_checkout_spawn "$id" 0)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched from a slot whose checkout never finished"$'\n'"$out"
+  assert_contains "$out" "did not enter an isolated worktree" \
+    "spawn did not report the unfinished acquisition"
+  assert_contains "$out" "still being written" \
+    "the refusal did not say the slot checkout was still in progress"
+  assert_not_contains "$out" "is not clean" \
+    "spawn misread an unfinished checkout as uncommitted work"
+  [ ! -e "$(dirname "$WT_DIR")/.fm-slot-owner" ] || fail "refused spawn claimed the unfinished slot"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  [ ! -e "$WT_DIR/README.md" ] || fail "refused spawn changed the unfinished checkout"
+  pass "a checkout that never finishes is refused by name, unclaimed and untouched"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_pool_slot_checkout_in_progress_is_waited_out
+test_initializing_worktree_is_waited_out
+test_checkout_that_never_finishes_refuses_without_claiming
 
 echo "# all fm-spawn-worktree-settle tests passed"
