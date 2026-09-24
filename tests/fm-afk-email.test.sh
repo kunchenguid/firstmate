@@ -134,6 +134,7 @@ wait_for_file() {  # <path>
 
 
 
+
 # Pi entry requires the fixed owner destination; other harnesses keep hold-for-return.
 test_invalid_mail_ports_keep_afk_on_hold() {
   local home out port value rc
@@ -525,6 +526,7 @@ test_processed_marker_cannot_suppress_outcomes() {
 
 
 
+
 test_invalid_away_record_does_not_enable_email() {
   local home out
   home=$(make_home invalid-record configured)
@@ -553,6 +555,7 @@ import importlib.util
 import os
 import sys
 from contextlib import redirect_stderr, redirect_stdout
+
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -882,6 +885,7 @@ class FakeMailbox:
 
 
 
+
     def login(self, *_): pass
     def select(self, *_): pass
     def logout(self): pass
@@ -904,6 +908,7 @@ class FakeMailbox:
             self.body_fetches.append(key)
             if self.fail_body_fetch:
                 return "NO", []
+
 
 
 
@@ -934,6 +939,7 @@ note = notes[0].read_text(encoding="utf-8").split("--\n", 1)[1]
 words = note.split("Captain's words:\n", 1)[1].rstrip("\n")
 assert words == "a" * 8000 and len(words) == 8000, len(words)
 assert mailbox.body_fetches == ["2", "4"], mailbox.body_fetches
+
 
 
 mailbox.body_fetches.clear()
@@ -1048,6 +1054,7 @@ assert handoff_rows["2"][4] == "degraded", handoff_rows["2"]
 assert handoff_rows["4"][4] == "degraded", handoff_rows["4"]
 assert "away-email reply handoff failed" in handoff_error.getvalue(), handoff_error.getvalue()
 assert mailbox.body_fetches == ["2", "4"], mailbox.body_fetches
+
 
 
 
@@ -1322,6 +1329,7 @@ PY
   assert_contains "$out" 'received 0 verified and 1 untrusted' 'a pending-token reply remains single-use after the sent transition'
   pass "reply tokens survive the SMTP-accepted, sent-record-crash window"
 
+
 }
 
 test_expired_and_unknown_codes_are_untrusted() {
@@ -1550,6 +1558,7 @@ test_failed_send_keeps_outcomes_queued
 test_live_email_posture_requires_runtime_config
 test_missing_outcome_store_is_empty_but_invalid_store_fails
 test_processed_marker_cannot_suppress_outcomes
+
 
 
 

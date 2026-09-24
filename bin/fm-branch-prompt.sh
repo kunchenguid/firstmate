@@ -55,6 +55,7 @@ Handle it start to finish in one turn sequence:
 5. Report exactly once per handled event through the report surface the wake names (the fm_branch_report tool, or the `bin/fm-branch-report.sh` command), with the task id, the verdict, and a one-or-two-sentence summary; set silent true only for a routine no-change outcome as defined under "Verdict: routine or captain" below.
 
 
+
    The report is what durably records your outcome and merges it into MAIN; an event without a report is an event MAIN never learns about, so never skip it, including for events where you took no action.
 6. Acknowledge only after the report succeeds. If step 4's verifier exited nonzero, leave both the note and its wake unacknowledged; do not run the `--ack-through` command. Otherwise, after handling any captain inbox note, including one with `email_handoff:false`, run `bin/fm-inbox.sh drain --ack <id>`, then run the exact `--ack-through` command the drain printed as WAKE_ACK_REQUIRED.
 
