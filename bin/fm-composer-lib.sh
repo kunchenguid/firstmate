@@ -349,7 +349,7 @@ fm_composer_strip_ghost() {
 # Matching a footer to confirm a keystroke landed is a different question from
 # asking what a worker is doing, and the two must not be conflated.
 # Delivery-only rendered busy footers per harness. claude/codex: "esc to
-# interrupt"; opencode: "esc interrupt"; pi: "Working..."; omp: "Working…"; grok: "Ctrl+c:cancel"; agy: "esc to cancel";
+# interrupt"; opencode/copilot: "esc interrupt"; pi: "Working..."; omp: "Working…"; grok: "Ctrl+c:cancel"; agy: "esc to cancel";
 # devin: "esc twice to interrupt" and its "❭ Guide Devin while it works" working composer.
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this
@@ -418,6 +418,15 @@ FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
 # agy-regex fold in bin/fm-busy-lib.sh.
 FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT='esc[[:space:]]+to[[:space:]]+cancel'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
+# copilot (GitHub Copilot CLI) pins `esc interrupt` in its status row while a
+# turn runs, beside the spinner and byte count (`◎ Working · 113 B esc
+# interrupt`, verified live on copilot 1.0.88; a backgrounded tool renders
+# `◎ Waiting for background shells · 120 B esc interrupt` instead). The idle
+# row carries no such token (`<- open sidebar ...`), and the `Working` word
+# beside it is deliberately not matched on its own: it is ordinary prose a
+# worker could echo. Delivery guard only; recorded worker state comes from
+# the copilot-session-log fold in bin/fm-busy-lib.sh.
+FM_DELIVERY_COPILOT_BUSY_REGEX_DEFAULT='esc[[:space:]]+interrupt'
 
 fm_busy_lines_match() {  # [harness]
   local harness=${1:-} lines regex
@@ -436,6 +445,7 @@ fm_busy_lines_match() {  # [harness]
       agy) regex=$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
       cursor) regex=$FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT ;;
+      copilot) regex=$FM_DELIVERY_COPILOT_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_DELIVERY_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.
