@@ -185,14 +185,16 @@ _fm_status_corr_attempt() {  # <word>
 }
 
 # 0 when <line> declares a status prefix that did not parse as a recognized verb.
-# An unknown single word (parked:, holding:) is one shape. A recognized verb
+# An unknown lowercase word (parked:, holding:) is one shape. A recognized verb
 # followed only by a missing or mismatched correlation token is the other, as is
 # a token written ahead of the verb. The line stays that text: it does not
 # become the verb the token failed to separate. Continuation prose is not a
-# prefix, including a sentence that merely starts with a known verb.
+# prefix, including a sentence that merely starts with a known verb, a label
+# such as Reason: or e.g.:, a URL, or a clock time such as 10:30.
 status_prefix_unrecognized() {  # <status-line>
   local line=$1 verb first rest word
   case "$line" in *:*) ;; *) return 1 ;; esac
+  case "${line#*:}" in ''|[[:space:]]*) ;; *) return 1 ;; esac
   status_line_verb "$line" verb
   [ -n "$verb" ] || return 1
   _fm_status_verb_recognized "$verb" && return 1
@@ -200,6 +202,8 @@ status_prefix_unrecognized() {  # <status-line>
   rest=${verb#"$first"}
   rest=${rest#"${rest%%[![:space:]]*}"}
   if [ -z "$rest" ]; then
+    case "$first" in [[:lower:]]*) ;; *) return 1 ;; esac
+    case "$first" in *[![:lower:]-]*) return 1 ;; esac
     return 0
   fi
   if _fm_status_corr_attempt "$first"; then

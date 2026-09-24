@@ -419,7 +419,7 @@ EOF
 # parse, must reach the supervisor as that line. Recognized verbs stay on their
 # existing classification, and continuation prose must not become a prefix.
 test_unrecognized_status_prefix_is_visible() {
-  local dir state event
+  local dir state event continuation
   dir=$(make_case unrecognized-prefix); state="$dir/state"
   printf 'working: still on it\nparked: waiting for upstream\n' > "$state/parked.status"
   [ "$(last_status_line "$state/parked.status")" = 'parked: waiting for upstream' ] \
@@ -473,6 +473,21 @@ test_unrecognized_status_prefix_is_visible() {
     || fail "continuation prose cleared the pause classification"
   status_span_has_actionable "$state/prose.status" 0 \
     && fail "a paused declaration or its continuation became a supervisor event"
+  for continuation in 'https://github.com/o/r/pull/12' 'Reason: upstream is slow' \
+    'Note: see above' 'e.g.: the release notes' '10:30 retry scheduled'; do
+    printf 'paused: waiting on the upstream release\n%s\n' "$continuation" > "$state/paused-cont.status"
+    [ "$(last_status_line "$state/paused-cont.status")" = 'paused: waiting on the upstream release' ] \
+      || fail "continuation '$continuation' hid the paused declaration"
+    status_is_paused "$(last_status_line "$state/paused-cont.status")" \
+      || fail "continuation '$continuation' cleared the pause classification"
+    status_span_has_actionable "$state/paused-cont.status" 0 \
+      && fail "continuation '$continuation' after paused: became a supervisor event"
+    printf 'working: opened PR\n%s\n' "$continuation" > "$state/working-cont.status"
+    [ "$(last_status_line "$state/working-cont.status")" = 'working: opened PR' ] \
+      || fail "continuation '$continuation' hid the working declaration"
+    status_span_has_actionable "$state/working-cont.status" 0 \
+      && fail "continuation '$continuation' after working: became a supervisor event"
+  done
   printf 'done: shipped\n' > "$state/done.status"
   event=$(status_span_first_actionable "$state/done.status" 0) \
     || fail "done: stopped reaching the supervisor"
