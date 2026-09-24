@@ -36,6 +36,7 @@ It then computes the branch-claimable rows, publishes the grant, and runs one bo
 The engine drains, handles, reports through `bin/fm-branch-report.sh`, and acknowledges, exactly as the Pi branch does.
 The host counts the wake handled only when the turn exited cleanly and recorded at least one report; it then releases the branch's leases and grant and parks on the successor.
 A handled wake never reaches main, whether its outcome was routine or captain: captain outcomes wait in the outcome store, and the return brief (`bin/fm-afk-return.sh`) presents them.
+The one exception is a captain who returns while a turn is still running: the return brief was rendered before that turn's outcomes existed, so the host hands the close to main with those outcomes for main to relay.
 
 ## Failure direction
 
@@ -59,7 +60,7 @@ One short main turn per boundary is the cost of never losing the park silently.
 The engine keeps one conversation across wakes so the byte-stable prompt stays cached, keyed to the current main session: every main session start opens a new one, and so does every `FM_SUPERVISION_HOST_ROTATE_TURNS` turns, because each wake adds history and the per-wake cost grows with it.
 Nothing captain-facing rides on that conversation, because the outcome store carries every result.
 The engine sees no mirror of main's dialog; the away record's read-back at the tail of every wake is the captain context it acts on.
-Each turn appends one line to `state/.supervision-host.log` with its result and the engine's reported usage, which is where engine cost is read today.
+Each turn appends one line to `state/.supervision-host.log` with its result, the engine's reported usage, the turn's cost, and the conversation's running cost, which is where engine cost is read today.
 
 ## Engines
 
@@ -70,7 +71,7 @@ Today the only verified engine is Claude's print mode, measured on Claude Code 2
 - `--permission-mode dontAsk` with the `Bash` and `Read` allowlist never prompts: a denied call reaches the model as a tool error and never wedges the turn; `--safe-mode` does not override the user's default mode, so the mode is always passed.
 - Claude path-checks direct file reads against its working directories, so a home or state directory outside the code root is passed with `--add-dir`.
 - The conversation starts with `--session-id` and continues with `--resume`; the prompt is the first argument and stdin is `/dev/null`, because an open stdin costs a three-second wait.
-- `--output-format json` carries the error flag, turn count, usage, and the tool's own cost estimate.
+- `--output-format json` carries the error flag, turn count, usage, and the tool's own cost estimate; on a resumed conversation that cost is the conversation's running total while the usage and turn count are the turn's own, so the engine lib derives each turn's cost from the total the host recorded after the previous turn.
 - The engine runs from the tracked code root, so its session files land in Claude's own project store for that directory and appear in that directory's resume list.
 - Tool commands run in process groups of their own, which a bound's group signal cannot reach, so the engine lib reaps them by recorded identity after every turn.
 - From inside the engine's shell the primary is not in the harness ancestry, so the engine can never act as the session-lock owner.

@@ -265,10 +265,15 @@ fm_supervision_engine_turn() {
   return "$rc"
 }
 
-# fm_supervision_engine_result <engine> <result-file>: print one line
-# "error=0|1 cost=<usd> input=<n> cache_read=<n> cache_write=<n> output=<n>
-# turns=<n>" from the engine's machine-readable result. Returns 1 when the
-# result cannot be read, which the host treats as a failed turn.
+# fm_supervision_engine_result <engine> <result-file> [<prior-conversation-cost>]:
+# print one line "error=0|1 cost=<usd> conversation_cost=<usd> input=<n>
+# cache_read=<n> cache_write=<n> output=<n> turns=<n>" from the engine's
+# machine-readable result, where cost is this turn's and conversation_cost the
+# conversation's running total (the caller records it and passes it back for
+# the next turn; 0 for a new conversation). Claude's total_cost_usd is that
+# running total on a resumed conversation, while its usage and num_turns are
+# per turn. Returns 1 when the result cannot be read, which the host treats as
+# a failed turn.
 fm_supervision_engine_result() {
   case "$1" in
     claude)
@@ -281,8 +286,12 @@ fm_supervision_engine_result() {
         const u = j.usage || {};
         const n = (v) => (Number.isFinite(v) ? v : 0);
         const error = j.is_error === true || (j.subtype && j.subtype !== "success") ? 1 : 0;
-        process.stdout.write(`error=${error} cost=${n(j.total_cost_usd)} input=${n(u.input_tokens)} cache_read=${n(u.cache_read_input_tokens)} cache_write=${n(u.cache_creation_input_tokens)} output=${n(u.output_tokens)} turns=${n(j.num_turns)}\n`);
-      ' "$2" 2>/dev/null
+        const total = n(j.total_cost_usd);
+        const prior = Number(process.argv[2]);
+        const turn = Number.isFinite(prior) && prior >= 0 && prior <= total ? total - prior : total;
+        const usd = (v) => Number(v.toFixed(6));
+        process.stdout.write(`error=${error} cost=${usd(turn)} conversation_cost=${usd(total)} input=${n(u.input_tokens)} cache_read=${n(u.cache_read_input_tokens)} cache_write=${n(u.cache_creation_input_tokens)} output=${n(u.output_tokens)} turns=${n(j.num_turns)}\n`);
+      ' "$2" "${3:-0}" 2>/dev/null
       ;;
     *) return 1 ;;
   esac

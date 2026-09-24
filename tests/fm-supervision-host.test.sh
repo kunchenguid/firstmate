@@ -34,6 +34,8 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 # branch turn through the real scripts according to $FM_HOME/stub-mode:
 #   handle      drain, claim the task's lease, report, acknowledge, release
 #   hold-lease  the same, but leave the lease held (the host must release it)
+#   return      handle, but the captain returns (the record is archived) before
+#               the turn ends
 #   noreport    drain and exit cleanly without a report
 #   hang        start a descendant in a process group of its own, then block
 STUB="$TMP_ROOT/engine-stub"
@@ -48,8 +50,10 @@ n=$(( $(ls "$FM_HOME"/engine-call.* 2>/dev/null | wc -l) + 1 ))
     "${FM_LEASE_HOLDER_PID:-}" "${FM_SUPERVISION_PRIMARY_HARNESS:-}" "${FM_BRANCH_REPORT_TURN:-}"
   for a in "$@"; do printf 'arg=%s\n' "$a"; done
 } > "$FM_HOME/engine-call.$n"
+# Like Claude, the reported cost is the conversation's running total.
 result() {
-  printf '{"type":"result","subtype":"success","is_error":false,"num_turns":3,"total_cost_usd":0.01,"usage":{"input_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":10,"output_tokens":20},"session_id":"stub"}\n'
+  printf '{"type":"result","subtype":"success","is_error":false,"num_turns":3,"total_cost_usd":%s,' "$(awk -v n="$n" 'BEGIN { print n * 0.25 }')"
+  printf '"usage":{"input_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":10,"output_tokens":20},"session_id":"stub"}\n'
 }
 drain=$("$FM_REPO/bin/fm-wake-drain.sh" 2>&1)
 printf '%s\n' "$drain" > "$FM_HOME/engine-drain.$n"
@@ -57,13 +61,14 @@ ack=$(printf '%s\n' "$drain" | sed -n 's/^WAKE_ACK_REQUIRED: after handling comp
 task=$(sed -n 's/^tasks=//p' "$STATE/.supervision-host-turn" | awk '{ print $1 }')
 [ -n "$task" ] || task=fleet
 case "$mode" in
-  handle|hold-lease)
+  handle|hold-lease|return)
     "$FM_REPO/bin/fm-lease.sh" claim "$task" >> "$FM_HOME/engine-lease.log" 2>&1
     "$FM_REPO/bin/fm-branch-report.sh" --task "$task" --verdict routine --summary "stub handled $task" \
       >> "$FM_HOME/engine-report.log" 2>&1
     # shellcheck disable=SC2086 # the printed acknowledgement arguments
     [ -z "$ack" ] || "$FM_REPO/bin/fm-wake-drain.sh" $ack >> "$FM_HOME/engine-ack.log" 2>&1
     [ "$mode" = hold-lease ] || "$FM_REPO/bin/fm-lease.sh" release "$task" >> "$FM_HOME/engine-lease.log" 2>&1
+    [ "$mode" != return ] || "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1
     result
     ;;
   noreport) result ;;
@@ -256,6 +261,7 @@ test_attended_close_passes_straight_to_main() {
   ! ls "$home"/engine-call.* >/dev/null 2>&1 || fail "attended: the engine ran"
   assert_absent "$home/state/.supervision-host" "attended: the host record outlived the host"
   assert_grep 'demo.status' "$home/state/.wake-queue" "attended: the wake must stay queued for main"
+  assert_re '	pass-through	attended	signal:' "$home/state/.supervision-host.log" "attended: the ledger must record where the close went"
   pass "host: an attended close reaches main exactly as the plain arm delivers it"
 }
 
@@ -296,6 +302,8 @@ test_away_wake_is_handled_on_the_engine_and_never_reaches_main() {
   assert_re '^arg=--resume$' "$second" "a later turn must resume the conversation"
   assert_re "^arg=$session\$" "$second" "a later turn must resume the same conversation"
   [ "$(grep -c '"task":"demo"' "$home/state/branch-outcomes.jsonl")" -eq 2 ] || fail "the second outcome was not recorded"
+  assert_re '	handled	turn=[^	]*\.2	.* cost=0\.25 conversation_cost=0\.5 ' "$home/state/.supervision-host.log" \
+    "a resumed turn must log its own cost, not the conversation's running total"
 
   pid=$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")
   watcher=$(cat "$home/state/.watch.lock/pid")
@@ -327,6 +335,27 @@ test_away_turn_without_a_report_hands_the_wake_to_main() {
   esac
   assert_absent "$home/state/.supervision-host-engine" "a turn that did not handle its wake must not keep its conversation"
   pass "host: an engine turn that records no outcome hands its durable wake to main"
+}
+
+test_return_during_an_engine_turn_hands_its_outcomes_to_main() {
+  local home
+  home=$(make_home away-return away)
+  echo return > "$home/stub-mode"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "return: the host never started a watcher cycle"
+  append_status "$home" 'mid-task'
+  wait_until 250 host_exited "$home" || fail "return: the host did not hand the late outcome to main: $(cat "$home/state/.supervision-host.log")"
+  expect_code 0 "$(cat "$home/host.rc")" "a late-outcome handoff must exit 0 for the owner to deliver"
+  assert_absent "$home/state/.afk-contract" "fixture: the stub's return did not archive the record"
+  assert_re '^signal: .*demo.status' "$home/host.out" "the handoff must carry the close"
+  assert_re '^supervision-host: the captain returned while the away session was handling this wake.*store rows 1[,)]' "$home/host.out" \
+    "the handoff must say the captain returned mid-turn and name the store rows"
+  assert_re '^supervision-host: outcome 1 for demo \[routine\]: stub handled demo$' "$home/host.out" \
+    "the handoff must carry the turn's outcome for main to relay"
+  assert_re '	handled	turn=' "$home/state/.supervision-host.log" "the turn itself was handled"
+  assert_no_grep 'demo.status' "$home/state/.wake-queue" "the handled wake must stay acknowledged"
+  watcher_live "$home" && fail "the host left its successor cycle running when it handed the outcome to main"
+  pass "host: a captain return during an engine turn hands that turn's outcomes to main"
 }
 
 test_engine_turn_is_bounded_and_its_descendants_reaped() {
@@ -412,6 +441,7 @@ test_dispatch_entry_scopes_rows_and_renders_the_away_tail
 test_attended_close_passes_straight_to_main
 test_away_wake_is_handled_on_the_engine_and_never_reaches_main
 test_away_turn_without_a_report_hands_the_wake_to_main
+test_return_during_an_engine_turn_hands_its_outcomes_to_main
 test_engine_turn_is_bounded_and_its_descendants_reaped
 test_restarted_host_stops_what_a_killed_predecessor_left
 test_park_boundary_ends_the_park_before_the_hook_timeout

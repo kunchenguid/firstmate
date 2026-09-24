@@ -29,7 +29,10 @@
 #     recorded a durable report (bin/fm-branch-report.sh). A handled wake - a
 #     routine or a captain outcome alike - never wakes main: captain outcomes
 #     wait in the outcome store for the return brief. It then parks on the
-#     successor.
+#     successor, unless the captain returned during that turn: the return
+#     brief was rendered before the turn's outcomes existed, so the host
+#     exits with the close and one "supervision-host:" line naming them, plus
+#     one line per outcome, for main to relay.
 # Every other outcome exits with the close's own reason line plus one
 # "supervision-host:" line saying why main has this wake, after stopping the
 # successor cycle so main's next turn end starts from the same state as
@@ -60,11 +63,12 @@
 #
 # STATE (all under state/, owned here): .supervision-host (this host's pid and
 # the processes it runs), .supervision-host-engine (the engine conversation:
-# engine, model, session id, main-session key, turn count), .supervision-host-turn
-# and .supervision-host-receipts (the current turn's report scope and the
-# reports it recorded), .supervision-host-prompt and .supervision-host-wake
-# (the prompt and wake text of the current turn), and .supervision-host.log (a
-# bounded per-turn ledger with the engine's usage and the outcome).
+# engine, model, session id, main-session key, turn count, running cost),
+# .supervision-host-turn and .supervision-host-receipts (the current turn's
+# report scope and the reports it recorded), .supervision-host-prompt and
+# .supervision-host-wake (the prompt and wake text of the current turn), and
+# .supervision-host.log (a bounded ledger of where every close went, with each
+# engine turn's usage and outcome).
 #
 # Tunables (environment): FM_SUPERVISION_HOST_PARK_SECONDS (27000),
 # FM_SUPERVISION_HOST_TURN_TIMEOUT (1200), FM_SUPERVISION_HOST_ROTATE_TURNS (20:
@@ -123,6 +127,7 @@ HOST_PID=$$
 HOST_STARTED=$(date +%s)
 GEN="host-$HOST_PID-$HOST_STARTED"
 TURN_SEQ=0
+LAST_TURN=
 GRANT_ACTIVE=0
 ARM_PID=
 ARM_OUT=
@@ -342,8 +347,9 @@ print_close() {
 }
 
 # Hand the close to main: stop the successor cycle (the state main's own turn
-# end starts from without the host), print the close and why, and exit.
-exit_to_main() {  # <why>
+# end starts from without the host), print the close, why, and any further
+# "supervision-host:" lines, and exit.
+exit_to_main() {  # <why> [further lines]
   if [ -n "$SUCCESSOR_PID" ]; then
     retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT"
     SUCCESSOR_PID=
@@ -352,8 +358,22 @@ exit_to_main() {  # <why>
   fi
   print_close
   printf 'supervision-host: %s\n' "$1"
+  [ -z "${2:-}" ] || printf '%s\n' "$2"
   log_line "to-main	$1"
   exit 0
+}
+
+# The outcomes one turn recorded, one "supervision-host:" line each, from its
+# receipts and the store (bin/fm-branch-outcome.sh owns the rows).
+turn_outcome_lines() {  # <turn>
+  local seqs
+  seqs=$(awk -F '\t' -v turn="$1" '$1 == turn { printf "%s%s", sep, $2; sep = "," }' "$RECEIPTS" 2>/dev/null)
+  [ -n "$seqs" ] || return 0
+  "$SCRIPT_DIR/fm-branch-outcome.sh" list --recent 1000 2>/dev/null \
+    | jq -r --arg seqs "$seqs" '($seqs | split(",") | map(tonumber)) as $want
+        | select(.seq as $q | $want | index($q))
+        | "supervision-host: outcome \(.seq) for \(.task) [\(.verdict)]: \(.summary)"' 2>/dev/null \
+    | tr -d '\r'
 }
 
 stand_down() {  # <why>
@@ -407,6 +427,7 @@ choose_conversation() {
     ENGINE_SESSION=$recorded_session
     ENGINE_MODE=resume
     ENGINE_TURNS=$turns
+    ENGINE_COST=$(sed -n 's/^conversation_cost=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)
     ENGINE_KEY=$key
     return 0
   fi
@@ -417,6 +438,7 @@ choose_conversation() {
   esac
   ENGINE_MODE=new
   ENGINE_TURNS=0
+  ENGINE_COST=0
   ENGINE_KEY=$key
   local tmp
   tmp=$(mktemp "$PROMPT_FILE.tmp.XXXXXX") || return 1
@@ -429,11 +451,11 @@ choose_conversation() {
   return 0
 }
 
-write_engine_record() {  # <turns>
+write_engine_record() {  # <turns> <conversation-cost>
   local tmp
   tmp=$(mktemp "$ENGINE_RECORD.tmp.XXXXXX") || return 1
-  printf 'engine=%s\nmodel=%s\nsession=%s\nkey=%s\nturns=%s\n' \
-    "$FM_SUPERVISION_ENGINE" "$FM_SUPERVISION_ENGINE_MODEL" "$ENGINE_SESSION" "$ENGINE_KEY" "$1" > "$tmp" \
+  printf 'engine=%s\nmodel=%s\nsession=%s\nkey=%s\nturns=%s\nconversation_cost=%s\n' \
+    "$FM_SUPERVISION_ENGINE" "$FM_SUPERVISION_ENGINE_MODEL" "$ENGINE_SESSION" "$ENGINE_KEY" "$1" "$2" > "$tmp" \
     && mv -f "$tmp" "$ENGINE_RECORD"
 }
 
@@ -491,6 +513,7 @@ handle_away() {  # <reason-lines>
   fi
   TURN_SEQ=$((TURN_SEQ + 1))
   turn="$GEN.$TURN_SEQ"
+  LAST_TURN=$turn
   : > "$RECEIPTS"
   printf 'turn=%s\nrows=%s\ntasks=%s\nunscoped=%s\nwake=%s\n' \
     "$turn" "$rows" "$tasks" "${unscoped:-0}" "$first" > "$TURN_FILE"
@@ -535,10 +558,11 @@ handle_away() {  # <reason-lines>
   "$SCRIPT_DIR/fm-wake-grant.sh" release "$GEN" >/dev/null 2>&1 || true
   rm -f "$TURN_FILE"
   receipts=$(awk -F '\t' -v turn="$turn" '$1 == turn { n++ } END { print n + 0 }' "$RECEIPTS" 2>/dev/null)
-  usage=$(fm_supervision_engine_result "$FM_SUPERVISION_ENGINE" "$result" 2>/dev/null || true)
+  usage=$(fm_supervision_engine_result "$FM_SUPERVISION_ENGINE" "$result" "${ENGINE_COST:-0}" 2>/dev/null || true)
   [ "$result" = /dev/null ] || rm -f "$result"
   if [ "$rc" -eq 0 ] && [ "${receipts:-0}" -gt 0 ] && [ -n "$usage" ] && [ "${usage#error=0}" != "$usage" ]; then
-    write_engine_record $((ENGINE_TURNS + 1)) || rm -f "$ENGINE_RECORD"
+    write_engine_record $((ENGINE_TURNS + 1)) "$(printf '%s\n' "$usage" | sed -n 's/.* conversation_cost=\([^ ]*\).*/\1/p')" \
+      || rm -f "$ENGINE_RECORD"
     [ "$errors" = /dev/null ] || rm -f "$errors"
     log_line "handled	turn=$turn	rc=$rc	reports=$receipts	$usage	$first"
     return 0
@@ -588,12 +612,19 @@ while :; do
   # A close with no wake is the arm's own failure or attach result, which the
   # owner judges exactly as it judges the arm's. Exit status 0 in both: a
   # status above 128 tells the owner the host itself died.
-  if [ -e "$STATE/.afk" ] || [ -z "$REASON" ]; then
+  if [ -z "$REASON" ]; then
+    log_line "pass-through	a close without a wake"
+    print_close
+    exit 0
+  fi
+  if [ -e "$STATE/.afk" ]; then
+    log_line "pass-through	the away daemon's flag exists	$(printf '%s\n' "$REASON" | head -n 1)"
     print_close
     exit 0
   fi
   # Attended: every wake is main's, as without the host.
   if [ ! -f "$STATE/.afk-contract" ]; then
+    log_line "pass-through	attended	$(printf '%s\n' "$REASON" | head -n 1)"
     print_close
     exit 0
   fi
@@ -621,6 +652,13 @@ while :; do
 
   if ! handle_away "$REASON"; then
     exit_to_main "the away session could not take this wake: $HANDLE_WHY; this wake is yours"
+  fi
+  # The captain returned during that turn: the return brief was rendered
+  # before its outcomes existed, so main relays them now.
+  if [ ! -f "$STATE/.afk-contract" ]; then
+    seqs=$(awk -F '\t' -v turn="$LAST_TURN" '$1 == turn { printf "%s%s", sep, $2; sep = ", " }' "$RECEIPTS" 2>/dev/null)
+    exit_to_main "the captain returned while the away session was handling this wake, which it finished after the return brief was rendered; relay its outcomes (store rows $seqs, listed next and in bin/fm-branch-outcome.sh list) to the captain" \
+      "$(turn_outcome_lines "$LAST_TURN")"
   fi
 
   # Handled: park on the successor.
