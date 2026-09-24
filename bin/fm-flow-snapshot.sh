@@ -70,7 +70,6 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-STATE_DIR="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 NM_TIMEOUT=${FM_FLOW_SNAPSHOT_NM_TIMEOUT:-10}
 GH_TIMEOUT=${FM_FLOW_SNAPSHOT_GH_TIMEOUT:-20}
@@ -104,6 +103,10 @@ command -v jq >/dev/null 2>&1 || { echo "fm-flow-snapshot: jq not found" >&2; ex
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# The link itself comes from the fleet document and nowhere else: taking one
+# from the run's own scalar would let this view report a pull request the rest
+# of firstmate does not associate with the task.
+#
 # The ONE owner of the pull request link grammar. A recorded link is read
 # through fm_pr_url_parse rather than by stripping its trailing number, because
 # the number alone does not say WHICH repository it belongs to: `gh pr view <n>`
@@ -413,17 +416,16 @@ row_common() {  # <task-json>
   # owner's decision from a new reader.
   FM_ROW_AGENT_ALIVE=$(printf '%s' "$task" | jq -r '.endpoint.agent_alive // "not_checked"')
   FM_ROW_PR_URL=$(printf '%s' "$task" | jq -r '.pr.url // ""')
-  # The path comes from the fleet document when it carries one, because
-  # bin/fm-fleet-snapshot.sh is this view's owner of fleet state and already
-  # resolved it; the standard construction is the fallback.
+  # Resolved by bin/fm-fleet-snapshot.sh, which publishes it for every task in
+  # the document, so there is nothing to reconstruct it from here.
   FM_ROW_META=$(printf '%s' "$task" | jq -r '.paths.meta.path // ""')
-  [ -n "$FM_ROW_META" ] || FM_ROW_META="$STATE_DIR/$FM_ROW_ID.meta"
   # Which model and effort the WORKER itself runs on, from the one machine
   # record of it: the fields bin/fm-spawn.sh wrote at dispatch. `default` means
   # the harness picked, which is not the name of a model, so it is emitted as
   # absent rather than as the word.
   FM_ROW_HARNESS=$(printf '%s' "$task" | jq -r '.harness // ""')
-  [ -n "$FM_ROW_HARNESS" ] || FM_ROW_HARNESS=$(fm_meta_get "$FM_ROW_META" harness)
+  # Model and effort are the two the fleet document does not publish, so they
+  # are the only facts still read from the task record here.
   FM_ROW_MODEL=$(fm_meta_get "$FM_ROW_META" model)
   [ "$FM_ROW_MODEL" != default ] || FM_ROW_MODEL=
   FM_ROW_EFFORT=$(fm_meta_get "$FM_ROW_META" effort)
@@ -481,8 +483,11 @@ agent_json() {  # <task-json>
   # DIRECTORY, so the read is done in the task's own copy. The subshell inside
   # fm_nm_bounded keeps that change local: this collector reads several tasks in
   # one pass and must not carry one task's directory into the next.
+  # The task's OWN copy, with no second acceptance path. The project root is a
+  # different copy, and the pipeline keys its repository record on the working
+  # path, so reading there answers for a different repository - which is the
+  # limit this command's header states rather than something to work around.
   rundir=$worktree
-  if [ -z "$rundir" ] || [ ! -d "$rundir" ]; then rundir=$project; fi
   if [ -z "$rundir" ] || [ ! -d "$rundir" ]; then
     collect_ok=false
     collect_reason='no copy of the repository left to read the run from'
@@ -574,7 +579,6 @@ agent_json() {  # <task-json>
       # tests/captures/no-mistakes-v1.70.1/failed.toon is that shape.
       run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$axi" head)")
       run_error=$(fm_nm_strip_quotes "$(fm_nm_field "$axi" error)")
-      [ -n "$pr_url" ] || pr_url=$(fm_nm_strip_quotes "$(fm_nm_field "$axi" pr)")
     fi
   fi
 

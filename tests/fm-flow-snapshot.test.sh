@@ -67,6 +67,13 @@ write_task ship-ansi     ship no-mistakes fm:13
 # bin/fm-fleet-snapshot.sh publishes it; run attribution is keyed on it.
 write_task ship-prefixed ship no-mistakes fm:14
 printf 'branch=release/ship-prefixed\n' >> "$HOME_DIR/state/ship-prefixed.meta"
+# Deliberately NOT created: the run is read in the task's own copy or not at
+# all, and the project root is a different copy answering for a different
+# repository.
+fm_write_meta "$HOME_DIR/state/ship-nocopy.meta" \
+  "window=fm:15" "endpoint_task_id=ship-nocopy" \
+  "worktree=$TMP_ROOT/wt/ship-nocopy-absent" \
+  "project=$PROJECT" "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
 write_task scout-one   scout local-only fm:10
 # No window at all, which is how the fleet document reports a task it could not
 # observe as well as one that never had an endpoint.
@@ -167,6 +174,7 @@ run:
   branch: fm/ship-wide
   status: running
   head: ab12cd34
+  pr: "https://github.com/example/project/pull/999"
   steps[4]{step,status,detail,attempt,findings,duration_ms}:
     "intent",completed,,1,0,44
     review,running,"failed, then fixed",2,3,0
@@ -288,6 +296,7 @@ case "${1:-}" in
     printf 'fm:5 fm-ship-closed\nfm:6 fm-ship-gitlab\nfm:7 fm-ship-badrun\nfm:8 fm-ship-odd\n'
     printf 'fm:9 fm-ship-wide\nfm:10 fm-scout-one\nfm:11 fm-ship-readfail\n'
     printf 'fm:12 fm-ship-captured\nfm:13 fm-ship-ansi\nfm:14 fm-ship-prefixed\n'
+    printf 'fm:15 fm-ship-nocopy\n'
     ;;
   list-panes)
     printf '%s\n' "${target##*:}"
@@ -412,6 +421,20 @@ assert_equals "failed" \
 assert_equals "6980" \
   "$(agent ship-captured '[.steps[] | select(.step == "push")][0].duration_ms')" \
   "and their durations"
+
+# --- the run is read in the task's own copy, or not at all ------------------
+
+assert_equals "false" "$(agent ship-nocopy '.collection.ok')" \
+  "a task whose own copy of the repository is gone reports its run as unestablished"
+assert_contains "$(agent ship-nocopy '.collection.reason')" "no copy of the repository" \
+  "and says so, rather than reading a different copy and answering from it"
+
+# --- the pull request link has one source -----------------------------------
+
+assert_equals "null" "$(agent ship-wide '.pr.url')" \
+  "a link on the run itself is not adopted as the task's, which the fleet document owns"
+assert_equals "null" "$(agent ship-wide '.pr.number')" \
+  "so no PR number is attached to a task the rest of firstmate has none for"
 
 # --- a project that registered its own ship-branch prefix -------------------
 
