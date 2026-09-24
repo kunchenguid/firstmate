@@ -19,8 +19,8 @@
 //     successor generation commits its own arm, so omp keeps the plain
 //     teardown-and-rearm replacement shape.
 //   - The Pi supervision branch is out of scope for omp: every actionable wake
-//     is delivered to main, so no branch offer is made and no calm presentation
-//     hooks exist.
+//     is delivered to main, so no branch offer is made here. Transcript Calm
+//     hide-ceremony lives in the sibling .omp/extensions/fm-calm.ts extension.
 //   - The arming tool is fm_watch_arm_omp and its human fallback
 //     /fm-watch-arm-omp; the loaded-build marker is state/.omp-watch-extension-loaded.
 //   - Supervision host: a home opted in with config/supervision-host

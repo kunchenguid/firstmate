@@ -18,14 +18,8 @@
 // session_start; and collision-check only the later first-activation path, when
 // getAllTools() is reliable. docs/calm-mode-feasibility.md owns the Pi-source evidence
 // and docs/calm.md owns the user-facing behavior and non-retroactive first-toggle bound.
-import { randomUUID } from "node:crypto";
 import {
-  mkdirSync,
-  readFileSync,
   realpathSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,6 +56,11 @@ import {
   setCalmPresentation,
   setCalmStockExportRendering,
 } from "./lib/fm-calm-visibility.ts";
+import { calmPreferencePath } from "./lib/fm-calm-preference.ts";
+import {
+  loadCalmPreference,
+  persistCalmPreference,
+} from "./lib/fm-calm-persistence.ts";
 
 type DefinitionFactory<TParams extends TSchema, TDetails, TState> = (
   cwd: string,
@@ -156,35 +155,14 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
-  const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
-  const configDirectory = process.env.FM_CONFIG_OVERRIDE || resolve(fmHome, "config");
-  const calmPreferencePath = resolve(configDirectory, "calm");
-  // "max" is the legacy value written by the removed third presentation level, whose
-  // behavior is now ordinary Calm; a home upgraded from it restores as on rather than
-  // dropping to off. docs/configuration.md owns the persisted value schema.
-  const loadCalmPreference = (): boolean => {
-    let stored: string;
-    try {
-      stored = readFileSync(calmPreferencePath, "utf8").trim();
-    } catch {
-      return false;
-    }
-    return stored === "on" || stored === "max";
-  };
-  const persistCalmPreference = (active: boolean): void => {
-    mkdirSync(dirname(calmPreferencePath), { recursive: true });
-    const temporaryPath = `${calmPreferencePath}.${process.pid}.${randomUUID()}.tmp`;
-    try {
-      writeFileSync(temporaryPath, active ? "on\n" : "off\n", {
-        encoding: "utf8",
-        flag: "wx",
-        mode: 0o600,
-      });
-      renameSync(temporaryPath, calmPreferencePath);
-    } finally {
-      rmSync(temporaryPath, { force: true });
-    }
-  };
+  const preferencePath = calmPreferencePath(
+    {
+      FM_HOME: process.env.FM_HOME,
+      FM_ROOT_OVERRIDE: process.env.FM_ROOT_OVERRIDE,
+      FM_CONFIG_OVERRIDE: process.env.FM_CONFIG_OVERRIDE,
+    },
+    root,
+  );
 
   const publishPresentationState = (): void => {
     pi.events.emit(FIRSTMATE_CALM_PRESENTATION_EVENT, {
@@ -335,7 +313,7 @@ export default function (pi: ExtensionAPI) {
   // unconditional here (see file header): a foreign-claim check is not reachable at
   // this point, while deferral would make restored rows capture the wrong definition.
   // A Calm-off session or reload registers nothing and creates no collision exposure.
-  if (loadCalmPreference()) {
+  if (loadCalmPreference(preferencePath)) {
     for (const tool of wrappedBuiltIns) pi.registerTool(tool);
     builtInsRegistered = true;
   }
@@ -412,7 +390,7 @@ export default function (pi: ExtensionAPI) {
     reportBuiltInLosses();
     calmToolRowRepaints.clear();
     exportRendering = false;
-    setCalmPresentation(loadCalmPreference());
+    setCalmPresentation(loadCalmPreference(preferencePath));
     setCalmStockExportRendering(false);
     publishPresentationState();
     agentRunActive = false;
@@ -478,7 +456,7 @@ export default function (pi: ExtensionAPI) {
     description: "Toggle Firstmate's supported conversation-only transcript presentation.",
     handler: async (_args, ctx) => {
       const active = !calmPresentationIsActive();
-      persistCalmPreference(active);
+      persistCalmPreference(preferencePath, active);
       setCalmPresentation(active);
       if (active) activateBuiltInsIfNeeded(ctx.ui);
       publishPresentationState();
