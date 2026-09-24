@@ -4519,9 +4519,9 @@ tout_elapsed=$(cat "$TMP_ROOT/timeout-arm/elapsed")
 pass "arm waits out the confirm window before reporting that the listener is not running"
 
 # Re-arming a firstmate-owned board publishes a new registration while the
-# earlier generation's listener still holds the claim. That listener keeps
-# serving the board, so arm must say so at once instead of waiting out the
-# confirm window and reporting failure, and must never claim this generation is
+# earlier generation's listener still holds the claim. When that listener still
+# holds it as the confirm window ends, it keeps serving the board, so arm must
+# say so instead of reporting failure, and must never claim this generation is
 # the one listening.
 LIVE="$TMP_ROOT/live-rearm"
 mkdir -p "$LIVE/bin" "$LIVE/home/state"
@@ -4537,17 +4537,13 @@ PATH="$LIVE/bin:$PATH" FM_HOME="$LIVE/home" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$live_art" > "$LIVE/arm1.out"
 assert_contains "$(cat "$LIVE/arm1.out")" "armed: $live_id" "the first arm was not reported ready"
 wait_for_lines "$READY_MARK" 1 || fail "the first generation's listener never ran"
-live_began=$(date +%s)
 set +e
-PATH="$LIVE/bin:$PATH" FM_HOME="$LIVE/home" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=5 \
+PATH="$LIVE/bin:$PATH" FM_HOME="$LIVE/home" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$live_art" > "$LIVE/arm2.out" 2> "$LIVE/arm2.err"
 live_rc=$?
 set -e
-live_elapsed=$(( $(date +%s) - live_began ))
 [ "$live_rc" -eq 0 ] \
   || fail "re-arm over a live earlier listener failed ($live_rc): $(cat "$LIVE/arm2.err")"
-[ "$live_elapsed" -lt 4 ] \
-  || fail "re-arm over a live earlier listener waited out the confirm window (${live_elapsed}s)"
 assert_contains "$(cat "$LIVE/arm2.out")" "still-listening: $live_id" \
   "re-arm did not say the earlier listener is still serving the board"
 assert_contains "$(cat "$LIVE/arm2.out")" "retired and armed again" \
@@ -4565,6 +4561,82 @@ touch "$READY_RELEASE"
 PATH="$LIVE/bin:$PATH" FM_HOME="$LIVE/home" \
   "$ROOT/bin/fm-procevent-lavish.sh" retire "$live_art" >/dev/null 2>&1 || true
 pass "re-arm over a live earlier listener reports it still serving the board"
+
+# A worker re-arms as soon as its round is published, which can land while the
+# earlier generation's runner is still finishing and holding the claim. Once
+# that claim is released inside the confirm window, arm must start the new
+# generation carrying the worker's reply and report it armed.
+DRAIN="$TMP_ROOT/draining-rearm"
+mkdir -p "$DRAIN/bin" "$DRAIN/home/state"
+export DRAIN
+cat > "$DRAIN/bin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "${3-}" != --agent-reply ] || printf '%s\n' "$4" >> "$DRAIN/replies"
+printf 'poll\n' >> "$DRAIN/polls"
+if [ "$(wc -l < "$DRAIN/polls")" -ge 2 ]; then
+  while [ ! -e "$DRAIN/release2" ]; do sleep 0.02; done
+else
+  while [ ! -e "$DRAIN/release1" ]; do sleep 0.02; done
+fi
+printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","next round","","message",""\n'
+SH
+chmod +x "$DRAIN/bin/lavish-axi"
+drain_art="$DRAIN/board.html"
+printf '<h1>drain</h1>\n' > "$drain_art"
+lavish_session "$drain_art"
+drain_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$drain_art")
+fm_test_track_procevent_home "$DRAIN/home"
+new_task_endpoint "$DRAIN/home" worker-drain
+printf 'first drain reply\n' > "$DRAIN/reply1"
+printf 'second drain reply\n' > "$DRAIN/reply2"
+PATH="$DRAIN/bin:$PATH" FM_HOME="$DRAIN/home" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$drain_art" --for worker-drain \
+  --agent-reply-file "$DRAIN/reply1" >/dev/null \
+  || fail "the first generation of the draining fixture did not arm"
+drain_claim="$FM_PROCEVENT_CLAIM_ROOT/$drain_id.claim"
+cp "$drain_claim" "$DRAIN/generation-one.claim"
+touch "$DRAIN/release1"
+wait_for "$DRAIN/home/state/procevent-inbox/$drain_id.1.result" \
+  || fail "the first generation of the draining fixture never captured its round"
+for _ in $(seq 1 100); do
+  [ -e "$drain_claim" ] || break
+  sleep 0.05
+done
+[ ! -e "$drain_claim" ] || fail "the first generation of the draining fixture never exited"
+# Stand the first generation's claim back up on a live process so the re-arm
+# meets it still held, then release it partway through the confirm window.
+setsid sleep 60 &
+drain_holder=$!
+drain_holder_identity=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$ROOT" "$drain_holder") \
+  || fail "could not read the draining holder's identity"
+awk -v pid="$drain_holder" -v ident="$drain_holder_identity" \
+  'NR == 2 { print pid; next } NR == 4 { print ident; next } { print }' \
+  "$DRAIN/generation-one.claim" > "$drain_claim"
+chmod 0600 "$drain_claim"
+[ "$(pe "$DRAIN/home" list | awk -v id="$drain_id" '$1 == id { print $3 }')" = task:worker-drain/round-open ] \
+  || fail "fixture invalid: the stood-up first generation is not reported live: $(pe "$DRAIN/home" list)"
+PATH="$DRAIN/bin:$PATH" FM_HOME="$DRAIN/home" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=5 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$drain_art" --for worker-drain \
+  --agent-reply-file "$DRAIN/reply2" > "$DRAIN/arm2.out" 2> "$DRAIN/arm2.err" &
+drain_arm=$!
+sleep 1
+kill -KILL "$drain_holder" 2>/dev/null || true
+wait "$drain_holder" 2>/dev/null || true
+wait "$drain_arm" \
+  || fail "re-arm failed after the earlier claim was released: $(cat "$DRAIN/arm2.err")"
+assert_contains "$(cat "$DRAIN/arm2.out")" "armed: $drain_id" \
+  "re-arm did not launch the new generation once the earlier claim was released"
+assert_not_contains "$(cat "$DRAIN/arm2.out")" "still-listening" \
+  "re-arm reported the released earlier listener as still serving the board"
+wait_for_lines "$DRAIN/replies" 2 \
+  || fail "the new generation never handed the board the worker's reply"
+[ "$(grep -c 'second drain reply' "$DRAIN/replies" 2>/dev/null || true)" = 1 ] \
+  || fail "the new generation did not hand the board its own reply exactly once"
+touch "$DRAIN/release2"
+wait_for "$DRAIN/home/state/procevent-inbox/$drain_id.2.result" \
+  || fail "the new generation never captured its round"
+pass "re-arm launches the new generation once a draining earlier claim is released"
 
 # A stale claim whose process group is still alive may still have its polling
 # child on the board's session. Reconcile refuses to launch beside it, and arm

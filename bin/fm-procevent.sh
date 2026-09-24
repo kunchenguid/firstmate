@@ -47,8 +47,9 @@
 #            that generation's live claim or its launch stamp says it started.
 #            The wait is the reconcile confirm window and ends early on evidence.
 #            No evidence within the window is a nonzero result. Exit 3 means a
-#            live listener from another registration generation still owns the
-#            source, so this generation cannot start until it is retired.
+#            live listener from another registration generation still held the
+#            source when the window ended, so this generation cannot start until
+#            it is retired.
 # start      Claim the source, run its child to completion, durably capture the
 #            output, publish normalized wakes for pending results, then release
 #            the claim. It blocks for as long as the source blocks and is meant
@@ -1840,10 +1841,7 @@ cmd_ensure_listening() {
   while :; do
     listening=0
     generation_is_listening "$id" "$identity" || listening=$?
-    case "$listening" in
-      0) return 0 ;;
-      3) return 3 ;;
-    esac
+    [ "$listening" -ne 0 ] || return 0
     mark=
     if stamp=$(fm_procevent_launch_floor_stamp_path "$STATE" "$id" "$identity"); then
       mark=$(cat -- "$stamp" 2>/dev/null || true)
@@ -1858,6 +1856,7 @@ cmd_ensure_listening() {
     [ "$SECONDS" -lt "$deadline" ] || break
     sleep 0.05
   done
+  [ "$listening" -ne 3 ] || return 3
   printf 'error: listener is not running: %s\n' "$id" >&2
   return 1
 }
