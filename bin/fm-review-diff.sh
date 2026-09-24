@@ -167,7 +167,10 @@ if [ "$MODE" = local-only ]; then
 elif git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
+  if ! git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet; then
+    echo "error: could not fetch remote base origin/$DEFAULT; refusing to review against a cached ref" >&2
+    exit 1
+  fi
   BASE_REF="refs/remotes/origin/$DEFAULT"
   BASE_LABEL="origin/$DEFAULT"
 else
