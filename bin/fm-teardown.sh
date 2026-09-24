@@ -2888,10 +2888,11 @@ preflight_descendant_treehouse_slots() {
       continue
     fi
     fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
+    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
     owner_rc=0
     require_owned_worktree_slot_record "$task_id" "$worktree" || owner_rc=$?
     case "$owner_rc" in
-      0) require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1 ;;
+      0) ;;
       "$TEARDOWN_SLOT_REASSIGNED_RC") ;;
       *) return 1 ;;
     esac

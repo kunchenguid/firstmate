@@ -1048,7 +1048,7 @@ test_reassigned_records_sharing_a_slot_retire_before_the_owner() {
 
   # A claim that cannot prove non-ownership keeps the record-scan refusal:
   # absent, unreadable, and conflicting claims all stop before any change.
-  for claim in absent unreadable conflicting; do
+  for claim in absent unreadable conflicting empty-task-first empty-home-first; do
     dir=$(make_case "slot-three-records-$claim")
     mark_case_as_treehouse_pool "$dir"
     write_shared_slot_record "$dir" "$first" scout
@@ -1058,9 +1058,23 @@ test_reassigned_records_sharing_a_slot_retire_before_the_owner() {
       unreadable) printf 'not-a-claim\n' > "$dir/pool/1/.fm-slot-owner" ;;
       conflicting) printf 'task=%s\ntask=%s\nhome=%s\n' "$first" "$owner" "$dir/home" \
         > "$dir/pool/1/.fm-slot-owner" ;;
+      empty-task-first) printf 'task=\ntask=%s\nhome=%s\n' "$owner" "$dir/home" \
+        > "$dir/pool/1/.fm-slot-owner" ;;
+      empty-home-first) printf 'task=%s\nhome=\nhome=%s\n' "$owner" "$dir/home" \
+        > "$dir/pool/1/.fm-slot-owner" ;;
     esac
     for id in "$first" "$owner"; do
-      assert_refused_without_mutation "$dir" "$id" "$claim slot claim, three records, teardown of $id"
+      set +e
+      FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+        "$TEARDOWN" "$id" > "$dir/stdout" 2> "$dir/stderr"
+      rc=$?
+      set -e
+      [ "$rc" -ne 0 ] || fail "$claim slot claim, three records: teardown of $id unexpectedly succeeded"
+      assert_present "$dir/home/state/$id.meta" "$claim slot claim: teardown of $id removed its record"
+      assert_present "$dir/worktree/sentinel" "$claim slot claim: teardown of $id changed the shared slot"
+      [ ! -s "$dir/runtime.log" ] \
+        || fail "$claim slot claim: teardown of $id reached the runtime: $(cat "$dir/runtime.log")"
       assert_present "$dir/home/state/$second.meta" "$claim slot claim: teardown of $id removed $second's record"
     done
   done

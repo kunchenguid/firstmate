@@ -1327,7 +1327,7 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
 # claimant as evidence. The home is reported, never matched: a home that moved
 # must not turn a task's own slot into a refusal.
 fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
-  local worktree=$1 id=$2 marker line owner_id='' owner_home=''
+  local worktree=$1 id=$2 marker line owner_id='' owner_home='' task_seen=0 home_seen=0
   FM_TREEHOUSE_SLOT_OWNER=unsafe
   FM_TREEHOUSE_SLOT_OWNER_ID=
   FM_TREEHOUSE_SLOT_OWNER_HOME=
@@ -1340,12 +1340,14 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       task=*)
-        [ -z "$owner_id" ] || [ "$owner_id" = "${line#task=}" ] || return 0
+        [ "$task_seen" -eq 0 ] || [ "$owner_id" = "${line#task=}" ] || return 0
         owner_id=${line#task=}
+        task_seen=1
         ;;
       home=*)
-        [ -z "$owner_home" ] || [ "$owner_home" = "${line#home=}" ] || return 0
+        [ "$home_seen" -eq 0 ] || [ "$owner_home" = "${line#home=}" ] || return 0
         owner_home=${line#home=}
+        home_seen=1
         ;;
     esac
   done < "$marker" || return 0
