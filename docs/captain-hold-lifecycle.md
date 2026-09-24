@@ -280,6 +280,8 @@ The binding-checked `reconcile-requests` command is that internal intake rather 
 
 ### Verifying and retiring a request
 
+A pending request is also a classification fact, not merely bookkeeping: the canonical snapshot buckets a hold with a pending request `reconciling`, so it leaves the live Captain's Call (it is no longer waiting on the captain) and is disclosed under Charted Next as `reconcile requested <timestamp>: <hold reason>`. Retiring the request restores the live call when the hold is still due and unblocked.
+
 Verification retires a request through one of two outcomes.
 Each outcome requires both the pending board-created request and the operator input that supports its claim:
 

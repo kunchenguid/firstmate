@@ -407,6 +407,21 @@ reconcile_requests_json() {
     2>/dev/null || printf '{}\n'
 }
 
+# Ids of tasks already landed into data/done-archive.md. A blocker whose task
+# landed is resolved even though it is no longer an in-backlog record, so the
+# classifier folds those ids into its resolved set. A live backlog row still
+# wins: the record reduce overwrites an archived id the backlog mentions.
+archived_ids_json() {
+  local archive="$DATA/done-archive.md"
+  if [ ! -f "$archive" ] || [ -L "$archive" ]; then
+    printf '[]\n'
+    return 0
+  fi
+  sed -n 's/^- \[x\] \([^ ]*\) -.*/\1/p' "$archive" \
+    | jq -Rn '[inputs | select(test("^[A-Za-z0-9._-]{1,128}$"))]' 2>/dev/null \
+    || printf '[]\n'
+}
+
 backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   local backlog=${1:-$BACKLOG}
   if [ ! -f "$backlog" ]; then
@@ -417,7 +432,8 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   # shellcheck disable=SC2094
   jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" --arg now "$SNAPSHOT_NOW" \
     --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" \
-    --argjson reconcile "$(reconcile_requests_json)" '
+    --argjson reconcile "$(reconcile_requests_json)" \
+    --argjson archived "$(archived_ids_json)" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def timestamp_epoch($d):
       if ($d | type) != "string" then null
@@ -569,8 +585,9 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
           | .body_excerpt = ((.body_lines | join(" "))[:240])
         else . end)
     | .records as $records
-    | (reduce ($records[] | select(.structured)) as $record ({};
-         .[$record.id] = ((.[$record.id] // true) and ($record.state == "done")))) as $resolved_ids
+    | (($archived | map({(.): true}) | add) // {}) as $archived_ids
+    | ($archived_ids + (reduce ($records[] | select(.structured)) as $record ({};
+         .[$record.id] = ((.[$record.id] // true) and ($record.state == "done"))))) as $resolved_ids
     | .records |= map(
         if .structured then
           . as $record

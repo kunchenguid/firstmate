@@ -769,7 +769,33 @@ test_build_refuses_a_nondecision_reconcile_value() {
   pass "build reserves reconcile across non-decision cards"
 }
 
+test_build_persists_decision_cards_durably() {
+  local home data store key
+  home=$(make_home durable-cards)
+  data="$home/payload.json"
+  store="$home/state/decision-cards"
+  key=sample-instruction-layer-refinement-review-decision-perishable-first-admission-choice
+  write_valid_payload "$data"
+
+  run_board "$home" build "$data" >/dev/null || fail "a valid payload did not build"
+  assert_present "$store/$key.json" "build did not persist the effective decision card"
+  [ "$(jq -r '.card.title' "$store/$key.json")" = "Perishable-first admission" ] \
+    || fail "the persisted card does not carry the composed title"
+  jq -e '.schema == "fm-decision-card.v1"
+         and (any(.card.options[]; .value == "reconcile"))' "$store/$key.json" >/dev/null \
+    || fail "the persisted card must be the effective card, reconcile choice included"
+
+  # A rebuild that no longer cards the key keeps the record: an absent or
+  # unestablished task must not hide the options a later reader needs.
+  jq --arg key "$key" '.captains_call = [.captains_call[] | select(.key != $key)]' \
+    "$data" > "$data.next" && mv "$data.next" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "a rebuild without the card did not build"
+  assert_present "$store/$key.json" "a rebuild without the card pruned a call that may still be open"
+  pass "build persists the effective decision cards for later readers"
+}
+
 test_path_is_stable_and_home_scoped
+test_build_persists_decision_cards_durably
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
 test_build_injects_binds_then_arms

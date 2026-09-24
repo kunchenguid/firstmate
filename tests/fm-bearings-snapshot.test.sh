@@ -1195,6 +1195,71 @@ EOF
   pass "captain-held tasks of any kind reach Captain's Call, deferral is honored, and landed excludes answered calls"
 }
 
+# A call the captain sent back for a re-check is not waiting on the captain: the
+# pending request buckets it apart from the live Captain's Call and discloses it
+# as a gate naming the request time, until the owner reconciles or answers it.
+test_reconcile_requested_hold_leaves_captains_call() {
+  local home fakebin json
+  home=$(make_home reconciling-call)
+  mkdir -p "$home/data" "$home/state/reconcile-requests"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] waiting-call - Captain choice still waiting (repo: firstmate) (kind: captain) (hold: pick a route) (hold-kind: captain)
+- [ ] checking-call - Captain choice under re-check (repo: firstmate) (kind: captain) (hold: verify the premise) (hold-kind: captain)
+
+## Done
+EOF
+  printf 'schema=fm-reconcile-request.v1\ntask=checking-call\nrequested=2026-07-14T09:30:00Z\nsource=herdr-firstmate-flow Captain Deck\n' \
+    > "$home/state/reconcile-requests/checking-call.request"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.[]; .id == "waiting-call"))
+      and (.decisions_open | any(.[]; .id == "checking-call") | not)
+      and (.gates | any(.[]; .id == "checking-call"
+                        and (.reason | startswith("reconcile requested 2026-07-14T09:30:00Z"))))
+  ' >/dev/null || fail "a reconcile-requested hold must leave Captain's Call for a dated gate: $json"
+  rm -f "$home/state/reconcile-requests/checking-call.request"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.[]; .id == "checking-call"))
+      and (.gates | any(.[]; .id == "checking-call") | not)
+  ' >/dev/null || fail "a retired request must restore the live call: $json"
+  pass "a reconcile-requested captain call leaves Captain's Call and is disclosed as a gate"
+}
+
+# A blocker whose task already landed into data/done-archive.md is resolved,
+# even though it is no longer an in-backlog record: the call it gated is the
+# captain's now, not a Charted Next gate waiting on shipped work.
+test_archived_blocker_does_not_hold_a_call() {
+  local home fakebin json
+  home=$(make_home archived-blocker)
+  mkdir -p "$home/data"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] landed-blocker-call - Real call once the blocker landed (repo: firstmate) (kind: captain) blocked-by: archived-blocker (hold: decide now) (hold-kind: captain)
+- [ ] absent-blocker-call - Still gated by a blocker with no record (repo: firstmate) (kind: captain) blocked-by: never-filed (hold: waits) (hold-kind: captain)
+
+## Done
+EOF
+  cat > "$home/data/done-archive.md" <<'EOF'
+- [x] archived-blocker - Landed blocker work https://github.com/example/x/pull/9 (repo: firstmate) (kind: ship) (merged 2026-07-10)
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open | any(.[]; .id == "landed-blocker-call"))
+      and (.gates | any(.[]; .id == "landed-blocker-call") | not)
+      and (.decisions_open | any(.[]; .id == "absent-blocker-call") | not)
+      and (.gates | any(.[]; .id == "absent-blocker-call"))
+  ' >/dev/null || fail "an archived blocker must not keep a call out of Captain's Call: $json"
+  pass "a landed blocker resolves the call it gated"
+}
+
 test_undated_hold_phrasing_and_aging_projection() {
   local home mate fakebin json
   home=$(make_home undated-aging-proj)
@@ -3408,6 +3473,8 @@ test_partial_github_failure_degrades
 test_perl_fallback_bounds_github_call
 test_section_caps_and_expansion_flags
 test_collapsed_captain_call_deferral_and_landed
+test_reconcile_requested_hold_leaves_captains_call
+test_archived_blocker_does_not_hold_a_call
 test_undated_hold_phrasing_and_aging_projection
 test_blocked_deferred_hold_has_concrete_disclosure
 test_revealed_deferred_holds_show_their_deferral_reason
