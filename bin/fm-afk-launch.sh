@@ -292,15 +292,17 @@ fm_afk_launch_posture_require() {
 # launches nothing, no later flag write would ever correct it. It rewrites and
 # never removes: that file is the live daemon's presence gate
 # (bin/fm-supervise-daemon.sh afk_active), and an absent flag is not created,
-# because no daemon is running to gate.
+# because no daemon is running to gate. The flag goes FIRST so a failed write
+# leaves no record behind: the record is the posture, so a reported failure with
+# one standing would be a lie.
 fm_afk_launch_enter() {
   fm_afk_launch_catchup_pending away && return 1
-  "$FM_AFK_CONTRACT_CMD" enter "$@" || return $?
-  [ -e "$FM_AFK_LAUNCH_STATE/.afk" ] || return 0
-  fm_afk_flag_write "$FM_AFK_LAUNCH_STATE" away || {
-    fm_afk_launch_log "failed to write the away posture to the flag beside the away-posture record"
+  if [ -e "$FM_AFK_LAUNCH_STATE/.afk" ] \
+    && ! fm_afk_flag_write "$FM_AFK_LAUNCH_STATE" away; then
+    fm_afk_launch_log "failed to write the away posture to the flag; no away-posture record was written, so the home did not go away"
     return 1
-  }
+  fi
+  "$FM_AFK_CONTRACT_CMD" enter "$@"
 }
 
 # The command run inside the created terminal. Real launch runs the shared

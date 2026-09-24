@@ -323,6 +323,27 @@ unit_launcher_messages_name_the_posture() {
   rm -rf "$st"
 }
 
+# The record IS the away posture, so a reported entry failure must be true: the
+# flag write goes first, and when it fails no record is written and the home
+# stays where it was.
+unit_enter_flag_failure_writes_no_record() {
+  local st out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-enter-flag-fail.XXXXXX")
+  mkdir -p "$st/state"
+  # A directory standing where the flag file belongs is exactly what
+  # fm_afk_flag_write refuses to overwrite.
+  mkdir -p "$st/state/.afk"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'ship it' 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -f "$st/state/.afk-contract" ] \
+    && printf '%s' "$out" | grep -F 'no away-posture record was written' >/dev/null; then
+    pass "enter: a failed flag write reports a failure that is true - no away-posture record stands"
+  else
+    fail "enter: reported failure (rc=$rc) with an away-posture record standing: $out"
+  fi
+  rm -rf "$st"
+}
+
 unit_failed_daemon_launch_preserves_the_record() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-failed-record.XXXXXX")
@@ -474,6 +495,51 @@ unit_fresh_vs_refresh() {
 # ---------------------------------------------------------------------------
 read_mode() {  # <state-dir>
   bash -c '. "$1"; fm_afk_mode "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$1"
+}
+
+read_window_start() {  # <state-dir>
+  sed -n '2p' "$1/.afk" 2>/dev/null || true
+}
+
+# The flag's second line is when this posture window started, and the return's
+# catch-up covers everything from it (bin/fm-afk-return.sh window_start_epoch).
+# A quiet window has no posture record to take that epoch from, so a refresh
+# that restamped it would silently shorten the catch-up and drop every outcome
+# the daemon self-handled before the refresh.
+unit_mode_refresh_keeps_the_window_start() {
+  local st before after
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-window-start.XXXXXX")
+  mkdir -p "$st/state"
+  before=$(( $(date '+%s') - 3600 ))
+  printf 'quiet\n%s\n' "$before" > "$st/state/.afk"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet \
+    bash -c '. "$1"; fm_afk_launch_flag_write' _ "$LAUNCH"
+  after=$(read_window_start "$st/state")
+  if [ "$after" = "$before" ] && [ "$(read_mode "$st/state")" = quiet ]; then
+    pass "window start: a quiet refresh keeps the window's original start timestamp"
+  else
+    fail "window start: a quiet refresh restamped the window ($before -> $after)"
+  fi
+
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    bash -c '. "$1"; fm_afk_launch_flag_write' _ "$LAUNCH"
+  after=$(read_window_start "$st/state")
+  if [ "$after" = "$before" ]; then
+    pass "window start: a bare refresh with no requested mode keeps it too"
+  else
+    fail "window start: a bare refresh restamped the window ($before -> $after)"
+  fi
+
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=away \
+    bash -c '. "$1"; fm_afk_launch_flag_write' _ "$LAUNCH"
+  after=$(read_window_start "$st/state")
+  case "$after" in ''|*[!0-9]*) after=0 ;; esac
+  if [ "$(read_mode "$st/state")" = away ] && [ "$after" -gt "$before" ]; then
+    pass "window start: entering the other mode starts a new window"
+  else
+    fail "window start: the quiet -> away entry kept the old window start ($after)"
+  fi
+  rm -rf "$st"
 }
 
 unit_mode_explicit_write() {
@@ -1444,6 +1510,7 @@ unit_daemon_entry_requires_the_record
 unit_quiet_entry_needs_no_record
 unit_away_entry_from_quiet_writes_away
 unit_launcher_messages_name_the_posture
+unit_enter_flag_failure_writes_no_record
 unit_failed_daemon_launch_preserves_the_record
 unit_stop_archives_the_record_last
 unit_relative_paths_are_absolute_before_daemon_launch
@@ -1451,6 +1518,7 @@ unit_fresh_vs_refresh
 unit_mode_explicit_write
 unit_mode_fresh_defaults_away
 unit_mode_refresh_preserves_quiet
+unit_mode_refresh_keeps_the_window_start
 unit_mode_garbage_and_legacy_content_reads_away
 unit_stop_ordering
 unit_stop_rejects_reused_pid

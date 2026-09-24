@@ -320,6 +320,7 @@ test_return_is_mode_agnostic_for_quiet_mode() {
 
   out=$(run_return "$dir" begin) || fail "return did not succeed cleanly against a quiet-mode flag: $out"
   assert_contains "$out" 'catch-up clear' "quiet-mode return did not announce ordinary work may proceed"
+  assert_contains "$out" '=== Return brief (quiet ' "the brief told a captain who never left that they were away"
   [ ! -e "$dir/home/state/.afk" ] || fail "quiet-mode return left the mode flag behind"
   [ "$(wc -l < "$dir/home/stop.log" | tr -d ' ')" -eq 1 ] || fail "quiet-mode return did not stop the daemon exactly once"
   pass "/quiet off's return path behaves identically for a quiet-content flag as for a legacy away-content one"
@@ -797,6 +798,31 @@ test_return_brief_without_a_record_reports_the_legacy_flag() {
 
 
 
+# The brief renders after the shutdown has already cleared state/.afk, and a
+# gated return re-renders it on every `check`, so the posture has to survive in
+# the gate the way the window epoch does.
+test_return_brief_keeps_the_quiet_posture_across_a_retry() {
+  local dir out rc
+  dir="$TMP_ROOT/brief-quiet-posture"
+  install_runner "$dir"
+  printf 'quiet\n%s\n' "$(( $(date +%s) - 3600 ))" > "$dir/home/state/.afk"
+  printf 'herdr\tsynthetic:pane\tsynthetic-workspace\n' > "$dir/home/state/.afk-daemon-terminal"
+  touch "$dir/home/state/.fail-terminal-stop-once"
+  : > "$dir/home/state/.fake-drain"
+
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "the failed teardown should keep the quiet return gated (rc=$rc): $out"
+  assert_contains "$out" '=== Return brief (quiet ' "the gated quiet brief named the away posture"
+
+  out=$(run_return "$dir" check) || fail "the quiet check did not clear: $out"
+  assert_contains "$out" '=== Return brief (quiet ' "the check re-run lost the quiet posture after the flag was cleared"
+  assert_contains "$out" ', 1h00m) ===' "the quiet window was not measured from the flag's own timestamp"
+  pass "the return brief names the quiet posture and keeps naming it once the flag is gone"
+}
+
 test_unreadable_superseded_archive_keeps_return_gated() {
   local dir out rc epoch archive backup
   dir="$TMP_ROOT/superseded-unreadable"
@@ -888,3 +914,4 @@ test_return_guard_refuses_while_the_record_exists
 test_return_brief_health_leads_with_a_gap
 test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap
 test_return_brief_without_a_record_reports_the_legacy_flag
+test_return_brief_keeps_the_quiet_posture_across_a_retry
