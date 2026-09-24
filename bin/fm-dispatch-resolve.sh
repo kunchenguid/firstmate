@@ -288,7 +288,11 @@ jq -e --slurpfile rules "$RULES" '
   "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
 
 # ---- dynamic catalog evidence for the selected policy, if any ------------------
-mapfile -t CATALOG_HARNESSES < <(jq -n -r --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" '
+CATALOG_HARNESSES=()
+while IFS= read -r catalog_harness; do
+  [ -n "$catalog_harness" ] || continue
+  CATALOG_HARNESSES[${#CATALOG_HARNESSES[@]}]=$catalog_harness
+done < <(jq -n -r --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" '
   def dynamic($v): ($v | type) == "object" and ((($v.discover // null) | type) == "object");
   ($resp[0].answers.rule.choice) as $choice |
   (if ($choice | test("^rule_[1-9][0-9]*$")) then ($choice | ltrimstr("rule_") | tonumber) else null end) as $rule_number |

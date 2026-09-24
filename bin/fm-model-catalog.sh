@@ -100,6 +100,10 @@ run_capture() {  # <harness> <method> <outfile> <command...>
 catalog_opencode() {
   local harness=opencode tmp
   with_fixture_if_present "$harness" && return 0
+  if ! command -v python3 >/dev/null 2>&1; then
+    json_emit_error "$harness" "python3 not installed" "opencode models"
+    return 1
+  fi
   tmp=$(mktemp) || return 1
   if run_capture "$harness" "opencode models" "$tmp" opencode models; then
     python3 - "$tmp" <<'PY'
@@ -176,6 +180,10 @@ PY
 catalog_pi() {  # <harness>
   local harness=$1 tmp executable
   with_fixture_if_present "$harness" && return 0
+  if ! command -v python3 >/dev/null 2>&1; then
+    json_emit_error "$harness" "python3 not installed" "$harness --list-models"
+    return 1
+  fi
   executable=pi
   [ "$harness" = pi-signed ] && executable=pi-signed
   tmp=$(mktemp) || return 1
