@@ -292,17 +292,35 @@ fm_afk_launch_posture_require() {
 # launches nothing, no later flag write would ever correct it. It rewrites and
 # never removes: that file is the live daemon's presence gate
 # (bin/fm-supervise-daemon.sh afk_active), and an absent flag is not created,
-# because no daemon is running to gate. The flag goes FIRST so a failed write
-# leaves no record behind: the record is the posture, so a reported failure with
-# one standing would be a lie.
+# because no daemon is running to gate. The two writes stand or fall together:
+# the flag goes first so a failed write leaves no record behind, and a failed
+# record write (fm-afk-contract.sh validates its own arguments, so every usage
+# error lands here) puts the previous flag back byte for byte. Either way a
+# reported failure means the home did not move.
 fm_afk_launch_enter() {
+  local backup='' rc
   fm_afk_launch_catchup_pending away && return 1
-  if [ -e "$FM_AFK_LAUNCH_STATE/.afk" ] \
-    && ! fm_afk_flag_write "$FM_AFK_LAUNCH_STATE" away; then
-    fm_afk_launch_log "failed to write the away posture to the flag; no away-posture record was written, so the home did not go away"
-    return 1
+  if [ -e "$FM_AFK_LAUNCH_STATE/.afk" ]; then
+    if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
+      backup=$(mktemp "$FM_AFK_LAUNCH_STATE/.afk-enter-backup.XXXXXX") || return 1
+      cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup" || { rm -f "$backup"; return 1; }
+    fi
+    if ! fm_afk_flag_write "$FM_AFK_LAUNCH_STATE" away; then
+      [ -z "$backup" ] || rm -f "$backup"
+      fm_afk_launch_log "failed to write the away posture to the flag; no away-posture record was written, so the home did not go away"
+      return 1
+    fi
   fi
   "$FM_AFK_CONTRACT_CMD" enter "$@"
+  rc=$?
+  if [ -n "$backup" ]; then
+    if [ "$rc" -ne 0 ] && ! cp "$backup" "$FM_AFK_LAUNCH_STATE/.afk"; then
+      fm_afk_launch_log "the away-posture record failed and the prior flag could not be restored; its content is retained at $backup"
+      return 1
+    fi
+    rm -f "$backup"
+  fi
+  return "$rc"
 }
 
 # The command run inside the created terminal. Real launch runs the shared
@@ -781,8 +799,10 @@ fm_afk_launch_stop() {
     [ "$result" -eq 0 ] || closed_daemon_terminal=0
   fi
   # (3) Clear the posture flag, then (4) archive the posture record LAST so the
-  # posture ends only once every daemon-side artifact is down.
-  if ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
+  # posture ends only once every daemon-side artifact is down. A teardown that
+  # failed above leaves the flag standing, so the retry still reads the real
+  # posture rather than falling back to away.
+  if [ "$result" -eq 0 ] && ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
     fm_afk_launch_log "failed to clear the $mode-mode flag"
     result=1
   fi
@@ -804,7 +824,7 @@ fm_afk_launch_stop() {
       fm_afk_launch_log "$mode mode stopped; no daemon terminal was running, .afk cleared, and $record_note"
     fi
   else
-    fm_afk_launch_log "$mode mode stopped; terminal teardown or the record archive remains recorded for retry"
+    fm_afk_launch_log "$mode mode is not stopped; the flag still stands and terminal teardown or the record archive remains recorded for retry"
   fi
   return "$result"
 }

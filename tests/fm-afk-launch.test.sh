@@ -344,6 +344,73 @@ unit_enter_flag_failure_writes_no_record() {
   rm -rf "$st"
 }
 
+# The mirror of the above: fm-afk-contract.sh validates its own arguments, so a
+# usage error lands after the flag was already rewritten. The record is the
+# posture, so a failed entry must leave the captain's standing posture exactly
+# as it was - mode AND window start.
+unit_enter_record_failure_restores_the_flag() {
+  local st before out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-enter-record-fail.XXXXXX")
+  mkdir -p "$st/state"
+  before=$(( $(date '+%s') - 3600 ))
+  printf 'quiet\n%s\n' "$before" > "$st/state/.afk"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words-file "$st/nonexistent" 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -f "$st/state/.afk-contract" ] \
+    && [ "$(read_mode "$st/state")" = quiet ] \
+    && [ "$(read_window_start "$st/state")" = "$before" ]; then
+    pass "enter: a failed away-posture record puts the captain's quiet flag back untouched"
+  else
+    fail "enter: a failed record left the flag as '$(read_mode "$st/state")' at '$(read_window_start "$st/state")' (rc=$rc): $out"
+  fi
+  if ! ls "$st/state"/.afk-enter-backup.* >/dev/null 2>&1; then
+    pass "enter: the restored flag leaves no backup behind"
+  else
+    fail "enter: a flag backup leaked into the state directory"
+  fi
+  rm -rf "$st"
+}
+
+# A stop that could not finish has not ended the posture, so it must leave
+# state/.afk standing: it is the only thing a retried stop can read the real
+# posture from, and clearing it would make the retry announce away mode to a
+# captain who was only ever quiet.
+unit_failed_stop_keeps_the_flag_for_the_retry() {
+  local st out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-retry.XXXXXX")
+  mkdir -p "$st/state"
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$st/state/.afk"
+  printf 'tmux\texact-session\towned\n' > "$st/state/.afk-daemon-terminal"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_close_terminal() { return 1; }
+    fm_afk_launch_terminal_absent() { return 1; }
+    fm_afk_launch_stop
+  ' _ "$LAUNCH" 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ -e "$st/state/.afk" ] && [ "$(read_mode "$st/state")" = quiet ] \
+    && printf '%s' "$out" | grep -F 'quiet mode is not stopped' >/dev/null; then
+    pass "stop retry: a failed teardown keeps the quiet flag and says the posture still stands"
+  else
+    fail "stop retry: the failed teardown cleared the flag or misreported it (rc=$rc): $out"
+  fi
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_close_terminal() { return 0; }
+    fm_afk_launch_terminal_absent() { return 0; }
+    fm_afk_launch_stop
+  ' _ "$LAUNCH" 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ ! -e "$st/state/.afk" ] \
+    && printf '%s' "$out" | grep -F 'quiet mode stopped' >/dev/null \
+    && ! printf '%s' "$out" | grep -F 'away mode stopped' >/dev/null; then
+    pass "stop retry: the retry still names the quiet posture and clears the flag on success"
+  else
+    fail "stop retry: the retry misnamed the posture or left the flag behind (rc=$rc): $out"
+  fi
+  rm -rf "$st"
+}
+
 unit_failed_daemon_launch_preserves_the_record() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-failed-record.XXXXXX")
@@ -1511,6 +1578,8 @@ unit_quiet_entry_needs_no_record
 unit_away_entry_from_quiet_writes_away
 unit_launcher_messages_name_the_posture
 unit_enter_flag_failure_writes_no_record
+unit_enter_record_failure_restores_the_flag
+unit_failed_stop_keeps_the_flag_for_the_retry
 unit_failed_daemon_launch_preserves_the_record
 unit_stop_archives_the_record_last
 unit_relative_paths_are_absolute_before_daemon_launch

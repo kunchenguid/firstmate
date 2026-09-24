@@ -38,18 +38,19 @@ install_runner() {  # <case-dir>
   cp "$ROOT/bin/fm-pr-lib.sh" "$dir/bin/"
   cp "$ROOT/.tasks.toml" "$dir/home/.tasks.toml"
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/home/data/backlog.md"
-  # The fake stop mirrors the real one's ordering: the away flag goes, then the
-  # posture record is archived through its owner.
+  # The fake stop mirrors the real one's ordering: the daemon terminal comes
+  # down, then the away flag goes, then the posture record is archived through
+  # its owner - and a failed teardown leaves the flag standing for the retry.
   cat > "$dir/bin/fm-afk-launch.sh" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" = stop ] || exit 2
 printf 'stop\n' >> "$FM_HOME/stop.log"
-rm -f "$FM_HOME/state/.afk"
 if [ -e "$FM_HOME/state/.fail-terminal-stop-once" ]; then
   rm -f "$FM_HOME/state/.fail-terminal-stop-once"
   exit 1
 fi
 rm -f "$FM_HOME/state/.afk-daemon-terminal"
+rm -f "$FM_HOME/state/.afk"
 "$(dirname "$0")/fm-afk-contract.sh" archive >/dev/null
 SH
   cat > "$dir/bin/fm-wake-drain.sh" <<'SH'
@@ -342,7 +343,7 @@ test_check_retries_recorded_terminal_teardown() {
   [ "$rc" -eq 3 ] || fail "failed terminal teardown should keep return catch-up gated (rc=$rc): $out"
   [ -e "$gate" ] || fail "failed terminal teardown cleared the return gate"
   [ -e "$dir/home/state/.afk-daemon-terminal" ] || fail "failed terminal teardown discarded its durable record"
-  [ ! -e "$dir/home/state/.afk" ] || fail "failed terminal teardown did not preserve stop ordering"
+  [ -e "$dir/home/state/.afk" ] || fail "failed terminal teardown cleared the posture flag the retry reads"
 
   out=$(run_return "$dir" check) || fail "check did not retry recorded terminal teardown: $out"
   [ ! -e "$dir/home/state/.afk-daemon-terminal" ] || fail "successful check left the terminal teardown record behind"
