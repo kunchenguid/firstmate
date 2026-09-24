@@ -23,7 +23,6 @@ RESTART_SUPERVISOR_PID=
 LOST_TERM_PID=
 REPLACEMENT_OWNER_PID=
 STALL_WORKER_PID=
-STALL_DECOY_PID=
 STALL_REPLACEMENT_PID=
 STALL_JOB_GROUP=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
@@ -38,7 +37,7 @@ cleanup_remote_job_fixture() {
   [ -z "$LOST_TERM_PID" ] || kill -KILL "$LOST_TERM_PID" 2>/dev/null || true
   [ -z "$REPLACEMENT_OWNER_PID" ] || kill -KILL "$REPLACEMENT_OWNER_PID" 2>/dev/null || true
   local stall_pid
-  for stall_pid in "$STALL_WORKER_PID" "$STALL_DECOY_PID" "$STALL_REPLACEMENT_PID"; do
+  for stall_pid in "$STALL_WORKER_PID" "$STALL_REPLACEMENT_PID"; do
     [ -n "$stall_pid" ] || continue
     kill -KILL "$stall_pid" 2>/dev/null || true
     wait "$stall_pid" 2>/dev/null || true
@@ -972,21 +971,10 @@ STALL_DEADLINE=$((SECONDS + 30))
 until [ -f "$STALL_STARTED" ] || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do sleep 0.05; done
 assert_present "$STALL_STARTED" "the command that keeps shutdown in its stop loop did not start"
 STALL_JOB="$STALL_STATE/jobs/$FM_REMOTE_JOB_ID"
-# The decoy replaces the job's group record, so no worker stops the real
-# command group; the test does.
+# An unreadable start record keeps the worker from signalling the job's own
+# command group while it still counts that group as alive, so shutdown waits in
+# its stop loop until the test stops the group.
 STALL_JOB_GROUP=$(cat "$STALL_JOB/.claim/group")
-# Shell job control does not reliably give a background job its own group on
-# every runner, so the decoy makes its own session and leads its group.
-perl -MPOSIX=setsid -e 'setsid() >= 0 or exit 1; exec @ARGV' sleep 30 &
-STALL_DECOY_PID=$!
-STALL_DEADLINE=$((SECONDS + 30))
-until [ "$(ps -o pgid= -p "$STALL_DECOY_PID" 2>/dev/null | tr -d ' ')" = "$STALL_DECOY_PID" ] \
-  || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
-  sleep 0.05
-done
-[ "$(ps -o pgid= -p "$STALL_DECOY_PID" 2>/dev/null | tr -d ' ')" = "$STALL_DECOY_PID" ] \
-  || fail "the decoy did not become its own process-group leader"
-printf '%s\n' "$STALL_DECOY_PID" > "$STALL_JOB/.claim/group"
 printf 'unconfirmed\nstart\n' > "$STALL_JOB/.claim/group_start"
 kill -TERM "$STALL_WORKER_PID"
 STALL_DEADLINE=$((SECONDS + 30))
@@ -1020,9 +1008,13 @@ until [ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | tr -d ' ')" = 
 done
 [ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | tr -d ' ')" = T ] \
   || fail "the replacement could not be held while the ousted worker resumed"
-kill -KILL "$STALL_DECOY_PID" 2>/dev/null || true
-wait "$STALL_DECOY_PID" 2>/dev/null || true
-STALL_DECOY_PID=
+kill -KILL -- "-$STALL_JOB_GROUP" 2>/dev/null || true
+STALL_DEADLINE=$((SECONDS + 30))
+until ! kill -0 -- "-$STALL_JOB_GROUP" 2>/dev/null || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
+  sleep 0.05
+done
+! kill -0 -- "-$STALL_JOB_GROUP" 2>/dev/null \
+  || fail "the job's command group was still alive after the test stopped it"
 rm -f -- "$STALL_HOLD"
 STALL_DEADLINE=$((SECONDS + 30))
 until [ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | tr -d ' ')" = Z ] \
@@ -1056,7 +1048,6 @@ done
   || fail "the replacement did not finish its own TERM shutdown"
 wait "$STALL_REPLACEMENT_PID" 2>/dev/null || true
 STALL_REPLACEMENT_PID=
-kill -KILL -- "-$STALL_JOB_GROUP" 2>/dev/null || true
 STALL_JOB_GROUP=
 pass "an ousted worker in shutdown leaves the replacement quarantine untouched"
 
