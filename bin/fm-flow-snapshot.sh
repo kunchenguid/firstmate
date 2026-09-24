@@ -60,8 +60,6 @@
 #                                   status` read (default 10)
 #   FM_FLOW_SNAPSHOT_GH_TIMEOUT     seconds bounding one `gh pr view` (default
 #                                   20)
-#   FM_FLOW_SNAPSHOT_FLEET_JSON     consume this file instead of running
-#                                   bin/fm-fleet-snapshot.sh
 #   FM_FLOW_SNAPSHOT_NOW_EPOCH      override the clock, in epoch seconds
 #   FM_FLOW_SNAPSHOT_NOW            override the clock, as an ISO timestamp
 #
@@ -83,7 +81,7 @@ WANT_CI=1
 ONLY_TASK=
 
 usage() {
-  sed -n '2,71p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,69p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -191,17 +189,29 @@ TOON_AWK_PRELUDE='
       gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v)
       return v
     }
+    # A row of the block being read, decided by INDENTATION rather than by its
+    # first character. Requiring a lowercase letter there dropped any row whose
+    # leading cell is quoted, which this emitter does elsewhere - its own runs
+    # table quotes the leading id - and because a miss also closes the block,
+    # one such row silently discarded every row after it too.
+    function is_row(line) {
+      if (line !~ /^    [^ ]/) return 0
+      if (line ~ /^    [A-Za-z_][A-Za-z0-9_]*\[[0-9]+\]\{/) return 0
+      return 1
+    }
     # A row is readable only when the header named the columns it is read for.
     function has_cols(names,   parts, i, m) {
       m = split(names, parts, " ")
       for (i = 1; i <= m; i++) if (!col[parts[i]] || col[parts[i]] > n) return 0
       return 1
     }
-    # A numeric cell the header did not declare, or that is not a number, is 0
-    # rather than an unquoted empty string that would break the JSON.
+    # A numeric cell the header did not declare, or whose value this parser
+    # cannot read, is null. Zero is a MEASURED value here - a step that took no
+    # time, a step with no findings - so returning it for a column that was
+    # never emitted reports a measurement that was never made.
     function num(name,   v) {
       v = field(name)
-      return (v ~ /^-?[0-9]+$/) ? v : 0
+      return (v ~ /^-?[0-9]+$/) ? v : "null"
     }
 '
 
@@ -209,7 +219,7 @@ steps_json() {  # <axi-status-output>
   printf '%s\n' "$1" | awk "$TOON_AWK_PRELUDE"'
     /^  steps\[[0-9]+\]\{/ { read_header($0); in_steps = 1; next }
     in_steps {
-      if ($0 !~ /^    [a-z]/) { in_steps = 0; next }
+      if (!is_row($0)) { in_steps = 0; next }
       line = $0
       sub(/^    /, "", line)
       split_row(line)
@@ -247,7 +257,7 @@ active_steps_json() {  # <axi-status-output>
     }
     /^  active_steps\[[0-9]+\]\{/ { read_header($0); in_a = 1; next }
     in_a {
-      if ($0 !~ /^    [a-z]/) { in_a = 0; next }
+      if (!is_row($0)) { in_a = 0; next }
       line = $0
       sub(/^    /, "", line)
       split_row(line)
@@ -434,7 +444,7 @@ row_common() {  # <task-json>
 
 agent_json() {  # <task-json>
   local task=$1 id kind mode project worktree window branch endpoint_alive agent_alive pr_url
-  local rundir overview sel axi rc steps actives ci meta
+  local rundir overview overview_rc sel axi rc steps actives ci meta
   local run_id run_status run_head run_error
 
   row_common "$task"
@@ -471,9 +481,26 @@ agent_json() {  # <task-json>
     collect_ok=false
     collect_reason='no-mistakes not found'
   else
-    overview=$(fm_nm_run "$rundir" "$NM_TIMEOUT" axi status)
-    sel=$(fm_nm_select_run "$branch" "$overview" "$rundir" "$NM_TIMEOUT")
+    # fm_nm_run is the fail-open query wrapper: it discards the exit status, so
+    # a read that TIMED OUT returns the same empty string as a pipeline with no
+    # runs, and the row would report a claim about the pipeline's contents on
+    # the strength of a failed read. The bounded form keeps the status, so the
+    # two are told apart.
+    overview=$(fm_nm_run_bounded "$rundir" "$NM_TIMEOUT" axi status 2>/dev/null)
+    overview_rc=$?
+    if [ $overview_rc -ne 0 ]; then
+      collect_ok=false
+      if [ "$overview_rc" = 124 ]; then
+        collect_reason="the run list timed out after ${NM_TIMEOUT}s"
+      else
+        collect_reason="the run list could not be read (exit $overview_rc)"
+      fi
+      sel=
+    else
+      sel=$(fm_nm_select_run "$branch" "$overview" "$rundir" "$NM_TIMEOUT")
+    fi
     case $sel in
+      "") ;;
       selected\|*)
         run_id=$(printf '%s' "$sel" | cut -d'|' -f2)
         run_status=$(printf '%s' "$sel" | cut -d'|' -f3)
@@ -493,8 +520,19 @@ agent_json() {  # <task-json>
   fi
 
   if [ -n "$run_id" ]; then
+    # Allocated rather than constructed, and for the same reason the agents
+    # buffer is: a name built from the pid and the task id is predictable by
+    # anyone who can read the fleet document or `ps`, and `2>` follows a symlink
+    # sitting at that name and truncates whatever it resolves to.
     local axi_err
-    axi_err="${TMPDIR:-/tmp}/fm-flow-axi-err.$$.$id"
+    axi_err=$(mktemp "${TMPDIR:-/tmp}/fm-flow-axi-err.XXXXXX") || axi_err=
+    if [ -z "$axi_err" ]; then
+      collect_ok=false
+      collect_reason='could not allocate a buffer for the run read'
+      run_id=''
+    fi
+  fi
+  if [ -n "$run_id" ]; then
     axi=$(fm_nm_run_bounded "$rundir" "$NM_TIMEOUT" axi status --run "$run_id" 2>"$axi_err")
     rc=$?
     if [ $rc -ne 0 ] || [ -z "$axi" ]; then
@@ -682,24 +720,21 @@ compact_json() {  # <task-json>
     }'
 }
 
-if [ -n "${FM_FLOW_SNAPSHOT_FLEET_JSON:-}" ]; then
-  FLEET=$(cat "$FM_FLOW_SNAPSHOT_FLEET_JSON") || {
-    echo "fm-flow-snapshot: cannot read $FM_FLOW_SNAPSHOT_FLEET_JSON" >&2
-    exit 1
-  }
-else
-  # Under --no-ci the fleet read is told to skip its forge fallback too. Its
-  # crew-state reader otherwise makes a bounded `gh api graphql` call for a ship
-  # task whose run passed, which would make "the whole snapshot is local" false
-  # on the one flag that promises it.
-  FLEET_NO_FORGE=${FM_CREW_STATE_NO_FORGE:-0}
-  [ "$WANT_CI" = 1 ] || FLEET_NO_FORGE=1
-  FLEET=$(
-    FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
-    FM_CREW_STATE_NO_FORGE="$FLEET_NO_FORGE" \
-      "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json 2>/dev/null
-  ) || FLEET=
-fi
+# The fleet is always read through its owner, never from a file handed in: a
+# second input would be a second source of truth for the one thing this view
+# must not disagree with the rest of firstmate about.
+#
+# Under --no-ci that read is told to skip its forge fallback too. Its crew-state
+# reader otherwise makes a bounded `gh api graphql` call for a ship task whose
+# run passed, which would make "the whole snapshot is local" false on the one
+# flag that promises it.
+FLEET_NO_FORGE=${FM_CREW_STATE_NO_FORGE:-0}
+[ "$WANT_CI" = 1 ] || FLEET_NO_FORGE=1
+FLEET=$(
+  FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
+  FM_CREW_STATE_NO_FORGE="$FLEET_NO_FORGE" \
+    "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json 2>/dev/null
+) || FLEET=
 
 # The fleet read is the one hard dependency: without the agent list there is
 # nothing to draw, and an empty document would read as an empty fleet, which is

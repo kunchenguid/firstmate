@@ -59,6 +59,7 @@ write_task ship-gitlab ship no-mistakes fm:6 https://gitlab.example.com/group/pr
 write_task ship-badrun ship no-mistakes fm:7
 write_task ship-odd    ship no-mistakes fm:8
 write_task ship-wide   ship no-mistakes fm:9
+write_task ship-readfail ship no-mistakes fm:11
 write_task scout-one   scout local-only fm:10
 # No window at all, which is how the fleet document reports a task it could not
 # observe as well as one that never had an endpoint.
@@ -116,8 +117,8 @@ run:
   branch: fm/ship-odd
   status: running
   head: d00d1234
-  steps[1]{step,status,findings,duration_ms}:
-    review,running,0,0
+  steps[1]{step,status,findings}:
+    review,running,0
   active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:
     review,running,2w3d,"no news","",1
 TOON
@@ -146,7 +147,7 @@ run:
   status: running
   head: ab12cd34
   steps[3]{step,status,detail,attempt,findings,duration_ms}:
-    intent,completed,,1,0,44
+    "intent",completed,,1,0,44
     review,running,"failed, then fixed",2,3,0
     test,completed,"two, commas, here",1,5,176257
   active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
@@ -168,6 +169,11 @@ case "\${1:-}" in
   --version|version) echo "no-mistakes version v1.75.3"; exit 0 ;;
 esac
 if [ "\${1:-}" = axi ] && [ "\${2:-}" = status ] && [ -z "\$run" ]; then
+  # The overview is read in the task's own copy of the repository, so the
+  # working directory is what lets this fake fail for one task only.
+  case "\$PWD" in
+    */ship-readfail) echo "error: repo not initialized" >&2; exit 1 ;;
+  esac
   cat "$TMP_ROOT/overview.txt"
   exit 0
 fi
@@ -245,7 +251,7 @@ case "${1:-}" in
   list-windows)
     printf 'fm:1 fm-ship-run\nfm:2 fm-ship-norun\nfm:3 fm-ship-direct\nfm:4 fm-ship-merged\n'
     printf 'fm:5 fm-ship-closed\nfm:6 fm-ship-gitlab\nfm:7 fm-ship-badrun\nfm:8 fm-ship-odd\n'
-    printf 'fm:9 fm-ship-wide\nfm:10 fm-scout-one\n'
+    printf 'fm:9 fm-ship-wide\nfm:10 fm-scout-one\nfm:11 fm-ship-readfail\n'
     ;;
   list-panes)
     printf '%s\n' "${target##*:}"
@@ -380,6 +386,18 @@ assert_equals "null" \
   "$(agent ship-odd '[.active_steps[] | select(.step == "review")][0].active_ms')" \
   "an elapsed carrying an unknown unit is reported as unknown, not partially summed"
 
+# --- a numeric column the header never declared -----------------------------
+#
+# Zero is a measured value here, a step that took no time or found nothing, so
+# reporting it for a column that was never emitted states a measurement that was
+# never made.
+assert_equals "null" \
+  "$(agent ship-odd '[.steps[] | select(.step == "review")][0].duration_ms')" \
+  "a duration the block header did not declare is unknown, not a measured zero"
+assert_equals "0" \
+  "$(agent ship-odd '[.steps[] | select(.step == "review")][0].findings')" \
+  "while a column that IS declared keeps its own measured zero"
+
 # --- a block whose columns moved ---------------------------------------------
 
 assert_equals "150000" \
@@ -408,6 +426,14 @@ assert_equals "176257" \
 assert_equals "5" \
   "$(agent ship-wide '[.steps[] | select(.step == "test")][0].findings')" \
   "nor the finding count that sits between them"
+# This emitter quotes a leading cell elsewhere, and a row gate keyed on the
+# first CHARACTER dropped such a row and closed the block with it, so every row
+# after it went too.
+assert_equals "completed" \
+  "$(agent ship-wide '[.steps[] | select(.step == "intent")][0].status')" \
+  "a row whose leading cell is quoted is still read"
+assert_equals "3" "$(agent ship-wide '[.steps[] | select(.step != "building")] | length')" \
+  "and it does not take the rest of its block with it"
 
 # --- GitHub check classes ---------------------------------------------------
 
@@ -454,6 +480,15 @@ assert_equals "checks are read for GitHub pull requests only" \
 assert_equals "0" "$(agent ship-gitlab '.ci.total')" \
   "no check count is invented for it"
 
+# --- a failed run LIST read is not an empty pipeline ------------------------
+
+assert_equals "false" "$(agent ship-readfail '.collection.ok')" \
+  "a run list that could not be read collects as a failure"
+assert_contains "$(agent ship-readfail '.collection.reason')" "could not be read" \
+  "and says the READ failed, rather than claiming the pipeline holds no runs"
+assert_not_contains "$(agent ship-readfail '.collection.reason')" "listed no runs" \
+  "which is a claim about the pipeline's contents that a failed read cannot support"
+
 # --- a failed run read reports the command's own words ----------------------
 
 assert_equals "false" "$(agent ship-badrun '.collection.ok')" \
@@ -494,7 +529,7 @@ assert_equals "ship-run" "$(printf '%s' "$DOC" | jq -r '.agents[0].id')" \
 HELP=$(snapshot --help) || fail "--help refused to run"
 for documented in --json --no-ci --task \
   FM_FLOW_SNAPSHOT_NM_TIMEOUT FM_FLOW_SNAPSHOT_GH_TIMEOUT \
-  FM_FLOW_SNAPSHOT_FLEET_JSON FM_FLOW_SNAPSHOT_NOW_EPOCH FM_FLOW_SNAPSHOT_NOW; do
+  FM_FLOW_SNAPSHOT_NOW_EPOCH FM_FLOW_SNAPSHOT_NOW; do
   assert_contains "$HELP" "$documented" "--help documents $documented"
 done
 assert_contains "$HELP" "fm-flow-snapshot.sh - read-only per-agent pipeline snapshot." \
@@ -502,8 +537,9 @@ assert_contains "$HELP" "fm-flow-snapshot.sh - read-only per-agent pipeline snap
 assert_equals "one wedged worker must not blank the whole view." \
   "$(printf '%s\n' "$HELP" | sed -e '/^$/d' -e '$!d')" \
   "--help reaches its last line rather than stopping mid-sentence"
-assert_not_contains "$HELP" "FM_FLOW_SNAPSHOT_STATE_TIMEOUT" \
-  "--help does not document a knob this command no longer has"
+for gone in FM_FLOW_SNAPSHOT_STATE_TIMEOUT FM_FLOW_SNAPSHOT_FLEET_JSON; do
+  assert_not_contains "$HELP" "$gone" "--help does not document $gone, which this command no longer has"
+done
 
 snapshot --not-a-flag >/dev/null 2>&1
 expect_code 2 $? "the collector refuses an unknown flag"
@@ -511,9 +547,22 @@ expect_code 2 $? "the collector refuses an unknown flag"
 snapshot --task >/dev/null 2>&1
 expect_code 2 $? "--task refuses to run with no id"
 
-PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
-  FM_FLOW_SNAPSHOT_FLEET_JSON="$TMP_ROOT/does-not-exist.json" \
-  "$SNAPSHOT" --json >/dev/null 2>&1
-expect_code 1 $? "an unreadable fleet document refuses rather than emitting an empty fleet"
+# A fleet read that FAILS must refuse, because an empty document would read as
+# an empty fleet, which is a different and far more dangerous claim. An absent
+# home is not that case: it is a real, empty fleet. A task record the fleet read
+# cannot take a copy of is, and it is the cheapest genuine trigger.
+if [ "$(id -u)" != 0 ]; then
+  FAIL_HOME=$TMP_ROOT/unreadable-home
+  mkdir -p "$FAIL_HOME/state" "$FAIL_HOME/data"
+  printf '# Backlog\n' > "$FAIL_HOME/data/backlog.md"
+  fm_write_meta "$FAIL_HOME/state/unreadable.meta" \
+    "window=fm:1" "worktree=$TMP_ROOT/wt/ship-run" "project=$PROJECT" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  chmod 000 "$FAIL_HOME/state/unreadable.meta"
+  PATH="$FAKEBIN:$PATH" FM_HOME="$FAIL_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+    "$SNAPSHOT" --json >/dev/null 2>&1
+  expect_code 1 $? "a fleet read that fails refuses rather than emitting an empty fleet"
+  chmod 644 "$FAIL_HOME/state/unreadable.meta"
+fi
 
 pass "fm-flow-snapshot: pipeline steps, check classes and crew state over a synthetic fleet"
