@@ -354,6 +354,24 @@ test_checkout_that_never_finishes_refuses_without_claiming() {
   pass "a checkout that never finishes is refused by name, unclaimed and untouched"
 }
 
+test_leased_pool_slot_waits_for_handoff() {
+  local rec id out status state
+  id=settle-leased-pool-z9
+  rec=$(make_checkout_case settle-leased-pool "$id" pool)
+  read_settle_record "$rec"
+  state="$(dirname "$(dirname "$WT_DIR")")/treehouse-state.json"
+  printf '{"worktrees":[{"name":"1","path":"%s","owner_pid":%s,"leased":true,"lease_holder":"acquisition incomplete"}]}\n' "$WT_DIR" "$$" > "$state"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(run_checkout_spawn "$id" 5)
+  status=$?
+  expect_code 0 "$status" "spawn should wait for the leased slot to be handed out"$'\n'"$out"
+  [ "$(cat "$COUNTFILE")" -ge 5 ] || fail "spawn adopted the leased slot before handoff"
+  assert_not_contains "$out" "is not clean" "spawn adopted a leased slot mid-checkout"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "spawn did not adopt the released slot"
+  pass "leased pool slot with live owner waits until handoff"
+}
+
 test_pool_slot_without_jq_refuses_immediately() {
   local rec id out status no_jq dir tool
   id=settle-no-jq-pool-z8
@@ -387,6 +405,7 @@ test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_pool_slot_checkout_in_progress_is_waited_out
+test_leased_pool_slot_waits_for_handoff
 test_initializing_worktree_is_waited_out
 test_checkout_that_never_finishes_refuses_without_claiming
 test_pool_slot_without_jq_refuses_immediately
