@@ -77,6 +77,41 @@ reclaim_stale_branch_grant_locked() {
   fi
 }
 
+# Rebuild a lost or corrupt branch-eligible row snapshot from the live owner
+# record's durable sequence list, before any presentment, acknowledgement, or
+# reclaim decides on the older files. Only the extension's own publish/release
+# write that list, so it names exactly the rows its live grant still reserves;
+# intersecting it with the queue restores the snapshot a descendant process
+# clobbered between the prompt's publish and its acknowledgement. Every
+# no-evidence case (no live record, a v1 record with no list, an empty list, no
+# surviving rows) falls through to the loud refusal unchanged; a rebuild that
+# cannot be written is fatal, matching claim_main_rows_locked's posture.
+# This regeneration stays inline in the drain rather than a fm-wake-grant.sh
+# subcommand, because every grant subcommand acquires this same queue lock and
+# would deadlock under the drain that already holds it.
+restore_branch_eligible_rows_locked() {
+  local seqs restore_tmp
+  rows_file_valid "$ELIGIBLE_ROWS_FILE" && return 0
+  fm_wake_branch_owner_matches "$ELIGIBLE_OWNER_FILE" || return 0
+  seqs=$(fm_wake_branch_owner_seqs "$ELIGIBLE_OWNER_FILE") || return 0
+  [ -n "$seqs" ] || return 0
+  # A dedicated temp, never the caller's DRAIN_TMP: the ack section calls this
+  # with its own live ack temp, and a rebuild here must not consume or clear
+  # that variable for the caller's awk redirect.
+  restore_tmp=$(mktemp "$STATE/.branch-eligible-rows.tmp.XXXXXX") || return 1
+  awk -F '\t' -v seqs="$seqs" '
+    BEGIN {
+      n = split(seqs, wanted, ",")
+      for (i = 1; i <= n; i += 1) if (wanted[i] != "") keep[wanted[i]] = 1
+    }
+    NF >= 5 && $2 ~ /^[0-9]+$/ && ($2 in keep) { print $2 }
+  ' "$FM_WAKE_QUEUE" > "$restore_tmp" || { rm -f -- "$restore_tmp"; return 1; }
+  write_rows_file_locked "$ELIGIBLE_ROWS_FILE" "$restore_tmp" \
+    || { rm -f -- "$restore_tmp"; return 1; }
+  rows_file_valid "$ELIGIBLE_ROWS_FILE" || return 0
+  echo "wake drain: restored a lost branch-eligible row snapshot from the live owner record" >&2
+}
+
 # Retire rows no actor can ever consume. A claim, a presentation, and an
 # acknowledgement all require the five appended fields and a numeric sequence,
 # so a truncated or corrupted row is counted as queued while it can never be
@@ -206,8 +241,6 @@ case "${1:-}" in
     ;;
   *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
 esac
-
-[ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 
 # Defense in depth for the supervision chain: this script runs at the top of
 # every wake-handling and recovery turn, so assert supervision health here too. A
@@ -639,6 +672,11 @@ else
   exit 1
 fi
 DRAIN_LOCK_HELD=true
+# Any actor rebuilds a lost eligible-row snapshot from the live v2 owner
+# record before reclaim or claiming, so a snapshot lost mid-grant can never
+# leave a main drain claiming the branch's granted rows while the grant
+# still fences main out of them.
+restore_branch_eligible_rows_locked || exit 1
 reclaim_stale_branch_grant_locked || exit 1
 [ "$ACTOR" != main ] || retire_unconsumable_rows_locked
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
@@ -686,6 +724,10 @@ if [ -n "$ACK_THROUGH" ]; then
   DRAIN_TMP=$(mktemp "$STATE/.wake-queue.ack.XXXXXX") || exit 1
   chmod 0600 "$DRAIN_TMP" || exit 1
   if [ "$ACTOR" = branch ]; then
+    # The lock was released above, so the snapshot may have been lost in that
+    # window; rebuild from the record again rather than fail the ack that was
+    # already authorized by the first locked section.
+    restore_branch_eligible_rows_locked || exit 1
     require_branch_eligible_rows || exit 1
     # Delete a row only when its sequence is <= cutoff AND it is named in the
     # extension's eligible snapshot; every other row - including one whose

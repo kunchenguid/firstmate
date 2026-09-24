@@ -268,8 +268,10 @@ fm_pi_extension_loaded() {
 
 # fm_pi_extension_owns_supervision <state> <root>
 # True when a LIVE Pi session owns supervision continuity for this home: both
-# primary extensions are loaded at their current on-disk builds by the process
-# recorded in this home's session lock, and that process is still alive.
+# primary extensions are loaded at their current on-disk builds with their
+# state markers naming the process recorded in this home's session lock -
+# which a descendant of that session records on the holder's behalf rather
+# than under its own transient pid - and that process is still alive.
 # Requiring the turn-end guard extension too is deliberate - it is the structural
 # backstop that catches a cycle the watch extension failed to restore, so a home
 # missing it has no benign hand-off to tolerate.
@@ -2057,28 +2059,76 @@ fm_wake_grant_rows_valid() {  # <rows-file>
   [ -s "$1" ] && awk 'BEGIN { ok=1 } !/^[0-9]+$/ || seen[$0]++ { ok=0 } END { exit !ok }' "$1"
 }
 
-# 0 when <owner-file> holds the supported record, names a live process whose
+# 0 when <owner-file> holds a supported owner record, names a live process whose
 # identity still matches what was recorded, and matches any expected pid and
 # generation the caller pins. An unreadable, malformed, or superseded record is
 # not a match, so uncertainty reads as "no live owner".
+# v1 records are four lines; v2 adds a fifth line holding the reserved
+# sequence numbers as a comma-separated list (possibly empty), written by
+# publish/release so a lost row snapshot can be rebuilt from the record.
 fm_wake_branch_owner_matches() {  # <owner-file> [<pid>] [<generation>]
   local file=$1 expected_pid=${2:-} expected_generation=${3:-}
-  local version pid identity generation current extra
+  local version pid identity generation seqs='' has_seqs=false
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   exec 8< "$file" || return 1
   IFS= read -r version <&8 || { exec 8<&-; return 1; }
   IFS= read -r pid <&8 || { exec 8<&-; return 1; }
   IFS= read -r identity <&8 || { exec 8<&-; return 1; }
   IFS= read -r generation <&8 || { exec 8<&-; return 1; }
-  if IFS= read -r extra <&8; then exec 8<&-; return 1; fi
+  if IFS= read -r seqs <&8; then
+    has_seqs=true
+    if IFS= read -r _ <&8; then exec 8<&-; return 1; fi
+  fi
   exec 8<&-
-  [ "$version" = fm-branch-eligible-owner-v1 ] || return 1
+  case "$version" in
+    fm-branch-eligible-owner-v1)
+      [ "$has_seqs" = false ] || return 1
+      ;;
+    fm-branch-eligible-owner-v2)
+      [ "$has_seqs" = true ] || return 1
+      fm_wake_owner_seqs_valid "$seqs" || return 1
+      ;;
+    *) return 1 ;;
+  esac
   case "$pid" in ''|*[!0-9]*|1) return 1 ;; esac
   case "$generation" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   [ -z "$expected_pid" ] || [ "$pid" = "$expected_pid" ] || return 1
   [ -z "$expected_generation" ] || [ "$generation" = "$expected_generation" ] || return 1
   current=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
   [ -n "$current" ] && [ "$current" = "$identity" ]
+}
+
+# True when <seqs> is a well-formed owner-record sequence list: distinct queue
+# sequence numbers separated by commas, or empty. Data rides -v, never ARGV,
+# so awk opens no files and reads no stdin.
+fm_wake_owner_seqs_valid() {  # <seqs>
+  [ -z "$1" ] && return 0
+  awk -v list="$1" '
+    BEGIN {
+      n = split(list, wanted, ",")
+      for (i = 1; i <= n; i += 1) if (wanted[i] !~ /^[0-9]+$/ || seen[wanted[i]]++) exit 1
+      exit 0
+    }
+  '
+}
+
+# Print the durable sequence list of a well-formed v2 owner record, true only
+# when one exists. A v1 record or any malformed shape carries no durable
+# reservation to rebuild from, so callers fall back to their own refusal.
+fm_wake_branch_owner_seqs() {  # <owner-file>
+  local file=$1 version pid identity generation seqs
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  exec 8< "$file" || return 1
+  IFS= read -r version <&8 || { exec 8<&-; return 1; }
+  IFS= read -r pid <&8 || { exec 8<&-; return 1; }
+  IFS= read -r identity <&8 || { exec 8<&-; return 1; }
+  IFS= read -r generation <&8 || { exec 8<&-; return 1; }
+  IFS= read -r seqs <&8 || { exec 8<&-; return 1; }
+  if IFS= read -r _ <&8; then exec 8<&-; return 1; fi
+  exec 8<&-
+  [ "$version" = fm-branch-eligible-owner-v2 ] || return 1
+  fm_wake_owner_seqs_valid "$seqs" || return 1
+  printf '%s\n' "$seqs"
 }
 
 # 0 when a branch grant is currently reserving rows: a valid row snapshot whose

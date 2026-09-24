@@ -37,26 +37,34 @@ function pidAlive(pid: string): boolean {
   }
 }
 
-function lockOwnership(): LockOwnership {
+function lockOwnershipDetail(): { verdict: LockOwnership; ownerPid: string } {
   let lockPid = "";
   try {
     lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
   } catch {
-    return "missing";
+    return { verdict: "missing", ownerPid: "" };
   }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
+  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return { verdict: "other", ownerPid: "" };
   let pid = String(process.pid);
   for (let i = 0; i < 8; i += 1) {
-    if (pid === lockPid) return "owned";
+    if (pid === lockPid) return { verdict: "owned", ownerPid: lockPid };
     pid = parentPid(pid);
     if (!pid || pid === "1") break;
   }
-  return pidAlive(lockPid) ? "other" : "missing";
+  return { verdict: pidAlive(lockPid) ? "other" : "missing", ownerPid: "" };
+}
+
+function lockOwnership(): LockOwnership {
+  return lockOwnershipDetail().verdict;
 }
 
 function markLoaded(): void {
-  if (!existsSync(state) || lockOwnership() === "other") return;
-  writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
+  const ownership = lockOwnershipDetail();
+  if (!existsSync(state) || ownership.verdict === "other") return;
+  // The marker names the lock-holder session: a descendant process (a Pi
+  // compaction child) reaching the holder through the ancestry walk must
+  // anchor on that holder, not on its own transient pid that dies with it.
+  writeFileSync(marker, `${extensionVersion}\n${ownership.ownerPid || process.pid}\n`);
 }
 
 // Pi's session_start reasons are startup | reload | new | resume | fork, and a

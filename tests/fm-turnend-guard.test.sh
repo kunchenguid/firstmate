@@ -1174,6 +1174,116 @@ EOF
   pass ".pi primary extension: delivery failure resets the logical-run latch"
 }
 
+# The marker must name the lock-holder session, not the process that happened
+# to write it: a descendant of the holder (the Pi compaction-child shape)
+# reaching it through the ancestry walk anchors on that holder, so the marker
+# still identifies the live session after the transient descendant exits. A
+# cold start with no lock file still names its own pid, and a live foreign
+# holder still refuses to write anything.
+test_pi_extension_marker_anchors_on_the_lock_holder_from_a_descendant() {
+  local repo home ext marker out status sleep_pid
+  repo="$TMP_ROOT/pi-descendant-marker-root"
+  home="$TMP_ROOT/pi-descendant-marker-home"
+  ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  marker="$home/state/.pi-turnend-extension-loaded"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin" "$home/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  # This test shell is the lock holder's ancestor chain; the node driver
+  # names its own live parent (this command's subshell) as the holder, so the
+  # driver is a genuine descendant and the walk must resolve "owned" through
+  # ancestry - robust even when the test shell itself is pid 1 in a container.
+  out=$(PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const home = process.env.FM_HOME;
+const holder = String(process.ppid);
+writeFileSync(`${home}/state/.lock`, `${holder}\n`);
+writeFileSync(`${home}/state/holder.pid`, `${holder}\n`);
+const handlers = new Map();
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const readMarkerPid = () => readFileSync(`${home}/state/.pi-turnend-extension-loaded`, "utf8").trim().split("\n")[1];
+
+// Factory init already marked: it must name the ancestor lock holder, not
+// this transient descendant, its own pid excluded.
+if (readMarkerPid() !== holder) {
+  throw new Error(`init marker named ${readMarkerPid()}, not the holder ${holder}`);
+}
+
+// An unknown session_start reason exercises the markLoaded path of the
+// handler (and spawns no sessionstart script) and must keep the same anchor.
+await handlers.get("session_start")?.({ type: "session_start", reason: "descendant-probe" }, {});
+if (readMarkerPid() !== holder) {
+  throw new Error(`session_start marker named ${readMarkerPid()}, not the holder ${holder}`);
+}
+
+// The transient descendant pid itself must never be what the marker recorded.
+if (readMarkerPid() === String(process.pid)) {
+  throw new Error("marker anchored on the transient descendant pid");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi guard marker must anchor on the lock holder from a descendant"
+  [ -z "$out" ] || fail "Pi descendant-marker guard test printed output: $out"
+  [ "$(sed -n '2p' "$marker")" = "$(cat "$home/state/holder.pid")" ] \
+    || fail "marker pid line should survive the driver's exit unchanged"
+
+  # Cold start: no lock file at all, so the walk cannot reach a holder and
+  # the marker keeps the writer's own pid.
+  rm -f "$home/state/.lock" "$marker"
+  out=$(PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const pi = { on() {} };
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const pid = readFileSync(`${process.env.FM_HOME}/state/.pi-turnend-extension-loaded`, "utf8").trim().split("\n")[1];
+if (pid !== String(process.pid)) {
+  throw new Error(`cold-start marker named ${pid}, not its own pid ${process.pid}`);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi guard cold-start marker must keep its own pid"
+  [ -z "$out" ] || fail "Pi cold-start marker test printed output: $out"
+
+  # A live holder that is NOT an ancestor is "other": nothing may be written.
+  rm -f "$marker"
+  sleep 30 &
+  sleep_pid=$!
+  printf '%s\n' "$sleep_pid" > "$home/state/.lock"
+  out=$(PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+import { existsSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const pi = { on() {} };
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (existsSync(`${process.env.FM_HOME}/state/.pi-turnend-extension-loaded`)) {
+  throw new Error("marker was written under a live foreign lock holder");
+}
+EOF
+)
+  status=$?
+  kill "$sleep_pid" 2>/dev/null || true
+  wait "$sleep_pid" 2>/dev/null || true
+  expect_code 0 "$status" "Pi guard must refuse to mark under a live foreign holder"
+  [ -z "$out" ] || fail "Pi foreign-holder marker test printed output: $out"
+  [ ! -e "$marker" ] || fail "marker must not exist under a live foreign holder"
+
+  pass ".pi primary extension: the loaded marker anchors on the lock holder from a descendant process"
+}
+
 # --- --claude cooperative mode -----------------------------------------------
 # In --claude mode the guard ignores stop_hook_active (Claude marks every stop
 # after ANY stop-hook continuation true, including asyncRewake rewake turns) and
@@ -2238,6 +2348,7 @@ test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
+test_pi_extension_marker_anchors_on_the_lock_holder_from_a_descendant
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive

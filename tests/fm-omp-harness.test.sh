@@ -514,6 +514,154 @@ EOF
   pass ".omp turn-end guard: digest delivery, seatbelt block, one compelled continuation, flagged stop stands down"
 }
 
+# The marker must name the lock-holder session, not the transient descendant
+# process (a compaction child) that walked to it: a cold start keeps its own
+# pid, and a live foreign holder writes nothing.
+test_turnend_guard_extension_marker_anchors_on_the_lock_holder_from_a_descendant() {
+  local repo home out status sleep_pid
+  repo="$TMP_ROOT/guard-marker/repo"; home="$TMP_ROOT/guard-marker/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+exit 2
+SH
+  cat > "$repo/bin/fm-arm-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/bin/fm-cd-pretool-check.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/bin/fm-sessionstart-run.sh"
+  chmod +x "$repo/bin/"*.sh
+  # The node driver names its own live parent (this command's subshell) as
+  # the lock holder, so the driver is a genuine descendant and the walk must
+  # resolve "owned" through ancestry - robust even when the test shell is
+  # pid 1 in a container.
+  out=$(FM_HOME="$home" EXT="$repo/.omp/extensions/fm-primary-turnend-guard.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { readFileSync, writeFileSync } from "node:fs";
+const home = process.env.FM_HOME;
+const holder = String(process.ppid);
+writeFileSync(`${home}/state/.lock`, `${holder}\n`);
+const handlers = new Map();
+const pi = { on(e, h) { handlers.set(e, h); }, sendMessage() {} };
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+const marker = () => readFileSync(`${home}/state/.omp-turnend-extension-loaded`, "utf8").trim().split("\n")[1];
+if (marker() !== holder) {
+  throw new Error(`init marker named ${marker()}, not the holder ${holder}`);
+}
+const ctx = { sessionManager: { getSessionId: () => "s1" } };
+await handlers.get("session_start")({ type: "session_start" }, ctx);
+if (marker() !== holder) {
+  throw new Error(`session_start marker named ${marker()}, not the holder ${holder}`);
+}
+if (marker() === String(process.pid)) {
+  throw new Error("marker anchored on the transient descendant pid");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp guard marker must anchor on the lock holder from a descendant"
+  [ -z "$out" ] || fail "omp guard descendant-marker test printed output: $out"
+
+  rm -f "$home/state/.lock" "$home/state/.omp-turnend-extension-loaded"
+  out=$(FM_HOME="$home" EXT="$repo/.omp/extensions/fm-primary-turnend-guard.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { readFileSync } from "node:fs";
+const pi = { on() {}, sendMessage() {} };
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+const pid = readFileSync(`${process.env.FM_HOME}/state/.omp-turnend-extension-loaded`, "utf8").trim().split("\n")[1];
+if (pid !== String(process.pid)) {
+  throw new Error(`cold-start marker named ${pid}, not its own pid ${process.pid}`);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp guard cold-start marker must keep its own pid"
+  [ -z "$out" ] || fail "omp guard cold-start marker test printed output: $out"
+
+  sleep 30 &
+  sleep_pid=$!
+  printf '%s\n' "$sleep_pid" > "$home/state/.lock"
+  rm -f "$home/state/.omp-turnend-extension-loaded"
+  out=$(FM_HOME="$home" EXT="$repo/.omp/extensions/fm-primary-turnend-guard.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { existsSync } from "node:fs";
+const pi = { on() {}, sendMessage() {} };
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+if (existsSync(`${process.env.FM_HOME}/state/.omp-turnend-extension-loaded`)) {
+  throw new Error("marker was written under a live foreign lock holder");
+}
+EOF
+)
+  status=$?
+  kill "$sleep_pid" 2>/dev/null || true
+  wait "$sleep_pid" 2>/dev/null || true
+  expect_code 0 "$status" "omp guard must refuse to mark under a live foreign holder"
+  [ -z "$out" ] || fail "omp guard foreign-holder marker test printed output: $out"
+
+  pass ".omp turn-end guard: the loaded marker anchors on the lock holder from a descendant process"
+}
+
+# The watch marker must name the lock-holder session, not the transient
+# descendant process that walked to it; a cold start keeps its own pid.
+test_watch_extension_marker_anchors_on_the_lock_holder_from_a_descendant() {
+  local repo home out status
+  repo="$TMP_ROOT/watch-marker/repo"; home="$TMP_ROOT/watch-marker/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  # The node driver names its own live parent (this command's subshell) as
+  # the lock holder, so the driver is a genuine descendant and the walk must
+  # resolve "owned" through ancestry - robust even when the test shell is
+  # pid 1 in a container.
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { readFileSync, writeFileSync } from "node:fs";
+const home = process.env.FM_HOME;
+const holder = String(process.ppid);
+writeFileSync(`${home}/state/.lock`, `${holder}\n`);
+const pi = { on() {}, registerCommand() {}, registerTool() {}, sendUserMessage() {} };
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+const pid = readFileSync(`${home}/state/.omp-watch-extension-loaded`, "utf8").trim().split("\n")[1];
+if (pid !== holder) {
+  throw new Error(`marker named ${pid}, not the holder ${holder}`);
+}
+if (pid === String(process.pid)) {
+  throw new Error("marker anchored on the transient descendant pid");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch marker must anchor on the lock holder from a descendant"
+  [ -z "$out" ] || fail "omp watch descendant-marker test printed output: $out"
+
+  rm -f "$home/state/.lock" "$home/state/.omp-watch-extension-loaded"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { readFileSync } from "node:fs";
+const pi = { on() {}, registerCommand() {}, registerTool() {}, sendUserMessage() {} };
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+const pid = readFileSync(`${process.env.FM_HOME}/state/.omp-watch-extension-loaded`, "utf8").trim().split("\n")[1];
+if (pid !== String(process.pid)) {
+  throw new Error(`cold-start marker named ${pid}, not its own pid ${process.pid}`);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp watch cold-start marker must keep its own pid"
+  [ -z "$out" ] || fail "omp watch cold-start marker test printed output: $out"
+
+  pass ".omp watch extension: the loaded marker anchors on the lock holder from a descendant process"
+}
+
 test_watch_extension_arms_and_delivers() {
   local repo home out status
   repo="$TMP_ROOT/watch/repo"; home="$TMP_ROOT/watch/home"
@@ -584,4 +732,6 @@ test_busy_extension_lifecycle
 test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
+test_turnend_guard_extension_marker_anchors_on_the_lock_holder_from_a_descendant
 test_watch_extension_arms_and_delivers
+test_watch_extension_marker_anchors_on_the_lock_holder_from_a_descendant

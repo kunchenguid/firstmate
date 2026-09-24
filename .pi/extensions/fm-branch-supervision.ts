@@ -899,7 +899,10 @@ export default function (pi: ExtensionAPI) {
   function markLoaded(): void {
     try {
       mkdirSync(state, { recursive: true });
-      writeFileSync(loadedMarker, `${process.pid}\n`);
+      // Anchored on the lock holder named by the ownership walk that gated
+      // this activation: a descendant process acting as owner must not strand
+      // the marker on its own transient pid.
+      writeFileSync(loadedMarker, `${ownedLockPid || process.pid}\n`);
     } catch {
       // Diagnostic marker only; never block activation on it.
     }

@@ -773,7 +773,9 @@ fi
 # with no dialog, so the only ways both tracked primary extensions fail to load
 # are a session started outside this home, an extension disabled in the omp
 # config, or a build older than the tracked file. The markers carry the loaded
-# build plus the loading pid, exactly as the Pi ones do (bin/fm-wake-lib.sh).
+# build plus the lock-holder session's pid (a descendant of that session
+# records the holder's pid, never its own transient pid), exactly as the Pi
+# ones do (bin/fm-wake-lib.sh).
 if [ "$PRIMARY_HARNESS" = omp ]; then
   OMP_EXT="$FM_ROOT/.omp/extensions/fm-primary-omp-watch.ts"
   OMP_TURNEND_EXT="$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts"

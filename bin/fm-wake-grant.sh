@@ -29,6 +29,25 @@ owner_matches() { # [<pid>] [<generation>]
   fm_wake_branch_owner_matches "$BRANCH_OWNER" "${1:-}" "${2:-}"
 }
 
+# Rewrite the just-validated owner record carrying the given reserved
+# sequences as its v2 fifth line (empty when none), keeping its pid, identity,
+# and generation as-is. Callers hold the queue lock and rewrite this record
+# before publishing or removing the row snapshot, so a crash never leaves
+# live sequences naming a snapshot the caller already moved past.
+owner_record_seqs_rewritten() { # <seq>...
+  local IFS=, pid identity generation owner_tmp
+  pid=$(sed -n '2p' "$BRANCH_OWNER")
+  identity=$(sed -n '3p' "$BRANCH_OWNER")
+  generation=$(sed -n '4p' "$BRANCH_OWNER")
+  # A dedicated temp, never the caller's TMP: publish calls this with its own
+  # rows temp possibly still live, and this rewrite must not orphan it.
+  owner_tmp=$(mktemp "$STATE/.branch-eligible-owner.tmp.XXXXXX") || return 1
+  printf '%s\n%s\n%s\n%s\n%s\n' fm-branch-eligible-owner-v2 "$pid" "$identity" "$generation" "$*" > "$owner_tmp" \
+    || { rm -f -- "$owner_tmp"; return 1; }
+  chmod 0600 "$owner_tmp" || { rm -f -- "$owner_tmp"; return 1; }
+  _fm_atomic_replace "$owner_tmp" "$BRANCH_OWNER" || { rm -f -- "$owner_tmp"; return 1; }
+}
+
 case "${1:-}" in
   activate)
     pid=${2:-}
@@ -39,11 +58,21 @@ case "${1:-}" in
     identity=$(fm_pid_identity "$pid" 2>/dev/null) || exit 1
     [ -n "$identity" ] || exit 1
     TMP=$(mktemp "$STATE/.branch-eligible-owner.tmp.XXXXXX") || exit 1
-    printf '%s\n%s\n%s\n%s\n' fm-branch-eligible-owner-v1 "$pid" "$identity" "$generation" > "$TMP" || exit 1
+    printf '%s\n%s\n%s\n%s\n%s\n' fm-branch-eligible-owner-v2 "$pid" "$identity" "$generation" '' > "$TMP" || exit 1
     chmod 0600 "$TMP" || exit 1
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
     LOCK_HELD=true
     [ "$(fm_pid_identity "$pid" 2>/dev/null || true)" = "$identity" ] || exit 1
+    # A descendant of the lock-holding primary (a compaction child) reaches the
+    # same "owned" walk verdict as the primary itself and would otherwise
+    # clobber the live grant with its transient pid; its later exit would then
+    # deactivate the primary's grant and strand its eligible rows. Refusing a
+    # live different-pid takeover closes that hole; a dead owner is still
+    # replaceable, and the same pid may always reactivate (generation bumps).
+    if owner_matches && [ "$(sed -n '2p' "$BRANCH_OWNER")" != "$pid" ]; then
+      echo "fm-wake-grant.sh: activate refused - a live branch owner holds the grant under a different pid" >&2
+      exit 1
+    fi
     rm -f -- "$BRANCH_ROWS" || exit 1
     _fm_atomic_replace "$TMP" "$BRANCH_OWNER" || exit 1
     TMP=
@@ -78,8 +107,18 @@ case "${1:-}" in
     ' "$FM_WAKE_QUEUE"
     rc=$?
     [ "$rc" -eq 0 ] || exit "$rc"
+    # The record rewrites before the snapshot publishes: a crash between them
+    # either leaves a stale-but-valid snapshot filtering already-acked
+    # sequences, or, on first publish, no snapshot at all, which the next
+    # drain rebuilds from this fresh record.
+    owner_record_seqs_rewritten "$@" || exit 1
     if [ "$replace" -eq 1 ]; then
       _fm_atomic_replace "$TMP" "$BRANCH_ROWS" || exit 1
+      TMP=
+    else
+      # The existing snapshot already holds this exact content; only the
+      # rows temp remains to discard.
+      rm -f -- "$TMP"
       TMP=
     fi
     ;;
@@ -89,6 +128,15 @@ case "${1:-}" in
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
     LOCK_HELD=true
     owner_matches '' "$generation" || exit 1
+    # Clearing the durable sequence list is what keeps a released grant from
+    # ever being resurrected from its own record: with no row snapshot and no
+    # recorded sequences, a later drain finds nothing to rebuild and keeps
+    # failing loudly as the wiring-bug guard it is. The record must clear
+    # before the snapshot is removed: a crash between them then leaves a
+    # stale-but-valid snapshot filtering nothing, while the old order left
+    # live sequences with no snapshot for the next drain to rebuild into
+    # already-released wakes.
+    owner_record_seqs_rewritten || exit 1
     rm -f -- "$BRANCH_ROWS" || exit 1
     ;;
   deactivate)

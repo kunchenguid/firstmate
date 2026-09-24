@@ -1682,6 +1682,223 @@ test_branch_actor_without_eligible_snapshot_refuses() {
   pass "a branch-actor drain with no eligible-row snapshot refuses loudly instead of draining nothing"
 }
 
+# The descendant-clobber durability shape: the row snapshot disappears between
+# the branch's publish and its acknowledgement while the live owner record
+# keeps naming the reserved rows. Both the drain and the ack rebuild the
+# snapshot from that record, so the queue never wedges and main-owned rows
+# stay untouched. Do not regress it.
+test_branch_drain_and_ack_restore_a_lost_eligible_snapshot() {
+  local dir state out err sequence generation
+  dir=$(make_case actor-restore)
+  state="$dir/state"
+
+  append_wake "$state" check "some-poll.check.sh" "check: some-poll.check.sh: merged" \
+    || fail "main-only append failed"
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
+  append_wake "$state" stale "fm-window" "stale: fm-window" || fail "stale append failed"
+
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" actor-restore || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish actor-restore 2 3 || fail "branch grant publication failed"
+
+  rm -f -- "$state/.branch-eligible-rows"
+
+  out="$dir/branch-drain.out"
+  err="$dir/branch-drain.err"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$out" 2> "$err" \
+    || fail "branch drain with a lost snapshot failed: $(cat "$err")"
+  grep -Fq "restored a lost branch-eligible row snapshot" "$err" \
+    || fail "the rebuilt snapshot was not reported: $(cat "$err")"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$out" || fail "restored branch drain omitted its eligible signal row"
+  grep -Fq "$(printf '\tstale\tfm-window\t')" "$out" || fail "restored branch drain omitted its eligible stale row"
+  grep -Fq "$(printf '\tcheck\tsome-poll.check.sh\t')" "$out" && fail "restored branch drain presented the main-owned row"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ "$sequence" = 3 ] || fail "restored branch ack cutoff must stay the max eligible seq (3), got ${sequence:-none}"
+
+  # The restored reservation still fences main out of the granted rows.
+  out="$dir/main-drain.out"
+  err="$dir/main-drain.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "main drain failed: $(cat "$err")"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$out" && fail "main drained the branch's restored reservation"
+  grep -Fq "$(printf '\tstale\tfm-window\t')" "$out" && fail "main drained the branch's restored reservation"
+  grep -Fq "$(printf '\tcheck\tsome-poll.check.sh\t')" "$out" || fail "main's fenced drain lost the main-owned row"
+
+  # The snapshot is lost again in the acknowledgement window; the ack must
+  # rebuild it too rather than wedging the queue at its own step.
+  rm -f -- "$state/.branch-eligible-rows"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "branch ack with a lost snapshot failed"
+  grep -Fq "$(printf '\tcheck\tsome-poll.check.sh\t')" "$state/.wake-queue" \
+    || fail "restored branch ack swallowed the main-owned row"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$state/.wake-queue" \
+    && fail "restored branch ack left its eligible signal row queued"
+
+  pass "a lost branch-eligible row snapshot is rebuilt from the live owner record for both drain and ack"
+}
+
+# The main-first durability shape: the row snapshot disappears between the
+# branch's publish and the branch's next drain, and a MAIN drain runs first.
+# That drain rebuilds the reservation from the live owner record before
+# claiming, so main stays fenced out of the granted rows instead of claiming
+# and presenting them while the branch later presents them again. Do not
+# regress it.
+test_main_drain_rebuilds_a_lost_eligible_snapshot_before_claiming() {
+  local dir state out err
+  dir=$(make_case actor-main-first)
+  state="$dir/state"
+
+  append_wake "$state" check "some-poll.check.sh" "check: some-poll.check.sh: merged" \
+    || fail "main-only append failed"
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
+  append_wake "$state" stale "fm-window" "stale: fm-window" || fail "stale append failed"
+
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" actor-main-first || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish actor-main-first 2 3 || fail "branch grant publication failed"
+
+  rm -f -- "$state/.branch-eligible-rows"
+
+  out="$dir/main-drain.out"
+  err="$dir/main-drain.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" \
+    || fail "main drain with a lost snapshot failed: $(cat "$err")"
+  grep -Fq "restored a lost branch-eligible row snapshot" "$err" \
+    || fail "the main drain did not rebuild the lost snapshot: $(cat "$err")"
+  grep -Fq "$(printf '\tcheck\tsome-poll.check.sh\t')" "$out" || fail "main drain omitted its main-owned check row"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$out" && fail "main drain claimed the live branch grant's signal row"
+  grep -Fq "$(printf '\tstale\tfm-window\t')" "$out" && fail "main drain claimed the live branch grant's stale row"
+
+  out="$dir/branch-drain.out"
+  err="$dir/branch-drain.err"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$out" 2> "$err" \
+    || fail "branch drain after the main-side rebuild failed: $(cat "$err")"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$out" || fail "branch drain omitted its eligible signal row"
+  grep -Fq "$(printf '\tstale\tfm-window\t')" "$out" || fail "branch drain omitted its eligible stale row"
+
+  pass "a main drain rebuilds a lost eligible snapshot and stays fenced out of the branch rows"
+}
+
+# The grant is keyed to one live owner: an activate from a different live pid
+# - the descendant-of-the-primary shape - must be refused so the descendant can
+# neither clobber the snapshot nor deactivate the live owner's grant when it
+# exits. The same pid may always reactivate (a generation bump), and a dead
+# owner is replaceable by anyone.
+test_grant_activate_refuses_a_live_foreign_owner() {
+  local dir state owner out status
+  dir=$(make_case grant-takeover)
+  state="$dir/state"
+
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "append failed"
+  sleep 30 &
+  owner=$!
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$owner" takeover-live \
+    || { kill "$owner" 2>/dev/null || true; fail "branch owner activation failed"; }
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish takeover-live 1 \
+    || { kill "$owner" 2>/dev/null || true; fail "branch grant publication failed"; }
+
+  out=$(FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" takeover-live 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || { kill "$owner" 2>/dev/null || true; fail "activate from a live different pid must be refused"; }
+  grep -Fq "activate refused - a live branch owner holds the grant under a different pid" <<< "$out" \
+    || fail "the refusal did not name the live foreign owner: $out"
+  [ -e "$state/.branch-eligible-rows" ] || fail "the refused activate must leave the row snapshot intact"
+  [ "$(sed -n '2p' "$state/.branch-eligible-owner")" = "$owner" ] \
+    || fail "the refused activate disturbed the recorded owner"
+
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$owner" takeover-live-b \
+    || { kill "$owner" 2>/dev/null || true; fail "same-pid reactivation must be allowed"; }
+  [ "$(sed -n '2p' "$state/.branch-eligible-owner")" = "$owner" ] \
+    || fail "same-pid reactivation changed the recorded owner"
+
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" takeover-after \
+    || fail "activate after the owner exited must be allowed"
+  [ "$(sed -n '2p' "$state/.branch-eligible-owner")" = "$$" ] \
+    || fail "the post-exit activate did not record the new owner"
+
+  pass "grant activation refuses a live foreign owner while allowing generation bumps and dead-owner takeover"
+}
+
+# A released grant must never resurrect from its own record: release clears
+# the durable sequence list, so a later branch drain still refuses loudly
+# rather than rebuilding rows the settled prompt already delivered.
+test_released_grant_does_not_resurrect_from_its_record() {
+  local dir state
+  dir=$(make_case grant-release-evidence)
+  state="$dir/state"
+
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "append failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" release-evidence || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish release-evidence 1 || fail "branch grant publication failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" release release-evidence || fail "branch grant release failed"
+
+  [ -e "$state/.branch-eligible-owner" ] || fail "the owner record should survive its release"
+  [ -z "$(sed -n '5p' "$state/.branch-eligible-owner")" ] \
+    || fail "release must clear the durable sequence list"
+
+  if FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" >/dev/null 2>"$dir/err"; then
+    fail "a branch drain after release must still refuse, not rebuild the settled grant"
+  fi
+  grep -q "no branch-eligible row snapshot" "$dir/err" || fail "the refusal did not name the missing snapshot: $(cat "$dir/err")"
+  [ -s "$state/.wake-queue" ] || fail "the refused drain must leave the queue untouched"
+  pass "a released grant cannot be resurrected from its own record"
+}
+
+# An idempotent republish - the same sequence list, so the existing snapshot
+# already holds the exact content - must not leak its rows temp or its owner
+# record temp into state/, and must keep the recorded sequence list intact.
+test_idempotent_republish_leaves_no_temp_files() {
+  local dir state leaked
+  dir=$(make_case republish-temps)
+  state="$dir/state"
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "append failed"
+  append_wake "$state" stale "fm-window" "stale: window" || fail "append failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" activate "$$" republish-temps \
+    || fail "branch owner activation failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish republish-temps 1 2 \
+    || fail "branch grant publication failed"
+  FM_STATE_OVERRIDE="$state" "$GRANT" publish republish-temps 1 2 \
+    || fail "idempotent republish failed"
+  for leaked in "$state"/.branch-eligible-rows.tmp.* "$state"/.branch-eligible-owner.tmp.*; do
+    [ -e "$leaked" ] && fail "a republish leaked $leaked into state"
+  done
+  [ "$(sed -n '5p' "$state/.branch-eligible-owner")" = "1,2" ] \
+    || fail "idempotent republish changed the recorded sequence list"
+  pass "an idempotent republish leaves no temp files and keeps the recorded list"
+}
+
+# Main's presented-set claim is self-healing: losing or corrupting
+# .main-eligible-rows must never block main's acknowledgement, because the
+# claim is re-derived from the queue under the lock exactly as a fresh drain
+# would.
+test_main_ack_survives_a_lost_or_corrupt_presented_claim() {
+  local dir state sequence generation
+  dir=$(make_case main-lost-claim)
+  state="$dir/state"
+
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/first.out" 2> "$dir/first.err" || fail "first main drain failed"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/first.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/first.err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "first drain omitted its acknowledgement boundary"
+
+  printf 'garbage\nnot-a-seq\n' > "$state/.main-eligible-rows"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "main ack with a corrupt presented claim failed"
+  [ ! -s "$state/.wake-queue" ] || fail "main's corrupt-claim ack left its row queued"
+
+  append_wake "$state" signal "task-b.status" "signal: task-b" || fail "second append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/second.out" 2> "$dir/second.err" || fail "second main drain failed"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/second.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/second.err")
+  rm -f -- "$state/.main-eligible-rows"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "main ack with a lost presented claim failed"
+  [ ! -s "$state/.wake-queue" ] || fail "main's lost-claim ack left its row queued"
+
+  pass "main drain and acknowledgement re-derive a lost or corrupt presented claim"
+}
+
 test_wake_publish_requires_atomic_recovery_evidence() {
   local dir state fakebin real_mv rc out
   dir=$(make_case wake-publish-recovery-evidence)
@@ -2732,6 +2949,12 @@ test_branch_grant_refuses_rows_already_claimed_by_main
 test_actor_filter_precedes_same_key_deduplication
 test_main_reclaims_a_grant_whose_branch_owner_exited
 test_branch_actor_without_eligible_snapshot_refuses
+test_branch_drain_and_ack_restore_a_lost_eligible_snapshot
+test_main_drain_rebuilds_a_lost_eligible_snapshot_before_claiming
+test_grant_activate_refuses_a_live_foreign_owner
+test_released_grant_does_not_resurrect_from_its_record
+test_idempotent_republish_leaves_no_temp_files
+test_main_ack_survives_a_lost_or_corrupt_presented_claim
 test_wake_publish_requires_atomic_recovery_evidence
 test_legacy_generationless_wake_is_adopted
 test_stale_recovery_generation_cannot_touch_a_newer_episode

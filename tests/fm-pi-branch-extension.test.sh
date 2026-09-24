@@ -4049,6 +4049,70 @@ EOF
   pass "a Pi session that does not own the lock accepts nothing and mutates no branch state"
 }
 
+# The lazy branch marker must name the lock-holder session, not the branch
+# process that walked to it. In production the branch session itself is a
+# descendant of the holder (a Pi compaction child can act as owner too), so
+# the marker a descendant writes still has to anchor on the holder it reached
+# through the ownership walk - the branch process pid would strand the marker
+# on a transient process that dies with it.
+test_branch_marker_anchors_on_the_lock_holder() {
+  local repo home out status
+  repo="$TMP_ROOT/branch-marker-root"
+  home="$TMP_ROOT/branch-marker-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, defaultSessionCtx }; })()`);
+const { fire, dispatch, settle, home, defaultSessionCtx } = globalThis.__t;
+import { readFileSync, writeFileSync } from "node:fs";
+
+// The driver node process is a genuine descendant of the test shell: the
+// shell holds the lock, the driver acts as the branch, exactly the
+// descendant-actor shape the production bug observed.
+writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
+await fire("session_start", {}, defaultSessionCtx);
+
+const marker = () => readFileSync(`${home}/state/.pi-branch-extension-loaded`, "utf8").trim();
+if (marker() !== String(process.ppid)) {
+  throw new Error(`activation marker named ${marker()}, not the lock holder ${process.ppid}`);
+}
+
+// A full accepted-wake cycle must keep that anchor, even though the grant
+// owner record correctly names the branch process itself.
+let finishWakePrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishWakePrompt = resolve; });
+const offer = dispatch("signal: branch-marker probe done: PR https://example.com/pr/31 checks green");
+if (!offer.accepted) throw new Error("branch did not accept the wake offer");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
+if (marker() !== String(process.ppid)) {
+  throw new Error(`post-wake marker named ${marker()}, not the lock holder ${process.ppid}`);
+}
+const grantOwner = readFileSync(`${home}/state/.branch-eligible-owner`, "utf8").trim().split("\n");
+if (grantOwner[1] !== String(process.pid)) {
+  throw new Error(`grant owner record named ${grantOwner[1]}, not the branch process ${process.pid}`);
+}
+const session = globalThis.__fmSessions[0];
+const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+const r1 = await report.execute("call-1", { task: "branch-driver", verdict: "routine", summary: "marker probe healthy, no action needed", wake: "signal: branch-marker probe done" }, undefined, undefined, {});
+if (r1.isError) throw new Error(`routine report failed: ${JSON.stringify(r1)}`);
+finishWakePrompt();
+await offer.settlement;
+globalThis.__fmOnBranchPrompt = undefined;
+
+await fire("session_shutdown", {});
+if (marker() !== String(process.ppid)) {
+  throw new Error(`post-shutdown marker named ${marker()}, not the lock holder ${process.ppid}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "the branch marker must anchor on the lock holder: $out"
+  pass "the branch supervision marker names the lock holder, not the branch process"
+}
+
 test_rebind_remirrors_undelivered_dialog_from_durable_cursor() {
   local repo home out status
   repo="$TMP_ROOT/rebind-root"
@@ -5307,6 +5371,7 @@ test_cold_start_activates_after_lock_acquisition
 test_queued_actions_recheck_lock_ownership
 test_stale_generation_boundaries_are_side_effect_free
 test_secondary_session_stays_inert
+test_branch_marker_anchors_on_the_lock_holder
 test_rebind_remirrors_undelivered_dialog_from_durable_cursor
 test_delivery_keeps_the_event_loop_live_and_ordered
 test_session_replacement_during_delivery_neither_loses_nor_duplicates

@@ -553,14 +553,21 @@ set -eu
 printf '%s\n' "$*" >> "$FORGE/calls"
 fault=$(cat "$FORGE/fault" 2>/dev/null || true)
 case "$fault" in latency) sleep "${FORGE_LATENCY:-2}" ;; esac
+# Clock advances go through a unique temp file plus an atomic rename: a
+# concurrent reader (a parallel wave-2 call, or the main script's date) must
+# never observe the truncated clock that `>` briefly exposes, because bash
+# arithmetic treats an empty operand as 0 and would reset the budget clock.
 case "$fault:$*" in
   # Advance once before the parallel read wave; its readers share this clock.
   reserve:'api repos/o/r/issues/9')
-    printf '%s\n' "$(( $(cat "$FORGE/clock") + 6 ))" > "$FORGE/clock" ;;
+    printf '%s\n' "$(( $(cat "$FORGE/clock") + 6 ))" > "$FORGE/clock.advance.$$"
+    mv -f "$FORGE/clock.advance.$$" "$FORGE/clock" ;;
   exhaust:'api repos/o/r/issues/8/comments?'*)
-    printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock" ;;
+    printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock.advance.$$"
+    mv -f "$FORGE/clock.advance.$$" "$FORGE/clock" ;;
   fail-late:'api repos/o/r/pulls/8/reviews?'*)
-    printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock"
+    printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock.advance.$$"
+    mv -f "$FORGE/clock.advance.$$" "$FORGE/clock"
     printf 'HTTP 502\n' >&2; exit 1 ;;
   fail:'api repos/o/r/pulls/8/reviews?'*) printf 'HTTP 502\n' >&2; exit 1 ;;
   down:*) printf 'HTTP 502\n' >&2; exit 1 ;;

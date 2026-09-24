@@ -152,6 +152,67 @@ EOF
   pass "Pi extension reports external healthy watcher output"
 }
 
+# The watch marker must name the lock-holder session, not the transient
+# descendant process (a Pi compaction child) that walked to it; a cold start
+# with no lock file keeps the writer's own pid.
+test_pi_watch_extension_marker_anchors_on_the_lock_holder_from_a_descendant() {
+  local repo home plugin marker out status
+  repo="$TMP_ROOT/pi-watch-descendant-marker-root"
+  home="$TMP_ROOT/pi-watch-descendant-marker-home"
+  marker="$home/state/.pi-watch-extension-loaded"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  # The node driver names its own live parent (this command's subshell) as
+  # the lock holder, so the driver is a genuine descendant and the walk must
+  # resolve "owned" through ancestry - robust even when the test shell is
+  # pid 1 in a container.
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const home = process.env.FM_HOME;
+const holder = String(process.ppid);
+writeFileSync(`${home}/state/.lock`, `${holder}\n`);
+const pi = { on() {}, registerCommand() {}, registerTool() {} };
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const pid = readFileSync(`${home}/state/.pi-watch-extension-loaded`, "utf8").trim().split("\n")[1];
+if (pid !== holder) {
+  throw new Error(`marker named ${pid}, not the holder ${holder}`);
+}
+if (pid === String(process.pid)) {
+  throw new Error("marker anchored on the transient descendant pid");
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi watch marker must anchor on the lock holder from a descendant"
+  [ -z "$out" ] || fail "Pi watch descendant-marker test printed output: $out"
+  [ "$(sed -n '2p' "$marker")" = "$(cat "$home/state/.lock")" ] \
+    || fail "watch marker pid line should survive the driver's exit unchanged"
+
+  rm -f "$home/state/.lock" "$marker"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const pi = { on() {}, registerCommand() {}, registerTool() {} };
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const pid = readFileSync(`${process.env.FM_HOME}/state/.pi-watch-extension-loaded`, "utf8").trim().split("\n")[1];
+if (pid !== String(process.pid)) {
+  throw new Error(`cold-start marker named ${pid}, not its own pid ${process.pid}`);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi watch cold-start marker must keep its own pid"
+  [ -z "$out" ] || fail "Pi watch cold-start marker test printed output: $out"
+
+  pass "Pi watch extension marker anchors on the lock holder from a descendant process"
+}
+
 test_pi_tool_returns_agent_tool_result() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-tool-result-root"
@@ -4315,6 +4376,7 @@ EOF
 }
 
 test_pi_extension_reports_external_healthy_watcher
+test_pi_watch_extension_marker_anchors_on_the_lock_holder_from_a_descendant
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
