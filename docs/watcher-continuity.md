@@ -297,12 +297,16 @@ Failing the whole drain would strand the usable rows too.
 | Main `--ack-through <SEQ>` | Only claimed main rows at or below the cutoff. |
 | Branch | Only claimed branch rows at or below its cutoff. |
 
+Either acknowledgement leaves an `inbox:<id>` check row queued while `state/inbox/<id>.note` is pending.
+A main acknowledgement keeps that row claimed for the next drain; a branch acknowledgement releases it for the next branch grant or main drain.
+Handling the note with `bin/fm-inbox.sh drain --ack <id>` allows the next wake acknowledgement to consume its row.
+
 A main acknowledgement first claims every unreserved row at or below its cutoff, so none is stranded.
 It leaves a row above the cutoff that arrived after presentation unowned, so an away-session grant can still take it rather than handing every later wake back to main.
 
 Every settled branch prompt releases any residual grant.
 So an omitted or failed acknowledgement leaves the durable row available to a later main drain.
-A successful acknowledgement has already removed it.
+A successful acknowledgement has already removed consumed rows, while pending inbox notes stay available.
 
 An acknowledgement can remove none of the actor's rows while a presented row above the cutoff still waits.
 Such an acknowledgement is reported as having acknowledged nothing, together with the exact `--ack-through` and `--recovery-generation` command for that presented row.
