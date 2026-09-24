@@ -5028,7 +5028,9 @@ if [ -n "$MEMORY_MAX_MIB" ]; then
   else
     MEMORY_SCOPE_CMD="/bin/sh -c $(shell_quote "$LAUNCH")"
   fi
-  LAUNCH="systemd-run --user --scope --quiet --unit=$MEMORY_SCOPE_UNIT -p MemoryMax=${MEMORY_MAX_MIB}M -p MemorySwapMax=${MEMORY_MAX_MIB}M -p OOMPolicy=stop -- $MEMORY_SCOPE_CMD; $(shell_quote "$SCRIPT_DIR/fm-worker-memory-cap.sh") outcome $MEMORY_SCOPE_UNIT $MEMORY_MAX_MIB $(shell_quote "$STATE/$ID.status") $(shell_quote "$CONFIG")"
+  MEMORY_SCOPE_MARKER="$STATE/$ID-$SPAWN_GEN.scope-started"
+  MEMORY_SCOPE_CMD="/bin/sh -c $(shell_quote ": > $(shell_quote "$MEMORY_SCOPE_MARKER"); exec $MEMORY_SCOPE_CMD")"
+  LAUNCH="rm -f $(shell_quote "$MEMORY_SCOPE_MARKER"); systemd-run --user --scope --quiet --unit=$MEMORY_SCOPE_UNIT -p MemoryMax=${MEMORY_MAX_MIB}M -p MemorySwapMax=${MEMORY_MAX_MIB}M -p OOMPolicy=stop -- $MEMORY_SCOPE_CMD; scope_rc=\$?; $(shell_quote "$SCRIPT_DIR/fm-worker-memory-cap.sh") outcome $MEMORY_SCOPE_UNIT $MEMORY_MAX_MIB $(shell_quote "$STATE/$ID.status") $(shell_quote "$CONFIG") \$scope_rc $(shell_quote "$MEMORY_SCOPE_MARKER")"
 fi
 # Implement the launch-delivery contract in this script's header. The full
 # home-identity hash isolates equal task ids across homes, and the spawn token in
