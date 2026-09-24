@@ -138,6 +138,7 @@ def away_posture_operation():
 
 
 
+
 def afk_record_field(name):
     contract = os.path.join(os.path.dirname(__file__), 'fm-afk-contract.sh')
     env = os.environ.copy()
@@ -197,6 +198,7 @@ def afk_email_context():
     if configured.returncode != 0 or not recipient:
         return None, True, False
     return recipient, True, False
+
 
 
 
@@ -622,6 +624,7 @@ def cmd_poll_list():
 
 
         afk_enabled = recipient is not None
+
 
 
 
