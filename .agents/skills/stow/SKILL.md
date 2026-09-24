@@ -272,6 +272,25 @@ It is never a claim that the home's durable records are correct, because this pa
 Do not hide an over-budget result behind a reset-safe claim.
 In a primary home the receipt is written after the cascade below, not instead of it.
 
+## Coordinated periodic or recoverable invocation
+
+When an `fm-stow-request` custom message supplies a `run_id`, this complete skill remains the content owner, while `bin/fm-stow-run.sh` owns the durable request and run lifecycle.
+Treat message delivery and `agent_end` as neither consumption nor completion: call the requested `begin` or `recover` operation with the current state revision before planning, and call `finish` only after writing and reading back the machine receipt.
+If user work, known background validation, a write-critical step, retry, queued input, or compaction still has priority, call `defer` with the concrete reason instead of beginning or continuing a step.
+Unknown session-message types remain candidate material for the ordinary relevance test, while `fm-stow-request` delivery and coordinator bookkeeping are never knowledge merely because they exist; do not turn a coordinated pass into task archival or repository-state inspection.
+
+Build one fixed plan under `data/stow-runs/<run_id>/` before the first mutation.
+For every file or owned-record mutation, record a stable operation id, original digest, and target digest through `step --phase prepared`, perform the owner-governed write, read it back, and record `step --phase verified` only when the actual digest equals the planned target.
+On recovery, reuse the original operation ids, digests, archive markers, task operations, and secondmate correlations: target means record verified without rewriting, original means the planned operation may proceed, and any third value means defer or block without overwriting it.
+The run receipt is version 1, binds the exact run and generation, reports its final outcome, local-step readbacks, budget verdict, and every required cascade result; a skipped receipt also explicitly records false for uncovered material, due maintenance, external memory change, budget change, anomaly, and unfinished cascade.
+The exact command arguments, exit codes, compare-and-swap revision, and JSON state mechanics belong to `bin/fm-stow-run.sh --help`, not this skill.
+
+Automatic full passes add conservative gates without changing manual semantics.
+Before an automatic pass, refuse and report any registered home with pass-horizon opt-in, an unmarked or grace-marked legacy learning, an unfinished run, an unavailable safe receiver, or an unreadable eligibility result; never silently remove that home from the cascade.
+A missing harness-safe receiver is `unsupported`, not permission to send a raw execution command.
+In particular, the cascade's ordinary `direct` transport remains valid for an independent manual pass but is `unsupported` for an automatic run until that child has a guarded lifecycle receiver; never execute an automatic child mutation as an untracked direct shell action.
+Manual independent invocation still performs the complete pass above, including its existing decay and cascade semantics.
+
 ## Automatic cascade to secondmates
 
 In a primary home, every `/stow` cascades to every registered secondmate after this home's own required pass and knowledge sweep are complete.

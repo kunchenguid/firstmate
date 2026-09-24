@@ -419,6 +419,16 @@ The flag is per home and is not inherited by secondmate homes, because stow cade
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
 
+## Periodic stow (config/periodic-stow.json)
+
+`config/periodic-stow.json` is an optional per-home opt-in for the Pi main-session coordinator in `.pi/extensions/fm-periodic-stow.ts`; absence means disabled, and secondmate configuration inheritance never copies it.
+The complete version 1 object has exactly `version`, `enabled`, `interval_seconds`, and `min_interval_seconds`, with integer intervals of at least 3600 seconds and `interval_seconds >= min_interval_seconds`.
+The recommended initial values are an 86400-second check interval and a 14400-second minimum between successful automatic full passes, but tracked code installs no enabled configuration and choosing the home and frequency remains an explicit operator action.
+The first due point is the enable-file modification time plus the configured interval; a successful full pass schedules from its completion, a verified no-op schedules from that check, and offline time produces at most one request rather than catch-up runs.
+Unknown fields or versions, malformed JSON, symlinks, unsafe interval values, clock rollback, legacy or pass-horizon conflicts, and corrupt coordinator state disable automatic progress with a concrete diagnostic instead of falling back.
+Setting `enabled` to false stops new periodic requests and withdraws an unconsumed periodic-only request, while manual, partial, blocked, plan, and receipt evidence remains available for recovery.
+`state/stow/state.json` is the single coordinator-state owner and `data/stow-runs/<run_id>/` holds non-injected plans and receipts; `bin/fm-stow-run.sh --help` owns their mutation interface, and the internal [`stow` skill](../.agents/skills/stow/SKILL.md) owns all knowledge, decay, budget, open-record, and cascade semantics.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
