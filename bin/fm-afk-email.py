@@ -850,6 +850,7 @@ def main():
         print(config["recipient"])
         return 0
 
+
     if command == "queue-unprocessed":
         return queue_unprocessed()
     if command == "flush":

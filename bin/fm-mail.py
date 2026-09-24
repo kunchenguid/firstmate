@@ -62,6 +62,7 @@ class AfkBodyFetchError(Exception):
 
 
 
+
 def afk_record_field(name):
     contract = os.path.join(os.path.dirname(__file__), 'fm-afk-contract.sh')
     env = os.environ.copy()
@@ -113,6 +114,7 @@ def afk_email_context():
     if configured.returncode != 0 or not recipient:
         return None, True, False
     return recipient, True, False
+
 
 
 
@@ -501,6 +503,7 @@ def cmd_poll_list():
         retry_candidates = [u for u in retry_window if u in seen]
         recipient, afk_email_active, invalid_posture = afk_email_context()
         afk_enabled = recipient is not None
+
 
 
         afk_messages = []

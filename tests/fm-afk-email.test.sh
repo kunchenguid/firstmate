@@ -28,6 +28,7 @@ if [ "${FM_TEST_SMTP_FAIL:-}" = 1 ]; then
   exit 1
 fi
 
+
 count=$(find "$CAPTURE" -maxdepth 1 -name '*.txt' | wc -l | tr -d ' ')
 path="$CAPTURE/$count.txt"
 printf 'to=%s\nsubject=%s\n' "$2" "$3" > "$path"
@@ -178,6 +179,7 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
   assert_contains "$out" 'Captain-facing outcomes are emailed to the configured address' 'record announces email delivery'
   [ "$(run_email "$home" configured)" = "$AFK_OWNER_EMAIL" ] || fail "mail config did not return the fixed away-email destination"
 
+
   [ "$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field reach_channels)" = email ] \
     || fail "configured Pi posture did not record email reach"
   entered=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field entered_epoch)
@@ -304,6 +306,7 @@ PY
   pass "an unmatched reply-shaped note remains an ordinary non-email inbox note"
 }
 
+
 test_failed_send_keeps_outcomes_queued() {
   local home entered out
   home=$(make_home failed-send configured)
@@ -394,6 +397,7 @@ test_processed_marker_cannot_suppress_outcomes() {
   [ ! -e "$home/state/afk-email/pending/1.json" ] || fail "invalid processed marker queued no longer trustworthy outcomes"
   pass "processed markers cannot suppress or invent outcome progress"
 }
+
 
 
 test_invalid_away_record_does_not_enable_email() {
@@ -1208,6 +1212,7 @@ test_failed_send_keeps_outcomes_queued
 test_live_email_posture_requires_runtime_config
 test_missing_outcome_store_is_empty_but_invalid_store_fails
 test_processed_marker_cannot_suppress_outcomes
+
 test_invalid_away_record_does_not_enable_email
 test_invalid_or_unreadable_posture_suppresses_mail
 test_read_gates_unauthenticated_bodies_during_away
