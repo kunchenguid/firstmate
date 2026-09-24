@@ -1948,7 +1948,7 @@ On Linux x86_64 with Node v22.22.2, the installed Pi 0.85.1 CLI and an isolated 
 The fixture starts with delivered legacy endpoint outcomes and no branch pointer, lets the real primary extension reconcile history, then offers its first eligible synthetic notification through Pi's event bus.
 The fixture pins `minimal`; Pi retains its supported-level clamp, producing `low` in the current Luna request.
 It verifies lazy branch creation, provider startup, the exact `read`, guarded `bash`, and `fm_branch_report` request payload, a new report in the durable store and main's active session tree, and a persisted native compaction checkpoint.
-The portable suite separately checks that cache migration preserves authoritative history and unprocessed captain results, and that mismatched, non-semver, missing, and future version declarations do not prevent valid runtime startup.
+The portable suite at that time separately checked that cache migration preserved authoritative history and unprocessed captain results, and that mismatched, non-semver, missing, and future version declarations did not prevent valid runtime startup; the [current exact-pair admission evidence](#2026-09-24-pi-0871-and-codex-compatibility-0016) supersedes that historical admission behavior.
 Package identity, provenance, containment, startup, failed tool restoration, and unexpected tool mutations retain their safe fallback regressions.
 
 ```sh
