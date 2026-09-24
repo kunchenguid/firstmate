@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Render the primary-harness supervision operating block for session start and
-# the short repair line used by guards and turn-end hooks.
+# the short repair line used by guards and turn-end hooks. On a Claude primary
+# whose home opted into the supervision host (config/supervision-host), the
+# block adds one state line and the host's main-side protocol
+# (docs/supervision-protocols/supervision-host.md); without that file the
+# output is unchanged.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -97,6 +101,10 @@ case "$HARNESS" in
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
 [ -f "$SNIPPET" ] || SNIPPET="$DOC_DIR/unknown.md"
+HOST_SNIPPET=
+if [ "$HARNESS" = claude ] && [ -f "$CONFIG/supervision-host" ]; then
+  HOST_SNIPPET="$DOC_DIR/supervision-host.md"
+fi
 
 checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
 pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
@@ -117,8 +125,8 @@ if [ "$X_MODE" -eq 0 ] && [ -f "$x_mode_env" ]; then
   X_MODE=1
 fi
 
-render_snippet() {
-  local line
+render_snippet() {  # [snippet]
+  local line snippet=${1:-$SNIPPET}
   while IFS= read -r line || [ -n "$line" ]; do
     line=${line//__FM_PI_EXT__/$pi_ext}
     line=${line//__FM_PI_TURNEND_EXT__/$pi_turnend_ext}
@@ -127,7 +135,7 @@ render_snippet() {
     line=${line//__FM_X_MODE_ENV_SH__/$x_mode_env_sh}
     line=${line//__FM_X_MODE_ENV__/$x_mode_env}
     printf '%s\n' "$line"
-  done < "$SNIPPET"
+  done < "$snippet"
 }
 
 repair_line() {
@@ -238,7 +246,14 @@ if [ "$X_MODE" -eq 1 ]; then
 else
   printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
 fi
+if [ -n "$HOST_SNIPPET" ]; then
+  printf '%s\n' '- Supervision host: on; it takes away-posture wakes itself and hands the rest to you (protocol at the end of this block).'
+fi
 ordinary_wake_line
 printf '\n'
 render_snippet
 printf '\n'
+if [ -n "$HOST_SNIPPET" ]; then
+  render_snippet "$HOST_SNIPPET"
+  printf '\n'
+fi

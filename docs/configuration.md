@@ -96,6 +96,21 @@ Cancelling the model picker cancels the whole command and changes neither choice
 Cancelling only the effort picker keeps the standing effort choice and still applies the model pick made in the same run, and the command's one closing message reports both choices as they will actually take effect.
 Both choices are local to each Firstmate home and are not part of secondmate inherited configuration, the same as the Calm preference; a secondmate home pins its own supervision model and effort with its own `/supervision-model`.
 
+## Supervision host (config/supervision-host)
+
+The optional local, gitignored `config/supervision-host` opts this home into the supervision host, which runs the supervision branch's contract on a headless engine session beside a non-Pi primary; [docs/supervision-host.md](supervision-host.md) owns the design, its current scope, and the verified engines.
+Today only a Claude primary runs it, and only for the away posture: with the file present, the Claude Stop hook runs the host in the watcher arm's place, the host handles wakes on the engine while the away-posture record `state/.afk-contract` exists, and `/afk` launches no away daemon on that home, while `/quiet` still does.
+Absence leaves the home exactly as it is without the host, on every harness; a Pi primary keeps its in-process supervision branch whether or not the file exists.
+The file may be empty, or hold one line `<engine> [<model>]`:
+
+- empty or `default` selects the primary harness's own engine at that engine's default model (`sonnet` for the Claude engine);
+- `<engine> [<model>]` names a verified engine, currently only `claude`, and optionally the engine's own model name or alias; `default <model>` selects the primary harness's engine with that model.
+
+An engine that is not verified, a primary with no verified engine, or a malformed line leaves the host with no engine: it takes no wake, every wake reaches main as it would without the host, and each away-posture wake carries a line naming the problem.
+The file is read at every wake, so a change applies at the next one without a restart.
+It is local to each home and not part of secondmate inherited configuration.
+While the file exists, main's lease-checked commands also take the per-task lease lock, so a claim by the host's engine cannot race a mutation main already started (`bin/fm-lease-lib.sh`).
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
@@ -1292,6 +1307,11 @@ FM_CRASH_BACKOFF=60                # seconds to wait after crossing the crash th
 FM_CRASH_NORMAL_SLEEP=5            # seconds to wait after an isolated watcher crash
 FM_LOG_MAX_BYTES=1048576           # daemon log size that triggers trimming
 FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
+# supervision host (bin/fm-supervision-host.sh); read only in a home with config/supervision-host
+FM_SUPERVISION_HOST_PARK_SECONDS=27000   # the host ends its park with a cycle-boundary wake after this long, under the Stop hook's 28800 s timeout
+FM_SUPERVISION_HOST_TURN_TIMEOUT=1200    # bound on one engine turn; a turn that hits it hands its wake to main
+FM_SUPERVISION_HOST_ROTATE_TURNS=20      # the engine conversation starts fresh after this many turns (and at every main session start)
+FM_SUPERVISION_ENGINE_GRACE=30           # seconds between TERM and KILL when an engine turn is stopped
 # spoken interface and captain inbox; see "Spoken interface and captain inbox" above
 FM_VOICE_REGION=        # overrides config/voice-region for one relay run
 FM_VOICE_MODEL=         # overrides config/voice-model for one relay run
