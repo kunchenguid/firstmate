@@ -107,12 +107,14 @@ fi
 git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 
 RECORDED_BASE=$(grep '^base_branch=' "$META" | tail -n 1 | cut -d= -f2- || true)
+CHECKOUT_BRANCH=
 if [ -n "$RECORDED_BASE" ]; then
   if ! git check-ref-format --branch "$RECORDED_BASE" >/dev/null 2>&1; then
     echo "error: task $ID has an invalid recorded base branch '$RECORDED_BASE'" >&2
     exit 1
   fi
   DEFAULT=$RECORDED_BASE
+  CHECKOUT_BRANCH=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 else
   DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 fi
@@ -123,12 +125,19 @@ if [ "$(git -C "$PROJ" rev-parse --is-bare-repository 2>/dev/null || echo false)
   BARE=true
 fi
 
-# A non-bare checkout must be on the landing branch and clean, so the
-# fast-forward lands predictably (firstmate never writes here otherwise).
+# A non-bare checkout must be on the landing or default branch and clean, so
+# the fast-forward lands predictably (firstmate never writes here otherwise).
 # A bare repository has no worktree; the ref update below is the landing.
 if [ "$BARE" = false ]; then
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
-  [ "$cur" = "$DEFAULT" ] || { echo "error: $PROJ is on '$cur', expected landing branch '$DEFAULT'; cannot merge safely" >&2; exit 1; }
+  if [ -n "$RECORDED_BASE" ]; then
+    [ "$cur" = "$DEFAULT" ] || [ "$cur" = "$CHECKOUT_BRANCH" ] || {
+      echo "error: $PROJ is on '$cur', expected landing branch '$DEFAULT' or default branch '$CHECKOUT_BRANCH'; cannot merge safely" >&2
+      exit 1
+    }
+  else
+    [ "$cur" = "$DEFAULT" ] || { echo "error: $PROJ is on '$cur', expected landing branch '$DEFAULT'; cannot merge safely" >&2; exit 1; }
+  fi
   if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then
     echo "error: $PROJ has a dirty working tree; refusing to merge into it" >&2
     exit 1
@@ -158,7 +167,7 @@ case "$hold_status" in
     ;;
 esac
 merge_status=0
-if [ "$BARE" = true ]; then
+if [ "$BARE" = true ] || { [ -n "$RECORDED_BASE" ] && [ "$cur" != "$DEFAULT" ]; }; then
   old=$(git -C "$PROJ" rev-parse "refs/heads/$DEFAULT")
   new=$(git -C "$PROJ" rev-parse "refs/heads/$BRANCH")
   git -C "$PROJ" update-ref "refs/heads/$DEFAULT" "$new" "$old" >/dev/null || merge_status=$?
