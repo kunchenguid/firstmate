@@ -952,19 +952,26 @@ for _ in $(seq 1 100); do
 done
 assert_present "$STALL_STARTED" "the command that keeps shutdown in its stop loop did not start"
 STALL_JOB="$STALL_STATE/jobs/$FM_REMOTE_JOB_ID"
+set -m
 sleep 30 &
 STALL_DECOY_PID=$!
+set +m
 printf '%s\n' "$STALL_DECOY_PID" > "$STALL_JOB/.claim/group"
-chmod 000 "$STALL_JOB/.claim/group_start"
+printf 'unconfirmed\nstart\n' > "$STALL_JOB/.claim/group_start"
 kill -TERM "$STALL_WORKER_PID"
 for _ in $(seq 1 200); do
   [ -f "$STALL_STATE/worker.lock/quarantine" ] && break
   sleep 0.01
 done
-assert_present "$STALL_STATE/worker.lock/quarantine" "shutdown did not publish quarantine before the stop loop"
 kill -STOP "$STALL_WORKER_PID"
-kill -0 "$STALL_WORKER_PID" 2>/dev/null \
-  || fail "shutdown finished before the lock could be handed to a replacement"
+for _ in $(seq 1 100); do
+  [ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | tr -d ' ')" = T ] && break
+  sleep 0.05
+done
+[ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | tr -d ' ')" = T ] \
+  || fail "shutdown left its stop loop before the lock could be handed to a replacement"
+assert_present "$STALL_STATE/worker.lock/quarantine" \
+  "the worker stopped in its stop loop did not hold its own quarantine"
 rm -rf -- "$STALL_STATE/worker.lock"
 HOME="$STALL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STALL_STATE" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
@@ -989,8 +996,11 @@ done
 if kill -0 "$STALL_WORKER_PID" 2>/dev/null; then
   fail "the ousted worker did not exit after shutdown resumed"
 fi
-wait "$STALL_WORKER_PID" 2>/dev/null || true
+wait "$STALL_WORKER_PID" 2>/dev/null
+STALL_WORKER_RC=$?
 STALL_WORKER_PID=
+[ "$STALL_WORKER_RC" -eq 0 ] \
+  || fail "the ousted worker did not finish shutdown through its lost-ownership exit"
 kill -0 "$STALL_REPLACEMENT_PID" 2>/dev/null \
   || fail "the ousted worker's resumed shutdown terminated the replacement"
 [ "$(cat "$STALL_STATE/worker.lock/pid" 2>/dev/null || true)" = "$STALL_REPLACEMENT_PID" ] \
