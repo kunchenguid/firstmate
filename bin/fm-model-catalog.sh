@@ -359,7 +359,7 @@ while time.time() < deadline:
                 result.append(value.lower())
         return sorted(set(result))
     for model in ((response.get('response') or {}).get('models') or []):
-        mid = model.get('value') or model.get('resolvedModel') or model.get('id') or model.get('model')
+        mid = model.get('resolvedModel') or model.get('value') or model.get('id') or model.get('model')
         if not isinstance(mid, str) or not mid or mid in seen:
             continue
         seen.add(mid)
