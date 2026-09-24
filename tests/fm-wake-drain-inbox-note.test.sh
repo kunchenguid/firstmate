@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-wake-drain-inbox-note.test.sh - a captain inbox note's wake must be
 # presented by the drain even when it is buried among many task status wakes,
-# and the note must survive that wake's acknowledgement: acknowledging the wake
-# row never acknowledges the note, and an acknowledgement that consumes the row
-# of a still-pending note names it, so a caller that filtered the drain output
-# down to WAKE_ACK_REQUIRED still learns the note is waiting.
+# and the row must persist until the note itself is acknowledged.
 # Portable: the real fm-inbox.sh and fm-wake-drain.sh over a scratch home.
 set -u
 
@@ -73,18 +70,20 @@ test_note_among_status_wakes_is_presented_and_survives_ack() {
     || fail "the drain did not present the inbox note wake among 40 status wakes: $(cat "$dir/drain.out")"
 
   run_ack "$dir"
-  if grep -F "inbox:$NOTE_ID" "$dir/state/.wake-queue" >/dev/null 2>&1; then
-    fail "the acknowledged note wake row is still queued"
+  grep -F "inbox:$NOTE_ID" "$dir/state/.wake-queue" >/dev/null \
+    || fail "pending note wake was consumed by acknowledgement"
+  [ -f "$dir/state/inbox/$NOTE_ID.note" ] || fail "wake acknowledgement handled the note"
+  FM_STATE_OVERRIDE="$dir/state" "$DRAIN" > "$dir/again.out" 2> "$dir/again.err" \
+    || fail "second drain failed"
+  grep -F "check: captain inbox note $NOTE_ID - hold the release until the canary is green" "$dir/again.out" >/dev/null \
+    || fail "pending note was not presented again"
+  ACK_CMD=$(grep -o 'bin/fm-wake-drain.sh --ack-through [0-9]* --recovery-generation [^ ]*' "$dir/again.err" | head -1)
+  run_inbox "$dir" drain --ack "$NOTE_ID" >/dev/null || fail "note acknowledgement failed"
+  run_ack "$dir"
+  if grep -F "inbox:$NOTE_ID" "$dir/state/.wake-queue" >/dev/null; then
+    fail "handled note wake was not consumed"
   fi
-  [ -f "$dir/state/inbox/$NOTE_ID.note" ] \
-    || fail "acknowledging the wake row acknowledged the note itself"
-  run_inbox "$dir" list | grep -F "hold the release until the canary is green" >/dev/null \
-    || fail "the note is no longer listed as waiting after the wake acknowledgement"
-  grep -F "CAPTAIN INBOX NOTE STILL WAITING: $NOTE_ID" "$dir/ack.err" >/dev/null \
-    || fail "the acknowledgement consumed a pending note's wake without naming it: $(cat "$dir/ack.err")"
-  grep -F "bin/fm-inbox.sh drain --ack $NOTE_ID" "$dir/ack.err" >/dev/null \
-    || fail "the waiting-note notice did not name the note acknowledgement command: $(cat "$dir/ack.err")"
-  pass "an inbox note among 40 status wakes is presented, and survives and is named by the wake acknowledgement"
+  pass "pending inbox note repeats until handled among 40 status wakes"
 }
 
 test_handled_note_is_not_renamed_at_ack() {
@@ -94,8 +93,8 @@ test_handled_note_is_not_renamed_at_ack() {
 
   run_inbox "$dir" drain --ack "$NOTE_ID" >/dev/null || fail "note acknowledgement failed"
   run_ack "$dir"
-  if grep -F "CAPTAIN INBOX NOTE STILL WAITING" "$dir/ack.err" >/dev/null; then
-    fail "a note acknowledged before its wake row was still reported waiting: $(cat "$dir/ack.err")"
+  if grep -F "inbox:$NOTE_ID" "$dir/state/.wake-queue" >/dev/null; then
+    fail "handled note row was not consumed"
   fi
   pass "a note acknowledged in the same turn is not reported waiting at the wake acknowledgement"
 }
@@ -109,9 +108,6 @@ test_note_above_cutoff_is_not_named() {
   late_id=$(printf '%s\n' "$late_out" | awk '/^queued /{ print $2; exit }')
 
   run_ack "$dir"
-  if grep -F "CAPTAIN INBOX NOTE STILL WAITING" "$dir/ack.err" >/dev/null; then
-    fail "a note whose wake row was not consumed was reported: $(cat "$dir/ack.err")"
-  fi
   grep -F "inbox:$late_id" "$dir/state/.wake-queue" >/dev/null \
     || fail "the late note's unpresented wake row was consumed by the earlier acknowledgement"
   pass "a note whose wake arrived after presentation keeps its row and is not named early"
