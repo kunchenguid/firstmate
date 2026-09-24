@@ -640,6 +640,35 @@ ok - the rendered-export-DOM guard renders in one pass, retries a bounded number
 ok - Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior
 ```
 
+## 2026-09-24 Pi 0.87.1 queued-row retention verification
+
+The queued-row adapter was verified on Linux 7.0.0 x86_64, Node v22.23.1, and tmux against the globally installed `@earendil-works/pi-coding-agent` 0.87.1, with TypeScript 7.0.2 installed only for the typecheck.
+Every Pi run used a scratch home, project, agent directory, and session directory with a local faux provider, so no model request left the machine.
+
+```sh
+pi --version
+tests/fm-calm-pi-queue-retention-live-e2e.test.sh
+tests/fm-calm-pi-extension.test.sh
+tests/fm-pi-primary-types.test.sh
+```
+
+```text
+0.87.1
+ok - Pi 0.87.1 exposes every queue-retention member Calm preflights before hiding queued Firstmate rows
+ok - Calm hides queued Firstmate rows only on a session that can keep them, keeps hidden ones out of the editor on Escape, delivers them once in order, and leaves unsupported sessions and Calm off stock
+ok - Pi 0.87.1 with Calm on keeps a queued Firstmate notification unlisted, out of the editor on Escape, and delivers it once in a new announced turn, while Calm off stays stock
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.87.1
+```
+
+The rest of `tests/fm-calm-pi-extension.test.sh` passed unchanged in the same run.
+With a member name the running session does not have added to the adapter's required list, the live guard failed as designed:
+
+```text
+not ok - Pi 0.87.1 lacks the queue-retention capability Calm needs to hide queued Firstmate rows: session._queueNotARealMember
+```
+
+With the queued-row adapter left uninstalled, the real-Pi Escape case failed on the listed notification, `Pi Calm listed a queued Firstmate notification`.
+
 ## 2026-09-15 Claude Code 2.1.272 mods feasibility and the shipped mod
 
 Claude Code 2.1.272 exposes exactly the capability the 2026-07-22 row found missing, through its early-access "Claude Mods" surface, whose engineering primitive is the function hook: a plugin whose behavior lives in one hooks module exporting `register(on, options)`, hooking dotted engine events as `($, e, next)` middleware, with `ui.render` drawing per-component transcript rows and the working row, `$.ui.invalidate("ui.render")` redrawing every hooked drawing, and `$.ui.blit` repainting a mounted `Raster` without a render pass.

@@ -13,8 +13,8 @@
 // hidden notifications back in the queue in their original order.
 //
 // Putting them back needs members that live on the session object rather than the
-// prototype, so they cannot be probed at install. Each session is checked on the first
-// render that would hide anything, before any row is hidden. A session missing any of them
+// prototype, so they cannot be probed at install. Each session is checked on its first
+// queued-listing draw while Calm is on, before any row is hidden. A session missing any of them
 // gets no queued-row hiding at all and one warning; its rows and Escape stay stock.
 // See https://github.com/kunchenguid/firstmate/issues/1588.
 //
