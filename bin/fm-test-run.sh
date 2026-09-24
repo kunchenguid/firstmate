@@ -295,7 +295,7 @@ family_for_basename() {
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
-    fm-daemon.test.sh|fm-feishu-channel.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
+    fm-daemon.test.sh|fm-feishu-channel.test.sh|fm-guard-stale-banner.test.sh|fm-periodic-stow.test.sh|fm-pi-watch-extension.test.sh|\
     fm-session-lock-ancestry.test.sh|fm-cursor-primary.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
     fm-wake-drain-unread-status.test.sh|\
@@ -313,6 +313,7 @@ family_for_basename() {
     fm-backend-herdr-focus-flash-e2e.test.sh|\
     fm-backend-herdr-stale-active-tab-e2e.test.sh|\
     fm-backend-herdr-agent-exit-shell-e2e.test.sh|\
+    fm-periodic-stow-herdr-live-e2e.test.sh|\
     fm-herdr-attached-viewer-live-e2e.test.sh|fm-herdr-session-cleanup-e2e.test.sh|\
     fm-backend-herdr-smoke.test.sh|fm-backend-herdr-workspace-per-home-e2e.test.sh|\
     fm-control-herdr-smoke.test.sh)
@@ -1403,6 +1404,10 @@ families_for_changed_path() {
     bin/fm-stow-cascade.sh)
       printf '%s\n' secondmate
       ;;
+    bin/fm-stow-run.sh)
+      printf '%s\n' "__script__:fm-periodic-stow.test.sh"
+      printf '%s\n' real-herdr-gated
+      ;;
     bin/fm-session-start.sh)
       printf '%s\n' session-bootstrap
       printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
@@ -1449,6 +1454,12 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
       # Whether an arriving outcome still lets the captain type is a fact only
       # a real Pi TUI can answer, so the live guards are selected too.
+      printf '%s\n' live-harness-optin
+      ;;
+    .pi/extensions/fm-periodic-stow.ts)
+      printf '%s\n' __script__:fm-periodic-stow.test.sh
+      printf '%s\n' __script__:fm-pi-primary-types.test.sh
+      printf '%s\n' __script__:fm-periodic-stow-herdr-live-e2e.test.sh
       printf '%s\n' live-harness-optin
       ;;
     .pi/extensions/lib/fm-operational-input.ts)
