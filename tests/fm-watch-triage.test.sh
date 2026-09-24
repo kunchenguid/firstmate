@@ -3703,8 +3703,7 @@ make_hold_home() {  # <name> <status-line> <hold|parked|nohold>
   if [ "$hold" = hold ]; then
     run_hold "$dir" hold held-merge --reason 'awaiting the captain on the merge' || return 1
   elif [ "$hold" = parked ]; then
-    (cd "$dir" && tasks-axi hold held-merge --reason 'desk parked, preserve only' --kind parked \
-      --file data/backlog.md) >/dev/null 2>&1 || return 1
+    run_hold "$dir" park held-merge --reason 'desk parked, preserve only' || return 1
   fi
   printf 'window=test:fm-held-merge\nkind=ship\nharness=grok\nbackend=tmux\n' \
     > "$state/held-merge.meta"
@@ -3829,12 +3828,24 @@ test_parked_rehold_alarms_again() {
   state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
   hold_watch_surface "$dir" "$out" "$capture" 'idle, first' || fail 'first parked sight missed'
   ack_stopped_cycle "$state" || fail 'first parked wake not acknowledged'
-  (cd "$dir" && tasks-axi unhold held-merge --file data/backlog.md >/dev/null && \
-    tasks-axi hold held-merge --reason 'desk parked, preserve only' --kind parked --file data/backlog.md >/dev/null) \
-    || fail 'repark failed'
+  (cd "$dir" && tasks-axi unhold held-merge --file data/backlog.md >/dev/null) || fail 'unpark failed'
+  run_hold "$dir" park held-merge --reason 'desk parked, preserve only' || fail 'repark failed'
   hold_watch_surface "$dir" "$out" "$capture" 'idle, second' || fail 'repark first sight missed'
   [ "$(hold_stale_wakes "$state")" -eq 1 ] || fail 'repark inherited old cadence'
   pass 'repark with unchanged reason starts a new alarm window'
+}
+
+test_unrelated_backlog_edit_keeps_parked_cadence() {
+  local dir state out capture
+  command -v tasks-axi >/dev/null 2>&1 || return 0
+  dir=$(make_hold_home parked-unrelated 'resolved: gate cleared' parked) || fail 'parked fixture failed'
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, first' || fail 'parked first sight missed'
+  ack_stopped_cycle "$state" || fail 'parked first wake not acknowledged'
+  (cd "$dir" && tasks-axi add unrelated 'another task' --file data/backlog.md >/dev/null) || fail 'unrelated edit failed'
+  hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 1 || fail 'parked churn failed'
+  [ "$(hold_stale_wakes "$state")" -eq 0 ] || fail 'unrelated edit reset parked cadence'
+  pass 'unrelated backlog edits do not reset parked hold cadence'
 }
 
 test_away_parked_hold_bounds_churn() {
@@ -6278,6 +6289,7 @@ test_wedge_defer_refuses_a_half_filled_wait_record
 test_open_captain_call_bounds_stale_churn
 test_parked_hold_bounds_stale_churn
 test_parked_rehold_alarms_again
+test_unrelated_backlog_edit_keeps_parked_cadence
 test_away_parked_hold_bounds_churn
 test_live_parked_gate_not_bounded
 test_stale_churn_without_a_captain_call_still_alarms
