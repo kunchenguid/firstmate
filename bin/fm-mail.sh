@@ -184,6 +184,7 @@ run_py() {
 
 
 
+
   FM_IMAP_HOST="$IMAP_HOST" FM_IMAP_PORT="$IMAP_PORT" \
   FM_SMTP_HOST="$SMTP_HOST" FM_SMTP_PORT="$SMTP_PORT" \
   FM_MAIL_CURSOR="$CURSOR" FM_MAIL_RETRY="$RETRY" \
@@ -210,6 +211,7 @@ fm-mail.sh send <to> <subject> <body | ->
 fm-mail.sh poll
 fm-mail.sh status
 fm-mail.sh afk-email destination|configured|queue-unprocessed|flush|verify-note <id>
+
 
 
 

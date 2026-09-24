@@ -23,6 +23,7 @@ set -euo pipefail
 if [ "${1:-}" = afk-email ] || [ "${1:-}" = read ]; then
 
 
+
   exec "$(dirname "$0")/fm-mail-real.sh" "$@"
 fi
 [ "${1:-}" = send ] || exit 2
@@ -93,6 +94,7 @@ run_email() {  # <home> <command>
     -u FM_SMTP_HOST -u FM_SMTP_PORT -u FM_AFK_EMAIL_TO \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
     "$REPO/bin/fm-mail.sh" afk-email "$command" "$@"
+
 
 
 
@@ -518,6 +520,7 @@ test_processed_marker_cannot_suppress_outcomes() {
 
 
 
+
 test_invalid_away_record_does_not_enable_email() {
   local home out
   home=$(make_home invalid-record configured)
@@ -790,6 +793,7 @@ home = Path(sys.argv[2])
 reply_token = sys.argv[3]
 recovery_token = sys.argv[4]
 
+
 state = home / "state"
 os.environ.update({
     "FM_HOME": str(home),
@@ -797,6 +801,7 @@ os.environ.update({
     "FM_ROOT_OVERRIDE": str(root),
     "FM_AFK_POSTURE": "1",
     "FM_AFK_EMAIL_TO": "johnpoyser@gmail.com",
+
 
 
     "FM_MAIL_USER": "owner@example.com",
@@ -860,6 +865,7 @@ bodies = {
 
 
 
+
 }
 class FakeMailbox:
     untagged_responses = {"UIDVALIDITY": [b"44"]}
@@ -871,6 +877,7 @@ class FakeMailbox:
 
 
 
+
     def login(self, *_): pass
     def select(self, *_): pass
     def logout(self): pass
@@ -878,6 +885,7 @@ class FakeMailbox:
     def uid(self, command, uid, fetch_spec):
         if command == "search":
             return "OK", [self.search_ids]
+
 
 
 
@@ -892,6 +900,7 @@ class FakeMailbox:
             self.body_fetches.append(key)
             if self.fail_body_fetch:
                 return "NO", []
+
 
 
             return "OK", [(f"{key} (BODY[]<0> {{{len(bodies[key])}}}".encode(), bodies[key]), b")"]
@@ -1035,6 +1044,7 @@ assert handoff_rows["2"][4] == "degraded", handoff_rows["2"]
 assert handoff_rows["4"][4] == "degraded", handoff_rows["4"]
 assert "away-email reply handoff failed" in handoff_error.getvalue(), handoff_error.getvalue()
 assert mailbox.body_fetches == ["2", "4"], mailbox.body_fetches
+
 
 
 
@@ -1307,6 +1317,7 @@ PY
     || fail "replayed reply errored: $out"
   assert_contains "$out" 'received 0 verified and 1 untrusted' 'a pending-token reply remains single-use after the sent transition'
   pass "reply tokens survive the SMTP-accepted, sent-record-crash window"
+
 }
 
 test_expired_and_unknown_codes_are_untrusted() {
@@ -1547,6 +1558,7 @@ test_read_gates_unauthenticated_bodies_during_away
 test_voice_inbox_note_remains_ordinary_during_away_mode
 test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit
 test_over_limit_reply_is_explicitly_rejected
+
 
 test_expired_and_unknown_codes_are_untrusted
 test_reply_survives_crash_after_smtp_acceptance
