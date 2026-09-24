@@ -183,6 +183,14 @@ if [ "$status" -eq 0 ] && [ "$mutation" = tab-create ]; then
       mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$POST_CREATE_ABORT_CONTROL/$task/task-pane"
       ;;
+    fm-abort-resume)
+      # This fixture spawns twice and only the second one is armed, so it
+      # records a pane only once the control root already exists.
+      if [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+        mkdir -p "$POST_CREATE_ABORT_CONTROL/abort-resume"
+        printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$POST_CREATE_ABORT_CONTROL/abort-resume/task-pane"
+      fi
+      ;;
   esac
 fi
 if [ "${1:-} ${2:-}" = "worktree list" ] && [ "$status" -eq 0 ] && [ -d "$FOREIGN_ATTACH_CONTROL" ]; then
@@ -632,6 +640,7 @@ write_ship_brief "$HOME_DIR" wheelhouse-healing-r1 'Wheelhouse-style projection 
 write_ship_brief "$HOME_DIR" active-seeded 'Projection active seeded fixture.'
 write_ship_brief "$HOME_DIR" abort-a 'Projection abort fixture A.'
 write_ship_brief "$HOME_DIR" abort-b 'Projection abort fixture B.'
+write_ship_brief "$HOME_DIR" abort-resume 'Projection respawn abort fixture.'
 write_ship_brief "$HOME_DIR" lock-contended 'Projection lock contention fixture.'
 write_ship_brief "$HOME_DIR" default-on 'Projection default-on fixture.'
 make_project "$PROJECT_DIR"
@@ -1490,6 +1499,15 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   spawn_task "$RESTART_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-reclaim.out" 2> "$TMP_ROOT/$RESTART_ID-reclaim.err" \
     || fail "$RESTART_ID same-identity reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-reclaim.err")"
   NEW_RESTART_WT=$(remember_meta_worktree "$RESTART_META")
+  # The reclaim re-enters the copy its surviving record names rather than
+  # leasing a second one. A fresh lease here would strand the recorded copy,
+  # which still holds the previous incarnation's work and which teardown is
+  # the only thing that ever releases.
+  [ "$NEW_RESTART_WT" = "$OLD_RESTART_WT" ] \
+    || fail "$RESTART_ID same-identity reclaim moved to a different copy instead of re-entering its recorded one ($OLD_RESTART_WT -> $NEW_RESTART_WT)"
+  RESTART_LEASES=$(grep -Fxc $'get\t--lease\t--lease-holder\tfm-'"$RESTART_ID" "$TREEHOUSE_CALL_LOG" || true)
+  [ "$RESTART_LEASES" = 1 ] \
+    || fail "$RESTART_ID holds $RESTART_LEASES Treehouse leases across its restart; only the first spawn's lease is expected"
   NEW_RESTART_WSID=$(grep '^herdr_workspace_id=' "$RESTART_META" | cut -d= -f2-)
   NEW_RESTART_PANE=$(grep '^herdr_pane_id=' "$RESTART_META" | cut -d= -f2-)
   [ "$NEW_RESTART_WSID" = "$OLD_RESTART_WSID" ] \
@@ -1528,6 +1546,8 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
       || fail "$RESTART_ID repeated reclaim changed workspace identity"
     [ "$NEW_RESTART_PANE" != "$PRIOR_RESTART_PANE" ] \
       || fail "$RESTART_ID repeated reclaim reused the prior husk pane"
+    [ "$NEW_RESTART_WT" = "$PRIOR_RESTART_WT" ] \
+      || fail "$RESTART_ID repeated reclaim moved to a different copy instead of re-entering its recorded one"
     if [ "$PRIOR_RESTART_WT" != "$NEW_RESTART_WT" ]; then
       "$REAL_TREEHOUSE" return --force "$PRIOR_RESTART_WT" >/dev/null 2>&1 || true
     fi
@@ -1579,6 +1599,45 @@ teardown_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" > "$TMP_ROOT/cross-restart-te
 "$REAL_TREEHOUSE" return --force "$CROSS_OLD_WT" >/dev/null 2>&1 || true
 "$REAL_TREEHOUSE" return --force "$CROSS_NEW_WT" >/dev/null 2>&1 || true
 pass "real Herdr lab: secondmate restart binding and reclaim stay isolated to the exact child home and parent"
+
+# A same-identity respawn whose recorded copy is gone cannot re-enter it, so it
+# leases a fresh slot - and an abort after that lease must give exactly that
+# slot back. The surviving record names the vanished copy, so nothing else
+# would ever release the new one.
+RESPAWN_ABORT_ID=abort-resume
+spawn_task "$RESPAWN_ABORT_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/abort-resume-first.out" 2> "$TMP_ROOT/abort-resume-first.err" \
+  || fail "respawn-abort fixture's first projected spawn failed: $(cat "$TMP_ROOT/abort-resume-first.err")"
+RESPAWN_ABORT_META="$HOME_DIR/state/$RESPAWN_ABORT_ID.meta"
+RESPAWN_ABORT_FIRST_WT=$(remember_meta_worktree "$RESPAWN_ABORT_META")
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
+  || fail "could not stop the isolated session for the respawn-abort fixture"
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+  || fail "could not reprovision the isolated session for the respawn-abort fixture"
+# Stand in for a recorded copy that is gone: give the real slot back and point
+# the surviving record at a path that no longer exists.
+"$REAL_TREEHOUSE" return --force "$RESPAWN_ABORT_FIRST_WT" >/dev/null 2>&1 || true
+sed -i.bak "s|^worktree=.*|worktree=$TMP_ROOT/abort-resume-removed-copy|" "$RESPAWN_ABORT_META"
+rm -f "$RESPAWN_ABORT_META.bak"
+mkdir -p "$POST_CREATE_ABORT_CONTROL"
+if spawn_task "$RESPAWN_ABORT_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/abort-resume-retry.out" 2> "$TMP_ROOT/abort-resume-retry.err"; then
+  fail "respawn-abort fixture unexpectedly succeeded: $(cat "$TMP_ROOT/abort-resume-retry.out")"
+fi
+grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-resume-retry.err" >/dev/null 2>&1 \
+  || fail "respawn-abort fixture did not reach the armed validation failure: $(cat "$TMP_ROOT/abort-resume-retry.err")"
+RESPAWN_ABORT_LEASES=$(grep -Fxc $'get\t--lease\t--lease-holder\tfm-'"$RESPAWN_ABORT_ID" "$TREEHOUSE_CALL_LOG" || true)
+[ "$RESPAWN_ABORT_LEASES" = 2 ] \
+  || fail "respawn-abort fixture took $RESPAWN_ABORT_LEASES leases; the vanished recorded copy should have forced exactly one fresh lease after the first spawn's"
+if (cd "$RECOVERY_PROJECT_DIR" && "$REAL_TREEHOUSE" status 2>/dev/null) | grep -F "held by fm-$RESPAWN_ABORT_ID" >/dev/null 2>&1; then
+  fail "the aborted respawn kept the slot it leased while the surviving record named a different copy: $(cd "$RECOVERY_PROJECT_DIR" && "$REAL_TREEHOUSE" status 2>&1)"
+fi
+if grep -F "leaving task $RESPAWN_ABORT_ID's leased worktree" "$TMP_ROOT/abort-resume-retry.err" >/dev/null 2>&1; then
+  fail "the aborted respawn could not return the slot it leased: $(cat "$TMP_ROOT/abort-resume-retry.err")"
+fi
+[ -e "$RESPAWN_ABORT_META" ] \
+  || fail "the aborted respawn erased the surviving task record"
+rm -rf "$POST_CREATE_ABORT_CONTROL"
+rm -f "$RESPAWN_ABORT_META" "$HOME_DIR/state/$RESPAWN_ABORT_ID.herdr-presentation"
+pass "real Herdr lab: an aborted respawn returns the slot it leased even though an older record survives"
 
 # Two homes recovering concurrently serialize on the named session lock and
 # each replace only their own exact husk.
