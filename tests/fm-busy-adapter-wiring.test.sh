@@ -454,12 +454,28 @@ secondmate_stall_watch() { # <primary> <id> <out> [seconds]
   local primary=$1 id=$2 out=$3 seconds=${4:-4} state window fakebin
   state="$primary/state"
   window=$(grep '^window=' "$state/$id.meta" | cut -d= -f2-)
+  # A previous quiet checkpoint leaves a downtime marker. The next watcher
+  # would exit on that recovery wake before this observation finishes.
+  rm -f "$state/.watcher-down"
   fakebin="$primary/watch-fake-$id"
   mkdir -p "$fakebin"
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 case "\${1:-}" in
-  list-windows) printf '%s\n' '$window' ;;
+  list-windows)
+    # The watcher asks for session:window. The liveness inventory asks for the
+    # window name alone, and a full target there reads as a missing endpoint.
+    format=
+    prev=
+    for arg in "\$@"; do
+      if [ "\$prev" = -F ]; then format=\$arg; fi
+      prev=\$arg
+    done
+    case "\$format" in
+      '#{window_name}') printf '%s\n' '${window#*:}' ;;
+      *) printf '%s\n' '$window' ;;
+    esac
+    ;;
   capture-pane) printf 'working\n' ;;
   display-message) printf '0\n' ;;
   *) exit 0 ;;
