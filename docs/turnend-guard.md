@@ -23,6 +23,7 @@ The guard remains a backstop; [`watcher-continuity.md`](watcher-continuity.md) o
 The guard first calls the shared primary scope.
 A secondmate home runs its own primary Firstmate session, so a genuine `.fm-secondmate-home` marker includes it whether the home is a linked worktree or plain clone.
 The marker must be a regular non-symlink file whose whitespace-stripped first line is a non-empty identifier containing only letters, digits, dots, underscores, and dashes.
+A genuine `.fm-primary-home` marker likewise includes a primary home that is itself a linked worktree; [`configuration.md`](configuration.md) "Linked-worktree primary home" owns that marker.
 An unmarked checkout or invalid marker falls through to the git-dir check.
 That check keeps crewmate and scout linked worktrees inert because their git dir differs from their git common dir.
 It also requires `AGENTS.md`, `bin/`, and the effective state directory.

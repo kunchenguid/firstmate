@@ -28,6 +28,7 @@ install_cd_scripts() {
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-cd-pretool-check.sh" "$dir/bin/fm-cd-pretool-check.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-cd-command-policy.mjs" "$dir/bin/fm-cd-command-policy.mjs"
   cp "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/fm-arm-command-policy.mjs"
   chmod +x "$dir/bin/fm-cd-pretool-check.sh" "$dir/bin/fm-cd-command-policy.mjs"
@@ -226,6 +227,18 @@ test_inert_in_child_worktree() {
   pass "cd-guard: inert in a crewmate/scout task worktree (linked git worktree)"
 }
 
+test_fires_in_marked_linked_primary_home() {
+  local base dir out rc
+  base="$TMP_ROOT/linked-primary-base"
+  dir="$TMP_ROOT/linked-primary"
+  make_child_worktree_fixture "$base" "$dir" >/dev/null
+  printf 'fm/cd-guard-test-branch\n' > "$dir/.fm-primary-home"
+  out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
+  expect_code 2 "$rc" "cd-guard must fire in a linked primary home carrying a genuine .fm-primary-home marker"
+  assert_contains "$out" '[persistent-cd]' "marked linked primary block must carry the reason code"
+  pass "cd-guard: fires in a marked linked primary home"
+}
+
 test_inert_when_not_firstmate_repo() {
   local dir out rc
   dir="$TMP_ROOT/not-firstmate"
@@ -388,6 +401,7 @@ test_scripts_are_shellcheck_clean() {
 test_full_acceptance_matrix
 test_fires_in_secondmate_home
 test_inert_in_child_worktree
+test_fires_in_marked_linked_primary_home
 test_inert_when_not_firstmate_repo
 test_inert_when_not_a_git_repo
 test_e2e_cwd_leak_regression

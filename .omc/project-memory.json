@@ -1,0 +1,104 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1790198664630,
+  "projectRoot": "/Users/eduardopicazo/.no-mistakes/worktrees/b40656e60d69/01M382FCRWQNW2TD3R93JAMZB9",
+  "techStack": {
+    "languages": [],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "assets",
+      "bin",
+      "docs",
+      "tests"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "assets": {
+      "path": "assets",
+      "purpose": "Static assets",
+      "fileCount": 1,
+      "lastAccessed": 1790198664620,
+      "keyFiles": [
+        "banner.png"
+      ]
+    },
+    "bin": {
+      "path": "bin",
+      "purpose": "Executable scripts",
+      "fileCount": 192,
+      "lastAccessed": 1790198664620,
+      "keyFiles": [
+        "fm-afk-contract.sh",
+        "fm-afk-launch.sh",
+        "fm-afk-return.sh",
+        "fm-afk-start.sh",
+        "fm-agent-process-lib.sh"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 36,
+      "lastAccessed": 1790198664621,
+      "keyFiles": [
+        "agent-control.md",
+        "architecture.md",
+        "arm-pretool-check.md",
+        "calm-mode-feasibility.md",
+        "calm.md"
+      ]
+    },
+    "skills": {
+      "path": "skills",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1790198664621,
+      "keyFiles": []
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 237,
+      "lastAccessed": 1790198664622,
+      "keyFiles": [
+        "cmux-test-safety.sh",
+        "fixtures.sh",
+        "fm-afk-contract.test.sh",
+        "fm-afk-inject-e2e.test.sh",
+        "fm-afk-inject-herdr-e2e.test.sh"
+      ]
+    },
+    "tests/assets": {
+      "path": "tests/assets",
+      "purpose": "Static assets",
+      "fileCount": 1,
+      "lastAccessed": 1790198664623,
+      "keyFiles": [
+        "board-render-harness.mjs"
+      ]
+    }
+  },
+  "hotPaths": [],
+  "userDirectives": []
+}

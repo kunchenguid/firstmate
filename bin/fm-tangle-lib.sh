@@ -15,7 +15,12 @@
 # every legitimate state - the primary on its default branch, and detached HEAD,
 # which is how every linked worktree and secondmate home legitimately sits on the
 # default branch. Detached HEAD on the default is fine; a feature branch in a
-# primary checkout is the alarm.
+# primary checkout is the alarm. A primary home that is itself a linked worktree
+# sits on a named branch by design, so its .fm-primary-home marker (owned by
+# bin/fm-primary-scope-lib.sh) names the expected branch in place of the default.
+
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-primary-scope-lib.sh"
 
 # Resolve the default branch name of the git repo at <dir>: prefer origin/HEAD,
 # then fall back to a local main/master. Echoes the name, or returns 1.
@@ -35,9 +40,15 @@ fm_default_branch() {
   return 1
 }
 
+# Echo the branch the primary at <dir> should sit on: its linked-primary marker's
+# branch when valid, otherwise its default branch. Returns 1 when neither resolves.
+fm_primary_expected_branch() {
+  fm_primary_home_branch "$1" || fm_default_branch "$1"
+}
+
 # If the git checkout at <root> is tangled - on a NAMED branch that is not its
-# default branch - echo the offending branch name and return 0. For every healthy
-# state (not a git work tree, detached HEAD, or already on the default branch)
+# expected branch - echo the offending branch name and return 0. For every healthy
+# state (not a git work tree, detached HEAD, or already on the expected branch)
 # echo nothing and return 1. Detached HEAD is how linked worktrees and secondmate
 # homes legitimately sit, so they never trip this; only a feature branch checked
 # out in a primary checkout does.
@@ -46,7 +57,7 @@ fm_primary_tangle_branch() {
   git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
   cur=$(git -C "$root" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   [ -n "$cur" ] || return 1
-  default=$(fm_default_branch "$root") || return 1
+  default=$(fm_primary_expected_branch "$root") || return 1
   [ "$cur" = "$default" ] && return 1
   printf '%s\n' "$cur"
   return 0

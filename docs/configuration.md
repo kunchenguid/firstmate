@@ -322,6 +322,15 @@ This does not relax protection for any other untracked file.
 An existing linked-worktree home that predates this rule advances through its marker-only state during its next bootstrap or spawn local sync, after which Git ignores the marker normally.
 A local standalone-clone home cannot receive a primary-local commit through that no-fetch sync, so it receives the rule through `/updatefirstmate`'s origin refresh instead.
 
+## Linked-worktree primary home (.fm-primary-home)
+
+A primary home that is itself a linked git worktree, such as an Orca workspace, looks exactly like a crewmate task worktree to Git, so the primary-scoped hooks stay inert there and the worktree-tangle check alarms on its named branch.
+Mark such a home explicitly by writing the branch it sits on into `.fm-primary-home` at the home root, for example `git branch --show-current > .fm-primary-home`.
+Firstmate never writes or infers this marker from a path or runtime; it is an operator opt-in and belongs only in the genuine primary home, and the root `.gitignore` keeps it out of commits so task worktrees never inherit it.
+`bin/fm-primary-scope-lib.sh` owns validation: a regular non-symlink file whose whitespace-stripped first line is a branch name, and an absent, symlinked, or invalid marker leaves the home an ordinary linked worktree.
+A valid marker brings the home into the shared primary scope used by the Claude Stop auto-arm, the turn-end guards, the session-open hooks, and the subagent guard, and into the cd guard's scope.
+The worktree-tangle check then expects the marked branch in place of the default branch, so it stays quiet on that branch and still alarms if the home is switched to another named branch.
+
 ## FM_HOME
 
 `FM_HOME` selects the operational home for one firstmate instance.

@@ -1225,6 +1225,38 @@ test_active_in_marked_secondmate_home() {
   pass "auto-arm: active in a marked secondmate home"
 }
 
+# A primary home that is itself a linked worktree (an Orca workspace, say) is in
+# scope only through a genuine .fm-primary-home marker naming its branch; an
+# unmarked, empty, malformed, or symlinked marker keeps it inert like a task
+# worktree.
+test_linked_primary_home_marker_scope() {
+  local dir out status case
+  for case in valid unmarked empty malformed symlink; do
+    dir="$TMP_ROOT/linked-primary-$case"
+    make_crewmate_worktree_dir "$TMP_ROOT/linked-primary-base-$case" "$dir" >/dev/null
+    case "$case" in
+      valid) printf 'fm/autoarm-test-branch\n' > "$dir/.fm-primary-home" ;;
+      empty) printf '\n' > "$dir/.fm-primary-home" ;;
+      malformed) printf 'bad branch;name\n' > "$dir/.fm-primary-home" ;;
+      symlink)
+        printf 'fm/autoarm-test-branch\n' > "$TMP_ROOT/linked-primary-target"
+        ln -s "$TMP_ROOT/linked-primary-target" "$dir/.fm-primary-home"
+        ;;
+    esac
+    : > "$dir/state/task.meta"
+    write_arm_fixture "$dir" actionable
+    out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+    if [ "$case" = valid ]; then
+      expect_code 2 "$status" "a marked linked primary home must get the active auto-arm"
+      [ -e "$dir/state/arm-ran" ] || fail "hook did not arm in a marked linked primary home"
+    else
+      expect_code 0 "$status" "a linked home with a $case marker must stay inert"
+      [ ! -e "$dir/state/arm-ran" ] || fail "hook armed in a linked home with a $case marker"
+    fi
+  done
+  pass "auto-arm: a linked primary home engages only through a genuine .fm-primary-home marker"
+}
+
 test_long_poll_grace_reaches_arm_wrapper() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/long-poll-grace")
@@ -1449,6 +1481,7 @@ test_superseded_owner_goes_silent_and_never_double_translates
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
+test_linked_primary_home_marker_scope
 test_long_poll_grace_reaches_arm_wrapper
 test_host_absent_flag_keeps_the_arm
 test_host_boundary_rewakes_with_the_host_line

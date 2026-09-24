@@ -120,6 +120,48 @@ test_bootstrap_line() {
   pass "fm-bootstrap: TANGLE problem line fires only for a feature branch and suppresses repair commands in detect-only mode"
 }
 
+# --- linked primary home marker ---------------------------------------------
+
+# A primary home that is itself a linked worktree (an Orca workspace, say) sits on
+# its own named branch by design. Unmarked, that reads as a tangle; a genuine
+# .fm-primary-home marker names the expected branch, so the lib, the guard banner,
+# and the bootstrap line stay quiet there and still alarm on any other branch.
+test_marked_linked_primary_home() {
+  local repo home out
+  repo=$(make_repo "$TMP_ROOT/linked-primary-repo")
+  home="$TMP_ROOT/linked-primary-home"
+  git -C "$repo" worktree add -q -b owner/workspace "$home"
+
+  out=$(fm_primary_tangle_branch "$home" || true)
+  [ "$out" = owner/workspace ] || fail "unmarked linked home must still classify its branch as a tangle, got '$out'"
+  out=$(run_bootstrap "$home" | grep '^TANGLE:' || true)
+  assert_contains "$out" "owner/workspace" "unmarked linked home did not report its branch"
+
+  printf 'owner/workspace\n' > "$home/.fm-primary-home"
+  out=$(fm_primary_tangle_branch "$home" || true)
+  [ -z "$out" ] || fail "marked linked home on its marked branch reported a tangle: '$out'"
+  out=$(run_guard "$home")
+  assert_not_contains "$out" "WORKTREE TANGLE" "guard alarmed on a marked linked home's own branch"
+  out=$(run_bootstrap "$home" | grep '^TANGLE:' || true)
+  [ -z "$out" ] || fail "bootstrap emitted a TANGLE line for a marked linked home's own branch: $out"
+
+  mv "$home/.fm-primary-home" "$TMP_ROOT/linked-primary-marker"
+  ln -s "$TMP_ROOT/linked-primary-marker" "$home/.fm-primary-home"
+  out=$(fm_primary_tangle_branch "$home" || true)
+  [ "$out" = owner/workspace ] || fail "a symlinked marker must be ignored, got '$out'"
+  rm "$home/.fm-primary-home"
+  printf 'owner/workspace\n' > "$home/.fm-primary-home"
+
+  git -C "$home" checkout -q -b fm/tangle-dd4
+  out=$(run_guard "$home")
+  assert_contains "$out" "WORKTREE TANGLE" "guard did not alarm when a marked home left its marked branch"
+  assert_contains "$out" "checkout owner/workspace" "guard remediation must restore the marked branch"
+  out=$(run_bootstrap "$home" | grep '^TANGLE:' || true)
+  assert_contains "$out" "fm/tangle-dd4" "bootstrap did not report a marked home leaving its marked branch"
+  assert_contains "$out" "expected 'owner/workspace'" "bootstrap must expect the marked branch"
+  pass "tangle: a marked linked primary home is quiet on its marked branch and alarms on any other"
+}
+
 # --- GUARD 1a: brief isolation assertion ------------------------------------
 
 # The generated ship brief must carry the isolation assertion AHEAD of the
@@ -290,6 +332,7 @@ test_spawn_tmux_window_construction() {
 test_lib_classification
 test_guard_banner
 test_bootstrap_line
+test_marked_linked_primary_home
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawn_tmux_window_construction

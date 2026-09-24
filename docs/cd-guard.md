@@ -19,14 +19,15 @@ This guard is not a general sandbox.
 It classifies shell command positions only; it never evaluates, expands, sources, or runs any byte of the submitted command.
 Its threat model is agent mistakes, the same as the watcher-arm seatbelt: an accidental bare `cd projects/foo`, not a deliberately obfuscated bypass.
 
-## Scope: plain firstmate checkouts only
+## Scope: plain firstmate checkouts and marked primary homes
 
-The guard fires only in a plain firstmate checkout where git-dir equals git-common-dir.
+The guard fires only in a plain firstmate checkout where git-dir equals git-common-dir, or in a marked linked primary home described below.
 It is a silent no-op (exit 0, no output) everywhere else, so it never interferes with a crewmate or scout that legitimately works inside its own project or firstmate task worktree.
 
 `bin/fm-cd-pretool-check.sh` owns its checkout detection; the turn-end guard's marker-aware scope is a separate contract (`docs/turnend-guard.md`).
 A plain, non-worktree checkout has `git rev-parse --git-dir` equal to `git rev-parse --git-common-dir`.
 A crewmate or scout task worktree - the shape `bin/fm-spawn.sh` always hands out - is a linked git worktree where the two differ, so the guard is inert there.
+A linked primary home carrying a genuine `.fm-primary-home` marker is also in scope; [`configuration.md`](configuration.md) "Linked-worktree primary home" owns that marker.
 The checkout must also carry `AGENTS.md` and `bin/`, and any failure to confirm the primary is treated as inert, never as a block.
 
 The cd-guard does not inspect `.fm-secondmate-home`.
