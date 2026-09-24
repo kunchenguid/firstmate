@@ -1226,6 +1226,127 @@ test_long_poll_grace_reaches_arm_wrapper() {
   pass "auto-arm: a long FM_POLL with FM_GUARD_GRACE unset reaches fm-watch-arm.sh with the derived grace"
 }
 
+# Supervision-host fixture variants, installed per test as
+# <dir>/bin/fm-supervision-host.sh. Each run appends its pid to state/host-ran
+# and records the environment the hook handed it.
+write_host_fixture() {
+  local dir=$1 kind=$2
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'echo "$$" >> "$FM_HOME/state/host-ran"\n'
+    printf 'printf "gen=%%s owner=%%s primary=%%s mode=%%s\\n" "${FM_SUPERVISION_HOST_AUTOARM_GEN:-}" "${FM_SUPERVISION_HOST_OWNER_PID:-}" "${FM_SUPERVISION_HOST_PRIMARY:-}" "${1:-}" > "$FM_HOME/state/host-env"\n'
+    case "$kind" in
+      boundary)
+        printf "printf 'pending:downtime:fixture-generation\\n' > \"\$FM_HOME/state/.watcher-down\"\n"
+        printf 'touch "$FM_HOME/state/.last-watcher-beat"\n'
+        printf "printf 'supervision-host: cycle boundary - fixture\\n'\n"
+        ;;
+      handed-back)
+        printf "printf 'pending:downtime:fixture-generation\\n' > \"\$FM_HOME/state/.watcher-down\"\n"
+        printf 'touch "$FM_HOME/state/.last-watcher-beat"\n'
+        printf "printf 'signal: fixture.status\\n'\n"
+        printf "printf 'supervision-host: the away session could not take this wake: fixture; this wake is yours\\n'\n"
+        ;;
+      stood-down)
+        printf "printf 'supervision-host stood down: this session no longer owns supervision\\n'\n"
+        ;;
+      crash)
+        printf 'kill -KILL "$$"\n'
+        ;;
+    esac
+    printf 'exit 0\n'
+  } > "$dir/bin/fm-supervision-host.sh"
+  chmod +x "$dir/bin/fm-supervision-host.sh"
+}
+
+test_host_absent_flag_keeps_the_arm() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-flag-absent")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" boundary
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a home without config/supervision-host must still rewake from the arm"
+  assert_present "$dir/state/arm-ran" "a home without config/supervision-host did not run the arm"
+  [ ! -e "$dir/state/host-ran" ] || fail "a home without config/supervision-host ran the supervision host"
+  assert_contains "$out" "stale: fixture-win actionable" "the arm's reason must still reach the rewake"
+  pass "auto-arm: without config/supervision-host the hook runs the arm exactly as before"
+}
+
+test_host_boundary_rewakes_with_the_host_line() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-boundary")
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host"
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" boundary
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a host cycle boundary must rewake main"
+  assert_contains "$out" "firstmate watcher wake" "the host close must carry the wake banner"
+  assert_contains "$out" "supervision-host: cycle boundary - fixture" "the rewake must carry the host's line"
+  [ ! -e "$dir/state/arm-ran" ] || fail "an opted-in home ran the plain arm instead of the host"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "a host boundary must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  [ "$(sed -n 's/^.* mode=//p' "$dir/state/host-env")" = park ] || fail "the host was not run in park mode: $(cat "$dir/state/host-env")"
+  [ "$(sed -n 's/^.* primary=\([a-z]*\) .*$/\1/p' "$dir/state/host-env")" = claude ] \
+    || fail "the host was not told its primary harness: $(cat "$dir/state/host-env")"
+  [ "$(sed -n 's/^gen=\([0-9]*\) .*$/\1/p' "$dir/state/host-env")" = "$(epoch_field "$dir" epoch)" ] \
+    || fail "the host was not bound to the hook's generation: $(cat "$dir/state/host-env") vs $(head -n 1 "$dir/state/.claude-autoarm-epoch")"
+  [ "$(sed -n 's/^.* owner=\([0-9]*\) .*$/\1/p' "$dir/state/host-env")" = "$(epoch_field "$dir" owner_pid)" ] \
+    || fail "the host was not bound to the hook's owner pid: $(cat "$dir/state/host-env")"
+  pass "auto-arm: an opted-in home runs the host bound to its generation, and a host line rewakes like a wake"
+}
+
+test_host_handback_under_away_record_is_not_a_return() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-handback")
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host"
+  : > "$dir/state/task.meta"
+  : > "$dir/state/.afk-contract"
+  write_host_fixture "$dir" handed-back
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a wake the host hands back must rewake main"
+  assert_contains "$out" "signal: fixture.status" "the handed-back wake must carry its reason line"
+  assert_contains "$out" "supervision-host: the away session could not take this wake" "the handed-back wake must say why"
+  assert_contains "$out" "not from the captain: it is not a return" "an away-posture handback must say it is not the captain's return"
+  pass "auto-arm: a wake the host hands back under the away record says it is automatic supervision, not a return"
+}
+
+test_host_stand_down_is_silent() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-stand-down")
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host"
+  : > "$dir/state/task.meta"
+  write_host_fixture "$dir" stood-down
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "a host that stood down must not rewake main"
+  [ -z "$out" ] || fail "a host stand-down printed to main: $out"
+  [ "$(wc -l < "$dir/state/host-ran" | tr -d ' ')" -eq 1 ] || fail "a host stand-down was retried"
+  [ "$(epoch_outcome "$dir")" = clean ] || fail "a host stand-down must record outcome=clean, got: $(epoch_outcome "$dir")"
+  pass "auto-arm: a host that stood down closes silently without a retry"
+}
+
+test_host_crash_is_retried_then_reported() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-crash")
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host"
+  : > "$dir/state/task.meta"
+  write_host_fixture "$dir" crash
+  # A live watcher with a fresh beacon would pass the plain arm's benign-close
+  # check; a host that died has no owner for such a cycle, so it must not.
+  printf 'pending:downtime:fixture-generation\n' > "$dir/state/.watcher-down"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an exhausted host crash must notify"
+  [ "$(wc -l < "$dir/state/host-ran" | tr -d ' ')" -eq 2 ] || fail "a crashed host was not retried within the attempt bound"
+  assert_contains "$out" "auto-arm FAILED" "an exhausted host crash must deliver the failure notice"
+  assert_contains "$out" "The supervision host (config/supervision-host) ran these cycles; its last one exited 137 without a wake." \
+    "the failure notice must name the host and its exit"
+  pass "auto-arm: a host that died without a close is retried, then reported as a failure"
+}
+
 test_fm_lock_status_still_works_with_shared_lib() {
   local out
   out=$(FM_HOME="$TMP_ROOT/lock-status-home" bash "$ROOT/bin/fm-lock.sh" status 2>&1)
@@ -1274,4 +1395,9 @@ test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_long_poll_grace_reaches_arm_wrapper
+test_host_absent_flag_keeps_the_arm
+test_host_boundary_rewakes_with_the_host_line
+test_host_handback_under_away_record_is_not_a_return
+test_host_stand_down_is_silent
+test_host_crash_is_retried_then_reported
 test_fm_lock_status_still_works_with_shared_lib

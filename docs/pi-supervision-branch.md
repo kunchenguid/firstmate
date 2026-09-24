@@ -20,6 +20,8 @@ This in-process supervision branch is Pi-only by construction:
   A home on any harness that already has an outcome store still receives the shared drain compatibility recovery described in [Lost-wake outcome backstop](#lost-wake-outcome-backstop).
 - It does not change which harness is primary and never moves a home to Pi.
 
+Off Pi, the supervision host runs this same contract on a headless engine beside the primary, reusing the prompt, row eligibility, grant, drain, outcome store, leases, and posture rules this document describes ([supervision-host.md](supervision-host.md)).
+
 ## Components and their owners
 
 - Wake dispatch: `.pi/extensions/fm-primary-pi-watch.ts` stays the dispatcher; `.pi/extensions/lib/fm-branch-dispatch.ts` owns the offer handshake and row eligibility, while [`watcher-continuity.md`](watcher-continuity.md#per-actor-acknowledgement) owns the per-actor consume contract.

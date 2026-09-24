@@ -16,9 +16,11 @@
 # every harness.
 # On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
 # on Pi, the ordinary supervision session keeps running in both postures, and
-# `start` refuses on those harnesses. Every other harness still runs the daemon
-# for now, so `start` and `start-native` require the record `enter` wrote before
-# they launch the daemon.
+# `start` refuses on those harnesses. The same holds for away mode (not quiet
+# mode) on a Claude primary whose home opted into the supervision host
+# (config/supervision-host), where the host runs the away session. Every other
+# harness still runs the daemon for now, so `start` and `start-native` require
+# the record `enter` wrote before they launch the daemon.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/.
 #
@@ -189,14 +191,27 @@ fm_afk_launch_primary_harness() {
   "$FM_AFK_LAUNCH_DIR/fm-harness.sh" 2>/dev/null || printf unknown
 }
 
-# The away daemon is no longer launched on Pi: the posture record is the whole
-# entry there and the ordinary supervision session runs in both postures.
+# The away daemon is no longer launched on Pi, nor for away mode on a Claude
+# primary whose home opted into the supervision host (config/supervision-host,
+# docs/supervision-host.md): the posture record is the whole entry there and
+# the ordinary supervision session runs in both postures. Quiet mode still
+# runs the daemon on that Claude home, so a quiet entry or a refresh of a
+# running quiet daemon is allowed.
 fm_afk_launch_daemon_allowed() {
-  local harness
+  local harness mode
   harness=$(fm_afk_launch_primary_harness)
   case "$harness" in
     pi|pi-signed)
       fm_afk_launch_log "the away daemon is no longer launched on $harness; the away-posture record is the posture there (run bin/fm-afk-launch.sh enter and stop)"
+      return 1 ;;
+    claude)
+      [ -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/supervision-host" ] || return 0
+      mode=${FM_AFK_MODE:-}
+      if [ -z "$mode" ] && [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
+        mode=$(head -n 1 "$FM_AFK_LAUNCH_STATE/.afk" 2>/dev/null || true)
+      fi
+      [ "$mode" != quiet ] || return 0
+      fm_afk_launch_log "the away daemon is not launched on this claude home, which runs the supervision host (config/supervision-host); the away-posture record is the posture here (run bin/fm-afk-launch.sh enter and stop)"
       return 1 ;;
   esac
   return 0
