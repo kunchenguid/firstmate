@@ -17,6 +17,7 @@ The throttle is scoped to both the current captain-call lifecycle and the status
 A secondmate reaches the stale path only for a wait declared in its status line, so a hold recorded only in the backlog while its last line is `working:` or `done:` is outside this guard.
 Reaching that case would require consulting the backlog for windows the secondmate gate deliberately skips, putting backlog reads on the ordinary poll hot path this design preserves.
 Repeated provably-working stale escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
+Before repairing or expiring that escalation timer, the watcher rechecks current work evidence; a task that has stopped surfaces once for inspection and keeps a hash-scoped surfaced marker across watcher re-arms instead of continuing to escalate from a cached working verdict.
 A pane holding a file newer than the start of its own quiet window, anywhere in the worktree recorded for that task, is deferred instead of escalated, because a crew writing source, then tests, then documentation behind a static pane is liveness that neither pane quietness nor the run step can show.
 That deferral re-surfaces on the same `FM_PAUSE_RESURFACE_SECS` cadence as a declared wait, with a reason naming the write evidence rather than a wedge, and it is bounded to one pruned, depth-bounded, wall-clock-bounded walk (`FM_WORKTREE_WRITE_PRUNE`, `FM_WORKTREE_WRITE_MAXDEPTH`, `FM_WORKTREE_WRITE_TIMEOUT`) taken only in the branch that was about to escalate, never on every poll.
 Every absence of write evidence, including a missing worktree record, a torn-down worktree, a walk that outlives its wall-clock bound on a hung mount, and a failed walk, leaves the existing escalation schedule untouched, so a crew that writes nothing still escalates exactly as before.
@@ -54,7 +55,7 @@ Live or inconclusive liveness remains fail-open at that initial surface, so a wo
 Its later sights are still held to that same bounded cadence rather than re-alarming on every pane-hash change, because the throttle is keyed to the declaration and not to the pane an idle parked worker keeps ticking.
 A secondmate's endpoint liveness is still never read at all; a mate is admitted to that same cadence only to serve a status-declared wait's bounded re-surface, so a forgotten `paused:` declaration, or an attended `captain-held` declaration, cannot rot invisibly.
 Its initial normal-mode status signal still surfaces through the no-verb path, while a daemon-backed away posture self-handles that routine signal and owns later external-wait rechecks.
-Fresh stale panes use the same current-state read before trusting the status log, so an active run or a proven busy worker outranks an old captain-relevant status-log line left behind before validation.
+Fresh stale panes use the same current-state proof before trusting the status log, so an active run or a proven busy worker outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
 Separately from heartbeat backoff and wedge handling, the watcher poll runs `bin/fm-inactive-reconcile.sh` on its own bounded cadence, while locked session start sends the same bounded local scan through `bin/fm-startup-network.sh`'s deferred worker so current-state reads never block the digest.
 In each home the scan considers only that home's long-inactive direct ordinary crewmates, excludes captain-held work, and accepts only `done` or `failed` from `bin/fm-crew-state.sh`.
@@ -93,6 +94,8 @@ For whole-fleet review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet
 Each home atomically publishes that bounded home summary with freshness epoch metadata at `state/home-summary.json` after a locked session start, a watcher-observed status change, task spawn, task teardown, and on a recurring live-watcher cadence; `bin/fm-home-summary-refresh.sh` owns the publication mechanics.
 The fleet snapshot and Bearings paths use the concurrent remote-ledger collection, cache, unreadable-home disclosure, and remote-liveness boundary owned by `bin/fm-fleet-snapshot.sh`'s header.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
+The snapshot classifies a main-home task record as retained when its backlog row is closed without current working evidence; the human view separates it from Under Way, and Bearings keeps its execution evidence and open decisions visible without presenting it as active work.
+That classification does not prove endpoint cleanup or semantic acceptance.
 The script header owns the exact JSON schema.
 
 On a Pi primary, supervision is default-on: the watcher extension can hand eligible task-local rows from an ordinary actionable wake, plus selected fleet-wide heartbeat reviews, to a persistent in-process supervision conversation while main-only rows remain on the captain-facing path.

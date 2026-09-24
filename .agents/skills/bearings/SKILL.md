@@ -45,6 +45,7 @@ Board answers are acted on later under the normal authority rules; this skill's 
    A decision is simply a task held for the captain (`captain-hold-lifecycle`), whatever its kind.
    The canonical snapshot assigns every captain hold exactly one bucket from structured fields only: `blocked` when any blocker is unresolved, else `dated` while `hold_until` is in the future, else `aged` when an undated hold has reached the configured age threshold, else `live`.
    Never use hold-reason or body prose to classify or place a decision.
+   Treat `retained_records` as preserved execution evidence, never as Underway; any unresolved captain action remains independently represented by the snapshot's structured decision surfaces.
    A `live` hold appears in Captain's Call; `blocked`, `dated`, and `aged` holds appear as disclosed Charted Next gates stating their structured reason.
    Use `--all-decisions` to reveal every captain hold available within the bounded snapshot and remove each revealed gate from Charted Next so the buckets remain exclusive.
    Aging is only a presentation safety net, and re-holding with `--until` remains the durable deferral.

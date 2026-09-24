@@ -149,6 +149,7 @@ remote homes under one shared snapshot budget and may refresh the parent-side ca
 --include-prs additionally performs live GitHub discovery and checks.
 
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
+  retained_records{id,state,open_decisions,reason},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
