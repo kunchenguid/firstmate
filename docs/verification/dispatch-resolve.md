@@ -57,7 +57,8 @@ Two default-labeled briefs became ambiguous.
 `tests/fm-dispatch-resolve.test.sh` drives the public interface with a fake `curl` that records argv, the request body, the header read from file descriptor 3, and whether the OpenRouter secret reached its environment, plus a fake `quota-axi` that performs the same environment check.
 It proves firstmate can invoke the resolve path without a preflight, rules are snapshotted once from the isolated home's canonical `config/crew-dispatch.json`, and dynamic output fields are flattened to one line.
 It proves absent or off mode and an absent key each print one stderr line, nothing on stdout, exit 0, and never invoke `curl` or `quota-axi`.
-It proves shadow mode records the complete decision under `data/jev-shadow/`, reports its underlying status and recommendation, and never emits an applicable `profile:` line.
+It proves shadow mode records the complete decision under `data/jev-shadow/` with the task id, accepts either usage naming or no usage object, reports its underlying status and recommendation, and never emits an applicable `profile:` line.
+It proves failed shadow attempts (HTTP, timeout, unusable response, `quota-axi` failure) exit 0 as errors and are recorded with their reason and task id, that no record holds brief text or the key, and that `on` mode emits an applicable `profile:` line without writing a shadow record.
 It proves absent, default-only, and empty-rules files return `no rules to match` without a model or quota request, while a broken rules-file symlink exits 2 as unreadable.
 It proves the documented starter configuration resolves its Pi default through the declared Claude provider, a `.env` key turns the tool on, and the environment wins over it.
 It proves the key is absent from child environments, never appears on `curl` argv, and arrives only as the bearer header on the descriptor.
@@ -74,3 +75,13 @@ $ bash tests/fm-jev.test.sh | tail -1
 ```
 
 A live OpenRouter run needs a key and is not part of the suite; point the tool at a brief with `config/jev-mode` set to `shadow` or `on` and the key injected for that one command.
+
+## Open live proofs
+
+These two checks have not been run.
+Nothing in this record claims they pass.
+
+| Proof | Why still open | How to close it |
+| --- | --- | --- |
+| A real Jev decision comes back from OpenRouter | No `OPENROUTER_API_KEY` was available when this change was tested. Every resolver run so far used a fake `curl`. | Add the key to the home's `.env`, run `bin/fm-jev.sh shadow`, then run `bin/fm-dispatch-resolve.sh data/<task-id>/brief.md --project <project>`. The output must show `status: shadow` and a `shadow_record:` path whose file holds a non-error `decision.status`. |
+| `/jev` works in a live Firstmate Claude Code session | This needs an interactive operator session, and a test run cannot start a nested harness session. | Type `/jev status` and then `/jev shadow` in the operator session. The skill must run `bin/fm-jev.sh`, and `config/jev-mode` must then read `shadow`. |

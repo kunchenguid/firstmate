@@ -284,6 +284,8 @@ assert_shadow_failure() {  # <label> <reason>
   assert_equals 'error' "$(jq -r .decision.status "$record")" "failed attempt is recorded as error: $1"
   assert_contains "$(jq -r .decision.reason "$record")" "$2" "failed attempt keeps its reason: $1"
   assert_equals 't-42' "$(jq -r .task "$record")" "failed attempt carries the task id: $1"
+  assert_not_contains "$(cat "$record")" "$KEY" "failed attempt record never stores the key: $1"
+  assert_not_contains "$(cat "$record")" "$(sed -n 2p "$BRIEF")" "failed attempt record never stores brief text: $1"
 }
 reset_log
 OPENROUTER_API_KEY=$KEY FAKE_CURL_HTTP=429 run code out err "$TMP_ROOT/data/t-42/brief.md" --project pager
@@ -305,7 +307,27 @@ OPENROUTER_API_KEY=$KEY run code out err "$TMP_ROOT/data/t-42/brief.md" --projec
 shadow_record=$(sed -n 's/^  shadow_record: //p' <<<"$out")
 assert_equals 't-42' "$(jq -r .task "$shadow_record")" "successful record carries the task id"
 assert_not_contains "$(cat "$shadow_record")" "$(sed -n 2p "$BRIEF")" "shadow record never stores brief text"
+assert_not_contains "$(cat "$shadow_record")" "$KEY" "shadow record never stores the key"
+for usage_shape in '.usage = {"prompt_tokens": 700, "completion_tokens": 0}' 'del(.usage)'; do
+  reset_log
+  write_response "$RESPONSE" rule_4 0.9
+  jq "$usage_shape" "$RESPONSE" > "$TMP_ROOT/shadow-usage.json"
+  mv "$TMP_ROOT/shadow-usage.json" "$RESPONSE"
+  OPENROUTER_API_KEY=$KEY run code out err "$TMP_ROOT/data/t-42/brief.md" --project pager
+  assert_contains "$out" '  status: shadow' "shadow accepts OpenRouter usage shape: $usage_shape"
+  assert_contains "$out" "  shadow_profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "shadow recommends under usage shape: $usage_shape"
+  assert_not_contains "$out" $'\n  profile:' "shadow emits no applicable profile under usage shape: $usage_shape"
+  shadow_record=$(sed -n 's/^  shadow_record: //p' <<<"$out")
+  assert_equals 't-42' "$(jq -r .task "$shadow_record")" "shadow record carries the task id under usage shape: $usage_shape"
+done
 printf '%s\n' on > "$HOME_DIR/config/jev-mode"
+records_before=$(find "$HOME_DIR/data/jev-shadow" -type f | wc -l)
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+OPENROUTER_API_KEY=$KEY run code out err "$TMP_ROOT/data/t-42/brief.md" --project pager
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "on mode emits an applicable profile line"
+assert_not_contains "$out" 'shadow_record:' "on mode reports no shadow record"
+assert_equals "$records_before" "$(find "$HOME_DIR/data/jev-shadow" -type f | wc -l)" "on mode writes no shadow record"
 pass "shadow mode records Jev's recommendation without authorizing dispatch"
 
 # --- rules are snapshotted and line output is injection-safe -------------------
