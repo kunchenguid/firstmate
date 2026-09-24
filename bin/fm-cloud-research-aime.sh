@@ -46,6 +46,7 @@
 # result source, quarantines and generation-acknowledges its bounded pending
 # captures, and removes only their exact queued wakes before ordinary terminal,
 # report, and decision-gate retirement checks continue.
+# Retirement's paired backlog transition is owned by fm-backlog-transition-lib.sh.
 #
 # `sandbox-verify` is intentionally mutating and opt-in.
 # It creates one disposable empty AIME session, reads that same session back, and
@@ -71,6 +72,11 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 AIME_PROBE_TIMEOUT=${FM_AIME_PROBE_TIMEOUT:-20}
 AIME_WRITE_TIMEOUT=${FM_AIME_WRITE_TIMEOUT:-30}
 AIME_STATE_TIMEOUT=${FM_AIME_STATE_TIMEOUT:-15}
+
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 
 die() {
   printf 'error: %s\n' "$1" >&2
@@ -715,7 +721,7 @@ cmd_cancel() {
 }
 
 cmd_retire() {
-  local id=${1-} source lock report
+  local id=${1-} source lock report meta_lock
   [ "$#" -eq 1 ] || usage
   fm_aime_task_id_valid "$id" || die "invalid task id"
   "$SCRIPT_DIR/fm-procevent-aime.sh" prepare-retire "$id" >/dev/null \
@@ -724,6 +730,9 @@ cmd_retire() {
   (
     fm_lock_acquire_wait "$lock" || die "cannot lock AIME task $id"
     trap 'fm_lock_release "$lock"' EXIT
+    meta_lock=$(fm_meta_lock_path "$STATE/$id.meta") || die "cannot resolve task meta lock"
+    fm_lock_acquire_wait "$meta_lock" || die "cannot lock task metadata"
+    trap 'fm_lock_release "$meta_lock"; fm_lock_release "$lock"' EXIT
     fm_aime_state_load "$id" || die "AIME task state is missing or invalid"
     case "$AIME_STATE_PHASE" in
       terminal-success|terminal-failure) ;;
@@ -738,6 +747,8 @@ cmd_retire() {
     source=$(fm_aime_source_id "$id") || die "invalid task id"
     "$SCRIPT_DIR/fm-procevent.sh" retire "$source" >/dev/null \
       || die "cannot retire the AIME process-event source"
+    fm_backlog_remote_retire "$CONFIG" "$DATA" "$id" \
+      || die "remote retirement backlog transition failed; execution evidence retained: $FM_BACKLOG_TRANSITION_ERROR"
     rm -f -- "$STATE/$id.meta" "$STATE/$id.status" "$STATE/$id.turn-ended" \
       "$STATE/.$id.open-decisions-cursor"
     rm -rf -- "$(fm_aime_task_dir "$id")"
