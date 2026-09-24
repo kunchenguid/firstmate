@@ -169,12 +169,14 @@ TURN="$STATE_DIR/.mail-turn"
 # Invoke the python engine with the resolved endpoints, cursor, and cap in the
 # environment so credentials never reach argv.
 run_py() {
-  FM_MAIL_USER="$FM_MAIL_USER" FM_MAIL_PASS="$FM_MAIL_PASS" \
+  FM_HOME="$FM_HOME" FM_MAIL_USER="$FM_MAIL_USER" FM_MAIL_PASS="$FM_MAIL_PASS" \
   FM_IMAP_HOST="$IMAP_HOST" FM_IMAP_PORT="$IMAP_PORT" \
   FM_SMTP_HOST="$SMTP_HOST" FM_SMTP_PORT="$SMTP_PORT" \
   FM_MAIL_CURSOR="$CURSOR" FM_MAIL_RETRY="$RETRY" \
   FM_MAIL_RETRY_POS="$RETRY_POS" FM_MAIL_TURN="$TURN" \
   FM_MAIL_POLL_MAX_WAKES="$MAIL_MAX_WAKES" \
+  FM_AFK_EMAIL_TO="${FM_AFK_EMAIL_TO:-}" \
+  FM_AFK_POSTURE="$( [ -f "$STATE_DIR/.afk-contract" ] && printf 1 || printf 0 )" \
     "$PY" "$PY_BIN" "$@"
 }
 

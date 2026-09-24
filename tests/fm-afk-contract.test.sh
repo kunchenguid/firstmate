@@ -4,7 +4,7 @@
 # whole mandate, the read-back rendering, the entry announcement (hold-for-
 # return only), the one-step same-turn entry with no wait for a go, the
 # retired two-step entry refusing by name, the refresh and replace rules,
-# the archive at return, the version 2 record with version 1 still readable,
+# the archive at return, the version 3 record with versions 1 and 2 still readable,
 # the retired clause and merge-grant apparatus refusing by name, and the read
 # subcommands every consumer uses instead of parsing the file.
 set -u
@@ -24,7 +24,8 @@ make_home() {  # <name> -> prints the home dir
 contract() {  # <home> <args...>
   local home=$1
   shift
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$CONTRACT" "$@"
+  env -u FM_MAIL_USER -u FM_MAIL_PASS -u FM_IMAP_HOST -u FM_SMTP_HOST -u FM_AFK_EMAIL_TO \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$CONTRACT" "$@"
 }
 
 # A confirmed record in the retired version 1 shape, exactly as the clause
@@ -134,7 +135,7 @@ test_enter_writes_a_v2_record_in_one_step_and_announces_hold_for_return() {
   assert_not_contains "$out" 'confirm' 'entry must never ask for a confirmation'
   assert_not_contains "$out" 'not executed' 'the announcement must not call the words inert'
   assert_not_contains "$out" 'clause' 'the announcement must carry no clause apparatus'
-  [ "$(contract "$home" field version)" = 2 ] || fail "record version is not 2: $(contract "$home" field version)"
+  [ "$(contract "$home" field version)" = 3 ] || fail "record version is not 3: $(contract "$home" field version)"
   [ "$(contract "$home" field reach_channels)" = none ] || fail "reach channels are not none"
   case "$(contract "$home" field confirmed_epoch)" in ''|*[!0-9]*) fail "confirmed_epoch is not numeric" ;; esac
   case "$(contract "$home" field entered_epoch)" in ''|*[!0-9]*) fail "entered_epoch is not numeric" ;; esac
@@ -149,7 +150,7 @@ test_enter_writes_a_v2_record_in_one_step_and_announces_hold_for_return() {
   out=$(contract "$home" readback) || fail "readback of the record failed"
   assert_contains "$out" 'Away posture (recorded):' 'read-back title'
   assert_contains "$out" '    merge it when green' 'read-back carries the words'
-  pass "one enter call writes a version 2 record, announces hold-for-return only, reads it back without asking for a go, and every read subcommand reflects it"
+  pass "one enter call writes a version 3 record, falls back to hold-for-return without mail setup, reads it back without asking for a go, and every read subcommand reflects it"
 }
 
 # The wait-for-go gate is gone: the retired two-step subcommands and the
@@ -493,14 +494,14 @@ test_version_1_record_is_replaced_by_a_version_2_record() {
   home=$(make_home v1-replace)
   write_v1_record "$home" 'first words, version 1'
   contract "$home" enter --words 'new words after the upgrade' >/dev/null 2>&1 || fail "replacement entry over a v1 record failed"
-  [ "$(contract "$home" field version)" = 2 ] || fail "the replacement did not write a version 2 record"
+  [ "$(contract "$home" field version)" = 3 ] || fail "the replacement did not write a version 3 record"
   [ "$(contract "$home" field entered_epoch)" = 1789600000 ] || fail "the replacement changed the v1 session start"
   [ "$(contract "$home" words)" = 'new words after the upgrade' ] || fail "the replacement lost the new words"
   archived=$(find "$home/state/afk-contracts" -name '1789600000-superseded-*.afk-contract' -print -quit)
   [ -f "$archived" ] || fail "the superseded v1 record was not archived"
   contract "$home" validate --path "$archived" >/dev/null 2>&1 || fail "the archived v1 record no longer validates"
   [ "$(contract "$home" words --path "$archived")" = 'first words, version 1' ] || fail "the archived v1 record lost its words"
-  pass "new words over a live version 1 record archive it and write version 2 with the same session start"
+  pass "new words over a live version 1 record archive it and write version 3 with the same session start"
 }
 
 # The record-mutating commands share one lock with the subsystems that read this

@@ -944,8 +944,11 @@ if [ -f "$STATE/.afk-contract" ]; then
     printf 'present - quiet mode recorded at %s (the captain is present and nothing is held for a return: requested actions proceed under ordinary attended authority; only an explicit /quiet off exits it)' \
       "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)"
   else
-    printf 'present - away posture recorded at %s (hold-for-return only; bin/fm-afk-contract.sh readback for the mandate)' \
-      "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)"
+    reach=$("$SCRIPT_DIR/fm-afk-contract.sh" field reach_channels 2>/dev/null || printf none)
+    case "$reach" in email) reach_label='email reach' ;; *) reach_label='hold-for-return only' ;; esac
+    printf 'present - away posture recorded at %s (%s; bin/fm-afk-contract.sh readback for the mandate)' \
+      "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)" \
+      "$reach_label"
   fi
   if [ -e "$STATE/.afk" ]; then
     if [ "$AFK_MODE" = quiet ]; then

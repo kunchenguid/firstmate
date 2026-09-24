@@ -194,6 +194,7 @@ While attended, a captain-facing branch outcome (verdict `captain`) is saved as 
 It then opens one processing turn on main for that sequence.
 The turn stays open until main acknowledges the sequence through its `fm_branch_processed` tool.
 While away, the entry is saved, but processing waits until the away-posture record is archived.
+When configured, Pi email reach sends the same captain-facing outcome set to the captain's mailbox.
 The branch prompt's "Verdict: routine or captain" section owns the distinction between captain-facing, unsolicited routine, and unchanged-review outcomes.
 
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns main's event ownership, acknowledgement duty, and conversational treatment for merged outcomes, while the persisted entry itself owns captain visibility.
@@ -1393,10 +1394,9 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 
 ## Mail plane (.env)
 
-The mail plane (bin/fm-mail.sh) reads unseen IMAP messages and sends one SMTP message.
+The mail plane (`bin/fm-mail.sh`) reads unseen IMAP messages and sends one SMTP message.
 
 **Polling and delivery guarantees**
-
 Its `poll` command surfaces each new message as a durable `check: mail <uid>` wake, which is also what the standing received-mail check runs each watcher cycle.
 Poll emission is exactly-once-recovering: a published wake always carries a durable journal record, and a poll interrupted before recording its uid is healed from that journal, so inbound mail is never silently missed.
 
@@ -1417,9 +1417,11 @@ FM_MAIL_USER=   # IMAP/SMTP login
 FM_MAIL_PASS=   # IMAP/SMTP password
 FM_IMAP_HOST=   # IMAP server hostname
 FM_SMTP_HOST=   # SMTP server hostname
+FM_AFK_EMAIL_TO=   # optional captain destination; enables Pi away email only when all four mail settings above are present
 ```
 
 `FM_IMAP_PORT` (default 993), `FM_SMTP_PORT` (default 465), `FM_MAIL_TIMEOUT` (default 20 seconds), and `FM_MAIL_POLL_MAX_WAKES` (default 20, valid 1..200) are optional.
+Away-email setup, reply-code handling, and its authority limit are documented in [Away email on Pi](afk-email.md).
 The per-poll wake cap bounds the wakes of one `poll` run; header fetches scan a larger bounded window of new unseen uids plus already-surfaced retry-set uids, so a flood or large backlog still makes bounded progress every poll, keeping the durable wake queue bounded without ever dropping mail.
 
 **Unfetchable headers**

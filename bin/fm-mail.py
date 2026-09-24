@@ -14,10 +14,12 @@
 # so credentials never appear in argv or logs. read/poll use BODY.PEEK so mail
 # is never marked seen before firstmate answers it.
 import imaplib
+import json
 import os
 import re
 import socket
 import ssl
+import subprocess
 import sys
 import email
 import smtplib
@@ -74,6 +76,29 @@ def connect_mailbox():
     m = imaplib.IMAP4_SSL(IMH, IMP, ssl_context=CTX, timeout=MAIL_TIMEOUT)
     m.login(USER, PW)
     return m
+
+
+def plain_body(msg):
+    """Return decoded text/plain content only; replies are never inferred from HTML."""
+    try:
+        if msg is None:
+            return ''
+        parts = msg.walk() if msg.is_multipart() else [msg]
+        chunks = []
+        for part in parts:
+            if part.get_content_type() != 'text/plain' or part.get_filename():
+                continue
+            payload = part.get_payload(decode=True)
+            if payload is None:
+                continue
+            charset = part.get_content_charset() or 'utf-8'
+            try:
+                chunks.append(payload.decode(charset, 'replace'))
+            except LookupError:
+                chunks.append(payload.decode('utf-8', 'replace'))
+        return '\n'.join(chunks)
+    except Exception:
+        return ''
 
 
 def body_preview(msg):
@@ -317,6 +342,20 @@ def cmd_poll_list():
         # retry set.
         retry_window = retry_scan_window(retry_order, retry_pos, window)
         retry_candidates = [u for u in retry_window if u in seen]
+        recipient = os.environ.get('FM_AFK_EMAIL_TO', '').strip()
+        state_root = os.environ.get('FM_STATE_OVERRIDE') or os.path.join(
+            os.environ.get('FM_HOME') or os.path.dirname(os.path.dirname(__file__)), 'state')
+        posture_path = os.path.join(state_root, '.afk-contract')
+        try:
+            posture = open(posture_path, encoding='utf-8').read().splitlines()
+        except OSError:
+            posture = []
+        afk_enabled = (
+            os.environ.get('FM_AFK_POSTURE') == '1'
+            and re.fullmatch(r'[^@\s<>]+@[^@\s<>]+', recipient)
+            and 'reach_channels: email' in posture
+        )
+        afk_messages = []
         turn_path = os.environ.get('FM_MAIL_TURN', '')
         next_turn = None
         if cap == 1 and new_candidates and retry_candidates:
@@ -365,19 +404,36 @@ def cmd_poll_list():
             # surfaced degraded, a retry uid is left for a later scan step, and
             # the scan advances.
             try:
-                typ, msg = m.uid('fetch', u.encode(), '(BODY.PEEK[HEADER])')
+                fetch_spec = '(BODY.PEEK[])' if afk_enabled else '(BODY.PEEK[HEADER])'
+                typ, msg = m.uid('fetch', u.encode(), fetch_spec)
                 if typ != 'OK' or not msg or not msg[0]:
-                    raise ValueError('no header data')
+                    raise ValueError('no mail data')
                 mi = email.message_from_bytes(msg[0][1])
                 uid = clean(u)
                 idate = clean(dec(mi.get('Date')))
                 subj = clean(dec(mi.get('Subject')))
                 fr = clean(dec(mi.get('From')))
+                if afk_enabled:
+                    afk_messages.append({
+                        'uidvalidity': uidv,
+                        'uid': uid,
+                        'from': fr,
+                        'subject': subj,
+                        'body': plain_body(mi),
+                    })
             except Exception:
                 if is_retry:
                     continue
                 out.append((clean(u), '', '(no header)',
                             'unfetchable header - see fm-mail read', 'degraded'))
+                if afk_enabled:
+                    afk_messages.append({
+                        'uidvalidity': uidv,
+                        'uid': clean(u),
+                        'from': '',
+                        'subject': '(unavailable)',
+                        'body': '',
+                    })
                 new_emitted += 1
                 continue
             status = 'retry' if is_retry else 'ok'
@@ -406,6 +462,18 @@ def cmd_poll_list():
         except Exception:
             pass
         m = None
+        if afk_messages:
+            helper = os.path.join(os.path.dirname(__file__), 'fm-afk-email.py')
+            result = subprocess.run(
+                [sys.executable, helper, 'receive-batch'],
+                input=json.dumps(afk_messages, ensure_ascii=False),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=os.environ.copy(),
+            )
+            if result.returncode != 0:
+                raise RuntimeError('away-email reply handoff could not be recorded')
         print('uidvalidity\t%s' % uidv)
         for uid, idate, fr, subj, status in out:
             print('%s\t%s\t%s\t%s\t%s' % (uid, idate, fr, subj, status))
