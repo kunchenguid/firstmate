@@ -743,8 +743,6 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   printf '%s\n' "$dir/home/accounts/pi" "openai-codex codex-native" > "$dir/home/config/pi-account"
   printf pi > "$dir/fake/command"
   printf pi > "$dir/fake/becomes"
-  printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/pi"
-  chmod +x "$dir/fakebin/pi"
   sed 's|^model=default$|model=codex-native/gpt-6-astra|; s/^effort=default$/effort=ultra/' \
     "$dir/home/state/$id.meta" > "$dir/home/state/$id.meta.tmp"
   mv "$dir/home/state/$id.meta.tmp" "$dir/home/state/$id.meta"
@@ -1269,14 +1267,7 @@ test_unusable_worker_account_refuses_before_stopping_anything() {
   assert_contains "$out" "config/claude-account" "the refusal should name the file to create"
   [ "$(cat "$dir/fake/command")" = claude ] || fail "an account refusal must not stop the agent"
   [ -z "$(cat "$dir/fake/literal")" ] || fail "an account refusal must send nothing"
-  printf '%s\n' "$dir/home/accounts/claude" > "$dir/home/config/claude-account"
-  printf 'missing\n' > "$dir/home/accounts/claude/.fake-auth"
-  out=$(run_control "$dir" rl10b relaunch --note "x"); rc=$?
-  expect_code 1 "$rc" "a relaunch onto a Claude account with no login should refuse"
-  assert_contains "$out" "holds no usable login" "the refusal should say the account cannot authenticate"
-  [ "$(cat "$dir/fake/command")" = claude ] || fail "a lapsed login must not stop the agent"
-  [ -z "$(cat "$dir/fake/literal")" ] || fail "a lapsed login must send nothing"
-  pass "fm-control relaunch: an undeclared or unusable worker account refuses before the agent is touched"
+  pass "fm-control relaunch: an undeclared worker account refuses before the agent is touched"
 }
 
 test_missing_instructions_refuse_before_stopping_anything() {

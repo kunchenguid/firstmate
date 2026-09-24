@@ -199,6 +199,25 @@ test_claude_ordinary_pin_unsets_the_config_root() {
   pass "an ordinary Claude pin selects the default login and drops an ambient root"
 }
 
+test_claude_environment_pin_keeps_environment_credentials() {
+  local out rc id=acct-environment
+  new_case environment claude
+  printf 'environment\n' > "$HOME_DIR/config/claude-account"
+  out=$(spawn_ship "$id"); rc=$?
+  expect_code 0 "$rc" "an environment pin should launch with no stored login: $out"
+  assert_contains "$out" "account=environment" "the spawn should report the environment account"
+  assert_absent "$CASE/claude-checks" "an environment pin must not run a stored-login check"
+  assert_contains "$(cat "$CASE/ambient-claude/.claude.json" 2>/dev/null)" "$WT" \
+    "trust should land in firstmate's own Claude store"
+  run_pane
+  assert_grep "CLAUDE_CONFIG_DIR=$CASE/ambient-claude" "$CASE/claude-worker" \
+    "the worker should read firstmate's own Claude store"
+  assert_grep "ANTHROPIC_API_KEY=ambient-pane-key" "$CASE/claude-worker" "an environment pin must keep the API key"
+  assert_grep "CLAUDE_CODE_OAUTH_TOKEN=ambient-pane-token" "$CASE/claude-worker" "an environment pin must keep the OAuth token"
+  assert_grep "CLAUDE_CODE_USE_BEDROCK=1" "$CASE/claude-worker" "an environment pin must keep the cloud-provider switch"
+  pass "an environment Claude pin keeps environment credentials and skips the stored-login check"
+}
+
 test_malformed_pins_refuse_before_launch() {
   local out rc id=acct-bad n=0 body
   new_case malformed claude
@@ -335,7 +354,7 @@ test_raw_claude_account_override_refuses_under_a_pin() {
     out=$(spawn_ship "$id-${var%%=*}" --harness "FOO=1 $var claude --print raw"); rc=$?
     expect_code 1 "$rc" "a raw Claude command setting ${var%%=*} must refuse under a pin"
     assert_refused_before_launch "$id-${var%%=*}" "$out" "the raw launch command sets ${var%%=*}"
-    assert_contains "$out" "remove ${var%%=*} from the raw command, or change or remove config/claude-account" \
+    assert_contains "$out" "remove ${var%%=*} from the raw command, or ask the captain to change config/claude-account" \
       "the refusal should say how to proceed"
   done
   assert_absent "$CASE/claude-worker" "a refused raw override must never start Claude"
@@ -381,6 +400,7 @@ test_absent_account_refuses_claude_and_pi
 test_claude_pin_selects_the_root_and_sheds_ambient_credentials
 test_claude_pin_refuses_a_signed_out_root_despite_an_ambient_login
 test_claude_ordinary_pin_unsets_the_config_root
+test_claude_environment_pin_keeps_environment_credentials
 test_malformed_pins_refuse_before_launch
 test_pi_pin_selects_the_root_and_the_declared_provider
 test_pi_pin_refusals
