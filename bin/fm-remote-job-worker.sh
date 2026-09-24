@@ -59,7 +59,6 @@ FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}
 
 WORKER_LOCK=
 WORKER_LOCK_HELD=0
-WORKER_LOCK_FD=
 WORKER_LOCK_BOUND=
 WORKER_RELEASE_OWNERSHIP=1
 WORKER_SUPERVISED_PID=
@@ -190,29 +189,24 @@ worker_acquire_lock() {
 # creates a new directory is invisible through a Linux directory fd, so a
 # later write or clear cannot land in the replacement's quarantine.
 worker_bind_owned_lock() {
-  local fd pid
+  local pid
   [ "$WORKER_LOCK_HELD" -eq 1 ] || return 1
   [ -d "$WORKER_LOCK" ] && [ ! -L "$WORKER_LOCK" ] || return 1
-  exec {fd}< "$WORKER_LOCK" || return 1
-  if [ -d "/proc/self/fd/$fd" ]; then
-    WORKER_LOCK_BOUND="/proc/self/fd/$fd"
+  exec 9< "$WORKER_LOCK" || return 1
+  if [ -d /proc/self/fd/9 ]; then
+    WORKER_LOCK_BOUND=/proc/self/fd/9
   else
     WORKER_LOCK_BOUND=$WORKER_LOCK
   fi
   pid=$(fm_remote_job_read_single_line "$WORKER_LOCK_BOUND/pid" 64 2>/dev/null || true)
   if [ "$pid" != "${BASHPID:-$$}" ]; then
-    exec {fd}<&-
-    WORKER_LOCK_BOUND=
+    worker_unbind_owned_lock
     return 1
   fi
-  WORKER_LOCK_FD=$fd
 }
 
 worker_unbind_owned_lock() {
-  local fd=${WORKER_LOCK_FD:-}
-  [ -n "$fd" ] || return 0
-  exec {fd}<&-
-  WORKER_LOCK_FD=
+  exec 9<&-
   WORKER_LOCK_BOUND=
 }
 
@@ -359,8 +353,9 @@ worker_recorded_execution_alive() { # <job-dir> process|group <pid>
       0) ;;
       1) return 1 ;;
       2)
-        # Bash 5.2 drops the failing status of a bare return when this function
-        # runs in a conditional, so a dead process still looks alive.
+        # This runs inside the shutdown and exit traps, where a bare return
+        # reports the status from before the trap, so a dead process would
+        # still look alive.
         worker_process_or_group_alive process "$pid"
         return $?
         ;;
@@ -372,8 +367,9 @@ worker_recorded_execution_alive() { # <job-dir> process|group <pid>
       0|3) ;;
       1) return 1 ;;
       2)
-        # Bash 5.2 drops the failing status of a bare return when this function
-        # runs in a conditional, so a dead group still looks alive.
+        # This runs inside the shutdown and exit traps, where a bare return
+        # reports the status from before the trap, so a dead group would
+        # still look alive.
         worker_process_or_group_alive group "$pid"
         return $?
         ;;
