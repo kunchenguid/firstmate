@@ -812,7 +812,7 @@ test_open_admits_parked_rows_only_when_asked() {
   second=$(run_captain "$home" open parked-lane --identity --include-parked) \
     || fail "open --include-parked lost a re-parked row"
   [ "$first" != "$second" ] || fail "re-parking with a new reason kept the same identity"
-  tasks_in "$home" done parked-lane --file data/backlog.md >/dev/null
+  tasks_in "$home" "done" parked-lane --file data/backlog.md >/dev/null
   rc=0; run_captain "$home" open parked-lane --include-parked >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 1 ] || fail "open --include-parked admitted a Done row (exit $rc)"
   pass "open admits parked rows only under --include-parked, with a reason-bound identity"
