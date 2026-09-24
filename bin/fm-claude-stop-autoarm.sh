@@ -52,7 +52,9 @@
 #     bin/fm-supervision-host.sh in the arm's place, bound to this generation.
 #     To this hook it is an arm that also takes away-posture wakes itself and
 #     ends its own park before the hook timeout with a "supervision-host:"
-#     line, which is actionable here like a wake line; a "supervision-host stood
+#     line, which is actionable here like a wake line; its rewake banner
+#     carries every "supervision-host:" line the host printed, in order, while
+#     its wake lines keep the arm's eight-line cap. A "supervision-host stood
 #     down:" close exits 0 silently, and a host that died without a close is
 #     retried instead of being judged by the healthy-watcher predicate
 #     (docs/supervision-host.md). Without the file nothing below changes.
@@ -395,7 +397,11 @@ if [ "$ACTIONABLE" -eq 1 ]; then
   fi
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
-    [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat|supervision-host:)' "$OUT" 2>/dev/null | head -8
+    if [ "$HOST_MODE" -eq 1 ]; then
+      [ -n "$OUT" ] && awk '/^supervision-host:/ { print; next } /^(signal:|stale:|check:|heartbeat)/ && shown++ < 8' "$OUT" 2>/dev/null
+    else
+      [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
+    fi
     if [ "$HOST_MODE" -eq 1 ] && [ -e "$STATE/.afk-contract" ]; then
       printf 'This wake comes from automatic supervision under the away-posture record, not from the captain: it is not a return, so handle it under the away posture.\n'
     fi

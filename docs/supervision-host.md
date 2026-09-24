@@ -54,6 +54,7 @@ A host that dies without a close is retried by the auto-arm, and the next host s
 
 Claude drops the exit 2 of a Stop hook it terminated at the hook timeout ([verification](verification/supervision.md#claude-drops-the-exit-2-of-a-hook-it-timed-out-2026-09-23)).
 A plain watcher park rarely lasts that long, because heartbeat closes wake main, but a host absorbs its own wakes, so it ends its park itself before the tracked 28,800-second registration.
+`FM_SUPERVISION_HOST_PARK_SECONDS` sets that boundary (default 27,000), and a value that is not a positive integer below 28,800 is treated as the default.
 At the boundary it stops the home's watcher and exits with one `supervision-host: cycle boundary` line; main drains, acknowledges, and ends its turn, and that turn end starts the next park.
 The host checks the boundary on every loop pass, so closes that are already waiting cannot carry it past the boundary.
 It also starts no engine turn that could still be running at the boundary (the turn bound plus the engine grace), judged when the close arrives and again just before the turn starts: that close reaches main ahead of the boundary line instead, and its wake stays durable in the queue.
@@ -76,6 +77,7 @@ Today the only verified engine is Claude's print mode, measured on Claude Code 2
 - Claude path-checks direct file reads against its working directories, so a home or state directory outside the code root is passed with `--add-dir`.
 - The conversation starts with `--session-id` and continues with `--resume`; the prompt is the first argument and stdin is `/dev/null`, because an open stdin costs a three-second wait.
 - `--output-format json` carries the error flag, turn count, usage, and the tool's own cost estimate; on a resumed conversation that cost is the conversation's running total while the usage and turn count are the turn's own, so the engine lib derives each turn's cost from the total the host recorded after the previous turn.
+- The host counts a turn successful only when that result is complete: `type` is `result`, `subtype` is `success`, `is_error` is false, and `total_cost_usd`, `num_turns`, and the four `usage` token counts (input, cache read, cache creation, output) are finite numbers; any other result fails the turn and hands its wake to main.
 - The engine runs from the tracked code root, so its session files land in Claude's own project store for that directory and appear in that directory's resume list.
 - Tool commands run in process groups of their own, which a bound's group signal cannot reach, so the engine lib records the engine's descendants once a second and reaps them by recorded identity after every turn; the reap is best-effort for what it observed, not a bound, so a process that a tool detaches into a process group of its own and that loses its ancestry to the engine between two snapshots is never recorded and survives the turn, the same residual `bin/fm-timeout-lib.sh` names.
 - From inside the engine's shell the primary is not in the harness ancestry, so the engine can never act as the session-lock owner.

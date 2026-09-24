@@ -118,6 +118,17 @@ printf 'watcher: FAILED - cycle ended without an actionable reason\n'
 exit 1
 SH
       ;;
+    actionable-many)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+for i in 1 2 3 4 5 6 7 8 9 10; do printf 'stale: fixture-%s actionable\n' "$i"; done
+exit 0
+SH
+      ;;
     reset-boundary)
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1250,6 +1261,15 @@ write_host_fixture() {
       stood-down)
         printf "printf 'supervision-host stood down: this session no longer owns supervision\\n'\n"
         ;;
+      handed-back-many)
+        cat <<'SH'
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+for i in 1 2 3 4 5 6 7 8 9 10; do printf 'signal: fixture-%s.status\n' "$i"; done
+printf 'supervision-host: the away session could not take this wake: fixture; relay its outcomes\n'
+for i in 1 2 3 4 5 6 7 8 9 10; do printf 'supervision-host: outcome %s for demo [routine]: fixture %s\n' "$i" "$i"; done
+SH
+        ;;
       crash)
         printf 'kill -KILL "$$"\n'
         ;;
@@ -1311,6 +1331,41 @@ test_host_handback_under_away_record_is_not_a_return() {
   assert_contains "$out" "supervision-host: the away session could not take this wake" "the handed-back wake must say why"
   assert_contains "$out" "not from the captain: it is not a return" "an away-posture handback must say it is not the captain's return"
   pass "auto-arm: a wake the host hands back under the away record says it is automatic supervision, not a return"
+}
+
+test_plain_arm_banner_keeps_its_wake_line_cap() {
+  local dir out expected
+  dir=$(make_primary_dir "$TMP_ROOT/plain-banner")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable-many
+  out=$(run_autoarm "$dir" 2>/dev/null)
+  expected=$(
+    printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
+    for i in 1 2 3 4 5 6 7 8; do printf 'stale: fixture-%s actionable\n' "$i"; done
+    printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
+  )
+  [ "$out" = "$expected" ] || fail "the plain-arm rewake banner changed:"$'\n'"$out"
+  pass "auto-arm: without the host the rewake banner is unchanged, eight wake lines at most"
+}
+
+test_host_handback_carries_every_host_line() {
+  local dir out status expected
+  dir=$(make_primary_dir "$TMP_ROOT/host-many")
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host"
+  : > "$dir/state/task.meta"
+  write_host_fixture "$dir" handed-back-many
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a wake the host hands back must rewake main"
+  expected=$(
+    printf 'supervision-host: the away session could not take this wake: fixture; relay its outcomes\n'
+    for i in 1 2 3 4 5 6 7 8 9 10; do printf 'supervision-host: outcome %s for demo [routine]: fixture %s\n' "$i" "$i"; done
+  )
+  [ "$(printf '%s\n' "$out" | grep '^supervision-host:')" = "$expected" ] \
+    || fail "the rewake must carry every host line in the host's order:"$'\n'"$out"
+  [ "$(printf '%s\n' "$out" | grep -c '^signal: ')" -eq 8 ] || fail "the host's wake lines must keep the eight-line cap:"$'\n'"$out"
+  assert_contains "$out" "signal: fixture-8.status" "the first eight wake lines must reach the rewake"
+  pass "auto-arm: a host handback delivers every host line, while its wake lines keep their cap"
 }
 
 test_host_stand_down_is_silent() {
@@ -1398,6 +1453,8 @@ test_long_poll_grace_reaches_arm_wrapper
 test_host_absent_flag_keeps_the_arm
 test_host_boundary_rewakes_with_the_host_line
 test_host_handback_under_away_record_is_not_a_return
+test_plain_arm_banner_keeps_its_wake_line_cap
+test_host_handback_carries_every_host_line
 test_host_stand_down_is_silent
 test_host_crash_is_retried_then_reported
 test_fm_lock_status_still_works_with_shared_lib

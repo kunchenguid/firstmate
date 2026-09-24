@@ -79,7 +79,8 @@
 # .supervision-host.log (a bounded ledger of where every close went, with each
 # engine turn's usage and outcome).
 #
-# Tunables (environment): FM_SUPERVISION_HOST_PARK_SECONDS (27000),
+# Tunables (environment): FM_SUPERVISION_HOST_PARK_SECONDS (27000; a positive
+# integer below the 28800-second registration, any other value is the default),
 # FM_SUPERVISION_HOST_TURN_TIMEOUT (1200), FM_SUPERVISION_HOST_ROTATE_TURNS (20:
 # a new engine conversation after this many turns; every main session start
 # also opens a new one), FM_SUPERVISION_HOST_READY_TIMEOUT (25: how long a
@@ -114,6 +115,7 @@ numeric_or() {  # <value> <default>
 GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
 ENGINE_GRACE=$(numeric_or "${FM_SUPERVISION_ENGINE_GRACE:-}" 30)
 PARK_SECONDS=$(numeric_or "${FM_SUPERVISION_HOST_PARK_SECONDS:-}" 27000)
+[ "$PARK_SECONDS" -lt 28800 ] 2>/dev/null || PARK_SECONDS=27000
 TURN_TIMEOUT=$(numeric_or "${FM_SUPERVISION_HOST_TURN_TIMEOUT:-}" 1200)
 ROTATE_TURNS=$(numeric_or "${FM_SUPERVISION_HOST_ROTATE_TURNS:-}" 20)
 READY_TIMEOUT=$(numeric_or "${FM_SUPERVISION_HOST_READY_TIMEOUT:-}" 25)
@@ -621,8 +623,10 @@ handle_away() {  # <reason-lines>
     HANDLE_WHY="the engine turn hit its ${TURN_TIMEOUT}s bound"
   elif [ "$rc" -eq 127 ]; then
     HANDLE_WHY="the $FM_SUPERVISION_ENGINE engine could not run"
-  elif [ "$rc" -ne 0 ] || [ "${usage#error=0}" = "$usage" ]; then
+  elif [ "$rc" -ne 0 ]; then
     HANDLE_WHY="the engine turn failed (exit $rc)"
+  elif [ "${usage#error=0}" = "$usage" ]; then
+    HANDLE_WHY="the engine turn ended with an error or an incomplete result"
   elif [ "${receipts:-0}" -eq 0 ]; then
     HANDLE_WHY="the engine turn recorded no outcome for its wake"
   else

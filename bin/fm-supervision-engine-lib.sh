@@ -277,8 +277,10 @@ fm_supervision_engine_turn() {
 # conversation's running total (the caller records it and passes it back for
 # the next turn; 0 for a new conversation). Claude's total_cost_usd is that
 # running total on a resumed conversation, while its usage and num_turns are
-# per turn. Returns 1 when the result cannot be read, which the host treats as
-# a failed turn.
+# per turn. error=0 only for a complete success result: type "result",
+# subtype "success", is_error false, and finite total_cost_usd, num_turns, and
+# the four usage token counts; any other shape is error=1. Returns 1 when the
+# result cannot be read. The host treats both as a failed turn.
 fm_supervision_engine_result() {
   case "$1" in
     claude)
@@ -288,9 +290,13 @@ fm_supervision_engine_result() {
         let j;
         try { j = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch { process.exit(1); }
         if (!j || typeof j !== "object") process.exit(1);
-        const u = j.usage || {};
-        const n = (v) => (Number.isFinite(v) ? v : 0);
-        const error = j.is_error === true || (j.subtype && j.subtype !== "success") ? 1 : 0;
+        const u = j.usage && typeof j.usage === "object" ? j.usage : {};
+        const finite = (v) => typeof v === "number" && Number.isFinite(v);
+        const n = (v) => (finite(v) ? v : 0);
+        const complete = j.type === "result" && j.subtype === "success" && j.is_error === false
+          && finite(j.total_cost_usd) && finite(j.num_turns) && finite(u.input_tokens)
+          && finite(u.cache_read_input_tokens) && finite(u.cache_creation_input_tokens) && finite(u.output_tokens);
+        const error = complete ? 0 : 1;
         const total = n(j.total_cost_usd);
         const prior = Number(process.argv[2]);
         const turn = Number.isFinite(prior) && prior >= 0 && prior <= total ? total - prior : total;

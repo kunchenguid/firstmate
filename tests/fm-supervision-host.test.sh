@@ -40,6 +40,7 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #   noack       the same as handle, but skip the acknowledgement
 #   chain       handle, then append a status line, so the next close is already
 #               waiting when the turn ends
+#   emptyresult the same as handle, but print {} as its result
 #   noreport    drain and exit cleanly without a report
 #   hang        start a descendant in a process group of its own, then block
 STUB="$TMP_ROOT/engine-stub"
@@ -65,7 +66,7 @@ ack=$(printf '%s\n' "$drain" | sed -n 's/^WAKE_ACK_REQUIRED: after handling comp
 task=$(sed -n 's/^tasks=//p' "$STATE/.supervision-host-turn" | awk '{ print $1 }')
 [ -n "$task" ] || task=fleet
 case "$mode" in
-  handle|hold-lease|return|return-fail|noack|chain)
+  handle|hold-lease|return|return-fail|noack|chain|emptyresult)
     "$FM_REPO/bin/fm-lease.sh" claim "$task" >> "$FM_HOME/engine-lease.log" 2>&1
     "$FM_REPO/bin/fm-branch-report.sh" --task "$task" --verdict routine --summary "stub handled $task" \
       >> "$FM_HOME/engine-report.log" 2>&1
@@ -77,6 +78,7 @@ case "$mode" in
       chain) printf 'working [at=%s]: chained %s\n' "$(date +%s)" "$n" >> "$STATE/demo.status" ;;
     esac
     [ "$mode" != return-fail ] || exit 3
+    [ "$mode" != emptyresult ] || { printf '{}\n'; exit 0; }
     result
     ;;
   noreport) result ;;
@@ -404,6 +406,25 @@ test_return_during_a_failed_turn_still_hands_its_outcomes_to_main() {
   pass "host: a captain return during a failed engine turn still hands that turn's outcomes to main"
 }
 
+test_incomplete_engine_result_hands_the_wake_to_main() {
+  local home
+  home=$(make_home away-emptyresult away)
+  echo emptyresult > "$home/stub-mode"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "emptyresult: the host never started a watcher cycle"
+  append_status "$home" 'handled, but the result is empty'
+  wait_until 250 host_exited "$home" || fail "emptyresult: the host counted an empty result handled: $(cat "$home/state/.supervision-host.log")"
+  expect_code 0 "$(cat "$home/host.rc")" "a handed-back wake must exit 0 for the owner to deliver"
+  assert_grep '"task":"demo"' "$home/state/branch-outcomes.jsonl" "fixture: the stub did not report"
+  assert_re '^signal: .*demo.status' "$home/host.out" "the handed-back close must carry the reason line"
+  assert_re '^supervision-host: .*the engine turn ended with an error or an incomplete result; this wake is yours$' "$home/host.out" \
+    "the handback must say the engine's result was incomplete"
+  assert_re '	failed	turn=.*	error=1 ' "$home/state/.supervision-host.log" "the ledger must record the turn as failed"
+  assert_no_re '	handled	turn=' "$home/state/.supervision-host.log" "an incomplete result must never count as handled"
+  assert_absent "$home/state/.supervision-host-engine" "a turn that did not handle its wake must not keep its conversation"
+  pass "host: an engine turn whose result is incomplete hands its wake to main"
+}
+
 test_engine_turn_is_bounded_and_its_descendants_reaped() {
   local home orphan
   home=$(make_home away-hang away)
@@ -504,6 +525,39 @@ SH
   pass "host: a close whose margin runs out while the successor starts reaches main at the boundary without a turn"
 }
 
+# A park at or beyond the hook registration is refused for the default. The
+# default is observable through the pre-turn margin: a turn bound plus grace of
+# 27000 seconds crosses a 27000-second park, so the close goes to main at the
+# boundary, while under a 28799-second park the same turn runs.
+park_outcome() {  # <name> <park-seconds>; sets PARK_OUTCOME to boundary or handled
+  local home
+  home=$(make_home "$1" away)
+  FM_SUPERVISION_HOST_PARK_SECONDS=$2 FM_SUPERVISION_HOST_TURN_TIMEOUT=26990 FM_SUPERVISION_ENGINE_GRACE=10 start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "$1: the host never started a watcher cycle"
+  append_status "$home" 'one close'
+  wait_until 250 sh -c '[ -s "$1/host.rc" ] || grep -q "	handled	" "$1/state/.supervision-host.log" 2>/dev/null' _ "$home" \
+    || fail "$1: the close was neither handled nor handed to main: $(cat "$home/state/.supervision-host.log")"
+  if host_exited "$home"; then
+    grep -q '^supervision-host: cycle boundary - ' "$home/host.out" || fail "$1: the host exited without the boundary: $(cat "$home/host.out")"
+    ! ls "$home"/engine-call.* >/dev/null 2>&1 || fail "$1: an engine turn ran before the boundary exit"
+    PARK_OUTCOME=boundary
+  else
+    kill -TERM "$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")"
+    wait_until 200 host_exited "$home" || fail "$1: the host did not stop on TERM"
+    PARK_OUTCOME=handled
+  fi
+}
+
+test_park_seconds_at_or_beyond_the_hook_registration_fall_back_to_the_default() {
+  park_outcome park-28799 28799
+  [ "$PARK_OUTCOME" = handled ] || fail "a park just under the registration must be honored"
+  park_outcome park-28800 28800
+  [ "$PARK_OUTCOME" = boundary ] || fail "a park at the registration must fall back to the default"
+  park_outcome park-huge 100000000000000000000
+  [ "$PARK_OUTCOME" = boundary ] || fail "a park far beyond the registration must fall back to the default"
+  pass "host: a park at or beyond the Stop-hook registration falls back to the default boundary"
+}
+
 test_unverified_engine_hands_every_away_wake_to_main() {
   local home
   home=$(make_home no-engine away 'pi')
@@ -579,11 +633,13 @@ test_away_turn_without_a_report_hands_the_wake_to_main
 test_return_during_an_engine_turn_hands_its_outcomes_to_main
 test_report_without_acknowledgement_hands_the_wake_to_main
 test_return_during_a_failed_turn_still_hands_its_outcomes_to_main
+test_incomplete_engine_result_hands_the_wake_to_main
 test_engine_turn_is_bounded_and_its_descendants_reaped
 test_restarted_host_stops_what_a_killed_predecessor_left
 test_park_boundary_ends_the_park_before_the_hook_timeout
 test_park_boundary_holds_under_back_to_back_closes
 test_park_boundary_rechecked_just_before_the_engine_turn
+test_park_seconds_at_or_beyond_the_hook_registration_fall_back_to_the_default
 test_unverified_engine_hands_every_away_wake_to_main
 test_host_outside_the_lock_owner_stands_down
 test_superseded_host_leaves_the_owner_untouched
