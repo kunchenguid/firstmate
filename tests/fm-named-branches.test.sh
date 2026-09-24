@@ -223,7 +223,7 @@ promote_keeps_the_named_branches() {
   git_identity "$project"
   commit_file "$project" base base base
   git -C "$project" checkout -qb office
-  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=office\n' "$id" "$project" > "$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\nbase_branch=office\n' "$id" "$project" "$project" > "$home/state/$id.meta"
   FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch office >/dev/null
   fill_brief "$home/data/$id/brief.md"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
@@ -240,7 +240,7 @@ promote_keeps_the_named_branches() {
 }
 
 test_promote_rejects_base_changes_and_branch_collisions() {
-  local home project remote id out status
+  local home project remote scout id out status
   home="$TMP_ROOT/promote-refuse/home"
   project="$home/project"
   remote="$home/remote.git"
@@ -279,7 +279,7 @@ test_promote_rejects_base_changes_and_branch_collisions() {
   git -C "$project" push -q origin refs/heads/office:refs/heads/office
   git -C "$project" push -q origin refs/heads/office:refs/heads/feature/remote
   id=named-promote-remote-collision
-  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=office\n' "$id" "$project" > "$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\nbase_branch=office\n' "$id" "$project" "$project" > "$home/state/$id.meta"
   FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch office >/dev/null
   fill_brief "$home/data/$id/brief.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
@@ -290,7 +290,7 @@ test_promote_rejects_base_changes_and_branch_collisions() {
   assert_absent "$home/data/$id/ship-instructions.md" "remote collision published ship instructions"
 
   id=named-promote-missing-remote-base
-  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=release\n' "$id" "$project" > "$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\nbase_branch=release\n' "$id" "$project" "$project" > "$home/state/$id.meta"
   FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch release >/dev/null
   fill_brief "$home/data/$id/brief.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
@@ -305,7 +305,7 @@ test_promote_rejects_base_changes_and_branch_collisions() {
   git -C "$project" branch -D office >/dev/null
   git -C "$project" fetch -q origin refs/heads/release:refs/remotes/origin/release
   id=named-promote-remote-base
-  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=release\n' "$id" "$project" > "$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\nbase_branch=release\n' "$id" "$project" "$project" > "$home/state/$id.meta"
   FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch release >/dev/null
   fill_brief "$home/data/$id/brief.md"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
@@ -313,15 +313,18 @@ test_promote_rejects_base_changes_and_branch_collisions() {
   assert_grep 'refs/remotes/origin/release' "$home/data/$id/ship-instructions.md" \
     "remote promotion instructions did not name the qualified base ref"
 
-  git -C "$project" update-ref -d refs/remotes/origin/release
+  scout="$home/scout"
+  git clone -q "$remote" "$scout"
+  git -C "$scout" fetch -q origin refs/heads/release:refs/remotes/origin/release
+  git -C "$scout" update-ref -d refs/remotes/origin/release
   id=named-promote-missing-local-remote-base
-  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=release\n' "$id" "$project" > "$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\nbase_branch=release\n' "$id" "$scout" "$project" > "$home/state/$id.meta"
   FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch release >/dev/null
   fill_brief "$home/data/$id/brief.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
     --mode direct-PR --yolo off --branch-name feature/missing-local-remote-base 2>&1); status=$?
   expect_code 1 "$status" "promotion accepted a missing local remote-tracking base"
-  assert_contains "$out" "not available in the scout project checkout" \
+  assert_contains "$out" "not available in the scout worktree" \
     "missing local remote-tracking base was not refused"
   assert_grep 'kind=scout' "$home/state/$id.meta" "missing local remote-tracking base published ship metadata"
   assert_absent "$home/data/$id/ship-instructions.md" \
