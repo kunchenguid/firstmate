@@ -1061,6 +1061,35 @@ SH
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
 }
 
+test_pid_identity_is_terminal_width_invariant() {
+  # The portable fallback records its identity from a wide shell (the arm or
+  # watcher process) but re-reads it inside a narrow-COLUMNS hook, where ps cuts
+  # the command column to the ambient width unless the fallback pins COLUMNS wide.
+  # A truncated command then never equals the recorded one and every fleet command
+  # is denied (issue #799). A long sleep argument makes the cut visible on GNU and
+  # BSD ps alike, so both readings must be byte-identical and carry the whole command.
+  local live no_proc narrow wide
+  local long_arg=300.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+  no_proc="$TMP_ROOT/no-width-proc"
+  if ! LC_ALL=C ps -p "$$" -o lstart= -o command= >/dev/null 2>&1; then
+    pass "terminal-width check skipped where ps -o lstart= is unsupported"
+    return
+  fi
+  sleep "$long_arg" &
+  live=$!
+  narrow=$(COLUMNS=20 FM_PROC_ROOT_OVERRIDE="$no_proc" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  wide=$(COLUMNS=1000 FM_PROC_ROOT_OVERRIDE="$no_proc" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ -n "$wide" ] || fail "fm_pid_identity produced no identity under a wide COLUMNS"
+  case "$wide" in
+    *"sleep $long_arg"*) ;;
+    *) fail "fm_pid_identity dropped the full command under a wide COLUMNS (got '$wide')" ;;
+  esac
+  [ "$narrow" = "$wide" ] || fail "fm_pid_identity varied with COLUMNS (narrow '$narrow', wide '$wide')"
+  pass "fm_pid_identity ps fallback is terminal-width-invariant"
+}
+
 write_fake_proc_identity() {
   local proc_root=$1 pid=$2 starttime=$3
   mkdir -p "$proc_root/$pid"
@@ -1165,6 +1194,7 @@ test_msys_pid_identity_uses_proc() {
 test_wait_deadline_reaps_a_stopped_child
 test_singleton_start
 test_pid_identity_is_locale_invariant
+test_pid_identity_is_terminal_width_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
