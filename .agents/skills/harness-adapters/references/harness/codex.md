@@ -31,7 +31,8 @@ A secondmate is a primary in its own home and keeps its hooks, so an unanswerabl
 
 ## Code-mode host
 
-Crewmate and scout launches also carry `--disable code_mode_host` alongside `--disable hooks`, for the same reason: the operator's personal `~/.codex/config.toml` wires every `exec` tool call through a `code_mode_host` feature backed by ChatGPT-Desktop-app MCP servers (`node_repl`, `cua_repl`), and a task worker should not inherit that dependency.
+Crewmate and scout launches also carry `-c features.code_mode_host=false` alongside `--disable hooks`, for the same reason: on codex-cli 0.155.1 `code_mode_host` is stable and on by default, it routes every `exec` tool call through a code-mode host backed by whatever MCP servers the operator has configured (on the incident machine, ChatGPT-Desktop-app `node_repl` and `cua_repl`), and a task worker should not inherit that dependency.
+The `-c features.*` form is deliberate: an unknown `--disable` name is a hard codex error, while an unknown `features.*` key is ignored, so older codex releases without the feature still launch (verified on 0.155.1 with a made-up feature key).
 Verified from codex's own structured logs on codex-cli 0.155.1: without the flag, five crew workers in a real incident all timed out on their first `exec` call with "timed out negotiating with the code-mode host", 100% of attempts, both in the initial launch and a relaunch.
 A secondmate keeps `code_mode_host` on along with its hooks, since it is a primary in its own home running under the operator's own posture.
 

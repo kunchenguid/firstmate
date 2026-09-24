@@ -1937,15 +1937,6 @@ launch_template() {
     ;;
   # --disable hooks (equivalent to -c features.hooks=false) turns codex's whole
   # lifecycle-hook layer off for CREWMATE and SCOUT launches only.
-  # --disable code_mode_host (same mechanism) keeps a crew/scout `exec` tool
-  # call off the ChatGPT-Desktop-app-backed code-mode host (node_repl/cua_repl
-  # MCP servers from the operator's personal ~/.codex/config.toml), which
-  # timed out "negotiating with the code-mode host" for every exec call across
-  # all five crew workers in a real incident (.agents/skills/harness-adapters/
-  # references/harness/codex.md "Code-mode host" owns the verified detail).
-  # A crew/scout worker should not depend on the operator's desktop-app
-  # integrations any more than it should depend on the operator's hooks; the
-  # operator's own interactive codex sessions keep code_mode_host untouched.
   # Without it a crewmate launch parks forever on codex's hook-trust modal
   # ("N hooks are new or changed"), whose selection sits on "Review hooks" -
   # neither trusting nor declining. Firstmate's key plane carries Enter, Escape
@@ -1962,6 +1953,19 @@ launch_template() {
   # ~/.codex untouched. An unknown feature name is a hard codex error, so a future
   # release that drops this flag fails the launch loudly instead of silently
   # restoring the modal.
+  # -c features.code_mode_host=false keeps a crew/scout `exec` tool call off
+  # codex's code-mode host. On codex-cli 0.155.1 that feature is stable and on
+  # by default, and its host is backed by whatever MCP servers the operator has
+  # configured (on the incident machine, ChatGPT-Desktop-app node_repl/cua_repl
+  # servers), so every exec call timed out "negotiating with the code-mode host"
+  # across all five crew workers in a real incident (.agents/skills/
+  # harness-adapters/references/harness/codex.md "Code-mode host" owns the
+  # verified detail). The -c form is used rather than --disable because an
+  # unknown --disable name is a hard codex error while an unknown features.*
+  # key is ignored, so codex releases that predate the feature still launch.
+  # A crew/scout worker should not depend on the operator's desktop-app
+  # integrations any more than on the operator's hooks; the operator's own
+  # interactive codex sessions keep code_mode_host untouched.
   # A secondmate is a firstmate PRIMARY in its own home, and its turn-end guard,
   # session-start digest, and cd/arm seatbelts are exactly those project hooks
   # (docs/turnend-guard.md, docs/sessionstart-nudge.md, docs/cd-guard.md), so the
@@ -1970,7 +1974,7 @@ launch_template() {
     if [ "$kind" = secondmate ]; then
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks --disable code_mode_host -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c features.code_mode_host=false -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;

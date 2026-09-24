@@ -476,10 +476,10 @@ test_codex_crewmate_launch_disables_the_hook_layer() {
   # disabling them, so a launch must never reach for it.
   assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
     "codex crewmate launch ran the operator's untrusted hooks instead of disabling them"
-  # A crewmate exec call must not depend on the operator's ChatGPT-Desktop-app
-  # code-mode host (node_repl/cua_repl MCP servers), which timed out every
-  # exec call for a real crew incident (data/codex-exec-diagnose/report.md).
-  assert_contains "$launch" "--disable code_mode_host" \
+  # A crewmate exec call must not depend on the operator's code-mode host,
+  # which timed out every exec call for a real crew incident
+  # (.agents/skills/harness-adapters/references/harness/codex.md "Code-mode host").
+  assert_contains "$launch" "-c features.code_mode_host=false" \
     "codex crewmate launch did not disable the code-mode host that timed out every exec call"
   # Firstmate goes blind without the turn-end signal, which rides this same
   # launch rather than any hook.
@@ -502,7 +502,7 @@ test_codex_secondmate_launch_keeps_the_hook_layer() {
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "--disable hooks" \
     "codex secondmate launch disabled the project hooks its own primary supervision depends on"
-  assert_not_contains "$launch" "--disable code_mode_host" \
+  assert_not_contains "$launch" "code_mode_host" \
     "codex secondmate launch disabled the operator's own code-mode host integrations"
   pass "a codex secondmate keeps the project hook layer and code-mode host its primary session runs on"
 }
