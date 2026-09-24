@@ -516,28 +516,71 @@ fm_backlog_start() {  # <data-dir> <id>
   fm_backlog_mutate "$1" start "$2"
 }
 
-# tasks-axi takes a --pr link only as a canonical GitHub or Forgejo pull request
-# and refuses anything else, so a Gerrit change URL is recorded on the row as a
-# note instead. The subshell keeps the parse from overwriting a caller's
-# FM_PR_* identity.
-fm_backlog_pr_is_gerrit_change() {  # <url>
-  ( fm_pr_url_parse "$1" && [ "$FM_PR_PROVIDER" = gerrit ] )
+fm_backlog_archived_done() {  # <data-dir> <id>
+  # tasks-axi removes pruned Done rows from the active markdown file; only an
+  # exact completed row in that home's configured archive makes this a no-op.
+  local data=$1 id=$2 root authorized_root config archive backend
+  data=$(fm_backlog_data_absolute "$data") || return 1
+  root=$(fm_backlog_root "$data") || return 1
+  authorized_root=$(fm_backlog_authorized_root "$1") || return 1
+  backend=$(fm_tasks_axi_backend "$root") || return 1
+  [ "$backend" = markdown ] || return 1
+  config="$root/.tasks.toml"
+  archive=$(LC_ALL=C awk '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    BEGIN { section=""; single=sprintf("%c", 39) }
+    {
+      line=$0
+      sub(/[[:space:]]*#.*/, "", line)
+      line=trim(line)
+      if (line ~ /^\[[^]]+\]$/) {
+        section=substr(line, 2, length(line) - 2)
+        next
+      }
+      if (section == "markdown" && line ~ /^archive[[:space:]]*=/) {
+        sub(/^archive[[:space:]]*=[[:space:]]*/, "", line)
+        line=trim(line)
+        if ((substr(line, 1, 1) == "\"" && substr(line, length(line), 1) == "\"") ||
+            (substr(line, 1, 1) == single && substr(line, length(line), 1) == single)) {
+          print substr(line, 2, length(line) - 2)
+          exit
+        }
+      }
+    }
+  ' "$config" 2>/dev/null)
+  [ -n "$archive" ] || archive=data/done-archive.md
+  case "$archive" in
+    /*) ;;
+    *) archive="$root/$archive" ;;
+  esac
+  fm_backlog_record_present "$archive" "backlog archive" "$authorized_root" || return 1
+  awk -v id="$id" '
+    BEGIN { prefix="- [x] " id }
+    index($0, prefix) == 1 &&
+      (length($0) == length(prefix) || substr($0, length(prefix) + 1, 1) == " ") { found=1 }
+    END { exit !found }
+  ' "$archive"
 }
 
 fm_backlog_done() {  # <data-dir> <id> [flag...]
-  local data=$1 id=$2 arg previous_arg=''
-  local -a done_args=()
+  local data=$1 id=$2 mutation_error
   shift 2
-  for arg in "$@"; do
-    if [ "$previous_arg" = --pr ] && fm_backlog_pr_is_gerrit_change "$arg"; then
-      done_args[${#done_args[@]}-1]=--note
-      done_args+=("Gerrit change $arg")
-    else
-      done_args+=("$arg")
-    fi
-    previous_arg=$arg
-  done
-  fm_backlog_mutate "$data" "done" "$id" "${done_args[@]+"${done_args[@]}"}"
+  if fm_backlog_mutate "$data" "done" "$id" "$@"; then
+    return 0
+  fi
+  mutation_error=$FM_BACKLOG_TRANSITION_ERROR
+  if printf '%s\n' "$FM_BACKLOG_TRANSITION_ERROR" \
+    | grep -F -- "Task \\\"$id\\\" not found in this backlog" >/dev/null \
+    && fm_backlog_archived_done "$data" "$id"; then
+    FM_BACKLOG_TRANSITION_ERROR=
+    return 0
+  fi
+  FM_BACKLOG_TRANSITION_ERROR=$mutation_error
+  return 1
 }
 
 fm_backlog_row_artifact_supported() {

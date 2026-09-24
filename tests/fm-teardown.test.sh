@@ -732,49 +732,31 @@ test_teardown_closes_the_backlog_item_itself() {
   pass "teardown closes its own backlog item before reporting success"
 }
 
-test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note() {
-  local case_dir out real_tasks_axi gerrit_url=https://gerrit.example.com/c/project/+/12345
-  case_dir=$(make_case tasks-axi-close-gerrit)
+test_teardown_accepts_an_already_archived_done_item() {
+  local case_dir out pr='https://github.com/example/repo/pull/7'
+  case_dir=$(make_case tasks-axi-close-archived)
   write_meta "$case_dir" no-mistakes ship
-  printf 'pr=%s\n' "$gerrit_url" >> "$case_dir/state/task-x1.meta"
+  printf 'pr=%s\n' "$pr" >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
-  # Pin the refusal tasks-axi applies to a --pr link that is not a canonical
-  # GitHub pull request, so this case keeps reproducing whatever the installed
-  # release accepts.
-  real_tasks_axi=$(command -v tasks-axi)
-  cat > "$case_dir/fakebin/tasks-axi" <<SH
-#!/usr/bin/env bash
-previous=
-for arg in "\$@"; do
-  if [ "\$previous" = --pr ] && ! [[ "\$arg" =~ ^https://github\.com/[^/]+/[^/]+/pull/[0-9]+\$ ]]; then
-    echo "error: \"Task pr link must be a canonical pull request URL\""
-    exit 1
-  fi
-  previous=\$arg
-done
-exec "$real_tasks_axi" "\$@"
-SH
-  chmod +x "$case_dir/fakebin/tasks-axi"
+  cat > "$case_dir/.tasks.toml" <<'EOF'
+backend = "markdown"
 
-  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed Gerrit task failed: $out"
-  [ "$(backlog_row_state "$case_dir")" = "done" ] \
-    || fail "teardown left a landed Gerrit task's backlog item at $(backlog_row_state "$case_dir"): $out"
-  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
-    | grep -F "body: \"Gerrit change $gerrit_url\"" >/dev/null \
-    || fail "closed Gerrit backlog item did not record its change URL as a note"
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+done_keep = 0
+EOF
+  (cd "$case_dir" && tasks-axi update task-x1 --pr "$pr" --file data/backlog.md >/dev/null \
+    && tasks-axi 'done' task-x1 --keep 0 --file data/backlog.md) \
+    || fail "could not stage the fixture's already-closed archived row"
+  grep -F -- "- [x] task-x1" "$case_dir/data/done-archive.md" >/dev/null \
+    || fail "fixture task was not pruned into the configured archive"
+  out=$(run_teardown "$case_dir") || fail "teardown rejected an item already closed into the archive: $out"
   assert_absent "$case_dir/state/task-x1.backlog-close" \
-    "a landed Gerrit close left its pending-close record behind"
-
-  case_dir=$(make_case tasks-axi-close-github-under-refusal)
-  write_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
-  seed_backlog_in_flight "$case_dir"
-  cp "$TMP_ROOT/tasks-axi-close-gerrit/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
-  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed GitHub task failed: $out"
-  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
-    | grep -F 'links: "pr:https://github.com/example/repo/pull/7"' >/dev/null \
-    || fail "a GitHub pull request no longer closed as the item's pr link"
-  pass "teardown closes a landed Gerrit task with its change URL as a note and a GitHub task with --pr"
+    "teardown retained a pending-close marker for an already-archived Done item"
+  grep -F -- "$pr" "$case_dir/data/done-archive.md" >/dev/null \
+    || fail "archived Done item lost its existing PR link"
+  pass "teardown treats its already-archived Done item as an idempotent close"
 }
 
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
@@ -4505,7 +4487,7 @@ test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
-test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
+test_teardown_accepts_an_already_archived_done_item
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
