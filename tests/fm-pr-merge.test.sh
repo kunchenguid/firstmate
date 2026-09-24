@@ -3340,6 +3340,49 @@ test_required_producer_identity() {
   pass "fm-pr-merge enforces required producer identity and named waivers"
 }
 
+# A commit status carries no app id to compare, so an app-bound required context
+# that arrives as a green status matches by name, while the same context left
+# unreported still refuses.
+test_app_bound_required_status_context_matches_by_name() {
+  local case_dir head kind variant
+  head=a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7
+  for kind in classic ruleset; do
+    for variant in reported absent; do
+      case_dir=$(make_case "required-app-status-$kind-$variant")
+      add_gh_mocks "$case_dir" "$head"
+      if [ "$variant" = reported ]; then
+        write_github_rollup_json "$case_dir" "$head" \
+          "$(check_run ci COMPLETED SUCCESS)" \
+          "$(status_context 'license/cla' SUCCESS)"
+      fi
+      write_github_required "$case_dir" "$kind:license/cla"
+      if [ "$kind" = classic ]; then
+        jq '.protection.required_status_checks.checks[0].app_id = 865473' \
+          "$case_dir/github-branch.json" > "$case_dir/updated.json"
+        mv "$case_dir/updated.json" "$case_dir/github-branch.json"
+      else
+        jq '.[1].parameters.required_status_checks[0].integration_id = 865473' \
+          "$case_dir/github-required-rules.json" > "$case_dir/updated.json"
+        mv "$case_dir/updated.json" "$case_dir/github-required-rules.json"
+      fi
+      printf '{"check_runs":[{"name":"ci","app":{"id":42},"head_sha":"%s"}]}\n' \
+        "$head" > "$case_dir/github-runs.json"
+      run_required_case "$case_dir" 111
+      if [ "$variant" = reported ]; then
+        expect_code 0 "$RC" "app-status-$kind-reported: a green app-bound status must merge: $(cat "$case_dir/stderr")"
+        assert_logged_gh_merge "$case_dir" 111 example/repo --squash
+      else
+        expect_code 1 "$RC" "app-status-$kind-absent: an unreported app-bound status must refuse"
+        assert_grep "required check 'license/cla' has not reported" "$case_dir/stderr" \
+          "app-status-$kind-absent: the unreported status was not named"
+        assert_no_grep 'pr merge' "$case_dir/gh.log" \
+          "app-status-$kind-absent: gh pr merge ran with the status unreported"
+      fi
+    done
+  done
+  pass "fm-pr-merge matches an app-bound required commit status by name"
+}
+
 test_required_partial_reads_report_all_failures() {
   local case_dir head variant
   head=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
@@ -3673,4 +3716,5 @@ test_allow_missing_waives_only_the_named_unreported_check
 test_allow_missing_follows_the_allow_red_rules
 
 test_required_producer_identity
+test_app_bound_required_status_context_matches_by_name
 test_required_partial_reads_report_all_failures

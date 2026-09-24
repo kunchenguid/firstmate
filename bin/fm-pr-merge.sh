@@ -19,10 +19,12 @@
 # that head. A required check that never reported is absent from the checks
 # list rather than red, so github_read_required_contexts below reads the
 # required set from classic branch protection and active rulesets. Requirements
-# retain their producer app binding: a same-named check from another app cannot
+# retain their producer app binding: a same-named check run from another app cannot
 # satisfy them, and a duplicate name-only entry cannot weaken that binding.
-# Unbound requirements match by name. Bound requirements also need a matching
-# producer in the check-runs read at the verified head; an unreadable producer
+# Unbound requirements match by name. A bound requirement reported as a check
+# run also needs a matching producer in the check-runs read at the verified
+# head, while one reported as a commit status matches by name, because the
+# status carries no app id to compare; an unreadable producer
 # read refuses. Successfully read requirements remain checked even if another
 # source fails, so known missing checks and all read errors are reported together.
 # github_branch_rules_unavailable_on_plan owns the narrow plan-unavailable
@@ -689,9 +691,11 @@ github_required_checks_missing() {
       | select(any($reported[];
           if $requirement.app_id == null then
             (if .__typename == "CheckRun" then .name else .context end) == $requirement.context
-          else
-            .__typename == "CheckRun" and .name == $requirement.context
+          elif .__typename == "CheckRun" then
+            .name == $requirement.context
             and any($producers[]; .name == $requirement.context and .app.id == $requirement.app_id)
+          else
+            .context == $requirement.context
           end) | not)
       | .context) | unique[]
   ' 2>/dev/null || return 1
