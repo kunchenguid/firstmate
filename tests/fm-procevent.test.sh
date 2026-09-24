@@ -1508,7 +1508,7 @@ ep_reconcile "failed=1" 1 "a launch that never proved its claim was not reported
 ep_key=$(launch_failed_wake_keys "$HEP" episode-src)
 # <registration identity>-<per-episode nonce>: the watcher remembers every key
 # it has surfaced for good, so the identity alone would announce only the first
-# episode of a registration (tests/fm-watch-triage.test.sh proves delivery).
+# episode of a registration (tests/fm-watch-triage-procevent-away.test.sh proves delivery).
 [[ "$ep_key" =~ ^(procevent:episode-src:launch-failed:[0-9]+-[0-9]+)-[0-9]+$ ]] \
   || fail "the launch-failed wake is not keyed by source, registration identity and episode: $ep_key"
 ep_episode_prefix=${BASH_REMATCH[1]}
