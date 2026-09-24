@@ -13,11 +13,16 @@
 # state, and adds two things that document does not carry: the named pipeline
 # step each agent is on, and its GitHub check rollup.
 #
-# An agent here is a task with a LIVE worker behind it, whatever its kind. A
+# An agent here is a task with a worker behind it, whatever its kind. A
 # `state/<id>.meta` outlives the window it names, so membership is decided by
 # `endpoint.exists`, bin/fm-fleet-snapshot.sh's own reading of
-# fm_backend_target_exists; a record that no longer resolves moves to `omitted`,
-# named and counted rather than drawn. Kind decides only what an agent CARRIES:
+# fm_backend_target_exists. Only a recorded endpoint that PROVABLY no longer
+# resolves is dropped, to `omitted`, named and counted rather than drawn.
+# `endpoint.exists` null means liveness was never established rather than
+# established as dead - which is every REMOTE worker, since that reader does
+# not probe one - so those are drawn with `endpoint_alive: "unknown"`, the
+# same three-way reading bin/fm-fleet-view.sh renders. Omitting them would
+# make this view disagree with the rest of firstmate about who is running. Kind decides only what an agent CARRIES:
 # a `pipeline:true` agent carries a no-mistakes run, its steps and its GitHub
 # checks, and a `pipeline:false` agent - a scout, a second mate - carries the
 # fleet document's own `current_state` instead. Pipeline agents are emitted
@@ -324,7 +329,11 @@ ci_json() {  # <pr-url>
   # 2. Exclusive buckets. Reading `conclusion` without first checking `status`
   #    counts a re-running check as both passed and pending, on a conclusion
   #    left over from its previous attempt.
-  # 3. A deliberately-not-run check is its OWN class: a job GitHub reports
+  # 3. A check that verified nothing is its OWN class, never folded into
+  #    passing. That is SKIPPED, and NEUTRAL with it: `gh pr checks` puts both
+  #    in its skipping bucket and bin/fm-pr-merge.sh groups them the same way
+  #    as merely non-blocking, so counting NEUTRAL as a pass disagrees with
+  #    both. A job GitHub reports
   #    SKIPPED verified nothing, so it is never folded into passing.
   #
   # A StatusContext, a commit status rather than a check run, carries `state`
@@ -352,8 +361,8 @@ ci_json() {  # <pr-url>
     | map(del(.seq))
     | map(. + {verdict:
         (if .status != "COMPLETED" then "pending"
-         elif .conclusion == "SKIPPED" then "skipped"
-         elif .conclusion == "SUCCESS" or .conclusion == "NEUTRAL" then "passed"
+         elif .conclusion == "SKIPPED" or .conclusion == "NEUTRAL" then "skipped"
+         elif .conclusion == "SUCCESS" then "passed"
          else "failed" end)})') || norm=
   if [ -z "$norm" ]; then
     ci_unread "check rollup could not be read"
@@ -414,7 +423,10 @@ row_common() {  # <task-json>
   FM_ROW_PROJECT=$(printf '%s' "$task" | jq -r '.project // ""')
   FM_ROW_WORKTREE=$(printf '%s' "$task" | jq -r '.paths.worktree.path // ""')
   FM_ROW_WINDOW=$(printf '%s' "$task" | jq -r '.endpoint.target // ""')
-  FM_ROW_ENDPOINT_ALIVE=$(printf '%s' "$task" | jq -r 'if .endpoint.exists then "true" else "false" end')
+  # true, false, or "unknown" when liveness was never established. A remote
+  # worker is always the third: bin/fm-fleet-snapshot.sh does not probe one.
+  FM_ROW_ENDPOINT_ALIVE=$(printf '%s' "$task" | jq -c '
+    if .endpoint.exists == null then "unknown" else (.endpoint.exists == true) end')
   # Passed straight through. bin/fm-fleet-snapshot.sh states as policy in its own
   # header that it probes this for local second mates only and reports
   # `not_checked` for everything else, and a probe here would reverse the fleet
@@ -774,20 +786,17 @@ fi
 
 SCOPED=$(printf '%s' "$FLEET" | jq -c --arg only "$ONLY_TASK" '
   [ .tasks[] | select($only == "" or .id == $only) ]')
-# Membership is liveness and nothing else, and `endpoint.exists` is consumed
-# rather than re-derived so the view can never disagree with the rest of
-# firstmate about which workers are running. null means no endpoint was ever
-# recorded, which is not a live worker either and is a different reason worth
-# naming.
+# `endpoint.exists` is consumed rather than re-derived, so the view can never
+# disagree with the rest of firstmate about which workers are running. Only a
+# provable false drops a task; null is liveness that was never established,
+# and it is drawn as unknown rather than treated as dead.
 ORDER='([ .[] | select(.kind == "ship") ] + [ .[] | select(.kind != "ship") ])[]'
-TASKS=$(printf '%s' "$SCOPED" | jq -c "[ .[] | select(.endpoint.exists == true) ] | $ORDER")
+TASKS=$(printf '%s' "$SCOPED" | jq -c "[ .[] | select(.endpoint.exists != false) ] | $ORDER")
 OMITTED=$(printf '%s' "$SCOPED" | jq -c '[
   .[]
-  | select(.endpoint.exists != true)
+  | select(.endpoint.exists == false)
   | {id, kind:(.kind // ""), window:(.endpoint.target // null),
-     reason:(if .endpoint.exists == false
-             then "recorded window no longer exists"
-             else "no endpoint liveness recorded for this task" end)}
+     reason:"recorded window no longer exists"}
 ]')
 
 AGENTS_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-flow-agents.XXXXXX")
@@ -816,7 +825,7 @@ while IFS= read -r task; do
       --argjson ci "$CI_EMPTY" \
       '{id:$id, branch:("fm/" + $id), project:"", worktree:"", window:"",
         kind:$kind, mode:"", pipeline:false, state:null,
-        endpoint_alive:true, agent_alive:"not_checked",
+        endpoint_alive:"unknown", agent_alive:"not_checked",
         worker:{harness:null, model:null, effort:null},
         pr:{url:null, number:null},
         collection:{ok:false, reason:"this agent'"'"'s record could not be built",

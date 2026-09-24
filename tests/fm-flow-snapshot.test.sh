@@ -247,7 +247,8 @@ cat > "$ROLLUP_DIR/25.json" <<'JSON'
 {"__typename":"CheckRun","name":"Lint","status":"COMPLETED","conclusion":"SUCCESS","workflowName":"CI","startedAt":"2026-09-24T06:10:00Z"},
 {"__typename":"CheckRun","name":"Behavior tests","status":"COMPLETED","conclusion":"FAILURE","workflowName":"CI","startedAt":"2026-09-24T06:10:00Z"},
 {"__typename":"CheckRun","name":"Docs","status":"IN_PROGRESS","conclusion":"","workflowName":"CI","startedAt":"2026-09-24T06:11:00Z"},
-{"__typename":"CheckRun","name":"Optional guard","status":"COMPLETED","conclusion":"SKIPPED","workflowName":"CI","startedAt":"2026-09-24T06:10:00Z"}
+{"__typename":"CheckRun","name":"Optional guard","status":"COMPLETED","conclusion":"SKIPPED","workflowName":"CI","startedAt":"2026-09-24T06:10:00Z"},
+{"__typename":"CheckRun","name":"Advisory","status":"COMPLETED","conclusion":"NEUTRAL","workflowName":"CI","startedAt":"2026-09-24T06:10:00Z"}
 ]}
 JSON
 
@@ -352,9 +353,19 @@ assert_equals "gone-one" \
 assert_equals "recorded window no longer exists" \
   "$(printf '%s' "$DOC" | jq -r '[.omitted[] | select(.id == "gone-one")][0].reason')" \
   "omitted says why the task is not drawn"
-assert_equals "no endpoint liveness recorded for this task" \
-  "$(printf '%s' "$DOC" | jq -r '[.omitted[] | select(.id == "no-endpoint")][0].reason')" \
-  "a task the fleet read could not observe is not reported as never having had an endpoint"
+# Liveness that was never established is not liveness established as dead. Every
+# REMOTE worker is in that position, because the fleet read does not probe one,
+# so dropping these would make this view disagree with the rest of firstmate
+# about who is running. bin/fm-fleet-view.sh renders the same three-way reading.
+assert_equals "" \
+  "$(printf '%s' "$DOC" | jq -r '[.omitted[] | select(.id == "no-endpoint")][0].id // ""')" \
+  "a task whose liveness was never established is not omitted"
+assert_equals "no-endpoint" "$(agent no-endpoint '.id // ""')" \
+  "it is drawn as an agent like any other"
+assert_equals '"unknown"' "$(agent no-endpoint '.endpoint_alive | tojson')" \
+  "with its liveness stated as unknown rather than as dead"
+assert_equals "true" "$(agent ship-run '.endpoint_alive | tojson')" \
+  "while a worker whose endpoint resolves is still stated as alive"
 assert_equals "true" \
   "$(printf '%s' "$DOC" | jq -r '[.agents[].pipeline] == ([.agents[].pipeline] | sort | reverse)')" \
   "pipeline agents are emitted first, so the wire order is the draw order"
@@ -551,13 +562,16 @@ assert_equals "7" \
 
 assert_equals "true" "$(agent ship-run '.ci.collection.ok')" \
   "the check rollup was read"
-assert_equals "4" "$(agent ship-run '.ci.total')" \
+assert_equals "5" "$(agent ship-run '.ci.total')" \
   "a superseded earlier attempt of a check is counted nowhere"
 assert_equals "1" "$(agent ship-run '.ci.passed')" "one check passed"
 assert_equals "1" "$(agent ship-run '.ci.failed')" "one check failed"
 assert_equals "1" "$(agent ship-run '.ci.pending')" "one check has not finished"
-assert_equals "1" "$(agent ship-run '.ci.skipped')" \
-  "a deliberately-not-run check is its own class, never folded into passing"
+# gh pr checks puts NEUTRAL in its skipping bucket and bin/fm-pr-merge.sh groups
+# it with SKIPPED as merely non-blocking, so counting it as a pass would
+# disagree with both, and with this script's own rule.
+assert_equals "2" "$(agent ship-run '.ci.skipped')" \
+  "a check that verified nothing is its own class, whether SKIPPED or NEUTRAL"
 assert_equals "SUCCESS" \
   "$(agent ship-run '[.ci.checks[] | select(.name == "Lint")][0].conclusion')" \
   "the latest attempt of a check is the one kept"
