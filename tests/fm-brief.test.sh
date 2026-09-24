@@ -498,7 +498,85 @@ test_ship_project_memory_wording() {
     "project-memory contract lost pointer-over-copy guidance"
   assert_grep "follow \`$ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract" "$brief" \
     "project-memory contract no longer defers to the ensure helper"
-  pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
+  # The helper only ever writes the self-governance section into an AGENTS.md,
+  # and the --no-promote path returns before doing even that, so the deferral
+  # must stay scoped to AGENTS.md and must say that a CLAUDE.md the helper left
+  # alone owes no such section - otherwise the only way to comply in a
+  # CLAUDE.md-only project is an unrequested structural edit.
+  assert_grep "If you touch a project \`AGENTS.md\`" "$brief" \
+    "project-memory self-governance deferral is no longer scoped to AGENTS.md"
+  assert_grep "the helper left in place owes no self-governance section" "$brief" \
+    "project-memory contract no longer scopes the self-governance exemption to the memory file the helper left in place"
+  # The proportionality escape hatch must still cover whichever file the helper
+  # left in place, not AGENTS.md alone.
+  assert_grep "skip memory-file edits entirely for trivial tasks" "$brief" \
+    "project-memory contract lost the proportionality escape hatch"
+  pass "fm-brief.sh: ship project-memory wording carries the memory-file authoring bar"
+}
+
+# Read the memory command back out of a generated brief exactly as a crewmate
+# would, then run it. Review rejected the resulting CLAUDE.md -> AGENTS.md
+# rename as an unrequested component in five consecutive ship tasks, so the
+# guarantee under test is the effect of following the brief, not its wording:
+# recording knowledge must leave the project's instruction file where it is.
+memory_command_from_brief() {
+  local brief
+  brief=$1
+  # shellcheck disable=SC2016 # The backticks are the brief's Markdown, not a shell expansion.
+  sed -n 's/.*run `\([^`]*fm-ensure-agents-md[^`]*\)`.*/\1/p' "$brief" | head -n 1
+}
+
+test_ship_memory_step_does_not_rename_an_existing_claude_md() {
+  local home id brief repo line before after
+  local -a cmd
+  home="$TMP_ROOT/memory-effect-home"
+  mkdir -p "$home/data"
+  id="brief-memory-effect-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  line=$(memory_command_from_brief "$brief")
+  [ -n "$line" ] || fail "ship brief no longer names a runnable project-memory command"
+
+  repo="$TMP_ROOT/memory-effect-claude-only"
+  mkdir -p "$repo"
+  printf '# Existing agent memory\n\nConvention documented here.\n' > "$repo/CLAUDE.md"
+  before=$(cksum < "$repo/CLAUDE.md")
+
+  read -r -a cmd <<< "$line"
+  ( cd "$repo" && "${cmd[@]}" >/dev/null 2>&1 ) \
+    || fail "the brief's project-memory command failed in a CLAUDE.md-only project"
+
+  assert_absent "$repo/AGENTS.md" \
+    "following the brief's project-memory step renamed the project's CLAUDE.md"
+  assert_present "$repo/CLAUDE.md" "the brief's project-memory step removed CLAUDE.md"
+  after=$(cksum < "$repo/CLAUDE.md")
+  assert_equals "$before" "$after" "the brief's project-memory step rewrote CLAUDE.md"
+  pass "fm-brief.sh: running the ship memory step leaves an existing CLAUDE.md in place"
+}
+
+# The same step must still set a project up when there is nothing to preserve.
+test_ship_memory_step_still_establishes_memory_for_a_bare_project() {
+  local home id brief repo line
+  local -a cmd
+  home="$TMP_ROOT/memory-effect-bare-home"
+  mkdir -p "$home/data"
+  id="brief-memory-effect-c2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  line=$(memory_command_from_brief "$brief")
+  [ -n "$line" ] || fail "ship brief no longer names a runnable project-memory command"
+
+  repo="$TMP_ROOT/memory-effect-bare"
+  mkdir -p "$repo"
+  read -r -a cmd <<< "$line"
+  ( cd "$repo" && "${cmd[@]}" >/dev/null 2>&1 ) \
+    || fail "the brief's project-memory command failed in a project with no memory file"
+  assert_present "$repo/AGENTS.md" \
+    "the brief's project-memory step no longer establishes AGENTS.md where none exists"
+  assert_present "$repo/CLAUDE.md" "the brief's project-memory step did not write the pointer"
+  pass "fm-brief.sh: the ship memory step still establishes memory for a bare project"
 }
 
 test_herdr_lab_contract_is_explicit_and_complete() {
@@ -1320,6 +1398,8 @@ test_no_mistakes_dod_green_detection
 test_pr_based_dod_requires_non_draft
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_ship_memory_step_does_not_rename_an_existing_claude_md
+test_ship_memory_step_still_establishes_memory_for_a_bare_project
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

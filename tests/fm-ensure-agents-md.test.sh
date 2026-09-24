@@ -415,6 +415,112 @@ test_lowercase_agents_md_refuses_case_fragile_pointer() {
   pass "fm-ensure-agents-md.sh: refuses a case-variant lowercase agents.md (issue #389)"
 }
 
+# --no-promote exists so a task that only records knowledge never renames the
+# project's instruction file. The rename is legitimate work; it just needs its
+# own change, because it leaves every "see CLAUDE.md" cross-reference pointing
+# at the two-line pointer instead of the content.
+test_no_promote_keeps_an_existing_claude_md_in_place() {
+  local repo before after out
+  repo="$TMP_ROOT/no-promote-claude-only"
+  mkdir -p "$repo"
+  cat > "$repo/CLAUDE.md" <<'MEMO'
+# Existing agent memory
+
+Run tests with `make test`.
+MEMO
+  before=$(cksum < "$repo/CLAUDE.md")
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" --no-promote "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh --no-promote failed on a CLAUDE.md-only project"
+  assert_absent "$repo/AGENTS.md" "--no-promote created AGENTS.md from an existing CLAUDE.md"
+  assert_present "$repo/CLAUDE.md" "--no-promote removed the existing CLAUDE.md"
+  after=$(cksum < "$repo/CLAUDE.md")
+  assert_equals "$before" "$after" "--no-promote rewrote the existing CLAUDE.md"
+  assert_contains "$out" "CLAUDE.md" "--no-promote did not name the memory file to record in"
+  pass "fm-ensure-agents-md.sh: --no-promote keeps an existing CLAUDE.md as the memory file"
+}
+
+# The promotion is the only path --no-promote suppresses; a project that already
+# follows the convention must still gain its pointer and self-governance section.
+test_no_promote_still_serves_an_existing_agents_md() {
+  local repo out
+  repo="$TMP_ROOT/no-promote-agents-only"
+  mkdir -p "$repo"
+  printf '# Project agent memory\n\nBuild with make.\n' > "$repo/AGENTS.md"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" --no-promote "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh --no-promote failed on an AGENTS.md-only project"
+  assert_contains "$out" "updated:" "--no-promote did not report the AGENTS.md update"
+  assert_claude_pointer "$repo/CLAUDE.md"
+  assert_grep "Build with make." "$repo/AGENTS.md" "--no-promote lost existing AGENTS.md content"
+  assert_grep "## Maintaining this file" "$repo/AGENTS.md" \
+    "--no-promote skipped the self-governance section on an existing AGENTS.md"
+  pass "fm-ensure-agents-md.sh: --no-promote still completes an existing AGENTS.md project"
+}
+
+# A project with no memory file has no instruction file to preserve and no
+# cross-references to break, so --no-promote still establishes the convention.
+test_no_promote_still_creates_a_skeleton_for_an_empty_project() {
+  local repo out
+  repo="$TMP_ROOT/no-promote-empty"
+  mkdir -p "$repo"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" --no-promote "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh --no-promote failed on an empty project"
+  assert_contains "$out" "created:" "--no-promote did not report creating the skeleton"
+  assert_present "$repo/AGENTS.md" "--no-promote skipped skeleton creation for an empty project"
+  assert_claude_pointer "$repo/CLAUDE.md"
+  assert_grep "## Maintaining this file" "$repo/AGENTS.md" \
+    "--no-promote skeleton lost the self-governance section"
+  pass "fm-ensure-agents-md.sh: --no-promote still creates a skeleton where no memory file exists"
+}
+
+# Repeated feature tasks each run this step, so the suppressed path must stay a
+# stable no-op rather than converging on a rename after the first run.
+test_no_promote_is_idempotent_on_a_claude_only_project() {
+  local repo before after i
+  repo="$TMP_ROOT/no-promote-idempotent"
+  mkdir -p "$repo"
+  printf '# Existing agent memory\n\nSee CONTEXT.md.\n' > "$repo/CLAUDE.md"
+  before=$(cksum < "$repo/CLAUDE.md")
+  for i in 1 2 3; do
+    "$ROOT/bin/fm-ensure-agents-md.sh" --no-promote "$repo" >/dev/null 2>&1 \
+      || fail "fm-ensure-agents-md.sh --no-promote failed on run $i"
+  done
+  assert_absent "$repo/AGENTS.md" "repeated --no-promote runs eventually promoted CLAUDE.md"
+  after=$(cksum < "$repo/CLAUDE.md")
+  assert_equals "$before" "$after" "repeated --no-promote runs mutated CLAUDE.md"
+  pass "fm-ensure-agents-md.sh: --no-promote stays a no-op across repeated runs"
+}
+
+# Without the flag the promotion is still available, so the migration remains
+# ordinary deliberate work rather than something this change removed.
+test_promotion_remains_available_without_the_flag() {
+  local repo
+  repo="$TMP_ROOT/no-promote-opt-in-only"
+  mkdir -p "$repo"
+  printf '# Existing agent memory\n\nRun make check.\n' > "$repo/CLAUDE.md"
+  "$ROOT/bin/fm-ensure-agents-md.sh" --no-promote "$repo" >/dev/null 2>&1 \
+    || fail "fm-ensure-agents-md.sh --no-promote failed before the deliberate migration"
+  assert_absent "$repo/AGENTS.md" "--no-promote promoted CLAUDE.md"
+  "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+    || fail "fm-ensure-agents-md.sh failed the deliberate migration"
+  assert_present "$repo/AGENTS.md" "the deliberate migration did not create AGENTS.md"
+  assert_grep "Run make check." "$repo/AGENTS.md" "the deliberate migration lost CLAUDE.md content"
+  assert_claude_pointer "$repo/CLAUDE.md"
+  pass "fm-ensure-agents-md.sh: promotion still runs when the flag is omitted"
+}
+
+test_unknown_option_is_refused() {
+  local repo out rc
+  repo="$TMP_ROOT/no-promote-unknown-option"
+  mkdir -p "$repo"
+  printf '# Existing agent memory\n' > "$repo/CLAUDE.md"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" --promote-everything "$repo" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "expected a non-zero exit for an unknown option"
+  assert_contains "$out" "usage:" "unknown option did not print usage"
+  assert_absent "$repo/AGENTS.md" "an unknown option still promoted CLAUDE.md"
+  pass "fm-ensure-agents-md.sh: refuses an unknown option instead of ignoring it"
+}
+
 test_created_agents_md_includes_self_governance
 test_fresh_setup_writes_real_claude_pointer
 test_promoted_claude_md_includes_self_governance
@@ -433,3 +539,9 @@ test_agents_md_symlink_is_refused
 test_wrong_target_symlink_is_refused
 test_non_regular_claude_md_is_refused
 test_lowercase_agents_md_refuses_case_fragile_pointer
+test_no_promote_keeps_an_existing_claude_md_in_place
+test_no_promote_still_serves_an_existing_agents_md
+test_no_promote_still_creates_a_skeleton_for_an_empty_project
+test_no_promote_is_idempotent_on_a_claude_only_project
+test_promotion_remains_available_without_the_flag
+test_unknown_option_is_refused

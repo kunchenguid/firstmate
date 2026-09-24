@@ -7,6 +7,13 @@
 # file present (unless it is already the canonical pointer), converts a correct
 # CLAUDE.md -> AGENTS.md symlink into the pointer file, and refuses to clobber
 # distinct real files or wrong symlinks.
+# --no-promote suppresses exactly that one promotion: when a real non-pointer
+# CLAUDE.md is the project's only memory file, the helper leaves the worktree
+# untouched, reports CLAUDE.md as the file to record knowledge in, and exits 0.
+# Every other path is unchanged, because only the promotion renames a file the
+# caller did not ask to rename. Callers whose task is recording knowledge, not
+# migrating a project, pass it so the rename and its dangling cross-references
+# stay their own deliberate change.
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
 # promoted CLAUDE.md files, and existing AGENTS.md files lacking both the exact
@@ -25,12 +32,16 @@
 # link would have carried for that same mismatch.
 # This is a worktree utility for crewmates, not a supervision script, so it does
 # not call fm-guard.sh.
-# Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
+# Usage: fm-ensure-agents-md.sh [--no-promote] [repo-or-worktree-dir]
 set -eu
 
 usage() {
-  echo "usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]" >&2
+  echo "usage: fm-ensure-agents-md.sh [--no-promote] [repo-or-worktree-dir]" >&2
   cat >&2 <<'EOF'
+
+--no-promote leaves a real non-pointer CLAUDE.md in place as the project's
+memory file instead of renaming it to AGENTS.md, and reports which file to
+record knowledge in. Every other path behaves identically.
 
 To retain equivalent project-owned maintenance guidance without adding the
 canonical section, use this exact first line of AGENTS.md (LF or CRLF):
@@ -40,15 +51,30 @@ Without the first-line mark or exact canonical heading, the helper adds the sect
 EOF
 }
 
-case "${1:-}" in
-  -h|--help)
-    usage
-    exit 0
-    ;;
-esac
-[ "$#" -le 1 ] || { usage; exit 1; }
+NO_PROMOTE=0
+DIR=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --no-promote)
+      NO_PROMOTE=1
+      ;;
+    -*)
+      usage
+      exit 1
+      ;;
+    *)
+      [ -z "$DIR" ] || { usage; exit 1; }
+      DIR=$1
+      ;;
+  esac
+  shift
+done
 
-DIR=${1:-.}
+DIR=${DIR:-.}
 [ -d "$DIR" ] || { echo "error: not a directory: $DIR" >&2; exit 1; }
 DIR=$(cd "$DIR" && pwd -P)
 cd "$DIR"
@@ -250,6 +276,10 @@ if [ -e "$CLAUDE" ]; then
     if is_canonical_claude_pointer; then
       write_skeleton
       echo "created: AGENTS.md and kept CLAUDE.md @AGENTS.md pointer in $DIR"
+      exit 0
+    fi
+    if [ "$NO_PROMOTE" -eq 1 ]; then
+      echo "kept: CLAUDE.md is this project's agent memory file in $DIR; record durable knowledge there and migrate it to AGENTS.md as its own change"
       exit 0
     fi
     mv "$CLAUDE" "$AGENTS"

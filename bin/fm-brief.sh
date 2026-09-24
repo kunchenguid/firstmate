@@ -99,10 +99,12 @@
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
 # Ship tasks include a project-memory section so durable project-intrinsic
-# learnings can be committed to AGENTS.md through the project's delivery path;
-# it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
+# learnings can be committed to the project's memory file through its delivery
+# path; it carries the authoring bar (widely useful knowledge only, pointers
 # over copied detail) and defers self-governance recognition and insertion to
-# fm-ensure-agents-md.sh's contract.
+# fm-ensure-agents-md.sh's contract. It invokes that helper with --no-promote so
+# recording knowledge never renames a project's existing CLAUDE.md, which review
+# repeatedly rejected as an unrequested component of a feature change.
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
@@ -650,11 +652,12 @@ $SHARED_INFRA_RULE
 $INBOX_SECTION
 
 # Project memory
-If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
+If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh --no-promote .\` in the worktree.
+Record the knowledge in whichever memory file that command leaves in place, and never change which file this project uses as a side effect of this task; switching it is its own separate change.
 Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
-If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass.
-Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass; a \`CLAUDE.md\` the helper left in place owes no self-governance section.
+Keep it proportionate: skip memory-file edits entirely for trivial tasks that produced no durable project knowledge.
 
 $DOD
 EOF
