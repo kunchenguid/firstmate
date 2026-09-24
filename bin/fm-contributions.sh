@@ -56,7 +56,7 @@
 # head-mismatch (with before_head and after_head), jq-validation, or
 # record-validation. Each parallel read keeps its own entry. last_failure
 # survives later successful reads until the next failure replaces it. A
-# budget-cut observation records nothing, so it stores no last_failure.
+# budget-cut observation leaves measured state untouched and updates only last_failure.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
 # ready-for-pr. Labels are matched case-insensitively and exactly.
@@ -281,7 +281,7 @@ observe() { # canonical GitHub URL -> normalized JSON
     check_json comments-shape jq-validation "repos/$part/issues/$number/comments" \
       jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1
     FORGE_STAGE=closing forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
-    after=$(check_json closing-head jq-validation "pr view $url" jq -er .headRefOid "$TMP/after.json") || return 1
+    after=$(check_json closing-head jq-validation "pr view $url" jq -er '.headRefOid | select(type == "string" and test("^[a-fA-F0-9]{40}$"))' "$TMP/after.json") || return 1
     if [ "$head" != "$after" ]; then
       note_failure head-mismatch head-mismatch "pr view $url" '' /dev/null \
         "$(jq -nc --arg before "$head" --arg after "$after" '{before_head:$before,after_head:($after | .[:64])}')"
@@ -416,8 +416,19 @@ poll() {
     observed=0
     observe "$url" || observed=$?
     # An observation the budget cut short is unmeasured, not unavailable: keep
-    # every owner's prior record so the URL is observed first next poll.
-    [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
+    # every owner's measured state so the URL is observed first next poll.
+    if [ "$BUDGET_EXHAUSTED" -ne 0 ]; then
+      collect_failure
+      for task in "${row[@]:1}"; do
+        jq -n --slurpfile saved "$TMP/saved.json" --arg task "$task" --arg url "$url" '
+          [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first' > "$TMP/old.json"
+        if jq -e '. != null' "$TMP/old.json" >/dev/null; then
+          jq --slurpfile failure "$TMP/last-failure.json" '.last_failure=$failure[0]' "$TMP/old.json" > "$TMP/row.json"
+          write_record "$task" "$TMP/row.json"
+        fi
+      done
+      break
+    fi
     [ "$observed" -eq 0 ] || collect_failure
     # Wake once per failure episode: only when no owner has a prior error.
     if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
