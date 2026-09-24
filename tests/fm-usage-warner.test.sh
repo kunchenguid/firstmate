@@ -108,27 +108,31 @@ test_config_parses_comments_whitespace_and_model_ids() {
   printf '%s\n' \
     '# a comment line' \
     '   ' \
-    '  five_hour:80  ' \
-    'seven_day:90' \
-    'model:fable:50' \
+    '  five_hour:20  ' \
+    'seven_day:10' \
+    'model:fable:40' \
     'bad-no-colon' \
     'seven_day:not-a-number' \
     'seven_day:0' \
     'seven_day:101' \
     > "$home/config/usage-warner"
-  # five_hour crosses (85>=80): proves a directive survives leading/trailing
-  # whitespace. seven_day stays at 50, below its one valid threshold of 90;
-  # if any of the three malformed seven_day directives above it had leaked
-  # past validation - especially seven_day:0, which would match any
-  # percentUsed - it would show up here too. model:fable crosses (60>=50):
-  # proves the id/percent split lands on the LAST colon, not the first.
+  # Thresholds count percent LEFT and cross downward. five_hour crosses
+  # (15 left <= 20): proves a directive survives leading/trailing whitespace.
+  # seven_day sits at 50 left, still above its one valid threshold of 10; if
+  # any of the three malformed seven_day directives above it had leaked past
+  # validation - especially seven_day:101, which no percent left can stay above
+  # - it would show up here too. model:fable crosses (40 left <= 40), proving
+  # the boundary is inclusive and that the id/percent split lands on the LAST
+  # colon, not the first.
   fake_quota_axi "$fakebin" \
     '{"id":"five_hour","percentUsed":85}' \
     '{"id":"seven_day","percentUsed":50}' \
     '{"id":"model:fable","percentUsed":60}'
   out=$(run_check "$home" "$fakebin")
-  assert_contains "$out" "five_hour at 85%" "a directive survives surrounding whitespace"
-  assert_contains "$out" "model:fable at 60%" "a colon-containing window id splits on the LAST colon"
+  assert_contains "$out" "five_hour at 15% left (85% used)" \
+    "a directive survives surrounding whitespace, and the line names both figures"
+  assert_contains "$out" "model:fable at 40% left (60% used)" \
+    "a colon-containing window id splits on the LAST colon"
   assert_not_contains "$out" "seven_day" "malformed duplicate directives (no colon, non-numeric, out-of-range) never leak a usable threshold"
   pass "fm-usage-warner: config parsing keeps only valid directives, including colon-containing ids"
 }
@@ -140,27 +144,28 @@ test_check_crosses_notifies_stays_quiet_then_rearms() {
   notify_log="$TMP_ROOT/lifecycle/notify.log"
   : > "$notify_log"
   fake_osascript_recorder "$fakebin" "$notify_log"
-  printf 'five_hour:80\n' > "$home/config/usage-warner"
+  printf 'five_hour:20\n' > "$home/config/usage-warner"
 
   fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":90}'
   out=$(run_check "$home" "$fakebin")
-  assert_contains "$out" "five_hour at 90% (>=80%)" "a fresh crossing is reported"
+  assert_contains "$out" "five_hour at 10% left (90% used), threshold 20% left" \
+    "a fresh crossing is reported, naming percent left, percent used, and the threshold"
   assert_grep "Firstmate: Claude usage" "$notify_log" "a fresh crossing posts one osascript notification"
 
   : > "$notify_log"
   fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":95}'
   out=$(run_check "$home" "$fakebin")
-  [ -z "$out" ] || fail "staying above threshold must stay quiet: $out"
-  [ ! -s "$notify_log" ] || fail "staying above threshold must not notify again"
+  [ -z "$out" ] || fail "sinking further below the threshold must stay quiet: $out"
+  [ ! -s "$notify_log" ] || fail "sinking further below the threshold must not notify again"
 
   fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":50}'
   out=$(run_check "$home" "$fakebin")
-  [ -z "$out" ] || fail "dropping back below threshold must stay quiet (it only re-arms): $out"
+  [ -z "$out" ] || fail "recovering back above the threshold must stay quiet (it only re-arms): $out"
 
   : > "$notify_log"
   fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":85}'
   out=$(run_check "$home" "$fakebin")
-  assert_contains "$out" "five_hour at 85% (>=80%)" "crossing again after dropping below must notify again"
+  assert_contains "$out" "five_hour at 15% left (85% used)" "crossing again after recovering must notify again"
   assert_grep "Firstmate: Claude usage" "$notify_log" "the re-crossing posts a fresh notification"
   pass "fm-usage-warner: edge-triggered de-dupe crosses once, stays quiet, and re-arms on drop"
 }
@@ -172,11 +177,11 @@ test_check_batches_multiple_crossings_into_one_notification() {
   notify_log="$TMP_ROOT/batch/notify.log"
   : > "$notify_log"
   fake_osascript_recorder "$fakebin" "$notify_log"
-  printf 'five_hour:80\nseven_day:90\n' > "$home/config/usage-warner"
+  printf 'five_hour:20\nseven_day:10\n' > "$home/config/usage-warner"
   fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":92}' '{"id":"seven_day","percentUsed":97}'
   out=$(run_check "$home" "$fakebin")
-  assert_contains "$out" "five_hour at 92%" "the batched line names the first crossing"
-  assert_contains "$out" "seven_day at 97%" "the batched line names the second crossing"
+  assert_contains "$out" "five_hour at 8% left" "the batched line names the first crossing"
+  assert_contains "$out" "seven_day at 3% left" "the batched line names the second crossing"
   local notify_count
   notify_count=$(grep -c . "$notify_log" || true)
   [ "$notify_count" -eq 1 ] || fail "two crossings in one read must post exactly one notification, got $notify_count"
@@ -188,7 +193,7 @@ test_check_ignores_a_window_the_account_does_not_return() {
   home=$(make_home missing-window)
   fakebin="$TMP_ROOT/missing-window/fakebin"
   printf 'model:sonnet:50\n' > "$home/config/usage-warner"
-  fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":99}'
+  fake_quota_axi "$fakebin" '{"id":"five_hour","percentUsed":1}'
   out=$(run_check "$home" "$fakebin")
   [ -z "$out" ] || fail "a configured window id the account never returns must stay silent: $out"
   pass "fm-usage-warner: a configured but absent window id is silently skipped"
@@ -388,9 +393,89 @@ test_armed_shim_runs_a_real_check() {
   printf 'five_hour:80\n' > "$home/config/usage-warner"
   FM_HOME="$home" "$WARNER" arm >/dev/null 2>&1 || fail "arm must succeed"
   out=$(PATH="$fakebin:$PATH" "$home/state/usage-warner.check.sh" </dev/null)
-  assert_contains "$out" "five_hour at 92%" "the armed shim, run the way the watcher runs it, performs a real check"
+  assert_contains "$out" "five_hour at 8% left (92% used)" "the armed shim, run the way the watcher runs it, performs a real check"
   pass "fm-usage-warner: the armed shim is exactly what the watcher would dispatch"
 }
+
+# --- threshold setter --------------------------------------------------------
+# The setter exists so an operator never has to know this file's path or line
+# format, and so the direction matches bin/fm-seat.sh's threshold rather than
+# opposing it. Every number here is percent LEFT.
+
+test_threshold_setter_writes_reads_and_clears_a_directive() {
+  local home fakebin out
+  home=$(make_home threshold-setter)
+  fakebin="$TMP_ROOT/threshold-setter/fakebin"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$WARNER" threshold)
+  assert_contains "$out" "(unset" "an unconfigured home must report no watched window"
+  assert_absent "$home/config/usage-warner" "reading the thresholds must not create the config file"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$WARNER" threshold five_hour 20)
+  expect_code 0 "$?" "setting a threshold should succeed"
+  assert_contains "$out" "20% left" "the setter must echo percent left"
+  assert_contains "$out" "80% used" "the setter must also name the percent-used figure during the transition"
+  assert_grep "five_hour:20" "$home/config/usage-warner" "the directive must be written in the canonical schema"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$WARNER" threshold)
+  assert_contains "$out" "five_hour" "the threshold must read back"
+  assert_contains "$out" "20% left" "the listing must count percent left"
+  assert_contains "$out" "80% used" "the listing must name both figures"
+
+  # A colon-carrying window id must round-trip, because the schema splits on the
+  # LAST colon and a setter that broke that would silently write a dead line.
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$WARNER" threshold model:fable 30 >/dev/null
+  assert_grep "model:fable:30" "$home/config/usage-warner" "a colon-carrying window id must round-trip"
+
+  # Re-setting replaces rather than appends, so a file cannot accumulate two
+  # live directives for one window.
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$WARNER" threshold five_hour 5 >/dev/null
+  [ "$(grep -c '^five_hour:' "$home/config/usage-warner")" -eq 1 ] ||
+    fail "re-setting a window must replace its directive, not add a second"
+  assert_grep "five_hour:5" "$home/config/usage-warner" "the replacement must hold the new value"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$WARNER" threshold five_hour off)
+  expect_code 0 "$?" "clearing one window should succeed"
+  grep -q '^five_hour:' "$home/config/usage-warner" &&
+    fail "clearing a window must remove its directive"
+  assert_grep "model:fable:30" "$home/config/usage-warner" "clearing one window must leave the others alone"
+  pass "fm-usage-warner: the threshold setter writes, lists, replaces, and clears directives in percent left"
+}
+
+test_threshold_setter_refuses_an_out_of_range_percent() {
+  local home fakebin out
+  home=$(make_home threshold-setter-range)
+  fakebin="$TMP_ROOT/threshold-setter-range/fakebin"
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$WARNER" threshold five_hour 20 >/dev/null
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$WARNER" threshold five_hour 101 2>&1)
+  expect_code 1 "$?" "a percent above 100 must be refused"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$WARNER" threshold five_hour 0 2>&1)
+  expect_code 1 "$?" "a percent of 0 must be refused, because no window can sit below it"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$WARNER" threshold five_hour banana 2>&1)
+  expect_code 1 "$?" "a non-numeric percent must be refused"
+  assert_grep "five_hour:20" "$home/config/usage-warner" "every refusal must leave the configured directive intact"
+  pass "fm-usage-warner: the threshold setter refuses an out-of-range or non-numeric percent and changes nothing"
+}
+
+test_notify_exposes_the_homes_single_notification_path() {
+  local home fakebin notify_log out
+  home=$(make_home notify-action)
+  fakebin="$TMP_ROOT/notify-action/fakebin"
+  notify_log="$TMP_ROOT/notify-action/notify.log"
+  : > "$notify_log"
+  fake_osascript_recorder "$fakebin" "$notify_log"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$WARNER" notify "seat work is on paid extra usage" >/dev/null
+  expect_code 0 "$?" "notify should post through the existing path"
+  assert_grep "Firstmate: Claude usage" "$notify_log" "notify must use the home's one notification title"
+  assert_grep "paid extra usage" "$notify_log" "notify must carry the caller's summary"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$WARNER" notify 2>&1)
+  expect_code 2 "$?" "notify with no summary must be refused rather than posting an empty banner"
+  pass "fm-usage-warner: notify exposes the home's single notification path for another feature to speak through"
+}
+
 
 test_help_and_usage
 test_unconfigured_home_stays_silent
@@ -406,6 +491,9 @@ test_slow_quota_axi_is_reported_as_a_timeout
 test_read_bound_fits_a_lowered_check_timeout
 test_no_room_for_a_read_is_recorded_as_not_measured
 test_unconfigured_invocation_ignores_unused_environment
+test_threshold_setter_writes_reads_and_clears_a_directive
+test_threshold_setter_refuses_an_out_of_range_percent
+test_notify_exposes_the_homes_single_notification_path
 test_arm_refuses_without_a_configured_threshold
 test_arm_refuses_on_a_non_macos_platform
 if [ "$(uname)" = Darwin ]; then

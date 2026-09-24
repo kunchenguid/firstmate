@@ -29,6 +29,23 @@ Thresholds live in `config/usage-warner`, local and gitignored; its
 [`configuration.md`](configuration.md#local-claude-usage-warner-configusage-warner).
 `<window-id>` reuses `quota-axi`'s own `--json` `id` vocabulary - `five_hour`,
 `seven_day`, `model:<name>`, and so on - rather than inventing a second one.
+
+Set one with the setter rather than by editing the file:
+
+```
+bin/fm-usage-warner.sh threshold five_hour 20    # warn at or below 20% left
+bin/fm-usage-warner.sh threshold five_hour off   # stop warning on that window
+bin/fm-usage-warner.sh threshold                 # list what is watched
+```
+
+That is the same shape and the same direction as `bin/fm-seat.sh threshold`,
+which is the point: every percentage across both features counts **percent
+left** and crosses downward.
+These directives previously counted percent *used* and crossed upward, so the
+two read as contradicting each other.
+Every line this feature prints now names both figures - `8% left (92% used)` -
+so a config carried over from the old reading announces itself the first time
+it speaks instead of quietly meaning something else.
 A configured window id the account does not return is silently never
 compared: this is a local convenience feature, not a critical monitor, so a
 stale or unavailable id is not treated as a misconfiguration to flag.
@@ -49,9 +66,8 @@ Both hit the identical function, so this is one program with two callers, not
 two programs, and there is no daemon and no schedule of its own.
 
 A window that crosses its configured threshold notifies once, stays quiet
-while it remains at or above that threshold, and re-arms the moment it next
-reads back below threshold (an account-level window's own reset does exactly
-this).
+while it remains at or below that percent left, and re-arms the moment it next
+reads back above it (an account-level window's own reset does exactly this).
 Multiple windows crossing in the same read are batched into one notification
 rather than one per window.
 A standing read failure (`quota-axi` missing, `jq` missing, a malformed
@@ -62,6 +78,15 @@ own standing checks.
 The read bound is 10 seconds, or `FM_CHECK_TIMEOUT` minus 3 seconds when that
 is lower, so the watcher never kills the check first; when that leaves under
 1 second the read is skipped and reported as not measured.
+
+## The notification path, and who else speaks through it
+
+`bin/fm-usage-warner.sh notify <summary>` posts one banner and nothing else.
+It exists so this home keeps exactly one alert mechanism rather than growing a
+second: `bin/fm-seat.sh`'s automatic mode calls it to warn the moment a seat a
+worker is *already running on* enters paid extra usage, which is a warning
+firstmate can raise but cannot act on - see
+[`claude-seats.md`](claude-seats.md#what-the-automatic-mode-cannot-do).
 
 ## Notification path
 
@@ -94,5 +119,7 @@ refuses, is owned by
 Install, refresh, or write any credential; read or render a live usage
 report; or make `quota-axi` a dependency of anything beyond this one opt-in
 feature.
-Account or seat switching is explicitly out of scope: only the default
-account lane is ever read.
+Account or seat switching is explicitly out of scope for this script's own
+`check`: only the default account lane is ever read.
+Per-seat reads belong to [`bin/fm-seat.sh`](../bin/fm-seat.sh), which speaks
+through this script's `notify` action rather than duplicating the path.

@@ -71,14 +71,14 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode lavish-axi-host claude-seat claude-seats-root claude-seat-threshold}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode lavish-axi-host claude-seat claude-seats-root claude-seat-threshold claude-seat-destination-min claude-seat-extra-usage}"
 
 # Items that name something that exists only on THIS machine, so they reach local
 # secondmate homes but never cross to a remote route. A Claude seat is a
 # per-machine, Keychain-backed profile the owner logged in here; a remote home
 # handed its name would resolve a profile nobody logged in there, so it keeps
 # its own login exactly as before seats existed (docs/claude-seats.md).
-FM_MACHINE_LOCAL_INHERITABLE_CONFIG="claude-seat claude-seats-root claude-seat-threshold"
+FM_MACHINE_LOCAL_INHERITABLE_CONFIG="claude-seat claude-seats-root claude-seat-threshold claude-seat-destination-min claude-seat-extra-usage"
 
 # The one per-home decline from those machine-local seat items, read in the
 # DESTINATION home's own config dir and deliberately not inheritable itself, so

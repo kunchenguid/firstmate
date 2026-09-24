@@ -3,6 +3,8 @@
 #
 # Usage:
 #   fm-usage-warner.sh [check]
+#   fm-usage-warner.sh threshold [<window-id> <percent-left>|<window-id> off]
+#   fm-usage-warner.sh notify <summary>
 #   fm-usage-warner.sh arm
 #   fm-usage-warner.sh disarm
 #   fm-usage-warner.sh --help
@@ -65,6 +67,17 @@
 # this is a local convenience feature, not a critical monitor, so a stale or
 # unavailable id is not treated as a misconfiguration to flag.
 #
+# `<percent>` counts percent LEFT, and a window warns when it drops TO OR BELOW
+# it. That is the same direction the quota viewer, bin/fm-seat.sh's threshold,
+# and every seat setting count, so no two settings here have to be mentally
+# inverted against one another. It is NOT the direction this file's directives
+# were read in before: they counted percent USED and warned on rising past the
+# number. Every line this script prints therefore names both figures - "8% left
+# (92% used)" - so a config carried over from the old reading is unmistakable
+# the first time it speaks rather than quietly meaning something else. Set them
+# through `fm-usage-warner.sh threshold <window-id> <percent-left>` and there is
+# nothing to remember; docs/configuration.md owns the schema.
+#
 # What this script never does: install, refresh, or write any credential; read
 # or render a live usage report; or make quota-axi a dependency of anything
 # beyond this one opt-in feature.
@@ -78,9 +91,6 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/usage-warner"
 RECORD="$STATE/.usage-warner"
 RECORD_SCHEMA=fm-usage-warner-v1
 CHECK_ID=usage-warner
-CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
-CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
-REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
 PROVIDER=claude
 MAX_LINE=1000
 
@@ -92,6 +102,8 @@ MAX_LINE=1000
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-check-shim-lib.sh
+. "$SCRIPT_DIR/fm-check-shim-lib.sh"
 # shellcheck source=bin/fm-quota-axi-lib.sh
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 
@@ -101,11 +113,23 @@ Usage:
   fm-usage-warner.sh [check]   read Claude usage once and warn only on a new
                                 threshold crossing (silent when unconfigured,
                                 unchanged, or nothing crossed)
+  fm-usage-warner.sh threshold
+                               print every configured threshold
+  fm-usage-warner.sh threshold <window-id> <percent-left>
+                               warn when <window-id> drops to or below that
+                                percent LEFT
+  fm-usage-warner.sh threshold <window-id> off
+                               stop warning on <window-id>
+  fm-usage-warner.sh notify <summary>
+                               post one notification through this home's single
+                                notification path
   fm-usage-warner.sh arm       write and register state/usage-warner.check.sh
   fm-usage-warner.sh disarm    remove the check shim, its trust binding, and
                                 the de-dupe record
   fm-usage-warner.sh --help    print this help
 
+Every threshold counts percent LEFT and warns on dropping to or below it, the
+same direction bin/fm-seat.sh's threshold counts. Output names both figures.
 Thresholds are read from config/usage-warner (local, gitignored).
 See docs/usage-warner.md for the schema and docs/examples/usage-warner for a
 starting point.
@@ -152,10 +176,11 @@ config_thresholds() {
   done < "$CONFIG"
 }
 
-# lookup_value <table> <key>: <table> is newline-separated "key<TAB>value" rows;
-# prints the first matching value, or nothing when <key> is not present.
+# lookup_value <table> <key> [column]: <table> is newline-separated tab-separated
+# rows keyed by their first field; prints that row's <column> (default 2), or
+# nothing when <key> is not present.
 lookup_value() {
-  printf '%s\n' "$1" | awk -F'\t' -v k="$2" '$1==k{print $2; exit}'
+  printf '%s\n' "$1" | awk -F'\t' -v k="$2" -v c="${3:-2}" '$1==k{print $c; exit}'
 }
 
 # id_in_list <newline-list> <id>: exact-line membership test.
@@ -165,9 +190,12 @@ id_in_list() {
 }
 
 # --- the one read ---------------------------------------------------------
-# On success (exit 0), prints "<window-id>\t<percentUsed>" once per window
-# quota-axi returns for $PROVIDER's default account. On failure (exit 1),
-# prints one plain-text reason instead - the caller is always invoked through
+# On success (exit 0), prints "<window-id>\t<percentLeft>\t<percentUsed>" once
+# per window quota-axi returns for $PROVIDER's default account. quota-axi
+# reports each window as percent USED, so percent LEFT is its complement and
+# both are carried through together: the comparison uses percent left, and every
+# line printed names both so the direction can never be misread.
+# On failure (exit 1), prints one plain-text reason instead - the caller is always invoked through
 # command substitution, which runs this function in a subshell, so a side
 # channel global would never make it back to the caller; the captured stdout
 # is the only channel that does. quota_row is the exact join
@@ -209,7 +237,7 @@ usage_warner_read() {
         ($row.windows // [])[]
         | select((.percentUsed | type) == "number")
         | select((.id | type) == "string")
-        | "\(.id)\t\(.percentUsed)"
+        | "\(.id)\t\(100 - .percentUsed)\t\(.percentUsed)"
       end
   ' 2>/dev/null)
   if [ -z "$rows" ]; then
@@ -299,16 +327,20 @@ action_check() {
   fi
   windows_out=$read_out
 
-  local id threshold pct notified_new="" crossed=""
+  local id threshold left used notified_new="" crossed=""
   while IFS=$'\t' read -r id threshold; do
     [ -n "$id" ] || continue
-    pct=$(lookup_value "$windows_out" "$id")
-    [ -n "$pct" ] || continue
-    if awk -v p="$pct" -v t="$threshold" 'BEGIN{exit !(p+0>=t+0)}'; then
+    left=$(lookup_value "$windows_out" "$id")
+    [ -n "$left" ] || continue
+    used=$(lookup_value "$windows_out" "$id" 3)
+    # A window is crossed once it has dropped TO OR BELOW the configured percent
+    # left. It stays crossed while it remains there and re-arms the moment it
+    # reads back above, which is exactly what a window's own reset does.
+    if awk -v p="$left" -v t="$threshold" 'BEGIN{exit !(p+0<=t+0)}'; then
       notified_new="${notified_new}${id}
 "
       if ! id_in_list "$RECORD_NOTIFIED" "$id"; then
-        crossed="${crossed}${id} at ${pct}% (>=${threshold}%); "
+        crossed="${crossed}${id} at ${left}% left (${used}% used), threshold ${threshold}% left; "
       fi
     fi
   done <<< "$thresholds"
@@ -326,95 +358,84 @@ action_check() {
   return 0
 }
 
-# --- arm / disarm -----------------------------------------------------------
-# The home is embedded already resolved, because the watcher runs the shim from
-# its own working directory and a relative spelling would send the check to a
-# different home, or to none at all.
-shim_content() {
-  local home=$1
-  printf '%s\n' \
-    '#!/usr/bin/env bash' \
-    '# Auto-generated by fm-usage-warner.sh - Claude usage threshold poll shim.' \
-    '# The watcher validates these bytes, then dispatches the trusted check script.' \
-    "export FM_HOME=$(printf '%q' "$home")" \
-    "exec $(printf '%q' "$SCRIPT_DIR/fm-usage-warner.sh") check"
-}
-
-# Write the shim the way this repo writes its other trusted check shims
-# (bin/fm-mail-check.sh, bin/fm-tool-update-check.sh): guards run before
-# anything is written, so a symlink at the shim path is refused instead of
-# followed, and the bytes arrive by rename so the watcher never reads a
-# half-written shim and rejects it as unauthenticated.
-SHIM_WRITE_TMP=
-
-shim_write() {
-  local want=$1 device tmp
-  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
-  device=$(fm_pr_file_device "$STATE") || return 1
-  [ -n "$device" ] || return 1
-  fm_pr_regular_destination_on_device_or_absent "$CHECK_SHIM" "$device" || return 1
-  if [ -e "$CHECK_SHIM" ] && [ "$(fm_pr_file_mode "$CHECK_SHIM")" = 700 ] \
-    && [ "$(cat "$CHECK_SHIM" 2>/dev/null)" = "$want" ]; then
-    return 0
+# --- threshold setter -------------------------------------------------------
+# The setter exists so a threshold is settable the same way bin/fm-seat.sh's is,
+# rather than needing an operator to know this file's path and line format. It
+# rewrites one directive and leaves every other line, including comments,
+# exactly as it found them.
+config_write_threshold() {  # <window-id> <percent-left|off>
+  local id=$1 value=$2 tmp seen=0 line lid
+  case "$id" in ''|*[[:space:]]*) printf 'fm-usage-warner: invalid window id: %s\n' "$id" >&2; return 1 ;; esac
+  if [ "$value" != off ]; then
+    case "$value" in ''|*[!0-9]*) printf 'fm-usage-warner: percent left must be a whole number from 1 to 100, or "off"\n' >&2; return 1 ;; esac
+    { [ "$value" -ge 1 ] && [ "$value" -le 100 ]; } ||
+      { printf 'fm-usage-warner: percent left must be a whole number from 1 to 100, or "off"\n' >&2; return 1; }
   fi
-  tmp=$(umask 077; mktemp "$STATE/.fm-usage-warner-check.XXXXXX" 2>/dev/null) || return 1
-  SHIM_WRITE_TMP=$tmp
-  if ! printf '%s\n' "$want" > "$tmp" \
-    || ! chmod 0700 "$tmp" \
-    || ! fm_pr_private_file_valid "$tmp" 700 "$device"; then
-    rm -f -- "$tmp"
-    SHIM_WRITE_TMP=
-    return 1
+  mkdir -p "$(dirname "$CONFIG")" || return 1
+  tmp=$(umask 077; mktemp "$(dirname "$CONFIG")/.fm-usage-warner-config.XXXXXX" 2>/dev/null) || return 1
+  if [ -f "$CONFIG" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      lid=${line%:*}
+      lid="${lid#"${lid%%[![:space:]]*}"}"
+      lid="${lid%"${lid##*[![:space:]]}"}"
+      if [ "$lid" = "$id" ] && [ "${line%:*}" != "$line" ]; then
+        seen=1
+        [ "$value" = off ] || printf '%s:%s\n' "$id" "$value" >> "$tmp"
+      else
+        printf '%s\n' "$line" >> "$tmp"
+      fi
+    done < "$CONFIG"
   fi
-  if ! fm_pr_regular_destination_on_device_or_absent "$CHECK_SHIM" "$device" \
-    || ! mv -f -- "$tmp" "$CHECK_SHIM"; then
-    rm -f -- "$tmp"
-    SHIM_WRITE_TMP=
-    return 1
+  if [ "$seen" -eq 0 ] && [ "$value" != off ]; then
+    printf '%s:%s\n' "$id" "$value" >> "$tmp"
   fi
-  SHIM_WRITE_TMP=
-  fm_pr_private_file_valid "$CHECK_SHIM" 700 "$device"
-}
-
-shim_backup() {
-  local device tmp
-  device=$(fm_pr_file_device "$STATE") || return 1
-  [ -n "$device" ] || return 1
-  tmp=$(umask 077; mktemp "$STATE/.fm-usage-warner-check.XXXXXX" 2>/dev/null) || return 1
-  if ! cat "$CHECK_SHIM" > "$tmp" 2>/dev/null \
-    || ! chmod 0700 "$tmp" \
-    || ! fm_pr_private_file_valid "$tmp" 700 "$device"; then
+  if ! mv -f -- "$tmp" "$CONFIG"; then
     rm -f -- "$tmp"
     return 1
   fi
-  printf '%s\n' "$tmp"
+  return 0
 }
 
-ARM_BACKUP=
-
-# An unregistered shim is not inert: the watcher rejects it on every cycle and
-# wakes firstmate about unauthenticated state checks. So a failed or
-# interrupted arm never leaves the home holding a shim without a matching trust
-# binding: an already-bound shim is put back, otherwise the shim goes.
-arm_rollback() {
-  [ -z "$SHIM_WRITE_TMP" ] || rm -f -- "$SHIM_WRITE_TMP"
-  SHIM_WRITE_TMP=
-  if [ -n "$ARM_BACKUP" ]; then
-    mv -f -- "$ARM_BACKUP" "$CHECK_SHIM" 2>/dev/null || rm -f -- "$ARM_BACKUP"
-    ARM_BACKUP=
-    if fm_custom_check_registered "$STATE" "$CHECK_ID"; then
+action_threshold() {
+  local id=${1-} value=${2-} rows row_id row_pct
+  if [ -z "$id" ]; then
+    rows=$(config_thresholds)
+    if [ -z "$rows" ]; then
+      printf '(unset - no window is watched, so this home warns about nothing)\n'
       return 0
     fi
+    printf '%s\n' "$rows" | while IFS=$'\t' read -r row_id row_pct; do
+      printf '%s\t%s%% left (warns once at or below %s%% left, which is %s%% used)\n' \
+        "$row_id" "$row_pct" "$row_pct" "$((100 - row_pct))"
+    done
+    return 0
   fi
-  rm -f -- "$CHECK_SHIM"
+  [ -n "$value" ] || die_usage 'threshold <window-id> needs a percent left, or "off"'
+  config_write_threshold "$id" "$value" || return 1
+  if [ "$value" = off ]; then
+    printf 'threshold cleared: %s\n' "$id"
+  else
+    printf 'threshold: %s at %s%% left (which is %s%% used)\n' "$id" "$value" "$((100 - value))"
+  fi
+  return 0
 }
 
-# shellcheck disable=SC2329  # Registered by action_arm's signal trap.
-arm_interrupted() {
-  arm_rollback
-  printf 'fm-usage-warner: arming was interrupted, so state/%s.check.sh is not armed\n' "$CHECK_ID" >&2
-  exit 1
+# --- notify -----------------------------------------------------------------
+# This home's ONE notification path, exposed as an action so another firstmate
+# feature can speak through it instead of opening a second alert mechanism.
+# bin/fm-seat.sh's automatic mode uses it to warn the moment a seat a worker is
+# already running on enters paid extra usage.
+action_notify() {
+  local summary=${1-}
+  [ -n "$summary" ] || die_usage 'notify needs a summary'
+  usage_warner_notify "$summary"
 }
+
+# --- arm / disarm -----------------------------------------------------------
+# bin/fm-check-shim-lib.sh owns the shim write, trust binding, rollback, and
+# removal; this script owns only when arming is refused.
+FM_CHECK_SHIM_ID=$CHECK_ID
+FM_CHECK_SHIM_LABEL=fm-usage-warner
 
 action_arm() {
   if [ "$(uname)" != Darwin ]; then
@@ -425,55 +446,21 @@ action_arm() {
     printf 'fm-usage-warner: no threshold configured at %s\n' "$CONFIG" >&2
     return 1
   fi
-  mkdir -p "$STATE" || return 1
-  local home want
-  case "$FM_HOME" in
-    /*) home=$FM_HOME ;;
-    *)
-      home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || {
-        printf 'fm-usage-warner: cannot resolve FM_HOME %s\n' "$FM_HOME" >&2
-        return 1
-      }
-      ;;
-  esac
-  want=$(shim_content "$home")
-  ARM_BACKUP=
-  if [ -f "$CHECK_SHIM" ] && [ ! -L "$CHECK_SHIM" ]; then
-    ARM_BACKUP=$(shim_backup) || {
-      printf 'fm-usage-warner: could not save the existing %s\n' "$CHECK_SHIM" >&2
-      return 1
-    }
-  fi
-  # The shim exists unbound from the rename until the register returns, so a
-  # signal in that window rolls back the same way a failure does.
-  trap arm_interrupted HUP INT TERM
-  if ! shim_write "$want"; then
-    trap - HUP INT TERM
-    arm_rollback
-    printf 'fm-usage-warner: could not write %s\n' "$CHECK_SHIM" >&2
-    return 1
-  fi
-  if ! FM_HOME="$home" "$REGISTER_BIN" "$CHECK_ID" >/dev/null; then
-    trap - HUP INT TERM
-    arm_rollback
-    printf 'fm-usage-warner: could not register %s\n' "$CHECK_SHIM" >&2
-    return 1
-  fi
-  trap - HUP INT TERM
-  [ -z "$ARM_BACKUP" ] || rm -f -- "$ARM_BACKUP"
-  ARM_BACKUP=
+  fm_check_shim_arm "$FM_HOME" "$SCRIPT_DIR/fm-usage-warner.sh" check || return 1
   printf 'armed: state/%s.check.sh\n' "$CHECK_ID"
   return 0
 }
 
 action_disarm() {
-  rm -f -- "$CHECK_SHIM" "$CHECK_TRUST" "$RECORD"
+  fm_check_shim_disarm "$RECORD"
   printf 'disarmed: state/%s.check.sh\n' "$CHECK_ID"
   return 0
 }
 
 case "${1:-check}" in
   check) action_check ;;
+  threshold) shift; action_threshold "${1-}" "${2-}" ;;
+  notify) shift; action_notify "${1-}" ;;
   arm) action_arm ;;
   disarm) action_disarm ;;
   -h|--help) usage ;;

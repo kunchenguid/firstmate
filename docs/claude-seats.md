@@ -82,31 +82,78 @@ A switch rewrites one setting that only a fresh spawn reads.
 
 `bin/fm-seat.sh status` shows the active seat alongside every task's own recorded seat, which is how to confirm a switch left running work alone.
 
-## Switching automatically at a threshold
+## Switching automatically
 
 The automatic path is the same switch, fired by a condition instead of by hand.
-It is off until configured; there is no default that moves accounts on its own.
+Every setting below is off until configured; there is no default that moves accounts, or holds work, on a home that never asked for it.
+Every percentage counts **percent left**, the same direction the quota viewer reports, so no two settings here have to be mentally inverted against each other.
 
 ```
-bin/fm-seat.sh threshold 15     # switch when the active seat drops to 15% remaining
+bin/fm-seat.sh threshold 15          # switch when the ACTIVE seat drops to 15% left
+bin/fm-seat.sh destination-min 30    # only switch onto a seat with MORE than 30% left
+bin/fm-seat.sh extra-usage stop      # when no seat qualifies, hold new work
 bin/fm-seat.sh arm
 ```
 
-`arm` registers one condition-to-action watch: the condition reads the same quota surface the rest of the fleet reads, and the action is `switch --next`, which rotates to the next logged-in seat under the seats root.
-The seat set is read fresh at each step, so nothing assumes which seats exist.
-It runs on the supervision cycle that already exists rather than a daemon of its own, and it fires **at most once**, which is what makes it edge-triggered.
-Re-arm after it fires to watch the next crossing.
+### The three controls
 
-Only the account-level windows (`all_models` and `all_products`) count toward the threshold, the same scopes the dispatch chooser applies to a worker with no specific model; a model- or product-only window such as an Opus weekly limit does not trip a switch on its own.
+**Trigger** (`threshold`) is when to look for a new seat: the active seat has dropped to or below that percent left.
+
+**Destination headroom** (`destination-min`) is what counts as somewhere to go: a candidate must read **more** than that percent left.
+A seat below it is skipped, and the refusal names each skipped seat with its measured headroom.
+If no seat qualifies, nothing is switched.
+Without this setting the rotation gate is login-only and no candidate's quota is read at all, which is how it behaved before the setting existed.
+
+**Extra-usage policy** (`extra-usage`) is what to do when no seat qualifies and the active seat's plan quota is gone, so further work would run on paid extra usage.
+
+- `stop` holds new Claude dispatch rather than starting workers on paid extra usage.
+- `allow <usd>` keeps dispatching while that seat's extra-usage spend is below the dollar cap, and holds once it reaches it.
+- `off` clears the policy, and nothing is held.
+
+Spend is read from the `extra_usage` window the account itself reports, and the cap is a firstmate-side figure compared against it - deliberately a smaller, separate number from the account's own extra-usage ceiling.
+
+`bin/fm-seat.sh status` prints all three settings, whether the watch is armed, and whether new Claude dispatch is held right now, with the same reason `bin/fm-spawn.sh` gives when it refuses a spawn.
+
+### What the automatic mode cannot do
+
+This is worth being exact about, because the setting is easy to read as a spend guarantee and it is not one.
+
+Firstmate controls **which seat a new worker starts on**, and **whether new Claude work is dispatched at all**.
+It cannot stop a worker that is *already running* from drawing paid extra usage mid-task.
+A running worker keeps the profile recorded in its own task record, by design, and nothing outside the organisation's Claude admin setting can stop that profile spending once its plan quota is gone.
+
+So `stop` means **stop starting new work**, plus a loud warning the moment a seat a worker is already running on enters extra usage.
+That warning goes out through this home's one notification path, the same one the usage warner uses.
+It is never a guarantee of zero spend, and nothing here should be read as one.
+
+A single spawn can be pushed through a hold with `--ignore-seat-hold`; that changes no setting, so the next spawn is gated again.
+
+### The watch
+
+`arm` registers the automatic pass as this home's repeating Claude-seat check, so it runs on the supervision cycle that already exists rather than a daemon of its own.
+It **keeps watching after a switch**: one crossing fires at most once per seat, and when the seat it moved to later crosses its own threshold, that fires again with nothing re-armed by hand.
+A crossing with nowhere to go is reported once, but every later poll still looks for a destination, so a seat whose window resets is switched to on the next poll while the active seat stays below its trigger.
+Each pass keeps every quota read inside the watcher's per-check timeout (`FM_CHECK_TIMEOUT`), capping one read at 10 seconds, and a read cut short counts as unreadable.
+`bin/fm-seat.sh retire` stops it and removes its record.
+
+### What never trips a switch
+
+Only the account-level windows (`all_models` and `all_products`) count toward the trigger, the same scopes the dispatch chooser applies to a worker with no specific model; a model- or product-only window such as an Opus weekly limit does not trip a switch on its own.
 For the `default` seat the condition reads the same profile a new worker on it gets, which is firstmate's own `CLAUDE_CONFIG_DIR` when that is set.
-An unreadable quota, or one that reports no account-level window, is treated as an error, never as a threshold crossing, so a failed read never switches accounts.
-A rotation with no other logged-in seat under the seats root refuses rather than pretending to switch, and never falls back to the default profile.
 
-`bin/fm-seat.sh threshold off` clears the threshold, and `bin/fm-seat.sh retire` stops the watch.
+An unreadable or ambiguous quota is never guessed at, in either direction:
+
+- The **active** seat's quota unreadable means no switch, and the watch stays silent rather than waking on every poll.
+- A **candidate** seat's quota unreadable means that seat is skipped, and the output says the quota could not be read rather than implying a number.
+- With an extra-usage policy configured, an unreadable quota **holds** dispatch, because launching anyway would be exactly the guess the policy was set to avoid. The hold lifts on its own once the quota reads again.
+
+A rotation with no qualifying seat refuses rather than pretending to switch, and never falls back to the default profile.
+
+`bin/fm-seat.sh threshold off`, `destination-min off`, and `extra-usage off` each clear their own setting.
 
 ## Secondmate homes
 
-All three seat settings are inherited into this machine's local secondmate homes through the primary-authoritative configuration contract, so a secondmate's own Claude crewmates launch on the same seat as the primary's.
+All five seat settings are inherited into this machine's local secondmate homes through the primary-authoritative configuration contract, so a secondmate's own Claude crewmates launch on the same seat as the primary's.
 Every switch, manual or automatic, runs `bin/fm-config-push.sh --local-only` right after it changes the primary's seat, so running local secondmates pick up the new seat without being stopped, and the switch prints which homes were updated and which were not.
 A failed push never undoes the primary's switch: it is reported, those homes keep spawning on their previous seat, and re-running `bin/fm-config-push.sh --local-only` retries them.
 The push skips remote routes entirely, so a switch never opens SSH, never waits on another machine, and reports only this machine's homes.
@@ -124,14 +171,14 @@ touch <that home>/config/claude-seat-local
 ```
 
 The file's presence is the whole setting; nothing reads its content.
-From then on that home keeps its own `claude-seat`, `claude-seats-root`, and `claude-seat-threshold` untouched, including when it has none, and no local convergence overwrites them: not a switch's push, not the session-start secondmate sweep, and not that home's own launch or relaunch.
-The declining home still runs `bin/fm-seat.sh switch`, `threshold`, and `arm` normally; those act on itself alone.
+From then on that home keeps its own `claude-seat`, `claude-seats-root`, `claude-seat-threshold`, `claude-seat-destination-min`, and `claude-seat-extra-usage` untouched, including when it has none, and no local convergence overwrites them: not a switch's push, not the session-start secondmate sweep, and not that home's own launch or relaunch.
+The declining home still runs `bin/fm-seat.sh switch`, `threshold`, `destination-min`, `extra-usage`, and `arm` normally; those act on itself alone.
 Only that home is left alone - every other local home still takes each switch, and a machine with no such file anywhere behaves exactly as it did before the flag existed.
 
 The decline is visible from the primary, because a setting that silently does nothing is the failure worth avoiding here.
 `bin/fm-seat.sh status` lists every local secondmate home that declined, with the seat that home is actually on, and each switch names the seat items it skipped for that home and why.
 Put the flag only in the home it belongs to: it is never inherited, so one home's billing choice is never decided for it elsewhere.
-[Configuration](configuration.md#claude-seats-configclaude-seat-configclaude-seats-root-configclaude-seat-threshold-configclaude-seat-local) owns the flag's schema.
+[Configuration](configuration.md#claude-seats-configclaude-seat-configclaude-seats-root-configclaude-seat-threshold-configclaude-seat-destination-min-configclaude-seat-extra-usage-configclaude-seat-local) owns the flag's schema.
 
 ## Limits worth knowing
 

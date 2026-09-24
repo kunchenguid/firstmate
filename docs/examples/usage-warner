@@ -8,11 +8,20 @@
 # uses. <percent> is a whole number from 1 to 100. A configured window id the
 # account does not return is silently never compared.
 #
+# <percent> counts percent LEFT, and a window warns when it drops TO OR BELOW
+# it - the same direction bin/fm-seat.sh's threshold and the quota viewer count.
+# These directives used to count percent USED and warn on rising past the
+# number, so a file written against that older reading now means the opposite;
+# every warning names both figures ("8% left (92% used)") so it says so the
+# first time it speaks. Prefer the setter to editing this by hand:
+#
+#   bin/fm-usage-warner.sh threshold five_hour 20
+#
 # An ABSENT config/usage-warner means the feature is off: `check` stays
 # completely silent and `arm` refuses. This file's mere presence is the
 # opt-in.
 #
 # The two account-level windows below exist for every account regardless of
 # what per-model windows a given account happens to return.
-five_hour:80
-seven_day:90
+five_hour:20
+seven_day:10

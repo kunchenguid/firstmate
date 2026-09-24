@@ -31,6 +31,18 @@ TMP_ROOT=$(fm_test_tmproot fm-seat)
 #                       account-level (all_models) window
 #   <spec>/availability optional JSON array replacing the whole
 #                       effectiveAvailability list, for scope-specific cases
+#   <spec>/remaining_map  optional "<CLAUDE_CONFIG_DIR><TAB><percent>" rows,
+#                       giving a profile its OWN percent remaining so a case can
+#                       drive candidate seats apart; a profile with no row falls
+#                       back to <spec>/remaining
+#   <spec>/unreadable_quota  newline-separated CLAUDE_CONFIG_DIR values that are
+#                       logged in but whose account-level availability cannot be
+#                       read, which must never be guessed at as headroom
+#   <spec>/extra_map    optional "<CLAUDE_CONFIG_DIR><TAB><spentUsd>" rows adding
+#                       an extra_usage window (kind credits) to that profile's
+#                       report, which is where paid overflow spend is observed
+#   <spec>/slow         optional seconds every read sleeps before answering, for
+#                       a quota endpoint slower than the watcher's budget
 # An empty CLAUDE_CONFIG_DIR is spelled "(default)" in the oauth list.
 # The fake reproduces the real tool's contract that matters here: an unavailable
 # provider still prints a valid report AND exits non-zero.
@@ -43,9 +55,23 @@ set -u
 spec="$spec"
 key="\${CLAUDE_CONFIG_DIR:-}"
 [ -n "\$key" ] || key='(default)'
+[ ! -f "\$spec/slow" ] || sleep "\$(cat "\$spec/slow")"
 remaining=\$(cat "\$spec/remaining" 2>/dev/null || printf '80')
+if [ -f "\$spec/remaining_map" ]; then
+  mapped=\$(awk -F'\t' -v k="\$key" '\$1==k{print \$2; exit}' "\$spec/remaining_map")
+  [ -z "\$mapped" ] || remaining=\$mapped
+fi
 availability=\$(cat "\$spec/availability" 2>/dev/null ||
   printf '[{"scope":"all_models","status":"known","effectivePercentRemaining":%s,"runway":{"status":"through_reset"}}]' "\$remaining")
+if [ -f "\$spec/unreadable_quota" ] && grep -Fxq "\$key" "\$spec/unreadable_quota"; then
+  availability='[]'
+fi
+windows='[]'
+if [ -f "\$spec/extra_map" ]; then
+  spent=\$(awk -F'\t' -v k="\$key" '\$1==k{print \$2; exit}' "\$spec/extra_map")
+  [ -z "\$spent" ] ||
+    windows=\$(printf '[{"id":"extra_usage","kind":"credits","percentUsed":1,"spentUsd":%s,"limitUsd":10000}]' "\$spent")
+fi
 if [ -f "\$spec/rate_limited" ] && grep -Fxq "\$key" "\$spec/rate_limited"; then
   cat <<'JSON'
 {"generatedAt":"2026-01-01T00:00:00Z","schemaVersion":5,"providers":[{"provider":"claude","label":"Claude","source":"unavailable","windows":[],"state":{"status":"rate_limited","error":"Claude quota endpoint rate limited"},"attempts":[{"source":"oauth-file","status":"skipped","error":"credentials_missing"},{"source":"keychain","status":"failed","error":"Claude quota endpoint rate limited"}],"quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}]}
@@ -53,8 +79,10 @@ JSON
   exit 1
 fi
 if [ -f "\$spec/oauth" ] && grep -Fxq "\$key" "\$spec/oauth"; then
+  semantics_status=known
+  [ "\$availability" != '[]' ] || semantics_status=unknown
   cat <<JSON
-{"generatedAt":"2026-01-01T00:00:00Z","schemaVersion":5,"providers":[{"provider":"claude","label":"Claude","source":"oauth","account":{"email":"seat-\$(printf '%s' "\$key" | tr -c 'a-zA-Z0-9' '-')@example.test"},"quotaSemantics":{"status":"known","effectiveAvailability":\$availability}}]}
+{"generatedAt":"2026-01-01T00:00:00Z","schemaVersion":5,"providers":[{"provider":"claude","label":"Claude","source":"oauth","account":{"email":"seat-\$(printf '%s' "\$key" | tr -c 'a-zA-Z0-9' '-')@example.test"},"windows":\$windows,"quotaSemantics":{"status":"\$semantics_status","effectiveAvailability":\$availability}}]}
 JSON
   exit 0
 fi
@@ -139,8 +167,12 @@ test_absent_setting_is_the_default_seat() {
     "an absent config/claude-seat must resolve to the default seat"
   assert_contains "$out" "active profile: (ambient default login)" \
     "the default seat must name no profile directory"
-  assert_contains "$out" "auto-switch threshold: (unset" \
-    "no threshold may be configured by default"
+  assert_contains "$out" "auto-switch trigger: (unset" \
+    "no switch trigger may be configured by default"
+  assert_contains "$out" "destination minimum: (unset" \
+    "no destination minimum may be configured by default"
+  assert_contains "$out" "extra-usage policy: (unset" \
+    "no extra-usage policy may be configured by default"
   assert_absent "$HOME_DIR/config/claude-seat" \
     "reading status must not create the seat setting"
   pass "an unset seat setting is the ambient default and configures no automatic switching"
@@ -773,7 +805,9 @@ test_rotation_refuses_when_there_is_nowhere_to_go() {
   out=$(run_seat "$HOME_DIR" "$FAKEBIN" switch --next)
   status=$?
   expect_code 1 "$status" "rotation with no other logged-in seat must refuse"
-  assert_contains "$out" "no other logged-in seat" "the refusal must name the cause"
+  assert_contains "$out" "no seat under the seats root qualifies" "the refusal must name the cause"
+  assert_contains "$out" "seat spare: skipped, not logged in" \
+    "the refusal must say which seat was rejected and why"
   assert_absent "$HOME_DIR/config/claude-seat" "a refused rotation must change nothing"
   pass "rotation refuses rather than pretending to switch when no other seat is usable"
 }
@@ -1168,6 +1202,612 @@ test_pin_at_a_seat_directory_still_relaunches_a_claude_task() {
   pass "a pin pointing at a seat directory still relaunches a task recorded on that directory"
 }
 
+# --- automatic mode ----------------------------------------------------------
+# The three controls are the trigger (the ACTIVE seat's percent left), the
+# destination minimum (the percent left a DESTINATION must exceed), and the
+# extra-usage policy (what happens when neither can be satisfied). Every one is
+# off when absent, which the first case below pins.
+
+# seat_remaining <spec> <profile> <percent>
+# Give one profile its own percent remaining.
+seat_remaining() {
+  printf '%s\t%s\n' "$2" "$3" >> "$1/remaining_map"
+}
+
+# seat_quota_unreadable <spec> <profile...>
+# Declare profiles that are logged in but whose account-level quota cannot be
+# read, so a case can prove an ambiguous read is skipped rather than guessed at.
+seat_quota_unreadable() {
+  local spec=$1
+  shift
+  printf '%s\n' "$@" > "$spec/unreadable_quota"
+}
+
+# seat_extra_spend <spec> <profile> <usd>
+# Give one profile an extra_usage window carrying that much paid spend.
+seat_extra_spend() {
+  printf '%s\t%s\n' "$2" "$3" >> "$1/extra_map"
+}
+
+test_an_unconfigured_home_reads_no_candidate_quota_and_holds_nothing() {
+  local rec out
+  rec=$(make_seat_case auto-off-by-default)
+  read_seat_case "$rec"
+  mkdir -p "$SEATS_DIR/work" "$SEATS_DIR/spare"
+  seat_logged_in "$SPEC_DIR" '(default)' "$SEATS_DIR/work" "$SEATS_DIR/spare"
+  printf 'work\n' > "$HOME_DIR/config/claude-seat"
+  # Both other seats read as nearly empty. With no destination minimum set, that
+  # is not consulted at all and rotation is login-only, exactly as before these
+  # settings existed.
+  seat_remaining "$SPEC_DIR" "$SEATS_DIR/spare" 1
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" switch --next)
+  expect_code 0 "$?" "with no destination minimum, rotation must ignore a candidate's quota entirely"
+  assert_contains "$out" "-> spare" "an unconfigured home must rotate exactly as it did before"
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" status)
+  assert_contains "$out" "new Claude dispatch: allowed" "with no extra-usage policy, dispatch must never be held"
+  assert_contains "$out" "no extra-usage policy is configured" \
+    "the gate must say it read nothing rather than implying a quota verdict"
+  assert_absent "$HOME_DIR/config/claude-seat-destination-min" \
+    "reading the gate must not create a destination minimum"
+  assert_absent "$HOME_DIR/config/claude-seat-extra-usage" \
+    "reading the gate must not create an extra-usage policy"
+  pass "a home that configures none of the automatic settings behaves exactly as before they existed"
+}
+
+test_dispatch_gate_needs_no_quota_reader_when_unconfigured() {
+  local rec out bare
+  rec=$(make_seat_case auto-off-no-reader)
+  read_seat_case "$rec"
+  # A fakebin with NO quota-axi at all. An unconfigured home must still allow
+  # dispatch, which proves the gate reads nothing rather than failing open on a
+  # read it attempted and could not make.
+  bare=$(fm_fakebin "$CASE_DIR/bare")
+  out=$(run_seat "$HOME_DIR" "$bare" status)
+  assert_contains "$out" "new Claude dispatch: allowed" \
+    "an unconfigured gate must allow dispatch with no quota reader present at all"
+  assert_contains "$out" "no extra-usage policy" "the allow must name the unset policy as its reason"
+  pass "the dispatch gate reads no quota at all until an extra-usage policy is configured"
+}
+
+test_destination_minimum_is_configurable_validated_and_clearable() {
+  local rec out
+  rec=$(make_seat_case dest-min-config)
+  read_seat_case "$rec"
+  seat_logged_in "$SPEC_DIR" '(default)'
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" destination-min)
+  assert_contains "$out" "(unset" "an unconfigured destination minimum must report as unset"
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" destination-min 30)
+  expect_code 0 "$?" "setting a destination minimum should succeed"
+  assert_contains "$out" "30% left" "the setter must echo the value in percent LEFT"
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" destination-min)
+  assert_contains "$out" "30" "the destination minimum must read back"
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" destination-min 101)
+  expect_code 1 "$?" "an out-of-range destination minimum must be refused"
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" destination-min)
+  assert_contains "$out" "30" "a refused value must leave the configured one intact"
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" destination-min off)
+  expect_code 0 "$?" "clearing the destination minimum should succeed"
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" destination-min)
+  assert_contains "$out" "(unset" "a cleared destination minimum must report as unset"
+  pass "the destination minimum is settable by command, validated, clearable, and unset by default"
+}
+
+test_a_switch_skips_a_seat_below_the_destination_minimum() {
+  local rec out
+  rec=$(make_seat_case dest-min-skip)
+  read_seat_case "$rec"
+  # Named so the LEAN seat comes first in rotation order and the roomy one
+  # second: a gate that only ever looked at the first candidate would pass a
+  # test where the roomy seat happened to be reached first.
+  mkdir -p "$SEATS_DIR/alpha" "$SEATS_DIR/beta-lean" "$SEATS_DIR/zulu-roomy"
+  seat_logged_in "$SPEC_DIR" "$SEATS_DIR/alpha" "$SEATS_DIR/beta-lean" "$SEATS_DIR/zulu-roomy"
+  printf 'alpha\n' > "$HOME_DIR/config/claude-seat"
+  seat_remaining "$SPEC_DIR" "$SEATS_DIR/alpha" 5
+  seat_remaining "$SPEC_DIR" "$SEATS_DIR/beta-lean" 12
+  seat_remaining "$SPEC_DIR" "$SEATS_DIR/zulu-roomy" 70
+  run_seat "$HOME_DIR" "$FAKEBIN" destination-min 25 >/dev/null
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" switch --next)
+  expect_code 0 "$?" "a rotation with one qualifying seat must succeed: $out"
+  assert_contains "$out" "-> zulu-roomy" "rotation must land on the seat with headroom, not the next one in list order"
+  assert_contains "$out" "seat beta-lean: skipped, 12% left is not above the 25% destination minimum" \
+    "the skipped seat and its measured headroom must be reported"
+  assert_grep "zulu-roomy" "$HOME_DIR/config/claude-seat" "the qualifying seat must be recorded"
+  pass "a switch skips a logged-in seat below the destination minimum and lands on one above it"
+}
+
+test_no_switch_happens_when_no_seat_clears_the_destination_minimum() {
+  local rec out
+  rec=$(make_seat_case dest-min-none)
+  read_seat_case "$rec"
+  mkdir -p "$SEATS_DIR/alpha" "$SEATS_DIR/beta-lean"
+  seat_logged_in "$SPEC_DIR" "$SEATS_DIR/alpha" "$SEATS_DIR/beta-lean"
+  printf 'alpha\n' > "$HOME_DIR/config/claude-seat"
+  seat_remaining "$SPEC_DIR" "$SEATS_DIR/alpha" 5
+  seat_remaining "$SPEC_DIR" "$SEATS_DIR/beta-lean" 12
+  run_seat "$HOME_DIR" "$FAKEBIN" destination-min 25 >/dev/null
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" switch --next)
+  expect_code 1 "$?" "a rotation with no qualifying seat must refuse rather than switch"
+  assert_contains "$out" "no seat under the seats root qualifies" "the refusal must name the cause"
+  assert_contains "$out" "seat beta-lean: skipped, 12% left" "the refusal must say which seat was rejected and why"
+  assert_grep "alpha" "$HOME_DIR/config/claude-seat" "a refused rotation must leave the active seat in place"
+  pass "no switch happens when every candidate is below the destination minimum"
+}
+
+test_an_unreadable_candidate_quota_is_skipped_and_never_guessed() {
+  local rec out
+  rec=$(make_seat_case dest-min-unreadable)
+  read_seat_case "$rec"
+  mkdir -p "$SEATS_DIR/alpha" "$SEATS_DIR/murky"
+  seat_logged_in "$SPEC_DIR" "$SEATS_DIR/alpha" "$SEATS_DIR/murky"
+  printf 'alpha\n' > "$HOME_DIR/config/claude-seat"
+  # murky is logged in, so the login gate alone would accept it. Its quota gives
+  # no verdict, which is not evidence of headroom in either direction.
+  seat_quota_unreadable "$SPEC_DIR" "$SEATS_DIR/murky"
+  run_seat "$HOME_DIR" "$FAKEBIN" destination-min 25 >/dev/null
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" switch --next)
+  expect_code 1 "$?" "an ambiguous candidate quota must never be treated as headroom"
+  assert_contains "$out" "seat murky: skipped, its quota could not be read" \
+    "the skip must say the quota gave no verdict rather than implying a number"
+  assert_contains "$out" "makes no guess" "the refusal must state that nothing was guessed"
+  assert_grep "alpha" "$HOME_DIR/config/claude-seat" "nothing may be switched on an unreadable quota"
+  pass "a candidate whose quota gives no verdict is skipped, never guessed at as headroom"
+}
+
+test_extra_usage_policy_is_configurable_validated_and_clearable() {
+  local rec out
+  rec=$(make_seat_case extra-usage-config)
+  read_seat_case "$rec"
+  seat_logged_in "$SPEC_DIR" '(default)'
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" extra-usage)
+  assert_contains "$out" "(unset" "an unconfigured extra-usage policy must report as unset"
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" extra-usage stop)
+  expect_code 0 "$?" "setting the stop policy should succeed"
+  assert_contains "$out" "not a guarantee of zero spend" \
+    "setting stop must state plainly that a running worker is not stopped"
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" extra-usage)
+  assert_contains "$out" "stop" "the stop policy must read back"
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" extra-usage allow 25)
+  expect_code 0 "$?" "setting a dollar cap should succeed"
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" extra-usage)
+  assert_contains "$out" "25" "the cap must read back"
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" extra-usage allow)
+  expect_code 1 "$?" "allow with no dollar cap must be refused"
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" extra-usage banana)
+  expect_code 1 "$?" "an unknown policy word must be refused"
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" extra-usage)
+  assert_contains "$out" "25" "a refused policy must leave the configured one intact"
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" extra-usage off)
+  expect_code 0 "$?" "clearing the policy should succeed"
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" extra-usage)
+  assert_contains "$out" "(unset" "a cleared policy must report as unset"
+  pass "the extra-usage policy is settable by command, validated, clearable, and unset by default"
+}
+
+test_stop_policy_holds_dispatch_only_once_the_plan_quota_is_gone() {
+  local rec out
+  rec=$(make_seat_case extra-usage-stop)
+  read_seat_case "$rec"
+  mkdir -p "$SEATS_DIR/alpha"
+  seat_logged_in "$SPEC_DIR" "$SEATS_DIR/alpha"
+  printf 'alpha\n' > "$HOME_DIR/config/claude-seat"
+  run_seat "$HOME_DIR" "$FAKEBIN" extra-usage stop >/dev/null
+
+  # Plan quota still left: the gate exists to guard paid overflow, not to
+  # ration the plan, so this must allow.
+  seat_remaining "$SPEC_DIR" "$SEATS_DIR/alpha" 8
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" status)
+  assert_contains "$out" "new Claude dispatch: allowed" \
+    "plan quota still remaining must never be held by the extra-usage policy"
+  assert_contains "$out" "8% of its plan quota left" "the allow must name the remaining plan quota"
+
+  # Plan quota gone: any further work runs on paid extra usage.
+  printf '%s\t0\n' "$SEATS_DIR/alpha" > "$SPEC_DIR/remaining_map"
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" status)
+  assert_contains "$out" "new Claude dispatch: HELD" \
+    "with the plan quota gone and the policy set to stop, dispatch must be held"
+  assert_contains "$out" "no new Claude worker is started on paid extra usage" \
+    "the hold must say what it is preventing"
+  assert_contains "$out" "a worker already running keeps its own seat" \
+    "the hold must state plainly that a running worker is not stopped"
+  pass "the stop policy holds new dispatch only once the active seat's plan quota is gone"
+}
+
+test_allow_policy_proceeds_under_the_cap_and_holds_at_it() {
+  local rec out
+  rec=$(make_seat_case extra-usage-cap)
+  read_seat_case "$rec"
+  mkdir -p "$SEATS_DIR/alpha"
+  seat_logged_in "$SPEC_DIR" "$SEATS_DIR/alpha"
+  printf 'alpha\n' > "$HOME_DIR/config/claude-seat"
+  seat_remaining "$SPEC_DIR" "$SEATS_DIR/alpha" 0
+  run_seat "$HOME_DIR" "$FAKEBIN" extra-usage allow 25 >/dev/null
+
+  seat_extra_spend "$SPEC_DIR" "$SEATS_DIR/alpha" 10
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" status)
+  assert_contains "$out" "new Claude dispatch: allowed" "spend below the cap must keep dispatching: $out"
+  # shellcheck disable=SC2016  # literal dollar signs in the expected output, not expansions
+  assert_contains "$out" '$10 of extra usage spent on the active Claude seat, under the $25 cap' \
+    "the allow must name the spend and the cap it was compared against"
+
+  printf '%s\t25\n' "$SEATS_DIR/alpha" > "$SPEC_DIR/extra_map"
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" status)
+  assert_contains "$out" "new Claude dispatch: HELD" \
+    "spend at the cap must hold, so the cap is a ceiling and not a target to pass"
+  # shellcheck disable=SC2016  # literal dollar signs in the expected output, not expansions
+  assert_contains "$out" 'at or over the $25 cap' "the hold must name the cap it reached"
+  pass "the allow policy dispatches under its dollar cap and holds once the spend reaches it"
+}
+
+test_an_unreadable_quota_holds_dispatch_rather_than_guessing() {
+  local rec out
+  rec=$(make_seat_case extra-usage-unreadable)
+  read_seat_case "$rec"
+  mkdir -p "$SEATS_DIR/alpha"
+  seat_logged_in "$SPEC_DIR" "$SEATS_DIR/alpha"
+  printf 'alpha\n' > "$HOME_DIR/config/claude-seat"
+  seat_quota_unreadable "$SPEC_DIR" "$SEATS_DIR/alpha"
+  run_seat "$HOME_DIR" "$FAKEBIN" extra-usage stop >/dev/null
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" status)
+  assert_contains "$out" "new Claude dispatch: HELD" \
+    "a quota that gives no verdict must hold rather than dispatch on a guess"
+  assert_contains "$out" "makes no guess" "the hold must say it refused to guess"
+
+  # Once the plan quota can be read again the hold lifts on its own, so this is
+  # a condition that clears rather than a state an operator must reset.
+  rm -f "$SPEC_DIR/unreadable_quota"
+  seat_remaining "$SPEC_DIR" "$SEATS_DIR/alpha" 40
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" status)
+  assert_contains "$out" "new Claude dispatch: allowed" \
+    "a readable quota with plan headroom must lift the hold with no operator action"
+  pass "an unreadable quota holds dispatch instead of guessing, and the hold lifts once it reads again"
+}
+
+test_the_watch_keeps_firing_across_crossings_and_never_twice_on_one() {
+  local rec out
+  rec=$(make_seat_case auto-repeats)
+  read_seat_case "$rec"
+  mkdir -p "$SEATS_DIR/alpha" "$SEATS_DIR/beta" "$SEATS_DIR/gamma"
+  seat_logged_in "$SPEC_DIR" "$SEATS_DIR/alpha" "$SEATS_DIR/beta" "$SEATS_DIR/gamma"
+  printf 'alpha\n' > "$HOME_DIR/config/claude-seat"
+  run_seat "$HOME_DIR" "$FAKEBIN" threshold 15 >/dev/null
+  run_seat "$HOME_DIR" "$FAKEBIN" destination-min 25 >/dev/null
+
+  # Above the trigger: silent, and nothing moves.
+  seat_remaining "$SPEC_DIR" "$SEATS_DIR/alpha" 60
+  seat_remaining "$SPEC_DIR" "$SEATS_DIR/beta" 80
+  seat_remaining "$SPEC_DIR" "$SEATS_DIR/gamma" 90
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" auto)
+  [ -z "$out" ] || fail "a seat above its trigger must produce no wake: $out"
+  assert_grep "alpha" "$HOME_DIR/config/claude-seat" "nothing may move above the trigger"
+
+  # First crossing: switches, and says so once.
+  printf '%s\t10\n%s\t80\n%s\t90\n' \
+    "$SEATS_DIR/alpha" "$SEATS_DIR/beta" "$SEATS_DIR/gamma" > "$SPEC_DIR/remaining_map"
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" auto)
+  assert_contains "$out" "switched from alpha at 10% left to beta" "the first crossing must switch and report it"
+  assert_grep "beta" "$HOME_DIR/config/claude-seat" "the first crossing must record the new seat"
+
+  # The same seat sitting below its trigger is one crossing, not many: the next
+  # poll must be silent even though the condition is still true.
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" auto)
+  [ -z "$out" ] || fail "a crossing already acted on must not fire again on the next poll: $out"
+
+  # The seat it moved TO now crosses. This is the property a fire-once watch
+  # loses: it must fire again with nothing re-armed by hand.
+  printf '%s\t10\n%s\t9\n%s\t90\n' \
+    "$SEATS_DIR/alpha" "$SEATS_DIR/beta" "$SEATS_DIR/gamma" > "$SPEC_DIR/remaining_map"
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" auto)
+  assert_contains "$out" "switched from beta at 9% left to gamma" \
+    "the watch must keep watching and fire on the next seat's own crossing"
+  assert_grep "gamma" "$HOME_DIR/config/claude-seat" "the second crossing must record the third seat"
+  pass "the watch keeps running after a switch, fires once per crossing, and catches the next seat's own"
+}
+
+test_the_watch_reports_the_policy_consequence_when_no_seat_qualifies() {
+  local rec out
+  rec=$(make_seat_case auto-no-destination)
+  read_seat_case "$rec"
+  mkdir -p "$SEATS_DIR/alpha" "$SEATS_DIR/beta"
+  seat_logged_in "$SPEC_DIR" "$SEATS_DIR/alpha" "$SEATS_DIR/beta"
+  printf 'alpha\n' > "$HOME_DIR/config/claude-seat"
+  run_seat "$HOME_DIR" "$FAKEBIN" threshold 15 >/dev/null
+  run_seat "$HOME_DIR" "$FAKEBIN" destination-min 25 >/dev/null
+  run_seat "$HOME_DIR" "$FAKEBIN" extra-usage stop >/dev/null
+  seat_remaining "$SPEC_DIR" "$SEATS_DIR/alpha" 10
+  seat_remaining "$SPEC_DIR" "$SEATS_DIR/beta" 11
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" auto)
+  assert_contains "$out" "no seat has enough headroom" "the wake must say why no switch happened"
+  assert_contains "$out" "will be held once this seat's plan quota runs out" \
+    "the wake must name the policy consequence, not just the failed switch"
+  assert_contains "$out" "A worker already running is not stopped" \
+    "the wake must state the limit plainly"
+  assert_grep "alpha" "$HOME_DIR/config/claude-seat" "no seat qualifying must leave the active seat alone"
+
+  # One crossing, one wake: the same unqualified state must not wake again.
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" auto)
+  [ -z "$out" ] || fail "an unchanged unqualified crossing must not wake again: $out"
+  pass "with no seat qualifying the watch reports the policy consequence once and switches nothing"
+}
+
+test_the_watch_and_status_agree_while_plan_quota_remains() {
+  local rec wake st
+  rec=$(make_seat_case auto-agrees-with-status)
+  read_seat_case "$rec"
+  mkdir -p "$SEATS_DIR/alpha" "$SEATS_DIR/beta"
+  seat_logged_in "$SPEC_DIR" "$SEATS_DIR/alpha" "$SEATS_DIR/beta"
+  printf 'alpha\n' > "$HOME_DIR/config/claude-seat"
+  run_seat "$HOME_DIR" "$FAKEBIN" threshold 15 >/dev/null
+  run_seat "$HOME_DIR" "$FAKEBIN" destination-min 30 >/dev/null
+  run_seat "$HOME_DIR" "$FAKEBIN" extra-usage stop >/dev/null
+  seat_remaining "$SPEC_DIR" "$SEATS_DIR/alpha" 11
+  seat_remaining "$SPEC_DIR" "$SEATS_DIR/beta" 20
+
+  wake=$(run_seat "$HOME_DIR" "$FAKEBIN" auto)
+  st=$(run_seat "$HOME_DIR" "$FAKEBIN" status)
+  assert_contains "$wake" "no seat has enough headroom" "precondition: the crossing must find nowhere to go"
+  assert_contains "$st" "new Claude dispatch: allowed" \
+    "precondition: with plan quota still left, status must report dispatch allowed: $st"
+  case "$wake" in
+    *"is held"*|*"held rather"*) fail "the wake claims work is already held while status says dispatch is allowed: $wake" ;;
+  esac
+  assert_contains "$wake" "once this seat's plan quota runs out" \
+    "the wake must say when the hold will begin"
+  assert_contains "$wake" "A worker already running is not stopped" "the wake must still state the limit"
+  pass "the watch's wake line and status agree while the seat still has plan quota"
+}
+
+test_the_watch_switches_once_a_candidate_recovers_after_a_crossing_with_nowhere_to_go() {
+  local rec out
+  rec=$(make_seat_case auto-recovers)
+  read_seat_case "$rec"
+  mkdir -p "$SEATS_DIR/alpha" "$SEATS_DIR/beta"
+  seat_logged_in "$SPEC_DIR" "$SEATS_DIR/alpha" "$SEATS_DIR/beta"
+  printf 'alpha\n' > "$HOME_DIR/config/claude-seat"
+  run_seat "$HOME_DIR" "$FAKEBIN" threshold 15 >/dev/null
+  run_seat "$HOME_DIR" "$FAKEBIN" destination-min 30 >/dev/null
+  run_seat "$HOME_DIR" "$FAKEBIN" extra-usage stop >/dev/null
+  printf '%s\t5\n%s\t20\n' "$SEATS_DIR/alpha" "$SEATS_DIR/beta" > "$SPEC_DIR/remaining_map"
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" auto)
+  assert_contains "$out" "no seat has enough headroom" "precondition: the crossing must find nowhere to go"
+
+  # beta's window resets while alpha is still below its trigger. The watch must
+  # look again rather than stay silent until alpha itself recovers.
+  printf '%s\t5\n%s\t100\n' "$SEATS_DIR/alpha" "$SEATS_DIR/beta" > "$SPEC_DIR/remaining_map"
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" auto)
+  assert_contains "$out" "switched from alpha at 5% left to beta" \
+    "a candidate that recovers after a crossing with nowhere to go must be switched to"
+  assert_grep "beta" "$HOME_DIR/config/claude-seat" "the recovered candidate must become the active seat"
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" auto)
+  [ -z "$out" ] || fail "a completed switch must not wake again on the next poll: $out"
+  pass "after a crossing with nowhere to go, the watch keeps looking and switches once a seat recovers"
+}
+
+test_the_watch_keeps_every_quota_read_inside_the_check_budget() {
+  local rec out started elapsed
+  rec=$(make_seat_case auto-slow-reads)
+  read_seat_case "$rec"
+  mkdir -p "$SEATS_DIR/alpha" "$SEATS_DIR/beta"
+  seat_logged_in "$SPEC_DIR" "$SEATS_DIR/alpha" "$SEATS_DIR/beta"
+  printf 'alpha\n' > "$HOME_DIR/config/claude-seat"
+  run_seat "$HOME_DIR" "$FAKEBIN" threshold 15 >/dev/null
+  run_seat "$HOME_DIR" "$FAKEBIN" extra-usage stop >/dev/null
+  printf '%s\t5\n%s\t90\n' "$SEATS_DIR/alpha" "$SEATS_DIR/beta" > "$SPEC_DIR/remaining_map"
+  printf 'task=t1\nharness=claude\nclaude_seat=%s\n' "$SEATS_DIR/alpha" > "$HOME_DIR/state/t1.meta"
+  printf '30\n' > "$SPEC_DIR/slow"
+
+  started=$(date +%s)
+  out=$(FM_CHECK_TIMEOUT=8 run_seat "$HOME_DIR" "$FAKEBIN" auto)
+  elapsed=$(($(date +%s) - started))
+  [ "$elapsed" -lt 8 ] || fail "a pass with slow quota reads must finish inside FM_CHECK_TIMEOUT, took ${elapsed}s"
+  [ -z "$out" ] || fail "a read cut short must give no verdict and no wake: $out"
+  assert_grep "alpha" "$HOME_DIR/config/claude-seat" "a read cut short must never switch accounts"
+  pass "every quota read one automatic pass makes stays inside the watcher's per-check budget"
+}
+
+test_the_watch_never_switches_on_an_unreadable_active_quota() {
+  local rec out
+  rec=$(make_seat_case auto-unreadable)
+  read_seat_case "$rec"
+  mkdir -p "$SEATS_DIR/alpha" "$SEATS_DIR/beta"
+  seat_logged_in "$SPEC_DIR" "$SEATS_DIR/alpha" "$SEATS_DIR/beta"
+  printf 'alpha\n' > "$HOME_DIR/config/claude-seat"
+  run_seat "$HOME_DIR" "$FAKEBIN" threshold 15 >/dev/null
+  seat_quota_unreadable "$SPEC_DIR" "$SEATS_DIR/alpha"
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" auto)
+  [ -z "$out" ] || fail "an unreadable active quota must not wake firstmate on every poll: $out"
+  assert_grep "alpha" "$HOME_DIR/config/claude-seat" "an unreadable active quota must never switch accounts"
+  pass "the watch switches nothing when the active seat's quota gives no verdict"
+}
+
+test_arm_registers_a_repeating_watch_and_retire_removes_it() {
+  local rec out shim
+  rec=$(make_seat_case auto-arm)
+  read_seat_case "$rec"
+  mkdir -p "$SEATS_DIR/alpha" "$SEATS_DIR/beta"
+  seat_logged_in "$SPEC_DIR" "$SEATS_DIR/alpha" "$SEATS_DIR/beta"
+  printf 'alpha\n' > "$HOME_DIR/config/claude-seat"
+  shim="$HOME_DIR/state/claude-seat.check.sh"
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" arm)
+  expect_code 1 "$?" "arming with no trigger configured must refuse"
+  assert_contains "$out" "no auto-switch threshold configured" "the refusal must name the missing setting"
+  assert_absent "$shim" "a refused arm must register nothing"
+
+  run_seat "$HOME_DIR" "$FAKEBIN" threshold 15 >/dev/null
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" arm)
+  expect_code 0 "$?" "arming with a trigger and a destination should succeed: $out"
+  assert_contains "$out" "keeps watching after each switch" \
+    "arming must say the watch is repeating rather than one-shot"
+  [ -f "$shim" ] || fail "arm must write the check shim"
+  [ -f "$HOME_DIR/state/claude-seat.check-trust" ] || fail "arm must bind the shim's bytes"
+  assert_grep "auto" "$shim" "the shim must dispatch the automatic pass"
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" status)
+  assert_contains "$out" "auto-switch watch: armed" "status must report the armed watch"
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" retire)
+  expect_code 0 "$?" "retiring should succeed"
+  assert_absent "$shim" "retire must remove the shim"
+  assert_absent "$HOME_DIR/state/claude-seat.check-trust" "retire must remove the trust binding"
+  assert_absent "$HOME_DIR/state/.claude-seat-auto" "retire must remove the de-dupe record"
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" status)
+  assert_contains "$out" "auto-switch watch: not armed" "status must report the retired watch"
+  pass "arm registers a repeating watch the watcher can run, and retire removes it cleanly"
+}
+
+test_status_reports_every_automatic_setting_in_percent_left() {
+  local rec out
+  rec=$(make_seat_case auto-status)
+  read_seat_case "$rec"
+  seat_logged_in "$SPEC_DIR" '(default)'
+  run_seat "$HOME_DIR" "$FAKEBIN" threshold 15 >/dev/null
+  run_seat "$HOME_DIR" "$FAKEBIN" destination-min 30 >/dev/null
+  run_seat "$HOME_DIR" "$FAKEBIN" extra-usage allow 25 >/dev/null
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" status)
+  assert_contains "$out" "auto-switch trigger: at or below 15% left on the active seat" \
+    "the trigger must be reported in percent left"
+  assert_contains "$out" "destination minimum: only switch to a seat above 30% left" \
+    "the destination minimum must be reported in percent left"
+  # shellcheck disable=SC2016  # literal dollar signs in the expected output, not expansions
+  assert_contains "$out" 'extra-usage policy: allow up to $25' \
+    "the extra-usage policy must be reported with its dollar cap"
+  pass "status reports all three automatic settings, every percentage counting percent left"
+}
+
+test_a_stop_policy_holds_a_fresh_claude_spawn_and_the_override_gets_through() {
+  local rec id out spec
+  id=seat-hold-1
+  rec=$(spawn_case spawn-extra-usage-hold "$id")
+  read_spawn_case "$rec"
+  spec="$CASE_DIR/quota-spec"
+  make_quota_fake "$FAKEBIN" "$spec"
+  mkdir -p "$SEATS_DIR/alpha"
+  printf '%s\n' "$SEATS_DIR/alpha" > "$spec/oauth"
+  printf 'alpha\n' > "$HOME_DIR/config/claude-seat"
+  # The active seat's plan quota is gone, so any new worker would run on paid
+  # extra usage.
+  printf '%s\t0\n' "$SEATS_DIR/alpha" > "$spec/remaining_map"
+  printf 'stop\n' > "$HOME_DIR/config/claude-seat-extra-usage"
+
+  out=$(run_spawn_here "$HOME_DIR" "$WT_DIR" "$FAKEBIN" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1)
+  expect_code 1 "$?" "a fresh claude spawn must be held once the seat has no plan quota left"
+  assert_contains "$out" "holds new Claude work" "the refusal must say the work was held, not that it failed"
+  assert_contains "$out" "the extra-usage policy is stop" "the refusal must give the reason the gate held it"
+  assert_contains "$out" "--ignore-seat-hold" "the refusal must name the override"
+  assert_absent "$HOME_DIR/state/$id.meta" "a held spawn must create no task record"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a held spawn must launch nothing: $(cat "$LAUNCH_LOG")"
+
+  out=$(run_spawn_here "$HOME_DIR" "$WT_DIR" "$FAKEBIN" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --ignore-seat-hold 2>&1)
+  expect_code 0 "$?" "--ignore-seat-hold must start the task anyway: $out"
+  assert_grep "claude_seat=" "$HOME_DIR/state/$id.meta" "the overridden spawn must record its seat as any other does"
+  assert_grep "stop" "$HOME_DIR/config/claude-seat-extra-usage" \
+    "the override must change no setting, so the next spawn is gated again"
+  pass "a stop policy holds a fresh claude spawn, names the override, and changes nothing when overridden"
+}
+
+test_the_spawn_gate_holds_at_the_cap_and_on_an_unreadable_quota() {
+  local rec id out spec
+  id=seat-hold-cap-1
+  rec=$(spawn_case spawn-extra-usage-cap "$id")
+  read_spawn_case "$rec"
+  spec="$CASE_DIR/quota-spec"
+  make_quota_fake "$FAKEBIN" "$spec"
+  mkdir -p "$SEATS_DIR/alpha"
+  printf '%s\n' "$SEATS_DIR/alpha" > "$spec/oauth"
+  printf 'alpha\n' > "$HOME_DIR/config/claude-seat"
+  printf '%s\t0\n' "$SEATS_DIR/alpha" > "$spec/remaining_map"
+  printf '%s\t25\n' "$SEATS_DIR/alpha" > "$spec/extra_map"
+  printf 'allow 25\n' > "$HOME_DIR/config/claude-seat-extra-usage"
+
+  out=$(run_spawn_here "$HOME_DIR" "$WT_DIR" "$FAKEBIN" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1)
+  expect_code 1 "$?" "a fresh claude spawn must be held once extra-usage spend reaches the cap"
+  # shellcheck disable=SC2016  # literal dollar signs in the expected output, not expansions
+  assert_contains "$out" 'at or over the $25 cap' "the spawn refusal must name the cap it reached"
+  assert_absent "$HOME_DIR/state/$id.meta" "a held spawn must create no task record"
+
+  printf '%s\n' "$SEATS_DIR/alpha" > "$spec/unreadable_quota"
+  out=$(run_spawn_here "$HOME_DIR" "$WT_DIR" "$FAKEBIN" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1)
+  expect_code 1 "$?" "a fresh claude spawn must be held when the quota gives no verdict"
+  assert_contains "$out" "makes no guess" "the spawn refusal must say it refused to guess"
+
+  rm -f "$spec/unreadable_quota"
+  printf '%s\t10\n' "$SEATS_DIR/alpha" > "$spec/extra_map"
+  out=$(run_spawn_here "$HOME_DIR" "$WT_DIR" "$FAKEBIN" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1)
+  expect_code 0 "$?" "spend under the cap must let the spawn through: $out"
+  pass "the spawn gate holds at the dollar cap and on an unreadable quota, and dispatches under the cap"
+}
+
+test_a_hold_never_blocks_a_relaunch_or_another_harness() {
+  local rec id out spec
+  id=seat-hold-relaunch-1
+  rec=$(spawn_case spawn-extra-usage-relaunch "$id")
+  read_spawn_case "$rec"
+  spec="$CASE_DIR/quota-spec"
+  make_quota_fake "$FAKEBIN" "$spec"
+  fm_fake_exit0 "$FAKEBIN" claude
+  mkdir -p "$SEATS_DIR/alpha"
+  printf '%s\n' "$SEATS_DIR/alpha" > "$spec/oauth"
+  printf 'alpha\n' > "$HOME_DIR/config/claude-seat"
+  printf '%s\t80\n' "$SEATS_DIR/alpha" > "$spec/remaining_map"
+
+  # Launch the task while the seat is healthy, then exhaust it.
+  out=$(run_spawn_here "$HOME_DIR" "$WT_DIR" "$FAKEBIN" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  expect_code 0 "$?" "precondition: a spawn on a healthy seat should succeed: $out"
+  printf '%s\t0\n' "$SEATS_DIR/alpha" > "$spec/remaining_map"
+  printf 'stop\n' > "$HOME_DIR/config/claude-seat-extra-usage"
+  make_dead_endpoint_tmux "$FAKEBIN" "fm-$id"
+  : > "$LAUNCH_LOG"
+
+  # A relaunch is recovery of work already under way, not work being started.
+  # Holding it would strand a task mid-flight over a decision its own launch
+  # already made.
+  out=$(CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+    fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN" "$id" --relaunch 2>&1)
+  expect_code 0 "$?" "a relaunch must never be held by the extra-usage policy: $out"
+  [ -s "$LAUNCH_LOG" ] || fail "the relaunch must actually launch"
+  pass "the dispatch hold covers fresh claude spawns only and never strands a task already under way"
+}
+
+test_a_non_claude_spawn_is_never_held_by_the_claude_policy() {
+  local rec id out spec
+  id=seat-hold-codex-1
+  rec=$(spawn_case spawn-extra-usage-codex "$id")
+  read_spawn_case "$rec"
+  spec="$CASE_DIR/quota-spec"
+  make_quota_fake "$FAKEBIN" "$spec"
+  mkdir -p "$SEATS_DIR/alpha"
+  printf '%s\n' "$SEATS_DIR/alpha" > "$spec/oauth"
+  printf 'alpha\n' > "$HOME_DIR/config/claude-seat"
+  printf '%s\t0\n' "$SEATS_DIR/alpha" > "$spec/remaining_map"
+  printf 'stop\n' > "$HOME_DIR/config/claude-seat-extra-usage"
+
+  out=$(run_spawn_here "$HOME_DIR" "$WT_DIR" "$FAKEBIN" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex 2>&1)
+  expect_code 0 "$?" "a worker on another harness reads no Claude profile and must never be held: $out"
+  assert_no_grep "claude_seat=" "$HOME_DIR/state/$id.meta" "a non-claude spawn must still record no Claude seat"
+  pass "the Claude extra-usage hold never reaches a worker on another harness"
+}
+
 test_absent_setting_is_the_default_seat
 test_switch_to_logged_in_seat_updates_only_the_setting
 test_switch_to_seat_that_is_not_logged_in_is_refused
@@ -1190,6 +1830,24 @@ test_threshold_reached_is_edge_triggered_by_the_configured_percent
 test_unreadable_quota_never_reports_the_threshold_reached
 test_model_scoped_window_alone_does_not_trip_the_threshold
 test_default_seat_probes_the_ambient_profile_workers_get
+test_an_unconfigured_home_reads_no_candidate_quota_and_holds_nothing
+test_dispatch_gate_needs_no_quota_reader_when_unconfigured
+test_destination_minimum_is_configurable_validated_and_clearable
+test_a_switch_skips_a_seat_below_the_destination_minimum
+test_no_switch_happens_when_no_seat_clears_the_destination_minimum
+test_an_unreadable_candidate_quota_is_skipped_and_never_guessed
+test_extra_usage_policy_is_configurable_validated_and_clearable
+test_stop_policy_holds_dispatch_only_once_the_plan_quota_is_gone
+test_allow_policy_proceeds_under_the_cap_and_holds_at_it
+test_an_unreadable_quota_holds_dispatch_rather_than_guessing
+test_the_watch_keeps_firing_across_crossings_and_never_twice_on_one
+test_the_watch_reports_the_policy_consequence_when_no_seat_qualifies
+test_the_watch_and_status_agree_while_plan_quota_remains
+test_the_watch_switches_once_a_candidate_recovers_after_a_crossing_with_nowhere_to_go
+test_the_watch_keeps_every_quota_read_inside_the_check_budget
+test_the_watch_never_switches_on_an_unreadable_active_quota
+test_arm_registers_a_repeating_watch_and_retire_removes_it
+test_status_reports_every_automatic_setting_in_percent_left
 test_rotation_picks_the_next_logged_in_seat
 test_rotation_never_targets_the_default_profile
 test_rotation_reads_the_seat_set_fresh
@@ -1208,5 +1866,9 @@ test_account_pin_and_active_seat_refuse_the_spawn
 test_account_pin_and_recorded_seat_refuse_the_relaunch
 test_pin_only_home_still_relaunches_a_claude_task
 test_pin_at_a_seat_directory_still_relaunches_a_claude_task
+test_a_stop_policy_holds_a_fresh_claude_spawn_and_the_override_gets_through
+test_the_spawn_gate_holds_at_the_cap_and_on_an_unreadable_quota
+test_a_hold_never_blocks_a_relaunch_or_another_harness
+test_a_non_claude_spawn_is_never_held_by_the_claude_policy
 
 echo "# all fm-seat tests passed"

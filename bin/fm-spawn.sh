@@ -35,6 +35,10 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
+#   --ignore-seat-hold starts a claude task that this home's Claude extra-usage
+#   policy would otherwise hold, for the one spawn it is passed to. It changes
+#   no setting, so the next spawn is gated again; bin/fm-seat.sh extra-usage
+#   owns the policy and docs/claude-seats.md owns what a hold can and cannot do.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
@@ -589,8 +593,11 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-quota-axi-lib.sh
+. "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-seat-lib.sh
 . "$SCRIPT_DIR/fm-seat-lib.sh"
+
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -614,6 +621,7 @@ MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+IGNORE_SEAT_HOLD=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -671,6 +679,7 @@ for a in "$@"; do
     KIND_SET=1
     ;;
   --relaunch) RELAUNCH=1 ;;
+  --ignore-seat-hold) IGNORE_SEAT_HOLD=1 ;;
   --harness) want_value=harness ;;
   --harness=*)
     HARNESS_ARG=${a#--harness=}
@@ -2290,6 +2299,27 @@ if [ -f "$CONFIG/claude-account" ] && [ "$(fm_seat_active)" != "$FM_SEAT_DEFAULT
   } >&2
   exit 1
 fi
+# Claude extra-usage dispatch gate: the home's configured answer to "start new
+# Claude work on paid extra usage, or hold?". With config/claude-seat-extra-usage
+# absent, fm_seat_dispatch_decision returns allow without reading any quota at
+# all, so an unconfigured home reaches no new code path and pays nothing here.
+#
+# Only a FRESH claude spawn is gated. A relaunch is recovery of work that is
+# already under way, not work being started, and holding it would strand a task
+# mid-flight for a spend decision its own launch already made.
+# --ignore-seat-hold is the deliberate override for a task the operator wants
+# started anyway; it never changes the setting, so the next spawn is gated again.
+if [ "$HARNESS" = claude ] && [ "$RELAUNCH" -eq 0 ] && [ "$IGNORE_SEAT_HOLD" -eq 0 ]; then
+  if ! SEAT_DISPATCH=$(fm_seat_dispatch_reason "$(fm_seat_dispatch_decision)"); then
+    {
+      echo "error: this home holds new Claude work rather than starting it on paid extra usage:"
+      printf '%s\n' "$SEAT_DISPATCH" | sed 's/^/  /'
+      echo "re-run with --ignore-seat-hold to start this task anyway, or change the policy with bin/fm-seat.sh extra-usage"
+    } >&2
+    exit 1
+  fi
+fi
+
 # Worker account pin (header above): resolved before any endpoint, worktree, or
 # record exists. An absent pin selects nothing and leaves every later launch
 # step exactly as it was. A pinned Claude root is exported here as well, so the
