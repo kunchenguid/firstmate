@@ -2038,10 +2038,11 @@ test_config_push_defers_reread_while_the_mate_waits_on_a_decision() {
   assert_present "$flag" "the deferral was not flagged for the watcher's retry"
 
   fakebin=$(make_fake_toolchain "$w")
-  PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" FM_SEND_SETTLE=0 \
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" FM_SEND_SETTLE=0 \
     FM_FAKE_TMUX_LOG="$w/config-reread-deferred.tmux.log" \
-    "$ROOT/bin/fm-config-push.sh" --retry-deferred >/dev/null 2>&1; status=$?
+    "$ROOT/bin/fm-config-push.sh" --retry-deferred 2>&1); status=$?
   expect_code 0 "$status" "a retry that is still waiting on the decision is not a failure"
+  [ -z "$out" ] || fail "a retry still waiting on the decision must not attempt the send:"$'\n'"$out"
   [ -z "$(inbox_stream "$w/home/state" sm)" ] || fail "the retry woke a mate still waiting on its decision"
   assert_present "$flag" "a retry still waiting on the decision must stay flagged"
 
