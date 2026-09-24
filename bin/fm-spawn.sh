@@ -47,7 +47,8 @@
 #   to start from and target instead of origin's default branch. A fresh launch
 #   resets its pooled copy to origin/<branch>, refusing when the project has no
 #   origin or origin lacks that branch, or when the project's registered forge
-#   cannot carry it. It must agree with every Setup "Base branch:" line in the
+#   cannot carry it; a local-only task without origin requires the named ref
+#   locally. It must agree with every Setup "Base branch:" line in the
 #   brief (bin/fm-brief.sh --base-branch writes one; other such lines are prose),
 #   and a brief with such a line refuses a spawn without the flag. The spawn records it as
 #   base_branch= in state/<id>.meta, which a relaunch reuses and later review and
@@ -3360,6 +3361,20 @@ fi
 # Named base and crew-branch occupancy are proven before a pane exists. A
 # missing base or a branch already assigned to another ship for this project
 # stops here, so a later freshen failure cannot leave an endpoint behind.
+# Resolved remote.origin.* variables cover Git's effective include/includeIf chain; raw headers are also detected in the worktree config and any included file Git names through another variable. Git cannot enumerate a variable-less included file, so an empty origin section that is its only content remains indistinguishable from absence and intentionally proceeds rather than reimplementing Git's config parser.
+spawn_worktree_has_origin_config() { # <worktree>
+  local worktree=$1 config origin key seen=$'\n'
+  git -C "$worktree" config --get-regexp '^remote\.origin\.' >/dev/null 2>&1 && return 0
+  while IFS=$'\t' read -r origin key; do
+    case $origin in file:*) config=${origin#file:} ;; *) continue ;; esac
+    [ -f "$config" ] || continue
+    case $seen in *$'\n'"$config"$'\n'*) continue ;; esac
+    seen+="$config"$'\n'
+    awk '/^[[:space:]]*\[[[:space:]]*[Rr][Ee][Mm][Oo][Tt][Ee][[:space:]]+"origin"[[:space:]]*\][[:space:]]*([#;].*)?$/ || /^[[:space:]]*\[[[:space:]]*[Rr][Ee][Mm][Oo][Tt][Ee]\.origin[[:space:]]*\][[:space:]]*([#;].*)?$/ { found=1 } END { exit !found }' "$config" && return 0
+  done < <(git -C "$worktree" config --list --show-origin 2>/dev/null || true)
+  return 1
+}
+
 refuse_shared_crew_branch() {
   local meta other_branch other_project other_kind other_real proj_real other_id
   [ "$KIND" = ship ] || return 0
@@ -3387,8 +3402,35 @@ refuse_shared_crew_branch() {
   done
 }
 
+refuse_named_crew_branch_collision() {
+  local remote_refs
+  [ "$KIND" = ship ] || return 0
+  [ "$BRANCH_NAME_SET" -eq 1 ] || return 0
+  if git -C "$PROJ_ABS" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    echo "error: crew branch $BRANCH already exists locally; refusing to launch a fresh task with a reused branch" >&2
+    return 1
+  fi
+  if spawn_worktree_has_origin_config "$PROJ_ABS"; then
+    if ! remote_refs=$(git -C "$PROJ_ABS" ls-remote --heads origin "refs/heads/$BRANCH" 2>/dev/null); then
+      echo "error: could not check whether crew branch $BRANCH exists on origin; refusing to launch" >&2
+      return 1
+    fi
+    if [ -n "$remote_refs" ]; then
+      echo "error: crew branch $BRANCH already exists on origin; refusing to launch a fresh task with a reused branch" >&2
+      return 1
+    fi
+  fi
+}
+
 ensure_named_base_present() { # <repo> <branch>
   local repo=$1 branch=$2
+  if [ "$MODE" = local-only ]; then
+    if git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null; then
+      return 0
+    fi
+    echo "error: named base '$branch' does not exist locally in $repo; refusing to launch" >&2
+    return 1
+  fi
   if spawn_worktree_has_origin_config "$repo"; then
     if ! git -C "$repo" fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch"; then
       echo "error: could not fetch named base '$branch' for $repo; refusing to launch" >&2
@@ -3413,6 +3455,7 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   fi
   if [ "$KIND" = ship ]; then
     refuse_shared_crew_branch || exit 1
+    refuse_named_crew_branch_collision || exit 1
   fi
 fi
 
@@ -3594,10 +3637,27 @@ freshen_spawn_worktree_base() { # <worktree> [<base-branch>]
     return 1
   fi
   if ! spawn_worktree_has_origin_config "$worktree"; then
-    [ -z "$base" ] || {
-      echo "error: pooled worktree '$worktree' has no origin, so it cannot start from base branch '$base'" >&2
-      return 1
-    }
+    if [ -n "$base" ]; then
+      [ "$MODE" = local-only ] || {
+        echo "error: pooled worktree '$worktree' has no origin, so it cannot start from base branch '$base'" >&2
+        return 1
+      }
+      git -C "$worktree" rev-parse --verify --quiet "refs/heads/$base^{commit}" >/dev/null || {
+        echo "error: named base '$base' does not exist locally for pooled worktree '$worktree'; refusing to launch" >&2
+        return 1
+      }
+      target="refs/heads/$base"
+      expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}") || return 1
+      if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
+        echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch" >&2
+        return 1
+      fi
+      actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+      if [ "$actual" != "$expected" ]; then
+        echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
+        return 1
+      fi
+    fi
     return 0
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
