@@ -2115,6 +2115,48 @@ test_live_blocker_is_not_charted_queue_work() {
   pass "Bearings keeps a live blocker in structured live state and never converts it to Charted Next queue work"
 }
 
+# An escalated pending-reply record stays in decisions until it resolves.
+# A record that has not escalated does not.
+test_escalated_pending_reply_stays_in_decisions_until_resolved() {
+  local home fakebin json dir corr
+  home=$(make_home escalated-reply); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  dir="$home/state/pending-replies"
+  mkdir -p "$dir"
+  corr=abcdef0123456789
+  cat > "$dir/$corr" <<EOF
+schema=fm-pending-reply.v1
+corr_id=$corr
+task_id=mate
+phase=escalated
+request_summary=finish the report
+EOF
+  cat > "$dir/0123456789abcdef" <<EOF
+schema=fm-pending-reply.v1
+corr_id=0123456789abcdef
+task_id=mate
+phase=awaiting_report
+request_summary=not yet
+EOF
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e --arg key "pending-reply-$corr" '
+    (.decisions_open | any(.[]; .key == $key and (.summary | contains("finish the report"))))
+      and (.decisions_open | any(.[]; .key == "pending-reply-0123456789abcdef") | not)
+  ' >/dev/null || fail "escalated pending reply was missing from bearings: $json"
+  cat > "$dir/$corr" <<EOF
+schema=fm-pending-reply.v1
+corr_id=$corr
+task_id=mate
+phase=resolved
+request_summary=finish the report
+EOF
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e --arg key "pending-reply-$corr" '
+    (.decisions_open | any(.[]; .key == $key) | not)
+  ' >/dev/null || fail "resolved pending reply stayed in bearings: $json"
+  pass "bearings lists an escalated pending reply until it resolves"
+}
+
 # Captain's Call is populated only from the durable keyed open-decision set. The
 # anti-leak guard: action-free highlights - a working task, a completed scout,
 # queued/gated items, landed work - must never surface as an open decision, so they
@@ -3387,6 +3429,7 @@ test_landed_default_handles_no_landed_items
 test_all_landed_keeps_complete_global_order
 test_landed_bounded_and_disclosed
 test_live_blocker_is_not_charted_queue_work
+test_escalated_pending_reply_stays_in_decisions_until_resolved
 test_captains_call_anti_leak
 test_main_orphan_in_flight_is_disclosed_not_invented
 test_main_unstructured_current_is_disclosed_with_structured_sibling

@@ -1600,6 +1600,74 @@ test_escalated_undelivered_correlation_stays_retryable() {
   pass "an escalated correlation stays retryable only while undelivered"
 }
 
+# An escalated record is reminded once on a later session, not on every poll,
+# and not by a second recovery or a second blocked line. An unkeyed resolved
+# line still does not settle it. A correlated reply does, and then stays quiet.
+test_escalated_record_is_reminded_once_per_later_session() {
+  local home state corr rec other wakes blocked
+  home=$(setup_parent remind-later)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=1000
+  export FM_PENDING_REPLY_SESSION=s1
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  corr=$(fm_pending_reply_create "$home" "$state" mate "finish the report")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  FM_PENDING_REPLY_NOW=2000 fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery send failed"
+  FM_PENDING_REPLY_NOW=3000 fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  FM_PENDING_REPLY_NOW=4000 fm_pending_reply_maybe_escalate "$state" "$corr" || fail "escalation should fire"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ "$(fm_pending_reply_get "$rec" surfaced_session)" = s1 ] \
+    || fail "escalation should count as this session's surface"
+  other=$(fm_pending_reply_create "$home" "$state" mate "still waiting on delivery")
+  fm_pending_reply_tick "$state" || fail "same-session tick failed"
+  wakes=$(grep -c pending-reply-escalated "$state/.wake-queue" 2>/dev/null || true)
+  [ "${wakes:-0}" = 0 ] || fail "the escalating session was reminded again"
+  blocked=$(grep -Fc "blocked [key=pending-reply-$corr]" "$state/mate.status")
+  [ "$blocked" = 1 ] || fail "same-session tick injected another escalation, got $blocked"
+  [ "$(phase_of "$state" "$other")" != escalated ] || fail "neighbour must not be escalated by the reminder"
+
+  export FM_PENDING_REPLY_SESSION=s2
+  fm_pending_reply_tick "$state" || fail "later-session tick failed"
+  wakes=$(grep -c $'\tcheck\tpending-reply-escalated\t' "$state/.wake-queue" || true)
+  [ "$wakes" = 1 ] || fail "later session should enqueue one reminder, got ${wakes:-0}"
+  grep -F "pending-reply-id=$corr" "$state/.wake-queue" >/dev/null \
+    || fail "reminder did not name the escalated correlation"
+  grep -F "pending-reply-id=$other" "$state/.wake-queue" >/dev/null \
+    && fail "reminder named a record that is not escalated"
+  blocked=$(grep -Fc "blocked [key=pending-reply-$corr]" "$state/mate.status")
+  [ "$blocked" = 1 ] || fail "reminder injected another escalation, got $blocked"
+  [ "$(phase_of "$state" "$corr")" = escalated ] || fail "reminder must leave the record escalated"
+  fm_pending_reply_tick "$state" || fail "repeat poll failed"
+  wakes=$(grep -c $'\tcheck\tpending-reply-escalated\t' "$state/.wake-queue" || true)
+  [ "$wakes" = 1 ] || fail "same session polled the reminder again, got ${wakes:-0}"
+
+  : > "$state/.wake-queue"
+  fm_pending_reply_remind_escalated "$state" || fail "acked same-session remind failed"
+  [ ! -s "$state/.wake-queue" ] || fail "acking the wake must not re-arm the same session"
+
+  printf 'resolved: looked at it\n' >> "$state/mate.status"
+  export FM_PENDING_REPLY_SESSION=s3
+  fm_pending_reply_tick "$state" || fail "post-unkeyed-resolved tick failed"
+  [ "$(phase_of "$state" "$corr")" = escalated ] \
+    || fail "unkeyed resolved must not settle the record"
+  grep -F "pending-reply-id=$corr" "$state/.wake-queue" >/dev/null \
+    || fail "a later session went quiet after an unkeyed resolved line"
+  wakes=$(grep -c $'\tcheck\tpending-reply-escalated\t' "$state/.wake-queue" || true)
+  [ "$wakes" = 1 ] || fail "unkeyed resolved session enqueued $wakes reminders"
+
+  printf 'done [corr=%s]: the report is in\n' "$corr" >> "$state/mate.status"
+  fm_pending_reply_try_resolve "$state" "$corr" || fail "correlated reply should resolve"
+  : > "$state/.wake-queue"
+  export FM_PENDING_REPLY_SESSION=s4
+  fm_pending_reply_tick "$state" || fail "resolved tick failed"
+  [ ! -s "$state/.wake-queue" ] || fail "a resolved record was reminded: $(cat "$state/.wake-queue")"
+  json=$(fm_pending_reply_escalated_decisions_json "$state")
+  [ "$json" = '[]' ] || fail "bearings input still listed a resolved escalation: $json"
+  unset FM_PENDING_REPLY_SESSION
+  pass "an escalated pending reply is reminded once per later session until it resolves"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -1607,6 +1675,7 @@ test_completed_turn_no_report_triggers_one_recovery
 test_recovery_attempt_is_never_reinjected
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
+test_escalated_record_is_reminded_once_per_later_session
 test_escalation_wakes_and_its_close_stays_quiet
 test_escalation_publication_failure_retries
 test_legacy_escalation_closes_default_decision
