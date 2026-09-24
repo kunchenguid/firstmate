@@ -113,17 +113,6 @@ if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
   exit 0
 fi
 
-CATALOG_CWD=${FM_DISPATCH_PROJECT_DIR:-}
-if [ -z "$CATALOG_CWD" ] && [ -n "$PROJECT" ]; then
-  case "$PROJECT" in
-    projects/*) CATALOG_CWD="$FM_HOME/projects/${PROJECT#projects/}" ;;
-    /*) CATALOG_CWD="$PROJECT" ;;
-    *) [ -d "$FM_HOME/projects/$PROJECT" ] && CATALOG_CWD="$FM_HOME/projects/$PROJECT" ;;
-  esac
-fi
-[ -n "$CATALOG_CWD" ] || CATALOG_CWD=$PWD
-[ -d "$CATALOG_CWD" ] || die "dispatch project directory not found: $CATALOG_CWD"
-CATALOG_CWD=$(cd "$CATALOG_CWD" && pwd -P) || die "dispatch project directory cannot be resolved: $CATALOG_CWD"
 
 # ---- inputs --------------------------------------------------------------------
 [ -n "$BRIEF" ] || die "brief file required (see --help)"
@@ -335,6 +324,17 @@ done < <(jq -n -r --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slu
   .discover.harnesses[]
 ' /dev/null | awk '!seen[$0]++')
 if [ "${#CATALOG_HARNESSES[@]}" -gt 0 ]; then
+  CATALOG_CWD=${FM_DISPATCH_PROJECT_DIR:-}
+  if [ -z "$CATALOG_CWD" ] && [ -n "$PROJECT" ]; then
+    case "$PROJECT" in
+      projects/*) CATALOG_CWD="$FM_HOME/projects/${PROJECT#projects/}" ;;
+      /*) CATALOG_CWD="$PROJECT" ;;
+      *) [ -d "$FM_HOME/projects/$PROJECT" ] && CATALOG_CWD="$FM_HOME/projects/$PROJECT" ;;
+    esac
+  fi
+  [ -n "$CATALOG_CWD" ] || CATALOG_CWD=$PWD
+  [ -d "$CATALOG_CWD" ] || die "dispatch project directory not found: $CATALOG_CWD"
+  CATALOG_CWD=$(cd "$CATALOG_CWD" && pwd -P) || die "dispatch project directory cannot be resolved: $CATALOG_CWD"
   for catalog_harness in "${CATALOG_HARNESSES[@]}"; do
     catalog_account=''
     catalog_env=()
