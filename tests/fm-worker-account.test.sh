@@ -420,9 +420,21 @@ test_relaunch_guard_keeps_a_task_on_its_recorded_account() {
   assert_contains "$GUARD_OUT" "config/claude-account now selects account $a" "the refusal should name the account the pin selects"
   assert_contains "$GUARD_OUT" "Set config/claude-account back to '$b'" "the refusal should say how to proceed"
 
+  # A removed pin selects what an unpinned launch would use, so it is measured
+  # against the recorded account like any other pin.
   rm "$cfg/claude-account"
-  guard_says 0 "a home that no longer pins the runner must relaunch as before" \
+  CLAUDE_CONFIG_DIR='' guard_says 1 "a removed pin that would move the task to the ordinary account must refuse" \
     claude "$cfg" g1 claude "$b"
+  assert_contains "$GUARD_OUT" "config/claude-account is now absent, so the relaunch would use the ordinary account (~/.claude with CLAUDE_CONFIG_DIR unset)" \
+    "the refusal should name the account an unpinned relaunch would use"
+  assert_contains "$GUARD_OUT" "Set config/claude-account back to '$b'" "the refusal should say how to proceed"
+  CLAUDE_CONFIG_DIR=$a guard_says 1 "a removed pin that would move the task to the ambient root must refuse" \
+    claude "$cfg" g1 claude "$b"
+  assert_contains "$GUARD_OUT" "would use the ambient account $a" "the refusal should name the ambient root"
+  CLAUDE_CONFIG_DIR=$b guard_says 0 "a removed pin whose ambient root is the recorded account must not refuse" \
+    claude "$cfg" g1 claude "$b"
+  CLAUDE_CONFIG_DIR='' guard_says 0 "a removed pin on the recorded ordinary account must not refuse" \
+    claude "$cfg" g1 claude ordinary
 
   # `ordinary` is an account like any other: for Claude it is the one no
   # directory is named for, and for Pi it is the root under HOME.
@@ -445,8 +457,17 @@ test_relaunch_guard_keeps_a_task_on_its_recorded_account() {
   printf '%s\nopenai-codex\n' "$pi_home/.pi/agent" > "$cfg/pi-account"
   guard_says 0 "a Pi pin naming the ordinary root outright must not refuse" \
     pi-signed "$cfg" g1 pi ordinary
+  rm "$cfg/pi-account"
+  guard_says 0 "a removed Pi pin on the recorded ordinary root must not refuse" \
+    pi "$cfg" g1 pi ordinary
+  guard_says 1 "a removed Pi pin that would move the task off its recorded root must refuse" \
+    pi "$cfg" g1 pi "$TMP_ROOT/guard/pi-other"
+  assert_contains "$GUARD_OUT" "config/pi-account is now absent, so the relaunch would use the ambient account $pi_home/.pi/agent" \
+    "the refusal should name the Pi root an unpinned relaunch would use"
+  PI_CODING_AGENT_DIR=$TMP_ROOT/guard/pi-other guard_says 0 "a removed Pi pin whose ambient root is the recorded one must not refuse" \
+    pi "$cfg" g1 pi "$TMP_ROOT/guard/pi-other"
   HOME=$saved_home
-  pass "the relaunch guard refuses only a pin that has moved off the task's recorded account"
+  pass "the relaunch guard refuses only a pin, present or removed, that has moved off the task's recorded account"
 }
 
 test_absent_pin_keeps_the_launch_unchanged

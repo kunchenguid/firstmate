@@ -203,28 +203,43 @@ fm_worker_account_describe() {
 # The one check that keeps a relaunch on the account its task was launched on,
 # shared by bin/fm-control.sh's pre-stop resolution and bin/fm-spawn.sh
 # --relaunch so both refuse identically for every pinnable runner. Returns 0
-# and changes nothing when the task records no account, when the home no
-# longer pins this runner, when the replacement harness reads a different pin
-# file than the recorded one, or when both select the same account directory.
-# Otherwise prints one refusal naming the recorded account, the account the
-# current pin selects, and both ways forward, and returns 1. Runs before the
-# sign-in check, so a pin pointing somewhere else is reported as the move it
-# is rather than as whatever that other account's login happens to say.
+# and changes nothing when the task records no account, when the replacement
+# harness reads a different pin file than the recorded one, or when both
+# select the same account directory. A home that no longer pins this runner
+# selects what an unpinned launch uses: this process's CLAUDE_CONFIG_DIR or
+# else the ordinary account for Claude, and the ambient PI_CODING_AGENT_DIR or
+# else $HOME/.pi/agent for Pi. Otherwise prints one refusal naming the
+# recorded account, the account the relaunch would use, and both ways
+# forward, and returns 1. Runs before the sign-in check, so a pin pointing
+# somewhere else is reported as the move it is rather than as whatever that
+# other account's login happens to say.
 fm_worker_account_relaunch_guard() {
   local harness=$1 config=$2 id=$3 recorded_harness=${4:-} recorded=${5:-}
-  local file recorded_file selection declared root recorded_root
+  local file recorded_file selection declared root recorded_root now
   [ -n "$recorded" ] || return 0
   file=$(fm_worker_account_file "$harness") || return 0
   recorded_file=$(fm_worker_account_file "$recorded_harness") || return 0
   [ "$file" = "$recorded_file" ] || return 0
   selection=$(fm_worker_account_resolve "$harness" "$config") || return 1
-  [ -n "$selection" ] || return 0
-  declared=${selection%%$'\t'*}
-  root=${selection#*$'\t'}
-  root=${root%%$'\t'*}
+  if [ -n "$selection" ]; then
+    declared=${selection%%$'\t'*}
+    root=${selection#*$'\t'}
+    root=${root%%$'\t'*}
+    now="config/$file now selects $(fm_worker_account_describe "$harness" "$declared")"
+  else
+    case "$harness" in
+    claude) root=${CLAUDE_CONFIG_DIR:-} ;;
+    *) root=${PI_CODING_AGENT_DIR:-$(fm_worker_account_root "$harness" ordinary)} || return 1 ;;
+    esac
+    if [ -n "$root" ]; then
+      now="config/$file is now absent, so the relaunch would use the ambient account $root"
+    else
+      now="config/$file is now absent, so the relaunch would use $(fm_worker_account_describe "$harness" ordinary)"
+    fi
+  fi
   recorded_root=$(fm_worker_account_root "$recorded_harness" "$recorded") || return 1
   ! fm_worker_account_same_root "$root" "$recorded_root" || return 0
-  echo "error: task $id was launched on $(fm_worker_account_describe "$recorded_harness" "$recorded"), but config/$file now selects $(fm_worker_account_describe "$harness" "$declared"); relaunching would move the task to a different account directory, and the replacement would start without the outgoing worker's session state, which stays under the recorded account. Set config/$file back to '$recorded' to relaunch this task, or leave it and start a fresh task on the new account" >&2
+  echo "error: task $id was launched on $(fm_worker_account_describe "$recorded_harness" "$recorded"), but $now; relaunching would move the task to a different account directory, and the replacement would start without the outgoing worker's session state, which stays under the recorded account. Set config/$file back to '$recorded' to relaunch this task, or leave it and start a fresh task on the new account" >&2
   return 1
 }
 
