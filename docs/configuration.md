@@ -503,6 +503,29 @@ This applies only to agents Firstmate launches; the captain's own primary Firstm
 
 Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
 
+## Worker memory cap (config/worker-memory-max)
+
+The optional local, gitignored `config/worker-memory-max` caps the memory of each ship and scout lane so one runaway tool inside a lane cannot push the whole host into out-of-memory.
+With no file, every launch is unchanged.
+It requires Linux with a reachable systemd user manager, because each capped lane runs inside a transient `systemd-run --user --scope` unit with `MemoryMax` and `MemorySwapMax` set to the cap.
+The scope holds the agent and every process it starts, so the kernel's cgroup OOM killer acts inside that lane only; systemd then stops the whole scope and Firstmate appends a `failed:` status line naming the cap, so supervision sees a lane failure rather than a host event.
+
+Write one rule per line as `<harness|*> <project|*> <MiB>`, where the harness is the resolved worker harness, the project is the basename of the project clone, and the cap is a positive whole number of mebibytes; `#` comments and blank lines are allowed.
+The first matching rule wins, so put specific rules above general ones, and a lane no rule matches runs uncapped.
+Size each cap from the lane's measured working set plus headroom for the agent itself, for example:
+
+```text
+# <harness|*> <project|*> <MiB>
+* big-monorepo 5120
+* * 2560
+```
+
+A malformed file, or a matched cap on a host where the scope cannot be started, refuses the spawn or relaunch before any endpoint, worktree, or task record exists, rather than launching the lane uncapped.
+The capped launch runs under noninteractive POSIX `sh`, so raw launch commands must use compatible syntax.
+Secondmates are never capped, and the file is not inherited into secondmate homes.
+The accepted cap appears as `memory_max=<N>MiB` on the spawn confirmation line.
+[`bin/fm-worker-memory-cap.sh`](../bin/fm-worker-memory-cap.sh) owns the rule format, the host probe, and the outcome record, with regression coverage in [`tests/fm-worker-memory-cap.test.sh`](../tests/fm-worker-memory-cap.test.sh).
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
