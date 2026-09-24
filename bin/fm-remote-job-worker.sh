@@ -358,7 +358,12 @@ worker_recorded_execution_alive() { # <job-dir> process|group <pid>
     case "$identity_status" in
       0) ;;
       1) return 1 ;;
-      2) worker_process_or_group_alive process "$pid"; return ;;
+      2)
+        # Bash 5.2 drops the failing status of a bare return when this function
+        # runs in a conditional, so a dead process still looks alive.
+        worker_process_or_group_alive process "$pid"
+        return $?
+        ;;
     esac
   else
     worker_group_identity_status "$job" "$pid"
@@ -366,7 +371,12 @@ worker_recorded_execution_alive() { # <job-dir> process|group <pid>
     case "$identity_status" in
       0|3) ;;
       1) return 1 ;;
-      2) worker_process_or_group_alive group "$pid"; return ;;
+      2)
+        # Bash 5.2 drops the failing status of a bare return when this function
+        # runs in a conditional, so a dead group still looks alive.
+        worker_process_or_group_alive group "$pid"
+        return $?
+        ;;
     esac
   fi
   worker_process_or_group_alive "$kind" "$pid"
