@@ -156,8 +156,9 @@
 # blocked: record in the target task's state/<id>.status. fm-send itself
 # appends the closing resolved line to that status file, so the captain-facing
 # OPEN DECISIONS record closes at answer time and never depends on the busy
-# worker writing a matching resolved line. Ordinary keys close with
-# "resolved [key=<key>]: answered: <capped excerpt>". A reserved key
+# worker writing a matching resolved line. For ordinary keys the payload is
+# "resolved [key=<key>]: answered: <capped excerpt>" before the emission-time
+# handling owned by bin/fm-classify-lib.sh. A reserved key
 # (pending-reply-* today; bin/fm-classify-lib.sh's reserved-key guard) is
 # closed with the owning library's vocabulary note
 # (fm_pending_reply_close_note_for_key / fm_pending_reply_resolved_note), so
@@ -175,6 +176,14 @@
 # open-decision ledger fm-wake-drain folds lives in this home's own state dir
 # (a remote mate's escalations reach it through the parent-replies ingest);
 # only the answer message crosses the backend or remote transport.
+#
+# Answering a decision is the gate-answer path and is main-owned while
+# attended: when any named key is an open needs-decision or a captain-held task
+# (a blocked: key is ordinary steering and stays lease-guarded only), the Pi
+# supervision branch is refused outright, exactly as its prompt promises. While
+# the away-posture record exists main is parked and that one refusal relocates
+# to the branch (contract: bin/fm-lease-lib.sh); which findings firstmate may
+# decide at all remains ask-user-authority's judgment for either actor.
 #
 # Chat is also a channel that carries keyed captain answers, so the same flag
 # feeds bin/fm-captain-hold.sh's one keyed-answer intake for any key that names
@@ -551,6 +560,7 @@ RESOLVE_STATUS_FILE=
 # longer owns also keeps the common path free of any backlog read.
 RESOLVE_STATUS_KEYS=
 RESOLVE_HOLD_KEYS=
+RESOLVE_CLOSE_MAX=$FM_LINE_CAP_DEFAULT
 
 # Resolve a --resolve-key key that the status log no longer owns to the
 # captain-held task that carries it: the key as a task id itself (the collapsed
@@ -636,8 +646,29 @@ if [ -n "$RESOLVE_KEYS" ]; then
     echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
     exit 1
   done
+  # The decision-answer partition (the header's "Answering a decision"
+  # contract): a key that is an open needs-decision, or already a captain-held
+  # task, is a decision, and answering one is main-owned while attended. A
+  # blocked: key is ordinary steering and takes no partition guard. Under the
+  # away-posture record the guard passes the branch instead (relocation:
+  # bin/fm-lease-lib.sh); which findings firstmate may decide at all stays
+  # ask-user-authority's judgment, for either actor.
+  RESOLVE_IS_DECISION=0
+  [ -z "$RESOLVE_HOLD_KEYS" ] || RESOLVE_IS_DECISION=1
+  for k in $RESOLVE_STATUS_KEYS; do
+    [ "$(_fm_open_set_verb "$resolve_open_set" "$k")" = needs-decision ] && RESOLVE_IS_DECISION=1
+  done
+  if [ "$RESOLVE_IS_DECISION" -eq 1 ]; then
+    fm_lease_forbid_branch "decision answer (fm-send --resolve-key)" --away-relocated
+  fi
   # Refuse before send when a named status-log key cannot actually close: a
   # reserved key with an answered: note is a silent no-op in the fold.
+  # The cap bounds the line that is actually APPENDED, and the self-announced
+  # append stamps each line with its emission time. Reserve that stamp's width
+  # here so the probe below measures the same bytes the writer will produce and
+  # the close record stays inside the cap this refusal cites.
+  RESOLVE_CLOSE_MAX=$((FM_LINE_CAP_DEFAULT - $(status_stamp_width)))
+  [ "$RESOLVE_CLOSE_MAX" -ge 0 ] || RESOLVE_CLOSE_MAX=0
   resolve_excerpt=$(printf '%s' "$*" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_STATUS_KEYS; do
     probe=$(fm_send_resolve_close_note "$k" "$resolve_excerpt")
@@ -646,7 +677,7 @@ if [ -n "$RESOLVE_KEYS" ]; then
       exit 1
     fi
     probe_line="resolved [key=$k]: $probe"
-    fm_cap_line_var "$probe_line"
+    fm_cap_line_var "$probe_line" "$RESOLVE_CLOSE_MAX"
     probe_key=$(_fm_decision_key "$FM_LINE_CAP_LINE") || probe_key=
     if [ "$(status_line_verb "$FM_LINE_CAP_LINE")" != resolved ] || [ "$probe_key" != "$k" ]; then
       echo "error: --resolve-key cannot close a decision key of length ${#k}: its ${#probe_line}-character close record exceeds the $FM_LINE_CAP_DEFAULT-character status-line cap, and truncation would remove the structural key delimiter. Refusing rather than writing an ineffective close; nothing was sent." >&2
@@ -659,31 +690,41 @@ fi
 # durably sent: enqueued on the inbox plane, submit-confirmed on the typed
 # plane. An append failure exits nonzero with the manual close
 # command; the decision then stays open and re-surfaces, never silently lost.
-# The close is this home's own bookkeeping, written by the very turn that
-# answered the decision, so it goes through the guarded self-announced append
-# (bin/fm-wake-lib.sh) and does not wake this same session again; any
-# concurrent foreign status bytes leave the watcher's wake path untouched.
+# All of one answer's closes are this home's own bookkeeping, written by the
+# very turn that answered the decisions, so they go through ONE guarded
+# self-announced append (bin/fm-wake-lib.sh). That records the appended byte
+# range so separate --resolve-key answers do not each wake this same session,
+# including when this home already folded those bytes through OPEN DECISIONS
+# without a matching watcher seen marker; any concurrent foreign status bytes,
+# or a worker line the fold read but never listed, leave the watcher's wake
+# path untouched.
 fm_send_close_resolved_keys() { # <answer-text>
-  local note=$1 k line close_note append_rc still manual_close_cmd
+  local note=$1 k close_note append_rc still manual_close_cmd close_lines=() i=0
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_STATUS_KEYS; do
     close_note=$(fm_send_resolve_close_note "$k" "$note")
-    line="resolved [key=$k]: $close_note"
-    fm_cap_line_var "$line"
-    printf -v manual_close_cmd "printf '%%s\\n' %q >> %q" "$FM_LINE_CAP_LINE" "$RESOLVE_STATUS_FILE"
-    append_rc=0
-    fm_wake_status_append_self_announced "$STATE" "$RESOLVE_STATUS_FILE" "$FM_LINE_CAP_LINE" || append_rc=$?
-    if [ "$append_rc" -eq 2 ]; then
-      echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it manually with: $manual_close_cmd - do not resend the answer." >&2
-      return 1
-    fi
-    still=$(status_open_decisions "$RESOLVE_STATUS_FILE")
+    fm_cap_line_var "resolved [key=$k]: $close_note" "$RESOLVE_CLOSE_MAX"
+    close_lines+=("$FM_LINE_CAP_LINE")
+  done
+  [ "${#close_lines[@]}" -gt 0 ] || return 0
+  append_rc=0
+  fm_wake_status_append_self_announced "$STATE" "$RESOLVE_STATUS_FILE" "${close_lines[@]}" || append_rc=$?
+  if [ "$append_rc" -eq 2 ]; then
+    printf -v manual_close_cmd ' %q' "${close_lines[@]}"
+    printf -v manual_close_cmd "printf '%%s\\n'%s >> %q" "$manual_close_cmd" "$RESOLVE_STATUS_FILE"
+    echo "error: the answer was delivered to $T, but the close for decision key(s) '$RESOLVE_STATUS_KEYS' could not be appended to $RESOLVE_STATUS_FILE. Close it manually with: $manual_close_cmd - do not resend the answer." >&2
+    return 1
+  fi
+  still=$(status_open_decisions "$RESOLVE_STATUS_FILE")
+  for k in $RESOLVE_STATUS_KEYS; do
     case "$still" in
     "$k"$'\t'* | *$'\n'"$k"$'\t'*)
+      printf -v manual_close_cmd "printf '%%s\\n' %q >> %q" "${close_lines[$i]}" "$RESOLVE_STATUS_FILE"
       echo "error: the answer was delivered to $T, but decision key '$k' is still open in $RESOLVE_STATUS_FILE; it may have been reopened concurrently or the fold did not accept the close. Close it manually with: $manual_close_cmd - do not resend the answer." >&2
       return 1
       ;;
     esac
+    i=$((i + 1))
   done
 }
 

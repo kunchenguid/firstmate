@@ -10,7 +10,11 @@
 #   - Scope: only a genuine primary checkout (plain checkout or validly marked
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
 #     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
-#   - Identity: only when THIS session's harness ancestor holds state/.lock.
+#   - Identity: only when THIS session holds state/.lock, as
+#     bin/fm-session-lock-lib.sh decides it: the recorded pid is a harness
+#     ancestor, or a live lock was recorded under this same trusted Claude
+#     session id (which is what keeps a background session arming after its
+#     transient helper chain is recycled).
 #     When an existing numeric owner fails the shared harness-liveness predicate,
 #     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
 #     ownership. A live owner, missing lock, malformed lock, or unresolved
@@ -36,7 +40,13 @@
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together.
 #     HUP, TERM, and INT are translated through the ordinary durable failure
-#     handoff instead of leaving the generation frozen at arming.
+#     handoff instead of leaving the generation frozen at arming. Claude does
+#     not deliver the exit 2 of a hook it terminated at the configured timeout
+#     as a rewake (measured on Claude Code 2.1.278 and 2.1.281,
+#     docs/verification/supervision.md), so a park that outlives that timeout
+#     records the failure durably without waking an idle primary; nothing here
+#     shortens a quiet park, because no-change heartbeats are absorbed without
+#     closing the arm.
 #   - Translation: while supervision is still needed and AFK remains inactive,
 #     an actionable arm close (signal:/stale:/check:/heartbeat) prints one
 #     rewake banner to stderr and exits 2, which wakes Claude even while idle
@@ -214,7 +224,8 @@ autoarm_record() {  # <outcome>
 # watcher until its next wake, so that wait cannot be shortened without adding
 # artificial turns. Translate a host interruption through the ordinary durable
 # failure protocol instead: the winning generation records a terminal outcome,
-# creates the episode marker, and exits 2 so Claude delivers a recovery turn.
+# creates the episode marker, and exits 2 so Claude delivers a recovery turn -
+# except after Claude's own timeout kill, whose exit 2 is dropped (header).
 # A superseded generation remains silent, and an episode whose attended
 # fail-open was already consumed must not restart automatic continuation.
 # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.

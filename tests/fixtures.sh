@@ -124,6 +124,26 @@ case "${1:-}" in
       prev=
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
+          # A spawn types a short line sourcing its staged launch file; log
+          # the staged command itself so suites assert what the pane runs.
+          # Direct literals past the terminal line buffer are truncated, so a
+          # long launch only survives when it arrived through that short source.
+          case "$a" in
+            ". '"*"'")
+              staged=${a#". '"}
+              staged=${staged%"'"}
+              if [ -f "$staged" ]; then
+                a=$(cat "$staged")
+              elif [ "${#a}" -gt 1024 ]; then
+                a=${a:0:1024}
+              fi
+              ;;
+            *)
+              if [ "${#a}" -gt 1024 ]; then
+                a=${a:0:1024}
+              fi
+              ;;
+          esac
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
         fi
         prev=$a
@@ -287,21 +307,14 @@ fm_test_config_claude_account() {
 }
 
 # fm_test_fake_account_auth <fakebin>
-# Installs the two authentication checks the spawn preflight runs under a
-# selected account: a quota-axi answering `auth --json --provider claude`, and
-# fm-fake-pi-auth for a fake pi to exec on `auth check`. The preflight scrubs
-# its environment, so each answers from a .fake-auth file inside the selected
-# root (for ordinary Claude, with CLAUDE_CONFIG_DIR unset, $HOME/.claude),
-# holding the status to report; absent means authenticated.
+# Installs the sign-in checks bin/fm-worker-account-lib.sh runs under a
+# selected account: a claude that exits 0 for `auth status`, and a pi that
+# answers `auth check` ready unless the selected root's .fake-auth says
+# otherwise. A later test may replace either binary.
 fm_test_fake_account_auth() {
   local fakebin=$1
-  cat > "$fakebin/quota-axi" <<'SH'
-#!/bin/sh
-status=$(cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.fake-auth" 2>/dev/null) || status=available
-printf '{"schemaVersion":1,"auth":[{"provider":"claude","sources":[{"source":"keychain","status":"%s"}]}]}\n' "$status"
-SH
-  chmod +x "$fakebin/quota-axi"
-  fm_test_fake_pi_runner "$fakebin"
+  fm_fake_exit0 "$fakebin" claude
+  fm_test_fake_pi_runner "$fakebin" pi pi-signed
 }
 
 # fm_test_fake_pi_runner <fakebin> [runner...]

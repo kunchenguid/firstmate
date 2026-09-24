@@ -1,619 +1,394 @@
 #!/usr/bin/env bash
-# Behavior tests for explicit worker-account selection (issue 4574).
+# Behavior tests for the per-home worker account pin
+# (config/claude-account, config/pi-account; bin/fm-worker-account-lib.sh).
 #
-# Exercised through bin/fm-worker-account-lib.sh (the sourced public interface)
-# and through bin/fm-spawn.sh launch construction and refusal. Assertions pin
-# observable spawn behavior: exit status, stderr, metadata presence, and the
-# captured launch command. They do not grep implementation source.
+# Each case drives the real fm-spawn.sh through the shared fake tmux, which
+# records the launch command, then runs that command in a synthetic pane whose
+# ambient environment carries a different account. The fake claude and pi
+# answer the sign-in checks the way the real runners do - an environment
+# credential counts as signed in, otherwise the selected root's stored login
+# decides - and record the account environment and arguments a launched worker
+# receives. tests/fm-worker-account-live-e2e.test.sh proves those answers
+# against the real runners.
 set -u
 
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
-# shellcheck source=/dev/null
-. "$ROOT/bin/fm-worker-account-lib.sh"
-
 TMP_ROOT=$(fm_test_tmproot fm-worker-account)
+unset LAVISH_AXI_HOST ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN PI_CODING_AGENT_DIR OPENAI_API_KEY
 
-make_world() {
-  local name=$1 harness=${2:-claude} world home fakebin
-  world="$TMP_ROOT/$name"
-  home="$world/home"
-  fakebin=$(fm_test_make_spawn_fakebin "$world/fake" pi pi-signed)
-  fm_test_spawn_home "$home" "$harness"
-  printf '%s\n' "$world|$home|$fakebin"
+# make_account_fakes <fakebin> <case-dir>
+# The fakes cannot read test variables during a sign-in check, which runs with
+# a cleared environment, so their log paths are written into them here.
+make_account_fakes() {
+  local fakebin=$1 dir=$2
+  cat > "$fakebin/claude" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = auth ] && [ "\${2:-}" = status ]; then
+  printf '%s\n' "\${CLAUDE_CONFIG_DIR-unset}" >> '$dir/claude-checks'
+  [ -z "\${ANTHROPIC_API_KEY:-}\${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || exit 0
+  [ -f "\${CLAUDE_CONFIG_DIR:-\$HOME/.claude}/.credentials.json" ]
+  exit
+fi
+{
+  printf 'CLAUDE_CONFIG_DIR=%s\n' "\${CLAUDE_CONFIG_DIR-unset}"
+  printf 'ANTHROPIC_API_KEY=%s\n' "\${ANTHROPIC_API_KEY-unset}"
+  printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "\${CLAUDE_CODE_OAUTH_TOKEN-unset}"
+  printf 'CLAUDE_CODE_USE_BEDROCK=%s\n' "\${CLAUDE_CODE_USE_BEDROCK-unset}"
+} > '$dir/claude-worker'
+SH
+  cat > "$fakebin/pi" <<SH
+#!/usr/bin/env bash
+root=\${PI_CODING_AGENT_DIR:-\$HOME/.pi/agent}
+case "\${1:-}" in
+  --help) printf '%s\n' 'Pi 0.86.1' 'Options: --help --tui-mode <mode>'; exit 0 ;;
+  auth)
+    provider=\$4
+    printf '%s %s\n' "\${PI_CODING_AGENT_DIR-unset}" "\$provider" >> '$dir/pi-checks'
+    if [ -f "\$root/old-pi" ]; then echo "Unknown command: auth" >&2; exit 1; fi
+    if [ -n "\${OPENAI_API_KEY:-}" ] || grep -qx "\$provider" "\$root/signed-in" 2>/dev/null; then
+      printf '{"status":"ready","provider":"%s","authType":"oauth"}\n' "\$provider"
+      exit 0
+    fi
+    if grep -qx "\$provider" "\$root/extension-providers" 2>/dev/null; then
+      printf '{"status":"not_ready","provider":"%s","reason":"provider_not_found"}\n' "\$provider"
+      exit 1
+    fi
+    printf '{"status":"not_ready","provider":"%s","reason":"credentials_not_configured"}\n' "\$provider"
+    exit 1
+    ;;
+  --list-models)
+    printf 'provider  model  context\n'
+    [ ! -f "\$root/listed" ] || cat "\$root/listed"
+    exit 0
+    ;;
+esac
+{
+  printf 'PI_CODING_AGENT_DIR=%s\n' "\${PI_CODING_AGENT_DIR-unset}"
+  printf 'ARGS=%s\n' "\$*"
+} > '$dir/pi-worker'
+SH
+  chmod +x "$fakebin/claude" "$fakebin/pi"
 }
 
-read_world() {
-  IFS='|' read -r WORLD HOME_DIR FAKEBIN_DIR <<EOF
-$1
-EOF
+# new_case <name> <crew-harness> -> sets CASE HOME_DIR PROJ WT FAKEBIN
+new_case() {
+  CASE="$TMP_ROOT/$1"
+  HOME_DIR="$CASE/home"
+  PROJ="$CASE/project"
+  WT="$CASE/wt"
+  FAKEBIN=$(fm_test_make_spawn_fakebin "$CASE/fake")
+  make_account_fakes "$FAKEBIN" "$CASE"
+  fm_test_spawn_home "$HOME_DIR" "$2"
+  fm_git_worktree "$PROJ" "$WT" "wt-$1"
+  mkdir -p "$HOME_DIR/user-home"
+  : > "$CASE/launch.log"
 }
 
-run_account_spawn() {
-  local home=$1 wt=$2 fakebin=$3 launchlog=$4
-  shift 4
-  mkdir -p "$wt"
-  : > "$launchlog"
-  FM_FAKE_LAUNCH_LOG="$launchlog" \
-    fm_test_run_spawn "$home" "$wt" "$fakebin" "$@"
+# signed_in_claude_root <dir>: a Claude config root holding a stored login.
+signed_in_claude_root() {
+  mkdir -p "$1"
+  printf '{}\n' > "$1/.credentials.json"
 }
 
-# --- library: resolve --------------------------------------------------------
-
-test_missing_claude_declaration_refuses() {
-  local dir cfg err rc
-  dir="$TMP_ROOT/lib-missing-claude"
-  mkdir -p "$dir/config"
-  cfg="$dir/config/claude-account"
-  err=$(mktemp "$dir/err.XXXXXX")
-  fm_worker_account_resolve claude "$dir/config" "$dir" >"$dir/out" 2>"$err"
-  rc=$?
-  expect_code 1 "$rc" "a missing Claude declaration must refuse"
-  assert_contains "$(cat "$err")" "require an explicit account selection" \
-    "refusal must say the declaration is required"
-  assert_contains "$(cat "$err")" "$cfg" "refusal must name the file to create"
-  assert_contains "$(cat "$err")" "does not spend an ambient" \
-    "refusal must distinguish absence from ordinary-account consent"
-  pass "a missing Claude account declaration refuses with the file to create"
+# spawn_ship <id> [fm-spawn args...]: a ship spawn from HOME_DIR whose invoking
+# process carries an ambient signed-in Claude root and an ambient API key.
+spawn_ship() {
+  local id=$1
+  shift
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  signed_in_claude_root "$CASE/ambient-claude"
+  : > "$CASE/launch.log"
+  FM_FAKE_LAUNCH_LOG="$CASE/launch.log" FM_TEST_CLAUDE_CONFIG_DIR="$CASE/ambient-claude" \
+    ANTHROPIC_API_KEY=ambient-invoker-key \
+    fm_test_run_spawn "$HOME_DIR" "$WT" "$FAKEBIN" "$id" "$PROJ" --mode no-mistakes --yolo off "$@"
 }
 
-test_missing_pi_declaration_refuses() {
-  local dir err rc
-  dir="$TMP_ROOT/lib-missing-pi"
-  mkdir -p "$dir/config"
-  err=$(mktemp "$dir/err.XXXXXX")
-  fm_worker_account_resolve pi "$dir/config" "$dir" >"$dir/out" 2>"$err"
-  rc=$?
-  expect_code 1 "$rc" "a missing Pi declaration must refuse"
-  assert_contains "$(cat "$err")" "$dir/config/pi-account" \
-    "refusal must name config/pi-account"
-  pass "a missing Pi account declaration refuses with the file to create"
+# run_pane: execute the recorded launch in a pane whose ambient environment
+# names another account for every runner.
+run_pane() {
+  env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN:$PATH" TERM=xterm \
+    CLAUDE_CONFIG_DIR="$CASE/ambient-claude" ANTHROPIC_API_KEY=ambient-pane-key \
+    CLAUDE_CODE_OAUTH_TOKEN=ambient-pane-token CLAUDE_CODE_USE_BEDROCK=1 \
+    PI_CODING_AGENT_DIR="$CASE/ambient-pi" OPENAI_API_KEY=ambient-pane-openai \
+    bash -c "$(cat "$CASE/launch.log")" || fail "the recorded launch failed in the synthetic pane"
 }
 
-test_ordinary_claude_selects_the_unset_config_dir() {
-  local dir out
-  dir="$TMP_ROOT/lib-ordinary-claude"
-  mkdir -p "$dir/config"
-  printf 'ordinary\n' > "$dir/config/claude-account"
-  out=$(fm_worker_account_resolve claude "$dir/config" "$dir") || fail "ordinary Claude must resolve"
-  # Claude keys its Keychain entry to any CLAUDE_CONFIG_DIR that is set, so the
-  # default login is reachable only with the variable unset: an empty root.
-  [ "$out" = $'\t\t' ] || fail "ordinary Claude must resolve to an empty root, no provider, no environment; got '$out'"
-  pass "ordinary Claude selects the default login, with CLAUDE_CONFIG_DIR unset"
+# assert_refused_before_launch <id> <out> <needle>
+assert_refused_before_launch() {
+  local id=$1 out=$2 needle=$3
+  assert_contains "$out" "$needle" "the refusal should say: $needle"
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn must not publish a task record"
+  [ ! -s "$CASE/launch.log" ] || fail "a refused spawn must not launch a worker: $(cat "$CASE/launch.log")"
 }
 
-test_environment_line_is_an_explicit_selection() {
-  local dir err
-  dir="$TMP_ROOT/lib-environment"
-  mkdir -p "$dir/config" "$dir/accounts/work"
-  err=$(mktemp "$TMP_ROOT/env-err.XXXXXX")
-  printf '%s\nenvironment\n' "$dir/accounts/work" > "$dir/config/claude-account"
-  [ "$(fm_worker_account_resolve claude "$dir/config" "$dir")" = "$dir/accounts/work"$'\t\tenvironment' ] || \
-    fail "a Claude root followed by environment must resolve with the environment selection"
-  printf 'ordinary\nfake\nenvironment\n' > "$dir/config/pi-account"
-  mkdir -p "$dir/user/.pi/agent"
-  [ "$(HOME="$dir/user" fm_worker_account_resolve pi "$dir/config" "$dir")" = "$dir/user/.pi/agent"$'\tfake\tenvironment' ] || \
-    fail "a Pi root and provider followed by environment must resolve with the environment selection"
-  printf '%s\nenv\n' "$dir/accounts/work" > "$dir/config/claude-account"
-  fm_worker_account_resolve claude "$dir/config" "$dir" >/dev/null 2>"$err" && \
-    fail "a second line other than environment must refuse"
-  assert_contains "$(cat "$err")" "optionally 'environment'" "refusal must name the accepted second line"
-  pass "a final environment line is the explicit selection of environment credentials"
+test_absent_account_refuses_claude_and_pi() {
+  local out rc id=acct-absent
+  new_case absent claude
+  rm -f "$HOME_DIR/config/claude-account" "$HOME_DIR/config/pi-account"
+  out=$(spawn_ship "$id"); rc=$?
+  expect_code 1 "$rc" "a Claude spawn with no account file should refuse: $out"
+  assert_refused_before_launch "$id" "$out" "config/claude-account is absent"
+  assert_contains "$out" "does not spend an ambient" "the refusal should say the ambient login is not spent"
+
+  new_case absent-pi pi
+  rm -f "$HOME_DIR/config/claude-account" "$HOME_DIR/config/pi-account"
+  out=$(spawn_ship acct-absent-pi --model gpt-5.5); rc=$?
+  expect_code 1 "$rc" "a Pi spawn with no account file should refuse: $out"
+  assert_refused_before_launch acct-absent-pi "$out" "config/pi-account is absent"
+  assert_contains "$out" "does not spend an ambient" "the Pi refusal should say the ambient login is not spent"
+  pass "an absent account file refuses Claude and Pi launches"
 }
 
-test_explicit_claude_path_is_the_selected_root() {
-  local dir root
-  dir="$TMP_ROOT/lib-path-claude"
-  mkdir -p "$dir/config" "$dir/accounts/work"
-  printf '%s\n' "$dir/accounts/work" > "$dir/config/claude-account"
-  root=$(fm_worker_account_resolve claude "$dir/config" "$dir")
-  root=${root%%$'\t'*}
-  [ "$root" = "$dir/accounts/work" ] || fail "explicit Claude root was '$root'"
-  pass "an explicit Claude path is the selected account root"
+test_claude_pin_selects_the_root_and_sheds_ambient_credentials() {
+  local out rc id=acct-claude
+  new_case claude-pin claude
+  signed_in_claude_root "$CASE/work"
+  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  out=$(spawn_ship "$id"); rc=$?
+  expect_code 0 "$rc" "a Claude spawn pinned to a signed-in root should succeed: $out"
+  assert_contains "$out" "account=$CASE/work" "the spawn should report the pinned account"
+  assert_grep "account=$CASE/work" "$HOME_DIR/state/$id.meta" "the task record should carry the pinned account"
+  [ "$(cat "$CASE/claude-checks")" = "$CASE/work" ] \
+    || fail "the sign-in check should ask about the pinned root only: $(cat "$CASE/claude-checks")"
+  assert_contains "$(cat "$CASE/work/.claude.json" 2>/dev/null)" "$WT" \
+    "workspace trust should be registered in the pinned root's store"
+  assert_absent "$CASE/ambient-claude/.claude.json" "the ambient Claude store must not receive the trust entry"
+  run_pane
+  assert_grep "CLAUDE_CONFIG_DIR=$CASE/work" "$CASE/claude-worker" "the worker should run under the pinned root"
+  assert_grep "ANTHROPIC_API_KEY=unset" "$CASE/claude-worker" "an ambient API key must not outrank the pin"
+  assert_grep "CLAUDE_CODE_OAUTH_TOKEN=unset" "$CASE/claude-worker" "an ambient OAuth token must not outrank the pin"
+  assert_grep "CLAUDE_CODE_USE_BEDROCK=unset" "$CASE/claude-worker" "an ambient cloud-provider switch must not outrank the pin"
+  pass "a Claude pin selects its root and sheds the credentials that would outrank it"
 }
 
-test_pi_declaration_requires_a_provider() {
-  local dir err rc
-  dir="$TMP_ROOT/lib-pi-root-only"
-  mkdir -p "$dir/config" "$dir/accounts/pi"
-  printf '%s\n' "$dir/accounts/pi" > "$dir/config/pi-account"
-  err=$(mktemp "$dir/err.XXXXXX")
-  fm_worker_account_resolve pi "$dir/config" "$dir" >"$dir/out" 2>"$err"
-  rc=$?
-  expect_code 1 "$rc" "a Pi root without a provider must refuse"
-  assert_contains "$(cat "$err")" "providers this home may spend" \
-    "refusal must say selecting the root alone is not enough"
-  pass "selecting a Pi root without naming a provider refuses"
+test_claude_pin_refuses_a_signed_out_root_despite_an_ambient_login() {
+  local out rc id=acct-claude-out
+  new_case claude-signed-out claude
+  mkdir -p "$CASE/work"
+  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  out=$(spawn_ship "$id"); rc=$?
+  expect_code 1 "$rc" "a Claude pin to a signed-out root must refuse"
+  assert_refused_before_launch "$id" "$out" "config/claude-account pins Claude workers to $CASE/work, which is not signed in"
+  assert_absent "$CASE/work/.claude.json" "a refused spawn must not register trust in the pinned root"
+  pass "a Claude pin refuses a signed-out root even when the invoking process has a usable login and API key"
 }
 
-test_pi_ordinary_with_provider_resolves() {
-  local dir home root provider
-  dir="$TMP_ROOT/lib-ordinary-pi"
-  home="$dir/user"
-  mkdir -p "$home/.pi/agent" "$dir/config"
-  printf 'ordinary\nopenai-codex\n' > "$dir/config/pi-account"
-  HOME="$home" IFS=$'\t' read -r root provider <<EOF
-$(HOME="$home" fm_worker_account_resolve pi "$dir/config" "$dir")
-EOF
-  [ "$root" = "$home/.pi/agent" ] || fail "ordinary Pi root was '$root'"
-  [ "$provider" = openai-codex ] || fail "Pi provider was '$provider'"
-  pass "ordinary Pi plus a declared provider selects the vendor default root"
+test_claude_ordinary_pin_unsets_the_config_root() {
+  local out rc id=acct-ordinary
+  new_case ordinary claude
+  printf 'ordinary' > "$HOME_DIR/config/claude-account"
+  out=$(spawn_ship "$id"); rc=$?
+  expect_code 1 "$rc" "an ordinary pin with no default login must refuse"
+  assert_refused_before_launch "$id" "$out" "pins Claude workers to the ordinary account, which is not signed in"
+  signed_in_claude_root "$HOME_DIR/user-home/.claude"
+  : > "$CASE/claude-checks"
+  out=$(spawn_ship "$id"); rc=$?
+  expect_code 0 "$rc" "an ordinary pin with a default login should succeed: $out"
+  assert_contains "$out" "account=ordinary" "the spawn should report the ordinary account"
+  [ "$(cat "$CASE/claude-checks")" = unset ] \
+    || fail "the ordinary check must run with CLAUDE_CONFIG_DIR unset: $(cat "$CASE/claude-checks")"
+  assert_contains "$(cat "$HOME_DIR/user-home/.claude.json" 2>/dev/null)" "$WT" \
+    "ordinary trust should land in the default ~/.claude.json store"
+  assert_absent "$CASE/ambient-claude/.claude.json" "the ambient Claude store must not receive the trust entry"
+  run_pane
+  assert_grep "CLAUDE_CONFIG_DIR=unset" "$CASE/claude-worker" \
+    "the ordinary account must drop an ambient CLAUDE_CONFIG_DIR"
+  assert_grep "ANTHROPIC_API_KEY=unset" "$CASE/claude-worker" "an ambient API key must not outrank the ordinary pin"
+  pass "an ordinary Claude pin selects the default login and drops an ambient root"
 }
 
-test_pi_guard_requires_matching_provider_model() {
-  local err
-  err=$(mktemp "$TMP_ROOT/guard.XXXXXX")
-  fm_worker_account_pi_guard openai-codex openai-codex/gpt-5.4 || fail "matching provider/id must pass"
-  fm_worker_account_pi_guard openai-codex openai-codex-work/gpt-5.4 >"$TMP_ROOT/guard.out" 2>"$err" && \
-    fail "a different provider in --model must refuse"
-  assert_contains "$(cat "$err")" "openai-codex-work" \
-    "mismatch refusal must name the --model provider"
-  fm_worker_account_pi_guard openai-codex gpt-5.4 >"$TMP_ROOT/guard.out" 2>"$err" && \
-    fail "an unqualified model must refuse"
-  assert_contains "$(cat "$err")" "names no provider" \
-    "unqualified-model refusal must say the account cannot be proved"
-  fm_worker_account_pi_guard 'openai-codex codex-native' codex-native/gpt-6-astra || \
-    fail "any provider the home lists must pass"
-  fm_worker_account_pi_guard 'openai-codex codex-native' openai-codex/gpt-5.4 || \
-    fail "the first listed provider must pass too"
-  fm_worker_account_pi_guard 'openai-codex codex-native' openrouter/gpt-5.4 >"$TMP_ROOT/guard.out" 2>"$err" && \
-    fail "a provider missing from the list must refuse"
-  fm_worker_account_pi_guard 'openai-codex codex-native' codex/gpt-5.4 >"$TMP_ROOT/guard.out" 2>"$err" && \
-    fail "a prefix of a listed provider is not that provider"
-  pass "Pi launches must name a declared provider in --model"
-}
-
-test_raw_launch_flags_read_the_embedded_values() {
-  [ "$(fm_worker_account_raw_flag 'pi --model fake/test --offline' --model)" = fake/test ] || \
-    fail "space-separated --model was not read"
-  [ -z "$(fm_worker_account_raw_flag "pi --model='openai-codex/gpt-5.4'" --model)" ] || \
-    fail "Pi does not parse --model=<value>, so it must not count as a model"
-  [ -z "$(fm_worker_account_raw_flag 'pi --offline' --model)" ] || \
-    fail "a raw command with no --model must yield an empty model"
-  [ "$(fm_worker_account_raw_flag "pi --provider 'fake' --model fake/test" --provider)" = fake ] || \
-    fail "a quoted --provider was not read"
-  [ -z "$(fm_worker_account_raw_flag 'pi --model fake/test' --provider)" ] || \
-    fail "a raw command with no --provider must yield an empty provider"
-  pass "a raw Pi command's embedded --model and --provider are the account the launch would spend"
-}
-
-test_declaration_final_newline_is_optional() {
-  local dir err
-  dir="$TMP_ROOT/lib-no-final-newline"
-  mkdir -p "$dir/config" "$dir/accounts/work" "$dir/user/.pi/agent"
-  err=$(mktemp "$TMP_ROOT/newline-err.XXXXXX")
-  printf 'ordinary' > "$dir/config/claude-account"
-  [ "$(fm_worker_account_resolve claude "$dir/config" "$dir")" = $'\t\t' ] || \
-    fail "'ordinary' without a final newline must resolve"
-  printf '%s\nenvironment' "$dir/accounts/work" > "$dir/config/claude-account"
-  [ "$(fm_worker_account_resolve claude "$dir/config" "$dir")" = "$dir/accounts/work"$'\t\tenvironment' ] || \
-    fail "a Claude root and environment without a final newline must resolve"
-  printf 'ordinary\nfake' > "$dir/config/pi-account"
-  [ "$(HOME="$dir/user" fm_worker_account_resolve pi "$dir/config" "$dir")" = "$dir/user/.pi/agent"$'\tfake\t' ] || \
-    fail "a Pi root and provider without a final newline must resolve"
-  printf 'ordinary\r\n' > "$dir/config/claude-account"
-  fm_worker_account_resolve claude "$dir/config" "$dir" >/dev/null 2>"$err" && \
-    fail "a CR inside a line must still refuse"
-  assert_contains "$(cat "$err")" "no other control characters" "refusal must name the control-character rule"
-  pass "a declaration's final newline is optional while other control bytes still refuse"
-}
-
-# --- spawn -------------------------------------------------------------------
-
-test_spawn_refuses_claude_without_a_declaration_before_any_record() {
-  local rec world home fakebin wt launchlog out status id=no-claude-account
-  rec=$(make_world spawn-missing-claude claude)
-  read_world "$rec"
-  world=$WORLD
-  home=$HOME_DIR
-  fakebin=$FAKEBIN_DIR
-  rm -f "$home/config/claude-account"
-  wt="$world/wt"
-  fm_git_worktree "$world/proj" "$wt" wt-missing-claude
-  fm_test_spawn_brief "$home" "$id"
-  launchlog="$world/launch.log"
-  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" --mode no-mistakes --yolo off --harness claude 2>&1)
-  status=$?
-  expect_code 1 "$status" "claude spawn without config/claude-account must refuse"$'\n'"$out"
-  assert_contains "$out" "config/claude-account" "refusal must name the file"
-  assert_absent "$home/state/$id.meta" "a missing declaration must not publish metadata"
-  [ ! -s "$launchlog" ] || fail "a missing declaration launched an agent"
-  pass "a Claude spawn without an account declaration refuses before any record"
-}
-
-test_spawn_refuses_pi_without_a_declaration() {
-  local rec world home fakebin wt launchlog out status id=no-pi-account
-  rec=$(make_world spawn-missing-pi pi)
-  read_world "$rec"
-  world=$WORLD
-  home=$HOME_DIR
-  fakebin=$FAKEBIN_DIR
-  rm -f "$home/config/pi-account"
-  wt="$world/wt"
-  fm_git_worktree "$world/proj" "$wt" wt-missing-pi
-  fm_test_spawn_brief "$home" "$id"
-  launchlog="$world/launch.log"
-  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" --mode no-mistakes --yolo off --harness pi --model fake/test 2>&1)
-  status=$?
-  expect_code 1 "$status" "pi spawn without config/pi-account must refuse"$'\n'"$out"
-  assert_contains "$out" "config/pi-account" "refusal must name the file"
-  assert_absent "$home/state/$id.meta" "a missing Pi declaration must not publish metadata"
-  pass "a Pi spawn without an account declaration refuses before any record"
-}
-
-test_spawn_claude_ignores_ambient_config_dir() {
-  local rec world home fakebin wt launchlog out launch id=ambient-ignored
-  rec=$(make_world spawn-ambient claude)
-  read_world "$rec"
-  world=$WORLD
-  home=$HOME_DIR
-  fakebin=$FAKEBIN_DIR
-  mkdir -p "$world/ambient-claude"
-  wt="$world/wt"
-  fm_git_worktree "$world/proj" "$wt" wt-ambient
-  fm_test_spawn_brief "$home" "$id"
-  launchlog="$world/launch.log"
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$world/ambient-claude" \
-    run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" --mode no-mistakes --yolo off --harness claude 2>&1)
-  expect_code 0 "$?" "declared Claude spawn should succeed"$'\n'"$out"
-  launch=$(cat "$launchlog")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$home/accounts/claude'" \
-    "launch must spend the declared root"
-  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR='$world/ambient-claude'" \
-    "launch must not spend the ambient CLAUDE_CONFIG_DIR"
-  assert_contains "$launch" "-u ANTHROPIC_API_KEY" \
-    "Claude launch must shed environment credentials ranked above the selected root"
-  assert_contains "$launch" "-u CLAUDE_CODE_USE_MANTLE" \
-    "Claude launch must shed the AWS provider switches ranked above the selected root"
-  assert_contains "$launch" "-u CLAUDE_CODE_USE_ANTHROPIC_AWS" \
-    "Claude launch must shed the AWS provider switches ranked above the selected root"
-  pass "a declared Claude account wins over an ambient CLAUDE_CONFIG_DIR"
-}
-
-test_spawn_pi_refuses_a_provider_the_home_did_not_declare() {
-  local rec world home fakebin wt launchlog out status id=pi-wrong-provider
-  rec=$(make_world spawn-pi-mismatch pi)
-  read_world "$rec"
-  world=$WORLD
-  home=$HOME_DIR
-  fakebin=$FAKEBIN_DIR
-  wt="$world/wt"
-  fm_git_worktree "$world/proj" "$wt" wt-mismatch
-  fm_test_spawn_brief "$home" "$id"
-  launchlog="$world/launch.log"
-  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" --mode no-mistakes --yolo off --harness pi \
-    --model openai-codex-work/gpt-5.4 2>&1)
-  status=$?
-  expect_code 1 "$status" "a Pi spawn on an undeclared provider must refuse"$'\n'"$out"
-  assert_contains "$out" "openai-codex-work" "refusal must name the undeclared provider"
-  assert_absent "$home/state/$id.meta" "an undeclared Pi provider must not publish metadata"
-  pass "an undeclared Pi provider in a shared root cannot be spent"
-}
-
-test_spawn_pi_home_may_declare_several_providers() {
-  local rec world home fakebin id out
-  rec=$(make_world spawn-pi-mixed pi)
-  read_world "$rec"
-  world=$WORLD
-  home=$HOME_DIR
-  fakebin=$FAKEBIN_DIR
-  printf '%s\nopenai-codex codex-native\n' "$home/accounts/pi" > "$home/config/pi-account"
-  for id in mixed-openai mixed-native; do
-    fm_git_worktree "$world/proj-$id" "$world/wt-$id" "wt-$id"
-    fm_test_spawn_brief "$home" "$id"
+test_malformed_pins_refuse_before_launch() {
+  local out rc id=acct-bad n=0 body
+  new_case malformed claude
+  mkdir -p "$CASE/work"
+  for body in 'relative/root' "$CASE/work"$'\r' '' 'ordinary'$'\n''environment' "$CASE/missing-root"; do
+    n=$((n + 1))
+    printf '%s' "$body" > "$HOME_DIR/config/claude-account"
+    out=$(spawn_ship "$id-$n"); rc=$?
+    expect_code 1 "$rc" "malformed pin #$n must refuse"
+    assert_refused_before_launch "$id-$n" "$out" "config/claude-account"
   done
-  out=$(run_account_spawn "$home" "$world/wt-mixed-openai" "$fakebin" "$world/openai.log" \
-    mixed-openai "$world/proj-mixed-openai" --mode no-mistakes --yolo off --harness pi \
-    --model openai-codex/gpt-5.6-sol 2>&1)
-  expect_code 0 "$?" "a model under the first declared provider should launch"$'\n'"$out"
-  assert_contains "$(cat "$world/openai.log")" "--provider 'openai-codex' --model 'openai-codex/gpt-5.6-sol'" \
-    "the launch must pin its own model's provider"
-  out=$(run_account_spawn "$home" "$world/wt-mixed-native" "$fakebin" "$world/native.log" \
-    mixed-native "$world/proj-mixed-native" --mode no-mistakes --yolo off --harness pi \
-    --model codex-native/gpt-6-astra 2>&1)
-  expect_code 0 "$?" "a model under the second declared provider should launch from the same home"$'\n'"$out"
-  assert_contains "$(cat "$world/native.log")" "--provider 'codex-native' --model 'codex-native/gpt-6-astra'" \
-    "the launch must pin its own model's provider, not the whole declared list"
-  pass "one home may declare several Pi providers and each launch pins its own"
+  rm "$HOME_DIR/config/claude-account"
+  mkdir "$HOME_DIR/config/claude-account"
+  out=$(spawn_ship "$id-dir"); rc=$?
+  expect_code 1 "$rc" "a directory in place of the pin must refuse"
+  assert_refused_before_launch "$id-dir" "$out" "config/claude-account must be a readable regular file"
+  rmdir "$HOME_DIR/config/claude-account"
+  printf 'ordinary\n' > "$HOME_DIR/config/pi-account"
+  out=$(spawn_ship "$id-pi" --harness pi --model openai-codex/gpt-5.5); rc=$?
+  expect_code 1 "$rc" "a Pi pin without a providers line must refuse"
+  assert_refused_before_launch "$id-pi" "$out" "config/pi-account must hold"
+  assert_absent "$CASE/claude-checks" "a malformed pin must refuse before any sign-in check"
+  pass "malformed, relative, CR-terminated, empty, extra-line, missing-root, and non-file pins refuse before launch"
 }
 
-test_spawn_pi_launch_pins_the_declared_provider() {
-  local rec world home fakebin wt launchlog out id=pi-pinned
-  rec=$(make_world spawn-pi-pinned pi)
-  read_world "$rec"
-  world=$WORLD
-  home=$HOME_DIR
-  fakebin=$FAKEBIN_DIR
-  wt="$world/wt"
-  fm_git_worktree "$world/proj" "$wt" wt-pinned
-  fm_test_spawn_brief "$home" "$id"
-  launchlog="$world/launch.log"
-  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" --mode no-mistakes --yolo off --harness pi --model fake/test 2>&1)
-  expect_code 0 "$?" "a declared Pi spawn should succeed"$'\n'"$out"
-  # Without --provider, Pi resolves an id its prefix provider lacks under any
-  # other authenticated provider holding an identical id.
-  assert_contains "$(cat "$launchlog")" "--provider 'fake' --model 'fake/test'" \
-    "a Pi launch must pin the declared provider, not leave Pi to infer it from --model"
-  pass "a canonical Pi launch pins the declared provider"
+test_pi_pin_selects_the_root_and_the_declared_provider() {
+  local out rc id=acct-pi launch
+  new_case pi-pin pi
+  mkdir -p "$CASE/pi-work"
+  printf 'openai-codex\n' > "$CASE/pi-work/signed-in"
+  printf '%s\nopenai-codex anthropic\n' "$CASE/pi-work" > "$HOME_DIR/config/pi-account"
+  out=$(spawn_ship "$id" --model openai-codex/gpt-5.5); rc=$?
+  expect_code 0 "$rc" "a Pi spawn pinned to a signed-in provider should succeed: $out"
+  assert_contains "$out" "account=$CASE/pi-work account_provider=openai-codex" \
+    "the spawn should report the pinned root and provider"
+  assert_grep "account=$CASE/pi-work" "$HOME_DIR/state/$id.meta" "the task record should carry the pinned root"
+  assert_grep "account_provider=openai-codex" "$HOME_DIR/state/$id.meta" "the task record should carry the pinned provider"
+  [ "$(cat "$CASE/pi-checks")" = "$CASE/pi-work openai-codex" ] \
+    || fail "the sign-in check should ask the pinned root about the model's provider: $(cat "$CASE/pi-checks")"
+  launch=$(cat "$CASE/launch.log")
+  assert_contains "$launch" "--provider 'openai-codex' --model 'openai-codex/gpt-5.5'" \
+    "the launch should confine Pi's model lookup to the declared provider"
+  run_pane
+  assert_grep "PI_CODING_AGENT_DIR=$CASE/pi-work" "$CASE/pi-worker" "the worker should run under the pinned Pi root"
+  assert_grep "--provider openai-codex --model openai-codex/gpt-5.5" "$CASE/pi-worker" \
+    "the worker should receive the declared provider"
+  pass "a Pi pin selects its root and passes the declared provider"
 }
 
-test_spawn_raw_pi_command_must_pass_the_declared_provider() {
-  local rec world home fakebin wt launchlog out status id=pi-raw
-  rec=$(make_world spawn-pi-raw pi)
-  read_world "$rec"
-  world=$WORLD
-  home=$HOME_DIR
-  fakebin=$FAKEBIN_DIR
-  wt="$world/wt"
-  fm_git_worktree "$world/proj" "$wt" wt-raw
-  fm_test_spawn_brief "$home" "$id"
-  launchlog="$world/launch.log"
-  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" "pi --model fake/test" --mode no-mistakes --yolo off 2>&1)
-  status=$?
-  expect_code 1 "$status" "a raw Pi command without --provider must refuse"$'\n'"$out"
-  assert_contains "$out" "must pass --provider fake" "refusal must name the provider to pass"
-  assert_absent "$home/state/$id.meta" "a raw Pi command without --provider must not publish metadata"
-  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" "pi --provider openrouter --model fake/test" --mode no-mistakes --yolo off 2>&1)
-  status=$?
-  expect_code 1 "$status" "a raw Pi command naming another provider must refuse"$'\n'"$out"
-  assert_contains "$out" "passes 'openrouter'" "refusal must name the provider the command passes"
-  # Pi rejects --provider=<value> as an unknown option, so the worker would die
-  # at startup; the spawn must refuse instead.
-  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" "pi --provider=fake --model fake/test" --mode no-mistakes --yolo off 2>&1)
-  status=$?
-  expect_code 1 "$status" "a raw Pi command spelling --provider=<value> must refuse"$'\n'"$out"
-  assert_contains "$out" "must pass --provider fake" "refusal must name the form Pi parses"
-  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" "pi --provider fake --model fake/test" --mode no-mistakes --yolo off 2>&1)
-  expect_code 0 "$?" "a raw Pi command passing the declared provider should launch"$'\n'"$out"
-  pass "a raw Pi command must pass the declared --provider itself"
+test_pi_pin_refusals() {
+  local out rc id=acct-pi-bad
+  new_case pi-refusals pi
+  mkdir -p "$CASE/pi-work"
+  printf 'openai-codex\n' > "$CASE/pi-work/signed-in"
+  printf '%s\nopenai-codex anthropic\n' "$CASE/pi-work" > "$HOME_DIR/config/pi-account"
+  out=$(spawn_ship "$id-bare" --model gpt-5.5); rc=$?
+  expect_code 1 "$rc" "an unqualified Pi model must refuse under a pin"
+  assert_refused_before_launch "$id-bare" "$out" "'gpt-5.5' names no provider"
+  out=$(spawn_ship "$id-none"); rc=$?
+  expect_code 1 "$rc" "a Pi launch with no model must refuse under a pin"
+  assert_refused_before_launch "$id-none" "$out" "'none' names no provider"
+  out=$(spawn_ship "$id-other" --model openrouter/gpt-5.5); rc=$?
+  expect_code 1 "$rc" "an undeclared Pi provider must refuse"
+  assert_refused_before_launch "$id-other" "$out" "names provider 'openrouter'"
+  out=$(OPENAI_API_KEY=ambient-invoker-openai spawn_ship "$id-out" --model anthropic/claude-sonnet); rc=$?
+  expect_code 1 "$rc" "a declared provider the root is not signed in to must refuse"
+  assert_refused_before_launch "$id-out" "$out" "which is not signed in for provider 'anthropic'"
+  out=$(spawn_ship "$id-raw" --harness "pi --provider openai-codex --model openai-codex/gpt-5.5"); rc=$?
+  expect_code 1 "$rc" "a raw Pi launch must refuse under a pin"
+  assert_refused_before_launch "$id-raw" "$out" "a raw Pi launch command runs verbatim"
+  pass "a Pi pin refuses unqualified, missing, undeclared, signed-out, and raw launches"
 }
 
-test_spawn_pi_without_auth_check_is_proved_by_its_model_list() {
-  local rec world home fakebin wt launchlog out status id=pi-old
-  rec=$(make_world spawn-pi-old pi)
-  read_world "$rec"
-  world=$WORLD
-  home=$HOME_DIR
-  fakebin=$FAKEBIN_DIR
-  printf '0.84.0\n' > "$fakebin/.fake-pi-version"
-  wt="$world/wt"
-  fm_git_worktree "$world/proj" "$wt" wt-pi-old
-  fm_test_spawn_brief "$home" "$id"
-  launchlog="$world/launch.log"
-  # The search lists near matches too, so a provider merely containing the
-  # declared name must not count.
-  printf 'fakeother claude-sonnet-4-5\n' > "$home/accounts/pi/.fake-models"
-  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" --mode no-mistakes --yolo off --harness pi --model fake/sonnet:high 2>&1)
-  status=$?
-  expect_code 1 "$status" "a root that lists no model under the declared provider must refuse"$'\n'"$out"
-  assert_contains "$out" "lists no model for provider 'fake'" "refusal must come from the model list"
-  assert_not_contains "$out" "cannot authenticate" \
-    "a Pi without auth check must not be reported as unable to authenticate"
-  # A --model pattern is not a catalog id; the provider is what the account spends.
-  printf 'fake claude-sonnet-4-5\n' > "$home/accounts/pi/.fake-models"
-  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" --mode no-mistakes --yolo off --harness pi --model fake/sonnet:high 2>&1)
-  expect_code 0 "$?" "a root listing models under the declared provider should launch a pattern"$'\n'"$out"
-  pass "a Pi without auth check is proved ready by the provider its root lists"
+test_pi_extension_provider_and_old_pi_fall_back_to_the_model_listing() {
+  local out rc id=acct-pi-list
+  new_case pi-listing pi
+  mkdir -p "$CASE/pi-work"
+  printf 'codex-native\n' > "$CASE/pi-work/extension-providers"
+  printf '%s\ncodex-native openai-codex\n' "$CASE/pi-work" > "$HOME_DIR/config/pi-account"
+  out=$(spawn_ship "$id-unlisted" --model codex-native/gpt-6); rc=$?
+  expect_code 1 "$rc" "an extension provider the root lists no model for must refuse"
+  assert_refused_before_launch "$id-unlisted" "$out" "no model listed for provider codex-native"
+  printf 'codex-native  gpt-6  272K\n' > "$CASE/pi-work/listed"
+  out=$(spawn_ship "$id-ext" --model codex-native/gpt-6); rc=$?
+  expect_code 0 "$rc" "an extension provider listed under the root should launch: $out"
+  : > "$CASE/pi-work/old-pi"
+  printf 'openai-codex-mini  gpt-5  128K\n' > "$CASE/pi-work/listed"
+  out=$(spawn_ship "$id-old-near" --model openai-codex/gpt-5); rc=$?
+  expect_code 1 "$rc" "a Pi without auth check must match the provider column exactly"
+  assert_refused_before_launch "$id-old-near" "$out" "no model listed for provider openai-codex"
+  printf 'openai-codex  gpt-5  128K\n' > "$CASE/pi-work/listed"
+  out=$(spawn_ship "$id-old" --model openai-codex/gpt-5); rc=$?
+  expect_code 0 "$rc" "a Pi without auth check should launch when the root lists the provider: $out"
+  pass "extension providers and a Pi without auth check fall back to an exact model-listing match"
 }
 
-test_spawn_pi_refuses_an_unqualified_model() {
-  local rec world home fakebin wt launchlog out status id=pi-no-provider
-  rec=$(make_world spawn-pi-bare pi)
-  read_world "$rec"
-  world=$WORLD
-  home=$HOME_DIR
-  fakebin=$FAKEBIN_DIR
-  wt="$world/wt"
-  fm_git_worktree "$world/proj" "$wt" wt-bare
-  fm_test_spawn_brief "$home" "$id"
-  launchlog="$world/launch.log"
-  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" --mode no-mistakes --yolo off --harness pi 2>&1)
-  status=$?
-  expect_code 1 "$status" "a Pi spawn without --model must refuse"$'\n'"$out"
-  assert_contains "$out" "names no provider" "refusal must say the account cannot be proved"
-  pass "a Pi spawn without --model as provider/id refuses rather than using defaultProvider"
+test_a_pin_governs_only_its_own_runner() {
+  local out rc id=acct-scope
+  new_case scope codex
+  mkdir -p "$CASE/work"
+  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  out=$(spawn_ship "$id-codex"); rc=$?
+  expect_code 0 "$rc" "a codex spawn must ignore a Claude pin: $out"
+  assert_not_contains "$out" "account=" "a codex spawn must not report a Claude pin"
+  rm -f "$HOME_DIR/config/pi-account"
+  out=$(spawn_ship "$id-pi" --harness pi --model gpt-5.5); rc=$?
+  expect_code 1 "$rc" "a Pi spawn must not treat a Claude account file as its own selection: $out"
+  assert_refused_before_launch "$id-pi" "$out" "config/pi-account is absent"
+  assert_absent "$CASE/claude-checks" "no Claude sign-in check may run for another runner"
+  pass "a Claude account file does not select a Codex or Pi launch"
 }
 
-test_spawn_codex_does_not_require_an_account_declaration() {
-  local rec world home fakebin wt launchlog out id=codex-no-account
-  rec=$(make_world spawn-codex-ok codex)
-  read_world "$rec"
-  world=$WORLD
-  home=$HOME_DIR
-  fakebin=$FAKEBIN_DIR
-  rm -f "$home/config/claude-account" "$home/config/pi-account"
-  wt="$world/wt"
-  fm_git_worktree "$world/proj" "$wt" wt-codex
-  fm_test_spawn_brief "$home" "$id"
-  launchlog="$world/launch.log"
-  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" --mode no-mistakes --yolo off --harness codex 2>&1)
-  expect_code 0 "$?" "codex spawn without account files should succeed"$'\n'"$out"
-  pass "runners without a selectable account root still launch without a declaration"
+test_raw_claude_command_receives_the_pin() {
+  local out rc id=acct-raw
+  new_case raw-claude claude
+  signed_in_claude_root "$CASE/work"
+  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  out=$(spawn_ship "$id" --harness "claude --print raw"); rc=$?
+  expect_code 0 "$rc" "a raw Claude spawn under a signed-in pin should succeed: $out"
+  assert_contains "$out" "account=$CASE/work" "a raw Claude spawn should report the pin"
+  run_pane
+  assert_grep "CLAUDE_CONFIG_DIR=$CASE/work" "$CASE/claude-worker" "a raw Claude worker should run under the pinned root"
+  assert_grep "ANTHROPIC_API_KEY=unset" "$CASE/claude-worker" "a raw Claude worker must not keep an ambient API key"
+  pass "a raw Claude launch command receives the home's pin"
 }
 
-test_spawn_claude_ordinary_uses_the_default_login_under_throwaway_home() {
-  local rec world home fakebin wt launchlog out launch id=ordinary-claude
-  rec=$(make_world spawn-ordinary claude)
-  read_world "$rec"
-  world=$WORLD
-  home=$HOME_DIR
-  fakebin=$FAKEBIN_DIR
-  mkdir -p "$world/ambient-claude"
-  printf 'ordinary\n' > "$home/config/claude-account"
-  # A keychain-only default login: quota-axi skips the keychain, and only
-  # $HOME/.claude.json records the login, never $HOME/.claude/.claude.json.
-  mkdir -p "$home/user-home"
-  printf '{"oauthAccount":{"emailAddress":"a@example.test"}}\n' > "$home/user-home/.claude.json"
-  cat > "$fakebin/quota-axi" <<'SH'
-#!/bin/sh
-printf '%s\n' '{"schemaVersion":1,"auth":[{"provider":"claude","sources":[{"source":"keychain","status":"skipped","credentialPresent":true}]}]}'
-SH
-  chmod +x "$fakebin/quota-axi"
-  wt="$world/wt"
-  fm_git_worktree "$world/proj" "$wt" wt-ordinary
-  fm_test_spawn_brief "$home" "$id"
-  launchlog="$world/launch.log"
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$world/ambient-claude" \
-    run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" --mode no-mistakes --yolo off --harness claude 2>&1)
-  expect_code 0 "$?" "ordinary Claude spawn should succeed"$'\n'"$out"
-  launch=$(cat "$launchlog")
-  assert_contains "$launch" "-u CLAUDE_CONFIG_DIR " \
-    "ordinary must launch with CLAUDE_CONFIG_DIR unset, the only way Claude reads its default login"
-  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
-    "ordinary must not point Claude at any config dir, not even \$HOME/.claude"
-  [ "$(jq -r --arg p "$wt" '.projects[$p].hasTrustDialogAccepted' "$home/user-home/.claude.json")" = true ] || \
-    fail "ordinary must pre-trust the worktree in \$HOME/.claude.json, the store the default login uses"
-  assert_absent "$world/ambient-claude/.claude.json" "ordinary must not write the ambient CLAUDE_CONFIG_DIR store"
-  pass "ordinary Claude launches, trusts, and preflights the default login with CLAUDE_CONFIG_DIR unset"
+test_raw_claude_account_override_refuses_under_a_pin() {
+  local out rc id=acct-raw-override var
+  new_case raw-override claude
+  signed_in_claude_root "$CASE/work"
+  signed_in_claude_root "$CASE/other"
+  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  for var in "CLAUDE_CONFIG_DIR=$CASE/other" ANTHROPIC_API_KEY=override-key; do
+    out=$(spawn_ship "$id-${var%%=*}" --harness "FOO=1 $var claude --print raw"); rc=$?
+    expect_code 1 "$rc" "a raw Claude command setting ${var%%=*} must refuse under a pin"
+    assert_refused_before_launch "$id-${var%%=*}" "$out" "the raw launch command sets ${var%%=*}"
+    assert_contains "$out" "remove ${var%%=*} from the raw command, or change or remove config/claude-account" \
+      "the refusal should say how to proceed"
+  done
+  assert_absent "$CASE/claude-worker" "a refused raw override must never start Claude"
+  pass "a pinned home refuses a raw Claude command that overrides the account"
 }
 
-test_spawn_claude_environment_keeps_environment_credentials() {
-  local rec world home fakebin wt launchlog out launch id=environment-claude
-  rec=$(make_world spawn-environment claude)
-  read_world "$rec"
-  world=$WORLD
-  home=$HOME_DIR
-  fakebin=$FAKEBIN_DIR
-  # An API-key or cloud-provider home: the root holds no /login at all.
-  printf 'missing\n' > "$home/accounts/claude/.fake-auth"
-  wt="$world/wt"
-  fm_git_worktree "$world/proj" "$wt" wt-environment
-  fm_test_spawn_brief "$home" "$id"
-  launchlog="$world/launch.log"
-  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" --mode no-mistakes --yolo off --harness claude 2>&1)
-  expect_code 1 "$?" "a root without a login and without environment must refuse"$'\n'"$out"
-  assert_contains "$out" "declare environment credentials" "refusal must offer the environment selection"
-  printf '%s\nenvironment\n' "$home/accounts/claude" > "$home/config/claude-account"
-  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" --mode no-mistakes --yolo off --harness claude 2>&1)
-  expect_code 0 "$?" "a declared environment selection should launch"$'\n'"$out"
-  launch=$(cat "$launchlog")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$home/accounts/claude'" \
-    "the selected root must stay the launch's config dir"
-  assert_not_contains "$launch" "-u ANTHROPIC_API_KEY" \
-    "a declared environment selection must keep the API key"
-  assert_not_contains "$launch" "-u CLAUDE_CODE_USE_BEDROCK" \
-    "a declared environment selection must keep the cloud provider switch"
-  assert_not_contains "$launch" "-u CLAUDE_CODE_USE_MANTLE" \
-    "a declared environment selection must keep the AWS provider switches"
-  pass "a declared environment selection keeps Claude's environment credentials"
+test_raw_claude_without_an_account_file_refuses() {
+  local out rc id=acct-raw-unpinned
+  new_case raw-unpinned claude
+  rm -f "$HOME_DIR/config/claude-account"
+  mkdir -p "$CASE/other"
+  out=$(spawn_ship "$id" --harness "CLAUDE_CONFIG_DIR=$CASE/other ANTHROPIC_API_KEY=override-key claude --print raw"); rc=$?
+  expect_code 1 "$rc" "a raw Claude command with no account file should refuse: $out"
+  assert_refused_before_launch "$id" "$out" "config/claude-account is absent"
+  pass "a raw Claude command cannot bypass a missing account file"
 }
 
-test_spawn_pi_environment_admits_a_provider_the_root_has_not_stored() {
-  local rec world home fakebin wt launchlog out id=environment-pi
-  rec=$(make_world spawn-pi-environment pi)
-  read_world "$rec"
-  world=$WORLD
-  home=$HOME_DIR
-  fakebin=$FAKEBIN_DIR
-  printf 'not_ready\n' > "$home/accounts/pi/.fake-auth"
-  wt="$world/wt"
-  fm_git_worktree "$world/proj" "$wt" wt-pi-environment
-  fm_test_spawn_brief "$home" "$id"
-  launchlog="$world/launch.log"
-  out=$(ANTHROPIC_API_KEY=ambient-key run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" --mode no-mistakes --yolo off --harness pi --model fake/test 2>&1)
-  expect_code 1 "$?" "an ambient provider key must not answer for a root without the provider"$'\n'"$out"
-  assert_contains "$out" "cannot authenticate" "refusal must say the root cannot authenticate"
-  printf '%s\nfake\nenvironment\n' "$home/accounts/pi" > "$home/config/pi-account"
-  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" --mode no-mistakes --yolo off --harness pi --model fake/test 2>&1)
-  expect_code 0 "$?" "a declared environment selection should launch Pi"$'\n'"$out"
-  assert_contains "$(cat "$launchlog")" "PI_CODING_AGENT_DIR='$home/accounts/pi'" \
-    "the selected Pi root must stay the launch's agent dir"
-  pass "a declared environment selection lets Pi use its provider's environment key"
-}
-
-test_preflight_refuses_a_skipped_keychain_without_a_recorded_login() {
-  local rec world home fakebin wt launchlog out status id=empty-claude
-  rec=$(make_world spawn-empty-root claude)
-  read_world "$rec"
-  world=$WORLD
-  home=$HOME_DIR
-  fakebin=$FAKEBIN_DIR
-  printf '{"schemaVersion":1}\n' > "$home/accounts/claude/.claude.json"
-  wt="$world/wt"
-  fm_git_worktree "$world/proj" "$wt" wt-empty
-  fm_test_spawn_brief "$home" "$id"
-  launchlog="$world/launch.log"
-  # skipped plus no oauthAccount must refuse.
-  cat > "$fakebin/quota-axi" <<SH
-#!/bin/sh
-printf '%s\n' '{"schemaVersion":1,"auth":[{"provider":"claude","sources":[{"source":"keychain","status":"skipped","credentialPresent":true}]}]}'
-SH
-  chmod +x "$fakebin/quota-axi"
-  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" --mode no-mistakes --yolo off --harness claude 2>&1)
-  status=$?
-  expect_code 1 "$status" "an empty Claude root with skipped keychain must refuse"$'\n'"$out"
-  assert_contains "$out" "holds no usable login" "refusal must say the root cannot authenticate"
-  assert_absent "$home/state/$id.meta" "an empty Claude root must not publish metadata"
-  pass "a skipped keychain answer without oauthAccount does not authenticate an empty Claude root"
-}
-
-test_secondmate_launch_reads_the_launching_home_not_its_own() {
-  local rec world home fakebin sm launchlog out launch id=sm-launching-account
-  rec=$(make_world spawn-sm-account claude)
-  read_world "$rec"
-  world=$WORLD
-  home=$HOME_DIR
-  fakebin=$FAKEBIN_DIR
-  sm="$world/sm"
-  mkdir -p "$sm/bin" "$sm/data" "$sm/config" "$sm/accounts/other"
+test_local_secondmate_reads_the_launching_home_pin() {
+  local out rc id=acct-sm sm
+  new_case secondmate claude
+  signed_in_claude_root "$CASE/work"
+  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  sm="$CASE/secondmate-home"
+  mkdir -p "$sm/bin" "$sm/data" "$sm/config" "$CASE/sm-own"
   printf '# Firstmate\n' > "$sm/AGENTS.md"
   printf '%s\n' "$id" > "$sm/.fm-secondmate-home"
   printf 'charter for %s\n' "$id" > "$sm/data/charter.md"
-  printf '%s\n' "$sm/accounts/other" > "$sm/config/claude-account"
-  launchlog="$world/launch.log"
-  out=$(run_account_spawn "$home" "$sm" "$fakebin" "$launchlog" \
-    "$id" "$sm" claude --secondmate 2>&1)
-  expect_code 0 "$?" "secondmate Claude spawn should succeed"$'\n'"$out"
-  launch=$(cat "$launchlog")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$home/accounts/claude'" \
-    "a secondmate must spend the launching home's declared account"
-  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR='$sm/accounts/other'" \
-    "a secondmate must not spend its own home's worker declaration"
-  pass "a secondmate launch reads the launching home, never its own worker files"
+  printf '%s\n' "$CASE/sm-own" > "$sm/config/claude-account"
+  signed_in_claude_root "$CASE/ambient-claude"
+  out=$(FM_FAKE_LAUNCH_LOG="$CASE/launch.log" FM_TEST_CLAUDE_CONFIG_DIR="$CASE/ambient-claude" \
+    fm_test_run_spawn "$HOME_DIR" "$WT" "$FAKEBIN" "$id" "$sm" --secondmate); rc=$?
+  expect_code 0 "$rc" "a local secondmate spawn under the launching home's pin should succeed: $out"
+  assert_contains "$out" "account=$CASE/work" "the secondmate spawn should report the launching home's pin"
+  [ "$(cat "$sm/config/claude-account")" = "$CASE/sm-own" ] \
+    || fail "the launching home's pin must not be inherited over the secondmate home's own file"
+  run_pane
+  assert_grep "CLAUDE_CONFIG_DIR=$CASE/work" "$CASE/claude-worker" \
+    "the secondmate agent should run under the launching home's pinned root"
+  pass "a local secondmate reads the launching home's pin and its own home's file is never inherited over"
 }
 
-test_missing_claude_declaration_refuses
-test_missing_pi_declaration_refuses
-test_ordinary_claude_selects_the_unset_config_dir
-test_environment_line_is_an_explicit_selection
-test_explicit_claude_path_is_the_selected_root
-test_pi_declaration_requires_a_provider
-test_pi_ordinary_with_provider_resolves
-test_pi_guard_requires_matching_provider_model
-test_raw_launch_flags_read_the_embedded_values
-test_declaration_final_newline_is_optional
-test_spawn_refuses_claude_without_a_declaration_before_any_record
-test_spawn_refuses_pi_without_a_declaration
-test_spawn_claude_ignores_ambient_config_dir
-test_spawn_pi_refuses_a_provider_the_home_did_not_declare
-test_spawn_pi_home_may_declare_several_providers
-test_spawn_pi_launch_pins_the_declared_provider
-test_spawn_raw_pi_command_must_pass_the_declared_provider
-test_spawn_pi_without_auth_check_is_proved_by_its_model_list
-test_spawn_pi_refuses_an_unqualified_model
-test_spawn_codex_does_not_require_an_account_declaration
-test_spawn_claude_ordinary_uses_the_default_login_under_throwaway_home
-test_spawn_claude_environment_keeps_environment_credentials
-test_spawn_pi_environment_admits_a_provider_the_root_has_not_stored
-test_preflight_refuses_a_skipped_keychain_without_a_recorded_login
-test_secondmate_launch_reads_the_launching_home_not_its_own
+test_absent_account_refuses_claude_and_pi
+test_claude_pin_selects_the_root_and_sheds_ambient_credentials
+test_claude_pin_refuses_a_signed_out_root_despite_an_ambient_login
+test_claude_ordinary_pin_unsets_the_config_root
+test_malformed_pins_refuse_before_launch
+test_pi_pin_selects_the_root_and_the_declared_provider
+test_pi_pin_refusals
+test_pi_extension_provider_and_old_pi_fall_back_to_the_model_listing
+test_a_pin_governs_only_its_own_runner
+test_raw_claude_command_receives_the_pin
+test_raw_claude_account_override_refuses_under_a_pin
+test_raw_claude_without_an_account_file_refuses
+test_local_secondmate_reads_the_launching_home_pin
+
+echo "# all fm-worker-account tests passed"
