@@ -526,7 +526,7 @@ test_lock_create_hard_failure_fails_fast_without_recursion() {
 # of eight and confirm the walk refuses past that bound instead of reclaiming
 # an unbounded distance.
 test_lock_steal_recursion_is_depth_bounded() {
-  local dir state lockdir dead path i out
+  local dir state lockdir dead path i out pid rc
   dir=$(make_case lock-steal-depth-bound)
   state="$dir/state"
   lockdir="$state/.contend.lock"
@@ -548,7 +548,20 @@ test_lock_steal_recursion_is_depth_bounded() {
     *"rc=1"*) ;;
     *) fail "steal recursion reclaimed a chain deeper than the fixed bound: $out" ;;
   esac
-  pass "steal recursion halts at the fixed depth bound instead of reclaiming an arbitrarily deep chain"
+
+  FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_acquire_wait_unless_refused "$2"; then rc=0; else rc=$?; fi
+    printf "rc=%s\n" "$rc"
+  ' _ "$LIB" "$lockdir" > "$dir/wait-out" 2> "$dir/wait-err" &
+  pid=$!
+  wait_for_exit "$pid" 20
+  rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "refusal-aware wait did not return promptly at the fixed depth bound (rc=$rc); see $dir/wait-err"
+  [ "$(cat "$dir/wait-out")" = "rc=1" ] \
+    || fail "refusal-aware wait did not refuse the exhausted stale chain: $(cat "$dir/wait-out")"
+  pass "steal recursion and refusal-aware wait halt at the fixed depth bound"
 }
 
 # fm_lock_acquire_wait_unless_refused refuses only a lock it cannot create: a

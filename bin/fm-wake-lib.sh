@@ -949,6 +949,7 @@ fm_lock_try_acquire() {  # <lockdir> [recursion-depth]
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
+  FM_LOCK_STEAL_DEPTH_EXHAUSTED=
 
   if fm_lock_try_create "$lockdir"; then
     return 0
@@ -988,6 +989,7 @@ fm_lock_try_acquire() {  # <lockdir> [recursion-depth]
     # example a long-abandoned chain of .steal.steal... artifacts left by a
     # prior crash of this same bug) fails bounded instead of unbounded.
     FM_LOCK_HELD_PID=
+    FM_LOCK_STEAL_DEPTH_EXHAUSTED=1
     return 1
   fi
 
@@ -1093,15 +1095,16 @@ fm_lock_acquire_wait() {
 # such as the machine-wide process-event claim root outside FM_HOME, which a
 # harness sandbox (Codex's workspace-write profile denies writes under $HOME),
 # a read-only filesystem, or a full disk can make unwritable. It waits through
-# contention exactly as fm_lock_acquire_wait does, but returns 1 as soon as an
-# attempt cannot write its own candidate (FM_LOCK_CREATE_REFUSED), because no
-# holder's release can change that and waiting would block its caller forever.
+# contention exactly as fm_lock_acquire_wait does, but returns 1 when an attempt
+# cannot write its own candidate or exhausts the stale-chain recursion bound,
+# because retrying either unchanged condition would block its caller forever.
 # Only callers that handle a failed acquisition may use it; fm_lock_acquire_wait
 # keeps returning only once the lock is held, for callers that do not check.
 fm_lock_acquire_wait_unless_refused() {
   local lockdir=$1
   while ! fm_lock_try_acquire "$lockdir"; do
-    [ -z "${FM_LOCK_CREATE_REFUSED:-}" ] || return 1
+    [ -z "${FM_LOCK_CREATE_REFUSED:-}" ] \
+      && [ -z "${FM_LOCK_STEAL_DEPTH_EXHAUSTED:-}" ] || return 1
     sleep 0.1
   done
 }
