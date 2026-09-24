@@ -163,7 +163,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|copilot)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -348,6 +348,7 @@
 #     __DEVINBIN__ resolved Devin executable
 #     __DEVINCONFIG__ private per-task Devin config with lifecycle hooks
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
+#     __COPILOTBIN__ resolved, copilot-verified executable for a copilot launch
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -364,7 +365,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse, gemini, agy, and devin are crewmate/scout only and are refused for --secondmate.
+# log; muse, gemini, agy, copilot, and devin are crewmate/scout only and are refused for --secondmate.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -1777,7 +1778,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | copilot)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -1825,6 +1826,31 @@ pi_supports_tui_mode() {
   local executable=$1 help
   help=$("$executable" --help 2>&1) || return 1
   printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--tui-mode([[:space:]=]|$)'
+}
+
+# resolve_copilot_binary: absolute copilot executable from PATH, or a loud
+# refusal. Defined beside the other pre-launch resolvers because the harness
+# dispatch above calls it before any endpoint exists.
+resolve_copilot_binary() {
+  local candidate dir
+  candidate=$(command -v copilot 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    case "$candidate" in
+    /*)
+      printf '%s\n' "$candidate"
+      return 0
+      ;;
+    *)
+      dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+      if [ -n "$dir" ]; then
+        printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+        return 0
+      fi
+      ;;
+    esac
+  fi
+  echo "error: copilot executable not found on PATH; install GitHub Copilot CLI or select a different verified harness" >&2
+  return 1
 }
 
 # omp pre-launch model validation. `omp models --json` (omp 18.1.11) prints
@@ -2073,6 +2099,41 @@ launch_template() {
   # Its turn-end and busy-state signals do NOT ride the launch command:
   # they are project hooks written into the worktree below.
   gemini) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS GEMINI_CLI_TRUST_WORKSPACE=true GEMINI_CLI_SYSTEM_SETTINGS_PATH=__GEMINISETTINGS__ gemini -y __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # copilot (GitHub Copilot CLI): -i/--interactive "<brief>" starts the
+  # supervised interactive session and auto-submits it, so the brief rides
+  # the launch command (verified: a multi-line brief submitted itself with
+  # no extra Enter, copilot 1.0.88). --model takes the catalog id or `auto`
+  # (the footer renders `Auto -> <model>` while it is on). --reasoning-effort
+  # takes none|minimal|low|medium|high|xhigh|max.
+  # --yolo (equivalent to --allow-all-tools --allow-all-paths --allow-all-urls)
+  # auto-approves every tool, path, and URL grant, which an unattended
+  # crewmate needs; without it every shell command parks on a "Do you want
+  # to run this command?" approval dialog (verified live).
+  # Every task worktree is a fresh path, so copilot would stop on its
+  # "Confirm folder trust" dialog ("Do you trust the files in this
+  # folder?", safe `1. Yes` preselected, verified live). No launch flag
+  # suppresses it - --yolo was A/B tested without effect - but
+  # COPILOT_ALLOW_ALL=true trusts the working directory for the run without
+  # prompting (verified live: the dialog never rendered and the -i turn ran),
+  # per-session with no growing global record of disposable worktree paths,
+  # so the spawn carries it as an env prefix exactly like gemini's
+  # GEMINI_CLI_TRUST_WORKSPACE=true. Trusting the workspace loads that
+  # directory's skills, plugins, MCP servers, and hooks, the same posture
+  # the other adapters already run under in a task worktree.
+  # The foreign primary markers are cleared for the same reason cursor
+  # clears them: copilot publishes COPILOT_CLI=1 on its own children but
+  # does not scrub an inherited CLAUDECODE (verified: a non-interactive
+  # probe with CLAUDECODE=1 exported printed the value back through the
+  # model's shell tool), and bin/fm-harness.sh must not read a copilot
+  # worker as its launcher.
+  # copilot exposes a hook surface (sessionStart/sessionEnd/
+  # userPromptSubmitted/agentStop/...), but hooks load from the user-global
+  # ~/.copilot/hooks/ or the project's own .github/hooks/ - there is no
+  # layered per-task settings path like gemini's - so firstmate installs no
+  # push wiring and folds copilot's own durable session event log instead
+  # (bin/fm-busy-lib.sh), bound by the sidecar written below. Nothing to
+  # place in the template for it.
+  copilot) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI COPILOT_ALLOW_ALL=true __COPILOTBIN__ -i "$(__OPINPUT__ encode launch-brief < __BRIEF__)" __MODELFLAG____EFFORTFLAG__--yolo' ;;
   # Devin receives the typed launch envelope after --. Its private config
   # appends native worker lifecycle hooks. Clear NO_COLOR so the shared
   # composer guard can distinguish the dim placeholder from a real draft.
@@ -2187,7 +2248,7 @@ case "$ARG3" in
   ;;
 esac
 
-# muse, gemini, agy, and devin are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, agy, copilot, and devin are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -2199,9 +2260,12 @@ esac
 # secondmate whose supervision cycle could never be armed.
 # agy has none either: it exposes no hook surface for primary supervision and
 # docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
+# copilot has none either: its hook surface has no per-task layer a primary
+# could arm, and docs/supervision-protocols/ carries no copilot wake protocol
+# (copilot 1.0.88).
 # devin has none either: only its worker lifecycle hooks are verified, and
 # docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ]; }; then
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = copilot ] || [ "$HARNESS" = devin ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -2266,6 +2330,9 @@ agy)
     echo "error: agy executable not found on PATH; install Antigravity CLI or select a different verified harness" >&2
     exit 1
   }
+  ;;
+copilot)
+  COPILOT_BIN=$(resolve_copilot_binary) || exit 1
   ;;
 esac
 
@@ -2444,7 +2511,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | copilot)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
@@ -2517,6 +2584,18 @@ effort_flag_for_harness() {
     case "$effort" in
     low | medium | high | xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
     max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
+    esac
+    ;;
+  copilot)
+    # copilot 1.0.88 --reasoning-effort accepts none|minimal|low|medium|
+    # high|xhigh|max, so the shared vocabulary maps straight across,
+    # including max - but only ever as an EXPLICIT captain choice, never as
+    # a fallback, because AGENTS.md section 4 forbids selecting max without
+    # captain preference. copilot's extra none/minimal levels sit below
+    # firstmate's shared vocabulary and are deliberately unreachable rather
+    # than remapped onto low, exactly like muse's.
+    case "$effort" in
+    low | medium | high | xhigh | max) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
     esac
     ;;
     # rovo has no --effort flag on `run`; its effort mapping rides
@@ -3976,6 +4055,63 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+# copilot carries its brief on the launch command, so it needs no delivery
+# gate, but a worktree copilot does not trust parks the TUI on the Confirm
+# folder trust dialog and the brief never runs. The trust rides the launch
+# command itself (COPILOT_ALLOW_ALL=true, verified to remove the dialog), so
+# there is no pre-registration step and no store to check - this gate is the
+# backstop in the rovo/kimi launch-then-confirm shape: answer the dialog
+# once with the preselected safe default (`1. Yes`, verified live) if it
+# renders anyway, then require positive proof that the brief is being
+# processed before the spawn reports success.
+# That proof is the session-events fold itself (fm_busy_classify's
+# copilot-session-log verdict), and the gate accepts NOTHING else: the fold
+# binds the turn to this worktree through the session's recorded workspace,
+# so a busy verdict IS the proof the brief runs where the work is, while a
+# Herdr-native busy verdict alone could precede the dialog and proves no
+# location. A launch that never turns busy fails here with endpoint cleanup
+# rather than leaving a parked autonomous agent outside task control.
+COPILOT_TRUST_DIALOG_QUESTION='Do you trust the files in this folder?'
+COPILOT_TRUST_DIALOG_REMEMBER='Yes, and remember this folder for future sessions'
+COPILOT_TRUST_ANSWERED=0
+
+copilot_capture() {
+  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+}
+
+copilot_pane_shows_trust_dialog() {  # <plain-pane-capture>
+  printf '%s\n' "$1" | grep -Fq "$COPILOT_TRUST_DIALOG_QUESTION" \
+    && printf '%s\n' "$1" | grep -Fq "$COPILOT_TRUST_DIALOG_REMEMBER"
+}
+
+copilot_pane_is_working() {
+  [ "$(fm_busy_classify "$BACKEND" "$T" copilot "$ID" "$STATE")" = "busy copilot-session-log" ]
+}
+
+copilot_wait_for_working() {
+  local pane i=0 max=${FM_COPILOT_READY_POLLS:-60} interval=${FM_COPILOT_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(copilot_capture)
+    if copilot_pane_shows_trust_dialog "$pane"; then
+      if [ "$COPILOT_TRUST_ANSWERED" -eq 0 ]; then
+        spawn_send_key "$T" Enter
+        COPILOT_TRUST_ANSWERED=1
+      fi
+    else
+      copilot_pane_is_working && return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+copilot_spawn_fail() {  # <detail>
+  printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+  rovo_endpoint_cleanup
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -4199,8 +4335,10 @@ if [ "$KIND" != secondmate ]; then
   # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
   # embedded into each adapter's wiring so an event from a superseded
   # incarnation is rejected as stale. Grok and rovo stay on their isolated
-  # rendered-tail fallbacks and standalone Kimi stays unknown until
-  # fm_busy_kimi_verified opens, so none of the three is armed here. Gemini IS
+  # rendered-tail fallbacks, muse, cursor, and copilot stay on their pull
+  # sources (session logs bound by the sidecars written below), and
+  # standalone Kimi stays unknown until
+  # fm_busy_kimi_verified opens, so none of them is armed here. Gemini IS
   # armed: its BeforeAgent / AfterAgent / SessionEnd hooks are a verified
   # open-close pair.
   BUSY_GEN=
@@ -4546,6 +4684,35 @@ EOF
       fi
     } >"$STATE/$ID.cursor-session"
     ;;
+  copilot*)
+    # copilot's turn lifecycle is neither a hook nor a launch flag: it writes
+    # its own durable per-session event log and brackets every turn there
+    # (bin/fm-busy-lib.sh owns the fold). Like muse and cursor that is a
+    # PULL source with no writer, so nothing is armed and no record is
+    # seeded - exactly the reason standalone Kimi is not armed either.
+    # This sidecar is the whole binding: it pins the copilot home whose
+    # session-state tree the classifier searches, the workspace root this
+    # pane starts in, this pane's binding identity, and every session
+    # directory that predates this pane. The classifier then accepts only
+    # one new matching session, so it never guesses between pane
+    # incarnations. Recording the effective home here also means a later
+    # change to COPILOT_HOME cannot silently re-point an already-running
+    # task at a different session tree.
+    COPILOT_HOME_RESOLVED="${COPILOT_HOME:-${HOME:-}/.copilot}"
+    COPILOT_BINDING_ID="$$.$RANDOM.$(date +%s)"
+    rm -f "$STATE/$ID.copilot-session"
+    {
+      printf 'copilot_home=%s\n' "$COPILOT_HOME_RESOLVED"
+      printf 'workspace_root=%s\n' "$WT"
+      printf 'binding_id=%s\n' "$COPILOT_BINDING_ID"
+      while IFS= read -r COPILOT_PRIOR_SESSION; do
+        [ -n "$COPILOT_PRIOR_SESSION" ] || continue
+        printf 'prior_session=%s\n' "$(basename -- "$COPILOT_PRIOR_SESSION")"
+      done <<EOF
+$(fm_busy_copilot_matching_sessions "$COPILOT_HOME_RESOLVED" "$WT" || true)
+EOF
+    } >"$STATE/$ID.copilot-session"
+    ;;
   kimi*)
     # Kimi's Stop hook is global, but it is inert unless cwd contains this
     # task's token pointer and the token resolves through Firstmate's private
@@ -4817,10 +4984,11 @@ devin)
   LAUNCH=${LAUNCH//__DEVINCONFIG__/"$(shell_quote "$STATE_REAL/$ID.devin-config.json")"}
   ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+copilot) LAUNCH=${LAUNCH//__COPILOTBIN__/"$(shell_quote "$COPILOT_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin)
+claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | copilot)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac
@@ -5099,6 +5267,16 @@ if [ "$HARNESS" = agy ]; then
       agy_spawn_fail "agy did not start processing its brief in the pre-trusted worktree in window $T"
     else
       agy_spawn_fail "agy never showed its folder-trust dialog on an unregistered worktree in window $T, so the brief could not be confirmed to run there"
+    fi
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = copilot ]; then
+  if ! copilot_wait_for_working; then
+    if [ "$COPILOT_TRUST_ANSWERED" -eq 1 ]; then
+      copilot_spawn_fail "copilot did not start processing its brief after the folder-trust dialog was answered in window $T"
+    else
+      copilot_spawn_fail "copilot did not start processing its brief in window $T; the folder-trust dialog never rendered, so COPILOT_ALLOW_ALL=true may not have reached the pane"
     fi
     exit 1
   fi
