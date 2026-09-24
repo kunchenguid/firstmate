@@ -4010,11 +4010,6 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
   pass "present required sources still reach the ordinary teardown refusal"
 }
 
-if [ -n "${FM_TEST_ONLY:-}" ]; then
-  "$FM_TEST_ONLY"
-  exit 0
-fi
-
 test_missing_startup_source_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup
 test_missing_adapter_sibling_refuses_before_cleanup
