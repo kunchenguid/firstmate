@@ -975,10 +975,17 @@ STALL_JOB="$STALL_STATE/jobs/$FM_REMOTE_JOB_ID"
 # The decoy replaces the job's group record, so no worker stops the real
 # command group; the test does.
 STALL_JOB_GROUP=$(cat "$STALL_JOB/.claim/group")
-set -m
-sleep 30 &
+# Shell job control does not reliably give a background job its own group on
+# every runner, so the decoy makes its own session and leads its group.
+perl -MPOSIX=setsid -e 'setsid() >= 0 or exit 1; exec @ARGV' sleep 30 &
 STALL_DECOY_PID=$!
-set +m
+STALL_DEADLINE=$((SECONDS + 30))
+until [ "$(ps -o pgid= -p "$STALL_DECOY_PID" 2>/dev/null | tr -d ' ')" = "$STALL_DECOY_PID" ] \
+  || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
+  sleep 0.05
+done
+[ "$(ps -o pgid= -p "$STALL_DECOY_PID" 2>/dev/null | tr -d ' ')" = "$STALL_DECOY_PID" ] \
+  || fail "the decoy did not become its own process-group leader"
 printf '%s\n' "$STALL_DECOY_PID" > "$STALL_JOB/.claim/group"
 printf 'unconfirmed\nstart\n' > "$STALL_JOB/.claim/group_start"
 kill -TERM "$STALL_WORKER_PID"
