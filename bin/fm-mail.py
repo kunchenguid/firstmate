@@ -30,6 +30,7 @@ from email.utils import formatdate, getaddresses
 from pathlib import Path
 
 
+
 USER = os.environ['FM_MAIL_USER']
 PW = os.environ['FM_MAIL_PASS']
 IMH = os.environ['FM_IMAP_HOST']
@@ -136,6 +137,7 @@ def away_posture_operation():
             os.environ['FM_AFK_CONTRACT_LOCK_HELD'] = old_locked
 
 
+
 def afk_record_field(name):
     contract = os.path.join(os.path.dirname(__file__), 'fm-afk-contract.sh')
     env = os.environ.copy()
@@ -195,6 +197,7 @@ def afk_email_context():
     if configured.returncode != 0 or not recipient:
         return None, True, False
     return recipient, True, False
+
 
 
 
@@ -273,6 +276,7 @@ def gmail_authentication_pass(message):
             if gmail_aligned(authentication_property(clause, 'header.from')):
                 return True
     return False
+
 
 
 
@@ -625,7 +629,9 @@ def cmd_poll_list():
 
 
 
+
         afk_messages = []
+        afk_body_budget = MAX_AFK_BATCH_BODY_BYTES
         turn_path = os.environ.get('FM_MAIL_TURN', '')
         next_turn = None
         if cap == 1 and new_candidates and retry_candidates:
@@ -700,6 +706,7 @@ def cmd_poll_list():
 
 
 
+
                 uid = clean(u)
                 idate = clean(dec(mi.get('Date')))
                 subj = clean(dec(mi.get('Subject')))
@@ -748,6 +755,7 @@ def cmd_poll_list():
                 out.append((uid, idate, fr, subj, 'degraded'))
                 new_emitted += 1
                 continue
+
 
 
 

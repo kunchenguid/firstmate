@@ -20,6 +20,7 @@ from email.utils import getaddresses
 
 
 
+
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -90,6 +91,7 @@ def mail_configuration():
         or addresses[0][1].casefold() != recipient.casefold()
     ):
         return None
+
 
     return {"recipient": recipient}
 
@@ -180,6 +182,7 @@ def afk_contract_lock():
 
 
 
+
 def atomic_json(path, value):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
@@ -231,6 +234,7 @@ def redact_secrets(text):
             if all(chr(codepoint) not in secret for secret in secret_values)
         )
         replacement = marker * 3
+
     for secret in sorted(secret_values, key=len, reverse=True):
         text = text.replace(secret, replacement)
 
@@ -351,6 +355,7 @@ def queue_unprocessed():
             "seq": seq,
             "task": safe_text(redact_secrets(str(row.get("task", ""))), 160),
             "summary": safe_text(redact_secrets(str(row.get("summary", "")))),
+
 
 
 
@@ -930,6 +935,7 @@ def receive_messages(messages, posture, config):
         except (OSError, ValueError):
             print("fm-afk-email: away-email token state could not be checked; mail poll will retry", file=sys.stderr)
             return 1
+
 
 
 
