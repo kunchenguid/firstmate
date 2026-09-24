@@ -1,4 +1,4 @@
-import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { runCommandAsync } from "./fm-async-exec.ts";
 
 // Shared wake-dispatch handshake between the Pi watcher extension (the
@@ -63,6 +63,13 @@ export interface UnreadWakeScope {
    * to main.
    */
   needsDecisionKeys: string[];
+  /**
+   * Exact check payloads whose captured iDA result identity was proved to
+   * belong to this home's recorded remote-agent task. The watcher uses this
+   * set to distinguish the one branch-owned check trigger from every other
+   * check class, which remains main-owned.
+   */
+  eligibleIdaResults: Array<{ trigger: string; row: string; task: string }>;
   taskByWakeKey: Record<string, string>;
 }
 
@@ -74,6 +81,7 @@ const EMPTY_SCOPE: UnreadWakeScope = {
   eligibleTasks: [],
   corrupted: false,
   needsDecisionKeys: [],
+  eligibleIdaResults: [],
   taskByWakeKey: {},
 };
 const UNSAFE_SCOPE: UnreadWakeScope = {
@@ -84,6 +92,7 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
   eligibleTasks: [],
   corrupted: true,
   needsDecisionKeys: [],
+  eligibleIdaResults: [],
   taskByWakeKey: {},
 };
 
@@ -93,12 +102,12 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
 // itself - it only consumes the exact sequence-number snapshot this function
 // (via writeEligibleRowsSnapshot) hands it.
 //
-// A check-kind row - merge-confirmation polls, Relay mentions, credential/auth
-// failures, and every other legitimately main-only class - never vetoes a scan
-// in either mode. It is simply excluded from eligibleSeqs and left queued for
-// main, which is woken for it on that check's own watcher cycle
-// (fm-primary-pi-watch.ts forces every check-kind TRIGGER to main), so nothing
-// starves by being left behind.
+// The one branch-owned check class is a fully identity-bound task-scoped iDA
+// process result. Merge-confirmation polls, Relay mentions, credential/auth
+// failures, malformed iDA-looking rows, and every other check class never veto
+// a scan in either mode. They are excluded from eligibleSeqs and left queued
+// for main, which is woken for each on that check's own watcher cycle, so
+// nothing starves by being left behind.
 //
 // A signal row whose payload is "needs-decision:"-prefixed, or a stale row
 // for a task with an open needs-decision or a current captain-held declaration,
@@ -166,6 +175,152 @@ function statusFileVersion(path: string): string | null {
   }
 }
 
+function privateRegularFile(path: string): boolean {
+  try {
+    const stat = lstatSync(path);
+    return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 &&
+      (stat.mode & 0o777) === 0o600 &&
+      (typeof process.getuid !== "function" || stat.uid === process.getuid());
+  } catch {
+    return false;
+  }
+}
+
+function parseUniqueFields(raw: string): Map<string, string> | null {
+  const fields = new Map<string, string>();
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line) continue;
+    const split = line.indexOf("=");
+    if (split < 1) return null;
+    const key = line.slice(0, split);
+    if (fields.has(key)) return null;
+    fields.set(key, line.slice(split + 1));
+  }
+  return fields;
+}
+
+function stringField(value: unknown, key: string): string {
+  if (!value || typeof value !== "object") return "";
+  const candidate = (value as Record<string, unknown>)[key];
+  return typeof candidate === "string" ? candidate : "";
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function nullableString(value: unknown, maxLength?: number): boolean {
+  return value == null || (typeof value === "string" && (maxLength === undefined || value.length <= maxLength));
+}
+
+function validRemoteTaskState(value: unknown, task: string): boolean {
+  const state = recordValue(value);
+  if (!state) return false;
+  const phases = new Set([
+    "submission-not-started", "submission-unknown", "submitted", "running", "result-unavailable",
+    "ambiguous", "terminal-success", "terminal-failure", "terminal-cancelled",
+  ]);
+  const waiters = new Set(["not-armed", "armed", "rearming", "interrupted", "terminal"]);
+  const availability = new Set([null, "available", "zero", "unavailable", "error"]);
+  return state.schema === "fm-remote-agent-task-state.v1" && state.task_id === task &&
+    state.executor === "remote-agent" && state.provider === "ida" && state.task_type === "research" &&
+    typeof state.phase === "string" && phases.has(state.phase) &&
+    typeof state.revision === "number" && Number.isSafeInteger(state.revision) && state.revision >= 1 &&
+    typeof state.instruction_file === "string" && state.instruction_file.length > 0 &&
+    typeof state.instruction_sha256 === "string" && /^[0-9a-f]{64}$/.test(state.instruction_sha256) &&
+    (!("bytedcli_version" in state) || typeof state.bytedcli_version === "string") &&
+    nullableString(state.outcome) && nullableString(state.error_class) &&
+    typeof state.waiter === "string" && waiters.has(state.waiter) &&
+    (state.result_availability == null ||
+      (typeof state.result_availability === "string" && availability.has(state.result_availability))) &&
+    nullableString(state.result_path) &&
+    nullableString(state.report_path) && recordValue(state.provider_state) !== null;
+}
+
+function validArtifactReference(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  const artifact = recordValue(value);
+  if (!artifact) return false;
+  const keys = Object.keys(artifact).sort().join(",");
+  return keys === "artifact_count,kind,part_count,part_kinds,readback,schema" &&
+    artifact.schema === "fm-ida-artifact-reference.v1" && artifact.kind === "deep-research-final-answer" &&
+    artifact.readback === "session-get" && Number.isSafeInteger(artifact.artifact_count) &&
+    (artifact.artifact_count as number) >= 1 && Number.isSafeInteger(artifact.part_count) &&
+    (artifact.part_count as number) >= 1 && Array.isArray(artifact.part_kinds) && artifact.part_kinds.length >= 1 &&
+    artifact.part_kinds.every((kind) => kind === "file" || kind === "data");
+}
+
+function validIdaObservation(value: unknown, task: string, marker: string): boolean {
+  const observation = recordValue(value);
+  if (!observation) return false;
+  const resultKind = "result_kind" in observation ? observation.result_kind : undefined;
+  if (observation.schema !== "fm-ida-observation.v1" || observation.task_id !== task ||
+    observation.provider !== "ida" || observation.region !== "sg" || observation.session_marker !== marker ||
+    !["submission", "reconcile", "session"].includes(String(observation.kind)) ||
+    typeof observation.terminal !== "boolean" || typeof observation.ambiguous !== "boolean" ||
+    !(observation.session_id === null || (typeof observation.session_id === "string" && /^[0-9]+$/.test(observation.session_id))) ||
+    !(observation.task_id_remote === null || (typeof observation.task_id_remote === "string" && observation.task_id_remote.length > 0)) ||
+    !nullableString(observation.provider_status, 120) ||
+    !["available", "zero", "unavailable", "error"].includes(String(observation.result_availability)) ||
+    !nullableString(observation.answer) || !nullableString(observation.error_class, 120) ||
+    !(resultKind === undefined || resultKind === null || resultKind === "text" || resultKind === "artifact") ||
+    !validArtifactReference(observation.artifact_reference)) return false;
+  if (resultKind === "text") {
+    return typeof observation.answer === "string" && observation.answer.length > 0 && observation.artifact_reference == null;
+  }
+  if (resultKind === "artifact") return observation.answer === null && recordValue(observation.artifact_reference) !== null;
+  return resultKind === undefined || (observation.answer === null && observation.artifact_reference === null);
+}
+
+function validIdaResultWake(
+  state: string,
+  key: string,
+  payload: string,
+): { task: string; trigger: string } | null {
+  const match = payload.match(/^check: procevent ida (ida-([A-Za-z0-9][A-Za-z0-9._-]{0,58})) ([0-9]+)$/);
+  if (!match) return null;
+  const [, source, task, captureSeq] = match;
+  if (key !== `procevent:${source}:${captureSeq}`) return null;
+
+  const metaPath = `${state}/${task}.meta`;
+  const remoteDir = `${state}/remote-tasks/${task}`;
+  const remoteStatePath = `${remoteDir}/state.json`;
+  const resultPath = `${state}/procevent-inbox/${source}.${captureSeq}.result`;
+  const adapterPath = `${state}/procevent-inbox/${source}.${captureSeq}.adapter`;
+  if (![metaPath, remoteStatePath, resultPath, adapterPath].every(privateRegularFile)) return null;
+
+  try {
+    const canonicalState = realpathSync(state);
+    if (realpathSync(metaPath) !== `${canonicalState}/${task}.meta` ||
+      realpathSync(remoteStatePath) !== `${canonicalState}/remote-tasks/${task}/state.json` ||
+      realpathSync(resultPath) !== `${canonicalState}/procevent-inbox/${source}.${captureSeq}.result` ||
+      realpathSync(adapterPath) !== `${canonicalState}/procevent-inbox/${source}.${captureSeq}.adapter`) return null;
+    const meta = parseUniqueFields(readFileSync(metaPath, "utf8"));
+    if (!meta || meta.get("kind") !== "scout" || meta.get("executor") !== "remote-agent" ||
+      meta.get("provider") !== "ida" || meta.get("task_type") !== "research" ||
+      meta.get("remote_state") !== remoteDir) return null;
+    if (readFileSync(adapterPath, "utf8") !== "ida\n") return null;
+
+    const remoteState = JSON.parse(readFileSync(remoteStatePath, "utf8")) as unknown;
+    const observation = JSON.parse(readFileSync(resultPath, "utf8")) as unknown;
+    if (!validRemoteTaskState(remoteState, task)) return null;
+
+    const providerState = (remoteState as Record<string, unknown>).provider_state;
+    const marker = stringField(providerState, "session_marker");
+    if (!marker || !validIdaObservation(observation, task, marker)) return null;
+    for (const [stateKey, observationKey] of [["session_id", "session_id"], ["task_id", "task_id_remote"]] as const) {
+      const recorded = stringField(providerState, stateKey);
+      const observed = stringField(observation, observationKey);
+      if (recorded && observed && recorded !== observed) return null;
+    }
+    return { task, trigger: payload };
+  } catch {
+    return null;
+  }
+}
+
 function hasOpenNeedsDecision(
   lines: readonly string[],
   resolveVerb: string,
@@ -228,6 +383,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   const eligibleSeqs: string[] = [];
   const eligibleTasks = new Set<string>();
   const needsDecisionKeys: string[] = [];
+  const eligibleIdaResults: Array<{ trigger: string; row: string; task: string }> = [];
   const staleDecisionOwnership = new Map<string, boolean>();
   const resolveVerb = process.env.FM_CLASSIFY_RESOLVE_VERB || "resolved";
   const heldVerb = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
@@ -246,9 +402,15 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
       continue;
     }
     if (kind === "check") {
-      // Always main-owned, in every mode: excluded from what the branch may
-      // claim, never a reason to reject the rest of the queue and never a
-      // reason to send an otherwise-eligible heartbeat review to main.
+      // The sole branch-owned check class is a fully identity-bound iDA
+      // process result. Everything else remains main-owned and excluded from
+      // the claim without vetoing unrelated eligible rows.
+      const idaResult = fields.length === 5 ? validIdaResultWake(state, key, fields[4] ?? "") : null;
+      if (idaResult) {
+        eligibleSeqs.push(seq);
+        eligibleTasks.add(idaResult.task);
+        eligibleIdaResults.push({ trigger: idaResult.trigger, row: seq, task: idaResult.task });
+      }
       continue;
     }
     let project = "";
@@ -333,6 +495,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     eligibleTasks: [...eligibleTasks],
     corrupted: false,
     needsDecisionKeys,
+    eligibleIdaResults,
     taskByWakeKey: Object.fromEntries(taskByKey),
   };
 }
@@ -442,6 +605,8 @@ export interface BranchDispatchOffer {
   heartbeat: boolean;
   /** True only when at least one currently unread row is safe for branch handling. */
   eligible: boolean;
+  /** Exact iDA-result queue rows that caused this check trigger, if any. */
+  idaResultRows: readonly string[];
   /** Set by accept(); read by the watcher after emit returns. */
   accepted: boolean;
   settlement: Promise<void>;
@@ -453,12 +618,14 @@ export function createBranchDispatchOffer(
   projects: readonly string[] = [],
   heartbeat = false,
   eligible = false,
+  idaResultRows: readonly string[] = [],
 ): BranchDispatchOffer {
   const offer: BranchDispatchOffer = {
     message,
     projects: [...projects],
     heartbeat,
     eligible,
+    idaResultRows: [...idaResultRows],
     accepted: false,
     settlement: Promise.resolve(),
     accept(settlement = Promise.resolve()) {

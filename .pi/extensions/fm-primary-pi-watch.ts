@@ -596,17 +596,16 @@ export default function (pi: ExtensionAPI) {
 
   function offerWakeToBranch(message: string): Promise<void> | null {
     const heartbeat = /^heartbeat($|:)/.test(message);
-    // A check-kind close (merge-confirmation polls, Relay mentions,
-    // credential/auth failures, and every other legitimately main-only
-    // class - docs/pi-supervision-branch.md) is never routed to the branch
-    // even when other currently-unread rows are individually eligible: this
-    // watcher cycle's own triggering event stays on main, exactly as before
-    // scopeForUnreadWake stopped letting a co-present check row veto the
-    // whole scan. That relaxation is what lets an UNRELATED eligible
-    // signal/stale row still reach the branch on this cycle; it must never
-    // also let a check-kind trigger itself slip past main's delivery.
+    // A check-kind close stays on main except for the exact task-scoped iDA
+    // result payload whose captured identity scopeForUnreadWake validated.
+    // That narrow exception does not let any other check trigger slip past
+    // main merely because another currently unread row is eligible.
     const isCheckTrigger = /^check:/.test(message);
     const scope = scopeForUnreadWake(state, heartbeat);
+    const idaResultRows = isCheckTrigger
+      ? scope.eligibleIdaResults.filter((result) => result.trigger === message).map((result) => result.row)
+      : [];
+    const isIdaResultTrigger = idaResultRows.length > 0;
     // A signal close containing a needs-decision status file, or a stale close
     // for a captain-held task, gets the identical main-only treatment as a
     // check-kind trigger. The cross-reference deliberately includes every
@@ -626,8 +625,8 @@ export default function (pi: ExtensionAPI) {
       scope.taskByWakeKey[key] ?? scope.taskByWakeKey[key.replace(/^fm-/, "")] ?? key;
     const needsDecisionTasks = new Set(scope.needsDecisionKeys.map(taskIdentity));
     const isNeedsDecisionTrigger = triggerKeys.some((key) => needsDecisionTasks.has(taskIdentity(key)));
-    const eligible = !isCheckTrigger && !isNeedsDecisionTrigger && scope.eligible;
-    const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible);
+    const eligible = (!isCheckTrigger || isIdaResultTrigger) && !isNeedsDecisionTrigger && scope.eligible;
+    const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible, idaResultRows);
     pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
     return offer.accepted ? offer.settlement : null;
   }
