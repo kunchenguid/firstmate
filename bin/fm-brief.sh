@@ -6,7 +6,14 @@
 # fills before dispatch: `{TASK}` under `## Captain's intent` (the captain's
 # own ask plus the context needed to read it, including the substance of any
 # report, decision, or PR the ask refers to, without added speaker labels or
-# direct address) and `{FIRSTMATE_SPEC}`
+# direct address). Any text the captain pasted or attached in the current
+# request (a proposal, a diff, a link, quoted external material) goes into
+# `{TASK}` verbatim, never summarized or paraphrased; a link is preserved as
+# the link; never rewrite, paraphrase, or replace the captain's words with a
+# fetched summary. Investigate and add the referenced substance required above
+# separately alongside the preserved text. When it will not fit, say what was
+# cut rather than silently condensing or inventing a summary in its place.
+# `{FIRSTMATE_SPEC}`
 # under `## Firstmate spec` (build instructions, which are never the captain's
 # intent). bin/fm-dod-lib.sh owns the no-mistakes `--intent` contract those
 # subsections feed; bin/fm-spawn.sh refuses leftover placeholders and a

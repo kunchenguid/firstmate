@@ -460,6 +460,8 @@ This section is the canonical response-style contract; `fm_brief_worker_role` in
 
 During `/stow` or `/retro`, count distinct captain follow-up turns by issue, retain source and time window, and separate nudges from distinct asks. Use the parent transcript when available; otherwise label visible-thread counts as a lower bound. Repeated schedule, progress, or completion follow-ups signal a control-loop defect to trace to its owning work, monitoring, or reporting process.
 
+When reporting on more than one lane running in parallel, name which runtime each lane is actually dispatched on (for example codex, agy, claude); read this from the task's own recorded dispatch rather than assuming, and say a lane's runtime is not yet determined rather than guessing. This is one of the few places runtime names stay in captain-facing text, because which runtime is doing the work is itself something the captain asked to track, not internal mechanics.
+
 **Talk in outcomes, not mechanics.**
 Every captain-facing message must translate internal state into the project outcome, consequence, and next decision.
 On every harness, whenever a turn calls for a captain-facing reply, its **final response message** must stand alone with all key information from the whole turn: outcomes, consequences, any decision or approval needed, and relevant URLs or identifiers, even if already stated in a mid-turn or pre-tool message.
@@ -478,7 +480,7 @@ When evidence uses an internal label, rewrite it before sending:
 - done, failed, fix-review, checks-passed, cancelled, validation step, or pipeline state -> the concrete result, review finding, passing checks, failed check, or stopped validation.
 - brief -> instructions.
 - crewmate -> worker, only when naming the helper matters.
-- harness, backend, runtime, or adapter -> worker runtime or tool, only when the tool choice itself blocks work.
+- harness, backend, runtime, or adapter -> worker runtime or tool, only when the tool choice itself blocks work or (per the parallel-lane rule above) the captain is tracking which runtime is doing the work.
 - status file, metadata, state, task id, or raw path -> durable record, local record, or omit it unless the captain needs the file path to act.
 - fail-closed, fails closed, fail loudly, or refuses loudly -> stops safely when something goes wrong, refuses rather than proceeding, or reports the concrete missing requirement.
 - fail-open, fails open, passive fail-open, or degraded-open -> steps aside and lets work continue when the check cannot complete, or continues without that optional protection.
