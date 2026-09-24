@@ -216,6 +216,38 @@ They fail for opposite reasons, which is the point of keeping them apart.
 The crashed-leader cases separately pin refusal and claim preservation when a leader dies outside the stop's own signal, so successful escalation cannot be mistaken for closing that limit.
 Refresh the regressions with `bash tests/fm-procevent.test.sh`; the dated measurements above are recorded observations, not fixed timing thresholds.
 
+## The published session listing the board guard resolves through
+
+Verified on 2026-09-22 on macOS (Darwin 25.6.0) with `lavish-axi` 0.1.77.
+A status log carries only a board URL, so `bin/fm-lavish-board-guard.sh` needs a URL-to-artifact-file resolution.
+This build publishes one, and `bin/fm-procevent-lavish.sh sessions` reads exactly it:
+
+```sh
+$ lavish-axi | sed -n '/^sessions\[/,/^visual_guidance/p' | head -2
+sessions[3]{file,status,url,pending_prompts,listener}:
+  /Users/.../page.html,open,"http://127.0.0.1:4387/session/24d3974cafa3912a",0,none
+$ bin/fm-procevent-lavish.sh sessions | head -1
+open	http://127.0.0.1:4387/session/24d3974cafa3912a	/Users/.../page.html
+```
+
+There is still no dedicated `sessions` subcommand: `lavish-axi sessions` exits 2 with `VALIDATION_ERROR`, the same positive proof of absence recorded above, so the bare listing is the published surface.
+The parse asserts that the header's first four fields are exactly `file,status,url,pending_prompts` and refuses otherwise, because a reordered or dropped field is what would resolve a URL to the wrong artifact.
+An appended column is absorbed rather than parsed.
+
+`listener` is an appended column this build added, and it must not be read as a verdict.
+Observed on the same date: the listing reported `listener: none` for a board that had a live listener attached, proved by the process table in the same minute.
+
+```sh
+$ ps -eww -o args= | grep lavish | grep poll
+bash .../bin/fm-procevent-lavish.sh poll /Users/.../wallets-board.html
+node /Users/.../.local/bin/lavish-axi poll /Users/.../wallets-board.html
+```
+
+Attendance therefore comes from firstmate's own process-event registration, read through `bin/fm-procevent.sh list`, never from that column and never from the process table.
+
+[`tests/fm-lavish-board-guard-live-e2e.test.sh`](../../tests/fm-lavish-board-guard-live-e2e.test.sh) is the command that refreshes this evidence; it opens its own scratch session, asserts the resolution against the installed build, and ends that session again.
+[`tests/fm-lavish-board-guard.test.sh`](../../tests/fm-lavish-board-guard.test.sh) pins the guard's own logic in CI with real registrations and no Lavish server, including the appended-column and reordered-header cases.
+
 ## Portability finding
 
 `setsid` is **not present on macOS**, so it cannot establish the runner's process group.

@@ -12,6 +12,7 @@
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
 #   fm-procevent-lavish.sh poll <artifact.html> [--agent-reply-file <path>]
+#   fm-procevent-lavish.sh sessions
 #
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, disconnected, missing, or unknown.
@@ -50,6 +51,24 @@
 #            only place Lavish's notion of "nothing was said" is decided.
 #            Task-owned terminal rounds bypass generic silence so their owner
 #            receives the stop-and-conclude instruction.
+#
+# sessions   Print the server's current session inventory as
+#            `<status><TAB><url><TAB><file>` lines, one per session, and nothing
+#            else. It is the read-only resolution from a board URL - the only
+#            handle a status log carries - to the artifact file every other
+#            Lavish command takes. It reads the published listing that bare
+#            `lavish-axi` prints under its `sessions[N]{...}` header, applies
+#            config/lavish-axi-host exactly like the poll does, and never arms,
+#            polls, opens, or ends anything.
+#            It requires the header's first four fields to be exactly
+#            `file,status,url,pending_prompts` and refuses with a diagnostic
+#            otherwise, because a reordered or dropped field is what would
+#            resolve a URL to the WRONG file. An appended column is absorbed:
+#            0.1.77 added `listener`, and that trailing value is dropped rather
+#            than parsed. `listener` is deliberately NOT read as a verdict -
+#            verified on 2026-09-22 against 0.1.77, it reported `none` for a
+#            board that had a live `lavish-axi poll` attached, so nothing here
+#            may treat it as evidence about who is listening.
 #
 # AN EMPTY BOARD CLOSE IS NOT NEWS, and that is what `silent` exists to say.
 # Closing a review surface that carried nothing is the single most common Lavish
@@ -242,6 +261,71 @@ cmd_arm() {
   printf 'armed: %s\n' "$id"
   printf 'artifact: %s\n' "$real"
   [ -z "$task" ] || printf 'owner-task: %s\n' "$task"
+}
+
+# Read-only session inventory. `lavish-axi` with no arguments prints the
+# server's own session table; nothing here opens, resumes, polls, or ends a
+# session, and the artifact path is never touched. Fields are parsed from the
+# RIGHT so an artifact path containing a comma still resolves: the published row
+# is `<file>,<status>,"<url>",<pending_prompts>`.
+cmd_sessions() {
+  local original_host_present=0 original_host="" listing rc=0
+  [ "$#" -eq 0 ] || usage
+  command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
+  if [ "${LAVISH_AXI_HOST+x}" = x ]; then
+    original_host_present=1
+    original_host=$LAVISH_AXI_HOST
+  fi
+  apply_configured_lavish_host "$original_host_present" "$original_host"
+  listing=$(lavish-axi 2>/dev/null) || rc=$?
+  [ "$rc" -eq 0 ] || die "lavish-axi could not list its sessions"
+  printf '%s\n' "$listing" | perl -e '
+    use strict;
+    use warnings;
+    # The four fields this command is written against, in this order, at the
+    # head of the published row. A vendor that APPENDS a column (0.1.77 added
+    # `listener`) is absorbed by dropping that many trailing values; a vendor
+    # that reorders or drops one of these four is refused, because that is the
+    # change that would resolve a URL to the wrong file.
+    my @required = qw(file status url pending_prompts);
+    my ($in_block, $want, $seen, $extra) = (0, 0, 0, 0);
+    while (my $line = <STDIN>) {
+      chomp $line;
+      if ($line =~ /^sessions\[(\d+)\](?:\{([^}]*)\})?:\s*$/) {
+        ($in_block, $want, $seen, $extra) = (1, $1, 0, 0);
+        if ($want > 0) {
+          my @fields = split /,/, (defined $2 ? $2 : ""), -1;
+          die "error: unrecognized lavish-axi session listing fields: @{[ join q{,}, @fields ]}\n"
+            if @fields < @required
+            || join(q{,}, @fields[0 .. $#required]) ne join(q{,}, @required);
+          $extra = @fields - @required;
+        }
+        next;
+      }
+      next unless $in_block;
+      last unless $line =~ /^\s\s(\S.*)$/;
+      my $row = $1;
+      $row =~ s/\s+$//;
+      # Appended columns first, then pending_prompts, the quoted url, and the
+      # status, right to left, so an artifact path containing a comma survives.
+      for (1 .. $extra) {
+        next unless $row =~ s/,[^,]*$//;
+      }
+      next unless $row =~ s/,\s*\d+$//;
+      next unless $row =~ s/,\s*"([^"]*)"$//;
+      my $url = $1;
+      next unless $row =~ s/,\s*([^,]*)$//;
+      my $status = $1;
+      my $file = $row;
+      $file =~ s/^"(.*)"$/$1/;
+      next if $file eq "" || $url eq "";
+      $seen++;
+      print join("\t", $status, $url, $file), "\n";
+    }
+    if ($in_block && $seen != $want) {
+      die "error: lavish-axi listed $want sessions but $seen were readable\n";
+    }
+  ' || die "cannot read the lavish-axi session listing"
 }
 
 cmd_retire() {
@@ -792,6 +876,7 @@ case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
   poll)      shift; cmd_poll "$@" ;;
+  sessions)  shift; cmd_sessions "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;
