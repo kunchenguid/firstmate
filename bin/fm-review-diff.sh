@@ -4,6 +4,9 @@
 # Pooled project clones do not keep their local default branch current, so this
 # helper compares remote-backed projects against origin/<default> after fetching
 # the default branch, and local-only projects against the local default branch.
+# state/<id>.meta base_branch= replaces that default when the task shipped
+# against a named integration branch, including a branch that exists only in a
+# bare project repository.
 # When state/<id>.meta records pr= as a GitHub pull-request URL or a bare
 # number for an open PR, the compare side is ALWAYS a freshly fetched
 # refs/pull/<n>/head by default so review stays current after no-mistakes fix
@@ -74,7 +77,16 @@ default_branch() {
   return 1
 }
 
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+RECORDED_BASE=$(grep '^base_branch=' "$META" | tail -n 1 | cut -d= -f2- || true)
+if [ -n "$RECORDED_BASE" ]; then
+  if ! git check-ref-format --branch "$RECORDED_BASE" >/dev/null 2>&1; then
+    echo "error: task $ID has an invalid recorded base branch '$RECORDED_BASE'" >&2
+    exit 1
+  fi
+  DEFAULT=$RECORDED_BASE
+else
+  DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+fi
 
 BRANCH=$(grep '^branch=' "$META" | cut -d= -f2- || true)
 [ -n "$BRANCH" ] || BRANCH="fm/$ID"
