@@ -68,8 +68,8 @@ Other transient consumers retain their existing shell-relative behavior.
 
 ## Operational home layout and state
 
-This section defines the top-level operational-home layout.
-Producer script headers and their help define exact child-file fields and rules for changing them.
+This section is the single owner of the top-level operational-home layout.
+Producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains shared instructions, skills, documentation, workflows, and `bin/`.
 Each effective `FM_HOME` contains private operational directories.
 
@@ -220,7 +220,7 @@ The command saves the model pick in gitignored `config/supervision-branch-model`
 Both live under the effective Firstmate home, resolved in this order: `FM_HOME`, `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path.
 When `FM_CONFIG_OVERRIDE` is present for tests or specialized setup, it selects the config directory directly.
 Firstmate keeps no model catalog of its own.
-The list includes only models that Pi reports when the picker opens and that a fresh isolated branch runtime can run.
+The list is the intersection of what Pi reports when the picker opens and what a fresh isolated branch runtime can run.
 
 A provider that exists only because an extension registered it inside the captain's session, such as pi-devin-auth's `devin`, is offered and can be pinned or followed like any other; [pi-supervision-branch.md](pi-supervision-branch.md#cost-model-and-the-byte-stable-prefix) owns how that registration reaches the isolated branch runtime.
 Stored OAuth and API-key credentials retain their native credential type because Firstmate never copies, converts, installs, or overwrites credentials for the branch runtime.
@@ -479,7 +479,7 @@ Otherwise an exact task id matching `state/<id>.meta` wins before the legacy `fm
 A metadata-routed selector returns the recorded backend target (`terminal=` for Orca, otherwise `window=`), and matching explicit targets can still recover the recorded backend when metadata contains the same endpoint.
 
 Only metadata-routed task selectors carry secondmate-marker and Codex-harness context; explicit endpoint escape hatches do not.
-These rules define the task-selector vocabulary.
+These rules are the single owner of the task-selector vocabulary.
 Backend guides and other documents refer here instead of restating the resolution order.
 
 ### Teardown identity checks
@@ -968,7 +968,7 @@ Every claude launch's inline `--settings` JSON also carries `"attribution":{"com
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
-Firstmate chooses the best matching rule; shell scripts do not match the natural-language rules.
+Firstmate chooses the best matching rule with judgment; shell scripts do not match the natural-language rules.
 Firstmate resolves the rule's profile object or array under `AGENTS.md` section 4 and `quota-array-dispatch`, then passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
 
 **Spawn requirements**
@@ -1378,10 +1378,12 @@ FM_SMTP_HOST=   # SMTP server hostname
 `FM_IMAP_PORT` (default 993), `FM_SMTP_PORT` (default 465), `FM_MAIL_TIMEOUT` (default 20 seconds), and `FM_MAIL_POLL_MAX_WAKES` (default 20, valid 1..200) are optional.
 The per-poll wake cap bounds the wakes of one `poll` run; header fetches scan a larger bounded window of new unseen uids plus already-surfaced retry-set uids, so a flood or large backlog still makes bounded progress every poll, keeping the durable wake queue bounded without ever dropping mail.
 
-**Arm unattended polling**
+**Unfetchable headers**
 
 A message whose header cannot be fetched is surfaced with a degraded summary instead of being skipped, so it is never missed and cannot block later mail.
 A later poll retries that fetch and, on success, surfaces the real sender and subject; a persistently unfetchable message stays degraded without repeating that wake.
+
+**Arm unattended polling**
 
 A home that wants mail polled unattended arms the standing check in the live home: `bin/fm-mail-check.sh arm`.
 Arming writes `state/mail.check.sh` and registers it with the watcher's slow-check cadence (`FM_CHECK_INTERVAL`), so the plane's `poll` runs on its own: new mail still surfaces as `check: mail <uid>` wakes from the poll, and the standing check itself also prints a line (and the watcher turns that line into a wake) unless the poll is a proven no-op.
@@ -1739,10 +1741,10 @@ bin/fm-extension.sh inspect org.firstmate.example.file-signal
 bin/fm-extension.sh verify org.firstmate.example.file-signal
 ```
 
-**Bind on a remote secondmate**
-
 Use an absent destination for the copy so the source identity remains inspectable and reproducible.
 For a non-default home, set `FM_HOME=<that-home>` on every command; local and remote secondmate homes bind the package independently, and bindings are not inherited.
+
+**Bind on a remote secondmate**
 
 For a configured remote secondmate, keep the package at the controller and transfer it through the authenticated `fm-on` route:
 
@@ -1757,10 +1759,14 @@ bin/fm-extension.sh remote-bind <secondmate-id> \
 The command serializes only the validated extension package, stages it below the addressed remote home's fixed extension staging root, binds it there, and prints transfer and binding digests.
 Registration uses `bin/fm-on.sh <secondmate-id> fm-procevent.sh ...`.
 
+**Retire a binding**
+
 After retiring every registration with its printed owner token and handling every captured result, retire the enabled remote binding and its exact staged transfer together with `bin/fm-on.sh <secondmate-id> fm-extension.sh retire-transfer <extension-id> --if-transfer-digest <transfer-digest> --if-binding-digest <binding-digest>`.
 For a direct local binding, use `bin/fm-extension.sh retire-binding <extension-id> --if-binding-digest <binding-digest>` after the same process-event retirement and handling steps.
 
 Both commands retain the retired identity reversibly and leave unrelated bindings and content-addressed installed packages unchanged.
+
+**Register a completion source**
 
 Register one file completion source with a path-safe source id and an explicit non-secret source configuration reference.
 Credential values never belong in that reference, command argv, or a process-event result:
@@ -1773,12 +1779,12 @@ bin/fm-procevent.sh reconcile
 
 `register-extension` prints the new registration's owner token and exact owner-matched retirement command.
 
-**Open the Lavish artifact first**
+**Classify and acknowledge results**
 
 The source waits outside the conversational turn, and its completed result arrives through the existing process-event `check` path.
 Classify the captured result through its immutable package identity with `bin/fm-procevent.sh classify <result-file>`, acknowledge it with the existing `handled` command only after it is handled, and use the printed `retire --if-owner` command when explicit retirement is needed.
 
-**Retry interrupted Lavish polls**
+**Keep blocking sources out of the turn**
 
 Never run the registered blocking source command directly in a conversational turn.
 
@@ -1788,7 +1794,12 @@ A long-polling external process is registered as a *source* through its adapter,
 `bin/fm-procevent.sh` owns the generic contract; built-in adapters retain their tracked `bin/fm-procevent-<adapter>.sh` commands, while an explicitly bound external adapter routes through the trusted host contract above.
 
 `bin/fm-procevent-lavish.sh` is the first built-in adapter and wraps only the currently published `lavish-axi poll` interface.
+
+**Open the Lavish artifact first**
+
 Before arming any Lavish source, open its artifact with `lavish-axi` so the saved session identifies the board's server; each poll attempt derives its host and port from that session and refuses missing or invalid session evidence before consuming a staged worker reply.
+
+**Retry interrupted Lavish polls**
 
 That adapter, and only that adapter, retries the one exact transient response a cut-short listener returns while its marks remain available (`error: Lavish Editor poll response was interrupted` with `code: SERVER_ERROR`), up to 12 times with poll starts at least 5 seconds apart, so an internal retry never reaches the runner as a captured result.
 This start-to-start governor is a no-op after a normally blocking poll but caps an immediately returning poll under the shipped defaults independently of the owner lease and registration launch pacing.
@@ -1822,9 +1833,9 @@ It may carry `--agent-reply-file <path>`.
 The file's contents are copied into that generation's private staging file and passed once to the published `--agent-reply` argument.
 
 A failed re-arm leaves the prior registration and its referenced reply unchanged, including when its required acknowledgement cannot be recorded.
-Reply posting is best effort.
+Reply posting is best effort by design.
 The listener consumes the staged file only after validating its own setup and the board artifact.
-A rare crash between consuming the file and making the call can drop that round's reply; it will not post it twice.
+The one loss window is a rare crash between consuming the file and making the call, which drops that round's reply rather than posting it twice.
 
 This path keeps no receipt, retry, or idempotency record.
 Robust reply delivery waits on lavish-axi's exclusive listener.
