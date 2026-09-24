@@ -196,8 +196,9 @@
 #   never lists) passes through unvalidated with a stderr notice, and a bare
 #   fuzzy pattern is left to omp's own matcher. A crewmate or scout loads its
 #   per-task busy-state extension with -e from state/ (outside the worktree, so
-#   auto-discovery cannot load it a second time); a secondmate passes no -e at
-#   all and relies on omp auto-discovering the home's tracked .omp/extensions/
+#   auto-discovery cannot load it a second time); a secondmate names only that
+#   state/<id>.omp-ext.ts busy extension with -e and relies on omp
+#   auto-discovering the home's tracked .omp/extensions/ for the rest
 #   (verified, omp 18.1.11: a file named both ways loads twice, and discovery is
 #   cwd-only with no trust dialog).
 #   config/secondmate-harness may also carry an optional model and effort as extra
@@ -357,7 +358,7 @@
 # a mate's completed turns stay in its own home. Codex stays unknown until a semantic
 # source exists. Grok keeps its rendered-tail fallback and is not given a parent
 # turn-end hook. Cursor's transcript binding is written for a secondmate the same way
-# as for a crewmate. Muse, gemini, agy, and rovo are refused as secondmates.
+# as for a crewmate. Muse, gemini, agy, devin, and rovo are refused as secondmates.
 # A claude secondmate gets no Stop busy hook; its home's tracked Stop guard is its
 # only Stop writer, through the .fm-busy-stop pointer in that home. A home whose
 # guard predates that pointer keeps the ordinary Stop idle hook instead.
