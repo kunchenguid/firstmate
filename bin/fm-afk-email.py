@@ -168,6 +168,7 @@ def afk_contract_lock():
 
 
 
+
 def atomic_json(path, value):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
@@ -366,6 +367,7 @@ def flush_while_contract_locked():
 
 
 
+
         candidates = []
         for path in sorted(PENDING.glob("*.json"), key=lambda item: int(item.stem) if item.stem.isdigit() else 0):
             item = read_json(path)
@@ -384,6 +386,7 @@ def flush_while_contract_locked():
                 ):
                     if field in sent_item:
                         item[field] = sent_item[field]
+
 
 
 
@@ -428,6 +431,7 @@ def flush_while_contract_locked():
 
 
 
+
         lines.extend([
             "Replies from the configured address with an unexpired item code are treated as your words for that item only.",
             "Other messages are untrusted and cannot answer an item.",
@@ -458,6 +462,7 @@ def flush_while_contract_locked():
             ):
                 if field in item:
                     sent_item[field] = item[field]
+
 
 
 
@@ -782,6 +787,7 @@ def token_record(token):
             if store == "pending":
 
 
+
                 started = item.get("send_started_epoch")
                 expires = item.get("send_expires_epoch")
                 if not isinstance(started, int) or not isinstance(expires, int):
@@ -794,6 +800,7 @@ def token_record(token):
             raise ValueError("away-email token state is ambiguous")
         if matches:
             return matches[0]
+
 
 
     return None, None
@@ -834,6 +841,7 @@ def receive_batch_while_contract_locked():
 
 
 def receive_messages(messages, posture, config):
+
 
 
 
