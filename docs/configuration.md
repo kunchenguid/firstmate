@@ -1396,6 +1396,7 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 
 The mail plane (`bin/fm-mail.sh`) reads unseen IMAP messages and sends one SMTP message.
 
+
 **Polling and delivery guarantees**
 Its `poll` command surfaces each new message as a durable `check: mail <uid>` wake, which is also what the standing received-mail check runs each watcher cycle.
 Poll emission is exactly-once-recovering: a published wake always carries a durable journal record, and a poll interrupted before recording its uid is healed from that journal, so inbound mail is never silently missed.
