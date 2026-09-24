@@ -47,6 +47,11 @@ Successful dispatch returns after durable state publication and process-event ar
 Do not block the conversational turn with provider polling or output readback.
 Keep ordinary supervision live because a registered process-event source is active work even though no local endpoint exists.
 
+Provider completion is an executor fact, not business-level acceptance of the research goal.
+On every provider-terminal observation, compare the bound report and artifacts with the intended outcome and acceptance evidence in the durable brief.
+If an authorized gap remains, keep the task unfinished and continue only through the recorded provider's existing supported lifecycle; never rewrite a terminal provider identity as running, create a duplicate session, bypass a one-create or adoption guard, or accept a provider compliance statement in place of observable evidence.
+If the provider has no supported continuation from that terminal state, record the exact remaining gap, the attempts and evidence, and the specific new authority or external change required instead of pretending the goal completed.
+
 On restart, retain the existing task id and recorded provider/session identity.
 Read current truth with `bin/fm-task-state.sh <id>`, not the latest status event or local endpoint tools.
 Use the selected provider's adoption path for nonterminal work; adoption reconciles or re-arms the recorded task and never invents a replacement remote session.
@@ -125,7 +130,8 @@ A successful close response is only a request acknowledgement; do not claim canc
 
 ## Retirement
 
-Before retirement, require a provider-terminal state, a private single-link `data/<id>/report.md` bound by task state, a retired provider source, and the ordinary captain-hold completion gate.
+Before retirement, require semantic acceptance of the report against the durable research goal, a provider-terminal state, a private single-link `data/<id>/report.md` bound by task state, a retired provider source, and the ordinary captain-hold completion gate.
+Once those conditions hold, retire completed research automatically without another routine approval.
 Retire through `bin/fm-task-retire.sh` so local tasks continue through `fm-teardown.sh` while remote tasks use provider-specific safety checks.
 Preserve the durable report and any provider-owned quarantine evidence.
-Never delete an ambiguous or nonterminal record, treat interruption as provider cancellation, or bypass an open captain decision.
+Never delete an ambiguous or nonterminal record, treat interruption as provider cancellation, bypass an open captain decision, or auto-resume explicitly cancelled or archived work.

@@ -57,6 +57,14 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *"# PR identity: copy or abstain"*"copied verbatim from the task's \`done: PR <url>\` status line or its \`pr=\` metadata field"*"Never assemble an owner, repository, host, or number"*"report the identifier you do have"*) ;;
     *) fail "branch prompt lost the copy-or-abstain PR identity rule" ;;
   esac
+  case "$out_a" in
+    *"# Goal-directed acceptance"*"bounded continuation"*"existing validation phase"*"provider-terminal research whose report does not satisfy the research goal"*"explicit cancellation, archival state, or stop remains stopped"*) ;;
+    *) fail "branch prompt lost incomplete-provider, intermediate-result, continuation, or explicit-stop handling" ;;
+  esac
+  case "$out_a" in
+    *"pass the unresolved-captain-decision gate"*"without requesting another routine approval"*"real permission boundary"*"bounded retries"*"never reinterpret a ready PR as already delivered or merged"*) ;;
+    *) fail "branch prompt lost accepted-research archival, hard-block evidence, or delivery-authority boundaries" ;;
+  esac
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor"
 }
 

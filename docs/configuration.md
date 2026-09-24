@@ -58,7 +58,7 @@ New AIME records retain `cloud_state=...` and the proven `fm-aime-task-state.v1`
 Provider adapters own provider commands and normalized observations.
 Existing AIME records with `executor=cloud-worker`, `provider=aime`, `cloud_state=...`, and `fm-aime-task-state.v1` are a permanent read-compatibility path.
 They are not migrated or rewritten and remain readable, adoptable, cancellable, reportable, and retireable through their original lifecycle.
-The [`cloud-research-worker` skill](../.agents/skills/cloud-research-worker/SKILL.md) owns the conditional operator procedure for both providers.
+The [`cloud-research-worker` skill](../.agents/skills/cloud-research-worker/SKILL.md) owns the conditional operator procedure for both providers, including the semantic-acceptance check that keeps provider-terminal state distinct from completion of the research goal.
 
 <a id="aime-cloud-research-worker-configaime-cloud-worker"></a>
 

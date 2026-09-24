@@ -865,6 +865,12 @@ EOF
       assert_grep "$home/state/$id.inbox" "$brief" "$project_kind $kind omitted its exact steering inbox"
       assert_grep 'When this task works on Firstmate itself' "$brief" "$project_kind $kind made the exception unconditional"
       assert_grep 'Project instructions still govern the work wherever they do not conflict with this worker identity' "$brief" "$project_kind $kind displaced project guidance"
+      assert_grep '# Goal-directed task lifecycle' "$brief" "$project_kind $kind omitted the goal-directed lifecycle"
+      assert_grep 'identify from `## Captain' "$brief" "$project_kind $kind omitted durable outcome and evidence intake"
+      assert_grep 'compare the current evidence with that outcome' "$brief" "$project_kind $kind omitted the next-action verification loop"
+      assert_grep 'An empty steering inbox means there is no new instruction' "$brief" "$project_kind $kind replaced goal progress with inbox polling"
+      assert_grep 'Stop only for a required decision above your authority, a real permission boundary, an explicit cancellation or stop' "$brief" "$project_kind $kind omitted bounded stop conditions"
+      assert_grep 'do not expand that boundary in the name of completing the goal' "$brief" "$project_kind $kind broadened authority for goal completion"
       ! grep -q '^This section supersedes every earlier brief instruction about your role' "$brief" ||
         fail "$project_kind $kind revoked the brief's own role for a task that is not Firstmate"
       assert_no_grep '# Current worker role contract' "$home/data/$id/brief.md" "spawn rewrote the source brief"

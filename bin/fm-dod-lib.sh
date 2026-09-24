@@ -52,6 +52,16 @@ EOF
 Never inspect or change any other home's endpoint namespace; this authorization is limited to the exact task paths named by this brief.
 When this task works on Firstmate itself, the repository root `AGENTS.md` (also imported by `CLAUDE.md`) is project content and the supervisor contract for the firstmate managing you: follow this brief instead of that supervisor contract.
 Project instructions still govern the work wherever they do not conflict with this worker identity, including `CONTRIBUTING.md` and `firstmate-coding-guidelines` for Firstmate changes.
+
+# Goal-directed task lifecycle
+Treat the durable task brief as the contract for the result, not as a list of steps to perform.
+Before acting, identify from `## Captain's intent` and `## Firstmate spec` the intended outcome, the evidence or acceptance checks that prove it, the allowed scope and exclusions, and the conditions that would be a genuine hard block; if a material ambiguity prevents a safe dispatch, ask firstmate before beginning.
+At the start of every resumed turn and after each material result, compare the current evidence with that outcome, name the remaining gap, take the next authorized task-local action, and verify its effect.
+An implementation commit, report, provider success, process exit, PR, or intermediate milestone is evidence or a delivery checkpoint only; none substitutes for the brief's accepted outcome.
+An empty steering inbox means there is no new instruction, not that goal-directed work should pause; continue authorized task-local work while a gap remains.
+Do not ask for permission for routine reversible steps already inside the brief's boundary, and do not expand that boundary in the name of completing the goal.
+Stop only for a required decision above your authority, a real permission boundary, an explicit cancellation or stop, or an external failure after bounded retries and a genuinely different authorized diagnostic or recovery path have both been exhausted.
+When stopping short, report what is complete, the exact remaining gap, the attempts and evidence, and the specific input or external change needed next.
 EOF
 }
 
@@ -240,8 +250,8 @@ fm_dod_block() {  # <mode> <task-id>
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+The implementation phase reaches its delivery checkpoint only when the brief's acceptance evidence is satisfied and the result is committed on your branch.
+When that is true, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop for firstmate's semantic acceptance and the configured merge decision.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
@@ -250,7 +260,7 @@ EOF
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
+The implementation phase reaches its delivery checkpoint only when the brief's acceptance evidence is satisfied and the result is committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
@@ -260,8 +270,8 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+The implementation phase reaches its first delivery checkpoint only when the brief's acceptance evidence is satisfied and the result is committed on your branch.
+When that is true, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you on the next delivery phase.
 For an ordinary no-mistakes task, that next phase is /no-mistakes validation and PR delivery.
 For deployable ByteDance-internal code with a BITS/PPE delivery surface, do not start no-mistakes until Firstmate has loaded \`bits-development\`, delivered the exact candidate through the BITS-owned source branch, created one fresh dedicated PPE for the first delivery through the newly created Dev Task or reused that task's existing PPE for a subsequent revision, and passed the required API or end-to-end test against that exact deployment.
@@ -293,7 +303,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, bypassing firstmate's authority check; answering your own ask-user finding is a hard rule violation.
 
-On the ordinary path, after /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+On the ordinary path, after /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. Your worker phase is finished; firstmate still owns semantic acceptance and the configured merge decision.
 On the BITS/PPE path, follow \`bits-development\` for the ready signal because BITS owns the MR and CI while no-mistakes validates only the already PPE-proven candidate.
 EOF
       ;;
