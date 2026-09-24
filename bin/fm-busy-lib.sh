@@ -43,7 +43,8 @@
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
-#   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
+#   cursor-transcript, codex-transcript, traex-transcript, missing, malformed,
+#   gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
@@ -82,17 +83,21 @@
 # cleared. See fm_busy_cursor_turn_state for the fold. Cursor's rendered
 # `ctrl+c to stop` footer is deliberately not a state source here.
 #
-# Codex negotiation (fm_busy_codex_appserver_observable,
-# fm_busy_codex_hooks_verified): the approved contract prefers Codex's
-# app-server turn lifecycle with capability negotiation, and sanctions its
-# stable lifecycle hooks as the intermediate. Neither is usable on the
-# installed binary, so Codex classifies unknown codex-unverified rather than
-# falling back to idle, and fm-spawn installs no Codex busy wiring.
-# docs/verification/supervision.md owns the evidence for both probes.
+# Codex and TraeX managed workers use the task-bound pull reader in
+# fm-busy-transcript.py, which owns binding, verified versions and submission
+# fences. They arm an unknown record for generation ownership only; the reader
+# never trusts that seed as evidence of activity. tmux/Herdr process liveness
+# must be verified before reading; other backends remain unknown. Missing
+# bindings on legacy Codex tasks remain codex-unverified; legacy TraeX retains
+# the generic native busy-only fallback. New bindings outrank native state.
+# The reserved Codex push probes below remain closed: hooks miss API failure,
+# and observing a separate app-server thread does not observe a default TUI.
+# docs/verification/supervision.md owns the current and historical evidence.
 #
 # Sourcing: set -u and set -e safe; no subshell-unfriendly globals.
 
 FM_BUSY_LIB_VERSION=v1
+FM_BUSY_TRANSCRIPT_READER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-busy-transcript.py"
 
 # Standalone-Kimi verification gate. Empty means no installed Kimi version
 # has passed live verification, so every standalone Kimi task classifies
@@ -145,9 +150,8 @@ fm_busy_codex_hooks_verified() {
   return 1
 }
 
-# fm_busy_codex_semantic_source: 0 when ANY verified Codex semantic source
-# exists. fm-spawn arms and wires Codex only behind this gate, and the
-# classifier reports unknown codex-unverified until it opens.
+# fm_busy_codex_semantic_source: reserved PUSH-source gate. The verified
+# transcript pull source does not use this record-writer trust table.
 fm_busy_codex_semantic_source() {
   fm_busy_codex_appserver_observable || fm_busy_codex_hooks_verified
 }
@@ -870,7 +874,8 @@ fm_busy_agy_tail_busy() {
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown plus the producing source (see header). Never probes
-# process state. <tail40> is optional pre-captured plain output used only by
+# process state except the Codex/TraeX reader liveness prerequisite. <tail40>
+# is optional pre-captured plain output used only by
 # the grok, rovo, and agy arms; when absent each captures through
 # fm_backend_capture if available, else reports unknown capture-failed.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
@@ -883,8 +888,36 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
         return 0
       fi
       ;;
-    codex*)
-      if ! fm_busy_codex_semantic_source; then
+    codex*|traex)
+      if [ -f "$state/$id.busy-session" ] || [ -f "$state/$id.busy-gen" ] ||
+        grep -q '^busy_gen=' "$state/$id.meta" 2>/dev/null; then
+        # A stopped agent cannot leave an open rollout classified busy. Only
+        # recovery-grade backend evidence may override the semantic reader.
+        native=unverified
+        if command -v fm_backend_agent_state >/dev/null 2>&1; then
+          native=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
+          # TraeX can have native agent_status=unknown while its process is
+          # alive. Reuse the backend's structural process probe, without
+          # letting that native semantic status mask a valid transcript.
+          if [ "$backend" = herdr ] && [ "$native" = unreadable ] &&
+            fm_backend_herdr_parse_target "$target"; then
+            case "$(fm_backend_herdr_pane_process_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null)" in
+              agent) native=alive ;;
+              shell) native=dead ;;
+            esac
+          fi
+        fi
+        case "$native" in
+          dead|missing) printf 'dead endpoint-gone' ;;
+          alive)
+            python3 "$FM_BUSY_TRANSCRIPT_READER" read "$state" "$id" "$harness" "$backend" "$target" 2>/dev/null ||
+              printf 'unknown %s-transcript' "$harness"
+            ;;
+          *) printf 'unknown %s-transcript' "$harness" ;;
+        esac
+        return 0
+      fi
+      if [ "$harness" != traex ]; then
         printf 'unknown codex-unverified'
         return 0
       fi

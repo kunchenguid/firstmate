@@ -312,7 +312,7 @@ test_codex_unverified_gate() {
   gen=$("$EV" arm "$state" t1)
   "$EV" apply "$state" t1 busy --gen "$gen" --source codex-hook --event user-prompt-submit
   out=$(fm_busy_classify tmux w1 codex t1 "$state")
-  [ "$out" = "unknown codex-unverified" ] || fail "unverified codex must classify unknown, got '$out'"
+  [ "$out" = "unknown codex-transcript" ] || fail "unverified codex must classify unknown, got '$out'"
   [ -z "$(fm_busy_sources_for_harness codex)" ] \
     || fail "codex must trust no semantic source until one is verified"
   pass "codex classifies unknown until a semantic source passes its verification gate"
@@ -482,5 +482,119 @@ test_dead_endpoint_overrides
 test_herdr_native_busy_only
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
+
+
+test_task_bound_rollouts() {
+  python3 - "$ROOT" "$TMP_ROOT/rollouts" <<'PYTEST' || fail 'task-bound rollout regressions failed'
+import copy, json, os, pathlib, subprocess, sys
+root, base = map(pathlib.Path, sys.argv[1:])
+reader = root/'bin/fm-busy-transcript.py'
+
+def run(*args):
+    return subprocess.check_output([str(x) for x in args], text=True).strip()
+
+for harness, version in [('codex', '0.156.1'), ('traex', '0.207.1')]:
+    home = base/harness
+    state = home/'state'; state.mkdir(parents=True)
+    cwd = home/'project'; cwd.mkdir()
+    sessions = home/'sessions'; logs = sessions/'2026/09/25'; logs.mkdir(parents=True)
+    log = logs/'rollout-main.jsonl'
+    gen = run(root/'bin/fm-busy-event.sh', 'arm', state, 'worker', '--state', 'unknown')
+    meta = f'harness={harness}\nworktree={cwd}\nwindow=lab:w\nbusy_gen={gen}\n'
+    (state/'worker.meta').write_text(meta)
+    run('python3', reader, 'init', state, 'worker', harness, cwd, sessions, 'tmux', 'lab:w')
+    run('python3', reader, 'activate', state, 'worker')
+    binding = (state/'worker.busy-session').read_text()
+    records = [
+        {'type':'session_meta','payload':{'id':'session-1','session_id':'session-1','cwd':str(cwd),
+            'source':'cli','thread_source':'user','originator':harness+'-tui','cli_version':version}},
+        {'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-1','root_turn_id':'turn-1'}},
+        {'type':'event_msg','payload':{'type':'item_completed','thread_id':'session-1','turn_id':'turn-1',
+            'item':{'type':'UserMessage','content':[{'type':'text','text':'brief\nFIRSTMATE_BUSY_GENERATION='+gen}]}}},
+    ]
+    complete = {'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-1','error':None}}
+    def write(rows):
+        with log.open('w') as f:
+            for i, row in enumerate(rows): f.write(json.dumps(dict(row,ordinal=i))+'\n')
+    def append(row):
+        i = len(log.read_text().splitlines())
+        with log.open('a') as f:f.write(json.dumps(dict(row,ordinal=i))+'\n')
+    def reset():
+        for p in logs.glob('*'):p.unlink()
+        (state/'worker.busy-session').write_text(binding)
+        (state/'worker.meta').write_text(meta)
+        (state/'worker.busy-gen').write_text(gen+'\n')
+        write(records)
+    def expect(verdict, label):
+        actual = run('python3', reader, 'read', state, 'worker', harness, 'tmux', 'lab:w')
+        assert actual == verdict+' '+harness+'-transcript', (harness,label,actual)
+        print('ok - '+harness+' '+label)
+    reset(); expect('busy','active turn')
+    append({'type':'response_item','payload':{'type':'function_call_output','call_id':'tool-1','output':'exit code 7'}})
+    expect('busy','tool failure does not end the turn')
+    append(complete); expect('idle','normal completion')
+    # Exercise the public backend dispatcher, including the ordering of fencing
+    # before a mocked transport failure. No implementation text is inspected.
+    script = '''source "$1/bin/fm-backend.sh"
+fm_backend_source() { :; }
+fm_backend_tmux_send_text_submit() { return 9; }
+fm_backend_send_text_submit tmux lab:w next 1 .01 .01
+'''
+    result = subprocess.run(['bash','-c',script,'_',str(root)], env=dict(os.environ,FM_HOME=str(home)))
+    assert result.returncode == 9
+    expect('unknown','submit-before-log and transport failure cannot reuse old idle')
+    append({'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-2','root_turn_id':'turn-2'}})
+    expect('busy','next matching turn clears submission fence')
+    append({'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-2','error':{'message':'simulated 401'}}})
+    expect('idle','API failure terminal settles turn')
+    reset(); append({'type':'event_msg','payload':{'type':'turn_aborted','turn_id':'turn-1','reason':'interrupted'}})
+    expect('idle','user interrupt settles matching turn')
+    reset(); append(complete); expect('idle','bind exact session')
+    saved = log.read_bytes(); log.unlink(); expect('unknown','missing bound log')
+    log.write_bytes(saved); expect('unknown','replacement inode cannot rebind')
+    reset(); expect('busy','bind before truncation'); log.write_text(''); expect('unknown','truncated bound log')
+    reset(); append(complete); expect('idle','bind before prefix rewrite')
+    write(records+[dict(complete,payload={'type':'task_complete','turn_id':'turn-X'})]); expect('unknown','rewritten prefix')
+    reset(); log.write_text(log.read_text()+'{"type":'); expect('unknown','partial tail')
+    reset(); log.write_text(log.read_text()+'invalid\n'); expect('unknown','corrupt record')
+    reset(); other=logs/'rollout-duplicate.jsonl';other.write_bytes(log.read_bytes()); expect('unknown','ambiguous sessions')
+    reset(); child=copy.deepcopy(records);child[0]['payload']['source']={'subagent':'worker'}; write(child)
+    expect('unknown','child session excluded even with copied marker')
+    reset(); wrong=copy.deepcopy(records);wrong[0]['payload']['cwd']=str(home/'other');write(wrong)
+    expect('unknown','canonical task path mismatch')
+    reset(); wrong=copy.deepcopy(records);wrong[0]['payload']['session_id']='session-other';write(wrong)
+    expect('unknown','session identity mismatch')
+    reset(); wrong=copy.deepcopy(records);wrong[0]['payload']['cli_version']='999.0.0';write(wrong)
+    expect('unknown','unverified version')
+    reset(); wrong=copy.deepcopy(records);wrong[2]['payload']['item']['content'][0]['text']='FIRSTMATE_BUSY_GENERATION=old';write(wrong)
+    append(complete);expect('unknown','reused slot old launch generation')
+    reset(); (state/'worker.busy-gen').write_text('replacement\n');expect('unknown','retired busy generation')
+    reset(); append(dict(complete,payload={'type':'task_complete','turn_id':'old-turn'}));expect('unknown','mismatched terminal turn')
+    reset(); append(complete);run('python3',reader,'fence-target',state,'tmux','lab:w')
+    run('python3',reader,'fence-target',state,'tmux','lab:w')
+    append({'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-2','root_turn_id':'turn-2'}})
+    append({'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-2'}})
+    expect('unknown','two pending submissions need two observed starts')
+    reset();append(complete);expect('idle','bind before unreadable submission');log.unlink()
+    run('python3',reader,'fence-target',state,'tmux','lab:w');write(records+[complete])
+    expect('unknown','lost watermark cannot later resurrect old idle')
+    reset();append(complete)
+    # The classifier's liveness input is backed by a real short-lived process.
+    process=subprocess.Popen(['sleep','30'])
+    def classify():
+        code='''source "$1/bin/fm-busy-lib.sh"
+probe_pid=$5
+fm_backend_agent_state() { if kill -0 "$probe_pid" 2>/dev/null; then printf alive; else printf dead; fi; }
+fm_busy_classify tmux lab:w "$2" worker "$3"
+'''
+        return run('bash','-c',code,'_',root,harness,state,'unused',process.pid)
+    assert classify() == 'idle '+harness+'-transcript'
+    process.terminate();process.wait()
+    assert classify() == 'dead endpoint-gone'
+    print('ok - '+harness+' process exit overrides transcript completion')
+PYTEST
+}
+
+test_task_bound_rollouts
 
 echo "all fm-busy-state tests passed"

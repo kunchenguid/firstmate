@@ -1671,9 +1671,9 @@ launch_template() {
       ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)__BUSYMARKER__"'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)__BUSYMARKER__"'
       fi
       ;;
     opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -1820,7 +1820,7 @@ launch_template() {
     # launch-scoped because TraeX has no verified child-process identity marker.
     # Herdr owns pane/process/input/lifecycle behavior; the harness contributes
     # only its autonomous CLI shape and the trust-dialog fact checked below.
-    traex) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS FM_TRAEX_HARNESS=traex traex -y __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    traex) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS FM_TRAEX_HARNESS=traex traex -y __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)__BUSYMARKER__"' ;;
     *) return 1 ;;
   esac
 }
@@ -3654,7 +3654,8 @@ fi
 if [ "$KIND" != secondmate ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
-  # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
+  # submitted turn, so push adapters seed busy/fm-spawn. Transcript readers
+  # seed unknown until their bound log proves activity. The minted gen is
   # embedded into each adapter's wiring so an event from a superseded
   # incarnation is rejected as stale. Grok and rovo stay on their isolated
   # rendered-tail fallbacks and standalone Kimi stays unknown until
@@ -3663,14 +3664,19 @@ if [ "$KIND" != secondmate ]; then
   # open-close pair.
   BUSY_GEN=
   case "$HARNESS" in
-  codex*)
-    if fm_busy_codex_semantic_source; then
-      echo "error: codex semantic busy-state wiring is not implemented; extend the probe only together with verified wiring" >&2
-      exit 1
+  codex | traex)
+    if [ "$RAW_LAUNCH" -eq 0 ]; then
+      BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID" --state unknown) || exit 1
+      [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
+      if [ "$HARNESS" = codex ]; then
+        BUSY_SESSIONS_ROOT="${CODEX_HOME:-$HOME/.codex}/sessions"
+      else
+        BUSY_SESSIONS_ROOT="${TRAE_HOME:-$HOME/.trae}/cli/sessions"
+      fi
+      python3 "$FM_ROOT/bin/fm-busy-transcript.py" init "$STATE_REAL" "$ID" "$HARNESS" \
+        "$WT" "$BUSY_SESSIONS_ROOT" "$BACKEND" "$T" || exit 1
     fi
     ;;
-  esac
-  case "$HARNESS" in
   claude* | opencode* | pi | pi-signed | omp)
     BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
       echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -3890,14 +3896,8 @@ export default function (pi: any) {
 EOF
     ;;
   codex*)
-    # Semantic busy-state source negotiation (bin/fm-busy-lib.sh owns the
-    # probes and the evidence). Neither Codex path is usable on the
-    # installed binary: a pane worker's turns are not observable through
-    # the app-server protocol, and its lifecycle hooks did not fire for a
-    # firstmate-launched worker. Codex therefore classifies unknown with
-    # an explicit reason rather than falling back to idle, and no busy
-    # wiring is installed. The turn-end NOTIFICATION marker still rides
-    # the launch command via -c notify=[...] and __TURNEND__.
+    # The transcript binding above owns busy state. Codex's notify marker
+    # remains a separate wake notification carried by the managed launch.
     ;;
   grok*)
     # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
@@ -4236,6 +4236,21 @@ MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+BUSY_MARKER=
+if [ -n "${BUSY_GEN:-}" ]; then
+  case "$HARNESS" in
+    codex|traex) BUSY_MARKER="\$(printf '\\nFIRSTMATE_BUSY_GENERATION=%s' '$BUSY_GEN')" ;;
+  esac
+fi
+LAUNCH=${LAUNCH//__BUSYMARKER__/$BUSY_MARKER}
+if [ -n "$BUSY_MARKER" ]; then
+  # The pane shell may have a different ambient vendor home from the spawning
+  # process. Pin the launched TUI to the same session root that we bound.
+  case "$HARNESS" in
+    codex) LAUNCH="CODEX_HOME=$(shell_quote "${BUSY_SESSIONS_ROOT%/sessions}") $LAUNCH" ;;
+    traex) LAUNCH="TRAE_HOME=$(shell_quote "${BUSY_SESSIONS_ROOT%/cli/sessions}") $LAUNCH" ;;
+  esac
+fi
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
 if [ "$HARNESS" = rovo ]; then
   ROVOCONFIGOVERRIDE=$(rovo_config_override_flag "$EFFORT" "$DATA" "$STATE" "$ID") || {
@@ -4385,6 +4400,11 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ -n "${BUSY_GEN:-}" ]; then
+  case "$HARNESS" in
+    codex|traex) python3 "$FM_ROOT/bin/fm-busy-transcript.py" activate "$STATE_REAL" "$ID" || exit 1 ;;
+  esac
+fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 if [ "$HARNESS" = traex ]; then
   # Sending Enter proves transport only. A fresh isolated copy may show TraeX's

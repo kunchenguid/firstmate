@@ -109,7 +109,7 @@ export FM_HOME="$PROBE/home" FM_BACKEND=herdr HERDR_SESSION="$LAB" FM_SPAWN_NO_G
 unset HERDR_ENV HERDR_PANE_ID HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_SOCKET_PATH 2>/dev/null || true
 
 SPAWN_OUT=$("$ROOT/bin/fm-spawn.sh" traex-live "$REPO" --scout --harness traex \
-  --model Doubao-Seed-2.1-Pro --effort high 2>&1) || fail "real TraeX spawn failed: $SPAWN_OUT"
+  --model Seed-Evolving --effort high 2>&1) || fail "real TraeX spawn failed: $SPAWN_OUT"
 printf '%s\n' "$SPAWN_OUT" | grep -Fq 'spawned traex-live harness=traex kind=scout' \
   || fail "spawn omitted success identity: $SPAWN_OUT"
 META="$PROBE/home/state/traex-live.meta"
@@ -119,7 +119,7 @@ PANE=${TARGET#*:}
 [ -n "$WT" ] && [ -n "$PANE" ] || fail 'spawn metadata omitted task copy or pane'
 grep -qx 'harness=traex' "$META" || fail 'metadata omitted TraeX'
 ! grep -q '^traex_ready=' "$META" || fail 'thin adapter wrote TraeX readiness state'
-[ ! -e "$PROBE/home/state/traex-live.busy-gen" ] || fail 'thin adapter armed custom lifecycle state'
+[ -e "$PROBE/home/state/traex-live.busy-session" ] || fail 'missing transcript task binding'
 grep -q '^pane read ' "$PROBE/herdr-wrapper.log" || fail 'fresh copy did not exercise rendered trust recognition'
 [ "$(grep -c '^pane send-keys .* enter ' "$PROBE/herdr-wrapper.log")" -eq 2 ] \
   || fail 'fresh launch did not send one shell Enter and one verified trust Enter'

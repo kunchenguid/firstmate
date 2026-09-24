@@ -245,6 +245,7 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
       printf '%s\n' "$state/$id.muse-session-current"
       ;;
     cursor) printf '%s\n' "$state/$id.cursor-session" ;;
+    codex|traex) printf '%s\n' "$state/$id.busy-session" ;;
     # gemini's busy-state and turn-end hooks live in a firstmate-owned
     # settings file the launch reaches through GEMINI_CLI_SYSTEM_SETTINGS_PATH,
     # so retiring that one file retires the whole incarnation's wiring. Nothing

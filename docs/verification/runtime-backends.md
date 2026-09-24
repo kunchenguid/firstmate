@@ -2145,3 +2145,22 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## Codex and TraeX transcript liveness (2026-09-25)
+
+`FM_BUSY_TRANSCRIPT_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-busy-transcript-live-e2e.test.sh` passed on Herdr 0.8.0, Codex 0.156.1 and TraeX 0.207.1 internal.
+It launches default interactive workers in a named Herdr lab and private mount/PID/network namespaces against a local simulated provider.
+It does not attach to the shared daemon or default session.
+The exact successful output for each tool was:
+
+```text
+ok - <tool> default TUI startup and completion
+ok - <tool> active turn and user interrupt
+ok - <tool> real tool failure and simulated API failure
+ok - <tool> process exit overrides a completed transcript
+ok - <tool> endpoint death
+```
+
+TraeX can report native `agent_status=unknown` while its `traex` foreground process remains alive.
+The busy reader uses the existing structural process probe in that case; exact `traex` and `traecli` names are recognized, with real-process decoy coverage in `tests/fm-tmux-agent-liveness.test.sh`.
+[Semantic busy state](supervision.md#semantic-busy-state) records the source coverage and its limits.

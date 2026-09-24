@@ -57,6 +57,7 @@ ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
 # omp (Oh My Pi) is a single binary whose live process name is the bare word
 # `omp`; the two decoys are the substrings an unanchored glob would misread.
 ln -s "$SLEEP_BIN" "$LAB/bin/omp"
+for name in traex traecli extraex; do ln -s "$SLEEP_BIN" "$LAB/bin/$name"; done
 ln -s "$SLEEP_BIN" "$LAB/bin/ompd"
 ln -s "$SLEEP_BIN" "$LAB/bin/comp"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
@@ -193,6 +194,16 @@ for decoy in ompd comp; do
     || fail "'$decoy' merely contains 'omp' and must not classify as a live agent pane"
 done
 pass "tmux liveness: unrelated omp-containing command names stay ambiguous"
+
+# The TraeX process probe must survive a native unknown status, but must not
+# claim unrelated executables containing its name.
+for name in traex traecli; do
+  new_window "$name" "$LAB/bin/$name" 900
+  wait_for_state "$SESSION:$name" alive || fail "$name must classify alive"
+done
+new_window extraex "$LAB/bin/extraex" 900
+wait_for_state "$SESSION:extraex" ambiguous || fail "extraex must remain ambiguous"
+pass "tmux liveness: exact TraeX executable names are recognized without substring matches"
 
 # --- a version name blinds one source ---------------------------------------
 # Giving a genuine harness-named executable the version-string argv[0] that

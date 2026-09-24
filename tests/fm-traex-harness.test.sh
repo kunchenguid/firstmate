@@ -193,7 +193,7 @@ run_traex_spawn() {
   traex_env env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_ENV \
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     "$SPAWN" "$TASK_ID" "$PROJECT_DIR" --harness traex --backend herdr \
-      --model Doubao-Seed-2.1-Pro --effort high --mode no-mistakes --yolo off 2>&1
+      --model Seed-Evolving --effort high --mode no-mistakes --yolo off 2>&1
 }
 
 run_traex_send() {
@@ -205,7 +205,8 @@ assert_no_custom_lifecycle() {
   local meta="$HOME_DIR/state/$TASK_ID.meta"
   assert_no_grep '^traex_ready=' "$meta" "thin adapter wrote TraeX readiness state"
   assert_no_grep '^traex_session_id=' "$meta" "thin adapter wrote a native-session lifecycle binding"
-  assert_absent "$HOME_DIR/state/$TASK_ID.busy-gen" "thin adapter armed a custom busy-state writer"
+  assert_present "$HOME_DIR/state/$TASK_ID.busy-gen" "transcript reader lacks launch generation"
+  assert_present "$HOME_DIR/state/$TASK_ID.busy-session" "transcript reader lacks task binding"
   assert_absent "$HOME_DIR/state/.traex-herdr-bindings" "thin adapter created a binding index"
 }
 
@@ -235,7 +236,7 @@ test_spawn_trust_and_generic_lifecycle() {
   launch=$(cat "$CASE_DIR/launch.log")
   [ "$(grep -c . "$CASE_DIR/launch.log")" = 1 ] || fail "launch brief was injected more than once"
   assert_contains "$launch" 'FM_TRAEX_HARNESS=traex traex -y' "launch omitted scoped identity/autonomy"
-  assert_contains "$launch" "--model 'Doubao-Seed-2.1-Pro'" "launch omitted model"
+  assert_contains "$launch" "--model 'Seed-Evolving'" "launch omitted model"
   assert_contains "$launch" "-c 'model_reasoning_effort=\"high\"'" "launch omitted effort"
   assert_contains "$launch" 'encode launch-brief' "launch omitted positional brief"
   assert_grep 'backend=herdr' "$HOME_DIR/state/$TASK_ID.meta" "metadata omitted Herdr"
