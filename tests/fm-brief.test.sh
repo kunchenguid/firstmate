@@ -216,6 +216,12 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep 'never a bare number such as "PR 108"' "$brief" "$id: brief missing the full-PR-URL rule"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_grep "genuinely different authorized diagnostic or recovery path" "$brief" \
+      "$id: brief missing evidence-based retry progression"
+    assert_grep "blocked: {what remains, what you tried, and what is needed next}" "$brief" \
+      "$id: brief missing concrete hard-block reporting"
+    assert_grep "does not replace progress on the goal in your task brief" "$brief" \
+      "$id: brief lets an empty inbox replace goal progress"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
@@ -888,6 +894,10 @@ test_scout_and_secondmate_scaffold() {
   assert_grep "## Captain's intent" "$brief" "scout brief missing Captain's intent subsection"
   assert_grep "## Firstmate spec" "$brief" "scout brief missing Firstmate spec subsection"
   assert_grep "{FIRSTMATE_SPEC}" "$brief" "scout brief missing the spec placeholder"
+  assert_grep "Report existence is not objective acceptance" "$brief" \
+    "scout brief treats report existence as goal acceptance"
+  assert_grep "archive completed research automatically after the unresolved-decision gate" "$brief" \
+    "scout brief lost automatic accepted-research archival"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \

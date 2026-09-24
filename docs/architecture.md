@@ -201,6 +201,7 @@ Remote agents are therefore task executors, not harnesses or runtime backends, a
 
 All executors reuse the ordinary Firstmate task identity and lifecycle.
 A remote research task keeps its backlog item, private brief and instruction, status-event history, supervision obligation, `data/<id>/report.md`, captain-hold gate, and completion handling, while its metadata records `executor=remote-agent` and an explicit `provider=aime|ida` instead of faking local fields.
+Provider-terminal state remains separate from semantic acceptance of that brief's research goal: an incomplete result stays an unfinished business task and can continue only through the recorded provider's supported lifecycle, while an accepted result retires automatically after the ordinary captain-hold gate.
 `bin/fm-task-state.sh` and `bin/fm-task-retire.sh` are the matching provider-aware read and retirement boundaries.
 Legacy or explicit local task records delegate unchanged to `fm-crew-state.sh` and `fm-teardown.sh`.
 
@@ -280,6 +281,8 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
 The intake and authority contract in `AGENTS.md` owns when separate scout research is warranted.
+Every ship and scout brief durably pairs the captain's intent with a Firstmate specification of the intended outcome, observable acceptance evidence, allowed scope and exclusions, and the hard-block stop condition.
+The worker and supervisor compare material results with that contract until it is accepted or genuinely blocked; delivery milestones retain their existing meanings and do not imply merge or business-level acceptance by themselves.
 
 ## Dispatch profiles
 
