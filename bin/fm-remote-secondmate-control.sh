@@ -3,7 +3,11 @@
 #
 # Usage:
 #   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
-#   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|->
+#   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|-> [<handoff-sha256> | --abandon-live-context]
+#     A handoff digest reads the context handoff from stdin and retains
+#     its host-side raw copy until the replacement confirms receipt and readiness.
+#     Context abandonment requires current explicit captain authority.
+#     Omit custody only when recovering an already-dead agent.
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
@@ -67,8 +71,29 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $1" ;; esac; }
+
+remote_file_link_count() {  # <path>
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %l "$1" 2>/dev/null
+  else
+    stat -c %h "$1" 2>/dev/null
+  fi
+}
+
+remote_sha256_file() {  # <path>
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+REMOTE_HANDOFF_STAGE=
+trap '[ -z "$REMOTE_HANDOFF_STAGE" ] || rm -f -- "$REMOTE_HANDOFF_STAGE" 2>/dev/null || true' EXIT
 
 validate_home() { # <id> [allow-absent]
   local id=$1 allow_absent=${2:-no} marker
@@ -224,7 +249,8 @@ cmd_launch() {
 # re-resolve it here would silently drift the mate onto another runtime. `default`
 # explicitly clears an absent parent pin; `-` remains its compatibility spelling.
 cmd_relaunch() {
-  local id=$1 harness=$2 model=$3 effort=$4
+  local id=$1 harness=$2 model=$3 effort=$4 custody=${5:-}
+  local handoff='' actual='' durable_handoff='' rc
   local -a control_args
 
   validate_id "$id"
@@ -242,15 +268,67 @@ cmd_relaunch() {
   [ "$model" != - ] || model=default
   [ "$effort" != - ] || effort=default
   control_args=("$id" relaunch --harness "$harness" --model "$model" --effort "$effort")
+  case "$custody" in
+    ''|-) ;;
+    --abandon-live-context)
+      control_args+=(--abandon-live-context)
+      ;;
+    *[!0-9a-f]*) die "remote context-handoff argument must be a SHA-256 or --abandon-live-context" ;;
+    *)
+      [ "${#custody}" -eq 64 ] \
+        || die "remote context-handoff argument must be exactly 64 lowercase hexadecimal characters"
+      mkdir -p "$CONTROL_STATE" || die "could not create remote secondmate control state"
+      handoff=$(mktemp "$CONTROL_STATE/.$id.remote-context-handoff.XXXXXX") \
+        || die "could not stage the streamed remote context handoff"
+      REMOTE_HANDOFF_STAGE=$handoff
+      (umask 077; cat > "$handoff") || die "could not capture the streamed remote context handoff"
+      [ -s "$handoff" ] || die "streamed remote context handoff is empty"
+      [ "$(remote_file_link_count "$handoff")" = 1 ] \
+        || die "streamed remote context handoff must be a single-link regular file"
+      actual=$(remote_sha256_file "$handoff") || die "streamed remote context handoff cannot be hashed"
+      [ "$actual" = "$custody" ] \
+        || die "streamed remote context handoff does not match its SHA-256"
+      durable_handoff="$CONTROL_STATE/$id.remote-context-handoff-$custody"
+      if [ -e "$durable_handoff" ] || [ -L "$durable_handoff" ]; then
+        [ -f "$durable_handoff" ] && [ ! -L "$durable_handoff" ] \
+          || die "existing remote context handoff is not a safe regular file"
+        [ "$(remote_file_link_count "$durable_handoff")" = 1 ] \
+          || die "existing remote context handoff must not be hardlinked"
+        if [ "$(remote_sha256_file "$durable_handoff")" != "$custody" ] \
+           || ! cmp -s "$handoff" "$durable_handoff"; then
+          die "existing remote context handoff does not match its content-addressed path"
+        fi
+        rm -f -- "$handoff" || die "could not retire duplicate remote handoff staging file"
+      else
+        mv "$handoff" "$durable_handoff" \
+          || die "could not retain the remote context handoff before relaunch"
+      fi
+      REMOTE_HANDOFF_STAGE=
+      handoff=
+      control_args+=(--handoff-file "$durable_handoff" --handoff-sha256 "$custody")
+      ;;
+  esac
   # The same launch-boundary facts cmd_launch establishes: the endpoint lives in
   # the dedicated fm-remote session, and the parent already owns both convergence
   # legs, so the host-local spawn must not re-sync or re-inherit against this
-  # host's own Firstmate copy.
-  HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
-    FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
-    FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
-    FM_SKIP_SECONDMATE_SYNC=1 \
-    "$SCRIPT_DIR/fm-control.sh" "${control_args[@]}"
+  # host's own Firstmate copy. A streamed raw handoff is retained unless the
+  # control plane confirms that the replacement received it and is ready to resume.
+  if HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
+      FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
+      FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
+      FM_SKIP_SECONDMATE_SYNC=1 \
+      "$SCRIPT_DIR/fm-control.sh" "${control_args[@]}"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -eq 0 ] && [ -n "$durable_handoff" ]; then
+    rm -f -- "$durable_handoff" \
+      || die "replacement confirmed safe resumption, but the superseded remote context handoff could not be retired"
+  fi
+  # Every refusal, timeout, malformed receipt, or uncertain transport result
+  # leaves the host-side handoff in place for inspection or a safe retry.
+  return "$rc"
 }
 
 cmd_send() {
@@ -421,7 +499,7 @@ cmd_retire() {
 
 case "${1:-}" in
   launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;
-  relaunch) shift; [ "$#" -eq 4 ] || usage; cmd_relaunch "$@" ;;
+  relaunch) shift; [ "$#" -ge 4 ] && [ "$#" -le 5 ] || usage; cmd_relaunch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;

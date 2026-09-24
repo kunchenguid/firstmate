@@ -31,12 +31,16 @@
 #   B. RESTART. Only after that mate's own correlated terminal `done` answer
 #      lands on the parent channel. Progress and terminal non-success replies do
 #      not authorize replacement; a blocked, failed, or needs-decision answer
-#      takes the ordinary nudge path. The gate is terminal success, never a wall
-#      clock, so a mate that is mid-turn queues the request behind that turn; the
-#      bound below exists to end the wait, not to authorize a restart. A timeout
-#      deliberately leaves an unanswered or still-in-progress expectation open:
-#      it is a genuine open loop owned by the ordinary pending-reply recovery
-#      ladder, not state this restart pass may close.
+#      takes the ordinary nudge path. The exact request and correlated answer
+#      become a content-addressed handoff delivered to the replacement. Its raw
+#      copies remain until that agent confirms receipt and readiness to resume;
+#      a failed or uncertain local or remote delivery retains the parent copy.
+#      The gate is terminal success, never a wall clock, so a mate that is
+#      mid-turn queues the request behind that turn; the bound below exists to
+#      end the wait, not to authorize a restart. A timeout deliberately leaves
+#      an unanswered or still-in-progress expectation open: it is a genuine
+#      open loop owned by the ordinary pending-reply recovery ladder, not state
+#      this restart pass may close.
 #
 # A mate whose persist answer is missing, still in progress, or non-successful,
 # or whose runtime cannot prove a restart, gets the ordinary re-read nudge and is
@@ -148,6 +152,7 @@ classify_persist_reply() {  # <array-index>
   local i=$1 corr rec status_file line latest='' verb
   PERSIST_REPLY_STATE=pending
   PERSIST_REPLY_VERB=
+  PERSIST_REPLY_LINE=
   corr=${CORR[i]}
   rec=$(fm_pending_reply_path "$STATE" "$corr")
   status_file=$(fm_pending_reply_get "$rec" parent_status)
@@ -158,6 +163,7 @@ classify_persist_reply() {  # <array-index>
     latest=$line
   done < "$status_file"
   [ -n "$latest" ] || return 0
+  PERSIST_REPLY_LINE=$latest
   verb=$(status_line_verb "$latest")
   PERSIST_REPLY_VERB=$verb
   case "$verb" in
@@ -168,12 +174,72 @@ classify_persist_reply() {  # <array-index>
 
 # Advance only a terminal persist result. A terminal non-success reply settles
 # its own expectation but never authorizes replacement; progress keeps waiting.
+restart_sha256_file() {  # <path>
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+restart_file_link_count() {  # <path>
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %l "$1" 2>/dev/null
+  else
+    stat -c %h "$1" 2>/dev/null
+  fi
+}
+
+write_context_handoff() {  # <array-index> <destination>
+  local i=$1 id=${IDS[$1]} destination=$2 tmp latest_digest existing_digest links
+  [ "$PERSIST_REPLY_STATE" = success ] && [ -n "$PERSIST_REPLY_LINE" ] \
+    || return 1
+  tmp=$(mktemp "$STATE/.$id.secondmate-restart.handoff.XXXXXX") || return 1
+  if ! (umask 077; {
+    printf '# Persisted context handoff for secondmate %s\n\n' "$id"
+    printf 'correlation=%s\n\n' "${CORR[$i]}"
+    printf '## Original persistence request\n\n%s\n\n' "$FM_SECONDMATE_PERSIST_REQUEST"
+    printf '## Exact correlated terminal response\n\n%s\n' "$PERSIST_REPLY_LINE"
+  } > "$tmp"); then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  latest_digest=$(restart_sha256_file "$tmp") || { rm -f -- "$tmp"; return 1; }
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    [ -f "$destination" ] && [ ! -L "$destination" ] \
+      || { rm -f -- "$tmp"; return 1; }
+    links=$(restart_file_link_count "$destination") || { rm -f -- "$tmp"; return 1; }
+    [ "$links" = 1 ] || { rm -f -- "$tmp"; return 1; }
+    existing_digest=$(restart_sha256_file "$destination") || { rm -f -- "$tmp"; return 1; }
+    if [ "$existing_digest" != "$latest_digest" ] || ! cmp -s "$tmp" "$destination"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+    rm -f -- "$tmp"
+    return 0
+  fi
+  mv "$tmp" "$destination" || { rm -f -- "$tmp"; return 1; }
+  return 0
+}
+
 advance_persist_reply() {  # <array-index>
-  local i=$1 id rec status_file
+  local i=$1 id rec status_file handoff
   id=${IDS[$i]}
   classify_persist_reply "$i"
   case "$PERSIST_REPLY_STATE" in
     success)
+      handoff="$STATE/$id.secondmate-restart.handoff-${CORR[i]}"
+      if ! write_context_handoff "$i" "$handoff"; then
+        rec=$(fm_pending_reply_path "$STATE" "${CORR[i]}")
+        status_file=$(fm_pending_reply_get "$rec" parent_status)
+        fm_pending_reply_try_resolve "$STATE" "${CORR[i]}" "$status_file" >/dev/null 2>&1 || true
+        report_unreached "$id" "its successful persistence response could not be retained as an integrity-checked handoff, so the live agent was not restarted"
+        PLAN[i]='done'
+        pending_count=$((pending_count - 1))
+        return 0
+      fi
       rec=$(fm_pending_reply_path "$STATE" "${CORR[i]}")
       status_file=$(fm_pending_reply_get "$rec" parent_status)
       fm_pending_reply_try_resolve "$STATE" "${CORR[i]}" "$status_file" || return 1
@@ -216,19 +282,30 @@ report_unreached() {  # <id> <reason>
 }
 
 restart_mate() {  # <array-index>
-  local i=$1 id restart_out restart_rc restart_reason ran_on
+  local i=$1 id restart_out restart_rc restart_reason ran_on handoff handoff_sha256
   id=${IDS[$i]}
+  handoff="$STATE/$id.secondmate-restart.handoff-${CORR[i]}"
+  [ -f "$handoff" ] && [ ! -L "$handoff" ] \
+    || { report_unreached "$id" "the confirmed persistence answer has no safe retained context handoff; the live agent was not restarted"; return; }
+  handoff_sha256=$(restart_sha256_file "$handoff") \
+    || { report_unreached "$id" "the retained context handoff could not be hashed; the live agent was not restarted"; return; }
   if [ "${PLACEMENT[i]}" = remote ]; then
-    restart_out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$id" \
+    restart_out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" --stdin "$id" \
       fm-remote-secondmate-control.sh relaunch \
-      "$id" "${HARNESS[i]}" "${MODEL[i]:-default}" "${EFFORT[i]:-default}" < /dev/null 2>&1)
+      "$id" "${HARNESS[i]}" "${MODEL[i]:-default}" "${EFFORT[i]:-default}" \
+      "$handoff_sha256" < "$handoff" 2>&1)
     restart_rc=$?
   else
     restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-control.sh" "$id" relaunch 2>&1)
+      "$SCRIPT_DIR/fm-control.sh" "$id" relaunch \
+      --handoff-file "$handoff" --handoff-sha256 "$handoff_sha256" 2>&1)
     restart_rc=$?
   fi
   if [ "$restart_rc" -eq 0 ]; then
+    if ! rm -f -- "$handoff"; then
+      report_unreached "$id" "the replacement confirmed safe resumption, but its superseded parent-side raw context could not be retired at $handoff"
+      return
+    fi
     ran_on=$(printf '%s\n' "$restart_out" | sed -n 's/^relaunched .* harness=\([^ ]*\).*/\1/p' | tail -1)
     [ -n "$ran_on" ] || ran_on=${HARNESS[i]}
     if [ "${PLACEMENT[i]}" = remote ]; then

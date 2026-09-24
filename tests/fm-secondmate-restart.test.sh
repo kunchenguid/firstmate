@@ -77,7 +77,17 @@ case "${1:-}" in
           fi
           printf 'zsh' > "$D/command.$target"
           ;;
-        *'encode launch-brief'*) cat "$D/becomes" > "$D/command.$target" ;;
+        *'encode launch-brief'*)
+          cat "$D/becomes" > "$D/command.$target"
+          if [ -n "${FM_CONTROL_RELAUNCH_BRIEF:-}" ] && [ -f "$FM_CONTROL_RELAUNCH_BRIEF" ]; then
+            cp "$FM_CONTROL_RELAUNCH_BRIEF" "$D/replacement-brief"
+            if [ "${FM_FAKE_CONFIRM_HANDOFF_RECEIPT:-0}" = 1 ]; then
+              receipt_command=$(grep -F 'fm-context-handoff-receipt.sh' "$FM_CONTROL_RELAUNCH_BRIEF" | tail -1)
+              [ -n "$receipt_command" ] || exit 1
+              /bin/bash -c "$receipt_command" >/dev/null
+            fi
+          fi
+          ;;
         ': Firstmate instruction waiting: list '*)
           printf 'doorbell\n' >> "$D/rings"
           if [ -x "$D/on-doorbell" ]; then
@@ -248,6 +258,8 @@ run_restart() {  # <case-dir> <args...>
     FM_SPAWN_NO_GUARD=1 FM_SECONDMATE_PERSIST_POLL=1 \
     FM_SECONDMATE_PERSIST_WAIT="${FM_TEST_PERSIST_WAIT:-30}" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    FM_CONTROL_HANDOFF_RECEIPT_WAIT=0.05 FM_CONTROL_HANDOFF_RECEIPT_POLL=0.01 \
+    FM_FAKE_CONFIRM_HANDOFF_RECEIPT="${FM_FAKE_CONFIRM_HANDOFF_RECEIPT:-1}" \
     FM_SSH_BIN="${FM_TEST_SSH_BIN:-ssh}" \
     "$RESTART" "$@" 2>&1
 }
@@ -307,7 +319,17 @@ test_persist_precedes_restart() {
   # The reply expectation is settled rather than left open behind the restart.
   grep -h '^phase=' "$dir/home/state/pending-replies"/* | grep -q '^phase=resolved$' \
     || fail "the persist answer did not settle its durable expectation"
-  pass "T2 the mate persists before anything is stopped"
+  [ "$(grep '^context_custody=' "$dir/home/state/sm1.control-relaunch" | tail -1)" = context_custody=handoff-confirmed ] \
+    || fail "the confirmed persistence answer was not used as confirmed replacement context custody"
+  assert_contains "$(cat "$dir/fake/replacement-brief")" "## Original persistence request" \
+    "the replacement did not receive the exact persistence request"
+  assert_contains "$(cat "$dir/fake/replacement-brief")" "## Exact correlated terminal response" \
+    "the replacement did not receive the correlated persistence response"
+  assert_contains "$(cat "$dir/fake/replacement-brief")" "persistence response" \
+    "the exact persistence response was not present in the replacement instructions"
+  assert_absent "$(find "$dir/home/state" -maxdepth 1 -name 'sm1.secondmate-restart.handoff-*' -print -quit)" \
+    "confirmed local resumption should retire the parent-owned raw handoff"
+  pass "T2 the mate persists, receives the exact answer, and confirms safe resumption before raw context is retired"
 }
 
 # --- T2b: an answer delivered at a zero-second bound still releases the gate -
@@ -325,7 +347,7 @@ test_arrived_answer_precedes_deadline_check() {
 }
 
 test_only_done_persist_reply_releases_restart_gate() {
-  local dir out rc verb phase
+  local dir out rc verb phase corr
   for verb in blocked failed needs-decision working; do
     dir=$(new_case "persist-$verb")
     add_local_mate "$dir" sm1
@@ -342,7 +364,9 @@ test_only_done_persist_reply_releases_restart_gate() {
     assert_no_grep '^/exit$' "$dir/fake/literal" "$verb persistence reply stopped the live mate"
     assert_absent "$dir/home/state/sm1.control-relaunch" \
       "$verb persistence reply opened a relaunch transaction"
-    phase=$(grep -h '^phase=' "$dir/home/state/pending-replies"/* | tail -1 | cut -d= -f2-)
+    corr=$(grep "^$verb \\[corr=" "$dir/home/state/sm1.status" | tail -1 | sed -E "s/^$verb \\[corr=([0-9a-f]{16})\\].*/\\1/")
+    [ -n "$corr" ] || fail "$verb persistence response lost its exact correlation"
+    phase=$(grep '^phase=' "$dir/home/state/pending-replies/$corr" | tail -1 | cut -d= -f2-)
     if [ "$verb" = working ]; then
       [ "$phase" = awaiting_report ] || fail "progress reply unexpectedly settled its persistence expectation"
     else
@@ -450,6 +474,14 @@ test_refused_restart_falls_back_without_claiming_a_reload() {
   pass "T5 a refused restart leaves the mate running and reports an unknown outcome"
 }
 
+sha256_file() {  # <path>
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+
 # --- T6: a remote mate restarts over the fm-on hop, on the parent's pin -------
 # The seam decodes what fm-on.sh actually put on the wire, so this pins the
 # host-local command and the profile the PARENT resolved, not a local shortcut.
@@ -480,7 +512,7 @@ setup_remote_case() {  # <case-dir> <id> <ssh-mode>
   cat > "$fb/fake-ssh" <<'SH'
 #!/usr/bin/env bash
 set -u
-cat > /dev/null
+if [ -n "${FM_FAKE_SSH_STDIN:-}" ]; then cat > "$FM_FAKE_SSH_STDIN"; else cat > /dev/null; fi
 while [ "$#" -gt 0 ]; do
   case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
 done
@@ -510,6 +542,10 @@ case "${rargs[1]:-}" in
         /bin/sleep 2
         : > "$FM_FAKE_DIR/remote-relaunch-end"
         ;;
+      relaunch-fail)
+        printf 'remote control did not confirm the replacement\n' >&2
+        exit 1
+        ;;
     esac
     printf 'relaunched %s\n' "${rargs[2]}"
     ;;
@@ -518,13 +554,15 @@ exit 0
 SH
   chmod +x "$fb/fake-ssh"
   : > "$dir/ssh.log"
+  : > "$dir/ssh.stdin"
   export FM_FAKE_SSH_LOG="$dir/ssh.log"
+  export FM_FAKE_SSH_STDIN="$dir/ssh.stdin"
   export FM_FAKE_SSH_MODE="$mode"
   export FM_TEST_SSH_BIN="$fb/fake-ssh"
 }
 
 test_remote_mate_restarts_over_the_transport_hop() {
-  local dir out rc relaunch_line
+  local dir out rc relaunch_line handoff_digest
   dir=$(new_case remote)
   setup_remote_case "$dir" sm2 ok
   export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm2.status"
@@ -540,8 +578,13 @@ test_remote_mate_restarts_over_the_transport_hop() {
     "a remote restart should be reported with its host and the parent's pinned runtime"
   relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
   [ -n "$relaunch_line" ] || fail "no relaunch crossed the transport hop"$'\n'"$(cat "$dir/ssh.log")"
-  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high" ] \
-    || fail "the host-local relaunch did not carry the parent's resolved profile: $relaunch_line"
+  handoff_digest=$(sha256_file "$dir/ssh.stdin")
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high $handoff_digest" ] \
+    || fail "the host-local relaunch did not carry the parent's resolved profile and handoff digest: $relaunch_line"
+  assert_contains "$(cat "$dir/ssh.stdin")" "## Exact correlated terminal response" \
+    "the remote relaunch did not stream the exact persistence response"
+  assert_absent "$(find "$dir/home/state" -maxdepth 1 -name 'sm2.secondmate-restart.handoff-*' -print -quit)" \
+    "confirmed remote resumption should retire the parent-side raw handoff"
   # The persist request crossed the SAME hop before the restart did.
   [ "$(grep -n '^fm-remote-secondmate-control.sh send' "$dir/ssh.log" | head -1 | cut -d: -f1)" \
      -lt "$(grep -n '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1 | cut -d: -f1)" ] \
@@ -564,6 +607,27 @@ test_unreachable_host_is_reported_unknown() {
   pass "T7 an unreachable host is reported honestly instead of claimed as reloaded"
 }
 
+test_failed_remote_relaunch_retains_the_primary_raw_handoff() {
+  local dir out rc retained
+  dir=$(new_case remote-retention)
+  setup_remote_case "$dir" sm3 relaunch-fail
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm3.status"
+
+  out=$(run_restart "$dir" sm3); rc=$?
+  unset FM_FAKE_ANSWER_STATUS
+
+  expect_code 3 "$rc" "a failed remote relaunch must remain uncertain"$'\n'"$out"
+  assert_contains "$out" "restart outcome is unknown" \
+    "a failed remote delivery should not be reported as complete"
+  retained=$(find "$dir/home/state" -maxdepth 1 \
+    -name 'sm3.secondmate-restart.handoff-*' -type f -print -quit)
+  assert_present "$retained" \
+    "a failed remote delivery must retain the primary-side raw handoff"
+  assert_contains "$(cat "$retained")" "Exact correlated terminal response" \
+    "the retained remote handoff should preserve the persistence answer"
+  pass "T7b a failed remote relaunch retains the primary-side raw handoff"
+}
+
 # --- T8: a local restart lands on this home's durable pin, and says which -----
 test_local_restart_uses_the_home_pin_and_reports_what_ran() {
   local dir out rc
@@ -584,7 +648,7 @@ test_local_restart_uses_the_home_pin_and_reports_what_ran() {
 }
 
 test_native_ultra_restart_keeps_local_and_remote_profiles() {
-  local dir out rc relaunch_line
+  local dir out rc relaunch_line handoff_digest
   dir=$(new_case native-local)
   add_local_mate "$dir" sm1
   arm_answer "$dir" sm1
@@ -606,8 +670,9 @@ test_native_ultra_restart_keeps_local_and_remote_profiles() {
   unset FM_FAKE_ANSWER_STATUS
   expect_code 0 "$rc" "native remote restart failed: $out"
   relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
-  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 pi-signed codex-native/gpt-6-astra ultra" ] \
-    || fail "remote restart dropped native profile: $relaunch_line"
+  handoff_digest=$(sha256_file "$dir/ssh.stdin")
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 pi-signed codex-native/gpt-6-astra ultra $handoff_digest" ] \
+    || fail "remote restart dropped the native profile or context-handoff digest: $relaunch_line"
   pass "native Ultra survives local restart and the remote restart transport"
 }
 
@@ -877,6 +942,7 @@ test_local_restart_uses_the_home_pin_and_reports_what_ran
 test_native_ultra_restart_keeps_local_and_remote_profiles
 test_remote_mate_restarts_over_the_transport_hop
 test_unreachable_host_is_reported_unknown
+test_failed_remote_relaunch_retains_the_primary_raw_handoff
 test_concurrent_reply_cannot_release_persist_gate
 test_persist_waits_are_polled_together
 test_post_stop_failure_is_reported_unreached

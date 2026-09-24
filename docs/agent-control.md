@@ -34,7 +34,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. An endpoint reading `missing` goes through the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) the reclaim uses before anything is claimed about it, and only Herdr can supply one: proven gone reports `endpoint-gone` (the agent went with it, and the endpoint this verb normally preserves did not survive), a pane that turns out to be there and idle is the ordinary `already-stopped`, one whose agent is back takes the ordinary interrupt-then-exit path. A tmux `missing` always refuses rather than claim a stop it cannot see. |
-| `relaunch` | Replace the running agent with a new one in the same worktree - and the same endpoint whenever that endpoint still exists - on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint the task's record now names, and that record names the harness that is actually running. |
+| `relaunch` | Replace the running agent with a new one in the same worktree - and the same endpoint whenever that endpoint still exists - on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint the task's record now names, and that record names the harness that is actually running. A live secondmate also requires a confirmed context handoff or explicit abandonment; a dead or proven-missing agent requires no handoff. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Interrupt never rewrites busy state as proof of its own success.
@@ -74,14 +74,31 @@ It is not deterministic across the verified adapters: codex, grok, gemini, and d
    The recorded worktree must exist and be a worktree root; its head and dirty state are recorded.
    For a `kind=secondmate` task, the home's identity marker must match and its child records must be readable, so a relaunch can never strand child work behind an unreadable home.
    A secondmate's own crewmates run in their own endpoints and outlive its relaunch; the relaunched secondmate reconciles them from its home's durable records at startup.
-3. **Record the note.**
+3. **Record the note or handoff.**
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
-   A secondmate relaunch does not require one and never rewrites its standing charter.
+   A secondmate relaunch does not require a note and never rewrites its standing charter.
+   A live secondmate additionally requires the transaction-bound handoff and replacement receipt described above, or explicit `--abandon-live-context`; dead or proven-missing recovery is custody-free.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which reuses the recorded worktree instead of creating one, adopts the recorded endpoint when it still exists, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+   With a live secondmate handoff, the replacement receives a one-launch-only instruction to read the saved context, verify the receipt transaction details, record the receipt only after it is ready to resume, and preserve the standing charter.
+6. **Confirm and retire custody artifacts.**
+   The control plane waits for the replacement's bound receipt before removing its raw and delivered context copies.
+   A timeout or launch uncertainty retains the full content for recovery rather than claiming that it transferred successfully.
    When the recorded endpoint is proven gone rather than merely idle or unreachable - which only Herdr can establish - the launch owner creates one fresh endpoint in that same worktree and the republished record rebinds the task to it - see [Reclaiming a task whose endpoint is gone](#reclaiming-a-task-whose-endpoint-is-gone).
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
+
+### Live secondmate context custody
+
+A live secondmate's standing charter is not a copy of its current conversation, so replacing its agent without a handoff can discard context that exists nowhere durable.
+A live secondmate relaunch through `bin/fm-control.sh` therefore requires either `--handoff-file <path> --handoff-sha256 <sha256>` or `--abandon-live-context`.
+The handoff must be a readable, single-link text file whose SHA-256 matches the supplied digest; the control plane snapshots it before stopping the old agent and places it in a replacement-only brief without rewriting the standing charter.
+The replacement must read the handoff and confirm both receipt and readiness to resume through `bin/fm-context-handoff-receipt.sh`, with a receipt bound to that relaunch transaction and handoff digest.
+The control-owned raw snapshot and full delivery copy remain until that receipt is verified; an absent or invalid receipt leaves them in place and reports that resumption is unconfirmed.
+`fm-secondmate-restart.sh` separately retires its parent-side source only after the control command returns successfully.
+`--abandon-live-context` is a distinct, auditable no-handoff path and requires current explicit captain authority.
+An already-dead or proven-missing agent can be relaunched without either custody option, because it cannot provide recoverable live conversation; the ordinary endpoint recovery proof still applies.
+The parent-side `bin/fm-secondmate-restart.sh` owns the automatic persist-request path: it packages the exact correlated request and successful response, and it does not restart on a terminal failure reply.
 
 ### Reclaiming a task whose endpoint is gone
 
@@ -139,6 +156,8 @@ The worktree and the task's records are unaffected either way.
 
 - A refusal **before** the agent is stopped leaves the durable record and the instructions byte-identical.
 - A launch failure **after** the agent is stopped restores the prior durable record, keeps the progress note so a later recovery still has it, marks the journal `failed:launching`, and reports plainly that no agent is running and where the work is preserved.
+- A replacement that starts but does not provide a valid handoff receipt remains recorded as running, while the original and delivered context copies are retained and the result is reported as unconfirmed.
+- If a valid receipt exists but redundant-copy cleanup fails, the journal records that resumption was confirmed and preserves any copy that could not be retired.
 - If the launch owner already published the new record but no running agent can be confirmed, the new record is kept: the task is recorded on the new harness with no agent confirmed, which is exactly what recovery reconciles.
   Rewriting it back to the old harness would be a second, worse inaccuracy.
 
@@ -184,5 +203,5 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 ## Verification
 
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
-- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch, and the endpoint-absence proof both verbs share - the Herdr reclaim of a destroyed endpoint, and tmux refusing one it cannot prove absent.
+- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch, live-secondmate context custody and receipt, and the endpoint-absence proof both verbs share - the Herdr reclaim of a destroyed endpoint, and tmux refusing one it cannot prove absent.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.

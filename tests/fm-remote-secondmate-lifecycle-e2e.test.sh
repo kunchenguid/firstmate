@@ -91,7 +91,15 @@ case "\${1:-}" in
     exit 0
     ;;
   capture-pane) printf '❯\n'; exit 0 ;;
-  send-keys) [ ! -f "\$fail_send" ] || exit 1; exit 0 ;;
+  send-keys)
+    [ ! -f "\$fail_send" ] || exit 1
+    if [ -n "\${FM_CONTROL_RELAUNCH_BRIEF:-}" ] && [ -f "\$FM_CONTROL_RELAUNCH_BRIEF" ]; then
+      receipt_command=\$(grep -F 'fm-context-handoff-receipt.sh' "\$FM_CONTROL_RELAUNCH_BRIEF" | tail -1)
+      [ -n "\$receipt_command" ] || exit 1
+      /bin/bash -c "\$receipt_command" >/dev/null
+    fi
+    exit 0
+    ;;
   kill-window) rm -f -- "\$state"; exit 0 ;;
   list-panes) printf 'codex\n'; exit 0 ;;
 esac
@@ -1092,7 +1100,36 @@ assert_contains "$RELAUNCH_CHECKPOINT" 'refusing to relaunch without a checkout 
 cp "$TMP_ROOT/ios-before-relaunch.meta" "$RELAUNCH_ROUTE_META"
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
   || fail "a refused remote restart must leave the running agent untouched"
-pass "the remote restart verb delegates to the host-local control plane and refuses before stopping anything"
+RELAUNCH_CUSTODY=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh \
+  relaunch ios codex - - 2>&1) && fail "a live remote secondmate without context custody should refuse"
+assert_contains "$RELAUNCH_CUSTODY" 'still has recoverable conversation context' \
+  "the remote control verb did not apply the live-context custody requirement"
+RELAUNCH_HANDOFF="$TMP_ROOT/remote-relaunch-handoff.md"
+printf 'Remote handoff request and exact correlated answer.\n' > "$RELAUNCH_HANDOFF"
+RELAUNCH_HANDOFF_SHA256=$(sha256_file "$RELAUNCH_HANDOFF")
+RELAUNCH_LIVE=$(remote_env "$ROOT/bin/fm-on.sh" --stdin ios \
+  fm-remote-secondmate-control.sh relaunch ios codex - - "$RELAUNCH_HANDOFF_SHA256" \
+  < "$RELAUNCH_HANDOFF" 2>&1) \
+  || fail "a remote live relaunch with a streamed handoff did not confirm resume"$'\n'"$RELAUNCH_LIVE"
+assert_contains "$RELAUNCH_LIVE" 'relaunched ios' \
+  "the remote replacement did not complete after its handoff receipt"
+assert_grep 'context_custody=handoff-confirmed' \
+  "$REMOTE_HOME/state/parent-route/ios.control-relaunch" \
+  "the remote replacement did not confirm context receipt and readiness to resume"
+assert_absent "$REMOTE_HOME/state/parent-route/ios.remote-context-handoff-$RELAUNCH_HANDOFF_SHA256" \
+  "confirmed remote resume left the raw transport handoff behind"
+if find "$REMOTE_HOME/state/parent-route" -maxdepth 1 \
+  \( -name 'ios.control-relaunch.handoff-*' -o -name 'ios.control-relaunch.brief-*' \) \
+  -print -quit | grep -q .; then
+  fail "confirmed remote resume left a redundant full context copy behind"
+fi
+RELAUNCH_ABANDON=$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh \
+  relaunch ios codex - - --abandon-live-context 2>&1) \
+  || fail "an explicit live remote context abandonment did not relaunch"$'\n'"$RELAUNCH_ABANDON"
+assert_grep 'context_custody=abandoned' \
+  "$REMOTE_HOME/state/parent-route/ios.control-relaunch" \
+  "the remote abandonment choice was not recorded"
+pass "the remote control verb requires custody for live agents and confirms streamed handoffs before retiring copies"
 
 
 rm -f "$TMP_ROOT/doctor.repaired"

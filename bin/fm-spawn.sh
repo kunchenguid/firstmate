@@ -1540,6 +1540,25 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   fi
 fi
+CONTROL_RELAUNCH_BRIEF=
+if [ -n "${FM_CONTROL_RELAUNCH_BRIEF:-}" ] || [ -n "${FM_CONTROL_RELAUNCH_BRIEF_SHA256:-}" ]; then
+  [ "$RELAUNCH" -eq 1 ] && [ "$SPAWN_CONTROL_PARENT" = 1 ] \
+    && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ] \
+    || { echo "error: replacement-only context brief is accepted only from the owning fm-control relaunch" >&2; exit 1; }
+  case "${FM_CONTROL_RELAUNCH_BRIEF_SHA256:-}" in
+    *[!0-9a-f]*|'') echo "error: replacement-only context brief has an invalid SHA-256" >&2; exit 1 ;;
+  esac
+  [ "${#FM_CONTROL_RELAUNCH_BRIEF_SHA256}" -eq 64 ] \
+    || { echo "error: replacement-only context brief has an invalid SHA-256" >&2; exit 1; }
+  CONTROL_RELAUNCH_BRIEF="$STATE/$ID.control-relaunch.brief-$FM_CONTROL_RELAUNCH_BRIEF_SHA256"
+  [ "${FM_CONTROL_RELAUNCH_BRIEF:-}" = "$CONTROL_RELAUNCH_BRIEF" ] \
+    || { echo "error: replacement-only context brief is not at its transaction-owned content address" >&2; exit 1; }
+  fm_pr_regular_destination_or_absent "$CONTROL_RELAUNCH_BRIEF" \
+    || { echo "error: replacement-only context brief is not a safe single-link regular file" >&2; exit 1; }
+  [ -f "$CONTROL_RELAUNCH_BRIEF" ] \
+    && [ "$(fm_pr_sha256 "$CONTROL_RELAUNCH_BRIEF")" = "$FM_CONTROL_RELAUNCH_BRIEF_SHA256" ] \
+    || { echo "error: replacement-only context brief does not match its SHA-256" >&2; exit 1; }
+fi
 if [ "$RELAUNCH" -eq 0 ]; then
   mkdir -p "$STATE" || {
     echo "error: could not create parent state directory" >&2
@@ -1717,6 +1736,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
+  if [ -n "$CONTROL_RELAUNCH_BRIEF" ] && [ "$KIND" != secondmate ]; then
+    echo "error: replacement-only context brief is accepted only for a secondmate relaunch" >&2
+    exit 1
+  fi
   # A secondmate whose endpoint is gone already has ONE owner for that
   # recovery: the session-start liveness sweep respawns it with
   # `fm-spawn.sh <id> --secondmate`, which stands its home's own workspace back
@@ -2806,6 +2829,9 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
   else
     BRIEF="$DATA/$ID/brief.md"
+  fi
+  if [ "$RELAUNCH" -eq 1 ] && [ -n "$CONTROL_RELAUNCH_BRIEF" ]; then
+    BRIEF=$CONTROL_RELAUNCH_BRIEF
   fi
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"

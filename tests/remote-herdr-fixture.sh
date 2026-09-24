@@ -83,7 +83,10 @@ case "${1:-} ${2:-}" in
     if [ "$(jq_state -r --arg p "$pane" '[.tabs[]|select(.pane_id==$p)]|length')" = 0 ]; then
       printf '{"error":{"code":"pane_not_found","message":"%s"}}\n' "$pane"
     else
-      printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$pane"
+      cwd=$(jq_state -r --arg p "$pane" '
+        .tabs[] | select(.pane_id==$p) as $tab
+        | ($tab.cwd // ([.workspaces[] | select(.workspace_id==$tab.workspace_id) | .cwd][0] // ""))')
+      printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' "$pane" "$cwd"
     fi
     ;;
   "pane close")
@@ -93,11 +96,31 @@ case "${1:-} ${2:-}" in
        | .working |= with_entries(select(.key != $p))' | save ;;
   "pane send-text")
     [ ! -f "$SEND_FAIL" ] || exit 1
-    jq_state --arg p "${3:-}" '.typed[$p] = true' | save ;;
+    if [ -n "${FM_CONTROL_RELAUNCH_BRIEF:-}" ] && [ -f "$FM_CONTROL_RELAUNCH_BRIEF" ]; then
+      receipt_command=$(grep -F 'fm-context-handoff-receipt.sh' "$FM_CONTROL_RELAUNCH_BRIEF" | tail -1)
+      [ -n "$receipt_command" ] || exit 1
+      /bin/bash -c "$receipt_command" >/dev/null
+    fi
+    text=${args[3]:-}
+    if [ "$text" = /quit ] || [ "$text" = /exit ]; then
+      jq_state --arg p "${3:-}" '.typed[$p] = true | .exiting[$p] = true' | save
+    else
+      jq_state --arg p "${3:-}" '.typed[$p] = true' | save
+    fi
+    ;;
   "pane send-keys")
     [ ! -f "$SEND_FAIL" ] || exit 1
-    jq_state --arg p "${3:-}" '.typed[$p] = true | .working[$p] = true' | save ;;
-  "pane read") printf '\n' ;;
+    pane=${3:-}
+    if [ "$(jq_state -r --arg p "$pane" '.exiting[$p] // false')" = true ]; then
+      jq_state --arg p "$pane" \
+        '.typed |= with_entries(select(.key != $p))
+         | .working |= with_entries(select(.key != $p))
+         | .exiting |= with_entries(select(.key != $p))' | save
+    else
+      jq_state --arg p "$pane" '.typed[$p] = true | .working[$p] = true' | save
+    fi
+    ;;
+  "pane read") printf '❯\n' ;;
   "pane process-info")
     printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"codex","argv0":"codex","argv":["codex"],"cmdline":"codex"}]}}}\n' \
       "$pane" "$$" "$$" "$$" ;;
