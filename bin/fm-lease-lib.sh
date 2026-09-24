@@ -3,11 +3,13 @@
 #
 # WHY. A supervision branch (docs/pi-supervision-branch.md) is a second LLM
 # actor beside MAIN (the captain's chat) in one firstmate home - on Pi, a
-# persistent conversation inside the same pi process - and nothing in this
-# contract assumes the two actors share a process. Most records have exactly
-# one natural owner, but the overlap set - steering or stopping a worker,
-# post-landing cleanup, backlog status for a task, stuck-worker recovery -
-# could otherwise be mutated by both actors at once. The lease is the
+# persistent conversation inside the same pi process; beside another primary,
+# a headless engine session run by the supervision host
+# (docs/supervision-host.md) - and nothing in this contract assumes the two
+# actors share a process. Most records have exactly one natural owner, but the
+# overlap set - steering or stopping a worker, post-landing cleanup, backlog
+# status for a task, stuck-worker recovery - could otherwise be mutated by both
+# actors at once. The lease is the
 # merge-conflict analog: a small per-task file saying which actor is changing
 # that task right now, and the mutating entrypoints refuse the other actor
 # while it exists.
@@ -20,9 +22,10 @@
 #   - Actors: exactly "main" and "branch". The current actor is
 #     $FM_SUPERVISION_ACTOR when set, else "main". The branch's shell gets
 #     FM_SUPERVISION_ACTOR=branch injected deterministically by the process
-#     hosting it (on Pi, the branch extension's bash tool), not by agent
-#     memory. Any other value is refused loudly - an unknown actor is a wiring
-#     bug, not a third role.
+#     hosting it (on Pi, the branch extension's bash tool; elsewhere, the
+#     supervision host's engine environment), not by agent memory. Any other
+#     value is refused loudly - an unknown actor is a wiring bug, not a third
+#     role.
 #   - Staleness: the recorded pid is the long-lived supervising process (the
 #     session-lock holder, or FM_LEASE_HOLDER_PID - see bin/fm-lease.sh), so a
 #     dead recorded pid means the supervising session died; the lease is
@@ -34,8 +37,9 @@
 #     one residual is a recorded pid recycled onto the next session-lock holder
 #     itself; the host that owns a branch conversation releases that actor's
 #     leases when it activates a new one (the Pi branch extension's
-#     generation-activation cleanup), which also recovers a lease held by the
-#     live session but an abandoned branch conversation.
+#     generation-activation cleanup; the supervision host also releases them
+#     after every engine turn), which also recovers a lease held by the live
+#     session but an abandoned branch conversation.
 #
 # THREAT MODEL (deliberate, captain-decided): these guards are
 # CONFUSED-AGENT-GRADE, the same grade bin/fm-gate-refuse-lib.sh documents
@@ -51,13 +55,14 @@
 #   - Guard semantics (fm_lease_guard): no lease, a same-actor lease, or a
 #     provably stale lease passes; a live lease held by the OTHER actor
 #     refuses with exit FM_LEASE_REFUSE_EXIT. Whenever the guard engages - a
-#     supervision context (Pi, or an explicit actor) or any lease file for the
-#     task - it retains the lease-command lock until fm_lease_guard_release,
-#     so the other actor cannot claim between the check and the guarded
-#     mutation. An unmarked caller with no lease file for the task returns
-#     before taking any lock, so a home that never ran a branch is unchanged
-#     byte for byte; that caller does not exclude a claim that starts during
-#     its mutation.
+#     supervision context (Pi, or an explicit actor), a home opted into the
+#     supervision host (config/supervision-host, whose host can claim a task
+#     that has no lease yet), or any lease file for the task - it retains the
+#     lease-command lock until fm_lease_guard_release, so the other actor
+#     cannot claim between the check and the guarded mutation, including the
+#     first claim of a task no one has leased. An unmarked caller in any other
+#     home with no lease file for the task returns before taking any lock, so a
+#     home that never runs a branch is unchanged byte for byte.
 #   - Role partition (fm_lease_forbid_branch): actions MAIN alone owns -
 #     merging a PR, landing local-only work, spawning workers, answering a
 #     decision - refuse the branch actor outright, lease or no lease, while
@@ -194,7 +199,11 @@ fm_lease_guard() {
   actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
   case "${PI_CODING_AGENT:-}:${FM_SUPERVISION_ACTOR:-}" in
     true:*|*:main|*:branch) ;;
-    *) [ -e "$(fm_lease_path "$task")" ] || return 0 ;;
+    *)
+      [ -e "$(fm_lease_path "$task")" ] \
+        || [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-$STATE/..}/config}/supervision-host" ] \
+        || return 0
+      ;;
   esac
   fm_lease_lock_helpers
   lock="$STATE/.fm-lease-command.lock"
@@ -211,7 +220,7 @@ fm_lease_guard() {
   lease_actor=$FM_LEASE_ACTOR
   if [ "$lease_actor" != "$actor" ]; then
     fm_lease_guard_release
-    echo "error: $action refused - task '$task' is leased to the $lease_actor supervision actor (state/.lease-$task); retry after that actor releases it" >&2
+    echo "error: $action refused - task '$task' is leased to the $lease_actor supervision actor (state/.lease-$task), which is handling that task right now; leave the lease alone (never remove or clear it) and retry after that actor releases it, which it does when its handling ends" >&2
     exit "$FM_LEASE_REFUSE_EXIT"
   fi
 }

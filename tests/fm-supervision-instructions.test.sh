@@ -19,6 +19,26 @@ test_selected_harness_block_only() {
   pass "renderer prints exactly the selected harness block"
 }
 
+test_supervision_host_protocol_only_on_an_opted_in_claude_home() {
+  local home config plain hosted other
+  home="$TMP_ROOT/host-home"
+  config="$TMP_ROOT/host-config"
+  mkdir -p "$home/state" "$config"
+  plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness claude)
+  assert_not_contains "$plain" "Supervision host" "a claude home without config/supervision-host rendered the host protocol"
+  : > "$config/supervision-host"
+  hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness claude)
+  assert_contains "$hosted" "- Supervision host: on;" "an opted-in claude home did not render the host state line"
+  assert_contains "$hosted" "Mode: Claude Stop-hook-owned supervision." "the host protocol replaced the claude protocol instead of adding to it"
+  assert_contains "$hosted" "supervision-host: cycle boundary" "the host protocol did not tell main how to handle a park boundary"
+  assert_contains "$hosted" "never run the return from it" "the host protocol did not say a handed-back wake is not the captain's return"
+  [ "$(printf '%s\n' "$hosted" | grep -vF -e '- Supervision host: on;' | head -n "$(printf '%s\n' "$plain" | wc -l)")" = "$plain" ] \
+    || fail "the host protocol changed the claude block it should only append to"
+  other=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness codex)
+  assert_not_contains "$other" "Supervision host" "a non-claude primary rendered the host protocol"
+  pass "renderer adds the supervision-host protocol only on an opted-in claude home, leaving the claude block intact"
+}
+
 test_unknown_fallback() {
   local out
   out=$("$RENDER" --harness not-real)
@@ -218,6 +238,7 @@ test_pi_snippet_uses_effective_extension_path() {
   pass "pi supervision snippet renders the effective extension path"
 }
 
+test_supervision_host_protocol_only_on_an_opted_in_claude_home
 test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas

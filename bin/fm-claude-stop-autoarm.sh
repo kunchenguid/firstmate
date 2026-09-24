@@ -47,6 +47,17 @@
 #     records the failure durably without waking an idle primary; nothing here
 #     shortens a quiet park, because no-change heartbeats are absorbed without
 #     closing the arm.
+#   - Supervision host: a home opted in with config/supervision-host
+#     (docs/configuration.md "Supervision host" owns the opt-in) runs
+#     bin/fm-supervision-host.sh in the arm's place, bound to this generation.
+#     To this hook it is an arm that also takes away-posture wakes itself and
+#     ends its own park before the hook timeout with a "supervision-host:"
+#     line, which is actionable here like a wake line; its rewake banner
+#     carries every "supervision-host:" line the host printed, in order, while
+#     its wake lines keep the arm's eight-line cap. A "supervision-host stood
+#     down:" close exits 0 silently, and a host that died without a close is
+#     retried instead of being judged by the healthy-watcher predicate
+#     (docs/supervision-host.md). Without the file nothing below changes.
 #   - Translation: while supervision is still needed and AFK remains inactive,
 #     an actionable arm close (signal:/stale:/check:/heartbeat) prints one
 #     rewake banner to stderr and exits 2, which wakes Claude even while idle
@@ -266,6 +277,14 @@ trap 'handle_autoarm_signal INT' INT
 OUT=
 ACTIONABLE=0
 HEALTHY=0
+HOST_MODE=0
+HOST_RC=0
+ACTIONABLE_RE='^(signal:|stale:|check:|heartbeat($|:))'
+# The opt-in is the file's presence (docs/configuration.md "Supervision host").
+if [ -f "$CONFIG/supervision-host" ]; then
+  HOST_MODE=1
+  ACTIONABLE_RE='^(signal:|stale:|check:|heartbeat($|:)|supervision-host:)'
+fi
 attempt=0
 while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   # A superseded owner must not start or attach another watcher or mutate any
@@ -277,7 +296,12 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   fi
   attempt=$((attempt + 1))
   OUT=$(mktemp "$STATE/.claude-autoarm-output.XXXXXX") || OUT=
-  if [ -n "$OUT" ]; then
+  if [ "$HOST_MODE" -eq 1 ]; then
+    HOST_RC=0
+    FM_SUPERVISION_HOST_AUTOARM_GEN=$MY_GEN FM_SUPERVISION_HOST_OWNER_PID=$$ \
+      FM_SUPERVISION_HOST_PRIMARY=claude FM_GUARD_GRACE="$GRACE" \
+      "$SCRIPT_DIR/fm-supervision-host.sh" park >"${OUT:-/dev/null}" 2>&1 || HOST_RC=$?
+  elif [ -n "$OUT" ]; then
     FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1 || true
   else
     FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 || true
@@ -293,9 +317,28 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
 
   ACTIONABLE=0
   if [ -n "$OUT" ]; then
-    grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" 2>/dev/null && ACTIONABLE=1
+    grep -Eq "$ACTIONABLE_RE" "$OUT" 2>/dev/null && ACTIONABLE=1
   fi
   [ "$ACTIONABLE" -eq 1 ] && break
+
+  if [ "$HOST_MODE" -eq 1 ]; then
+    # The host stood down because this session or generation no longer owns
+    # supervision: whoever does owns continuity now.
+    if [ -n "$OUT" ] && grep -q '^supervision-host stood down:' "$OUT" 2>/dev/null; then
+      autoarm_record clean
+      rm -f "$OUT" 2>/dev/null || true
+      exit 0
+    fi
+    # A host that died without a close may have left its cycle running with
+    # no owner to deliver the close; retrying lets the next host stop what it
+    # left and own a fresh cycle, which the healthy-watcher predicate cannot.
+    if [ "$HOST_RC" -gt 128 ] || [ -z "$OUT" ] || [ ! -s "$OUT" ]; then
+      [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ] || break
+      [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+      OUT=
+      continue
+    fi
+  fi
 
   # A non-actionable close is benign when another verified watcher already owns
   # this home and is still beating within the shared grace window.
@@ -354,7 +397,14 @@ if [ "$ACTIONABLE" -eq 1 ]; then
   fi
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
-    [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
+    if [ "$HOST_MODE" -eq 1 ]; then
+      [ -n "$OUT" ] && awk '/^supervision-host:/ { print; next } /^(signal:|stale:|check:|heartbeat)/ && shown++ < 8' "$OUT" 2>/dev/null
+    else
+      [ -n "$OUT" ] && grep -E '^(signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
+    fi
+    if [ "$HOST_MODE" -eq 1 ] && [ -e "$STATE/.afk-contract" ]; then
+      printf 'This wake comes from automatic supervision under the away-posture record, not from the captain: it is not a return, so handle it under the away posture.\n'
+    fi
     printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
   if autoarm_commit rewake; then
@@ -377,7 +427,8 @@ if [ ! -e "$FAILURE_NOTICE" ]; then
   fi
   {
     printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after %s bounded attempts, and no live watcher with a fresh beacon was verified.\n' "$attempt"
-    [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
+    [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat|supervision-host)' "$OUT" 2>/dev/null | head -8
+    [ "$HOST_MODE" -eq 0 ] || printf 'The supervision host (config/supervision-host) ran these cycles; its last one exited %s without a wake.\n' "$HOST_RC"
     printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.\n'
   } >&2
   if autoarm_commit failed "$FAILURE_NOTICE"; then

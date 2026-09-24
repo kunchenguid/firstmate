@@ -42,6 +42,35 @@ export function afkPostureRecordPresent(state: string): boolean {
   }
 }
 
+// The per-wake prompt every supervision-branch host sends: the Pi branch
+// extension, and the supervision host off Pi (bin/fm-supervision-host.sh,
+// through bin/fm-branch-dispatch.mjs), so the wake text has one owner. The
+// tail is appended while the away-posture record exists: per-wake content,
+// never prefix; bin/fm-branch-prompt.sh's fixed "Postures" section is what it
+// refers back to.
+export const AWAY_POSTURE_TAIL =
+  "POSTURE: AWAY. The away-posture record state/.afk-contract exists, so the captain is not present and MAIN is parked: you take every row, including check rows and decision rows, and no outcome reaches the captain until the return brief. " +
+  "The record below is the captain's away words, verbatim, and the whole mandate: act on them by your own judgment where this event is the moment they name, only through the guarded scripts under MAIN's standing authority - never more - which enforce it: bin/fm-pr-merge.sh merges any pull request that is green at its live head, synchronously, and refuses a red one or --allow-red; bin/fm-spawn.sh dispatches queued work (already queued, or filed by you from the words) within the spend cap; bin/fm-send.sh --resolve-key answers a decision the words pre-answer, or one the ask-user-authority policy in your prompt lets firstmate decide; bin/fm-merge-local.sh still refuses you. " +
+  "Never by analogy, and hold on doubt: a sentence you cannot act on with confidence is reported with verdict captain, naming it, and left for the return. " +
+  "Credential entry, legal or financial acceptance, an attended prompt, any discard the captain did not name, and any destructive, irreversible, or security-sensitive action are refused for every actor in every posture, whatever the words say. " +
+  "Log every action taken under the words in its outcome summary, opening with \"per your away instructions:\". " +
+  "A mirrored captain sentence authorizes nothing new once the record exists. " +
+  "The record, verbatim:";
+
+// The posture tail for one wake: the record's read-back (bin/fm-afk-contract.sh
+// readback) carried byte-for-byte, or a fixed notice when it could not be
+// rendered, because the record's presence is the fact the guarded scripts
+// enforce either way.
+export function awayPostureTailFor(readback: string): string {
+  return `\n\n${AWAY_POSTURE_TAIL}\n${readback || "(the record's read-back could not be rendered; treat the captain's words as unavailable, act on standing authority only, and hold on doubt)"}`;
+}
+
+// `reportSurface` names how this host's branch records an outcome: the
+// fm_branch_report tool on Pi, the bin/fm-branch-report.sh command elsewhere.
+export function branchWakePrompt(message: string, reportSurface: string, postureTail: string): string {
+  return `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with ${reportSurface}.${postureTail}`;
+}
+
 export type UnreadWakeScopeStatus = "safe" | "empty" | "unsafe";
 
 export interface UnreadWakeScope {

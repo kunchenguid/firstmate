@@ -857,6 +857,32 @@ test_moved_generation_acknowledgement_is_self_healing() {
   pass "watch-arm: a moved recovery generation consumes handled rows and names its remedy"
 }
 
+# The supervision host ends its own cycle on purpose; --stop is the home-scoped
+# stop without a re-arm, and the stopped watcher publishes downtime as any
+# close does, so the owner's rewake can commit.
+test_stop_ends_the_home_watcher_and_publishes_downtime() {
+  local dir home state fakebin out status
+  dir="$TMP_ROOT/stop-home-watcher"
+  home="$dir/home"
+  state="$home/state"
+  fakebin=$(make_case stop-home-watcher-bin)/fakebin
+  mkdir -p "$state"
+  FM_HOME="$home" start_seed_watcher "$state" "$fakebin" "$dir/watch.out"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --stop 2>&1); status=$?
+  expect_code 0 "$status" "--stop of a live home watcher must succeed"
+  assert_contains "$out" "watcher: stopped pid=$SEED_PID" "--stop must name the watcher it stopped"
+  wait_for_exit "$SEED_PID" 50 >/dev/null 2>&1 || true
+  kill -0 "$SEED_PID" 2>/dev/null && fail "--stop left the home watcher running"
+  case "$(cat "$state/.watcher-down" 2>/dev/null)" in
+    pending:downtime:*|announced:downtime:*) ;;
+    *) fail "--stop did not leave downtime published: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+  esac
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --stop 2>&1); status=$?
+  expect_code 0 "$status" "--stop with no watcher must succeed"
+  assert_contains "$out" "watcher: none running" "--stop with no watcher must say so"
+  pass "watch-arm: --stop ends only this home's watcher, publishes downtime, and reports when none runs"
+}
+
 test_downtime_marker_does_not_follow_symlink() {
   local dir home state fakebin armout watcher_pid sentinel
   dir=$(make_case downtime-marker-symlink)
@@ -940,3 +966,4 @@ test_markerless_legacy_queue_is_recovered_on_arm
 test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink
+test_stop_ends_the_home_watcher_and_publishes_downtime

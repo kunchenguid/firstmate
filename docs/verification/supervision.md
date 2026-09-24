@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports current session-start, turn-end, watcher-continuity, and wedge-alarm guarantees.
+This record supports current session-start, turn-end, watcher-continuity, supervision-host, and wedge-alarm guarantees.
 Operator behavior and active limits remain in the linked current guides.
 Task-specific chronology, temporary paths, run identifiers, and delivery transcripts remain in private reports or PR evidence.
 
@@ -573,6 +573,60 @@ tests/fm-wake-queue.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
+```
+
+## Supervision host
+
+This supports [supervision-host.md](../supervision-host.md): the Claude engine, the away-wake path, its failure direction, and the unchanged behavior of homes without `config/supervision-host`.
+It was measured on 2026-09-23 on macOS 26.6.2 arm64 with Claude Code 2.1.281 as both primary and engine (model `sonnet`), Pi 0.87.0 workers on `openai-codex/gpt-5.6-sol`, and Herdr 0.9.0, in disposable lab homes on private tmux sockets and named Herdr lab sessions.
+
+The opt-in live guard refreshes the engine evidence:
+
+```text
+$ FM_SUPERVISION_HOST_LIVE_E2E=1 tests/fm-supervision-host-live-e2e.test.sh
+# first turn: handled	turn=host-66707-1790213279.1	rc=0	reports=1
+# second turn: handled	turn=host-66707-1790213279.2	rc=0	reports=1
+ok - supervision host live (2.1.281 (Claude Code)): a real engine handles and resumes away wakes under the branch contract without waking main
+```
+
+A real Claude primary with the host on supervised real Pi workers on a disposable repository through attended work and three away windows:
+
+| Case | Observed |
+| --- | --- |
+| Attended close | reached main unchanged; main landed and cleaned up the work |
+| Away decision the words pre-answered | the engine answered it with the captain's answer and reported it as `per your away instructions:`; main stayed parked |
+| Away steer the words named | the engine steered the worker, which acknowledged it |
+| Worker stopped mid-task, words asking to recover it | the engine told it to continue and confirmed it busy again before reporting |
+| Host `SIGKILL` while parked | the auto-arm restarted the host at once; the new host stopped the killed host's arm and watcher by recorded identity, one watcher remained, and the next wake resumed the same engine conversation |
+| Main steer while the engine held that task's lease | `fm-send.sh` exited 6 with `task ... is leased to the branch supervision actor ... retry after that actor releases it`; the lease released when the turn ended 22 seconds later |
+| Captain return during an engine turn | the host handed the finished turn's outcome to main as `supervision-host: outcome 10 for fmhc-notes-stats [captain]: ...` |
+
+Claude's `--output-format json` reports `total_cost_usd` as the resumed conversation's running total, including across a host restart, while its usage fields are per turn.
+Five consecutive turns of one conversation, a host restart between the second and third, reported totals of 0.2093, 0.3441, 0.4234, 0.4870, and 0.5408 with per-turn `cache_read_input_tokens` of 423687, 359255, 245302, 174613, and 185598.
+Each handled away wake cost between $0.05 and $0.21 on `sonnet`.
+
+Without `config/supervision-host`, the same live sessions and guards ran on the tree before the host (`ac2ed3b2`) and with it, with identical results:
+
+| Check | Before | After |
+| --- | --- | --- |
+| Claude primary: dispatch, worker done, Stop-hook rewake, landing, cleanup | ok | ok |
+| Pi primary in a Herdr lab, attended: branch outcome, main lands | ok | ok |
+| Pi primary in a Herdr lab, away: branch handles the finish, main parked, return brief | ok | ok |
+| `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | ok | ok |
+| `FM_PI_BRANCH_LIVE_E2E=1 tests/fm-pi-branch-live-e2e.test.sh` | 5 of 5 ok | 5 of 5 ok |
+| `tests/fm-pi-branch-responsiveness-live-e2e.test.sh` | ok | ok |
+| `FM_AFK_PI_HERDR_E2E=1 tests/fm-afk-pi-herdr-return-e2e.test.sh` | 4 of 4 ok | 4 of 4 ok |
+
+The Herdr return guard needs the operator's login shell: under `SHELL=/bin/bash` its lab pane's login profile drops `pi` from `PATH` and the guard reports that the primary never became idle, in both trees.
+
+Deterministic entry points:
+
+```sh
+tests/fm-supervision-host.test.sh
+tests/fm-claude-stop-autoarm.test.sh
+tests/fm-afk-launch.test.sh
+tests/fm-supervision-instructions.test.sh
+tests/fm-watch-arm.test.sh
 ```
 
 ## Wedge-alarm channels
