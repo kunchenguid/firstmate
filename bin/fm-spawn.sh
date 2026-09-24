@@ -3080,25 +3080,16 @@ spawn_worktree_isolated() { # <path>
 # A worktree whose checkout is still being written already passes the isolation
 # test: `git worktree add` creates its .git link first and runs its checkout
 # inside it, so a pane reporting its foreground cwd reads the new slot from the
-# first poll while `git status` still lists every file not yet written. Git
-# marks such a worktree with an `initializing` lock until the checkout ends, and
-# a Treehouse pool slot is not handed out until the pool state records its live
-# owner. Sets SPAWN_WT_REASON when the worktree is still settling.
+# first poll while `git status` still lists every file not yet written. A
+# Treehouse pool slot is not handed out until the pool state records its live
+# owner. Sets SPAWN_WT_REASON when the pool slot is still settling.
 spawn_worktree_settling() { # <path>
-  local path=$1 git_dir reason=
-  git_dir=$(git -C "$path" rev-parse --absolute-git-dir 2>/dev/null) || git_dir=
-  if [ -n "$git_dir" ] && [ -f "$git_dir/locked" ]; then
-    IFS= read -r reason <"$git_dir/locked" 2>/dev/null || true
-  fi
+  local path=$1
   if fm_treehouse_pool_slot "$PROJ_ABS" "$path"; then
     fm_treehouse_slot_acquired "$path" || {
       SPAWN_WT_REASON="its checkout is still being written (treehouse get has not finished handing it out)"
       return 0
     }
-  fi
-  if [ "$reason" = initializing ]; then
-    SPAWN_WT_REASON="its checkout is still being written (treehouse get has not finished handing it out)"
-    return 0
   fi
   return 1
 }
