@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared wake classifier: the common source of truth for captain-relevant status
-# tests, declared-external-wait vocabulary, and the working/paused absorb
+# tests, declared-external-wait vocabulary, and the working/paused/terminal
 # classification that makes no-verb signal and stale-pane wakes safe to absorb.
 # Sourced by BOTH the always-on watcher
 # (bin/fm-watch.sh) and the away-mode daemon (bin/fm-supervise-daemon.sh) so the
@@ -2242,9 +2242,11 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 #             (e.g. waiting on CI);
 #   paused  - the crew's authoritative current state is a declared external-wait
 #             pause (paused:), which is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
+#   done/failed - the crew's authoritative current state is terminal, so a
+#                 matching already-surfaced outcome cannot also be a pane wedge;
+#   none    - neither, so the wake must surface (a stopped/parked/blocked/
 #             torn-down/unknown crew, or an unreadable verdict).
-# One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
+# One fm-crew-state.sh read serves every classification at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
@@ -2256,7 +2258,9 @@ crew_absorb_class() {  # <id>
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
-  if [ "$state" = paused ]; then printf 'paused'; return; fi
+  case "$state" in
+    paused|done|failed) printf '%s' "$state"; return ;;
+  esac
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
@@ -2270,10 +2274,10 @@ crew_absorb_class() {  # <id>
 # shared authoritative proof for no-verb signals. Where a home opts in, fm-watch.sh
 # may additionally absorb a bare turn-end on bounded pane churn, while every other
 # failed verdict surfaces
-# because the crew may be done, waiting on a decision, or wedged. For stale panes
+# because the crew may be waiting on a decision or wedged. For stale panes
 # it is checked before trusting the status log so a pre-validation captain-relevant
 # line does not override an active run. See crew_absorb_class for the exact
-# working/paused/none decision.
+# working/paused/done/failed/none decision.
 crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
 }
