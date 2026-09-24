@@ -12,9 +12,9 @@
 # clause fields, the never-set, the refusal wording, and the record schema); `confirm` promotes it
 # into state/.afk-contract and prints the entry announcement (hold-for-return
 # only: no phone channel exists). The record is the posture in every harness.
-# On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
+# On Pi the entry ends there: the away daemon is no longer launched
 # on Pi, the ordinary supervision session keeps running in both postures, and
-# `start` refuses on those harnesses. Every other harness still runs the daemon
+# `start` refuses on Pi. Codex uses the daemon
 # for now, so `start` and `start-native` require the confirmed record before they
 # launch the daemon.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
@@ -22,9 +22,8 @@
 #
 # Why the terminal lifecycle exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
-# terminal it is already in. Harnesses with a native in-pane tracked-background
-# tool (claude, grok) run it there directly and it is fine. A harness with NO
-# native background mechanism (pi) has to manufacture a terminal, and doing that
+# terminal it is already in. Codex uses a tracked terminal for this daemon;
+# Pi's extension supervision does not launch it. Creating a daemon terminal
 # by SPLITTING the captain's active pane visibly shrinks it - the regression this
 # script fixes. Instead this creates a non-visible tracked terminal (a herdr tab/
 # workspace with --no-focus, or a detached tmux session) that never touches the
@@ -197,7 +196,7 @@ fm_afk_launch_daemon_allowed() {
   local harness
   harness=$(fm_afk_launch_primary_harness)
   case "$harness" in
-    pi|pi-signed)
+    pi)
       fm_afk_launch_log "the away daemon is no longer launched on $harness; the away-posture record is the posture there (run bin/fm-afk-launch.sh confirm and stop)"
       return 1 ;;
   esac

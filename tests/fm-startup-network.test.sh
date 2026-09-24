@@ -75,8 +75,8 @@ for argument in "$@"; do
 done
 if [ "$pid" = "${FM_FAKE_HARNESS_PID:-}" ]; then
   case "$*" in
-    *comm=*) printf '/usr/local/bin/claude\n' ;;
-    *args=*) printf 'claude\n' ;;
+    *comm=*) printf '/usr/local/bin/pi\n' ;;
+    *args=*) printf 'pi\n' ;;
     *ppid=*) /bin/ps -o ppid= -p "$pid" ;;
   esac
 else

@@ -271,7 +271,11 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
     # the file on that host belongs to a different home and re-resolving there
     # would silently move the mate onto another runtime. Resolve the pin here and
     # pass it explicitly, so both placements land on the same decision.
-    HARNESS[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate 2>/dev/null || true)
+    if ! HARNESS[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate 2>/dev/null); then
+      REASON[i]="restart refused: config/secondmate-harness or config/crew-harness selects an unsupported harness; explicitly select pi or codex"
+      i=$((i + 1))
+      continue
+    fi
     [ -n "${HARNESS[i]}" ] || HARNESS[i]=$FM_SECONDMATE_RESTART_HARNESS
     MODEL[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model 2>/dev/null || true)
     EFFORT[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort 2>/dev/null || true)

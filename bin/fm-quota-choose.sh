@@ -26,7 +26,7 @@
 # Multi-provider limitation: this helper maps each harness to ONE primary
 # provider family (see provider_for_harness below) and checks quota for that
 # family only. Some harnesses can run models from several providers - for
-# example, Pi and OpenCode may dispatch xAI, Anthropic, or other models - so a
+# example, Pi may dispatch xAI, Anthropic, or other models - so a
 # candidate whose established provider differs from the harness's primary family
 # is checked against the wrong quota row. This is an accepted limitation of the
 # optional helper. Authoritative multi-provider routing - including provider
@@ -35,15 +35,6 @@
 # not by this helper. Use this helper only when the brief already fixed the
 # candidate order and every candidate's provider is the harness's primary family.
 #
-# omp (Oh My Pi) has no single primary family, so its candidate model prefix
-# selects the family: openai-codex/<id> checks the codex row and
-# claude-bridge/<id> checks the claude row, each against the bare <id> for
-# model: and product: scopes. Any other or absent prefix is refused up front,
-# the same shape as an unknown harness, because no quota-axi row measures it.
-# quota-axi reports Codex quota unavailable on this host because omp carries
-# its own Codex login, so an openai-codex candidate reads as unknown quota here
-# and is never selected on this host; its runway is disclosed uncertainty for
-# the agent-side gates, not measured headroom.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -310,29 +301,15 @@ printf '%s\n' "$QUOTA_JSON" | fm_quota_json_valid || die "invalid quota-axi prov
 
 # provider_for_harness <harness> [<model>]
 # Map a firstmate harness name to its primary quota-axi provider family.
-# Multi-provider harnesses (Pi, OpenCode) map to their primary family only; see
-# the header limitation note. omp is keyed on the candidate model prefix instead
-# and has no family for any other prefix (see the header). Authoritative
-# multi-provider routing is owned by AGENTS.md section 4 and the
+# Multi-provider harnesses (Pi) map to their primary family only; see
+# the header limitation note.
+# Authoritative multi-provider routing is owned by AGENTS.md section 4 and the
 # quota-array-dispatch skill, not this helper.
 provider_for_harness() {
   case "$1" in
-    omp)
-      case "${2:-}" in
-        openai-codex/*)  printf 'codex\n' ;;
-        claude-bridge/*) printf 'claude\n' ;;
-        *)               return 1 ;;
-      esac
-      ;;
-    claude)       printf 'claude\n' ;;
-    codex)        printf 'codex\n' ;;
-    opencode)     printf 'codex\n' ;;
-    pi|pi-signed) printf 'pi\n' ;;
-    grok)         printf 'grok\n' ;;
-    kimi)         printf 'kimi\n' ;;
-    cursor)       printf 'cursor\n' ;;
-    muse)         printf 'meta\n' ;;
-    *)            return 1 ;;
+    codex) printf 'codex\n' ;;
+    pi) printf 'pi\n' ;;
+    *) return 1 ;;
   esac
 }
 
@@ -371,10 +348,9 @@ for c in "${CANDIDATES[@]}"; do
   [ "$model" = "$c" ] && model="default"
   [ -n "$model" ] || die "invalid candidate: $c"
   fm_control_harness_supported "$harness" || die "unknown harness: $harness"
-  provider_for_harness "$harness" "$model" >/dev/null || case "$harness" in
-    omp) die "omp quota mapping covers only the openai-codex and claude-bridge prefixes: $model" ;;
-    *) die "unknown harness: $harness" ;;
-  esac
+  provider_for_harness "$harness" "$model" >/dev/null \
+    || die "no verified quota mapping for harness: $harness"
+
 done
 
 chosen="none"
@@ -384,7 +360,6 @@ for c in "${CANDIDATES[@]}"; do
   [ "$model" = "$c" ] && model="default"
   provider=$(provider_for_harness "$harness" "$model")
   scope_model=$model
-  [ "$harness" != omp ] || scope_model=${model#*/}
   effective=$(effective_for_provider_model "$provider" "$scope_model")
   if [ -z "$effective" ] || [ "$effective" = "null" ]; then
     continue

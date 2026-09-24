@@ -32,7 +32,7 @@ setup_homes() {
   cat > "$home/state/$id.meta" <<EOF
 window=firstmate:fm-$id
 kind=secondmate
-harness=claude
+harness=pi
 backend=tmux
 home=$sub_abs
 worktree=$sub_abs
@@ -65,7 +65,7 @@ test_handoff_wakes_live_local_receiver() {
   cat > "$home/state/design.meta" <<EOF
 window=firstmate:fm-design
 kind=secondmate
-harness=claude
+harness=pi
 backend=tmux
 home=$sub
 worktree=$sub
@@ -134,7 +134,7 @@ EOF
   cat > "$home/state/design.meta" <<EOF
 window=firstmate:fm-design
 kind=secondmate
-harness=claude
+harness=pi
 backend=tmux
 home=$sub
 worktree=$sub

@@ -54,7 +54,7 @@ Everything files to a local destination by default; an external system such as a
 
 5. **Write only into locations that already exist as a real convention, the step-3 fallback (plus its `.gitignore` line), or a destination the user just approved in step 4.**
    Do not invent new shared files, new folders, or new tracker categories the project doesn't already have.
-   Never store, create, or edit a skill as a destination for a finding: there is no "graduate this to a skill" move, even in a repo whose existing `.claude/skills/` or `skills/` directory makes one look like a convention.
+   Never store, create, or edit a skill as a destination for a finding: there is no "graduate this to a skill" move, even in a repo whose existing `skills/` directory makes one look like a convention.
    The offload exit in step 7 does not weaken this: this skill only ever proposes such a move, and the on-demand home is created through the user's own change process, never by this skill's writes.
    If the fallback is unwritable and the user doesn't want a new convention, say so plainly and leave that finding unfiled rather than fabricate a destination.
 

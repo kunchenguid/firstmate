@@ -54,7 +54,7 @@ Verify setup by spawning a small task and confirming metadata contains `backend=
 `CMUX_SOCKET_PATH` is not sufficient because operators may set it outside cmux.
 Detection checks tmux first, then Herdr, then cmux, so a multiplexer nested inside cmux remains the active backend.
 
-cmux's bundled Claude wrapper can remove every `CMUX_*` variable when its internal socket probe fails, including in Password mode.
+One bundled agent wrapper was observed removing every `CMUX_*` variable when its internal socket probe failed, including in Password mode.
 On macOS only, detection therefore falls back first to `__CFBundleIdentifier=com.cmuxterm.app`, then to process ancestry reaching the running cmux app.
 Those fallbacks are consulted only when neither tmux nor Herdr already won.
 An environment-scrubbed or launchd-reparented process with no reliable marker is not auto-detected.
@@ -93,11 +93,10 @@ Spawn-time worktree discovery sends begin and end markers around `pwd`, captures
 An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through cmux's submit machinery.
 On the typed plane, literal send and Enter are separate calls.
 Enter, Escape, and Ctrl-C are supported.
-The composer verifier is a thin adapter: it captures a bounded plain-text tail and hands it with cmux's capability facts to the fleet-wide classifier in `bin/fm-composer-lib.sh`, which owns every shape, including Claude's borderless `❯` row with its U+00A0 separator.
+The composer verifier is a thin adapter: it captures a bounded plain-text tail and hands it with cmux's capability facts to the fleet-wide classifier in `bin/fm-composer-lib.sh`, which owns every shape, including bare agent glyphs and strict unidentified-row refusal.
 `read-screen` is plain text with no cursor primitive, so the shared classifier degrades a glyph row carrying trailing text to `unknown` rather than misreading a harness's own idle suggestion as unsent input.
 An unstructured bare prompt is `unknown`, and a slash-popup placeholder remains `pending`, so only Enter is retried and text is never retyped.
 cmux exposes no native generic agent busy signal, so supervision uses capture/hash polling for screen changes and each harness adapter's semantic lifecycle for worker state.
-Grok alone retains its isolated rendered-tail fallback.
 
 A task workspace's last surface cannot be closed directly.
 Cleanup owns the whole workspace and uses `close-workspace`.

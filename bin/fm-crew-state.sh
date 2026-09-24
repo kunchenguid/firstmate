@@ -147,6 +147,12 @@ meta_value() {  # <key>
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
+# Retired records remain visible without probing or reclassifying their runtime.
+# shellcheck source=bin/fm-control-lib.sh
+. "$SCRIPT_DIR/fm-control-lib.sh"
+if fm_control_harness_removed "$HARNESS"; then
+  emit unknown none "historical harness $HARNESS is unsupported; record and work preserved; explicit migration required"
+fi
 REMOTE_HOST=$(meta_value remote_host)
 [ -n "$KIND" ] || KIND=ship
 
@@ -243,17 +249,10 @@ pane_readable() {  # <target>
 }
 # crew_busy_verdict: the crew's semantic busy state from the one contract
 # owner (bin/fm-busy-lib.sh), as "<busy|idle|unknown> <source>". A converted
-# adapter answers from its own lifecycle record; Grok answers from its
-# isolated rendered-tail fallback; a herdr crew's native `busy` is accepted
-# when no record exists, but its native `idle` is NOT, because agent.get
-# reports generation state (idle while a crew blocks on its own long-running
-# foreground tool call) rather than turn state.
+# adapter answers from its own lifecycle record. Herdr native busy is positive
+# activity evidence when no record exists; native idle never closes a turn.
 crew_busy_verdict() {  # <target>
-  local tail40=''
-  case "$HARNESS" in
-    grok*) tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
-  esac
-  fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
+  fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE"
 }
 
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --

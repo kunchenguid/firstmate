@@ -255,92 +255,6 @@ test_unrecognized_state_skips_busy_conversion() {
   pass "fm_tmux_submit_enter_core: unrecognized states skip busy conversion"
 }
 
-test_claude_busy_signature_uses_real_capture_shapes() {
-  local dir fakebin composer
-  dir="$TMP_ROOT/claude-signature"
-  fakebin=$(make_submit_mock "$dir")
-  composer="$dir/composer"
-  pane_busy() {
-    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" \
-      bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_pane_is_busy "$2" "$3"' \
-      _ "$ROOT" "$1" "${2:-}"
-  }
-
-  # Live Claude 2.1.220 capture 1: spinner glyph and word from one turn.
-  printf '✢ Pollinating… (16s · ↓ 1.1k tokens · thought for 1s)\n' > "$composer"
-  pane_busy live claude || fail "Claude capture 1 should be busy"
-
-  # Live Claude 2.1.220 capture 2: a later turn with a changed glyph and word.
-  printf '✽ Proofing… (5s · thinking with high effort)\n' > "$composer"
-  pane_busy live claude || fail "Claude capture 2 should be busy"
-
-  # Real idle Claude capture shape from the verified pane sample.
-  printf '✻ Worked for 31s\n' > "$composer"
-  pane_busy idle claude && fail "Claude Worked-for capture must be idle"
-
-  # The new signature is Claude-scoped and must not widen the shared default.
-  printf '✢ Pollinating… (16s · ↓ 1.1k tokens)\n' > "$composer"
-  pane_busy live && fail "Claude signature must not match without the Claude harness"
-
-  # Each verified harness must use only its own signature.
-  printf 'Ctrl+c:cancel\n' > "$composer"
-  pane_busy cross claude && fail "Claude must ignore Grok's cancel footer"
-  printf 'esc interrupt\n' > "$composer"
-  pane_busy cross claude && fail "Claude must ignore OpenCode's interrupt footer"
-  printf 'Working...\n' > "$composer"
-  pane_busy cross codex && fail "Codex must ignore Pi's Working footer"
-  printf 'esc interrupt\n' > "$composer"
-  pane_busy cross codex && fail "Codex must ignore OpenCode's interrupt footer"
-  printf 'Ctrl+c:cancel\n' > "$composer"
-  pane_busy cross opencode && fail "OpenCode must ignore Grok's cancel footer"
-  printf 'esc interrupt\n' > "$composer"
-  pane_busy cross pi && fail "Pi must ignore OpenCode's interrupt footer"
-  printf 'esc to interrupt\n' > "$composer"
-  pane_busy cross grok && fail "Grok must ignore Claude's legacy interrupt footer"
-  printf 'esc to interrupt\n' > "$composer"
-  pane_busy own codex || fail "Codex's escape footer should be busy"
-  printf 'esc interrupt\n' > "$composer"
-  pane_busy own opencode || fail "OpenCode's interrupt footer should be busy"
-
-  # No harness keeps the historical combined-pattern compatibility fallback.
-  printf 'Working...\n' > "$composer"
-  pane_busy fallback || fail "no-harness fallback should retain Pi's shared signature"
-  printf 'Ctrl+c:cancel\n' > "$composer"
-  pane_busy fallback || fail "no-harness fallback should retain Grok's shared signature"
-
-  # A supplied harness must never use another harness's signature. This is
-  # particularly important for Kimi: its idle key-tip rotation can include the
-  # same cancel token Grok uses to mean busy.
-  printf 'Working...\n' > "$composer"
-  pane_busy unknown kimi && fail "Kimi must ignore Pi's Working footer"
-  printf 'Ctrl+c:cancel\n' > "$composer"
-  pane_busy unknown kimi && fail "idle Kimi must ignore Grok's cancel footer"
-
-  # Older Claude Code and the existing Pi and Grok signatures remain unchanged.
-  printf 'esc to interrupt\n' > "$composer"
-  pane_busy old-claude claude || fail "older Claude escape footer should be busy"
-  printf 'Working...\n' > "$composer"
-  pane_busy pi pi || fail "Pi Working footer should be busy"
-  pane_busy pi-signed pi-signed || fail "pi-signed should share Pi's exact Working footer"
-  # omp (Oh My Pi) renders its TUI line with U+2026; Pi's three-dot footer is
-  # not omp's signature, and neither Pi nor Codex may borrow the ellipsis form.
-  # The status-row spinner cell is its second, independent signal, and an idle
-  # status row (identity glyph, no elapsed time) is not busy.
-  pane_busy omp-three-dots omp && fail "omp must not read Pi's three-dot Working... footer as busy"
-  printf ' \xf3\xb1\x8a\xb7 Working\xe2\x80\xa6\n' > "$composer"
-  pane_busy omp omp || fail "omp TUI Working… footer should be busy"
-  pane_busy omp-ellipsis-pi pi && fail "Pi must not borrow omp's Working… footer"
-  pane_busy omp-ellipsis-codex codex && fail "Codex must not borrow omp's Working… footer"
-  printf ' \xe2\xa0\xa7 11s  \xc2\xb7 gpt-6-astra\n' > "$composer"
-  pane_busy omp-spinner omp || fail "omp braille spinner plus elapsed cell should be busy"
-  printf ' \xf3\xb0\xb5\x97  \xc2\xb7 gpt-6-astra \xc2\xb7 36.7%%/41K\n' > "$composer"
-  pane_busy omp-idle omp && fail "omp idle status row must not read busy"
-  printf 'esc interrupt\n' > "$composer"
-  pane_busy omp-cross omp && fail "omp must ignore OpenCode's interrupt footer"
-  printf 'Ctrl+c:cancel\n' > "$composer"
-  pane_busy grok grok || fail "Grok cancel footer should be busy"
-  pass "fm_pane_is_busy: Claude spinner is scoped, multi-frame, and backward-compatible"
-}
 
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
@@ -352,4 +266,17 @@ test_busy_pane_unknown_stays_unknown
 test_failed_baseline_capture_keeps_busy_unknown_unconfirmed
 test_busy_pane_ambiguous_pending_retries_without_conversion
 test_unrecognized_state_skips_busy_conversion
-test_claude_busy_signature_uses_real_capture_shapes
+
+# Rendered signatures confirm delivery only; semantic state is tested separately.
+for harness in pi codex; do
+  dir="$TMP_ROOT/$harness-signature"; fakebin=$(make_submit_mock "$dir"); composer="$dir/composer"
+  own='Working...'; other='esc to interrupt'
+  [ "$harness" != codex ] || { own='esc to interrupt'; other='Working...'; }
+  printf '%s\n' "$own" > "$composer"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_pane_is_busy live "$2"' _ "$ROOT" "$harness" \
+    || fail "$harness must recognize its delivery footer"
+  printf '%s\n' "$other" > "$composer"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_pane_is_busy live "$2"' _ "$ROOT" "$harness" \
+    && fail "$harness borrowed another harness delivery footer"
+done
+pass 'Pi and Codex delivery footers stay independently scoped'

@@ -467,7 +467,6 @@ jobs:
             '<!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->' \
             '@AGENTS.md' >"$tmp"
           cmp -s CLAUDE.md "$tmp" || { echo "::error::CLAUDE.md must be the canonical @AGENTS.md pointer"; exit 1; }
-          [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo "::error::.claude/skills must be a symlink to ../.agents/skills"; exit 1; }
       - name: Personal fleet paths must not be tracked
         run: |
           set -eu

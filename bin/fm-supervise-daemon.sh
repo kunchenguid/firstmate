@@ -108,7 +108,7 @@
 #          FM_HOUSEKEEPING_TICK     seconds between housekeeping passes while
 #                                   the watcher is mid-cycle (default 15)
 #          FM_BUSY_REGEX            optional rendered busy-signature override
-#                                   for delivery guards and Grok's fallback
+#                                   for delivery guards
 #          FM_COMPOSER_IDLE_RE      optional shared classifier override; see
 #                                   docs/configuration.md for its safety gates
 #          FM_MAX_DEFER_SECS        max seconds a buffered escalation may sit
@@ -220,7 +220,6 @@ WEDGE_ALARM_NOTIFIER_PID=
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
 # Composer-empty detection, submit acknowledgement, and the harness-scoped
 # supervisor-pane busy guard live in bin/fm-tmux-lib.sh.
-# FM_BUSY_REGEX also overrides Grok's isolated task-state fallback.
 INJECT_FAIL_SLEEP_DEFAULT=30
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
@@ -618,7 +617,7 @@ mark_escalated_seen() {  # <state> <captured-endpoint-file>
 # blank or otherwise unidentified rows (the strict container-proof rule owned
 # by bin/fm-composer-lib.sh), and future verdicts. The detector drops
 # dim/faint ghost text and strips the harness's composer box borders, so an
-# aligned ghost-only or idle bordered claude composer ("│ > … │") is correctly
+# aligned ghost-only or idle bordered composer ("│ > … │") is correctly
 # proven empty while a modal dialog or dead shell never is.
 # pane_is_busy / pane_input_pending: BACKEND-AWARE (dispatch goes through
 # bin/fm-backend.sh's generic per-backend primitives rather than a hand-rolled
@@ -718,7 +717,7 @@ escalate_flush() {  # <state>
 # --- backend-independent active wedge alert ---------------------------------
 # The tmux status-line flash in inject_wedge_alarm below is a cosmetic,
 # client-side OSD with no cross-backend equivalent, so a wedged non-tmux primary
-# (the 2026-07-10 overnight incident: a claude-on-herdr primary) got NO active
+# in the 2026-07-10 incident got NO active
 # signal - only the passive state/.subsuper-inject-wedged marker, which nothing
 # surfaces until the next fleet action (that night, 20 escalations sat buffered
 # for 8.5h). These helpers add a configurable active alert that does not depend

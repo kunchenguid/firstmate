@@ -240,7 +240,7 @@ test_secondmate_foreign_queue_stall_tracks_progress_and_alerts_once() {
   mkdir -p "$sub/state" "$sub/data" "$sub/bin"
   printf '# Firstmate\n' > "$sub/AGENTS.md"
   printf 'mate\n' > "$sub/.fm-secondmate-home"
-  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=pi\nbackend=tmux\nhome=%s\n' \
     "$sub" > "$state/mate.meta"
   fakebin="$dir/fakebin"
   real_date=$(command -v date)
@@ -385,7 +385,7 @@ test_secondmate_reprovisioned_queue_starts_a_fresh_interval() {
   sub="$dir/secondmate"
   mkdir -p "$sub/state"
   printf 'mate\n' > "$sub/.fm-secondmate-home"
-  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=pi\nbackend=tmux\nhome=%s\n' \
     "$sub" > "$state/mate.meta"
   fakebin="$dir/fakebin"
   real_date=$(command -v date)
@@ -447,7 +447,7 @@ test_secondmate_active_turn_defers_stall_until_the_turn_ends() {
   sub="$dir/secondmate"
   mkdir -p "$sub/state"
   printf 'mate\n' > "$sub/.fm-secondmate-home"
-  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=pi\nbackend=tmux\nhome=%s\n' \
     "$sub" > "$state/mate.meta"
   printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 10 ))" \
     > "$sub/state/.wake-queue"
@@ -476,7 +476,7 @@ SH
     || fail "a mate inside an active turn published a durable stall notification"
 
   "$ROOT/bin/fm-busy-event.sh" apply "$state" mate idle --current-gen \
-    --source claude-hook --event stop >/dev/null \
+    --source pi-ext --event stop >/dev/null \
     || fail "could not end the mate's turn"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 \
@@ -536,7 +536,7 @@ test_acknowledged_stall_publication_survives_pre_marker_crash() {
   sub="$dir/secondmate"
   mkdir -p "$sub/state" "$sub/data"
   printf 'mate\n' > "$sub/.fm-secondmate-home"
-  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=pi\nbackend=tmux\nhome=%s\n' \
     "$sub" > "$state/mate.meta"
   epoch=$(( $(date +%s) - 10 ))
   printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$epoch" > "$sub/state/.wake-queue"

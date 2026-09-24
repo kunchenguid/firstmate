@@ -3,7 +3,7 @@
 # Behavior tests for the watcher-arm PreToolUse seatbelt (docs/arm-pretool-check.md).
 #
 # bin/fm-arm-command-policy.mjs is the single owner of command classification.
-# This suite drives the stable shell transport through all five harness entry
+# This suite drives the stable shell transport through both supported primary entry
 # forms and asserts the per-harness wiring contract without spawning a harness.
 # Empirical harness evidence lives in docs/arm-pretool-check.md.
 set -u
@@ -156,17 +156,7 @@ run_matrix_entry() {
       printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
       rc=$?
       ;;
-    claude)
-      payload=$(jq -cn --arg command "$cmd" '{tool_name:"Bash",tool_input:{command:$command}}')
-      printf '%s' "$payload" | "$CHECK" --claude >"$out_file" 2>"$err_file"
-      rc=$?
-      ;;
-    grok)
-      payload=$(jq -cn --arg command "$cmd" '{toolName:"run_terminal_command",toolInput:{command:$command}}')
-      printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
-      rc=$?
-      ;;
-    opencode|pi)
+    pi)
       "$CHECK" --command "$cmd" >"$out_file" 2>"$err_file"
       rc=$?
       ;;
@@ -185,18 +175,12 @@ run_matrix_entry() {
   [ "$rc" -eq 2 ] || fail "$id via $entry must deny, got exit $rc"
   jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' "$err_file" >/dev/null 2>&1 \
     || fail "$id via $entry deny must carry a stable reason code on stderr: $(cat "$err_file")"
-  if [ "$entry" = claude ]; then
-    [ ! -s "$out_file" ] || fail "$id via claude deny must leave stdout empty: $(cat "$out_file")"
-  elif [ "$entry" = grok ]; then
-    jq -e '.decision == "deny"' "$out_file" >/dev/null 2>&1 \
-      || fail "$id via grok deny must carry decision=deny on stdout: $(cat "$out_file")"
-  fi
 }
 
 test_full_acceptance_matrix() {
   local i entry
   for ((i = 0; i < ${#MATRIX_IDS[@]}; i++)); do
-    for entry in codex claude grok opencode pi; do
+    for entry in codex pi; do
       run_matrix_entry "${MATRIX_IDS[$i]}" "${MATRIX_EXPECTED[$i]}" "$entry" "${MATRIX_COMMANDS[$i]}"
     done
     pass "matrix ${MATRIX_IDS[$i]}: ${MATRIX_EXPECTED[$i]} through all five entry forms"
@@ -266,29 +250,21 @@ test_unknown_flag_errors() {
 
 # --- stdin JSON mode ----------------------------------------------------------
 
-test_stdin_grok_schema_deny() {
-  local out rc
-  out=$(printf '%s' '{"toolInput":{"command":"bin/fm-watch-arm.sh &","background":false},"toolName":"run_terminal_command"}' | "$CHECK" 2>/dev/null)
-  rc=$?
-  [ "$rc" -eq 2 ] || fail "grok toolInput.command schema must be read and denied, got exit $rc"
-  printf '%s' "$out" | jq -e '.decision == "deny"' >/dev/null 2>&1 || fail "stdout must carry Grok's {\"decision\":\"deny\",...} shape: $out"
-  pass "stdin grok schema (toolInput.command): denied with Grok-shaped stdout JSON"
-}
 
-test_stdin_claude_codex_schema_allow() {
+test_stdin_codex_schema_allow() {
   local rc
   printf '%s' '{"tool_input":{"command":"exec bin/fm-watch-arm.sh"},"tool_name":"Bash"}' | "$CHECK" >/dev/null 2>&1
   rc=$?
-  [ "$rc" -eq 0 ] || fail "claude/codex tool_input.command schema must be read and allowed for the blessed shape, got exit $rc"
-  pass "stdin claude/codex schema (tool_input.command): blessed shape allowed"
+  [ "$rc" -eq 0 ] || fail "codex tool_input.command schema must be read and allowed for the blessed shape, got exit $rc"
+  pass "stdin codex schema (tool_input.command): blessed shape allowed"
 }
 
-test_stdin_claude_codex_schema_deny() {
+test_stdin_codex_schema_deny() {
   local rc
   printf '%s' '{"tool_input":{"command":"bin/fm-watch-arm.sh &"},"tool_name":"Bash"}' | "$CHECK" >/dev/null 2>&1
   rc=$?
-  [ "$rc" -eq 2 ] || fail "claude/codex tool_input.command schema must be denied for the backgrounded shape, got exit $rc"
-  pass "stdin claude/codex schema (tool_input.command): backgrounded shape denied"
+  [ "$rc" -eq 2 ] || fail "codex tool_input.command schema must be denied for the backgrounded shape, got exit $rc"
+  pass "stdin codex schema (tool_input.command): backgrounded shape denied"
 }
 
 test_stdin_unrelated_command_allowed() {
@@ -400,41 +376,17 @@ test_failopen_missing_node() {
   pass "fail-open: missing classifier runtime"
 }
 
-# --- --claude output shaping ---------------------------------------------------
+# --- output shaping ---------------------------------------------------
 
-test_claude_mode_stdout_empty_on_deny() {
-  local out err rc stderr_file
-  # Keep stderr capture under TMPDIR so concurrent isolation-proof workers do
-  # not share a fixed global /tmp path.
-  stderr_file=$(mktemp "${TMPDIR:-/tmp}/fm-arm-pretool-check-claude-stderr.XXXXXX")
-  out=$("$CHECK" --claude --command 'bin/fm-watch-arm.sh &' 2>"$stderr_file")
-  rc=$?
-  err=$(cat "$stderr_file" 2>/dev/null)
-  rm -f "$stderr_file"
-  [ "$rc" -eq 2 ] || fail "--claude deny must still exit 2, got $rc"
-  [ -z "$out" ] || fail "--claude deny must leave stdout EMPTY (Claude Code only honors a stderr-only deny), got: $out"
-  printf '%s' "$err" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-    || fail "--claude deny must put hookSpecificOutput.permissionDecision=deny on stderr: $err"
-  pass "--claude: stdout empty, stderr carries hookSpecificOutput deny JSON"
-}
 
-test_default_mode_stdout_has_grok_json_on_deny() {
-  local out rc
-  out=$("$CHECK" --command 'bin/fm-watch-arm.sh &' 2>/dev/null)
-  rc=$?
-  [ "$rc" -eq 2 ] || fail "default deny must exit 2, got $rc"
-  printf '%s' "$out" | jq -e '.decision == "deny"' >/dev/null 2>&1 \
-    || fail "default (non-claude) deny must put Grok's decision JSON on stdout: $out"
-  pass "default mode: stdout carries Grok-shaped decision JSON on deny"
-}
 
 test_allow_is_silent_both_modes() {
   local out1 out2
   out1=$("$CHECK" --command 'exec bin/fm-watch-arm.sh' 2>&1)
-  out2=$("$CHECK" --claude --command 'exec bin/fm-watch-arm.sh' 2>&1)
+  out2=$("$CHECK" --command 'exec bin/fm-watch-arm.sh' 2>&1)
   [ -z "$out1" ] || fail "default allow must be silent, got: $out1"
   [ -z "$out2" ] || fail "--claude allow must be silent, got: $out2"
-  pass "allow is silent on both stdout and stderr in default and --claude mode"
+  pass "allow is silent on both stdout and stderr in default and mode"
 }
 
 # --- harness wiring: each adapter invokes the shared checker -----------------
@@ -459,16 +411,13 @@ test_direct_policy_contract
 test_command_equals_form
 test_background_flag_accepted_and_non_gating
 test_unknown_flag_errors
-test_stdin_grok_schema_deny
-test_stdin_claude_codex_schema_allow
-test_stdin_claude_codex_schema_deny
+test_stdin_codex_schema_allow
+test_stdin_codex_schema_deny
 test_stdin_unrelated_command_allowed
 test_prefilter_is_strict_superset
 test_failopen_empty_stdin
 test_failopen_garbage_stdin
 test_failopen_missing_jq
 test_failopen_missing_node
-test_claude_mode_stdout_empty_on_deny
-test_default_mode_stdout_has_grok_json_on_deny
 test_allow_is_silent_both_modes
 test_shellcheck_clean

@@ -30,7 +30,6 @@ The helper maps each harness to its primary provider family and applies the prov
 An `exhausted_now` runway vetoes the candidate.
 The helper selects a candidate only when its applicable quota has a known `effectivePercentRemaining` greater than zero.
 This is an optional narrow helper with a known limitation: it maps each harness to one primary provider family only, so a candidate whose established provider differs from that primary family is checked against the wrong quota row.
-omp has no primary family, so the helper keys an `omp:` candidate on its model prefix, mapping only `openai-codex/` and `claude-bridge/` and refusing every other prefix; the helper's header owns that mapping.
 Authoritative multi-provider routing - including provider discovery from the harness catalog and quota matching by that explicit provider - stays owned by this skill's intake procedure above and AGENTS.md section 4, not by the helper.
 Use it only when the brief already fixed the candidate order and every candidate's provider is the harness's primary family.
 It does not replace the reasoning-class, runway-feasibility, or authentication gates above.
@@ -120,10 +119,9 @@ Uncertainty and ineligibility are different findings:
 - Only concrete contradictory evidence blocks: an authoritative catalog proving the model unsupported, or proof that the credential the candidate actually selects is unusable.
 - Reserve login wording for that proven-unusable case, and name the harness, model, surface, and evidence.
 
-When a credential's local classification is the only thing standing between a candidate and a block, get ground truth before blocking.
-`bin/fm-vendor-auth-probe.sh` is the only approved vendor-credential probe; its `--help` owns the registered probes and mechanics.
-It takes no harness, model, or provider and returns a fact, not a route: only `authenticated` and `unauthenticated` are ground truth, while `indeterminate`, `timeout`, and `unavailable` establish nothing and must never be read as either outcome.
-Never launch a vendor CLI yourself, and never probe a credential store the candidate does not use.
+A local credential classification alone does not establish that a retained harness cannot authenticate.
+Use evidence from the selected Pi or Codex surface; preserve uncertainty when no authoritative selected-surface result exists.
+Never launch a removed vendor CLI or probe a credential store the candidate does not use.
 Grok prepaid `credits` are unrelated to paid-window headroom; never read them as exhaustion.
 
 Malformed configuration is an actionable error, not a candidate to rank around.

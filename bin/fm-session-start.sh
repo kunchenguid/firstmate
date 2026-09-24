@@ -216,7 +216,7 @@
 #             session lock records AGENTS.md's SHA-256 baseline only after the
 #             digest completion record is published, keyed to that lock's
 #             harness pid. No resume, clear, reset, compact, or other rebuild
-#             creates or replaces it. Pi and pi-signed compaction are the only
+#             creates or replaces it. Pi compaction is the only
 #             supported stale-cache rebuild pair: a missing baseline, a baseline
 #             for another harness pid, or a changed hash causes the complete
 #             current AGENTS.md to print before the bulky digest. The baseline
@@ -590,7 +590,7 @@ agents_baseline_drifted() {  # <rebuilding-session-pid>
 agents_refresh_required() {  # <rebuilding-session-pid>
   local lock_pid=$1
   case "$PRIMARY_HARNESS:$SESSION_SOURCE" in
-    pi:compact|pi-signed:compact) ;;
+    pi:compact) ;;
     *) return 1 ;;
   esac
   agents_baseline_drifted "$lock_pid"
@@ -731,9 +731,9 @@ else
   # Pi supervision-branch recovery, locked path only: clear leases whose
   # supervising session died, and surface outcomes the branch stored durably
   # that never reached main (docs/pi-supervision-branch.md). Gated to the
-  # pi/pi-signed primary so a non-Pi home runs neither step - homes on any
+  # Pi primary so a non-Pi home runs neither step - homes on any
   # other harness stay entirely untouched (captain-decided criterion).
-  if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
+  if [ "$PRIMARY_HARNESS" = pi ]; then
     FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-lease.sh" sweep 2>/dev/null || true
     BRANCH_REPLAY_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-branch-outcome.sh" startup-replay 2>&1) || BRANCH_REPLAY_OUT=
@@ -757,7 +757,7 @@ AFK_MODE=$(fm_afk_mode "$STATE")
 X_MODE_PRESENT=0
 [ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
 
-if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
+if [ "$PRIMARY_HARNESS" = pi ]; then
   PI_EXT="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
   PI_TURNEND_EXT="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
   PI_FEISHU_EXT="$FM_ROOT/.pi/extensions/fm-primary-feishu-bridge.ts"
@@ -782,24 +782,6 @@ if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
   if [ "$PI_FEISHU_ACTIVE" = '{"status":"enabled"}' ] \
     && ! fm_pi_extension_loaded "$PI_FEISHU_MARKER" "$PI_FEISHU_VERSION" "$PI_LOCK"; then
     printf 'FEISHU: Pi bridge not loaded - restart %s after approving project trust so %s can converge the configured exact current-session binding\n' "$PI_RESTART_COMMAND" "$PI_FEISHU_EXT"
-  fi
-fi
-# omp (Oh My Pi) has no project-trust gate: it auto-discovers <cwd>/.omp/extensions
-# with no dialog, so the only ways both tracked primary extensions fail to load
-# are a session started outside this home, an extension disabled in the omp
-# config, or a build older than the tracked file. The markers carry the loaded
-# build plus the loading pid, exactly as the Pi ones do (bin/fm-wake-lib.sh).
-if [ "$PRIMARY_HARNESS" = omp ]; then
-  OMP_EXT="$FM_ROOT/.omp/extensions/fm-primary-omp-watch.ts"
-  OMP_TURNEND_EXT="$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
-  OMP_WATCH_MARKER="$STATE/.omp-watch-extension-loaded"
-  OMP_TURNEND_MARKER="$STATE/.omp-turnend-extension-loaded"
-  OMP_LOCK="$STATE/.lock"
-  OMP_WATCH_VERSION=$(fm_pi_extension_version "$OMP_EXT" || printf '')
-  OMP_TURNEND_VERSION=$(fm_pi_extension_version "$OMP_TURNEND_EXT" || printf '')
-  if ! fm_pi_extension_loaded "$OMP_WATCH_MARKER" "$OMP_WATCH_VERSION" "$OMP_LOCK" \
-    || ! fm_pi_extension_loaded "$OMP_TURNEND_MARKER" "$OMP_TURNEND_VERSION" "$OMP_LOCK"; then
-    printf 'OMP_WATCH_EXTENSION: not loaded - restart omp with this home as its working directory so %s and %s auto-load from .omp/extensions/ for turn-end guard and background wake coverage; pass -e %s -e %s only when omp must start from another directory, never together with auto-discovery (omp loads a file named both ways twice)\n' "$OMP_TURNEND_EXT" "$OMP_EXT" "$OMP_TURNEND_EXT" "$OMP_EXT"
   fi
 fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \

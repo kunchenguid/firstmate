@@ -17,11 +17,8 @@ Select only its documented trust choice from the active Firstmate home, binding 
 No observed dialog proves only that launch.
 
 Each supported harness handles its folder-trust gate differently, and the tool reference owns the detail.
-For Claude, load `references/harness/claude.md`; its workspace-trust section owns the non-key-answerable gate and spawn-time pre-registration for every spawn kind.
-agy gates every fresh worktree too; the spawn pre-registers it in agy's own store the same way, and a strict post-launch gate answers any dialog that still renders before the spawn reports success.
-Cursor suppresses its dialog with launch-time `--trust`, and Muse suppresses its own with `--yolo`.
-Grok dodges its gate instead of granting trust, because its project picker appears only outside a project and the spawn starts in the isolated git root.
-Pi gates the fresh-worktree case too, but unlike Claude its dialog is answered with Enter, and `references/harness/pi.md` owns that recipe and where the decision persists.
+Pi answers its fresh-worktree trust dialog with Enter; `references/harness/pi.md` owns the persistence details.
+TraeX trust behavior belongs to `references/harness/traex.md`.
 Codex shows a directory-trust dialog on the first run for a repository root.
 
 Use the tool's exact skill form, or natural language only when no separate command is verified or the form remains uncertain.
@@ -43,3 +40,6 @@ Deterministic relaunch instead trusts instructions on disk, not a private sessio
 
 `../stuck-crewmate-recovery/SKILL.md` owns worker recovery and `../secondmate-provisioning/SKILL.md` owns secondmate recovery; both preserve recorded work.
 The router's recovery scenarios select the additional common references for replacement profiles and secondmates.
+
+Records naming removed harnesses are historical evidence, not authority to relaunch another tool.
+Control, relaunch, and teardown refuse them; preserve the record and worktree until an explicit migration is authorized.
