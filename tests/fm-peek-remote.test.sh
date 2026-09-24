@@ -47,7 +47,7 @@ setup_remote_home() {  # <name> -> echoes home dir with remote meta + registry
   fm_write_meta "$home/state/rsm.meta" \
     "window=remote:rsm" \
     "endpoint_task_id=rsm" \
-    "harness=claude" \
+    "harness=pi" \
     "kind=secondmate" \
     "mode=secondmate" \
     "remote_host=remote-mac" \

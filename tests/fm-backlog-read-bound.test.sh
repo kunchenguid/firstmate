@@ -218,7 +218,7 @@ fm_write_meta "$CAPTAIN/state/wedged-origin.meta" \
   'window=firstmate:fm-wedged-origin' \
   'worktree=/nonexistent/wedged-origin' \
   'project=alpha' \
-  'harness=claude' \
+  'harness=pi' \
   'decisions_reviewed=1' \
   'decision_keys=wedged-entry'
 
@@ -337,7 +337,7 @@ fm_write_meta "$MIG/state/wedged-origin.meta" \
   'window=firstmate:fm-wedged-origin' \
   'worktree=/nonexistent/wedged-origin' \
   'project=alpha' \
-  'harness=claude' \
+  'harness=pi' \
   'decisions_reviewed=1' \
   'decision_keys=mig-entry'
 
@@ -377,14 +377,14 @@ make_hanging_tasks_axi "$E2E_FAKEBIN"
 # through `ps`. A CI runner's ancestry carries no harness process, so the lock
 # would be refused there and the sweep silently skipped. Pin the lock evidence
 # the same way tests/fm-session-start.test.sh's make_fake_ps_harness does:
-# every queried pid reports a live `claude` harness, independent of whatever
+# every queried pid reports a live `pi` harness, independent of whatever
 # process tree the test itself was launched from.
 cat > "$E2E_FAKEBIN/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
 case "$*" in
-  *"comm="*) printf '%s\n' '/usr/local/bin/claude'; exit 0 ;;
-  *"args="*) printf '%s\n' 'claude'; exit 0 ;;
+  *"comm="*) printf '%s\n' '/usr/local/bin/pi'; exit 0 ;;
+  *"args="*) printf '%s\n' 'pi'; exit 0 ;;
   *"ppid="*) exit 1 ;;
 esac
 exit 1
@@ -402,7 +402,7 @@ fm_write_meta "$E2E_HOME/state/wedged-task.meta" \
   'window=firstmate:fm-wedged-task' \
   'worktree=/nonexistent/wedged-task' \
   'project=alpha' \
-  'harness=claude' \
+  'harness=pi' \
   'mode=no-mistakes' \
   'yolo=off'
 

@@ -399,7 +399,7 @@ setup_remote_home() {  # <name> -> echoes home dir with remote meta + registry
   fm_write_meta "$home/state/rsm.meta" \
     "window=fm-remote:w1:p1" \
     "endpoint_task_id=rsm" \
-    "harness=claude" \
+    "harness=pi" \
     "kind=secondmate" \
     "mode=secondmate" \
     "yolo=off" \

@@ -670,7 +670,7 @@ test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn() {
     printf 'window=%s\n' "$stale"
     printf 'backend=herdr\n'
     printf 'kind=secondmate\n'
-    printf 'harness=claude\n'
+    printf 'harness=pi\n'
     printf 'home=%s/sm-instr\n' "$w"
   } > "$meta"
 

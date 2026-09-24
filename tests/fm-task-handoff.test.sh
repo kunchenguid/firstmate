@@ -49,7 +49,7 @@ make_home() {  # <case-dir> <task>...
     {
       printf 'window=fm-%s\n' "$task"
       printf 'endpoint_task_id=%s\n' "$task"
-      printf 'harness=claude\n'
+      printf 'harness=pi\n'
       printf 'kind=ship\n'
       printf 'backend=tmux\n'
       printf 'spawn_gen=test-%s\n' "$task"
@@ -152,7 +152,7 @@ test_local_runtime_backend_matrix_uses_one_durable_plane() {
     endpoint="test-$backend-endpoint"
     {
       printf 'endpoint_task_id=target\n'
-      printf 'harness=claude\n'
+      printf 'harness=pi\n'
       printf 'kind=ship\n'
       printf 'backend=%s\n' "$backend"
       if [ "$backend" = orca ]; then
@@ -205,7 +205,7 @@ test_secondmate_routes_stay_with_pending_reply_owner() {
     home=$(make_home "$dir" source mate)
     {
       printf 'window=fm-mate\n'
-      printf 'harness=claude\n'
+      printf 'harness=pi\n'
       printf 'kind=secondmate\n'
       printf 'backend=tmux\n'
       [ "$scope" != remote ] || printf 'remote_host=secondmate.example\n'

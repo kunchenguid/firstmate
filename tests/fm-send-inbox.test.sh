@@ -89,7 +89,7 @@ SH
 }
 
 setup_case() { # <name> [harness] -> echoes case dir with home/state + t1 meta
-  local name=$1 harness=${2:-claude} dir
+  local name=$1 harness=${2:-pi} dir
   dir="$TMP_ROOT/$name"
   mkdir -p "$dir/home/state"
   make_stubs "$dir" >/dev/null
@@ -215,9 +215,9 @@ test_harness_invocations_stay_typed() {
   assert_contains "$(cat "$dir/send.log")" '$no-mistakes' "the codex \$skill should be typed literally"
   [ ! -d "$dir/home/state/t1.inbox" ] || fail "a codex \$skill must not be routed to the inbox"
   # The same `$` message to a non-codex harness is plain text: inbox plane.
-  dir=$(setup_case dollartext claude)
+  dir=$(setup_case dollartext pi)
   err="$dir/send.err"
-  run_send "$dir" "$err" -- t1 '$5/month is cheap' || fail "a claude \$-text send should succeed"
+  run_send "$dir" "$err" -- t1 '$5/month is cheap' || fail "a pi \$-text send should succeed"
   [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "a non-codex \$-message should ride the inbox"
   case "$(cat "$dir/send.log")" in
   *'$5/month'*) fail "a non-codex \$-message payload was typed" ;;

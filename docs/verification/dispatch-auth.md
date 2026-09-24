@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports the dispatch judgment rules in `.agents/skills/quota-array-dispatch/SKILL.md` and the bounded vendor probe in `bin/fm-vendor-auth-probe.sh`.
+This record supports the dispatch judgment rules in `.agents/skills/quota-array-dispatch/SKILL.md`.
 It records only facts that must be re-established when a producer or vendor version changes.
 Task chronology, incident transcripts, and credential metadata stay in private reports or PR evidence.
 
@@ -175,32 +175,3 @@ Neither this per-source shape nor `state.authStatus` exists before quota-axi 0.1
 
 Grok also reports `credits.remaining: 0` alongside `percentRemaining: 41` on a healthy account.
 That zero is a prepaid balance, not the subscription window, and is never headroom.
-
-## Standalone Grok discovery probe
-
-Verified 2026-07-30 on `grok 0.2.117 (f1c06093089f) [stable]`.
-
-```sh
-grok --version
-grok models   # stdin closed, single attempt, hard-bounded
-```
-
-Observed:
-
-- `grok models` exits `0` and its first stdout line is `You are logged in with grok.com.` for an authenticated session.
-- With a home directory holding no Grok credential, the first stdout line is `You are not authenticated.`, also with exit status `0`.
-- Because the status is `0` in both cases, the exit status is not a verdict; only the literal first stdout line is examined, and a blank first line does not authenticate.
-- `<home>/.grok/auth.json` was byte-identical across the authenticated run (`mtime`, `size`, and mode `0600` unchanged), so the probe is a read in that path.
-
-These discriminator strings are un-owned vendor UI text.
-`bin/fm-vendor-auth-probe.sh` pins the verified version, reports `versionVerified=no` when the running CLI differs, and classifies any unrecognized first line as `indeterminate` rather than authenticated.
-Re-run the two commands above and update this section and the pinned version together when the vendor CLI changes.
-
-## Regression coverage
-
-`tests/fm-vendor-auth-probe.test.sh` drives the real script against a fake vendor CLI that records every invocation's argv and anything readable on stdin.
-It asserts that the script accepts no harness, model, or provider input, never calls `quota-axi`, exits alike for every probe result because it renders no verdict, invokes only the two fixed non-destructive argv forms with stdin closed, holds a real bound even when the configured bound is zero or malformed, and never echoes raw vendor output.
-`tests/fm-spawn-dispatch-profile.test.sh` owns spawn's deterministic profile and harness refusals.
-`tests/fm-bootstrap.test.sh` owns the quota-axi version-floor diagnostic.
-`tests/fm-quota-array-dispatch-live-e2e.test.sh` drives the public Pi skill-loading interface against one fake schema-5 snapshot per case, serving default TOON and the permitted JSON fallback while recording the exact call sequence.
-It covers TOON-first `spendPriority` ranking among candidates that pass eligibility, reasoning-class, and runway-feasibility gates, explicit accounting for unmeasurable runway, the strongest-reasoning constraint, the runway feasibility floor over a higher `spendPriority`, and the schema-5 TraeX load-threshold, quota-depletion, runway-horizon, quota-scope, unsupported-model, tie-order, and all-tight cases.

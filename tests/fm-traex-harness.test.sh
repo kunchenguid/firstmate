@@ -211,7 +211,11 @@ assert_no_custom_lifecycle() {
 
 test_marker_detection_is_scoped() {
   local out dir
-  out=$(FM_TRAEX_HARNESS=traex CLAUDECODE=1 "$HARNESS")
+  dir="$TMP_ROOT/marker-only"
+  mkdir -p "$dir"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$dir/ps"
+  chmod +x "$dir/ps"
+  out=$(PATH="$dir:$PATH" FM_TRAEX_HARNESS=traex "$HARNESS")
   [ "$out" = traex ] || fail "TraeX marker did not win detection, got '$out'"
   dir="$TMP_ROOT/detect"
   mkdir -p "$dir"

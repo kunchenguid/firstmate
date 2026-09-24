@@ -165,52 +165,6 @@ test_namespace_pid1_lock_holder_is_silent() {
   pass "fm-sessionstart-nudge: a lock holder that is pid 1 of its own namespace is already run"
 }
 
-test_opencode_plugin_delivers_exact_nudge_once() {
-  local root="$TMP_ROOT/opencode-primary" out status=0
-  make_primary "$root"
-  cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
-    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
-  chmod +x "$root/bin/fm-sessionstart-nudge.sh"
-  out=$(PLUGIN="$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
-    WORKTREE="$root" EXPECTED="$NUDGE_LINE" node --input-type=module 2>&1 <<'EOF'
-import { pathToFileURL } from "node:url";
-
-const prompts = [];
-const client = {
-  session: {
-    promptAsync: async (request) => {
-      prompts.push(request.body.parts[0].text);
-    },
-  },
-};
-const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const hooks = await mod.FmPrimarySessionstartNudge({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
-const event = {
-  type: "session.created",
-  properties: { sessionID: "session-nudge-test", info: { id: "session-nudge-test" } },
-};
-await hooks.event({ event });
-await hooks.event({ event });
-if (prompts.length !== 1) throw new Error(`expected one prompt, got ${prompts.length}`);
-if (prompts[0] !== process.env.EXPECTED) throw new Error(`unexpected prompt: ${prompts[0]}`);
-EOF
-  ) || status=$?
-  expect_code 0 "$status" "OpenCode exact nudge delivery"
-  [ -z "$out" ] || fail "OpenCode exact nudge delivery printed output: $out"
-  pass "OpenCode session.created delivers the exact wrapper nudge once per session"
-}
-
-# --- run tier ----------------------------------------------------------------
-#
-# make_run_primary builds a primary the run wrapper accepts and the REAL
-# fm-session-start.sh can execute: a git repo on main so the tangle check
-# behaves, plus the home directories the digest reads. The deliberately bare
-# PATH keeps every bootstrap probe fast and hermetic - it reports missing tools
-# instead of reaching the host's real gh/tmux/tasks-axi.
 RUN_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 
 make_run_primary() {
@@ -929,7 +883,6 @@ test_pi_large_sessionstart_digest_is_delivered_loudly() {
     "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
   cp "$ROOT/bin/fm-sessionstart-run.sh" "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-gate-refuse-lib.sh" \
-    "$ROOT/bin/fm-hook-host-lib.sh" \
     "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
   cat > "$fixture/bin/fm-session-start.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1060,7 +1013,6 @@ test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
 test_owned_lock_is_silent
 test_namespace_pid1_lock_holder_is_silent
-test_opencode_plugin_delivers_exact_nudge_once
 test_run_startup_runs_the_full_digest
 test_run_clear_and_compact_reemit
 test_run_rebuild_forwards_source_to_drifted_instruction_refresh

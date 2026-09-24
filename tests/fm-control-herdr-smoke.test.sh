@@ -88,7 +88,7 @@ EOF
   echo "endpoint_task_id=hsmoke"
   echo "worktree=$WT"
   echo "project=$PROJ"
-  echo "harness=claude"
+  echo "harness=pi"
   echo "kind=ship"
   echo "mode=no-mistakes"
   echo "yolo=off"
@@ -188,7 +188,7 @@ done
   || fail "the Herdr relaunch replaced its endpoint instead of reusing it"
 herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
   || fail "the Herdr relaunch removed the endpoint it was required to reuse"
-awk -F= '$1 == "harness" {$0="harness=claude"} {print}' "$HOME_DIR/state/hsmoke.meta" \
+awk -F= '$1 == "harness" {$0="harness=pi"} {print}' "$HOME_DIR/state/hsmoke.meta" \
   > "$HOME_DIR/state/hsmoke.meta.tmp"
 mv "$HOME_DIR/state/hsmoke.meta.tmp" "$HOME_DIR/state/hsmoke.meta"
 pass "real herdr: a drifted agent-free shell returns to its worktree and reuses the same endpoint"
@@ -207,14 +207,14 @@ pass "real herdr: interrupt refuses when herdr's own agent registry reports no a
 # A registration alone no longer proves an agent (issue #4115): the adapter
 # verifies the pane's processes through the real `pane process-info` view. So
 # the registered agent is backed by a real agent-named foreground process - a
-# symlink to a long-running system binary named `claude`, the same construction
+# symlink to a long-running system binary named `pi`, the same construction
 # tests/fm-tmux-agent-liveness.test.sh uses (a copied platform binary fails code
 # signing on macOS arm64; the symlink name is what the kernel records as argv[0]).
 AGENT_BIN="$SCRATCH/agentbin"
 mkdir -p "$AGENT_BIN"
 SLEEP_BIN=$(command -v sleep) || fail "sleep not found"
-ln -s "$SLEEP_BIN" "$AGENT_BIN/claude"
-printf -v AGENT_Q '%q' "$AGENT_BIN/claude"
+ln -s "$SLEEP_BIN" "$AGENT_BIN/pi"
+printf -v AGENT_Q '%q' "$AGENT_BIN/pi"
 
 wait_process_state() {  # <expected> <tries>
   local expected=$1 tries=$2 i=0
@@ -243,7 +243,7 @@ STATE=$(fm_backend_agent_state herdr "$SESSION:$PANE_ID")
 
 OUT=$(run_control hsmoke interrupt) || fail "interrupt against a registered agent should succeed: $OUT"
 case "$OUT" in
-  *"interrupt-delivered hsmoke harness=claude backend=herdr verified=agent-alive cancel=unconfirmed"*) : ;;
+  *"interrupt-delivered hsmoke harness=pi backend=herdr verified=agent-alive cancel=unconfirmed"*) : ;;
   *) fail "interrupt should report the agent-alive proof on herdr, got: $OUT" ;;
 esac
 pass "real herdr: interrupt delivers the harness's key and proves the agent survived it"
@@ -302,7 +302,7 @@ done
 herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
   || fail "the relaunch removed the endpoint it was required to reuse"
 [ -d "$WT" ] || fail "the relaunch must never remove the task's local copy"
-awk -F= '$1 == "harness" {$0="harness=claude"} {print}' "$HOME_DIR/state/hsmoke.meta" \
+awk -F= '$1 == "harness" {$0="harness=pi"} {print}' "$HOME_DIR/state/hsmoke.meta" \
   > "$HOME_DIR/state/hsmoke.meta.tmp"
 mv "$HOME_DIR/state/hsmoke.meta.tmp" "$HOME_DIR/state/hsmoke.meta"
 pass "real herdr: a stale registration no longer blocks relaunch, and the endpoint and local copy survive"

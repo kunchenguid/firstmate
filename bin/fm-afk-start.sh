@@ -18,15 +18,9 @@
 # restore them explicitly.
 #
 # This is the COMMON daemon entry for every backend. HOW it becomes a tracked
-# background process differs by harness/backend and is owned elsewhere:
-#   - Harnesses with a native in-pane tracked-background tool (e.g. claude, grok)
-#     run this directly via that tool, so the daemon inherits the captain pane's
-#     env and auto-discovers it.
-#   - Harnesses with NO native background mechanism (e.g. pi) run this THROUGH
-#     bin/fm-afk-launch.sh, which creates a non-visible tracked terminal per
-#     backend (herdr tab/workspace, tmux detached session) and passes the
-#     captain pane in as FM_SUPERVISOR_TARGET so injection targets it, not the
-#     daemon's own new pane.
+# terminal is owned by bin/fm-afk-launch.sh: Codex uses a non-visible tracked
+# backend terminal and an explicit FM_SUPERVISOR_TARGET. Pi keeps its ordinary
+# extension supervision and does not enter this daemon path.
 # Do not wrap this in `nohup ... &`: Codex/herdr can reap fire-and-forget shell
 # children after the tool call returns, while a tracked background terminal stays
 # attached and has a real lifecycle.
@@ -111,7 +105,7 @@ daemon_lock_held_by_live_daemon() {
 }
 
 fm_afk_flag_write() {  # <state-dir> [mode]
-  local state=$1 requested_mode=${2:-} lock="$1/.cursor-park-owner.lock" \
+  local state=$1 requested_mode=${2:-} lock="$1/.afk-publish.lock" \
     pending attempt=0 status=1 mode
   mkdir -p "$state" || return 1
   [ ! -d "$state/.afk" ] || return 1

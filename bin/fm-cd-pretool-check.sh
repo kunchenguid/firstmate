@@ -12,52 +12,18 @@
 # responses. It never executes, sources, evaluates, or expands the command.
 # See docs/cd-guard.md for the complete contract and validation record.
 #
-# Usage:
-#   <PreToolUse JSON on stdin> | bin/fm-cd-pretool-check.sh
-#   bin/fm-cd-pretool-check.sh --command '<cmd>'
-#
-# Stdin mode extracts .toolInput.command for Grok or .tool_input.command for
-# Claude, Codex, and Cursor. CLI mode is used by OpenCode and Pi after their
-# adapters extract the exact command string. --cursor selects Cursor's own deny
-# rendering and marks this invocation as the Cursor registration rather than the
-# Claude-settings duplicate Cursor also loads.
-#
-# Exit/output contract (identical shape to bin/fm-arm-pretool-check.sh):
-#   ALLOW - exit 0 and no output.
-#   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
-#          deny object on stdout unless --claude was supplied.
-#   DENY, --cursor - exit 0 and Cursor's own decision object on stdout. Cursor
-#          reads the returned object rather than the exit status.
-#   INERT - not the real primary checkout (a crewmate/scout task worktree or a
-#           non-firstmate repo): exit 0 with no output, exactly like ALLOW.
-#   FAIL OPEN - malformed or empty stdin, missing jq for stdin transport,
-#               missing Node or policy owner, or an invalid policy response.
-#
-# Claude requires stdout to remain empty on deny.
-# Codex blocks on exit 2 and displays stderr.
-# Grok consumes the stdout decision object.
-# OpenCode and Pi consume exit 2 plus stderr.
-# Cursor consumes the stdout decision object.
+# Codex sends tool_input.command; Pi passes --command.
 set -u
 
 CMD=""
 CMD_SET=0
-CLAUDE_MODE=0
-CURSOR_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-cd-pretool-check.sh [--command <cmd>] [--claude|--cursor]
+Usage: fm-cd-pretool-check.sh [--command <cmd>]
 
-With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
-toolInput.command, or Claude/Codex tool_input.command).
-Fires only in the real primary firstmate checkout; it is a silent no-op in a
-crewmate/scout task worktree or any non-firstmate repo.
-Exits 0 to allow and 2 to deny a persistent top-level cwd change.
-The deny reason is written to stderr, with a Grok decision object on stdout
-unless --claude is supplied.
-With --cursor, a deny is Cursor's own decision object on stdout and exit 0,
-because Cursor reads the returned object rather than the exit status.
+With no --command, reads tool_input.command from a JSON hook payload on stdin.
+Exits 0 to allow and 2 to deny, with a structured reason on stderr.
 Malformed transport and an unavailable classifier runtime fail open.
 EOF
 }
@@ -73,14 +39,6 @@ while [ "$#" -gt 0 ]; do
     --command=*)
       CMD=${1#--command=}
       CMD_SET=1
-      shift
-      ;;
-    --claude)
-      CLAUDE_MODE=1
-      shift
-      ;;
-    --cursor)
-      CURSOR_MODE=1
       shift
       ;;
     -h|--help)
@@ -99,15 +57,7 @@ if [ "$CMD_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
   [ -n "$PAYLOAD" ] || exit 0
   command -v jq >/dev/null 2>&1 || exit 0
-  # shellcheck source=bin/fm-hook-host-lib.sh
-  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fm-hook-host-lib.sh"
-  # Cursor's own registration passes --cursor. Without it a Cursor-delivered
-  # payload is the Claude-settings duplicate Cursor also loads, already
-  # evaluated by that registration, so this copy allows without re-classifying.
-  if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
-    exit 0
-  fi
-  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
+  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_input.command // empty)' 2>/dev/null) || exit 0
 fi
 
 [ -n "$CMD" ] || exit 0
@@ -181,10 +131,5 @@ json_escape() {
 
 DETAIL="[$CODE] $REASON"
 ESCAPED=$(json_escape "$DETAIL")
-if [ "$CURSOR_MODE" -eq 1 ]; then
-  printf '{"permission":"deny","user_message":"%s"}\n' "$ESCAPED"
-  exit 0
-fi
-printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
-[ "$CLAUDE_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
 exit 2

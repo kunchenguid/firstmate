@@ -64,54 +64,18 @@ export PATH
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
-# shellcheck source=/dev/null
-. "$ROOT/bin/fm-cursor-lib.sh"
 fm_backend_source tmux || fail "fm_backend_source tmux failed"
 
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n control -c "$LAB/wt" \
   || fail "could not start the private tmux server"
 
-# Kimi is not required to be on PATH; mirror bin/fm-spawn.sh's own resolution
-# order so this guard covers the same binary firstmate would actually launch.
-resolve_harness_binary() {  # <harness>
-  local harness=$1 candidate
-  # cursor is resolved FIRST, before the generic PATH lookup, and only through
-  # the verified owner fm-spawn uses. The Cursor agent never installs as
-  # `cursor`: it installs as `cursor-agent` plus the legacy alias `agent`. A
-  # machine that also has the Cursor editor does have an executable `cursor` on
-  # PATH, and launching that one exits immediately, leaving a bare shell in the
-  # pane that this guard then reports as liveness drift the classifier can do
-  # nothing about. Asking the owner first also keeps an unrelated executable
-  # named `agent` rejected here exactly as it would be at launch.
-  if [ "$harness" = cursor ]; then
-    fm_cursor_resolve_binary 2>/dev/null && return 0
-    return 1
-  fi
-  candidate=$(command -v "$harness" 2>/dev/null || true)
-  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-    printf '%s\n' "$candidate"
-    return 0
-  fi
-  if [ "$harness" = kimi ] && [ -n "${HOME:-}" ] && [ -x "$HOME/.kimi-code/bin/kimi" ]; then
-    printf '%s\n' "$HOME/.kimi-code/bin/kimi"
-    return 0
-  fi
-  return 1
-}
+resolve_harness_binary() { command -v "$1"; }
 
 CHECKED=0
 SKIPPED=
 
-# The verified adapters, in the order the harness-adapters skill router records
-# them. An adapter that gains a verified launch path belongs here too.
-# muse matters most of all here: its launcher execs a VERSION-SUFFIXED binary,
-# so the live process name changes on every auto-update and its install path
-# carries no `muse` component to fall back on. That is precisely the drift this
-# guard exists to catch, and only a real muse release can produce it.
-# cursor matters for the same reason muse does, from the other direction: it
-# runs as a bundled node script, so its pane title is a bare `node` that no name
-# pattern can own, and identity has to come from its install path or argv[0].
-for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
+# Retained tmux-capable adapters; TraeX is Herdr-only.
+for harness in codex pi; do
   if ! bin_path=$(resolve_harness_binary "$harness"); then
     SKIPPED="$SKIPPED $harness"
     note "skip: $harness is not installed on this machine, so its classification is unverified here"
@@ -126,7 +90,6 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
   # which would hang this probe rather than classify anything; --trust is the
   # same flag fm-spawn passes for the same reason.
   launch_args=""
-  [ "$harness" = cursor ] && launch_args="--trust"
   # shellcheck disable=SC2086  # deliberate: an empty value must add no argument
   "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$harness" -c "$LAB/wt" -- "$bin_path" $launch_args \
     || fail "$harness ($version): could not launch a window for the liveness probe"
@@ -152,7 +115,6 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
   # Both Pi identities share one launcher name, so ancestry can only ever prove
   # the family; only the launch-boundary marker selects the signed identity.
   expect_harness=$harness
-  [ "$harness" = pi-signed ] && expect_harness=pi
   pane_pid=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$target" '#{pane_pid}' 2>/dev/null | tr -d ' ')
   [ -n "$pane_pid" ] || fail "$harness ($version): could not read the pane pid for the detection probe"
   # Probe from BELOW the pane process, not the pane process alone. The shipped
