@@ -2281,9 +2281,10 @@ fi
 # worker against a store that holds no trust entry for its own copy. Refuse the
 # spawn here, before any endpoint, worktree, or record exists, rather than
 # letting either mechanism quietly take the other's launch. A claude relaunch
-# of a task whose record carries a claude_seat keeps that seat whatever the
-# home's active seat now reads (below), so the pin conflicts with it the same
-# way and is refused the same way.
+# of a task whose record names a seat's profile directory keeps that seat
+# whatever the home's active seat now reads (below), so the pin conflicts with
+# it the same way and is refused the same way. A recorded ambient or pin root
+# is no seat and relaunches as before.
 if [ -f "$CONFIG/claude-account" ]; then
   if [ "$(fm_seat_active)" != "$FM_SEAT_DEFAULT_NAME" ]; then
     {
@@ -2294,7 +2295,8 @@ if [ -f "$CONFIG/claude-account" ]; then
     } >&2
     exit 1
   fi
-  if [ "$HARNESS" = claude ] && [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = claude ] && [ -n "$RELAUNCH_SEAT" ]; then
+  if [ "$HARNESS" = claude ] && [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = claude ] \
+    && [ -n "$RELAUNCH_SEAT" ] && [ "$(fm_seat_dir "${RELAUNCH_SEAT##*/}")" = "$RELAUNCH_SEAT" ]; then
     {
       echo "error: task $ID was launched on the Claude seat $RELAUNCH_SEAT, and this home now configures a worker account pin that also chooses a Claude worker's configuration directory:"
       echo "  $CONFIG/claude-account"

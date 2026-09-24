@@ -981,6 +981,28 @@ test_account_pin_and_recorded_seat_refuse_the_relaunch() {
   pass "an account pin refuses relaunching a task recorded on a seat before anything is touched"
 }
 
+test_pin_only_home_still_relaunches_a_claude_task() {
+  local rec id out pin
+  id=seat-pin-only-relaunch-1
+  rec=$(spawn_case spawn-pin-only-relaunch "$id")
+  read_spawn_case "$rec"
+  fm_fake_exit0 "$FAKEBIN" claude
+  pin="$CASE_DIR/pin-root"
+  mkdir -p "$pin"
+  printf '%s\n' "$pin" > "$HOME_DIR/config/claude-account"
+  out=$(run_spawn_here "$HOME_DIR" "$WT_DIR" "$FAKEBIN" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  expect_code 0 "$?" "a spawn under a named-root pin with no seat should succeed: $out"
+  make_dead_endpoint_tmux "$FAKEBIN" "fm-$id"
+  : > "$LAUNCH_LOG"
+
+  out=$(CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+    fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN" "$id" --relaunch)
+  expect_code 0 "$?" "a pin-only home must still relaunch its claude task: $out"
+  assert_contains "$(cat "$LAUNCH_LOG")" "CLAUDE_CONFIG_DIR='$pin'" \
+    "the relaunched worker must launch under the pinned root"
+  pass "a pin-only home with no seat file still relaunches a claude task under its pin"
+}
+
 test_absent_setting_is_the_default_seat
 test_switch_to_logged_in_seat_updates_only_the_setting
 test_switch_to_seat_that_is_not_logged_in_is_refused
@@ -1015,5 +1037,6 @@ test_active_seat_overrides_the_ambient_config_dir
 test_non_claude_spawn_records_no_seat
 test_account_pin_and_active_seat_refuse_the_spawn
 test_account_pin_and_recorded_seat_refuse_the_relaunch
+test_pin_only_home_still_relaunches_a_claude_task
 
 echo "# all fm-seat tests passed"
