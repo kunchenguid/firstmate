@@ -337,6 +337,56 @@ effective_payload() {  # <data.json> <dest.json>
     ]' "$data" > "$dest" || return 1
 }
 
+# --- durable decision cards ---------------------------------------------------
+# The board is rebuilt from scratch on every composition, so a card that is not
+# in the newest payload disappears with it. The Deck and any later reader still
+# need the options the captain was shown, so every surviving card is persisted
+# per task under state/decision-cards/. A record whose task is definitely no
+# longer an open captain call is pruned; a task whose state cannot be
+# established is kept, because a card wrongly hidden is worse than one wrongly
+# shown - the same asymmetry as the card hygiene above.
+
+DECISION_CARDS_DIR="$FM_HOME/state/decision-cards"
+
+persist_decision_cards() {  # <effective-payload.json>
+  local data=$1 key card tmp existing task rc keep=''
+  if [ -d "$DECISION_CARDS_DIR" ] && [ ! -L "$DECISION_CARDS_DIR" ]; then
+    :
+  elif ! (umask 077; mkdir -p "$DECISION_CARDS_DIR"); then
+    return 1
+  fi
+  [ -d "$DECISION_CARDS_DIR" ] && [ ! -L "$DECISION_CARDS_DIR" ] || return 1
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    keep=$keep$key$'\n'
+    card=$(jq -c --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg key "$key" \
+      '.captains_call[] | select(.key == $key)
+       | {schema:"fm-decision-card.v1",generated:$generated,card:.}' "$data") || return 1
+    [ -n "$card" ] || return 1
+    tmp=$(umask 077; mktemp "$DECISION_CARDS_DIR/.card.XXXXXX") || return 1
+    if printf '%s\n' "$card" > "$tmp" \
+      && chmod 0600 "$tmp" \
+      && mv -f -- "$tmp" "$DECISION_CARDS_DIR/$key.json"; then
+      continue
+    fi
+    rm -f -- "$tmp"
+    return 1
+  done < <(jq -r '.captains_call[]?.key' "$data")
+  for existing in "$DECISION_CARDS_DIR"/*.json; do
+    [ -f "$existing" ] && [ ! -L "$existing" ] || continue
+    task=$(basename "$existing" .json)
+    case $'\n'"$keep" in
+      *$'\n'"$task"$'\n'*) continue ;;
+    esac
+    rc=0
+    "$SCRIPT_DIR/fm-captain-hold.sh" open "$task" --distinguish-absent >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 1 ] || continue
+    rm -f -- "$existing" || return 1
+  done
+  return 0
+}
+
 # The OWNER column bin/fm-procevent.sh already publishes: live, none,
 # orphaned, or uncertain. Empty means the source is not registered at all.
 source_owner() {  # <source-id>
@@ -374,6 +424,10 @@ command_build() {
     rm -f -- "$effective"
     fail "cannot reconcile the board payload against landed work"
   fi
+  persist_decision_cards "$effective" || {
+    rm -f -- "$effective"
+    fail "cannot persist the decision cards under $DECISION_CARDS_DIR"
+  }
   json=$(jq -c . "$effective") || { rm -f -- "$effective"; fail "cannot compact the board data"; }
   rm -f -- "$effective"
   # `<` never appears in JSON syntax outside strings, so escaping every

@@ -381,6 +381,32 @@ first_pr_url_in_file() {  # <file>
   grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$1" 2>/dev/null | head -1
 }
 
+# Pending captain-hold reconcile requests (state/reconcile-requests/*.request) as
+# a task-id -> requested-timestamp map. A call the captain sent back for a
+# re-check is no longer waiting on the captain, so the classification below
+# buckets it apart from the live Captain's Call. Unreadable or unsafe records
+# are ignored: they can neither create nor hide a call.
+reconcile_requests_json() {
+  local dir="$STATE/reconcile-requests" file task requested
+  if [ ! -d "$dir" ] || [ -L "$dir" ]; then
+    printf '{}\n'
+    return 0
+  fi
+  {
+    for file in "$dir"/*.request; do
+      [ -f "$file" ] && [ ! -L "$file" ] || continue
+      task=$(sed -n 's/^task=//p' "$file" | head -1)
+      [ -n "$task" ] || continue
+      case "$task" in
+        *[!A-Za-z0-9._-]*) continue ;;
+      esac
+      requested=$(sed -n 's/^requested=//p' "$file" | head -1)
+      printf '%s\t%s\n' "$task" "$requested"
+    done
+  } | jq -Rn 'reduce (inputs | split("\t")) as $row ({}; .[$row[0]] = ($row[1] // ""))' \
+    2>/dev/null || printf '{}\n'
+}
+
 backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   local backlog=${1:-$BACKLOG}
   if [ ! -f "$backlog" ]; then
@@ -390,7 +416,8 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 
   # shellcheck disable=SC2094
   jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" --arg now "$SNAPSHOT_NOW" \
-    --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" '
+    --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" \
+    --argjson reconcile "$(reconcile_requests_json)" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def timestamp_epoch($d):
       if ($d | type) != "string" then null
@@ -560,8 +587,10 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
                else "done" end)
           | .requires_child_metadata = (.current_role == "worker")
           | .hold_age_days = days_between((.hold_set // .since); $now)
+          | .reconcile_requested = ($reconcile[.id] // null)
           | .hold_bucket =
               (if .hold_kind != "captain" or .hold_reason == null or .state == "done" then null
+               elif .reconcile_requested != null then "reconciling"
                elif (.unresolved_blocker_ids | length) > 0 then "blocked"
                elif .hold_until != null and .hold_until > $today then "dated"
                elif .hold_until == null and .hold_age_days != null
@@ -1121,6 +1150,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           hold_until:((.hold_until // null) | if . == null then null else trunc(40) end),
           hold_bucket:(.hold_bucket // null),
           hold_age_days:(.hold_age_days // null),
+          reconcile_requested:((.reconcile_requested // null) | if . == null then null else trunc(40) end),
           captain_actionable:(.captain_actionable // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           kind:((.kind // null) | if . == null then null else trunc(40) end),
