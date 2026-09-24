@@ -157,12 +157,17 @@ wait_for() {  # <file> [tries]
 }
 
 # Arm now starts the listener, so a later start would poll again. Wait for the
-# capture that listener is already producing.
+# capture that listener is already producing, and for its runner to release the
+# claim: the result lands before the runner publishes and exits, and a retire or
+# re-arm in that gap meets a live claim the synchronous start never left behind.
 wait_capture() {  # <home> <source-id> [tries]
   local home=$1 id=$2 n=${3:-100}
   local _
   for _ in $(seq 1 "$n"); do
-    first_result "$home" "$id" >/dev/null 2>&1 && return 0
+    if first_result "$home" "$id" >/dev/null 2>&1 \
+      && [ ! -e "$FM_PROCEVENT_CLAIM_ROOT/$id.claim" ]; then
+      return 0
+    fi
     sleep 0.1
   done
   return 1
@@ -1077,8 +1082,8 @@ fm_test_track_procevent_home "$HREDELIVER"
 new_task_endpoint "$HREDELIVER" worker-6
 PATH="$ADOPT_BIN:$PATH" FM_HOME="$HREDELIVER" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$REDELIVER_ART" --for worker-6 >/dev/null
-wait_for "$HREDELIVER/state/worker-6.inbox/001.msg" \
-  || fail "the first worker-owned round never reached the worker inbox"
+wait_capture "$HREDELIVER" "$redeliver_id" \
+  || fail "the first worker-owned round was never captured"
 [ -f "$HREDELIVER/state/worker-6.inbox/001.msg" ] \
   || fail "the first worker-owned round never reached the worker inbox"
 mv "$HREDELIVER/state/worker-6.inbox/001.msg" \
@@ -1164,8 +1169,8 @@ fm_test_track_procevent_home "$HINTR"
 new_task_endpoint "$HINTR" worker-12
 PATH="$INTR_BIN:$PATH" FM_HOME="$HINTR" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$INTR_ART" --for worker-12 >/dev/null
-wait_for_lines "$INTR_ROOT/count" 1 \
-  || fail "the terminal worker-owned round was not polled exactly once"
+wait_capture "$HINTR" "$intr_id" \
+  || fail "the terminal worker-owned round was never captured"
 [ "$(cat "$INTR_ROOT/count" 2>/dev/null || echo 0)" = 1 ] \
   || fail "the terminal worker-owned round was not polled exactly once"
 rm -f "$HINTR/state/procevent/$intr_id.source"
@@ -1215,6 +1220,11 @@ wait_for "$ROLL_ROOT/replies" \
   || fail "the first generation's reply never reached the board"
 [ "$(grep -c 'generation one' "$ROLL_ROOT/replies" 2>/dev/null || true)" = 1 ] \
   || fail "the first generation's reply never reached the board"
+# The reply is posted before the round is captured. Making the inbox read-only
+# before the runner commits and exits would fail that capture instead of the
+# re-arm's acknowledgement, leaving no round for the retried re-arm.
+wait_capture "$HROLL" "$roll_id" \
+  || fail "the first generation's round was never captured"
 cp "$HROLL/state/procevent/$roll_id.source" "$ROLL_ROOT/generation-one.source"
 chmod 0500 "$HROLL/state/procevent-inbox"
 rollback_status=0
