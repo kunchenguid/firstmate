@@ -178,7 +178,8 @@
 # crew task reaches a due stale alarm - its open backlog hold need not appear in
 # the task's last status line - and on a 0 bounds repeated alarms from new pane
 # hashes for the decision; it asks `--deferred` before a captain-held recheck
-# would ring, and stays silent while the captain's deferral stands.
+# would ring, and stays silent while the captain's deferral stands, as the
+# away-mode bin/fm-supervise-daemon.sh does before its own captain-held recheck.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
