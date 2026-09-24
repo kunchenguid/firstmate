@@ -162,30 +162,30 @@ if [ -n "$PR_URL" ]; then
 fi
 
 if [ "$MODE" = local-only ]; then
-  BASE="refs/heads/$DEFAULT"
+  BASE_REF="refs/heads/$DEFAULT"
   BASE_LABEL=$DEFAULT
 elif git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
   git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE="origin/$DEFAULT"
-  BASE_LABEL=$BASE
+  BASE_REF="refs/remotes/origin/$DEFAULT"
+  BASE_LABEL="origin/$DEFAULT"
 else
-  BASE="$DEFAULT"
-  BASE_LABEL=$BASE
+  BASE_REF="refs/heads/$DEFAULT"
+  BASE_LABEL=$DEFAULT
 fi
 
-git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
+git -C "$WT" rev-parse --verify --quiet "$BASE_REF^{commit}" >/dev/null || { echo "error: base $BASE_LABEL does not exist in $WT" >&2; exit 1; }
 git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
 
 echo "diff base: $BASE_LABEL"
-if git -C "$WT" diff --quiet "$BASE...$COMPARE_REF" --; then
-  echo "no changes vs $BASE"
+if git -C "$WT" diff --quiet "$BASE_REF...$COMPARE_REF" --; then
+  echo "no changes vs $BASE_LABEL"
   exit 0
 fi
 
-git -C "$WT" diff --stat "$BASE...$COMPARE_REF" --
+git -C "$WT" diff --stat "$BASE_REF...$COMPARE_REF" --
 if ! "$STAT_ONLY"; then
   echo
-  git -C "$WT" diff "$BASE...$COMPARE_REF" --
+  git -C "$WT" diff "$BASE_REF...$COMPARE_REF" --
 fi
