@@ -3090,8 +3090,13 @@ spawn_worktree_settling() { # <path>
   if [ -n "$git_dir" ] && [ -f "$git_dir/locked" ]; then
     IFS= read -r reason <"$git_dir/locked" 2>/dev/null || true
   fi
-  if [ "$reason" = initializing ] ||
-    { fm_treehouse_pool_slot "$PROJ_ABS" "$path" && ! fm_treehouse_slot_acquired "$path"; }; then
+  if fm_treehouse_pool_slot "$PROJ_ABS" "$path"; then
+    fm_treehouse_slot_acquired "$path" || {
+      SPAWN_WT_REASON="its checkout is still being written (treehouse get has not finished handing it out)"
+      return 0
+    }
+  fi
+  if [ "$reason" = initializing ]; then
     SPAWN_WT_REASON="its checkout is still being written (treehouse get has not finished handing it out)"
     return 0
   fi
