@@ -480,12 +480,15 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   pass "paused mid-acquire claimant backs off to active stealer"
 }
 
-# Regression for the watcher segfault: a lockdir under a write-denied parent
-# (a sandboxed filesystem, permission denial, disk full) makes every attempt
-# to prepare our own candidate fail even though nothing holds the lock. Before
-# the fix, fm_lock_try_acquire read that as ordinary stale-owner contention
-# and recursed into an ever-longer ".steal.steal..." chain that never
-# terminated, overflowing bash's call stack and crashing with SIGSEGV - hit in
+# Minimal unit reproduction of the watcher segfault, with a mode-0500 parent
+# standing in for the real causes: a harness sandbox denying writes outside its
+# workspace, a read-only filesystem, or a full disk (tests/fm-procevent.test.sh
+# drives the production path through a real Seatbelt denial on macOS). Any of
+# them makes every attempt to prepare our own candidate fail even though
+# nothing holds the lock. Before the fix, fm_lock_try_acquire read that as
+# ordinary stale-owner contention and recursed into an ever-longer
+# ".steal.steal..." chain that never terminated, overflowing bash's call
+# stack and crashing with SIGSEGV - hit in
 # production via bin/fm-watch.sh's inline `fm-procevent.sh reconcile` call
 # against a machine-wide claim lock the watcher's sandbox could not write.
 # The fix must fail the attempt outright instead, since there is nothing to
@@ -547,6 +550,51 @@ test_lock_steal_recursion_is_depth_bounded() {
     *) fail "steal recursion reclaimed a chain deeper than the configured bound: $out" ;;
   esac
   pass "steal recursion halts at the configured depth bound instead of reclaiming an arbitrarily deep chain"
+}
+
+# fm_lock_acquire_wait_unless_refused refuses only a lock it cannot create: a
+# live holder is ordinary contention it waits through exactly as
+# fm_lock_acquire_wait does, while a write-denied parent is refused promptly
+# instead of waited on forever.
+test_lock_wait_unless_refused_waits_for_holder_but_refuses_denied_parent() {
+  local dir state lockdir holder i out pid rc
+  dir=$(make_case lock-wait-unless-refused)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 1
+    : > "$3"
+    sleep 1
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" "$dir/held" &
+  holder=$!
+  i=0
+  while [ ! -e "$dir/held" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -e "$dir/held" ] || fail "the contention fixture never took its lock"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_acquire_wait_unless_refused "$2"; then echo acquired; else echo refused; fi
+  ' _ "$LIB" "$lockdir")
+  wait "$holder"
+  [ "$out" = acquired ] \
+    || fail "a lock held by a live process was refused instead of waited for: $out"
+
+  mkdir -p "$state/locks"
+  chmod 0500 "$state/locks"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_acquire_wait_unless_refused "$2"; then echo acquired; else echo refused; fi
+  ' _ "$LIB" "$state/locks/.test.lock" > "$dir/out" 2> "$dir/err" &
+  pid=$!
+  wait_for_exit "$pid" 100
+  rc=$?
+  chmod 0700 "$state/locks"
+  [ "$rc" -eq 0 ] \
+    || fail "waiting on a lock under a write-denied parent did not return (rc=$rc); see $dir/err"
+  [ "$(cat "$dir/out")" = refused ] \
+    || fail "a lock under a write-denied parent was not refused: $(cat "$dir/out")"
+  pass "waiting unless refused waits through a live holder and refuses a write-denied parent"
 }
 
 test_watch_restart_rejects_reused_pid() {
@@ -1280,6 +1328,7 @@ test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_lock_create_hard_failure_fails_fast_without_recursion
 test_lock_steal_recursion_is_depth_bounded
+test_lock_wait_unless_refused_waits_for_holder_but_refuses_denied_parent
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover

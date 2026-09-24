@@ -4346,4 +4346,55 @@ kill -0 -"$CRASH_PID" 2>/dev/null \
 pass "a group whose leader died to something else is still refused, not signalled"
 kill -KILL -"$CRASH_PID" 2>/dev/null || true
 
+# --- a claim root that refuses writes -----------------------------------------
+# A harness sandbox leaves the machine-wide claim root present but unwritable:
+# Codex's workspace-write sandbox denies writes under $HOME, where the default
+# root lives, while the firstmate home it runs in stays writable. Every source
+# lock then fails to create. The watcher runs reconcile inline on every cycle,
+# so reconcile must skip the source and return, rather than recurse into
+# ".steal.steal..." until bash overflows its stack or wait forever on a lock
+# nothing holds. On macOS the denial is a Seatbelt profile, the mechanism that
+# sandbox uses; elsewhere a mode-0500 root stands in for it.
+HDENY="$TMP_ROOT/denied-home"; new_home "$HDENY"
+DENY_ROOT="$TMP_ROOT/denied-claims"
+fm_test_track_procevent_home "$HDENY" "$DENY_ROOT"
+FM_PROCEVENT_CLAIM_ROOT="$DENY_ROOT" pe "$HDENY" register lavish denied-src -- \
+  "$QUIET_STUB" "$TMP_ROOT/denied-never" >/dev/null \
+  || fail "the denied-claim-root fixture could not register its source"
+deny_prefix=()
+if command -v sandbox-exec >/dev/null 2>&1 \
+  && sandbox-exec -p '(version 1)(allow default)' true 2>/dev/null; then
+  deny_prefix=(sandbox-exec -p "(version 1)(allow default)(deny file-write* (subpath \"$(cd "$DENY_ROOT" && pwd -P)\"))")
+else
+  chmod 0500 "$DENY_ROOT"
+fi
+if ${deny_prefix[@]+"${deny_prefix[@]}"} mkdir "$DENY_ROOT/probe" 2>/dev/null; then
+  rmdir "$DENY_ROOT/probe"
+  chmod 0700 "$DENY_ROOT"
+  printf 'skip: this user can write a denied claim root, so no denial could be arranged\n'
+else
+  ${deny_prefix[@]+"${deny_prefix[@]}"} env FM_HOME="$HDENY" FM_PROCEVENT_CLAIM_ROOT="$DENY_ROOT" \
+    "$ROOT/bin/fm-procevent.sh" reconcile > "$TMP_ROOT/denied.out" 2> "$TMP_ROOT/denied.err" &
+  deny_pid=$!
+  deadline=$((SECONDS + 15))
+  while kill -0 "$deny_pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.1; done
+  if kill -0 "$deny_pid" 2>/dev/null; then
+    kill -KILL "$deny_pid" 2>/dev/null || true
+    wait "$deny_pid" 2>/dev/null
+    chmod 0700 "$DENY_ROOT"
+    fail "reconcile never returned against a claim root that refuses writes (stderr: $(head -c 300 "$TMP_ROOT/denied.err"))"
+  fi
+  wait "$deny_pid"
+  deny_rc=$?
+  chmod 0700 "$DENY_ROOT"
+  [ "$deny_rc" -eq 0 ] \
+    || fail "reconcile against a claim root that refuses writes exited $deny_rc (stderr: $(head -c 300 "$TMP_ROOT/denied.err"))"
+  assert_contains "$(cat "$TMP_ROOT/denied.out")" "reconciled:" \
+    "reconcile reports its cycle against a claim root that refuses writes"
+  [ -z "$(find "$DENY_ROOT" -name '*.steal*' 2>/dev/null)" ] \
+    || fail "reconcile tried to steal a lock it could not create"
+  assert_absent "$DENY_ROOT/denied-src.claim" "a refused source lock starts no runner"
+  pass "reconcile returns promptly when the claim root refuses writes"
+fi
+
 printf '\nall procevent tests passed\n'

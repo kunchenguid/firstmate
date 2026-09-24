@@ -564,12 +564,21 @@ fm_lock_claim() {
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
-  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+  # Set when this attempt could not even write its own private, uniquely named
+  # candidate beside the lock (a sandbox write denial, a read-only filesystem, a
+  # full disk): no holder's release can change that, so
+  # fm_lock_acquire_wait_unless_refused stops waiting on it.
+  FM_LOCK_CREATE_REFUSED=
+  if ! ownerdir=$(fm_lock_owner_dir "$lockdir"); then
+    FM_LOCK_CREATE_REFUSED=1
+    return 1
+  fi
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
   if ! fm_lock_prepare_owner "$ownerdir"; then
+    FM_LOCK_CREATE_REFUSED=1
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
@@ -964,8 +973,8 @@ fm_lock_try_acquire() {  # <lockdir> [recursion-depth]
     # ".steal.steal..." recursion and a stack-overflow crash. Fail this
     # attempt outright: a benign race is retried by the caller's own loop
     # (fm_lock_acquire_wait) next cycle, while a persistent hard failure now
-    # fails fast on every cycle instead of crashing, letting a bounded
-    # caller's own timeout fire and report cleanly.
+    # fails fast on every cycle instead of crashing, and a caller that must
+    # not block on it waits with fm_lock_acquire_wait_unless_refused.
     #
     # When the steal mutex DOES exist, another acquirer is actively resolving
     # a claim race on this exact lock (for example it won the create, lost
@@ -1079,6 +1088,25 @@ fm_lock_try_acquire() {  # <lockdir> [recursion-depth]
 fm_lock_acquire_wait() {
   local lockdir=$1
   while ! fm_lock_try_acquire "$lockdir"; do
+    sleep 0.1
+  done
+}
+
+# fm_lock_acquire_wait_unless_refused <lockdir>
+#
+# fm_lock_acquire_wait for a lock whose parent can refuse creation outright,
+# such as the machine-wide process-event claim root outside FM_HOME, which a
+# harness sandbox (Codex's workspace-write profile denies writes under $HOME),
+# a read-only filesystem, or a full disk can make unwritable. It waits through
+# contention exactly as fm_lock_acquire_wait does, but returns 1 as soon as an
+# attempt cannot write its own candidate (FM_LOCK_CREATE_REFUSED), because no
+# holder's release can change that and waiting would block its caller forever.
+# Only callers that handle a failed acquisition may use it; fm_lock_acquire_wait
+# keeps returning only once the lock is held, for callers that do not check.
+fm_lock_acquire_wait_unless_refused() {
+  local lockdir=$1
+  while ! fm_lock_try_acquire "$lockdir"; do
+    [ -z "${FM_LOCK_CREATE_REFUSED:-}" ] || return 1
     sleep 0.1
   done
 }

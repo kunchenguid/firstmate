@@ -341,7 +341,10 @@ fm_procevent_source_lock_acquire() {
   root=$(fm_procevent_claim_root)
   (umask 077; mkdir -p "$root") || return 1
   [ -d "$root" ] && [ ! -L "$root" ] || return 1
-  fm_lock_acquire_wait "$(fm_procevent_source_lock_path "$id")"
+  # The root can exist yet refuse writes (a harness sandbox denying writes
+  # outside its workspace); refuse then rather than wait forever, which would
+  # wedge the watcher's inline reconcile. Every caller handles the refusal.
+  fm_lock_acquire_wait_unless_refused "$(fm_procevent_source_lock_path "$id")"
 }
 
 # fm_procevent_source_lock_try_acquire <source-id>
