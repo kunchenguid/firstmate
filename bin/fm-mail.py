@@ -61,6 +61,7 @@ class AfkBodyFetchError(Exception):
     pass
 
 
+
 def afk_record_field(name):
     contract = os.path.join(os.path.dirname(__file__), 'fm-afk-contract.sh')
     env = os.environ.copy()
@@ -112,6 +113,7 @@ def afk_email_context():
     if configured.returncode != 0 or not recipient:
         return None, True, False
     return recipient, True, False
+
 
 
 def fetched_literal(data):
@@ -170,6 +172,7 @@ def gmail_authentication_pass(message):
             if gmail_aligned(authentication_property(clause, 'header.from')):
                 return True
     return False
+
 
 
 def dec(s):
@@ -499,7 +502,9 @@ def cmd_poll_list():
         recipient, afk_email_active, invalid_posture = afk_email_context()
         afk_enabled = recipient is not None
 
+
         afk_messages = []
+        afk_body_budget = MAX_AFK_BATCH_BODY_BYTES
         turn_path = os.environ.get('FM_MAIL_TURN', '')
         next_turn = None
         if cap == 1 and new_candidates and retry_candidates:
@@ -566,6 +571,7 @@ def cmd_poll_list():
                     raise ValueError('no header data')
                 mi = email.message_from_bytes(header_bytes)
 
+
                 uid = clean(u)
                 idate = clean(dec(mi.get('Date')))
                 subj = clean(dec(mi.get('Subject')))
@@ -606,6 +612,7 @@ def cmd_poll_list():
                 out.append((uid, idate, fr, subj, 'degraded'))
                 new_emitted += 1
                 continue
+
 
             except Exception:
                 if afk_email_active:

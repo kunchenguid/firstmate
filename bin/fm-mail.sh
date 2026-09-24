@@ -173,6 +173,7 @@ TURN="$STATE_DIR/.mail-turn"
 run_py() {
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE_DIR" FM_MAIL_USER="$FM_MAIL_USER" FM_MAIL_PASS="$FM_MAIL_PASS" \
 
+
   FM_IMAP_HOST="$IMAP_HOST" FM_IMAP_PORT="$IMAP_PORT" \
   FM_SMTP_HOST="$SMTP_HOST" FM_SMTP_PORT="$SMTP_PORT" \
   FM_MAIL_CURSOR="$CURSOR" FM_MAIL_RETRY="$RETRY" \
@@ -199,6 +200,7 @@ fm-mail.sh send <to> <subject> <body | ->
 fm-mail.sh poll
 fm-mail.sh status
 fm-mail.sh afk-email destination|configured|queue-unprocessed|flush|verify-note <id>
+
 EOF
 }
 

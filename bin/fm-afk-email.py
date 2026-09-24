@@ -16,6 +16,7 @@ import time
 from contextlib import contextmanager
 from email.utils import getaddresses
 
+
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -46,6 +47,7 @@ SECRET_ENV_RE = re.compile(
 )
 
 
+
 def mail_configuration():
     required = ["FM_MAIL_USER", "FM_MAIL_PASS", "FM_IMAP_HOST", "FM_SMTP_HOST"]
     if any(not os.environ.get(name) for name in required):
@@ -55,6 +57,7 @@ def mail_configuration():
     if (
         not recipient
         or recipient != OWNER_EMAIL
+
         or not EMAIL_RE.fullmatch(recipient)
         or len(addresses) != 1
         or addresses[0][1].casefold() != recipient.casefold()
@@ -141,6 +144,7 @@ def afk_contract_lock():
 
 
 
+
 def atomic_json(path, value):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
@@ -179,6 +183,7 @@ def redact_secrets(text):
     secret_values = set()
     for key, value in os.environ.items():
         if SECRET_ENV_RE.search(key) and value:
+
             secret_values.add(value)
     replacement = "[redacted]"
     if any(secret in replacement for secret in secret_values):
@@ -287,6 +292,7 @@ def queue_unprocessed():
             "seq": seq,
             "task": safe_text(redact_secrets(str(row.get("task", ""))), 160),
             "summary": safe_text(redact_secrets(str(row.get("summary", "")))),
+
 
             "token": token,
             "token_hash": token_digest(token),
@@ -780,6 +786,7 @@ def receive_messages(messages, posture, config):
         except (OSError, ValueError):
             print("fm-afk-email: away-email token state could not be checked; mail poll will retry", file=sys.stderr)
             return 1
+
 
         now = int(time.time())
         if item and item.get("used_mail_key") == mail_key:
