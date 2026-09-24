@@ -758,9 +758,6 @@ if [ -n "$ACK_THROUGH" ]; then
   DRAIN_TMP=
   if [ "$ACTOR" = branch ]; then
     consume_actor_rows_locked "$ELIGIBLE_ROWS_FILE" "$ACK_THROUGH" || exit 1
-    if [ -s "$RETAINED_NOTE_ROWS" ]; then
-      claim_main_rows_locked || exit 1
-    fi
   else
     consume_actor_rows_locked "$MAIN_ROWS_FILE" "$ACK_THROUGH" || exit 1
     if [ -s "$RETAINED_NOTE_ROWS" ]; then
