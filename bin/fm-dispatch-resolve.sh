@@ -47,10 +47,17 @@
 #   ambiguous -> confidence below the floor; decide as today from the probabilities
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
 #   error     -> API, network, response, or quota-axi failure; decide as today
+#     decision_id: <id of this call's DecisionEnvelope in state/jev-decisions.jsonl>
 #   Every outcome exits 0 so an intake is never blocked by this tool.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
 #   existing unreadable rules file, malformed rules, or missing jq), which is
 #   actionable, never selected around.
+#
+# Decision log: every opted-in call that exits 0 appends one decision record
+#   to state/jev-decisions.jsonl through bin/fm-jev-decisions.sh, which owns
+#   the record format, and prints its decision_id; a record that cannot be
+#   written drops only that line and never changes the outcome. The log is
+#   measurement evidence, never read back by this tool.
 #
 # Environment:
 #   TYPESAFE_API_KEY is the only resolver-specific environment setting.
@@ -87,8 +94,48 @@ TS_TIMEOUT=5
 DEFAULT_WHEN="No listed rule applies to this task."
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
+sha256_text() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'; else sha256sum | awk '{print $1}'; fi
+}
+# Append this call's decision record and print its decision_id line; a record
+# that cannot be built or written prints nothing and changes nothing else.
+log_decision() { # <status> <reason>
+  local resp=null rules=null state_digest='' question_digest='' record
+  command -v jq >/dev/null 2>&1 || return 0
+  [ -n "$RESP_FILE" ] && resp=$(jq -c 'if type == "object" then . else null end' "$RESP_FILE" 2>/dev/null) && [ -n "$resp" ] || resp=null
+  [ -n "$RULES" ] && rules=$(jq -c . "$RULES" 2>/dev/null) && [ -n "$rules" ] || rules=null
+  if [ -n "$REQUEST" ]; then
+    state_digest=$(jq -cS .state <<<"$REQUEST" | sha256_text) || state_digest=''
+    question_digest=$(jq -cS .questions <<<"$REQUEST" | sha256_text) || question_digest=''
+  fi
+  record=$(jq -c -n --arg id "$DECISION_ID" --arg task "$TASK_ID" --arg project "$PROJECT" \
+    --arg kind "$BRIEF_KIND" --arg model_req "$TS_MODEL" --arg status "$1" --arg reason "$2" \
+    --arg none "$DEFAULT_WHEN" --arg sd "$state_digest" --arg qd "$question_digest" \
+    --argjson lat "$LAT_MS" --argjson resp "$resp" --argjson rules "$rules" --argjson result "${RESULT:-null}" '
+    def opt($s): if $s == "" then null else $s end;
+    ($resp.answers.rule // null | if type == "object" then . else null end) as $a |
+    def when_of($c):
+      if $c == null then null
+      elif $c == "default" then $none
+      elif ($c | test("^rule_[1-9][0-9]*$")) and $rules != null then ($rules.rules[($c | ltrimstr("rule_") | tonumber) - 1].when // null)
+      else null end | if . == null then null else .[0:80] end;
+    {schema_version: 1, kind: "decision", decision_id: $id, at: now | floor,
+     surface: "dispatch-resolve", question_id: "dispatch.rule",
+     question_digest: opt($qd), state_digest: opt($sd),
+     task: opt($task), project: opt($project), brief_kind: opt($kind),
+     model_requested: $model_req, model: ($resp.model // null), latency_ms: $lat,
+     tokens: ($resp.usage // null),
+     choice: ($a.choice // null), choice_when: when_of($a.choice // null),
+     confidence: ($a.confidence // null), probabilities: ($a.probabilities // null),
+     resolved: ($result.resolved // null),
+     status: $status, reason: opt($reason),
+     profile: ($result.chosen.profile // null)}' 2>/dev/null) || return 0
+  printf '%s\n' "$record" | FM_HOME=$FM_HOME "$SCRIPT_DIR/fm-jev-decisions.sh" append 2>/dev/null || return 0
+  printf '  decision_id: %s\n' "$DECISION_ID"
+}
 no_rules() {
   printf 'dispatch-resolve:\n  status: escalate\n  reason: no rules to match\n'
+  log_decision escalate "no rules to match"
   exit 0
 }
 usage() {
@@ -100,6 +147,8 @@ usage() {
 }
 
 BRIEF='' PROJECT='' RULES_PATH="$CONFIG/crew-dispatch.json" RULES=''
+RESP_FILE='' REQUEST='' RESULT='' LAT_MS=null BRIEF_KIND=whole TASK_ID=''
+DECISION_ID="jd-$(date +%s)-$(od -An -tx1 -N6 /dev/urandom 2>/dev/null | tr -d ' \n')$$"
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) [ $# -ge 2 ] || die "--project needs a value"; PROJECT=$2; shift 2 ;;
@@ -121,6 +170,15 @@ fi
 # ---- inputs --------------------------------------------------------------------
 [ -n "$BRIEF" ] || die "brief file required (see --help)"
 [ -r "$BRIEF" ] || die "brief file not readable: $BRIEF"
+# A scaffolded brief lives at data/<task-id>/brief.md; the log keys on that id
+# so bin/fm-spawn.sh can record the dispatch that followed.
+case "$BRIEF" in
+  */brief.md)
+    TASK_ID=${BRIEF%/brief.md}
+    TASK_ID=${TASK_ID##*/}
+    case "$TASK_ID" in ''|.*|*[!A-Za-z0-9._-]*) TASK_ID='' ;; esac
+    ;;
+esac
 [ -e "$RULES_PATH" ] || [ -L "$RULES_PATH" ] || no_rules
 [ -r "$RULES_PATH" ] || die "rules file not readable: $RULES_PATH"
 command -v jq >/dev/null 2>&1 || die "jq required"
@@ -221,6 +279,7 @@ emit_error() {
   local reason=$1
   echo "dispatch-resolve: error ($reason)" >&2
   printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
+  log_decision error "$reason"
   exit 0
 }
 
@@ -240,6 +299,7 @@ trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT"' EXIT
 # not sent: live runs showed it pushing routine ship briefs to the top tier.
 brief_kind() {
   if grep -qxF 'This is a SCOUT task: the deliverable is a written report, not a PR.' "$BRIEF"; then
+    BRIEF_KIND=scout
     printf 'Brief kind: scout (report only)\n\n'
   fi
 }
@@ -252,11 +312,11 @@ task_sections() {
 }
 SECTIONS=$(task_sections)
 if [ -n "$SECTIONS" ]; then
+  BRIEF_KIND=ship
   { brief_kind; printf '%s\n' "$SECTIONS"; } > "$TASK_TEXT" || die "could not read brief: $BRIEF"
 else
   cp "$BRIEF" "$TASK_TEXT" || die "could not read brief: $BRIEF"
 fi
-LAT_MS=null
 command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   REQUEST=$(jq -n --rawfile brief "$TASK_TEXT" --arg project "$PROJECT" --arg model "$TS_MODEL" \
     --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
@@ -417,6 +477,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     model: $r.model, latency_ms: $lat, tokens: ($r.usage // null),
     rule: $picked,
     rule_when: when_of($picked),
+    resolved: $choice,
     confidence: $a.confidence, probabilities: $a.probabilities
   }
   + (if $fb.to then {fallback: "\($choice) (\(when_of($choice))) probability \($fb.p) clears its floor \($fb.to_floor); \($picked) probability \($a.probabilities[$picked]) is below its floor \($picked_floor)"} else {} end)
@@ -468,4 +529,5 @@ TEXT=$(jq -r '
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
       + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
 printf '%s\n' "$TEXT"
+log_decision "$(jq -r '.status' <<<"$RESULT")" "$(jq -r '.reason // ""' <<<"$RESULT")"
 exit 0

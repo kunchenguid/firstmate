@@ -611,6 +611,17 @@ The resolver sends the key to `curl` only as a header read from a file descripto
 The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, default confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
+### Jev decision log
+
+Every opted-in resolver call that exits 0 appends one DecisionEnvelope record to the home's `state/jev-decisions.jsonl` and prints its `decision_id:` line, whatever its status; the off path and exit-2 configuration errors are not calls and write nothing.
+The record carries a schema version, the question id and a digest of the offered options, a digest of the exact state sent (never the brief text or the key), the task id of a `data/<id>/brief.md` brief, the model version the API reported, latency, reported token counts, the picked option and its text, probabilities, confidence, the rule resolved after any fallback, the status and reason, and the resolver's profile.
+The outcome the supervisor actually took is a second record in the same file joined on `decision_id`: `bin/fm-spawn.sh` records the profile a fresh ship or scout spawn launched against the newest decision for that task, and firstmate records any other fate, such as holding a decision for the captain or declining to dispatch, with `bin/fm-jev-decisions.sh outcome`.
+`bin/fm-jev-decisions.sh report` prints the clear, ambiguous, escalate, and error rates and the followed or overridden counts per class, where a class is the option Jev picked, so an escalation class and a work-brief class are measured apart and any later threshold is set per class from this log rather than as one global number.
+The report prints no token or cost figure, because token counts alone support no spend claim.
+The log is measurement evidence and a replay corpus only: nothing reads it to grant permission, choose effort, wake or suppress a wake, mark work done, or decide state, and the watcher never reads it.
+Writing it never changes a resolver outcome or blocks a spawn; a record that cannot be written is dropped.
+The script header owns the record fields and subcommand syntax.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.

@@ -906,4 +906,67 @@ expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
 
+# --- decision log: one envelope line per opted-in call, never the key --------
+JEV_LOG="$HOME_DIR/state/jev-decisions.jsonl"
+mkdir -p "$HOME_DIR/state" "$HOME_DIR/data/pager-fix"
+TASK_BRIEF="$HOME_DIR/data/pager-fix/brief.md"
+cp "$BRIEF" "$TASK_BRIEF"
+cp "$BASE_RULES" "$RULES"
+rm -f "$JEV_LOG"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+run code out err "$TASK_BRIEF" --project pager
+assert_absent "$JEV_LOG" "an off resolver writes no decision record"
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+expect_code 0 "$code" "a logged clear call exits 0"
+assert_contains "$out" '  status: clear' "logging leaves the clear outcome unchanged"
+id_line=$(grep '^  decision_id: ' <<<"$out")
+decision_id=${id_line#  decision_id: }
+assert_equals '1' "$(wc -l < "$JEV_LOG" | tr -d ' ')" "one clear call writes one line"
+record=$(cat "$JEV_LOG")
+assert_equals "$decision_id" "$(jq -r .decision_id <<<"$record")" "the printed decision_id names the logged record"
+assert_equals '1|decision|dispatch.rule|pager-fix|pager|whole' "$(jq -r '[.schema_version, .kind, .question_id, .task, .project, .brief_kind] | join("|")' <<<"$record")" "the envelope names its question, task, project, and brief kind"
+assert_equals 'jev-latest|jev-1.13.0|rule_4|rule_4|0.9|0.96|clear' "$(jq -r '[.model_requested, .model, .choice, .resolved, .confidence, .probabilities.rule_4, .status] | join("|")' <<<"$record")" "the envelope keeps the model version, answer, probabilities, and status"
+assert_equals 'A simple bug fix with a stated root cause.' "$(jq -r .choice_when <<<"$record")" "the envelope names the picked class by its option text"
+assert_equals 'true|true|true' "$(jq -r '[(.latency_ms | type == "number"), (.state_digest | test("^[0-9a-f]{64}$")), (.question_digest | test("^[0-9a-f]{64}$"))] | join("|")' <<<"$record")" "latency and both digests are recorded"
+expected_state_digest=$(jq -cS .state "$LOG/body" | { if command -v shasum >/dev/null 2>&1; then shasum -a 256; else sha256sum; fi; } | awk '{print $1}')
+assert_equals "$expected_state_digest" "$(jq -r .state_digest <<<"$record")" "the state digest is the digest of the exact state sent"
+assert_equals '{"harness":"cursor","model":"cursor-grok-4.6-medium"}' "$(jq -c .profile <<<"$record")" "the envelope keeps the resolver's profile"
+assert_not_contains "$record" "$KEY" "the decision log never holds the key"
+assert_not_contains "$record" 'off-by-one' "the decision log holds a digest, never the brief text"
+
+reset_log
+write_response "$RESPONSE" rule_4 0.4
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+assert_equals 'ambiguous' "$(tail -n 1 "$JEV_LOG" | jq -r .status)" "an ambiguous call is logged with its status"
+assert_equals 'null' "$(tail -n 1 "$JEV_LOG" | jq -c .profile)" "a non-clear call logs no profile"
+
+reset_log
+TYPESAFE_API_KEY=$KEY FAKE_CURL_FAIL=1 run code out err "$TASK_BRIEF" --project pager
+assert_contains "$out" '  status: error' "a transport failure is still an error outcome"
+assert_contains "$out" '  decision_id: ' "an error outcome still prints its decision_id"
+assert_equals 'error|null|null' "$(tail -n 1 "$JEV_LOG" | jq -r '[.status, (.model | tostring), (.choice | tostring)] | join("|")')" "an error call is logged without an answer"
+
+rm -f "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF"
+assert_equals 'escalate|no rules to match|null' "$(tail -n 1 "$JEV_LOG" | jq -r '[.status, .reason, (.state_digest | tostring)] | join("|")')" "a no-rules call is logged with no state digest because nothing was sent"
+cp "$BASE_RULES" "$RULES"
+assert_equals '4' "$(wc -l < "$JEV_LOG" | tr -d ' ')" "every opted-in call wrote exactly one line"
+
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --bogus
+expect_code 2 "$code" "a usage error still exits 2"
+assert_equals '4' "$(wc -l < "$JEV_LOG" | tr -d ' ')" "a usage error is not a call and writes no line"
+
+chmod 500 "$HOME_DIR/state"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+chmod 700 "$HOME_DIR/state"
+expect_code 0 "$code" "an unwritable log never changes the exit status"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "an unwritable log never changes the outcome"
+assert_not_contains "$out" 'decision_id:' "an unwritten record prints no decision_id"
+rm -rf "$HOME_DIR/state" "$HOME_DIR/data"
+pass "decision log: one envelope per opted-in call with digests, answer, and status; logging never changes the outcome"
+
 printf '# all fm-dispatch-resolve tests passed\n'
