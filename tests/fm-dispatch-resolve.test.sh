@@ -654,10 +654,10 @@ pass "quota evidence comes from one quota-axi --json read, and its failure is an
 DYNAMIC_FIXTURES="$TMP_ROOT/catalog-fixtures"
 mkdir -p "$DYNAMIC_FIXTURES"
 cat > "$DYNAMIC_FIXTURES/codex.jsonl" <<'JSONL'
-{"model":"gpt-5.6-sol","provider":"codex"}
+{"model":"gpt-5.6-sol","provider":"codex","reasoningCapabilities":["high","xhigh"]}
 JSONL
 cat > "$DYNAMIC_FIXTURES/claude.jsonl" <<'JSONL'
-{"model":"claude-haiku-4-5-20251001","provider":"claude"}
+{"model":"claude-haiku-4-5-20251001","provider":"claude","reasoningCapabilities":["high"]}
 JSONL
 cat > "$TMP_ROOT/dynamic-rules.json" <<'JSON'
 {"rules":[{"when":"Dynamic implementation.","use":{"discover":{"task_type":"implementation","required_reasoning_class":"high","harnesses":["codex","claude"],"providers":["codex","claude"],"preferred_families":["gpt-5.6"]}}}]}
@@ -680,7 +680,7 @@ reset_log
 FM_MODEL_CATALOG_FIXTURE_DIR="$DYNAMIC_FIXTURES" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "catalog max capability satisfies a max dynamic policy"
 assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-luna'" "catalog max capability keeps Luna eligible"
-assert_contains "$out" 'catalog=fixture  fit=task:implementation/supported  reasoning:max [catalog]' "dynamic candidates disclose catalog provenance and task fit"
+assert_contains "$out" 'catalog=fixture  fit=task:implementation/supported/catalog  reasoning:max [catalog/catalog]' "dynamic candidates disclose catalog provenance and task fit"
 
 cat > "$RULES" <<'JSON'
 {"rules":[{"when":"Dynamic documentation.","use":{"discover":{"task_type":"documentation","required_reasoning_class":"max","harnesses":["codex"],"providers":["codex"]}}}]}
@@ -703,12 +703,49 @@ assert_contains "$out" 'preference=preferred_model' "dynamic preference is discl
 
 printf '%s\n' '{"model":"opencode-go/space-bunny-free","provider":"opencode-go"}' > "$DYNAMIC_FIXTURES/opencode.jsonl"
 cat > "$RULES" <<'JSON'
+{"rules":[{"when":"Floored dynamic rule.","floor":{"scope":"model:fable","min_percent":20,"provider":"claude"},"use":{"harness":"claude","model":"fable"}}],"default":{"discover":{"task_type":"implementation","required_reasoning_class":"medium","harnesses":["opencode"],"providers":["opencode-go"]}}}
+JSON
+reset_log
+FM_MODEL_CATALOG_FIXTURE_DIR="$DYNAMIC_FIXTURES" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "a floored rule can fall through to a dynamic default"
+assert_contains "$out" 'candidate: opencode:opencode-go/space-bunny-free' "dynamic fallback uses the collected default catalog"
+
+cat > "$RULES" <<'JSON'
 {"rules":[{"when":"OpenCode dynamic work.","use":{"discover":{"task_type":"implementation","required_reasoning_class":"medium","harnesses":["opencode"],"providers":["opencode-go"]}}}]}
 JSON
 reset_log
 FM_MODEL_CATALOG_FIXTURE_DIR="$DYNAMIC_FIXTURES" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: escalate' "unknown dynamic quota does not silently choose"
-assert_contains "$out" 'candidate: opencode:opencode-go/space-bunny-free  provider=opencode-go  catalog=fixture  fit=task:implementation/unknown  reasoning:high [inferred]  fitReason=catalog does not declare implementation; meets medium  -> eligible, unranked: provider opencode-go not in the quota snapshot: disclosed uncertainty' "unknown quota is disclosed on the discovered candidate"
+assert_contains "$out" 'candidate: opencode:opencode-go/space-bunny-free  provider=opencode-go  catalog=fixture  fit=task:implementation/prior/low  reasoning:high [prior/low]  fitReason=low-confidence implementation prior from catalog identity; catalog did not declare support for medium; using low-confidence high prior  -> eligible, unranked: provider opencode-go not in the quota snapshot: disclosed uncertainty' "unknown quota is disclosed on the discovered candidate"
+
+cat > "$FAKEBIN/opencode" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"id":"opencode-live","providerID":"opencode-go","supportedReasoningEfforts":["high"],"taskTypes":["documentation"]}'
+SH
+chmod +x "$FAKEBIN/opencode"
+cat > "$FAKEBIN/pi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"id":"pi-live","provider":"openai","reasoningCapabilities":["max"],"taskTypes":["implementation"]}'
+SH
+chmod +x "$FAKEBIN/pi"
+cat > "$FAKEBIN/claude" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"type":"control_response","response":{"request_id":"catalog-only","response":{"models":[{"value":"claude-live","reasoningEfforts":["xhigh"],"taskTypes":["documentation"]}]}}}'
+SH
+chmod +x "$FAKEBIN/claude"
+CATALOG_OUT=$(PATH="$FAKEBIN:$BASE_PATH" FM_MODEL_CATALOG_FIXTURE_DIR= "$ROOT/bin/fm-model-catalog.sh" opencode pi claude)
+assert_equals '0' "$?" "live catalog normalizers exit successfully"
+assert_equals '["documentation"]' "$(jq -c -s 'map(select(.harness == "opencode"))[0].taskTypes' <<<"$CATALOG_OUT")" "OpenCode catalog preserves task metadata"
+assert_equals '["high"]' "$(jq -c -s 'map(select(.harness == "opencode"))[0].reasoningCapabilities' <<<"$CATALOG_OUT")" "OpenCode catalog preserves reasoning metadata"
+assert_equals '["implementation"]' "$(jq -c -s 'map(select(.harness == "pi"))[0].taskTypes' <<<"$CATALOG_OUT")" "Pi catalog preserves task metadata"
+assert_equals '["max"]' "$(jq -c -s 'map(select(.harness == "pi"))[0].reasoningCapabilities' <<<"$CATALOG_OUT")" "Pi catalog preserves reasoning metadata"
+assert_equals '["documentation"]' "$(jq -c -s 'map(select(.harness == "claude"))[0].taskTypes' <<<"$CATALOG_OUT")" "Claude catalog preserves task metadata"
+assert_equals '["xhigh"]' "$(jq -c -s 'map(select(.harness == "claude"))[0].reasoningCapabilities' <<<"$CATALOG_OUT")" "Claude catalog preserves reasoning metadata"
+cat > "$FAKEBIN/opencode" <<'SH'
+#!/usr/bin/env bash
+sleep 5
+SH
+chmod +x "$FAKEBIN/opencode"
 
 cat > "$RULES" <<'JSON'
 {"rules":[{"when":"Unsupported dynamic work.","use":{"discover":{"task_type":"implementation","required_reasoning_class":"high","harnesses":["grok"],"providers":["grok"]}}}]}

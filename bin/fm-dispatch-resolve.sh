@@ -290,7 +290,8 @@ mapfile -t CATALOG_HARNESSES < <(jq -n -r --slurpfile resp "$RESP_FILE" --slurpf
   (if $choice == "default" then ($rules[0].default // null)
    elif $rule_number != null and $rule_number <= (($rules[0].rules // []) | length) then $rules[0].rules[$rule_number - 1].use
    else null end) as $use |
-  if dynamic($use) then $use.discover.harnesses[] else empty end
+  [ $use, ($rules[0].default // null) ][] |
+  if dynamic(.) then .discover.harnesses[] else empty end
 ' /dev/null | awk '!seen[$0]++')
 if [ "${#CATALOG_HARNESSES[@]}" -gt 0 ]; then
   "$SCRIPT_DIR/fm-model-catalog.sh" "${CATALOG_HARNESSES[@]}" > "$CATALOG" 2>/dev/null || true
@@ -325,21 +326,36 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   def catalog_reasoning($row):
     [($row.reasoningCapabilities // [])[]? | ascii_downcase | select(reasoning_rank(.) > 0)] | unique as $classes |
     if ($classes | length) == 0 then
-      {class: inferred_reasoning($row.model; $row.provider), source: "inferred", capabilities: []}
+      {class: inferred_reasoning($row.model; $row.provider), source: "prior", confidence: "low", known: false, capabilities: []}
     else
-      {class: ($classes | max_by(reasoning_rank(.))), source: "catalog", capabilities: $classes}
+      {class: ($classes | max_by(reasoning_rank(.))), source: "catalog", confidence: "catalog", known: true, capabilities: $classes}
+    end;
+  def task_alias($task):
+    (($task // "") | ascii_downcase) as $name |
+    if (["implementation", "coding", "code", "software"] | index($name)) != null then "implementation"
+    elif (["documentation", "docs", "writing", "writer"] | index($name)) != null then "documentation"
+    else $name end;
+  def task_fit_prior($task; $row):
+    (task_alias($task)) as $task_name |
+    (($row.model // "") + " " + ($row.provider // "") | ascii_downcase) as $identity |
+    if $task_name == "implementation" and ($identity | test("code|coder|coding|dev|swe|software")) then
+      {status: "prior", eligible: true, confidence: "low", reason: "low-confidence implementation prior from catalog identity"}
+    elif $task_name == "documentation" and ($identity | test("doc|write|writing|sonnet|opus|haiku|claude|gemini|gpt")) then
+      {status: "prior", eligible: true, confidence: "low", reason: "low-confidence documentation prior from catalog identity"}
+    else
+      {status: "unknown", eligible: true, confidence: "low", reason: ("catalog has no task metadata; task fit for " + $task_name + " is uncertain")}
     end;
   def task_fit($task; $row):
-    (($task // "") | ascii_downcase) as $task_name |
-    [($row.taskTypes // [])[]? | ascii_downcase] | unique as $declared_tasks |
+    (task_alias($task)) as $task_name |
+    [($row.taskTypes // [])[]? | task_alias(.)] | unique as $declared_tasks |
     if ($declared_tasks | length) > 0 then
       if ($declared_tasks | index($task_name)) != null then
-        {status: "supported", eligible: true, reason: ("catalog declares " + $task_name)}
+        {status: "supported", eligible: true, confidence: "catalog", reason: ("catalog declares " + $task_name)}
       else
-        {status: "unsupported", eligible: false, reason: ("catalog declares " + ($declared_tasks | join(", ")) + ", not " + $task_name)}
+        {status: "unsupported", eligible: false, confidence: "catalog", reason: ("catalog declares " + ($declared_tasks | join(", ")) + ", not " + $task_name)}
       end
     else
-      {status: "unknown", eligible: true, reason: ("catalog does not declare " + $task_name)}
+      task_fit_prior($task_name; $row)
     end;
   def preference($model; $d):
     (($model // "") | ascii_downcase) as $m |
@@ -367,10 +383,11 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
         (reasoning_rank($d.required_reasoning_class)) as $required_rank |
         {harness: .harness, model: $model, provider: $provider,
          catalogMethod: (.provenance.method // "unknown"), catalogCapabilities: $reasoning.capabilities,
-         taskType: $d.task_type, taskFit: $task_fit.status, taskFitReason: $task_fit.reason,
-         fitClass: $reasoning.class, fitSource: $reasoning.source,
-         fitEligible: ($task_fit.eligible and ($class_rank >= $required_rank)),
-         fitReason: (if ($class_rank >= $required_rank) then "meets " + $d.required_reasoning_class else "requires " + $d.required_reasoning_class + ", catalog fit is " + $reasoning.class end),
+         taskType: $d.task_type, taskFit: $task_fit.status, taskFitConfidence: $task_fit.confidence, taskFitReason: $task_fit.reason,
+         fitClass: $reasoning.class, fitSource: $reasoning.source, fitConfidence: $reasoning.confidence,
+         fitEligible: ($task_fit.eligible and (($reasoning.known | not) or ($class_rank >= $required_rank))),
+         fitUnranked: ($reasoning.known | not),
+         fitReason: (if ($reasoning.known | not) then "catalog did not declare support for " + $d.required_reasoning_class + "; using low-confidence " + $reasoning.class + " prior" else if ($class_rank >= $required_rank) then "meets " + $d.required_reasoning_class else "requires " + $d.required_reasoning_class + ", catalog fit is " + $reasoning.class end end),
          preference: preference($model; $d)}
         + (if $d.floor then {floor: $d.floor} else {} end)
       ] | unique_by([.harness, .model, .provider])) as $profiles |
@@ -422,6 +439,9 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
           .effectivePercentRemaining < $c.floor.min_percent
         )] | first) as $floor_row |
         {profile: $c, provider: $p, bounds: $bounds, scope: ($floor_row.scope // $c.floor.scope), pct: ($floor_row.effectivePercentRemaining // null), runway: ($floor_row.runway.status // null), eligible: false, reason: "profile floor \($c.floor.scope) below \($c.floor.min_percent)%"}
+      elif $c.fitUnranked then
+        {profile: $c, provider: $p, bounds: $bounds, eligible: true, unranked: true, unknown: true,
+         reason: "reasoning fit is low-confidence: \($c.fitClass) prior does not prove \($c.fitReason)"}
       elif (measured($p; $lane) | not) then
         ($rows | first) as $row |
         {profile: $c, provider: $p, bounds: $bounds, scope: ($row.scope // null), pct: ($row.effectivePercentRemaining // null), runway: ($row.runway.status // null), eligible: true, unranked: true, unknown: true, reason: "provider \($p) unmeasured (\(prov($p; $lane).quotaSemantics.status))"}
@@ -507,7 +527,7 @@ TEXT=$(jq -r '
   (.candidates[]? | "  candidate: \(.profile.harness | flat):\(show(.profile.model))"
       + (if .provider then "  provider=\(.provider | flat)" else "" end)
       + (if .profile.catalogMethod then "  catalog=\(.profile.catalogMethod | flat)" else "" end)
-      + (if .profile.fitClass then "  fit=task:\(.profile.taskType | flat)/\(.profile.taskFit | flat)  reasoning:\(.profile.fitClass | flat) [\(.profile.fitSource | flat)]  fitReason=\(.profile.taskFitReason | flat); \(.profile.fitReason | flat)" else "" end)
+      + (if .profile.fitClass then "  fit=task:\(.profile.taskType | flat)/\(.profile.taskFit | flat)/\(.profile.taskFitConfidence | flat)  reasoning:\(.profile.fitClass | flat) [\(.profile.fitSource | flat)/\(.profile.fitConfidence | flat)]  fitReason=\(.profile.taskFitReason | flat); \(.profile.fitReason | flat)" else "" end)
       + (if .profile.preference and .profile.preference != "none" then "  preference=\(.profile.preference | flat)" else "" end)
       + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
       + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope | flat):\(show(.pct))%/\((.runway // .status) | flat)"] | join(",")) else "" end)

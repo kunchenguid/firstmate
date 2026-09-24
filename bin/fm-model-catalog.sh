@@ -6,7 +6,7 @@
 #
 # Prints JSON Lines.
 # Successful model rows carry:
-#   {"status":"ok","harness":"<h>","model":"<id>","provider":"<provider>","provenance":{...}}
+#   {"status":"ok","harness":"<h>","model":"<id>","provider":"<provider>","reasoningCapabilities":[...],"taskTypes":[...],"provenance":{...}}
 # Failed harness rows carry:
 #   {"status":"error","harness":"<h>","reason":"<reason>","provenance":{...}}
 #
@@ -39,11 +39,11 @@ normalize_fixture() {  # <harness> <file>
   local harness=$1 file=$2
   jq -c --arg harness "$harness" '
     def reasoning_capabilities:
-      [(.reasoningCapabilities // .reasoning_classes // .supportedReasoningEfforts // .capabilities.reasoning // [])[]?
+      [(.reasoningCapabilities // .reasoning_classes // .supportedReasoningEfforts // .reasoning // .capabilities.reasoning // [])[]?
        | if type == "object" then (.reasoningEffort // .reasoning_effort // .level // .name // empty) else . end
        | select(type == "string") | ascii_downcase] | unique;
     def task_types:
-      [(.taskTypes // .task_types // .capabilities.taskTypes // .capabilities.task_types // [])[]?
+      [(.taskTypes // .task_types // .capabilities.taskTypes // .capabilities.task_types // .capabilities.tasks // .tasks // [])[]?
        | select(type == "string") | ascii_downcase] | unique;
     select(type == "object") |
     if (.status // "ok") == "ok" then
@@ -101,6 +101,29 @@ catalog_opencode() {
 import json, sys
 path = sys.argv[1]
 seen = set()
+
+def values(obj, keys, item_keys):
+    raw = None
+    for key in keys:
+        if obj.get(key) is not None:
+            raw = obj.get(key)
+            break
+    if raw is None:
+        capabilities = obj.get('capabilities') or {}
+        for key in keys:
+            if capabilities.get(key) is not None:
+                raw = capabilities.get(key)
+                break
+    if not isinstance(raw, list):
+        return []
+    result = []
+    for value in raw:
+        if isinstance(value, dict):
+            value = next((value.get(key) for key in item_keys if value.get(key)), None)
+        if isinstance(value, str) and value:
+            result.append(value.lower())
+    return sorted(set(result))
+
 with open(path, encoding='utf-8', errors='replace') as fh:
     for line in fh:
         s = line.strip()
@@ -120,6 +143,8 @@ with open(path, encoding='utf-8', errors='replace') as fh:
         seen.add(key)
         print(json.dumps({
             'status': 'ok', 'harness': 'opencode', 'model': model, 'provider': provider,
+            'reasoningCapabilities': values(obj, ['reasoningCapabilities', 'supportedReasoningEfforts', 'reasoningEfforts', 'reasoning', 'thinkingLevels', 'effortLevels'], ['reasoningEffort', 'reasoning_effort', 'level', 'name']),
+            'taskTypes': values(obj, ['taskTypes', 'task_types', 'useCases', 'tasks'], ['taskType', 'task_type', 'type', 'name']),
             'provenance': {'method': 'opencode --pure models --verbose', 'rawProvider': provider}
         }, separators=(',', ':')))
 PY
@@ -136,11 +161,52 @@ catalog_pi() {  # <harness>
 import json, re, sys
 path, harness = sys.argv[1], sys.argv[2]
 seen = set()
+
+def values(obj, keys, item_keys):
+    raw = None
+    for key in keys:
+        if obj.get(key) is not None:
+            raw = obj.get(key)
+            break
+    if raw is None:
+        capabilities = obj.get('capabilities') or {}
+        for key in keys:
+            if capabilities.get(key) is not None:
+                raw = capabilities.get(key)
+                break
+    if not isinstance(raw, list):
+        return []
+    result = []
+    for value in raw:
+        if isinstance(value, dict):
+            value = next((value.get(key) for key in item_keys if value.get(key)), None)
+        if isinstance(value, str) and value:
+            result.append(value.lower())
+    return sorted(set(result))
+
 with open(path, encoding='utf-8', errors='replace') as fh:
     for line in fh:
         s = line.strip()
         if not s or s.startswith(('-', '#')):
             continue
+        try:
+            obj = json.loads(s)
+        except Exception:
+            obj = None
+        if isinstance(obj, dict):
+            provider = obj.get('provider') or obj.get('providerID')
+            model = obj.get('model') or obj.get('id') or obj.get('name')
+            if isinstance(provider, str) and isinstance(model, str) and provider and model:
+                key = (model, provider)
+                if key not in seen:
+                    seen.add(key)
+                    print(json.dumps({
+                        'status': 'ok', 'harness': harness, 'model': model, 'provider': provider,
+                        'reasoningCapabilities': values(obj, ['reasoningCapabilities', 'supportedReasoningEfforts', 'reasoningEfforts', 'reasoning', 'thinkingLevels', 'effortLevels'], ['reasoningEffort', 'reasoning_effort', 'level', 'name']),
+                        'taskTypes': values(obj, ['taskTypes', 'task_types', 'useCases', 'tasks'], ['taskType', 'task_type', 'type', 'name']),
+                        'provenance': {'method': 'pi --list-models', 'rawProvider': provider}
+                    }, separators=(',', ':')))
+                continue
         cols = re.split(r'\s+', s)
         if len(cols) < 2:
             continue
@@ -157,6 +223,7 @@ with open(path, encoding='utf-8', errors='replace') as fh:
         seen.add(key)
         print(json.dumps({
             'status': 'ok', 'harness': harness, 'model': f'{provider}/{model}', 'provider': provider,
+            'reasoningCapabilities': [], 'taskTypes': [],
             'provenance': {'method': 'pi --list-models', 'rawProvider': provider}
         }, separators=(',', ':')))
 PY
@@ -165,7 +232,7 @@ PY
 }
 
 catalog_claude() {
-  local harness=claude rc
+  local harness=claude rc script
   with_fixture_if_present "$harness" && return 0
   if ! command -v python3 >/dev/null 2>&1; then
     json_emit_error "$harness" "python3 not installed" "claude stream-json initialize"
@@ -175,7 +242,8 @@ catalog_claude() {
     json_emit_error "$harness" "claude not installed" "claude stream-json initialize"
     return 1
   fi
-  fm_run_timed "$CATALOG_TIMEOUT" python3 - <<'PY'
+  script=$(mktemp) || return 1
+  cat > "$script" <<'PY'
 import json, subprocess, sys, time
 cmd = [
   'claude', '--safe-mode', '--no-session-persistence', '--no-chrome',
@@ -202,12 +270,36 @@ while time.time() < deadline:
     response = obj.get('response') or {}
     if response.get('request_id') != 'catalog-only':
         continue
+    def values(obj, keys, item_keys):
+        raw = None
+        for key in keys:
+            if obj.get(key) is not None:
+                raw = obj.get(key)
+                break
+        if raw is None:
+            capabilities = obj.get('capabilities') or {}
+            for key in keys:
+                if capabilities.get(key) is not None:
+                    raw = capabilities.get(key)
+                    break
+        if not isinstance(raw, list):
+            return []
+        result = []
+        for value in raw:
+            if isinstance(value, dict):
+                value = next((value.get(key) for key in item_keys if value.get(key)), None)
+            if isinstance(value, str) and value:
+                result.append(value.lower())
+        return sorted(set(result))
     for model in ((response.get('response') or {}).get('models') or []):
-        mid = model.get('value') or model.get('resolvedModel')
+        mid = model.get('value') or model.get('resolvedModel') or model.get('id') or model.get('model')
         if not isinstance(mid, str) or not mid or mid in seen:
             continue
         seen.add(mid)
-        print(json.dumps({'status':'ok','harness':'claude','model':mid,'provider':'claude','provenance':{'method':'claude stream-json initialize','resolvedModel':model.get('resolvedModel')}}, separators=(',', ':')))
+        print(json.dumps({'status':'ok','harness':'claude','model':mid,'provider':'claude',
+                          'reasoningCapabilities':values(model, ['reasoningCapabilities', 'supportedReasoningEfforts', 'reasoningEfforts', 'reasoning', 'thinkingLevels', 'effortLevels'], ['reasoningEffort', 'reasoning_effort', 'level', 'name']),
+                          'taskTypes':values(model, ['taskTypes', 'task_types', 'useCases', 'tasks'], ['taskType', 'task_type', 'type', 'name']),
+                          'provenance':{'method':'claude stream-json initialize','resolvedModel':model.get('resolvedModel')}}, separators=(',', ':')))
     proc.terminate()
     try:
         proc.wait(timeout=1)
@@ -217,7 +309,9 @@ while time.time() < deadline:
 proc.kill()
 sys.exit(1)
 PY
+  fm_run_timed "$CATALOG_TIMEOUT" python3 "$script"
   rc=$?
+  rm -f "$script"
   if [ "$rc" -ne 0 ]; then
     if fm_timed_out "$rc"; then
       json_emit_error "$harness" "catalog command timed out after ${CATALOG_TIMEOUT}s" "claude stream-json initialize"
@@ -229,7 +323,7 @@ PY
 }
 
 catalog_codex() {
-  local harness=codex rc
+  local harness=codex rc script
   with_fixture_if_present "$harness" && return 0
   if ! command -v python3 >/dev/null 2>&1; then
     json_emit_error "$harness" "python3 not installed" "codex app-server model/list"
@@ -239,7 +333,8 @@ catalog_codex() {
     json_emit_error "$harness" "codex not installed" "codex app-server model/list"
     return 1
   fi
-  fm_run_timed "$CATALOG_TIMEOUT" python3 - <<'PY'
+  script=$(mktemp) || return 1
+  cat > "$script" <<'PY'
 import json, subprocess, sys, time
 cmd = ['codex', 'app-server', '--listen', 'stdio://', '-c', 'analytics.enabled=false']
 proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
@@ -289,14 +384,31 @@ while True:
         if not isinstance(mid, str) or not mid or mid in seen:
             continue
         seen.add(mid)
-        raw_efforts = model.get('supportedReasoningEfforts') or model.get('supported_reasoning_efforts') or []
-        efforts = []
-        for effort in raw_efforts:
-            if isinstance(effort, dict):
-                effort = effort.get('reasoningEffort') or effort.get('reasoning_effort') or effort.get('level') or effort.get('name')
-            if isinstance(effort, str) and effort:
-                efforts.append(effort.lower())
-        print(json.dumps({'status':'ok','harness':'codex','model':mid,'provider':'codex','reasoningCapabilities':sorted(set(efforts)),'provenance':{'method':'codex app-server model/list','displayName':model.get('displayName'),'catalogProvider':model.get('provider')}}, separators=(',', ':')))
+        def values(keys, item_keys):
+            raw = None
+            for key in keys:
+                if model.get(key) is not None:
+                    raw = model.get(key)
+                    break
+            if raw is None:
+                capabilities = model.get('capabilities') or {}
+                for key in keys:
+                    if capabilities.get(key) is not None:
+                        raw = capabilities.get(key)
+                        break
+            if not isinstance(raw, list):
+                return []
+            result = []
+            for value in raw:
+                if isinstance(value, dict):
+                    value = next((value.get(key) for key in item_keys if value.get(key)), None)
+                if isinstance(value, str) and value:
+                    result.append(value.lower())
+            return sorted(set(result))
+        print(json.dumps({'status':'ok','harness':'codex','model':mid,'provider':'codex',
+                          'reasoningCapabilities':values(['reasoningCapabilities', 'supportedReasoningEfforts', 'supported_reasoning_efforts', 'reasoningEfforts', 'reasoning'], ['reasoningEffort', 'reasoning_effort', 'level', 'name']),
+                          'taskTypes':values(['taskTypes', 'task_types', 'useCases', 'tasks'], ['taskType', 'task_type', 'type', 'name']),
+                          'provenance':{'method':'codex app-server model/list','displayName':model.get('displayName'),'catalogProvider':model.get('provider')}}, separators=(',', ':')))
     cursor = got.get('nextCursor')
     if not cursor:
         break
@@ -307,7 +419,9 @@ try:
 except subprocess.TimeoutExpired:
     proc.kill()
 PY
+  fm_run_timed "$CATALOG_TIMEOUT" python3 "$script"
   rc=$?
+  rm -f "$script"
   if [ "$rc" -ne 0 ]; then
     if fm_timed_out "$rc"; then
       json_emit_error "$harness" "catalog command timed out after ${CATALOG_TIMEOUT}s" "codex app-server model/list"
