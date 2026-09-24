@@ -14,7 +14,9 @@ omp's replacement follows the same generation-owner contract in `.omp/extensions
 Cursor's `.cursor/hooks.json` `stop` hook (`bin/fm-turnend-guard-cursor.sh`) owns routine tokenless re-arm for a Cursor primary by parking that awaited hook on `bin/fm-watch-arm.sh` and returning an actionable close as one follow-up; [`turnend-guard.md`](turnend-guard.md#harness-integrations) owns its Pi-host stand-down, loop bounds, and supersession baton.
 Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
 The hook fires on every Stop, and an eligible primary with supervision need admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
-A numeric session-lock owner that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, while a live owner, absent lock, or malformed lock keeps the competing hook inert.
+Ownership is proved by either identity the lock carries, both owned by `bin/fm-session-lock-lib.sh`: the stable harness session identity recorded in `state/.lock-session`, or harness-ancestor membership of the pid in `state/.lock`.
+The session identity is what keeps a session that Claude re-hosts onto a background worker - which severs every process link to the pid its own session start recorded - from losing its own home.
+A session-lock owner that fails the shared `fm_session_lock_owner_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, and so is a lock this session owns under a pid it no longer runs as, while a live foreign owner, absent lock, or malformed lock keeps the competing hook inert.
 The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
 After each non-actionable arm close, the hook rechecks the identity-matched watcher lock and fresh beacon before retrying a bounded number of times.
 A cycle-end failure is benign when that live-watcher predicate is true, and the hook suppresses the arm output and continues silently.

@@ -112,7 +112,7 @@ When none of those proofs appears, it re-blocks up to `FM_CLAUDE_TURNEND_BLOCK_B
 In Claude mode, positive watcher recovery clears the block budget, failure notice, and attended alarm together under the existing budget lock before either hook reports ordinary recovery.
 The one loud attended fail-open is available only when the auto-arm has recorded an exhausted failure, its one notice is already consumed, the block budget is exhausted, and a final check finds neither a healthy watcher nor an automatic continuation.
 Each epoch identity is charged at most once per Stop under the budget lock, and a re-block against an epoch the auto-arm did not advance past the previous re-block is charged as well.
-That second rule is what bounds an inert auto-arm: a hook kept silent by a session lock held by a live harness outside its ancestry, a hook that never fires, or a hook failing before its generation claim leaves the ledger frozen at its last outcome.
+That second rule is what bounds an inert auto-arm: a hook kept silent by a session lock held by a genuinely different live session, a hook that never fires, or a hook failing before its generation claim leaves the ledger frozen at its last outcome.
 Charging only epoch changes let the count freeze with that ledger, so the guard re-blocked without limit and the attended fail-open was never reachable; `budget_account_current_epoch` in `bin/fm-turnend-guard.sh` owns the rule.
 Whenever both coordination locks are needed, positive auto-arm recovery and the terminal check acquire the auto-arm owner lock before the budget lock.
 After that alarm, the Stop auto-arm suppresses further exit-2 continuations until positive watcher recovery, so the final fail-open remains reachable.

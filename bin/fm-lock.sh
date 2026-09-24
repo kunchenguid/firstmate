@@ -3,6 +3,12 @@
 # Writes the harness (agent) process PID found by walking the shell's ancestry,
 # which lives as long as the firstmate session - unlike the transient subshell
 # PID of any one tool call, which is dead moments after it is written.
+# Alongside it, in state/.lock-session, it records the harness's stable session
+# identity when the harness publishes one, so the SAME session still recognizes
+# this lock after the harness moves it onto a different process
+# (bin/fm-session-lock-lib.sh owns that identity contract). Reclaiming a lock
+# that carries this session's own identity is not stealing it: no other
+# session's identity is ever accepted.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -29,7 +35,7 @@ if [ "${1:-}" = "status" ]; then
     echo "lock: unreadable"
     exit 0
   }
-  if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  if fm_session_lock_owner_alive "$STATE"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
   exit 0
 fi
 
@@ -58,10 +64,17 @@ trap 'exit 1' HUP INT TERM
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   old=$(cat "$LOCK" 2>/dev/null || true)
   if [ "$old" = "$me" ]; then
+    fm_session_lock_publish_identity "$STATE" || {
+      echo "error: cannot record this session's identity beside the lock; operate read-only until resolved" >&2
+      exit 1
+    }
     echo "lock acquired: harness pid $me"
     exit 0
   fi
-  if fm_harness_pid_alive "$old"; then
+  # A lock carrying THIS session's own identity is ours under a pid we no longer
+  # run as, so fall through and refresh it. Only a genuinely different live
+  # session refuses the acquisition.
+  if ! fm_session_lock_owned_by_session "$STATE" && fm_session_lock_owner_alive "$STATE"; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi
@@ -86,10 +99,19 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+  if [ "$old" != "$me" ] && ! fm_session_lock_owned_by_session "$STATE" \
+    && fm_session_lock_owner_alive "$STATE"; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi
+fi
+# Retire a foreign session's identity record BEFORE the pid moves, so no reader
+# can ever see this session's pid paired with a previous owner's identity.
+if ! fm_session_lock_owned_by_session "$STATE"; then
+  rm -f "$STATE/.lock-session" 2>/dev/null || {
+    echo "error: cannot retire the previous session's identity record; operate read-only until resolved" >&2
+    exit 1
+  }
 fi
 if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
   echo "error: cannot write session lock; operate read-only until resolved" >&2
@@ -101,6 +123,10 @@ written=$(cat "$LOCK" 2>/dev/null) || {
 }
 if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
+  exit 1
+fi
+if ! fm_session_lock_publish_identity "$STATE"; then
+  echo "error: cannot record this session's identity beside the lock; operate read-only until resolved" >&2
   exit 1
 fi
 release_claim_lock

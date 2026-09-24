@@ -10,11 +10,15 @@
 #   - Scope: only a genuine primary checkout (plain checkout or validly marked
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
 #     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
-#   - Identity: only when THIS session's harness ancestor holds state/.lock.
-#     When an existing numeric owner fails the shared harness-liveness predicate,
-#     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
-#     ownership. A live owner, missing lock, malformed lock, or unresolved
-#     ancestry remains inert, so a competing session never arms or rewakes.
+#   - Identity: only when THIS session owns state/.lock, by either identity the
+#     lock carries - the session identity recorded beside it, or harness-ancestor
+#     membership of its pid (bin/fm-session-lock-lib.sh owns both). When an
+#     existing numeric owner fails the shared lock-owner liveness predicate, or
+#     when this session owns the lock under a pid it no longer runs as because
+#     the harness moved the session, the hook delegates the guarded (re)claim to
+#     bin/fm-lock.sh and then re-verifies ownership. A live foreign owner,
+#     missing lock, malformed lock, or unresolved ancestry remains inert, so a
+#     competing session never arms or rewakes.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
@@ -141,7 +145,14 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
   case "$LOCK_PID" in
     ''|*[!0-9]*) exit 0 ;;
   esac
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  fm_session_lock_owner_alive "$STATE" && exit 0
+  RECOVER_SESSION_LOCK=1
+elif ! fm_session_lock_pid_is_self "$STATE"; then
+  # This session owns the lock by its recorded session identity, but the pid in
+  # the lock is a process it no longer runs as, because the harness moved the
+  # session. Refresh the pid through the acquisition owner below, so every
+  # pid-bound reader - this hook's own epoch record included - agrees with the
+  # identity that just proved ownership.
   RECOVER_SESSION_LOCK=1
 fi
 
