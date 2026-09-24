@@ -570,6 +570,7 @@ case "$fault:$*" in
   slow:'api repos/o/r/commits/'*'/statuses?'*) sleep 7 ;;
   hang:'api repos/o/r/pulls/8') sleep 4 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
+  malformed-head:'pr view '*) printf '{"headRefOid":"not-a-sha"}\n'; exit 0 ;;
 esac
 exec "$(dirname "$0")/gh-fixture" "$@"
 SH
@@ -597,8 +598,11 @@ test_budget_exhaustion_keeps_prior_record() { # exhaust|hang
   [ -z "$out" ] || fail "budget exhaustion ($mode) printed a wake line: $out"
   grep -F 'api repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
     || fail "budget exhaustion ($mode) never started the observation"
-  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
-    || fail "budget exhaustion ($mode) rewrote the prior record: $(cat "$home/data/delivery/contributions.json")"
+  jq -e --slurpfile prior "$home/prior.json" '
+    .records[0].last_failure.class == "aggregate-budget"
+    and (.records[0].last_failure.failures | any(.class == "aggregate-budget"))
+    and (del(.records[0].last_failure) == $prior[0])' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail "budget exhaustion ($mode) changed prior state or lost its diagnostic"
   [ ! -s "$home/state/.wake-queue" ] || fail "budget exhaustion ($mode) enqueued a wake"
   pass "budget exhausted mid-observation ($mode) keeps the prior record and stays silent"
 }
@@ -867,6 +871,13 @@ test_failed_observation_keeps_classified_diagnostic() {
   printf '%s' "$diag" | jq -e --arg a "$HEAD_A" '.class == "head-mismatch" and .failures[0].stage == "head-mismatch"
     and .failures[0].before_head == $a and .failures[0].after_head == ($a | gsub("a"; "b"))' >/dev/null \
     || fail "a head change did not record both heads: $diag"
+
+  home=$(new_home diag-malformed-head)
+  forge_home "$home"
+  wrap_forge "$home"
+  diag=$(failure_poll "$home" malformed-head)
+  printf '%s' "$diag" | jq -e '.class == "jq-validation" and .failures[0].stage == "closing-head"' >/dev/null \
+    || fail "a malformed closing head was misclassified: $diag"
 
   home=$(new_home diag-jq)
   forge_home "$home"
