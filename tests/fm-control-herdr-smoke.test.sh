@@ -311,6 +311,10 @@ pass "real herdr: a stale registration no longer blocks relaunch, and the endpoi
 # recognized composer chrome. exit's composer-empty guard (bin/fm-control.sh)
 # therefore refuses before ever typing the exit command, rather than typing it
 # into a live agent that ignores it and reporting a stop that did not happen.
+# Which refusal fires depends on how the classifier reads that chromeless pane -
+# its own echoed command line reads as pending text on some renders and as an
+# unproven composer on others - and both are the same guarantee, so the
+# assertion pins the refusal and its composer reason rather than one verdict.
 start_agent_process
 herdr pane report-agent "$PANE_ID" --source fm-control-smoke --agent fm-control-smoke-agent \
   --state idle --session "$SESSION" >/dev/null 2>&1 \
@@ -319,8 +323,8 @@ if OUT=$(run_control hsmoke exit 2>&1); then
   fail "exit should fail closed when the agent's composer is not proven empty: $OUT"
 fi
 case "$OUT" in
-  *"not proven empty"*) : ;;
-  *) fail "the exit failure should say the composer is not proven empty, got: $OUT" ;;
+  *"composer"*"not proven empty"*|*"composer visibly holds pending text"*) : ;;
+  *) fail "the exit failure should refuse on the composer it could not prove empty, got: $OUT" ;;
 esac
 pass "real herdr: an agent behind an unproven composer fails closed instead of typing an exit command into it"
 

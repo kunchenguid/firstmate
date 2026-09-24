@@ -2984,13 +2984,153 @@ fm_backend_herdr_current_path() {  # <target>
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
 }
 
-# fm_backend_herdr_send_text_line: send one line of TEXT then submit,
-# ATOMICALLY - mirrors tmux's `send-keys -t T text Enter`. Used for the fixed
-# spawn-time commands (treehouse get, the GOTMPDIR export). `pane run` types
-# the command and submits it in one call (verified).
+# fm_backend_herdr_submitted_line_state: has <text>, just written to <target>,
+# been accepted by the pane's shell as its own command line? Echoes
+# `submitted`, `pending`, `unseen`, or `unknown` (the pane could not be read).
+#
+# Herdr exposes no pty input-queue state to read directly: `pane get` carries
+# agent status, cwd, and a revision counter, none of which distinguish a typed
+# line from an accepted one. Two independent signals answer it instead, and
+# either one alone can carry the positive verdict.
+#
+# The render (verified live on herdr 0.9.1, see
+# docs/verification/runtime-backends.md "Herdr pre-launch line submission"): a
+# typed-but-unaccepted line is the LAST non-empty rendered line, and an accepted
+# one always has the shell's next prompt rendered after it. `--source
+# recent-unwrapped` is deliberate, because the wrapped sources split one long
+# command across rendered rows and the launch paths this guards routinely send
+# lines longer than a pane is wide.
+#
+# The process table, for the case the render alone gets wrong: a command that
+# blocks without printing anything - an agent, `sleep`, a server - leaves its
+# own echoed line as the last rendered line for as long as it runs, which is
+# indistinguishable from pending text. The foreground process group is not: a
+# pane still sitting at its prompt is shells-only, so anything else in the
+# foreground is proof the shell already took the line.
+#
+# <before> is the unwrapped capture taken just before this write. Only output
+# after it (see fm_backend_herdr_output_after) can be this write's echo: a
+# relaunch writes the same export lines into a pane whose history already holds
+# byte-identical copies from the original spawn, and those must never read as
+# this write being accepted.
+fm_backend_herdr_submitted_line_state() {  # <target> <text> [before]
+  local target=$1 text=$2 before=${3:-} out last line
+  [ -n "$text" ] || { printf 'submitted'; return 0; }
+  # The capture below runs in a command substitution, so the session and pane
+  # it resolves never reach this shell; parse them here for the process sample.
+  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  out=$(fm_backend_herdr_unwrapped_capture "$target") || { printf 'unknown'; return 0; }
+  case "$(fm_backend_herdr_output_after "$before" "$out")" in
+    *"$text"*) ;;
+    *) printf 'unseen'; return 0 ;;
+  esac
+  last=
+  while IFS= read -r line; do
+    case "$line" in '') ;; *) last=$line ;; esac
+  done <<EOF
+$out
+EOF
+  case "$last" in
+    *"$text"*)
+      # One instantaneous sample, never the settling poll loop: this runs inside
+      # the caller's own polling budget and must not spend it.
+      case "$(fm_backend_herdr_pane_process_state_sample "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
+        agent|other) printf 'submitted' ;;
+        *) printf 'pending' ;;
+      esac
+      return 0
+      ;;
+  esac
+  printf 'submitted'
+}
+
+# fm_backend_herdr_output_after: the part of capture <out> written after
+# capture <before>. <before>'s last non-empty line is its prompt row, which the
+# next echo lands on, so everything above that row is the anchor. The recent
+# window may have scrolled the anchor's top rows (and cut the window's own top
+# row) away since, so the longest remaining suffix of the anchor that opens
+# <out> marks where the new output starts. With no anchor to align on, all of
+# <out> counts as new.
+fm_backend_herdr_output_after() {  # <before> <out>
+  local anchor=$1 cur a
+  anchor=${anchor%"${anchor##*[!$'\n']}"}
+  case "$anchor" in *$'\n'*) anchor=${anchor%$'\n'*} ;; *) anchor= ;; esac
+  if [ -n "$anchor" ]; then
+    for cur in "$2" "${2#*$'\n'}"; do
+      a=$anchor
+      while [ -n "$a" ]; do
+        case "$cur" in "$a"*) printf '%s' "${cur#"$a"}"; return 0 ;; esac
+        case "$a" in *$'\n'*) a=${a#*$'\n'} ;; *) a= ;; esac
+      done
+    done
+  fi
+  printf '%s' "$2"
+}
+
+# fm_backend_herdr_send_text_line: send one line of TEXT and CONFIRM the pane's
+# shell accepted it as its own command line - mirrors tmux's `send-keys -t T
+# text Enter`. Used for the fixed spawn-time commands (treehouse get, the
+# GOTMPDIR export, the relaunch `cd`).
+#
+# `pane run` is herdr's documented text-plus-Enter submit ("`pane run` honors
+# live bracketed-paste mode and submits text plus Enter atomically" - herdr
+# 0.9.1 CLI reference), and it delivers faithfully: a pane capturing its own raw
+# stdin receives exactly `AAA\rBBB\r` for two back-to-back calls, in order, with
+# no paste brackets and no lost carriage return. The earlier comment here
+# recorded that as proof the caller needed no confirmation. It is not.
+#
+# Verified defect (2026-09-21, herdr 0.9.1, docs/verification/runtime-backends.md
+# "Herdr pre-launch line submission"): when fm-spawn.sh writes its pre-launch
+# lines into a pane whose shell has not finished taking over the tty - the
+# window between `treehouse get`'s nested shell appearing in `foreground_cwd`
+# and its line editor accepting input - the SHELL absorbs the carriage return
+# between two consecutive lines. The next line then concatenates onto the same
+# input line (`export COMPACT_ADVISER_DISABLE=1export FM_TASK_ID=<id>`), the
+# staged launch command concatenates after that, and the whole thing dies as one
+# shell syntax error with no agent ever started. That is a receiving-shell race,
+# not a herdr delivery bug, so the fix belongs here rather than at any call site:
+# every caller needs one submitted line before the next one is written.
+#
+# Exit status mirrors bin/backends/cmux.sh's send_text_line contract, which
+# fm-spawn.sh already reads: 0 submitted, 1 not submitted but the pane's input
+# line was cleared so nothing can merge into the next write, 2 not submitted and
+# NOT cleared - the caller must refuse to append anything after it.
 fm_backend_herdr_send_text_line() {  # <target> <text>
+  local polls sleep_s enters state before pending_seen=0 enters_sent=0 i=0
   fm_backend_herdr_target_ready "$1" || return 1
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
+  before=$(fm_backend_herdr_unwrapped_capture "$1")
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1 || return 1
+  polls=${FM_BACKEND_HERDR_LINE_CONFIRM_POLLS:-40}
+  sleep_s=${FM_BACKEND_HERDR_LINE_CONFIRM_SLEEP:-0.25}
+  enters=${FM_BACKEND_HERDR_LINE_CONFIRM_ENTERS:-3}
+  case "$polls" in ''|*[!0-9]*) polls=40 ;; esac
+  case "$enters" in ''|*[!0-9]*) enters=3 ;; esac
+  while [ "$i" -lt "$polls" ]; do
+    sleep "$sleep_s"
+    i=$((i + 1))
+    state=$(fm_backend_herdr_submitted_line_state "$1" "$2" "$before")
+    case "$state" in
+      submitted) return 0 ;;
+      pending)
+        # One poll of `pending` is the ordinary in-flight render, so recovering
+        # the Enter waits for a second consecutive one. Re-sending Enter on a
+        # line the shell already took only adds an empty prompt; re-sending the
+        # TEXT could run the command twice, so the text is never retyped.
+        pending_seen=$((pending_seen + 1))
+        if [ "$pending_seen" -ge 2 ] && [ "$enters_sent" -lt "$enters" ]; then
+          fm_backend_herdr_send_key "$1" Enter || true
+          enters_sent=$((enters_sent + 1))
+        fi
+        ;;
+      *) pending_seen=0 ;;
+    esac
+  done
+  # Unresolved. Clear whatever is sitting on the input line so it cannot merge
+  # into the next write, and report which of the two failures this was.
+  if fm_backend_herdr_send_key "$1" C-u; then
+    return 1
+  fi
+  return 2
 }
 
 # fm_backend_herdr_send_literal: send TEXT as literal, UNSUBMITTED input - the
@@ -3058,6 +3198,16 @@ fm_backend_herdr_capture() {  # <target> <lines>
 fm_backend_herdr_visible_capture() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 1
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source visible 2>/dev/null
+}
+
+# fm_backend_herdr_unwrapped_capture: the recent pane history with each logical
+# line kept whole. `--source recent-unwrapped` is herdr's own unwrapped read, so
+# a command longer than the pane is wide stays one line instead of being split
+# across rendered rows. No --lines bound is passed, which also keeps it clear of
+# the small-N empty-read bug documented above.
+fm_backend_herdr_unwrapped_capture() {  # <target>
+  fm_backend_herdr_target_ready "$1" || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent-unwrapped 2>/dev/null
 }
 
 fm_backend_herdr_capture_ansi() {  # <target> <lines>

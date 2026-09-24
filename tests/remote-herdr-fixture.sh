@@ -97,7 +97,16 @@ case "${1:-} ${2:-}" in
   "pane send-keys")
     [ ! -f "$SEND_FAIL" ] || exit 1
     jq_state --arg p "${3:-}" '.typed[$p] = true | .working[$p] = true' | save ;;
-  "pane read") printf '\n' ;;
+  "pane run")
+    # The adapter submits a pre-launch line with `pane run` and confirms from
+    # the pane's render that the shell accepted it, so record the echo a real
+    # shell would have produced.
+    [ ! -f "$SEND_FAIL" ] || exit 1
+    printf '> %s\n' "${4:-}" >> "$STATE.screen.${3:-}" ;;
+  "pane read")
+    # An accepted command is always followed by the shell's next prompt.
+    [ ! -f "$STATE.screen.${3:-}" ] || cat "$STATE.screen.${3:-}"
+    printf '>\n' ;;
   "pane process-info")
     printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"codex","argv0":"codex","argv":["codex"],"cmdline":"codex"}]}}}\n' \
       "$pane" "$$" "$$" "$$" ;;

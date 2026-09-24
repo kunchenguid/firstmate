@@ -477,7 +477,17 @@ case "${1:-} ${2:-}" in
   "pane close")
     [ "${3:-}" = p-old ] && : > "$killed"
     ;;
-  "pane run"|"pane send-text"|"pane send-keys"|"tab close")
+  "pane run")
+    # The adapter confirms a submitted line from the pane's render, so record
+    # what a real shell would have echoed for it.
+    printf '> %s\n' "${4:-}" >> "${spawned}.screen"
+    ;;
+  "pane read")
+    # An accepted command is always followed by the shell's next prompt.
+    [ ! -f "${spawned}.screen" ] || cat "${spawned}.screen"
+    printf '>\n'
+    ;;
+  "pane send-text"|"pane send-keys"|"tab close")
     ;;
   *)
     exit 1
