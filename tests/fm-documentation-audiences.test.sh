@@ -135,8 +135,8 @@ MD
   pass "local links resolve while dates, versions, commands, and incident prose remain semantically reviewed"
 }
 
-test_technical_design_skill_registration() {
-  python3 - "$ROOT" <<'PY' || fail "technical-design-docs metadata, discovery, or trigger registration is invalid"
+test_readable_documents_skill_registration() {
+  python3 - "$ROOT" <<'PY' || fail "readable-documents metadata, discovery, or trigger registration is invalid"
 from __future__ import annotations
 
 import json
@@ -145,7 +145,7 @@ import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
-skill_path = root / ".agents/skills/technical-design-docs/SKILL.md"
+skill_path = root / ".agents/skills/readable-documents/SKILL.md"
 lines = skill_path.read_text(encoding="utf-8").splitlines()
 assert lines[0] == "---"
 end = lines.index("---", 1)
@@ -188,7 +188,7 @@ while index < end:
 
 name = frontmatter["name"]
 description = frontmatter["description"]
-assert name == skill_path.parent.name == "technical-design-docs"
+assert name == skill_path.parent.name == "readable-documents"
 assert isinstance(description, str) and 0 < len(description) <= 1024
 assert re.search(r"\buse before\b", description, re.IGNORECASE)
 assert frontmatter["user-invocable"] is False
@@ -210,11 +210,11 @@ for line in agents[start:]:
 assert name in triggers
 assert triggers[name].lower().startswith("load before ")
 PY
-  pass "technical-design-docs is discoverable as an internal agent-only skill with a precise load trigger"
+  pass "readable-documents is discoverable as an internal agent-only skill with a precise load trigger"
 }
 
 test_repository_inventory_passes
 test_duplicate_and_setup_classification_fail
 test_required_pointer_fails
 test_local_links_and_no_keyword_heuristic
-test_technical_design_skill_registration
+test_readable_documents_skill_registration
