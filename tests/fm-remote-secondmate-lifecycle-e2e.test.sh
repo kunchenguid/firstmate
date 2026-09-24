@@ -151,6 +151,10 @@ command_fields=$(perl -MMIME::Base64=decode_base64 -e '
 IFS=$'\t' read -r command_name _command_action command_rel <<EOF
 $command_fields
 EOF
+# Record which inherited paths cross to the remote host when a case asks.
+if [ -n "${FM_FAKE_INHERIT_LOG:-}" ] && [ "$command_name" = fm-remote-inherit.sh ]; then
+  printf '%s\n' "$command_rel" >> "$FM_FAKE_INHERIT_LOG"
+fi
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
   inherit-partial:fm-remote-inherit.sh:config/crew-harness) exit 255 ;;
   inherit-block:fm-remote-inherit.sh:data/captain-shared.md)
@@ -699,6 +703,37 @@ cmp -s "$TMP_ROOT/inherit-complete" "$PROTOCOL_HOME/config/crew-harness" \
   || fail "superseded inheritance replaced the current payload"
 pass "remote inheritance rejects incomplete and superseded payload generations"
 
+# A path this code root does not declare is refused with the one exact line a
+# newer sender treats as version skew, and nothing is read, locked, or written
+# for it. A machine-local item is recognized but never applied on this other
+# machine, so an older sender that still offers one neither replaces nor
+# deletes this host's own value.
+unknown_out=$(FM_HOME="$PROTOCOL_HOME" "$REMOTE_ROOT/bin/fm-remote-inherit.sh" \
+  put config/fm-unknown-item "$inherit_bytes" "$inherit_hash" 3 < "$TMP_ROOT/inherit-complete" 2>&1)
+unknown_rc=$?
+expect_code 1 "$unknown_rc" "remote inheritance accepted an undeclared path"
+[ "$unknown_out" = 'error: path is not inherited material: config/fm-unknown-item' ] \
+  || fail "undeclared path refusal changed the line senders recognize as version skew: $unknown_out"
+for unknown_artifact in fm-unknown-item .fm-inherit-fm-unknown-item.generation .fm-inherit-fm-unknown-item.lock; do
+  assert_absent "$PROTOCOL_HOME/config/$unknown_artifact" "undeclared path left $unknown_artifact behind"
+done
+: > "$TMP_ROOT/inherit-empty"
+inherit_empty_hash=$(sha256_file "$TMP_ROOT/inherit-empty")
+printf 'this-host:4455\n' > "$PROTOCOL_HOME/config/lavish-axi-host"
+machine_out=$(FM_HOME="$PROTOCOL_HOME" "$REMOTE_ROOT/bin/fm-remote-inherit.sh" \
+  put config/lavish-axi-host "$inherit_bytes" "$inherit_hash" 4 < "$TMP_ROOT/inherit-complete" 2>&1) \
+  || fail "machine-local put from an older sender was refused: $machine_out"
+assert_contains "$machine_out" 'skipped: config/lavish-axi-host' "machine-local put was not reported as skipped"
+machine_out=$(FM_HOME="$PROTOCOL_HOME" "$REMOTE_ROOT/bin/fm-remote-inherit.sh" \
+  absent config/lavish-axi-host 0 "$inherit_empty_hash" 5 < /dev/null 2>&1) \
+  || fail "machine-local absence from an older sender was refused: $machine_out"
+assert_contains "$machine_out" 'skipped: config/lavish-axi-host' "machine-local absence was not reported as skipped"
+[ "$(cat "$PROTOCOL_HOME/config/lavish-axi-host")" = this-host:4455 ] \
+  || fail "another machine's inheritance changed this host's own Lavish address"
+assert_absent "$PROTOCOL_HOME/config/.fm-inherit-lavish-axi-host.generation" \
+  "a skipped machine-local item committed an inheritance generation"
+pass "remote inheritance refuses undeclared paths untouched and never applies machine-local items"
+
 # Add one local route to prove mixed fleets remain parseable and projected.
 mkdir -p "$LOCAL_HOME/data" "$LOCAL_HOME/state" "$LOCAL_HOME/config" "$LOCAL_HOME/projects" "$LOCAL_HOME/bin"
 printf 'local\n' > "$LOCAL_HOME/.fm-secondmate-home"
@@ -873,6 +908,60 @@ wait "$spawn_config_push" || fail "config push failed after serialized remote sp
 [ "$(tail -1 "$REMOTE_HOME/data/captain-shared.md")" = 'current post-spawn preference' ] \
   || fail "stale spawn inheritance overwrote later config convergence"
 pass "remote spawn serializes inheritance through launch publication"
+
+# Version skew on the relaunch path that recovers a stuck remote second mate.
+# This primary declares two items the remote host's code root has never heard
+# of, ahead of every real item. The remote entrypoint runs each command under an
+# empty environment, so this primary-side declaration never reaches the far
+# side, exactly as a newer primary meets an older host. One item exists only on
+# the primary and the other on neither side.
+default_inheritable=$(unset FM_INHERITABLE_CONFIG; . "$ROOT/bin/fm-config-inherit-lib.sh"; printf '%s' "$FM_INHERITABLE_CONFIG")
+skew_inheritable="fm-skew-present fm-skew-absent $default_inheritable"
+printf 'future primary-only value\n' > "$PARENT/config/fm-skew-present"
+printf 'primary-host:4455\n' > "$PARENT/config/lavish-axi-host"
+printf 'remote-host:4455\n' > "$REMOTE_HOME/config/lavish-axi-host"
+cat > "$PARENT/data/captain-shared.md" <<'EOF'
+# Shared captain preferences
+This file is main-authoritative and maintained by the main firstmate.
+It is read-only in secondmate homes and must not be edited there.
+Changes return through a marked status document pointer.
+skew relaunch preference
+EOF
+# Skipping an unknown item never masks a genuine failure of a known one.
+assert_absent "$REMOTE_HOME/config/crew-dispatch.json" "fixture expected no remote dispatch rules yet"
+ln -s "$TMP_ROOT/nowhere" "$REMOTE_HOME/config/crew-dispatch.json"
+if FM_INHERITABLE_CONFIG="$skew_inheritable" remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  > "$TMP_ROOT/spawn-skew-genuine.out" 2> "$TMP_ROOT/spawn-skew-genuine.err"; then
+  fail "remote relaunch proceeded past a genuine inheritance failure"
+fi
+assert_grep 'inherited destination is a symlink' "$TMP_ROOT/spawn-skew-genuine.err" \
+  "genuine inheritance failure lost the remote diagnostic"
+assert_grep 'inheritance failed; launch refused' "$TMP_ROOT/spawn-skew-genuine.err" \
+  "genuine inheritance failure did not refuse the relaunch"
+rm -f -- "$REMOTE_HOME/config/crew-dispatch.json"
+if ! FM_INHERITABLE_CONFIG="$skew_inheritable" FM_FAKE_INHERIT_LOG="$TMP_ROOT/spawn-skew.sent" \
+  remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  > "$TMP_ROOT/spawn-skew.out" 2> "$TMP_ROOT/spawn-skew.err"; then
+  fail "remote relaunch was refused over version skew alone"$'\n'"$(cat "$TMP_ROOT/spawn-skew.err")"
+fi
+assert_grep 'remote=remote-mac backend=herdr' "$TMP_ROOT/spawn-skew.out" "skewed remote relaunch did not launch"
+assert_no_grep 'launch refused' "$TMP_ROOT/spawn-skew.err" "skewed remote relaunch reported a refusal"
+for skew_item in fm-skew-present fm-skew-absent; do
+  assert_grep "warning: skipped config/$skew_item for remote secondmate ios" "$TMP_ROOT/spawn-skew.err" \
+    "skewed remote relaunch dropped config/$skew_item without saying so"
+  assert_absent "$REMOTE_HOME/config/$skew_item" "an item the remote does not declare was written there"
+  assert_absent "$REMOTE_HOME/config/.fm-inherit-$skew_item.generation" \
+    "an item the remote does not declare committed a generation there"
+done
+[ "$(tail -1 "$REMOTE_HOME/data/captain-shared.md")" = 'skew relaunch preference' ] \
+  || fail "a skipped item stopped the items after it from converging"
+[ "$(cat "$REMOTE_HOME/config/lavish-axi-host")" = remote-host:4455 ] \
+  || fail "the primary's per-machine Lavish address changed the remote host's own value"
+assert_grep 'data/captain-shared.md' "$TMP_ROOT/spawn-skew.sent" "the relaunch transfer was not observed at the SSH boundary"
+assert_no_grep 'config/lavish-axi-host' "$TMP_ROOT/spawn-skew.sent" \
+  "the primary offered its per-machine Lavish address to another machine"
+rm -f -- "$PARENT/config/fm-skew-present" "$PARENT/config/lavish-axi-host" "$REMOTE_HOME/config/lavish-axi-host"
+pass "remote relaunch skips items an older host does not declare and keeps per-machine values on their machine"
 
 # A normal marked parent request traverses SSH as a durable remote inbox
 # record plus a rung doorbell - the payload is never typed into the pane. An

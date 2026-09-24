@@ -2,11 +2,16 @@
 # Push the declared inherited-material allowlist to one remote secondmate route.
 # Usage: fm-remote-inherit-push.sh <secondmate-id> <generation>
 #
-# The item set is derived from the ONE declared owner
-# (FM_INHERITABLE_CONFIG in bin/fm-config-inherit-lib.sh), the same declaration
-# the receiving bin/fm-remote-inherit.sh enforces, so the two implementations in
-# one code revision cannot drift silently. Different local and remote revisions
-# fail closed as documented by that owner. FM_CONFIG_INHERIT_LIVE=1 marks a live
+# The item set is fm_config_inherit_remote_items from the ONE declared owner
+# (bin/fm-config-inherit-lib.sh), the same declaration the receiving
+# bin/fm-remote-inherit.sh enforces, so the two implementations in one code
+# revision cannot drift silently; machine-local items are never offered to
+# another machine. When the remote code root is older and refuses an item with
+# the receiver's cross-revision refusal line, that item is reported on stderr as
+# a skipped-item warning and the push continues, because that refusal happens
+# before the receiver reads, locks, or writes anything. Every other failure
+# stops the push with the remote's stderr and exit status unchanged, including
+# exit 255 for unknown completion. FM_CONFIG_INHERIT_LIVE=1 marks a live
 # convergence push into an already-running home and skips session-scoped items,
 # exactly as the local propagation path does.
 set -eu
@@ -51,8 +56,23 @@ trap 'rm -rf -- "$TMP"' EXIT
 EMPTY="$TMP/empty"
 : > "$EMPTY"
 EMPTY_HASH=$(sha256_file "$EMPTY") || die "cannot hash empty inheritance payload"
+REMOTE_ERR="$TMP/remote.stderr"
 
-ITEMS=$(fm_config_inherit_items)
+# Apply one item on the remote host, classifying only the receiver's
+# cross-revision refusal of <rel> as version skew (see the header).
+remote_apply() {  # <rel> <stdin-path> <fm-on.sh arguments...>
+  local rel=$1 input=$2 rc=0
+  shift 2
+  "$SCRIPT_DIR/fm-on.sh" "$@" < "$input" 2> "$REMOTE_ERR" || rc=$?
+  if [ "$rc" -eq 1 ] && grep -Fxq -- "error: path is not inherited material: $rel" "$REMOTE_ERR"; then
+    printf '%s\n' "fm-remote-inherit-push: warning: skipped $rel for remote secondmate $ID: the Firstmate code root on that host predates it and does not declare it inherited material, so nothing was written; updating Firstmate on that host converges it" >&2
+    return 0
+  fi
+  cat -- "$REMOTE_ERR" >&2
+  [ "$rc" -eq 0 ] || exit "$rc"
+}
+
+ITEMS=$(fm_config_inherit_remote_items)
 while IFS= read -r rel; do
   [ -n "$rel" ] || continue
   if [ "${FM_CONFIG_INHERIT_LIVE:-0}" = 1 ]; then
@@ -81,10 +101,10 @@ while IFS= read -r rel; do
     [ -f "$snapshot" ] && [ ! -L "$snapshot" ] || die "inherited source snapshot is unsafe: $source"
     bytes=$(LC_ALL=C wc -c < "$snapshot" | tr -d ' ')
     hash=$(sha256_file "$snapshot") || die "cannot hash inherited source: $source"
-    "$SCRIPT_DIR/fm-on.sh" --stdin "$ID" fm-remote-inherit.sh put "$rel" "$bytes" "$hash" "$GENERATION" < "$snapshot"
+    remote_apply "$rel" "$snapshot" --stdin "$ID" fm-remote-inherit.sh put "$rel" "$bytes" "$hash" "$GENERATION"
   else
     # This loop's heredoc is its control stream, not remote command input.
-    "$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-inherit.sh absent "$rel" 0 "$EMPTY_HASH" "$GENERATION" < /dev/null
+    remote_apply "$rel" /dev/null "$ID" fm-remote-inherit.sh absent "$rel" 0 "$EMPTY_HASH" "$GENERATION"
   fi
 done <<EOF
 $ITEMS

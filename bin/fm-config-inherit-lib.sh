@@ -15,10 +15,11 @@
 # "off" preferences propagate as files. Primary
 # config/trace-context is copied at the launch convergence point as part of the
 # default-off W3C trace-context setup, while live convergence leaves it unchanged.
-# Primary config/lavish-axi-host carries the one per-machine Lavish server address
-# to every worker so a worker never starts a second server on another interface.
 # The primary passes its frozen home-session decision into a newly launched
 # Secondmate; see docs/trace-context.md.
+# Primary config/lavish-axi-host carries the one per-machine Lavish server address
+# to every same-machine worker so a worker never starts a second server on another
+# interface; it is machine-local, so it never crosses to a remote host (below).
 # Primary config/claude-permission-mode is a captain-wide safety preference
 # (bypass or auto for every claude launch), so it flows down too and a
 # secondmate's own claude crewmates launch on the same permission posture.
@@ -42,7 +43,8 @@
 #
 # Extensible by design: FM_INHERITABLE_CONFIG is the single declared list of
 # config-dir-relative items the primary propagates. Add an item there and every
-# convergence point inherits it - no other change needed. config/secondmate-harness
+# convergence point inherits it; a value that describes one machine must also be
+# listed in FM_MACHINE_LOCAL_INHERITABLE_CONFIG below. config/secondmate-harness
 # is deliberately NOT in the list: it is the primary's own setting for launching
 # secondmates, and a secondmate never spawns secondmates, so it must not flow
 # downstream.
@@ -50,11 +52,18 @@
 # That single declaration is also the ONE owner of the inherited-material
 # allowlist for remote routes: bin/fm-remote-inherit-push.sh (sender) and
 # bin/fm-remote-inherit.sh (receiver, executing inside the remote home) both
-# derive their item set from fm_config_inherit_items rather than restating it,
-# so a new inheritable item cannot be accepted by one side and refused by the
-# other. A local and remote code root that disagree about this list must be
-# reconciled by the ordinary remote sync/update path before the transfer
-# succeeds; there is no separate allowlist version negotiation.
+# derive their item set from this declaration rather than restating it, so within
+# one code revision a new inheritable item cannot be accepted by one side and
+# refused by the other; machine-local items stay on their own machine.
+# Across revisions the two ends can still disagree, and that is ordinary version
+# skew rather than a safety event: the remote code root only advances through
+# /updatefirstmate, so a primary that has gained an item routinely talks to a
+# host whose receiver has never heard of it. The receiver refuses such a path
+# before any read, lock, or write, and the sender reports that one refusal as a
+# skipped item and continues with the rest, so skew changes failure handling but
+# never what a remote may write. There is no separate allowlist version
+# negotiation; bin/fm-remote-inherit.sh owns the refusal line the sender
+# recognizes.
 #
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"
@@ -86,16 +95,49 @@ fm_config_inherit_item_session_scoped() {  # <item>
   return 1
 }
 
+# Items whose value describes THIS machine, such as the address of a server that
+# runs here. A secondmate home on the same machine inherits them like any other
+# item, but they never cross to another machine: the remote sender never offers
+# them, and the remote receiver writes and removes nothing for them, so a remote
+# host keeps whatever value its own operator set. Declaring a per-machine value
+# only in FM_INHERITABLE_CONFIG would copy one machine's address onto another
+# machine, or delete that machine's own value whenever the primary has none;
+# list every such item here as well.
+FM_MACHINE_LOCAL_INHERITABLE_CONFIG="lavish-axi-host"
+
+# True when <item> is machine-local in the sense above.
+fm_config_inherit_item_machine_local() {  # <item>
+  local item=$1 candidate
+  for candidate in $FM_MACHINE_LOCAL_INHERITABLE_CONFIG; do
+    [ "$candidate" = "$item" ] && return 0
+  done
+  return 1
+}
+
 # The complete declared inherited-material set as home-relative paths, one per
 # line, in propagation order: every FM_INHERITABLE_CONFIG item under config/,
-# then the one shared data file. This is what remote senders and receivers
-# derive from, so both ends of a transfer agree by construction.
+# then the one shared data file. The remote receiver's writable set derives from
+# this, so both ends of a transfer in one revision agree by construction.
 fm_config_inherit_items() {
   local item
   for item in $FM_INHERITABLE_CONFIG; do
     printf 'config/%s\n' "$item"
   done
   printf '%s\n' "$FM_SHARED_CAPTAIN_REL"
+}
+
+# The subset a primary offers to a remote route on another machine:
+# fm_config_inherit_items without the machine-local items, in the same order.
+fm_config_inherit_remote_items() {
+  local rel
+  while IFS= read -r rel; do
+    case "$rel" in
+      config/*) ! fm_config_inherit_item_machine_local "${rel#config/}" || continue ;;
+    esac
+    printf '%s\n' "$rel"
+  done <<EOF
+$(fm_config_inherit_items)
+EOF
 }
 
 fm_config_source_present() {

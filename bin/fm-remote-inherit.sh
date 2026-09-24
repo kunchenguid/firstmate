@@ -8,6 +8,19 @@
 # Only the inherited-material allowlist is writable or removable. Writes are
 # atomic ordinary-file replacements. Divergent data/captain-shared.md bytes are
 # quarantined before replacement or removal and its converged copy is read-only.
+#
+# A machine-local item (FM_MACHINE_LOCAL_INHERITABLE_CONFIG) is recognized but
+# never applied here, because this home is on another machine than the sender:
+# it prints "skipped: <path> ..." and exits 0 without reading, locking, or
+# writing, so an older sender that still offers one cannot overwrite or delete
+# this host's own value and does not have its launch refused.
+#
+# A path outside this code root's own allowlist exits 1 with exactly the line
+# "error: path is not inherited material: <path>" right after the argument count
+# check, before any other validation, read, lock, or write. That line is a
+# cross-revision contract: bin/fm-remote-inherit-push.sh treats it, and only it,
+# as version skew and skips the item, so keep its wording and its place ahead of
+# every side effect.
 set -eu
 
 FM_HOME=${FM_HOME:?FM_HOME is required}
@@ -31,8 +44,8 @@ sha256_file() {
 # (FM_INHERITABLE_CONFIG in bin/fm-config-inherit-lib.sh), so this code root's
 # receiver and sender cannot drift silently. This runs under the remote
 # entrypoint's fixed empty environment, so the declaration is this code root's
-# own, never something the caller can widen over SSH; a caller from a different
-# revision must match it or the transfer fails closed.
+# own, never something the caller can widen over SSH; a path it does not declare
+# is refused with the cross-revision refusal line described above, never written.
 allowed() {
   local candidate
   while IFS= read -r candidate; do
@@ -50,6 +63,14 @@ EXPECTED_BYTES=$3
 EXPECTED_HASH=$4
 GENERATION=$5
 allowed "$REL" || die "path is not inherited material: $REL"
+case "$REL" in
+  config/*)
+    if fm_config_inherit_item_machine_local "${REL#config/}"; then
+      printf 'skipped: %s (machine-local; this host keeps its own value)\n' "$REL"
+      exit 0
+    fi
+    ;;
+esac
 case "$EXPECTED_BYTES" in ''|*[!0-9]*) die "expected bytes must be a nonnegative integer" ;; esac
 [ "${#EXPECTED_BYTES}" -le 10 ] || die "expected bytes exceed the byte bound"
 [ "$EXPECTED_BYTES" -le "$MAX_BYTES" ] || die "expected bytes exceed the byte bound"
