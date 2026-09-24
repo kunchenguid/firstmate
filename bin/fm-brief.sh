@@ -542,6 +542,10 @@ The report is the only thing that survives, so anything worth keeping must be in
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. Never put fleet vocabulary or a direct address into a commit message, PR title, PR body, issue, or code comment -
+   no "captain", "first mate"/"second mate", "crewmate", "brief", or any direct address to a person.
+   A PR number, issue number, or repo name is fine, since that is already shared language outside this tooling.
+   Write so the text stands on its own for any reader of this repo, including someone five years from now who has never used this tooling.
 
 $INBOX_SECTION
 
@@ -634,6 +638,10 @@ $ASK_USER_BLOCK
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. Never put fleet vocabulary or a direct address into a commit message, PR title, PR body, issue, or code comment -
+   no "captain", "first mate"/"second mate", "crewmate", "brief", or any direct address to a person.
+   A PR number, issue number, or repo name is fine, since that is already shared language outside this tooling.
+   Write so the text stands on its own for any reader of this repo, including someone five years from now who has never used this tooling.
 
 $INBOX_SECTION
 
