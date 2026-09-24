@@ -480,6 +480,117 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   pass "paused mid-acquire claimant backs off to active stealer"
 }
 
+# A write-denied parent (mode 0500 standing in for a sandbox) must fail fast,
+# not recurse into ".steal.steal..." until bash overflows its stack.
+test_lock_create_hard_failure_fails_fast_without_recursion() {
+  local dir state lockdir pid rc out steal_count
+  dir=$(make_case lock-create-hard-failure)
+  state="$dir/state"
+  mkdir -p "$state/locks"
+  lockdir="$state/locks/.test.lock"
+  chmod 0500 "$state/locks"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir" > "$dir/out" 2> "$dir/err" &
+  pid=$!
+  wait_for_exit "$pid" 100
+  rc=$?
+  chmod 0700 "$state/locks"
+  [ "$rc" -eq 0 ] \
+    || fail "a lock-creation failure with nothing to steal did not return cleanly and promptly (rc=$rc); see $dir/err"
+  out=$(cat "$dir/out")
+  [ "$out" = "rc=1 held=" ] \
+    || fail "lock creation under a write-denied parent was not reported as a clean, unheld failure: $out"
+  steal_count=$(find "$state" -name '*.steal*' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$steal_count" -eq 0 ] \
+    || fail "a hard lock-creation failure recursed into stealing anyway ($steal_count artifacts under $state)"
+  pass "a lock-creation failure with nothing to steal fails fast instead of recursing"
+}
+
+# A stale .steal chain deeper than the fixed bound of 8 is refused, not walked.
+test_lock_steal_recursion_is_depth_bounded() {
+  local dir state lockdir dead path i out pid rc
+  dir=$(make_case lock-steal-depth-bound)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  path="$lockdir"
+  i=0
+  while [ "$i" -le 10 ]; do
+    mkdir "$path" || fail "could not build fixture chain level $i"
+    printf '%s\n' "$dead" > "$path/pid"
+    path="$path.steal"
+    i=$((i + 1))
+  done
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "steal recursion reclaimed a chain deeper than the fixed bound: $out" ;;
+  esac
+
+  FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_acquire_wait_unless_refused "$2"; then rc=0; else rc=$?; fi
+    printf "rc=%s\n" "$rc"
+  ' _ "$LIB" "$lockdir" > "$dir/wait-out" 2> "$dir/wait-err" &
+  pid=$!
+  wait_for_exit "$pid" 20
+  rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "refusal-aware wait did not return promptly at the fixed depth bound (rc=$rc); see $dir/wait-err"
+  [ "$(cat "$dir/wait-out")" = "rc=1" ] \
+    || fail "refusal-aware wait did not refuse the exhausted stale chain: $(cat "$dir/wait-out")"
+  pass "steal recursion and refusal-aware wait halt at the fixed depth bound"
+}
+
+# The refusal-aware wait still waits for a live holder but refuses a denied parent.
+test_lock_wait_unless_refused_waits_for_holder_but_refuses_denied_parent() {
+  local dir state lockdir holder i out pid rc
+  dir=$(make_case lock-wait-unless-refused)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 1
+    : > "$3"
+    sleep 1
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" "$dir/held" &
+  holder=$!
+  i=0
+  while [ ! -e "$dir/held" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -e "$dir/held" ] || fail "the contention fixture never took its lock"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_acquire_wait_unless_refused "$2"; then echo acquired; else echo refused; fi
+  ' _ "$LIB" "$lockdir")
+  wait "$holder"
+  [ "$out" = acquired ] \
+    || fail "a lock held by a live process was refused instead of waited for: $out"
+
+  mkdir -p "$state/locks"
+  chmod 0500 "$state/locks"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_acquire_wait_unless_refused "$2"; then echo acquired; else echo refused; fi
+  ' _ "$LIB" "$state/locks/.test.lock" > "$dir/out" 2> "$dir/err" &
+  pid=$!
+  wait_for_exit "$pid" 100
+  rc=$?
+  chmod 0700 "$state/locks"
+  [ "$rc" -eq 0 ] \
+    || fail "waiting on a lock under a write-denied parent did not return (rc=$rc); see $dir/err"
+  [ "$(cat "$dir/out")" = refused ] \
+    || fail "a lock under a write-denied parent was not refused: $(cat "$dir/out")"
+  pass "waiting unless refused waits through a live holder and refuses a write-denied parent"
+}
+
 test_watch_restart_rejects_reused_pid() {
   local dir state fakebin out live pid i
   dir=$(make_case restart-reused-pid)
@@ -1209,6 +1320,9 @@ test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
+test_lock_create_hard_failure_fails_fast_without_recursion
+test_lock_steal_recursion_is_depth_bounded
+test_lock_wait_unless_refused_waits_for_holder_but_refuses_denied_parent
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover

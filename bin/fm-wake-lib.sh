@@ -559,12 +559,18 @@ fm_lock_claim() {
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
-  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+  # Set when we cannot write our own candidate (sandbox, read-only or full disk).
+  FM_LOCK_CREATE_REFUSED=
+  if ! ownerdir=$(fm_lock_owner_dir "$lockdir"); then
+    FM_LOCK_CREATE_REFUSED=1
+    return 1
+  fi
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
   if ! fm_lock_prepare_owner "$ownerdir"; then
+    FM_LOCK_CREATE_REFUSED=1
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
@@ -935,14 +941,30 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
-fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner current
+fm_lock_try_acquire() {  # <lockdir> [recursion-depth]
+  local lockdir=$1 depth=${2:-0} pid steal cur rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
+  FM_LOCK_STEAL_DEPTH_EXHAUSTED=
 
   if fm_lock_try_create "$lockdir"; then
     return 0
+  fi
+
+  steal="$lockdir.steal"
+  if { [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; } \
+    && { [ ! -e "$steal" ] && [ ! -L "$steal" ]; }; then
+    # Nothing to reclaim: recursing into .steal would only repeat the failure.
+    FM_LOCK_HELD_PID=
+    return 1
+  fi
+
+  if [ "$depth" -ge 8 ]; then
+    # Backstop: a stale .steal chain this deep is abandoned, not contention.
+    FM_LOCK_HELD_PID=
+    FM_LOCK_STEAL_DEPTH_EXHAUSTED=1
+    return 1
   fi
 
   fm_current_pid current || return 1
@@ -972,8 +994,7 @@ fm_lock_try_acquire() {
     return 1
   fi
 
-  steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  if ! fm_lock_try_acquire "$steal" "$((depth + 1))"; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
@@ -1038,6 +1059,18 @@ fm_lock_try_acquire() {
 fm_lock_acquire_wait() {
   local lockdir=$1
   while ! fm_lock_try_acquire "$lockdir"; do
+    sleep 0.1
+  done
+}
+
+# fm_lock_acquire_wait_unless_refused <lockdir>
+# Like fm_lock_acquire_wait, but returns 1 when waiting cannot help (creation
+# refused or steal depth exhausted); only for callers that check the result.
+fm_lock_acquire_wait_unless_refused() {
+  local lockdir=$1
+  while ! fm_lock_try_acquire "$lockdir"; do
+    [ -z "${FM_LOCK_CREATE_REFUSED:-}" ] \
+      && [ -z "${FM_LOCK_STEAL_DEPTH_EXHAUSTED:-}" ] || return 1
     sleep 0.1
   done
 }
