@@ -2053,6 +2053,80 @@ seed_canonical_poll() {
   fm_pr_poll_publish_prepared || fail "could not publish retirement fixture"
 }
 
+# Fixture is the static PR poll immediately before Gerrit support changed its
+# bytes; the pinned historical hash proves the test is not using live source.
+test_pre_update_draft_poll_retirement() {
+  local dir state id url number rc output before
+  dir=$(make_case pre-update-drafts)
+  state="$dir/home/state"
+  [ "$(fm_pr_sha256 "$ROOT/tests/fixtures/pr-poll-pre-gerrit.sh")" = e87aae384ec62ae28f78a0779020f52f7b891ba0cafea2551b5a2c4e967870cf ] \
+    || fail "historical template fixture is not the pinned pre-update template"
+  for id in draft-a draft-b draft-c; do
+    # Use numeric PRs; the three registrations must be independent generations.
+    case "$id" in draft-a) number=1 ;; draft-b) number=2 ;; draft-c) number=3 ;; esac
+    url="https://github.com/o/r/pull/$number"
+    write_poll_meta "$state" "$id" "$url"
+    seed_canonical_poll "$dir" "$id" "$url" "$ROOT/tests/fixtures/pr-poll-pre-gerrit.sh"
+    ! fm_pr_poll_artifacts_valid "$state" "$id" "$POLL" \
+      || fail "old template unexpectedly accepted by the current validator"
+  done
+  write_poll_meta "$state" live https://github.com/o/r/pull/4
+  seed_canonical_poll "$dir" live https://github.com/o/r/pull/4
+  before=$(fm_pr_sha256 "$state/live.pr-poll-registration")
+  add_stop_custom_check "$dir"
+  FM_TEST_GH_DRAFT=true FM_TEST_GH_LOG="$dir/gh.log" run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err" || fail "draft cleanup watcher failed: $(cat "$dir/watch.err")"
+  output=$(cat "$dir/watch.out")
+  case "$output" in *'rejected unauthenticated state checks'*) fail "authenticated draft retirement still raised the alarm" ;; esac
+  for id in draft-a draft-b draft-c; do
+    assert_poll_absent "$state" "$id"
+    case "$id" in draft-a) number=1 ;; draft-b) number=2 ;; draft-c) number=3 ;; esac
+    grep -qxF "pr=https://github.com/o/r/pull/$number" "$state/$id.meta" \
+      || fail "draft cleanup changed task metadata"
+  done
+  [ "$(fm_pr_sha256 "$state/live.pr-poll-registration")" = "$before" ] \
+    || fail "draft cleanup changed another live poll"
+  [ -f "$state/live.check.sh" ] || fail "draft cleanup removed a current live poll"
+  [ -s "$dir/gh.log" ] || fail "draft status was not confirmed by the forge"
+  ack_watcher_cycle "$state" || fail "draft cleanup wake could not be acknowledged"
+  FM_TEST_GH_DRAFT=true FM_TEST_GH_LOG="$dir/gh.log" run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch-again.out" 2> "$dir/watch-again.err" \
+    || fail "second watcher cycle failed: $(cat "$dir/watch-again.err")"
+  ! grep -q 'rejected unauthenticated state checks' "$dir/watch-again.out" \
+    || fail "retired draft poll raised a repeated alarm"
+  for id in 1 2 3; do
+    ! grep -qF "pr view https://github.com/o/r/pull/$id --json state" "$dir/gh.log" \
+      || fail "old check was executed"
+  done
+  # Once ready, the ordinary registration entrypoint remains available.
+  FM_TEST_GH_DRAFT=false run_check_entry "$dir" draft-a https://github.com/o/r/pull/1 \
+    > "$dir/rearm.out" 2> "$dir/rearm.err" || fail "ready draft could not rearm: $(cat "$dir/rearm.err")"
+  fm_pr_poll_artifacts_valid "$state" draft-a "$POLL" || fail "ready poll was not currently authenticated"
+  pass "three historical draft polls retire quietly without affecting live polls or ready rearming"
+
+  for id in altered ready; do
+    dir=$(make_case "old-$id")
+    state="$dir/home/state"
+    write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$ROOT/tests/fixtures/pr-poll-pre-gerrit.sh"
+    if [ "$id" = altered ]; then
+      printf 'untrusted\n' >> "$state/task-a.check.sh"
+    fi
+    set +e
+    FM_TEST_GH_DRAFT=$([ "$id" = ready ] && echo false || echo true) \
+      FM_TEST_GH_LOG="$dir/gh.log" run_watcher_bounded "$dir/home" "$dir/fakebin" \
+      > "$dir/watch.out" 2> "$dir/watch.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || fail "refusal watcher failed for $id"
+    grep -q 'rejected unauthenticated state checks:.*task-a.check.sh' "$dir/watch.out" \
+      || fail "unsafe or ready historical poll was silently retired ($id)"
+    [ -f "$state/task-a.check.sh" ] || fail "refusal removed the $id check"
+    ! grep -q -- '--json state' "$dir/gh.log" || fail "unauthenticated bytes ran ($id)"
+  done
+  pass "modified checks and ready historical polls retain the unauthorized-check alarm"
+}
+
 add_stop_custom_check() {
   local dir=$1 state
   state="$dir/home/state"
@@ -3380,6 +3454,7 @@ SH
   pass "device re-record publication waits without rewriting its registration"
 }
 
+test_pre_update_draft_poll_retirement
 test_parser_matrix
 test_gitlab_merge_watch
 test_gerrit_merge_watch

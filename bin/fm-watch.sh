@@ -2490,6 +2490,26 @@ retire_merged_pr_poll() {  # <id>
   fi
 }
 
+# A pre-Gerrit template has a different hash from the current static poll.
+# Only an exact historical GitHub generation for a forge-confirmed draft may
+# be retired; every other unauthenticated check still raises the normal alarm.
+retire_legacy_draft_pr_poll() {  # <id>
+  local id=$1 retired=1
+  fm_pr_poll_artifacts_content_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" legacy-github \
+    && [ "$FM_PR_REG_PROVIDER" = github ] || return 1
+  PR_POLL_CONTROL_LOCK="$STATE/.control-$id.lock"
+  fm_lock_acquire_wait "$PR_POLL_CONTROL_LOCK" || exit 1
+  PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$id.lock"
+  fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK" || exit 1
+  if fm_pr_poll_retire_legacy_draft "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+    retired=0
+    triage_log "retired pre-update merge poll for draft $id; re-arm when ready"
+  fi
+  pr_poll_publish_release || exit 1
+  pr_poll_control_release || exit 1
+  return "$retired"
+}
+
 # A poll armed before a state volume remount can fail capture only because its
 # registration names the old device number; bin/fm-pr-lib.sh
 # fm_pr_poll_registration_rerecord_device owns the proof and the rewrite.
@@ -2662,6 +2682,9 @@ while :; do
           fm_custom_check_snapshot_cleanup
         else
           fm_custom_check_snapshot_cleanup
+          if retire_legacy_draft_pr_poll "$id"; then
+            continue
+          fi
           rejected_checks="$rejected_checks $c"
           continue
         fi

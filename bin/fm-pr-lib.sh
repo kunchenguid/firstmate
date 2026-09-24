@@ -665,10 +665,11 @@ fm_pr_poll_artifacts_valid() {
   [ "$FM_PR_REG_CHECK_IDENTITY" = "$check_identity" ]
 }
 
-# Everything fm_pr_poll_artifacts_valid proves except that the registration's
-# recorded file identities name the live sidecar and check. Success alone is
-# never authentication. On success FM_PR_DATA_*, FM_PR_REG_*, and FM_PR_META_*
-# hold the parsed records.
+# Everything fm_pr_poll_artifacts_valid proves except the recorded file
+# identities. With the internal legacy-github selector, compare the check to
+# the pinned pre-Gerrit template hash instead of the current template; this
+# mode never authenticates a runnable poll. On success FM_PR_DATA_*, FM_PR_REG_*,
+# and FM_PR_META_* hold the parsed records.
 fm_pr_poll_artifacts_content_valid() {
   local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash
   fm_pr_task_id_valid "$id" || return 1
@@ -683,7 +684,12 @@ fm_pr_poll_artifacts_content_valid() {
   fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
-  cmp -s "$template" "$check" || return 1
+  if [ "${4:-}" = legacy-github ]; then
+    # Exact pre-Gerrit static template, not a hash supplied by state or the caller.
+    [ "$(fm_pr_sha256 "$check")" = e87aae384ec62ae28f78a0779020f52f7b891ba0cafea2551b5a2c4e967870cf ] || return 1
+  else
+    cmp -s "$template" "$check" || return 1
+  fi
   fm_pr_poll_data_parse "$data" || return 1
   data_hash=$(fm_pr_sha256 "$data") || return 1
   template_hash=$(fm_pr_sha256 "$check") || return 1
@@ -787,6 +793,47 @@ fm_pr_poll_registration_rerecord_device() {  # <state> <id> <template>
     return 1
   fi
   fm_pr_poll_artifacts_valid "$state" "$id" "$template"
+}
+
+# Retire only the exact pre-Gerrit GitHub poll for a confirmed draft. Its
+# registration must still bind the original file objects and hashes to the
+# canonical task metadata. Never run the old check, and never accept a legacy
+# hash from state as proof of the template. Caller holds both task locks.
+# A failed or unreadable forge lookup leaves the check rejected as usual.
+fm_pr_poll_retire_legacy_draft() {  # <state> <id> <template>
+  local state=$1 id=$2 template=$3 receipt data_identity check_identity reg_identity reg_hash url draft device
+  fm_pr_task_id_valid "$id" || return 1
+  receipt="$state/$id.pr-poll-retirement"
+  [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  fm_pr_poll_artifacts_content_valid "$state" "$id" "$template" legacy-github || return 1
+  [ "$FM_PR_REG_PROVIDER" = github ] || return 1
+  data_identity=$(fm_pr_file_identity "$state/$id.pr-poll") || return 1
+  check_identity=$(fm_pr_file_identity "$state/$id.check.sh") || return 1
+  [ "$FM_PR_REG_DATA_IDENTITY" = "$data_identity" ] || return 1
+  [ "$FM_PR_REG_CHECK_IDENTITY" = "$check_identity" ] || return 1
+  reg_identity=$(fm_pr_file_identity "$state/$id.pr-poll-registration") || return 1
+  reg_hash=$(fm_pr_sha256 "$state/$id.pr-poll-registration") || return 1
+  device=$(fm_pr_file_device "$state") || return 1
+  url=$FM_PR_REG_URL
+  command -v gh >/dev/null 2>&1 || return 1
+  draft=$(gh pr view "$url" --json isDraft 2>/dev/null) || return 1
+  [ "$(fm_pr_json_draft_state "$draft")" = true ] || return 1
+  # The forge read may have taken time; prove that the same generation remains.
+  fm_pr_poll_artifacts_content_valid "$state" "$id" "$template" legacy-github || return 1
+  [ "$FM_PR_REG_PROVIDER" = github ] && [ "$FM_PR_REG_URL" = "$url" ] || return 1
+  [ "$FM_PR_REG_DATA_IDENTITY" = "$data_identity" ] || return 1
+  [ "$FM_PR_REG_CHECK_IDENTITY" = "$check_identity" ] || return 1
+  [ "$(fm_pr_file_identity "$state/$id.pr-poll-registration")" = "$reg_identity" ] || return 1
+  [ "$(fm_pr_sha256 "$state/$id.pr-poll-registration")" = "$reg_hash" ] || return 1
+  [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  # Revoke the runnable name first. A failed subsequent removal is not an
+  # executable poll; a later supported fm-pr-check registration can replace it.
+  fm_pr_poll_retirement_remove_exact "$state/$id.check.sh" "$device" \
+    "$check_identity" "$FM_PR_REG_TEMPLATE_HASH" || return 1
+  fm_pr_poll_retirement_remove_exact "$state/$id.pr-poll-registration" "$device" \
+    "$reg_identity" "$reg_hash" || return 1
+  fm_pr_poll_retirement_remove_exact "$state/$id.pr-poll" "$device" \
+    "$data_identity" "$FM_PR_REG_DATA_HASH"
 }
 
 fm_pr_poll_snapshot_capture() {
