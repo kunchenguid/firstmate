@@ -14,6 +14,12 @@ set -u
 
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
+# The relaunch guard is the one check both launch paths share, and its Pi,
+# `ordinary`, and harness-switch axes have no end-to-end relaunch path here, so
+# those cases call the shared function directly; tests/fm-control-relaunch.test.sh
+# drives it end to end through a real relaunch.
+# shellcheck source=bin/fm-worker-account-lib.sh
+. "$ROOT/bin/fm-worker-account-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-worker-account)
 unset LAVISH_AXI_HOST ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN PI_CODING_AGENT_DIR OPENAI_API_KEY
@@ -383,6 +389,87 @@ test_local_secondmate_reads_the_launching_home_pin() {
   pass "a local secondmate reads the launching home's pin and its own home's file is never inherited over"
 }
 
+# guard_says <expect-rc> <message> <guard args...>
+guard_says() {
+  local want=$1 msg=$2 out rc
+  shift 2
+  out=$(fm_worker_account_relaunch_guard "$@" 2>&1); rc=$?
+  [ "$rc" = "$want" ] || fail "$msg: expected exit $want, got $rc ($out)"
+  GUARD_OUT=$out
+}
+
+test_relaunch_guard_keeps_a_task_on_its_recorded_account() {
+  local cfg=$TMP_ROOT/guard/config pi_home=$TMP_ROOT/guard/pi-home
+  mkdir -p "$cfg" "$TMP_ROOT/guard/a" "$TMP_ROOT/guard/b" "$pi_home/.pi/agent" "$TMP_ROOT/guard/pi-other"
+  local a=$TMP_ROOT/guard/a b=$TMP_ROOT/guard/b
+
+  printf '%s\n' "$a" > "$cfg/claude-account"
+  guard_says 0 "the pin still on the recorded account must not refuse" \
+    claude "$cfg" g1 claude "$a"
+  [ -z "$GUARD_OUT" ] || fail "an unchanged pin must say nothing: $GUARD_OUT"
+  guard_says 0 "the same account reached by another spelling must not refuse" \
+    claude "$cfg" g1 claude "$a/."
+  guard_says 0 "a task with no recorded account must relaunch as before" \
+    claude "$cfg" g1 claude ""
+  guard_says 0 "a relaunch onto a harness reading the other pin file has nothing to compare" \
+    pi "$cfg" g1 claude "$a"
+
+  guard_says 1 "a pin moved off the recorded account must refuse" \
+    claude "$cfg" g1 claude "$b"
+  assert_contains "$GUARD_OUT" "task g1 was launched on account $b" "the refusal should name the recorded account"
+  assert_contains "$GUARD_OUT" "config/claude-account now selects account $a" "the refusal should name the account the pin selects"
+  assert_contains "$GUARD_OUT" "Set config/claude-account back to '$b'" "the refusal should say how to proceed"
+
+  # A removed pin selects what an unpinned launch would use, so it is measured
+  # against the recorded account like any other pin.
+  rm "$cfg/claude-account"
+  CLAUDE_CONFIG_DIR='' guard_says 1 "a removed pin that would move the task to the ordinary account must refuse" \
+    claude "$cfg" g1 claude "$b"
+  assert_contains "$GUARD_OUT" "config/claude-account is now absent, so the relaunch would use the ordinary account (~/.claude with CLAUDE_CONFIG_DIR unset)" \
+    "the refusal should name the account an unpinned relaunch would use"
+  assert_contains "$GUARD_OUT" "Set config/claude-account back to '$b'" "the refusal should say how to proceed"
+  CLAUDE_CONFIG_DIR=$a guard_says 1 "a removed pin that would move the task to the ambient root must refuse" \
+    claude "$cfg" g1 claude "$b"
+  assert_contains "$GUARD_OUT" "would use the ambient account $a" "the refusal should name the ambient root"
+  CLAUDE_CONFIG_DIR=$b guard_says 0 "a removed pin whose ambient root is the recorded account must not refuse" \
+    claude "$cfg" g1 claude "$b"
+  CLAUDE_CONFIG_DIR='' guard_says 0 "a removed pin on the recorded ordinary account must not refuse" \
+    claude "$cfg" g1 claude ordinary
+
+  # `ordinary` is an account like any other: for Claude it is the one no
+  # directory is named for, and for Pi it is the root under HOME.
+  printf 'ordinary\n' > "$cfg/claude-account"
+  guard_says 1 "a pin moved from a named root to the ordinary account must refuse" \
+    claude "$cfg" g1 claude "$a"
+  assert_contains "$GUARD_OUT" "now selects the ordinary account (~/.claude with CLAUDE_CONFIG_DIR unset)" \
+    "the refusal should name the ordinary Claude account"
+  guard_says 0 "the unchanged ordinary Claude account must not refuse" \
+    claude "$cfg" g1 claude ordinary
+
+  local saved_home=$HOME
+  HOME=$pi_home
+  printf '%s\nopenai-codex\n' "$TMP_ROOT/guard/pi-other" > "$cfg/pi-account"
+  guard_says 1 "a Pi pin moved off the recorded root must refuse" \
+    pi "$cfg" g1 pi-signed ordinary
+  assert_contains "$GUARD_OUT" "launched on the ordinary account (~/.pi/agent)" "the refusal should name the ordinary Pi account"
+  assert_contains "$GUARD_OUT" "config/pi-account now selects account $TMP_ROOT/guard/pi-other" \
+    "the refusal should name the Pi root the pin selects"
+  printf '%s\nopenai-codex\n' "$pi_home/.pi/agent" > "$cfg/pi-account"
+  guard_says 0 "a Pi pin naming the ordinary root outright must not refuse" \
+    pi-signed "$cfg" g1 pi ordinary
+  rm "$cfg/pi-account"
+  guard_says 0 "a removed Pi pin on the recorded ordinary root must not refuse" \
+    pi "$cfg" g1 pi ordinary
+  guard_says 1 "a removed Pi pin that would move the task off its recorded root must refuse" \
+    pi "$cfg" g1 pi "$TMP_ROOT/guard/pi-other"
+  assert_contains "$GUARD_OUT" "config/pi-account is now absent, so the relaunch would use the ambient account $pi_home/.pi/agent" \
+    "the refusal should name the Pi root an unpinned relaunch would use"
+  PI_CODING_AGENT_DIR=$TMP_ROOT/guard/pi-other guard_says 0 "a removed Pi pin whose ambient root is the recorded one must not refuse" \
+    pi "$cfg" g1 pi "$TMP_ROOT/guard/pi-other"
+  HOME=$saved_home
+  pass "the relaunch guard refuses only a pin, present or removed, that has moved off the task's recorded account"
+}
+
 test_absent_pin_keeps_the_launch_unchanged
 test_claude_pin_selects_the_root_and_sheds_ambient_credentials
 test_claude_pin_refuses_a_signed_out_root_despite_an_ambient_login
@@ -396,5 +483,6 @@ test_raw_claude_command_receives_the_pin
 test_raw_claude_account_override_refuses_under_a_pin
 test_raw_claude_account_override_is_kept_without_a_pin
 test_local_secondmate_reads_the_launching_home_pin
+test_relaunch_guard_keeps_a_task_on_its_recorded_account
 
 echo "# all fm-worker-account tests passed"

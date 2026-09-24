@@ -790,27 +790,106 @@ test_signed_out_worker_account_pin_refuses_before_stop() {
   pass "fm-control relaunch: a signed-out worker account pin refuses before the old agent stops"
 }
 
-test_worker_account_pin_follows_the_relaunch() {
-  local dir out rc id=rl-acct
-  dir=$(new_case acct "$id")
-  add_ship_task "$dir" "$id" claude
+# A relaunch keeps the task on the account it was launched on: the pin decides
+# new launches, and a pin that has since moved elsewhere refuses rather than
+# starting the replacement in a directory the outgoing worker's session state
+# is not in.
+pin_and_relaunch_once() {  # <case-dir> <id> <root>
+  local dir=$1 id=$2 root=$3 out rc
   make_claude_auth_stub "$dir"
-  mkdir -p "$dir/home/config" "$dir/work"
-  : > "$dir/work/.credentials.json"
-  printf '%s\n' "$dir/work" > "$dir/home/config/claude-account"
+  mkdir -p "$dir/home/config" "$root"
+  : > "$root/.credentials.json"
+  printf '%s\n' "$root" > "$dir/home/config/claude-account"
   out=$(run_control "$dir" "$id" relaunch --note "pinned account"); rc=$?
   expect_code 0 "$rc" "a relaunch under a signed-in account pin should succeed"$'\n'"$out"
-  [ "$(meta_field "$dir" "$id" account)" = "$dir/work" ] || fail "the relaunched record should carry the pinned account"
-  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/work'" \
+  [ "$(meta_field "$dir" "$id" account)" = "$root" ] || fail "the relaunched record should carry the pinned account"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$root'" \
     "the replacement should launch under the pinned root"
+}
+
+test_worker_account_pin_moved_since_the_launch_refuses() {
+  local dir out rc id=rl-acct-moved
+  dir=$(new_case acct-moved "$id")
+  add_ship_task "$dir" "$id" claude
+  pin_and_relaunch_once "$dir" "$id" "$dir/work"
+  mkdir -p "$dir/other"
+  : > "$dir/other/.credentials.json"
+  printf '%s\n' "$dir/other" > "$dir/home/config/claude-account"
+  cp "$dir/home/state/$id.meta" "$dir/meta-before"
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --note "pin moved"); rc=$?
+  expect_code 1 "$rc" "a relaunch under a pin that has moved off the recorded account must refuse"
+  assert_contains "$out" "task $id was launched on account $dir/work, but config/claude-account now selects account $dir/other" \
+    "the refusal should name the recorded account and the one the pin now selects"
+  assert_contains "$out" "Set config/claude-account back to '$dir/work'" \
+    "the refusal should say how to proceed"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a moved pin must refuse before the running agent stops"
+  [ ! -s "$dir/fake/literal" ] || fail "a moved pin must refuse before any replacement is launched"
+  cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "a refused relaunch must leave the task record untouched"
+  # The launch owner refuses on its own, so reaching it directly - with an
+  # agent-free endpoint, which is all it asks for - cannot move the task either.
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" "$id" --relaunch); rc=$?
+  expect_code 1 "$rc" "fm-spawn --relaunch under a moved pin must refuse on its own"
+  assert_contains "$out" "now selects account $dir/other" "the launch owner should refuse with the same message"
+  [ ! -s "$dir/fake/literal" ] || fail "the launch owner must refuse before any replacement is launched"
+  cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "the launch owner's refusal must leave the task record untouched"
+  pass "fm-control relaunch: a pin that has moved off the task's recorded account refuses and changes nothing"
+}
+
+test_worker_account_pin_on_the_recorded_account_relaunches() {
+  local dir out rc id=rl-acct-same
+  dir=$(new_case acct-same "$id")
+  add_ship_task "$dir" "$id" claude
+  pin_and_relaunch_once "$dir" "$id" "$dir/work"
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --note "same account again"); rc=$?
+  expect_code 0 "$rc" "a relaunch under the unchanged pin should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/work" ] || fail "the record should still carry the recorded account"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/work'" \
+    "the replacement should launch under the recorded root"
+  # The same directory reached by another spelling is the same account, so it
+  # relaunches rather than reading a rewritten pin file as a move.
+  ln -s "$dir/work" "$dir/work-link"
+  printf '%s\n' "$dir/work-link" > "$dir/home/config/claude-account"
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --note "same account, other spelling"); rc=$?
+  expect_code 0 "$rc" "a pin naming the recorded account by another path should relaunch"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/work-link'" \
+    "the replacement should launch under the account the pin names"
+  pass "fm-control relaunch: a pin still on the task's recorded account relaunches it"
+}
+
+test_worker_account_pin_removed_refuses() {
+  local dir out rc id=rl-acct-gone
+  dir=$(new_case acct-gone "$id")
+  add_ship_task "$dir" "$id" claude
+  pin_and_relaunch_once "$dir" "$id" "$dir/work"
   rm "$dir/home/config/claude-account"
+  cp "$dir/home/state/$id.meta" "$dir/meta-before"
   : > "$dir/fake/literal"
   out=$(run_control "$dir" "$id" relaunch --note "pin removed"); rc=$?
-  expect_code 0 "$rc" "a relaunch after the pin is removed should succeed"$'\n'"$out"
-  assert_no_grep "account=" "$dir/home/state/$id.meta" "a relaunch without a pin must drop the previous account from the record"
+  expect_code 1 "$rc" "a relaunch after the pin is removed must refuse"
+  assert_contains "$out" "task $id was launched on account $dir/work, but config/claude-account is now absent, so the relaunch would use the ordinary account" \
+    "the refusal should name the recorded account and the one an unpinned relaunch would use"
+  assert_contains "$out" "Set config/claude-account back to '$dir/work'" \
+    "the refusal should say how to proceed"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a removed pin must refuse before the running agent stops"
+  [ ! -s "$dir/fake/literal" ] || fail "a removed pin must refuse before any replacement is launched"
+  cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "a refused relaunch must leave the task record untouched"
+  pass "fm-control relaunch: a removed pin that would move the task off its recorded account refuses and changes nothing"
+}
+
+test_worker_account_never_pinned_relaunches_unchanged() {
+  local dir out rc id=rl-acct-never
+  dir=$(new_case acct-never "$id")
+  add_ship_task "$dir" "$id" claude
+  out=$(run_control "$dir" "$id" relaunch --note "never pinned"); rc=$?
+  expect_code 0 "$rc" "a relaunch in a home that never pinned the runner should succeed"$'\n'"$out"
+  assert_no_grep "account=" "$dir/home/state/$id.meta" "a never-pinned task record must not gain an account"
   assert_not_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR=" \
     "an unpinned replacement must launch exactly as before"
-  pass "fm-control relaunch: the replacement follows the home's current worker account pin"
+  pass "fm-control relaunch: a home that never pinned the runner relaunches unchanged"
 }
 
 test_explicit_model_wins_over_the_recorded_one() {
@@ -2349,7 +2428,10 @@ test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
-test_worker_account_pin_follows_the_relaunch
+test_worker_account_pin_moved_since_the_launch_refuses
+test_worker_account_pin_on_the_recorded_account_relaunches
+test_worker_account_pin_removed_refuses
+test_worker_account_never_pinned_relaunches_unchanged
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared
