@@ -91,7 +91,8 @@ case "${1:-}" in
             corr=$(cat "$inbox"/*.msg 2>/dev/null \
               | grep -oE 'corr=[0-9a-f]{16}' | head -1)
             if [ -n "$corr" ]; then
-              printf 'done [%s]: open records written down\n' "$corr" \
+              verb=$(cat "$D/answer-verb" 2>/dev/null || printf 'done')
+              printf '%s [%s]: persistence response\n' "$verb" "$corr" \
                 >> "$(cat "$D/answer-status")"
             fi
           fi
@@ -323,41 +324,66 @@ test_arrived_answer_precedes_deadline_check() {
   pass "T2b an arrived persist answer is resolved before timeout"
 }
 
-# --- T2c: an answer arriving between resolution and timeout wins -------------
+test_only_done_persist_reply_releases_restart_gate() {
+  local dir out rc verb phase
+  for verb in blocked failed needs-decision working; do
+    dir=$(new_case "persist-$verb")
+    add_local_mate "$dir" sm1
+    arm_answer "$dir" sm1
+    printf '%s\n' "$verb" > "$dir/fake/answer-verb"
+
+    out=$(FM_TEST_PERSIST_WAIT=0 run_restart "$dir" sm1); rc=$?
+
+    expect_code 3 "$rc" "$verb persistence reply must not authorize a restart"$'\n'"$out"
+    assert_not_contains "$out" "restarted: sm1" "$verb persistence reply authorized a restart"
+    assert_contains "$out" "nudged: sm1:" "$verb persistence reply did not take the safe fallback"
+    [ "$verb" = working ] || assert_contains "$out" "reported $verb instead of done" \
+      "$verb persistence reply reason was not reported"
+    assert_no_grep '^/exit$' "$dir/fake/literal" "$verb persistence reply stopped the live mate"
+    assert_absent "$dir/home/state/sm1.control-relaunch" \
+      "$verb persistence reply opened a relaunch transaction"
+    phase=$(grep -h '^phase=' "$dir/home/state/pending-replies"/* | tail -1 | cut -d= -f2-)
+    if [ "$verb" = working ]; then
+      [ "$phase" = awaiting_report ] || fail "progress reply unexpectedly settled its persistence expectation"
+    else
+      [ "$phase" = resolved ] || fail "terminal non-success reply did not settle its persistence expectation"
+    fi
+  done
+  pass "T2c only a correlated done persistence reply releases the restart gate"
+}
+
+# --- T2d: progress does not release the gate, but later success does ---------
 test_answer_between_resolution_and_timeout_wins() {
   local dir out rc
-  dir=$(new_case answer-at-timeout-decision)
+  dir=$(new_case answer-during-wait)
   add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  printf 'working\n' > "$dir/fake/answer-verb"
 
-  # Delay the modelled answer until the first resolution attempt has completed
-  # its unsuccessful status scan. The real pending-reply machinery publishes
-  # that scan signature with mv; this wrapper appends the correlated answer only
-  # after that publication, reproducing the boundary race deterministically.
-  cat > "$dir/fakebin/mv" <<'SH'
+  # The live mate first reports progress, then completes persistence while the
+  # restart pass waits. The first status must not release the gate; the later
+  # terminal success must still be observed before timeout.
+  cat > "$dir/fakebin/sleep" <<'SH'
 #!/usr/bin/env bash
 set -u
-/bin/mv "$@" || exit $?
-target=${!#}
-case "$target" in
-  "${FM_FAKE_DIR%/fake}"/home/state/pending-replies/*)
-    if [ ! -e "$FM_FAKE_DIR/answer-after-scan" ] \
-      && grep -q '^parent_status_scan_signature=.' "$target"; then
-      : > "$FM_FAKE_DIR/answer-after-scan"
-      corr=${target##*/}
-      status=$(sed -n 's/^parent_status=//p' "$target")
-      printf 'done [corr=%s]: open records written down\n' "$corr" >> "$status"
-    fi
-    ;;
-esac
+inbox=$(cat "$FM_FAKE_DIR/answer-inbox" 2>/dev/null || true)
+status=$(cat "$FM_FAKE_DIR/answer-status" 2>/dev/null || true)
+corr=$(cat "$inbox"/*.msg 2>/dev/null | grep -oE 'corr=[0-9a-f]{16}' | head -1)
+if [ -n "$corr" ] && [ ! -e "$FM_FAKE_DIR/answer-after-progress" ] \
+  && grep -q "^working \\[$corr\\]" "$status"; then
+  : > "$FM_FAKE_DIR/answer-after-progress"
+  printf 'done [%s]: persistence completed\n' "$corr" >> "$status"
+fi
+/bin/sleep 0.01
 SH
-  chmod +x "$dir/fakebin/mv"
+  chmod +x "$dir/fakebin/sleep"
 
-  out=$(FM_TEST_PERSIST_WAIT=0 run_restart "$dir" sm1); rc=$?
+  out=$(FM_TEST_PERSIST_WAIT=2 run_restart "$dir" sm1); rc=$?
 
-  expect_code 0 "$rc" "an answer already on disk at the timeout decision must release the gate"$'\n'"$out"
-  assert_contains "$out" "restarted: sm1" "the reply that raced the timeout was ignored"
+  expect_code 0 "$rc" "a later terminal success must release the gate after progress"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1" "the later correlated success was ignored"
   assert_not_contains "$out" "nudged: sm1" "a confirmed mate must not take the timeout fallback"
-  pass "T2c a reply between the preliminary scan and timeout decision wins"
+  pass "T2d progress leaves the gate open for a later terminal success"
 }
 
 # --- T3: a runtime that cannot prove a restart never gets one ----------------
@@ -842,6 +868,7 @@ test_already_current_unprovable_mate_stays_on_the_nudge_path() {
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
+test_only_done_persist_reply_releases_restart_gate
 test_answer_between_resolution_and_timeout_wins
 test_unprovable_runtime_falls_back
 test_unknown_mate_is_accounted_for
