@@ -111,6 +111,8 @@ For every changed maintained prose surface, identify its inventory audience, aut
 Move or delete evidence only after the current owner and regression pointer are verified.
 After all documentation, review-fix, and lint-fix commits, review the complete branch diff again against those criteria rather than reviewing only the latest commit.
 Run `bin/fm-doc-audience-check.sh`; it enforces classification, README setup routing, local link targets, and owner pointers without keyword-linting legitimate evidence prose.
+For guidance-only or documentation-only changes, run only static checks and narrow tests directly required by acceptance; obtain separate captain approval before live-session, watcher, or multi-scenario validation.
+Report validation expansion and retries with measured elapsed time and available token telemetry; omit token estimates without telemetry (see `AGENTS.md` section 9).
 
 ## No-mistakes test configuration
 
