@@ -104,7 +104,7 @@ Absence leaves the home exactly as it is without the host, on every harness; a P
 The file may be empty, or hold one line `<engine> [<model>]`:
 
 - empty or `default` selects the primary harness's own engine at that engine's default model (`sonnet` for the Claude engine);
-- `<engine> [<model>]` names a verified engine, currently only `claude`, and optionally the engine's own model name or alias.
+- `<engine> [<model>]` names a verified engine, currently only `claude`, and optionally the engine's own model name or alias; `default <model>` selects the primary harness's engine with that model.
 
 An engine that is not verified, a primary with no verified engine, or a malformed line leaves the host with no engine: it takes no wake, every wake reaches main as it would without the host, and each away-posture wake carries a line naming the problem.
 The file is read at every wake, so a change applies at the next one without a restart.

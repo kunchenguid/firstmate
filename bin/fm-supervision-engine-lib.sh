@@ -13,9 +13,10 @@
 # ONE ENGINE TURN (fm_supervision_engine_turn). One prompt to one engine
 # conversation, bounded, from the tracked code root, with the environment the
 # caller exported (the host exports the branch actor, the lease holder pid,
-# the primary-harness pin, and the report-turn id). Success means the engine
-# exited 0 and did not report an error; the host separately requires a durable
-# report before it counts a wake handled. The turn is bounded by fm_exec_timed
+# the primary-harness pin, and the report-turn id). The runner returns the
+# process exit status; the host separately requires a complete successful
+# result, a durable report, and acknowledgement before counting a wake handled.
+# The turn is bounded by fm_exec_timed
 # (bin/fm-timeout-lib.sh), and the engine's descendants are snapshotted once a
 # second while it runs, because an engine CLI runs every tool command in a
 # process group of its own that the bound's group signal cannot reach: once
