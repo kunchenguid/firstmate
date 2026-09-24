@@ -15,6 +15,7 @@ import sys
 import time
 from contextlib import contextmanager
 from email.utils import getaddresses
+
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -139,6 +140,7 @@ def afk_contract_lock():
         process.stdout.close()
 
 
+
 def atomic_json(path, value):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
@@ -183,6 +185,7 @@ def redact_secrets(text):
         replacement = ""
     for secret in sorted(secret_values, key=len, reverse=True):
         text = text.replace(secret, replacement)
+
     return text
 
 
@@ -204,6 +207,7 @@ def outcomes_by_seq():
                 return None
             rows[row["seq"]] = row
     except ValueError:
+
         return None
     return rows
 
@@ -247,6 +251,7 @@ def queue_unprocessed():
         return 0
     if config is None:
         return 1
+
     rows = outcomes_by_seq()
     if rows is None:
         print("fm-afk-email: outcome store is unreadable; pending email was not queued", file=sys.stderr)
@@ -260,6 +265,7 @@ def queue_unprocessed():
     except ValueError:
         print("fm-afk-email: outcome markers are invalid; pending email was not queued", file=sys.stderr)
         return 1
+
     PENDING.mkdir(mode=0o700, parents=True, exist_ok=True)
     SENT.mkdir(mode=0o700, parents=True, exist_ok=True)
     queued = 0
@@ -281,6 +287,7 @@ def queue_unprocessed():
             "seq": seq,
             "task": safe_text(redact_secrets(str(row.get("task", ""))), 160),
             "summary": safe_text(redact_secrets(str(row.get("summary", "")))),
+
             "token": token,
             "token_hash": token_digest(token),
             "away_epoch": posture["entered_epoch"],
@@ -309,6 +316,7 @@ def flush_while_contract_locked():
     if config is None:
         return 1
     with afk_state_lock():
+
         candidates = []
         for path in sorted(PENDING.glob("*.json"), key=lambda item: int(item.stem) if item.stem.isdigit() else 0):
             item = read_json(path)
@@ -327,6 +335,7 @@ def flush_while_contract_locked():
                 ):
                     if field in sent_item:
                         item[field] = sent_item[field]
+
             candidates.append((path, item))
             if len(candidates) >= MAX_BATCH_ITEMS:
                 break
@@ -365,6 +374,7 @@ def flush_while_contract_locked():
             item["send_started_epoch"] = send_started_epoch
             item["send_expires_epoch"] = send_started_epoch + TOKEN_TTL
             atomic_json(path, item)
+
         lines.extend([
             "Replies from the configured address with an unexpired item code are treated as your words for that item only.",
             "Other messages are untrusted and cannot answer an item.",
@@ -395,6 +405,7 @@ def flush_while_contract_locked():
             ):
                 if field in item:
                     sent_item[field] = item[field]
+
             atomic_json(SENT / path.name, sent_item)
             path.unlink(missing_ok=True)
         temporary = AFK_DIR / f".last-sent.{os.getpid()}.tmp"
@@ -422,6 +433,7 @@ def extract_reply(body):
             or stripped == "-----Original Message-----"
             or QUOTED_HEADER_RE.match(stripped)
         ):
+
             break
         answer_lines.append(line)
     answer = "\n".join(answer_lines).strip()
@@ -678,6 +690,7 @@ def verify_note(note_id):
     return 0
 
 
+
 def token_record(token):
     digest = token_digest(token)
     for store, directory in (("sent", SENT), ("pending", PENDING)):
@@ -725,6 +738,7 @@ def receive_batch_while_contract_locked():
         return 0
     if config is None:
         return 1
+
     try:
         messages = json.load(sys.stdin)
     except (ValueError, OSError):
@@ -738,6 +752,7 @@ def receive_batch_while_contract_locked():
 
 
 def receive_messages(messages, posture, config):
+
     accepted = 0
     untrusted = 0
     for message in messages:
@@ -765,6 +780,7 @@ def receive_messages(messages, posture, config):
         except (OSError, ValueError):
             print("fm-afk-email: away-email token state could not be checked; mail poll will retry", file=sys.stderr)
             return 1
+
         now = int(time.time())
         if item and item.get("used_mail_key") == mail_key:
             continue
@@ -778,6 +794,7 @@ def receive_messages(messages, posture, config):
             and not item.get("used_epoch")
             and bool(answer.strip())
             and item.get("handoff_mail_key", mail_key) == mail_key
+
         )
         if valid:
             note = (
@@ -809,6 +826,7 @@ def receive_messages(messages, posture, config):
             continue
         untrusted += 1
         continue
+
     print(f"received {accepted} verified and {untrusted} untrusted away-email message(s)")
     return 0
 
@@ -824,6 +842,7 @@ def main():
             return 1
         print(config["recipient"])
         return 0
+
     if command == "queue-unprocessed":
         return queue_unprocessed()
     if command == "flush":
@@ -833,6 +852,7 @@ def main():
     if command == "verify-note" and len(sys.argv) == 3:
         return verify_note(sys.argv[2])
     print("usage: fm-afk-email.py destination|configured|queue-unprocessed|flush|receive-batch|verify-note <id>", file=sys.stderr)
+
     return 2
 
 

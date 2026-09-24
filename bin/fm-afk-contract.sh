@@ -24,6 +24,7 @@
 # entry over no record or over a quiet record writes one: an away entry over a
 # quiet record, a refresh included, rewrites it as away, and a quiet entry never
 # turns a standing away record quiet (the captain's return comes first).
+
 #
 # ENTRY IS THE GO. `/afk` itself is the captain's go: `enter` writes the record
 # in the same turn, before any other work, and never waits for a further human
@@ -139,6 +140,7 @@ FM_AFK_CONTRACT_VERSION=3
 FM_AFK_CONTRACT_READABLE_VERSIONS="1 2 3"
 FM_AFK_CONTRACT_REACH_CHANNELS=none
 FM_AFK_CONTRACT_REACH_ANNOUNCED='No phone channel is configured; anything that needs you waits for your return.'
+FM_AFK_EMAIL_HELPER="$FM_AFK_CONTRACT_DIR/fm-afk-email.py"
 FM_AFK_CONTRACT_SPEND_DEFAULT=4
 FM_AFK_CONTRACT_QUIET_HOLDS_NOTHING='you are present, so nothing waits for your return: every action you ask for, a local landing or a merge included, proceeds now under ordinary attended authority, and quiet mode changes only which updates reach this conversation.'
 # Generous against the longest legitimate holder, a merge waiting on the forge,
@@ -405,6 +407,7 @@ fm_afk_contract_render_readback() {  # <path>
       *) printf '  reach: hold-for-return only. %s\n' "$(fm_afk_contract_read_field "$path" reach_announced)" ;;
     esac
   fi
+
   words=$(fm_afk_contract_read_words "$path"; rc=$?; printf x; exit "$rc") || return 1
   words=${words%x}
   if [ -n "$words" ]; then
@@ -423,6 +426,7 @@ fm_afk_contract_render_announcement() {  # <path>
       "$(fm_afk_contract_read_field "$path" confirmed)" "$FM_AFK_CONTRACT_QUIET_HOLDS_NOTHING"
     return 0
   fi
+
   expected=$(fm_afk_contract_read_field "$path" expected_return)
   words=$(fm_afk_contract_read_words "$path"; rc=$?; printf x; exit "$rc") || return 1
   words=${words%x}
@@ -576,6 +580,7 @@ fm_afk_contract_cmd_enter() {
   case "$harness" in
     pi|pi-signed)
       if [ -x "$FM_AFK_CONTRACT_DIR/fm-mail.sh" ] && "$FM_AFK_CONTRACT_DIR/fm-mail.sh" afk-email configured >/dev/null 2>&1; then
+
         FM_AFK_CONTRACT_REACH_CHANNELS=email
         FM_AFK_CONTRACT_REACH_ANNOUNCED='Captain-facing outcomes are emailed to the configured address; replies with a current item code reach the away session.'
       fi

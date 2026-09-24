@@ -414,6 +414,7 @@ Each skill owns its own daemon procedure, which is otherwise identical; these sa
 
 - Every current daemon injection uses the `away-supervisor` kind from `bin/fm-operational-input.sh` after `FM_OPERATIONAL_PREFIX` (U+2063 INVISIBLE SEPARATOR followed by `FIRSTMATE_OP: `), while the `/afk` skill owns legacy bare-marker compatibility.
 - `state/.afk-contract` is the away posture, written in the same turn as `/afk` before any other work, because `/afk` is itself the go: no read-back gates entry or waits for a go; entry announces configured Pi email reach or the hold-for-return fallback, and the away session acts on its words by its own judgment through the guarded scripts under standing authority, holding for the return on doubt.
+
 - While `state/.afk` exists, the daemon owns supervision; do not arm a separate watcher.
   The daemon is never launched on Pi, where the ordinary supervision session continues under the record with main parked: the branch takes every safe actionable wake it can, and only a declined wake (including a broken branch or unsafe scan) or a watcher failure wakes main.
   Away mode on a non-Pi home with `config/supervision-host` works the same way with the supervision host as the branch; a wake it hands back arrives through that harness's own wake path and is never the captain's return.

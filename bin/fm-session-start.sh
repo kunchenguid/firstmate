@@ -950,6 +950,7 @@ if [ -f "$STATE/.afk-contract" ]; then
       "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)" \
       "$reach_label"
   fi
+
   if [ -e "$STATE/.afk" ]; then
     if [ "$AFK_MODE" = quiet ]; then
       printf '; the quiet daemon owns the watcher.\n'

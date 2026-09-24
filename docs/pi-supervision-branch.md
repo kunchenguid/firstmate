@@ -575,6 +575,8 @@ A leftover `state/.afk` flag declines nothing.
   [Away email on Pi](afk-email.md) owns operator setup, message validation, and limits.
   The first run boundary after the record is archived, ordinarily the captain's return message, presents the accumulated rows with a fresh triggered budget exactly as after any other gap.
   `bin/fm-afk-return.sh` lists them under "waiting on you".
+  When the record selected email reach, these outcomes are durably batched and sent to the configured address; each item has its own expiring one-use reply code, and validated replies enter the captain inbox.
+  [Away email on Pi](afk-email.md) owns operator setup, message validation, and limits.
 - Main's standing authority relocates to the branch, and nothing more.
   [Authority relocation](#authority-relocation) below gives the details.
 - The branch prompt's fixed "Postures" section states these rules once per firstmate version, so the prefix stays byte-stable.
@@ -653,6 +655,8 @@ At that moment the branch reports any refusal instead of concluding there is "no
 - The away relocation: only under a valid live record, never for local-only landing, queued-only branch dispatch rather than orphaned in-flight recovery, the spend cap for both actors and its lock-held recheck, and the attended guarded-action behavior restored by archive or an invalid record.
 
 `tests/fm-afk-return.test.sh` covers the ordered cleanup-due section, its durable merge-marker requirement, and exclusion of both a done task without durable merge evidence and a persistent secondmate carrying that evidence.
+
+`tests/fm-afk-email.test.sh` covers away-email configuration gating, batched sends, expiring one-use tokens, sender checks, inbox handoff, and the unconfigured fallback without network access.
 
 `tests/fm-pr-merge.test.sh` covers the branch actor merging a green task under the record, being refused on a red check, an unreported required check, or `--allow-red`/`--allow-missing` under it, and being refused at the partition while attended.
 

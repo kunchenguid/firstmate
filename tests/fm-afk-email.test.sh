@@ -12,6 +12,7 @@ cp -R "$ROOT/bin" "$REPO/bin"
 mv "$REPO/bin/fm-mail.sh" "$REPO/bin/fm-mail-real.sh"
 CAPTURE="$TMP_ROOT/sent"
 AFK_OWNER_EMAIL=johnpoyser@gmail.com
+
 mkdir -p "$CAPTURE"
 export CAPTURE
 cat > "$REPO/bin/fm-mail.sh" <<'SH'
@@ -25,6 +26,7 @@ if [ "${FM_TEST_SMTP_FAIL:-}" = 1 ]; then
   printf 'fake SMTP rejected message\n' >&2
   exit 1
 fi
+
 count=$(find "$CAPTURE" -maxdepth 1 -name '*.txt' | wc -l | tr -d ' ')
 path="$CAPTURE/$count.txt"
 printf 'to=%s\nsubject=%s\n' "$2" "$3" > "$path"
@@ -36,6 +38,7 @@ if [ -n "${FM_TEST_SMTP_STARTED:-}" ] && [ -n "${FM_TEST_SMTP_RELEASE:-}" ]; the
     sleep 0.02
   done
 fi
+
 printf 'fake SMTP accepted\n' >&2
 SH
 chmod 700 "$REPO/bin/fm-mail.sh"
@@ -50,11 +53,13 @@ make_home() {  # <name> [configured] [recipient]
   mkdir -p "$home/state"
   if [ "${2:-}" = configured ]; then
     cat > "$home/.env" <<ENV
+
 FM_MAIL_USER=owner@example.com
 FM_MAIL_PASS=mail-secret-not-to-leak
 FM_IMAP_HOST=imap.example.test
 FM_SMTP_HOST=smtp.example.test
 FM_AFK_EMAIL_TO=${3:-$AFK_OWNER_EMAIL}
+
 ENV
   fi
   printf '%s\n' "$home"
@@ -75,6 +80,7 @@ run_email() {  # <home> <command>
     -u FM_SMTP_HOST -u FM_SMTP_PORT -u FM_AFK_EMAIL_TO \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
     "$REPO/bin/fm-mail.sh" afk-email "$command" "$@"
+
 }
 
 write_outcomes() {  # <home> <entry epoch>
@@ -163,11 +169,13 @@ PY
 
 test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
   local home out entered body reply_body token1 token2 sent1 sent2 inbox note note_id verification
+
   home=$(make_home configured configured)
   out=$(run_contract "$home" FM_TEST_HARNESS=pi 2>&1) || fail "configured Pi entry failed: $out"
   assert_contains "$out" 'email reach active.' 'configured Pi entry announces email reach'
   assert_contains "$out" 'Captain-facing outcomes are emailed to the configured address' 'record announces email delivery'
   [ "$(run_email "$home" configured)" = "$AFK_OWNER_EMAIL" ] || fail "mail config did not return the fixed away-email destination"
+
   [ "$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field reach_channels)" = email ] \
     || fail "configured Pi posture did not record email reach"
   entered=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field entered_epoch)
@@ -210,6 +218,7 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
 
   reply_body=$(printf 'FM-AFK-REPLY %s\nPlease merge the UI pull request\n\nFrom: %s\nSent: Tuesday, June 30, 2026 9:00 AM\nTo: %s\nSubject: Firstmate away update\n\nFM-AFK-REPLY %s\nRelease the API now' "$token1" "$AFK_OWNER_EMAIL" "$AFK_OWNER_EMAIL" "$token2")
   out=$(message "$home" 101 "$AFK_OWNER_EMAIL" 'Re: Firstmate away update' "$reply_body" 2>&1) \
+
     || fail "valid reply handoff errored: $out"
   assert_contains "$out" 'received 1 verified and 0 untrusted' 'matching sender and code are accepted'
   note=$(find "$inbox" -maxdepth 1 -name '*.note' -print -quit)
@@ -228,6 +237,7 @@ assert result["seq"] == 1, result
 assert result["task"] == "ui", result
 assert result["id"] == sys.argv[2], result
 PY
+
   [ -n "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("used_epoch", ""))' "$sent1")" ] \
     || fail "accepted code was not marked consumed"
 
@@ -979,6 +989,7 @@ PY
 
 test_expired_and_unknown_codes_are_untrusted() {
   local home out entered token sent reply_body send_index
+
   home=$(make_home expiry configured)
   run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
   entered=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field entered_epoch)
@@ -988,6 +999,7 @@ test_expired_and_unknown_codes_are_untrusted() {
   run_email "$home" flush >/dev/null || fail "flush failed"
   sent="$home/state/afk-email/sent/1.json"
   token=$(grep -oE 'FM-AFK-[A-Za-z0-9_-]{16}' "$CAPTURE/$send_index.txt" | sed -n '1p')
+
   python3 - "$sent" <<'PY'
 import json, sys
 path = sys.argv[1]
@@ -1197,3 +1209,4 @@ test_short_configured_secret_is_redacted_before_storage_and_send
 test_flush_holds_away_lock_until_send_completes
 test_receive_batch_holds_away_lock_through_reply_handoff
 test_branch_prompt_preserves_wake_after_verification_error
+
