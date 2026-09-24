@@ -14,7 +14,7 @@ metadata:
 
 This skill is the single owner of the completion-aware profile-array selection procedure.
 `AGENTS.md` section 4 owns the always-loaded intake boundary, load trigger, malformed-config refusal, every-candidate accounting, and strongest-reasoning/tie safety rules.
-`harness-adapters` owns harness verification, model/provider discovery, and effort fallback.
+`harness-adapters` owns harness verification and effort fallback; `bin/fm-model-catalog.sh` is the narrow typed-dispatch helper that normalizes harness-owned catalog listings when a dynamic `discover` policy is selected.
 `quota-axi` remains data-only: it publishes `spendPriority` as a comparable scalar and never recommends, selects, ranks, or infers a route.
 Do not add a daemon, opaque composite score, routing wrapper, hard-coded model-specific policy, or producer-side route recommendation.
 The [worker helper](../../../bin/fm-quota-choose.sh) and [typed resolver](../../../docs/configuration.md#typed-dispatch-resolution-env-typesafe_api_key) own their deterministic mapping boundaries.
@@ -34,6 +34,7 @@ Use it only when the brief already fixed the candidate order and every candidate
 It does not replace the reasoning-class, runway-feasibility, or authentication gates above.
 Firstmate can optionally arm `bin/fm-procevent-quota.sh` for a recurring mid-task check that wakes when the tracked provider drops below its configured threshold or its runway becomes `exhausted_now`.
 The opt-in [typed resolver](../../../docs/configuration.md#typed-dispatch-resolution-env-typesafe_api_key) has its own documented gates.
+For dynamic `discover` policies it expands candidates from the harness catalog helper, applies its small declared task-fit table first, then keeps the same quota comparator; a catalog failure or timeout is an `error`, not a stale-list fallback.
 It never removes this skill's authority, and its `ambiguous`, `escalate`, and `error` outcomes return here.
 
 ## Read the default TOON
@@ -67,7 +68,8 @@ Outside those documented mappings, deterministic shell must not infer a provider
 You establish the remaining relations yourself, in the open, from the candidate's own authoritative catalog (`harness-adapters` owns the per-harness discovery surface) plus the one intake snapshot.
 
 Confirm the catalog lists the candidate's model and record the provider family it reports.
-A model the catalog does not list is concrete contradictory evidence: block that candidate and quote the catalog result.
+For typed dynamic dispatch this evidence comes from `bin/fm-model-catalog.sh` and is already reflected in the resolver's candidate list.
+A model absent from a successful authoritative catalog is concrete contradictory evidence for that dispatch and drops out; a failed, timed-out, or unsupported catalog is uncertainty or an error to report, never permission to resurrect a stale shortlist.
 Apply quota at the granularity the vendor actually supplies.
 A provider-level or `all_models`/`all_products` scope bounds every model you established in that family within the candidate's matched account, including one with no window of its own.
 A named-model or named-product scope is an additional bound for that model alone.

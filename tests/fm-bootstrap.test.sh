@@ -1129,6 +1129,7 @@ test_crew_dispatch_validation() {
   done <<'ROWS'
 malformed dispatch config is flagged^{"rules":[^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON
 unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harness":"spaceship"}}],"default":{"harness":"codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship
+dynamic harness without catalog method is flagged^{"rules":[{"when":"dynamic work","use":{"discover":{"task_type":"implementation","required_reasoning_class":"high","harnesses":["grok"]}}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - dynamic use needs discover.task_type, required_reasoning_class, non-empty harnesses, optional providers, preferred_models, preferred_families, and floor with well formed values
 codex Luna max effort is accepted^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}}]}^empty^
 codex unsupported model max effort is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:max

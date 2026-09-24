@@ -1129,8 +1129,13 @@ crew_dispatch_validate() {
   else
     verified_harnesses='["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp","devin"]'
   fi
-  err=$(jq -r --argjson typed "$typed_active" --argjson verified_harnesses "$verified_harnesses" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
+  catalog_method_harnesses='[]'
+  if $typed_active; then
+    catalog_method_harnesses=$("$SCRIPT_DIR/fm-model-catalog.sh" --list-harnesses | jq -Rsc 'split("\n") | map(select(length > 0))') || catalog_method_harnesses='[]'
+  fi
+  err=$(jq -r --argjson typed "$typed_active" --argjson verified_harnesses "$verified_harnesses" --argjson catalog_method_harnesses "$catalog_method_harnesses" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     def verified($h): $verified_harnesses | index($h);
+    def catalog_method($h): $catalog_method_harnesses | index($h);
     def provider_id($p): ($p | type) == "string" and ($p | test($provider_re));
     def effort_ok($h; $m; $e):
       if $e == null then true
@@ -1146,8 +1151,10 @@ crew_dispatch_validate() {
       elif $h == "opencode" or $h == "kimi" or $h == "cursor" then false
       else true
       end;
+    def dynamic($value): ($value | type) == "object" and ((($value.discover // null) | type) == "object");
     def profiles($value):
-      if ($value | type) == "array" then $value
+      if dynamic($value) then []
+      elif ($value | type) == "array" then $value
       elif ($value | type) == "object" then [$value]
       else []
       end;
@@ -1171,6 +1178,22 @@ crew_dispatch_validate() {
           end);
     def malformed_profile_floors($items):
       ($items | any(has("floor") and floor_bad(.floor; false)));
+    def string_array($value): ($value | type) == "array" and all($value[]; (type == "string" and length > 0));
+    def unsupported_catalog_harness($d):
+      if ($d.harnesses | type) == "array" then any($d.harnesses[]; catalog_method(.) == null) else false end;
+    def dynamic_bad($d):
+      (($d.task_type | type) != "string" or ($d.task_type | length) == 0)
+      or ((["low","medium","high","xhigh","max"] | index($d.required_reasoning_class)) == null)
+      or (string_array($d.harnesses) | not)
+      or (($d.harnesses | length) == 0)
+      or ($typed and unsupported_catalog_harness($d))
+      or ($typed and ($d | has("providers") and ((string_array($d.providers) | not) or any($d.providers[]; provider_id(.) | not))))
+      or ($d | has("preferred_models") and (string_array($d.preferred_models) | not))
+      or ($d | has("preferred_families") and (string_array($d.preferred_families) | not))
+      or ($typed and ($d | has("floor") and floor_bad($d.floor; false)));
+    def dynamic_harnesses:
+      ([ (.rules // [])[]? | select(dynamic(.use?)) | .use.discover.harnesses[]? ]
+       + (if dynamic(.default // null) then [ .default.discover.harnesses[]? ] else [] end));
     def bad_efforts:
       configured_profiles
       | map({h: .harness, m: .model, e: .effort})
@@ -1184,7 +1207,8 @@ crew_dispatch_validate() {
     elif [(.rules // [])[]? | select(type != "object")] | length > 0 then "each rule must be an object"
     elif [(.rules // [])[]? | select((.when? | type) != "string" or (.when | length) == 0)] | length > 0 then "each rule needs non-empty when"
     elif [(.rules // [])[]? | select((.use? | type) != "object" and (.use? | type) != "array")] | length > 0 then "each rule needs use"
-    elif [(.rules // [])[]? | select((.use? | type) == "array" and (.use | length) == 0)] | length > 0 then "each rule needs at least one use profile"
+    elif [(.rules // [])[]? | select((dynamic(.use?) | not) and (.use? | type) == "array" and (.use | length) == 0)] | length > 0 then "each rule needs at least one use profile"
+    elif [(.rules // [])[]? | select(dynamic(.use?) and dynamic_bad(.use.discover))] | length > 0 then "dynamic use needs discover.task_type, required_reasoning_class, non-empty harnesses, optional providers, preferred_models, preferred_families, and floor with well formed values"
     elif [(.rules // [])[]? | profiles(.use?)[]? | select(type != "object")] | length > 0 then "each use profile must be an object"
     elif [(.rules // [])[]? | profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
     elif malformed_optional_fields([(.rules // [])[]? | profiles(.use?)[]?]) then
@@ -1198,7 +1222,9 @@ crew_dispatch_validate() {
     elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced")] | length > 0 then
       "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced") ] | unique | join(", "))
     elif has("default") and ((.default | type) != "object" and (.default | type) != "array") then "default must be a profile object or non-empty profile array"
-    elif has("default") and ((.default | type) == "array" and (.default | length) == 0) then "default needs at least one profile"
+    elif has("default") and (dynamic(.default) | not) and ((.default | type) == "array" and (.default | length) == 0) then "default needs at least one profile"
+    elif has("default") and dynamic(.default) and dynamic_bad(.default.discover) then "dynamic default needs discover.task_type, required_reasoning_class, non-empty harnesses, optional providers, preferred_models, preferred_families, and floor with well formed values"
+    elif ($typed | not) and (any((.rules // [])[]?; dynamic(.use)) or (has("default") and dynamic(.default))) then "dynamic dispatch requires TYPESAFE_API_KEY; configure concrete harness profiles for ordinary intake"
     elif has("default") and ([profiles(.default)[]? | select(type != "object")] | length) > 0 then "each default profile must be an object"
     elif has("default") and ([profiles(.default)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length) > 0 then "each default profile needs harness"
     elif has("default") and malformed_optional_fields([profiles(.default)[]?]) then
@@ -1207,9 +1233,9 @@ crew_dispatch_validate() {
       end
     elif $typed and has("default") and malformed_profile_floors([profiles(.default)[]?]) then "default profile floor needs scope and min_percent 0..100"
     else
-      (configured_profiles
+      ((configured_profiles
         | map(.harness)
-        | map(select(. != null))
+        | map(select(. != null))) + dynamic_harnesses
         | map(select(. as $h | verified($h) | not))
         | unique) as $bad_harnesses
       | if ($bad_harnesses | length) > 0 then "unverified harness: " + ($bad_harnesses | join(", "))
@@ -1224,6 +1250,7 @@ crew_dispatch_validate() {
   fi
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
     jq -r '
+    def dynamic($value): ($value | type) == "object" and ((($value.discover // null) | type) == "object");
     def profile($p):
       ($p.harness | tostring)
       + (if ($p.model? != null) then "/" + ($p.model | tostring)
@@ -1231,7 +1258,9 @@ crew_dispatch_validate() {
          else "" end)
       + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end);
     def profile_set($value; $selector):
-      if ($value | type) == "array" then
+      if dynamic($value) then
+        "discover[" + (($value.discover.harnesses // []) | join(", ")) + "]"
+      elif ($value | type) == "array" then
         (($selector // "quota-balanced") + "[" + ([$value[] | profile(.)] | join(", ")) + "]")
       else profile($value)
       end;

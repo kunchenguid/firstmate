@@ -520,6 +520,8 @@ This section is the single owner of the canonical schema and its per-field seman
 Per rule, `when` and `use` are required; the top-level `rules` array itself may be absent or empty for a default-only configuration.
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
+Typed resolution also accepts an opt-in dynamic form in place of that profile object or array: `{ "discover": { "task_type": "implementation", "required_reasoning_class": "high", "harnesses": ["codex", "claude"], "providers": ["codex"], "preferred_models": ["gpt-5.6-sol"], "preferred_families": ["gpt-5.6"] } }`.
+Dynamic `discover` requires `task_type`, `required_reasoning_class` (`low`, `medium`, `high`, `xhigh`, or `max`), and a non-empty `harnesses` array; `providers`, `preferred_models`, `preferred_families`, and a profile-shaped `floor` are optional filters or preferences.
 Profile `model` and `effort` fields and rule `why` are optional.
 Rule `approval` and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
 The resolver supplies the fixed neutral Choice option `No listed rule applies to this task.` for work that matches no listed rule.
@@ -540,14 +542,17 @@ An absent or unknown named row also makes the candidate unrankable and is report
 Codex `max` is valid when the profile selects `gpt-5.6-luna`, whose installed catalog entry supports that reasoning level.
 An omitted model or effort means the selected harness uses its own default for that axis.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
-If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
+A dynamic `discover` rule is expanded only by typed resolution: `bin/fm-model-catalog.sh` calls each listed harness's own catalog method with a timeout, normalizes harness, model ID, provider, task-type and reasoning metadata, and provenance, and never ranks or spawns.
+Dynamic discovery accepts only harnesses with an implemented catalog method; another verified harness is an actionable configuration error rather than a runtime fallback.
+A model absent from a successful harness catalog is not retained from any old shortlist, while a catalog error, timeout, unsupported harness, or missing result is an `error` outcome rather than a fallback to stale candidates.
+If no dispatch rule fits, firstmate resolves `default` through the same object-array-or-discover path before falling back to `config/crew-harness`.
 Except for `ultra`, which refuses unsupported profiles under the native-effort contract above, an effort value the chosen harness does not accept is recorded as `effort=` in task meta for traceability but omitted from the launch flags.
 Bootstrap reports unsupported harness/model/effort combinations as a `CREW_DISPATCH` diagnostic when they are visible in the file.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`; its Pi default declares the `claude` provider required for typed resolution of that Anthropic model.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
-Malformed JSON, malformed rules, an empty or malformed profile array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
-While typed resolution is active, malformed `approval`, `floor`, and present `provider` declarations receive the same diagnostic; without the key those inert declarations preserve the pre-existing bootstrap behavior.
+Malformed JSON, malformed rules, an empty or malformed profile array, an unverified harness, a malformed dynamic `discover` policy, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
+While typed resolution is active, malformed `approval`, `floor`, dynamic `providers`, and present profile `provider` declarations receive the same diagnostic; without the key those inert declarations preserve the pre-existing bootstrap behavior.
 Missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
@@ -567,7 +572,7 @@ bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON blo
 Firstmate invokes the resolve path directly after writing the brief, without a preflight; the absent-key off line is handled exactly like every other non-clear outcome.
 When on and at least one rule exists, the tool sends the project name and the whole brief as state and asks one Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never sees quota, catalogs, `why`, `use`, or approvals.
 An absent rules file, a default-only file, or `rules: []` returns the non-clear reason `no rules to match` without a model or quota request, leaving firstmate's existing routing in control; an existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.
-Everything after the answer runs in code: the confidence floor, the matched rule's `approval` and `floor`, each candidate's `provider` and `floor`, every applicable account-wide and model/product row from one `quota-axi --json` snapshot, and the numeric `spendPriority` argmax over candidates using each candidate's limiting row.
+Everything after the answer runs in code: dynamic catalog expansion when the selected rule uses `discover`, the confidence floor, the matched rule's `approval` and `floor`, each candidate's `provider` and `floor`, every applicable account-wide and model/product row from one `quota-axi --json` snapshot, catalog-backed task-fit and reasoning-class evidence for the declared task type and required reasoning class, and the numeric `spendPriority` argmax over candidates that pass those fit gates using each candidate's limiting row.
 The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and schema 6 and implements the [account-matching contract](../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility).
 An expanded provider with no matching account row leaves the candidate eligible but unranked.
 Known applicable rows from a provider with partial quota semantics remain rankable; rows whose own status is not known remain unrankable.
@@ -579,12 +584,14 @@ Response probabilities must contain exactly every offered choice, use numeric va
 Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
 Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
-By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
-Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
+With static profiles, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
+With dynamic `discover`, catalog presence and the resolver's task-type and reasoning-fit evidence are applied before quota ranking, but authentication and completion-runway uncertainty still remain evidence for firstmate's intake rather than spawn authority.
+Firstmate passes its profile line unless it states a reason to override, such as an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
 The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
 The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
-The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
+The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, confidence floor at 0.6, and Jev request timeout at 5 seconds.
+Dynamic catalog calls use an 8-second timeout by default; `FM_MODEL_CATALOG_TIMEOUT` can override it with a nonzero numeric value, and `FM_DISPATCH_PROJECT_DIR` can override the catalog working directory.
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
 ## Toolchain

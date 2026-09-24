@@ -70,6 +70,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-env-lib.sh
 . "$SCRIPT_DIR/fm-env-lib.sh"
+# shellcheck source=bin/fm-worker-account-lib.sh
+. "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
 
@@ -111,6 +113,7 @@ if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
   exit 0
 fi
 
+
 # ---- inputs --------------------------------------------------------------------
 [ -n "$BRIEF" ] || die "brief file required (see --help)"
 [ -r "$BRIEF" ] || die "brief file not readable: $BRIEF"
@@ -122,11 +125,13 @@ trap 'rm -f "$RULES"' EXIT
 cp "$RULES_PATH" "$RULES" || die "could not snapshot rules file: $RULES_PATH"
 chmod 400 "$RULES" || die "could not protect rules snapshot"
 VERIFIED_HARNESSES=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
+CATALOG_METHOD_HARNESSES=$("$SCRIPT_DIR/fm-model-catalog.sh" --list-harnesses | jq -Rsc 'split("\n") | map(select(length > 0))') || die "could not read model catalog methods"
 
 # The fields this tool consumes must be well formed; bootstrap owns the wider
 # schema diagnostic, but an intake never selects around a malformed file.
-rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
+rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --argjson catalog_method_harnesses "$CATALOG_METHOD_HARNESSES" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
   def verified($h): $verified_harnesses | index($h);
+  def catalog_method($h): $catalog_method_harnesses | index($h);
   def provider_id($p): ($p | type) == "string" and ($p | test($provider_re));
   def effort_ok($h; $m; $e):
     if $e == null then true
@@ -139,7 +144,8 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
     elif $h == "rovo" then (["low","medium","high","max"] | index($e)) != null
     elif $h == "opencode" or $h == "kimi" or $h == "cursor" then false
     else true end;
-  def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
+  def dynamic($v): ($v | type) == "object" and ((($v.discover // null) | type) == "object");
+  def profiles($v): if dynamic($v) then [] elif ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   def floor_bad($f; $need_provider):
     ($f | type) != "object"
     or (($f.scope | type) != "string") or (($f.scope | length) == 0)
@@ -158,11 +164,25 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
   def duplicate_profiles($items):
     ($items | map([.harness, (.model // null), (.effort // null)] | @json)) as $keys
     | ($keys | length) != ($keys | unique | length);
+  def string_array($v): ($v | type) == "array" and all($v[]; (type == "string" and length > 0));
+  def unsupported_catalog_harness($d):
+    if ($d.harnesses | type) == "array" then any($d.harnesses[]; catalog_method(.) == null) else false end;
+  def dynamic_bad($d):
+    (($d.task_type | type) != "string" or ($d.task_type | length) == 0)
+    or ((["low","medium","high","xhigh","max"] | index($d.required_reasoning_class)) == null)
+    or (string_array($d.harnesses) | not)
+    or (($d.harnesses | length) == 0)
+    or unsupported_catalog_harness($d)
+    or ($d | has("providers") and ((string_array($d.providers) | not) or any($d.providers[]; provider_id(.) | not)))
+    or ($d | has("preferred_models") and (string_array($d.preferred_models) | not))
+    or ($d | has("preferred_families") and (string_array($d.preferred_families) | not))
+    or ($d | has("floor") and floor_bad($d.floor; false));
   if type != "object" then "top-level value must be an object"
   elif has("rules") and (.rules | type) != "array" then "rules must be an array"
   elif any((.rules // [])[]; type != "object") then "each rule must be an object"
   elif any((.rules // [])[]; (.when | type) != "string" or (.when | length) == 0) then "each rule needs non-empty when"
-  elif any((.rules // [])[]; (profiles(.use) | length) == 0) then "each rule needs at least one use profile"
+  elif any((.rules // [])[]; (dynamic(.use) | not) and (profiles(.use) | length) == 0) then "each rule needs at least one use profile"
+  elif any((.rules // [])[]; dynamic(.use) and dynamic_bad(.use.discover)) then "dynamic use needs discover.task_type, required_reasoning_class, non-empty harnesses, optional providers, preferred_models, preferred_families, and floor with well formed values"
   elif any((.rules // [])[]; has("approval") and .approval != "captain") then "approval must be \"captain\" when present"
   elif any((.rules // [])[]; has("select") and ((.select | type) != "string" or (.select | length) == 0)) then "select must be a non-empty string"
   elif any((.rules // [])[]; has("select") and .select != "quota-balanced") then
@@ -170,11 +190,14 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
   elif any((.rules // [])[]; has("floor") and floor_bad(.floor; true)) then "rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\\z"
   elif any((.rules // [])[] | profiles(.use)[]; profile_bad(.)) then "each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
   elif any((.rules // [])[]; duplicate_profiles(profiles(.use))) then "each rule use must not contain duplicate harness, model, and effort profiles"
+  elif any((.rules // [])[] | select(dynamic(.use)) | .use.discover.harnesses[]; (verified(.) | not)) then "dynamic use harnesses must name verified harnesses"
   elif any((.rules // [])[] | profiles(.use)[]; (verified(.harness) | not)) then "each use profile must name a verified harness"
   elif any((.rules // [])[] | profiles(.use)[]; (effort_ok(.harness; .model; .effort) | not)) then "each use profile effort must be supported by its harness and model"
-  elif has("default") and (profiles(.default) | length) == 0 then "default must be a profile object or non-empty profile array"
+  elif has("default") and (dynamic(.default) | not) and (profiles(.default) | length) == 0 then "default must be a profile object or non-empty profile array"
+  elif has("default") and dynamic(.default) and dynamic_bad(.default.discover) then "dynamic default needs discover.task_type, required_reasoning_class, non-empty harnesses, optional providers, preferred_models, preferred_families, and floor with well formed values"
   elif has("default") and any(profiles(.default)[]; profile_bad(.)) then "each default profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
   elif has("default") and duplicate_profiles(profiles(.default)) then "default must not contain duplicate harness, model, and effort profiles"
+  elif has("default") and dynamic(.default) and any(.default.discover.harnesses[]; (verified(.) | not)) then "dynamic default harnesses must name verified harnesses"
   elif has("default") and any(profiles(.default)[]; (verified(.harness) | not)) then "each default profile must name a verified harness"
   elif has("default") and any(profiles(.default)[]; (effort_ok(.harness; .model; .effort) | not)) then "each default profile effort must be supported by its harness and model"
   else empty end
@@ -182,7 +205,8 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
 [ -z "$rules_err" ] || die "malformed rules file: $RULES_PATH - $rules_err"
 
 missing_provider=$(jq -r '
-  def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
+  def dynamic($v): ($v | type) == "object" and ((($v.discover // null) | type) == "object");
+  def profiles($v): if dynamic($v) then [] elif ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   ((.rules // [])[] | profiles(.use)[] | select(has("provider") | not) | "use\t\(.harness)"),
   (profiles(.default // null)[] | select(has("provider") | not) | "default\t\(.harness)")
 ' "$RULES" | while IFS=$'\t' read -r location harness; do
@@ -203,7 +227,8 @@ while IFS= read -r h; do
   p=$(fm_quota_single_provider_for_harness "$h" 2>/dev/null) || p=''
   PMAP=$(jq -c --arg h "$h" --arg p "$p" '. + {($h): (if $p == "" then null else $p end)}' <<<"$PMAP")
 done < <(jq -r '
-  def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
+  def dynamic($v): ($v | type) == "object" and ((($v.discover // null) | type) == "object");
+  def profiles($v): if dynamic($v) then [] elif ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   ([((.rules // [])[]) | profiles(.use)[]] + profiles(.default // null))
   | map(.harness) | unique | .[]' "$RULES")
 
@@ -222,7 +247,9 @@ fi
 
 RESP_FILE=$(mktemp) || die "mktemp failed"
 QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
-trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA"' EXIT
+CATALOG=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA"; die "mktemp failed"; }
+: > "$CATALOG" || die "could not initialize catalog snapshot"
+trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$CATALOG"' EXIT
 LAT_MS=null
 command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   REQUEST=$(jq -n --rawfile brief "$BRIEF" --arg project "$PROJECT" --arg model "$TS_MODEL" \
@@ -268,16 +295,186 @@ command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
 quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
 fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
 
+# ---- dynamic catalog evidence for the selected policy, if any ------------------
+CATALOG_HARNESSES=()
+while IFS= read -r catalog_harness; do
+  [ -n "$catalog_harness" ] || continue
+  CATALOG_HARNESSES[${#CATALOG_HARNESSES[@]}]=$catalog_harness
+done < <(jq -n -r --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ"'
+  def dynamic($v): ($v | type) == "object" and ((($v.discover // null) | type) == "object");
+  def floor_below($f):
+    if ($f | type) != "object" then false
+    else (quota_row($quota[0]; $f.provider; "")) as $row |
+      if $row == null or ((["known", "partial"] | index($row.quotaSemantics.status)) | not) then false
+      else [($row.quotaSemantics.effectiveAvailability // [])[] | select(.scope == $f.scope)] as $matches |
+        ($matches | length) > 0 and all($matches[]; .status == "known") and
+        any($matches[]; .effectivePercentRemaining < $f.min_percent)
+      end
+    end;
+  ($resp[0].answers.rule.choice) as $choice |
+  (if ($choice | test("^rule_[1-9][0-9]*$")) then ($choice | ltrimstr("rule_") | tonumber) else null end) as $rule_number |
+  (if $choice == "default" then
+     [($rules[0].default // null)]
+   elif $rule_number != null and $rule_number <= (($rules[0].rules // []) | length) then
+     ($rules[0].rules[$rule_number - 1]) as $rule |
+     [$rule.use, (if floor_below($rule.floor) then ($rules[0].default // null) else null end)]
+   else []
+   end)[] |
+  select(dynamic(.)) |
+  .discover.harnesses[]
+' /dev/null | awk '!seen[$0]++')
+if [ "${#CATALOG_HARNESSES[@]}" -gt 0 ]; then
+  CATALOG_CWD=${FM_DISPATCH_PROJECT_DIR:-}
+  if [ -z "$CATALOG_CWD" ] && [ -n "$PROJECT" ]; then
+    case "$PROJECT" in
+      projects/*) CATALOG_CWD="$FM_HOME/projects/${PROJECT#projects/}" ;;
+      /*) CATALOG_CWD="$PROJECT" ;;
+      *) [ -d "$FM_HOME/projects/$PROJECT" ] && CATALOG_CWD="$FM_HOME/projects/$PROJECT" ;;
+    esac
+  fi
+  [ -n "$CATALOG_CWD" ] || CATALOG_CWD=$PWD
+  [ -d "$CATALOG_CWD" ] || die "dispatch project directory not found: $CATALOG_CWD"
+  CATALOG_CWD=$(cd "$CATALOG_CWD" && pwd -P) || die "dispatch project directory cannot be resolved: $CATALOG_CWD"
+  for catalog_harness in "${CATALOG_HARNESSES[@]}"; do
+    catalog_account=''
+    catalog_env=()
+    catalog_allowlist='null'
+    case "$catalog_harness" in
+      claude|pi|pi-signed)
+        catalog_account=$(fm_worker_account_resolve "$catalog_harness" "$CONFIG") ||
+          emit_error "could not resolve $catalog_harness worker account for model catalog"
+        ;;
+    esac
+    case "$catalog_harness" in
+      claude)
+        if [ -n "$catalog_account" ]; then
+          IFS=$'\t' read -r catalog_declared catalog_root catalog_providers <<< "$catalog_account"
+          catalog_env=(env)
+          for catalog_var in $FM_WORKER_ACCOUNT_CLAUDE_SHED; do
+            catalog_env[${#catalog_env[@]}]=-u
+            catalog_env[${#catalog_env[@]}]=$catalog_var
+          done
+          if [ -n "$catalog_root" ]; then
+            catalog_env[${#catalog_env[@]}]="CLAUDE_CONFIG_DIR=$catalog_root"
+          else
+            catalog_env[${#catalog_env[@]}]=-u
+            catalog_env[${#catalog_env[@]}]=CLAUDE_CONFIG_DIR
+          fi
+        fi
+        ;;
+      pi|pi-signed)
+        if [ -n "$catalog_account" ]; then
+          IFS=$'\t' read -r catalog_declared catalog_root catalog_providers <<< "$catalog_account"
+          catalog_env=(env "PI_CODING_AGENT_DIR=$catalog_root")
+          catalog_allowlist=$(jq -cn --arg providers "$catalog_providers" '$providers | split(" ")')
+        fi
+        ;;
+    esac
+    (
+      cd "$CATALOG_CWD" || exit 1
+      if [ "${#catalog_env[@]}" -gt 0 ]; then
+        "${catalog_env[@]}" "$SCRIPT_DIR/fm-model-catalog.sh" "$catalog_harness"
+      else
+        "$SCRIPT_DIR/fm-model-catalog.sh" "$catalog_harness"
+      fi
+    ) | jq -c --argjson allowed "$catalog_allowlist" '. + (if $allowed == null then {} else {accountProviderAllowlist:$allowed} end)' >> "$CATALOG" 2>/dev/null || true
+  done
+fi
+
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
 RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
-  --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ"'
+  --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" --slurpfile catalog "$CATALOG" "$FM_QUOTA_ROW_JQ"'
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
-  def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
+  def dynamic($v): ($v | type) == "object" and ((($v.discover // null) | type) == "object");
+  def profiles($v): if dynamic($v) then [] elif ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   def prov($p; $lane): quota_row($q; $p; $lane);
   def rows($p; $lane): (prov($p; $lane) | .quotaSemantics.effectiveAvailability // []);
   def bare($m): ($m | split("/") | last);
   def provider_of($c): ($c.provider // $pmap[$c.harness] // null);
   def lane_of($c): quota_lane($c.harness; $c.model);
+  def reasoning_rank($class):
+    if $class == "low" then 1 elif $class == "medium" then 2 elif $class == "high" then 3 elif $class == "xhigh" then 4 elif $class == "max" then 5 else 0 end;
+  def inferred_reasoning($model; $provider):
+    (($model // "") | ascii_downcase) as $m |
+    (($provider // "") | ascii_downcase) as $p |
+    if ($m | test("gpt-5\\.6-luna")) then "max"
+    elif ($m | test("opus|fable|gpt-5\\.6|gpt-5\\.5|sol|grok-4|k3|k2\\.7|sonnet-5")) then "xhigh"
+    elif ($m | test("sonnet|gpt-5|claude|kimi|codex|space-bunny")) then "high"
+    elif ($p | test("claude|codex|opencode|grok|kimi|cursor")) then "medium"
+    else "low" end;
+  def catalog_reasoning($row):
+    [($row.reasoningCapabilities // [])[]? | ascii_downcase | select(reasoning_rank(.) > 0)] | unique as $classes |
+    if ($classes | length) == 0 then
+      {class: inferred_reasoning($row.model; $row.provider), source: "prior", confidence: "low", known: false, capabilities: []}
+    else
+      {class: ($classes | max_by(reasoning_rank(.))), source: "catalog", confidence: "catalog", known: true, capabilities: $classes}
+    end;
+  def task_alias($task):
+    (($task // "") | ascii_downcase) as $name |
+    if (["implementation", "coding", "code", "software"] | index($name)) != null then "implementation"
+    elif (["documentation", "docs", "writing", "writer"] | index($name)) != null then "documentation"
+    else $name end;
+  def task_fit_prior($task; $row):
+    (task_alias($task)) as $task_name |
+    (($row.model // "") + " " + ($row.provider // "") | ascii_downcase) as $identity |
+    if $task_name == "implementation" and ($identity | test("code|coder|coding|dev|swe|software")) then
+      {status: "prior", eligible: true, confidence: "low", reason: "low-confidence implementation prior from catalog identity"}
+    elif $task_name == "documentation" and ($identity | test("doc|write|writing|sonnet|opus|haiku|claude|gemini|gpt")) then
+      {status: "prior", eligible: true, confidence: "low", reason: "low-confidence documentation prior from catalog identity"}
+    else
+      {status: "unknown", eligible: true, confidence: "low", reason: ("catalog has no task metadata; task fit for " + $task_name + " is uncertain")}
+    end;
+  def task_fit($task; $row):
+    (task_alias($task)) as $task_name |
+    [($row.taskTypes // [])[]? | task_alias(.)] | unique as $declared_tasks |
+    if ($declared_tasks | length) > 0 then
+      if ($declared_tasks | index($task_name)) != null then
+        {status: "supported", eligible: true, confidence: "catalog", reason: ("catalog declares " + $task_name)}
+      else
+        {status: "unsupported", eligible: false, confidence: "catalog", reason: ("catalog declares " + ($declared_tasks | join(", ")) + ", not " + $task_name)}
+      end
+    else
+      task_fit_prior($task_name; $row)
+    end;
+  def preference($model; $d):
+    (($model // "") | ascii_downcase) as $m |
+    ((($d.preferred_models // []) | map(ascii_downcase) | index($m)) != null) as $model_hit |
+    ((($d.preferred_families // []) | map(ascii_downcase)) as $families | any($families[]?; . as $family | ($m | contains($family)))) as $family_hit |
+    if $model_hit then "preferred_model" elif $family_hit then "preferred_family" else "none" end;
+  def dynamic_profiles($u):
+    ($u.discover) as $d |
+    ([ $catalog[]? | select(. as $row | $row.status == "error" and (($d.harnesses // []) | index($row.harness))) ]) as $errs |
+    ([ $catalog[]? | select(. as $row | ($row.harness | type) == "string" and (($d.harnesses // []) | index($row.harness))) | .harness ] | unique) as $seen_harnesses |
+    ([ ($d.harnesses // [])[] | select(($seen_harnesses | index(.)) == null) ]) as $missing |
+    if ($errs | length) > 0 then
+      {error: ("model catalog discovery failed: " + ([$errs[] | (.harness + ": " + (.reason // "unknown"))] | join("; ")))}
+    elif ($missing | length) > 0 then
+      {error: ("model catalog discovery returned no result for " + ($missing | join(", ")))}
+    else
+      ([ $catalog[]? |
+        select(.status == "ok") |
+        select(. as $row | (($d.harnesses // []) | index($row.harness))) |
+        select(. as $row | ((($d.providers // []) | length) == 0 or (($d.providers // []) | index($row.provider)))) |
+        select(. as $row | (($row.accountProviderAllowlist // null) == null or (($row.accountProviderAllowlist | index($row.provenance.rawProvider // $row.provider)) != null))) |
+        (.model) as $model | (.provider) as $provider |
+        (catalog_reasoning(.)) as $reasoning |
+        (task_fit($d.task_type; .)) as $task_fit |
+        (reasoning_rank($reasoning.class)) as $class_rank |
+        (reasoning_rank($d.required_reasoning_class)) as $required_rank |
+        {harness: .harness, model: $model, provider: $provider,
+         catalogMethod: (.provenance.method // "unknown"), catalogCapabilities: $reasoning.capabilities,
+         taskType: $d.task_type, taskFit: $task_fit.status, taskFitConfidence: $task_fit.confidence, taskFitReason: $task_fit.reason,
+         fitClass: $reasoning.class, fitSource: $reasoning.source, fitConfidence: $reasoning.confidence,
+         fitEligible: ($task_fit.eligible and (($reasoning.known | not) or ($class_rank >= $required_rank))),
+         fitUnranked: ($reasoning.known | not),
+         fitReason: (if ($reasoning.known | not) then "catalog did not declare support for " + $d.required_reasoning_class + "; using low-confidence " + $reasoning.class + " prior" else if ($class_rank >= $required_rank) then "meets " + $d.required_reasoning_class else "requires " + $d.required_reasoning_class + ", catalog fit is " + $reasoning.class end end),
+         preference: preference($model; $d)}
+        + (if $d.floor then {floor: $d.floor} else {} end)
+      ] | unique_by([.harness, .model, .provider])) as $profiles |
+      if ($profiles | length) == 0 then {error: "model catalog discovery returned no candidates matching the dynamic policy"}
+      else {profiles: $profiles} end
+    end;
+  def expand_use($u): if dynamic($u) then dynamic_profiles($u) else {profiles: profiles($u)} end;
   def measured($p; $lane):
     (prov($p; $lane) != null and (["known", "partial"] | index(prov($p; $lane).quotaSemantics.status)) != null);
   def applicable($p; $lane; $m):
@@ -299,7 +496,8 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     $rows | map({scope, status, pct: (.effectivePercentRemaining // null), runway: (.runway.status // null), spendPriority: (.selection.spendPriority // null)});
   def evaluate($c):
     (provider_of($c)) as $p | (lane_of($c)) as $lane |
-    if $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
+    if ($c.fitEligible == false) then {profile: $c, provider: $p, eligible: false, reason: "task fit rejected: \($c.taskFitReason)"}
+    elif $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
     elif prov($p; $lane) == null then
       {profile: $c, provider: $p, eligible: true, unranked: true,
        reason: (if any($q.providers[]; .provider == $p)
@@ -321,6 +519,9 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
           .effectivePercentRemaining < $c.floor.min_percent
         )] | first) as $floor_row |
         {profile: $c, provider: $p, bounds: $bounds, scope: ($floor_row.scope // $c.floor.scope), pct: ($floor_row.effectivePercentRemaining // null), runway: ($floor_row.runway.status // null), eligible: false, reason: "profile floor \($c.floor.scope) below \($c.floor.min_percent)%"}
+      elif $c.fitUnranked then
+        {profile: $c, provider: $p, bounds: $bounds, eligible: true, unranked: true, unknown: true,
+         reason: "reasoning fit is low-confidence: \($c.fitClass) prior does not prove \($c.fitReason)"}
       elif (measured($p; $lane) | not) then
         ($rows | first) as $row |
         {profile: $c, provider: $p, bounds: $bounds, scope: ($row.scope // null), pct: ($row.effectivePercentRemaining // null), runway: ($row.runway.status // null), eligible: true, unranked: true, unknown: true, reason: "provider \($p) unmeasured (\(prov($p; $lane).quotaSemantics.status))"}
@@ -349,17 +550,18 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
    elif $rule_number != null and $rule_number <= (($cfg.rules // []) | length) then $cfg.rules[$rule_number - 1]
    else null end) as $rule |
   (if $rule == null then "none" else floor_state($rule.floor; $rule.floor.provider; "") end) as $rule_floor_state |
-  (if $choice != "default" and $rule == null then []
-   elif $rule == null then profiles($cfg.default // null)
-   else profiles($rule.use)
-   end) as $answer_use |
+  (if $choice != "default" and $rule == null then null
+   elif $rule == null then ($cfg.default // null)
+   else $rule.use
+   end) as $answer_raw_use |
+  (expand_use($answer_raw_use)) as $answer_expanded |
   (if $choice != "default" and $rule == null then {invalid: "rule \($choice) is not in the rules file"}
-   elif $rule == null then {source: "default", use: profiles($cfg.default // null), note: "no rule matched"}
-   elif ($rule.approval // "") == "captain" then {source: $choice, escalate: "rule requires the captain'"'"'s explicit approval before dispatch"}
-   elif $rule_floor_state == "unknown" then {source: $choice, escalate: "rule \($choice) floor \($rule.floor.provider)/\($rule.floor.scope) is unverifiable"}
+   elif $rule == null then (expand_use($cfg.default // null) + {source: "default", note: "no rule matched"})
+   elif ($rule.approval // "") == "captain" then ($answer_expanded + {source: $choice, escalate: "rule requires the captain'"'"'s explicit approval before dispatch"})
+   elif $rule_floor_state == "unknown" then ($answer_expanded + {source: $choice, escalate: "rule \($choice) floor \($rule.floor.provider)/\($rule.floor.scope) is unverifiable"})
    elif $rule_floor_state == "below"
-     then {source: "default", use: profiles($cfg.default // null), note: "rule \($choice) floor \($rule.floor.scope) below \($rule.floor.min_percent)%: fall through to default"}
-   else {source: $choice, use: profiles($rule.use), note: "rule matched"} end) as $sel |
+     then (expand_use($cfg.default // null) + {source: "default", note: "rule \($choice) floor \($rule.floor.scope) below \($rule.floor.min_percent)%: fall through to default"})
+   else ($answer_expanded + {source: $choice, note: "rule matched"}) end) as $sel |
   {
     model: $r.model, latency_ms: $lat, tokens: ($r.usage // null),
     rule: $choice,
@@ -367,13 +569,14 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     confidence: $a.confidence, probabilities: $a.probabilities
   } as $ev |
   if $sel.invalid then $ev + {status: "error", reason: $sel.invalid}
+  elif $sel.error then $ev + {status: "error", reason: $sel.error, candidates: []}
   elif $a.confidence < ($floor | tonumber) then
-    $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor)", candidates: ($answer_use | map(evaluate(.)))}
+    $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor)", candidates: (($sel.profiles // []) | map(evaluate(.)))}
   elif $sel.escalate then
-    $ev + {status: "escalate", reason: $sel.escalate, candidates: ($answer_use | map(evaluate(.)))}
-  elif ($sel.use | length) == 0 then $ev + {status: "escalate", reason: "no profiles configured for \($sel.source)", note: $sel.note, candidates: []}
+    $ev + {status: "escalate", reason: $sel.escalate, candidates: (($sel.profiles // []) | map(evaluate(.)))}
+  elif (($sel.profiles // []) | length) == 0 then $ev + {status: "escalate", reason: "no profiles configured for \($sel.source)", note: $sel.note, candidates: []}
   else
-    ($sel.use | map(evaluate(.))) as $cands |
+    (($sel.profiles // []) | map(evaluate(.))) as $cands |
     ([$cands[] | select(.eligible and ((.unranked // false) | not))]) as $elig |
     ([$cands[] | select(.unranked)]) as $unranked |
     if ($elig | length) == 0 then $ev + {status: "escalate", reason: "no rankable eligible candidate", note: $sel.note, candidates: $cands}
@@ -403,6 +606,9 @@ TEXT=$(jq -r '
   (if .unranked_note then "  note: \(.unranked_note | flat)" else empty end),
   (.candidates[]? | "  candidate: \(.profile.harness | flat):\(show(.profile.model))"
       + (if .provider then "  provider=\(.provider | flat)" else "" end)
+      + (if .profile.catalogMethod then "  catalog=\(.profile.catalogMethod | flat)" else "" end)
+      + (if .profile.fitClass then "  fit=task:\(.profile.taskType | flat)/\(.profile.taskFit | flat)/\(.profile.taskFitConfidence | flat)  reasoning:\(.profile.fitClass | flat) [\(.profile.fitSource | flat)/\(.profile.fitConfidence | flat)]  fitReason=\(.profile.taskFitReason | flat); \(.profile.fitReason | flat)" else "" end)
+      + (if .profile.preference and .profile.preference != "none" then "  preference=\(.profile.preference | flat)" else "" end)
       + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
       + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope | flat):\(show(.pct))%/\((.runway // .status) | flat)"] | join(",")) else "" end)
       + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
