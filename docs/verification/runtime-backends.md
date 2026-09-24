@@ -776,8 +776,31 @@ herdr 0.7.5
 
 ### TraeX thin worker adapter
 
-The ordinary TraeX worker/scout path was verified on 2026-08-11 with traecli 0.200.19 internal edition and Herdr 0.8.0.
-The guarded smoke used the same generic Herdr input, current-state, key, and cleanup owners as the other harnesses, while the only TraeX-specific backend fact was exact fresh-directory trust recognition.
+The fresh-directory trust path was verified on 2026-09-24 with traecli 0.207.1 internal edition and Herdr 0.8.0.
+That combination renders `enter continue | esc quit` and reports native `unknown` at the exact chooser, so the guard binds the TraeX identity, pane, and isolated cwd to that complete rendering before sending Enter.
+The same live run observed native `working`, verified the worker's benign instruction output, kept the post-turn native `unknown` unclassified, cleaned up the pane, and preserved the default-session tripwire.
+
+```sh
+HERDR_LAB_HELPER=/home/chengyuhang/firstmate/bin/fm-herdr-lab.sh \
+  FM_TRAEX_HERDR_LAB_TASK=fix-traex-trust-recognition-20260924 \
+  FM_TRAEX_HERDR_LIVE=1 \
+  bin/fm-test-run.sh tests/fm-traex-harness-live-e2e.test.sh
+```
+
+```text
+ok - real TraeX fresh-copy trust reached native working through generic Herdr
+note: Herdr kept native status unknown after the completed TraeX turn
+ok - real TraeX processed the benign initial instruction after guarded trust acceptance
+ok - native unknown remains unclassified after completion rather than being treated as idle
+ok - real TraeX exit cleanup uses the generic Herdr owner
+traex=traecli 0.207.1(internal edition)
+herdr=herdr 0.8.0
+ok - real TraeX lab teardown preserved the default Herdr session
+ok - thin TraeX/Herdr smoke completed
+```
+
+The broader ordinary TraeX worker/scout lifecycle was verified on 2026-08-11 with traecli 0.200.19 internal edition and Herdr 0.8.0.
+That guarded smoke used the same generic Herdr input, current-state, key, and cleanup owners as the other harnesses, while the only TraeX-specific backend fact was exact fresh-directory trust recognition.
 
 ```sh
 bin/fm-test-run.sh tests/fm-traex-harness.test.sh

@@ -3036,27 +3036,45 @@ fm_backend_herdr_strip_ansi() {  # <text>
 }
 
 # TraeX is a thin harness adapter over Herdr's generic lifecycle. Its only
-# backend-specific launch fact is the fresh-directory trust chooser: Herdr's
-# native manifest identifies the dialog, and the visible default must be the
-# affirmative option before Firstmate sends one Enter. No readiness record,
-# transition fold, binding index, or completion protocol is created here.
+# backend-specific launch fact is the fresh-directory trust chooser. The old
+# path requires Herdr's native manifest; the newer path requires the exact
+# rendered chooser while native state is unknown. Both paths first bind the
+# TraeX identity, pane, and cwd, and the visible default must be affirmative
+# before Firstmate sends one Enter. No readiness record, transition fold,
+# binding index, or completion protocol is created here.
 FM_BACKEND_HERDR_TRAEX_START_POLLS=${FM_BACKEND_HERDR_TRAEX_START_POLLS:-180}
 FM_BACKEND_HERDR_TRAEX_START_INTERVAL=${FM_BACKEND_HERDR_TRAEX_START_INTERVAL:-0.1}
 
-fm_backend_herdr_traex_trust_dialog_exact() {  # <target>
-  local target=$1 explain capture
+fm_backend_herdr_traex_trust_dialog_exact() {  # <target> <native-status>
+  local target=$1 status=$2 explain capture
   fm_backend_herdr_parse_target "$target" || return 1
-  explain=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent explain "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
-  printf '%s\n' "$explain" | grep -Fqx 'agent: traex' || return 1
-  printf '%s\n' "$explain" | grep -Fqx 'state: blocked' || return 1
-  printf '%s\n' "$explain" \
-    | grep -Fqx 'rule: directory_trust_prompt (region=whole_recent priority=1000)' \
-    || return 1
   capture=$(fm_backend_herdr_capture "$target" 80 2>/dev/null) || return 1
   case "$capture" in *'Do you trust the contents of this directory?'*) : ;; *) return 1 ;; esac
   case "$capture" in *'❯ 1. Yes, continue'*) : ;; *) return 1 ;; esac
   case "$capture" in *'  2. No, quit'*) : ;; *) return 1 ;; esac
-  case "$capture" in *'Press enter to continue'*) : ;; *) return 1 ;; esac
+  case "$status" in
+    blocked)
+      explain=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent explain "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+      printf '%s\n' "$explain" | grep -Fqx 'agent: traex' || return 1
+      printf '%s\n' "$explain" | grep -Fqx 'state: blocked' || return 1
+      printf '%s\n' "$explain" \
+        | grep -Fqx 'rule: directory_trust_prompt (region=whole_recent priority=1000)' \
+        || return 1
+      if printf '%s\n' "$capture" | grep -Fqx '  Press enter to continue'; then
+        :
+      else
+        printf '%s\n' "$capture" \
+          | grep -Eq '^[[:space:]]*enter continue[[:space:]]*\|[[:space:]]*esc quit[[:space:]]*$' \
+          || return 1
+      fi
+      ;;
+    unknown)
+      printf '%s\n' "$capture" \
+        | grep -Eq '^[[:space:]]*enter continue[[:space:]]*\|[[:space:]]*esc quit[[:space:]]*$' \
+        || return 1
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 fm_backend_herdr_traex_wait_started() {  # <target> <expected-worktree> <source-project>
@@ -3101,9 +3119,9 @@ fm_backend_herdr_traex_wait_started() {  # <target> <expected-worktree> <source-
       fi
       case "$status" in
         working) return 0 ;;
-        blocked)
+        blocked|unknown)
           if [ "$accepted" -eq 0 ]; then
-            fm_backend_herdr_traex_trust_dialog_exact "$target" || {
+            fm_backend_herdr_traex_trust_dialog_exact "$target" "$status" || {
               echo "error: Herdr did not identify the exact TraeX directory-trust chooser" >&2
               return 1
             }

@@ -95,16 +95,24 @@ case "${1:-} ${2:-}" in
     ;;
   "pane read")
     case "$phase" in
-      blocked) cat <<'EOF'
+      blocked)
+        if [ "${FM_FAKE_TRUST_PROMPT:-exact}" = other ]; then
+          printf '%s\n' '  Allow this command to access your files?' '  1. Allow' '  2. Deny' '  enter select  |  esc quit'
+          exit 0
+        fi
+        cat <<'EOF'
 > You are in the isolated task copy
 
   Do you trust the contents of this directory?
 
 ❯ 1. Yes, continue
   2. No, quit
-
-  Press enter to continue
 EOF
+        if [ "${FM_FAKE_TRUST_FOOTER:-old}" = new ]; then
+          printf '%s\n' '  enter continue  |  esc quit'
+        else
+          printf '%s\n' '  Press enter to continue'
+        fi
         ;;
       idle) printf '  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ──────╯\n' ;;
       *) printf 'Working... ctrl+c to stop\n' ;;
@@ -113,8 +121,11 @@ EOF
   "agent get")
     case "$phase" in
       blocked|working|idle|done)
+        reported_status=$phase
+        [ "$phase" != blocked ] || reported_status=${FM_FAKE_AGENT_STATUS:-$phase}
         printf '{"result":{"agent":{"agent":"traex","agent_status":"%s","cwd":"%s","foreground_cwd":"%s","pane_id":"w1:p2"}}}\n' \
-          "$phase" "${FM_FAKE_AGENT_CWD:-$project}" "$worktree"
+          "$reported_status" "${FM_FAKE_AGENT_CWD:-$project}" "$worktree" \
+          | sed "s/\"agent\":\"traex\"/\"agent\":\"${FM_FAKE_AGENT:-traex}\"/"
         ;;
       *) printf '%s\n' '{"error":{"code":"agent_not_found"}}' ;;
     esac
@@ -234,14 +245,36 @@ test_spawn_trust_and_generic_lifecycle() {
   pass "traex spawn uses exact trust and generic Herdr lifecycle state"
 }
 
+test_new_unknown_trust_rendering() {
+  local rec out status
+  rec=$(make_spawn_case new-unknown)
+  read_spawn_case "$rec"
+  out=$(FM_FAKE_AGENT_STATUS=unknown FM_FAKE_TRUST_FOOTER=new run_traex_spawn)
+  status=$?
+  expect_code 0 "$status" "new TraeX trust chooser should succeed from exact unknown evidence: $out"
+  [ "$(cat "$CASE_DIR/trust-count")" = 1 ] || fail "new trust chooser was not accepted exactly once"
+  [ "$(cat "$CASE_DIR/phase")" = working ] || fail "new trust chooser returned before native working"
+  pass "traex accepts the exact new chooser while native status is unknown"
+}
+
 test_trust_refusals() {
   local rec out status other
+  rec=$(make_spawn_case wrong-identity)
+  read_spawn_case "$rec"
+  out=$(FM_FAKE_AGENT=codex FM_FAKE_AGENT_STATUS=unknown FM_FAKE_TRUST_FOOTER=new \
+    FM_BACKEND_HERDR_TRAEX_START_POLLS=3 FM_BACKEND_HERDR_TRAEX_START_INTERVAL=0 \
+    run_traex_spawn)
+  status=$?
+  [ "$status" -ne 0 ] || fail "mismatched TraeX identity succeeded"
+  assert_absent "$CASE_DIR/trust-count" "mismatched identity received Enter"
+
   rec=$(make_spawn_case wrong-cwd)
   read_spawn_case "$rec"
   other="$CASE_DIR/unrelated"
   mkdir -p "$other"
-  out=$(FM_FAKE_AGENT_CWD="$other" FM_BACKEND_HERDR_TRAEX_START_POLLS=3 \
-    FM_BACKEND_HERDR_TRAEX_START_INTERVAL=0 run_traex_spawn)
+  out=$(FM_FAKE_AGENT_CWD="$other" FM_FAKE_AGENT_STATUS=unknown FM_FAKE_TRUST_FOOTER=new \
+    FM_BACKEND_HERDR_TRAEX_START_POLLS=3 FM_BACKEND_HERDR_TRAEX_START_INTERVAL=0 \
+    run_traex_spawn)
   status=$?
   [ "$status" -ne 0 ] || fail "mismatched trust provenance succeeded"
   assert_absent "$CASE_DIR/trust-count" "mismatched provenance received Enter"
@@ -254,6 +287,23 @@ test_trust_refusals() {
   [ "$status" -ne 0 ] || fail "unrecognized blocker was accepted"
   assert_contains "$out" 'exact TraeX directory-trust chooser' "wrong blocker diagnostic was unclear"
   assert_absent "$CASE_DIR/trust-count" "unrecognized blocker received Enter"
+
+  rec=$(make_spawn_case unknown-other-prompt)
+  read_spawn_case "$rec"
+  out=$(FM_FAKE_AGENT_STATUS=unknown FM_FAKE_TRUST_FOOTER=new FM_FAKE_TRUST_PROMPT=other \
+    FM_BACKEND_HERDR_TRAEX_START_POLLS=3 FM_BACKEND_HERDR_TRAEX_START_INTERVAL=0 \
+    run_traex_spawn)
+  status=$?
+  [ "$status" -ne 0 ] || fail "other prompt under unknown native state succeeded"
+  assert_absent "$CASE_DIR/trust-count" "other prompt under unknown native state received Enter"
+
+  rec=$(make_spawn_case unknown-old-rendering)
+  read_spawn_case "$rec"
+  out=$(FM_FAKE_AGENT_STATUS=unknown FM_BACKEND_HERDR_TRAEX_START_POLLS=3 \
+    FM_BACKEND_HERDR_TRAEX_START_INTERVAL=0 run_traex_spawn)
+  status=$?
+  [ "$status" -ne 0 ] || fail "generic unknown native state succeeded without the new rendering"
+  assert_absent "$CASE_DIR/trust-count" "generic unknown native state received Enter"
 
   rec=$(make_spawn_case no-working)
   read_spawn_case "$rec"
@@ -363,6 +413,7 @@ test_generic_steer_interrupt_and_keys() {
 
 test_marker_detection_is_scoped
 test_spawn_trust_and_generic_lifecycle
+test_new_unknown_trust_rendering
 test_trust_refusals
 test_scope_refuses_before_endpoint
 test_raw_traex_refuses_without_breaking_other_raw_launches
