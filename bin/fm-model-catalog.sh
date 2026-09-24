@@ -50,14 +50,27 @@ normalize_fixture() {  # <harness> <file>
     def task_types:
       [(.taskTypes // .task_types // .capabilities.taskTypes // .capabilities.task_types // .capabilities.tasks // .tasks // [])[]?
        | select(type == "string") | ascii_downcase] | unique;
+    def pi_harness: $harness == "pi" or $harness == "pi-signed";
+    def normalized_provider($provider):
+      if pi_harness and (($provider == "openai-codex") or ($provider | startswith("openai-codex-"))) then "codex"
+      elif pi_harness and $provider == "anthropic" then "claude"
+      else $provider end;
+    def launch_model($model; $raw_provider; $provider):
+      if ($model | type) != "string" then $model
+      elif (pi_harness | not) or ($model | contains("/")) then $model
+      elif $raw_provider != $provider then ($raw_provider + "/" + $model)
+      else $model end;
     select(type == "object") |
     if (.status // "ok") == "ok" then
       select((.harness? // $harness) == $harness) |
+      (.provider) as $raw_provider |
+      normalized_provider($raw_provider) as $provider |
+      (.model // .id) as $raw_model |
       (reasoning_capabilities) as $reasoning |
       (task_types) as $tasks |
-      {status:"ok", harness:$harness, model:(.model // .id), provider:.provider,
+      {status:"ok", harness:$harness, model:launch_model($raw_model; $raw_provider; $provider), provider:$provider,
        reasoningCapabilities:$reasoning, taskTypes:$tasks,
-       provenance: ((.provenance // {}) + {method:"fixture"})}
+       provenance: ((.provenance // {}) + {method:"fixture", rawProvider:$raw_provider})}
       | select((.model | type) == "string" and (.model | length) > 0 and (.provider | type) == "string" and (.provider | length) > 0)
     else
       {status:"error", harness:$harness, reason:(.reason // "fixture error"), provenance: ((.provenance // {}) + {method:"fixture"})}
@@ -215,6 +228,18 @@ def values(obj, keys, item_keys):
             result.append(value.lower())
     return sorted(set(result))
 
+def normalized_provider(provider):
+    if provider == 'openai-codex' or provider.startswith('openai-codex-'):
+        return 'codex'
+    if provider == 'anthropic':
+        return 'claude'
+    return provider
+
+def launch_model(model, raw_provider):
+    if '/' in model:
+        return model
+    return raw_provider + '/' + model
+
 with open(path, encoding='utf-8', errors='replace') as fh:
     for line in fh:
         s = line.strip()
@@ -228,14 +253,17 @@ with open(path, encoding='utf-8', errors='replace') as fh:
             provider = obj.get('provider') or obj.get('providerID')
             model = obj.get('model') or obj.get('id') or obj.get('name')
             if isinstance(provider, str) and isinstance(model, str) and provider and model:
-                key = (model, provider)
+                raw_provider = provider
+                normalized = normalized_provider(raw_provider)
+                model = launch_model(model, raw_provider)
+                key = (model, normalized)
                 if key not in seen:
                     seen.add(key)
                     print(json.dumps({
-                        'status': 'ok', 'harness': harness, 'model': model, 'provider': provider,
+                        'status': 'ok', 'harness': harness, 'model': model, 'provider': normalized,
                         'reasoningCapabilities': values(obj, ['reasoningCapabilities', 'supportedReasoningEfforts', 'reasoningEfforts', 'reasoning', 'thinkingLevels', 'effortLevels'], ['reasoningEffort', 'reasoning_effort', 'level', 'name']),
                         'taskTypes': values(obj, ['taskTypes', 'task_types', 'useCases', 'tasks'], ['taskType', 'task_type', 'type', 'name']),
-                        'provenance': {'method': 'pi --list-models', 'rawProvider': provider}
+                        'provenance': {'method': harness + ' --list-models', 'rawProvider': raw_provider}
                     }, separators=(',', ':')))
                 continue
         cols = re.split(r'\s+', s)
@@ -248,14 +276,17 @@ with open(path, encoding='utf-8', errors='replace') as fh:
             continue
         if not re.match(r'^[A-Za-z0-9][A-Za-z0-9_.-]*$', provider):
             continue
-        key = (model, provider)
+        raw_provider = provider
+        normalized = normalized_provider(raw_provider)
+        model = f'{raw_provider}/{model}'
+        key = (model, normalized)
         if key in seen:
             continue
         seen.add(key)
         print(json.dumps({
-            'status': 'ok', 'harness': harness, 'model': f'{provider}/{model}', 'provider': provider,
+            'status': 'ok', 'harness': harness, 'model': model, 'provider': normalized,
             'reasoningCapabilities': [], 'taskTypes': [],
-            'provenance': {'method': 'pi --list-models', 'rawProvider': provider}
+            'provenance': {'method': harness + ' --list-models', 'rawProvider': raw_provider}
         }, separators=(',', ':')))
 PY
   fi

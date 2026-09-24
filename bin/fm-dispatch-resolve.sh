@@ -296,11 +296,15 @@ done < <(jq -n -r --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" '
   def dynamic($v): ($v | type) == "object" and ((($v.discover // null) | type) == "object");
   ($resp[0].answers.rule.choice) as $choice |
   (if ($choice | test("^rule_[1-9][0-9]*$")) then ($choice | ltrimstr("rule_") | tonumber) else null end) as $rule_number |
-  (if $choice == "default" then ($rules[0].default // null)
-   elif $rule_number != null and $rule_number <= (($rules[0].rules // []) | length) then $rules[0].rules[$rule_number - 1].use
-   else null end) as $use |
-  [ $use, ($rules[0].default // null) ][] |
-  if dynamic(.) then .discover.harnesses[] else empty end
+  (if $choice == "default" then
+     [($rules[0].default // null)]
+   elif $rule_number != null and $rule_number <= (($rules[0].rules // []) | length) then
+     ($rules[0].rules[$rule_number - 1]) as $rule |
+     [$rule.use, (if ($rule | has("floor")) then ($rules[0].default // null) else null end)]
+   else []
+   end)[] |
+  select(dynamic(.)) |
+  .discover.harnesses[]
 ' /dev/null | awk '!seen[$0]++')
 if [ "${#CATALOG_HARNESSES[@]}" -gt 0 ]; then
   "$SCRIPT_DIR/fm-model-catalog.sh" "${CATALOG_HARNESSES[@]}" > "$CATALOG" 2>/dev/null || true
