@@ -92,17 +92,46 @@ SID=$(remote_env "$ADAPTER" source-id ios)
 out=$(remote_env "$ADAPTER" arm ios)
 assert_contains "$out" "armed: $SID offset=0" "remote reply source was not armed at the empty cursor"
 
-remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-one.out" 2>&1 &
-RUNNER=$!
+# Reproduce the false launch failure at its earliest divergence. The old
+# detached path backgrounded its tiny forking launcher, so reconcile began its
+# confirmation window before that launcher had even run. Delaying only that
+# launcher past the window made a healthy remote source report failed, then show
+# live seconds later. The fixed path waits for the launcher to fork the still-
+# detached runner before confirmation begins; the runner then claims before its
+# first blocking SSH fetch, while a true pre-claim failure remains covered by
+# tests/fm-procevent.test.sh.
+REAL_PERL=$(command -v perl) || fail "this host has no perl to delay the detached launcher"
+LAUNCH_DELAY_BIN=$(fm_fakebin "$TMP_ROOT/launch-delay-bin")
+LAUNCH_DELAY_LOG="$TMP_ROOT/launch-delay.log"
+cat > "$LAUNCH_DELAY_BIN/perl" <<SH
+#!/usr/bin/env bash
+if [ "\${1-}" = -e ] && [ "\${3-}" = detach ] && [ "\${5-}" = _start ]; then
+  printf 'delayed\n' >> "\$LAUNCH_DELAY_LOG"
+  sleep 4
+fi
+exec "$REAL_PERL" "\$@"
+SH
+chmod +x "$LAUNCH_DELAY_BIN/perl"
+launch_rc=0
+out=$(PATH="$LAUNCH_DELAY_BIN:$PATH" LAUNCH_DELAY_LOG="$LAUNCH_DELAY_LOG" \
+  FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=2 \
+  remote_env "$ROOT/bin/fm-procevent.sh" reconcile) || launch_rc=$?
+[ "$launch_rc" -eq 0 ] || fail "healthy delayed remote launch was reported failed: $out"
+assert_contains "$out" "started=1" "healthy delayed remote launch was not confirmed: $out"
+assert_contains "$out" "failed=0" "healthy delayed remote launch raised a false failure: $out"
+assert_present "$LAUNCH_DELAY_LOG" "fixture did not delay the detached launcher beyond the confirmation window"
 wait_for "$CLAIMS/$SID.claim" || fail "process-event runner never claimed the remote reply source"
+if [ -e "$PARENT/state/.wake-queue" ] \
+  && grep -q "procevent:$SID:launch-failed:" "$PARENT/state/.wake-queue"; then
+  fail "healthy delayed remote launch published a launch-failure wake"
+fi
 printf 'done [corr=0123456789abcdef] [at=1700000000]: build verified report=data/reply/report.md\n' \
   >> "$REMOTE/state/parent-replies.status"
-wait "$RUNNER" || fail "remote reply source failed to capture its first delta"
-RESULT=$(find "$PARENT/state/procevent-inbox" -name "$SID.1.result" -print -quit 2>/dev/null)
-if [ -z "$RESULT" ]; then
-  printf 'runner output:\n%s\n' "$(cat "$TMP_ROOT/start-one.out")" >&2
-  fail "the remote reply delta was not durably captured"
-fi
+wait_for "$PARENT/state/procevent-inbox/$SID.1.result" \
+  || fail "remote reply source failed to capture its first delta"
+RESULT="$PARENT/state/procevent-inbox/$SID.1.result"
+wait_for "$PARENT/state/procevent-inbox/$SID.1.handled" \
+  || fail "remote reply source did not finish applying its first delta"
 assert_grep 'done [corr=0123456789abcdef]' "$RESULT" "captured delta lost the correlated status line"
 # One remote note, one announcement: the adapter declares self-announcing, so a
 # fully autohandled capture publishes NO check wake - the mirrored status bytes

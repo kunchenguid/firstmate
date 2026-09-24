@@ -850,22 +850,36 @@ publish_pending() {  # [result-file-to-skip]
 
 # Start one command as the leader of a fresh process group, either waiting for
 # it (the public `start` boundary) or detaching from it (reconcile's restart and
-# the runner's own owner guard). The guard deliberately gets its OWN group
-# rather than joining the runner's: it has to survive the group signal it sends,
-# and a member of the runner's group would also make that group read as alive
-# after the runner itself is gone.
+# the runner's own owner guard). A detached launch runs the tiny forking parent
+# synchronously and waits for its child to establish the new process group, so
+# it returns only after the child is scheduled and ready to exec; backgrounding
+# that parent spent the launch-confirmation window waiting for the launcher
+# itself to be scheduled and falsely failed healthy runners whose claims
+# appeared later.
+# The child remains detached, and its source command still blocks nowhere in the
+# caller. The guard deliberately gets its OWN group rather than joining the
+# runner's: it has to survive the group signal it sends, and a member of the
+# runner's group would also make that group read as alive after the runner itself
+# is gone.
 isolate_process() {  # <wait|detach> <command> [argv...]
   local mode=$1 program
   shift
   # shellcheck disable=SC2016 # Perl owns every $ expression in this literal program.
   program='my $mode = shift @ARGV;
+    pipe(my $ready_read, my $ready_write) or exit 125;
     defined(my $pid = fork) or exit 125;
     if ($pid == 0) {
+      close $ready_read;
       setpgrp(0, 0) or exit 125;
       $ENV{FM_PROCEVENT_RUNNER_GROUP} = $$;
+      print {$ready_write} "ready\n" or exit 125;
+      close $ready_write or exit 125;
       exec @ARGV;
       exit 125;
     }
+    close $ready_write;
+    defined(<$ready_read>) or exit 125;
+    close $ready_read or exit 125;
     exit 0 if $mode eq "detach";
     waitpid($pid, 0) == $pid or exit 125;
     my $status = $?;
@@ -875,7 +889,7 @@ isolate_process() {  # <wait|detach> <command> [argv...]
     perl -e "$program" "$mode" "$@"
     return $?
   fi
-  perl -e "$program" "$mode" "$@" >/dev/null 2>&1 &
+  perl -e "$program" "$mode" "$@" >/dev/null 2>&1
 }
 
 isolate_runner() {  # <wait|detach> <source-id>

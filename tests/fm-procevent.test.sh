@@ -2274,7 +2274,10 @@ pass "a 64-char source id keeps the launch-failed key within the watcher's marke
 # that case.
 HUF="$TMP_ROOT/huf"; new_home "$HUF"
 UF_TRIGGER="$TMP_ROOT/unstartable-trigger"
-pe_register "$HUF" lavish unstartable-src -- "$BLOCKER" "$UF_TRIGGER" "unstartable" >/dev/null
+# A genuine remote launch that never claims still follows the loud failure
+# path. The damaged registration below prevents the source command from running,
+# so adapter-specific result handling is intentionally not involved.
+pe_register "$HUF" remote-reply unstartable-src -- "$BLOCKER" "$UF_TRIGGER" "unstartable" >/dev/null
 UF_SOURCE="$HUF/state/procevent/unstartable-src.source"
 if ! awk '/^argv:$/ { print; exit } { print }' "$UF_SOURCE" > "$UF_SOURCE.tmp"; then
   fail "could not damage the unstartable registration"
@@ -2290,8 +2293,15 @@ assert_contains "$uf_out" "failed=1" \
 [ "$uf_rc" -ne 0 ] || fail "reconcile reported success while a source could not start: $uf_out"
 uf_owner=$(pe "$HUF" list | awk '$1 == "unstartable-src" { print $3 }')
 [ "$uf_owner" = none ] || fail "the unstartable source reports an owner: $uf_owner"
+[ "$(launch_failed_wake_count "$HUF" unstartable-src)" = 1 ] \
+  || fail "the unstartable remote source did not publish exactly one failure wake: $uf_out"
+uf_again=$(FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=2 pe "$HUF" reconcile 2>/dev/null) || true
+assert_contains "$uf_again" "failed=1" \
+  "the unstartable remote source was not retried as failed: $uf_again"
+[ "$(launch_failed_wake_count "$HUF" unstartable-src)" = 1 ] \
+  || fail "the same unstartable remote failure episode was announced more than once: $uf_again"
 pe "$HUF" retire unstartable-src >/dev/null 2>&1 || true
-pass "reconcile reports a launch it could not confirm instead of counting it as a start"
+pass "a remote launch that never claims fails loudly exactly once per episode"
 
 # --- a launch that finished before the first poll is still confirmed ---------
 # Confirmation has to read evidence a finished runner leaves behind. A runner
