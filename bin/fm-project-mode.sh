@@ -164,7 +164,6 @@ parsed=$(awk -v n="$NAME" '
         if (a[j] != "" && mode_set == 0) { mode = a[j]; mode_set = 1 }
       }
     }
-    if (forge == "") forge = "none";
     # branch is printed LAST: an empty branch= override must survive as an
     # empty final field, which only holds when nothing follows it.
     print "posture", mode, yolo, forge, branch; exit
@@ -196,7 +195,7 @@ EOF
 forge=${rest_forge:-none}
 case "$mode" in
   no-mistakes|direct-PR|local-only|no-mistakes-prod-only) ;;
-  *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;
+  *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off; branch=fm/ ;;
 esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac
 if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then

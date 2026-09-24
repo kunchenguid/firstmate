@@ -2958,6 +2958,15 @@ if [ "$KIND" = ship ]; then
     [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi
+  # The registered ship-branch prefix (bin/fm-project-mode.sh) is the captain's
+  # answer to "should this project's branches read as firstmate-authored", so a
+  # spawn that ships the legacy fm/ prefix past a registered override is
+  # announced, not refused: the brief-vs-spawn agreement above already
+  # guarantees the worker's instructions match the branch this spawn selected.
+  STANDING_BRANCH=$("$FM_ROOT/bin/fm-project-mode.sh" --branch-prefix "$PROJ_NAME" 2>/dev/null) || STANDING_BRANCH=
+  if [ "$BRANCH" != "$STANDING_BRANCH$ID" ]; then
+    echo "notice: $ID ships branch=$BRANCH while $PROJ_NAME registers the ship-branch prefix '$STANDING_BRANCH' (branch $STANDING_BRANCH$ID) - the task's branch and PR will read as firstmate-authored; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
 fi
 
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)

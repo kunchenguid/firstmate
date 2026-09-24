@@ -1367,6 +1367,36 @@ EOF
   pass "fm-spawn: the brief must carry the spawn's selected ship branch, and the selection is validated before anything is created"
 }
 
+# The registered ship-branch prefix exists so a third-party project's branches and
+# PRs do not read as firstmate-authored, but a spawn that deviates from it breaks
+# no contract: the brief-vs-spawn agreement above already guarantees the worker's
+# instructions match the branch this spawn selected. So the deviation is announced
+# and the spawn proceeds, while matching the registry (or its fm/ default) stays
+# quiet.
+test_spawn_notices_a_ship_branch_against_the_registry_prefix() {
+  local rec home proj fakebin out
+  rec=$(make_home prefix-deviation "- proj [no-mistakes branch=fix/] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+
+  write_brief "$home" prefix-dev-a1 no-mistakes
+  out=$(run_spawn "$home" "$fakebin" prefix-dev-a1 "$proj" claude --mode no-mistakes --yolo off)
+  assert_contains "$out" "ships branch=fm/prefix-dev-a1 while proj registers the ship-branch prefix 'fix/'" \
+    "no deviation notice for shipping the legacy prefix past a registered override"
+  assert_contains "$out" "will read as firstmate-authored" \
+    "the deviation notice did not name the cost of the drift"
+
+  FM_HOME="$home" "$BRIEF" prefix-dev-a2 proj --mode no-mistakes --branch-prefix fix/ >/dev/null \
+    || fail "a fix/-prefixed brief should scaffold"
+  fill_brief_subsections "$home/data/prefix-dev-a2/brief.md" "Run the review loop." "Ship it."
+  out=$(run_spawn "$home" "$fakebin" prefix-dev-a2 "$proj" claude --mode no-mistakes --yolo off --branch-prefix fix/)
+  assert_not_contains "$out" "registers the ship-branch prefix" \
+    "a spawn matching the registered prefix was announced as a deviation"
+
+  pass "fm-spawn: a ship branch that deviates from the registered prefix is announced, never blocked"
+}
+
 # The registry is hand-edited markdown, so a one-character typo in the forge token
 # is the likeliest way it goes wrong. Such an entry must stop the spawn with the
 # parser's own reason in front of the operator: resolving it to "no registered
@@ -1501,7 +1531,7 @@ test_spawn_refreshes_legacy_worker_roles
 # presence-independent), defaults an unregistered/plain project to the legacy
 # "fm/" prefix, and resolves an empty override to "" for a bare <task-id> branch.
 test_project_mode_resolves_branch_prefix() {
-  local home out
+  local home out err
   home="$TMP_ROOT/project-mode-branch/home"
   mkdir -p "$home/data"
   cat > "$home/data/projects.md" <<'EOF'
@@ -1510,6 +1540,7 @@ test_project_mode_resolves_branch_prefix() {
 - overrideproj [direct-PR branch=fix/] - fixture with mode then branch override (added 2026-01-01)
 - reorderedproj [branch=contrib/ direct-PR +yolo] - fixture with branch before mode (added 2026-01-01)
 - bareproj [no-mistakes branch=] - fixture with an empty override (added 2026-01-01)
+- typomodeproj [no-mistake branch=fix/] - fixture with a typo'd mode (added 2026-01-01)
 
 EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" plainproj 2>/dev/null)
@@ -1533,6 +1564,13 @@ EOF
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix bareproj 2>/dev/null)
   [ "$out" = "" ] || fail "an empty branch= override must resolve to an empty prefix, not fm/ (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" typomodeproj 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "a typo'd mode's registered branch leaked into the mode/yolo output (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" typomodeproj 2>&1 >/dev/null)
+  assert_contains "$err" "unknown mode" "a typo'd mode with a branch override stopped warning"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix typomodeproj 2>/dev/null)
+  [ "$out" = "fm/" ] || fail "an unknown mode must fall back to the legacy fm/ prefix, not trust the malformed entry's branch (got '$out')"
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix never-registered 2>/dev/null)
   [ "$out" = "fm/" ] || fail "an unregistered project must default its branch prefix to fm/ (got '$out')"
@@ -1561,6 +1599,7 @@ test_forge_gerrit_changes_what_no_mistakes_means
 test_forge_gerrit_direct_pr_publishes_one_change
 test_spawn_requires_the_brief_to_carry_the_registered_forge
 test_spawn_requires_the_brief_to_carry_the_selected_branch
+test_spawn_notices_a_ship_branch_against_the_registry_prefix
 test_spawn_refuses_a_registry_forge_it_cannot_read
 test_promotion_carries_the_forge_binding
 test_spawn_and_promote_require_filled_task_subsections
