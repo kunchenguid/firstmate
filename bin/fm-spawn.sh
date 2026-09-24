@@ -33,7 +33,11 @@
 #   refused as a flag value.
 #   --branch-prefix is the optional prefix selected at intake for this ship's
 #   immutable branch, defaulting to "fm/". It must agree with the branch recorded
-#   in the brief, and is refused on scouts, secondmates, and relaunches.
+#   in the brief, and is refused on scouts, secondmates, and relaunches. When the
+#   selected branch does not match the project's registered prefix, the spawn
+#   prints a one-line deviation notice and continues, because the registered
+#   prefix is the captain's standing preference and the brief agreement above
+#   already guarantees the worker's instructions match the branch.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
