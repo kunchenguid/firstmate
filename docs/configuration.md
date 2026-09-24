@@ -543,6 +543,7 @@ Codex `max` is valid when the profile selects `gpt-5.6-luna`, whose installed ca
 An omitted model or effort means the selected harness uses its own default for that axis.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 A dynamic `discover` rule is expanded only by typed resolution: `bin/fm-model-catalog.sh` calls each listed harness's own catalog method with a timeout, normalizes harness, model ID, provider, task-type and reasoning metadata, and provenance, and never ranks or spawns.
+Dynamic discovery accepts only harnesses with an implemented catalog method; another verified harness is an actionable configuration error rather than a runtime fallback.
 A model absent from a successful harness catalog is not retained from any old shortlist, while a catalog error, timeout, unsupported harness, or missing result is an `error` outcome rather than a fallback to stale candidates.
 If no dispatch rule fits, firstmate resolves `default` through the same object-array-or-discover path before falling back to `config/crew-harness`.
 Except for `ultra`, which refuses unsupported profiles under the native-effort contract above, an effort value the chosen harness does not accept is recorded as `effort=` in task meta for traceability but omitted from the launch flags.

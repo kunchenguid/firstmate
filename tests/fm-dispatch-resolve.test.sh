@@ -743,6 +743,17 @@ assert_equals '["documentation"]' "$(jq -c -s 'map(select(.harness == "claude"))
 assert_equals '["xhigh"]' "$(jq -c -s 'map(select(.harness == "claude"))[0].reasoningCapabilities' <<<"$CATALOG_OUT")" "Claude catalog preserves reasoning metadata"
 cat > "$FAKEBIN/opencode" <<'SH'
 #!/usr/bin/env bash
+printf '%s\n' 'opencode-go/opencode-text'
+SH
+chmod +x "$FAKEBIN/opencode"
+TEXT_CATALOG_OUT=$(PATH="$FAKEBIN:$BASE_PATH" FM_MODEL_CATALOG_FIXTURE_DIR= "$ROOT/bin/fm-model-catalog.sh" opencode)
+assert_equals 'opencode-go/opencode-text' "$(jq -r '.model' <<<"$TEXT_CATALOG_OUT")" "OpenCode text catalog preserves the model id"
+assert_equals 'opencode-go' "$(jq -r '.provider' <<<"$TEXT_CATALOG_OUT")" "OpenCode text catalog preserves the provider"
+ln -s "$FAKEBIN/pi" "$FAKEBIN/pi-signed"
+SIGNED_CATALOG_OUT=$(PATH="$FAKEBIN:$BASE_PATH" FM_MODEL_CATALOG_FIXTURE_DIR= "$ROOT/bin/fm-model-catalog.sh" pi-signed)
+assert_equals 'pi-signed' "$(jq -r '.harness' <<<"$SIGNED_CATALOG_OUT")" "pi-signed discovery uses its selected harness identity"
+cat > "$FAKEBIN/opencode" <<'SH'
+#!/usr/bin/env bash
 sleep 5
 SH
 chmod +x "$FAKEBIN/opencode"
@@ -752,8 +763,9 @@ cat > "$RULES" <<'JSON'
 JSON
 reset_log
 FM_MODEL_CATALOG_FIXTURE_DIR= TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
-assert_contains "$out" '  status: error' "unavailable dynamic harness is an error outcome"
-assert_contains "$out" 'model catalog discovery failed: grok: no verified model catalog method for harness grok' "unavailable dynamic harness is named"
+expect_code 2 "$code" "unsupported dynamic harness fails configuration validation"
+assert_contains "$err" 'malformed rules file' "unsupported dynamic harness is an actionable configuration error"
+assert_contains "$err" 'dynamic use needs discover' "unsupported dynamic harness is named by dynamic validation"
 
 cat > "$RULES" <<'JSON'
 {"rules":[{"when":"Timeout dynamic work.","use":{"discover":{"task_type":"implementation","required_reasoning_class":"medium","harnesses":["opencode"],"providers":["opencode-go"]}}}]}
@@ -763,7 +775,7 @@ FM_MODEL_CATALOG_TIMEOUT=1 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "catalog timeout is an error outcome"
 assert_contains "$out" 'opencode: catalog command timed out after 1s' "catalog timeout is named"
 cp "$BASE_RULES" "$RULES"
-pass "dynamic discovery uses catalog rows, drops removed models, and reports unavailable, timeout, and unknown-quota cases"
+pass "dynamic discovery uses catalog rows, rejects unsupported harnesses, and reports timeout and unknown-quota cases"
 
 # --- API and response failures are error outcomes, exit 0 ----------------------
 reset_log

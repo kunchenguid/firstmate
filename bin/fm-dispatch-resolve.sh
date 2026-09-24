@@ -122,11 +122,13 @@ trap 'rm -f "$RULES"' EXIT
 cp "$RULES_PATH" "$RULES" || die "could not snapshot rules file: $RULES_PATH"
 chmod 400 "$RULES" || die "could not protect rules snapshot"
 VERIFIED_HARNESSES=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
+CATALOG_METHOD_HARNESSES=$("$SCRIPT_DIR/fm-model-catalog.sh" --list-harnesses | jq -Rsc 'split("\n") | map(select(length > 0))') || die "could not read model catalog methods"
 
 # The fields this tool consumes must be well formed; bootstrap owns the wider
 # schema diagnostic, but an intake never selects around a malformed file.
-rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
+rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --argjson catalog_method_harnesses "$CATALOG_METHOD_HARNESSES" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
   def verified($h): $verified_harnesses | index($h);
+  def catalog_method($h): $catalog_method_harnesses | index($h);
   def provider_id($p): ($p | type) == "string" and ($p | test($provider_re));
   def effort_ok($h; $m; $e):
     if $e == null then true
@@ -160,11 +162,14 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
     ($items | map([.harness, (.model // null), (.effort // null)] | @json)) as $keys
     | ($keys | length) != ($keys | unique | length);
   def string_array($v): ($v | type) == "array" and all($v[]; (type == "string" and length > 0));
+  def unsupported_catalog_harness($d):
+    if ($d.harnesses | type) == "array" then any($d.harnesses[]; catalog_method(.) == null) else false end;
   def dynamic_bad($d):
     (($d.task_type | type) != "string" or ($d.task_type | length) == 0)
     or ((["low","medium","high","xhigh","max"] | index($d.required_reasoning_class)) == null)
     or (string_array($d.harnesses) | not)
     or (($d.harnesses | length) == 0)
+    or unsupported_catalog_harness($d)
     or ($d | has("providers") and ((string_array($d.providers) | not) or any($d.providers[]; provider_id(.) | not)))
     or ($d | has("preferred_models") and (string_array($d.preferred_models) | not))
     or ($d | has("preferred_families") and (string_array($d.preferred_families) | not))

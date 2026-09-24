@@ -3,6 +3,7 @@
 #
 # Usage:
 #   fm-model-catalog.sh <harness> [<harness> ...]
+#   fm-model-catalog.sh --list-harnesses
 #
 # Prints JSON Lines.
 # Successful model rows carry:
@@ -28,6 +29,10 @@ usage() {
     /^#/ { sub(/^# ?/, ""); print; next }
     { exit }
   ' "$0"
+}
+
+supported_harnesses() {
+  printf '%s\n' claude codex opencode pi pi-signed
 }
 
 json_emit_error() {  # <harness> <reason> <method>
@@ -96,9 +101,9 @@ catalog_opencode() {
   local harness=opencode tmp
   with_fixture_if_present "$harness" && return 0
   tmp=$(mktemp) || return 1
-  if run_capture "$harness" "opencode --pure models --verbose" "$tmp" opencode --pure models --verbose; then
+  if run_capture "$harness" "opencode models" "$tmp" opencode models; then
     python3 - "$tmp" <<'PY'
-import json, sys
+import json, re, sys
 path = sys.argv[1]
 seen = set()
 
@@ -124,39 +129,57 @@ def values(obj, keys, item_keys):
             result.append(value.lower())
     return sorted(set(result))
 
+def emit(model, provider, obj=None):
+    obj = obj or {}
+    key = (model, provider)
+    if key in seen:
+        return
+    seen.add(key)
+    print(json.dumps({
+        'status': 'ok', 'harness': 'opencode', 'model': model, 'provider': provider,
+        'reasoningCapabilities': values(obj, ['reasoningCapabilities', 'supportedReasoningEfforts', 'reasoningEfforts', 'reasoning', 'thinkingLevels', 'effortLevels'], ['reasoningEffort', 'reasoning_effort', 'level', 'name']),
+        'taskTypes': values(obj, ['taskTypes', 'task_types', 'useCases', 'tasks'], ['taskType', 'task_type', 'type', 'name']),
+        'provenance': {'method': 'opencode models', 'rawProvider': provider}
+    }, separators=(',', ':')))
+
 with open(path, encoding='utf-8', errors='replace') as fh:
     for line in fh:
-        s = line.strip()
-        if not s.startswith('{'):
+        s = re.sub(r'\x1b\[[0-9;]*m', '', line.strip()).strip(' |*-')
+        if not s:
             continue
         try:
             obj = json.loads(s)
         except Exception:
+            obj = None
+        if isinstance(obj, dict):
+            model = obj.get('id') or obj.get('model') or obj.get('name')
+            provider = obj.get('providerID') or obj.get('provider')
+            if isinstance(model, str) and model and isinstance(provider, str) and provider:
+                emit(model, provider, obj)
+                continue
+        cols = re.split(r'\s+', s)
+        candidate = cols[0]
+        if '/' in candidate:
+            provider, model = candidate.split('/', 1)
+        elif len(cols) >= 2:
+            provider, model = cols[0], cols[1]
+        else:
             continue
-        model = obj.get('id') or obj.get('model') or obj.get('name')
-        provider = obj.get('providerID') or obj.get('provider')
-        if not isinstance(model, str) or not model or not isinstance(provider, str) or not provider:
+        if not re.match(r'^[A-Za-z0-9][A-Za-z0-9_.-]*$', provider) or not model or model.lower() in {'model', 'models'}:
             continue
-        key = (model, provider)
-        if key in seen:
-            continue
-        seen.add(key)
-        print(json.dumps({
-            'status': 'ok', 'harness': 'opencode', 'model': model, 'provider': provider,
-            'reasoningCapabilities': values(obj, ['reasoningCapabilities', 'supportedReasoningEfforts', 'reasoningEfforts', 'reasoning', 'thinkingLevels', 'effortLevels'], ['reasoningEffort', 'reasoning_effort', 'level', 'name']),
-            'taskTypes': values(obj, ['taskTypes', 'task_types', 'useCases', 'tasks'], ['taskType', 'task_type', 'type', 'name']),
-            'provenance': {'method': 'opencode --pure models --verbose', 'rawProvider': provider}
-        }, separators=(',', ':')))
+        emit(candidate if '/' in candidate else model, provider)
 PY
   fi
   rm -f "$tmp" "$tmp.err"
 }
 
 catalog_pi() {  # <harness>
-  local harness=$1 tmp
+  local harness=$1 tmp executable
   with_fixture_if_present "$harness" && return 0
+  executable=pi
+  [ "$harness" = pi-signed ] && executable=pi-signed
   tmp=$(mktemp) || return 1
-  if run_capture "$harness" "pi --list-models" "$tmp" pi -ne -ns -np -nc --no-themes --no-approve --list-models; then
+  if run_capture "$harness" "$executable --list-models" "$tmp" "$executable" -ne -ns -np -nc --no-themes --no-approve --list-models; then
     python3 - "$tmp" "$harness" <<'PY'
 import json, re, sys
 path, harness = sys.argv[1], sys.argv[2]
@@ -432,6 +455,10 @@ PY
   fi
 }
 
+if [ "${1:-}" = --list-harnesses ]; then
+  supported_harnesses
+  exit 0
+fi
 [ $# -gt 0 ] || { usage >&2; exit 2; }
 status=0
 for harness in "$@"; do

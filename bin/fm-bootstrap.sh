@@ -1129,8 +1129,13 @@ crew_dispatch_validate() {
   else
     verified_harnesses='["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp","devin"]'
   fi
-  err=$(jq -r --argjson typed "$typed_active" --argjson verified_harnesses "$verified_harnesses" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
+  catalog_method_harnesses='[]'
+  if $typed_active; then
+    catalog_method_harnesses=$("$SCRIPT_DIR/fm-model-catalog.sh" --list-harnesses | jq -Rsc 'split("\n") | map(select(length > 0))') || catalog_method_harnesses='[]'
+  fi
+  err=$(jq -r --argjson typed "$typed_active" --argjson verified_harnesses "$verified_harnesses" --argjson catalog_method_harnesses "$catalog_method_harnesses" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     def verified($h): $verified_harnesses | index($h);
+    def catalog_method($h): $catalog_method_harnesses | index($h);
     def provider_id($p): ($p | type) == "string" and ($p | test($provider_re));
     def effort_ok($h; $m; $e):
       if $e == null then true
@@ -1174,11 +1179,14 @@ crew_dispatch_validate() {
     def malformed_profile_floors($items):
       ($items | any(has("floor") and floor_bad(.floor; false)));
     def string_array($value): ($value | type) == "array" and all($value[]; (type == "string" and length > 0));
+    def unsupported_catalog_harness($d):
+      if ($d.harnesses | type) == "array" then any($d.harnesses[]; catalog_method(.) == null) else false end;
     def dynamic_bad($d):
       (($d.task_type | type) != "string" or ($d.task_type | length) == 0)
       or ((["low","medium","high","xhigh","max"] | index($d.required_reasoning_class)) == null)
       or (string_array($d.harnesses) | not)
       or (($d.harnesses | length) == 0)
+      or ($typed and unsupported_catalog_harness($d))
       or ($typed and ($d | has("providers") and ((string_array($d.providers) | not) or any($d.providers[]; provider_id(.) | not))))
       or ($d | has("preferred_models") and (string_array($d.preferred_models) | not))
       or ($d | has("preferred_families") and (string_array($d.preferred_families) | not))
