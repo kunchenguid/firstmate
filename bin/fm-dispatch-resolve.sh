@@ -104,6 +104,15 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# ---- opt-in gate ---------------------------------------------------------------
+if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
+  TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
+fi
+if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
+  echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
+  exit 0
+fi
+
 CATALOG_CWD=${FM_DISPATCH_PROJECT_DIR:-}
 if [ -z "$CATALOG_CWD" ] && [ -n "$PROJECT" ]; then
   case "$PROJECT" in
@@ -115,15 +124,6 @@ fi
 [ -n "$CATALOG_CWD" ] || CATALOG_CWD=$PWD
 [ -d "$CATALOG_CWD" ] || die "dispatch project directory not found: $CATALOG_CWD"
 CATALOG_CWD=$(cd "$CATALOG_CWD" && pwd -P) || die "dispatch project directory cannot be resolved: $CATALOG_CWD"
-
-# ---- opt-in gate ---------------------------------------------------------------
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
-fi
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
-  exit 0
-fi
 
 # ---- inputs --------------------------------------------------------------------
 [ -n "$BRIEF" ] || die "brief file required (see --help)"

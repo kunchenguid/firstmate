@@ -1224,6 +1224,7 @@ crew_dispatch_validate() {
     elif has("default") and ((.default | type) != "object" and (.default | type) != "array") then "default must be a profile object or non-empty profile array"
     elif has("default") and (dynamic(.default) | not) and ((.default | type) == "array" and (.default | length) == 0) then "default needs at least one profile"
     elif has("default") and dynamic(.default) and dynamic_bad(.default.discover) then "dynamic default needs discover.task_type, required_reasoning_class, non-empty harnesses, optional providers, preferred_models, preferred_families, and floor with well formed values"
+    elif ($typed | not) and (any((.rules // [])[]?; dynamic(.use)) or (has("default") and dynamic(.default))) then "dynamic dispatch requires TYPESAFE_API_KEY; configure concrete harness profiles for ordinary intake"
     elif has("default") and ([profiles(.default)[]? | select(type != "object")] | length) > 0 then "each default profile must be an object"
     elif has("default") and ([profiles(.default)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length) > 0 then "each default profile needs harness"
     elif has("default") and malformed_optional_fields([profiles(.default)[]?]) then

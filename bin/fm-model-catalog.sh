@@ -53,6 +53,7 @@ normalize_fixture() {  # <harness> <file>
     def pi_harness: $harness == "pi" or $harness == "pi-signed";
     def normalized_provider($provider):
       if pi_harness and (($provider == "openai-codex") or ($provider | startswith("openai-codex-"))) then "codex"
+      elif pi_harness and $provider == "codex-native" then "codex"
       elif pi_harness and $provider == "anthropic" then "claude"
       else $provider end;
     def launch_model($model; $raw_provider; $provider):
@@ -232,6 +233,8 @@ def values(obj, keys, item_keys):
 
 def normalized_provider(provider):
     if provider == 'openai-codex' or provider.startswith('openai-codex-'):
+        return 'codex'
+    if provider == 'codex-native':
         return 'codex'
     if provider == 'anthropic':
         return 'claude'
