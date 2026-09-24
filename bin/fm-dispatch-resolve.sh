@@ -104,6 +104,18 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+CATALOG_CWD=${FM_DISPATCH_PROJECT_DIR:-}
+if [ -z "$CATALOG_CWD" ] && [ -n "$PROJECT" ]; then
+  case "$PROJECT" in
+    projects/*) CATALOG_CWD="$FM_HOME/projects/${PROJECT#projects/}" ;;
+    /*) CATALOG_CWD="$PROJECT" ;;
+    *) [ -d "$FM_HOME/projects/$PROJECT" ] && CATALOG_CWD="$FM_HOME/projects/$PROJECT" ;;
+  esac
+fi
+[ -n "$CATALOG_CWD" ] || CATALOG_CWD=$PWD
+[ -d "$CATALOG_CWD" ] || die "dispatch project directory not found: $CATALOG_CWD"
+CATALOG_CWD=$(cd "$CATALOG_CWD" && pwd -P) || die "dispatch project directory cannot be resolved: $CATALOG_CWD"
+
 # ---- opt-in gate ---------------------------------------------------------------
 if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
   TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
@@ -325,6 +337,8 @@ done < <(jq -n -r --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slu
 if [ "${#CATALOG_HARNESSES[@]}" -gt 0 ]; then
   for catalog_harness in "${CATALOG_HARNESSES[@]}"; do
     catalog_account=''
+    catalog_env=()
+    catalog_allowlist='null'
     case "$catalog_harness" in
       claude|pi|pi-signed)
         catalog_account=$(fm_worker_account_resolve "$catalog_harness" "$CONFIG") ||
@@ -346,23 +360,24 @@ if [ "${#CATALOG_HARNESSES[@]}" -gt 0 ]; then
             catalog_env[${#catalog_env[@]}]=-u
             catalog_env[${#catalog_env[@]}]=CLAUDE_CONFIG_DIR
           fi
-          "${catalog_env[@]}" "$SCRIPT_DIR/fm-model-catalog.sh" "$catalog_harness" >> "$CATALOG" 2>/dev/null || true
-        else
-          "$SCRIPT_DIR/fm-model-catalog.sh" "$catalog_harness" >> "$CATALOG" 2>/dev/null || true
         fi
         ;;
       pi|pi-signed)
         if [ -n "$catalog_account" ]; then
           IFS=$'\t' read -r catalog_declared catalog_root catalog_providers <<< "$catalog_account"
-          PI_CODING_AGENT_DIR="$catalog_root" "$SCRIPT_DIR/fm-model-catalog.sh" "$catalog_harness" >> "$CATALOG" 2>/dev/null || true
-        else
-          "$SCRIPT_DIR/fm-model-catalog.sh" "$catalog_harness" >> "$CATALOG" 2>/dev/null || true
+          catalog_env=(env "PI_CODING_AGENT_DIR=$catalog_root")
+          catalog_allowlist=$(jq -cn --arg providers "$catalog_providers" '$providers | split(" ")')
         fi
         ;;
-      *)
-        "$SCRIPT_DIR/fm-model-catalog.sh" "$catalog_harness" >> "$CATALOG" 2>/dev/null || true
-        ;;
     esac
+    (
+      cd "$CATALOG_CWD" || exit 1
+      if [ "${#catalog_env[@]}" -gt 0 ]; then
+        "${catalog_env[@]}" "$SCRIPT_DIR/fm-model-catalog.sh" "$catalog_harness"
+      else
+        "$SCRIPT_DIR/fm-model-catalog.sh" "$catalog_harness"
+      fi
+    ) | jq -c --argjson allowed "$catalog_allowlist" '. + (if $allowed == null then {} else {accountProviderAllowlist:$allowed} end)' >> "$CATALOG" 2>/dev/null || true
   done
 fi
 
@@ -440,6 +455,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
         select(.status == "ok") |
         select(. as $row | (($d.harnesses // []) | index($row.harness))) |
         select(. as $row | ((($d.providers // []) | length) == 0 or (($d.providers // []) | index($row.provider)))) |
+        select(. as $row | (($row.accountProviderAllowlist // null) == null or (($row.accountProviderAllowlist | index($row.provenance.rawProvider // $row.provider)) != null))) |
         (.model) as $model | (.provider) as $provider |
         (catalog_reasoning(.)) as $reasoning |
         (task_fit($d.task_type; .)) as $task_fit |

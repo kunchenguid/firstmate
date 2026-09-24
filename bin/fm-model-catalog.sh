@@ -148,6 +148,8 @@ def values(obj, keys, item_keys):
 
 def emit(model, provider, obj=None):
     obj = obj or {}
+    if '/' not in model:
+        model = provider + '/' + model
     key = (model, provider)
     if key in seen:
         return
