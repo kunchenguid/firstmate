@@ -70,6 +70,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-env-lib.sh
 . "$SCRIPT_DIR/fm-env-lib.sh"
+# shellcheck source=bin/fm-worker-account-lib.sh
+. "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
 
@@ -321,7 +323,47 @@ done < <(jq -n -r --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slu
   .discover.harnesses[]
 ' /dev/null | awk '!seen[$0]++')
 if [ "${#CATALOG_HARNESSES[@]}" -gt 0 ]; then
-  "$SCRIPT_DIR/fm-model-catalog.sh" "${CATALOG_HARNESSES[@]}" > "$CATALOG" 2>/dev/null || true
+  for catalog_harness in "${CATALOG_HARNESSES[@]}"; do
+    catalog_account=''
+    case "$catalog_harness" in
+      claude|pi|pi-signed)
+        catalog_account=$(fm_worker_account_resolve "$catalog_harness" "$CONFIG") ||
+          emit_error "could not resolve $catalog_harness worker account for model catalog"
+        ;;
+    esac
+    case "$catalog_harness" in
+      claude)
+        if [ -n "$catalog_account" ]; then
+          IFS=$'\t' read -r catalog_declared catalog_root catalog_providers <<< "$catalog_account"
+          catalog_env=(env)
+          for catalog_var in $FM_WORKER_ACCOUNT_CLAUDE_SHED; do
+            catalog_env[${#catalog_env[@]}]=-u
+            catalog_env[${#catalog_env[@]}]=$catalog_var
+          done
+          if [ -n "$catalog_root" ]; then
+            catalog_env[${#catalog_env[@]}]="CLAUDE_CONFIG_DIR=$catalog_root"
+          else
+            catalog_env[${#catalog_env[@]}]=-u
+            catalog_env[${#catalog_env[@]}]=CLAUDE_CONFIG_DIR
+          fi
+          "${catalog_env[@]}" "$SCRIPT_DIR/fm-model-catalog.sh" "$catalog_harness" >> "$CATALOG" 2>/dev/null || true
+        else
+          "$SCRIPT_DIR/fm-model-catalog.sh" "$catalog_harness" >> "$CATALOG" 2>/dev/null || true
+        fi
+        ;;
+      pi|pi-signed)
+        if [ -n "$catalog_account" ]; then
+          IFS=$'\t' read -r catalog_declared catalog_root catalog_providers <<< "$catalog_account"
+          PI_CODING_AGENT_DIR="$catalog_root" "$SCRIPT_DIR/fm-model-catalog.sh" "$catalog_harness" >> "$CATALOG" 2>/dev/null || true
+        else
+          "$SCRIPT_DIR/fm-model-catalog.sh" "$catalog_harness" >> "$CATALOG" 2>/dev/null || true
+        fi
+        ;;
+      *)
+        "$SCRIPT_DIR/fm-model-catalog.sh" "$catalog_harness" >> "$CATALOG" 2>/dev/null || true
+        ;;
+    esac
+  done
 fi
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------

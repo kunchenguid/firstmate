@@ -200,7 +200,7 @@ catalog_pi() {  # <harness>
   executable=pi
   [ "$harness" = pi-signed ] && executable=pi-signed
   tmp=$(mktemp) || return 1
-  if run_capture "$harness" "$executable --list-models" "$tmp" "$executable" -ne -ns -np -nc --no-themes --no-approve --list-models; then
+  if run_capture "$harness" "$executable --list-models" "$tmp" "$executable" --list-models; then
     python3 - "$tmp" "$harness" <<'PY'
 import json, re, sys
 path, harness = sys.argv[1], sys.argv[2]
