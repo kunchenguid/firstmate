@@ -6,8 +6,8 @@
 # bin/fm-teardown.sh. docs/fleet-ledger.md owns the record contract.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-fleet-ledger)
 
@@ -26,6 +26,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse no-mistakes
+  fm_test_fake_account_auth "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -38,6 +39,7 @@ make_case() {  # <name> <on|off>
   WT_DIR="$dir/wt"
   mkdir -p "$HOME_DIR/data/$TASK" "$HOME_DIR/projects" "$HOME_DIR/state" "$HOME_DIR/config" "$HOME_DIR/user-home"
   printf 'claude\n' > "$HOME_DIR/config/crew-harness"
+  fm_test_worker_accounts "$HOME_DIR"
   printf '%s\n' "$$" > "$HOME_DIR/state/.lock"
   touch "$HOME_DIR/state/.last-watcher-beat"
   [ "$2" = off ] || : > "$HOME_DIR/config/fleet-ledger"

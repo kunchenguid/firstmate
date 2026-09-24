@@ -310,15 +310,17 @@
 #   on every spawn and relaunch, so a change reaches the next launch without a
 #   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
 # Worker account pin (config/claude-account, config/pi-account):
-#   Opt-in. With no file, a Claude or Pi launch is unchanged: Claude still
-#   receives this process's own CLAUDE_CONFIG_DIR when it is set, and Pi the
-#   destination pane's ambient account. A present file pins every launch of
+#   Required for Claude and Pi. With no file, that launch refuses and names
+#   the file to create; Firstmate does not spend an ambient login. A present
+#   file pins every launch of
 #   that runner from this home - ship, scout, local secondmate, raw Claude
 #   command, and relaunch - to the declared account root, and the spawn
 #   refuses before any endpoint, worktree, or record exists when the file is
 #   malformed, the root is unusable, or the runner's own check says it is not
 #   signed in. A pinned Claude launch sheds the environment credentials Claude
-#   ranks above the root's login; a pinned Pi launch needs --model
+#   ranks above the root's login, and a home that authenticates Claude only
+#   through those credentials is refused until the file names an account. A
+#   pinned Pi launch needs --model
 #   <provider>/<id> for a declared provider and also carries --provider, and a
 #   raw Pi command refuses. The pin is recorded as account= (and Pi's
 #   account_provider=) in the task record and on the spawned line. A local
@@ -2306,8 +2308,8 @@ if [ "$HARNESS" = agy ]; then
   agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
 fi
 # Worker account pin (header above): resolved before any endpoint, worktree, or
-# record exists. An absent pin selects nothing and leaves every later launch
-# step exactly as it was. A pinned Claude root is exported here as well, so the
+# record exists. An absent file refuses a Claude or Pi launch. A pinned Claude
+# root is exported here as well, so the
 # trust registration below writes the store the worker will actually read.
 RAW_COMMAND=
 [ "$RAW_LAUNCH" = 0 ] || RAW_COMMAND=$ARG3
@@ -4646,8 +4648,8 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
-  # The worker account pin, only when this home declares one, so an unpinned
-  # task record stays byte-identical.
+  # The worker account pin, only for a runner that takes one, so other
+  # runners' task records stay byte-identical.
   [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"
   [ -z "$WORKER_ACCOUNT_PROVIDER" ] || echo "account_provider=$WORKER_ACCOUNT_PROVIDER"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
@@ -4824,16 +4826,9 @@ claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo 
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac
-# Crewmate panes are created by a long-lived tmux/herdr daemon that does not
-# inherit firstmate's current environment, so a bare `claude` in the pane falls
-# back to the default ~/.claude store even when firstmate itself runs under a
-# different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
-# A home's worker account pin replaces that forwarding: the launch names the
-# pinned root (or unsets the variable for the ordinary Claude account) and
-# sheds the environment credentials Claude ranks above the root's login.
+# The launch names the pinned root (or unsets the variable for the ordinary
+# Claude account) and sheds the environment credentials Claude ranks above the
+# root's login. There is no selection that keeps those credentials.
 if [ -n "$WORKER_ACCOUNT" ]; then
   case "$HARNESS" in
   claude)
@@ -4847,8 +4842,6 @@ if [ -n "$WORKER_ACCOUNT" ]; then
     LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
     ;;
   esac
-elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

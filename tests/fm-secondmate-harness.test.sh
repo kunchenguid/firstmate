@@ -43,8 +43,8 @@
 #      flags still win.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-ff-lib.sh"
 # shellcheck source=/dev/null
@@ -443,6 +443,8 @@ SH
   # registration below needs, so link the real one in rather than presenting a
   # node-less spawn host no real fleet member looks like.
   ln -sf "$(command -v node)" "$fakebin/node"
+  fm_test_fake_account_auth "$fakebin"
+  fm_test_fake_pi_runner "$fakebin" pi pi-signed
   printf '%s\n' "$fakebin"
 }
 
@@ -465,6 +467,7 @@ make_seeded_home() {
 spawn_secondmate() {
   local world=$1 id=$2 home=$3 harness=${4:-} fakebin
   mkdir -p "$world/home/state" "$world/home/data"
+  fm_test_worker_accounts "$world/home"
   fakebin=$(make_noop_tmux "$world/tmux-$id")
   # An empty harness must contribute zero args, not an empty positional; build the
   # arg list explicitly so the optional harness is omitted cleanly.
@@ -685,6 +688,8 @@ SH
   # registration below needs, so link the real one in rather than presenting a
   # node-less spawn host no real fleet member looks like.
   ln -sf "$(command -v node)" "$fakebin/node"
+  fm_test_fake_account_auth "$fakebin"
+  fm_test_fake_pi_runner "$fakebin" pi pi-signed
   printf '%s\n' "$fakebin"
 }
 
@@ -695,6 +700,7 @@ spawn_secondmate_capture() {
   local world=$1 id=$2 home=$3 launchlog=$4 fakebin
   shift 4
   mkdir -p "$world/home/state" "$world/home/data"
+  fm_test_worker_accounts "$world/home"
   fakebin=$(make_launch_capturing_tmux "$world/tmux-$id")
   : > "$launchlog"
   PATH="$fakebin:$BLIND_BIN:$BASE_PATH" TMUX='' CLAUDECODE=1 \
@@ -1025,6 +1031,7 @@ new_world() {
   w="$TMP_ROOT/$name"
   mkdir -p "$w/home/state" "$w/home/data" "$w/home/config"
   touch "$w/home/state/.last-watcher-beat"
+  fm_test_worker_accounts "$w/home"
   git init -q -b main "$w/main"
   {
     printf 'projects/\nstate/\ndata/\n.no-mistakes/\n'
@@ -2499,7 +2506,7 @@ test_config_reread_bootstrap_path_and_spawn_flexibility() {
   fm_config_reread_mark_pending "$stale" "$stale.pending" \
     || fail "could not create spawn stale reread marker"
   launchlog="$w/spawn-flex.launch.log"
-  spawn_secondmate_capture "$w" sm-flex "$sm" "$launchlog" --harness pi >/dev/null 2>&1
+  spawn_secondmate_capture "$w" sm-flex "$sm" "$launchlog" --harness pi --model fake/test >/dev/null 2>&1
   assert_no_reread_pending "$sm"
   assert_no_reread_instructions "$sm"
   launch=$(cat "$launchlog")

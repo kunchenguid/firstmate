@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fm-worker-account-lib.sh - the single owner of the opt-in per-home worker
+# fm-worker-account-lib.sh - the single owner of the per-home worker
 # account pin: which runners can be pinned, how a pin file is parsed and
 # resolved, the launch-time sign-in check under it, and the environment
 # credentials a pinned Claude launch sheds.
@@ -12,15 +12,20 @@
 #   claude          CLAUDE_CONFIG_DIR     config/claude-account
 #   pi, pi-signed   PI_CODING_AGENT_DIR   config/pi-account
 #
-# The pin is opt-in: an absent file is no pin, and the launch keeps today's
-# ambient behavior byte for byte. A present file must resolve, or the launch
-# refuses; nothing falls back to an ambient or vendor-default login once a
-# home has declared one. `ordinary` selects the vendor default: for Claude
+# An absent file refuses a Claude or Pi launch. Nothing spends an ambient or
+# vendor-default login without an explicit selection. A present file must
+# resolve, or the launch refuses; nothing falls back to an ambient login once
+# a home has declared one, and nothing falls back when it has not. `ordinary`
+# is the explicit selection of the vendor default: for Claude
 # that is CLAUDE_CONFIG_DIR unset, because Claude reads $CLAUDE_CONFIG_DIR/
 # .claude.json and keys its macOS Keychain entry to any CLAUDE_CONFIG_DIR that
 # is set, even $HOME/.claude; for Pi it is $HOME/.pi/agent. Any other value is
-# one absolute path to an existing readable, searchable directory. Firstmate
-# never copies credentials or changes a global login.
+# one absolute path to an existing readable, searchable directory. A home that
+# authenticates Claude only through environment credentials (Bedrock, Vertex,
+# Foundry, an API key, or an OAuth token) is refused until the file names
+# ordinary or a directory whose stored login is signed in, because the sign-in
+# check scrubs those credentials. There is no selection that keeps them.
+# Firstmate never copies credentials or changes a global login.
 #
 # A Pi root can hold several provider identities, so config/pi-account names
 # the root on line 1 and the providers that home may spend on line 2,
@@ -107,17 +112,31 @@ fm_worker_account_read() {
 # Prints "declared<TAB>root<TAB>providers" for a valid pin, where root is the
 # directory the launch selects (empty for ordinary Claude, meaning
 # CLAUDE_CONFIG_DIR unset). Prints nothing and returns 0 when the runner is
-# not pinnable or the home has no pin. On refusal prints one error naming the
-# file and returns 1.
+# not pinnable. An absent pin file refuses: a Claude or Pi launch needs an
+# explicit selection. On refusal prints one error naming the file and returns 1.
 fm_worker_account_resolve() {
-  local harness=$1 config=$2 file cfg token rc declared root fallback
+  local harness=$1 config=$2 file cfg token rc declared root fallback want
   file=$(fm_worker_account_file "$harness") || return 0
   cfg="$config/$file"
   token=$(fm_worker_account_read "$harness" "$cfg")
   rc=$?
   case "$rc" in
   0) ;;
-  3) return 0 ;;
+  3)
+    # shellcheck disable=SC2088  # The fallbacks are literal text for the refusal.
+    case "$harness" in
+    claude)
+      fallback='~/.claude with CLAUDE_CONFIG_DIR unset'
+      want="'ordinary' or one absolute account directory"
+      ;;
+    *)
+      fallback='~/.pi/agent'
+      want="'ordinary' or one absolute account directory on line 1 and the providers this home may spend on line 2"
+      ;;
+    esac
+    echo "error: config/$file is absent, so this $harness launch has no explicit account selection: create $cfg with $want (see docs/configuration.md \"Worker account pin\"); Firstmate does not spend an ambient or $fallback login when that file is absent" >&2
+    return 1
+    ;;
   4) return 1 ;;
   5)
     echo "error: config/$file must be a readable regular file: $cfg" >&2
@@ -239,7 +258,7 @@ fm_worker_account_select() {
       [A-Za-z_]*=*)
         case " CLAUDE_CONFIG_DIR $FM_WORKER_ACCOUNT_CLAUDE_SHED " in
         *" ${word%%=*} "*)
-          echo "error: config/claude-account pins Claude workers, but the raw launch command sets ${word%%=*}, which would override the pinned account; remove ${word%%=*} from the raw command, or change or remove config/claude-account" >&2
+          echo "error: config/claude-account pins Claude workers, but the raw launch command sets ${word%%=*}, which would override the pinned account; remove ${word%%=*} from the raw command, or ask the captain to change config/claude-account" >&2
           return 1
           ;;
         esac
