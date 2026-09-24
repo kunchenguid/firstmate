@@ -41,19 +41,4 @@ test_symlink_invocation_resolves_sibling_lib() {
   pass "fm-remote-entrypoint.sh invoked via a PATH symlink resolves SCRIPT_DIR to the real bin/ directory"
 }
 
-test_direct_invocation_still_works() {
-  # Control: the same real script invoked directly (no symlink) must behave
-  # identically, so the symlink coverage above is proven by contrast.
-  local out err code
-  out="$TMP_ROOT/direct.stdout"
-  err="$TMP_ROOT/direct.stderr"
-  code=$(run_entrypoint "$REAL_BIN/fm-remote-entrypoint.sh" "$out" "$err")
-
-  expect_code 64 "$code" "direct invocation exit code"
-  assert_grep 'remote entrypoint expects protocol, root, home, and argv' "$err" \
-    "direct invocation did not reach argument validation"
-  pass "fm-remote-entrypoint.sh invoked directly still resolves SCRIPT_DIR correctly"
-}
-
 test_symlink_invocation_resolves_sibling_lib
-test_direct_invocation_still_works

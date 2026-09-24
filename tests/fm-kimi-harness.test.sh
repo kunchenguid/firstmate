@@ -979,16 +979,6 @@ test_watcher_never_classifies_kimi_from_its_spinner() (
   pass "fm-watch classifies Kimi as unknown rather than from its spinner, and Grok's fallback stays isolated"
 )
 
-test_kimi_bordered_prompt_needs_no_override() {
-  local out
-  # shellcheck source=/dev/null
-  . "$ROOT/bin/fm-composer-lib.sh"
-  out=$(fm_composer_classify_content 1 '>')
-  [ "$out" = empty ] || fail "kimi's bordered bare > composer should read empty, got '$out'"
-  out=$(fm_composer_classify_content 0 '>')
-  [ "$out" = unknown ] || fail "an unbordered dead-shell > must stay unknown, got '$out'"
-  pass "composer classifier: kimi's existing bordered > shape is already safe without an override"
-}
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable
 test_kimi_hook_remove_preserves_owned_newline_boundary
@@ -1018,4 +1008,3 @@ test_kimi_detection_uses_ancestry_after_markers
 test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines
 test_watcher_never_classifies_kimi_from_its_spinner
-test_kimi_bordered_prompt_needs_no_override

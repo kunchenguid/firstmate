@@ -370,7 +370,7 @@ The task worker that starts a no-mistakes run drives the pipeline and owns every
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 When the captain adds or changes an ask mid-task, append the captain's words without added speaker labels or direct address to that brief's `## Captain's intent` and relay those words to the worker; Firstmate build constraints stay in `## Firstmate spec` or the steer.
 `bin/fm-dod-lib.sh` owns the worker-side `--intent` contract.
-Once validation starts, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work being validated; however, the smallest downstream changes needed to keep already accepted product or engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within the current task even when they touch files not named at intake, and corrections required to satisfy already accepted intent are not new requirements.
+Once validation starts, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work being validated; however, the smallest downstream changes needed to keep already accepted product or engineering behavior correct, add E2E tests where an executable contract exists, or keep documentation accurate remain within the current task even when they touch files not named at intake, and corrections required to satisfy already accepted intent are not new requirements.
 
 Only a current, explicit captain instruction that completely invalidates the work being validated keeps the task with the same worker instead of routing it to follow-up work or handing it to a replacement.
 That worker cancels the active run through no-mistakes axi's supported abort command and confirms through axi status that the run has stopped before changing any code.
@@ -607,6 +607,17 @@ For every Relay-linked terminal outcome, load that owner and use the promised-fi
 A promised final public reply is durable state, never conversation memory.
 Load `fmx-respond` before promising one, on a `public-followup ...` check wake, and whenever the session-start digest lists a public commitment awaiting delivery or an open public loop.
 Only the home holding the relay consent and thread binding ever posts it, so never ask a secondmate or crewmate to find the thread or send the reply, and never recover a terminal result by reading a `done:` sentence.
+
+## 15. Testing
+
+These rules bind every agent that writes code or tests in this repository.
+E2E tests are the `tests/*-e2e.test.sh` and `tests/*-smoke.test.sh` scripts, and `bin/fm-test-run.sh` owns how they are selected and run.
+
+- Never write unit tests after you write code.
+- Highly prefer E2E tests as the sole testing mechanism.
+  Use them to verify complex features work.
+  At the end of E2E tests, produce a verifiable and repeatable artifact.
+- If you must test a system in isolation, first write down all the ways it could fail, then write the code.
 
 ## Captain instruction precedence
 

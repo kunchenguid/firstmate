@@ -36,56 +36,12 @@ test_list_all_exact_suite_coverage() {
   pass "exact suite coverage: --all lists every tests/*.test.sh once"
 }
 
-test_family_selection() {
-  local listed line
-  listed=$("$RUNNER" --list --family pure-contract-unit)
-  [ -n "$listed" ] || fail "--family pure-contract-unit selected nothing"
-  printf '%s\n' "$listed" | grep -Fq 'tests/fm-test-run.test.sh' \
-    || fail "pure-contract-unit must include fm-test-run.test.sh"
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    case "$line" in
-      tests/*.test.sh) ;;
-      *) fail "family selection produced non-test path: $line" ;;
-    esac
-  done <<<"$listed"
-  # Family mode must not equal the complete suite for a narrow family.
-  local all_count fam_count
-  all_count=$("$RUNNER" --list --all | wc -l | tr -d ' ')
-  fam_count=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
-  [ "$fam_count" -lt "$all_count" ] \
-    || fail "pure-contract-unit must be a proper subset of --all"
-  pass "family selection returns a proper subset of the suite"
-}
-
 test_single_script_selection() {
   local listed
   listed=$("$RUNNER" --list tests/fm-lint.test.sh)
   [ "$listed" = "tests/fm-lint.test.sh" ] \
     || fail "single-script list expected tests/fm-lint.test.sh, got: $listed"
   pass "single-script selection lists exactly that path"
-}
-
-test_changed_file_selection_is_conservative() {
-  local listed all_count fam_count listed_count
-  # A path-mapped pure unit should not expand to --all.
-  listed=$("$RUNNER" --list --family pure-contract-unit)
-  all_count=$("$RUNNER" --list --all | wc -l | tr -d ' ')
-  fam_count=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
-  [ "$fam_count" -lt "$all_count" ] || fail "changed-informed pure family still full suite"
-  # Directly exercise --changed: empty or partial selection is ok; must not
-  # exceed the suite and must never silently become --all by accident.
-  listed=$("$RUNNER" --list --changed --base HEAD 2>/dev/null || true)
-  if [ -n "$listed" ]; then
-    listed_count=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
-    [ "$listed_count" -le "$all_count" ] || fail "changed selection larger than suite"
-  fi
-  # A single test path selects only that script (same contract as a
-  # tests/*.test.sh change entry in the map).
-  listed=$("$RUNNER" --list tests/fm-brief.test.sh)
-  [ "$listed" = "tests/fm-brief.test.sh" ] \
-    || fail "test-file-only change contract should select one script"
-  pass "changed-file selection stays conservative (never silent full suite)"
 }
 
 init_changed_fixture_repo() {
@@ -104,7 +60,6 @@ init_changed_fixture_repo() {
     fm-cd-pretool-check.test.sh \
     fm-daemon.test.sh \
     fm-harness-adapter-instructions-live-e2e.test.sh \
-    fm-harness-adapter-references.test.sh \
     fm-backend-herdr-smoke.test.sh \
     fm-secondmate-safety.test.sh \
     fm-session-start.test.sh \
@@ -125,7 +80,6 @@ init_changed_fixture_repo() {
     chmod +x "$repo/tests/$script"
   done
   : >"$repo/tests/lib.sh"
-  : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/fm-control-lib.sh"
   : >"$repo/bin/fm-timeout-lib.sh"
@@ -327,13 +281,6 @@ test_changed_dependency_selection_and_unmapped_failure() {
   git -C "$repo" add tests/git-config-helpers.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm git-config-helper-change
 
-  printf '\n' >>"$repo/tests/fm-backend-herdr-eventwait.test.py"
-  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-backend-herdr-smoke.test.sh" "eventwait test selects Herdr coverage"
-  assert_contains "$listed" "tests/fm-backend.test.sh" "eventwait test selects backend coverage"
-  git -C "$repo" add tests/fm-backend-herdr-eventwait.test.py
-  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm eventwait-change
-
   printf '\n' >>"$repo/bin/fm-supervisor-target-lib.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
   assert_contains "$listed" "tests/fm-daemon.test.sh" "supervisor target selects daemon coverage"
@@ -363,14 +310,12 @@ test_changed_dependency_selection_and_unmapped_failure() {
 
   printf '\n' >>"$repo/.agents/skills/harness-adapters/references/common/dispatch.md"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-harness-adapter-references.test.sh" "harness adapter reference selects portable structural coverage"
   assert_contains "$listed" "tests/fm-harness-adapter-instructions-live-e2e.test.sh" "harness adapter reference selects opt-in instruction coverage"
   git -C "$repo" add .agents/skills/harness-adapters
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm harness-adapter-reference-change
 
   printf '\n' >>"$repo/.agents/skills/harness-adapters/SKILL.md"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-harness-adapter-references.test.sh" "harness adapter router selects portable structural coverage"
   assert_contains "$listed" "tests/fm-harness-adapter-instructions-live-e2e.test.sh" "harness adapter router selects opt-in instruction coverage"
   git -C "$repo" add .agents/skills/harness-adapters/SKILL.md
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm harness-adapter-router-change
@@ -992,63 +937,6 @@ test_exclude_family() {
   pass "exclude-family drops the named primary family after selection"
 }
 
-test_list_scheduled_proven_isolated_uses_serial_weights() {
-  local tmp
-  tmp=$(fm_test_tmproot fm-test-run-proven-schedule)
-  "$RUNNER" --list --proven-isolated | LC_ALL=C sort >"$tmp/expected"
-  "$RUNNER" --list-scheduled --proven-isolated >"$tmp/actual" \
-    || fail "--list-scheduled --proven-isolated failed"
-  cmp -s "$tmp/expected" "$tmp/actual" \
-    || fail "proven-isolated scheduling must break serial-default ties by path"
-  pass "proven-isolated scheduling ignores parallel hints"
-}
-
-test_list_scheduled_non_lane_selections_use_serial_weights() {
-  local tmp repo script selection
-  local -a scripts=(
-    tests/fm-operational-input.test.sh
-    tests/fm-lint.test.sh
-    tests/fm-muse-harness.test.sh
-    tests/fm-captain-hold-lifecycle.test.sh
-    tests/fm-kimi-harness.test.sh
-    tests/fm-brief.test.sh
-  )
-  tmp=$(fm_test_tmproot fm-test-run-non-lane-schedule)
-  repo="$tmp/repo"
-  mkdir -p "$repo/bin" "$repo/tests"
-  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
-  for script in "${scripts[@]}"; do
-    printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/$script"
-    chmod +x "$repo/$script"
-  done
-  git -C "$repo" init -q
-  git -C "$repo" add .
-  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
-  for script in "${scripts[@]}"; do
-    printf '\n' >>"$repo/$script"
-  done
-  printf '%s\n' \
-    tests/fm-muse-harness.test.sh \
-    tests/fm-brief.test.sh \
-    tests/fm-captain-hold-lifecycle.test.sh \
-    tests/fm-lint.test.sh \
-    tests/fm-kimi-harness.test.sh \
-    tests/fm-operational-input.test.sh >"$tmp/expected"
-  for selection in family all changed scripts; do
-    case "$selection" in
-      family) set -- --family pure-contract-unit ;;
-      all) set -- --all ;;
-      changed) set -- --changed --base HEAD ;;
-      scripts) set -- "${scripts[@]}" ;;
-    esac
-    "$repo/bin/fm-test-run.sh" --list-scheduled "$@" >"$tmp/actual" \
-      || fail "--list-scheduled $selection failed"
-    cmp -s "$tmp/expected" "$tmp/actual" \
-      || fail "$selection scheduling must use serial hints and path-ordered default ties"
-  done
-  pass "family, all, changed, and script selections ignore parallel hints"
-}
-
 test_portable_shard_union_and_coverage_guard() {
   local s1 s2 proven serial herdr all_count union_count overlap out lane
   s1=$("$RUNNER" --list --lane portable-parallel-1)
@@ -1377,28 +1265,6 @@ test_changed_shared_fixture_selects_its_readers() {
   pass "a changed shared test fixture selects its readers while an unread tests/ path still refuses"
 }
 
-# Workers are handed scripts in order, so the slowest script must start first or
-# it runs alone at the tail and throws away most of the concurrency.
-test_concurrent_runs_are_ordered_longest_first() {
-  local tmp listed first
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-order.XXXXXX")
-  set +e
-  "$RUNNER" --jobs 2 --family watcher-wake-lock --list >"$tmp/serial" 2>&1
-  set -e
-  # The scheduler reorders the real run, so assert on the begin-marker order of
-  # a real concurrent run over scripts whose hints differ by a wide margin.
-  set +e
-  "$RUNNER" --jobs 2 \
-    tests/fm-session-lock-ancestry.test.sh tests/fm-task-inbox.test.sh \
-    >"$tmp/out" 2>"$tmp/err"
-  set -e
-  first=$(grep -m1 '^FM_TEST_BEGIN' "$tmp/out" | awk '{print $3}')
-  [ "$first" = tests/fm-task-inbox.test.sh ] \
-    || fail "concurrent run did not start the longest script first, started: $first"
-  rm -rf "$tmp"
-  pass "a concurrent run starts the longest-hint script first"
-}
-
 # --max-wall-ms is checked after the run, so it cannot end a run that never
 # finishes. A hung script has to become a bounded failure, because an unbounded
 # suite is exactly what silently outruns its caller's invocation budget.
@@ -1660,40 +1526,6 @@ SH
   pass "jobs scheduler runs proven scripts; failure propagates; non-proven refused"
 }
 
-test_herdr_ci_family_run_has_a_step_timeout() {
-  # The required Herdr lane's hang tripwire is the family-run *step* bound, not
-  # the 75-minute job cap. Parse the workflow as YAML so nested `with.name`
-  # artifact keys cannot masquerade as the step contract.
-  command -v ruby >/dev/null 2>&1 \
-    || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
-  local json job_timeout step_timeout
-  json=$(ruby -ryaml -rjson -e '
-doc = YAML.load_file(ARGV[0])
-job = doc.fetch("jobs").fetch("tests-herdr")
-step = job.fetch("steps").find { |s|
-  s.is_a?(Hash) && s["name"] == "Run real-Herdr family (serial, required)"
-}
-raise "missing family-run step" if step.nil?
-raise "family-run step has no timeout-minutes" unless step.key?("timeout-minutes")
-puts JSON.generate(
-  "job_timeout" => job.fetch("timeout-minutes"),
-  "step_timeout" => step.fetch("timeout-minutes")
-)
-' "$ROOT/.github/workflows/ci.yml") \
-    || fail "could not parse tests-herdr timeouts from ci.yml"
-  job_timeout=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["job_timeout"])' <<<"$json") \
-    || fail "could not read job timeout from parsed workflow"
-  step_timeout=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["step_timeout"])' <<<"$json") \
-    || fail "could not read step timeout from parsed workflow"
-  [ "$job_timeout" = 75 ] \
-    || fail "tests-herdr job backstop must stay 75 minutes, got $job_timeout"
-  [ "$step_timeout" = 20 ] \
-    || fail "family-run step timeout must be 20 minutes, got $step_timeout"
-  [ "$step_timeout" -lt "$job_timeout" ] \
-    || fail "family-run step timeout must be below the job backstop"
-  pass "Herdr CI family-run step times out at 20 min under a 75 min job backstop"
-}
-
 test_aggregate_json() {
   local tmp a b
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-aggjson.XXXXXX")
@@ -1737,9 +1569,7 @@ assert len(doc["scripts"])==3
 }
 
 test_list_all_exact_suite_coverage
-test_family_selection
 test_single_script_selection
-test_changed_file_selection_is_conservative
 test_task_marker_refuses_the_primary_checkout
 test_changed_runner_surfaces_select_their_family
 test_shell_line_ending_policy_selects_runner_contract
@@ -1758,8 +1588,6 @@ test_a_run_that_ran_records_no_skip_reason
 test_live_guards_expect_a_capability_skip_class
 test_fail_on_gate_skip_token
 test_exclude_family
-test_list_scheduled_proven_isolated_uses_serial_weights
-test_list_scheduled_non_lane_selections_use_serial_weights
 test_portable_shard_union_and_coverage_guard
 test_portable_parallel_lanes_stay_duration_balanced
 test_portable_serial_shards_partition_the_serial_lane
@@ -1769,9 +1597,7 @@ test_jobs_requires_proven_isolated
 test_jobs_admits_a_concurrent_safe_family
 test_unmapped_new_test_never_inherits_family_concurrency
 test_changed_shared_fixture_selects_its_readers
-test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
 test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
-test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json

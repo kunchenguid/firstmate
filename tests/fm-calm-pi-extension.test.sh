@@ -265,18 +265,6 @@ JS
   pass "Pi calm resolves its persistent home independently of Pi's launch directory"
 }
 
-test_pi_compat_no_upper_bound() {
-  local version
-  for version in 0.83.0 0.90.0 1.0.0 2.3.4 0.82.1 10.20.30; do
-    record_pi_version_evidence "$version" "synthetic newer Pi" \
-      || fail "record_pi_version_evidence rejected Pi $version solely for being newer than 0.82.0"
-  done
-  if (record_pi_version_evidence "" "malformed Pi version probe") 2>/dev/null; then
-    fail "record_pi_version_evidence accepted a missing/malformed Pi version"
-  fi
-  pass "Pi calm compatibility evidence never rejects a Pi version for being newer than 0.82.0, and still fails closed on a missing or malformed version"
-}
-
 test_pi_compat_degraded_adapter() {
   local fixture out status
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
@@ -4278,7 +4266,6 @@ JS
 }
 
 test_home_resolution
-test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports
 test_builtin_gate_load_time

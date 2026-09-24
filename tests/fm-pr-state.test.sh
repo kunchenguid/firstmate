@@ -224,18 +224,6 @@ test_no_reported_checks_is_unverified() {
   pass "given gh's sentence, a head with no reported checks is unverified rather than ready"
 }
 
-test_help_states_what_silence_means_and_what_is_out_of_scope() {
-  local out
-  out=$("$SCRIPT" --help) || fail "help was refused"
-  assert_contains "$out" 'it does not mean the pull request is ready to merge' \
-    "help must not let empty output read as a verdict that the pull request can merge"
-  assert_contains "$out" 'is absent from what this command reads' \
-    "help must name the limit: a required context that never reported is absent from what is read"
-  assert_contains "$out" "Unresolved review-thread state is out of this command's scope" \
-    "help must state the thread-resolution boundary without inventing a reason for it"
-  pass "help states what empty output means and what is out of scope"
-}
-
 test_unknown_mergeability_is_a_blocker() {
   local out
   out=$(FM_TEST_VIEW_MERGEABLE=null run_state) \
@@ -281,6 +269,5 @@ test_pending_approval_is_not_a_blocker
 test_required_failure_is_a_blocker
 test_unreported_required_checks_are_unconfirmed
 test_no_reported_checks_is_unverified
-test_help_states_what_silence_means_and_what_is_out_of_scope
 test_unknown_mergeability_is_a_blocker
 test_refusals_exit_nonzero

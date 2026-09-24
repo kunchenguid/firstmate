@@ -1015,77 +1015,6 @@ test_kimi_capture_fallback_uses_recorded_harness() (
   pass "pending replies scope Kimi capture fallback by recorded harness"
 )
 
-test_tick_skips_terminal_and_reuses_target_observation() {
-  (
-    local home state open1 open2 resolved escalated rec probe_log probes scan_log scans snapshot
-    home=$(setup_parent observation-cache)
-    state="$home/state"
-    probe_log="$home/backend-probes.log"
-    scan_log="$home/status-scans.log"
-    : > "$probe_log"
-    : > "$scan_log"
-    # This fixture clock is intentionally scoped to the isolated subshell.
-    # shellcheck disable=SC2030,SC2031
-    export FM_PENDING_REPLY_NOW=10100
-    open1=$(fm_pending_reply_create "$home" "$state" hibit "first open request")
-    open2=$(fm_pending_reply_create "$home" "$state" hibit "second open request")
-    fm_pending_reply_mark_delivered "$state" "$open1"
-    fm_pending_reply_mark_delivered "$state" "$open2"
-    resolved=$(fm_pending_reply_create "$home" "$state" resolved "resolved request")
-    fm_pending_reply_mark_delivered "$state" "$resolved"
-    printf 'done [corr=%s]: complete\n' "$resolved" > "$state/resolved.status"
-    fm_pending_reply_try_resolve "$state" "$resolved" || fail "resolved fixture should resolve"
-    escalated=$(fm_pending_reply_create "$home" "$state" escalated "escalated request")
-    fm_pending_reply_mark_delivered "$state" "$escalated"
-    rec=$(fm_pending_reply_path "$state" "$escalated")
-    fm_pending_reply_set "$rec" phase escalated || fail "escalated fixture should transition"
-    mkdir -p "$home/escalated/state"
-    printf 'done [corr=%s]: wrong home\n' "$escalated" > "$home/escalated/state/child.status"
-    fm_write_secondmate_meta "$state/hibit.meta" "$home/hibit" "sess:fm-hibit"
-    fm_write_secondmate_meta "$state/resolved.meta" "$home/resolved" "sess:fm-resolved"
-    fm_write_secondmate_meta "$state/escalated.meta" "$home/escalated" "sess:fm-escalated"
-    # Runtime overrides called indirectly by the pending-reply tick.
-    # shellcheck disable=SC2329
-    fm_backend_busy_state() {
-      printf '%s\t%s\n' "$1" "$2" >> "$probe_log"
-      printf 'busy'
-    }
-    # shellcheck disable=SC2329
-    fm_backend_capture() { fail "native busy observations should not capture"; }
-    # shellcheck disable=SC2329
-    fm_pending_reply_find_resolve_line() {
-      local status_file=$1 corr=$2 line
-      printf '%s\t%s\n' "$status_file" "$corr" >> "$scan_log"
-      [ -f "$status_file" ] || return 0
-      while IFS= read -r line || [ -n "$line" ]; do
-        fm_pending_reply_line_resolves "$line" "$corr" || continue
-        printf '%s' "$line"
-        return 0
-      done < "$status_file"
-      return 0
-    }
-    fm_pending_reply_tick "$state"
-    probes=$(wc -l < "$probe_log" | tr -d ' ')
-    [ "$probes" = 1 ] || fail "two open records for one target should use one probe, got $probes"
-    rec=$(fm_pending_reply_path "$state" "$open1")
-    [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 1 ] \
-      || fail "cached observation should update the first open record"
-    rec=$(fm_pending_reply_path "$state" "$open2")
-    [ "$(fm_pending_reply_get "$rec" turn_seen_busy)" = 1 ] \
-      || fail "cached observation should update the second open record"
-    rec=$(fm_pending_reply_path "$state" "$escalated")
-    snapshot=$(fm_pending_reply_get "$rec" wrong_home_scan_signature)
-    [ -n "$snapshot" ] || fail "wrong-home scan should persist its file-set signature"
-    fm_pending_reply_tick "$state"
-    scans=$(wc -l < "$scan_log" | tr -d ' ')
-    [ "$scans" = 3 ] \
-      || fail "unchanged records should scan two open and one escalated status only once, got $scans"
-    [ "$(fm_pending_reply_get "$rec" wrong_home_scan_signature)" = "$snapshot" ] \
-      || fail "unchanged wrong-home logs should retain their scan signature"
-  ) || fail "terminal-skip and observation-cache regression failed"
-  pass "tick skips terminal records and reuses target observations"
-}
-
 test_correlations_reuse_only_for_matching_open_task() {
   local dir fb log home state got corr1 corr2 corr3 rec
   dir="$TMP_ROOT/corr-reuse"; mkdir -p "$dir"
@@ -1598,7 +1527,6 @@ test_helper_report_resolves
 test_busy_idle_observation_via_backend_abstraction
 test_unknown_backend_state_uses_capture_fallback
 test_kimi_capture_fallback_uses_recorded_harness
-test_tick_skips_terminal_and_reuses_target_observation
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation

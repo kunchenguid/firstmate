@@ -255,8 +255,6 @@ pi-signed
 
 ### Harness-adapter instruction routing
 
-Two checks keep the evidence boundaries separate.
-`tests/fm-harness-adapter-references.test.sh` parses the router's declared JSON contract as normalized data and proves every selected reference is readable, which is structural evidence only.
 `tests/fm-harness-adapter-instructions-live-e2e.test.sh` is an opt-in development check that sends the directly loaded router and every operation scenario across all nine harness identities to a local Ollama model, requires the generated plan as normalized JSON, and makes no external-provider call.
 
 ```sh

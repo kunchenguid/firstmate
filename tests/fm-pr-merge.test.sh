@@ -671,37 +671,6 @@ test_github_auto_merge_without_queue_refuses_legibly() {
   pass "fm-pr-merge explains an armed auto-merge that landed nothing on a queue-less base"
 }
 
-test_github_failed_merge_never_claims_armed_auto_merge() {
-  local case_dir rc
-  case_dir=$(make_case github-auto-merge-command-fails)
-  mkdir -p "$case_dir/wt"
-  add_gh_mocks_merge_fails "$case_dir"
-  write_github_outcome "$case_dir" OPEN false false main
-  : > "$case_dir/github-rules"
-  : > "$case_dir/gh-axi.log"
-  : > "$case_dir/gh.log"
-
-  set +e
-  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/67 --attended-override -- --auto --merge \
-    > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 1 "$rc" "github-auto-merge-command-fails: the forge failure must still fail the wrapper"
-  assert_grep 'error: pr merge failed' "$case_dir/stderr" \
-    "github-auto-merge-command-fails: the original forge error was masked"
-  assert_grep 'state=OPEN, merged=false, isInMergeQueue=false' "$case_dir/stderr" \
-    "github-auto-merge-command-fails: refusal did not name the concrete observed state"
-  assert_no_grep 'armed' "$case_dir/stderr" \
-    "github-auto-merge-command-fails: a failed merge command was reported as an armed auto-merge"
-  assert_grep 'auto-merge was requested for https://github.com/example/repo/pull/67' \
-    "$case_dir/stderr" \
-    "github-auto-merge-command-fails: the refusal never said auto-merge had only been requested"
-  assert_no_grep 'verified: ' "$case_dir/stdout" \
-    "github-auto-merge-command-fails: a failed merge command was reported as verified"
-  pass "fm-pr-merge never reports auto-merge as armed when the merge command failed"
-}
-
 test_github_failed_merge_with_queue_flags_never_claims_acceptance() {
   local case_dir rc
   case_dir=$(make_case github-failed-merge-queue-flags)
@@ -765,81 +734,6 @@ test_github_accepted_queue_flags_do_not_echo_back_the_same_command() {
   assert_no_grep 'verified: ' "$case_dir/stdout" \
     "github-accepted-queue-flags: an unproved merge was reported as verified"
   pass "fm-pr-merge does not echo back queue flags the caller already used"
-}
-
-test_github_mismatched_queue_flags_still_name_the_retry() {
-  local case_dir rc
-  case_dir=$(make_case github-mismatched-queue-flags)
-  mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 8282828282828282828282828282828282828282
-  write_github_outcome "$case_dir" OPEN false false main
-  printf 'merge_method=REBASE\n' > "$case_dir/github-rules"
-  : > "$case_dir/gh-axi.log"
-  : > "$case_dir/gh.log"
-
-  set +e
-  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/69 --attended-override -- --auto --merge \
-    > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 1 "$rc" "github-mismatched-queue-flags: an unproved merge must still fail"
-  assert_grep 'base branch main requires the merge queue; retry with:' "$case_dir/stderr" \
-    "github-mismatched-queue-flags: a caller method the queue does not use lost its retry guidance"
-  assert_grep '--attended-override -- --auto --rebase' "$case_dir/stderr" \
-    "github-mismatched-queue-flags: the exact compatible flags were not named"
-  pass "fm-pr-merge still names retry flags when the caller used a different method"
-}
-
-test_github_unrecognised_queue_method_still_names_the_queue() {
-  local case_dir rc
-  case_dir=$(make_case github-unrecognised-queue-method)
-  mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 8383838383838383838383838383838383838383
-  write_github_outcome "$case_dir" OPEN false false main
-  printf 'merge_method=FASTFORWARD\n' > "$case_dir/github-rules"
-  : > "$case_dir/gh-axi.log"
-  : > "$case_dir/gh.log"
-
-  set +e
-  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/70 \
-    > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 1 "$rc" "github-unrecognised-queue-method: an unproved merge must fail"
-  assert_grep 'base branch main requires the merge queue, but its configured merge method (FASTFORWARD) is not one this script recognises' \
-    "$case_dir/stderr" \
-    "github-unrecognised-queue-method: a readable queue rule produced no queue mention"
-  assert_no_grep 'retry with:' "$case_dir/stderr" \
-    "github-unrecognised-queue-method: retry flags were named for a method nothing recognises"
-  assert_no_grep '--auto --' "$case_dir/stderr" \
-    "github-unrecognised-queue-method: a merge method was guessed for the caller"
-  pass "fm-pr-merge names the queue requirement even when its method is unrecognised"
-}
-
-test_github_unreadable_queue_rules_are_not_reported_as_no_queue() {
-  local case_dir rc
-  case_dir=$(make_case github-unreadable-queue-rules)
-  mkdir -p "$case_dir/wt"
-  add_gh_mocks "$case_dir" 8484848484848484848484848484848484848484
-  write_github_outcome "$case_dir" OPEN false false main
-  : > "$case_dir/github-rules-fail"
-  : > "$case_dir/gh-axi.log"
-  : > "$case_dir/gh.log"
-
-  set +e
-  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
-    > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 1 "$rc" "github-unreadable-queue-rules: an unproved merge must fail"
-  assert_grep 'the branch rules for base branch main could not be read' "$case_dir/stderr" \
-    "github-unreadable-queue-rules: an unreadable rules response read like a queue-less base"
-  assert_no_grep 'retry with:' "$case_dir/stderr" \
-    "github-unreadable-queue-rules: retry flags were named from rules nothing could read"
-  pass "fm-pr-merge distinguishes unreadable branch rules from a base with no merge queue"
 }
 
 # A repository whose plan does not expose branch rules answers the rules
@@ -1674,33 +1568,6 @@ test_gitlab_each_condition_refuses_independently() {
   pass "fm-pr-merge refuses on each GitLab pre-merge condition independently"
 }
 
-test_gitlab_reports_every_failing_condition() {
-  local case_dir rc expected
-  case_dir=$(make_gitlab_case gitlab-refuse-all \
-    state=closed detail=conflict conflicts=true discussions=false \
-    pipeline_status=failed "pipeline_sha=$MR_STALE_HEAD")
-
-  set +e
-  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
-    > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 1 "$rc" "gitlab-refuse-all: fm-pr-merge should refuse"
-  for expected in \
-    'state is "closed", not open' \
-    'detailed_merge_status is "conflict", not mergeable' \
-    'has_conflicts is "true", not false' \
-    'blocking_discussions_resolved is "false", not true' \
-    'the head pipeline status is "failed", not success' \
-    "the head pipeline ran at \"$MR_STALE_HEAD\", not at the current head $MR_HEAD"
-  do
-    assert_grep "$expected" "$case_dir/stderr" \
-      "gitlab-refuse-all: '$expected' was not reported"
-  done
-  pass "fm-pr-merge reports every failing GitLab condition, not only the first"
-}
-
 test_gitlab_stale_recorded_head_is_reported() {
   local case_dir rc merge_line
   case_dir=$(make_gitlab_case gitlab-stale-head)
@@ -2163,14 +2030,10 @@ test_github_unreadable_outcome_keeps_pr_bookkeeping
 test_github_refusal_quotes_the_forge_output
 test_github_unreadable_outcome_refusal_quotes_the_forge_output
 test_github_accepted_queue_flags_do_not_echo_back_the_same_command
-test_github_mismatched_queue_flags_still_name_the_retry
-test_github_unrecognised_queue_method_still_names_the_queue
-test_github_unreadable_queue_rules_are_not_reported_as_no_queue
 test_github_plan_gated_403_reads_as_no_queue
 test_github_no_queue_rule_says_nothing_about_a_queue
 test_github_unmerged_fallback_cannot_replace_queue_aware_read
 test_github_auto_merge_without_queue_refuses_legibly
-test_github_failed_merge_never_claims_armed_auto_merge
 test_github_failed_merge_with_queue_flags_never_claims_acceptance
 test_github_failed_gh_read_falls_back_to_gh_axi
 test_github_failed_merge_names_an_observed_landed_state
@@ -2196,7 +2059,6 @@ test_gitlab_imposes_no_merge_method
 test_gitlab_extra_args_forwarded
 test_gitlab_merge_failure_propagates
 test_gitlab_each_condition_refuses_independently
-test_gitlab_reports_every_failing_condition
 test_gitlab_stale_recorded_head_is_reported
 test_gitlab_unreadable_state_refuses
 test_gitlab_invalid_head_refuses

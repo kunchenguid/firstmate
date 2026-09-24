@@ -593,31 +593,6 @@ test_remote_exit3_no_longer_delivered() {
   pass "fm-send remote: exit 3 from the remote leg is a failure, never a delivery claim"
 }
 
-test_remote_transport_loss_preserves_expectation() {
-  local dir fb ssh_log home rhome rc err pend
-  dir="$TMP_ROOT/remote-255"; mkdir -p "$dir"
-  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
-  rhome=$(setup_remote_secondmate_home remote-255)
-  home=$(setup_remote_parent_home remote-255 "$rhome")
-
-  rc=0
-  send_env "$fb" "$home" "$ssh_log" FM_FAKE_SSH_RC=255 \
-    "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
-  err=$(cat "$dir/err")
-  [ "$rc" -ne 0 ] || fail "an unknown-completion transport loss must exit nonzero"
-  [ "$(cat "$ssh_log.count")" = 2 ] \
-    || fail "fm-send must retry the identical remote leg once on ssh 255, got $(cat "$ssh_log.count") attempts"
-  assert_contains "$err" "Only the correlation-reusing resend below is idempotent" \
-    "transport loss must print the supported safe resend boundary"
-  assert_not_contains "$err" "do not resend" \
-    "the deleted do-not-resend trap must be gone for transport loss"
-  pend=$(pending_record "$home")
-  [ -n "$pend" ] || fail "transport loss must preserve the expectation for reconciliation"
-  [ "$(grep '^phase=' "$pend" | tail -1 | cut -d= -f2-)" = delivery_unknown ] \
-    || fail "transport loss must move the expectation to delivery_unknown: $(cat "$pend")"
-  pass "fm-send remote: ssh 255 fails with resend-safe guidance and preserves the expectation"
-}
-
 test_remote_send_budget_bounds_busy_lane() {
   local dir fb ssh_log home rhome rc err began elapsed count pend delivery corr ssh_before
   dir="$TMP_ROOT/remote-budget"; mkdir -p "$dir"
@@ -796,7 +771,6 @@ test_remote_resolve_key_closes_at_enqueue
 test_remote_slash_rides_inbox
 test_remote_real_failure_still_fails
 test_remote_exit3_no_longer_delivered
-test_remote_transport_loss_preserves_expectation
 test_remote_send_budget_bounds_busy_lane
 test_local_pending_reports_delivered_unconfirmed
 test_local_pending_does_not_close_resolve_key

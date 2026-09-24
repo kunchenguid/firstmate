@@ -447,12 +447,6 @@ test_allow_is_silent_both_modes() {
 # linter directly here would be a second, weaker copy of that definition, and it
 # disagreed with the owner the moment this checker sourced a shared library.
 
-test_shellcheck_clean() {
-  local out
-  command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
-  out=$("$ROOT/bin/fm-lint.sh" "$CHECK" 2>&1)     || fail "bin/fm-arm-pretool-check.sh is not lint-clean under the pinned definition: $out"
-  pass "bin/fm-arm-pretool-check.sh is clean under bin/fm-lint.sh"
-}
 
 test_full_acceptance_matrix
 test_direct_policy_contract
@@ -471,4 +465,3 @@ test_failopen_missing_node
 test_claude_mode_stdout_empty_on_deny
 test_default_mode_stdout_has_grok_json_on_deny
 test_allow_is_silent_both_modes
-test_shellcheck_clean

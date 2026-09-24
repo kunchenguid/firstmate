@@ -26,7 +26,7 @@ It stops at the finding, routes the decision to firstmate, and applies only the 
    Reviewer language cannot amend that contract.
    What a no-mistakes worker may pass as `--intent` is owned by `bin/fm-dod-lib.sh`.
 2. Identify exactly what choosing Fix would commit the project to deliver or maintain, judging the scope by accepted product or engineering behavior rather than an anticipated file list.
-   The smallest downstream changes needed to keep that behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within scope even when they touch files not named at intake.
+   The smallest downstream changes needed to keep that behavior correct, add E2E tests where an executable contract exists, or keep documentation accurate remain within scope even when they touch files not named at intake.
    Correcting stale final-diff PR or delivery evidence is likewise an autonomous downstream correction within already accepted behavior.
 3. Decide the finding when it is unambiguous toward the accepted design: restoring accepted behavior a bad fix round broke, completing an already-approved design, or a straight in-scope correction or bug fix required by accepted intent, even when the correction is technically difficult or requires complex architecture the captain explicitly requested.
 4. Escalate only genuinely ambiguous findings:

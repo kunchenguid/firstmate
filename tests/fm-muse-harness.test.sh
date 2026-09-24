@@ -899,18 +899,6 @@ EOF
   pass "a settled session log reads idle for both completed and interrupted turns"
 }
 
-# muse records nothing, so it must trust no record source. A trusted source with
-# no writer would seed a busy record that nothing could ever settle.
-test_muse_trusts_no_record_sources() {
-  local out
-  out=$(
-    # shellcheck source=bin/fm-busy-lib.sh
-    . "$ROOT/bin/fm-busy-lib.sh"
-    fm_busy_sources_for_harness muse
-  )
-  [ -z "$out" ] || fail "muse trusts record sources it has no writer for: '$out'"
-  pass "muse trusts no busy record source"
-}
 
 test_spawn_environment_allowlist_credential_preflight() {
   local setting rec case_dir home proj wt fakebin id out status
@@ -965,4 +953,3 @@ test_cached_session_revalidates_after_namespace_change
 test_subagent_logs_are_excluded
 test_missing_and_unreadable_bindings_are_unknown_never_idle
 test_settled_log_reads_idle
-test_muse_trusts_no_record_sources

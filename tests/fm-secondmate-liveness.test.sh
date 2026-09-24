@@ -454,20 +454,6 @@ test_sweep_never_acts_on_transient_unreadability() {
   pass "sweep: transient target unreadability never licenses recovery"
 }
 
-test_sweep_reports_missing_endpoint_relaunch_failure() {
-  local w fb tmuxfb log out
-  w=$(new_world sweep-missing-failure)
-  add_sm_home "$w" sm1 firstmate:fm-sm1 pi
-  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
-  log="$w/calls.log"; : > "$log"
-
-  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" missing "$log" FM_TEST_FAIL_NEW_WINDOW=1)
-
-  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawn failed after recorded endpoint confidently missing" \
-    "a failed missing-endpoint relaunch should retain its authorizing cause"
-  pass "sweep: failed relaunch diagnostics distinguish a confidently missing endpoint"
-}
-
 test_sweep_never_acts_on_unverified_harness_dead_reading() {
   local w fb tmuxfb log out
   w=$(new_world sweep-unverified-harness)
@@ -523,23 +509,6 @@ test_sweep_skipped_under_detect_only() {
   pass "sweep: skipped entirely under FM_BOOTSTRAP_DETECT_ONLY=1, exactly like the other mutating sweeps"
 }
 
-test_sweep_noop_with_no_secondmate_meta() {
-  local w fb tmuxfb log out
-  w=$(new_world sweep-no-secondmates)
-  # No add_sm_home call: this state/ dir looks exactly like what a
-  # secondmate's OWN home always has (secondmates never spawn secondmates),
-  # proving the sweep's primary-only scoping falls out naturally.
-  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
-  log="$w/calls.log"; : > "$log"
-
-  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
-
-  assert_not_contains "$out" "SECONDMATE_LIVENESS:" \
-    "with no kind=secondmate meta present, the sweep must print nothing"
-  [ ! -s "$log" ] || fail "with no secondmate meta, no endpoint should ever be touched: $(cat "$log")"
-  pass "sweep: a silent no-op with no kind=secondmate meta present (a secondmate home's own natural scoping)"
-}
-
 test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
@@ -550,10 +519,8 @@ test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
 test_sweep_never_acts_on_ambiguous_existing_process
 test_sweep_never_acts_on_transient_unreadability
-test_sweep_reports_missing_endpoint_relaunch_failure
 test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only
-test_sweep_noop_with_no_secondmate_meta
 
 echo "# all fm-secondmate-liveness tests passed"

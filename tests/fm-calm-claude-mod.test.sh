@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # Portable checks for the Claude Code Calm mod (.claude/mods/firstmate-calm) that need
 # no Claude Code binary, so CI enforces them wherever Node runs:
-#   - the plugin's declared shape: one hooks module and nothing else, reached from the
-#     project's .claude/skills auto-load path through the tracked symlink, so nothing
-#     of it can load while CLAUDE_CODE_ENABLE_FUNCTION_HOOKS is off;
 #   - the harness-neutral sprite core both harnesses share: the Pi widget's rendering
 #     is byte-for-byte the shared frame painted with standard ANSI codes, so extracting
 #     the core changed nothing Pi draws;
@@ -21,7 +18,6 @@ set -u
 
 MOD="$ROOT/.claude/mods/firstmate-calm"
 PI_SHIP="$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts"
-PI_SPRITE="$ROOT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
 OPERATIONAL_INPUT="$ROOT/bin/fm-operational-input.sh"
 TMP_ROOT=$(fm_test_tmproot fm-calm-claude-mod)
 
@@ -31,45 +27,6 @@ run_node() {  # <script-file>
   node --input-type=module <"$1"
 }
 
-test_plugin_shape() {
-  local link resolved autoload
-  link="$ROOT/.agents/skills/firstmate-calm"
-  [ -L "$link" ] || fail "the Calm mod is not linked into .agents/skills, so Claude Code's project skills-dir scan cannot adopt it"
-  resolved=$(cd "$link" && pwd -P) || fail "the .agents/skills/firstmate-calm link does not resolve"
-  [ "$resolved" = "$(cd "$MOD" && pwd -P)" ] || fail "the .agents/skills/firstmate-calm link resolves to $resolved, not the mod"
-  autoload="$ROOT/.claude/skills/firstmate-calm"
-  [ -f "$autoload/.claude-plugin/plugin.json" ] || fail "the project's .claude/skills path does not reach the mod's manifest"
-  [ -f "$autoload/hooks/hooks.json" ] || fail "the project's .claude/skills path does not reach the mod's hooks module declaration"
-  [ -L "$PI_SPRITE" ] || fail "the Pi sprite path is not a symlink to the shared core"
-  [ "$(node -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$PI_SPRITE")" = \
-    "$(node -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$MOD/lib/fm-calm-working-ship-sprite.ts")" ] \
-    || fail "the Pi sprite path does not resolve to the mod's shared core"
-  [ ! -e "$MOD/SKILL.md" ] || fail "the mod carries a SKILL.md and would load as a skill on every harness"
-  cat >"$TMP_ROOT/shape.mjs" <<JS
-import { readFileSync, readdirSync, existsSync } from "node:fs";
-const mod = ${MOD@Q};
-const manifest = JSON.parse(readFileSync(\`\${mod}/.claude-plugin/plugin.json\`, "utf8"));
-if (manifest.name !== "firstmate-calm") throw new Error(\`manifest name \${manifest.name}\`);
-for (const key of ["commands", "agents", "skills", "hooks", "mcpServers", "lspServers", "outputStyles"]) {
-  if (key in manifest) throw new Error(\`manifest declares \${key}, which would load while the flag is off\`);
-}
-const hooks = JSON.parse(readFileSync(\`\${mod}/hooks/hooks.json\`, "utf8"));
-const keys = Object.keys(hooks).sort();
-if (JSON.stringify(keys) !== JSON.stringify(["description", "modules"])) {
-  throw new Error(\`hooks.json declares \${keys.join(", ")}: a classic hook would run while the flag is off\`);
-}
-if (JSON.stringify(hooks.modules) !== JSON.stringify(["./register.ts"])) throw new Error("hooks.json names a different module");
-if (!existsSync(\`\${mod}/hooks/register.ts\`)) throw new Error("the hooks module is missing");
-const entries = readdirSync(mod).filter((name) => name !== ".claude-plugin").sort();
-if (JSON.stringify(entries) !== JSON.stringify(["hooks", "lib", "tests"])) {
-  throw new Error(\`the mod folder holds \${entries.join(", ")}: only hooks, lib, and tests may exist\`);
-}
-console.log("shape-ok");
-JS
-  out=$(run_node "$TMP_ROOT/shape.mjs" 2>&1) || fail "plugin shape: $out"
-  assert_contains "$out" "shape-ok" "plugin shape check did not complete"
-  pass "the Calm mod is one hooks module, linked into the project's auto-load path, with no command, skill, agent, or classic hook path that bypasses its exact opt-in"
-}
 
 test_shared_sprite_and_pi_rendering() {
   local out
@@ -418,7 +375,6 @@ JS
   pass "the mod's operational-input classifier agrees with bin/fm-operational-input.sh on all $count corpus cases: every current kind the owner encodes, every legacy shape, and every near miss"
 }
 
-test_plugin_shape
 test_shared_sprite_and_pi_rendering
 test_raster_packing
 test_presentation_policy

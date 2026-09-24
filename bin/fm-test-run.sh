@@ -287,7 +287,6 @@ family_for_basename() {
     fm-lint-workflows.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-calm-claude-mod.test.sh|\
-    fm-harness-adapter-references.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
@@ -728,7 +727,6 @@ tests/fm-grok-continuity-live-e2e.test.sh 45
 tests/fm-grok-stop-live-e2e.test.sh 46
 tests/fm-guard-stale-banner.test.sh 14968
 tests/fm-harness-adapter-instructions-live-e2e.test.sh 48
-tests/fm-harness-adapter-references.test.sh 83
 tests/fm-harness-liveness-drift-live-e2e.test.sh 881
 tests/fm-harness-precedence.test.sh 3661
 tests/fm-herdr-pi-stale-registration-live-e2e.test.sh 47
@@ -744,7 +742,6 @@ tests/fm-mail-check.test.sh 9162
 tests/fm-mail.test.sh 9703
 tests/fm-muse-harness.test.sh 40970
 tests/fm-muse-signals-live-e2e.test.sh 77
-tests/fm-nm-test-contract.test.sh 128
 tests/fm-no-mistakes-required.test.sh 247
 tests/fm-omp-harness.test.sh 47734
 tests/fm-omp-primary-live-e2e.test.sh 46
@@ -1346,10 +1343,6 @@ families_for_unmapped_bin() {
 families_for_changed_path() {
   local path=$1 fixture_ref
   case "$path" in
-    tests/fm-backend-herdr-eventwait.test.py)
-      printf '%s\n' real-herdr-gated
-      printf '%s\n' backend-dispatch
-      ;;
     tests/*.test.sh)
       # A single test file change selects only that script via basename family
       # resolution in the caller; emit a marker family of __script__

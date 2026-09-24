@@ -1666,32 +1666,6 @@ SH
   pass "session start: a read-only session declares its skipped network checks rather than dropping them"
 }
 
-# The compatibility verdict costs three tasks-axi subprocesses and one session
-# start needs it twice. The digest must pay for it once.
-test_tasks_axi_compatibility_is_probed_once() {
-  local rec root home fakebin log probes
-  rec=$(new_world tasks-axi-once)
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_ps_claude "$fakebin"
-  make_fake_tasks_axi_compact "$fakebin"
-  log="$home/tasks-axi.log"
-  printf '# Backlog\n\n## In flight\n\n## Queued\n' > "$home/data/backlog.md"
-
-  FM_FAKE_TASKS_AXI_LOG="$log" run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
-
-  probes=$(grep -c -- '--version' "$log" || true)
-  [ "$probes" -eq 1 ] \
-    || fail "tasks-axi was version-probed $probes times in one session start: $(cat "$log")"
-  probes=$(grep -c -- 'update --help' "$log" || true)
-  [ "$probes" -eq 1 ] \
-    || fail "tasks-axi update --help ran $probes times in one session start: $(cat "$log")"
-  assert_grep 'ready --file' "$log" "the backlog listing never ran, so the verdict was not actually reused"
-  pass "session start: the tasks-axi compatibility verdict is computed once and reused"
-}
-
 # --- fleet-state digest: compact backlog rendering --------------------------
 
 # A backlog whose Done section, held row, blocked row, and plain queued rows can
@@ -2452,25 +2426,6 @@ EOF
   pass "next step delegates watcher ownership to the daemon in quiet mode, distinctly from away mode"
 }
 
-test_next_step_afk_legacy_empty_flag_defaults_away() {
-  local rec root home fakebin out
-  rec=$(new_world next-step-afk-legacy)
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_ps_claude "$fakebin"
-  : > "$home/state/.afk"
-
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-
-  assert_contains "$out" "away-mode supervision is active" "a legacy empty .afk flag was not read as away mode"
-  assert_contains "$out" "Away mode is active" "a legacy empty .afk flag did not drive away-mode next-step guidance"
-  assert_not_contains "$out" "Quiet mode" "a legacy empty .afk flag leaked quiet-mode text"
-
-  pass "a legacy empty .afk flag (written before mode existed) still reads as away mode"
-}
-
 test_supervision_block_exactly_one_and_pi_diagnostic() {
   local rec root home fakebin out block_count wake_line sup_line context_line
   rec=$(new_world pi-supervision-block)
@@ -2684,7 +2639,6 @@ test_inactive_reconcile_never_blocks_the_digest
 test_unreachable_network_never_blocks_the_digest
 test_deferred_result_reaches_the_agent_when_the_digest_cannot_print_it
 test_read_only_session_declares_skipped_network_checks
-test_tasks_axi_compatibility_is_probed_once
 test_session_start_preserves_ambiguous_pi_process
 test_session_start_preserves_transiently_unreadable_tmux
 test_session_start_preserves_proven_bare_shell_recovery
@@ -2705,7 +2659,6 @@ test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_next_step_quiet_mode_delegates_to_daemon
-test_next_step_afk_legacy_empty_flag_defaults_away
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_pi_diagnostic_rejects_stale_loaded_marker

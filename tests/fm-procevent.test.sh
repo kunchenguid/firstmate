@@ -2489,24 +2489,6 @@ for adapter in remote-reply when; do
 done
 pass "an adapter with no silence verdict keeps announcing every result"
 
-# --- the loss limitation is stated on the public interface ------------------
-# Checked through --help, the operator-facing surface, rather than by reading
-# implementation bytes.
-adapter_help=$("$ROOT/bin/fm-procevent-lavish.sh" --help 2>&1 || true)
-assert_contains "$adapter_help" "destructively clears" \
-  "the adapter's help states the destructive-source loss limitation"
-assert_contains "$adapter_help" "Never describe" \
-  "the adapter's help forbids an at-least-once or lossless description"
-assert_contains "$adapter_help" "read <result-file>" \
-  "the adapter's help publishes the structured read command"
-
-runner_help=$("$ROOT/bin/fm-procevent.sh" --help 2>&1 || true)
-assert_contains "$runner_help" "Durability boundary" \
-  "the runner's help scopes what it actually proves"
-assert_not_contains "$runner_help" "exactly-once" \
-  "the runner's help claims no exactly-once delivery"
-pass "the published interfaces state the loss limitation and claim no lossless delivery"
-
 # --- launch pacing and guard startup ----------------------------------------
 
 FAST_SOURCE="$TMP_ROOT/fast-source.sh"

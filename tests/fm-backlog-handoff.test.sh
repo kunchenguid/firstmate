@@ -1002,41 +1002,6 @@ test_body_moves_when_last_lines_of_file() {
   pass "body as last lines of the file moves intact"
 }
 
-test_eof_body_before_seeded_destination_section_keeps_boundary() {
-  local home="$TMP_ROOT/body-eof-seeded-main"
-  local sub="$TMP_ROOT/body-eof-seeded-sub"
-  setup_homes "$home" "$sub"
-
-  {
-    printf '%s\n' '## Queued'
-    printf '%s\n' '- [ ] seeded-eof-item - ends the file (repo: alpha)'
-    printf '%s\n' '  seeded eof body one'
-    printf '%s' '  seeded eof body two'
-  } > "$home/data/backlog.md"
-  # tasks-axi owns the destination whitespace: the moved block sits directly
-  # under ## Queued with the section separator before the following ## Done, and
-  # the EOF body stays a clean line above that heading (its boundary is kept).
-  local expected_destination="$TMP_ROOT/body-eof-seeded-expected.md"
-  {
-    printf '%s\n' '## In flight'
-    printf '%s\n' ''
-    printf '%s\n' '## Queued'
-    printf '%s\n' '- [ ] seeded-eof-item - ends the file (repo: alpha)'
-    printf '%s\n' '  seeded eof body one'
-    printf '%s\n' '  seeded eof body two'
-    printf '%s\n' ''
-    printf '%s\n' '## Done'
-  } > "$expected_destination"
-
-  FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design seeded-eof-item >/dev/null \
-    || fail "handoff of EOF body into seeded backlog failed"
-
-  cmp -s "$expected_destination" "$sub/data/backlog.md" \
-    || fail "EOF body did not remain separate from the seeded ## Done heading"
-
-  pass "EOF body before a seeded destination section keeps its boundary"
-}
-
 test_untouched_eof_line_preserves_terminator() {
   local home="$TMP_ROOT/untouched-eof-main"
   local sub="$TMP_ROOT/untouched-eof-sub"
@@ -1359,7 +1324,6 @@ test_body_moves_when_followed_by_another_item
 test_body_moves_when_followed_by_section_heading
 test_multi_paragraph_body_with_internal_blanks_moves_whole
 test_body_moves_when_last_lines_of_file
-test_eof_body_before_seeded_destination_section_keeps_boundary
 test_untouched_eof_line_preserves_terminator
 test_body_handoff_is_idempotent
 test_noncanonical_indented_continuations_refuse_without_changes

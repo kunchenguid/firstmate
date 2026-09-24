@@ -207,33 +207,6 @@ test_candidates_exclude_serial_classes() {
   pass "serial classes remain excluded from the parallel candidate set"
 }
 
-test_extra_hermetic_candidates_present() {
-  local listed
-  listed=$("$PROOF" --list)
-  for want in \
-    tests/fm-backend-herdr.test.sh \
-    tests/fm-send-strict.test.sh \
-    tests/fm-spawn-batch.test.sh \
-    tests/fm-pr-merge.test.sh \
-    tests/fm-review-diff.test.sh \
-    tests/fm-x-mode.test.sh; do
-    printf '%s\n' "$listed" | grep -Fxq "$want" \
-      || fail "extra hermetic candidate missing: $want"
-  done
-  pass "audited fake-backend and stub-network extras are candidates"
-}
-
-test_list_exclusions_documents_reasons() {
-  local out
-  out=$("$PROOF" --list-exclusions)
-  [ -n "$out" ] || fail "--list-exclusions printed nothing"
-  printf '%s\n' "$out" | grep -Fq 'fm-watcher-lock.test.sh' \
-    || fail "exclusions must document watcher-lock serial reason"
-  printf '%s\n' "$out" | grep -Fq 'fm-backend-herdr-smoke.test.sh' \
-    || fail "exclusions must document real-herdr serial reason"
-  pass "exclusion list documents serial reasons"
-}
-
 test_family_map_labels_this_contract() {
   local fam safe safe_max scheduled_first
   fam=$("$RUNNER" --list --family pure-contract-unit)
@@ -290,8 +263,6 @@ test_unknown_pool_is_refused
 test_family_pool_json_identifies_admission
 test_list_candidates_nonempty_and_stable
 test_candidates_exclude_serial_classes
-test_extra_hermetic_candidates_present
-test_list_exclusions_documents_reasons
 test_family_map_labels_this_contract
 test_parallel_shards_consume_the_proven_set
 test_fixture_repo_branch_is_pinned

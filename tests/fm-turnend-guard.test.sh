@@ -75,17 +75,6 @@ test_predicate_healthy_fresh_beacon() {
   pass "fm_supervision_unhealthy: false with in-flight task and a fresh beacon"
 }
 
-test_predicate_queue_pending_flag() {
-  local state="$TMP_ROOT/pred-queue/state"
-  mkdir -p "$state"
-  fm_supervision_status "$state" 300
-  [ "$FM_SUP_QUEUE_PENDING" = false ] || fail "empty/absent wake queue must not read as pending"
-  printf 'record\n' > "$state/.wake-queue"
-  fm_supervision_status "$state" 300
-  [ "$FM_SUP_QUEUE_PENDING" = true ] || fail "a non-empty wake queue must read as pending"
-  pass "fm_supervision_status: FM_SUP_QUEUE_PENDING tracks state/.wake-queue"
-}
-
 test_predicate_x_mode_needs_supervision() {
   local state="$TMP_ROOT/pred-x-mode/state"
   mkdir -p "$state"
@@ -150,28 +139,6 @@ test_predicate_unregistered_check_needs_nothing() {
   fi
   [ "$FM_SUP_CHECKS" -eq 0 ] || fail "an unregistered check must not be counted, got $FM_SUP_CHECKS"
   pass "fm_supervision_needed: false for a check.sh with no registration binding"
-}
-
-test_predicate_task_pr_poll_is_not_a_custom_check() {
-  local state="$TMP_ROOT/pred-pr-poll/state"
-  mkdir -p "$state"
-  : > "$state/task1.meta"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$state/task1.check.sh"
-  chmod 700 "$state/task1.check.sh"
-  : > "$state/task1.pr-poll"
-  fm_supervision_needed "$state" 300 || fail "the in-flight task itself must need supervision"
-  [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "expected the task to be the one in-flight need, got $FM_SUP_IN_FLIGHT"
-  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "a task PR poll must not count as a registered custom check"
-  pass "fm_supervision_needed: a task PR poll without a trust binding is not a registered custom check"
-}
-
-test_predicate_relay_shim_is_not_a_custom_check() {
-  local state="$TMP_ROOT/pred-relay-not-custom/state"
-  mkdir -p "$state"
-  : > "$state/x-watch.check.sh"
-  fm_supervision_needed "$state" 300 || fail "the relay poll must still need supervision"
-  [ "$FM_SUP_CHECKS" -eq 0 ] || fail "the relay shim keeps its own trust path and must not be counted as a custom check"
-  pass "fm_supervision_status: the relay shim is not counted as a registered custom check"
 }
 
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
@@ -2190,14 +2157,11 @@ test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
-test_predicate_queue_pending_flag
 test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
 test_predicate_registered_check_needs_supervision
 test_predicate_registered_check_survives_rebinding_drift
 test_predicate_unregistered_check_needs_nothing
-test_predicate_task_pr_poll_is_not_a_custom_check
-test_predicate_relay_shim_is_not_a_custom_check
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home

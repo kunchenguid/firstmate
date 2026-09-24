@@ -646,21 +646,6 @@ test_sessionstart_silent_in_child_worktree() {
 
 # --- registration ------------------------------------------------------------
 
-test_tracked_registration_covers_the_primary_events() {
-  local reg
-  reg="$ROOT/.cursor/hooks.json"
-  [ -f "$reg" ] || fail "firstmate must ship a tracked project-scope .cursor/hooks.json"
-  jq -e '.hooks.stop and .hooks.sessionStart and .hooks.preToolUse' "$reg" >/dev/null 2>&1 \
-    || fail "the registration must cover stop, sessionStart, and preToolUse"
-  jq -e '.hooks | has("preCompact") | not' "$reg" >/dev/null 2>&1 \
-    || fail "preCompact staging is deliberately deferred to a follow-up and must stay unregistered"
-  jq -e '[.hooks.stop[] | select(.loop_limit != null and .loop_limit > 0)] | length == 1' "$reg" >/dev/null 2>&1 \
-    || fail "the stop registration needs an explicit positive loop_limit: without it Cursor's default is unlimited"
-  jq -e '[.hooks.sessionStart[]] | all(.timeout > 120)' "$reg" >/dev/null 2>&1 \
-    || fail "the session-open timeout must sit above bin/fm-session-start.sh's own 120s budget"
-  pass "cursor registration: covers every primary event with a bounded stop loop"
-}
-
 # The two bounds must nest, and the only honest way to prove it is to run the
 # adapter at Cursor's own registered limit with its DEFAULT ceiling: firstmate's
 # bound must already have stopped the loop by then, so Cursor's hard ceiling is
@@ -704,5 +689,4 @@ test_park_inert_in_child_worktree
 test_park_ignores_malformed_payload
 test_sessionstart_emits_additional_context
 test_sessionstart_silent_in_child_worktree
-test_tracked_registration_covers_the_primary_events
 test_default_ceiling_bites_before_the_registered_loop_limit

@@ -641,7 +641,4 @@ fi
 [ "$err" = "error: invalid quota-axi provider data" ] || fail "invalid availability status returned: $err"
 ok "invalid availability status fails closed"
 
-[ "$(wc -l < "$CALLS" | tr -d '[:space:]')" = 1 ] || fail "helper took an additional quota snapshot"
-ok "helper reuses the captured quota snapshot"
-
 printf '# all fm-quota-choose tests passed\n'

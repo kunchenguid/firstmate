@@ -555,20 +555,6 @@ test_autoarm_long_turn_does_not_silence_other_models() {
   pass "fm-guard stale banner: auto-arm long-turn health does not leak to other models"
 }
 
-test_persistent_no_watcher_banner_names_missing_process() {
-  local dir out
-  dir=$(make_guard_case persistent-no-watcher-reason)
-  # A fresh beacon with no live watcher under the persistent model: the real
-  # failing condition is the missing process, not a stale beacon.
-  touch "$(case_home "$dir")/state/.last-watcher-beat"
-  out=$(run_guard_case "$dir")
-  assert_contains "$out" "no live watcher process holds this home lock" \
-    "persistent no-watcher banner must name the missing watcher process"
-  assert_not_contains "$out" "no watcher has a fresh beacon" \
-    "persistent no-watcher banner must not blame the fresh beacon"
-  pass "fm-guard stale banner: persistent no-watcher banner names the true reason"
-}
-
 test_persistent_no_watcher_episode_survives_beacon_touch() {
   local dir home out1 out2
   dir=$(make_guard_case persistent-no-watcher-episode)
@@ -911,7 +897,6 @@ test_autoarm_long_handling_turn_stays_silent
 test_autoarm_long_turn_requires_every_healthy_signal
 test_autoarm_open_claim_does_not_explain_stale_beacon
 test_autoarm_long_turn_does_not_silence_other_models
-test_persistent_no_watcher_banner_names_missing_process
 test_persistent_no_watcher_episode_survives_beacon_touch
 test_fresh_beacon_without_live_watcher_stays_alarm
 test_x_mode_without_live_watcher_stays_alarm

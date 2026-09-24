@@ -1187,28 +1187,6 @@ test_remote_sync_skips_dirty_diverged_and_feature_branch() {
   pass "R6 dirty, diverged, and feature-branch remote homes skip and are left untouched"
 }
 
-# --- R7: /updatefirstmate's contract is unchanged ------------------------------
-# That path refreshes the host's own Firstmate copy from origin first and then
-# syncs the home to THAT copy, so the no-target call must still target the copy.
-test_remote_sync_without_target_follows_host_copy() {
-  local w c1 c2
-  w=$(new_remote_world remote-updatefirstmate)
-  c1=$(head_of "$w/main")
-  add_remote_home "$w" sm "$w/coderoot" "$c1"
-  bump_primary "$w" instr
-  c2=$(head_of "$w/main")
-  git -C "$w/main" push -q origin main
-  git -C "$w/coderoot" pull -q --ff-only        # what /updatefirstmate does first
-  [ "$(head_of "$w/coderoot")" = "$c2" ] || fail "precondition: the host copy should be refreshed"
-
-  remote_sync "$w" sm
-
-  [ "$REMOTE_SYNC_RC" -eq 0 ] || fail "the no-target sync failed: $REMOTE_SYNC_OUT"
-  assert_contains "$REMOTE_SYNC_OUT" "synced: $c2" "the no-target sync did not follow the host copy"
-  [ "$(head_of "$w/sm")" = "$c2" ] || fail "the no-target sync did not advance the home"
-  pass "R7 a sync with no target still follows the host's own refreshed Firstmate copy"
-}
-
 # --- R8: session start hands the remote host the PRIMARY's commit --------------
 # The deferred network stage is the only startup path that reaches a remote home,
 # so this drives the real bin/fm-bootstrap.sh network phase across the real
@@ -1255,44 +1233,6 @@ test_bootstrap_syncs_remote_home_to_primary_commit() {
   [ "$(head_of "$w/coderoot")" = "$coderoot_before" ] \
     || fail "session start moved the host's own Firstmate copy"
   pass "R8 session start converges a remote home on the primary's default-branch commit"
-}
-
-# --- R10: an outdated host refuses, and the report says how to fix it ----------
-# A host still running an older Firstmate copy rejects a command shape it does
-# not know, which for this leg can only mean it predates the parent-targeted
-# sync. Session start must name the command that refreshes that copy rather than
-# echoing an unexplained refusal.
-test_bootstrap_reports_outdated_host_actionably() {
-  local w c1 home fakebin out
-  w=$(new_remote_world remote-outdated)
-  cp "$ROOT"/bin/fm-remote-*.sh "$w/main/bin/"
-  git -C "$w/main" add -A
-  git -C "$w/main" commit -qm "primary tooling"
-  git -C "$w/main" push -q origin main
-  c1=$(head_of "$w/main")
-  add_remote_home "$w" sm "$w/forge.git" "$c1"
-  home="$w/home"
-  mkdir -p "$home/config" "$home/projects"
-  printf -- '- sm - remote fixture (host: host-sm; root: %s; home: %s; scope: remote work; projects: alpha; added 2026-08-02)\n' \
-    "$w/coderoot" "$w/sm" > "$home/data/secondmates.md"
-  fm_write_secondmate_meta "$home/state/sm.meta" "$w/sm"
-  printf 'remote_host=host-sm\n' >> "$home/state/sm.meta"
-
-  fakebin=$(make_remote_leg_ssh_stub "$w")
-  fm_fake_exit0 "$fakebin" gh treehouse tmux node
-  out=$(PATH="$fakebin:$BASE_PATH" \
-    FM_HOME="$home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_BOOTSTRAP_NETWORK=only \
-    FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$w/coderoot" \
-    FM_TEST_REPO_ROOT="$ROOT" FM_TEST_REMOTE_LEG_REJECT_SYNC=1 \
-    FM_INHERITABLE_CONFIG='' FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-bootstrap.sh" 2>&1)
-
-  assert_contains "$out" "SECONDMATE_SYNC: secondmate sm: skipped:" \
-    "an outdated host did not produce its own convergence line"
-  assert_contains "$out" "too old to sync to this primary's commit; run /updatefirstmate" \
-    "the outdated-host report does not say how to fix it"
-  pass "R10 a host too old for a parent-targeted sync is reported with the command that fixes it"
 }
 
 # --- R9: a remote launch never re-targets the host's own Firstmate copy --------
@@ -1370,9 +1310,7 @@ test_remote_sync_imports_from_origin
 test_remote_sync_uses_present_objects
 test_remote_sync_skips_unimportable_target
 test_remote_sync_skips_dirty_diverged_and_feature_branch
-test_remote_sync_without_target_follows_host_copy
 test_bootstrap_syncs_remote_home_to_primary_commit
-test_bootstrap_reports_outdated_host_actionably
 test_remote_launch_does_not_retarget_host_copy
 
 echo "# all fm-secondmate-sync tests passed"

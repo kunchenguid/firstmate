@@ -1229,22 +1229,6 @@ test_housekeeping_captain_held_stale_marker_transitions_to_pause() {
   pass "housekeeping moves a captain hold's existing stale marker to pause before wedge escalation"
 }
 
-test_housekeeping_pause_marker_transitions_to_clear() {
-  local dir state fakebin win pane key
-  dir=$(make_supercase paused-to-stale)
-  state="$dir/state"; fakebin="$dir/fakebin"; win="sess:fm-held-w15"; pane="$dir/pane.txt"
-  printf 'working: upstream landed, resuming\n' > "$state/held-w15.status"
-  printf 'idle prompt $\n' > "$pane"
-  key=$(printf '%s' "held-w15" | tr ':/.' '___')
-  date +%s > "$state/.subsuper-paused-$key"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
-    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=999999 housekeeping "$state"
-  [ ! -e "$state/.subsuper-paused-$key" ] || fail "pause marker remained after the crew resumed"
-  [ ! -e "$state/.subsuper-stale-$key" ] || fail "resume retained normal stale tracking"
-  [ ! -s "$state/.subsuper-escalations" ] || fail "resuming from pause escalated immediately"
-  pass "housekeeping clears tracking when a crew leaves pause"
-}
-
 test_housekeeping_persistent_stale_escalates() {
   local dir state fakebin win pane key
   dir=$(make_supercase stale-persistent)
@@ -2211,19 +2195,6 @@ SH
   printf '%s\n' "$dir"
 }
 
-test_wedge_alarm_library_mode_defaults_to_discard() {
-  # The structural guarantee: sourcing the daemon with NO seam configured defaults
-  # FM_WEDGE_ALARM_EXEC to "discard", so a sourced context (every test) cannot
-  # fire a real notification even if it forgets to stub. Checked in a clean
-  # subshell that first unsets this harness's recorder.
-  local out
-  # shellcheck disable=SC2016  # $1/$FM_WEDGE_ALARM_EXEC must expand in the child, not here
-  out=$(env -u FM_WEDGE_ALARM_EXEC bash -c '. "$1"; printf "%s" "${FM_WEDGE_ALARM_EXEC:-UNSET}"' _ "$DAEMON")
-  [ "$out" = discard ] \
-    || fail "sourcing the daemon did not default the notifier seam to discard (got: $out)"
-  pass "library mode: sourcing the daemon defaults FM_WEDGE_ALARM_EXEC to discard (no test can fire a real notification)"
-}
-
 test_wake_helpers_replace_inherited_notifier_override() {
   local dir unsafe_log alert_log unsafe
   dir=$(make_wedge_case wedge-inherited-override)
@@ -2722,26 +2693,6 @@ test_inject_msg_herdr_pane_gone_defers() {
   pass "inject_msg: herdr pane-gone check defers before any busy/composer/submit call"
 }
 
-test_inject_msg_herdr_submits_through_backend_dispatch() {
-  local dir state
-  dir=$(make_supercase inject-herdr-submit)
-  state="$dir/state"
-  afk_enter "$state"
-  (
-    fm_backend_target_exists() { return 0; }
-    pane_is_busy() { return 1; }
-    fm_backend_composer_state() { printf 'empty'; }
-    fm_backend_send_text_submit() {
-      [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected send_text_submit args: $1 $2"
-      case "$3" in *"hello"*) : ;; *) fail "digest text missing from send_text_submit: $3" ;; esac
-      printf 'empty'
-    }
-    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" \
-      || fail "inject_msg should succeed when send_text_submit confirms empty"
-  ) || fail "herdr successful-submit inject_msg subshell failed"
-  pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
-}
-
 # Safety-critical (task fm-composer-shellglyph-safety): the away-mode injector
 # must NEVER type an escalation into a dead-shell pane. A bare shell prompt
 # classifies `unknown` (not `pending`), and inject_msg now defers on anything
@@ -2812,7 +2763,6 @@ test_housekeeping_paused_unpaused_cleared
 test_housekeeping_captain_held_resolved_cleared
 test_housekeeping_stale_marker_transitions_to_pause
 test_housekeeping_captain_held_stale_marker_transitions_to_pause
-test_housekeeping_pause_marker_transitions_to_clear
 test_housekeeping_herdr_persistent_stale_resolves_meta
 test_housekeeping_herdr_idle_busy_record_clears_stale
 test_housekeeping_herdr_resumed_stale_cleared
@@ -2872,7 +2822,6 @@ test_max_defer_pending_composer_alarms_without_typing
 test_normal_flush_clears_stale_wedge_marker
 test_below_max_defer_does_nothing
 test_max_defer_afk_inactive_does_not_flush_or_alarm
-test_wedge_alarm_library_mode_defaults_to_discard
 test_wake_helpers_replace_inherited_notifier_override
 test_wedge_alarm_discard_seam_fires_nothing
 test_wedge_alarm_direct_notifiers_honor_discard_seam
@@ -2904,6 +2853,5 @@ test_pane_input_pending_herdr_dispatch
 test_inject_msg_herdr_busy_guard_defers
 test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
-test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state

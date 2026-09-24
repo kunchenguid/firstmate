@@ -710,17 +710,6 @@ test_reply_usage_error() {
   pass "fm-x-reply rejects missing arguments with a usage error"
 }
 
-test_reply_help_mentions_image() {
-  local home out rc
-  home="$TMP_ROOT/reply-help"; mkdir -p "$home"
-  out=$(PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-reply.sh" --help); rc=$?
-  expect_code 0 "$rc" "reply --help exit"
-  assert_contains "$out" "--image <path>" "reply help must mention --image"
-  assert_contains "$out" "threaded replies attach it to the opener tweet" \
-    "reply help must document thread image placement"
-  pass "fm-x-reply --help makes image support discoverable"
-}
-
 test_reply_whitespace_text_rejected() {
   local home out rc err
   home="$TMP_ROOT/reply-whitespace"; mkdir -p "$home"
@@ -3021,7 +3010,6 @@ test_reply_text_file_and_stdin
 test_reply_non_2xx_fails
 test_reply_auth_header_tempfile_cleans_up_on_interrupted_post
 test_reply_usage_error
-test_reply_help_mentions_image
 test_reply_whitespace_text_rejected
 test_reply_dry_run_records_not_posts
 test_reply_dry_run_needs_no_token

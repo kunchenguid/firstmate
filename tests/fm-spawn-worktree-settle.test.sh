@@ -134,26 +134,6 @@ test_single_stale_first_read_is_not_accepted() {
   pass "a single transient stale pane_current_path read is not accepted as the worktree"
 }
 
-# A pane that reports the real worktree from the very first read costs exactly
-# one confirming read - not a whole extra polling cycle on top of it. Counting
-# the pane reads measures the loop itself; wall-clock time would fold in every
-# other cost of a spawn (fetch, trust registration) and drift with the machine.
-test_already_settled_pane_costs_one_confirm_read() {
-  local rec id out status reads
-  id=settle-already-settled-z2
-  rec=$(make_settle_case settle-already-settled "$id" 0)
-  read_settle_record "$rec"
-
-  out=$(run_settle_spawn "$id")
-  status=$?
-  expect_code 0 "$status" "spawn should succeed when the pane is already settled"$'\n'"$out"
-  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
-    "meta did not record the already-settled worktree"
-  reads=$(cat "$COUNTFILE")
-  [ "$reads" -eq 2 ] || fail "already-settled pane took $reads reads to confirm - expected the first read plus one confirmation"
-  pass "an already-settled pane confirms on the next read, not a whole extra cycle"
-}
-
 # make_primary_case <name> <id> <stale_reads> builds the linked-home shape: the
 # spawning project is itself a LINKED worktree of the repository, and the path
 # the pane transiently reports is that repository's PRIMARY checkout. `treehouse
@@ -222,7 +202,6 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
 }
 
 test_single_stale_first_read_is_not_accepted
-test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 

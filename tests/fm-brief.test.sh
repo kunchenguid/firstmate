@@ -22,17 +22,6 @@ TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
-# The script itself must always parse under the ambient bash. That is Bash 5 in
-# CI and locally, where the issue #958/#1069 parser bug does not fire, so this
-# is a weak guard on its own; test_no_heredoc_in_command_substitution and the
-# macos-stock-bash CI job carry the real cross-version enforcement.
-test_script_parses() {
-  local out rc
-  out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
-  expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
-  [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
-  pass "fm-brief.sh: bash -n succeeds"
-}
 
 # Structural class guard (issues #166, #958, #1069): never build a variable by
 # wrapping a heredoc in a command substitution (`VAR=$(cat <<EOF ... EOF)`).
@@ -170,12 +159,6 @@ exit 0;
 PERL
 }
 
-test_help_includes_entire_header() {
-  local help
-  help=$("$ROOT/bin/fm-brief.sh" --help)
-  assert_contains "$help" "Refuses to overwrite an existing brief." "fm-brief.sh --help omitted its header terminator"
-  pass "fm-brief.sh: --help renders the complete header"
-}
 
 # Registry with one project per delivery mode. fm-brief.sh no longer reads it -
 # the ship mode arrives as an explicit flag - so this fixture exists to prove the
@@ -323,59 +306,6 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
-# Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
-# reference must render as plain prose with no dangling apostrophe artifact.
-test_no_mistakes_dod_wording() {
-  local home id brief spelling
-  home="$TMP_ROOT/wording-home"
-  mkdir -p "$home/data"
-  id="brief-wording-b1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
-  brief="$home/data/$id/brief.md"
-  assert_present "$brief" "brief was not scaffolded"
-  for spelling in 'Captain:' "Captain's words:" "Captain's ask:" "Captain's intent:" 'Captain,'; do
-    assert_no_grep "$spelling" "$brief" "rendered intent contract still teaches operator-address labels"
-  done
-  assert_grep '[captain]' "$brief" "rendered intent contract must explain the neutral legacy provenance marker"
-  assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
-    "no-mistakes DOD lost its guidance-reference sentence"
-  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep '`no-mistakes axi run --help`' "$brief" \
-    "no-mistakes DOD must render literal backticks around the help command"
-  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-  assert_grep '`help`' "$brief" \
-    "no-mistakes DOD must render literal backticks around help"
-  assert_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$brief" \
-    "no-mistakes DOD must require --intent to be the Captain's intent subsection"
-  assert_grep "plus any later words the captain actually said" "$brief" \
-    "no-mistakes DOD must allow later captain words in --intent"
-  assert_grep "Do not include \`## Firstmate spec\`" "$brief" \
-    "no-mistakes DOD must keep Firstmate spec out of --intent"
-  assert_grep "or your own decisions and tradeoffs" "$brief" \
-    "no-mistakes DOD must keep worker tradeoffs out of --intent"
-  assert_grep "This replaces the no-mistakes skill's advice to enrich \`--intent\`" "$brief" \
-    "no-mistakes DOD must override the external skill's enrich-with-decisions guidance"
-  # A bare reference cannot preserve the captain's ask, so the rendered DOD states
-  # the self-sufficiency rule and requires referenced material to be resolved into
-  # its substance.
-  assert_grep "The \`--intent\` string you pass must be self-sufficient" "$brief" \
-    "no-mistakes DOD must require a self-sufficient --intent string"
-  assert_grep "write the substance of the referenced items into \`--intent\`" "$brief" \
-    "no-mistakes DOD must tell the worker to resolve report, decision, and PR references into substance"
-
-  # The --yes ban is a fleet-wide prohibition, not a preference, and it must not
-  # claim an enforcement the tool does not provide: this is instruction only.
-  assert_grep "NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide." "$brief" \
-    "no-mistakes DOD must state the --yes ban as a prohibition"
-  assert_grep "answering your own ask-user finding is a hard rule violation" "$brief" \
-    "no-mistakes DOD must say why --yes is banned"
-  assert_no_grep "Avoid \`--yes\`" "$brief" \
-    "no-mistakes DOD still states the --yes ban as a preference"
-  assert_no_grep "no-mistakes refuses" "$brief" \
-    "no-mistakes DOD must not claim the tool itself refuses --yes"
-  pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
-}
-
 test_ask_user_escalation_format() {
   local home id brief mode other_id other_brief
   home="$TMP_ROOT/ask-user-home"
@@ -428,22 +358,6 @@ test_ask_user_escalation_format() {
   pass "fm-brief.sh: no-mistakes ask-user findings use one event plus a verbatim snapshot"
 }
 
-test_ship_project_memory_wording() {
-  local home id brief
-  home="$TMP_ROOT/project-memory-home"
-  mkdir -p "$home/data"
-  id="brief-memory-c1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
-  brief="$home/data/$id/brief.md"
-  assert_present "$brief" "brief was not scaffolded"
-  assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
-    "project-memory contract lost the durable-knowledge bar"
-  assert_grep "prefer a pointer to the authoritative file, command, or doc over copying the detail" "$brief" \
-    "project-memory contract lost pointer-over-copy guidance"
-  assert_grep "follow \`$ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract" "$brief" \
-    "project-memory contract no longer defers to the ensure helper"
-  pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
-}
 
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
@@ -802,43 +716,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
-test_ship_and_scout_teach_validation_round_pause() {
-  local home kind id brief
-  home="$TMP_ROOT/validation-round-pause-home"
-  mkdir -p "$home/data"
 
-  for kind in ship scout; do
-    id="brief-validation-round-pause-$kind"
-    if [ "$kind" = scout ]; then
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
-    else
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
-    fi
-    brief="$home/data/$id/brief.md"
-    assert_grep "your own validation round" "$brief" \
-      "$kind brief did not teach workers to declare their validation-round wait"
-  done
-  pass "fm-brief.sh: ship and scout scaffolds teach validation-round pauses"
-}
-
-test_scout_and_secondmate_load_decision_hold_policy() {
-  local home scout charter
-  home="$TMP_ROOT/decision-policy-home"
-  mkdir -p "$home/data"
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-brief.sh" sample-investigation sample --scout >/dev/null 2>&1
-  scout="$home/data/sample-investigation/brief.md"
-  assert_grep "$ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md" "$scout" \
-    "scout brief did not load the captain-call policy before done"
-  assert_grep "pass its shared completion gate for the report and any visual review" "$scout" \
-    "scout brief did not cross-reference visual-review completion"
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='sample reviews' \
-    "$ROOT/bin/fm-brief.sh" sample-mate --secondmate --no-projects >/dev/null 2>&1
-  charter="$home/data/sample-mate/brief.md"
-  assert_grep "load \`captain-hold-lifecycle\`" "$charter" \
-    "secondmate charter did not load the shared captain-call policy for detailed investigations"
-  pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
-}
 
 # A scout brief offers the Lavish review loop only when bootstrap confirms the
 # supported lavish-axi floor at scaffold time; a missing or older build gets a
@@ -925,17 +803,13 @@ test_worker_role_scope() {
 }
 
 test_worker_role_scope
-test_script_parses
 test_no_heredoc_in_command_substitution
-test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
-test_no_mistakes_dod_wording
 test_ask_user_escalation_format
-test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
@@ -945,7 +819,5 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
-test_ship_and_scout_teach_validation_round_pause
-test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor

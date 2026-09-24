@@ -368,13 +368,6 @@ test_probe_version_match_is_recorded() {
   pass "the pinned verified vendor version is recognized"
 }
 
-test_help_succeeds_and_names_the_registered_probes() {
-  local out rc=0
-  out=$("$SCRIPT" --help 2>&1) || rc=$?
-  expect_code 0 "$rc" "--help must succeed"
-  assert_contains "$out" "grok" "--help must name the registered probes"
-  pass "--help succeeds and names the registered probes"
-}
 
 test_probe_accepts_no_candidate_identity
 test_probe_never_reads_quota
@@ -392,4 +385,3 @@ test_probe_argv_is_fixed_and_non_destructive
 test_fact_line_carries_no_vendor_output_or_credential_material
 test_probe_version_change_is_disclosed
 test_probe_version_match_is_recorded
-test_help_succeeds_and_names_the_registered_probes

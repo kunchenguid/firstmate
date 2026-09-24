@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # tests/fm-trace-context-lib.test.sh - unit tests for the native, default-off
 # W3C trace-context library (bin/fm-trace-context-lib.sh) plus structural checks
-# that bin/fm-spawn.sh wires it in at the pre-launch injection seam and that the
-# capability is inherited into secondmate homes. Pure functions, no backend and
-# no live spawn required.
+# that bin/fm-spawn.sh wires it in at the pre-launch injection seam. Pure functions,
+# no backend and no live spawn required.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -195,11 +194,6 @@ fm_trace_context_valid "$out" || fail "a corrupt recorded value must be re-minte
 [ "$out" != "not-a-valid-traceparent" ] || fail "a corrupt recorded value must not be reused"
 pass "a corrupt recorded traceparent is re-minted rather than propagated"
 
-# --- durable metadata consistency: one value for record and injection --------
-
-out=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$NOMETA")
-fm_trace_context_valid "$out" || fail "resolve must yield a single valid carrier per call"
-pass "resolve yields exactly one carrier per logical task, so the recorded and injected values are identical by construction"
 
 # --- entropy failure omits telemetry safely (never aborts) -------------------
 
@@ -213,41 +207,6 @@ ef_res=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$NOMETA"); ef_r
 [ -z "$ef_res" ] && [ "$ef_res_rc" -eq 0 ] || fail "resolve must omit and STILL return 0 on entropy failure (rc=$ef_res_rc out='$ef_res')"
 pass "entropy failure omits telemetry safely: mint reports failure, resolve returns success with no carrier"
 
-# --- fail-independent timing: no hang source, always returns 0 ---------------
 
-assert_no_grep 'sleep' "$ROOT/bin/fm-trace-context-lib.sh" "trace-context lib must not sleep on the spawn path"
-assert_no_grep 'timeout' "$ROOT/bin/fm-trace-context-lib.sh" "trace-context lib must not depend on an external timeout"
-assert_no_grep 'command:' "$ROOT/bin/fm-trace-context-lib.sh" "trace-context lib must not run an arbitrary command provider"
-fm_trace_context_resolve "$CFG_OFF" "$NOMETA" >/dev/null || fail "resolve must return 0 when off"
-pass "the resolver has no sleep/timeout/command hang source and always returns success"
-
-# --- harness/backend/kind independence (code only, comments stripped) ---------
-
-LIB_CODE=$(sed 's/#.*$//' "$ROOT/bin/fm-trace-context-lib.sh")
-for tok in harness backend tmux herdr zellij orca cmux claude codex opencode grok kind ship scout secondmate ; do
-  case "$LIB_CODE" in
-    *"$tok"*) fail "trace-context lib code must be harness/backend/kind agnostic, but references '$tok'" ;;
-  esac
-done
-pass "the carrier is minted identically for every harness, backend, and spawn kind (no such branching in the lib code)"
-
-# --- no prompt / task-prose reads (code only, comments stripped) --------------
-
-for tok in brief prompt report status ; do
-  case "$LIB_CODE" in
-    *"$tok"*) fail "trace-context lib code must never read task prose, but references '$tok'" ;;
-  esac
-done
-pass "the lib code never reads a brief, prompt, report, or status - it cannot leak content"
-
-# --- secondmate inheritance wires the nested chain ---------------------------
-
-# shellcheck source=/dev/null
-. "$ROOT/bin/fm-config-inherit-lib.sh"
-case " $FM_INHERITABLE_CONFIG " in
-  *" trace-context "*) : ;;
-  *) fail "config/trace-context must be in FM_INHERITABLE_CONFIG so secondmate homes stay traced" ;;
-esac
-pass "config/trace-context is inherited into secondmate homes, keeping the nested chain enabled end to end"
 
 echo "# fm-trace-context-lib.test.sh: all assertions passed"

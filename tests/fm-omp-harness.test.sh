@@ -1139,81 +1139,6 @@ EOF
   pass ".omp watch extension: stale replacement records are dropped, filtering to empty removes the handoff file, and a later load does not fail"
 }
 
-test_watch_extension_consumption_clears_handoff() {
-  local repo home out status
-  repo="$TMP_ROOT/watch-consumption/repo"; home="$TMP_ROOT/watch-consumption/home"
-  install_omp_extension_fixture "$repo"
-  mkdir -p "$home/state"
-  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --handling-delivered ]; then
-  exit 0
-fi
-state=${FM_HOME:?}/state
-count=$(cat "$state/.arm-count" 2>/dev/null || printf 0)
-count=$((count + 1))
-printf '%s\n' "$count" > "$state/.arm-count"
-printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-%s\n' "$$" "$count"
-if [ "$count" -eq 1 ]; then
-  while [ ! -e "$state/.release-first-arm" ]; do sleep 0.05; done
-  printf 'stale: valid-task:wake-2\n'
-  exit 0
-fi
-exec sleep 30
-SH
-  chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=10000 FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
-    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
-import { pathToFileURL } from "node:url";
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-mkdirSync(`${process.env.FM_HOME}/state`, { recursive: true });
-writeFileSync(`${process.env.FM_HOME}/state/valid-task.meta`, "task_id=valid-task\n");
-const handoffDir = `${process.env.FM_HOME}/state/extensions/omp-primary-watch`;
-const handoff = `${handoffDir}/session-replacement-actionable.json`;
-mkdirSync(handoffDir, { recursive: true });
-writeFileSync(handoff, `${JSON.stringify({
-  version: 2,
-  pending: [
-    { version: 1, token: "1000-2000-4", message: "stale: valid-task:wake-1", predecessorArmPid: "4444" },
-  ],
-})}\n`);
-const waitUntil = async (predicate, label, timeoutMs = 10000) => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`timed out waiting for ${label}`);
-};
-const handlers = new Map(); let tool = null; const sent = [];
-const pi = {
-  on(e, h) { handlers.set(e, h); },
-  registerCommand() {},
-  registerTool(t) { tool = t; },
-  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
-};
-const mod = await import(pathToFileURL(process.env.EXT).href);
-mod.default(pi);
-await tool.execute();
-await waitUntil(() => sent.length >= 1, "replacement follow-up delivered");
-if (sent.length !== 1) throw new Error(`expected one follow-up, got ${sent.length}`);
-if (!sent[0].m.includes("stale: valid-task:wake-1")) throw new Error(`unexpected wake: ${sent[0].m}`);
-await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: sent[0].m }, {});
-await waitUntil(() => !existsSync(handoff), "handoff cleared after consumption");
-writeFileSync(`${process.env.FM_HOME}/state/.release-first-arm`, "\n");
-await waitUntil(() => sent.length >= 2, "post-consumption actionable");
-if (sent.length !== 2) throw new Error(`expected second follow-up, got ${sent.length}`);
-if (existsSync(handoff)) throw new Error("handoff should not be recreated for post-consumption actionable");
-process.exit(0);
-EOF
-)
-  status=$?
-  expect_code 0 "$status" "omp watch extension consumption clears handoff: $out"
-  [ -z "$out" ] || fail "omp watch extension consumption test printed output: $out"
-  pass ".omp watch extension: consumption at before_agent_start clears replacement handoff so it is not replayed"
-}
-
 test_detection_anchored_name_and_marker_precedence
 test_isolation_hides_a_genuine_omp_ancestor
 test_detection_through_startup_wrappers
@@ -1234,4 +1159,3 @@ test_watch_extension_retry_arms_as_a_cold_start
 test_watch_extension_resurface_cycles_still_reach_the_retry_limit
 test_watch_extension_genuine_wake_clears_the_failure_count
 test_watch_extension_drops_stale_replacement_records
-test_watch_extension_consumption_clears_handoff

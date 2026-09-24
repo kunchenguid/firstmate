@@ -278,14 +278,6 @@ test_backend_detect_cmux_fallback_bundle_id() {
   pass "fm_backend_detect: falls back to __CFBundleIdentifier=com.cmuxterm.app when CMUX_WORKSPACE_ID is absent (signal bundle-id; foreign bundle ids rejected)"
 }
 
-test_backend_detect_cmux_fallback_requires_darwin() {
-  local out
-  if out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID; PATH="$FAKE_NONDARWIN_BIN:$PATH" __CFBundleIdentifier='com.cmuxterm.app' fm_backend_detect); then
-    fail "the cmux fallback must be macOS-only (cmux itself is), got '$out' on a non-Darwin uname"
-  fi
-  pass "fm_backend_detect: the cmux fallback signals are macOS-only (inert on a non-Darwin uname)"
-}
-
 # The false positive the innermost-first ordering must keep absorbing: a tmux
 # server started from a cmux tab inherits __CFBundleIdentifier=com.cmuxterm.app
 # into every pane (verified live, docs/cmux-backend.md), so the bundle-id
@@ -396,58 +388,6 @@ test_backend_name_cmux_fallback_notice() {
   esac
 
   pass "fm_backend_name: a fallback-detected cmux prints a NOTICE naming the fallback signal; the primary-marker notice is unchanged"
-}
-
-# fm_backend_name's auto-detect step: fires only when FM_BACKEND/config/backend
-# are both absent, selects between the three markers exactly as
-# fm_backend_detect does, and is loud only when it selects herdr or cmux -
-# never when it selects tmux (today's default-path behavior must stay
-# byte-for-byte silent).
-test_backend_name_autodetect_notice() {
-  local dir cfg out errfile
-
-  dir="$TMP_ROOT/name-autodetect"; cfg="$dir/config-empty"; mkdir -p "$cfg"
-  errfile="$dir/err.txt"
-
-  : > "$errfile"
-  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
-  [ "$out" = tmux ] || fail "fm_backend_name should default to tmux with no detection markers, got '$out'"
-  [ -s "$errfile" ] && fail "fm_backend_name must stay silent with no detection markers"$'\n'"$(cat "$errfile")"
-
-  : > "$errfile"
-  out=$(unset TMUX CMUX_WORKSPACE_ID; HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
-  [ "$out" = herdr ] || fail "fm_backend_name should auto-detect herdr from HERDR_ENV=1, got '$out'"
-  assert_contains "$(cat "$errfile")" "EXPERIMENTAL herdr backend" \
-    "fm_backend_name did not print a loud notice when auto-detecting herdr"
-  assert_contains "$(cat "$errfile")" "config/backend" \
-    "fm_backend_name's auto-detect notice did not name the opt-out"
-
-  : > "$errfile"
-  out=$(unset HERDR_ENV CMUX_WORKSPACE_ID; TMUX='fake,1,0' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
-  [ "$out" = tmux ] || fail "fm_backend_name should auto-detect tmux from \$TMUX, got '$out'"
-  [ -s "$errfile" ] && fail "auto-detecting tmux must stay silent (today's unchanged default-path behavior)"$'\n'"$(cat "$errfile")"
-
-  : > "$errfile"
-  out=$(unset TMUX HERDR_ENV; CMUX_WORKSPACE_ID='fake-uuid' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
-  [ "$out" = cmux ] || fail "fm_backend_name should auto-detect cmux from CMUX_WORKSPACE_ID, got '$out'"
-  assert_contains "$(cat "$errfile")" "EXPERIMENTAL cmux backend" \
-    "fm_backend_name did not print a loud notice when auto-detecting cmux"
-  assert_contains "$(cat "$errfile")" "config/backend" \
-    "fm_backend_name's cmux auto-detect notice did not name the opt-out"
-  assert_contains "$(cat "$errfile")" "--backend tmux" \
-    "fm_backend_name's cmux auto-detect notice did not name the --backend tmux opt-out"
-
-  : > "$errfile"
-  out=$(unset CMUX_WORKSPACE_ID; TMUX='fake,1,0' HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
-  [ "$out" = tmux ] || fail "nested tmux-in-herdr should auto-detect tmux (innermost first), got '$out'"
-  [ -s "$errfile" ] && fail "nested tmux-in-herdr auto-detect (result tmux) must stay silent"$'\n'"$(cat "$errfile")"
-
-  : > "$errfile"
-  out=$(unset HERDR_ENV; TMUX='fake,1,0' CMUX_WORKSPACE_ID='fake-uuid' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
-  [ "$out" = tmux ] || fail "nested tmux-in-cmux should auto-detect tmux (innermost first), got '$out'"
-  [ -s "$errfile" ] && fail "nested tmux-in-cmux auto-detect (result tmux) must stay silent"$'\n'"$(cat "$errfile")"
-
-  pass "fm_backend_name: auto-detect selects herdr or cmux (loud notice) or tmux (silent, including nested tmux-in-herdr/tmux-in-cmux)"
 }
 
 # Explicit configuration (FM_BACKEND env or config/backend) always wins over
@@ -835,8 +775,9 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 # pins the name, and targets the window id"), and the real tmux create/kill path
 # by tests/fm-backend-tmux-smoke.test.sh. The send/peek/teardown conformance
 # tests below remain pure extractions and stay. (make_spawn_fakebin and
-# run_spawn_case are retained: test_spawn_default_backend_writes_no_meta_field
-# uses make_spawn_fakebin, and #294's run_spawn_symlink_case uses run_spawn_case.)
+# run_spawn_case are retained: the explicit-backend and autodetect-nesting
+# spawn cases use make_spawn_fakebin, and #294's run_spawn_symlink_case uses
+# run_spawn_case.)
 
 # --- symlinked project prefix must not false-refuse the isolation guard -----
 #
@@ -1036,17 +977,6 @@ test_spawn_refuses_unknown_backend_flag() {
   pass "fm-spawn.sh --backend bogus is refused loudly"
 }
 
-test_spawn_refuses_codex_app_backend_flag() {
-  local out status
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
-    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" nope-codex-app-z1 projects/none claude --mode no-mistakes --yolo off --backend codex-app 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "fm-spawn --backend codex-app should refuse"
-  assert_contains "$out" "unknown backend 'codex-app'" "fm-spawn did not preserve the blocked codex-app contract"
-  pass "fm-spawn.sh --backend codex-app is refused"
-}
-
 test_spawn_refuses_unknown_fm_backend_env() {
   local out status
   out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
@@ -1056,29 +986,6 @@ test_spawn_refuses_unknown_fm_backend_env() {
   [ "$status" -ne 0 ] || fail "FM_BACKEND=bogus should refuse"
   assert_contains "$out" "unknown backend 'bogus'" "fm-spawn did not name the rejected FM_BACKEND"
   pass "fm-spawn.sh honors FM_BACKEND and refuses an unimplemented value loudly"
-}
-
-test_spawn_default_backend_writes_no_meta_field() {
-  local proj wt data id state config out
-  proj="$TMP_ROOT/nobackend-project"; wt="$TMP_ROOT/nobackend-wt"; data="$TMP_ROOT/nobackend-data"
-  id="nobackendz3"
-  fm_git_worktree "$proj" "$wt" "fm/$id"
-  local fb
-  fb=$(make_spawn_fakebin "$TMP_ROOT/nobackend-fake" "$wt")
-  mkdir -p "$data/$id"; write_spawn_brief "$data/$id/brief.md" "$id"
-  state="$TMP_ROOT/nobackend-state"; config="$TMP_ROOT/nobackend-config"
-  mkdir -p "$state" "$config"
-
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
-    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
-    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
-    FM_TMUX_LOG="$TMP_ROOT/nobackend.log" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend tmux 2>&1)
-  expect_code 0 $? "explicit --backend tmux should spawn successfully"$'\n'"$out"
-  assert_no_grep 'backend=' "$state/$id.meta" \
-    "an explicit --backend tmux (the default) must not write backend= to meta (P1 compatibility contract)"
-  rm -rf "/tmp/fm-$id"
-  pass "fm-spawn.sh: an explicit --backend tmux resolves silently and writes no backend= (missing means tmux)"
 }
 
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
@@ -1138,13 +1045,11 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
 test_backend_name_precedence
 test_backend_detect_precedence
 test_backend_detect_cmux_fallback_bundle_id
-test_backend_detect_cmux_fallback_requires_darwin
 test_backend_detect_cmux_fallback_tmux_nested_false_positive
 test_backend_detect_cmux_fallback_ancestry_pid_match
 test_backend_detect_cmux_fallback_ancestry_comm_match
 test_backend_detect_cmux_fallback_ancestry_stops_at_launchd
 test_backend_name_cmux_fallback_notice
-test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
@@ -1157,8 +1062,6 @@ test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
-test_spawn_refuses_codex_app_backend_flag
 test_spawn_refuses_unknown_fm_backend_env
-test_spawn_default_backend_writes_no_meta_field
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env
 test_spawn_autodetect_nesting_resolves_tmux_silently

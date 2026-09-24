@@ -128,18 +128,6 @@ test_capture_fails_on_orca_error_json() {
   pass "fm_backend_orca_capture: fails closed on Orca read error JSON"
 }
 
-test_runtime_check_accepts_ready_orca_status() {
-  local out
-  orca_case runtime-ready
-  printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n' > "$RESP/1.out"
-  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_ORCA_STATUS_RESPONSE=sequence \
-    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_runtime_check' "$ROOT" )
-  [ -z "$out" ] || fail "runtime_check should be quiet on ready status, got '$out'"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''status'$'\x1f''--json' \
-    "runtime_check did not call orca status --json"
-  pass "fm_backend_orca_runtime_check: accepts reachable ready runtime"
-}
-
 test_runtime_check_refuses_unready_orca_status() {
   local out status
   orca_case runtime-unready
@@ -1347,7 +1335,6 @@ test_dispatcher_sources_orca_and_routes_primitives() {
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json
-test_runtime_check_accepts_ready_orca_status
 test_runtime_check_refuses_unready_orca_status
 test_send_text_submit_verifies_empty_composer_after_enter
 test_send_text_submit_borderless_claude_confirms

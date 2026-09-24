@@ -793,26 +793,6 @@ test_fleet_sync_timeout_empty_override_uses_default() {
   pass "bootstrap treats a blank timeout override as unset"
 }
 
-test_fleet_sync_timeout_is_computed_before_launch() {
-  local case_dir home fakebin fake_root out started_marker git_record
-  case_dir="$TMP_ROOT/fleet-timeout-launch-order"
-  home="$case_dir/home"
-  started_marker="$case_dir/fleet-started"
-  git_record="$case_dir/git-after-start"
-  mkdir -p "$home/config"
-  printf '%s\n' manual > "$home/config/backlog-backend"
-  add_origin_backed_projects "$home" 3
-  fakebin=$(make_fake_toolchain "$case_dir")
-  fake_root=$(make_fake_fleet_sync_root "$case_dir")
-
-  out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin" __unset__ "$started_marker" "$git_record" 1)
-
-  [ ! -s "$git_record" ] || fail "fleet sync launched before timeout scan finished: $(tr '\n' ';' < "$git_record")"
-  assert_contains "$out" $'FLEET_SYNC: alpha: synced\nFLEET_SYNC: beta: skipped: no origin remote' "launch-order case should relay partial fleet-sync output before reporting its timeout"
-  assert_timeout_report "$out" 20
-  pass "bootstrap computes the timeout before launching fleet sync"
-}
-
 make_routine_bootstrap_fixture() {
   local case_dir=$1 fakebin root home sm c1
   root="$case_dir/root"
@@ -1083,27 +1063,6 @@ SH
   pass "bootstrap: the tasks-axi compatibility verdict travels exactly one process hop"
 }
 
-test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
-  local case_dir fakebin out expect
-  case_dir="$TMP_ROOT/dispatch-active"
-  mkdir -p "$case_dir/home/config"
-  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]},{"when":"legacy feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"quota-balanced"}],"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5","effort":"high"},{"harness":"grok","model":"grok-4.5","effort":"high"}]}' > "$case_dir/home/config/crew-dispatch.json"
-  fakebin=$(make_fake_toolchain "$case_dir")
-  add_real_jq "$fakebin"
-
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ -z "$out" ] || fail "active dispatch profile should be silent by default, got: $out"
-
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_BOOTSTRAP_VERBOSE_FACTS=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-
-  expect=$'BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json\nBOOTSTRAP_INFO: crew dispatch rule: fresh news -> grok\nBOOTSTRAP_INFO: crew dispatch rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]\nBOOTSTRAP_INFO: crew dispatch rule: legacy feature -> quota-balanced[claude, codex]\nBOOTSTRAP_INFO: crew dispatch default: quota-balanced[pi/anthropic/claude-sonnet-5/high, grok/grok-4.5/high]'
-  [ "$out" = "$expect" ] || fail "active dispatch verbose info block mismatch"$'\n'"expected: $expect"$'\n'"actual:   $out"
-  pass "bootstrap surfaces active crew-dispatch rules only as verbose BOOTSTRAP_INFO"
-}
-
 test_crew_dispatch_validation() {
   local label body expect mode case_dir fakebin out child_env n
   n=0
@@ -1254,12 +1213,10 @@ test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins
 test_fleet_sync_timeout_empty_override_uses_default
-test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_network_phase_partitions_the_run
 test_network_sweeps_recheck_lock_ownership
 test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
-test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation

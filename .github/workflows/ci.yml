@@ -23,7 +23,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Timeout policy: docs/fm-test-portable-shards.md "Timeouts" owns the three
-# tiers and their rationale; tests/fm-ci-workflow.test.sh guards this workflow.
+# tiers and their rationale.
 # Each job comment identifies the tier implemented by its executable value.
 
 jobs:

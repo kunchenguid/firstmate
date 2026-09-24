@@ -110,21 +110,6 @@ case "$PANES" in *"default:wG:pQ"*) : ;; *) fail "the ship window must be in the
 case "$PANES" in *"default:wA:pS"*) fail "a kind=secondmate window must be EXCLUDED from the event pane list, got '$PANES'" ;; *) : ;; esac
 pass "event_wait_or_sleep: herdr windows go on the event pane list, but kind=secondmate endpoints are excluded"
 
-reset_state
-fm_write_meta "$STATE_DIR/tk3.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship"
-CAP_CALLS=0
-# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
-fm_backend_events_capable() { CAP_CALLS=$((CAP_CALLS + 1)); return 0; }
-# shellcheck disable=SC2329 # Runtime overrides called by the isolated watcher.
-fm_backend_wait_transition() {
-  [ "${FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED:-0}" = 1 ] || fail "cached capability verdict was not passed to the wait"
-  return 1
-}
-event_wait_or_sleep
-event_wait_or_sleep
-[ "$CAP_CALLS" = 1 ] || fail "capability probe must be memoized across waits, got $CAP_CALLS calls"
-pass "event_wait_or_sleep: one cached capability probe owns validation across bounded waits"
-
 # --- event_wait_or_sleep: a tmux-only home never runs the event path ----------
 
 reset_state

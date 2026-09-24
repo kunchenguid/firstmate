@@ -93,15 +93,14 @@ Build the check on the most structural signal that answers the question, and pre
 When a rendered surface is genuinely the only source, read more than one independent signal and let any of them carry a positive verdict, so no single vendor string is load-bearing.
 Where a surface signal is unavoidable, back it with a guard that fails loudly naming the harness and version rather than degrading quietly.
 
-Every such check needs two tests, because they fail for different reasons:
+Prove every such check with a live guard, the E2E test that `AGENTS.md` section 15 prefers: a test in the `live-harness-optin` family (`bin/fm-test-run.sh`) that exercises every INSTALLED harness for real and fails naming the harness and version.
+Report an absent harness explicitly rather than passing silently over it, and refuse a pass that checked nothing.
+Open it with `fm_live_gate` from `tests/lib.sh`, which is the single owner of that decision: a guard that spends no model tokens runs by default wherever its tools are installed, a guard that submits prompts stays opt-in, and its own variable or `FM_LIVE` forces it on (an absent tool then fails rather than skips) or off.
+The portable serial CI lane has no credentials and installs the public Pi package, so token-free guards exercise the available Pi surfaces while unavailable tools capability-skip; run a prompt-submitting guard after every harness upgrade and before trusting refreshed per-harness evidence.
 
-- A portable regression in `tests/` that pins the logic with real processes and no harness, so CI enforces the classifier everywhere it runs tmux.
-  Drive the signals apart deliberately and assert the verdict survives losing one; assert the divergence itself so the case cannot go quietly vacuous.
-  Confirm which signal a given construction actually blinds on each supported platform rather than assuming, because the same trick can break different sources on macOS and Linux.
-- A live guard in the `live-harness-optin` family (`bin/fm-test-run.sh`) that exercises every INSTALLED harness for real and fails naming the harness and version.
-  Report an absent harness explicitly rather than passing silently over it, and refuse a pass that checked nothing.
-  Open it with `fm_live_gate` from `tests/lib.sh`, which is the single owner of that decision: a guard that spends no model tokens runs by default wherever its tools are installed, a guard that submits prompts stays opt-in, and its own variable or `FM_LIVE` forces it on (an absent tool then fails rather than skips) or off.
-  The portable serial CI lane has no credentials and installs the public Pi package, so token-free guards exercise the available Pi surfaces while unavailable tools capability-skip; run a prompt-submitting guard after every harness upgrade and before trusting refreshed per-harness evidence.
+A portable regression in `tests/` that pins the classifier with real processes and no harness is isolation testing, so it follows section 15's isolation rule.
+When one is warranted, drive the signals apart deliberately and assert the verdict survives losing one; assert the divergence itself so the case cannot go quietly vacuous.
+Confirm which signal a given construction actually blinds on each supported platform rather than assuming, because the same trick can break different sources on macOS and Linux.
 
 Record the dated per-harness result in `docs/verification/runtime-backends.md`, and point at the live guard as the command that refreshes it, rather than leaving a version-scoped observation to rot into a false claim.
 

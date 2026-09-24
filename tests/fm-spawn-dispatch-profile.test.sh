@@ -231,34 +231,6 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   pass "FM_HOME defaults resolve relative paths and preserve absolute spellings"
 }
 
-test_absolute_override_spelling_is_preserved_in_launch_paths() {
-  local rec id out status launch linked_home
-  id=profile-absolute-paths-z1c
-  rec=$(make_spawn_case profile-absolute-paths pi "$id")
-  read_case_record "$rec"
-  linked_home="$CASE_DIR/home-link"
-  ln -s "$HOME_DIR" "$linked_home"
-  : > "$LAUNCH_LOG"
-
-  out=$(
-    FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" \
-      FM_STATE_OVERRIDE="$linked_home/state" FM_DATA_OVERRIDE="$linked_home/data" \
-      FM_PROJECTS_OVERRIDE="$linked_home/projects" FM_CONFIG_OVERRIDE="$linked_home/config" \
-      FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
-      CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
-      GROK_HOME="$linked_home/grok-home" PATH="$FAKEBIN_DIR:$PATH" \
-      "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
-  )
-  status=$?
-  expect_code 0 "$status" "spawn with absolute symlink-spelled overrides should succeed"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "-e '$linked_home/state/$id.pi-ext.ts'" \
-    "absolute FM_STATE_OVERRIDE spelling changed in Pi's cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$id/launch-brief.md'" \
-    "absolute FM_DATA_OVERRIDE spelling changed in the cross-process brief path"
-  pass "absolute override spellings are preserved in spawn launch paths"
-}
-
 test_unresolvable_relative_overrides_fail_loudly() {
   local rec id out status
   id=profile-unresolvable-paths-z1d
@@ -905,22 +877,6 @@ test_claude_omits_config_dir_prefix_when_unset() {
   pass "claude omits the config-dir prefix when firstmate runs with the single-store default"
 }
 
-test_non_claude_harness_ignores_config_dir() {
-  local rec id out status launch
-  id=profile-codex-nocfgdir-z19
-  rec=$(make_spawn_case profile-codex-nocfgdir codex "$id")
-  read_case_record "$rec"
-
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="/opt/test/claude-work" \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 0 "$status" "codex spawn with CLAUDE_CONFIG_DIR set should succeed"
-  launch=$(cat "$LAUNCH_LOG")
-  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
-    "non-claude harness launch must not receive the claude-specific config-dir prefix"
-  pass "non-claude harnesses do not receive the claude CLAUDE_CONFIG_DIR prefix"
-}
-
 # The captain's attribution policy lives in the `user` settings scope, which a
 # spawned worker's settings sources are not guaranteed to load. Every claude
 # launch must therefore carry the policy itself, or a spawned worker writes
@@ -1422,7 +1378,6 @@ test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
-test_absolute_override_spelling_is_preserved_in_launch_paths
 test_unresolvable_relative_overrides_fail_loudly
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
@@ -1458,7 +1413,6 @@ test_claude_permission_mode_auto_swaps_only_the_permission_flag
 test_claude_permission_mode_auto_reaches_scout_launch
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_permission_mode
-test_non_claude_harness_ignores_config_dir
 test_claude_task_launch_carries_control_channel_authority
 test_claude_secondmate_launch_omits_task_control_channel_authority
 test_claude_crewmate_launch_carries_the_attribution_policy

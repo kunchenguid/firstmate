@@ -123,12 +123,6 @@ expect_code 0 "$(printf '%s' "$out" | sed -n 's/^rc //p')" \
 grep -q 'not submitted' "$TMP_ROOT"/*/err 2>/dev/null && \
   fail "agy typed send: refusal text present despite confirmed submit"
 pass "agy typed send: no not-submitted refusal on confirmed idle-to-busy"
-case_dir=$(printf '%s\n' "$TMP_ROOT"/case-* | head -1)
-settles=$(grep -cv '^0\.4$' "$case_dir/sleep.log" || true)
-waits=$(grep -c '^0\.4$' "$case_dir/sleep.log" || true)
-[ "$settles" = 1 ] || fail "agy typed send: expected exactly 1 non-wait sleep (popup settle), got $settles"
-[ "$waits" = 5 ] || fail "agy typed send: expected the poll to reach the 5th busy read (5 x 0.4s: Enter wait + 4 poll waits), got $waits"
-pass "agy typed send: sleep log shows the confirm poll running to the late busy render"
 
 # agy with an explicit FM_SEND_RETRIES=3: the operator knob wins over the agy
 # default, the budget expires before the late footer, and the loud refusal

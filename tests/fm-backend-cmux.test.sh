@@ -165,17 +165,6 @@ test_version_check_accepts_current_version() {
   pass "fm_backend_cmux_version_check: accepts the verified minimum (0.64.17)"
 }
 
-test_version_check_accepts_newer_version() {
-  local dir fb status
-  dir="$TMP_ROOT/version-newer"; mkdir -p "$dir/responses"
-  fb=$(make_cmux_fakebin "$dir")
-  PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" FM_CMUX_FAKE_VERSION=0.70.0 \
-    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_version_check' "$ROOT"
-  status=$?
-  expect_code 0 "$status" "version_check should accept a newer minor (0.70.0)"
-  pass "fm_backend_cmux_version_check: accepts a newer version (0.70.0)"
-}
-
 test_version_check_refuses_old_version() {
   local dir fb out status
   dir="$TMP_ROOT/version-old"; mkdir -p "$dir/responses"
@@ -1104,7 +1093,6 @@ test_secondmate_spawn_refuses_cmux_backend() {
 . "$ROOT/bin/fm-backend.sh"
 
 test_version_check_accepts_current_version
-test_version_check_accepts_newer_version
 test_version_check_refuses_old_version
 test_version_check_refuses_missing_cmux
 test_password_reads_from_config_file

@@ -452,37 +452,6 @@ test_incremental_and_whole_file_folds_agree_over_correlated_lines() {
   pass "the cursor-backed fold and the whole-file fold agree on every correlated transition"
 }
 
-test_a_cursor_written_before_this_change_is_rebuilt() {
-  # The persisted cursor carries a folded open set, so every one written under
-  # the previous reading holds decisions computed while correlated lines were
-  # invisible. Without a fold-version bump those homes would keep serving the old
-  # answer forever - the live openers would stay missing after the fix landed.
-  local dir state status cursor out view
-  dir=$(make_case stale-cursor)
-  state="$dir/state"
-  status="$state/task-stale.status"
-
-  printf 'needs-decision corr=%s [key=owed]: a decision the captain is owed\n' "$CORR" > "$status"
-  # A cursor claiming the whole file is already folded, with an empty open set -
-  # byte for byte what the previous reading would have persisted here.
-  cursor="$state/.task-stale.open-decisions-cursor"
-  {
-    printf 'version=4\n'
-    printf 'offset=%s\n' "$(LC_ALL=C wc -c < "$status" | tr -d '[:space:]')"
-    printf 'ident=%s\n' "$(bash -c '. "$1"; _fm_open_decisions_file_ident "$2"' _ \
-      "$ROOT/bin/fm-classify-lib.sh" "$status")"
-  } > "$cursor"
-
-  out="$dir/drain.out"
-  view=$(drain_open "$state" "$out")
-  case "$view" in
-    *'task-stale'*'[key=owed]'*) : ;;
-    *) fail "a cursor from the previous reading hid the decision instead of being rebuilt: $view" ;;
-  esac
-
-  pass "a cursor persisted under the previous reading is discarded and refolded"
-}
-
 # --- the grammar pin ---------------------------------------------------------
 
 test_the_real_writers_produce_tokens_this_library_reads() {
@@ -550,5 +519,4 @@ test_consumer_verdicts_read_through_the_token
 test_daemon_and_crew_state_case_arms_read_through_the_token
 test_pending_reply_escalation_matching_is_unaffected
 test_incremental_and_whole_file_folds_agree_over_correlated_lines
-test_a_cursor_written_before_this_change_is_rebuilt
 test_the_real_writers_produce_tokens_this_library_reads

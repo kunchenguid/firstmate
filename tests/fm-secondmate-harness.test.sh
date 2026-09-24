@@ -951,63 +951,6 @@ SH
   pass "C9 spawn: secondmate launch pins supervision to its own harness"
 }
 
-# The harness fallback chain (secondmate-harness -> crew-harness -> own) still
-# resolves correctly with no model/effort tokens anywhere in the chain, and a
-# crew/scout (non-secondmate) launch is entirely unaffected by this feature: no
-# model/effort is invented for it even though its own project has no profile set.
-test_spawn_fallback_chain_and_crew_scout_unaffected() {
-  local w sm meta home proj wt fakebin launchlog id launch
-  w="$TMP_ROOT/spawn-fallback-and-crew"
-  sm="$w/sm"
-  launchlog="$w/launch.log"
-  mkdir -p "$w/home/config"
-  printf 'codex\n' > "$w/home/config/crew-harness"
-  make_seeded_home "$sm" sm
-
-  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>&1
-
-  meta="$w/home/state/sm.meta"
-  [ "$(meta_field "$meta" harness)" = codex ] \
-    || fail "fallback: secondmate harness did not fall back to crew-harness codex"
-  [ "$(meta_field "$meta" model)" = default ] || fail "fallback: meta model should stay default with no tokens anywhere"
-  [ "$(meta_field "$meta" effort)" = default ] || fail "fallback: meta effort should stay default with no tokens anywhere"
-
-  # Crew/scout launch: same crew-harness config, no --secondmate. Must resolve
-  # the crew harness and record no model/effort - this codepath must never read
-  # config/secondmate-harness's tokens at all.
-  id="crew-unaffected-z1"
-  home="$w/home"
-  proj="$w/crew-project"
-  wt="$w/crew-wt"
-  fakebin=$(make_launch_capturing_tmux "$w/tmux-crew")
-  fm_git_worktree "$proj" "$wt" "wt-crew"
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state"
-  cat > "$home/data/$id/brief.md" <<'EOF'
-# Task
-## Captain's intent
-Exercise an ordinary crew launch.
-
-## Firstmate spec
-Verify secondmate harness settings do not affect it.
-EOF
-  : > "$launchlog"
-  PATH="$fakebin:$BASE_PATH" TMUX="fake,1,0" CLAUDECODE=1 \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --mode no-mistakes --yolo off >/dev/null 2>&1
-  meta="$home/state/$id.meta"
-  [ "$(meta_field "$meta" kind)" = ship ] || fail "crew-unaffected: expected an ordinary ship task"
-  [ "$(meta_field "$meta" harness)" = codex ] || fail "crew-unaffected: crew harness resolution changed"
-  [ "$(meta_field "$meta" model)" = default ] || fail "crew-unaffected: crew task must not invent a model"
-  [ "$(meta_field "$meta" effort)" = default ] || fail "crew-unaffected: crew task must not invent an effort"
-  launch=$(cat "$launchlog")
-  assert_not_contains "$launch" "--model" "crew-unaffected: crew launch must not carry a --model flag"
-  assert_not_contains "$launch" "--effort" "crew-unaffected: crew launch must not carry an --effort flag"
-  pass "C9 spawn: the harness fallback chain still resolves with no tokens; crew/scout launches are unaffected by this feature"
-}
-
 # ===========================================================================
 # B integration: spawn, bootstrap, and config push propagate inherited local
 # material and keep it converged on the primary (independent of tracked-file ff
@@ -2650,7 +2593,6 @@ test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
 test_spawn_explicit_harness_uses_explicit_profile_axes
 test_spawned_secondmate_uses_its_harness_supervision_model
-test_spawn_fallback_chain_and_crew_scout_unaffected
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home

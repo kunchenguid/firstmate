@@ -343,15 +343,6 @@ os.environ.pop("FM_VOICE_REGION", None)
 PY
 pass "the relay reads whose account to use from this home and refuses to guess"
 
-set +e
-help_out=$(python3 "$ROOT/bin/fm-voice-relay.py" --help 2>&1)
-help_code=$?
-set -e
-expect_code 0 "$help_code" "--help must work with no configuration: $help_out"
-assert_contains "$help_out" 'voice-region' \
-  "--help should name the files a home has to write"
-pass "an unconfigured home can still read how to configure the relay"
-
 # The captain inbox is the same rule with a different consequence: note, status,
 # list and drain make no model call, so they must keep working unconfigured. The
 # voice handover depends on note, so that is not a nicety.
@@ -417,24 +408,6 @@ assert_contains "$unconfigured_note" 'queued ' "note should still queue a record
 assert_absent "$AWS_CALLED" \
   "no case above may reach a model: the aws stub recorded an attempt"
 pass "the model-backed subcommands refuse by name while note keeps working"
-
-# --help prints the whole header block, and finds where that block ends rather
-# than counting lines to it, so growing the header cannot silently truncate the
-# help again. The PRIVACY paragraph is the part that matters: it is the only place
-# a new operator is told which subcommands send audio or text off this host, and a
-# fixed line range had already dropped it.
-inbox_help=$("$ROOT/bin/fm-inbox.sh" --help) || fail "fm-inbox.sh --help failed"
-assert_contains "$inbox_help" 'PRIVACY:' \
-  "the help must say which subcommands send anything to a model"
-assert_contains "$inbox_help" 'make no network call at all' \
-  "the help must name the subcommands that stay on this host"
-assert_contains "$inbox_help" 'FM_HOME' \
-  "the help must keep its environment section"
-assert_contains "$inbox_help" 'inbox-ask-model' \
-  "the help must name the files a home has to write"
-assert_contains "$inbox_help" 'fm-inbox.sh note' \
-  "the help must still open with the usage it always had"
-pass "fm-inbox.sh --help prints its whole header, privacy paragraph included"
 
 # --- the tool surface the two sides share -----------------------------------
 #

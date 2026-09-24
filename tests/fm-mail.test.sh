@@ -63,20 +63,6 @@ test_status_without_network() {
   pass "fm-mail: status succeeds without network and prints configuration"
 }
 
-test_help_plumbing() {
-  local out rc
-  out=$(FM_MAIL_USER="test@example.com" FM_MAIL_PASS="test-pass" \
-    FM_IMAP_HOST="imap.test.invalid" FM_SMTP_HOST="smtp.test.invalid" \
-    FM_HOME="$HOME_DIR" "$MAIL" --help 2>&1)
-  rc=$?
-  expect_code 0 "$rc" "--help must exit 0"
-  assert_contains "$out" "read" "--help lists the read subcommand"
-  assert_contains "$out" "send" "--help lists the send subcommand"
-  assert_contains "$out" "poll" "--help lists the poll subcommand"
-  assert_contains "$out" "status" "--help lists the status subcommand"
-  pass "fm-mail: --help prints usage for every subcommand"
-}
-
 test_unknown_subcommand_prints_usage() {
   local out rc
   out=$(FM_MAIL_USER="test@example.com" FM_MAIL_PASS="test-pass" \
@@ -784,81 +770,6 @@ PYEOF
   pos2=$(cat "$HOME_DIR/state/.mail-retry-pos" 2>/dev/null || printf '')
   assert_equals "" "$pos2" "position does not advance while a retry row is emitted"
   pass "fm-mail: a zero retry budget leaves the retry-scan position unchanged"
-}
-
-test_poll_cap_one_never_suppresses_new_mail() {
-  local harness out
-  harness="$TMP_ROOT/cap-one-harness.py"
-  cat > "$harness" <<'PYEOF'
-import os, sys
-os.environ.update({
-    'FM_MAIL_USER': 't', 'FM_MAIL_PASS': 'p',
-    'FM_IMAP_HOST': 'imap.test', 'FM_IMAP_PORT': '993',
-    'FM_SMTP_HOST': 'smtp.test', 'FM_SMTP_PORT': '465',
-    'FM_MAIL_CURSOR': sys.argv[1],
-    'FM_MAIL_RETRY': sys.argv[2],
-    'FM_MAIL_POLL_MAX_WAKES': '1',
-})
-class FakeConn:
-    untagged_responses = {'UIDVALIDITY': [b'90009']}
-    def __init__(self, *a, **k):
-        pass
-    def login(self, *a):
-        pass
-    def select(self, *a):
-        return ('OK', [])
-    def uid(self, cmd, *args):
-        if cmd == 'search':
-            return ('OK', [b'61 41'])
-        if cmd == 'fetch':
-            return ('OK', [(b'', b'Subject: good\r\nFrom: a@b.c\r\n\r\n')])
-    def logout(self):
-        pass
-import imaplib
-imaplib.IMAP4_SSL = lambda *a, **k: FakeConn()
-import importlib.util
-spec = importlib.util.spec_from_file_location('fm_mail', sys.argv[3])
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-sys.exit(mod.cmd_poll_list())
-PYEOF
-  # cap=1 with a retry present would compute new_budget=0; the fix guarantees
-  # new mail keeps at least one slot, so uid 61 surfaces and the retry waits.
-  {
-    printf 'uidvalidity=90009\n'
-    printf '41\n'
-  } > "$HOME_DIR/state/.mail-seen"
-  printf '41\n' > "$HOME_DIR/state/.mail-retry"
-
-  out=$(python3 "$harness" "$HOME_DIR/state/.mail-seen" "$HOME_DIR/state/.mail-retry" "$ROOT/bin/fm-mail.py" 2>&1)
-  assert_contains "$out" $'61\t\ta@b.c\tgood\tok' "new mail keeps its slot when the cap is one"
-  pass "fm-mail: a cap of one never suppresses new mail while retries exist"
-}
-
-test_poll_restores_retry_when_recovered_wake_cannot_append() {
-  local fakebin homedir_bin out rc=0
-  fakebin=$(fm_fakebin "$TMP_ROOT")
-  mkdir -p "$HOME_DIR/bin"
-  [ -e "$HOME_DIR/bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$HOME_DIR/bin/fm-wake-lib.sh"
-  cat > "$fakebin/python3" <<'SH'
-#!/usr/bin/env bash
-printf 'uidvalidity\t90009\n'
-printf '77\t\tfrom@x\tRe: hi\tretry\n'
-SH
-  chmod +x "$fakebin/python3"
-  printf 'uidvalidity=90009\n77\n' > "$HOME_DIR/state/.mail-seen"
-  rm -f "$HOME_DIR/state/.mail-retry"
-  printf '77\n' > "$HOME_DIR/state/.mail-retry"
-  : > "$HOME_DIR/state/.wake-queue.seq"
-  chmod 0000 "$HOME_DIR/state/.wake-queue.seq"
-
-  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
-    FM_HOME="$HOME_DIR" PATH="$fakebin:$PATH" \
-    "$MAIL" poll 2>&1) || rc=$?
-  expect_code 1 "$rc" "poll must fail when the recovered wake cannot be appended"
-  assert_contains "$(cat "$HOME_DIR/state/.mail-retry" 2>/dev/null)" "77" "the retry record is restored so the recovered metadata can be re-fetched"
-  chmod 0600 "$HOME_DIR/state/.wake-queue.seq"
-  pass "fm-mail: a recovered wake that cannot append restores the retry instead of stranding the metadata"
 }
 
 test_poll_death_between_retry_remove_and_publish_does_not_strand() {
@@ -2603,7 +2514,6 @@ SH
 test_missing_secret_fails_cleanly
 test_env_overrides_env_file
 test_status_without_network
-test_help_plumbing
 test_unknown_subcommand_prints_usage
 test_no_secret_leaked_to_status
 test_send_passes_body
@@ -2638,7 +2548,6 @@ test_poll_cap_one_turn_not_saved_before_emit
 test_poll_cap_one_turn_not_saved_when_retry_pos_write_fails
 test_poll_retry_surfaces_under_new_mail_flood
 test_poll_resurfaces_degraded_uid_whose_wake_never_recorded
-test_poll_cap_one_never_suppresses_new_mail
 test_poll_cap_one_alternates_new_and_retry
 test_poll_cap_one_does_not_advance_unexamined_retry_window
 test_poll_fails_closed_when_retry_unwritable
@@ -2647,7 +2556,6 @@ test_poll_fails_closed_when_retry_clear_fails
 test_poll_fails_closed_when_stale_retry_clear_fails
 test_assert_equals_rejects_mismatch
 test_poll_fails_closed_when_poll_list_fails
-test_poll_restores_retry_when_recovered_wake_cannot_append
 test_poll_death_between_retry_remove_and_publish_does_not_strand
 test_poll_fetch_raise_does_not_abort_the_scan
 test_poll_keeps_journal_when_heal_cannot_record

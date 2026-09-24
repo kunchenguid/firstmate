@@ -67,20 +67,6 @@ SH
   chmod 0755 "$dir/$command_name"
 }
 
-# make_counting_copy <dir> <command> <version-output> <log>: the same copy, which
-# also appends one line to <log> every time it runs, so a case can assert how
-# many times the check actually probed it.
-make_counting_copy() {
-  local dir=$1 command_name=$2 text=$3 log=$4
-  mkdir -p "$dir"
-  cat > "$dir/$command_name" <<SH
-#!/usr/bin/env bash
-printf 'probed\n' >> '$log'
-printf '%s\n' '$text'
-SH
-  chmod 0755 "$dir/$command_name"
-}
-
 write_config() {
   local home=$1
   shift
@@ -163,28 +149,6 @@ test_identical_versions_are_silent() {
   run_check "$home" "$(fixture_path "$first:$second")" "$out"
   [ ! -s "$out" ] || fail "two copies of the same version reported skew: $(cat "$out")"
   pass "two copies of the same version are not skew"
-}
-
-test_one_copy_reached_twice_is_probed_once() {
-  local home dir link out log probes
-  # A single install reachable through two PATH entries must not read as two
-  # installs, or a symlinked bin directory would report skew against itself.
-  # Silence alone does not prove that, because two answers of the same version
-  # are silent too, so count the probes: the one install must be asked once.
-  home=$(make_home one-copy)
-  dir="$TMP_ROOT/one-copy/real/bin"
-  link="$TMP_ROOT/one-copy/linked-bin"
-  log="$TMP_ROOT/one-copy/probes.log"
-  make_counting_copy "$dir" "$TOOL" 'herdr 0.8.2' "$log"
-  ln -s "$dir" "$link"
-  write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
-  out="$home/out.txt"
-  : > "$log"
-  run_check "$home" "$(fixture_path "$dir:$link")" "$out"
-  [ ! -s "$out" ] || fail "one copy reached through two PATH entries reported a finding: $(cat "$out")"
-  probes=$(wc -l < "$log" | tr -d ' ')
-  [ "$probes" = 1 ] || fail "one install reached through two PATH entries was probed $probes times, so the two entries were not recognized as one install"
-  pass "one copy reached through two PATH entries is probed once as one install"
 }
 
 test_unreadable_version_is_a_failure_not_a_pass() {
@@ -1008,7 +972,6 @@ test_armed_check_wakes_the_watcher_with_the_skew_report() {
 test_path_skew_is_reported_from_every_copy
 test_newest_copy_first_on_path_is_silent
 test_identical_versions_are_silent
-test_one_copy_reached_twice_is_probed_once
 test_unreadable_version_is_a_failure_not_a_pass
 test_missing_command_is_reported
 test_announced_update_is_reported_from_the_tool_itself

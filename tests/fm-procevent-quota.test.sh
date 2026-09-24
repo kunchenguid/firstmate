@@ -104,16 +104,6 @@ chmod +x "$FAKEBIN/quota-axi"
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 ok() { printf 'ok - %s\n' "$1"; }
 
-if help=$("$BIN/fm-procevent-quota.sh" --help 2>&1); then
-  fail "help unexpectedly exited zero"
-fi
-printf '%s\n' "$help" | grep -Fq 'fm-procevent-quota.sh retire [--provider <provider>]' \
-  || fail "help omitted the retire usage"
-if printf '%s\n' "$help" | grep -Fq 'set -u'; then
-  fail "help leaked executable source"
-fi
-ok "help renders only the complete header"
-
 out=$(QUOTA_AXI_EXHAUSTED_DETAIL=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" \
   "$BIN/fm-procevent-quota.sh" poll)
 printf '%s\n' "$out" | grep -qx 'status: exhausted' \

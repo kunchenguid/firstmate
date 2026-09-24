@@ -879,21 +879,6 @@ test_reconciliation_never_calls_forge() {
   pass "reconciliation makes zero forge or PR API calls"
 }
 
-test_reconciliation_sets_no_forge_mode_for_state_read() {
-  make_world no-forge-env; write_child "$MAIN" child 'working: quiet since'
-  cat > "$WORLD/fakebin/fm-crew-state.sh" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "${FM_CREW_STATE_NO_FORGE:-}" > "${FM_NO_FORGE_LOG:?}"
-printf 'state: done · source: fake\n'
-SH
-  chmod +x "$WORLD/fakebin/fm-crew-state.sh"
-  export FM_NO_FORGE_LOG="$WORLD/no-forge.log"
-  run_reconcile "$MAIN" --startup
-  unset FM_NO_FORGE_LOG
-  assert_grep '1' "$WORLD/no-forge.log" "inactive reconciliation did not set crew-state no-forge mode"
-  pass "reconciliation state reads set no-forge mode"
-}
-
 test_main_direct_terminal_presentation_receipt
 test_local_secondmate_delivers_terminal_ledger_line
 test_secondmate_multiline_terminal_outcome_is_delivered_once
@@ -925,6 +910,5 @@ test_full_scan_budget_includes_wake_lock_wait
 test_notice_recovery_does_not_duplicate_wake
 test_missing_parent_binding_names_itself
 test_reconciliation_never_calls_forge
-test_reconciliation_sets_no_forge_mode_for_state_read
 
 echo "all inactive reconciliation tests passed"

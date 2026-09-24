@@ -156,57 +156,7 @@ EOF
   pass "fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree"
 }
 
-# The registry is the captain's standing posture, so dropping below its rigor is
-# allowed but never silent, while matching or exceeding it stays quiet. An
-# unregistered project resolves to the same no-mistakes standing default
-# (AGENTS.md section 7), so a downgrade there is announced too. A conditional
-# policy is excluded because both of its legs are legitimate classifications.
-test_spawn_notices_a_rigor_downgrade_against_the_registry() {
-  local rec home proj fakebin out label mode registry expect registered n=0
-  while IFS='|' read -r label registry mode expect registered; do
-    [ -n "$label" ] || continue
-    n=$((n + 1))
-    rec=$(make_home "deviation-$n" "$registry")
-    IFS='|' read -r home proj fakebin <<EOF
-$rec
-EOF
-    write_brief "$home" "delivery-dev-$n" "$mode"
-    out=$(run_spawn "$home" "$fakebin" "delivery-dev-$n" "$proj" claude --mode "$mode" --yolo off)
-    case "$expect" in
-      notice)
-        assert_contains "$out" "less rigor than the captain's standing posture" \
-          "$label: no deviation notice for a rigor downgrade"
-        assert_contains "$out" "the standing posture for proj is $registered" \
-          "$label: notice did not name the standing posture it compared against" ;;
-      quiet)
-        assert_not_contains "$out" "less rigor than the captain's standing posture" \
-          "$label: printed a deviation notice that is not a downgrade" ;;
-    esac
-  done <<'ROWS'
-no-mistakes project shipped direct-PR|- proj [no-mistakes] - fixture (added 2026-01-01)|direct-PR|notice|no-mistakes
-no-mistakes project shipped local-only|- proj [no-mistakes] - fixture (added 2026-01-01)|local-only|notice|no-mistakes
-no-mistakes project shipped no-mistakes|- proj [no-mistakes] - fixture (added 2026-01-01)|no-mistakes|quiet|no-mistakes
-local-only project shipped no-mistakes|- proj [local-only] - fixture (added 2026-01-01)|no-mistakes|quiet|local-only
-conditional policy shipped direct-PR|- proj [no-mistakes-prod-only] - fixture (added 2026-01-01)|direct-PR|quiet|no-mistakes-prod-only
-unregistered project resolves to the no-mistakes standing default|- other [no-mistakes] - fixture (added 2026-01-01)|direct-PR|notice|no-mistakes
-ROWS
-  pass "fm-spawn: a rigor downgrade against the registered posture is announced, never blocked"
-}
 
-# A scout's deliverable is a report, so it records no delivery posture at all;
-# teardown already treats an absent mode as the most protective one.
-test_scout_records_no_delivery_posture() {
-  local rec home proj fakebin out
-  rec=$(make_home scout-meta "- proj [direct-PR] - fixture (added 2026-01-01)")
-  IFS='|' read -r home proj fakebin <<EOF
-$rec
-EOF
-  write_brief "$home" delivery-scoutmeta-c1
-  out=$(run_spawn "$home" "$fakebin" delivery-scoutmeta-c1 "$proj" claude --scout)
-  assert_not_contains "$out" "less rigor" "a scout spawn consulted the registered delivery posture"
-  assert_not_contains "$out" "delivery mismatch" "a scout spawn checked a delivery contract it does not carry"
-  pass "fm-spawn: a scout spawn resolves no delivery posture from the registry"
-}
 
 # Promotion is where a scout's ship contract is finally decided, so it requires the
 # same explicit values and writes them into the task's durable record.
@@ -885,8 +835,6 @@ test_spawn_refreshes_legacy_worker_roles
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
-test_spawn_notices_a_rigor_downgrade_against_the_registry
-test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done

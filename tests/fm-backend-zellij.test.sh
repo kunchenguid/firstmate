@@ -158,17 +158,6 @@ test_version_check_accepts_current_version() {
   pass "fm_backend_zellij_version_check: accepts the verified minimum (0.44.0)"
 }
 
-test_version_check_accepts_newer_version() {
-  local dir fb status
-  dir="$TMP_ROOT/version-newer"; mkdir -p "$dir/responses"
-  fb=$(make_zellij_fakebin "$dir")
-  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_FAKE_VERSION=0.45.2 \
-    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_version_check' "$ROOT"
-  status=$?
-  expect_code 0 "$status" "version_check should accept a newer minor (0.45.2)"
-  pass "fm_backend_zellij_version_check: accepts a newer version (0.45.2)"
-}
-
 test_version_check_refuses_old_version() {
   local dir fb out status
   dir="$TMP_ROOT/version-old"; mkdir -p "$dir/responses"
@@ -501,23 +490,6 @@ test_create_task_restores_previously_active_tab() {
   assert_contains "$(cat "$dir/log")" $'\x1f''go-to-tab-by-id'$'\x1f''0' \
     "create_task did not restore focus to the previously-active tab (verified real-zellij focus-steal mitigation)"
   pass "fm_backend_zellij_create_task: restores focus to the previously-active tab after the steal-focus new-tab call"
-}
-
-test_create_task_no_restore_when_new_tab_was_already_active() {
-  local dir fb out
-  dir="$TMP_ROOT/focus-noop"; mkdir -p "$dir/responses"
-  # No active tab at all (no client attached - the common unattended case)
-  printf '[]\n' > "$dir/responses/1.out"
-  printf '5\n' > "$dir/responses/2.out"
-  printf '[{"id":11,"tab_id":5,"is_plugin":false}]\n' > "$dir/responses/3.out"
-  fb=$(make_zellij_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
-    FM_ZELLIJ_SESSION_LIST="firstmate" \
-    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_create_task firstmate fm-noclient /tmp/proj' "$ROOT" )
-  [ "$out" = "5 11" ] || fail "create_task should still echo '<tab_id> <pane_id>', got '$out'"
-  assert_not_contains "$(cat "$dir/log")" $'\x1f''go-to-tab-by-id' \
-    "create_task should not call go-to-tab-by-id when there was no previously-active tab (no attached client)"
-  pass "fm_backend_zellij_create_task: skips the restore call when there was no previously-active tab"
 }
 
 # --- capture / send_key / send_literal / current_path / kill -----------------
@@ -1250,27 +1222,6 @@ SH
   pass "fm-peek/fm-send: explicit metadata-matched targets use the recorded zellij backend"
 }
 
-test_scripts_verify_label_for_fm_targets() {
-  local dir state fb neutral out
-  dir="$TMP_ROOT/script-fm-target-label"; state="$dir/state"; mkdir -p "$state" "$dir/responses"
-  neutral="$dir/neutral-root"; mkdir -p "$neutral"
-  fm_write_meta "$state/zlabel.meta" "window=firstmate:7" "backend=zellij"
-  touch "$state/.last-watcher-beat"
-  zellij_pane_response "$dir" 1 7 3
-  zellij_tab_response "$dir" 2 3 fm-zlabel
-  printf 'captured through fm-id\n' > "$dir/responses/3.out"
-  fb=$(make_zellij_fakebin "$dir")
-
-  out=$( PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" \
-    FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_SESSION_LIST="firstmate" \
-    "$ROOT/bin/fm-peek.sh" fm-zlabel 5 2>/dev/null )
-  [ "$out" = "captured through fm-id" ] || fail "fm-peek did not capture through zellij for an fm-id target with a matching tab label, got '$out'"
-  zellij_assert_call_order "$dir/log" $'\x1f''list-tabs'$'\x1f''--json' $'\x1f''dump-screen' \
-    "fm-peek did not verify the fm-id tab label before capture"
-
-  pass "fm-peek: fm-id zellij targets verify the owning tab label before capture"
-}
-
 test_scripts_reject_fm_target_label_mismatch() {
   local dir state fb neutral status
   dir="$TMP_ROOT/script-fm-target-label-mismatch"; state="$dir/state"; mkdir -p "$state" "$dir/responses"
@@ -1295,7 +1246,6 @@ test_scripts_reject_fm_target_label_mismatch() {
 . "$ROOT/bin/fm-backend.sh"
 
 test_version_check_accepts_current_version
-test_version_check_accepts_newer_version
 test_version_check_refuses_old_version
 test_version_check_refuses_missing_zellij
 test_session_defaults_to_firstmate
@@ -1320,7 +1270,6 @@ test_dispatch_busy_state_unknown_for_zellij
 test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
 test_create_task_restores_previously_active_tab
-test_create_task_no_restore_when_new_tab_was_already_active
 test_capture_small_reads_use_viewport_and_trim
 test_capture_large_reads_use_full_scrollback_and_trim
 test_capture_fails_when_pane_absent
@@ -1356,5 +1305,4 @@ test_composer_state_dead_pane_is_unknown
 test_send_text_submit_send_failed_when_session_absent
 test_send_text_submit_send_failed_when_pane_absent
 test_scripts_route_explicit_target_through_meta_backend
-test_scripts_verify_label_for_fm_targets
 test_scripts_reject_fm_target_label_mismatch

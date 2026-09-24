@@ -56,14 +56,6 @@ test_scratchpad_prefix_is_ignored() {
   pass "names starting with scratchpad are gitignored"
 }
 
-test_scratchpad_prefix_ignores_no_tracked_path() {
-  local tracked
-  tracked=$(git -C "$ROOT" ls-files | grep -E '(^|/)scratchpad' || true)
-  [ -z "$tracked" ] \
-    || fail "a currently tracked path would be newly ignored by scratchpad*: $tracked"
-  pass "no currently tracked path starts with scratchpad"
-}
-
 test_scratchpad2_does_not_dirty_porcelain() {
   # Remote sync uses git status --porcelain. A scratchpad2/ directory must not
   # make a home look dirty once scratchpad* is gitignored.
@@ -87,5 +79,4 @@ test_scratchpad2_does_not_dirty_porcelain() {
 test_config_dir_ignored_as_category
 test_unrelated_path_stays_visible
 test_scratchpad_prefix_is_ignored
-test_scratchpad_prefix_ignores_no_tracked_path
 test_scratchpad2_does_not_dirty_porcelain

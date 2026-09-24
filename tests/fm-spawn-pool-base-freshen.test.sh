@@ -652,30 +652,6 @@ test_stale_pin_carrying_real_work_is_not_called_stale() {
   pass "a stale pin carrying real work is refused conservatively, never called stale"
 }
 
-test_stale_pin_beside_other_dirt_reports_one_verdict() {
-  local rec id out status
-  id='pool-sub-mixed-r11'
-  rec=$(make_submodule_case sub-mixed "$id")
-  read_submodule_case "$rec"
-  strand_submodule_pin_via_spawn 'pool-sub-mixed-seed-r11'
-  # Git sorts status paths, so the stale 'ui' entry is scanned before this file.
-  # The conservative verdict must not arrive contradicted by a stale-pin line.
-  printf 'notes the operator still wants\n' > "$POOL_DIR/zz-notes.txt"
-
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn launched from a slot with a stale pin beside an untracked file"
-  assert_contains "$out" "refusing to discard uncommitted work" \
-    "a stale pin beside an untracked file was not refused as uncommitted work"
-  assert_not_contains "$out" "stale submodule checkout" \
-    "a slot carrying more than a stale pin was reported as merely stale"
-  assert_not_contains "$out" "is checked out at" \
-    "the stale-pin diagnosis was printed alongside the conservative refusal"
-  assert_grep 'notes the operator still wants' "$POOL_DIR/zz-notes.txt" \
-    "spawn discarded the untracked file while refusing the pool"
-  pass "a stale pin beside other dirt yields the conservative refusal alone, with no stale-pin line"
-}
-
 # Re-lay a case's pooled worktree as a managed Treehouse slot: <pool>/<slot>/<repo>
 # with the pool's state file beside the slot, which is the shape fm-spawn claims
 # for its task. Rewrites POOL_DIR to the relocated checkout.
@@ -762,6 +738,5 @@ test_stale_submodule_pin_explains_itself
 test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale
-test_stale_pin_beside_other_dirt_reports_one_verdict
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

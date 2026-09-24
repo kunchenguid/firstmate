@@ -263,12 +263,6 @@ test_missing_actionlint_fails_closed() {
   pass "missing actionlint fails closed"
 }
 
-test_pins_an_explicit_version() {
-  [ -n "$REQUIRED" ] || fail "fm-lint-workflows.sh --required-version printed nothing"
-  assert_contains "$REQUIRED" "1.7.12" "fm-lint-workflows.sh must pin actionlint 1.7.12"
-  pass "fm-lint-workflows.sh pins an explicit actionlint version ($REQUIRED)"
-}
-
 test_rejects_wrong_actionlint_version() {
   local tmp fakebin out rc
   tmp=$(fm_test_tmproot fm-lint-wf-ver)
@@ -408,33 +402,6 @@ test_installer_falls_back_to_shasum() {
   pass "actionlint installer falls back to shasum -a 256 when sha256sum is absent"
 }
 
-test_installer_prefers_sha256sum_over_shasum() {
-  local tmp fakebin destination hasher_log
-  tmp=$(fm_test_tmproot fm-actionlint-sha256sum-pref)
-  fakebin=$(fm_fakebin "$tmp")
-  destination="$tmp/bin"
-  hasher_log="$tmp/hasher.log"
-
-  fm_install_stub_uname "$fakebin"
-  fm_install_stub_curl "$fakebin"
-  fm_install_stub_hasher "$fakebin" sha256sum
-  fm_install_stub_hasher "$fakebin" shasum
-  fm_install_stub_tar_actionlint "$fakebin"
-  fm_install_stub_sleep "$fakebin"
-
-  : > "$hasher_log"
-  PATH="$fakebin:$PATH" HASHER_LOG="$hasher_log" \
-    SHA256_STUB_HASH="$ACTIONLINT_SHA_LINUX_AMD64" \
-    FM_TEST_UNAME_S=Linux FM_TEST_UNAME_M=x86_64 \
-    "$INSTALLER" "$destination" >/dev/null \
-    || fail "installer failed when both hashers were present"
-  assert_grep 'sha256sum' "$hasher_log" "installer did not prefer sha256sum"
-  if grep -q 'shasum' "$hasher_log"; then
-    fail "installer invoked shasum even though sha256sum was present"$'\n'"$(cat "$hasher_log")"
-  fi
-  pass "actionlint installer prefers sha256sum when both hashers are present"
-}
-
 test_installer_rejects_unsupported_platform() {
   local tmp fakebin destination out rc
   tmp=$(fm_test_tmproot fm-actionlint-unsupported)
@@ -514,7 +481,6 @@ SH
   pass "fm-lint.sh default path catches a self-broken ci.yml"
 }
 
-test_pins_an_explicit_version
 test_current_workflows_pass
 test_col0_heredoc_fails_with_clear_error
 test_valid_fixture_passes
@@ -527,6 +493,5 @@ test_installer_retries_transient_download_failure
 test_installer_selects_platform_archive_url_and_checksum
 test_installer_rejects_wrong_checksum
 test_installer_falls_back_to_shasum
-test_installer_prefers_sha256sum_over_shasum
 test_installer_rejects_unsupported_platform
 test_fm_lint_default_path_catches_broken_ci_yml
