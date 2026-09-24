@@ -296,6 +296,14 @@ teardown_require_source() {  # <path>
     exit 1
   fi
 }
+
+teardown_require_backend_prerequisites() {  # <backend> <task-id>
+  local backend=$1 task_id=$2
+  if ! fm_backend_source "$backend"; then
+    echo "error: teardown refused: required $backend source is missing or unreadable for $task_id; nothing was changed" >&2
+    return 1
+  fi
+}
 for _teardown_source in \
   fm-tasks-axi-lib.sh \
   fm-backlog-transition-lib.sh \
@@ -312,6 +320,7 @@ for _teardown_source in \
   fm-secondmate-registry-lib.sh \
   fm-secondmate-parent-lib.sh \
   fm-pending-reply-lib.sh \
+  fm-operational-input.sh \
   fm-marker-lib.sh \
   fm-tmux-lib.sh \
   fm-composer-lib.sh \
@@ -1072,6 +1081,10 @@ else
   T=$FM_BACKEND_VALIDATED_TARGET
   [ "$BACKEND" != orca ] || T_ORCA=$T
 fi
+# The recorded backend, including every sibling its adapter sources, has to
+# be readable before the first destructive step. --force does not override
+# this. A forced descendant is proved in validate_firstmate_home_children_removal.
+teardown_require_backend_prerequisites "$BACKEND" "$ID" || exit 1
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
   "$FM_ROOT/bin/fm-guard.sh" || true
 fi
@@ -2986,14 +2999,6 @@ FMEOF
   return 1
 }
 
-teardown_require_backend_prerequisites() {  # <backend> <task-id>
-  local backend=$1 task_id=$2
-  if ! fm_backend_source "$backend"; then
-    echo "error: teardown refused: required $backend source is missing or unreadable for $task_id; nothing was changed" >&2
-    return 1
-  fi
-}
-
 teardown_herdr_require_prerequisites() {  # <task-id>
   local task_id=$1 prerequisite
   teardown_require_backend_prerequisites herdr "$task_id" || return 1
@@ -3398,11 +3403,6 @@ if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     fi
   fi
 fi
-
-# The recorded backend, including every sibling its adapter sources, has to
-# be readable before the first destructive step. --force does not override
-# this. A forced descendant is proved in validate_firstmate_home_children_removal.
-teardown_require_backend_prerequisites "$BACKEND" "$ID" || exit 1
 
 # A Herdr close may reposition shared workspace order, so the whole
 # destructive sequence below (worktree return, pane close, record removal)

@@ -3993,6 +3993,54 @@ test_forced_child_missing_adapter_sibling_refuses_before_cleanup() {
   pass "a forced descendant with a missing adapter sibling refuses before cleanup"
 }
 
+test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup() {
+  local case_dir home rc
+  case_dir=$(make_case missing-own-adapter-sibling)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=zs:3" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=secondmate" \
+    "mode=local-only" \
+    "backend=zellij" \
+    "zellij_session=zs" \
+    "zellij_tab_id=1" \
+    "zellij_pane_id=3" \
+    "spawn_gen=teardown-test-task-x1"
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  fm_write_meta "$home/state/child-tmux.meta" \
+    "window=childsession:fm-child-tmux" \
+    "endpoint_task_id=child-tmux" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only"
+  : > "$home/state/child-tmux.status"
+  prepare_teardown_source_copy "$case_dir"
+  cat > "$case_dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/tmux.log"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+  : > "$case_dir/tmux.log"
+  rm -f "$case_dir/test-root/bin/fm-backend-hometag-lib.sh"
+  rc=0
+  run_copied_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  assert_source_refusal_preserved_state "$case_dir" "missing-own-source" "required zellij source"
+  [ -e "$home/state/child-tmux.meta" ] || fail "missing-own-source: the refusal erased the child record"
+  [ -e "$home/state/child-tmux.status" ] || fail "missing-own-source: the refusal erased the child status"
+  [ -d "$home" ] || fail "missing-own-source: the refusal removed the secondmate home"
+  if grep -q "kill" "$case_dir/tmux.log"; then
+    fail "missing-own-source: the refusal killed the child endpoint: $(cat "$case_dir/tmux.log")"
+  fi
+  pass "a forced secondmate with a missing own adapter sibling refuses before child cleanup"
+}
+
 test_retained_sources_still_reach_the_ordinary_refusal() {
   local case_dir rc
   case_dir=$(make_case retained-sources)
@@ -4014,6 +4062,7 @@ test_missing_startup_source_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup
 test_missing_adapter_sibling_refuses_before_cleanup
 test_forced_child_missing_adapter_sibling_refuses_before_cleanup
+test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
