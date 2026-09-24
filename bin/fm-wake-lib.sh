@@ -1472,6 +1472,28 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
   [ "$project_common" = "$slot_common" ]
 }
 
+# A pool slot is handed out only once Treehouse's state lists it with a live
+# owner process. `treehouse get` appends a new slot's entry only after its
+# checkout and seeding finish, and records the owner of a reused slot only after
+# resetting it, so a slot the state does not yet attribute to a live owner may
+# still be mid-checkout even though it already reads as a git worktree. Without
+# jq the state cannot be read, so the slot is taken as handed out and callers
+# fall back to git's own initializing lock.
+fm_treehouse_slot_acquired() {  # <worktree>
+  local slot state entry pid
+  slot=$(CDPATH='' cd -- "$1" 2>/dev/null && pwd -P) || return 1
+  state="$(dirname "$(dirname "$slot")")/treehouse-state.json"
+  [ -f "$state" ] && [ ! -L "$state" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 0
+  while IFS=$'\t' read -r entry pid; do
+    entry=$(CDPATH='' cd -- "$entry" 2>/dev/null && pwd -P) || continue
+    [ "$entry" = "$slot" ] || continue
+    case $pid in ''|0|*[!0-9]*) continue ;; esac
+    kill -0 "$pid" 2>/dev/null && return 0
+  done < <(jq -r '.worktrees[]? | select((.destroying // false) | not) | [(.path // ""), (.owner_pid // 0 | tostring)] | @tsv' "$state" 2>/dev/null)
+  return 1
+}
+
 # Slot-owner claim: which task a Treehouse pool slot currently belongs to.
 #
 # Treehouse can record ownership durably: `treehouse get --lease --lease-holder`
