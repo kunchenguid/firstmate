@@ -23,9 +23,10 @@
 # worker's orphan recovery.
 #
 # A lane is bounded in age as well as in what it may run. Its command group is
-# bounded by the job deadline, its output capture is drained only for
-# FM_REMOTE_JOB_OUTPUT_DRAIN_SECONDS after that group is gone, and a lane still
-# alive FM_REMOTE_JOB_LANE_GRACE_SECONDS past the deadline is stopped outright.
+# bounded by the job deadline, and output readers receive TERM after
+# FM_REMOTE_JOB_OUTPUT_DRAIN_SECONDS of draining, then KILL one second later
+# if still present. A lane still alive FM_REMOTE_JOB_LANE_GRACE_SECONDS past
+# the deadline is stopped outright.
 # These bounds prevent an escaped descendant holding an output pipe from
 # blocking the home's queue and keeping later callers' SSH sessions open.
 #
@@ -567,7 +568,7 @@ worker_cleanup_output_capture() { # <job-dir> <stdout-reader> <stderr-reader>
   rm -f -- "$job/.stdout.pipe" "$job/.stderr.pipe"
 }
 
-# Wait for both output readers, but never longer than the drain bound. The
+# Wait for both output readers with the bounded shutdown owned by the header. The
 # command's own process group is already dead by the time this runs, so EOF is
 # immediate unless a descendant escaped that group - a daemonized agent runtime
 # or multiplexer server - and still holds the job's stdout or stderr. An
