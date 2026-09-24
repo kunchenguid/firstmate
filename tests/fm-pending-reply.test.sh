@@ -1702,6 +1702,11 @@ test_operator_closed_escalation_is_not_reminded() {
   [ "$(phase_of "$state" "$corr")" = escalated ] \
     || fail "an operator close must not count as the mate's reply"
 
+  json=$(fm_pending_reply_escalated_decisions_json "$state")
+  printf '%s' "$json" | jq -e --arg closed "pending-reply-$corr" --arg kept "pending-reply-$kept" '
+    (any(.[]; .key == $closed) | not) and any(.[]; .key == $kept)
+  ' >/dev/null || fail "bearings input did not honor the operator close: $json"
+
   : > "$state/.wake-queue"
   export FM_PENDING_REPLY_SESSION=s2
   fm_pending_reply_tick "$state" || fail "later-session tick failed"
@@ -1709,12 +1714,80 @@ test_operator_closed_escalation_is_not_reminded() {
     && fail "an operator-closed escalation was reminded: $(cat "$state/.wake-queue")"
   grep -F "pending-reply-id=$kept" "$state/.wake-queue" >/dev/null \
     || fail "an escalation left open was not reminded on a later session"
+  [ -n "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$corr")" escalation_dismissed_epoch)" ] \
+    || fail "the dismissal was not recorded on the record"
+
+  : > "$state/.wake-queue"
+  export FM_PENDING_REPLY_SESSION=s3
+  fm_pending_reply_tick "$state" || fail "third-session tick failed"
+  grep -F "pending-reply-id=$corr" "$state/.wake-queue" >/dev/null \
+    && fail "a recorded dismissal was reminded again: $(cat "$state/.wake-queue")"
+  grep -F "pending-reply-id=$kept" "$state/.wake-queue" >/dev/null \
+    || fail "an escalation left open was not reminded on the third session"
   json=$(fm_pending_reply_escalated_decisions_json "$state")
   printf '%s' "$json" | jq -e --arg closed "pending-reply-$corr" --arg kept "pending-reply-$kept" '
     (any(.[]; .key == $closed) | not) and any(.[]; .key == $kept)
-  ' >/dev/null || fail "bearings input did not honor the operator close: $json"
+  ' >/dev/null || fail "bearings input listed a recorded dismissal: $json"
   unset FM_PENDING_REPLY_SESSION
   pass "an operator-closed escalation is neither reminded nor listed, an open one still is"
+}
+
+# Only the operator's keyed close dismisses. A legacy unkeyed escalation next to
+# an unkeyed resolved line, and a keyed escalation whose fold a terminal done:
+# line or another key's close cleared, stay reminded and listed.
+test_other_closes_do_not_dismiss_escalation() {
+  local home state legacy keyed json
+  home=$(setup_parent other-closes)
+  state="$home/state"
+  fm_write_meta "$state/mate.meta" "window=sess:fm-mate" "kind=ship"
+  export FM_PENDING_REPLY_NOW=1000
+  export FM_PENDING_REPLY_SESSION=s1
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  legacy=$(escalate_new "$home" "$state" "legacy request")
+  keyed=$(escalate_new "$home" "$state" "keyed request")
+  sed -i "s/^blocked \[key=pending-reply-$legacy\]\(.*\): /blocked\1: /" "$state/mate.status"
+  grep -F "[key=pending-reply-$legacy]" "$state/mate.status" >/dev/null \
+    && fail "precondition: the legacy escalation should be unkeyed"
+  {
+    printf 'resolved: looked at it\n'
+    printf 'resolved [key=api-shape]: unrelated answer\n'
+    printf 'done: shipped everything\n'
+  } >> "$state/mate.status"
+
+  : > "$state/.wake-queue"
+  export FM_PENDING_REPLY_SESSION=s2
+  fm_pending_reply_tick "$state" || fail "later-session tick failed"
+  grep -F "pending-reply-id=$legacy" "$state/.wake-queue" >/dev/null \
+    || fail "a legacy escalation went quiet after an unkeyed resolved line"
+  grep -F "pending-reply-id=$keyed" "$state/.wake-queue" >/dev/null \
+    || fail "a keyed escalation went quiet after unrelated closes"
+  json=$(fm_pending_reply_escalated_decisions_json "$state")
+  printf '%s' "$json" | jq -e --arg legacy "pending-reply-$legacy" --arg keyed "pending-reply-$keyed" '
+    any(.[]; .key == $legacy) and any(.[]; .key == $keyed)
+  ' >/dev/null || fail "bearings input dropped an escalation nobody dismissed: $json"
+  unset FM_PENDING_REPLY_SESSION
+  pass "only the operator's keyed close dismisses an escalation"
+}
+
+# With nothing escalated, or only dismissed escalations, the reminder does no
+# session lookup and enqueues nothing.
+test_reminder_skips_session_lookup_without_escalations() {
+  local home state corr
+  home=$(setup_parent no-escalation)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=1000
+  unset FM_PENDING_REPLY_SESSION
+  corr=$(fm_pending_reply_create "$home" "$state" mate "still waiting")
+  (
+    fm_pending_reply_session_token() { : > "$state/token-looked-up"; }
+    fm_pending_reply_remind_escalated "$state"
+    fm_pending_reply_set "$(fm_pending_reply_path "$state" "$corr")" phase escalated
+    fm_pending_reply_set "$(fm_pending_reply_path "$state" "$corr")" escalation_dismissed_epoch 900
+    fm_pending_reply_remind_escalated "$state"
+  ) || fail "remind without live escalations failed"
+  [ ! -e "$state/token-looked-up" ] || fail "the session token was looked up with nothing to remind"
+  [ ! -s "$state/.wake-queue" ] || fail "a reminder was enqueued with nothing to remind"
+  pass "the reminder skips the session lookup when nothing needs reminding"
 }
 
 # --- run --------------------------------------------------------------------
@@ -1726,6 +1799,8 @@ test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
 test_escalated_record_is_reminded_once_per_later_session
 test_operator_closed_escalation_is_not_reminded
+test_other_closes_do_not_dismiss_escalation
+test_reminder_skips_session_lookup_without_escalations
 test_escalation_wakes_and_its_close_stays_quiet
 test_escalation_publication_failure_retries
 test_legacy_escalation_closes_default_decision
