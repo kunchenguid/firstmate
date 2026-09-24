@@ -2248,7 +2248,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
 # non-no-mistakes crew, or any crew with no running pipeline) are never left hanging.
 
 test_quota_stale_surfaced() {
-  local dir state fakebin out capture_file window key pane_hash sig pid harness pane observed reset recorded gen extra finished
+  local dir state fakebin out capture_file window key pane_hash sig pid harness pane observed observation reset recorded gen extra finished
   for harness in grok pi pi-trust; do
     dir=$(make_case "quota-$harness"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-quota"
@@ -2292,9 +2292,12 @@ test_quota_stale_surfaced() {
     if [ "$harness" = grok ]; then
       grep -F 'quota-exhausted: grok, resets unknown)' "$out" >/dev/null || fail 'invented weekly reset'
     elif [ "$harness" = pi ]; then
-      reset=$(sed -n 's/.*resets \([^ ]*\) (2h29m27s)).*/\1/p' "$out")
-      reset=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$reset" +%s 2>/dev/null || date -u -d "$reset" +%s) || fail 'missing UTC reset'
-      [ "$reset" -ge "$((observed + 8967))" ] && [ "$reset" -le "$((finished + 8967))" ] || fail 'wrong reset epoch'
+      observation=$(sed -n 's/.*observed \([^,]*\), resets no later than .*/\1/p' "$out")
+      reset=$(sed -n 's/.*resets no later than \([^ ]*\) (2h29m27s)).*/\1/p' "$out")
+      observation=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$observation" +%s 2>/dev/null || date -u -d "$observation" +%s) || fail 'missing UTC observation'
+      reset=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$reset" +%s 2>/dev/null || date -u -d "$reset" +%s) || fail 'missing UTC upper bound'
+      [ "$observation" -ge "$observed" ] && [ "$observation" -le "$finished" ] || fail 'wrong observation epoch'
+      [ "$reset" -eq "$((observation + 8967))" ] || fail 'wrong reset upper bound'
     fi
     [ ! -e "$state/.wedge-escalations-$key" ] || fail 'quota entered wedge ladder'
     recorded=$(cat "$state/.pane-stop-$key")

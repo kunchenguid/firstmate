@@ -74,8 +74,8 @@ Confirm the targeted current state and pane still show that stop and that no act
 Load `harness-adapters` and use the current dispatch resolver when available, then apply the ordinary dispatch eligibility and quota-array selection procedure to choose the next eligible candidate rather than retrying the exhausted model.
 Relaunch the same task in place through `bin/fm-control.sh <task-id> relaunch`, passing the selected harness, model, effort, and a progress note using its current help.
 Preserve existing work and report the recovery choice; silent automatic model switching is forbidden, and the watcher only reports evidence, never relaunches.
-If no eligible candidate can proceed, report the blocker and the reset estimate when known rather than repeatedly relaunching.
-`bin/fm-pane-stop-lib.sh` owns the supported rendered stops; `bin/fm-watch.sh`'s header owns wake timing, reset estimates, and deduplication.
+If no eligible candidate can proceed, report the blocker and, when present, the raw delay, UTC observation time, and reset upper bound ("no later than"), not an exact reset time; do not repeatedly relaunch.
+`bin/fm-pane-stop-lib.sh` owns the supported rendered stops; `bin/fm-watch.sh`'s header owns wake timing, reset upper bounds, and deduplication.
 An unknown reset must not be invented.
 
 A `blocked-at-prompt` stale wake instead calls for trust handling, including workers that have not yet written a status event.
