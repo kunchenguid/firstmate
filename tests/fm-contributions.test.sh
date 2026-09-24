@@ -563,6 +563,10 @@ case "$fault:$*" in
     printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock"
     printf 'HTTP 502\n' >&2; exit 1 ;;
   fail:'api repos/o/r/pulls/8/reviews?'*) printf 'HTTP 502\n' >&2; exit 1 ;;
+  fail-once:'api repos/o/r/pulls/8/reviews?'*)
+    if [ ! -e "$FORGE/fail-once-spent" ]; then
+      : > "$FORGE/fail-once-spent"; printf 'HTTP 502\n' >&2; exit 1
+    fi ;;
   down:*) printf 'HTTP 502\n' >&2; exit 1 ;;
   hang:'api repos/o/r/pulls/8') sleep 4 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
@@ -770,7 +774,7 @@ test_three_second_pr_reads_complete_fresh_in_one_cycle() { # 3-second reads: 8 s
 }
 
 test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine outage, two consecutive cycles
-  local home out line='contributions: observation unavailable for https://github.com/o/r/pull/8'
+  local home out first_cycle_calls line='contributions: observation unavailable for https://github.com/o/r/pull/8'
   local error='"forge observation unavailable or changed during read"'
   home=$(new_home failure-episode)
   forge_home "$home"
@@ -779,11 +783,13 @@ test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine ou
   poll_at() { with_home "$home" env FM_CONTRIBUTIONS_NOW="$1" "$ROOT/bin/fm-contributions.sh" poll || fail "poll at $1 failed"; }
   out=$(poll_at 2026-09-16T09:00:00Z)
   [ "$out" = "$line" ] || fail "the first failure of an episode did not wake: $out"
+  first_cycle_calls=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
   out=$(poll_at 2026-09-16T10:00:00Z)
   [ -z "$out" ] || fail "an unchanged read failure woke again on the next cycle: $out"
   jq -e --argjson error "$error" '.records[0] | .checked_at == "2026-09-16T10:00:00Z" and .error == $error' \
     "$home/data/delivery/contributions.json" >/dev/null || fail 'a repeated read failure stopped recording its error'
-  [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 2 ] || fail 'a failing open PR stopped being observed'
+  [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" -gt "$first_cycle_calls" ] \
+    || fail 'a failing open PR stopped being observed'
   : > "$home/forge/fault"
   out=$(poll_at 2026-09-16T11:00:00Z)
   [ -z "$out" ] || fail "a successful read printed: $out"
@@ -793,6 +799,46 @@ test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine ou
   out=$(poll_at 2026-09-16T12:00:00Z)
   [ "$out" = "$line" ] || fail "a new failure after a successful read did not wake: $out"
   pass 'a genuinely unavailable forge records an error and wakes once per failure episode'
+}
+
+test_transient_forge_failure_is_retried_without_waking() { # one blip, then success
+  local home out
+  home=$(new_home transient-failure)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  printf 'fail-once\n' > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed on a single transient forge failure'
+  [ -z "$out" ] || fail "one transient forge failure printed an unavailable line: $out"
+  [ "$(grep -cF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls")" = 2 ] \
+    || fail 'the failed read was not retried exactly once before succeeding'
+  jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'a read that succeeded on retry still recorded a failure'
+  [ ! -s "$home/state/.wake-queue" ] || fail 'one transient forge failure enqueued a wake'
+  pass 'a forge read that fails once and then succeeds records no error and wakes nobody'
+}
+
+test_sustained_forge_failure_spends_retries_then_wakes_once() { # every attempt fails
+  local home out attempts line='contributions: observation unavailable for https://github.com/o/r/pull/8'
+  home=$(new_home sustained-failure)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  printf 'fail\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed on a sustained forge failure'
+  [ "$out" = "$line" ] || fail "a failure that survived every attempt did not wake: $out"
+  attempts=$(grep -cF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls")
+  [ "$attempts" -ge 2 ] || fail "a sustained failure was never retried: $attempts attempt(s)"
+  jq -e '.records[0].error == "forge observation unavailable or changed during read"' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'a sustained failure left no error evidence'
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T10:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'second sustained-failure poll failed'
+  [ -z "$out" ] || fail "a sustained failure woke twice inside one episode: $out"
+  pass 'a forge read that fails every attempt records the error and wakes once per episode'
 }
 
 test_late_owner_keeps_failure_episode_suppressed() {
@@ -829,7 +875,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_transient_forge_failure_is_retried_without_waking test_sustained_forge_failure_spends_retries_then_wakes_once test_late_owner_keeps_failure_episode_suppressed; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
