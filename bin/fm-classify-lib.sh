@@ -78,6 +78,12 @@ unset _fm_classify_nounset
 # verb-aware: a nonterminal working: or paused: line never becomes captain-relevant
 # merely because its prose contains one of those tokens (for example
 # "working: rebased onto merged #76").
+# A declaration whose prefix is not one of those verbs is still an event, shown
+# as the line itself. That covers an unknown word such as parked: or holding:,
+# and a known verb whose correlation token is missing or mismatched, so the
+# declaration cannot disappear behind an earlier recognized line. Continuation
+# prose is not a prefix and stays off that path. Recognized verbs keep the
+# classification below.
 FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
 
 # The deliberate-external-wait verb. A crew (or firstmate steering it) appends
@@ -155,27 +161,85 @@ last_status_line() {  # <status-file> [<previous-event-var>]
   printf '%s\n' "${scan##*$'\n'}"
 }
 
+# 0 when <verb> is exactly one recognized status verb, with no leftover token.
+_fm_status_verb_recognized() {  # <verb>
+  case "$1" in
+    working|needs-decision|blocked|done|failed|note|\
+    "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|\
+    "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|\
+    "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}")
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# 0 when <word> is a correlation-token attempt the strict parser did not accept.
+# A well-formed token is stripped before this sees the verb, so only a missing
+# or mismatched token remains here.
+_fm_status_corr_attempt() {  # <word>
+  case "$1" in
+    corr|corr=*) return 0 ;;
+  esac
+  return 1
+}
+
+# 0 when <line> declares a status prefix that did not parse as a recognized verb.
+# An unknown single word (parked:, holding:) is one shape. A recognized verb
+# followed only by a missing or mismatched correlation token is the other, as is
+# a token written ahead of the verb. The line stays that text: it does not
+# become the verb the token failed to separate. Continuation prose is not a
+# prefix, including a sentence that merely starts with a known verb.
+status_prefix_unrecognized() {  # <status-line>
+  local line=$1 verb first rest word
+  case "$line" in *:*) ;; *) return 1 ;; esac
+  status_line_verb "$line" verb
+  [ -n "$verb" ] || return 1
+  _fm_status_verb_recognized "$verb" && return 1
+  first=${verb%%[[:space:]]*}
+  rest=${verb#"$first"}
+  rest=${rest#"${rest%%[![:space:]]*}"}
+  if [ -z "$rest" ]; then
+    return 0
+  fi
+  if _fm_status_corr_attempt "$first"; then
+    word=${rest%%[[:space:]]*}
+    _fm_status_verb_recognized "$word" || return 1
+    rest=${rest#"$word"}
+    rest=${rest#"${rest%%[![:space:]]*}"}
+  else
+    _fm_status_verb_recognized "$first" || return 1
+  fi
+  while [ -n "$rest" ]; do
+    word=${rest%%[[:space:]]*}
+    _fm_status_corr_attempt "$word" || return 1
+    rest=${rest#"$word"}
+    rest=${rest#"${rest%%[![:space:]]*}"}
+  done
+  return 0
+}
+
 # Print "<previous event>\n<latest event>" for the status lines on stdin, and
-# return 1 when the stream holds no recognized event at all, so a caller reading
-# a bounded window knows to widen it. A stream without events keeps its last
-# nonblank line as the latest, matching the read this replaced.
+# return 1 when the stream holds no event at all, so a caller reading a bounded
+# window knows to widen it. A stream without events keeps its last nonblank
+# line as the latest, matching the read this replaced.
 # Keep decision-closing events: skipping a resolved line would revive its opener.
 # A bare legacy free-text line counts as an event only when a captain token leads
 # it, so continuation prose that merely mentions one cannot hide a declaration.
+# An unrecognized status prefix is an event too, so that declaration is the
+# latest line instead of disappearing behind an earlier recognized one.
 _fm_status_event_scan() {
   local line last='' prev='' fallback='' verb legacy_re unstamped
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in *[![:space:]]*) fallback=$line ;; *) continue ;; esac
     case "$line" in *:*) status_line_verb "$line" verb ;; *) verb='' ;; esac
-    case "$verb" in
-      working|needs-decision|blocked|done|failed|note|\
-      "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|\
-      "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|\
-      "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") prev=$last; last=$line ;;
-      *) _fm_status_unstamped "$line" unstamped
-         _fm_classify_matches "$unstamped" "$legacy_re" && { prev=$last; last=$line; } ;;
-    esac
+    if _fm_status_verb_recognized "$verb" || status_prefix_unrecognized "$line"; then
+      prev=$last; last=$line
+    else
+      _fm_status_unstamped "$line" unstamped
+      _fm_classify_matches "$unstamped" "$legacy_re" && { prev=$last; last=$line; }
+    fi
   done
   printf '%s\n%s\n' "$prev" "${last:-$fallback}"
   [ -n "$last" ]
@@ -222,6 +286,10 @@ status_is_captain_relevant() {
       return 1
       ;;
   esac
+  # An unrecognized prefix is surfaced as itself. The check sits after the
+  # recognized nonterminal verbs, so working, paused, resolved, and captain-held
+  # keep their existing non-relevant classification.
+  status_prefix_unrecognized "$line" && return 0
   if [ -z "${FM_CAPTAIN_RE+x}" ]; then
     case "$verb" in
       done|needs-decision|blocked|failed) return 0 ;;
