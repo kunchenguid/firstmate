@@ -4545,7 +4545,7 @@ check(
   check(!starRow.includes("-"), "idle hull row rendered warp streak glyphs");
 }
 
-// --- Working: single-row compact warp sprite, faster twinkle, streaks stream left --
+// --- Working: single-row compact warp sprite, faster twinkle, parity-locked field toggles in place --
 {
   const animation = createCalmWorkingSpaceshipAnimation();
   animation.render(44);
@@ -4572,8 +4572,10 @@ check(
     "working star cadence drifted from two phases per tick",
   );
 
-  // Warp streaks stream left: with no movement tick in between, the glyph that sat
-  // two columns to the right now sits at this column.
+  // Working warp field is parity-locked: the star phase traverses the even orbit {0,2}
+  // (two phases per tick), so the field toggles in place between two phase states with no
+  // accumulated leftward drift. After a non-movement tick, the glyph that sat two columns
+  // to the right now sits at this column.
   const fresh = createCalmWorkingSpaceshipAnimation();
   fresh.setWorking(true);
   const before = fresh.render(44)[0];
@@ -4585,7 +4587,7 @@ check(
     const bareAfter = strip(after);
     check(
       bareAfter[column] === bareBefore[column + 2],
-      `streaks did not stream left at column ${column}: ${bareBefore[column + 2]} became ${bareAfter[column]}`,
+      `field did not toggle in place at column ${column}: ${bareBefore[column + 2]} became ${bareAfter[column]}`,
     );
   }
 
