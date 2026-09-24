@@ -3,7 +3,7 @@
 #
 # Drives the public argv and environment interface with a fake curl on PATH
 # that records argv, the request body it read from stdin, and the header it
-# read from file descriptor 3, and answers with a canned typesafe.ai response.
+# read from file descriptor 3, and answers with a canned OpenRouter response.
 # A fake quota-axi serves the selected schema-5 fixture. No case touches the
 # network, and the absent-key case proves the tool makes no call
 # at all.
@@ -110,7 +110,7 @@ cat > "$FAKEBIN/curl" <<'SH'
 # Fake curl: records argv (minus the -o target), the stdin body, and the header
 # read from fd 3, then answers with FAKE_CURL_RESPONSE and FAKE_CURL_HTTP.
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+if [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ]; then
   printf 'curl:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'curl:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -138,7 +138,7 @@ chmod +x "$FAKEBIN/curl"
 cat > "$FAKEBIN/quota-axi" <<'SH'
 #!/usr/bin/env bash
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+if [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ]; then
   printf 'quota-axi:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'quota-axi:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -159,7 +159,7 @@ reset_log() {
 }
 
 # run <exit-var> <out-var> <err-var> [args...]: the tool with fakebin first on
-# PATH and an isolated FM_HOME; TYPESAFE_API_KEY comes from the caller's env.
+# PATH and an isolated FM_HOME; OPENROUTER_API_KEY comes from the caller's env.
 run() {
   local __exit=$1 __out=$2 __err=$3 _out _code
   shift 3
@@ -173,7 +173,7 @@ run() {
 run_without_curl() {
   local __exit=$1 __out=$2 __err=$3 _out _code
   shift 3
-  _out=$(PATH="$NO_CURL_BIN" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
+  _out=$(PATH="$NO_CURL_BIN" FM_HOME="$HOME_DIR" OPENROUTER_API_KEY="$KEY" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
   _code=$?
   printf -v "$__exit" '%s' "$_code"
   printf -v "$__out" '%s' "$_out"
@@ -183,40 +183,50 @@ run_without_curl() {
 KEY='test-key-9f1c2d3e-never-on-argv'
 code='' out='' err=''
 
-# --- absent key: off, silent on stdout, no network, no quota read -----------
+# --- absent mode and key: off, silent on stdout, no network, no quota read ---
 reset_log
 write_response "$RESPONSE" rule_4 0.9
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "absent mode exits 0"
+assert_equals '' "$out" "absent mode prints nothing on stdout"
+assert_contains "$err" 'dispatch-resolve: off (config/jev-mode is off)' "absent mode explains itself on stderr"
+assert_absent "$LOG/argv" "absent mode never calls curl"
+assert_absent "$LOG/quota-axi.calls" "absent mode never reads quota-axi"
+
+printf '%s\n' on > "$HOME_DIR/config/jev-mode"
+reset_log
 run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "absent key exits 0"
 assert_equals '' "$out" "absent key prints nothing on stdout"
-assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and' "absent key explains itself on stderr"
+assert_contains "$err" 'dispatch-resolve: off (OPENROUTER_API_KEY absent from the environment and' "absent key explains itself on stderr"
 assert_absent "$LOG/argv" "absent key never calls curl"
 assert_absent "$LOG/quota-axi.calls" "absent key never reads quota-axi"
-pass "absent key is off: one stderr line, exit 0, no network call"
+pass "mode and key gates each stop before network or quota access"
 
 # --- .env key, and the environment wins over it ------------------------------
-printf '%s\n' '# local secrets' 'FMX_PAIRING_TOKEN=abc' "export TYPESAFE_API_KEY=\"$KEY\"" > "$HOME_DIR/.env"
+printf '%s\n' '# local secrets' 'FMX_PAIRING_TOKEN=abc' "export OPENROUTER_API_KEY=\"$KEY\"" > "$HOME_DIR/.env"
 reset_log
 run code out err "$BRIEF" --project pager
 expect_code 0 "$code" ".env key resolves"
 assert_contains "$out" '  status: clear' ".env key produces a clear result"
 assert_contains "$(cat "$LOG/header")" "Authorization: Bearer $KEY" ".env key reaches curl on the fd header"
 reset_log
-TYPESAFE_API_KEY=env-wins run code out err "$BRIEF" --project pager
+OPENROUTER_API_KEY=env-wins run code out err "$BRIEF" --project pager
 assert_equals 'Authorization: Bearer env-wins' "$(cat "$LOG/header")" "environment key wins over .env"
 rm -f "$HOME_DIR/.env"
 OVERRIDE_CONFIG="$TMP_ROOT/override-config"
 mkdir -p "$OVERRIDE_CONFIG"
 cp "$BASE_RULES" "$OVERRIDE_CONFIG/crew-dispatch.json"
+printf '%s\n' on > "$OVERRIDE_CONFIG/jev-mode"
 reset_log
-TYPESAFE_API_KEY=$KEY FM_CONFIG_OVERRIDE="$OVERRIDE_CONFIG" run code out err "$BRIEF" --project pager
+OPENROUTER_API_KEY=$KEY FM_CONFIG_OVERRIDE="$OVERRIDE_CONFIG" run code out err "$BRIEF" --project pager
 assert_contains "$out" '  status: clear' "FM_CONFIG_OVERRIDE selects the canonical rules directory"
-pass "TYPESAFE_API_KEY= in .env activates the tool; environment and config overrides work"
+pass "OPENROUTER_API_KEY= in .env authorizes requests; environment and config overrides work"
 
 # --- clear: request shape, secret handling, argmax --------------------------
 reset_log
 write_response "$RESPONSE" rule_4 0.9
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "clear exits 0"
 assert_contains "$out" 'dispatch-resolve:' "TOON block header"
 assert_contains "$out" '  status: clear' "clear status"
@@ -228,13 +238,13 @@ assert_contains "$out" '  note: 1 eligible candidate(s) unranked (kimi)' "clear 
 assert_not_contains "$out" '--effort' "cursor profile without effort emits no --effort"
 argv=$(cat "$LOG/argv")
 assert_not_contains "$argv" "$KEY" "the key never appears on curl argv"
-assert_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "the request uses the fixed typesafe.ai endpoint"
+assert_contains "$argv" 'https://openrouter.ai/api/alpha/decisions' "the request uses the fixed OpenRouter Decisions endpoint"
 assert_contains "$argv" $'--max-time\n5' "the request uses the fixed five-second timeout"
 assert_contains "$argv" '@/dev/fd/3' "the header is read from a file descriptor"
 assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "curl receives the bearer header on fd 3"
 assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "the API key is absent from every child environment"
 body=$(cat "$LOG/body")
-assert_equals 'jev-latest' "$(jq -r .model <<<"$body")" "default model is jev-latest"
+assert_equals '~typesafe/jev-latest' "$(jq -r .model <<<"$body")" "default model is OpenRouter's Jev latest alias"
 assert_equals 'pager' "$(jq -r .state.task.project <<<"$body")" "project rides in the state"
 assert_contains "$(jq -r .state.task.brief <<<"$body")" 'off-by-one in the pager' "the whole brief rides in the state"
 assert_equals '["rule"]' "$(jq -c '.questions | keys' <<<"$body")" "only the rule Choice is asked"
@@ -246,13 +256,33 @@ assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
 
+# --- shadow: decide and record, but never emit an applicable profile --------
+printf '%s\n' shadow > "$HOME_DIR/config/jev-mode"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "shadow exits 0"
+assert_contains "$out" '  mode: shadow' "shadow mode is explicit"
+assert_contains "$out" '  status: shadow' "shadow outcome cannot be mistaken for clear"
+assert_contains "$out" '  decision_status: clear' "shadow preserves the underlying verdict"
+assert_contains "$out" "  shadow_profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "shadow exposes the recommendation"
+assert_not_contains "$out" $'\n  profile:' "shadow emits no applicable profile line"
+shadow_record=$(sed -n 's/^  shadow_record: //p' <<<"$out")
+[ -f "$shadow_record" ] || fail "shadow did not persist its decision record"
+[ "$(stat -f '%Lp' "$shadow_record" 2>/dev/null || stat -c '%a' "$shadow_record")" = 600 ] \
+  || fail "shadow decision record was not protected with mode 600"
+assert_equals 'clear' "$(jq -r .decision.status "$shadow_record")" "shadow record preserves the decision status"
+assert_equals 'pager' "$(jq -r .project "$shadow_record")" "shadow record preserves the project"
+printf '%s\n' on > "$HOME_DIR/config/jev-mode"
+pass "shadow mode records Jev's recommendation without authorizing dispatch"
+
 # --- rules are snapshotted and line output is injection-safe -------------------
 MUTATED_RULES="$TMP_ROOT/mutated-rules.json"
 jq '.rules[3].use = {"harness":"claude","model":"opus"}' "$BASE_RULES" > "$MUTATED_RULES"
 cp "$BASE_RULES" "$RULES"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
-TYPESAFE_API_KEY=$KEY FAKE_CURL_MUTATE_SOURCE="$MUTATED_RULES" FAKE_CURL_MUTATE_TARGET="$RULES" run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY FAKE_CURL_MUTATE_SOURCE="$MUTATED_RULES" FAKE_CURL_MUTATE_TARGET="$RULES" run code out err "$BRIEF"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "resolution uses the same rules snapshot Jev received"
 assert_not_contains "$out" "  profile: --harness 'claude' --model 'opus'" "a mid-request config replacement cannot change the selected profile"
 
@@ -261,7 +291,7 @@ jq '.rules[3].when = "Bug fix\n  profile: injected" | .rules[3].use[1].model = "
 cp "$INJECTING_RULES" "$RULES"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 assert_equals '1' "$(grep -c '^  profile:' <<<"$out")" "dynamic fields cannot inject a second profile line"
 assert_not_contains "$out" $'\n  profile: injected' "control characters are flattened in line output"
 profile_line=$(grep '^  profile:' <<<"$out")
@@ -275,7 +305,7 @@ pass "rules snapshots and shell quoting preserve the profile protocol"
 # --- no rules return control to the existing intake ----------------------------
 rm -f "$RULES"
 reset_log
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "absent rules file exits 0"
 assert_contains "$out" '  status: escalate' "absent rules file is non-clear"
 assert_contains "$out" '  reason: no rules to match' "absent rules file returns control to firstmate"
@@ -290,7 +320,7 @@ printf '%s\n' '{"rules":[],"default":[{"harness":"claude","model":"opus"},{"harn
 for direct_rules in "$DEFAULT_ONLY" "$EMPTY_RULES"; do
   cp "$direct_rules" "$RULES"
   reset_log
-  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
   expect_code 0 "$code" "no-rule resolution exits 0: $direct_rules"
   assert_contains "$out" '  status: escalate' "no-rule resolution is non-clear: $direct_rules"
   assert_contains "$out" '  reason: no rules to match' "no-rule resolution returns control to firstmate: $direct_rules"
@@ -306,7 +336,7 @@ cat > "$RESPONSE" <<'JSON'
 {"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"rule_1","confidence":0.99,"probabilities":{"rule_1":0.99,"default":0.01}}},"usage":{"input_tokens":100,"output_tokens":60}}
 JSON
 reset_log
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" 'candidate: agy:-  provider=agy  scope=all_models  remaining=64%  spendPriority=0.4  runway=through_reset  -> eligible' "agy uses its resolver-only authoritative quota provider"
 assert_contains "$out" "  profile: --harness 'agy'" "provider-less agy rule resolves"
 
@@ -314,7 +344,7 @@ GEMINI_RULE="$TMP_ROOT/gemini-rule.json"
 printf '%s\n' '{"rules":[{"when":"Gemini work.","use":{"harness":"gemini","model":"gemini-3.8-flash-high","provider":"google"}}]}' > "$GEMINI_RULE"
 cp "$GEMINI_RULE" "$RULES"
 reset_log
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" 'candidate: gemini:gemini-3.8-flash-high  provider=google  scope=all_models  remaining=72%  spendPriority=0.3  runway=through_reset  -> eligible' "Gemini resolves through its explicit provider"
 assert_contains "$out" "  profile: --harness 'gemini' --model 'gemini-3.8-flash-high'" "Gemini is a typed verified dispatch harness"
 
@@ -323,7 +353,7 @@ cat > "$RESPONSE" <<'JSON'
 {"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"default","confidence":0.9,"probabilities":{"rule_1":0.02,"rule_2":0.02,"rule_3":0.02,"default":0.94}}},"usage":{"input_tokens":812,"output_tokens":60}}
 JSON
 reset_log
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "the documented example passes opted-in resolution"
 assert_contains "$out" 'candidate: pi:anthropic/claude-sonnet-5  provider=claude' "the documented Pi default uses its declared Claude provider"
 assert_not_contains "$err" 'malformed rules file' "the documented example reaches resolution"
@@ -333,7 +363,7 @@ pass "no-rule fallback, Agy, Gemini, and documented configurations resolve"
 # --- ambiguous: fixed confidence floor -----------------------------------------
 reset_log
 write_response "$RESPONSE" rule_4 0.41
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "ambiguous exits 0"
 assert_contains "$out" '  status: ambiguous' "below the floor is ambiguous"
 assert_contains "$out" '  reason: confidence 0.41 below floor 0.6' "ambiguous names the floor"
@@ -345,7 +375,7 @@ pass "ambiguous: confidence below the fixed floor hands the decision back"
 # --- escalate: captain approval ------------------------------------------------
 reset_log
 write_response "$RESPONSE" rule_3 0.95
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "escalate exits 0"
 assert_contains "$out" '  status: escalate' "approval-gated rule escalates"
 assert_contains "$out" "  reason: rule requires the captain's explicit approval before dispatch" "escalate names the approval gate"
@@ -356,7 +386,7 @@ pass "escalate: a rule declared approval: captain never yields a profile"
 # --- rule floor fails: fall through to default -------------------------------
 reset_log
 write_response "$RESPONSE" rule_1 0.97
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "rule floor fall-through still resolves"
 assert_contains "$out" '  note: rule rule_1 floor model:fable below 20%: fall through to default' "rule floor fall-through is explained"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-high'" "fall-through resolves among the default profiles"
@@ -364,7 +394,7 @@ assert_not_contains "$out" 'candidate: claude:fable' "the floored rule's own pro
 
 MISSING_RULE_FLOOR="$TMP_ROOT/missing-rule-floor.json"
 jq '(.providers[] | select(.provider == "claude") | .quotaSemantics.effectiveAvailability) |= map(select(.scope != "model:fable"))' "$QUOTA" > "$MISSING_RULE_FLOOR"
-TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$MISSING_RULE_FLOOR" run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY QUOTA_AXI_FIXTURE="$MISSING_RULE_FLOOR" run code out err "$BRIEF"
 assert_contains "$out" '  status: escalate' "an unverifiable rule floor escalates"
 assert_contains "$out" '  reason: rule rule_1 floor claude/model:fable is unverifiable' "the unverifiable rule floor names its provider and scope"
 assert_not_contains "$out" '  profile:' "an unverifiable rule floor never authorizes default routing"
@@ -373,7 +403,7 @@ pass "rule floor: known shortfall falls through while unavailable evidence escal
 # --- declared provider and profile floor --------------------------------------
 reset_log
 write_response "$RESPONSE" rule_2 0.99
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=31%' "declared provider routes a Pi profile to the codex row"
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=31%  spendPriority=-  runway=projected_exhaustion  -> not eligible: profile floor all_models below 50%' "profile floor makes a candidate ineligible with its reason"
 assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex/gpt-5.6-sol'" "the remaining eligible candidate wins"
@@ -382,20 +412,20 @@ FLOOR_BOUNDS="$TMP_ROOT/floor-bounds.json"
 jq '(.providers[] | select(.provider == "codex") | .quotaSemantics.effectiveAvailability) += [
   {"scope":"model:gpt-5.6-sol","status":"known","effectivePercentRemaining":10,"runway":{"status":"projected_exhaustion"},"selection":{"spendPriority":-0.9}}
 ]' "$QUOTA" > "$FLOOR_BOUNDS"
-TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$FLOOR_BOUNDS" run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY QUOTA_AXI_FIXTURE="$FLOOR_BOUNDS" run code out err "$BRIEF"
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=31%  spendPriority=-  runway=projected_exhaustion  bounds=all_models:31%/projected_exhaustion,model:gpt-5.6-sol:10%/projected_exhaustion  -> not eligible: profile floor all_models below 50%' "a failed profile floor reports its named row while retaining all bounds"
 
 FLOOR_WITH_UNKNOWN="$TMP_ROOT/floor-with-unknown.json"
 jq '(.providers[] | select(.provider == "codex") | .quotaSemantics) |= (.status = "partial" | .effectiveAvailability += [
   {"scope":"model:gpt-5.6-sol","status":"unknown","runway":{"status":"unknown"}}
 ])' "$QUOTA" > "$FLOOR_WITH_UNKNOWN"
-TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$FLOOR_WITH_UNKNOWN" run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY QUOTA_AXI_FIXTURE="$FLOOR_WITH_UNKNOWN" run code out err "$BRIEF"
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=31%  spendPriority=-  runway=projected_exhaustion  bounds=all_models:31%/projected_exhaustion,model:gpt-5.6-sol:-%/unknown  -> not eligible: profile floor all_models below 50%' "a known profile-floor shortfall wins over unrelated unknown model evidence"
 
 MISSING_PROFILE_FLOOR_RULES="$TMP_ROOT/missing-profile-floor-rules.json"
 jq '.rules[1].use[1].floor.scope = "model:missing"' "$BASE_RULES" > "$MISSING_PROFILE_FLOOR_RULES"
 cp "$MISSING_PROFILE_FLOOR_RULES" "$RULES"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=model:missing  remaining=-%  spendPriority=-  runway=-  -> eligible, unranked: profile floor model:missing is unverifiable: not rankable: disclosed uncertainty' "a missing profile floor remains eligible but unranked"
 assert_not_contains "$out" 'profile floor model:missing below' "missing profile evidence is not described as a shortfall"
 assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex/gpt-5.6-sol'" "another candidate may clear without misrepresenting missing floor evidence"
@@ -407,7 +437,7 @@ reset_log
 NONNUMERIC="$TMP_ROOT/nonnumeric-spend-priority.json"
 jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAvailability[] | select(.scope == "all_models") | .selection.spendPriority) = "high"' "$QUOTA" > "$NONNUMERIC"
 write_response "$RESPONSE" rule_4 0.9
-TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$NONNUMERIC" run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY QUOTA_AXI_FIXTURE="$NONNUMERIC" run code out err "$BRIEF"
 assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=91%  spendPriority=-  runway=through_reset  -> eligible, unranked: spendPriority missing or non-numeric at all_models: not rankable: disclosed uncertainty' "a nonnumeric spendPriority remains eligible but unranked"
 assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high'" "numeric evidence wins without mixed-type ordering"
 pass "nonnumeric spendPriority evidence is never ranked"
@@ -417,7 +447,7 @@ reset_log
 PARTIAL="$TMP_ROOT/partial.json"
 jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.status) = "partial"' "$QUOTA" > "$PARTIAL"
 write_response "$RESPONSE" rule_4 0.9
-TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$PARTIAL" run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY QUOTA_AXI_FIXTURE="$PARTIAL" run code out err "$BRIEF"
 assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=91%  spendPriority=0.7597  runway=through_reset  -> eligible' "a known row from a partial provider remains rankable"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "partial provider evidence can win the argmax"
 
@@ -425,7 +455,7 @@ PARTIAL_UNKNOWN="$TMP_ROOT/partial-unknown.json"
 jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics) |= (.status = "partial" | .effectiveAvailability += [
   {"scope":"model:cursor-grok-4.6-medium","status":"unknown","runway":{"status":"unknown"}}
 ])' "$QUOTA" > "$PARTIAL_UNKNOWN"
-TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$PARTIAL_UNKNOWN" run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY QUOTA_AXI_FIXTURE="$PARTIAL_UNKNOWN" run code out err "$BRIEF"
 assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=model:cursor-grok-4.6-medium  remaining=-%  spendPriority=-  runway=-  bounds=all_models:91%/through_reset,model:cursor-grok-4.6-medium:-%/unknown  -> eligible, unranked: quota row model:cursor-grok-4.6-medium unknown: not rankable: disclosed uncertainty' "an unknown exact-model row preserves partial known evidence without ranking"
 assert_contains "$out" '  note: 2 eligible candidate(s) unranked (cursor, kimi)' "clear result lists every provider with unranked uncertainty"
 assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high'" "another measured candidate can clear"
@@ -434,7 +464,7 @@ PARTIAL_EXHAUSTED="$TMP_ROOT/partial-exhausted.json"
 jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics) |= (.status = "partial" | .effectiveAvailability += [
   {"scope":"model:cursor-grok-4.6-medium","status":"unknown","runway":{"status":"unknown"}}
 ] | .effectiveAvailability[] |= if .scope == "all_models" then .effectivePercentRemaining = 0 | .runway.status = "exhausted_now" else . end)' "$QUOTA" > "$PARTIAL_EXHAUSTED"
-TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$PARTIAL_EXHAUSTED" run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY QUOTA_AXI_FIXTURE="$PARTIAL_EXHAUSTED" run code out err "$BRIEF"
 assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  bounds=all_models:0%/exhausted_now,model:cursor-grok-4.6-medium:-%/unknown  -> not eligible: runway exhausted_now at all_models' "known exhaustion vetoes a candidate despite unknown exact-model evidence"
 assert_contains "$out" '  note: 1 eligible candidate(s) unranked (kimi)' "an exhausted candidate is excluded from the unranked uncertainty note"
 
@@ -444,14 +474,14 @@ jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics) = {
     {"scope":"all_models","status":"unknown","runway":{"status":"exhausted_now"}}
   ]
 }' "$QUOTA" > "$UNKNOWN_EXHAUSTED"
-TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$UNKNOWN_EXHAUSTED" run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY QUOTA_AXI_FIXTURE="$UNKNOWN_EXHAUSTED" run code out err "$BRIEF"
 assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=-%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' "unknown provider semantics cannot mask concrete exhaustion"
 
 NO_APPLICABLE="$TMP_ROOT/no-applicable.json"
 jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAvailability) = [
   {"scope":"model:other","status":"known","effectivePercentRemaining":91,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.8}}
 ]' "$QUOTA" > "$NO_APPLICABLE"
-TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$NO_APPLICABLE" run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY QUOTA_AXI_FIXTURE="$NO_APPLICABLE" run code out err "$BRIEF"
 assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  -> eligible, unranked: no applicable quota row for provider cursor: disclosed uncertainty' "a candidate without an applicable row remains eligible but unranked"
 assert_contains "$out" '  note: 2 eligible candidate(s) unranked (cursor, kimi)' "no-applicable-row uncertainty appears in the clear-result note"
 pass "partial and missing quota evidence remain eligible but unranked"
@@ -463,13 +493,13 @@ jq '(.providers[] | select(.provider == "claude") | .quotaSemantics.effectiveAva
   {"scope":"model:sonnet","status":"known","effectivePercentRemaining":99,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.9}}
 ]' "$QUOTA" > "$BOUNDED"
 write_response "$RESPONSE" rule_4 0.9
-TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$BOUNDED" run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY QUOTA_AXI_FIXTURE="$BOUNDED" run code out err "$BRIEF"
 assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627' "the limiting provider-wide row drives ranking"
 assert_contains "$out" 'bounds=all_models:79%/projected_exhaustion,model:sonnet:99%/through_reset' "all applicable quota bounds are disclosed"
 
 EXHAUSTED_WIDE="$TMP_ROOT/exhausted-wide.json"
 jq '(.providers[] | select(.provider == "claude") | .quotaSemantics.effectiveAvailability[] | select(.scope == "all_models")) |= (.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")' "$BOUNDED" > "$EXHAUSTED_WIDE"
-TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$EXHAUSTED_WIDE" run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY QUOTA_AXI_FIXTURE="$EXHAUSTED_WIDE" run code out err "$BRIEF"
 assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=0%' "the exhausted account-wide bound is the candidate evidence"
 assert_contains "$out" '-> not eligible: runway exhausted_now at all_models' "a healthy exact row cannot bypass an exhausted account-wide bound"
 pass "provider-wide and exact quota rows combine into one limiting candidate"
@@ -477,7 +507,7 @@ pass "provider-wide and exact quota rows combine into one limiting candidate"
 # --- default choice ------------------------------------------------------------
 reset_log
 write_response "$RESPONSE" default 0.88
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  rule: default (No listed rule applies to this task.)' "default names the fixed neutral none option"
 assert_contains "$out" '  note: no rule matched' "default is explained"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-high'" "default resolves by argmax"
@@ -488,7 +518,7 @@ reset_log
 TIE="$TMP_ROOT/tie.json"
 write_quota "$TIE" 0.5 0.5
 write_response "$RESPONSE" default 0.88
-TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TIE" run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TIE" run code out err "$BRIEF"
 assert_contains "$out" '  status: escalate' "tie escalates"
 assert_contains "$out" '  reason: genuine spendPriority tie' "tie is named"
 pass "tie: equal spendPriority never breaks by array order"
@@ -497,7 +527,7 @@ pass "tie: equal spendPriority never breaks by array order"
 reset_log
 NONE="$TMP_ROOT/none.json"
 jq '.providers |= map(if .provider == "cursor" or .provider == "claude" then .quotaSemantics.effectiveAvailability |= map(.runway.status = "exhausted_now") else . end)' "$QUOTA" > "$NONE"
-TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$NONE" run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY QUOTA_AXI_FIXTURE="$NONE" run code out err "$BRIEF"
 assert_contains "$out" '  status: escalate' "no rankable candidate escalates"
 assert_contains "$out" '  reason: no rankable eligible candidate' "no-candidate reason"
 assert_contains "$out" '-> not eligible: runway exhausted_now' "exhausted candidates keep their reason"
@@ -506,12 +536,12 @@ pass "no rankable candidate: the tool escalates instead of guessing"
 # --- quota-axi is read exactly once --------------------------------------------
 reset_log
 write_response "$RESPONSE" rule_4 0.9
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "quota-axi path exits 0"
 assert_equals '--json' "$(cat "$LOG/quota-axi.calls")" "quota-axi --json is called exactly once"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "quota-axi snapshot drives the argmax"
 reset_log
-TYPESAFE_API_KEY=$KEY FAKE_QUOTA_FAIL=1 run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY FAKE_QUOTA_FAIL=1 run code out err "$BRIEF"
 expect_code 0 "$code" "quota-axi failure exits 0"
 assert_contains "$out" '  status: error' "quota-axi failure is an error outcome"
 assert_contains "$out" '  reason: quota-axi --json failed' "quota-axi failure is named"
@@ -525,79 +555,85 @@ assert_contains "$out" '  status: error' "missing curl is a structured error out
 assert_contains "$out" '  reason: curl not installed' "missing curl is named in the TOON block"
 assert_contains "$err" 'dispatch-resolve: error (curl not installed)' "missing curl is also reported on stderr"
 reset_log
-TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=429 run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY FAKE_CURL_HTTP=429 run code out err "$BRIEF"
 expect_code 0 "$code" "http 429 exits 0"
 assert_contains "$out" '  status: error' "http 429 is an error outcome"
 assert_contains "$out" '  reason: http 429 after' "http status is reported"
 assert_contains "$err" 'dispatch-resolve: error (http 429' "error also goes to stderr"
 reset_log
-TYPESAFE_API_KEY=$KEY FAKE_CURL_FAIL=1 run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY FAKE_CURL_FAIL=1 run code out err "$BRIEF"
 expect_code 0 "$code" "curl failure exits 0"
 assert_contains "$out" '  reason: http 000 after' "transport failure reads as http 000"
 reset_log
 printf '%s\n' '{"model":"jev","answers":{}}' > "$RESPONSE"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "a malformed answer is an error outcome"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 jq '.usage = "bad"' "$RESPONSE" > "$TMP_ROOT/malformed-usage.json"
 mv "$TMP_ROOT/malformed-usage.json" "$RESPONSE"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "malformed usage is an error outcome"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "malformed usage cannot break text rendering silently"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 jq 'del(.answers.rule.probabilities.default)' "$RESPONSE" > "$TMP_ROOT/malformed-probabilities.json"
 mv "$TMP_ROOT/malformed-probabilities.json" "$RESPONSE"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "missing probability choice is an error outcome"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "probabilities must name every offered choice"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 jq '.answers.rule.probabilities.rule_4 = "high"' "$RESPONSE" > "$TMP_ROOT/malformed-probabilities.json"
 mv "$TMP_ROOT/malformed-probabilities.json" "$RESPONSE"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "nonnumeric probability is an error outcome"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "probabilities must be numeric and bounded"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 jq '.answers.rule.probabilities[] = 0' "$RESPONSE" > "$TMP_ROOT/malformed-probabilities.json"
 mv "$TMP_ROOT/malformed-probabilities.json" "$RESPONSE"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "a zero-mass probability distribution is an error outcome"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "probabilities must sum to approximately one"
 reset_log
 write_response "$RESPONSE" rule_4 2
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "out-of-range confidence is an error outcome"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "out-of-range confidence is a malformed answer"
 reset_log
 write_response "$RESPONSE" rule_9 0.9
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "an unknown rule id is an error outcome"
 assert_contains "$out" '  reason: rule rule_9 is not in the rules file' "unknown rule id is named"
 write_response "$RESPONSE" rule_0 0.9
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "rule zero is an error outcome"
 assert_contains "$out" '  reason: rule rule_0 is not in the rules file' "rule zero cannot alias the final rule"
 reset_log
-TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=500 run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY FAKE_CURL_HTTP=500 run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "http 500 is a TOON error outcome"
 pass "API, transport, and response failures are error outcomes with exit 0"
 
 # --- configuration errors exit 2 and select nothing ----------------------------------
 reset_log
-TYPESAFE_API_KEY=$KEY run code out err
+printf '%s\n' invalid > "$HOME_DIR/config/jev-mode"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 2 "$code" "invalid mode exits 2"
+assert_contains "$err" "accepted values are: off, shadow, on" "invalid mode is actionable"
+assert_absent "$LOG/argv" "invalid mode never reaches the network"
+printf '%s\n' on > "$HOME_DIR/config/jev-mode"
+OPENROUTER_API_KEY=$KEY run code out err
 expect_code 2 "$code" "missing brief exits 2"
 assert_contains "$err" 'brief file required' "missing brief is named"
 rm -f "$RULES"
 ln -s "$TMP_ROOT/missing-rules-target.json" "$RULES"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 2 "$code" "broken canonical rules symlink exits 2"
 assert_contains "$err" "rules file not readable: $RULES" "broken rules symlink is actionable"
 rm -f "$RULES"
 printf '%s\n' '{"rules":[' > "$RULES"
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 2 "$code" "non-JSON rules exits 2"
 assert_contains "$err" 'not JSON' "non-JSON rules is named"
 for bad in \
@@ -617,18 +653,18 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"rovo"}}]}|use profiles whose harness lacks one authoritative provider family require provider: rovo' \
   '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":{"harness":"pi","model":"anthropic/claude-sonnet-5"}}|default profiles whose harness lacks one authoritative provider family require provider: pi'; do
   printf '%s\n' "${bad%%|*}" > "$RULES"
-  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
   expect_code 2 "$code" "malformed rules exit 2: ${bad#*|}"
   assert_contains "$err" "malformed rules file: $RULES - ${bad#*|}" "malformed rules are named: ${bad#*|}"
 done
 assert_absent "$LOG/argv" "configuration errors never reach the network"
 cp "$BASE_RULES" "$RULES"
 for removed in --json --rules --quota; do
-  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" "$removed"
+  OPENROUTER_API_KEY=$KEY run code out err "$BRIEF" "$removed"
   expect_code 2 "$code" "removed option is rejected: $removed"
   assert_contains "$err" "unknown flag $removed" "removed option has no public path: $removed"
 done
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --bogus
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF" --bogus
 expect_code 2 "$code" "unknown flag exits 2"
 run code out err --help
 expect_code 0 "$code" "--help exits 0"

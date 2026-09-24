@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # fm-dispatch-resolve.sh - resolve one concrete crewmate or scout dispatch
-# profile from a task brief with typesafe.ai's System One model (Jev), opt-in.
+# profile from a task brief with Jev through OpenRouter, opt-in.
 #
 # Usage:
 #   fm-dispatch-resolve.sh <brief-file> [--project <name>]
 #
-# Opt-in gate: TYPESAFE_API_KEY non-empty in this process environment, else a
-#   TYPESAFE_API_KEY= line in $FM_HOME/.env read with fmx_env_get, the same
-#   accessor as FMX_PAIRING_TOKEN (bin/fm-env-lib.sh). The environment wins.
-#   Absent in both: one "dispatch-resolve: off" line on stderr, nothing on
-#   stdout, exit 0, no network call, so firstmate dispatches exactly as today.
+# Opt-in gate: config/jev-mode contains `shadow` or `on`, and
+#   OPENROUTER_API_KEY is non-empty in this process environment or in a
+#   OPENROUTER_API_KEY= line in $FM_HOME/.env read with fmx_env_get. The
+#   environment wins. An absent mode file means `off`. Off or a missing key:
+#   one "dispatch-resolve: off" line on stderr, nothing on stdout, exit 0, no
+#   network call, so firstmate dispatches exactly as today.
 #   The key lives in one shell variable and reaches curl as a header read from
 #   a file descriptor, never on argv; nothing logs or writes it.
 #
-# What it does when on with at least one rule: one POST to
-#   https://api.typesafe.ai/v1/systemone with the project name and the whole brief as
+# What it does when shadow or on with at least one rule: one POST to
+#   https://openrouter.ai/api/alpha/decisions with the project name and the whole brief as
 #   state and ONE Choice question whose
 #   options are every rule's `when` from config/crew-dispatch.json plus one
 #   fixed generic none option. Jev returns the matched rule, a probability per
@@ -29,12 +30,13 @@
 #
 # Output (stdout, TOON-style block):
 #   dispatch-resolve:
-#     status: clear | ambiguous | escalate | error
+#     status: shadow | clear | ambiguous | escalate | error
 #     model/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
 #     reason: <why the status is not clear>
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
-#   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
+#   shadow    -> the nested decision_status is observational only; never apply it
+#   clear     -> in on mode, pass the profile line to fm-spawn.sh unless you state a reason to override
 #   ambiguous -> confidence below the floor; decide as today from the probabilities
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
 #   error     -> API, network, response, or quota-axi failure; decide as today
@@ -44,21 +46,22 @@
 #   actionable, never selected around.
 #
 # Environment:
-#   TYPESAFE_API_KEY is the only resolver-specific environment setting.
+#   OPENROUTER_API_KEY is the only resolver-specific environment setting.
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
 #   inspectable answer plus every candidate's evidence, in code.
 set -u
 
-TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
-export -n TYPESAFE_API_KEY_PRIVATE 2>/dev/null || true
-unset TYPESAFE_API_KEY
+OPENROUTER_API_KEY_PRIVATE=${OPENROUTER_API_KEY:-}
+export -n OPENROUTER_API_KEY_PRIVATE 2>/dev/null || true
+unset OPENROUTER_API_KEY
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-quota-axi-lib.sh
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
@@ -70,9 +73,9 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-timing-lib.sh"
 
 CONFIDENCE_FLOOR=0.6
-TS_MODEL=jev-latest
-TS_BASE=https://api.typesafe.ai
-TS_TIMEOUT=5
+JEV_MODEL='~typesafe/jev-latest'
+JEV_BASE=https://openrouter.ai/api
+JEV_TIMEOUT=5
 DEFAULT_WHEN="No listed rule applies to this task."
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
@@ -88,7 +91,7 @@ usage() {
   ' "$0"
 }
 
-BRIEF='' PROJECT='' RULES_PATH="$CONFIG/crew-dispatch.json" RULES=''
+BRIEF='' PROJECT='' RULES_PATH="$CONFIG/crew-dispatch.json" MODE_PATH="$CONFIG/jev-mode" RULES=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) [ $# -ge 2 ] || die "--project needs a value"; PROJECT=$2; shift 2 ;;
@@ -99,11 +102,26 @@ while [ $# -gt 0 ]; do
 done
 
 # ---- opt-in gate ---------------------------------------------------------------
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
+JEV_MODE=off
+if [ -e "$MODE_PATH" ] || [ -L "$MODE_PATH" ]; then
+  [ -f "$MODE_PATH" ] && [ ! -L "$MODE_PATH" ] && [ -r "$MODE_PATH" ] \
+    || die "config/jev-mode must be a readable regular file"
+  IFS= read -r JEV_MODE < "$MODE_PATH" || true
+  JEV_MODE=${JEV_MODE%$'\r'}
 fi
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
+case "$JEV_MODE" in
+  off)
+    echo "dispatch-resolve: off (config/jev-mode is off)" >&2
+    exit 0
+    ;;
+  shadow|on) ;;
+  *) die "config/jev-mode holds '$JEV_MODE'; accepted values are: off, shadow, on" ;;
+esac
+if [ -z "$OPENROUTER_API_KEY_PRIVATE" ]; then
+  OPENROUTER_API_KEY_PRIVATE=$(fmx_env_get OPENROUTER_API_KEY "$FM_HOME/.env")
+fi
+if [ -z "$OPENROUTER_API_KEY_PRIVATE" ]; then
+  echo "dispatch-resolve: off (OPENROUTER_API_KEY absent from the environment and $FM_HOME/.env)" >&2
   exit 0
 fi
 
@@ -221,7 +239,7 @@ QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
 trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA"' EXIT
 LAT_MS=null
 command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
-  REQUEST=$(jq -n --rawfile brief "$BRIEF" --arg project "$PROJECT" --arg model "$TS_MODEL" \
+  REQUEST=$(jq -n --rawfile brief "$BRIEF" --arg project "$PROJECT" --arg model "$JEV_MODEL" \
     --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
     ($rules[0]) as $cfg |
     ($cfg.rules | to_entries | map({key: ("rule_" + ((.key + 1) | tostring)), value: .value.when}) | from_entries) as $criteria |
@@ -237,9 +255,9 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
       }
     }')
   T0=$(fm_timing_now_ms)
-  HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
-    -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
-    -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$TYPESAFE_API_KEY_PRIVATE") \
+  HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$JEV_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
+    -X POST "$JEV_BASE/alpha/decisions" -H 'Content-Type: application/json' \
+    -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$OPENROUTER_API_KEY_PRIVATE") \
     --data-binary @- 2>/dev/null) || HTTP=000
   T1=$(fm_timing_now_ms)
   LAT_MS=$(( T1 - T0 ))
@@ -380,12 +398,14 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     end
   end') || emit_error "resolution failed"
 
-TEXT=$(jq -r '
+TEXT=$(jq -r --arg mode "$JEV_MODE" '
   def flat: tostring | gsub("[\t\r\n]"; " ");
   def show($value): ($value // "-") | flat;
   def shell_arg: flat | @sh;
   "dispatch-resolve:",
-  "  status: \(.status | flat)",
+  "  mode: \($mode)",
+  "  status: \(if $mode == "shadow" then "shadow" else (.status | flat) end)",
+  (if $mode == "shadow" then "  decision_status: \(.status | flat)" else empty end),
   "  model: \(show(.model))   latency_ms: \(show(.latency_ms))   tokens: \(show(.tokens.input_tokens))/\(show(.tokens.output_tokens))",
   "  rule: \(.rule | flat) (\(.rule_when | flat))   confidence: \(.confidence | flat)",
   "  probabilities: \([.probabilities | to_entries[] | "\(.key | flat)=\(.value | flat)"] | join(" "))",
@@ -397,8 +417,25 @@ TEXT=$(jq -r '
       + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
       + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope | flat):\(show(.pct))%/\((.runway // .status) | flat)"] | join(",")) else "" end)
       + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
-  (if .chosen then "  profile: --harness \(.chosen.profile.harness | shell_arg)"
+  (if .chosen then "  " + (if $mode == "shadow" then "shadow_profile" else "profile" end) + ": --harness \(.chosen.profile.harness | shell_arg)"
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
       + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
+if [ "$JEV_MODE" = shadow ]; then
+  SHADOW_DIR="$DATA/jev-shadow"
+  umask 077
+  mkdir -p "$SHADOW_DIR" || emit_error "could not create shadow record directory"
+  SHADOW_RECORD=$(mktemp "$SHADOW_DIR/decision.XXXXXX") || emit_error "could not create shadow record"
+  chmod 600 "$SHADOW_RECORD" || emit_error "could not protect shadow record"
+  if ! jq -n --arg recorded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg project "$PROJECT" \
+    --arg brief "$BRIEF" --argjson decision "$RESULT" \
+    '{recorded_at: $recorded_at, project: $project, brief: $brief, decision: $decision}' \
+    > "$SHADOW_RECORD"; then
+    rm -f "$SHADOW_RECORD"
+    emit_error "could not write shadow record"
+  fi
+  SHADOW_DISPLAY=$(printf '%s' "$SHADOW_RECORD" | tr '\t\r\n' '   ')
+  TEXT="$TEXT
+  shadow_record: $SHADOW_DISPLAY"
+fi
 printf '%s\n' "$TEXT"
 exit 0

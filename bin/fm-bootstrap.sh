@@ -12,6 +12,7 @@
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
+#                 "JEV_MODE: invalid config/jev-mode - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "HOME_SUMMARY: <ledger never published|not republished since
 #                 <stamp>>; <n> failed attempt(s) ... last: <recorded failure>",
@@ -157,9 +158,9 @@
 #          nothing; bin/fm-brief.sh uses it to gate scout Lavish hosting.
 set -u
 
-TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
-export -n TYPESAFE_API_KEY_PRIVATE 2>/dev/null || true
-unset TYPESAFE_API_KEY
+OPENROUTER_API_KEY_PRIVATE=${OPENROUTER_API_KEY:-}
+export -n OPENROUTER_API_KEY_PRIVATE 2>/dev/null || true
+unset OPENROUTER_API_KEY
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -1127,7 +1128,7 @@ EOF
 }
 
 crew_dispatch_validate() {
-  local file err verified_harnesses typed_key typed_active=false
+  local file err verified_harnesses typed_key typed_mode=off typed_active=false
   file="$CONFIG/crew-dispatch.json"
   [ -f "$file" ] || return 0
   if ! command -v jq >/dev/null 2>&1; then
@@ -1138,9 +1139,13 @@ crew_dispatch_validate() {
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON"
     return 0
   fi
-  typed_key=$TYPESAFE_API_KEY_PRIVATE
-  [ -n "$typed_key" ] || typed_key=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
-  [ -z "$typed_key" ] || typed_active=true
+  if [ -f "$CONFIG/jev-mode" ] && [ ! -L "$CONFIG/jev-mode" ] && [ -r "$CONFIG/jev-mode" ]; then
+    IFS= read -r typed_mode < "$CONFIG/jev-mode" || true
+    typed_mode=${typed_mode%$'\r'}
+  fi
+  typed_key=$OPENROUTER_API_KEY_PRIVATE
+  [ -n "$typed_key" ] || typed_key=$(fmx_env_get OPENROUTER_API_KEY "$FM_HOME/.env")
+  case "$typed_mode:$typed_key" in shadow:?*|on:?*) typed_active=true ;; esac
   if $typed_active; then
     verified_harnesses=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
   else
@@ -1258,6 +1263,21 @@ crew_dispatch_validate() {
     | .[]
   ' "$file"
   fi
+}
+
+jev_mode_validate() {
+  local file="$CONFIG/jev-mode" mode
+  [ -e "$file" ] || [ -L "$file" ] || return 0
+  if [ ! -f "$file" ] || [ -L "$file" ] || [ ! -r "$file" ]; then
+    echo "JEV_MODE: invalid config/jev-mode - must be a readable regular file"
+    return 0
+  fi
+  IFS= read -r mode < "$file" || true
+  mode=${mode%$'\r'}
+  case "$mode" in
+    off|shadow|on) ;;
+    *) echo "JEV_MODE: invalid config/jev-mode - accepted values are: off, shadow, on" ;;
+  esac
 }
 
 # Same-home record reconciliation. Every ordinary dispatch and completion now
@@ -1539,6 +1559,7 @@ detect_local_config() {
   if [ "$crew" = cursor ] && ! fm_cursor_resolve_binary >/dev/null 2>&1; then
     echo "MISSING_MANUAL: cursor-agent (instructions: $(manual_install_url cursor-agent))"
   fi
+  jev_mode_validate
   crew_dispatch_validate
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then

@@ -3,21 +3,20 @@
 Audience: maintainer verification.
 
 This record supports the opt-in `bin/fm-dispatch-resolve.sh` contract owned by [`../configuration.md`](../configuration.md) ("Typed dispatch resolution") and the declared rule and profile fields owned there under "Crew dispatch profiles".
-It records only facts that must be re-established when the typesafe.ai model, its API, or firstmate's dispatch rules change.
+It records only facts that must be re-established when the Jev model, OpenRouter's Decisions API, or firstmate's dispatch rules change.
 Task chronology, the captain's rules, and the briefs themselves stay in the private scout report.
 
 ## The API the tool depends on
 
-Verified 2026-09-16 against `https://api.typesafe.ai`.
-`GET /v1/models` listed `jev-latest` and `jev-preview`, both released 2026-09-10; a `jev-latest` request answered as `jev-1.13.0`.
-`POST /v1/systemone` takes `{model, state, questions}`; a `choice` question returns `{choice, probabilities, confidence}` with the probabilities summing to 1.
-Observed error shapes: 401 `authentication_error` for a bad key, 403 when the header is missing, 422 with a `detail[].loc` naming the offending field, 400 `api_usage_error` for an unknown model, 405 on GET.
-No rate-limit headers were present on any response; every response carried `x-typesafe-request-id`.
-Observed end-to-end latency from a Mac was 123 to 348 ms per request, with the server's own upstream time at 4 to 60 ms.
+Verified 2026-09-24 against OpenRouter's official [Jev model page](https://openrouter.ai/typesafe/jev-1.13/api) and [Jev Decisions API example](https://openrouter.ai/blog/tutorials/how-to-use-jev/).
+`POST https://openrouter.ai/api/alpha/decisions` takes `{model, state, questions}`; a `choice` question returns `{choice, probabilities, confidence}` with the probabilities keyed by the offered choices.
+The rolling model alias is `~typesafe/jev-latest`, while `typesafe/jev-1.13` pins the current release.
+The listed context window is 32,000 tokens, with input at $0.042 per million tokens and output at $0 per million tokens on that date.
 
-## Live rule match against real briefs
+## Jev rule-match baseline
 
-Run 2026-09-16 with the key injected for the one command through the vault (`av inject +TYPESAFE_API_KEY -- ...`), model `jev-latest`, confidence floor 0.6, timeout 5 s, one `quota-axi --json` snapshot for the whole run.
+This pre-migration run was performed 2026-09-16 against TypeSafe's direct endpoint with model `jev-latest`, confidence floor 0.6, timeout 5 s, and one `quota-axi --json` snapshot for the whole run.
+It remains evidence for the unchanged Jev question and local-resolution behavior, not for the current OpenRouter transport.
 Rules: the captain's five-rule file with a captain-authored none option, one `approval: captain` rule, two rule floors on `model:fable`, and declared `provider` on the Pi profiles.
 Briefs: 15 real briefs from this home's recent work plus 10 synthetic ones written to hit each rule.
 
@@ -55,19 +54,23 @@ Two default-labeled briefs became ambiguous.
 
 ## Offline behavior
 
-`tests/fm-dispatch-resolve.test.sh` drives the public interface with a fake `curl` that records argv, the request body, the header read from file descriptor 3, and whether the secret reached its environment, plus a fake `quota-axi` that performs the same environment check.
+`tests/fm-dispatch-resolve.test.sh` drives the public interface with a fake `curl` that records argv, the request body, the header read from file descriptor 3, and whether the OpenRouter secret reached its environment, plus a fake `quota-axi` that performs the same environment check.
 It proves firstmate can invoke the resolve path without a preflight, rules are snapshotted once from the isolated home's canonical `config/crew-dispatch.json`, and dynamic output fields are flattened to one line.
-It proves the absent key (environment and `.env`) prints one stderr line, nothing on stdout, exits 0, and never invokes `curl` or `quota-axi`.
+It proves absent or off mode and an absent key each print one stderr line, nothing on stdout, exit 0, and never invoke `curl` or `quota-axi`.
+It proves shadow mode records the complete decision under `data/jev-shadow/`, reports its underlying status and recommendation, and never emits an applicable `profile:` line.
 It proves absent, default-only, and empty-rules files return `no rules to match` without a model or quota request, while a broken rules-file symlink exits 2 as unreadable.
 It proves the documented starter configuration resolves its Pi default through the declared Claude provider, a `.env` key turns the tool on, and the environment wins over it.
 It proves the key is absent from child environments, never appears on `curl` argv, and arrives only as the bearer header on the descriptor.
-It proves the request uses the fixed endpoint and model, carries only the project, brief, and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
+It proves the request uses OpenRouter's fixed Decisions endpoint and rolling Jev model alias, carries only the project, brief, and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
 It proves the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, concrete quota vetoes and profile-floor shortfalls taking precedence over uncertainty, account-wide quota veto, limiting-bound ranking, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule ID paths behave as the contract states, with configuration errors exiting 2 before any network call.
-`tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without the typed key, validates each malformed shape when the environment or home `.env` activates typed resolution, and prevents an environment-provided key from reaching child processes.
+`tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without both an active Jev mode and key, validates each malformed shape when the environment or home `.env` activates typed resolution, rejects malformed mode files, and prevents an environment-provided key from reaching child processes.
+`tests/fm-jev.test.sh` proves the slash command's script defaults to off, atomically persists all three modes with private permissions, reports key presence without exposing it, and rejects unsafe or malformed mode files.
 
 ```console
 $ bash tests/fm-dispatch-resolve.test.sh | tail -1
 # all fm-dispatch-resolve tests passed
+$ bash tests/fm-jev.test.sh | tail -1
+# all fm-jev tests passed
 ```
 
-A live run needs a key and is not part of the suite; rerun the table above by pointing the tool at a brief with the key injected for that one command.
+A live OpenRouter run needs a key and is not part of the suite; point the tool at a brief with `config/jev-mode` set to `shadow` or `on` and the key injected for that one command.

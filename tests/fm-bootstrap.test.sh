@@ -136,7 +136,7 @@ add_real_jq() {
   cat > "$fakebin/jq" <<SH
 #!/usr/bin/env bash
 if [ -n "\${FM_TEST_CHILD_ENV_LOG:-}" ]; then
-  if [ -n "\${TYPESAFE_API_KEY+x}" ] || [ -n "\${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+  if [ -n "\${OPENROUTER_API_KEY+x}" ] || [ -n "\${OPENROUTER_API_KEY_PRIVATE+x}" ]; then
     printf 'secret-present\n' >> "\$FM_TEST_CHILD_ENV_LOG"
   else
     printf 'clean\n' >> "\$FM_TEST_CHILD_ENV_LOG"
@@ -1163,10 +1163,11 @@ test_crew_dispatch_validation() {
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     printf '%s\n' "$body" > "$case_dir/home/config/crew-dispatch.json"
+    printf '%s\n' on > "$case_dir/home/config/jev-mode"
     fakebin=$(make_fake_toolchain "$case_dir")
     add_real_jq "$fakebin"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      TYPESAFE_API_KEY=test-key FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+      OPENROUTER_API_KEY=test-key FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
     case "$mode" in
       empty)
         [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
@@ -1252,8 +1253,9 @@ ROWS
   printf '%s\n' '{"rules":[{"when":"legacy metadata","approval":"firstmate","floor":{"scope":"all_models","min_percent":200,"provider":"CLAUDE"},"use":{"harness":"claude","provider":"Anthropic","floor":{"scope":"all_models"}}}]}' > "$case_dir/home/config/crew-dispatch.json"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ -z "$out" ] || fail "resolver-only fields must be ignored without the typed key, got: $out"
-  printf '%s\n' 'TYPESAFE_API_KEY=test-key' > "$case_dir/home/.env"
+  [ -z "$out" ] || fail "resolver-only fields must be ignored without an active mode plus key, got: $out"
+  printf '%s\n' on > "$case_dir/home/config/jev-mode"
+  printf '%s\n' 'OPENROUTER_API_KEY=test-key' > "$case_dir/home/.env"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - use profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' ] \
@@ -1265,7 +1267,7 @@ ROWS
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: gemini' ] \
     || fail "no-key bootstrap must preserve its former verified-harness baseline, got: $out"
-  printf '%s\n' 'TYPESAFE_API_KEY=test-key' > "$case_dir/home/.env"
+  printf '%s\n' 'OPENROUTER_API_KEY=test-key' > "$case_dir/home/.env"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ -z "$out" ] || fail "typed resolution should add verified Gemini crewmate routing, got: $out"
@@ -1273,13 +1275,19 @@ ROWS
   rm -f "$case_dir/home/.env"
   : > "$case_dir/child-env.log"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    TYPESAFE_API_KEY=test-key FM_TEST_CHILD_ENV_LOG="$case_dir/child-env.log" \
+    OPENROUTER_API_KEY=test-key FM_TEST_CHILD_ENV_LOG="$case_dir/child-env.log" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ -z "$out" ] || fail "environment-key validation should remain silent, got: $out"
   child_env=$(cat "$case_dir/child-env.log")
   [ -n "$child_env" ] || fail "bootstrap child environment probe did not run"
-  assert_not_contains "$child_env" 'secret-present' "bootstrap children never inherit the typesafe key"
-  pass "bootstrap gates resolver fields and additive harnesses on the typed key"
+  assert_not_contains "$child_env" 'secret-present' "bootstrap children never inherit the OpenRouter key"
+
+  printf '%s\n' '{"rules":[{"when":"ordinary work","use":{"harness":"codex"}}]}' > "$case_dir/home/config/crew-dispatch.json"
+  printf '%s\n' maybe > "$case_dir/home/config/jev-mode"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" 'JEV_MODE: invalid config/jev-mode - accepted values are: off, shadow, on' "bootstrap reports an invalid Jev mode"
+  pass "bootstrap gates resolver fields on mode plus key and reports invalid modes"
 }
 
 test_bootstrap_reporting
