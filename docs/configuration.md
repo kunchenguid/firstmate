@@ -99,12 +99,15 @@ Both choices are local to each Firstmate home and are not part of secondmate inh
 ## Supervision host (config/supervision-host)
 
 The optional local, gitignored `config/supervision-host` opts this home into the supervision host, which runs the supervision branch's contract on a headless engine session beside a non-Pi primary; [docs/supervision-host.md](supervision-host.md) owns the design, its current scope, and the verified engines.
-Today only a Claude primary runs it, and only for the away posture: with the file present, the Claude Stop hook runs the host in the watcher arm's place, the host handles wakes on the engine while the away-posture record `state/.afk-contract` exists, and `/afk` launches no away daemon on that home, while `/quiet` still does.
+Today a Claude, Cursor, OpenCode, omp, Grok, or Codex primary runs it, and only for the away posture: with the file present, that primary's arm owner runs the host in the watcher arm's place, the host handles wakes on the engine while the away-posture record `state/.afk-contract` exists, and `/afk` launches no away daemon on that home, while `/quiet` still does.
 Absence leaves the home exactly as it is without the host, on every harness; a Pi primary keeps its in-process supervision branch whether or not the file exists.
+A Grok primary reads the file when its session-start block renders, so a change takes effect at its next session start; every other owner reads it at every arm.
 The file may be empty, or hold one line `<engine> [<model>]`:
 
 - empty or `default` selects the primary harness's own engine at that engine's default model (`sonnet` for the Claude engine);
 - `<engine> [<model>]` names a verified engine, currently only `claude`, and optionally the engine's own model name or alias; `default <model>` selects the primary harness's engine with that model.
+
+Only Claude has a verified engine of its own, so a Cursor, OpenCode, omp, Grok, or Codex home names `claude` in the file.
 
 An engine that is not verified, a primary with no verified engine, or a malformed line leaves the host with no engine: it takes no wake, every wake reaches main as it would without the host, and each away-posture wake carries a line naming the problem.
 The file is read at every wake, so a change applies at the next one without a restart.
@@ -1217,6 +1220,7 @@ FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1     # minimum interval between launches of o
 FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=3   # how long reconcile waits for the runners it started to prove they are running; 1..600, keep well below FM_POLL
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
+FM_CODEX_WATCH_CHECKPOINT_AWAY=3600  # requested away checkpoint bound on a home with config/supervision-host; longer of this and attended bound, capped at 27000
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh, and per state-database run-inventory read behind a capped AXI overview
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # plain runs-ledger rows scanned for fallback attribution; does not change the CLI's AXI overview window (selection owner: bin/fm-nm-run-lib.sh)

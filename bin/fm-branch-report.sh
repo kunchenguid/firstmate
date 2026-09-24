@@ -28,6 +28,14 @@
 # ended, or from any other shell, is refused. Exit codes: 0 recorded, 1 the
 # store refused or failed (nothing recorded), 2 usage, 3 refused (actor, turn,
 # or scope).
+#
+# A row recorded after the captain returned (the away-posture record is gone)
+# may be missing from the return brief, so it is also queued for MAIN as a
+# durable check wake keyed supervision-host-return:<seq>, presented by the
+# drain until MAIN acknowledges it. bin/fm-afk-return.sh archives the record
+# before it reads the store and this check follows the append, so every row is
+# in the brief, queued, or both: the relay does not depend on the host
+# surviving its turn or on its owner delivering the host's own handback.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -111,4 +119,15 @@ printf '%s\t%s\t%s\t%s\n' "$TURN" "$SEQ" "$VERDICT" "$TASK" >> "$RECEIPTS" || {
   echo "recorded seq $SEQ, but the host receipt could not be written; the host will hand this wake to MAIN" >&2
   exit 1
 }
+if [ ! -f "$STATE/.afk-contract" ]; then
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  if ! fm_wake_append check "supervision-host-return:$SEQ" \
+    "check: supervision-host outcome $SEQ for $TASK [$VERDICT] was recorded after the captain returned, so the return brief may not show it; relay it to the captain: $SUMMARY"; then
+    printf 'recorded seq %s [%s], but the captain has returned and its relay to MAIN could not be queued; the host hands this turn to MAIN\n' "$SEQ" "$VERDICT" >&2
+    exit 0
+  fi
+  printf 'recorded seq %s [%s]; the captain has returned, so it is queued for MAIN to relay\n' "$SEQ" "$VERDICT"
+  exit 0
+fi
 printf 'recorded seq %s [%s]; it waits in the outcome store for MAIN\n' "$SEQ" "$VERDICT"

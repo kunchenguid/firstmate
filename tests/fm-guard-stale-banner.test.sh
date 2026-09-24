@@ -160,6 +160,38 @@ $haystack
 EOF
 }
 
+# The same persistent-model call from the supervision branch actor, as the
+# supervision host's engine turn runs every guarded command.
+run_guard_case_as_branch() {
+  local dir=$1
+  FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+    FM_HOME="$(case_home "$dir")" \
+    FM_GUARD_GRACE=999 \
+    FM_SUPERVISION_MODEL=persistent \
+    FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-guard.sh" 2>&1
+}
+
+# The branch actor never owns watcher continuity, so a down watcher is never an
+# instruction to it, and its calls neither open nor end main's down-episode.
+test_branch_actor_is_never_told_to_repair_the_watcher() {
+  local dir out
+  dir=$(make_guard_case branch-watcher-down)
+  out=$(run_guard_case_as_branch "$dir")
+  assert_not_contains "$out" "WATCHER DOWN" "the branch actor was shown the watcher-down banner: $out"
+  assert_not_contains "$out" "watcher still down" "the branch actor was shown the watcher-down reminder: $out"
+  assert_not_contains "$out" "repair" "the branch actor was given a watcher repair instruction: $out"
+  out=$(run_guard_case "$dir")
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "a branch call must not consume main's full banner for the episode: $out"
+  out=$(run_guard_case_as_branch "$dir")
+  [ -z "$out" ] || fail "the branch actor must stay silent inside main's episode: $out"
+  out=$(run_guard_case "$dir")
+  assert_contains "$out" "full banner already printed this episode" \
+    "a branch call must not end main's down-episode"
+  pass "fm-guard stale banner: the branch actor is never told to repair the watcher and leaves main's episode alone"
+}
+
 test_first_stale_call_prints_full_banner() {
   local dir out
   dir=$(make_guard_case first-stale)
@@ -922,6 +954,7 @@ test_extension_ownership_needs_every_signal
 test_extension_stale_beacon_alarms_despite_live_session
 test_extension_handoff_keeps_queued_wake_warning
 test_branch_actor_is_not_told_to_drain_queued_wakes
+test_branch_actor_is_never_told_to_repair_the_watcher
 test_persistent_model_ignores_pi_extension_evidence
 test_extension_live_watcher_is_healthy_without_ownership_evidence
 test_autoarm_fresh_beacon_without_watcher_is_healthy

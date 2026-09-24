@@ -139,16 +139,19 @@ write_rows_file_locked() { # <target> <source>
   _fm_atomic_replace "$source" "$target"
 }
 
+# claim_main_rows_locked [<cutoff>]: claim every unreserved queued row for main,
+# or with a cutoff only the unreserved rows at or below it. Rows main already
+# owns stay owned either way.
 claim_main_rows_locked() {
   DRAIN_TMP=$(mktemp "$STATE/.main-eligible-rows.tmp.XXXXXX") || return 1
-  awk -F '\t' -v branch="$ELIGIBLE_ROWS_FILE" -v main="$MAIN_ROWS_FILE" '
+  awk -F '\t' -v branch="$ELIGIBLE_ROWS_FILE" -v main="$MAIN_ROWS_FILE" -v cutoff="${1:-}" '
     BEGIN {
       while ((getline line < branch) > 0) reserved[line]=1
       while ((getline line < main) > 0) owned[line]=1
     }
     NF >= 5 && $2 ~ /^[0-9]+$/ {
       present[$2]=1
-      if (!($2 in reserved)) owned[$2]=1
+      if (!($2 in reserved) && (cutoff == "" || $2 + 0 <= cutoff + 0)) owned[$2]=1
     }
     END { for (seq in owned) if (seq in present) print seq }
   ' "$FM_WAKE_QUEUE" | LC_ALL=C sort -n > "$DRAIN_TMP" || return 1
@@ -650,13 +653,15 @@ if [ -n "$ACK_THROUGH" ]; then
     PRESENTED_MAX=$(presented_max_row "$MAIN_ROWS_FILE") || exit 1
   fi
   if [ "$ACTOR" = main ]; then
-    # Preserve main's original whole-cutoff acknowledgement contract: rows may
-    # arrive after presentation but before the printed ack runs, and a direct
-    # or replayed main ack still owns every unreserved row through its cutoff.
-    # Claim again under the queue lock so those rows cannot be stranded merely
-    # because they were not present during the earlier drain. A live branch
+    # Preserve main's original whole-cutoff acknowledgement contract: a direct
+    # or replayed main ack still owns every unreserved row through its cutoff,
+    # so claim those again under the queue lock and none is stranded merely
+    # because it was not present during the earlier drain. A row above the
+    # cutoff arrived after presentation and was never shown to main, so it
+    # stays unowned for whichever actor presents it next; claiming it here
+    # would hand every later away-session wake back to main. A live branch
     # grant remains excluded by claim_main_rows_locked.
-    claim_main_rows_locked || exit 1
+    claim_main_rows_locked "$ACK_THROUGH" || exit 1
   fi
   if [ "$ACTOR" = branch ]; then
     # check-kind rows (inactive-outcome receipts, secondmate stall markers)
