@@ -228,10 +228,10 @@
 #   or the repository primary while `treehouse get` prepares the slot is waited
 #   out as a transient rather than adopted and then refused, so a home that is
 #   itself a linked worktree of the project repository still launches. A slot
-#   whose checkout is still being written (git's `initializing` worktree lock,
-#   or a Treehouse pool slot the pool state does not yet list with a live
-#   owner) is waited out the same way, on a separate longer allowance, so a
-#   slow first checkout is neither refused as uncommitted work nor abandoned
+#   whose checkout is still being written (a Treehouse pool slot not yet
+#   recorded with an unleased live owner) is waited out the same way, on a
+#   separate longer allowance, so a slow first checkout is neither refused as
+#   uncommitted work nor abandoned
 #   half-written. A pane that never reaches an isolated worktree refuses at the
 #   end of that wait, naming the last path seen and why it was rejected.
 #   That placement is proven only at launch. Every ship or scout pane therefore
@@ -3081,8 +3081,8 @@ spawn_worktree_isolated() { # <path>
 # test: `git worktree add` creates its .git link first and runs its checkout
 # inside it, so a pane reporting its foreground cwd reads the new slot from the
 # first poll while `git status` still lists every file not yet written. A
-# Treehouse pool slot is not handed out until the pool state records its live
-# owner. Sets SPAWN_WT_REASON when the pool slot is still settling.
+# Treehouse pool slot is not handed out until the pool state records an
+# unleased live owner. Sets SPAWN_WT_REASON when the pool slot is still settling.
 spawn_worktree_settling() { # <path>
   local path=$1
   if fm_treehouse_pool_slot "$PROJ_ABS" "$path"; then
