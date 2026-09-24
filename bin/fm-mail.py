@@ -142,6 +142,7 @@ def away_posture_operation():
 
 
 
+
 class AfkBodyFetchError(Exception):
     pass
 
