@@ -57,6 +57,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+[ "${FM_FAKE_SYSTEMD_RUN_LAUNCH_RC:-0}" -eq 0 ] || exit "$FM_FAKE_SYSTEMD_RUN_LAUNCH_RC"
 exec "$@"
 SH
   cat > "$FAKEBIN_DIR/systemctl" <<'SH'
@@ -91,6 +92,8 @@ run_emitted_launch() {  # [extra env assignments...]
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
     DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}" \
     FM_FAKE_SYSTEMD_RUN_LOG="$RUN_LOG" FM_FAKE_SYSTEMCTL_LOG="$CTL_LOG" \
+    FM_FAKE_SYSTEMD_RUN_LAUNCH_RC="${FM_FAKE_SYSTEMD_RUN_LAUNCH_RC:-0}" \
+    FM_FAKE_SCOPE_STATE="${FM_FAKE_SCOPE_STATE:-failed}" FM_FAKE_SCOPE_RESULT="${FM_FAKE_SCOPE_RESULT:-oom-kill}" \
     "$@" /bin/sh -c "$preamble
 $launch"
 }
@@ -136,7 +139,7 @@ test_outcome_records_oom_as_lane_failure() {
   install_fake_systemd
   status_file="$dir/state/lane-a1.status"
   FM_FAKE_SYSTEMCTL_LOG="$CTL_LOG" PATH="$FAKEBIN_DIR:$PATH" \
-    "$CAP" outcome fm-lane-a1-s1.scope 100 "$status_file" "$dir/config"
+    "$CAP" outcome fm-lane-a1-s1.scope 100 "$status_file" "$dir/config" 137 "$dir/started"
   out=$(cat "$status_file")
   assert_contains "$out" "failed [at=" "an OOM-killed scope should be recorded as a failed lane"
   assert_contains "$out" "100 MiB" "the failure should name the cap"
@@ -149,7 +152,7 @@ test_outcome_records_oom_as_lane_failure() {
   rm -f "$status_file"
   FM_FAKE_SCOPE_STATE=inactive FM_FAKE_SCOPE_RESULT=success \
     FM_FAKE_SYSTEMCTL_LOG="$CTL_LOG" PATH="$FAKEBIN_DIR:$PATH" \
-    "$CAP" outcome fm-lane-a1-s2.scope 100 "$status_file" "$dir/config"
+    "$CAP" outcome fm-lane-a1-s2.scope 100 "$status_file" "$dir/config" 0 "$dir/started"
   [ ! -e "$status_file" ] || fail "a scope that ended normally must not record a failure: $(cat "$status_file")"
   assert_not_contains "$(cat "$CTL_LOG")" "reset-failed" \
     "a scope that ended normally has no failed unit to clear"
@@ -199,6 +202,21 @@ test_capped_launch_runs_in_scope() {
       fail "allowlist=$allowlist: a normal worker exit must not be recorded as a failure"
   done
   pass "a matched cap launches the worker inside a MemoryMax/MemorySwapMax scope with its environment intact"
+}
+
+test_scope_start_failure_is_lane_failure() {
+  local status_file out
+  make_case start-failure codex start-failure-a1
+  install_fake_systemd
+  printf 'codex project 100\n' > "$HOME_DIR/config/worker-memory-max"
+  run_case_spawn start-failure-a1 "$PROJ_DIR" --mode no-mistakes --yolo off >/dev/null ||
+    fail "the scope probe should succeed"
+  out=$(FM_FAKE_SYSTEMD_RUN_LAUNCH_RC=1 FM_FAKE_SCOPE_STATE=inactive FM_FAKE_SCOPE_RESULT=success run_emitted_launch 2>&1)
+  status_file="$HOME_DIR/state/start-failure-a1.status"
+  [ -f "$status_file" ] || fail "a failed scope launch must record a lane failure: $out"
+  grep -q '^failed \[at=[0-9][0-9]*\]: memory-capped scope could not be started' "$status_file" ||
+    fail "a scope that never started must fail the lane: $(cat "$status_file")"
+  pass "a scope launch failure is recorded as a lane failure"
 }
 
 test_refusals_happen_before_any_record() {
@@ -283,5 +301,6 @@ test_outcome_records_oom_as_lane_failure
 test_absent_config_leaves_launch_unwrapped
 test_capped_launch_runs_in_scope
 test_refusals_happen_before_any_record
+test_scope_start_failure_is_lane_failure
 test_secondmate_is_never_capped
 test_live_oom_is_a_lane_failure

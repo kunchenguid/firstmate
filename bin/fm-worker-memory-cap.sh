@@ -7,8 +7,8 @@
 # launches the worker inside a transient systemd user scope carrying
 # MemoryMax=<cap> and MemorySwapMax=<cap>, so the kernel's cgroup OOM killer
 # stops a runaway tool inside that lane instead of letting it exhaust the host.
-# The scope holds the agent and every process it starts; systemd's default
-# OOMPolicy=stop ends the whole scope, so the lane dies as one unit and
+# The scope holds the agent and every process it starts; OOMPolicy=stop
+# ends the whole scope, so the lane dies as one unit and
 # this script records that as the lane's failure.
 #
 # Config format: one rule per line, `#` comments and blank lines ignored:
@@ -27,12 +27,13 @@
 #     Exit 0 when this host can start a memory-capped systemd user scope, else
 #     exit 1 naming what is missing. bin/fm-spawn.sh refuses a capped launch on
 #     a failed probe rather than launching the worker without its cap.
-#   fm-worker-memory-cap.sh outcome <unit> <cap-mib> <state>/<task>.status <config-dir>
+#   fm-worker-memory-cap.sh outcome <unit> <cap-mib> <status> <config-dir> <launch-rc> <start-marker>
 #     Run in the worker's pane shell after the scoped launch returns. When the
 #     scope ended with Result=oom-kill, append one
 #     `failed [at=<epoch>]: ...` line to the task's status log (plus the opt-in
 #     fleet-ledger record, as a worker's own append does) and clear the failed
-#     unit. Any other ending writes nothing. Always exits 0, so the pane shell
+#     unit. A failed launch without a start marker also records a lane failure.
+#     Other endings write nothing. Always exits 0, so the pane shell
 #     is never disturbed.
 #
 # The probe and the launch talk to the user's systemd manager, so they need the
@@ -92,9 +93,17 @@ probe() {
   fi
 }
 
-outcome() {  # <unit> <cap-mib> <status-file> <config-dir>
-  local unit=$1 cap=$2 status=$3 config=$4 props state result tries=0
-  command -v systemctl >/dev/null 2>&1 || return 0
+outcome() {  # <unit> <cap-mib> <status-file> <config-dir> <launch-rc> <start-marker>
+  local unit=$1 cap=$2 status=$3 config=$4 rc=$5 marker=$6 props state result tries=0
+  local failure=
+  if [ "$rc" -ne 0 ] && [ ! -e "$marker" ]; then
+    failure='memory-capped scope could not be started (config/worker-memory-max)'
+  fi
+  rm -f -- "$marker"
+  if ! command -v systemctl >/dev/null 2>&1; then
+    [ -z "$failure" ] || printf 'failed [at=%s]: %s\n' "$(date +%s)" "$failure" >>"$status"
+    return 0
+  fi
   # The scope can still be deactivating when the launch returns: systemd sets
   # Result as soon as the OOM kill lands, but the failed state only after the
   # remaining processes are gone, and reset-failed needs that state.
@@ -111,8 +120,10 @@ outcome() {  # <unit> <cap-mib> <status-file> <config-dir>
     sleep 0.1
   done
   if [ "$result" = oom-kill ]; then
-    printf 'failed [at=%s]: worker memory cap of %s MiB exceeded; the kernel OOM killer stopped this lane (config/worker-memory-max)\n' \
-      "$(date +%s)" "$cap" >>"$status"
+    failure="worker memory cap of $cap MiB exceeded; the kernel OOM killer stopped this lane (config/worker-memory-max)"
+  fi
+  if [ -n "$failure" ]; then
+    printf 'failed [at=%s]: %s\n' "$(date +%s)" "$failure" >>"$status"
     if [ -e "$config/fleet-ledger" ]; then
       "$(dirname -- "$0")/fm-fleet-ledger.sh" appended "$config" "$status" >/dev/null 2>&1 || true
     fi
@@ -131,8 +142,8 @@ probe)
   probe
   ;;
 outcome)
-  [ "$#" -eq 5 ] || usage
-  outcome "$2" "$3" "$4" "$5"
+  [ "$#" -eq 7 ] || usage
+  outcome "$2" "$3" "$4" "$5" "$6" "$7"
   ;;
 *) usage ;;
 esac
