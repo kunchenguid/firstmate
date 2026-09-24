@@ -1881,10 +1881,13 @@ command_park() {  # <task-id> --reason <reason>
     [ "$(show_field_value "$show" hold_kind)" = parked ] || fail "task $id has another hold"
   else
     body=$(show_field_value "$show" body)
-    case "$body" in
-      'Parked hold occurrence: '*$'\n\n'*) body=${body#*$'\n\n'} ;;
-      'Parked hold occurrence: '*) body='' ;;
-    esac
+    if [[ $body =~ ^Parked\ hold\ occurrence:\ [0-9a-f]{32}($|$'\n\n') ]]; then
+      if [[ $body == *$'\n\n'* ]]; then
+        body=${body#*$'\n\n'}
+      else
+        body=''
+      fi
+    fi
     stamp=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n') || fail "cannot create parked hold identity"
     tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-park-stamp.XXXXXX") || fail "cannot stage parked hold identity"
     if ! printf 'Parked hold occurrence: %s\n\n%s\n' "$stamp" "$body" > "$tmp"; then

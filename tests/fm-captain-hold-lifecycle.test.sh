@@ -791,6 +791,21 @@ EOF
   pass "the completion gate attests captain-held inventory and transfers open status decisions"
 }
 
+test_park_preserves_user_written_occurrence_prefix() {
+  local home show
+  home=$(make_home park-user-body)
+  tasks_in "$home" add parked-prose 'parked prose' --file data/backlog.md \
+    --body $'Parked hold occurrence: planned work\n\nKeep this plan.' >/dev/null
+  run_captain "$home" park parked-prose --reason 'desk parked' >/dev/null \
+    || fail "could not park task with user-written occurrence prefix"
+  show=$(tasks_in "$home" show parked-prose --file data/backlog.md) \
+    || fail "could not read parked task"
+  assert_contains "$show" 'Parked hold occurrence: planned work' \
+    "parking discarded user-written occurrence prefix"
+  assert_contains "$show" 'Keep this plan.' "parking discarded user-written plan"
+  pass "parking preserves user-written occurrence prose"
+}
+
 # A desk-parked row is not a captain call: every closer's plain `open` keeps
 # reading it as not held, and only the watcher's `--include-parked` admits it,
 # with an identity bound to the parked reason so re-parking starts a new window.
@@ -4059,6 +4074,7 @@ test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes
 test_completion_gate_attests_and_transfers
 test_open_admits_parked_rows_only_when_asked
+test_park_preserves_user_written_occurrence_prefix
 test_answer_records_and_closes
 test_release_frees_held_work
 test_hold_stamp_precedes_hold_visibility
