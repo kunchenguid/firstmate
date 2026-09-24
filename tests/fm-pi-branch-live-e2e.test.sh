@@ -991,3 +991,106 @@ if [ "$status" -ne 0 ] || [ "$out" != "STREAM_OK" ]; then
   fail "real-SDK streaming-time watcher delivery guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
 pass "real Pi SDK $PI_VERSION queues a streaming-time watcher wake without before_agent_start, keeps the successor chain, and surfaces consumption of both follow-ups"
+
+# Hidden processing retries must stay silent through the real event runner,
+# stock assistant renderer, and session persistence, including after reopen.
+retryhome="$TMP_ROOT/retry-home"
+retrydir="$TMP_ROOT/retry-agent-dir"
+mkdir -p "$retryhome/state" "$retryhome/config" "$retrydir"
+cp "$streamdir/models.json" "$retrydir/models.json"
+BRANCH_PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" \
+  FM_HOME="$retryhome" FM_ROOT_OVERRIDE="$ROOT" \
+  PI_CODING_AGENT_DIR="$retrydir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+  node --input-type=module > "$TMP_ROOT/retry-output" 2>&1 <<'EOF'
+import { readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+const home = process.env.FM_HOME;
+const pkg = resolve(process.env.PI_PACKAGE_DIR);
+const { DefaultResourceLoader, ModelRegistry, ModelRuntime, SessionManager, SettingsManager, createAgentSession, initTheme } =
+  await import(pathToFileURL(`${pkg}/dist/index.js`).href);
+const { AssistantMessageComponent } = await import(pathToFileURL(`${pkg}/dist/modes/interactive/components/assistant-message.js`).href);
+initTheme("dark");
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+const outcome = (...args) => {
+  const result = spawnSync("bash", [`${process.env.FM_ROOT_OVERRIDE}/bin/fm-branch-outcome.sh`, ...args], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error(result.stderr);
+  return result.stdout.trim();
+};
+outcome("processed-init");
+const seq = Number(outcome("append", "--task", "example", "--verdict", "captain", "--summary", "A decision is needed"));
+const original = "The requested result is complete and verified.";
+let completions = 0;
+let settled = 0;
+const failures = [];
+const chunk = (text, finish = null) => `data: ${JSON.stringify({
+  id: "local-retry-probe", object: "chat.completion.chunk", created: 1, model: "fm-live-stream-model",
+  choices: [{ index: 0, delta: text ? { role: "assistant", content: text } : {}, finish_reason: finish }],
+})}\n\n`;
+globalThis.fetch = async (input) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (!url.startsWith("https://fm-live-stream.invalid/")) throw new Error(`unexpected network request: ${url}`);
+  completions += 1;
+  const text = completions <= 2 ? original : completions === 3 ? "An unrelated old acknowledgment." : "The new user answer.";
+  return new Response(chunk(text) + chunk(null, "stop") + "data: [DONE]\n\n", {
+    headers: { "content-type": "text/event-stream" },
+  });
+};
+const agentDir = process.env.PI_CODING_AGENT_DIR;
+const settings = SettingsManager.create(home, agentDir);
+const loader = new DefaultResourceLoader({
+  cwd: home, agentDir, settingsManager: settings,
+  additionalExtensionPaths: [process.env.BRANCH_PLUGIN],
+  extensionFactories: [{ name: "retry-probe", factory: (pi) => {
+    pi.on("agent_settled", () => { settled += 1; });
+  } }],
+  noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+});
+await loader.reload();
+const runtime = await ModelRuntime.create({ authPath: `${agentDir}/auth.json`, modelsPath: `${agentDir}/models.json` });
+const registry = new ModelRegistry(runtime);
+await registry.refresh();
+const manager = SessionManager.create(home, `${home}/sessions`);
+const { session } = await createAgentSession({
+  cwd: home, sessionManager: manager, settingsManager: settings, resourceLoader: loader,
+  modelRuntime: runtime, model: registry.find("fm-live-stream", "fm-live-stream-model"), noTools: "builtin",
+});
+let streamedRetries = 0;
+const unsubscribe = session.subscribe((event) => {
+  if (event.type !== "message_update" || completions < 2 || completions > 3) return;
+  streamedRetries += 1;
+  const component = new AssistantMessageComponent(undefined, false, undefined, undefined, 0, session.extensionRunner.getMarkdownTransformers());
+  component.updateContent(event.message, true);
+  const rendered = component.render(120).join("\n");
+  if (rendered.includes(original) || rendered.includes("unrelated old acknowledgment")) failures.push("retry prose leaked from the streaming renderer");
+});
+await session.prompt("Finish the requested work.");
+for (let i = 0; i < 600 && settled < 3; i += 1) await new Promise((done) => setTimeout(done, 50));
+if (settled !== 3 || completions !== 3) throw new Error(`retry chain did not settle: ${settled} settlements, ${completions} completions`);
+if (streamedRetries === 0 || failures.length) throw new Error(`streaming suppression failed: ${streamedRetries} updates, ${failures}`);
+const assistantText = (messages) => messages.filter((message) => message.role === "assistant")
+  .flatMap((message) => message.content.filter((part) => part.type === "text").map((part) => part.text));
+if (JSON.stringify(assistantText(session.messages)) !== JSON.stringify([original])) throw new Error("retry prose survived in agent state");
+const reopened = SessionManager.open(manager.getSessionFile(), `${home}/sessions`);
+if (JSON.stringify(assistantText(reopened.buildSessionContext().messages)) !== JSON.stringify([original])) throw new Error("retry prose survived session reopen");
+if (!outcome("unprocessed").includes(`"seq":${seq}`)) throw new Error("silent retries advanced the processed marker");
+await session.prompt("A new user question.");
+if (assistantText(session.messages).at(-1) !== "The new user answer.") throw new Error("a nextTurn retry hid the new user answer");
+const acknowledged = await session.getToolDefinition("fm_branch_processed").execute("ack", { through: seq }, undefined, undefined, {});
+if (acknowledged.isError || outcome("unprocessed")) throw new Error("the outcome could not be acknowledged after silent retries");
+const entries = readFileSync(manager.getSessionFile(), "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+if (assistantText(entries.filter((entry) => entry.type === "message").map((entry) => entry.message)).length !== 2) {
+  throw new Error("persisted finals do not match the two user handling outcomes");
+}
+unsubscribe();
+session.dispose();
+console.log("RETRY_OK");
+process.exit(0);
+EOF
+status=$?
+out=$(cat "$TMP_ROOT/retry-output")
+if [ "$status" -ne 0 ] || [ "$out" != "RETRY_OK" ]; then
+  fail "real-SDK processing retry visibility guard failed against pi-coding-agent $PI_VERSION: $out"
+fi
+pass "real Pi SDK $PI_VERSION hides unacknowledged processing replies while streaming and after reopen, preserves user finals, and keeps outcomes retryable"

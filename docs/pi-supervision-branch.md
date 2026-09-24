@@ -429,6 +429,11 @@ Nothing else advances that marker.
 An unrelated reply, an empty reply, or a reply that paraphrases the outcome leaves the sequence unprocessed.
 The extension presents the current unprocessed sequence set again at the next main run boundary and at every session start.
 
+Until an autonomous processing request's listed outcomes are acknowledged, its assistant prose is removed before persistence.
+Tool calls, their signed reasoning, and usage accounting are preserved.
+Pi's Markdown transformer API additionally keeps that prose hidden while streaming on versions that expose it.
+Successful acknowledgement releases subsequent assistant output, and a real user message restores ordinary output immediately, including when a processing request rides that prompt.
+
 ### Re-presentation pacing
 
 A presentation already pending its run boundary is not resent or widened.
@@ -633,7 +638,7 @@ At that moment the branch reports any refusal instead of concluding there is "no
 - The new branch conversation at every main session start with continuation inside one session, and the mirror re-anchor that pairs with it.
 - Requested-versus-unsolicited delivery, exact visible entry content, and no unkeyed model turn.
 - The sequence-keyed processing request and its acknowledgement.
-- Re-presentation after an empty reply and after an unrelated prior answer, the triggered-then-next-turn pacing, and session-start re-presentation.
+- Silent re-presentation after an empty reply and after an unrelated or repeated prior answer, preserved tool calls and user responses, the triggered-then-next-turn pacing, and session-start re-presentation.
 - Routine outcomes staying turn-free, task-level no-change notes staying hidden, absent-marker re-presentation, and malformed-age reporting without acknowledgement.
 - Idle and busy main state, and incident-shaped compaction and unrelated-assistant context.
 - Cold-start post-lock recovery, crash-before-cursor reload recovery, and repeated-reload idempotency.

@@ -656,6 +656,11 @@ export default function (pi: ExtensionAPI) {
   let processing: ProcessingState | null = null;
   let queuedProcessingContent: string | null = null;
   let processingOpenedThisRun = false;
+  // An autonomous processing request has no new user question to answer.
+  // Keep its prose silent until its listed outcomes have been acknowledged;
+  // tools still run, and a real user message always restores ordinary output.
+  let silentProcessingThrough: number | null = null;
+  let userMessageThisTurn = false;
   let processedInitializedGeneration = -1;
   // One revision for BOTH selections: a model or effort change invalidates an
   // in-flight branch build exactly the same way.
@@ -1676,7 +1681,6 @@ ${context.command}
     // duplicate suppression. Operational extension injections are not dialog.
     const prompt = event.prompt;
     processingOpenedThisRun = queuedProcessingContent !== null && prompt === queuedProcessingContent;
-    if (processingOpenedThisRun) queuedProcessingContent = null;
     const trimmed = prompt.trim();
     if (!trimmed || isOperationalUserText(trimmed)) return;
     const file = currentMainSession.getSessionFile() ?? "";
@@ -1690,6 +1694,41 @@ ${context.command}
     // Pi delivers a queued nextTurn copy with the prompt that starts this run,
     // so a fresh copy may be queued again once this run settles unacknowledged.
     if (processing) processing.nextTurnQueued = false;
+  });
+  pi.on?.("turn_start", () => {
+    userMessageThisTurn = false;
+  });
+  pi.on?.("message_start", (event) => {
+    if (event.message.role === "user") {
+      userMessageThisTurn = true;
+      silentProcessingThrough = null;
+    } else if (
+      event.message.role === "custom" &&
+      isProcessingCustomMessage(event.message) &&
+      queuedProcessingContent !== null &&
+      event.message.content === queuedProcessingContent
+    ) {
+      // message_start covers both an idle custom prompt and a follow-up
+      // consumed inside an existing run; neither needs before_agent_start.
+      silentProcessingThrough = userMessageThisTurn ? null : processing?.through ?? null;
+      queuedProcessingContent = null;
+    }
+  });
+  pi.registerMarkdownTransformer?.((markdown, context) =>
+    silentProcessingThrough !== null && context.isStreaming && context.messageType !== "user" ? "" : markdown,
+  );
+  pi.on?.("message_end", (event) => {
+    if (silentProcessingThrough === null || event.message.role !== "assistant") return;
+    // Pi applies the replacement to agent state before persistence, later
+    // events, and transcript rendering. A tool continuation must retain its
+    // signed reasoning blocks for the provider, as well as calls and accounting.
+    const hasTools = event.message.content.some((part) => part.type === "toolCall");
+    return {
+      message: {
+        ...event.message,
+        content: event.message.content.filter((part) => part.type === "toolCall" || (hasTools && part.type === "thinking")),
+      },
+    };
   });
   pi.on?.("context", (event, ctx) => {
     if (!afkPostureRecordPresent(state)) return;
@@ -1713,6 +1752,7 @@ ${context.command}
     mainStreaming = false;
     queuedProcessingContent = null;
     processingOpenedThisRun = false;
+    silentProcessingThrough = null;
     if (processing) processing.pending = false;
     const settledGeneration = generation;
     await enqueueDelivery(async () => {
@@ -1772,6 +1812,8 @@ ${context.command}
     consecutiveProviderErrors = 0;
     providerRecovery = null;
     generation += 1;
+    silentProcessingThrough = null;
+    userMessageThisTurn = false;
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
     mirrorCollection.stagedCaptain = null;
@@ -1820,6 +1862,9 @@ ${context.command}
     shuttingDown = true;
     generation += 1;
     processing = null;
+    queuedProcessingContent = null;
+    silentProcessingThrough = null;
+    userMessageThisTurn = false;
     pendingMirror.length = 0;
     currentMainSession = null;
     mirrorCollection.collectAnchor = null;
@@ -2303,6 +2348,9 @@ ${context.command}
           };
         }
         const remaining = await readUnprocessedOutcomes(acknowledgedGeneration);
+        if (acknowledgedGeneration === generation && silentProcessingThrough !== null && through >= silentProcessingThrough) {
+          silentProcessingThrough = null;
+        }
         if (remaining !== null && remaining.length === 0) processing = null;
         const open = remaining === null
           ? "the remaining outcomes could not be read"
