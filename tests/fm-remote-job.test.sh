@@ -25,6 +25,7 @@ REPLACEMENT_OWNER_PID=
 STALL_WORKER_PID=
 STALL_DECOY_PID=
 STALL_REPLACEMENT_PID=
+STALL_JOB_GROUP=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -42,6 +43,7 @@ cleanup_remote_job_fixture() {
     kill -KILL "$stall_pid" 2>/dev/null || true
     wait "$stall_pid" 2>/dev/null || true
   done
+  [ -z "$STALL_JOB_GROUP" ] || kill -KILL -- "-$STALL_JOB_GROUP" 2>/dev/null || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -935,12 +937,31 @@ STALL_HOME="$TMP_ROOT/stall-owner-account"
 STALL_STATE="$TMP_ROOT/stall-owner-jobs"
 STALL_STARTED="$TMP_ROOT/stall-started"
 STALL_SIDE_EFFECT="$TMP_ROOT/stall-side-effect"
-mkdir -p "$STALL_HOME"
+STALL_BIN="$TMP_ROOT/stall-bin"
+STALL_HOLD="$TMP_ROOT/stall-hold"
+STALL_HELD="$TMP_ROOT/stall-held"
+mkdir -p "$STALL_HOME" "$STALL_BIN"
 chmod 700 "$STALL_HOME"
+# The stop loop gives up after a bounded number of retries, so pausing the
+# worker from outside races that bound on a slow runner. This sleep holds the
+# worker's own shell at its first stop-loop retry instead: that is the only
+# sleep it runs while its quarantine exists. Removing the hold file (or the
+# whole fixture) releases it.
+cat > "$STALL_BIN/sleep" <<SH
+#!/bin/sh
+if [ "\$PPID" = "\$(cat '$STALL_HOLD' 2>/dev/null)" ] && [ -e '$STALL_STATE/worker.lock/quarantine' ]; then
+  : > '$STALL_HELD'
+  while [ -e '$STALL_HOLD' ]; do '$(command -v sleep)' 0.05; done
+fi
+exec '$(command -v sleep)' "\$@"
+SH
+chmod +x "$STALL_BIN/sleep"
 HOME="$STALL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STALL_STATE" \
-  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux PATH="$STALL_BIN:$PATH" \
+  "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
   > "$TMP_ROOT/stall-lost.out" 2> "$TMP_ROOT/stall-lost.err" &
 STALL_WORKER_PID=$!
+printf '%s\n' "$STALL_WORKER_PID" > "$STALL_HOLD"
 STALL_DEADLINE=$((SECONDS + 30))
 until [ -f "$STALL_STATE/worker.ready" ] || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do sleep 0.05; done
 assert_present "$STALL_STATE/worker.ready" "the worker stalled in shutdown did not become ready"
@@ -951,33 +972,21 @@ STALL_DEADLINE=$((SECONDS + 30))
 until [ -f "$STALL_STARTED" ] || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do sleep 0.05; done
 assert_present "$STALL_STARTED" "the command that keeps shutdown in its stop loop did not start"
 STALL_JOB="$STALL_STATE/jobs/$FM_REMOTE_JOB_ID"
-STALL_LANE_PID=$(cat "$STALL_JOB/.claim/owner")
+# The decoy replaces the job's group record, so no worker stops the real
+# command group; the test does.
+STALL_JOB_GROUP=$(cat "$STALL_JOB/.claim/group")
 set -m
 sleep 30 &
 STALL_DECOY_PID=$!
 set +m
 printf '%s\n' "$STALL_DECOY_PID" > "$STALL_JOB/.claim/group"
 printf 'unconfirmed\nstart\n' > "$STALL_JOB/.claim/group_start"
-# Shutdown publishes quarantine, then kills and reaps its lane, then retries
-# the live decoy group in a bounded stop loop. Stopping the worker only once
-# both of those are visible pins it inside that loop. The short poll interval
-# keeps the stop well inside the loop's bounded retry window.
 kill -TERM "$STALL_WORKER_PID"
 STALL_DEADLINE=$((SECONDS + 30))
-until { [ -f "$STALL_STATE/worker.lock/quarantine" ] && ! kill -0 "$STALL_LANE_PID" 2>/dev/null; } \
-  || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
-  sleep 0.01
-done
-kill -STOP "$STALL_WORKER_PID"
-STALL_DEADLINE=$((SECONDS + 30))
-until [ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | tr -d ' ')" = T ] \
-  || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
-  sleep 0.05
-done
-[ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | tr -d ' ')" = T ] \
-  || fail "shutdown left its stop loop before the lock could be handed to a replacement"
+until [ -f "$STALL_HELD" ] || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do sleep 0.05; done
+assert_present "$STALL_HELD" "shutdown did not reach its stop loop behind its own quarantine"
 assert_present "$STALL_STATE/worker.lock/quarantine" \
-  "the worker stopped in its stop loop did not hold its own quarantine"
+  "the worker held in its stop loop did not hold its own quarantine"
 rm -rf -- "$STALL_STATE/worker.lock"
 HOME="$STALL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STALL_STATE" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
@@ -1007,7 +1016,7 @@ done
 kill -KILL "$STALL_DECOY_PID" 2>/dev/null || true
 wait "$STALL_DECOY_PID" 2>/dev/null || true
 STALL_DECOY_PID=
-kill -CONT "$STALL_WORKER_PID"
+rm -f -- "$STALL_HOLD"
 STALL_DEADLINE=$((SECONDS + 30))
 until [ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | tr -d ' ')" = Z ] \
   || ! kill -0 "$STALL_WORKER_PID" 2>/dev/null || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
@@ -1040,6 +1049,8 @@ done
   || fail "the replacement did not finish its own TERM shutdown"
 wait "$STALL_REPLACEMENT_PID" 2>/dev/null || true
 STALL_REPLACEMENT_PID=
+kill -KILL -- "-$STALL_JOB_GROUP" 2>/dev/null || true
+STALL_JOB_GROUP=
 pass "an ousted worker in shutdown leaves the replacement quarantine untouched"
 
 # A child that stays up for FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears the
