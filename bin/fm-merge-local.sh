@@ -63,7 +63,9 @@ fi
 MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
 
 MERGE_CONTROL_LOCK=
+MERGE_PROJECT_LOCK=
 merge_control_cleanup() {
+  [ -z "$MERGE_PROJECT_LOCK" ] || fm_lock_release "$MERGE_PROJECT_LOCK" || true
   [ -z "$MERGE_CONTROL_LOCK" ] || fm_lock_release "$MERGE_CONTROL_LOCK" || true
 }
 trap merge_control_cleanup EXIT
@@ -81,6 +83,11 @@ fi
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ "$MODE" = local-only ] || { echo "error: task $ID is mode=$MODE, not local-only; merge PR tasks with bin/fm-pr-merge.sh <id> <PR url> after approval" >&2; exit 1; }
+MERGE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ") || {
+  echo "error: could not resolve the shared project lock for $PROJ; refusing to merge" >&2
+  exit 1
+}
+fm_lock_acquire_wait "$MERGE_PROJECT_LOCK"
 
 default_branch() {
   local ref branch
@@ -136,25 +143,6 @@ if [ "$BARE" = false ]; then
     echo "error: $PROJ has a dirty working tree; refusing to merge into it" >&2
     exit 1
   fi
-  if [ -n "$RECORDED_BASE" ] && [ "$cur" != "$DEFAULT" ]; then
-    landing_worktree=
-    worktree_path=
-    while IFS= read -r worktree_line; do
-      case "$worktree_line" in
-        worktree\ *) worktree_path=${worktree_line#worktree } ;;
-        branch\ *)
-          if [ "${worktree_line#branch }" = "refs/heads/$DEFAULT" ]; then
-            landing_worktree=$worktree_path
-            break
-          fi
-          ;;
-      esac
-    done < <(git -C "$PROJ" worktree list --porcelain 2>/dev/null)
-    if [ -n "$landing_worktree" ]; then
-      echo "error: landing branch '$DEFAULT' is checked out in linked worktree '$landing_worktree'; refusing to update its ref" >&2
-      exit 1
-    fi
-  fi
 fi
 
 # Clean fast-forward only: DEFAULT must be an ancestor of BRANCH.
@@ -180,6 +168,25 @@ case "$hold_status" in
     ;;
 esac
 merge_status=0
+if [ "$BARE" = false ] && [ -n "$RECORDED_BASE" ] && [ "$cur" != "$DEFAULT" ]; then
+  landing_worktree=
+  worktree_path=
+  while IFS= read -r worktree_line; do
+    case "$worktree_line" in
+      worktree\ *) worktree_path=${worktree_line#worktree } ;;
+      branch\ *)
+        if [ "${worktree_line#branch }" = "refs/heads/$DEFAULT" ]; then
+          landing_worktree=$worktree_path
+          break
+        fi
+        ;;
+    esac
+  done < <(git -C "$PROJ" worktree list --porcelain 2>/dev/null)
+  if [ -n "$landing_worktree" ]; then
+    echo "error: landing branch '$DEFAULT' is checked out in linked worktree '$landing_worktree'; refusing to update its ref" >&2
+    exit 1
+  fi
+fi
 if [ "$BARE" = true ] || { [ -n "$RECORDED_BASE" ] && [ "$cur" != "$DEFAULT" ]; }; then
   old=$(git -C "$PROJ" rev-parse "refs/heads/$DEFAULT")
   new=$(git -C "$PROJ" rev-parse "refs/heads/$BRANCH")
@@ -187,6 +194,8 @@ if [ "$BARE" = true ] || { [ -n "$RECORDED_BASE" ] && [ "$cur" != "$DEFAULT" ]; 
 else
   git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null || merge_status=$?
 fi
+fm_lock_release "$MERGE_PROJECT_LOCK" || true
+MERGE_PROJECT_LOCK=
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
 [ "$merge_status" -eq 0 ] || exit "$merge_status"

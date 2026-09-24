@@ -3139,6 +3139,7 @@ refuse_named_crew_branch_collision() {
     echo "error: crew branch $BRANCH already exists locally; refusing to launch a fresh task with a reused branch" >&2
     return 1
   fi
+  [ "$MODE" = local-only ] && return 0
   if spawn_worktree_has_origin_config "$PROJ_ABS"; then
     if ! remote_refs=$(git -C "$PROJ_ABS" ls-remote --heads origin "refs/heads/$BRANCH" 2>/dev/null); then
       echo "error: could not check whether crew branch $BRANCH exists on origin; refusing to launch" >&2

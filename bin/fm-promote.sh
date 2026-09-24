@@ -322,6 +322,7 @@ refuse_promoted_branch_collision() {
     echo "error: crew branch $BRANCH already exists locally; refusing promotion with a reused branch" >&2
     return 1
   fi
+  [ "$MODE" = local-only ] && return 0
   if git -C "$PROMOTE_PROJECT" remote get-url origin >/dev/null 2>&1; then
     if ! remote_refs=$(git -C "$PROMOTE_PROJECT" ls-remote --heads origin "refs/heads/$BRANCH" 2>/dev/null); then
       echo "error: could not check whether crew branch $BRANCH exists on origin; refusing promotion" >&2
