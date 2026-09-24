@@ -47,6 +47,7 @@ The poller reads a message body only when its single `From` address is the owner
 Each code is accepted only for its own sent item, once, and for seven days after sending. Correctly authenticated owner messages larger than 256 KiB total, including attachments, are not processed as away-mode replies, but receive an ordinary mail wake marked that the body exceeds the limit. Replies over 8,000 characters are rejected with a notice in the durable mail wake.
 
 
+
 A matching reply enters Firstmate's existing captain inbox as words for that outcome.
 An authenticated owner message with a missing, invalid, expired, or already-used code follows the ordinary mail wake path and is never treated as verified instructions.
 The email footer states the same safety boundary: replies never authorize destructive, irreversible, or security-sensitive actions, which still require your return or trusted-channel confirmation.

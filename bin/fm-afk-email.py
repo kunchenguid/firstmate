@@ -257,6 +257,7 @@ def queue_unprocessed():
     if config is None:
         return 1
 
+
     rows = outcomes_by_seq()
     if rows is None:
         print("fm-afk-email: outcome store is unreadable; pending email was not queued", file=sys.stderr)
@@ -316,12 +317,14 @@ def flush():
 
 
 def flush_while_contract_locked():
+
     posture, config = live_mail_context()
     if posture is None:
         return 0
     if config is None:
         return 1
     with afk_state_lock():
+
 
         candidates = []
         for path in sorted(PENDING.glob("*.json"), key=lambda item: int(item.stem) if item.stem.isdigit() else 0):
@@ -739,11 +742,13 @@ def receive_batch():
 
 
 def receive_batch_while_contract_locked():
+
     posture, config = live_mail_context()
     if posture is None:
         return 0
     if config is None:
         return 1
+
 
     try:
         messages = json.load(sys.stdin)

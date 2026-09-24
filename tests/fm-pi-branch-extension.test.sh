@@ -1910,11 +1910,13 @@ if (warnings().length !== 1 || warnings()[0].message.display !== true) {
 await runNextTimer();
 if (warnings().length !== 1) throw new Error("repeated SMTP failures spammed the captain");
 
+
 writeFileSync(process.env.FM_TEST_MAIL_STATUS_FILE, "sent\n");
 await runNextTimer();
 writeFileSync(process.env.FM_TEST_MAIL_STATUS_FILE, "fail\n");
 await runNextTimer();
 if (warnings().length !== 2) throw new Error("a new failure after successful delivery was not reported");
+
 
 process.exit(0);
 EOF
@@ -1922,6 +1924,7 @@ EOF
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "away email failures must be visible and retried without notification spam: $out"
   pass "failed away-email delivery is shown to the captain, retried, and re-alerted after recovery"
+
 
 }
 

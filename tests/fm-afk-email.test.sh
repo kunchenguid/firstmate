@@ -117,6 +117,7 @@ wait_for_file() {  # <path>
   [ -e "$path" ]
 }
 
+
 # Pi entry requires the fixed owner destination; other harnesses keep hold-for-return.
 test_destination_is_required_for_pi_entry() {
   local home out
@@ -397,6 +398,7 @@ test_processed_marker_cannot_suppress_outcomes() {
   [ ! -e "$home/state/afk-email/pending/1.json" ] || fail "invalid processed marker queued no longer trustworthy outcomes"
   pass "processed markers cannot suppress or invent outcome progress"
 }
+
 
 
 
@@ -724,6 +726,7 @@ class FakeMailbox:
     fail_body_fetch = False
 
 
+
     def login(self, *_): pass
     def select(self, *_): pass
     def logout(self): pass
@@ -743,6 +746,7 @@ class FakeMailbox:
             self.body_fetches.append(key)
             if self.fail_body_fetch:
                 return "NO", []
+
 
             return "OK", [(f"{key} (BODY[]<0> {{{len(bodies[key])}}}".encode(), bodies[key]), b")"]
         raise AssertionError(f"unexpected fetch spec: {fetch_spec}")
@@ -768,6 +772,7 @@ note = notes[0].read_text(encoding="utf-8").split("--\n", 1)[1]
 words = note.split("Captain's words:\n", 1)[1].rstrip("\n")
 assert words == "a" * 8000 and len(words) == 8000, len(words)
 assert mailbox.body_fetches == ["2", "4"], mailbox.body_fetches
+
 mailbox.body_fetches.clear()
 mailbox.fail_body_fetch = True
 poll_output = StringIO()
@@ -863,6 +868,7 @@ assert handoff_rows["2"][4] == "degraded", handoff_rows["2"]
 assert handoff_rows["4"][4] == "degraded", handoff_rows["4"]
 assert "away-email reply handoff failed" in handoff_error.getvalue(), handoff_error.getvalue()
 assert mailbox.body_fetches == ["2", "4"], mailbox.body_fetches
+
 
 (state / ".afk-contract").write_text("version: 99\nentered_epoch: 1\nreach_channels: email\n")
 mailbox.body_fetches.clear()
@@ -999,6 +1005,7 @@ PY
     || fail "replayed reply errored: $out"
   assert_contains "$out" 'received 0 verified and 1 untrusted' 'a pending-token reply remains single-use after the sent transition'
   pass "reply tokens survive the SMTP-accepted, sent-record-crash window"
+
 
 }
 
@@ -1212,6 +1219,7 @@ test_failed_send_keeps_outcomes_queued
 test_live_email_posture_requires_runtime_config
 test_missing_outcome_store_is_empty_but_invalid_store_fails
 test_processed_marker_cannot_suppress_outcomes
+
 
 test_invalid_away_record_does_not_enable_email
 test_invalid_or_unreadable_posture_suppresses_mail
