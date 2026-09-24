@@ -239,6 +239,23 @@ cmd_arm() {
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" \
       -- "${listener[@]}" || exit 1
   fi
+  # Registration is not a running listener. Readiness is the process-event
+  # owner's evidence for this generation; a miss retires a source that never
+  # started so arm does not leave it registered.
+  if ! FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" ensure-listening "$id"; then
+    owner=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" list 2>/dev/null \
+      | awk -v id="$id" '$1 == id { print $3; exit }')
+    case "$owner" in
+      live|orphaned|task:*/listening|task:*/round-open) ;;
+      *)
+        FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" retire "$id" >/dev/null 2>&1 || true
+        if [ -e "$FM_HOME/state/procevent/$id.source" ] || [ -L "$FM_HOME/state/procevent/$id.source" ]; then
+          rm -f -- "$FM_HOME/state/procevent/$id.source"
+        fi
+        ;;
+    esac
+    exit 1
+  fi
   printf 'armed: %s\n' "$id"
   printf 'artifact: %s\n' "$real"
   [ -z "$task" ] || printf 'owner-task: %s\n' "$task"
