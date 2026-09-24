@@ -3153,12 +3153,12 @@ fm_backend_herdr_traex_wait_started() {  # <target> <expected-worktree> <source-
 # These functions are the ONLY herdr-specific composer knowledge left: the
 # ANSI pane capture (with its small-N workaround), the native `agent get`
 # identity probe, and the capability descriptor. Every shape - the bordered
-# box, the bare agent-glyph row, opencode's left-bar, and pi's
+# box, the bare agent-glyph row, the left-bar form, and Pi's
 # identity-gated separated pair (which this adapter pioneered) - now lives in
 # the shared owner (bin/fm-composer-lib.sh, fm_composer_classify_screen), so
 # a new harness shape is taught there once and every backend learns it in the
-# same commit. The muse `⟩` glyph this adapter's local bare-prompt pattern
-# silently omitted is exactly the drift class that consolidation removes.
+# same commit. A supported glyph omitted from one backend's local pattern is
+# exactly the drift class that consolidation removes.
 
 fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   local out
@@ -3231,13 +3231,13 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # fm_composer_queued_enter_verdict confirms delivery. Verified hazard
 # (herdr-verification-p2.md "slash/$ autocomplete popup"): a `/`- or
 # `$`-prefixed send opens a completion popup within ~0.1s, exactly like tmux's
-# claude/codex popups, so the caller's <settle> before the first Enter matters
+# harness popups, so the caller's <settle> before the first Enter matters
 # here the same way it does for tmux.
 #
 # Confirmation signal: when the target is legibly idle before Enter,
 # submission is confirmed by fm_backend_herdr_wait_for_working observing a
-# submit-active agent_status after Enter. Live Claude on Herdr 0.8.0 can
-# keep agent_status idle for a whole landed turn, so an idle native result
+# submit-active agent_status after Enter. A native agent can keep
+# agent_status idle for a whole landed turn, so an idle native result
 # falls through to the shared composer verdict: empty is positive delivery,
 # proven pending retries Enter, and retries-exhausted pending plus a
 # generating busy signal is a queued Enter via
@@ -3245,8 +3245,8 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 #
 # Incident (2026-07-07, followed up on 2026-07-08): a redelivery loop in the
 # away-mode daemon. Root cause: composer-content submit confirmation was too
-# sensitive to harness rendering details. Real claude/codex use bare prompt
-# rows, and real codex adds dynamic idle suggestions after `›`; the later
+# sensitive to harness rendering details. Codex uses bare prompt rows and adds
+# dynamic idle suggestions after `›`; the later
 # ANSI-aware composer classifier now handles that Codex shape, and idle-baseline
 # submit confirmation still prefers native agent-state so a faint idle tip
 # cannot block a landed send. Composer content is consulted only after native
@@ -3272,14 +3272,11 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 #     the composer fallback. A cleared composer is delivery; a proven-pending
 #     composer on an idle pane is a swallow; extra Enter on an already-empty
 #     composer is a no-op, not a duplicate delivery of <text>.
-# Fallback path, for a harness whose native agent-state is never legibly idle
-# (measured live: herdr reports a cursor pane `blocked` in every state - idle,
-# mid-turn, and after - so the idle-baseline path above is structurally
-# unreachable for it). That harness always lands in the composer branch, and
-# cursor's mid-turn composer row renders its own placeholder beside a
-# right-aligned `ctrl+c to stop`, so the content verdict is `pending` on a
-# composer that holds no user text at all and every steer reported delivery
-# unconfirmed on a message that had actually landed.
+# Fallback path, for a harness whose native agent-state is never legibly idle.
+# Such a harness always lands in the composer branch, and a mid-turn composer
+# can render its own placeholder beside a right-aligned busy token, producing
+# `pending` even when it holds no user text and making a landed steer look
+# unconfirmed.
 # The escape is the SAME semantic signal the idle-baseline path uses, read from
 # the pane's verified busy footer instead of native agent-state, and it is the
 # rendered-footer twin of the tmux submit core's turn-started confirmation
@@ -3290,24 +3287,23 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # mid-turn cannot use a rendered-footer transition as proof of this Enter;
 # only the separate retries-exhausted, proven-pending queued-Enter verdict can
 # confirm delivery from its native working state.
-# Queued-while-busy Enter (OpenCode 1.18.4, and any harness that keeps typed
-# text visible until the current turn ends): after the retry budget, a proven
+# Queued-while-busy Enter, for any harness that keeps typed text visible until
+# the current turn ends: after the retry budget, a proven
 # pending composer plus native agent_status=working is delivered, not swallowed.
-# blocked is not working, so a Cursor pane that is blocked in every state does
-# not receive this conversion. On an idle native baseline, a rendered busy
-# footer may supply the same generating signal because live Claude never leaves
-# idle. The policy is fm_composer_queued_enter_verdict; this adapter only
+# A blocked state is not working and does not receive this conversion. On an
+# idle native baseline, a rendered busy footer may supply the same generating
+# signal when native state never leaves idle. The policy is
+# fm_composer_queued_enter_verdict; this adapter only
 # supplies the busy primitive.
 # Echoes empty|pending|unknown|send-failed, a subset of the proof-carrying
 # submit vocabulary. Empty means confirmed submitted for every backend; how
 # each backend confirms it is an internal decision.
 #
 # fm_backend_herdr_queued_enter_busy: delivery-busy for the shared queued-Enter
-# conversion. Native agent_status=working is generating; blocked is not (a
-# permission prompt, or Cursor's always-blocked native state, is not a queued
-# mid-turn). When <allow-rendered> is 1, an idle native baseline may also take
-# the pane's rendered busy footer, because live Claude keeps agent_status idle
-# through a whole turn.
+# conversion. Native agent_status=working is generating; blocked is not, since
+# a permission prompt is not a queued mid-turn. When <allow-rendered> is 1, an
+# idle native baseline may also take the pane's rendered busy footer because
+# native state can remain idle through a whole turn.
 fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered>
   local target=$1 allow_rendered=${2:-0} raw
   raw=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
@@ -3356,8 +3352,8 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         busy) printf 'empty'; return 0 ;;
         unknown) printf 'unknown'; return 0 ;;
       esac
-      # Native stayed idle. Composer empty is positive delivery (a landed
-      # Claude turn that never flipped agent_status). Proven pending retries.
+      # Native stayed idle. Composer empty is positive delivery even when a
+      # landed turn never flipped agent_status. Proven pending retries.
       verdict=$(fm_backend_herdr_composer_state "$target")
       case "$verdict" in
         empty) printf 'empty'; return 0 ;;

@@ -463,10 +463,10 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   # Ghost stripping can leave a REMNANT of an idle placeholder rather than
   # emptying it, because a terminal draws the cell under its cursor in reverse
   # video (SGR 7) - neither dim/faint nor a dark foreground, so that one
-  # character survives a stripper built for the other two. cursor-agent renders
-  # exactly this shape: a dim `Plan, search, build anything` whose first
-  # character is reverse-video, leaving a lone `P` (verified live on
-  # cursor-agent 2026.08.11-e8db854). Judging that remnant on its own reads
+  # character survives a stripper built for the other two. A verified styled
+  # agent pane rendered exactly this shape: a dim placeholder whose first
+  # character was reverse-video, leaving a lone bright remnant. Judging that
+  # remnant on its own reads
   # `pending` on a genuinely idle pane.
   # The plain row is the styling-independent signal, so consult it here. This
   # stays safe in the false-EMPTY direction because it demands the remnant be a
@@ -760,7 +760,7 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
 # rules with ▄ and ▀ instead of the box-drawing family, so without them a bare
 # composer's WRAP region walks straight through its own closing rule and
 # swallows the footer below it - which reads as real typed text and turns an
-# idle pane into a false `pending`. Measured live on a herdr cursor pane, where
+# idle pane into a false `pending`. Measured live on a Herdr agent pane, where
 # the wrap region ran from the composer row through the model and path rows.
 fm_composer_row_has_edge() {  # <trimmed-row>
   local row=$1

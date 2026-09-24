@@ -22,7 +22,7 @@
 # GUI-first, macOS-only (docs/cmux-backend.md "Setup"): explicit selection or
 # runtime auto-detection when firstmate itself is already running inside a
 # cmux-spawned terminal (primary CMUX_WORKSPACE_ID marker, with documented
-# macOS fallback signals for wrapper-stripped claude). Unlike Orca, cmux is a
+# macOS fallback signals for wrapper-stripped environments). Unlike Orca, cmux is a
 # pure session provider (treehouse still owns the worktree) and Escape IS
 # natively supported.
 #
@@ -546,8 +546,8 @@ fm_backend_cmux_composer_caps() {
 }
 
 # fm_backend_cmux_composer_state: thin adapter - capture plus capabilities in,
-# shared verdict out. Every shape (including the borderless claude row this
-# adapter once carried its own NBSP workaround for) lives in
+# shared verdict out. Every shape (including a borderless row this adapter once
+# carried its own NBSP workaround for) lives in
 # bin/fm-composer-lib.sh, so a new harness shape is taught there once and
 # never here. cmux has no identity probe, so the classifier's identity
 # sentinel resolves to unknown.

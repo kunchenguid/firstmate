@@ -164,7 +164,7 @@ fm_backend_tmux_current_command() {  # <target>
 # This is the foreground-process-group half of the liveness probe, and it exists
 # because `#{pane_current_command}` and `ps -o comm=` expose different name
 # fields whose roles vary by platform. On macOS the tmux field can carry a
-# harness-rewritten title (Claude Code 2.1.220 reports `2.1.220`) while `comm`
+# harness-rewritten version title while `comm`
 # retains executable identity; the portable Linux regression observes the
 # reverse for its version-named executable. Reading both `comm` and argv[0]
 # preserves an identifying install path without making either platform's field

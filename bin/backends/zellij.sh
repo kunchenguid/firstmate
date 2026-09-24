@@ -495,7 +495,7 @@ fm_backend_zellij_capture() {  # <target> <lines> [expected-label]
 # --- zellij composer capture and capability primitives ----------------------
 #
 # `zellij action dump-screen --ansi` ("Preserve ANSI styling in the dump
-# output", verified live at zellij 0.44.0 against real Claude Code) gives
+# output", verified live at zellij 0.44.0 against a styled agent pane) gives
 # zellij a styled capture, so the shared classifier reads its composer with
 # the same ghost-stripping confidence as tmux and herdr. Every shape lives in
 # the shared owner (bin/fm-composer-lib.sh, fm_composer_classify_screen);

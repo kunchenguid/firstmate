@@ -47,8 +47,8 @@
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised
-# ghost/placeholder runs - dim/faint (SGR 2, claude's/codex's/cursor's ghost) AND a
-# dark/muted truecolor foreground (grok's placeholder) - from one captured,
+# ghost/placeholder runs - dim/faint (SGR 2) and dark/muted truecolor
+# foregrounds - from one captured,
 # styled composer line and prints the plain, real-typed text. Kept as a named
 # tmux entry point (and for existing callers/tests) but owns no logic of its own,
 # so the tmux and herdr adapters cannot drift apart on what counts as ghost text.
@@ -181,8 +181,8 @@ fm_pane_is_busy() {  # <target> [harness]
 # swallowed Enter leaves our text in the composer and retyping would duplicate
 # it. Echoes the final proof-carrying verdict on stdout so callers can require
 # exact `empty` before treating submission as confirmed.
-# Busy-queued Enter (opencode 1.18.4): the harness accepts Enter while mid-turn
-# and queues it for after the current turn, but keeps the typed text visible in
+# Busy-queued Enter: a harness may accept Enter while mid-turn and queue it for
+# after the current turn while keeping the typed text visible in
 # the composer. Once the Enter-retry budget is spent and a structurally proven
 # composer still reads "pending", the submit core falls back to
 # `fm_pane_is_busy`: a busy pane means the Enter was accepted and queued (report
