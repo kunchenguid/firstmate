@@ -27,6 +27,8 @@ set -u
 . "$ROOT/bin/fm-trace-context-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -487,6 +489,49 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+# fm-pr-check.sh publishes pr= and pr_head= as the record's last lines, and the
+# merge poll's identity parse rejects any unknown line after pr= as tampering.
+record_pr_last() {  # <case-dir> <id>
+  {
+    printf '%s\n' "pr=https://github.com/example/repo/pull/468"
+    printf '%s\n' 'pr_head=c8267c9bda4d80c433252459a368b60ee2d0f437'
+  } >> "$1/home/state/$2.meta"
+  fm_pr_metadata_identity_parse "$1/home/state/$2.meta" \
+    || fail "the seeded PR record should validate before relaunch"
+}
+
+test_relaunch_keeps_the_recorded_pr_valid_for_the_merge_poll() {
+  local dir out rc
+  dir=$(new_case pr-poll rl40)
+  add_ship_task "$dir" rl40 claude
+  record_pr_last "$dir" rl40
+
+  out=$(run_control "$dir" rl40 relaunch --note "continuing after review"); rc=$?
+  expect_code 0 "$rc" "relaunch of a task with a recorded PR should succeed"$'\n'"$out"
+  [ -n "$(meta_field "$dir" rl40 control_relaunch_tx)" ] \
+    || fail "the relaunch transaction id should be recorded"
+  fm_pr_metadata_identity_parse "$dir/home/state/rl40.meta" \
+    || fail "relaunch left a line after pr= that disables the merge poll:"$'\n'"$(cat "$dir/home/state/rl40.meta")"
+  pass "fm-control relaunch: a recorded PR still validates for the merge poll"
+}
+
+test_traced_relaunch_keeps_the_recorded_pr_valid_for_the_merge_poll() {
+  local dir out rc
+  dir=$(new_case pr-poll-trace rl41)
+  add_ship_task "$dir" rl41 claude
+  record_pr_last "$dir" rl41
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
+
+  out=$(run_control "$dir" rl41 relaunch --note "continuing after review"); rc=$?
+  expect_code 0 "$rc" "traced relaunch of a task with a recorded PR should succeed"$'\n'"$out"
+  fm_trace_context_valid "$(meta_field "$dir" rl41 traceparent)" \
+    || fail "the replacement's trace carrier should be recorded"
+  fm_pr_metadata_identity_parse "$dir/home/state/rl41.meta" \
+    || fail "traced relaunch left a line after pr= that disables the merge poll:"$'\n'"$(cat "$dir/home/state/rl41.meta")"
+  pass "fm-control relaunch: a recorded PR still validates for the merge poll when tracing is on"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -2338,6 +2383,8 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_the_recorded_pr_valid_for_the_merge_poll
+test_traced_relaunch_keeps_the_recorded_pr_valid_for_the_merge_poll
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
