@@ -132,6 +132,23 @@
 #                          inbox and a fresh child beacon are not idle proof;
 #                          the foreign queue itself stays read-only, and one
 #                          parent notification covers each no-progress episode
+#   check: secondmate <id> auto-relaunched after <cause> (<where>)
+#                          the liveness tick probed a registered secondmate's
+#                          recorded endpoint, got the recovery-grade `dead` or
+#                          `missing` verdict, and relaunched it through the
+#                          same guarded fm-spawn.sh --secondmate path the
+#                          session-start sweep uses; one wake per relaunch, and
+#                          state/.secondmate-relaunch-<id> keeps the durable
+#                          per-mate count (bin/fm-secondmate-liveness-lib.sh)
+#   check: secondmate <id> auto-relaunch failed after <cause>: <detail>
+#                          the same verdict authorized recovery but the
+#                          relaunch itself failed; the attempt is ledgered and
+#                          counts toward the bound below
+#   check: secondmate <id> auto-relaunch paused after <n> attempts in <s>s; ...
+#                          a mate that kept dying exceeded its bounded relaunch
+#                          budget and is parked until a probe reads it live
+#                          again (FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS and
+#                          FM_SECONDMATE_LIVENESS_WINDOW_SECS)
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -195,6 +212,13 @@ mkdir -p "$STATE"
 # watcher reads only its presence (afk_record_present below).
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
+# Persistent-secondmate endpoint liveness: the shared probe/relaunch library is
+# the same one bin/fm-bootstrap.sh's session-start sweep drives, so ordinary
+# supervision recovers a positively dead or missing mate through the identical
+# guarded path. The watcher contributes only the cadence, the relaunch bound,
+# and wake emission (secondmate_liveness_tick below).
+# shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
+. "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -293,6 +317,25 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # secondmate_wake_stall_tick, never a substitute for it.
 SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-}
 case "$SECONDMATE_WAKE_STALL_SECS" in ''|*[!0-9]*|0) SECONDMATE_WAKE_STALL_SECS=180 ;; esac
+# Secondmate ENDPOINT liveness (distinct from the wake-loop stall observation
+# above): on this cadence the watcher probes each registered mate's recorded
+# endpoint through fm-secondmate-liveness-lib.sh and relaunches only on the
+# same recovery-grade `dead` or `missing` verdicts the session-start sweep
+# uses. The cadence survives watcher restarts via a state marker's mtime, so a
+# relaunch wake cannot restart the probe into a tight loop.
+SECONDMATE_LIVENESS_SECS=${FM_SECONDMATE_LIVENESS_SECS:-}
+case "$SECONDMATE_LIVENESS_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_SECS=60 ;; esac
+# Per-relaunch wall-clock bound, so a wedged spawn cannot stall the poll.
+SECONDMATE_LIVENESS_TIMEOUT=${FM_SECONDMATE_LIVENESS_TIMEOUT:-}
+case "$SECONDMATE_LIVENESS_TIMEOUT" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_TIMEOUT=120 ;; esac
+# Relaunch bound: at most this many automatic attempts per window per mate,
+# counted from the durable attempt ledger the shared library appends to. A mate
+# that keeps dying past the bound wakes once and is parked until a probe reads
+# it alive again, so a flapping endpoint cannot relaunch forever unseen.
+SECONDMATE_LIVENESS_MAX_ATTEMPTS=${FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS:-}
+case "$SECONDMATE_LIVENESS_MAX_ATTEMPTS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_MAX_ATTEMPTS=3 ;; esac
+SECONDMATE_LIVENESS_WINDOW_SECS=${FM_SECONDMATE_LIVENESS_WINDOW_SECS:-}
+case "$SECONDMATE_LIVENESS_WINDOW_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_WINDOW_SECS=3600 ;; esac
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -943,6 +986,98 @@ EOF
     wake "$reason"
   done
   return 0
+}
+
+# The ordinary-supervision half of the secondmate liveness guarantee, paired
+# with bin/fm-bootstrap.sh's session-start sweep over the shared library in
+# bin/fm-secondmate-liveness-lib.sh (which owns the state contract, the remote
+# probe rules, the kill ordering, and the guarded relaunch). On a bounded
+# cadence each registered mate's recorded endpoint is probed once; only a
+# recovery-grade `dead` or `missing` verdict relaunches, every relaunch
+# (success or failure) becomes exactly one durable `check` wake row, and every
+# other verdict lands only in the triage log. The tick finishes every mate
+# before it wakes once on the first outcome, so one dead mate never delays
+# another's recovery; the drain surfaces every queued row. A mate that keeps
+# dying is parked after SECONDMATE_LIVENESS_MAX_ATTEMPTS ledgered attempts
+# inside SECONDMATE_LIVENESS_WINDOW_SECS: the bound marker wakes once, further
+# probes stay silent, and a later live probe ledgers a `rearmed` row and clears
+# the marker so a manually recovered mate rejoins the guarantee with a full
+# budget. The per-mate liveness lock serializes this tick against a concurrent
+# session-start sweep, so neither side can kill or re-probe an endpoint the
+# other is mid-relaunch on.
+secondmate_liveness_tick() {
+  local tick_marker="$STATE/.secondmate-liveness-tick"
+  [ "$(age_of "$tick_marker")" -ge "$SECONDMATE_LIVENESS_SECS" ] || return 0
+  touch "$tick_marker" || return 1
+  local now=$(( $(date +%s) )) meta id kind
+  local bound_marker attempts notify_key reason queued err first_reason='' failed=0
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    kind=$(fm_meta_get "$meta" kind 2>/dev/null || true)
+    [ "$kind" = secondmate ] || continue
+    id=${meta##*/}
+    id=${id%.meta}
+    case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    fm_secondmate_liveness_lock "$id" || continue
+    fm_secondmate_liveness_probe "$meta" "$id" poll
+    bound_marker="$STATE/.secondmate-relaunch-bound-$id"
+    reason='' notify_key='' err=''
+    case "$FM_SM_LIVE_STATUS" in
+      relaunchable)
+        if [ -e "$bound_marker" ] || [ -L "$bound_marker" ]; then
+          :
+        elif ! attempts=$(fm_secondmate_liveness_recent_attempts "$id" "$SECONDMATE_LIVENESS_WINDOW_SECS"); then
+          err="relaunch ledger is unreadable; endpoint left $FM_SM_LIVE_STATE"
+        elif [ "$attempts" -ge "$SECONDMATE_LIVENESS_MAX_ATTEMPTS" ]; then
+          if printf '%s\t%s\n' "$now" "$FM_SM_LIVE_STATE" > "$bound_marker"; then
+            reason="check: secondmate $id auto-relaunch paused after $SECONDMATE_LIVENESS_MAX_ATTEMPTS attempts in ${SECONDMATE_LIVENESS_WINDOW_SECS}s; endpoint still $FM_SM_LIVE_STATE - relaunch it manually or retire the route"
+            notify_key="secondmate-relaunch-bound-$id"
+          else
+            err="relaunch park marker could not be written; endpoint left $FM_SM_LIVE_STATE"
+          fi
+        elif fm_secondmate_liveness_relaunch "$meta" "$id" "$SECONDMATE_LIVENESS_TIMEOUT"; then
+          reason="check: secondmate $id auto-relaunched after $FM_SM_LIVE_CAUSE ($FM_SM_LIVE_WHERE)"
+          notify_key="secondmate-relaunch-$id-$now"
+        elif [ "$FM_SM_LIVE_STATUS" = skipped ]; then
+          err=$FM_SM_LIVE_REASON
+        else
+          reason="check: secondmate $id auto-relaunch failed after $FM_SM_LIVE_CAUSE: $(fm_sm_live_first_line "$FM_SM_LIVE_OUT")"
+          notify_key="secondmate-relaunch-failed-$id-$now"
+        fi
+        ;;
+      alive)
+        if [ -e "$bound_marker" ] || [ -L "$bound_marker" ]; then
+          if ! fm_secondmate_liveness_ledger_add "$id" rearmed; then
+            err="relaunch ledger is unwritable; auto-relaunch stays paused"
+          elif ! rm -f "$bound_marker"; then
+            err="relaunch park marker could not be cleared; auto-relaunch stays paused"
+          else
+            triage_log "secondmate $id live again; auto-relaunch pause cleared"
+          fi
+        fi
+        ;;
+      skipped)
+        triage_log "secondmate $id liveness: $FM_SM_LIVE_REASON"
+        ;;
+    esac
+    if [ -n "$reason" ]; then
+      queued=$(fm_wake_queued_keys check)
+      if printf '%s\n' "$queued" | grep -Fx "$notify_key" >/dev/null 2>&1 \
+        || fm_wake_append check "$notify_key" "$reason"; then
+        [ -n "$first_reason" ] || first_reason=$reason
+      else
+        err="check wake row could not be queued: $reason"
+      fi
+    fi
+    fm_secondmate_liveness_unlock "$id"
+    if [ -n "$err" ]; then
+      echo "watcher: secondmate $id liveness: $err" >&2
+      triage_log "secondmate $id liveness error: $err" || true
+      failed=1
+    fi
+  done
+  [ -z "$first_reason" ] || wake "$first_reason"
+  [ "$failed" -eq 0 ]
 }
 
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
@@ -2430,6 +2565,16 @@ while :; do
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
+
+  # Endpoint liveness runs before queue observation: a positively dead or
+  # missing secondmate endpoint is relaunched here on a bounded cadence, which
+  # is also what unsticks that mate's foreign wake queue. The tick's single
+  # wake exits the cycle like every other wake, so its marker is stamped before
+  # any relaunch and the restarted watcher will not re-probe early.
+  secondmate_liveness_tick || {
+    echo "watcher: secondmate liveness check failed" >&2
+    exit 1
+  }
 
   # A live secondmate endpoint does not prove that its own wake loop is alive.
   # Observe the foreign queue before the rest of this cycle so an aged row wakes
