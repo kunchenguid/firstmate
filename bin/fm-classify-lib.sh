@@ -163,22 +163,28 @@ last_status_line() {  # <status-file> [<previous-event-var>]
 # A bare legacy free-text line counts as an event only when a captain token leads
 # it, so continuation prose that merely mentions one cannot hide a declaration.
 _fm_status_event_scan() {
-  local line last='' prev='' fallback='' verb legacy_re unstamped
+  local line last='' prev='' fallback='' legacy_re
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in *[![:space:]]*) fallback=$line ;; *) continue ;; esac
-    case "$line" in *:*) status_line_verb "$line" verb ;; *) verb='' ;; esac
-    case "$verb" in
-      working|needs-decision|blocked|done|failed|note|\
-      "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|\
-      "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|\
-      "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") prev=$last; last=$line ;;
-      *) _fm_status_unstamped "$line" unstamped
-         _fm_classify_matches "$unstamped" "$legacy_re" && { prev=$last; last=$line; } ;;
-    esac
+    _fm_status_line_is_event "$line" "$legacy_re" && { prev=$last; last=$line; }
   done
   printf '%s\n%s\n' "$prev" "${last:-$fallback}"
   [ -n "$last" ]
+}
+
+# 0 when a nonblank <line> is a recognized status event for the scan above.
+_fm_status_line_is_event() {  # <line> <legacy-captain-re>
+  local verb unstamped
+  case "$1" in *:*) status_line_verb "$1" verb ;; *) verb='' ;; esac
+  case "$verb" in
+    working|needs-decision|blocked|done|failed|note|\
+    "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|\
+    "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|\
+    "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") return 0 ;;
+  esac
+  _fm_status_unstamped "$1" unstamped
+  _fm_classify_matches "$unstamped" "$2"
 }
 
 # 0 when <line> matches the extended regex <pattern> case-insensitively, leaving
@@ -265,6 +271,37 @@ status_is_captain_held() {  # <status-line>
 status_is_paused_or_captain_held() {  # <status-line>
   local line=$1
   status_is_paused "$line" || status_is_captain_held "$line"
+}
+
+# The status line that holds a crew in a declared wait, or nothing when it is in
+# none. Supervisors decide the wait from this line, never from the raw latest
+# event: a resolved line is also how firstmate answers a decision (fm-send
+# --resolve-key), and one that lands after a pause for a different phase key -
+# including the stated default key a keyless decision shares - does not end the
+# pause. Only a resolved line for the pause's own phase key (see
+# _fm_activity_phase_key) retracts it, as does any other later event. A
+# captain-held line counts only while it is the latest event.
+status_declared_wait_line() {  # <status-file>
+  local f=$1 last line wait='' legacy_re resolve
+  last=$(last_status_line "$f")
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  if status_is_paused_or_captain_held "$last"; then
+    printf '%s\n' "$last"
+    return 0
+  fi
+  [ "$(status_line_verb "$last")" = "$resolve" ] || return 0
+  legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    _fm_status_line_is_event "$line" "$legacy_re" || continue
+    if status_is_paused "$wait" && [ "$(status_line_verb "$line")" = "$resolve" ] \
+      && [ "$(_fm_activity_phase_key "$line")" != "$(_fm_activity_phase_key "$wait")" ]; then
+      continue
+    fi
+    wait=
+    status_is_paused "$line" && wait=$line
+  done < "$f"
+  [ -z "$wait" ] || printf '%s\n' "$wait"
 }
 
 # A condition-aware declared wait: a `paused:` line may say WHEN it expects to
@@ -758,8 +795,8 @@ status_open_decisions() {  # <status-file> [<kind>]
 
 # Resolve the log's current declaration at one boundary for crew-state consumers.
 # Any decision the fold still holds open wins over unrelated events, and the
-# fold's most recently opened record supplies it; the latest recognized event
-# stands when nothing is open.
+# fold's most recently opened record supplies it; a standing declared wait, then
+# the latest recognized event, stands when nothing is open.
 # Actual run/pane evidence is still reconciled by fm-crew-state.sh.
 status_current_line() {  # <status-file> <kind>
   local open key verb note current=''
@@ -769,6 +806,7 @@ status_current_line() {  # <status-file> <kind>
   done <<EOF
 $open
 EOF
+  [ -n "$current" ] || current=$(status_declared_wait_line "$1")
   [ -n "$current" ] || current=$(last_status_line "$1")
   printf '%s\n' "$current"
 }
