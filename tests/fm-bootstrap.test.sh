@@ -813,22 +813,37 @@ test_fleet_sync_timeout_is_computed_before_launch() {
   pass "bootstrap computes the timeout before launching fleet sync"
 }
 
+# make_routine_bootstrap_fixture <case-dir> [with-seats]
+# With `with-seats` the primary also carries the three Claude seat settings and
+# a SECOND live secondmate home that declines them, so one routine bootstrap run
+# exercises both the inherited default and a home's own decline. Without it the
+# fixture is exactly what it has always been.
 make_routine_bootstrap_fixture() {
-  local case_dir=$1 fakebin root home sm c1
+  local case_dir=$1 with_seats=${2:-} fakebin root home sm sm2 c1
   root="$case_dir/root"
   home="$case_dir/home"
   sm="$case_dir/sm"
+  sm2="$case_dir/sm-optout"
   fm_git_identity
   mkdir -p "$home/config" "$home/state"
   printf '%s\n' codex > "$home/config/crew-harness"
   printf '%s\n' '{"rules":[{"when":"normal work","use":{"harness":"codex"}}],"default":{"harness":"claude","effort":"low"}}' \
     > "$home/config/crew-dispatch.json"
+  if [ "$with_seats" = with-seats ]; then
+    printf '%s\n' work > "$home/config/claude-seat"
+    printf '%s\n' "$case_dir/fleet-seats" > "$home/config/claude-seats-root"
+    printf '%s\n' 15 > "$home/config/claude-seat-threshold"
+  fi
   git init -q -b main "$root"
   {
     printf '%s\n' '.fm-secondmate-home'
     printf '%s\n' 'config/crew-harness'
     printf '%s\n' 'config/crew-dispatch.json'
     printf '%s\n' 'config/startup-memory-budget'
+    printf '%s\n' 'config/claude-seat'
+    printf '%s\n' 'config/claude-seats-root'
+    printf '%s\n' 'config/claude-seat-threshold'
+    printf '%s\n' 'config/claude-seat-local'
   } > "$root/.gitignore"
   printf '%s\n' 'instructions' > "$root/AGENTS.md"
   mkdir -p "$root/bin" "$root/.agents/skills"
@@ -845,6 +860,19 @@ make_routine_bootstrap_fixture() {
     printf 'harness=codex\n'
     printf 'home=%s\n' "$sm"
   } > "$home/state/sm.meta"
+  if [ "$with_seats" = with-seats ]; then
+    git -C "$root" worktree add -q --detach "$sm2" "$c1"
+    printf '%s\n' sm-optout > "$sm2/.fm-secondmate-home"
+    mkdir -p "$sm2/config"
+    : > "$sm2/config/claude-seat-local"
+    printf '%s\n' personal > "$sm2/config/claude-seat"
+    {
+      printf 'window=firstmate:fm-sm-optout\n'
+      printf 'kind=secondmate\n'
+      printf 'harness=codex\n'
+      printf 'home=%s\n' "$sm2"
+    } > "$home/state/sm-optout.meta"
+  fi
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
@@ -857,7 +885,7 @@ case "${1:-}" in
     esac
     ;;
   capture-pane) printf '❯\n' ;;
-  list-windows) printf '%s\n' fm-sm ;;
+  list-windows) printf '%s\n' fm-sm; printf '%s\n' fm-sm-optout ;;
 esac
 exit 0
 SH
@@ -866,8 +894,8 @@ SH
 }
 
 run_routine_bootstrap_fixture() {
-  local shell=$1 case_dir=$2 fixture root home fakebin
-  fixture=$(make_routine_bootstrap_fixture "$case_dir")
+  local shell=$1 case_dir=$2 with_seats=${3:-} fixture root home fakebin
+  fixture=$(make_routine_bootstrap_fixture "$case_dir" "$with_seats")
   root=${fixture%%|*}
   fixture=${fixture#*|}
   home=${fixture%%|*}
@@ -882,6 +910,33 @@ test_routine_bootstrap_confirmations_are_silent() {
   out=$(run_routine_bootstrap_fixture bash "$TMP_ROOT/routine-silent")
   [ -z "$out" ] || fail "routine bootstrap confirmations should be silent, got: $out"
   pass "bootstrap keeps routine tasks-axi, harness, dispatch, and already-live liveness confirmations silent"
+}
+
+# The session-start secondmate sweep is the convergence point a declining home
+# meets without anyone running a command, so it is the one most likely to undo
+# an opt-out silently. This drives the real bootstrap and asserts both halves:
+# the declining home keeps its own seat and the other home still takes the
+# primary's.
+test_routine_bootstrap_honours_a_homes_seat_decline() {
+  local case_dir out sm sm2
+  case_dir="$TMP_ROOT/routine-seat-decline"
+  out=$(run_routine_bootstrap_fixture bash "$case_dir" with-seats)
+  sm="$case_dir/sm"
+  sm2="$case_dir/sm-optout"
+  [ -z "$out" ] || fail "a home's seat decline should stay a silent routine confirmation, got: $out"
+  [ "$(cat "$sm2/config/claude-seat" 2>/dev/null)" = personal ] \
+    || fail "the session-start sweep overwrote a declining home's own seat (got '$(cat "$sm2/config/claude-seat" 2>/dev/null)')"
+  [ -e "$sm2/config/claude-seats-root" ] \
+    && fail "the session-start sweep gave a declining home the fleet's seats root"
+  [ -e "$sm2/config/claude-seat-threshold" ] \
+    && fail "the session-start sweep gave a declining home the fleet's seat threshold"
+  [ "$(cat "$sm2/config/crew-harness" 2>/dev/null)" = codex ] \
+    || fail "declining seats must not stop a home's ordinary inherited config"
+  [ "$(cat "$sm/config/claude-seat" 2>/dev/null)" = work ] \
+    || fail "a home that did not decline must still take the primary's seat on the sweep"
+  [ "$(cat "$sm/config/claude-seat-threshold" 2>/dev/null)" = 15 ] \
+    || fail "a home that did not decline must still take the primary's seat threshold"
+  pass "bootstrap: the session-start secondmate sweep honours a home's seat decline and converges every other home"
 }
 
 test_routine_bootstrap_contract_runs_under_system_bash() {
@@ -1261,6 +1316,7 @@ test_fleet_sync_timeout_explicit_override_wins
 test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
+test_routine_bootstrap_honours_a_homes_seat_decline
 test_routine_bootstrap_contract_runs_under_system_bash
 test_network_phase_partitions_the_run
 test_network_sweeps_recheck_lock_ownership

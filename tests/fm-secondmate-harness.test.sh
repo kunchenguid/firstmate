@@ -555,6 +555,43 @@ test_spawn_bare_backward_compat() {
   pass "B4 spawn: no config at all -> own harness and no propagation side effects"
 }
 
+# A secondmate home that declines inherited Claude seats keeps its own three
+# seat files through its OWN spawn, which is the convergence point a declining
+# home passes through most often: every launch and relaunch runs it.
+test_spawn_honours_a_homes_seat_decline() {
+  local w declining taking
+  w="$TMP_ROOT/spawn-seat-decline"
+  declining="$w/sm-optout"
+  taking="$w/sm-fleet"
+  mkdir -p "$w/home/config"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  printf 'work\n' > "$w/home/config/claude-seat"
+  printf '%s\n' "$w/fleet-seats" > "$w/home/config/claude-seats-root"
+  printf '15\n' > "$w/home/config/claude-seat-threshold"
+  make_seeded_home "$declining" sm-optout
+  make_seeded_home "$taking" sm-fleet
+  mkdir -p "$declining/config"
+  : > "$declining/config/claude-seat-local"
+  printf 'personal\n' > "$declining/config/claude-seat"
+
+  spawn_secondmate "$w" sm-optout "$declining"
+  spawn_secondmate "$w" sm-fleet "$taking"
+
+  [ "$(cat "$declining/config/claude-seat" 2>/dev/null)" = personal ] \
+    || fail "seat decline: the declining home's own seat was overwritten at spawn (got '$(cat "$declining/config/claude-seat" 2>/dev/null)')"
+  [ -e "$declining/config/claude-seats-root" ] \
+    && fail "seat decline: the declining home was given the fleet's seats root at spawn"
+  [ -e "$declining/config/claude-seat-threshold" ] \
+    && fail "seat decline: the declining home was given the fleet's seat threshold at spawn"
+  [ "$(cat "$declining/config/crew-harness" 2>/dev/null)" = codex ] \
+    || fail "seat decline: declining seats must not stop ordinary inherited config"
+  [ "$(cat "$taking/config/claude-seat" 2>/dev/null)" = work ] \
+    || fail "seat decline: a home that did not decline must still inherit the seat at spawn"
+  [ "$(cat "$taking/config/claude-seat-threshold" 2>/dev/null)" = 15 ] \
+    || fail "seat decline: a home that did not decline must still inherit the threshold"
+  pass "B5a spawn: a home's seat decline holds at secondmate launch; every other home still inherits"
+}
+
 # An explicit per-spawn harness arg wins over config/secondmate-harness.
 test_spawn_explicit_harness_wins() {
   local w sm meta
@@ -2642,6 +2679,7 @@ test_propagate_lib
 test_spawn_split_and_inherit
 test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
+test_spawn_honours_a_homes_seat_decline
 test_spawn_explicit_harness_wins
 test_spawn_unverified_secondmate_harness_refused
 test_spawn_cursor_secondmate_launches_with_its_primary_contract

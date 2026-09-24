@@ -345,6 +345,147 @@ test_failed_secondmate_push_does_not_undo_the_switch() {
   pass "a failed secondmate push is reported and never undoes the primary switch"
 }
 
+# decline_inherited_seats <secondmate-home> [content]
+# The declining home's own opt-out flag. Presence is the whole setting, so the
+# default case writes an empty file exactly as an operator's `touch` would.
+decline_inherited_seats() {
+  local sm=$1
+  mkdir -p "$sm/config"
+  printf '%s' "${2-}" > "$sm/config/claude-seat-local"
+}
+
+test_a_declining_home_keeps_its_own_seat_through_a_switch() {
+  local rec out sm
+  rec=$(make_seat_case switch-decline)
+  read_seat_case "$rec"
+  mkdir -p "$SEATS_DIR/work"
+  seat_logged_in "$SPEC_DIR" '(default)' "$SEATS_DIR/work"
+  sm=$(add_local_secondmate "$HOME_DIR" "$FAKEBIN" smdecline)
+  decline_inherited_seats "$sm"
+  printf 'personal\n' > "$sm/config/claude-seat"
+  printf '%s\n' "$CASE_DIR/own-seats" > "$sm/config/claude-seats-root"
+  printf '40\n' > "$sm/config/claude-seat-threshold"
+
+  out=$(TMUX='' run_seat "$HOME_DIR" "$FAKEBIN" switch work)
+  expect_code 0 "$?" "a switch must succeed with a declining home on the machine: $out"
+  assert_grep "work" "$HOME_DIR/config/claude-seat" "the primary switch must still land"
+  [ "$(cat "$sm/config/claude-seat" 2>/dev/null)" = personal ] \
+    || fail "a declining home must keep its own seat through a switch (got '$(cat "$sm/config/claude-seat" 2>/dev/null)')"
+  [ "$(cat "$sm/config/claude-seats-root" 2>/dev/null)" = "$CASE_DIR/own-seats" ] \
+    || fail "a declining home must keep its own seats root"
+  [ "$(cat "$sm/config/claude-seat-threshold" 2>/dev/null)" = 40 ] \
+    || fail "a declining home must keep its own auto-switch threshold"
+  assert_contains "$out" "claude-seat: skipped - home declines inherited seat settings" \
+    "the switch must say which seat item it skipped and why"
+  assert_contains "$out" "secondmate smdecline ($sm)" "the skip must be attributed to the home it belongs to"
+
+  # A home that declines while holding NO seat of its own keeps holding none:
+  # the primary's value is not pushed in as a "missing" default either.
+  rm -f "$sm/config/claude-seat"
+  out=$(TMUX='' run_seat "$HOME_DIR" "$FAKEBIN" switch default)
+  expect_code 0 "$?" "the second switch must succeed: $out"
+  assert_absent "$sm/config/claude-seat" \
+    "a declining home with no seat of its own must still be left alone"
+
+  # The decline takes nothing away from the home itself: it runs its own switch
+  # against its own seats root, and that switch reaches no other home.
+  mkdir -p "$CASE_DIR/own-seats/client"
+  seat_logged_in "$SPEC_DIR" '(default)' "$SEATS_DIR/work" "$CASE_DIR/own-seats/client"
+  out=$(TMUX='' run_seat "$sm" "$FAKEBIN" switch client)
+  expect_code 0 "$?" "a declining home must still run its own switch: $out"
+  [ "$(cat "$sm/config/claude-seat" 2>/dev/null)" = client ] \
+    || fail "a declining home's own switch must record its own seat: $out"
+  assert_absent "$HOME_DIR/config/claude-seat" \
+    "a declining home's own switch must not reach back into the primary"
+  pass "a local home that declines keeps its own three seat settings through a switch"
+}
+
+test_a_switch_still_reaches_every_home_that_did_not_decline() {
+  local rec out declining taking
+  rec=$(make_seat_case switch-mixed)
+  read_seat_case "$rec"
+  mkdir -p "$SEATS_DIR/work"
+  seat_logged_in "$SPEC_DIR" '(default)' "$SEATS_DIR/work"
+  declining=$(add_local_secondmate "$HOME_DIR" "$FAKEBIN" smoptout)
+  taking=$(add_local_secondmate "$HOME_DIR" "$FAKEBIN" smfleet)
+  # Presence alone is the setting, so text an operator might expect to turn it
+  # back off does not: a file saying "off" still declines.
+  decline_inherited_seats "$declining" 'off
+'
+  printf 'personal\n' > "$declining/config/claude-seat"
+
+  out=$(TMUX='' run_seat "$HOME_DIR" "$FAKEBIN" switch work)
+  expect_code 0 "$?" "the switch should succeed: $out"
+  [ "$(cat "$taking/config/claude-seat" 2>/dev/null)" = work ] \
+    || fail "one home's decline must not hold back any other local home: $out"
+  [ "$(cat "$declining/config/claude-seat" 2>/dev/null)" = personal ] \
+    || fail "the declining home must be the only one left alone, whatever its flag file says"
+  pass "one home's decline leaves every other local home taking the switch"
+}
+
+test_status_names_every_local_home_that_declined() {
+  local rec out declining taking
+  rec=$(make_seat_case status-decline)
+  read_seat_case "$rec"
+  seat_logged_in "$SPEC_DIR" '(default)'
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" status)
+  assert_contains "$out" "local secondmate homes declining inherited seats:" \
+    "status must always carry the declining-homes section"
+  assert_contains "$out" "(none - every local home takes this seat)" \
+    "with no decline anywhere status must say so plainly"
+
+  declining=$(add_local_secondmate "$HOME_DIR" "$FAKEBIN" smshown)
+  taking=$(add_local_secondmate "$HOME_DIR" "$FAKEBIN" smhidden)
+  decline_inherited_seats "$declining"
+  printf 'personal\n' > "$declining/config/claude-seat"
+  printf 'work\n' > "$taking/config/claude-seat"
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" status |
+    sed -n '/^local secondmate homes declining inherited seats:$/,$p')
+  assert_contains "$out" "smshown	personal	$declining" \
+    "status must name each declining home with the seat it is actually on"
+  assert_not_contains "$out" "smhidden" \
+    "the declining section must not list a home that takes the fleet's seat"
+  pass "status names every local home that declined and the seat it is really on"
+}
+
+test_a_non_file_decline_flag_still_declines() {
+  local rec out sm_dir sm_link kind
+  rec=$(make_seat_case decline-non-file)
+  read_seat_case "$rec"
+  mkdir -p "$SEATS_DIR/work"
+  seat_logged_in "$SPEC_DIR" '(default)' "$SEATS_DIR/work"
+  sm_dir=$(add_local_secondmate "$HOME_DIR" "$FAKEBIN" smdirflag)
+  sm_link=$(add_local_secondmate "$HOME_DIR" "$FAKEBIN" smlinkflag)
+  mkdir -p "$sm_dir/config/claude-seat-local"
+  mkdir -p "$sm_link/config"
+  ln -s "$CASE_DIR/nowhere" "$sm_link/config/claude-seat-local"
+  printf 'personal\n' > "$sm_link/config/claude-seat"
+
+  out=$(TMUX='' run_seat "$HOME_DIR" "$FAKEBIN" switch work 2>&1)
+  expect_code 0 "$?" "a switch must succeed with non-file decline flags on the machine: $out"
+  assert_grep "work" "$HOME_DIR/config/claude-seat" "the primary switch must still stand"
+  assert_absent "$sm_dir/config/claude-seat" \
+    "a directory flag must decline, not let the seat through"
+  [ "$(cat "$sm_link/config/claude-seat" 2>/dev/null)" = personal ] \
+    || fail "a dangling symlink flag must decline and keep the home's own seat"
+  assert_not_contains "$out" "not every secondmate home was updated" \
+    "a non-file decline flag is a decline, not a push failure"
+  for kind in smdirflag smlinkflag; do
+    assert_contains "$out" "secondmate $kind" "the switch must report the declining home $kind"
+  done
+  assert_contains "$out" "claude-seat: skipped - home declines inherited seat settings" \
+    "a non-file flag must be reported as a decline"
+
+  out=$(run_seat "$HOME_DIR" "$FAKEBIN" status)
+  assert_contains "$out" "smdirflag	default	$sm_dir" \
+    "status must list a directory-flag home as declined"
+  assert_contains "$out" "smlinkflag	personal	$sm_link" \
+    "status must list a dangling-symlink-flag home as declined"
+  pass "a decline flag of any type declines and shows in status"
+}
+
 # add_unreachable_remote_secondmate <home> <fakebin> <id> -> echoes the path of
 # a log that records every SSH attempt to the remote route, which always fails.
 add_unreachable_remote_secondmate() {
@@ -1037,6 +1178,10 @@ test_forced_switch_refuses_a_seat_with_no_profile_directory
 test_switch_back_to_default_clears_the_setting
 test_switch_reaches_running_local_secondmate_homes
 test_failed_secondmate_push_does_not_undo_the_switch
+test_a_declining_home_keeps_its_own_seat_through_a_switch
+test_a_switch_still_reaches_every_home_that_did_not_decline
+test_status_names_every_local_home_that_declined
+test_a_non_file_decline_flag_still_declines
 test_remote_route_never_receives_seat_settings
 test_switch_never_contacts_remote_routes
 test_config_push_without_local_only_still_reaches_remote_routes

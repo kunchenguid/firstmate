@@ -114,6 +114,25 @@ Remote secondmate homes on other machines never receive seat settings, because a
 The seats themselves live outside any firstmate home - by default under `~/.claude-seats` - so the owner logs into a seat once and every home on the machine reaches the same profile.
 A home that needs its own set of seats overrides `config/claude-seats-root`.
 
+### One home on a separate account
+
+The default above is the whole machine moving together, and it stays the default.
+When one local home must spend a different account - a personal or client account while the rest run on the team account - that home declines the inheritance itself:
+
+```
+touch <that home>/config/claude-seat-local
+```
+
+The file's presence is the whole setting; nothing reads its content.
+From then on that home keeps its own `claude-seat`, `claude-seats-root`, and `claude-seat-threshold` untouched, including when it has none, and no local convergence overwrites them: not a switch's push, not the session-start secondmate sweep, and not that home's own launch or relaunch.
+The declining home still runs `bin/fm-seat.sh switch`, `threshold`, and `arm` normally; those act on itself alone.
+Only that home is left alone - every other local home still takes each switch, and a machine with no such file anywhere behaves exactly as it did before the flag existed.
+
+The decline is visible from the primary, because a setting that silently does nothing is the failure worth avoiding here.
+`bin/fm-seat.sh status` lists every local secondmate home that declined, with the seat that home is actually on, and each switch names the seat items it skipped for that home and why.
+Put the flag only in the home it belongs to: it is never inherited, so one home's billing choice is never decided for it elsewhere.
+[Configuration](configuration.md#claude-seats-configclaude-seat-configclaude-seats-root-configclaude-seat-threshold-configclaude-seat-local) owns the flag's schema.
+
 ## Limits worth knowing
 
 The login probe runs `quota-axi` against the seat's profile and treats an `oauth` source as logged in.

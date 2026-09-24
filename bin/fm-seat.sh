@@ -13,9 +13,11 @@
 #   fm-seat.sh arm [--interval <secs>] [--stable <n>]
 #   fm-seat.sh retire
 #
-# status     Print the active seat, the configured auto-switch threshold, and
-#            every live task's OWN recorded seat, so a switch can be read
-#            against the workers it did not touch.
+# status     Print the active seat, the configured auto-switch threshold, every
+#            live task's OWN recorded seat, so a switch can be read against the
+#            workers it did not touch, and every local secondmate home that
+#            declines inherited seat settings, with the seat that home is
+#            actually on, so a decline is never invisible.
 # list       Print every seat with its login state and account identity.
 # switch     Point future claude workers at <name>. `default` clears the setting
 #            and returns to the ambient login. `--next` rotates to the next
@@ -27,7 +29,8 @@
 #            there fails on its first message; --force overrides that refusal
 #            when the probe itself cannot reach a verdict. After the switch it
 #            runs bin/fm-config-push.sh --local-only so this machine's running local
-#            secondmate homes take the new seat too, reporting each home.
+#            secondmate homes take the new seat too, reporting each home, and
+#            naming each seat item a declining home skipped and why.
 # probe      Report whether a seat is logged in. Exit 0 logged in, 1 not logged
 #            in, 2 undecided.
 # add        Create an empty profile directory for a new seat and print the exact
@@ -51,6 +54,13 @@
 # A switch NEVER disturbs a running worker. It rewrites one config file that only
 # a fresh spawn reads; every live task keeps the profile recorded in its own task
 # record, and its relaunches and resumes keep reading that record.
+#
+# A switch reaches every local secondmate home by default, so the machine moves
+# together. A home that must spend a different account - one home on a personal
+# or client account while the rest run on the team account - declines by placing
+# config/claude-seat-local in its OWN config dir; it then keeps its own three
+# seat files and runs its own switch, threshold, and arm against itself.
+# bin/fm-config-inherit-lib.sh owns that decline for every convergence point.
 # bin/fm-seat-lib.sh owns the resolution rules; docs/claude-seats.md owns the
 # operator procedure, including what the account owner must do to add a seat.
 set -u
@@ -60,11 +70,20 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-seat-lib.sh
 . "$SCRIPT_DIR/fm-seat-lib.sh"
 # shellcheck source=bin/fm-quota-axi-lib.sh
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
+# Secondmate-home discovery and validation, shared with bin/fm-config-push.sh so
+# status reports the same homes a switch actually pushes to.
+# shellcheck source=bin/fm-ff-lib.sh
+. "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-config-inherit-lib.sh
+. "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 
 usage() {
   awk '
@@ -131,6 +150,24 @@ live_task_seats() {
   done
 }
 
+# declining_secondmate_homes
+# One tab-separated row per LOCAL secondmate home that declines inherited seat
+# settings: id, the seat that home is on, and its path. A decline that produced
+# no visible row would be a setting that silently does nothing, which is the one
+# failure this opt-out exists to avoid.
+# Remote routes never receive seat settings at all, so they are not listed.
+declining_secondmate_homes() {
+  local id home _window meta
+  [ -d "$STATE" ] || return 0
+  while IFS='|' read -r id home _window meta; do
+    [ -n "$id" ] && [ -n "$home" ] || continue
+    [ -z "$(fm_meta_get "$meta" remote_host)" ] || continue
+    validate_secondmate_home "$id" "$home" || continue
+    fm_config_inherit_seat_optout "$VALIDATED_HOME/config" || continue
+    printf '%s\t%s\t%s\n' "$id" "$(fm_seat_active "$VALIDATED_HOME/config")" "$VALIDATED_HOME"
+  done < <(live_secondmate_meta_records "$STATE" "$DATA/secondmates.md")
+}
+
 cmd_status() {
   local active profile threshold rows
   active=$(fm_seat_active)
@@ -156,6 +193,15 @@ cmd_status() {
   else
     printf '%s\n' "$rows" | while IFS=$'\t' read -r id seat; do
       printf '  %s\t%s\n' "$id" "$seat"
+    done
+  fi
+  printf '\nlocal secondmate homes declining inherited seats:\n'
+  rows=$(declining_secondmate_homes)
+  if [ -z "$rows" ]; then
+    printf '  (none - every local home takes this seat)\n'
+  else
+    printf '%s\n' "$rows" | while IFS=$'\t' read -r id seat home; do
+      printf '  %s\t%s\t%s\n' "$id" "$seat" "$home"
     done
   fi
 }

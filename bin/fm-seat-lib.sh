@@ -25,6 +25,8 @@
 #   config/claude-seat            active seat NAME for new claude workers
 #   config/claude-seats-root      where seat profile directories live
 #   config/claude-seat-threshold  percent remaining that trips an auto switch
+# A local home declines all three for itself with config/claude-seat-local, so it
+# can spend a separate account; bin/fm-config-inherit-lib.sh owns that decline.
 # docs/configuration.md "Claude seats" owns their schema.
 
 # The reserved seat name for "the default login", which is the ambient profile
@@ -76,14 +78,19 @@ fm_seat_dir() {
   printf '%s/%s\n' "$root" "$name"
 }
 
-# fm_seat_active
+# fm_seat_active [config-dir]
 # The configured active seat NAME, or the default seat name when unset. An
 # unreadable or malformed value is reported as the default rather than guessed
 # at, because the default is the one seat that always exists.
+#
+# The optional argument reads ANOTHER home's setting through this same
+# resolution, which is how the primary reports the seat a local secondmate home
+# that declined inherited seats is actually on. It defaults to this home's own
+# config dir, so every existing caller is unchanged.
 fm_seat_active() {
-  local name=
-  if [ -f "$CONFIG/claude-seat" ]; then
-    name=$(sed -n '1p' "$CONFIG/claude-seat" 2>/dev/null | tr -d '[:space:]')
+  local config_dir=${1:-$CONFIG} name=
+  if [ -f "$config_dir/claude-seat" ]; then
+    name=$(sed -n '1p' "$config_dir/claude-seat" 2>/dev/null | tr -d '[:space:]')
   fi
   if [ -z "$name" ] || ! fm_seat_name_valid "$name"; then
     printf '%s\n' "$FM_SEAT_DEFAULT_NAME"

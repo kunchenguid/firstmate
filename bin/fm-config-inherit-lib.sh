@@ -36,6 +36,9 @@
 # (bin/fm-config-push.sh). It is PRIMARY-AUTHORITATIVE: the primary's value wins
 # and is re-pushed on every convergence, so the fleet stays converged on the
 # primary; an item the primary does not set is mirrored as absence downstream.
+# The one exception is a destination home that declines the machine-local seat
+# items through FM_SEAT_LOCAL_OPTOUT_FILE below, which is a home's own billing
+# choice rather than a value the primary could hold for it.
 # After successful config/* changes under an already-running secondmate, callers
 # invoke fm_config_send_reread_nudge so the live agent re-reads exact post-write
 # bytes (spawn/respawn already re-reads at launch and needs no redundant nudge).
@@ -77,6 +80,34 @@ FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness 
 # its own login exactly as before seats existed (docs/claude-seats.md).
 FM_MACHINE_LOCAL_INHERITABLE_CONFIG="claude-seat claude-seats-root claude-seat-threshold"
 
+# The one per-home decline from those machine-local seat items, read in the
+# DESTINATION home's own config dir and deliberately not inheritable itself, so
+# a home's billing choice is never set for it from another home. Its presence
+# alone is the whole setting and its content is never read. A home that carries
+# it keeps its own three seat files exactly as they are, including absent, while
+# every other local home still moves together on each switch. With the file
+# nowhere on the machine, propagation is exactly what it was before it existed.
+FM_SEAT_LOCAL_OPTOUT_FILE="claude-seat-local"
+
+# True when <item> names something that exists only on THIS machine.
+fm_config_inherit_item_machine_local() {  # <item>
+  local item=${1-}
+  [ -n "$item" ] || return 1
+  case " $FM_MACHINE_LOCAL_INHERITABLE_CONFIG " in *" $item "*) return 0 ;; esac
+  return 1
+}
+
+# fm_config_inherit_seat_optout <dest-config-dir>
+# True when the destination home declines the machine-local seat items: any
+# config/<FM_SEAT_LOCAL_OPTOUT_FILE> path is there, whatever its type, including
+# a directory or a dangling symlink. False is the fleet-wide default.
+fm_config_inherit_seat_optout() {
+  local dest_config=${1-} flag
+  [ -n "$dest_config" ] || return 1
+  flag="$dest_config/$FM_SEAT_LOCAL_OPTOUT_FILE"
+  [ -e "$flag" ] || [ -L "$flag" ]
+}
+
 # Items whose value is a home-SESSION enablement decision rather than durable
 # local configuration. They are inherited at the launch convergence point, where
 # the primary also hands the new process its frozen on/off decision, and left
@@ -101,7 +132,7 @@ fm_config_inherit_item_session_scoped() {  # <item>
 fm_config_inherit_items() {
   local item
   for item in $FM_INHERITABLE_CONFIG; do
-    case " $FM_MACHINE_LOCAL_INHERITABLE_CONFIG " in *" $item "*) continue ;; esac
+    fm_config_inherit_item_machine_local "$item" && continue
     printf 'config/%s\n' "$item"
   done
   printf '%s\n' "$FM_SHARED_CAPTAIN_REL"
@@ -463,14 +494,24 @@ propagate_secondmate_inheritance() {
 }
 
 propagate_inheritable_config() {
-  local src_config=$1 dest_config=$2 item src dest source_present reason rc
+  local src_config=$1 dest_config=$2 item src dest source_present reason rc seat_optout=0
   [ -n "$src_config" ] || return 1
   [ -n "$dest_config" ] || return 1
   rc=0
+  # Read the destination home's own seat decline once, before any item is
+  # considered. Every local convergence point reaches the seat items through
+  # this loop, so honoring it here is what makes a declining home's choice hold
+  # on a post-switch push, a session-start sweep, and a secondmate launch alike.
+  fm_config_inherit_seat_optout "$dest_config" && seat_optout=1
   for item in $FM_INHERITABLE_CONFIG; do
     case "$item" in
       ''|/*|.|..|../*|*/../*|*/..) return 1 ;;
     esac
+    if [ "$seat_optout" = 1 ] && fm_config_inherit_item_machine_local "$item"; then
+      reason="home declines inherited seat settings (config/$FM_SEAT_LOCAL_OPTOUT_FILE)"
+      record_inheritable_config_result "$item" skipped "$reason"
+      continue
+    fi
     if [ "${FM_CONFIG_INHERIT_LIVE:-0}" = 1 ] && fm_config_inherit_item_session_scoped "$item"; then
       record_inheritable_config_result "$item" unchanged "session-scoped"
       continue
