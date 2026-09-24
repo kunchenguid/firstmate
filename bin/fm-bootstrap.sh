@@ -20,7 +20,7 @@
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
-#                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
+#                 "SECONDMATE_LIVENESS: secondmate <id>: <diagnostic>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate home is fast-forwarded, its target is
@@ -48,6 +48,21 @@
 #          fm_backend_agent_state: skipped distinguishes an existing ambiguous
 #          process, an unreadable target, and an unverified backend; respawn
 #          failed names whether the endpoint was missing or agent-less.
+#          Each secondmate's probe/relaunch transaction holds
+#          state/.secondmate-liveness-<id>.lock through local replacement
+#          confirmation (up to ten probes with 0.5s sleeps between failures).
+#          Local recovery passes FM_SPAWN_RECOVERY=1 to fm-spawn.sh, preserving
+#          the recovery metadata on failure instead of fresh-spawn rollback.
+#          After launch text is sent, immediately before attempting Enter,
+#          spawn writes state/.secondmate-liveness-<id>.pending with backend,
+#          target, and started (epoch seconds); failures before submission
+#          leave no new marker and permit retry.
+#          An unconfirmed replacement reports SECONDMATE_LIVENESS and retains
+#          that evidence: later sweeps clear it on alive or authoritatively
+#          missing, allowing recovery on missing, but skip all other states.
+#          Before explicitly clearing an inconclusive marker to retry, inspect
+#          the endpoint and marker to rule out a still-starting replacement.
+#          tests/fm-secondmate-liveness.test.sh covers overlap and retry cases.
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
@@ -191,6 +206,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
@@ -731,9 +748,10 @@ secondmate_liveness_one_timed() {  # <meta> <id> <label>
 # timed; every `return` here was a `continue` in the loop and means exactly the
 # same thing - move on to the next secondmate. Respawned ids are recorded through
 # secondmate_note_respawned so a concurrent sweep can collect them after wait.
-secondmate_liveness_one() {  # <meta> <id>
+secondmate_liveness_one_locked() {  # <meta> <id>
   local meta=$1 id=$2
   local window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
+  local pending="$STATE/.secondmate-liveness-$id.pending" attempt
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || return 0
   harness=$(fm_meta_get "$meta" harness)
@@ -809,6 +827,14 @@ secondmate_liveness_one() {  # <meta> <id>
   target=$(fm_backend_target_of_meta "$meta")
   [ -n "$target" ] || target="$window"
   agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
+  if [ -e "$pending" ]; then
+    if [ "$agent_state" = alive ] || [ "$agent_state" = missing ]; then
+      rm -f "$pending"
+    else
+      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: previous recovery is unconfirmed ($agent_state); inspect endpoint and $pending before explicitly clearing the marker to retry"
+      return 0
+    fi
+  fi
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|omp) ;;
     *)
@@ -828,10 +854,31 @@ secondmate_liveness_one() {  # <meta> <id>
       else
         cause="recorded endpoint confidently missing"
       fi
-      if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+      if out=$(FM_SPAWN_NO_GUARD=1 FM_SPAWN_RECOVERY=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
         secondmate_note_respawned "$id"
-        report_relaunch "$id" "$cause" "backend=$backend"
+        for ((attempt=0; attempt<10; attempt++)); do
+          backend=$(fm_backend_of_meta "$meta")
+          target=$(fm_backend_target_of_meta "$meta")
+          [ -n "$target" ] || target=$(fm_meta_get "$meta" window)
+          agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
+          if [ "$agent_state" = alive ]; then
+            rm -f "$pending"
+            report_relaunch "$id" "$cause" "backend=$backend"
+            break
+          fi
+          sleep 0.5
+        done
+        if [ -e "$pending" ]; then
+          echo "SECONDMATE_LIVENESS: secondmate $id: replacement liveness unconfirmed ($agent_state); inspect endpoint and $pending before explicitly clearing the marker to retry"
+        fi
       else
+        backend=$(fm_backend_of_meta "$meta")
+        target=$(fm_backend_target_of_meta "$meta")
+        [ -n "$target" ] || target=$(fm_meta_get "$meta" window)
+        agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
+        if [ "$agent_state" = missing ]; then
+          rm -f "$pending"
+        fi
         echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
       fi
       ;;
@@ -849,6 +896,22 @@ secondmate_liveness_one() {  # <meta> <id>
       ;;
   esac
   return 0
+}
+
+# Liveness sweeps run their per-secondmate bodies concurrently.  Serialize the
+# complete probe/relaunch transaction for each id so overlapping session-start
+# or deferred-network sweeps cannot both observe the same dead endpoint and
+# launch duplicate replacements.  The second caller re-probes after waiting for
+# the first caller to publish the replacement metadata/endpoint.
+secondmate_liveness_one() {  # <meta> <id>
+  local meta=$1 id=$2 lock rc
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
+  lock="$STATE/.secondmate-liveness-$id.lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  secondmate_liveness_one_locked "$meta" "$id"
+  rc=$?
+  fm_lock_release "$lock" || rc=1
+  return "$rc"
 }
 
 secondmate_handoff_resume() {
