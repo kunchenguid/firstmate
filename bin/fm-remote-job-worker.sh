@@ -197,6 +197,18 @@ worker_clear_quarantine() {
   rm -f -- "$WORKER_LOCK/quarantine"
 }
 
+# True only while this process still owns the lock directory it published.
+# A missing directory, or a directory whose pid is not this process, belongs
+# to a replacement or to nobody. Shutdown must not remove it or signal work
+# recorded only under that replacement.
+worker_shutdown_owns_lock() {
+  local owner_pid
+  [ "$WORKER_LOCK_HELD" -eq 1 ] || return 1
+  [ -d "$WORKER_LOCK" ] && [ ! -L "$WORKER_LOCK" ] || return 1
+  owner_pid=$(fm_remote_job_read_single_line "$WORKER_LOCK/pid" 64 2>/dev/null || true)
+  [ "$owner_pid" = "${BASHPID:-$$}" ]
+}
+
 worker_cleanup() {
   local pid_file ready identity owner_pid
   [ "$WORKER_LOCK_HELD" -eq 1 ] && [ "$WORKER_RELEASE_OWNERSHIP" -eq 1 ] || return 0
@@ -399,11 +411,26 @@ worker_stop_active_execution() {
 # KILL, which no disposition can block.
 worker_shutdown() {
   trap '' HUP INT TERM
-  worker_publish_quarantine || {
+  if ! worker_publish_quarantine; then
     worker_error "cannot guard worker ownership for shutdown"
-    trap worker_shutdown HUP INT TERM
-    return 0
-  }
+    # Still our lock: a transient publish failure must not abandon the
+    # directory. Re-arm and keep serving so a later signal can quarantine it.
+    if worker_shutdown_owns_lock; then
+      trap worker_shutdown HUP INT TERM
+      return 0
+    fi
+    # The ownership directory is gone. TERM stays authoritative: stop only
+    # this process's command tree, then exit. Drop the in-memory hold first
+    # so exit cleanup cannot remove a replacement's lock. Signals stay
+    # ignored until exit, so a repeat during this cleanup is a no-op.
+    WORKER_RELEASE_OWNERSHIP=0
+    WORKER_LOCK_HELD=0
+    worker_stop_active_execution || {
+      worker_error "could not stop the active command tree"
+      exit 125
+    }
+    exit 0
+  fi
   worker_stop_active_execution || {
     worker_error "could not stop the active command tree"
     WORKER_RELEASE_OWNERSHIP=0
