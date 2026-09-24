@@ -1272,6 +1272,27 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
   [ "$project_common" = "$slot_common" ]
 }
 
+# Treehouse skips live owners when reusing slots and clears dead owners before
+# reuse. In-progress acquisitions are leased as incomplete; interactive get
+# does not retain a lease, so only an unleased slot with a live owner is ready.
+fm_treehouse_slot_acquired() {  # <worktree>
+  local slot state entry pid leased
+  slot=$(CDPATH='' cd -- "$1" 2>/dev/null && pwd -P) || return 1
+  state="$(dirname "$(dirname "$slot")")/treehouse-state.json"
+  [ -f "$state" ] && [ ! -L "$state" ] || return 1
+  if ! command -v jq >/dev/null 2>&1; then
+    echo 'error: jq is required to inspect Treehouse pool slot state' >&2
+    exit 1
+  fi
+  while IFS=$'\t' read -r entry pid leased; do
+    entry=$(CDPATH='' cd -- "$entry" 2>/dev/null && pwd -P) || continue
+    [ "$entry" = "$slot" ] && [ "$leased" = false ] || continue
+    case $pid in ''|0|*[!0-9]*) continue ;; esac
+    kill -0 "$pid" 2>/dev/null && return 0
+  done < <(jq -r '.worktrees[]? | select((.destroying // false) | not) | [(.path // ""), (.owner_pid // 0 | tostring), (.leased // false | tostring)] | @tsv' "$state" 2>/dev/null)
+  return 1
+}
+
 # Slot-owner claim: which task a Treehouse pool slot currently belongs to.
 #
 # Treehouse can record ownership durably: `treehouse get --lease --lease-holder`
