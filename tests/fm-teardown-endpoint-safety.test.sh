@@ -565,7 +565,67 @@ test_cross_home_pool_slot_collision_refuses() {
     || fail "cross-home collision reached the runtime: $(cat "$dir/runtime.log")"
   assert_contains "$(cat "$dir/stderr")" "$other" \
     "cross-home refusal should name the task holding the slot"
-  pass "fm-teardown: a pool slot held by another firstmate home is never returned"
+
+  dir=$(make_case slot-reuse-cross-home-same-id)
+  mark_case_as_treehouse_pool "$dir"
+  id=same-id-task
+  second_home="$dir/secondmate-home"
+  mkdir -p "$second_home/state" "$second_home/data"
+  printf '%s\n' "- mate - fixture (home: $second_home; scope: test; projects: project; added 2026-01-01)" \
+    > "$dir/home/data/secondmates.md"
+  claim_pool_slot "$dir" "$id" "$second_home"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$second_home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown accepted another home's same-id slot record"
+  assert_present "$dir/home/state/$id.meta" "same-id collision removed root-home metadata"
+  assert_present "$second_home/state/$id.meta" "same-id collision removed child-home metadata"
+  assert_present "$dir/pool/1/.fm-slot-owner" "same-id collision removed the child home's claim"
+  assert_present "$dir/worktree/sentinel" "same-id collision reset the shared slot"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "same-id collision reached the runtime: $(cat "$dir/runtime.log")"
+
+  dir=$(make_case slot-reuse-duplicate-owner-id)
+  mark_case_as_treehouse_pool "$dir"
+  id=stale-task
+  other=shared-owner
+  second_home="$dir/secondmate-home"
+  mkdir -p "$second_home/state" "$second_home/data"
+  printf '%s\n' "- mate - fixture (home: $second_home; scope: test; projects: project; added 2026-01-01)" \
+    > "$dir/home/data/secondmates.md"
+  claim_pool_slot "$dir" "$other" "$dir/home"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$second_home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown collapsed two same-id owner records into one collision"
+  assert_present "$dir/home/state/$id.meta" "duplicate-owner collision removed stale metadata"
+  assert_present "$dir/home/state/$other.meta" "duplicate-owner collision removed root owner metadata"
+  assert_present "$second_home/state/$other.meta" "duplicate-owner collision removed child owner metadata"
+  assert_present "$dir/pool/1/.fm-slot-owner" "duplicate-owner collision removed the slot claim"
+  assert_present "$dir/worktree/sentinel" "duplicate-owner collision reset the shared slot"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "duplicate-owner collision reached the runtime: $(cat "$dir/runtime.log")"
+
+  pass "fm-teardown: cross-home slot records remain distinct even when task ids match"
 }
 
 test_sole_slot_record_still_tears_down() {
@@ -1000,6 +1060,304 @@ test_own_and_absent_slot_claims_still_tear_down() {
   pass "fm-teardown: a task's own slot claim, and an unclaimed slot, both still tear down"
 }
 
+test_task_slot_collision_stale_record_retires_and_owner_returns() {
+  local dir id=stale-mirasim other=current-owner worker rc
+
+  dir=$(make_case slot-collision-stale-retires)
+  mark_case_as_treehouse_pool "$dir"
+  claim_pool_slot "$dir" "$other" "$dir/home"
+
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  # Live worker holding the slot for the current owner.
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] \
+    || fail "teardown of stale task in slot collision failed: $(cat "$dir/stderr")"
+  kill -0 "$worker" 2>/dev/null \
+    || fail "stale task teardown killed the live owner's worker process"
+  assert_absent "$dir/home/state/$id.meta" \
+    "stale task teardown left its own metadata behind"
+  assert_present "$dir/home/state/$other.meta" \
+    "stale task teardown removed the current owner's metadata"
+  assert_present "$dir/worktree/sentinel" \
+    "stale task teardown reset the shared slot worktree"
+  assert_present "$dir/pool/1/.fm-slot-owner" \
+    "stale task teardown removed the owner's slot claim"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "task=$other" \
+    "stale task teardown modified the owner's slot claim"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "stale task teardown returned the pool slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$other" \
+    "stale task warning should name the owner task"
+  assert_contains "$(cat "$dir/stderr")" "reassigned" \
+    "stale task warning should state the slot was reassigned"
+
+  # Stop background worker before owner teardown.
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  # The owner task now has an exclusive slot record and can return the slot.
+  set +e
+  run_case "$dir" "$other" > "$dir/stdout2" 2> "$dir/stderr2"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] \
+    || fail "owner task teardown after stale reconciliation failed: $(cat "$dir/stderr2")"
+  assert_absent "$dir/home/state/$other.meta" \
+    "owner task teardown left its metadata behind"
+  assert_absent "$dir/pool/1/.fm-slot-owner" \
+    "owner task teardown did not release its slot claim"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "owner task teardown did not return its pool slot: $(cat "$dir/runtime.log")"
+
+  pass "fm-teardown: stale record in a slot collision retires without touching owner and owner returns slot after"
+}
+
+test_task_slot_collision_owner_refuses_until_stale_reconciled() {
+  local dir id=pi-fast-speed-local other=fm-mirasim-upstream-reconcile-s1 rc
+
+  dir=$(make_case slot-collision-owner-refuses)
+  mark_case_as_treehouse_pool "$dir"
+  claim_pool_slot "$dir" "$other" "$dir/home"
+
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  # Owner task attempts teardown while stale record still exists.
+  set +e
+  run_case "$dir" "$other" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] \
+    || fail "owner task teardown unexpectedly succeeded before stale record was reconciled"
+  assert_contains "$(cat "$dir/stderr")" "$id" \
+    "owner teardown refusal should name the colliding stale record"
+  assert_present "$dir/home/state/$other.meta" \
+    "refused owner teardown removed its own metadata"
+  assert_present "$dir/home/state/$id.meta" \
+    "refused owner teardown removed the stale task's metadata"
+  assert_present "$dir/pool/1/.fm-slot-owner" \
+    "refused owner teardown removed the slot claim"
+  assert_present "$dir/worktree/sentinel" \
+    "refused owner teardown reset the slot worktree"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "refused owner teardown returned the slot: $(cat "$dir/runtime.log")"
+
+  # Now retire the stale record first.
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout2" 2> "$dir/stderr2"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] \
+    || fail "stale record retirement failed: $(cat "$dir/stderr2")"
+  assert_absent "$dir/home/state/$id.meta" \
+    "retired stale record left its metadata"
+  assert_present "$dir/home/state/$other.meta" \
+    "stale record retirement removed the owner's metadata"
+
+  # Now the owner task can return its slot safely.
+  set +e
+  run_case "$dir" "$other" > "$dir/stdout3" 2> "$dir/stderr3"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] \
+    || fail "owner teardown after stale reconciliation failed: $(cat "$dir/stderr3")"
+  assert_absent "$dir/home/state/$other.meta" \
+    "owner teardown left its metadata behind"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "owner teardown did not return its pool slot: $(cat "$dir/runtime.log")"
+
+  pass "fm-teardown: current slot owner refuses teardown until stale collision record is reconciled"
+}
+
+test_task_slot_collision_no_harm_refusals() {
+  local dir id=stale-task other=owner-task rc
+
+  # Refusal 1: Unknown claim (claim names a third task not matching the other record).
+  dir=$(make_case slot-collision-unknown-claim)
+  mark_case_as_treehouse_pool "$dir"
+  claim_pool_slot "$dir" "unknown-third-task" "$dir/home"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown succeeded despite unknown claim"
+  assert_present "$dir/home/state/$id.meta" "unknown claim teardown removed stale metadata"
+  assert_present "$dir/home/state/$other.meta" "unknown claim teardown removed owner metadata"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "unknown claim teardown returned pool slot: $(cat "$dir/runtime.log")"
+
+  # Refusal 2: Other home claim (claim specifies a different home).
+  dir=$(make_case slot-collision-other-home)
+  mark_case_as_treehouse_pool "$dir"
+  claim_pool_slot "$dir" "$other" "$dir/different-home"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown succeeded despite other-home claim"
+  assert_present "$dir/home/state/$id.meta" "other-home teardown removed stale metadata"
+  assert_present "$dir/home/state/$other.meta" "other-home teardown removed owner metadata"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "other-home teardown returned pool slot: $(cat "$dir/runtime.log")"
+
+  # Refusal 3: Distinct live owners (three task records claiming the same slot).
+  dir=$(make_case slot-collision-three-tasks)
+  mark_case_as_treehouse_pool "$dir"
+  claim_pool_slot "$dir" "$other" "$dir/home"
+  fm_write_meta "$dir/home/state/$id-1.meta" \
+    "window=firstmate:fm-$id-1" "endpoint_task_id=$id-1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$id-2.meta" \
+    "window=firstmate:fm-$id-2" "endpoint_task_id=$id-2" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  set +e
+  run_case "$dir" "$id-1" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown succeeded with three conflicting task records"
+  assert_present "$dir/home/state/$id-1.meta" "multi-collision teardown removed metadata"
+  assert_present "$dir/home/state/$id-2.meta" "multi-collision teardown removed metadata"
+  assert_present "$dir/home/state/$other.meta" "multi-collision teardown removed owner metadata"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "multi-collision teardown returned pool slot: $(cat "$dir/runtime.log")"
+
+  # Refusal 4: Corrupt claim.
+  dir=$(make_case slot-collision-corrupt-claim)
+  mark_case_as_treehouse_pool "$dir"
+  printf 'invalid-claim-data\n' > "$dir/pool/1/.fm-slot-owner"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown succeeded with corrupt claim"
+  assert_present "$dir/home/state/$id.meta" "corrupt claim teardown removed stale metadata"
+  assert_present "$dir/home/state/$other.meta" "corrupt claim teardown removed owner metadata"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "corrupt claim teardown returned pool slot: $(cat "$dir/runtime.log")"
+
+  # Refusal 5: Active endpoint on the stale record.
+  dir=$(make_case slot-collision-active-endpoint)
+  mark_case_as_treehouse_pool "$dir"
+  claim_pool_slot "$dir" "$other" "$dir/home"
+  cat > "$dir/fakebin/tmux" << 'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = "#{pane_current_command}" ]; then
+    printf 'claude\n'
+    exit 0
+  fi
+  if [ "$arg" = "#{window_name}" ]; then
+    printf 'fm-stale-active\n'
+    exit 0
+  fi
+done
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+  fm_write_meta "$dir/home/state/stale-active.meta" \
+    "window=firstmate:fm-stale-active" "endpoint_task_id=stale-active" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  set +e
+  run_case "$dir" "stale-active" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown succeeded despite active endpoint on stale record"
+  assert_contains "$(cat "$dir/stderr")" "endpoint is active" \
+    "active endpoint refusal should name the active endpoint"
+  assert_present "$dir/home/state/stale-active.meta" \
+    "active endpoint teardown removed stale metadata"
+  assert_present "$dir/home/state/$other.meta" \
+    "active endpoint teardown removed owner metadata"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "active endpoint teardown returned pool slot: $(cat "$dir/runtime.log")"
+
+  dir=$(make_case slot-collision-unknown-liveness)
+  mark_case_as_treehouse_pool "$dir"
+  claim_pool_slot "$dir" "$other" "$dir/home"
+  cat > "$dir/fakebin/zellij" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$dir/fakebin/zellij"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "backend=zellij" "window=firstmate:1" "endpoint_task_id=$id" \
+    "zellij_session=firstmate" "zellij_tab_id=1" "zellij_pane_id=1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown accepted unknown endpoint liveness"
+  assert_contains "$(cat "$dir/stderr")" "liveness is unknown" \
+    "unknown liveness refusal should identify the missing proof"
+  assert_present "$dir/home/state/$id.meta" \
+    "unknown liveness teardown removed stale metadata"
+  assert_present "$dir/home/state/$other.meta" \
+    "unknown liveness teardown removed owner metadata"
+  assert_present "$dir/pool/1/.fm-slot-owner" \
+    "unknown liveness teardown removed the slot claim"
+  assert_present "$dir/worktree/sentinel" \
+    "unknown liveness teardown reset the shared slot"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "unknown liveness teardown returned pool slot: $(cat "$dir/runtime.log")"
+
+  pass "fm-teardown: unproved claims, owners, and endpoint liveness refuse without mutation"
+}
+
 # The tmux shim used by the endpoint-close tests below: every subcommand
 # reaches the real isolated server, so presence is always read from real tmux.
 # When FM_TEST_BLOCK_KILL is set, `kill-window` alone fails without forwarding,
@@ -1387,6 +1745,9 @@ test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_own_and_absent_slot_claims_still_tear_down
+test_task_slot_collision_stale_record_retires_and_owner_returns
+test_task_slot_collision_owner_refuses_until_stale_reconciled
+test_task_slot_collision_no_harm_refusals
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot

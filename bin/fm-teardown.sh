@@ -83,10 +83,17 @@
 # name a slot a DIFFERENT live task now holds. Cleanup kills every process under
 # that path and hard-resets it before returning it, so releasing a slot that is
 # not genuinely this task's destroys another worker's live work. Before the first
-# cleanup step, teardown verifies record exclusivity: no OTHER task record in
-# this home or any locally registered Firstmate home may name the same live path
-# in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale.
+# cleanup step, teardown checks every other metadata file in this home and in
+# every locally registered Firstmate home. A file whose worktree= or home= names
+# the same live path is a collision, even when its task id matches this record's
+# id. By default, every collision refuses teardown.
+# One narrow path reconciles a stale record without returning the slot. Exactly
+# one other record must name the slot from the same home, the slot claim must
+# name that record and home, and this record's endpoint must be confirmed dead.
+# Active or unknown endpoint liveness refuses. When all checks pass, the stale
+# record can retire its own state without touching the current owner's slot,
+# processes, copy, branch, or claim. The current owner remains blocked until the
+# stale record has retired.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -2242,8 +2249,9 @@ teardown_live_slot_path() {
 }
 
 collect_local_firstmate_states() {
-  local record_state=$1 root home reg line child known existing i=0
+  local record_state root home reg line child known existing i=0
   local -a homes
+  record_state=$(canonical_existing_dir "$1") || return 1
   TREEHOUSE_OWNER_STATES=("$record_state")
   root=$(fm_firstmate_root_home "$FM_HOME") || {
     echo "REFUSED: cannot resolve the root Firstmate home; nothing was changed" >&2
@@ -2290,25 +2298,70 @@ collect_local_firstmate_states() {
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
   local slot state_dir other other_id field other_path other_slot
+  local colliding_count=0 colliding_other_id='' colliding_other_state='' colliding_field=''
+  local claimant_home_canonical='' record_home_canonical='' backend='' window=''
+  local colliding_state_canonical='' record_state_canonical=''
   slot=$(canonical_existing_dir "$worktree") || return 0
   collect_local_firstmate_states "$record_state" || return 1
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
       [ -f "$other" ] && [ ! -L "$other" ] || continue
-      [ "$other" != "$record_meta" ] || continue
+      [ "$other" -ef "$record_meta" ] && continue
       other_id=$(basename "$other" .meta)
       for field in worktree home; do
         other_path=$(fm_meta_get "$other" "$field")
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
-        [ "$other_slot" = "$slot" ] || continue
-        echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
-        echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
-        echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
-        return 1
+        if [ "$other_slot" = "$slot" ]; then
+          if [ "$colliding_count" -eq 0 ]; then
+            colliding_other_id=$other_id
+            colliding_other_state=$state_dir
+            colliding_field=$field
+          fi
+          colliding_count=$((colliding_count + 1))
+          break
+        fi
       done
     done
   done
+
+  [ "$colliding_count" -eq 0 ] && return 0
+
+  colliding_state_canonical=$(canonical_existing_dir "$colliding_other_state" 2>/dev/null || true)
+  record_state_canonical=$(canonical_existing_dir "$record_state" 2>/dev/null || true)
+
+  # If there is exactly one colliding record in the same home, check whether
+  # this record is a stale record whose slot was positively claimed by that other task.
+  if [ "$colliding_count" -eq 1 ] \
+     && [ -n "$colliding_state_canonical" ] \
+     && [ "$colliding_state_canonical" = "$record_state_canonical" ]; then
+    fm_treehouse_slot_owner_state "$slot" "$record_id"
+    if [ "$FM_TREEHOUSE_SLOT_OWNER" = other ] \
+       && [ "$FM_TREEHOUSE_SLOT_OWNER_ID" = "$colliding_other_id" ]; then
+      claimant_home_canonical=$(canonical_existing_dir "$FM_TREEHOUSE_SLOT_OWNER_HOME" 2>/dev/null || true)
+      record_home_canonical=$(canonical_existing_dir "$(dirname "$record_state")" 2>/dev/null || true)
+      if [ -n "$claimant_home_canonical" ] \
+         && [ -n "$record_home_canonical" ] \
+         && [ "$claimant_home_canonical" = "$record_home_canonical" ]; then
+        backend=$(fm_meta_get "$record_meta" backend)
+        [ -n "$backend" ] || backend=tmux
+        window=$(fm_meta_get "$record_meta" window)
+        if [ -z "$window" ] || [ "$(fm_backend_agent_alive "$backend" "$window")" != dead ]; then
+          echo "REFUSED: task $record_id's recorded worktree $slot is also task $colliding_other_id's recorded $colliding_field, and task $record_id's recorded endpoint is active or its liveness is unknown; only a confirmed-dead worker can be retired as a stale record. Nothing was changed - not even with --force." >&2
+          echo "Stop or reconcile task $record_id's worker first, then re-run teardown." >&2
+          return 1
+        fi
+        # Positively claimed by the other task in this home, with a confirmed-dead
+        # endpoint on this record: safe to retire without touching the slot.
+        return 0
+      fi
+    fi
+  fi
+
+  echo "REFUSED: task $record_id's recorded worktree $slot is also task $colliding_other_id's recorded $colliding_field." >&2
+  echo "Returning that pool slot would kill $colliding_other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
+  echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $colliding_other_id), then re-run teardown." >&2
+  return 1
 }
 
 require_exclusive_task_worktree_slot() {
@@ -2320,8 +2373,11 @@ require_exclusive_task_worktree_slot() {
 # Positive slot ownership, read from the claim the task that took the slot wrote
 # into the slot itself (bin/fm-wake-lib.sh owns the claim and its states).
 #
-# The record scan above proves that no OTHER task record names this slot. It
-# cannot prove that THIS record is not the stale one, because the task that took
+# The record scan above normally proves that no OTHER task record names this
+# slot. Its sole collision exception is the stale-record path described in the
+# script header; in that case, the owner claim below must classify this slot as
+# reassigned so every later slot step is skipped. With no collision, the scan
+# still cannot prove that THIS record is not stale, because the task that took
 # the slot next may leave no record this scan can reach: its own worker may have
 # exited and its record been cleaned up, or it may belong to a home this machine
 # does not register. The claim closes that gap from the other side - it names the
