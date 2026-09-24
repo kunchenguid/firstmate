@@ -7,7 +7,7 @@ set -eu
 [ "$(fm_pane_stop pi 'Error: Quota reached. Please wait 2h29m27s')" = $'quota-exhausted\tgemini\t8967\t2h29m27s' ] || fail 'Gemini reset'
 [ "$(fm_pane_stop pi-signed $'\033[31mError: Quota reached. Please wait 09m05s\033[0m')" = $'quota-exhausted\tgemini\t545\t09m05s' ] || fail 'ANSI and leading zero'
 [ "$(fm_pane_stop pi 'Error: Quota reached. Please wait 1s')" = $'quota-exhausted\tgemini\t1\t1s' ] || fail 'seconds reset'
-for pane in 'idle prompt' 'You hit your weekly limit yesterday' '"You hit your weekly limit"' 'Example: You hit your weekly limit' 'Error: Quota reached. Please wait ' 'Error: Quota reached. Please wait 99m' 'Error: Quota reached. Please wait tomorrow'; do
+for pane in 'idle prompt' 'You hit your weekly limit yesterday' 'You hit your weekly limit.' 'You hit your weekly limit!' 'Error: Quota reached. Please wait 2h29m27s.' 'Error: Quota reached. Please wait 2h29m27s!' '"You hit your weekly limit"' 'Example: You hit your weekly limit' 'Error: Quota reached. Please wait ' 'Error: Quota reached. Please wait 99m' 'Error: Quota reached. Please wait tomorrow'; do
   ! fm_pane_stop grok "$pane" || fail "false positive: $pane"
   ! fm_pane_stop pi "$pane" || fail "false positive: $pane"
 done

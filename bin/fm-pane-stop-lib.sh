@@ -30,8 +30,8 @@ fm_pane_stop() {
       return 0
     done <<< "$recent"
   done <<'PATTERNS'
-grok|quota-exhausted|grok|^You hit your weekly limit[.!]?$
-pi,pi-signed|quota-exhausted|gemini|^Error: Quota reached\. Please wait (([0-9]{1,3})h)?(([0-9]{1,2})m)?(([0-9]{1,2})s)?[.!]?$
+grok|quota-exhausted|grok|^You hit your weekly limit$
+pi,pi-signed|quota-exhausted|gemini|^Error: Quota reached\. Please wait (([0-9]{1,3})h)?(([0-9]{1,2})m)?(([0-9]{1,2})s)?$
 pi,pi-signed|blocked-at-prompt|trust|^Trust project folder[?]$
 PATTERNS
   return 1
