@@ -130,12 +130,12 @@ SH
 new_case() {
   local dir="$TMP_ROOT/$1-$RANDOM"
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/fake"
-  printf 'claude\n' > "$dir/home/config/secondmate-harness"
+  printf 'pi\n' > "$dir/home/config/secondmate-harness"
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
   : > "$dir/fake/rings"
-  printf 'claude' > "$dir/fake/command"
-  printf 'claude' > "$dir/fake/becomes"
+  printf 'pi' > "$dir/fake/command"
+  printf 'pi' > "$dir/fake/becomes"
   make_stub "$dir"
   printf '%s\n' "$dir"
 }
@@ -144,7 +144,7 @@ new_case() {
 # A live LOCAL second mate: a real git worktree for its home, plus the durable
 # record this home keeps for it.
 add_local_mate() {
-  local dir=$1 id=$2 harness=${3:-claude} backend=${4:-}
+  local dir=$1 id=$2 harness=${3:-pi} backend=${4:-}
   local home="$dir/home" smhome="$dir/$id-home"
   fm_git_worktree "$dir/$id-repo" "$smhome" "sm-$id"
   mkdir -p "$smhome/state" "$smhome/data" "$smhome/bin" "$home/data/$id"
@@ -175,7 +175,7 @@ add_local_mate() {
 # mate's home as a DETACHED worktree of that repo already sitting on origin's tip.
 # That "already current" home is the shape the old classifier skipped entirely.
 add_repo_backed_mate() {  # <case-dir> <id> [harness] [backend]
-  local dir=$1 id=$2 harness=${3:-claude} backend=${4:-}
+  local dir=$1 id=$2 harness=${3:-pi} backend=${4:-}
   local home="$dir/home" repo="$dir/fmrepo" smhome="$dir/$id-home"
   if [ ! -d "$repo" ]; then
     git init -q --bare "$dir/origin.git"
@@ -258,7 +258,7 @@ test_persist_gates_and_asks_only_for_open_records() {
   assert_not_contains "$out" "restarted: sm1" "a mate that never confirmed must not be restarted"
   assert_contains "$out" "summary: 0 of 1 restarted" "the summary must not claim a reload"
   # The agent is untouched: nothing exited, nothing relaunched.
-  assert_no_grep '^/exit$' "$dir/fake/literal" "the agent was stopped without a confirmed persist"
+  assert_no_grep '^/quit$' "$dir/fake/literal" "the agent was stopped without a confirmed persist"
   assert_absent "$dir/home/state/sm1.control-relaunch" \
     "a restart transaction was opened without a confirmed persist"
   grep -h '^phase=' "$dir/home/state/pending-replies"/* | grep -q '^phase=awaiting_report$' \
@@ -286,12 +286,12 @@ test_persist_precedes_restart() {
   out=$(run_restart "$dir" sm1); rc=$?
 
   expect_code 0 "$rc" "a confirmed persist should restart the mate"$'\n'"$out"
-  assert_contains "$out" "restarted: sm1 (claude)" "the mate should be restarted on its pinned runtime"
+  assert_contains "$out" "restarted: sm1 (pi)" "the mate should be restarted on its pinned runtime"
   assert_contains "$out" "summary: 1 of 1 restarted, 0 nudged, 0 unreached" "the summary should report the reload"
   # The pane transcript orders the two phases: the instruction doorbell first,
   # the harness exit command only after it.
   doorbell_line=$(grep -n '^: Firstmate instruction waiting: ' "$dir/fake/literal" | head -1 | cut -d: -f1)
-  exit_line=$(grep -n '^/exit$' "$dir/fake/literal" | head -1 | cut -d: -f1)
+  exit_line=$(grep -n '^/quit$' "$dir/fake/literal" | head -1 | cut -d: -f1)
   [ -n "$doorbell_line" ] || fail "the persist request never reached the mate"
   [ -n "$exit_line" ] || fail "the mate was never stopped, so it was not restarted"
   [ "$doorbell_line" -lt "$exit_line" ] \
@@ -359,7 +359,7 @@ test_unprovable_runtime_falls_back() {
   dir=$(new_case unprovable)
   # zellij has no recovery-grade agent-state classifier, so "the old agent
   # stopped and the replacement came up" can never be established there.
-  add_local_mate "$dir" sm1 claude zellij
+  add_local_mate "$dir" sm1 pi zellij
 
   out=$(run_restart "$dir" sm1); rc=$?
 
@@ -399,8 +399,7 @@ test_refused_restart_falls_back_without_claiming_a_reload() {
   dir=$(new_case refused)
   add_local_mate "$dir" sm1
   arm_answer "$dir" sm1
-  # muse is a crewmate-only adapter, so the control plane refuses a secondmate
-  # relaunch onto it BEFORE stopping anything.
+  # Removed harness configuration must refuse BEFORE stopping anything.
   printf 'muse\n' > "$dir/home/config/secondmate-harness"
   before=$(cat "$dir/fake/command")
 
@@ -413,7 +412,7 @@ test_refused_restart_falls_back_without_claiming_a_reload() {
   assert_not_contains "$out" "restarted: sm1" "a refused restart must not be reported as restarted"
   [ "$(cat "$dir/fake/command")" = "$before" ] \
     || fail "a refusal before the stop should leave the running agent exactly as it was"
-  assert_no_grep '^/exit$' "$dir/fake/literal" "a pre-stop refusal must not have stopped the agent"
+  assert_no_grep '^/quit$' "$dir/fake/literal" "a pre-stop refusal must not have stopped the agent"
   pass "T5 a refused restart leaves the mate running and reports an unknown outcome"
 }
 
@@ -431,7 +430,7 @@ setup_remote_case() {  # <case-dir> <id> <ssh-mode>
     echo "endpoint_task_id=$id"
     echo "worktree=$dir/$id-home"
     echo "project=$dir/$id-home"
-    echo "harness=claude"
+    echo "harness=pi"
     echo "kind=secondmate"
     echo "mode=secondmate"
     echo "yolo=off"
@@ -568,12 +567,12 @@ test_native_ultra_restart_keeps_local_and_remote_profiles() {
   dir=$(new_case native-remote)
   setup_remote_case "$dir" sm2 ok
   export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm2.status"
-  printf 'pi-signed codex-native/gpt-6-astra ultra\n' > "$dir/home/config/secondmate-harness"
+  printf 'pi codex-native/gpt-6-astra ultra\n' > "$dir/home/config/secondmate-harness"
   out=$(run_restart "$dir" sm2); rc=$?
   unset FM_FAKE_ANSWER_STATUS
   expect_code 0 "$rc" "native remote restart failed: $out"
   relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
-  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 pi-signed codex-native/gpt-6-astra ultra" ] \
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 pi codex-native/gpt-6-astra ultra" ] \
     || fail "remote restart dropped native profile: $relaunch_line"
   pass "native Ultra survives local restart and the remote restart transport"
 }
@@ -608,7 +607,7 @@ SH
 
   expect_code 3 "$rc" "an unrelated concurrent answer must not release the persist gate"$'\n'"$out"
   assert_not_contains "$out" "restarted: sm1" "the unrelated answer authorized a restart"
-  assert_no_grep '^/exit$' "$dir/fake/literal" "the unrelated answer stopped the mate"
+  assert_no_grep '^/quit$' "$dir/fake/literal" "the unrelated answer stopped the mate"
   pass "T9 the persist gate retains its explicitly allocated correlation"
 }
 
@@ -623,7 +622,7 @@ test_persist_waits_are_polled_together() {
   out=$(FM_TEST_PERSIST_WAIT=3 run_restart "$dir" sm1 sm2); rc=$?
 
   expect_code 3 "$rc" "the unanswered mate should fall back after the confirmed mate restarts"$'\n'"$out"
-  exit_line=$(grep -n '^/exit$' "$dir/fake/literal" | head -1 | cut -d: -f1)
+  exit_line=$(grep -n '^/quit$' "$dir/fake/literal" | head -1 | cut -d: -f1)
   nudge_line=$(grep -n '^: Firstmate instruction waiting: ' "$dir/fake/literal" | tail -1 | cut -d: -f1)
   [ -n "$exit_line" ] && [ -n "$nudge_line" ] && [ "$exit_line" -lt "$nudge_line" ] \
     || fail "the first mate's timeout held the confirmed second mate behind it: $out"
@@ -668,7 +667,7 @@ test_relaunches_do_not_block_persist_polling() {
     "the slow first relaunch blocked lifecycle progress for the second mate"
   assert_contains "$out" "summary: 2 of 2 restarted, 0 nudged, 0 unreached" \
     "parallel relaunches were not both accounted for"
-  assert_grep 'fm-remote-secondmate-control.sh relaunch sm1 claude default default' "$dir/ssh.log" \
+  assert_grep 'fm-remote-secondmate-control.sh relaunch sm1 pi default default' "$dir/ssh.log" \
     "an absent remote model and effort pin were not expressed as explicit defaults"
   pass "T12 relaunch waits do not block fleet persistence polling"
 }
@@ -728,7 +727,7 @@ if [ -e "$FM_FAKE_DIR/remote-relaunch-start" ] && [ ! -e "$FM_FAKE_DIR/result-ra
   if [ -z "$result" ]; then
     result_dir=$(find "$FM_HOME/state" -maxdepth 1 -type d -name '.secondmate-restart.*' -print -quit)
     if [ -n "$result_dir" ]; then
-      printf 'restarted: sm1 on remote-mac (claude)\n' > "$result_dir/0.result"
+      printf 'restarted: sm1 on remote-mac (pi)\n' > "$result_dir/0.result"
       : > "$FM_FAKE_DIR/result-race-injected"
       printf 'Z\n'
       exit 0
@@ -743,7 +742,7 @@ SH
   unset FM_FAKE_ANSWER_STATUS
 
   expect_code 0 "$rc" "a result published while the worker is reaped must remain authoritative"$'\n'"$out"
-  assert_contains "$out" "restarted: sm1 on remote-mac (claude)" \
+  assert_contains "$out" "restarted: sm1 on remote-mac (pi)" \
     "the result published during the reap window was replaced with a worker failure"
   assert_not_contains "$out" "exited before publishing" \
     "the parent failed to recheck the worker result after wait"
@@ -784,7 +783,7 @@ test_already_current_mate_restarts_end_to_end() {
     "the pass must report the reload it performed"
   # Persist strictly before replace, read off the pane transcript.
   doorbell_line=$(grep -n '^: Firstmate instruction waiting: ' "$dir/fake/literal" | head -1 | cut -d: -f1)
-  exit_line=$(grep -n '^/exit$' "$dir/fake/literal" | head -1 | cut -d: -f1)
+  exit_line=$(grep -n '^/quit$' "$dir/fake/literal" | head -1 | cut -d: -f1)
   [ -n "$doorbell_line" ] || fail "the persist request never reached the already-current mate"
   [ -n "$exit_line" ] || fail "the already-current mate was never stopped, so it was not restarted"
   [ "$doorbell_line" -lt "$exit_line" ] \
@@ -806,7 +805,7 @@ test_already_current_unprovable_mate_stays_on_the_nudge_path() {
   local dir out rc restart_line nudge_line before
   dir=$(new_case already-current-unprovable)
   # zellij can never establish "the old agent stopped and the replacement came up".
-  add_repo_backed_mate "$dir" sm1 claude zellij
+  add_repo_backed_mate "$dir" sm1 pi zellij
   arm_answer "$dir" sm1
   before=$(cat "$dir/fake/command")
 
@@ -828,7 +827,7 @@ test_already_current_unprovable_mate_stays_on_the_nudge_path() {
   assert_not_contains "$out" "restarted: sm1" "an unprovable mate must never be reported as reloaded"
   [ "$(cat "$dir/fake/command")" = "$before" ] \
     || fail "the unprovable mate's agent was stopped anyway"
-  assert_no_grep '^/exit$' "$dir/fake/literal" "nothing may be stopped on the nudge path"
+  assert_no_grep '^/quit$' "$dir/fake/literal" "nothing may be stopped on the nudge path"
   pass "T16 an already-current mate with an unprovable runtime keeps the honest nudge path"
 }
 
@@ -853,3 +852,18 @@ test_already_current_mate_restarts_end_to_end
 test_already_current_unprovable_mate_stays_on_the_nudge_path
 
 echo "# all fm-secondmate-restart tests passed"
+
+# A remote parent's rejected selector must never fall back to the recorded adapter.
+test_removed_remote_pin_never_restarts_on_the_old_harness() {
+  local dir out rc
+  dir=$(new_case removed-remote)
+  setup_remote_case "$dir" sm2 ok
+  printf 'grok\n' > "$dir/home/config/secondmate-harness"
+  out=$(run_restart "$dir" sm2); rc=$?
+  expect_code 3 "$rc" "removed remote pin must refuse: $out"
+  assert_contains "$out" 'unsupported harness' 'remote refusal must explain the configuration'
+  assert_not_contains "$out" 'restarted:' 'remote refusal claimed a replacement launch'
+  assert_no_grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" 'invalid remote pin reached relaunch'
+  pass 'removed remote pin refuses without launching the recorded adapter'
+}
+test_removed_remote_pin_never_restarts_on_the_old_harness

@@ -102,7 +102,6 @@ $ bash tests/fm-pi-watch-extension.test.sh
 ...
 ok - Pi extension reports external healthy watcher output
 ...
-ok - OpenCode healthy arm output does not suppress the turn-end guard
 ```
 
 ```console

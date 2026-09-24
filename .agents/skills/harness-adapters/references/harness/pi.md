@@ -1,7 +1,6 @@
-# Pi and Pi-signed
+# Pi
 
-The combined contract is genuine: Pi and the signed wrapper expose the same verified CLI and TUI behavior.
-Verified on 2026-07-27 with Pi and Pi-signed 0.82.0 unless a fact gives another version.
+Verified on 2026-07-27 with Pi 0.82.0 unless a fact gives another version.
 
 ## Operating facts
 
@@ -12,7 +11,7 @@ Verified on 2026-07-27 with Pi and Pi-signed 0.82.0 unless a fact gives another 
 | Interrupt | Single Escape. |
 | Skill invocation | No separate verified form beyond normal command behavior; use natural language when the exact command is uncertain. |
 | Model flag | `--model <model>`. |
-| Effort flag | `--thinking <low\|medium\|high\|xhigh\|max>`; both identities expose the same levels and completed the same model-qualified max-thinking smoke. |
+| Effort flag | `--thinking <low\|medium\|high\|xhigh\|max>`; the model must support the requested thinking level. |
 | Model discovery | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 
 Native Codex sessions may request `ultra` through the native extension flag described by `../../../bin/fm-spawn.sh`; it is separate from Pi's thinking levels.
@@ -21,11 +20,8 @@ Pi's installed `packages/coding-agent/docs/settings.md` UI and display section d
 Fullscreen can bury steering messages by rewriting scrollback, so Firstmate avoids it when the installed CLI supports the override.
 `../../../bin/fm-spawn.sh --help` owns the executable-pinning and version-safe launch mechanics.
 
-Pi-signed is the signed wrapper identity verified on version 0.82.0.
-Firstmate records `pi-signed` without normalization and refuses rather than falling back to `pi` when that wrapper is unavailable.
-The observed signed process tree has an exact `pi-signed` wrapper parent with the Pi application as its child, while tmux reports the foreground command as the exact `pi-launcher` name for either selected executable.
-The installed plain `pi` command also execs that signed launcher.
-The router's Detection section owns how launch markers and ancestry select between the identities.
+The `pi-signed` selection is retired.
+A signed authentication launcher used internally by the installed `pi` executable remains a Pi implementation detail, not a separately selectable harness.
 
 Keep the instructions as one positional argument.
 Multiple positional arguments become separate queued messages; the spawn template already preserves the one-argument shape.
@@ -55,6 +51,6 @@ Native-harness adapters can discover the same guarded FirstMate tools and operat
 The tool result and clean-exit fallback are owned by `../../../docs/supervision-protocols/pi.md`.
 `../../../bin/fm-session-start.sh` reports when the live Pi-family session has not loaded both extensions and points at the selected executable after project trust as the fix, with `-e` as a trust-free fallback.
 
-When a secondmate is launched on Pi or Pi-signed, `../../../bin/fm-spawn.sh --secondmate` launches the selected executable with both `-e .pi/extensions/fm-primary-turnend-guard.ts` and `-e .pi/extensions/fm-primary-pi-watch.ts`.
+When a secondmate is launched on Pi, `../../../bin/fm-spawn.sh --secondmate` launches the selected executable with both `-e .pi/extensions/fm-primary-turnend-guard.ts` and `-e .pi/extensions/fm-primary-pi-watch.ts`.
 Both files already exist in the secondmate home's git worktree.
 The PreToolUse-equivalent watcher-arm seatbelt returns `{block: true}` from the `tool_call` event.

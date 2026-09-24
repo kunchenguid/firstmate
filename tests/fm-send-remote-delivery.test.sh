@@ -162,7 +162,7 @@ setup_remote_secondmate_home() {  # <name> -> echoes remote home dir
     "project=-" \
     "backend=herdr" \
     "endpoint_task_id=rsm" \
-    "harness=claude" \
+    "harness=pi" \
     "herdr_session=fm-remote" \
     "herdr_workspace_id=w1" \
     "herdr_tab_id=t1" \
@@ -179,7 +179,7 @@ setup_remote_parent_home() {  # <name> <remote-home> -> echoes home dir
   fm_write_meta "$home/state/rsm.meta" \
     "window=fm-remote:p1" \
     "endpoint_task_id=rsm" \
-    "harness=claude" \
+    "harness=pi" \
     "kind=secondmate" \
     "mode=secondmate" \
     "yolo=off" \
@@ -713,7 +713,7 @@ test_local_secondmate_pending_keeps_expectation_armed() {
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home local-pending-expectation)
   fm_write_meta "$home/state/lsm.meta" \
-    "window=sess:fm-lsm" "harness=claude" "kind=secondmate" "mode=secondmate" "home=$home/sm"
+    "window=sess:fm-lsm" "harness=pi" "kind=secondmate" "mode=secondmate" "home=$home/sm"
 
   # A harness-native slash invocation keeps the typed plane for a LOCAL marked
   # secondmate target, so this pins the kept armed-expectation semantics there.

@@ -80,13 +80,13 @@ fm_write_meta "$HOME_DIR/state/ledger-task.meta" \
   "window=fmtest:fm-ledger-task" \
   "worktree=$HOME_DIR/projects/task" \
   "project=firstmate" \
-  "harness=claude" \
+  "harness=pi" \
   "kind=ship" \
   "mode=no-mistakes" \
   "spawn_gen=fm.ledger123456"
 busy_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$HOME_DIR/state" ledger-task)
 "$ROOT/bin/fm-busy-event.sh" apply "$HOME_DIR/state" ledger-task idle \
-  --gen "$busy_gen" --source claude-hook --event stop
+  --gen "$busy_gen" --source pi-ext --event stop
 
 NOW_ONE=2026-08-28T10:00:00Z
 EPOCH_ONE=1787911200
@@ -244,7 +244,7 @@ printf -- '- large-child - fixture domain (home: %s; scope: fixture work; projec
 printf '%s\n' '## In flight' '' '## Queued' '' '## Done' \
   > "$LARGE_PARENT_HOME/data/backlog.md"
 fm_write_secondmate_meta "$LARGE_PARENT_HOME/state/large-child.meta" \
-  "$LARGE_CHILD_HOME" "fmtest:fm-large-child" firstmate claude
+  "$LARGE_CHILD_HOME" "fmtest:fm-large-child" firstmate pi
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_PARENT_HOME" \
   FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
   "$SNAPSHOT" --json > "$TMP_ROOT/large-parent-snapshot.json" \
@@ -329,7 +329,7 @@ cat > "$PARENT_HOME/data/backlog.md" <<'EOF'
 ## Done
 EOF
 fm_write_secondmate_meta "$PARENT_HOME/state/mate.meta" "$HOME_DIR" \
-  "fmtest:fm-mate" firstmate claude
+  "fmtest:fm-mate" firstmate pi
 PATH="$FAKEBIN:$PATH" \
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$PARENT_HOME" \
   FM_SNAPSHOT_NOW="$NOW_TWO" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_TWO" \
@@ -636,13 +636,13 @@ fm_write_meta "$COST_HOME/state/cost-task.meta" \
   "window=fmtest:fm-cost-task" \
   "worktree=$COST_HOME/projects/task" \
   "project=firstmate" \
-  "harness=claude" \
+  "harness=pi" \
   "kind=ship" \
   "mode=no-mistakes" \
   "spawn_gen=fm.cost123456"
 cost_busy_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$COST_HOME/state" cost-task)
 "$ROOT/bin/fm-busy-event.sh" apply "$COST_HOME/state" cost-task idle \
-  --gen "$cost_busy_gen" --source claude-hook --event stop
+  --gen "$cost_busy_gen" --source pi-ext --event stop
 python3 - "$COST_HOME/state/cost-task.status" <<'PY'
 import sys
 note = ("the crewmate ran validation and reported checks on the branch "
@@ -692,7 +692,7 @@ fm_write_meta "$REMOTE_HOME/state/rsm.meta" \
   "window=remote:rsm" \
   "endpoint_task_id=rsm" \
   "worktree=/remote/home/never-locally-present" \
-  "harness=claude" \
+  "harness=pi" \
   "kind=secondmate" \
   "mode=secondmate" \
   "home=/remote/home" \
@@ -820,7 +820,7 @@ fm_write_meta "$RESTART_HOME/state/restart-task.meta" \
   "window=fmtest:fm-restart-task" \
   "worktree=$RESTART_HOME/projects/task" \
   "project=firstmate" \
-  "harness=claude" \
+  "harness=pi" \
   "kind=ship" \
   "mode=no-mistakes" \
   "spawn_gen=fm.restart123456"

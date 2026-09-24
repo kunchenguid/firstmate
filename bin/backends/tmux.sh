@@ -164,7 +164,7 @@ fm_backend_tmux_current_command() {  # <target>
 # This is the foreground-process-group half of the liveness probe, and it exists
 # because `#{pane_current_command}` and `ps -o comm=` expose different name
 # fields whose roles vary by platform. On macOS the tmux field can carry a
-# harness-rewritten title (Claude Code 2.1.220 reports `2.1.220`) while `comm`
+# harness-rewritten version title while `comm`
 # retains executable identity; the portable Linux regression observes the
 # reverse for its version-named executable. Reading both `comm` and argv[0]
 # preserves an identifying install path without making either platform's field
@@ -175,7 +175,7 @@ fm_backend_tmux_current_command() {  # <target>
 # left running in the background of an otherwise idle pane is deliberately NOT
 # reported, so a genuinely agent-free pane still classifies `dead`. It also
 # reports every member of a multi-process launcher (the Pi Launcher path runs a
-# `pi-signed` wrapper and a `pi` engine in one group), so no launcher needs its
+# `pi-launcher` wrapper and a `pi` engine in one group), so no launcher needs its
 # own special case here.
 #
 # Like fm_backend_tmux_current_command this is a RAW pane read: tmux answers an
@@ -191,22 +191,6 @@ fm_backend_tmux_foreground_comms() {  # <target>
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
         printf '%s\n' "$comm"
-      done
-}
-
-# The foreground group's full command lines. Needed because a node-bundle
-# harness carries its identity in argv[1] rather than in its command name or
-# argv[0]; bin/fm-gemini-lib.sh owns what counts as evidence inside one.
-fm_backend_tmux_foreground_args() {  # <target>
-  local target=$1 tty pid pgid tpgid comm args
-  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 0
-  [ -n "$tty" ] || return 0
-  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
-    | while read -r pid pgid tpgid comm; do
-        [ -n "$comm" ] || continue
-        [ "$pgid" = "$tpgid" ] || continue
-        args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
-        [ -n "$args" ] && printf '%s\n' "$args"
       done
 }
 
@@ -306,31 +290,6 @@ EOF
     fi
   done <<EOF
 $argv0s
-EOF
-
-  # Preserve argv boundaries where the platform exposes them. This is needed
-  # when the Gemini script path contains whitespace, which flattened ps output
-  # cannot represent unambiguously.
-  while IFS= read -r pid; do
-    [ -n "$pid" ] || continue
-    if fm_gemini_pid_is_gemini "$pid"; then
-      printf 'alive'
-      return 0
-    fi
-  done <<EOF
-$(fm_backend_tmux_foreground_pids "$target")
-EOF
-
-  # Fall back to flattened arguments on platforms without /proc. Positive
-  # evidence only - a bare interpreter still reaches the negative verdicts.
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    if fm_gemini_args_are_gemini "$name"; then
-      printf 'alive'
-      return 0
-    fi
-  done <<EOF
-$(fm_backend_tmux_foreground_args "$target")
 EOF
 
   comm=$(fm_backend_tmux_current_command "$target") || {

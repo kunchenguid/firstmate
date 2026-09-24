@@ -266,7 +266,7 @@ test_ring_skips_dead_agent() {
   [ ! -s "$log" ] || fail "a missing endpoint was typed into:"$'\n'"$(cat "$log")"
   [ -f "$rec" ] || fail "skipping a missing endpoint must leave the durable record in place"
   rc=0
-  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=claude \
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=pi \
     inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
   [ "$rc" = 0 ] || fail "a live agent should still be rung, got $rc"
   grep -qF 'Firstmate instruction waiting' "$log" || fail "a live agent did not receive the doorbell"
@@ -484,7 +484,7 @@ setup_watch_case() {  # <name> -> echoes case dir; state in <dir>/state
   dir="$TMP_ROOT/$name"
   mkdir -p "$dir/state"
   make_watch_stubs "$dir" >/dev/null
-  fm_write_meta "$dir/state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=grok"
+  fm_write_meta "$dir/state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=pi"
   printf '%s\n' "$dir"
 }
 
@@ -531,6 +531,9 @@ test_watcher_waits_on_busy_pane() {
   dir=$(setup_watch_case busywait)
   state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
   printf 'some output\nBUSYTOKEN active\n' > "$dir/busy.capture"
+  local gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" t1)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
   age_path "$rec"
   watch_bg "$state" "$dir/fakebin" "$out" \
@@ -675,6 +678,9 @@ test_watcher_dead_pane_ignores_stale_busy_state() {
   dir=$(setup_watch_case dead-pane-busy)
   state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
   printf 'some output\nBUSYTOKEN active\n' > "$dir/busy.capture"
+  local gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" t1)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
   age_path "$rec"
   watch_bg "$state" "$dir/fakebin" "$out" \

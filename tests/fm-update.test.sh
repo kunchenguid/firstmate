@@ -58,7 +58,7 @@ case "${1:-}" in
     case "${*: -1}" in
       *pane_current_command*)
         id=${target##*fm-}
-        if [ -e "$FM_FAKE_DIR/dead-$id" ]; then printf 'zsh\n'; else printf 'claude\n'; fi
+        if [ -e "$FM_FAKE_DIR/dead-$id" ]; then printf 'zsh\n'; else printf 'pi\n'; fi
         ;;
       *) printf '\n' ;;
     esac
@@ -97,7 +97,7 @@ SH
 # which is what makes a restart provable. Pass a backend to model one that cannot
 # prove an agent stopped.
 add_sm() {
-  local w=$1 id=$2 harness=${3:-claude} backend=${4:-}
+  local w=$1 id=$2 harness=${3:-pi} backend=${4:-}
   git -C "$w/main" worktree add -q --detach "$w/$id" main
   {
     printf 'window=main:fm-%s\n' "$id"
@@ -219,7 +219,7 @@ test_unprovable_runtime_gets_fallback_nudge() {
   w=$(new_world t3c)
   # zellij has no recovery-grade agent-state classifier, so no restart there can
   # ever prove the old agent stopped and the replacement came up.
-  add_sm "$w" sm1 claude zellij
+  add_sm "$w" sm1 pi zellij
   bump_origin "$w" instr
 
   out=$(run_update "$w")
@@ -276,7 +276,7 @@ window=remote:sm1
 endpoint_task_id=sm1
 worktree=/srv/sm1
 project=/srv/sm1
-harness=claude
+harness=pi
 kind=secondmate
 home=/srv/sm1
 remote_host=remote-mac
@@ -409,7 +409,7 @@ test_already_current_secondmate_still_restarts() {
 test_already_current_unprovable_mate_is_nudged() {
   local w out restart_line nudge_line
   w=$(new_world t6b)
-  add_sm "$w" sm1 claude zellij
+  add_sm "$w" sm1 pi zellij
   bump_origin "$w" instr
   run_update "$w" >/dev/null   # first run advances both
 

@@ -637,7 +637,7 @@ test_home_without_branch_is_untouched() {
 
   # A stale Pi marker and recycled-but-live lease pid cannot activate leases in
   # a no-lock Claude home; the guard removes the leftover and passes silently.
-  printf 'harness=claude\n' > "$home/state/fake.meta"
+  printf 'harness=pi\n' > "$home/state/fake.meta"
   printf '%s\n' "$PPID" > "$home/state/.pi-branch-extension-loaded"
   printf 'branch\t%s\t123\n' "$PPID" > "$home/state/.lease-task-reused"
   out=$(STATE="$home/state" bash -c '. "$1"; fm_lease_guard task-reused "probe"; fm_lease_forbid_branch "probe"; echo silent-pass' _ "$ROOT/bin/fm-lease-lib.sh" 2>&1)

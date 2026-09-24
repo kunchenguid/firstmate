@@ -726,53 +726,53 @@ test_composer_state_bare_prompt_is_empty() {
   pass "fm_backend_cmux_composer_state: a bare '❯' composer row reads empty"
 }
 
-test_composer_state_borderless_claude_prompt_is_empty() {
+test_composer_state_borderless_bare_prompt_is_empty() {
   local dir fb out
-  dir="$TMP_ROOT/composer-borderless-claude"; mkdir -p "$dir/responses"
+  dir="$TMP_ROOT/composer-borderless-bare"; mkdir -p "$dir/responses"
   cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
   cmux_read_screen_response "$dir" 2 $'────────────────────────\n❯\n────────────────────────\nHaiku 4.5'
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
-  [ "$out" = empty ] || fail "a borderless Claude '❯' row bounded by horizontal rules should read empty, got '$out'"
-  pass "fm_backend_cmux_composer_state: a borderless Claude '❯' composer row reads empty"
+  [ "$out" = empty ] || fail "a borderless bare-glyph '❯' row bounded by horizontal rules should read empty, got '$out'"
+  pass "fm_backend_cmux_composer_state: a borderless bare-glyph '❯' composer row reads empty"
 }
 
-test_composer_state_borderless_claude_prompt_outranks_stale_bordered_row() {
+test_composer_state_borderless_bare_prompt_outranks_stale_bordered_row() {
   local dir fb out
-  dir="$TMP_ROOT/composer-borderless-claude-after-bordered"; mkdir -p "$dir/responses"
+  dir="$TMP_ROOT/composer-borderless-bare-after-bordered"; mkdir -p "$dir/responses"
   cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
   cmux_read_screen_response "$dir" 2 $'│ ❯ stale input │\n────────────────────────\n❯\n────────────────────────\nHaiku 4.5'
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
-  [ "$out" = empty ] || fail "a current borderless Claude row should outrank stale bordered scrollback, got '$out'"
-  pass "fm_backend_cmux_composer_state: a borderless Claude row outranks stale bordered scrollback"
+  [ "$out" = empty ] || fail "a current borderless bare-glyph row should outrank stale bordered scrollback, got '$out'"
+  pass "fm_backend_cmux_composer_state: a borderless bare-glyph row outranks stale bordered scrollback"
 }
 
-test_composer_state_borderless_claude_nbsp_prompt_is_empty() {
+test_composer_state_borderless_bare_nbsp_prompt_is_empty() {
   local dir fb out
-  dir="$TMP_ROOT/composer-borderless-claude-nbsp"; mkdir -p "$dir/responses"
+  dir="$TMP_ROOT/composer-borderless-bare-nbsp"; mkdir -p "$dir/responses"
   cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
   cmux_read_screen_response "$dir" 2 $'────────────────────────\n❯\302\240\n────────────────────────\nHaiku 4.5'
   fb=$(make_cmux_fakebin "$dir")
   out=$( LC_ALL=C PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
-  [ "$out" = empty ] || fail "a borderless Claude '❯'+NBSP row bounded by horizontal rules should read empty under LC_ALL=C, got '$out'"
-  pass "fm_backend_cmux_composer_state: a borderless Claude '❯'+NBSP composer row reads empty under LC_ALL=C"
+  [ "$out" = empty ] || fail "a borderless bare-glyph '❯'+NBSP row bounded by horizontal rules should read empty under LC_ALL=C, got '$out'"
+  pass "fm_backend_cmux_composer_state: a borderless bare-glyph '❯'+NBSP composer row reads empty under LC_ALL=C"
 }
 
-test_composer_state_borderless_claude_text_is_unknown_plain() {
+test_composer_state_borderless_bare_text_is_unknown_plain() {
   # Capability degradation (the consolidated classifier's styled=0 rule): on
   # cmux's plain-text capture, text after a bare agent glyph is unreadable -
-  # it may be the harness's own idle suggestion (claude's rotating dim hint,
+  # it may be the harness's own idle suggestion (a rotating dim hint,
   # codex's "Use /skills ..."), which a plain read cannot tell from typed
   # input. The verdict is `unknown` (defer, loud refusal at fm-send), never a
   # false `pending` that would misreport an idle pane as holding unsent text.
   # The same bytes on a styled backend (tmux/herdr/zellij) classify pending
   # when bright and empty when ghost - pinned in tests/fm-composer-lib.test.sh.
   local dir fb out
-  dir="$TMP_ROOT/composer-borderless-claude-text"; mkdir -p "$dir/responses"
+  dir="$TMP_ROOT/composer-borderless-bare-text"; mkdir -p "$dir/responses"
   cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
   cmux_read_screen_response "$dir" 2 $'────────────────────────\n❯ retain this message\n────────────────────────\nHaiku 4.5'
   fb=$(make_cmux_fakebin "$dir")
@@ -782,16 +782,16 @@ test_composer_state_borderless_claude_text_is_unknown_plain() {
   pass "fm_backend_cmux_composer_state: plain-capture text after a bare glyph degrades to unknown (never false pending)"
 }
 
-test_composer_state_ghost_placeholder_is_empty() {
+test_composer_state_plain_codex_suggestion_is_unknown() {
   local dir fb out
   dir="$TMP_ROOT/composer-ghost"; mkdir -p "$dir/responses"
   cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
-  cmux_read_screen_response "$dir" 2 $'  ╭────────────────────────╮\n  │ ❯ Type a message...    │\n  ╰──────── Composer ──────╯'
+  cmux_read_screen_response "$dir" 2 $'› Ask Codex to do anything'
   fb=$(make_cmux_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
-  [ "$out" = empty ] || fail "the known ghost placeholder 'Type a message...' should read as empty, got '$out'"
-  pass "fm_backend_cmux_composer_state: the ghost placeholder text reads empty, not pending"
+  [ "$out" = unknown ] || fail "plain Codex suggestion text cannot be distinguished from typed input, got '$out'"
+  pass "fm_backend_cmux_composer_state: plain Codex suggestion text remains unknown without styling"
 }
 
 test_composer_state_real_text_is_pending() {
@@ -1143,11 +1143,11 @@ test_send_text_line_clears_partial_input_when_enter_fails
 test_send_text_line_reports_unsafe_input_when_cleanup_fails
 test_current_path_probes_with_marker
 test_composer_state_bare_prompt_is_empty
-test_composer_state_borderless_claude_prompt_is_empty
-test_composer_state_borderless_claude_prompt_outranks_stale_bordered_row
-test_composer_state_borderless_claude_nbsp_prompt_is_empty
-test_composer_state_borderless_claude_text_is_unknown_plain
-test_composer_state_ghost_placeholder_is_empty
+test_composer_state_borderless_bare_prompt_is_empty
+test_composer_state_borderless_bare_prompt_outranks_stale_bordered_row
+test_composer_state_borderless_bare_nbsp_prompt_is_empty
+test_composer_state_borderless_bare_text_is_unknown_plain
+test_composer_state_plain_codex_suggestion_is_unknown
 test_composer_state_real_text_is_pending
 test_composer_state_popup_placeholder_fill_is_pending
 test_composer_state_unknown_on_capture_failure

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|traex|agy|unknown
+# Usage: fm-harness.sh                  print own harness: codex|pi|traex|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -14,8 +14,8 @@
 #        fm-harness.sh secondmate-effort   print the optional EFFORT token from
 #                                        config/secondmate-harness, or empty when absent.
 #        fm-harness.sh validate-native-effort <harness> <model> <effort>
-#                                        Refuse ultra unless the harness is pi or
-#                                        pi-signed and the model explicitly names
+#                                        Refuse ultra unless the harness is pi
+#                                        and the model explicitly names
 #                                        codex-native/<id>. Other efforts retain
 #                                        their adapter's existing policy. Native
 #                                        Codex validates model support at startup.
@@ -62,185 +62,23 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
-# shellcheck source=bin/fm-cursor-lib.sh
-. "$SCRIPT_DIR/fm-cursor-lib.sh"
-# shellcheck source=bin/fm-gemini-lib.sh
-. "$SCRIPT_DIR/fm-gemini-lib.sh"
-
-# Print the harness named by a verified environment marker, or nothing when no
-# marker is present. Markers only report what the environment CLAIMS; detect_own
-# decides whether that claim survives contradicting ancestry.
+# Only maintained harnesses provide detection evidence.
 harness_marker() {
   [ "${FM_TRAEX_HARNESS:-}" = traex ] && { echo traex; return; }
-  # Cursor is tested BEFORE claude, deliberately. cursor-agent does NOT clear an
-  # inherited CLAUDECODE, so a cursor session started by hand from a claude
-  # primary carries BOTH markers and whichever is tested first wins. This
-  # ordering only settles the case where ancestry finds nothing to arbitrate
-  # with; a nearer claude ancestor still outranks both in detect_own.
-  # Verified live on cursor-agent 2026.08.11-e8db854: CURSOR_INVOKED_AS=cursor-agent
-  # is set on the agent process itself, and CURSOR_AGENT=1 is set for the
-  # child/tool processes this script runs as.
-  [ "${CURSOR_AGENT:-}" = "1" ] && { echo cursor; return; }
-  [ "${CURSOR_INVOKED_AS:-}" = "cursor-agent" ] && { echo cursor; return; }
-  # Gemini is checked BEFORE claude for exactly cursor's reason above: the
-  # Gemini CLI does NOT clear an inherited CLAUDECODE, so a gemini worker
-  # launched from a claude primary carries BOTH markers and whichever is
-  # tested first wins. Verified live on gemini-cli 0.58.0: a tool process
-  # spawned by a gemini worker under a claude primary reported GEMINI_CLI=1
-  # AND CLAUDECODE=1 together. GEMINI_CLI is gemini's own and is unset in the
-  # launching environment, so ordering it first is what makes the verdict
-  # correct; bin/fm-spawn.sh additionally clears the foreign markers at the
-  # launch boundary. Both are kept for the same reason cursor keeps both.
-  # AI_AGENT is deliberately NOT used: it was present in that same process
-  # carrying the claude primary's value (claude-code_2-1-260_agent), so it is
-  # an inherited launcher marker, not a Gemini identity.
-  [ "${GEMINI_CLI:-}" = "1" ] && { echo gemini; return; }
-  # rovo (Atlassian Rovo CLI) sets ATLASSIAN_AGENT_TYPE=rovo, ROVODEV_CLI=1, and
-  # AGENT=rovodev_cli on its tool subprocesses (verified, rovo 202609.1.2). It does
-  # NOT scrub an inherited CLAUDECODE, so a rovo worker launched from a claude
-  # session carries both markers - this must be tested BEFORE the CLAUDECODE line,
-  # the same ordering hazard cursor documents above (see issue #3517). bin/fm-spawn.sh
-  # additionally clears foreign markers at rovo's launch boundary as defense in depth.
-  [ "${ATLASSIAN_AGENT_TYPE:-}" = "rovo" ] && { echo rovo; return; }
-  [ "${ROVODEV_CLI:-}" = "1" ] && { echo rovo; return; }
-  # omp (Oh My Pi) publishes NO harness-identity marker of its own: verified on
-  # omp 18.1.11 that PI_CODING_AGENT is absent from the binary and that the
-  # default profile sets neither PI_CODING_AGENT_DIR nor OMP_PROFILE in the
-  # process environment. FM_OMP_HARNESS=omp is therefore a Firstmate-OWNED
-  # launch marker, established by bin/fm-spawn.sh at the omp launch boundary
-  # (which also clears every foreign marker) and by the README's primary launch
-  # command. It is a PRECEDENCE override, never evidence on its own: it wins
-  # over an inherited CLAUDECODE only when an omp process is genuinely in the
-  # ancestry, so `FM_OMP_HARNESS=omp omp` started from a Claude pane identifies
-  # as omp, while the same variable leaking from an omp secondmate into that
-  # home's claude worker (whose ancestry holds no omp) changes nothing. The
-  # anchored ancestry arm below covers a plain hand-started `omp` by itself.
-  if [ "${FM_OMP_HARNESS:-}" = omp ] && ancestry_names_omp; then
-    echo omp
-    return
-  fi
-  [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
-  if [ "${PI_CODING_AGENT:-}" = "true" ]; then
-    if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
-    return
-  fi
-  # grok set GROK_AGENT=1 for its child/tool processes (verified, grok 0.2.73).
-  # It does NOT set CLAUDECODE despite being Claude-Code-compatible, so the marker
-  # is unambiguous WHEN PRESENT - but it is not guaranteed present. A grok 1.0.0
-  # hook process carries GROK_HOOK_EVENT, GROK_HOOK_NAME, GROK_SESSION_ID, and
-  # GROK_WORKSPACE_ROOT with no GROK_AGENT at all (verified from the live process
-  # environment of a wedged grok 1.0.0 Stop hook, 2026-08-07). Treat this marker as
-  # a fast path only; the ancestry walk below is what actually guarantees grok is
-  # identified, and any rule that must be RELIABLE under grok has to test the hook
-  # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
-  [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
-  # codex, opencode, kimi, muse, and agy publish no harness-identity marker at all, so
-  # they are never named here and are identified by ancestry alone. That is the
-  # whole reason a foreign marker must not outrank ancestry: with markers winning
-  # unconditionally, any retained CLAUDECODE would silently rename one of them.
-  # muse's only documented child variable is MUSE_CURRENT_SESSION_LOG, a
-  # per-session log PATH rather than an identity, and its export to tool
-  # subprocesses is unverified (verified: muse 0.1.0-R708.1). Do NOT promote it
-  # to a marker without verifying it reaches children AND that it cannot survive
-  # in a multiplexer's stored environment.
+  [ "${PI_CODING_AGENT:-}" = true ] && { echo pi; return; }
   return 0
 }
 
-# True when an exact `omp` process sits within eight parents of this one. The
-# same anchored match as the ancestry walk below, kept separate so the marker
-# precedence above can demand real process evidence before trusting FM_OMP_HARNESS.
-ancestry_names_omp() {
-  local pid=$$ comm
-  for _ in 1 2 3 4 5 6 7 8; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    [ "$(basename -- "$comm")" = omp ] && return 0
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
-  done
-  return 1
-}
-
-# Print "<strength> <harness>" when one process identifies a harness, or nothing.
-# Strength records how the match was made:
-#   comm - the ancestor's own executable name identifies the harness. This is a
-#          structural fact about the running program, so it outranks a marker.
-#   args - a bare interpreter matched only because a harness name appears in the
-#          script path it was handed. This is the weakest inference in this file
-#          (any node process holding a harness-shaped path matches it), so it is
-#          used only when no marker is present.
-harness_process_verdict() {  # <pid>
-  local pid=$1 comm args argv0
+harness_process_verdict() { # <pid>
+  local pid=$1 comm args
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 0
-  argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
-  if fm_cursor_process_matches "$comm" '' "$argv0"; then
-    echo "comm cursor"
-    return
-  fi
-  if fm_gemini_path_is_gemini "$comm"; then
-    echo "comm gemini"
-    return
-  fi
   case "$(basename -- "$comm")" in
-    # gemini precedes claude here for the same precedence reason as the
-    # marker layer above, so a gemini worker under a claude primary is never
-    # read as claude. This arm covers a natively-named gemini binary only.
-    # It does NOT reach the currently installed CLI, which is a node bundle
-    # (~/.local/bin/gemini -> @google/gemini-cli/bundle/gemini.js): modern
-    # Node on Linux reports `comm` as MainThread rather than node (measured
-    # on Node v24.20.0), so neither this arm nor the node interpreter arm
-    # below matches a live gemini process. GEMINI_CLI above is therefore
-    # load-bearing for gemini rather than a fast path, which is why gemini
-    # is not offered as a primary or secondmate harness. Do NOT add
-    # MainThread to the interpreter arm to close this: that would make the
-    # args of EVERY node process searchable and let an unrelated node
-    # command carrying a harness name in its arguments claim an identity.
-    *claude*) echo "comm claude"; return ;;
     *codex*) echo "comm codex"; return ;;
-    *opencode*) echo "comm opencode"; return ;;
-    *grok*) echo "comm grok"; return ;;
-    kimi) echo "comm kimi"; return ;;
-    rovo) echo "comm rovo"; return ;;
-      # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
-      # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
-      # name carries the version and CHANGES on every auto-update. Match the stable
-      # prefix rather than any exact name. Deliberately anchored, never *muse*, so
-      # unrelated commands (musescore, amuse) cannot be misread as this harness.
-    muse|muse-bin-*) echo "comm muse"; return ;;
-    # Both Pi identities share this launcher name. Ancestry can only prove the
-    # FAMILY; only the launch-boundary marker selects the signed identity, which
-    # is why detect_own keeps a marker that agrees on the family.
-    pi-signed) echo "comm pi"; return ;;
-    pi) echo "comm pi"; return ;;
-    # omp is a Bun-compiled single binary whose process name is exactly `omp`
-    # (verified, omp 18.1.11: `ps -o comm=` reports omp from both its `!`
-    # bash path and the model's bash tool). Anchored, never *omp*, so ompd,
-    # comp, and similar unrelated commands are not misread as this harness.
-    # It sits above the node*|python* interpreter fallback deliberately: the
-    # optional claude-bridge extension runs a nested executable literally
-    # named `claude` with its own node child, and that fallback's *claude*
-    # args glob would otherwise claim it if that subtree were ever walked.
-    omp) echo "comm omp"; return ;;
-    # agy (Antigravity CLI) is a Go-compiled single binary whose process name
-    # is exactly `agy` (verified, agy 1.2.0: `ps -o comm=` reports agy and
-    # Herdr's process-info reports name agy with argv[0] agy). Anchored, never
-    # *agy*, so unrelated commands cannot be misread as this harness. agy
-    # publishes no harness-identity marker of its own (a live 1.2.0 TUI
-    # carries no AGY_* or ANTIGRAVITY_* variable; AGENT=1 seen there is an
-    # inherited launcher value, not an agy identity), so like muse it is
-    # detected by ancestry alone.
-    agy) echo "comm agy"; return ;;
+    pi|pi-launcher) echo "comm pi"; return ;;
     node*|python*)
-      # Bare interpreter: match the harness name in its script path.
       args=$(ps -o args= -p "$pid" 2>/dev/null)
-      if fm_gemini_args_are_gemini "$args"; then
-        echo "args gemini"
-        return
-      fi
       case "$args" in
-        *claude*) echo "args claude"; return ;;
         *codex*) echo "args codex"; return ;;
-        *opencode*) echo "args opencode"; return ;;
-        *grok*) echo "args grok"; return ;;
         *" pi "*|*/pi) echo "args pi"; return ;;
       esac ;;
   esac
@@ -357,9 +195,8 @@ EOF
 #
 # Why the upward path and not the whole subtree: harness_ancestry only ever climbs,
 # so a SIBLING branch is a vantage firstmate's own detection can never occupy. A
-# harness-spawned MCP server running as `node <home>/.claude/mcp/<server>.js` matches
-# *claude* on its script path in the bare-interpreter branch above and would report a
-# foreign harness from a process no real tool subprocess ever asks from.
+# harness-spawned MCP server can carry another harness name in its script path;
+# sibling helper processes are not evidence from the active tool ancestry.
 harness_ancestry_descent() {  # <root> [<eligible-leaf-pid>...]
   local pid verdict seen=
   for pid in $(process_descent_path "$@"); do
@@ -371,30 +208,7 @@ harness_ancestry_descent() {  # <root> [<eligible-leaf-pid>...]
   done
 }
 
-# Collapse a verdict to the harness FAMILY its evidence can actually prove, so a
-# marker's more specific verdict and ancestry's coarser one are not read as a
-# disagreement. Only Pi has two identities behind one launcher name.
-harness_family() {
-  case "$1" in
-    pi-signed) printf 'pi\n' ;;
-    *) printf '%s\n' "$1" ;;
-  esac
-}
-
-# Combine the two evidence layers. The precedence boundary, in one rule: a
-# marker names its harness, but only ancestry proves which harness owns this
-# process tree, so a structural (comm) ancestor of a DIFFERENT harness wins.
-#   - No ancestry match: the marker is the only evidence there is.
-#   - No marker: ancestry is the only evidence there is.
-#   - Same family: keep the marker's verdict, which is the more specific one
-#     (pi-signed, which ancestry can only see as pi).
-#   - Different harness, structural ancestor: ancestry wins. This is what stops
-#     an inherited or multiplexer-retained CLAUDECODE from renaming a markerless
-#     codex, opencode, kimi, or muse session, and symmetrically stops a retained
-#     CURSOR_AGENT from renaming a claude worker nested under cursor.
-#   - Different harness, interpreter-args ancestor only: the marker wins, because
-#     a harness-shaped path in some node process's arguments is weaker evidence
-#     than a harness publishing its own identity.
+# Structural ancestry outranks a stale marker from a different harness.
 detect_own() {
   local marker ancestry strength harness
   marker=$(harness_marker)
@@ -406,11 +220,19 @@ detect_own() {
   strength=${ancestry%% *}
   harness=${ancestry#* }
   [ -n "$marker" ] || { echo "$harness"; return; }
-  if [ "$(harness_family "$marker")" = "$(harness_family "$harness")" ]; then
+  if [ "$marker" = "$harness" ]; then
     echo "$marker"
     return
   fi
   if [ "$strength" = comm ]; then echo "$harness"; else echo "$marker"; fi
+}
+
+# Shared selection boundary. Historical metadata keeps its original harness;
+# this check never rewrites a record or silently selects a replacement.
+validate_harness() {
+  case "${1:-}" in pi|codex|traex) return 0 ;; esac
+  echo "error: unsupported harness '${1:-none}'; supported harnesses: pi, codex, traex. Update ${2:-the harness selection} explicitly; historical task records and work are preserved." >&2
+  return 1
 }
 
 # Resolve the effective crewmate harness: config/crew-harness (a bare adapter
@@ -418,7 +240,7 @@ detect_own() {
 resolve_crew() {
   local crew=
   [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
-  if [ -z "$crew" ] || [ "$crew" = "default" ]; then detect_own; else echo "$crew"; fi
+  if [ -z "$crew" ] || [ "$crew" = "default" ]; then detect_own; else validate_harness "$crew" config/crew-harness && echo "$crew"; fi
 }
 
 # Print the first non-empty, non-comment line of config/secondmate-harness
@@ -463,7 +285,7 @@ secondmate_field() {
 resolve_secondmate() {
   local sm
   sm=$(secondmate_field 1)
-  if [ -z "$sm" ] || [ "$sm" = "default" ]; then resolve_crew; else echo "$sm"; fi
+  if [ -z "$sm" ] || [ "$sm" = "default" ]; then resolve_crew; else validate_harness "$sm" config/secondmate-harness && echo "$sm"; fi
 }
 
 # Print the optional model token (2nd field) from config/secondmate-harness, or
@@ -489,15 +311,16 @@ validate_native_effort() {
   local harness=${1:-} model=${2:-} effort=${3:-}
   [ "$effort" = ultra ] || return 0
   case "$harness" in
-    pi|pi-signed)
+    pi)
       case "$model" in codex-native/?*) return 0 ;; esac
       ;;
   esac
-  echo "error: ultra effort requires pi or pi-signed with an explicit codex-native/<model> model" >&2
+  echo "error: ultra effort requires pi with an explicit codex-native/<model> model" >&2
   return 1
 }
 
 case "${1:-}" in
+  validate) validate_harness "${2:-}" ;;
   validate-native-effort) shift; validate_native_effort "$@" ;;
   ancestry)
     case "${2:-}" in

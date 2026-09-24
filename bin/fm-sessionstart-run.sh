@@ -56,8 +56,6 @@ COMPLETION_FILE="$STATE/.session-start-complete"
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
-# shellcheck source=bin/fm-hook-host-lib.sh
-. "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
 SOURCE=
 PI_PREREQUISITE=0
@@ -110,14 +108,6 @@ if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
   # without depending on greedy-regex luck, and it cannot mistake a string VALUE
   # of "source" for the key, because only a key is followed by a bare colon.
   PAYLOAD=$(cat 2>/dev/null || true)
-  # Cursor loads the tracked Claude settings as well as its own registration,
-  # so a Cursor-delivered payload here is the duplicate: bin/fm-sessionstart-
-  # cursor.sh already owns that session open and calls this wrapper with an
-  # explicit --source and no payload. Running twice would take the helm twice
-  # and repeat every startup sweep.
-  if fm_hook_payload_is_foreign_host "$PAYLOAD"; then
-    exit 0
-  fi
   SOURCE=$(printf '%s' "$PAYLOAD" | awk '
     BEGIN { RS = "\"" }
     seen == 2 { print; exit }

@@ -2,6 +2,10 @@
 # Opt-in real TraeX/Herdr smoke for the thin ordinary worker adapter.
 set -u
 
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+fm_live_gate opt-in FM_TRAEX_HERDR_LIVE traex herdr jq treehouse
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 REAL_HERDR=$(command -v herdr 2>/dev/null || true)
@@ -14,7 +18,7 @@ CLEAN_PATH=$PATH
 cleanup() {
   local pool
   if [ -n "$LAB" ]; then
-    PATH="$CLEAN_PATH" "$HELPER" teardown "$LAB" >/dev/null 2>&1 || true
+    PATH="$CLEAN_PATH" "$HELPER" teardown "$LAB" || { echo "not ok - default-session isolation tripwire failed" >&2; exit 1; }
   fi
   if [ -n "$WT" ] && [ -d "$WT" ] && [ -n "$REPO" ] && [ -d "$REPO/.git" ] \
      && [ -z "$(git -C "$WT" status --porcelain 2>/dev/null)" ]; then
@@ -41,11 +45,6 @@ fail() {
 pass() {
   printf 'ok - %s\n' "$1"
 }
-
-if [ "${FM_TRAEX_HERDR_LIVE:-0}" != 1 ]; then
-  echo 'skip: set FM_TRAEX_HERDR_LIVE=1 to run the real TraeX/Herdr smoke'
-  exit 0
-fi
 
 command -v traex >/dev/null 2>&1 || fail 'real traex executable is not installed'
 [ -x "$REAL_HERDR" ] || fail 'real herdr executable is not installed'
@@ -230,7 +229,6 @@ case "$cleanup_state" in
 esac
 pass 'real TraeX exit cleanup uses the generic Herdr owner'
 printf 'traex=%s\n' "$(traex --version 2>&1 | head -1)"
-printf 'herdr=%s\n' "$(PATH="$CLEAN_PATH" "$REAL_HERDR" --version 2>&1 | head -1)"
 PATH="$CLEAN_PATH" "$HELPER" teardown "$LAB" || fail 'guarded teardown or default-session tripwire failed'
 LAB=
 pass 'real TraeX lab teardown preserved the default Herdr session'

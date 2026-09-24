@@ -25,8 +25,6 @@ SEMANTICS_MISMATCH="$LAB/semantics-mismatch.json"
 PARTIAL="$LAB/partial.json"
 NO_APPLICABLE="$LAB/no-applicable.json"
 APPLICABLE_VETO="$LAB/applicable-veto.json"
-MUSE_EXHAUSTED="$LAB/muse-exhausted.json"
-MUSE_POSITIVE="$LAB/muse-positive.json"
 TOON="$LAB/quota.toon"
 RENDERER_TOON="$LAB/renderer-quota.toon"
 EMPTY_TOON="$LAB/empty-quota.toon"
@@ -95,7 +93,7 @@ cat > "$FIXTURE" <<'JSON'
       }
     },
     {
-      "provider": "pi",
+      "provider": "unused",
       "windows": [],
       "quotaSemantics": {
         "status": "known",
@@ -110,7 +108,7 @@ cat > "$FIXTURE" <<'JSON'
       }
     },
     {
-      "provider": "claude",
+      "provider": "pi",
       "windows": [],
       "quotaSemantics": {
         "status": "known",
@@ -187,25 +185,25 @@ fi
 ok "help renders the complete header only"
 
 # 1. First candidate with positive effective quota.
-out=$(call_choose --snapshot "$LAB/captured.json" --candidate kimi:default --candidate codex:model:codex_bengalfox --candidate claude:claude-3-5-sonnet)
-[ "$out" = "claude claude-3-5-sonnet" ] || fail "first positive: expected 'claude claude-3-5-sonnet', got '$out'"
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate codex:model:codex_bengalfox --candidate codex:model:codex_bengalfox --candidate pi:claude-3-5-sonnet)
+[ "$out" = "pi claude-3-5-sonnet" ] || fail "first positive: expected 'pi claude-3-5-sonnet', got '$out'"
 ok "first positive candidate wins"
 
 # 2. Exhausted provider is skipped.
-out=$(call_choose --snapshot "$LAB/captured.json" --candidate kimi:default --candidate claude:claude-3-5-sonnet)
-[ "$out" = "claude claude-3-5-sonnet" ] || fail "exhausted skip: expected 'claude claude-3-5-sonnet', got '$out'"
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate codex:model:codex_bengalfox --candidate pi:claude-3-5-sonnet)
+[ "$out" = "pi claude-3-5-sonnet" ] || fail "exhausted skip: expected 'pi claude-3-5-sonnet', got '$out'"
 ok "exhausted provider is skipped"
 
 # 3. No candidates have positive quota.
-if out=$(call_choose --snapshot "$LAB/captured.json" --candidate kimi:default 2>/dev/null); then
+if out=$(call_choose --snapshot "$LAB/captured.json" --candidate codex:model:codex_bengalfox 2>/dev/null); then
   fail "no positive: expected exit 1, got exit 0 with '$out'"
 fi
 [ "$out" = "none" ] || fail "no positive: expected 'none', got '$out'"
 ok "no positive candidate returns none and exit 1"
 
 # 4. Positional arguments work.
-out=$(call_choose --snapshot "$LAB/captured.json" claude:claude-3-5-sonnet)
-[ "$out" = "claude claude-3-5-sonnet" ] || fail "positional: expected 'claude claude-3-5-sonnet', got '$out'"
+out=$(call_choose --snapshot "$LAB/captured.json" pi:claude-3-5-sonnet)
+[ "$out" = "pi claude-3-5-sonnet" ] || fail "positional: expected 'pi claude-3-5-sonnet', got '$out'"
 ok "positional candidates work"
 
 # 5. A model-specific exhausted scope bounds a healthy all-models scope.
@@ -215,116 +213,98 @@ fi
 [ "$out" = "none" ] || fail "specific scope: expected 'none', got '$out'"
 ok "specific model scope bounds generic quota"
 
-if out=$(call_choose --snapshot "$LAB/captured.json" --candidate omp:openai-codex/codex_bengalfox 2>/dev/null); then
-  fail "omp prefix: the bare codex model scope did not veto, got exit 0 with '$out'"
-fi
-[ "$out" = "none" ] || fail "omp prefix: expected 'none' from the exhausted codex model scope, got '$out'"
-out=$(call_choose --snapshot "$LAB/captured.json" --candidate omp:openai-codex/codex_other)
-[ "$out" = "omp openai-codex/codex_other" ] || fail "omp prefix: expected the provider-wide codex quota to select the prefixed model, got '$out'"
-ok "omp openai-codex prefix matches the bare codex model scope"
-
-if err=$(call_choose --snapshot "$LAB/captured.json" --candidate omp:ollama/qwen3:8b --candidate claude:claude-3-5-sonnet 2>&1); then
-  fail "unmapped omp prefix unexpectedly selected a later candidate"
-fi
-[ "$err" = "error: omp quota mapping covers only the openai-codex and claude-bridge prefixes: ollama/qwen3:8b" ] || fail "unmapped omp prefix returned: $err"
-if err=$(call_choose --snapshot "$LAB/captured.json" --candidate omp 2>&1); then
-  fail "bare omp candidate unexpectedly selected"
-fi
-[ "$err" = "error: omp quota mapping covers only the openai-codex and claude-bridge prefixes: default" ] || fail "bare omp candidate returned: $err"
-ok "omp without a mapped prefix fails closed"
-
 out=$(call_choose --snapshot "$LAB/captured.json" --candidate codex:default)
 [ "$out" = "codex default" ] || fail "default scope: expected provider-wide quota, got '$out'"
 ok "default model uses provider-wide quota"
 
-out=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:claude-3-5-sonnet)
-[ "$out" = "claude claude-3-5-sonnet" ] || fail "fractional quota: expected positive candidate, got '$out'"
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate pi:claude-3-5-sonnet)
+[ "$out" = "pi claude-3-5-sonnet" ] || fail "fractional quota: expected positive candidate, got '$out'"
 ok "fractional positive quota is eligible"
 
-if err=$(call_choose --snapshot "$LAB/captured.json" --candidate bogus:model --candidate claude:claude-3-5-sonnet 2>&1); then
+if err=$(call_choose --snapshot "$LAB/captured.json" --candidate bogus:model --candidate pi:claude-3-5-sonnet 2>&1); then
   fail "unknown harness unexpectedly selected a later candidate"
 fi
 [ "$err" = "error: unknown harness: bogus" ] || fail "unknown harness returned: $err"
 ok "unknown harness fails closed"
 
-if err=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:default --candidate agy:default 2>&1); then
+if err=$(call_choose --snapshot "$LAB/captured.json" --candidate pi:default --candidate agy:default 2>&1); then
   fail "trailing unsupported harness was hidden by an earlier selection"
 fi
 [ "$err" = "error: unknown harness: agy" ] || fail "trailing unsupported harness returned: $err"
 
-if err=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:default --candidate 'claude:' 2>&1); then
+if err=$(call_choose --snapshot "$LAB/captured.json" --candidate pi:default --candidate 'pi:' 2>&1); then
   fail "trailing empty model was hidden by an earlier selection"
 fi
-[ "$err" = "error: invalid candidate: claude:" ] || fail "trailing empty model returned: $err"
+[ "$err" = "error: invalid candidate: pi:" ] || fail "trailing empty model returned: $err"
 ok "all candidates are validated before selection"
 
-printf '{"schemaVersion":5,"providers":{"provider":"claude","quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":50,"runway":{"status":"through_reset"}}]}}}\n' > "$MALFORMED"
-if err=$(call_choose --snapshot "$MALFORMED" --candidate claude:default 2>&1); then
+printf '{"schemaVersion":5,"providers":{"provider":"pi","quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":50,"runway":{"status":"through_reset"}}]}}}\n' > "$MALFORMED"
+if err=$(call_choose --snapshot "$MALFORMED" --candidate pi:default 2>&1); then
   fail "malformed provider collection unexpectedly dispatched"
 fi
 [ "$err" = "error: invalid quota-axi provider data" ] || fail "malformed provider data returned: $err"
 ok "malformed provider data fails closed"
 
-printf '{"providers":[{"provider":"claude","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]}}]}\n' > "$MULTI_JSON"
+printf '{"providers":[{"provider":"pi","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]}}]}\n' > "$MULTI_JSON"
 cat "$LAB/captured.json" >> "$MULTI_JSON"
-if err=$(call_choose --snapshot "$MULTI_JSON" --candidate claude:default 2>&1); then
+if err=$(call_choose --snapshot "$MULTI_JSON" --candidate pi:default 2>&1); then
   fail "multiple JSON values unexpectedly dispatched"
 fi
 [ "$err" = "error: invalid quota-axi provider data" ] || fail "multiple JSON values returned: $err"
 ok "multiple JSON values fail closed"
 
-jq '(.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability) = []' \
+jq '(.providers[] | select(.provider == "pi").quotaSemantics.effectiveAvailability) = []' \
   "$LAB/captured.json" > "$KNOWN_EMPTY"
-if err=$(call_choose --snapshot "$KNOWN_EMPTY" --candidate claude:default 2>&1); then
+if err=$(call_choose --snapshot "$KNOWN_EMPTY" --candidate pi:default 2>&1); then
   fail "known-empty quota unexpectedly dispatched"
 fi
 [ "$err" = "error: invalid quota-axi provider data" ] || fail "known-empty quota returned: $err"
 ok "known-empty quota fails closed"
 
-jq '(.providers[] | select(.provider == "claude").quotaSemantics.status) = "unknown"' \
+jq '(.providers[] | select(.provider == "pi").quotaSemantics.status) = "unknown"' \
   "$LAB/captured.json" > "$SEMANTICS_MISMATCH"
-if err=$(call_choose --snapshot "$SEMANTICS_MISMATCH" --candidate claude:default 2>&1); then
+if err=$(call_choose --snapshot "$SEMANTICS_MISMATCH" --candidate pi:default 2>&1); then
   fail "unknown semantics with known entries unexpectedly dispatched"
 fi
 [ "$err" = "error: invalid quota-axi provider data" ] || fail "semantics mismatch returned: $err"
 ok "semantics and availability statuses must agree"
 
-jq '(.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability) = [{"scope":"all_models","status":"unknown","runway":{"status":"exhausted_now"}}]' \
+jq '(.providers[] | select(.provider == "pi").quotaSemantics.effectiveAvailability) = [{"scope":"all_models","status":"unknown","runway":{"status":"exhausted_now"}}]' \
   "$LAB/captured.json" > "$UNKNOWN_EXHAUSTED"
-if out=$(call_choose --snapshot "$UNKNOWN_EXHAUSTED" --candidate claude:default 2>/dev/null); then
+if out=$(call_choose --snapshot "$UNKNOWN_EXHAUSTED" --candidate pi:default 2>/dev/null); then
   fail "unknown headroom with exhausted runway unexpectedly dispatched"
 fi
 [ "$out" = "none" ] || fail "unknown exhausted quota returned: $out"
 ok "exhausted runway vetoes unknown headroom"
 
-jq '(.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability) = [{"scope":"all_models","status":"unknown","runway":{"status":"unknown"}}]' \
+jq '(.providers[] | select(.provider == "pi").quotaSemantics.effectiveAvailability) = [{"scope":"all_models","status":"unknown","runway":{"status":"unknown"}}]' \
   "$LAB/captured.json" > "$KNOWN_UNKNOWN"
-if out=$(call_choose --snapshot "$KNOWN_UNKNOWN" --candidate claude:default 2>/dev/null); then
+if out=$(call_choose --snapshot "$KNOWN_UNKNOWN" --candidate pi:default 2>/dev/null); then
   fail "unknown headroom unexpectedly dispatched"
 fi
 [ "$out" = "none" ] || fail "unknown headroom returned: $out"
 ok "unknown headroom is not positive quota"
 
-jq '(.providers[] | select(.provider == "claude").quotaSemantics.status) = "partial" |
-    (.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability) += [{"scope":"model:unmeasured","status":"unknown","runway":{"status":"unknown"}}]' \
+jq '(.providers[] | select(.provider == "pi").quotaSemantics.status) = "partial" |
+    (.providers[] | select(.provider == "pi").quotaSemantics.effectiveAvailability) += [{"scope":"model:unmeasured","status":"unknown","runway":{"status":"unknown"}}]' \
   "$LAB/captured.json" > "$PARTIAL"
-out=$(call_choose --snapshot "$PARTIAL" --candidate claude:default)
-[ "$out" = "claude default" ] || fail "valid partial semantics were rejected: $out"
+out=$(call_choose --snapshot "$PARTIAL" --candidate pi:default)
+[ "$out" = "pi default" ] || fail "valid partial semantics were rejected: $out"
 ok "partial semantics accept mixed availability"
 
-out=$(call_choose --candidate claude:default < "$LAB/captured.json")
-[ "$out" = "claude default" ] || fail "stdin snapshot returned '$out'"
+out=$(call_choose --candidate pi:default < "$LAB/captured.json")
+[ "$out" = "pi default" ] || fail "stdin snapshot returned '$out'"
 ok "stdin snapshot is accepted"
 
-if err=$(call_choose --snapshot "$LAB/captured.json" --candidate 'claude:' 2>&1); then
+if err=$(call_choose --snapshot "$LAB/captured.json" --candidate 'pi:' 2>&1); then
   fail "empty model candidate unexpectedly dispatched"
 fi
-[ "$err" = "error: invalid candidate: claude:" ] || fail "empty model candidate returned: $err"
+[ "$err" = "error: invalid candidate: pi:" ] || fail "empty model candidate returned: $err"
 ok "empty model candidate fails closed"
 
 # A bare harness with no colon means the default model.
-out=$(call_choose --snapshot "$LAB/captured.json" --candidate claude)
-[ "$out" = "claude default" ] || fail "bare harness: expected 'claude default', got '$out'"
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate pi)
+[ "$out" = "pi default" ] || fail "bare harness: expected 'pi default', got '$out'"
 ok "bare harness maps to default model"
 
 cat > "$TOON" <<'TOON'
@@ -332,12 +312,12 @@ bin: quota-axi
 generatedAt: "2030-01-01T00:00:00Z"
 quota[2]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
   codex,all_models,20,-1,through_reset,high,weekly,2030-01-02T00:00:00Z
-  claude,all_models,0.5,-1,through_reset,high,weekly,2030-01-02T00:00:00Z
+  pi,all_models,0.5,-1,through_reset,high,weekly,2030-01-02T00:00:00Z
 exhaustion[0]:
 attention[0]:
 TOON
-out=$(call_choose --snapshot "$TOON" --candidate claude:default)
-[ "$out" = "claude default" ] || fail "default TOON snapshot returned '$out'"
+out=$(call_choose --snapshot "$TOON" --candidate pi:default)
+[ "$out" = "pi default" ] || fail "default TOON snapshot returned '$out'"
 ok "default TOON snapshot is accepted"
 
 cat > "$RENDERER_TOON" <<'TOON'
@@ -345,14 +325,14 @@ bin: ~/.local/bin/quota-axi
 description: Report local agent-provider quota windows for routing-aware agents
 generatedAt: "2030-01-01T00:00:00Z"
 quota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
-  claude,all_models,50,-1,through_reset,high,weekly,"2030-01-02T00:00:00Z"
+  pi,all_models,50,-1,through_reset,high,weekly,"2030-01-02T00:00:00Z"
 exhaustion: []
 attention: []
 help[1]:
   Run `quota-axi --full` for windows, pace, reserve, and account evidence
 TOON
-out=$(call_choose --snapshot "$RENDERER_TOON" --candidate claude:default)
-[ "$out" = "claude default" ] || fail "renderer-shaped TOON snapshot returned: $out"
+out=$(call_choose --snapshot "$RENDERER_TOON" --candidate pi:default)
+[ "$out" = "pi default" ] || fail "renderer-shaped TOON snapshot returned: $out"
 ok "renderer-shaped TOON snapshot is accepted"
 
 printf 'garbage\n' > "$LEADING_GARBAGE_NONZERO_TOON"
@@ -364,7 +344,7 @@ for malformed_toon in \
   "$LEADING_GARBAGE_NONZERO_TOON" \
   "$TRAILING_GARBAGE_NONZERO_TOON" \
   "$TRUNCATED_NONZERO_TOON"; do
-  if err=$(call_choose --snapshot "$malformed_toon" --candidate claude:default 2>&1); then
+  if err=$(call_choose --snapshot "$malformed_toon" --candidate pi:default 2>&1); then
     fail "malformed nonzero TOON unexpectedly dispatched: $malformed_toon"
   fi
   [ "$err" = "error: invalid quota-axi snapshot" ] \
@@ -379,7 +359,7 @@ quota[0]:
 exhaustion[0]:
 attention[0]:
 TOON
-if out=$(call_choose --snapshot "$EMPTY_TOON" --candidate claude:default 2>/dev/null); then
+if out=$(call_choose --snapshot "$EMPTY_TOON" --candidate pi:default 2>/dev/null); then
   fail "zero-row TOON unexpectedly dispatched"
 fi
 [ "$out" = "none" ] || fail "zero-row TOON returned: $out"
@@ -392,11 +372,11 @@ generatedAt: "2030-01-01T00:00:00Z"
 quota: []
 exhaustion: []
 attention[1]{provider,scope,kind,detail,remedy}:
-  claude,all_models,error,"request failed, retry later",none
+  pi,all_models,error,"request failed, retry later",none
 help[1]:
   Run `quota-axi --full` for windows, pace, reserve, and account evidence
 TOON
-if out=$(call_choose --snapshot "$EMPTY_ARRAY_TOON" --candidate claude:default 2>/dev/null); then
+if out=$(call_choose --snapshot "$EMPTY_ARRAY_TOON" --candidate pi:default 2>/dev/null); then
   fail "empty-array TOON unexpectedly dispatched"
 fi
 [ "$out" = "none" ] || fail "empty-array TOON returned: $out"
@@ -407,9 +387,9 @@ bin: ~/.local/bin/quota-axi
 generatedAt: "2030-01-01T00:00:00Z"
 quota: []
 exhaustion: []
-attention: [{"provider":"claude","scope":"all_models","kind":"unmeasurable","detail":"unknown quota","remedy":"none"}]
+attention: [{"provider":"pi","scope":"all_models","kind":"unmeasurable","detail":"unknown quota","remedy":"none"}]
 TOON
-if out=$(call_choose --snapshot "$INLINE_ATTENTION_TOON" --candidate claude:default 2>/dev/null); then
+if out=$(call_choose --snapshot "$INLINE_ATTENTION_TOON" --candidate pi:default 2>/dev/null); then
   fail "inline attention TOON unexpectedly dispatched"
 fi
 [ "$out" = "none" ] || fail "inline attention TOON returned: $out"
@@ -421,9 +401,9 @@ generatedAt: "2030-01-01T00:00:00Z"
 quota: []
 exhaustion: []
 attention[1]{provider,scope,kind,detail,remedy}:
-  claude,all_models ,unmeasurable,unknown quota,none
+  pi,all_models ,unmeasurable,unknown quota,none
 TOON
-if err=$(call_choose --snapshot "$WHITESPACE_ATTENTION_TOON" --candidate claude:default 2>&1); then
+if err=$(call_choose --snapshot "$WHITESPACE_ATTENTION_TOON" --candidate pi:default 2>&1); then
   fail "whitespace attention scope unexpectedly dispatched"
 fi
 [ "$err" = "error: invalid quota-axi snapshot" ] || fail "whitespace attention scope returned: $err"
@@ -435,7 +415,7 @@ description: Report local agent-provider quota windows for routing-aware agents
 generatedAt: "2030-01-01T00:00:00Z"
 quota: []
 TOON
-if err=$(call_choose --snapshot "$TRUNCATED_ZERO_TOON" --candidate claude:default 2>&1); then
+if err=$(call_choose --snapshot "$TRUNCATED_ZERO_TOON" --candidate pi:default 2>&1); then
   fail "truncated zero-row TOON unexpectedly dispatched"
 fi
 [ "$err" = "error: invalid quota-axi snapshot" ] || fail "truncated zero-row TOON returned: $err"
@@ -447,7 +427,7 @@ generatedAt: "2030-01-01T00:00:00Z"
 quota[0]:
 garbage
 TOON
-if err=$(call_choose --snapshot "$MALFORMED_ZERO_TOON" --candidate claude:default 2>&1); then
+if err=$(call_choose --snapshot "$MALFORMED_ZERO_TOON" --candidate pi:default 2>&1); then
   fail "malformed zero-row TOON unexpectedly dispatched"
 fi
 [ "$err" = "error: invalid quota-axi snapshot" ] || fail "malformed zero-row TOON returned: $err"
@@ -461,7 +441,7 @@ quota[0]:
 exhaustion[0]:
 attention[0]:
 TOON
-if err=$(call_choose --snapshot "$LEADING_GARBAGE_TOON" --candidate claude:default 2>&1); then
+if err=$(call_choose --snapshot "$LEADING_GARBAGE_TOON" --candidate pi:default 2>&1); then
   fail "zero-row TOON with leading garbage unexpectedly dispatched"
 fi
 [ "$err" = "error: invalid quota-axi snapshot" ] || fail "leading garbage TOON returned: $err"
@@ -471,12 +451,12 @@ cat > "$MALFORMED_COUNTED_TOON" <<'TOON'
 bin: quota-axi
 generatedAt: "2030-01-01T00:00:00Z"
 quota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
-  claude,all_models,50,-1,through_reset,high,weekly,"2030-01-02T00:00:00Z"
+  pi,all_models,50,-1,through_reset,high,weekly,"2030-01-02T00:00:00Z"
 exhaustion[1]{provider,scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId}:
   garbage
 attention[0]:
 TOON
-if err=$(call_choose --snapshot "$MALFORMED_COUNTED_TOON" --candidate claude:default 2>&1); then
+if err=$(call_choose --snapshot "$MALFORMED_COUNTED_TOON" --candidate pi:default 2>&1); then
   fail "malformed counted TOON unexpectedly dispatched"
 fi
 [ "$err" = "error: invalid quota-axi snapshot" ] || fail "malformed counted TOON returned: $err"
@@ -489,11 +469,11 @@ generatedAt: "2030-01-01T00:00:00Z"
 quota: []
 exhaustion: []
 attention[1]{provider,scope,kind,detail,remedy}:
-  claude,all_models,headroom_unknown,"weekly · exhausted_now limited by weekly",none
+  pi,all_models,headroom_unknown,"weekly · exhausted_now limited by weekly",none
 help[1]:
   Run `quota-axi --full` for windows, pace, reserve, and account evidence
 TOON
-if out=$(call_choose --snapshot "$UNKNOWN_EXHAUSTED_TOON" --candidate claude:default 2>/dev/null); then
+if out=$(call_choose --snapshot "$UNKNOWN_EXHAUSTED_TOON" --candidate pi:default 2>/dev/null); then
   fail "TOON unknown headroom exhaustion unexpectedly dispatched"
 fi
 [ "$out" = "none" ] || fail "TOON unknown headroom exhaustion returned: $out"
@@ -503,11 +483,11 @@ cat > "$TRAILING_EMPTY_TOON" <<'TOON'
 bin: quota-axi
 generatedAt: "2030-01-01T00:00:00Z"
 quota[1]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
-  claude,all_models,50,-1,through_reset,high,weekly,"2030-01-02T00:00:00Z",
+  pi,all_models,50,-1,through_reset,high,weekly,"2030-01-02T00:00:00Z",
 exhaustion[0]:
 attention[0]:
 TOON
-if err=$(call_choose --snapshot "$TRAILING_EMPTY_TOON" --candidate claude:default 2>&1); then
+if err=$(call_choose --snapshot "$TRAILING_EMPTY_TOON" --candidate pi:default 2>&1); then
   fail "TOON row with trailing empty field unexpectedly dispatched"
 fi
 [ "$err" = "error: invalid quota-axi snapshot" ] || fail "trailing empty TOON field returned: $err"
@@ -518,38 +498,25 @@ bin: quota-axi
 description: Report local agent-provider quota windows for routing-aware agents
 generatedAt: "2030-01-01T00:00:00Z"
 quota[2]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
-  claude,all_models,50,-1,through_reset,high,weekly,"2030-01-02T00:00:00Z"
-  claude,"model:fable",0,-1,exhausted_now,high,weekly,"2030-01-02T00:00:00Z"
+  pi,all_models,50,-1,through_reset,high,weekly,"2030-01-02T00:00:00Z"
+  pi,"model:fable",0,-1,exhausted_now,high,weekly,"2030-01-02T00:00:00Z"
 exhaustion[0]:
 attention[0]:
 help[1]:
   Run `quota-axi --full` for windows, pace, reserve, and account evidence
 TOON
-if out=$(call_choose --snapshot "$QUOTED_TOON" --candidate claude:fable 2>/dev/null); then
+if out=$(call_choose --snapshot "$QUOTED_TOON" --candidate pi:fable 2>/dev/null); then
   fail "quoted exhausted model scope unexpectedly dispatched"
 fi
 [ "$out" = "none" ] || fail "quoted exhausted model scope returned: $out"
 ok "quoted TOON scope vetoes dispatch"
 
-if out=$(call_choose --snapshot "$LAB/captured.json" --candidate cursor:default 2>/dev/null); then
+jq '(.providers[] | select(.provider == "pi").quotaSemantics) = {"status":"unknown","effectiveAvailability":[]}' "$LAB/captured.json" > "$KNOWN_UNKNOWN"
+if out=$(call_choose --snapshot "$KNOWN_UNKNOWN" --candidate pi:default 2>/dev/null); then
   fail "provider-level unknown quota unexpectedly dispatched"
 fi
 [ "$out" = "none" ] || fail "provider-level unknown quota returned: $out"
 ok "provider-level unknown quota is not positive"
-
-jq '.providers += [{"provider":"meta","windows":[],"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":25,"runway":{"status":"through_reset"}}]}}]' \
-  "$LAB/captured.json" > "$MUSE_POSITIVE"
-out=$(call_choose --snapshot "$MUSE_POSITIVE" --candidate muse:default)
-[ "$out" = "muse default" ] || fail "supported Muse candidate returned: $out"
-ok "Muse candidate is accepted"
-
-jq '.providers += [{"provider":"meta","windows":[],"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]}}]' \
-  "$LAB/captured.json" > "$MUSE_EXHAUSTED"
-if out=$(call_choose --snapshot "$MUSE_EXHAUSTED" --candidate muse:default 2>/dev/null); then
-  fail "Muse candidate dispatched with exhausted Meta quota"
-fi
-[ "$out" = "none" ] || fail "exhausted Meta quota returned: $out"
-ok "Muse uses Meta quota"
 
 if err=$(call_choose --snapshot "$LAB/captured.json" --candidate agy:default 2>&1); then
   fail "unsupported harness unexpectedly dispatched"
@@ -557,82 +524,82 @@ fi
 [ "$err" = "error: unknown harness: agy" ] || fail "unsupported harness returned: $err"
 ok "unsupported harness is rejected"
 
-jq '.providers += [.providers[] | select(.provider == "claude")]' "$LAB/captured.json" > "$DUPLICATE"
-if err=$(call_choose --snapshot "$DUPLICATE" --candidate claude:default 2>&1); then
+jq '.providers += [.providers[] | select(.provider == "pi")]' "$LAB/captured.json" > "$DUPLICATE"
+if err=$(call_choose --snapshot "$DUPLICATE" --candidate pi:default 2>&1); then
   fail "duplicate provider snapshot unexpectedly dispatched"
 fi
 [ "$err" = "error: invalid quota-axi provider data" ] || fail "duplicate provider returned: $err"
 ok "duplicate providers fail closed"
 
-jq '(.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability[0].scope) = ""' \
+jq '(.providers[] | select(.provider == "pi").quotaSemantics.effectiveAvailability[0].scope) = ""' \
   "$LAB/captured.json" > "$EMPTY_SCOPE"
-if err=$(call_choose --snapshot "$EMPTY_SCOPE" --candidate claude:default 2>&1); then
+if err=$(call_choose --snapshot "$EMPTY_SCOPE" --candidate pi:default 2>&1); then
   fail "empty quota scope unexpectedly dispatched"
 fi
 [ "$err" = "error: invalid quota-axi provider data" ] || fail "empty quota scope returned: $err"
 ok "empty quota scopes fail closed"
 
-jq '(.providers[] | select(.provider == "claude").provider) = " claude" |
-    (.providers[] | select(.provider == " claude").quotaSemantics.effectiveAvailability[0].effectivePercentRemaining) = 0 |
-    (.providers[] | select(.provider == " claude").quotaSemantics.effectiveAvailability[0].runway.status) = "exhausted_now"' \
+jq '(.providers[] | select(.provider == "pi").provider) = " pi" |
+    (.providers[] | select(.provider == " pi").quotaSemantics.effectiveAvailability[0].effectivePercentRemaining) = 0 |
+    (.providers[] | select(.provider == " pi").quotaSemantics.effectiveAvailability[0].runway.status) = "exhausted_now"' \
   "$LAB/captured.json" > "$WHITESPACE_PROVIDER"
-if err=$(call_choose --snapshot "$WHITESPACE_PROVIDER" --candidate claude:default 2>&1); then
+if err=$(call_choose --snapshot "$WHITESPACE_PROVIDER" --candidate pi:default 2>&1); then
   fail "whitespace provider identity unexpectedly dispatched"
 fi
 [ "$err" = "error: invalid quota-axi provider data" ] || fail "whitespace provider returned: $err"
 
-jq '(.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability[0].scope) = "all_models "' \
+jq '(.providers[] | select(.provider == "pi").quotaSemantics.effectiveAvailability[0].scope) = "all_models "' \
   "$LAB/captured.json" > "$WHITESPACE_SCOPE"
-if err=$(call_choose --snapshot "$WHITESPACE_SCOPE" --candidate claude:default 2>&1); then
+if err=$(call_choose --snapshot "$WHITESPACE_SCOPE" --candidate pi:default 2>&1); then
   fail "whitespace scope identity unexpectedly dispatched"
 fi
 [ "$err" = "error: invalid quota-axi provider data" ] || fail "whitespace scope returned: $err"
 ok "whitespace quota identities fail closed"
 
-jq '(.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability[0].effectivePercentRemaining) = 150' "$LAB/captured.json" > "$OUT_OF_RANGE"
-if err=$(call_choose --snapshot "$OUT_OF_RANGE" --candidate claude:default 2>&1); then
+jq '(.providers[] | select(.provider == "pi").quotaSemantics.effectiveAvailability[0].effectivePercentRemaining) = 150' "$LAB/captured.json" > "$OUT_OF_RANGE"
+if err=$(call_choose --snapshot "$OUT_OF_RANGE" --candidate pi:default 2>&1); then
   fail "out-of-range quota unexpectedly dispatched"
 fi
 [ "$err" = "error: invalid quota-axi provider data" ] || fail "out-of-range quota returned: $err"
 ok "out-of-range quota fails closed"
 
-jq '(.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability[0].runway.status) = "invalid"' "$LAB/captured.json" > "$INVALID_RUNWAY"
-if err=$(call_choose --snapshot "$INVALID_RUNWAY" --candidate claude:default 2>&1); then
+jq '(.providers[] | select(.provider == "pi").quotaSemantics.effectiveAvailability[0].runway.status) = "invalid"' "$LAB/captured.json" > "$INVALID_RUNWAY"
+if err=$(call_choose --snapshot "$INVALID_RUNWAY" --candidate pi:default 2>&1); then
   fail "invalid runway status unexpectedly dispatched"
 fi
 [ "$err" = "error: invalid quota-axi provider data" ] || fail "invalid runway status returned: $err"
 ok "invalid runway status fails closed"
 
-jq '(.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability) = [{"scope":"model:other","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]' \
+jq '(.providers[] | select(.provider == "pi").quotaSemantics.effectiveAvailability) = [{"scope":"model:other","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]' \
   "$LAB/captured.json" > "$NO_APPLICABLE"
-if out=$(call_choose --snapshot "$NO_APPLICABLE" --candidate claude:fable 2>/dev/null); then
+if out=$(call_choose --snapshot "$NO_APPLICABLE" --candidate pi:fable 2>/dev/null); then
   fail "candidate without applicable quota unexpectedly dispatched"
 fi
 [ "$out" = "none" ] || fail "missing applicable quota returned: $out"
 ok "missing applicable quota is not positive"
 
-jq '(.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability) = [
+jq '(.providers[] | select(.provider == "pi").quotaSemantics.effectiveAvailability) = [
       {"scope":"all_models","status":"known","effectivePercentRemaining":10,"runway":{"status":"exhausted_now"}},
       {"scope":"model:foo","status":"known","effectivePercentRemaining":5,"runway":{"status":"through_reset"}}
     ]' "$LAB/captured.json" > "$APPLICABLE_VETO"
-if out=$(call_choose --snapshot "$APPLICABLE_VETO" --candidate claude:foo 2>/dev/null); then
+if out=$(call_choose --snapshot "$APPLICABLE_VETO" --candidate pi:foo 2>/dev/null); then
   fail "provider-wide exhausted scope did not veto the candidate"
 fi
 [ "$out" = "none" ] || fail "applicable exhausted scope returned: $out"
 ok "any exhausted applicable scope vetoes dispatch"
 
-if out=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:fable 2>/dev/null); then
+if out=$(call_choose --snapshot "$LAB/captured.json" --candidate pi:fable 2>/dev/null); then
   fail "exact named model exhaustion unexpectedly dispatched"
 fi
 [ "$out" = "none" ] || fail "exact named model returned '$out'"
-out=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:fable-2)
-[ "$out" = "claude fable-2" ] || fail "named model scope overmatched fable-2: $out"
-out=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:default)
-[ "$out" = "claude default" ] || fail "named model scope overmatched default: $out"
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate pi:fable-2)
+[ "$out" = "pi fable-2" ] || fail "named model scope overmatched fable-2: $out"
+out=$(call_choose --snapshot "$LAB/captured.json" --candidate pi:default)
+[ "$out" = "pi default" ] || fail "named model scope overmatched default: $out"
 ok "named model quota matches exact identity only"
 
-jq '(.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability[1].status) = "typo"' "$LAB/captured.json" > "$INVALID_AVAILABILITY"
-if err=$(call_choose --snapshot "$INVALID_AVAILABILITY" --candidate claude:default 2>&1); then
+jq '(.providers[] | select(.provider == "pi").quotaSemantics.effectiveAvailability[1].status) = "typo"' "$LAB/captured.json" > "$INVALID_AVAILABILITY"
+if err=$(call_choose --snapshot "$INVALID_AVAILABILITY" --candidate pi:default 2>&1); then
   fail "invalid availability status unexpectedly dispatched"
 fi
 [ "$err" = "error: invalid quota-axi provider data" ] || fail "invalid availability status returned: $err"
