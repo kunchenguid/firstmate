@@ -3724,7 +3724,7 @@ hold_watch_launch() {  # <dir> <out> <capture>
   local dir=$1 out=$2 capture=$3
   PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-held-merge \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
-    FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_FAKE_CREW_STATE="${FM_HOLD_CREW_STATE:-state: stopped · source: pane · bare shell}" \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
     FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
@@ -3820,6 +3820,49 @@ test_open_captain_call_bounds_stale_churn() {
 
 test_parked_hold_bounds_stale_churn() {
   test_open_captain_call_bounds_stale_churn parked
+}
+
+test_parked_rehold_alarms_again() {
+  local dir state out capture
+  command -v tasks-axi >/dev/null 2>&1 || return 0
+  dir=$(make_hold_home parked-rehold 'resolved: gate cleared' parked) || fail 'parked fixture failed'
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, first' || fail 'first parked sight missed'
+  ack_stopped_cycle "$state" || fail 'first parked wake not acknowledged'
+  (cd "$dir" && tasks-axi unhold held-merge --file data/backlog.md >/dev/null && \
+    tasks-axi hold held-merge --reason 'desk parked, preserve only' --kind parked --file data/backlog.md >/dev/null) \
+    || fail 'repark failed'
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, second' || fail 'repark first sight missed'
+  [ "$(hold_stale_wakes "$state")" -eq 1 ] || fail 'repark inherited old cadence'
+  pass 'repark with unchanged reason starts a new alarm window'
+}
+
+test_away_parked_hold_bounds_churn() {
+  local dir state out capture
+  command -v tasks-axi >/dev/null 2>&1 || return 0
+  dir=$(make_hold_home away-parked 'resolved: gate cleared' parked) || fail 'away parked fixture failed'
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  touch "$state/.afk"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, first' || fail 'away parked first sight missed'
+  ack_stopped_cycle "$state" || fail 'away parked wake not acknowledged'
+  hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 2 || fail 'away parked churn failed'
+  [ "$(hold_stale_wakes "$state")" -eq 0 ] || fail 'away parked churn re-alarmed'
+  pass 'away parked hold keeps its stale cadence'
+}
+
+test_live_parked_gate_not_bounded() {
+  local dir state out capture
+  command -v tasks-axi >/dev/null 2>&1 || return 0
+  dir=$(make_hold_home live-parked-gate 'resolved: gate cleared' parked) || fail 'gate fixture failed'
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  printf '%s\n' 'state: parked · source: run-step · parked at review · run: 01RUNGATE' > "$dir/gate-state"
+  FM_HOLD_CREW_STATE='state: parked · source: run-step · parked at review · run: 01RUNGATE'
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, first' || fail 'gate first sight missed'
+  ack_stopped_cycle "$state" || fail 'gate wake not acknowledged'
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, second' || fail 'gate second sight missed'
+  unset FM_HOLD_CREW_STATE
+  [ "$(hold_stale_wakes "$state")" -eq 1 ] || fail 'live gate was bounded by backlog hold'
+  pass 'live parked gate retains its own stale path'
 }
 
 
@@ -6234,6 +6277,9 @@ test_wedge_threshold_parked_gate_is_off_until_armed
 test_wedge_defer_refuses_a_half_filled_wait_record
 test_open_captain_call_bounds_stale_churn
 test_parked_hold_bounds_stale_churn
+test_parked_rehold_alarms_again
+test_away_parked_hold_bounds_churn
+test_live_parked_gate_not_bounded
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window

@@ -182,9 +182,7 @@
 # the task's last status line - and on a 0 bounds repeated alarms from new pane
 # hashes for the decision.
 # `--include-parked` widens the positive verdict to a not-Done row held with
-# hold kind `parked`, a desk disposition that is not a captain call; its
-# `--identity` is `parked:` plus a checksum of the hold reason, so re-parking
-# with a new reason starts a new lifecycle. Only the watcher's stale bound asks
+# hold kind `parked`, a desk disposition that is not a captain call. Only the watcher's stale bound asks
 # for it; every closer keeps the captain-only meaning above.
 #
 # `diverged` is the read-only guard over the seam between the two records of
@@ -1926,8 +1924,9 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
           printf 'fm-captain-hold: parked hold %s is open but its record could not be read\n' "$id" >&2
           exit 2
         }
-        printf 'parked:%s\n' \
-          "$(show_field_value "$TASK_SHOW_OUTPUT" hold_reason | cksum | cut -d' ' -f1)"
+        printf 'parked:%s:%s\n' \
+          "$(show_field_value "$TASK_SHOW_OUTPUT" hold_reason | cksum | cut -d' ' -f1)" \
+          "$(stat -c %y "$file" 2>/dev/null || true)"
       fi
       return 0
     fi
