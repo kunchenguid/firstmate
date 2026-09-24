@@ -75,6 +75,11 @@ fm_write_meta "$HOME_DIR/state/ship-nocopy.meta" \
   "worktree=$TMP_ROOT/wt/ship-nocopy-absent" \
   "project=$PROJECT" "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
 write_task scout-one   scout local-only fm:10
+# bin/fm-fleet-snapshot.sh fills .pr.url for ANY task from the first link in its
+# status log, so a scout that quoted one carries it. The row must not state a
+# link and deny having one.
+printf 'working: see https://github.com/example/project/pull/77 for context\n' \
+  > "$HOME_DIR/state/scout-one.status"
 # No window at all, which is how the fleet document reports a task it could not
 # observe as well as one that never had an endpoint.
 fm_write_meta "$HOME_DIR/state/no-endpoint.meta" \
@@ -371,9 +376,14 @@ assert_equals "$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$RO
   "and it is that document's own value, not a second reading that could disagree"
 assert_equals "not_checked" "$(agent scout-one '.agent_alive')" \
   "the fleet document's endpoint liveness is passed through, never re-probed here"
+assert_equals "77" "$(agent scout-one '.pr.number')" \
+  "a link the fleet document published for a non-pipeline worker carries its number"
+assert_equals "https://github.com/example/project/pull/77" "$(agent scout-one '.pr.url')" \
+  "and the link itself, rather than a row that states one and denies having it"
 assert_equals "not_checked" "$(agent ship-run '.agent_alive')" \
   "including for a pipeline agent"
-assert_equals "this worker opens no PR" "$(agent scout-one '.ci.collection.reason')" \
+assert_equals "this worker runs no pipeline, so no checks are read" \
+  "$(agent scout-one '.ci.collection.reason')" \
   "a scout's checks are named as absent rather than reported as zero"
 
 # --- run selection ----------------------------------------------------------
@@ -639,9 +649,18 @@ assert_contains "$HELP" "fm-flow-snapshot.sh - read-only per-agent pipeline snap
 assert_equals "one wedged worker must not blank the whole view." \
   "$(printf '%s\n' "$HELP" | sed -e '/^$/d' -e '$!d')" \
   "--help reaches its last line rather than stopping mid-sentence"
-for gone in FM_FLOW_SNAPSHOT_STATE_TIMEOUT FM_FLOW_SNAPSHOT_FLEET_JSON; do
-  assert_not_contains "$HELP" "$gone" "--help does not document $gone, which this command no longer has"
-done
+# Asserted by BEHAVIOUR, not by grepping the help text: --help is the script's
+# own leading comment block, so a text search there would pass just as well if
+# the knob were still read and merely undocumented, which is the regression it
+# is supposed to catch.
+REMOVED_KNOB_DOC=$(FM_FLOW_SNAPSHOT_FLEET_JSON=/nonexistent/fleet.json \
+  FM_FLOW_SNAPSHOT_STATE_TIMEOUT=0 snapshot) \
+  || fail "a removed knob still changed what the command does"
+assert_equals "fm-flow-snapshot.v1" "$(printf '%s' "$REMOVED_KNOB_DOC" | jq -r '.schema')" \
+  "setting a removed knob is inert: the fleet is still read through its owner"
+assert_equals "$(snapshot | jq -r '[.agents[].id] | sort | join(",")')" \
+  "$(printf '%s' "$REMOVED_KNOB_DOC" | jq -r '[.agents[].id] | sort | join(",")')" \
+  "and the same fleet arrives either way"
 
 snapshot --not-a-flag >/dev/null 2>&1
 expect_code 2 $? "the collector refuses an unknown flag"

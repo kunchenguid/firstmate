@@ -405,7 +405,12 @@ row_common() {  # <task-json>
   FM_ROW_ID=$(printf '%s' "$task" | jq -r '.id')
   FM_ROW_KIND=$(printf '%s' "$task" | jq -r '.kind // ""')
   FM_ROW_MODE=$(printf '%s' "$task" | jq -r '.mode // ""')
+  # The repository-wide default prefix, applied here only for a record written
+  # before the branch was recorded at all. Resolved in this one place because
+  # that is what this function is for: the two builders below must not drift
+  # apart in how they read the fleet document.
   FM_ROW_BRANCH=$(printf '%s' "$task" | jq -r '.branch // ""')
+  [ -n "$FM_ROW_BRANCH" ] || FM_ROW_BRANCH="fm/$FM_ROW_ID"
   FM_ROW_PROJECT=$(printf '%s' "$task" | jq -r '.project // ""')
   FM_ROW_WORKTREE=$(printf '%s' "$task" | jq -r '.paths.worktree.path // ""')
   FM_ROW_WINDOW=$(printf '%s' "$task" | jq -r '.endpoint.target // ""')
@@ -415,7 +420,15 @@ row_common() {  # <task-json>
   # `not_checked` for everything else, and a probe here would reverse the fleet
   # owner's decision from a new reader.
   FM_ROW_AGENT_ALIVE=$(printf '%s' "$task" | jq -r '.endpoint.agent_alive // "not_checked"')
+  # bin/fm-fleet-snapshot.sh fills this for ANY task, from the record or from
+  # the first link in its status log, so a scout that quoted a pull request
+  # carries one too. It is published with its number resolved by the same
+  # parser everywhere, so no row states a link it also denies having.
   FM_ROW_PR_URL=$(printf '%s' "$task" | jq -r '.pr.url // ""')
+  FM_ROW_PR_NUMBER=null
+  if [ -n "$FM_ROW_PR_URL" ] && fm_pr_url_parse "$FM_ROW_PR_URL"; then
+    FM_ROW_PR_NUMBER=$FM_PR_NUMBER
+  fi
   # Resolved by bin/fm-fleet-snapshot.sh, which publishes it for every task in
   # the document, so there is nothing to reconstruct it from here.
   FM_ROW_META=$(printf '%s' "$task" | jq -r '.paths.meta.path // ""')
@@ -467,9 +480,6 @@ agent_json() {  # <task-json>
   # attribution on a branch no run was ever created for, and the row would
   # report that a busy task has no pipeline run at all.
   branch=$FM_ROW_BRANCH
-  # Only for a record written before the branch was recorded at all, where the
-  # historical default is the prefix bin/fm-spawn.sh still starts from.
-  [ -n "$branch" ] || branch="fm/$id"
 
   steps='[]'
   actives='[]'
@@ -630,12 +640,9 @@ agent_json() {  # <task-json>
     ci=$(ci_json "$pr_url")
   fi
 
-  # The number the view labels the PR with comes from the same parser the CI
-  # read used, so a link one of them refuses cannot be numbered by the other.
-  local pr_num=
-  if [ -n "$pr_url" ] && fm_pr_url_parse "$pr_url"; then
-    pr_num=$FM_PR_NUMBER
-  fi
+  # Resolved by row_common through the same parser the check read uses, so a
+  # link one of them refuses cannot be numbered by the other.
+  local pr_num=$FM_ROW_PR_NUMBER
 
   jq -n \
     --arg id "$id" \
@@ -656,7 +663,7 @@ agent_json() {  # <task-json>
     --argjson now_epoch "$NOW_EPOCH" \
     --argjson endpoint_alive "$endpoint_alive" \
     --argjson collect_ok "$collect_ok" \
-    --argjson pr_num "${pr_num:-null}" \
+    --argjson pr_num "$pr_num" \
     --arg harness "$FM_ROW_HARNESS" \
     --arg w_model "$FM_ROW_MODEL" \
     --arg w_effort "$FM_ROW_EFFORT" \
@@ -702,7 +709,7 @@ compact_json() {  # <task-json>
 
   jq -n \
     --arg id "$FM_ROW_ID" \
-    --arg branch "${FM_ROW_BRANCH:-fm/$FM_ROW_ID}" \
+    --arg branch "$FM_ROW_BRANCH" \
     --arg project "$FM_ROW_PROJECT" \
     --arg worktree "$FM_ROW_WORKTREE" \
     --arg window "$FM_ROW_WINDOW" \
@@ -717,6 +724,7 @@ compact_json() {  # <task-json>
     --argjson now_epoch "$NOW_EPOCH" \
     --argjson endpoint_alive "$FM_ROW_ENDPOINT_ALIVE" \
     --argjson state "$FM_ROW_STATE" \
+    --argjson pr_num "$FM_ROW_PR_NUMBER" \
     --argjson ci "$CI_EMPTY" \
     '{
       id:$id, branch:$branch, project:$project, worktree:$worktree,
@@ -730,13 +738,13 @@ compact_json() {  # <task-json>
         model:(if $w_model == "" then null else $w_model end),
         effort:(if $w_effort == "" then null else $w_effort end)
       },
-      pr:{url:(if $pr_url == "" then null else $pr_url end), number:null},
+      pr:{url:(if $pr_url == "" then null else $pr_url end), number:$pr_num},
       collection:{ok:true, reason:"this worker runs no pipeline", source:"",
                   at:$now_iso, epoch:$now_epoch},
       run:{present:false, id:"", status:"", error:"", head:""},
       steps:[],
       active_steps:[],
-      ci:($ci | .collection.reason = "this worker opens no PR")
+      ci:($ci | .collection.reason = "this worker runs no pipeline, so no checks are read")
     }'
 }
 
