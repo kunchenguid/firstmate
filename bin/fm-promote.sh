@@ -264,6 +264,10 @@ if [ -n "$BASE_BRANCH" ] && [ "$MODE" != local-only ]; then
       echo "error: remote base '$BASE_BRANCH' does not exist on origin; refusing promotion" >&2
       exit 1
     }
+    git -C "$PROMOTE_PROJECT" rev-parse --verify --quiet "refs/remotes/origin/$BASE_BRANCH^{commit}" >/dev/null || {
+      echo "error: remote base '$BASE_BRANCH' is not available in the scout project checkout; refusing promotion" >&2
+      exit 1
+    }
     PROMOTE_BASE_REMOTE=1
   elif [ -n "$PROMOTE_PROJECT" ] && [ -d "$PROMOTE_PROJECT" ] &&
     ! git -C "$PROMOTE_PROJECT" rev-parse --verify --quiet "refs/heads/$BASE_BRANCH^{commit}" >/dev/null; then
