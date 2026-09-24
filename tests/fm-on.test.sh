@@ -62,7 +62,7 @@ cat > "$REMOTE_ROOT/bin/tasks-axi" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\${FM_REMOTE_JOB_ACTIVE:-absent}" >> "$TOOL_PROBE_LOG"
 case "\${1:-}:\${2:-}" in
-  --version:*) printf '0.2.4\n' ;;
+  --version:*) printf '0.2.6\n' ;;
   update:--help) printf '%s\n' --archive-body ;;
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
 esac
@@ -229,13 +229,51 @@ MANAGER_DIRS=(
   "$ACCOUNT_HOME"/.local/share/mise/installs/*/*/bin
   "$ACCOUNT_HOME"/.mise/installs/*/*/bin
 )
-OPTIONAL_DIRS=(
+RESOLVED_DIRS=(
   "$ACCOUNT_HOME/.nix-profile/bin"
   "/etc/profiles/per-user/$ACCOUNT_USER/bin"
   /run/current-system/sw/bin
+)
+PREFIX_DIRS=(
   /opt/homebrew/bin
   /usr/local/bin
 )
+DISCOVERED_DIRS=()
+OMITTED_DIRS=()
+PRESENT_CHECKED=0
+ABSENT_CHECKED=0
+# fm_remote_job_path_append_if_dir omits a symlinked directory outright, while
+# fm_remote_job_path_append_resolved_dir substitutes its physical target and
+# still omits the symlink path itself, so each group carries its own helper's
+# rule. The loops run in production's append order, because PATH is ordered.
+classify_plain_dir() {
+  if [ -d "$1" ] && [ ! -L "$1" ]; then
+    DISCOVERED_DIRS+=("$1")
+    PRESENT_CHECKED=$((PRESENT_CHECKED + 1))
+  else
+    OMITTED_DIRS+=("$1")
+    ABSENT_CHECKED=$((ABSENT_CHECKED + 1))
+  fi
+}
+classify_resolved_dir() {
+  local physical
+  if [ -d "$1" ] && [ ! -L "$1" ]; then
+    DISCOVERED_DIRS+=("$1")
+    PRESENT_CHECKED=$((PRESENT_CHECKED + 1))
+    return 0
+  fi
+  OMITTED_DIRS+=("$1")
+  physical=$(CDPATH='' cd -- "$1" 2>/dev/null && pwd -P) || physical=
+  if [ -d "$physical" ]; then
+    DISCOVERED_DIRS+=("$physical")
+    PRESENT_CHECKED=$((PRESENT_CHECKED + 1))
+  else
+    ABSENT_CHECKED=$((ABSENT_CHECKED + 1))
+  fi
+}
+for candidate in "${MANAGER_DIRS[@]}"; do classify_plain_dir "$candidate"; done
+for candidate in "${RESOLVED_DIRS[@]}"; do classify_resolved_dir "$candidate"; done
+for candidate in "${PREFIX_DIRS[@]}"; do classify_plain_dir "$candidate"; done
 EXPECTED_PATH=
 expect_dir() {
   case ":$EXPECTED_PATH:" in *":$1:"*) return 0 ;; esac
@@ -253,12 +291,7 @@ if [ -d "$ACCOUNT_HOME/.local/bin" ] && [ ! -L "$ACCOUNT_HOME/.local/bin" ]; the
   expect_dir "$ACCOUNT_HOME/.local/bin"
 fi
 for candidate in "${NVM_CHILD_DIRS[@]}"; do expect_dir "$candidate"; done
-for candidate in "${MANAGER_DIRS[@]}"; do
-  [ -d "$candidate" ] && [ ! -L "$candidate" ] && expect_dir "$candidate"
-done
-for candidate in "${OPTIONAL_DIRS[@]}"; do
-  [ -d "$candidate" ] && [ ! -L "$candidate" ] && expect_dir "$candidate"
-done
+for candidate in "${DISCOVERED_DIRS[@]}"; do expect_dir "$candidate"; done
 for fixed in /usr/bin /bin /usr/sbin /sbin; do expect_dir "$fixed"; done
 
 [ "$CHILD_PATH" = "$EXPECTED_PATH" ] \
@@ -274,16 +307,11 @@ fi
 case "$CHILD_PATH" in *:/usr/bin:/bin:/usr/sbin:/sbin) ;; *) fail "the child PATH did not end with the portable system tail" ;; esac
 DUPES=$(printf '%s\n' "$CHILD_PATH" | tr ':' '\n' | sort | uniq -d)
 [ -z "$DUPES" ] || fail "the child PATH repeated entries: $DUPES"
-PRESENT_CHECKED=0
-ABSENT_CHECKED=0
-for candidate in "${MANAGER_DIRS[@]}" "${OPTIONAL_DIRS[@]}"; do
-  if [ -d "$candidate" ] && [ ! -L "$candidate" ]; then
-    path_has "$CHILD_PATH" "$candidate" || fail "an existing discovered PATH directory was dropped: $candidate"
-    PRESENT_CHECKED=$((PRESENT_CHECKED + 1))
-  else
-    path_has "$CHILD_PATH" "$candidate" && fail "an absent or symlinked PATH directory was added: $candidate"
-    ABSENT_CHECKED=$((ABSENT_CHECKED + 1))
-  fi
+for candidate in "${DISCOVERED_DIRS[@]}"; do
+  path_has "$CHILD_PATH" "$candidate" || fail "an existing discovered PATH directory was dropped: $candidate"
+done
+for candidate in "${OMITTED_DIRS[@]}"; do
+  path_has "$CHILD_PATH" "$candidate" && fail "an absent or unresolved PATH directory was added: $candidate"
 done
 pass "the entrypoint composes a deduplicated discovered child PATH (kept $PRESENT_CHECKED existing, omitted $ABSENT_CHECKED absent)"
 
@@ -354,7 +382,7 @@ printf '#!/usr/bin/env bash\nprintf "{\\\"server\\\":{\\\"running\\\":false}}\\n
 cat > "$DOCTOR_BIN/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in
-  --version:*) printf '0.2.4\n' ;;
+  --version:*) printf '0.2.6\n' ;;
   update:--help) printf '%s\n' --archive-body ;;
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
 esac

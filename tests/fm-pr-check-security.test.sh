@@ -17,6 +17,7 @@ WATCH="$ROOT/bin/fm-watch.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 REGISTER="$ROOT/bin/fm-check-register.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-check-security)
+fm_git_identity fmtest fmtest@example.invalid
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
@@ -127,6 +128,9 @@ make_case() {
   fakebin="$dir/fakebin"
   fake_root="$dir/root"
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/wt" "$fakebin" "$fake_root/bin"
+  git -C "$dir/wt" init -q
+  git -C "$dir/wt" commit -q --allow-empty -m init
+  git -C "$dir/wt" update-ref refs/remotes/origin/main "$(git -C "$dir/wt" rev-parse HEAD)"
   cat > "$fake_root/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'guard\n' >> "$FM_TEST_GUARD_LOG"
@@ -210,10 +214,56 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
-  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  # gerrit-axi, reproducing the real CLI's contract: one JSON record on stdout
+  # and exit 0 on success, and a non-zero exit with no stdout on any failure.
+  # Its defaults are the real server's readings for an OPEN change, and the
+  # submit fields are settable independently of the status so a case can build
+  # the reading a merged change and a merely submittable change share.
+  cat > "$fakebin/gerrit-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GERRIT_AXI_LOG"
+[ "${FM_TEST_GERRIT_FAIL:-0}" = 0 ] || exit 1
+if [ -n "${FM_TEST_GERRIT_RAW:-}" ]; then
+  printf '%s\n' "$FM_TEST_GERRIT_RAW"
+  exit 0
+fi
+change=${FM_TEST_GERRIT_CHANGE:-${2:-0}}
+printf '{"ok":true,"op":"show","count":1,"missing":[],"changes":[{"change":%s,"subject":%s,"project":"p","status":"%s","wip":false,"submit":"%s","submittable":%s,"blocked_on":"%s","patch_set":1,"revision":"%s","url":"%s"}]}\n' \
+  "$change" \
+  "${FM_TEST_GERRIT_SUBJECT:-\"fixture change\"}" \
+  "${FM_TEST_GERRIT_STATUS:-NEW}" \
+  "${FM_TEST_GERRIT_SUBMIT:-NOT_READY}" \
+  "${FM_TEST_GERRIT_SUBMITTABLE:-false}" \
+  "${FM_TEST_GERRIT_BLOCKED_ON:-Code-Review}" \
+  "${FM_TEST_GERRIT_REVISION:-5f07a68436929a527ddc7abadc8ef1abceae40ed}" \
+  "${FM_TEST_GERRIT_URL:-https://gerrit.example/c/group/apps/console/+/4201}"
+SH
+  # no-mistakes, answering only `axi status` the way the real CLI does from a
+  # worker copy: a run object, then its branch_sync block. By default the run's
+  # result is the copy's own passed HEAD and custody is returned; a case
+  # overrides the outcome, the pipeline head, the next action, or makes the read
+  # fail.
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_TEST_NM_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TEST_NM_LOG"
+[ "${1:-} ${2:-}" = "axi status" ] || exit 2
+[ "${FM_TEST_NM_FAIL:-0}" = 0 ] || exit 1
+head=$(git rev-parse HEAD 2>/dev/null) || exit 1
+pipeline=${FM_TEST_NM_PIPELINE_HEAD:-$head}
+printf 'run:\n  id: "RUNFIXTURE"\n  branch: fm/task\n  status: completed\n  head_sha: %s\noutcome: %s\n' \
+  "$pipeline" "${FM_TEST_NM_OUTCOME-passed}"
+printf 'branch_sync:\n  state: %s\n  local:\n    head: %s\n  pipeline:\n    current_head: %s\n' \
+  "${FM_TEST_NM_SYNC_STATE:-synchronized}" "$head" "$pipeline"
+if [ -n "${FM_TEST_NM_NEXT_ACTION:-}" ]; then
+  printf '  next_action:\n    code: %s\n    command: no-mistakes axi status\n' "$FM_TEST_NM_NEXT_ACTION"
+fi
+SH
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/gerrit-axi"
+  chmod +x "$fakebin/no-mistakes"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
+  : > "$dir/gerrit-axi.log"
   : > "$dir/guard.log"
   printf '%s\n' "$dir"
 }
@@ -232,10 +282,12 @@ write_task_meta() {
 # Extra "field=value" arguments are written before pr=, because
 # fm_pr_metadata_identity_parse rejects an unrecognised line after it.
 write_poll_meta() {
-  local state=$1 id=$2 url=$3
+  local state=$1 id=$2 url=$3 case_dir
+  case_dir=$(cd "$state/../.." && pwd)
   shift 3
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" \
+    "worktree=$case_dir/wt" \
     "$@" \
     "pr=$url"
 }
@@ -247,6 +299,7 @@ run_check_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
@@ -257,6 +310,7 @@ run_merge_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -280,6 +334,31 @@ INVALID_URLS=(
   'https://.gitlab.com/g/p/-/merge_requests/1'
   'https://gitlab.com./g/p/-/merge_requests/1'
   'http://gitlab.com/g/p/-/merge_requests/1'
+  'https://gerrit.example/c/proj/+/0'
+  'https://gerrit.example/c/proj/+/01'
+  'https://gerrit.example/c/proj/+/1/'
+  'https://gerrit.example/c/proj/+/1/2'
+  'https://gerrit.example/c/proj/+/1?x=1'
+  'https://gerrit.example/c/proj/+/1#c'
+  'https://gerrit.example/c/proj/+/1/+/2'
+  'https://gerrit.example/c//+/1'
+  'https://gerrit.example/c/proj//+/1'
+  'https://gerrit.example/c/proj.git/+/1'
+  'https://gerrit.example/c/-proj/+/1'
+  'https://gerrit.example/c/a/-b/+/1'
+  'https://gerrit.example/c/./+/1'
+  'https://gerrit.example/c/a/../+/1'
+  'https://gerrit.example/proj/+/1'
+  'https://gerrit.example/c/proj/1'
+  'https://gerrit.example/#/c/proj/+/1'
+  'https://GERRIT.example/c/proj/+/1'
+  'https://gerrit.example:8443/c/proj/+/1'
+  'https://user@gerrit.example/c/proj/+/1'
+  'https://.gerrit.example/c/proj/+/1'
+  'https://gerrit.example./c/proj/+/1'
+  'http://gerrit.example/c/proj/+/1'
+  'https://github.com/c/proj/+/1'
+  'https://gerrit.example/c/proj/+/1 '
   'https://github.com/o/r/pull/1/'
   ' https://github.com/o/r/pull/1'
   'https://github.com/o/r/pull/1 '
@@ -415,6 +494,24 @@ https://gitlab.com/group/project/-/merge_requests/1|gitlab.com|group/project|1
 https://gitlab.com/group/sub/deep/project/-/merge_requests/42|gitlab.com|group/sub/deep/project|42
 https://gitlab.example.co.uk/g/p/-/merge_requests/7|gitlab.example.co.uk|g/p|7
 https://code.internal/team/tools/ci-runner/-/merge_requests/123456|code.internal|team/tools/ci-runner|123456
+EOF
+  # A Gerrit project is one nested name, so the whole path is the identity and
+  # is never flattened into an owner/repository pair that cannot address it.
+  while IFS='|' read -r url host path number; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected a canonical Gerrit change URL"
+    [ "$FM_PR_PROVIDER" = gerrit ] || fail "parser did not tag a Gerrit change URL as gerrit"
+    [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical Gerrit change URL"
+    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong Gerrit host"
+    [ "$FM_PR_PATH" = "$path" ] || fail "parser returned wrong Gerrit project path"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong Gerrit change number"
+    [ -z "$FM_PR_OWNER" ] && [ -z "$FM_PR_REPO" ] \
+      || fail "parser set GitHub owner/repository for a Gerrit change URL"
+  done <<'EOF'
+https://review.internal/c/group/apps/console/+/4201|review.internal|group/apps/console|4201
+https://gerrit.example/c/proj/+/1|gerrit.example|proj|1
+https://gerrit.example.co.uk/c/a/b/c/d/+/42|gerrit.example.co.uk|a/b/c/d|42
+https://review.internal/c/All-Projects/+/123456|review.internal|All-Projects|123456
 EOF
   fm_pr_url_parse https://github.com/a/b/pull/1 || fail "parser rejected canonical URL"
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
@@ -558,6 +655,43 @@ test_draft_pull_request_is_not_armed() {
   pass "arming refuses a draft pull request, naming it, and arms a ready or unreadable one"
 }
 
+# With no forge-reported head (gh cannot supply one), the named head is the
+# worker copy's HEAD, and a HEAD that exists only there is refused.
+test_unpushed_named_head_refuses_registration() {
+  local dir sha
+  dir=$(make_case unpushed-named-head)
+  write_task_meta "$dir"
+  git -C "$dir/wt" commit -q --allow-empty -m 'only in the copy'
+  sha=$(git -C "$dir/wt" rev-parse HEAD)
+  FM_TEST_GH_HEAD=unavailable run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/stderr" && fail "unpushed PR head was registered"
+  grep -Fq "named head $sha is unreachable outside the worker copy" "$dir/stderr" \
+    || fail "refusal did not name the unreachable head: $(cat "$dir/stderr")"
+  ! grep -q '^pr=' "$dir/home/state/task-a.meta" || fail "unpushed PR head still recorded pr="
+  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "unpushed PR head still armed a poll"
+  pass "fm-pr-check refuses to register a PR whose named head is only in the worker copy"
+}
+
+# A direct-PR worker pushes from its own copy: the forge still reports the
+# head pushed when the PR opened, but a later fix committed only in the copy
+# is the named head, so registration is refused.
+test_direct_pr_unpushed_commit_refuses_registration() {
+  local dir pushed later
+  dir=$(make_case direct-pr-unpushed)
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    "window=firstmate:fm-task-a" "endpoint_task_id=task-a" "worktree=$dir/wt" \
+    "project=$dir/project" "kind=ship" "mode=direct-PR"
+  pushed=$(git -C "$dir/wt" rev-parse HEAD)
+  git -C "$dir/wt" commit -q --allow-empty -m 'fix only in the copy'
+  later=$(git -C "$dir/wt" rev-parse HEAD)
+  FM_TEST_GH_HEAD=$pushed run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/stderr" && fail "direct-PR head with an unpushed later commit was registered"
+  grep -Fq "named head $later is unreachable outside the worker copy" "$dir/stderr" \
+    || fail "direct-PR refusal did not name the unpushed commit: $(cat "$dir/stderr")"
+  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "direct-PR unpushed commit still armed a poll"
+  pass "fm-pr-check refuses a direct-PR registration while a later commit is only in the copy"
+}
+
 test_valid_recording_and_merge_derivation() {
   local dir expected sidecar count rc
   dir=$(make_case valid-recording)
@@ -651,7 +785,7 @@ SH
     fm_write_meta "$dir/home/state/$id.meta" \
       "window=firstmate:fm-$id" \
       "endpoint_task_id=$id" \
-      "worktree=$dir/missing-worktree" \
+      "worktree=$dir/wt" \
       "project=$dir/project" \
       'kind=ship' \
       'mode=local-only'
@@ -682,6 +816,7 @@ SH
       || fail "path-safe legacy task ID could not use the PR merge flow"
     fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$POLL" \
       || fail "path-safe legacy task ID did not publish an authenticated poll"
+    rm -rf "$dir/wt"
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
       "$TEARDOWN" "$id" --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
       || fail "legacy path-safe task ID could not be torn down"
@@ -690,12 +825,23 @@ SH
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
 }
 
+# Runs one watcher under a hang guard that TERMs it and returns 124 once it has
+# used sixty seconds of its own time. The guard pauses while the file named by
+# FM_TEST_WATCH_BOUND_PAUSE exists, so a case that holds the watcher on work it
+# injects, or makes it wait on concurrent work it started, charges that work's
+# duration to itself instead of to the watcher.
+# FM_TEST_CHECK_TIMEOUT sets the per-check timeout for a case that exercises it.
+# Otherwise the product default applies: a tighter override silently kills a
+# correct poll on a loaded machine, and the watcher then only retries it or
+# exits on a later check's wake without the poll's result.
 run_watcher_bounded() {
   local home=$1 fakebin=$2 check_interval=${FM_TEST_CHECK_INTERVAL:-0} watch_root=${FM_TEST_WATCH_ROOT:-$ROOT}
-  local check_timeout=${FM_TEST_CHECK_TIMEOUT:-1}
+  local check_timeout_env=(-u FM_CHECK_TIMEOUT)
+  [ -z "${FM_TEST_CHECK_TIMEOUT:-}" ] || check_timeout_env=("FM_CHECK_TIMEOUT=$FM_TEST_CHECK_TIMEOUT")
   shift 2
-  perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
-    env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT="$check_timeout" \
+  perl -MPOSIX=WNOHANG -MTime::HiRes=time,sleep -e 'my $pause=shift; my $left=60; my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } my $last=time; while (waitpid($pid, WNOHANG) == 0) { my $now=time; $left -= $now - $last unless length $pause && -e $pause; $last=$now; if ($left <= 0) { kill "TERM", $pid; waitpid $pid, 0; exit 124 } sleep 0.02 } exit($? >> 8)' \
+    "${FM_TEST_WATCH_BOUND_PAUSE:-}" env "${check_timeout_env[@]}" \
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
 
@@ -755,6 +901,7 @@ make_poll_fixture() {
 run_poll() {
   local dir=$1
   FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
 }
@@ -841,11 +988,15 @@ SH
 }
 
 test_concurrent_watcher_sees_only_complete_publication() {
-  local n dir direct_pid rc i
+  local n dir direct_pid direct_rc watch_pid rc i id
+  # Arming also registers the contributions observer, and the watcher runs one
+  # cycle's checks in name order. This task sorts first, so the watcher reaches
+  # the poll under test, and stops on it, before that unrelated observer.
+  id=a-task
   n=1
   while [ "$n" -le 3 ]; do
     dir=$(make_case "concurrent-$n")
-    write_task_meta "$dir"
+    write_task_meta "$dir" "$id"
     cat > "$dir/fakebin/cp" <<SH
 #!/usr/bin/env bash
 '$REAL_CP' "\$@" || exit 1
@@ -854,7 +1005,7 @@ SH
     chmod +x "$dir/fakebin/cp"
 
     FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
-      run_check_entry "$dir" task-a https://github.com/o/r/pull/1 > "$dir/direct.out" 2> "$dir/direct.err" &
+      run_check_entry "$dir" "$id" https://github.com/o/r/pull/1 > "$dir/direct.out" 2> "$dir/direct.err" &
     direct_pid=$!
     i=0
     while [ "$i" -lt 100 ] && ! find "$dir/home/state" -name '.fm-pr-poll-check.*' -print | grep . >/dev/null; do
@@ -863,24 +1014,31 @@ SH
     done
     [ "$i" -lt 100 ] || fail "atomic publication did not reach staged check"
 
-    set +e
-    FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
-    rc=$?
-    set -e
-    wait "$direct_pid" || fail "concurrent direct arming failed"
-    [ "$rc" -eq 0 ] || fail "concurrent watcher did not complete"
+    # The watcher runs while publication is still in flight, and its hang
+    # guard is not charged for the time it spends waiting on that publication.
+    : > "$dir/direct-in-flight"
+    FM_TEST_WATCH_BOUND_PAUSE="$dir/direct-in-flight" FM_TEST_GH_STATE=MERGED \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" &
+    watch_pid=$!
+    direct_rc=0
+    wait "$direct_pid" || direct_rc=$?
+    rm -f "$dir/direct-in-flight"
+    rc=0
+    wait "$watch_pid" || rc=$?
+    [ "$direct_rc" -eq 0 ] || fail "concurrent direct arming failed"
+    [ "$rc" -eq 0 ] || fail "concurrent watcher did not complete (rc=$rc): $(cat "$dir/watch.err")"
     grep -q '^check: .*: merged$' "$dir/watch.out" || fail "concurrent watcher never saw complete poll"
     [ ! -s "$dir/watch.err" ] || fail "concurrent watcher observed a partial artifact error"
-    if [ -e "$dir/home/state/task-a.check.sh" ]; then
-      cmp -s "$POLL" "$dir/home/state/task-a.check.sh" || fail "concurrent publication check bytes changed"
-      [ "$(file_mode "$dir/home/state/task-a.check.sh")" = 600 ] || fail "concurrent check mode was not private"
-      [ "$(file_mode "$dir/home/state/task-a.pr-poll")" = 600 ] || fail "concurrent sidecar mode was not private"
-      [ "$(file_mode "$dir/home/state/task-a.pr-poll-registration")" = 600 ] \
+    if [ -e "$dir/home/state/$id.check.sh" ]; then
+      cmp -s "$POLL" "$dir/home/state/$id.check.sh" || fail "concurrent publication check bytes changed"
+      [ "$(file_mode "$dir/home/state/$id.check.sh")" = 600 ] || fail "concurrent check mode was not private"
+      [ "$(file_mode "$dir/home/state/$id.pr-poll")" = 600 ] || fail "concurrent sidecar mode was not private"
+      [ "$(file_mode "$dir/home/state/$id.pr-poll-registration")" = 600 ] \
         || fail "concurrent registration mode was not private"
-      fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+      fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$POLL" \
         || fail "concurrent publication did not leave canonical provenance"
     else
-      assert_poll_absent "$dir/home/state" task-a
+      assert_poll_absent "$dir/home/state" "$id"
     fi
     n=$((n + 1))
   done
@@ -1173,7 +1331,7 @@ SH
 }
 
 test_returned_custom_check_descendants_are_drained() {
-  local backend dir state fakebin ready direct_done child_pid_file sentinel watcher_pid child_pid i rc alive force_fallback
+  local backend dir state fakebin ready direct_done child_pid_file child_pid check rc force_fallback
   for backend in installed-timeout fallback-timeout; do
     dir=$(make_case "returned-custom-descendant-$backend")
     state="$dir/home/state"
@@ -1181,17 +1339,30 @@ test_returned_custom_check_descendants_are_drained() {
     ready="$dir/descendant-ready"
     direct_done="$dir/direct-check-done"
     child_pid_file="$dir/descendant.pid"
-    sentinel="$dir/descendant-sentinel"
+    # The descendant ignores TERM and never exits on its own while this case's
+    # directory exists, so its absence can only mean the watcher drained it.
     cat > "$state/custom.check.sh" <<'SH'
 #!/usr/bin/env bash
-perl -e '$SIG{TERM}="IGNORE"; open my $ready, ">", $ENV{FM_TEST_DESCENDANT_READY} or die $!; print {$ready} "ready\n"; close $ready; select undef, undef, undef, 4; open my $sentinel, ">", $ENV{FM_TEST_DESCENDANT_SENTINEL} or die $!; print {$sentinel} "late\n"; close $sentinel; select undef, undef, undef, 1' &
+perl -e '$SIG{TERM}="IGNORE"; open my $ready, ">", $ENV{FM_TEST_DESCENDANT_READY} or die $!; print {$ready} "ready\n"; close $ready; select undef, undef, undef, 0.2 while -d $ENV{FM_TEST_DESCENDANT_HOLD}' &
 printf '%s\n' "$!" > "$FM_TEST_DESCENDANT_PID"
 while [ ! -s "$FM_TEST_DESCENDANT_READY" ]; do sleep 0.01; done
 : > "$FM_TEST_DIRECT_DONE"
 SH
-    chmod 0700 "$state/custom.check.sh"
-    FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
-      || fail "could not register $backend returned-descendant check"
+    # The watcher runs this check next in the same cycle, only after it has
+    # finished with the returned one, so its wake both records whether the
+    # descendant outlived that drain and stops the watcher.
+    cat > "$state/z-drain-witness.check.sh" <<'SH'
+#!/usr/bin/env bash
+case "$(ps -o stat= -p "$(cat "$FM_TEST_DESCENDANT_PID")" 2>/dev/null)" in
+  ''|Z*) printf 'descendant drained\n' ;;
+  *) printf 'descendant alive\n' ;;
+esac
+SH
+    for check in custom z-drain-witness; do
+      chmod 0700 "$state/$check.check.sh"
+      FM_HOME="$dir/home" "$REGISTER" "$check" >/dev/null \
+        || fail "could not register $backend returned-descendant $check check"
+    done
     if [ "$backend" = installed-timeout ]; then
       cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
@@ -1205,46 +1376,22 @@ SH
       force_fallback=1
     fi
 
-    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_POLL=0.1 FM_CHECK_INTERVAL=999999 \
-      FM_CHECK_TIMEOUT=10 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
-      FM_CHECK_FORCE_FALLBACK="$force_fallback" FM_TEST_DESCENDANT_READY="$ready" \
-      FM_TEST_DESCENDANT_SENTINEL="$sentinel" FM_TEST_DESCENDANT_PID="$child_pid_file" \
-      FM_TEST_DIRECT_DONE="$direct_done" PATH="$fakebin:$BASE_PATH" "$WATCH" \
-      > "$dir/watch.out" 2> "$dir/watch.err" &
-    watcher_pid=$!
-    i=0
-    while [ "$i" -lt 200 ]; do
-      [ -s "$ready" ] && [ -s "$child_pid_file" ] && [ -e "$direct_done" ] \
-        && [ -e "$state/.last-check" ] && break
-      kill -0 "$watcher_pid" 2>/dev/null || break
-      sleep 0.02
-      i=$((i + 1))
-    done
-    [ -s "$ready" ] && [ -s "$child_pid_file" ] && [ -e "$direct_done" ] \
-      && [ -e "$state/.last-check" ] \
-      || fail "$backend watcher did not complete the direct custom check"
-    child_pid=$(cat "$child_pid_file")
-    kill -TERM "$watcher_pid" 2>/dev/null || fail "could not stop $backend watcher"
-    i=0
-    while process_is_live_non_zombie "$watcher_pid" && [ "$i" -lt 150 ]; do
-      sleep 0.02
-      i=$((i + 1))
-    done
-    if process_is_live_non_zombie "$watcher_pid"; then
-      kill -KILL "$watcher_pid" 2>/dev/null || true
-      wait "$watcher_pid" 2>/dev/null || true
-      kill -KILL "$child_pid" 2>/dev/null || true
-      fail "$backend watcher did not stop after the direct check returned"
-    fi
     rc=0
-    wait "$watcher_pid" || rc=$?
-    [ "$rc" -ne 0 ] || fail "$backend signaled watcher exited successfully"
-    alive=0
-    process_is_live_non_zombie "$child_pid" && alive=1
-    [ "$alive" -eq 0 ] || kill -KILL "$child_pid" 2>/dev/null || true
-    wait "$child_pid" 2>/dev/null || true
-    [ "$alive" -eq 0 ] || fail "$backend watcher left a returned check descendant alive"
-    [ ! -e "$sentinel" ] || fail "$backend returned check descendant reached its sentinel"
+    FM_TEST_CHECK_TIMEOUT=10 FM_CHECK_FORCE_FALLBACK="$force_fallback" \
+      FM_TEST_DESCENDANT_READY="$ready" FM_TEST_DESCENDANT_HOLD="$dir" \
+      FM_TEST_DESCENDANT_PID="$child_pid_file" FM_TEST_DIRECT_DONE="$direct_done" \
+      run_watcher_bounded "$dir/home" "$fakebin" > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+    child_pid=$(cat "$child_pid_file" 2>/dev/null || true)
+    if [ -n "$child_pid" ] && process_is_live_non_zombie "$child_pid"; then
+      kill -KILL "$child_pid" 2>/dev/null || true
+      fail "$backend watcher left a returned check descendant alive"
+    fi
+    [ "$rc" -eq 0 ] \
+      || fail "$backend watcher did not stop after the direct check returned (rc=$rc): $(cat "$dir/watch.err")"
+    [ -s "$ready" ] && [ -n "$child_pid" ] && [ -e "$direct_done" ] \
+      || fail "$backend watcher did not complete the direct custom check"
+    grep -qxF "check: $state/z-drain-witness.check.sh: descendant drained" "$dir/watch.out" \
+      || fail "$backend watcher moved past a returned check before draining its descendant: $(cat "$dir/watch.out")"
     ! find "$state" -maxdepth 1 -name '.fm-custom-check.*' -print | grep . >/dev/null \
       || fail "$backend watcher left a private custom check snapshot"
     ! find "$state" -maxdepth 1 -name '.fm-check-output.*' -print | grep . >/dev/null \
@@ -1354,6 +1501,426 @@ SH
   done
 
   pass "teardown removes safe poll artifacts and refuses directory-shaped check files without traversal"
+}
+
+# The Gerrit watch must follow a change exactly as the GitHub watch follows a
+# pull request, on any server, and must never turn an unreadable or merely
+# submittable change into a merge. Its evidence against a real change is in
+# docs/gerrit-change-watch.md; this exercises the same paths hermetically.
+test_gerrit_merge_watch() {
+  local dir state out rc url value notool entry bindir name tool
+  dir=$(make_case gerrit-merge-watch)
+  state="$dir/home/state"
+  url=https://gerrit.example/c/group/apps/console/+/4201
+  # The Gerrit branch reads its status with the real jq, and BASE_PATH is
+  # deliberately restricted, so this exposes jq explicitly rather than depending
+  # on the host keeping it in one of those four directories.
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a gerrit "$url" gerrit.example group/apps/console 4201 "$POLL" \
+    || fail "could not prepare a Gerrit poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Gerrit poll"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "published Gerrit poll provenance or metadata binding was invalid"
+  [ "$(cat "$state/task-a.pr-poll")" = "gerrit
+$url
+gerrit.example
+group/apps/console
+4201" ] || fail "published Gerrit sidecar bytes were not exact"
+
+  # Only an exact MERGED status wakes firstmate. Every other reading, including
+  # an abandoned change, a lowercase spelling, and a changed format, stays
+  # silent rather than reporting a merge.
+  for value in NEW ABANDONED merged Merged MERGED_LATER '' not-a-status; do
+    out=$(FM_TEST_GERRIT_STATUS="$value" run_poll "$dir")
+    [ -z "$out" ] || fail "Gerrit poll emitted for status '$value'"
+  done
+
+  # Readiness is not merge. A change that is fully submittable - nothing in its
+  # blocked_on list, submit OK, submittable true - is exactly what an approved
+  # but unsubmitted change looks like, and a merged change reports the same
+  # three fields. Only the status separates them, so only the status is read.
+  out=$(FM_TEST_GERRIT_STATUS=NEW FM_TEST_GERRIT_SUBMIT=OK \
+    FM_TEST_GERRIT_SUBMITTABLE=true FM_TEST_GERRIT_BLOCKED_ON='' run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll read a submittable open change as merged"
+
+  out=$(FM_TEST_GERRIT_STATUS=MERGED FM_TEST_GERRIT_SUBMIT=OK \
+    FM_TEST_GERRIT_SUBMITTABLE=true FM_TEST_GERRIT_BLOCKED_ON='' run_poll "$dir")
+  [ "$out" = merged ] || fail "Gerrit poll did not emit exactly one merged line"
+
+  out=$(FM_TEST_GERRIT_FAIL=1 FM_TEST_GERRIT_STATUS=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted after a gerrit-axi failure"
+  out=$(FM_TEST_GERRIT_RAW='not json at all' run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for unparseable output"
+  out=$(FM_TEST_GERRIT_RAW='{"ok":false,"error":"unauthenticated"}' run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for a typed error record"
+  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"changes":[]}' run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for a record naming no change"
+
+  # A record for some other change can never wake this task's poll, however the
+  # server came to return it. The change number is what names the change, and
+  # --host is what pins the server.
+  out=$(FM_TEST_GERRIT_STATUS=MERGED FM_TEST_GERRIT_CHANGE=4202 run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for another change's record"
+  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"op":"show","changes":[{"change":4202,"status":"MERGED","url":null}]}' \
+    run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for another change's url-less record"
+
+  # Gerrit composes a change's url field from gerrit.canonicalWebUrl and omits
+  # it when that setting is unset, so a merge must still be reported when the
+  # server returns the field null or does not return it at all. Comparing it
+  # against the stored URL is what would leave such a watch silent forever.
+  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"op":"show","changes":[{"change":4201,"status":"MERGED","url":null}]}' \
+    run_poll "$dir")
+  [ "$out" = merged ] || fail "Gerrit poll stayed silent for a merged change with a null url"
+  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"op":"show","changes":[{"change":4201,"status":"MERGED"}]}' \
+    run_poll "$dir")
+  [ "$out" = merged ] || fail "Gerrit poll stayed silent for a merged change with no url field"
+  out=$(FM_TEST_GERRIT_STATUS=MERGED \
+    FM_TEST_GERRIT_URL=https://alias.example/c/group/apps/console/+/4201 run_poll "$dir")
+  [ "$out" = merged ] || fail "Gerrit poll stayed silent for a merged change behind an alias host"
+
+  # A free-text subject carrying the merged spelling and the field separators
+  # cannot forge a status, because the status is read from the structured
+  # record rather than off a rendered line.
+  out=$(FM_TEST_GERRIT_STATUS=NEW \
+    FM_TEST_GERRIT_SUBJECT='"status: MERGED,MERGED,merged"' run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll read a merged spelling out of a change subject"
+
+  # gerrit-axi resolves its server from the current directory's origin remote
+  # first, and the watcher runs in no repository, so the host must be passed
+  # explicitly or the tool answers as though the change did not exist.
+  grep -qF -- "show 4201 --host gerrit.example --json" "$dir/gerrit-axi.log" \
+    || fail "Gerrit poll did not address gerrit-axi by change number and explicit host"
+  ! grep -qF -- "$url" "$dir/gerrit-axi.log" \
+    || fail "Gerrit poll passed a change URL to gerrit-axi"
+
+  # An absent CLI must produce no wake rather than a false merge, for either
+  # tool the Gerrit branch needs. The whole search path is mirrored without it,
+  # because a real one anywhere on PATH would make this prove nothing.
+  for tool in gerrit-axi jq; do
+    notool="$dir/no-$tool"
+    rm -rf "$notool"
+    mkdir -p "$notool"
+    while IFS= read -r bindir; do
+      [ -d "$bindir" ] || continue
+      for entry in "$bindir"/*; do
+        [ -e "$entry" ] || continue
+        name=$(basename "$entry")
+        [ "$name" = "$tool" ] && continue
+        [ -e "$notool/$name" ] || ln -s "$entry" "$notool/$name" 2>/dev/null
+      done
+    done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+    ! PATH="$notool" command -v "$tool" >/dev/null 2>&1 \
+      || fail "the $tool-free search path still resolved $tool"
+    out=$(FM_TEST_GERRIT_STATUS=MERGED FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
+      PATH="$notool" bash "$state/task-a.check.sh")
+    [ -z "$out" ] || fail "Gerrit poll emitted with $tool absent from PATH"
+
+    # Arming is where a missing CLI can still be reported, so it refuses there.
+    write_task_meta "$dir" "task-no-$tool"
+    set +e
+    out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+      FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$notool" \
+      "$PR_CHECK" "task-no-$tool" "$url" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "arming a Gerrit watch succeeded with $tool absent"
+    case "$out" in
+      *"requires $tool on PATH"*) ;;
+      *) fail "arming a Gerrit watch with $tool absent did not report the missing CLI" ;;
+    esac
+    [ ! -e "$state/task-no-$tool.check.sh" ] || fail "refused Gerrit arming left a poll armed"
+  done
+
+  # A doctored sidecar cannot redirect the poll: the stored parts must rebuild
+  # the stored URL exactly.
+  printf '%s\n%s\n%s\n%s\n%s\n' gerrit "$url" elsewhere.example group/apps/console 4201 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_GERRIT_STATUS=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for a sidecar whose host was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' gerrit "$url" gerrit.example group/apps/other 4201 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_GERRIT_STATUS=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for a sidecar whose project was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' gerrit "$url" gerrit.example group/apps/console 4202 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_GERRIT_STATUS=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for a sidecar whose change number was swapped"
+
+  pass "the Gerrit watch wakes only on an explicit merged status and never on submittability"
+}
+
+# Arming a Gerrit watch records the canonical change identity and no pr_head.
+# A Gerrit revision names one patch set, and bin/fm-review-diff.sh has no Gerrit
+# path to resolve a current head with, so a recorded revision would quietly
+# become the reviewed content after the next amend.
+test_gerrit_arming_records_no_patch_set_revision() {
+  local dir state rc out
+  dir=$(make_case gerrit-arming)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+
+  write_task_meta "$dir" task-rev
+  FM_TEST_GERRIT_REVISION=$(git -C "$dir/wt" rev-parse HEAD) run_check_entry "$dir" task-rev \
+    https://gerrit.example/c/group/apps/console/+/4201 >/dev/null \
+    || fail "arming a Gerrit watch failed"
+  grep -qxF 'pr=https://gerrit.example/c/group/apps/console/+/4201' "$state/task-rev.meta" \
+    || fail "arming did not record the canonical Gerrit change URL"
+  grep -q '^pr_head=' "$state/task-rev.meta" \
+    && fail "arming recorded a Gerrit patch set revision as pr_head"
+  [ -e "$state/task-rev.check.sh" ] || fail "arming a Gerrit watch left no poll armed"
+
+  # Submitting a Gerrit change is refused outright, before anything is read or
+  # recorded, rather than left as a silently absent provider branch.
+  set +e
+  out=$(run_merge_entry "$dir" task-rev \
+    https://gerrit.example/c/group/apps/console/+/4201 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the merge path accepted a Gerrit change"
+  case "$out" in
+    *"does not submit a Gerrit change"*) ;;
+    *) fail "the Gerrit merge refusal did not say firstmate does not submit" ;;
+  esac
+  [ ! -e "$state/task-rev.merge-authority" ] || fail "a refused Gerrit merge recorded merge authority"
+
+  pass "Gerrit arming records no patch set revision and the merge path refuses to submit"
+}
+
+# A push to refs/for/ leaves no ref a fetch can see, so a remote-tracking ref
+# that holds the worker's HEAD - the no-mistakes gate branch after a pipeline
+# run - says nothing about what was published. Arming accepts the named head
+# only when a live read shows the change's current patch set carrying that
+# HEAD's tree - the squash is a new commit on the server's base, so the tree and
+# not the commit names what was published - and refuses otherwise, before
+# anything is recorded or armed. Once arming has recorded the change as pr=, a
+# later done naming it is accepted from that record without a read, so a
+# reviewer's rebase or new patch set on the server does not revoke it.
+test_gerrit_ready_gate_reads_the_published_tree() {
+  local dir state base published other out rc
+  dir=$(make_case gerrit-ready-gate)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  base=$(git -C "$dir/wt" rev-parse HEAD)
+  printf 'one\n' > "$dir/wt/a"
+  git -C "$dir/wt" add a
+  git -C "$dir/wt" commit -q -m first
+  printf 'two\n' > "$dir/wt/b"
+  git -C "$dir/wt" add b
+  git -C "$dir/wt" commit -q -m second
+  git -C "$dir/wt" update-ref refs/remotes/no-mistakes/fm/task "$(git -C "$dir/wt" rev-parse HEAD)"
+  published=$(git -C "$dir/wt" commit-tree "$(git -C "$dir/wt" rev-parse 'HEAD^{tree}')" -p "$base" -m squashed)
+  other=$(git -C "$dir/wt" rev-parse HEAD~1)
+  [ "$(git -C "$dir/wt" rev-parse "$published^{tree}")" != "$(git -C "$dir/wt" rev-parse "$other^{tree}")" ] \
+    || fail "the fixture's two revisions carry the same tree"
+
+  write_task_meta "$dir" task-mismatch
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$other run_check_entry "$dir" task-mismatch \
+    https://gerrit.example/c/group/apps/console/+/4201 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a change whose patch set is not this copy's HEAD tree"
+  case "$out" in
+    *"not the published content"*) ;;
+    *) fail "the refusal did not say the change does not carry the named head: $out" ;;
+  esac
+  grep -q '^pr=' "$state/task-mismatch.meta" && fail "a refused Gerrit arming recorded pr="
+  [ ! -e "$state/task-mismatch.check.sh" ] || fail "a refused Gerrit arming armed a poll"
+
+  write_task_meta "$dir" task-unknown
+  set +e
+  FM_TEST_GERRIT_REVISION=0123456789abcdef0123456789abcdef01234567 run_check_entry "$dir" task-unknown \
+    https://gerrit.example/c/group/apps/console/+/4201 >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a patch set this copy has never held"
+
+  write_task_meta "$dir" task-unread
+  set +e
+  FM_TEST_GERRIT_FAIL=1 run_check_entry "$dir" task-unread \
+    https://gerrit.example/c/group/apps/console/+/4201 >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a change it could not read"
+
+  : > "$dir/gerrit-axi.log"
+  write_task_meta "$dir" task-published
+  FM_TEST_GERRIT_REVISION=$published run_check_entry "$dir" task-published \
+    https://gerrit.example/c/group/apps/console/+/4201 >/dev/null \
+    || fail "arming refused a change whose current patch set carries this copy's HEAD tree"
+  grep -qF -- "show 4201 --host gerrit.example --json" "$dir/gerrit-axi.log" \
+    || fail "the gate did not read the change from its own server"
+  [ -e "$state/task-published.check.sh" ] || fail "an accepted Gerrit arming left no poll armed"
+  grep -q '^pr_head=' "$state/task-published.meta" \
+    && fail "the gate's live revision was recorded as pr_head"
+
+  git -C "$dir/wt" update-ref -d refs/remotes/no-mistakes/fm/task
+  : > "$dir/gerrit-axi.log"
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=0123456789abcdef0123456789abcdef01234567 \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4" "$5" task-published "$6"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" \
+    "done: PR https://gerrit.example/c/group/apps/console/+/4201 published for review" \
+    "$state" "$state/task-published.meta" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "a server-side rebase after arming revoked the recorded change's done: $out"
+  [ ! -s "$dir/gerrit-axi.log" ] || fail "a done naming the recorded change read the server again"
+  pass "Gerrit arming accepts a published HEAD only by the change's current patch set tree"
+}
+
+# On a Gerrit project the pipeline's push is skipped, so a fix round's commits
+# stay in its local gate until the worker recovers custody. A worker that
+# publishes before recovering has an unfixed HEAD and an unfixed patch set that
+# agree, so the published-tree check alone accepts it. A no-mistakes ready
+# report on a Gerrit change must therefore also show the copy holds the run's
+# result: refused while the run still holds the branch, when HEAD's tree is not
+# the pipeline head's, or when the run cannot be read; accepted once recovered,
+# even after the publish's Change-Id stamp rewrote the branch's messages.
+test_gerrit_nm_ready_gate_requires_recovered_custody() {
+  local dir state base unfixed fixed stamped squash elsewhere out rc url line
+  dir=$(make_case gerrit-custody-gate)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  url=https://gerrit.example/c/group/apps/console/+/4201
+  line="done: PR $url published for review"
+  base=$(git -C "$dir/wt" rev-parse HEAD)
+  printf 'flawed\n' > "$dir/wt/doc"
+  git -C "$dir/wt" add doc
+  git -C "$dir/wt" commit -q -m "Document the value"
+  unfixed=$(git -C "$dir/wt" rev-parse HEAD)
+  # The pipeline's fix commit exists only in its gate: build it in another repo,
+  # so this copy does not hold its object, exactly as before recovery.
+  elsewhere="$dir/gate-only"
+  git clone -q "$dir/wt" "$elsewhere"
+  printf 'fixed\n' > "$elsewhere/doc"
+  git -C "$elsewhere" commit -q -am "no-mistakes(review): Correct the documented value"
+  fixed=$(git -C "$elsewhere" rev-parse HEAD)
+  git -C "$dir/wt" cat-file -e "$fixed" 2>/dev/null && fail "the fixture copy already holds the pipeline's fix"
+
+  # Case A from the live test: the server holds the unfixed patch set, which
+  # matches the unrecovered HEAD, and the run reports custody unreturned.
+  write_task_meta "$dir" task-unrecovered
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_PIPELINE_HEAD=$fixed \
+    FM_TEST_NM_NEXT_ACTION=recover_custody run_check_entry "$dir" task-unrecovered "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a publish of the head before the pipeline's fixes were recovered"
+  case "$out" in
+    *"still holds this copy's branch"*) ;;
+    *) fail "the refusal did not say the run still holds the branch: $out" ;;
+  esac
+  grep -q '^pr=' "$state/task-unrecovered.meta" && fail "a refused unrecovered publish recorded pr="
+  [ ! -e "$state/task-unrecovered.check.sh" ] || fail "a refused unrecovered publish armed a poll"
+
+  # The same state with no next action reported still refuses on the trees.
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_PIPELINE_HEAD=$fixed run_check_entry "$dir" task-unrecovered "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a copy whose HEAD is not the run's result"
+  case "$out" in
+    *"does not carry the no-mistakes run's result"*) ;;
+    *) fail "the refusal did not say the copy lacks the run's result: $out" ;;
+  esac
+
+  set +e
+  FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_NEXT_ACTION=continue_active_run \
+    run_check_entry "$dir" task-unrecovered "$url" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a publish while the run is still active"
+
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_FAIL=1 run_check_entry "$dir" task-unrecovered "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a publish whose no-mistakes run could not be read"
+  case "$out" in
+    *"could not be read"*) ;;
+    *) fail "the refusal did not say the run could not be read: $out" ;;
+  esac
+
+  # A failed run whose own head was published has nothing to recover, so the
+  # trees agree; its outcome alone refuses it, as does a missing outcome.
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_OUTCOME=failed run_check_entry "$dir" task-unrecovered "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a publish of a failed no-mistakes run"
+  case "$out" in
+    *"has outcome failed, not a pass"*) ;;
+    *) fail "the refusal did not name the run's failed outcome: $out" ;;
+  esac
+  grep -q '^pr=' "$state/task-unrecovered.meta" && fail "a refused failed-run publish recorded pr="
+  set +e
+  FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_OUTCOME='' run_check_entry "$dir" task-unrecovered "$url" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a publish of a run with no outcome"
+
+  # A published-for-review done whose URL is not a canonical Gerrit change is
+  # refused, even though a gate push left HEAD on a remote-tracking ref.
+  git -C "$dir/wt" update-ref refs/remotes/no-mistakes/fm/task "$unfixed"
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$unfixed PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" \
+    "done: PR https://gerrit.example/r/c/group/apps/console/+/4201/1 published for review" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the done gate accepted a published-for-review report naming no Gerrit change"
+  case "$out" in
+    *"canonical https://<host>/c/<project>/+/<number> form"*) ;;
+    *) fail "the refusal did not name the canonical Gerrit change form: $out" ;;
+  esac
+  git -C "$dir/wt" update-ref -d refs/remotes/no-mistakes/fm/task
+
+  # Recovery fast-forwards the copy to the fix; the publish then stamps a
+  # Change-Id, rewriting the message but not the tree, and pushes one squash.
+  git -C "$dir/wt" fetch -q "$elsewhere" "$fixed"
+  git -C "$dir/wt" merge -q --ff-only "$fixed"
+  stamped=$(git -C "$dir/wt" commit-tree "$(git -C "$dir/wt" rev-parse 'HEAD^{tree}')" -p "$unfixed" \
+    -m "no-mistakes(review): Correct the documented value" -m "Change-Id: I0123456789abcdef0123456789abcdef01234567")
+  git -C "$dir/wt" reset -q --hard "$stamped"
+  squash=$(git -C "$dir/wt" commit-tree "$(git -C "$dir/wt" rev-parse 'HEAD^{tree}')" -p "$base" -m squashed)
+  [ "$stamped" != "$fixed" ] || fail "the fixture's stamped head did not diverge from the pipeline head"
+
+  # The done gate itself, as crew-state and the secondmate ledger call it.
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" "$line" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the done gate refused a recovered, published copy: $out"
+
+  write_task_meta "$dir" task-recovered
+  FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed run_check_entry "$dir" task-recovered "$url" >/dev/null \
+    || fail "arming refused a recovered copy whose squash carries the pipeline's result"
+  grep -qxF "pr=$url" "$state/task-recovered.meta" || fail "the recovered publish was not recorded"
+
+  # A direct-PR task never runs the pipeline, so no run is asked about.
+  : > "$dir/nm.log"
+  write_task_meta "$dir" task-direct
+  sed -i.bak 's/^mode=no-mistakes$/mode=direct-PR/' "$state/task-direct.meta" && rm -f "$state/task-direct.meta.bak"
+  FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_FAIL=1 FM_TEST_NM_LOG="$dir/nm.log" \
+    run_check_entry "$dir" task-direct "$url" >/dev/null \
+    || fail "a direct-PR Gerrit publish was refused over a pipeline it never runs"
+  [ ! -s "$dir/nm.log" ] || fail "a direct-PR Gerrit publish consulted no-mistakes"
+  pass "a no-mistakes Gerrit ready report requires the pipeline's fixes recovered into the published copy"
 }
 
 # The GitLab watch must follow a merge request exactly as the GitHub watch
@@ -2226,8 +2793,19 @@ merged_ledger_row() {  # <state> <task-id>
     'index($5, prefix) == 1 { print $5 }' "$1/.wake-queue"
 }
 
+# Arming also registers the contributions observer, whose poll runs a full fleet
+# snapshot on every watcher check cycle. No case here exercises it (its own
+# suite does), so a case retires it before a bounded merged-poll run instead of
+# charging that work to the run's hang guard. Only ever call this while no
+# watcher runs, because a check removed mid-cycle is reported as rejected.
+retire_contributions_observer() {  # <dir>
+  FM_HOME="$1/home" "$ROOT/bin/fm-check-unregister.sh" contributions >/dev/null \
+    || fail "could not retire the contributions observer"
+}
+
 run_merged_poll_cycle() {  # <dir>
   local dir=$1 rc=0
+  retire_contributions_observer "$dir"
   add_stop_custom_check "$dir"
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
@@ -2411,7 +2989,7 @@ test_teardown_cannot_race_authority_consumption() {
 }
 
 test_authority_retirement_preserves_replacement() {
-  local dir state url_a url_b rc i
+  local dir state url_a url_b rc merge_pid
   url_a=https://github.com/o/r/pull/1
   url_b=https://github.com/o/r/pull/2
   dir=$(make_case merge-authority-retirement-replacement)
@@ -2420,8 +2998,11 @@ test_authority_retirement_preserves_replacement() {
   run_check_entry "$dir" task-a "$url_a" >/dev/null 2> "$dir/seed.err" \
     || fail "replacement: could not arm the original poll"
   queue_merge "$dir" "$url_a"
+  # The replacement runs inside the watcher, whose environment names the real
+  # firstmate root, so restore the fixture root every other arming here uses.
   cat > "$dir/replace-authority.sh" <<SH
 #!/usr/bin/env bash
+export FM_ROOT_OVERRIDE="$dir/root" FM_TEST_GUARD_LOG="$dir/guard.log"
 "$PR_CHECK" task-a "$url_b" >/dev/null
 (
   FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \\
@@ -2429,8 +3010,11 @@ test_authority_retirement_preserves_replacement() {
   "$PR_MERGE" task-a "$url_b" > "$dir/replacement-merge.out" 2> "$dir/replacement-merge.err"
   printf '%s\n' \$? > "$dir/replacement-merge.rc"
 ) &
+printf '%s\n' "\$!" > "$dir/replacement-merge.pid"
 SH
   chmod +x "$dir/replace-authority.sh"
+  # The watcher is held inside this mv while the replacement re-arms, so that
+  # work pauses the watcher's hang guard.
   cat > "$dir/fakebin/mv" <<'SH'
 #!/usr/bin/env bash
 "$FM_TEST_REAL_MV" "$@" || exit $?
@@ -2438,27 +3022,33 @@ case " $* " in
   *"task-a.pr-poll-merge-notified "*)
     if [ ! -e "$FM_TEST_REPLACEMENT_RAN" ]; then
       : > "$FM_TEST_REPLACEMENT_RAN"
+      : > "$FM_TEST_WATCH_BOUND_PAUSE"
       "$FM_TEST_REPLACEMENT_SCRIPT"
+      rm -f "$FM_TEST_WATCH_BOUND_PAUSE"
     fi
     ;;
 esac
 SH
   chmod +x "$dir/fakebin/mv"
+  retire_contributions_observer "$dir"
   add_stop_custom_check "$dir"
   set +e
   FM_TEST_REAL_MV="$REAL_MV" FM_TEST_REPLACEMENT_RAN="$dir/replacement-ran" \
     FM_TEST_REPLACEMENT_SCRIPT="$dir/replace-authority.sh" \
+    FM_TEST_WATCH_BOUND_PAUSE="$dir/replacement-in-flight" \
     FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
       > "$dir/watch-a.out" 2> "$dir/watch-a.err"
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "replacement: original poll failed: $(cat "$dir/watch-a.err")"
-  i=0
-  while [ ! -e "$dir/replacement-merge.rc" ]; do
+  # The replacement merge was started from inside the watcher, so it is not
+  # this shell's child; wait on its recorded process like any merge run here.
+  merge_pid=$(cat "$dir/replacement-merge.pid" 2>/dev/null) \
+    || fail "replacement: serialized replacement merge was not started"
+  while process_is_live_non_zombie "$merge_pid"; do
     sleep 0.01
-    i=$((i + 1))
-    [ "$i" -lt 200 ] || fail "replacement: serialized replacement merge did not finish"
   done
+  [ -e "$dir/replacement-merge.rc" ] || fail "replacement: serialized replacement merge did not finish"
   [ "$(cat "$dir/replacement-merge.rc")" -eq 0 ] \
     || fail "replacement: serialized replacement merge failed: $(cat "$dir/replacement-merge.err")"
   [ -f "$state/task-a.merge-authority" ] \
@@ -2792,6 +3382,10 @@ SH
 
 test_parser_matrix
 test_gitlab_merge_watch
+test_gerrit_merge_watch
+test_gerrit_arming_records_no_patch_set_revision
+test_gerrit_ready_gate_reads_the_published_tree
+test_gerrit_nm_ready_gate_requires_recovered_custody
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
@@ -2812,6 +3406,8 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_draft_pull_request_is_not_armed
+test_unpushed_named_head_refuses_registration
+test_direct_pr_unpushed_commit_refuses_registration
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract

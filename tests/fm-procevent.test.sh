@@ -57,6 +57,20 @@ printf '%s\n' "$@"
 SH
 chmod +x "$BLOCKER"
 
+# Records that the wrapped command actually started, then becomes it. A claim
+# only proves its runner got as far as claiming; a test that needs the runner
+# already inside its source command waits for this marker instead of a settle
+# window, because a runner still short of that command retires itself when its
+# registration goes away.
+STARTED_BLOCKER="$TMP_ROOT/started-blocker.sh"
+cat > "$STARTED_BLOCKER" <<'SH'
+#!/usr/bin/env bash
+printf 'started\n' > "$1"
+shift
+exec "$@"
+SH
+chmod +x "$STARTED_BLOCKER"
+
 pe() { FM_HOME="$1" "$ROOT/bin/fm-procevent.sh" "${@:2}"; }
 
 # Every home this suite registers a source in is tracked so teardown can stop
@@ -572,16 +586,8 @@ HREPLACE="$TMP_ROOT/hreplace"; new_home "$HREPLACE"
 fm_test_track_procevent_home "$HREPLACE"
 OLD_TRIGGER="$TMP_ROOT/replace-old-trigger"
 OLD_STARTED="$TMP_ROOT/replace-old-started"
-REPLACE_BLOCKER="$TMP_ROOT/replace-blocker.sh"
-cat > "$REPLACE_BLOCKER" <<'SH'
-#!/usr/bin/env bash
-printf 'started\n' > "$1"
-shift
-exec "$@"
-SH
-chmod +x "$REPLACE_BLOCKER"
 pe_adapter "$HREPLACE" register endnow replace-src -- \
-  "$REPLACE_BLOCKER" "$OLD_STARTED" "$BLOCKER" "$OLD_TRIGGER" "old terminal payload" >/dev/null
+  "$STARTED_BLOCKER" "$OLD_STARTED" "$BLOCKER" "$OLD_TRIGGER" "old terminal payload" >/dev/null
 pe_adapter "$HREPLACE" start replace-src > "$TMP_ROOT/replace-old.out" 2>&1 &
 replace_old_pid=$!
 wait_for "$OLD_STARTED" || fail "the old registration never started"
@@ -1713,12 +1719,18 @@ kill -0 "$runner_pid" 2>/dev/null && fail "retire left the blocked runner alive"
 assert_absent "$FM_PROCEVENT_CLAIM_ROOT/shared-src.claim" "retire releases the claim"
 pass "retiring a never-completing source stops its runner and its blocked child"
 
-# reconcile must also stop a runner whose registration was removed out from under it.
+# reconcile must also stop a runner whose registration was removed out from under
+# it. The input is a runner already blocked inside its source command, so wait for
+# the start marker rather than a settle window: a runner still short of that
+# command retires itself when the registration disappears, which on a loaded host
+# turns this into a test of the other outcome and reports uncertain=1.
 TRIG4="$TMP_ROOT/trigger-four"
+ORPHAN_STARTED="$TMP_ROOT/orphan-src.started"
 HZ="$TMP_ROOT/hz"; new_home "$HZ"
-pe_register "$HZ" lavish orphan-src -- "$BLOCKER" "$TRIG4" "orphan" >/dev/null
+pe_register "$HZ" lavish orphan-src \
+  -- "$STARTED_BLOCKER" "$ORPHAN_STARTED" "$BLOCKER" "$TRIG4" "orphan" >/dev/null
 pe "$HZ" reconcile >/dev/null
-sleep 0.5
+wait_for "$ORPHAN_STARTED" || fail "the orphan fixture runner never entered its source command"
 orphan_pid=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" 2>/dev/null)
 if [ -z "$orphan_pid" ] || ! kill -0 "$orphan_pid" 2>/dev/null; then
   fail "orphan fixture runner did not start"
@@ -1779,7 +1791,7 @@ for _ in $(seq 1 24); do
   pe "$HR" start race-src >/dev/null &
   race_pids+=("$!")
 done
-wait_for "$RACE_LOG" || fail "no contender acquired the stale claim"
+wait_for "$RACE_LOG" 300 || fail "no contender acquired the stale claim"
 sleep 0.5
 [ "$(wc -l < "$RACE_LOG" | tr -d ' ')" = 1 ] || fail "stale-claim race started more than one runner"
 : > "$RACE_TRIGGER"
@@ -3356,7 +3368,10 @@ fm_test_track_procevent_home "$HPACE_RACE"
 PACE_RACE_LOG="$TMP_ROOT/registration-pacing-race.log"
 pe_register "$HPACE_RACE" lavish pace-race-src -- "$FAST_SOURCE" "$PACE_RACE_LOG" >/dev/null
 FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=3 pe "$HPACE_RACE" start pace-race-src >/dev/null
-FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=3 \
+# The superseded runner sleeps out its whole floor before it rechecks the
+# registration, so the floor must outlast the claim wait and re-registration
+# below even on a loaded machine; a 3s floor let the stale command launch.
+FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=15 \
   pe "$HPACE_RACE" start pace-race-src > "$TMP_ROOT/registration-pacing-race.out" 2>&1 &
 PACE_RACE_PID=$!
 wait_for "$FM_PROCEVENT_CLAIM_ROOT/pace-race-src.claim" \
