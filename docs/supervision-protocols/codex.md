@@ -14,3 +14,5 @@ When this session owns supervision and away mode is not active:
 
 Codex cannot reason while a foreground tool call is running.
 The bounded checkpoint returns control regularly so user messages and queued wakes can be handled without relying on background-task wake semantics.
+When that turn is allowed to end, `bin/fm-codex-idle-continuity.sh` keeps process-event reconciliation running and queues an actionable close back into the same thread.
+The next checkpoint stops that idle supervisor before it starts its own watcher, so each turn's checkpoint owns supervision until the turn ends again.

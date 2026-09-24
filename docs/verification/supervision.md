@@ -511,6 +511,15 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | omp | `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` | One initial `fm_watch_arm_omp` invocation (the openai-codex model reaches extension tools through omp's `xd://` virtual-file bridge, a `write` to `xd://fm_watch_arm_omp`, counted as the same invocation) started a live watcher; an actionable close spawned a ledger-linked successor and woke main exactly once; the lab is reaped by path, and omp 18.1.11 did not exit within 30s of its rpc stdin closing, recorded as a note. omp 18.1.11, 2026-09-05. |
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
 
+On 2026-09-24 with codex-cli 0.154.0, `bash tests/fm-codex-idle-continuity.test.sh` kept a single-shot source at one run and `OWNER none` while nothing was supervising, then recorded a second run and a queued actionable close only after an allowing stop with a live owner pid.
+`FM_CODEX_LIVE_E2E=1 tests/fm-codex-idle-continuity-live-e2e.test.sh` ran an interactive codex in an isolated tmux server with a throwaway `CODEX_HOME` and printed `ok - codex-cli 0.154.0 Stop re-armed an ownerless source while the interactive session idled`, with the idle supervisor's recorded owner equal to that codex pid.
+A one-shot `codex exec` cannot show this, because the supervisor exits with its Codex owner and `codex exec` exits as soon as the Stop hook returns.
+Codex's hook documentation for that version parses `async` and does not run asynchronous command hooks, so the supervisor is detached with a perl fork and `setsid`, which also runs on macOS where util-linux `setsid` is absent, and the Stop hook returns.
+`bash tests/fm-codex-idle-continuity.test.sh` also ran three turns in a row: each `bin/fm-watch-checkpoint.sh` stopped the idle supervisor and ended as a quiet bounded checkpoint instead of `watcher: already running`, and each following allowing stop started a fresh supervisor that owned the watcher again.
+A supervisor whose arm attached to a checkpoint's watcher re-armed its own watcher after that checkpoint ended.
+Against an arm that reported only attached closes or signal exits, the supervisor kept running past five cycles, because an exit it did not cause is a handover rather than a failure, and it still stopped after three `watcher: FAILED - no live watcher` closes, queuing one `check: codex idle continuity stopped` line into the thread first.
+Three more allowing stops against that still-broken arm started no supervisor and queued no second check, and after one successful `bin/fm-watch-checkpoint.sh` the next allowing stop started a supervisor again, which queued the next episode's single check.
+
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 
 Pi 0.86.1 repeated the isolated watcher-only live check on 2026-09-22:
