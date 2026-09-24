@@ -677,6 +677,7 @@ For the away posture:
 - `tests/fm-afk-email.test.sh` covers away-email configuration gating, batched sends, expiring one-use tokens, sender checks, inbox handoff, and the unconfigured fallback without network access.
 
 
+
 `tests/fm-wake-drain-outcome-backstop.test.sh` covers keyless resurfacing, causal suppression, same-second ordering, one-shot presentation, first-drain index self-healing under the outcome lock, store-fault fail-closed behavior, bounded history cost and output, and the oversized-line limit.
 
 `tests/fm-teardown.test.sh` covers removal of the retired task's outcome index and the append-side rule that a post-teardown report does not recreate it.
