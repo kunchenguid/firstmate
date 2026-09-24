@@ -59,6 +59,8 @@ FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}
 
 WORKER_LOCK=
 WORKER_LOCK_HELD=0
+WORKER_LOCK_FD=
+WORKER_LOCK_BOUND=
 WORKER_RELEASE_OWNERSHIP=1
 WORKER_SUPERVISED_PID=
 WORKER_PREEMPTIBLE=0
@@ -183,18 +185,66 @@ worker_acquire_lock() {
   return 1
 }
 
+# Open the lock directory this process still owns and remember a path that
+# stays on that directory object. A replacement that removes the path and
+# creates a new directory is invisible through a Linux directory fd, so a
+# later write or clear cannot land in the replacement's quarantine.
+worker_bind_owned_lock() {
+  local fd pid
+  [ "$WORKER_LOCK_HELD" -eq 1 ] || return 1
+  [ -d "$WORKER_LOCK" ] && [ ! -L "$WORKER_LOCK" ] || return 1
+  exec {fd}< "$WORKER_LOCK" || return 1
+  if [ -d "/proc/self/fd/$fd" ]; then
+    WORKER_LOCK_BOUND="/proc/self/fd/$fd"
+  else
+    WORKER_LOCK_BOUND=$WORKER_LOCK
+  fi
+  pid=$(fm_remote_job_read_single_line "$WORKER_LOCK_BOUND/pid" 64 2>/dev/null || true)
+  if [ "$pid" != "${BASHPID:-$$}" ]; then
+    exec {fd}<&-
+    WORKER_LOCK_BOUND=
+    return 1
+  fi
+  WORKER_LOCK_FD=$fd
+}
+
+worker_unbind_owned_lock() {
+  local fd=${WORKER_LOCK_FD:-}
+  [ -n "$fd" ] || return 0
+  exec {fd}<&-
+  WORKER_LOCK_FD=
+  WORKER_LOCK_BOUND=
+}
+
+worker_bound_lock_still_owned() {
+  local pid
+  [ -n "${WORKER_LOCK_BOUND:-}" ] || return 1
+  pid=$(fm_remote_job_read_single_line "$WORKER_LOCK_BOUND/pid" 64 2>/dev/null || true)
+  [ "$pid" = "${BASHPID:-$$}" ]
+}
+
 worker_publish_quarantine() {
   local tmp
-  [ "$WORKER_LOCK_HELD" -eq 1 ] || return 1
-  tmp=$(umask 077; mktemp "$WORKER_LOCK/.quarantine.XXXXXX") || return 1
-  printf 'active execution could not be confirmed stopped\n' > "$tmp" || { rm -f -- "$tmp"; return 1; }
-  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  mv -f -- "$tmp" "$WORKER_LOCK/quarantine"
+  worker_bind_owned_lock || return 1
+  tmp=$(umask 077; mktemp "$WORKER_LOCK_BOUND/.quarantine.XXXXXX") || { worker_unbind_owned_lock; return 1; }
+  if ! printf 'active execution could not be confirmed stopped\n' > "$tmp" \
+    || ! chmod 600 "$tmp" || ! worker_bound_lock_still_owned \
+    || ! mv -f -- "$tmp" "$WORKER_LOCK_BOUND/quarantine"; then
+    rm -f -- "$tmp"
+    worker_unbind_owned_lock
+    return 1
+  fi
+  worker_unbind_owned_lock
 }
 
 worker_clear_quarantine() {
-  [ ! -L "$WORKER_LOCK/quarantine" ] || return 1
-  rm -f -- "$WORKER_LOCK/quarantine"
+  worker_bind_owned_lock || return 1
+  if [ -L "$WORKER_LOCK_BOUND/quarantine" ] || ! worker_bound_lock_still_owned \
+    || ! rm -f -- "$WORKER_LOCK_BOUND/quarantine"; then
+    worker_unbind_owned_lock
+    return 1
+  fi
+  worker_unbind_owned_lock
 }
 
 # True only while this process still owns the lock directory it published.
@@ -409,6 +459,18 @@ worker_stop_active_execution() {
 # file that no later worker could clear, so every replacement then failed to
 # report ready. A shutdown that hangs is still stopped: the caller escalates to
 # KILL, which no disposition can block.
+# Ownership is already gone. Stop only this process's command tree and exit
+# without releasing or rewriting the directory a replacement may now own.
+worker_exit_lost_lock() {
+  WORKER_RELEASE_OWNERSHIP=0
+  WORKER_LOCK_HELD=0
+  worker_stop_active_execution || {
+    worker_error "could not stop the active command tree"
+    exit 125
+  }
+  exit 0
+}
+
 worker_shutdown() {
   trap '' HUP INT TERM
   # The ownership directory is gone or a replacement owns it. TERM stays
@@ -418,20 +480,19 @@ worker_shutdown() {
   # cleanup cannot release a replacement's lock. Signals stay ignored until
   # exit, so a repeat is a no-op.
   if ! worker_shutdown_owns_lock; then
-    WORKER_RELEASE_OWNERSHIP=0
-    WORKER_LOCK_HELD=0
-    worker_stop_active_execution || {
-      worker_error "could not stop the active command tree"
-      exit 125
-    }
-    exit 0
+    worker_exit_lost_lock
   fi
   # Still our lock: a transient publish failure must not abandon the
   # directory. Re-arm and keep serving so a later signal can quarantine it.
+  # A publish failure after the directory was replaced is lost ownership,
+  # not a reason to keep serving.
   worker_publish_quarantine || {
-    worker_error "cannot guard worker ownership for shutdown"
-    trap worker_shutdown HUP INT TERM
-    return 0
+    if worker_shutdown_owns_lock; then
+      worker_error "cannot guard worker ownership for shutdown"
+      trap worker_shutdown HUP INT TERM
+      return 0
+    fi
+    worker_exit_lost_lock
   }
   worker_stop_active_execution || {
     worker_error "could not stop the active command tree"
@@ -439,9 +500,12 @@ worker_shutdown() {
     exit 125
   }
   worker_clear_quarantine || {
-    worker_error "could not clear guarded worker ownership after shutdown"
-    WORKER_RELEASE_OWNERSHIP=0
-    exit 125
+    if worker_shutdown_owns_lock; then
+      worker_error "could not clear guarded worker ownership after shutdown"
+      WORKER_RELEASE_OWNERSHIP=0
+      exit 125
+    fi
+    worker_exit_lost_lock
   }
   exit 0
 }
