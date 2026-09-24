@@ -153,7 +153,7 @@ run_pf_sysbash() {  # <home> <args...>
 tasks_in() {  # <home> <tasks-axi args...>
   local home=$1
   shift
-  (cd "$home" && tasks-axi "$@")
+  (cd "$home" && fm_test_tasks_axi "$@")
 }
 
 # seed_commitment <home> <obligation> <request> <platform> <work-home> <work-id>
@@ -301,7 +301,7 @@ test_ambient_tasks_axi_env_never_reaches_a_real_backlog() {
     . "$1/tests/lib.sh"
     [ -z "${TASKS_AXI_FILE+x}" ] || { echo "TASKS_AXI_FILE survived tests/lib.sh"; exit 1; }
     [ -z "${TASKS_AXI_BACKEND+x}" ] || { echo "TASKS_AXI_BACKEND survived tests/lib.sh"; exit 1; }
-    cd "$2" && tasks-axi public-followup add pf-ambient \
+    cd "$2" && fm_test_tasks_axi public-followup add pf-ambient \
       --request-context-file "$2/request.json" --purpose promised-final \
       --expected-final-file "$2/expected.json" --expires-at 2026-10-01T00:00:00Z >/dev/null
   ' _ "$ROOT" "$home" \

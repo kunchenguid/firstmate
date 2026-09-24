@@ -8,11 +8,15 @@
 # truncated before the wake queue, supervision instructions, fleet state, and
 # context sections printed, leaving a whole fleet unsupervised.
 #
-# Both halves are proved here:
+# Three parts are proved here:
 #   - a deliberately hanging `tasks-axi show` cannot exceed the per-item bound,
 #     and the failure names the item it could not read
 #   - a session start against that same wedged backend still completes end to
 #     end, with every digest section present and a loud partial reconcile
+#   - the suite's own tasks-axi call sites carry the same bound: a test that ran
+#     tasks-axi unbounded would hang the whole run against a wedged backend
+#     instead of failing the case, so tests/lib.sh's fm_test_tasks_axi must turn
+#     that hang into a bounded non-zero status
 #
 # The bound must hold on its own, independent of any particular tasks-axi
 # install, so the fake here simply never returns.
@@ -89,7 +93,7 @@ elapsed_since() {  # <start-epoch>
   printf '%s\n' "$((now - $1))"
 }
 
-# --- half one: the per-item bound holds -------------------------------------
+# --- part one: the per-item bound holds -------------------------------------
 
 UNIT="$TMP_ROOT/unit"
 UNIT_FAKEBIN=$(fm_fakebin "$UNIT")
@@ -361,7 +365,7 @@ case "$(cat "$VERIFY_MIG_OUT")" in
 esac
 pass "a bound hit in the migrated-prefix scan stops verify by name instead of resolving to nothing"
 
-# --- half two: the digest still completes end to end ------------------------
+# --- part two: the digest still completes end to end ------------------------
 
 E2E="$TMP_ROOT/e2e"
 E2E_ROOT="$E2E/root"
@@ -426,5 +430,45 @@ pass "a wedged backlog backend still leaves a complete digest: wake queue, super
 grep -q '^BACKLOG_RECONCILE: wedged-task: ' "$DIGEST" \
   || fail "the wedged item must be reported by name as a partial reconcile: $(cat "$DIGEST")"
 pass "an unreachable backlog backend degrades to a loud partial reconcile naming the item it could not read"
+
+# --- part three: the suite's own call sites carry the bound -----------------
+#
+# The same hazard one layer up. A test that calls tasks-axi directly runs it
+# unbounded, so a wedged backend holds the whole run open until CI kills it and
+# the run reports nothing instead of failing the case. tests/lib.sh's
+# fm_test_tasks_axi is the suite's one bounded call site; this asserts the bound
+# actually fires rather than being a passthrough that happens to compile.
+
+SUITE="$TMP_ROOT/suite"
+SUITE_FAKEBIN=$(fm_fakebin "$SUITE")
+make_hanging_tasks_axi "$SUITE_FAKEBIN"
+
+# The probe runs under an outer ceiling and records its own status to a file, so
+# an inert bound fails this case loudly inside the ceiling instead of
+# reproducing the 300s hang the bound exists to prevent. An absent status file
+# is the outer ceiling firing; the recorded status is the inner bound's own.
+SUITE_OUT="$SUITE/call.out"
+SUITE_STATUS_FILE="$SUITE/call.status"
+# shellcheck disable=SC2016 # The child shell, not this one, expands $rc.
+PATH="$SUITE_FAKEBIN:$BASE_PATH" FM_TEST_TASKS_AXI_TIMEOUT="$BOUND_SECS" \
+  timeout "$BOUND_CEILING" bash -c '
+    set -u
+    . "$1/tests/lib.sh"
+    rc=0
+    fm_test_tasks_axi show wedged-suite-call || rc=$?
+    printf "%s\n" "$rc" > "$2"
+  ' _ "$ROOT" "$SUITE_STATUS_FILE" > "$SUITE_OUT" 2>&1 || true
+
+SUITE_STATUS=$(cat "$SUITE_STATUS_FILE" 2>/dev/null || true)
+[ -n "$SUITE_STATUS" ] \
+  || fail "the suite bound is inert: a call site did not return within ${BOUND_CEILING}s against a hanging tasks-axi: $(cat "$SUITE_OUT")"
+# The status has to be the bound's own (124, or 137 when the kill-after fired),
+# not merely non-zero: a helper that vanished would exit 127 just as fast and
+# pass a returned-at-all assertion while every call site ran unbounded again.
+case "$SUITE_STATUS" in
+  124 | 137) ;;
+  *) fail "a hanging tasks-axi must fail a suite call site with the bound's own status, got $SUITE_STATUS: $(cat "$SUITE_OUT")" ;;
+esac
+pass "a hanging tasks-axi fails a suite call site within the bound instead of stalling the run"
 
 echo "# fm-backlog-read-bound.test.sh: all assertions passed"

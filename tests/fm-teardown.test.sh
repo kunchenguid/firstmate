@@ -640,14 +640,14 @@ seed_backlog_in_flight() {
   mkdir -p "$case_dir/data"
   printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
     > "$case_dir/data/backlog.md"
-  tasks-axi add task-x1 "teardown fixture task" --kind "$kind" \
+  fm_test_tasks_axi add task-x1 "teardown fixture task" --kind "$kind" \
     --file "$case_dir/data/backlog.md" >/dev/null
-  tasks-axi start task-x1 --file "$case_dir/data/backlog.md" >/dev/null
+  fm_test_tasks_axi start task-x1 --file "$case_dir/data/backlog.md" >/dev/null
 }
 
 backlog_row_state() {
   local case_dir=$1
-  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" 2>/dev/null |
+  fm_test_tasks_axi show task-x1 --file "$case_dir/data/backlog.md" 2>/dev/null |
     sed -n 's/^  state: *//p' | head -1
 }
 

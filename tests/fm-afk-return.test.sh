@@ -376,8 +376,8 @@ test_return_brief_composes_from_record_store_and_held_set() {
   local dir out rc gate health_line words_line waiting_line failed_line second
   dir="$TMP_ROOT/brief"
   install_runner "$dir"
-  (cd "$dir/home" && tasks-axi add fix-windows 'Fix the windows lane' --file data/backlog.md >/dev/null \
-    && tasks-axi hold fix-windows --reason 'awaiting the captain on the merge' --kind captain --file data/backlog.md >/dev/null) \
+  (cd "$dir/home" && fm_test_tasks_axi add fix-windows 'Fix the windows lane' --file data/backlog.md >/dev/null \
+    && fm_test_tasks_axi hold fix-windows --reason 'awaiting the captain on the merge' --kind captain --file data/backlog.md >/dev/null) \
     || fail "could not seed the held backlog"
   contract_in "$dir" enter --words $'merge the windows fix when green, then cut a prerelease\nif the install deadlocks abort the competing run' >/dev/null 2>&1 || fail "could not confirm the away-posture record"
   # Two live blockers, one on a task with a captain-verdict outcome and one on a
