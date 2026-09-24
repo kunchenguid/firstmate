@@ -36,9 +36,10 @@
 #     continuation (fm_autoarm_claim_open/fm_autoarm_claim_next in
 #     bin/fm-wake-lib.sh own the contract, including the legacy shim for a
 #     pre-generation lock).
-#   - Foreground arm: the owner runs bin/fm-watch-arm.sh in the FOREGROUND of
-#     this hook-owned process tree (never shell &); Claude owns the process
-#     group, so its timeout/session teardown kills arm and watcher together.
+#   - Foreground arm: the owner runs bin/fm-watch-arm.sh as a tracked child it
+#     waits on inside this hook-owned process tree (never a fire-and-forget
+#     shell &); Claude owns the process group, so its timeout/session teardown
+#     kills arm and watcher together, and the hook TERMs the arm with itself.
 #     HUP, TERM, and INT are translated through the ordinary durable failure
 #     handoff instead of leaving the generation frozen at arming. Claude does
 #     not deliver the exit 2 of a hook it terminated at the configured timeout
@@ -47,6 +48,21 @@
 #     records the failure durably without waking an idle primary; nothing here
 #     shortens a quiet park, because no-change heartbeats are absorbed without
 #     closing the arm.
+#   - Handling successor: Pi, omp, and OpenCode start the next arm before they
+#     deliver an actionable wake, so the fleet stays covered while the model
+#     handles it. After an actionable close, including an attached peer cycle
+#     that ended, this hook starts one successor bin/fm-watch-arm.sh with the
+#     closed arm's pid as FM_WATCH_PREDECESSOR_ARM_PID, the same handoff the
+#     Pi extension passes for its closed arm child, so the arm starts a
+#     handling-successor watcher and links the lifecycle ledger. A child of
+#     this hook cannot outlive the exit-2 rewake, so the successor is launched
+#     the one way a process survives a Claude hook: nohup, stdio detached, in
+#     its own process group (the shape bin/fm-startup-network.sh uses;
+#     docs/verification/supervision.md records the survival check). The hook
+#     waits for the successor's one status line, adds one banner line when no
+#     live watcher was confirmed, and never withholds the wake for it; the
+#     next Stop's foreground arm attaches to that live cycle. The supervision
+#     host owns its own successors, so its path is unchanged.
 #   - Supervision host: a home opted in with config/supervision-host
 #     (docs/configuration.md "Supervision host" owns the opt-in) runs
 #     bin/fm-supervision-host.sh in the arm's place, bound to this generation.
@@ -243,6 +259,10 @@ autoarm_record() {  # <outcome>
 handle_autoarm_signal() {
   local signal=$1
   trap - HUP TERM INT
+  if [ -n "${ARM_PID:-}" ]; then
+    kill -TERM "$ARM_PID" 2>/dev/null || true
+    wait "$ARM_PID" 2>/dev/null || true
+  fi
   [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
   if [ -e "$FAILURE_ALARM" ]; then
     autoarm_record failed-suppressed
@@ -268,12 +288,71 @@ trap 'handle_autoarm_signal INT' INT
 [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
 
 # --- foreground the real arm wrapper ------------------------------------------
-# NO shell &: this hook process tree is the harness-owned lifecycle. The arm
-# forks the watcher as its own tracked child exactly as it does for the
-# model-driven background-task path, and propagates the wake reason on close.
+# The arm is a tracked child this hook waits on, never a fire-and-forget shell
+# & whose child would be reaped when the hook returned: this hook process tree
+# is the harness-owned lifecycle. The arm forks the watcher as its own tracked
+# child exactly as it does for the model-driven background-task path, and
+# propagates the wake reason on close. Holding the arm's pid lets the signal
+# handler TERM it with the hook and lets the handling successor below name it
+# as the predecessor whose cycle just closed.
 # Every non-actionable close is checked against the same identity-matched live
 # watcher and fresh-beacon predicate used by the turn-end guard before it is
 # retried or translated into an operator-visible failure.
+ARM_PID=
+CLOSED_ARM_PID=
+run_arm() {  # <output file, or empty for none>
+  if [ -n "$1" ]; then
+    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >"$1" 2>&1 &
+  else
+    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 &
+  fi
+  ARM_PID=$!
+  wait "$ARM_PID" || true
+  CLOSED_ARM_PID=$ARM_PID
+  ARM_PID=
+}
+
+# --- handling successor --------------------------------------------------------
+# Start the next arm before the rewake delivers the wake, as the Pi, omp, and
+# OpenCode adapters do from their child-close handlers, so a watcher covers the
+# handling turn instead of the home waiting uncovered for the next Stop. The
+# successor receives the closed arm's pid as FM_WATCH_PREDECESSOR_ARM_PID; it
+# must outlive this hook's exit, so it is detached three ways: nohup, stdio
+# away from the hook's pipes, and its own process group. Its one status line
+# is awaited within the arm's own confirmation budget plus slack. Sets
+# SUCCESSOR_FAILURE to the banner line for an unconfirmed successor.
+SUCCESSOR_FAILURE=
+start_handling_successor() {  # <closed-arm-pid>
+  local out pid deadline budget line monitor_was_on=0
+  budget=${FM_ARM_CONFIRM_TIMEOUT:-30}
+  case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
+  if ! out=$(mktemp "$STATE/.claude-autoarm-successor.XXXXXX"); then
+    SUCCESSOR_FAILURE='The handling successor did not confirm a live watcher (its output file could not be created); this handling turn runs uncovered until the next turn end re-arms.'
+    return 1
+  fi
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m 2>/dev/null || true
+  FM_WATCH_PREDECESSOR_ARM_PID=$1 FM_GUARD_GRACE="$GRACE" \
+    nohup "$SCRIPT_DIR/fm-watch-arm.sh" >"$out" 2>&1 </dev/null &
+  pid=$!
+  [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+  deadline=$(( $(date +%s) + budget + 2 ))
+  while :; do
+    if grep -Eq '^watcher: (started|attached) pid=[0-9]+' "$out" 2>/dev/null; then
+      rm -f "$out" 2>/dev/null || true
+      return 0
+    fi
+    grep -q '^watcher: FAILED' "$out" 2>/dev/null && break
+    [ "$(date +%s)" -ge "$deadline" ] && break
+    sleep 0.2
+  done
+  line=$(grep '^watcher: FAILED' "$out" 2>/dev/null | head -n 1 || true)
+  rm -f "$out" 2>/dev/null || true
+  [ -z "$line" ] || line=" ($line)"
+  SUCCESSOR_FAILURE="The handling successor pid=$pid did not confirm a live watcher$line; this handling turn runs uncovered until the next turn end re-arms."
+  return 1
+}
+
 OUT=
 ACTIONABLE=0
 HEALTHY=0
@@ -301,10 +380,8 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
     FM_SUPERVISION_HOST_AUTOARM_GEN=$MY_GEN FM_SUPERVISION_HOST_OWNER_PID=$$ \
       FM_SUPERVISION_HOST_PRIMARY=claude FM_GUARD_GRACE="$GRACE" \
       "$SCRIPT_DIR/fm-supervision-host.sh" park >"${OUT:-/dev/null}" 2>&1 || HOST_RC=$?
-  elif [ -n "$OUT" ]; then
-    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1 || true
   else
-    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 || true
+    run_arm "$OUT"
   fi
 
   # AFK may have appeared mid-cycle: the daemon owns triage now, so suppress
@@ -395,6 +472,10 @@ if [ "$ACTIONABLE" -eq 1 ]; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
+  # The host owns its own successors and stops its cycle before handing back.
+  if [ "$HOST_MODE" -eq 0 ]; then
+    start_handling_successor "$CLOSED_ARM_PID" || true
+  fi
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
     if [ "$HOST_MODE" -eq 1 ]; then
@@ -405,6 +486,7 @@ if [ "$ACTIONABLE" -eq 1 ]; then
     if [ "$HOST_MODE" -eq 1 ] && [ -e "$STATE/.afk-contract" ]; then
       printf 'This wake comes from automatic supervision under the away-posture record, not from the captain: it is not a return, so handle it under the away posture.\n'
     fi
+    [ -z "$SUCCESSOR_FAILURE" ] || printf '%s\n' "$SUCCESSOR_FAILURE"
     printf 'Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle arms automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake.\n'
   } >&2
   if autoarm_commit rewake; then
