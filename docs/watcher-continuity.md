@@ -25,6 +25,7 @@ A cycle-end failure is benign when that live-watcher predicate is true, and the 
 Only an exhausted failure with no verified watcher commits one last-resort notice for the continuous failure episode; a refused notice commit stays silent for a later retry, and after a successful notice later Stop cycles exit 2 without repeating it until the turn-end guard consumes the attended fail-open.
 The Claude turn-end guard owns that notice commit contract, the monotonic failure progression, one-time attended fail-open, post-alarm continuation suppression, and positive recovery reset described in [`turnend-guard.md`](turnend-guard.md#harness-integrations).
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
+A home opted into the supervision host runs `bin/fm-supervision-host.sh` in that arm's place; it owns successive watcher cycles through the same arm, starts and confirms each successor before its engine handles an away wake, and stops its cycle before handing a wake back, so the recovery and acknowledgement contracts below apply unchanged ([supervision-host.md](supervision-host.md)).
 
 ## Actionable wake ordering
 

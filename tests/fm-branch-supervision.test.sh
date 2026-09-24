@@ -747,6 +747,63 @@ test_unmarked_guard_with_a_lease_file_holds_exclusivity_through_mutation() {
   pass "a lease file makes an unmarked guard exclude a concurrent claim for the complete mutation"
 }
 
+# A home opted into the supervision host has a branch actor that can claim a
+# task no one has leased yet, so its unmarked main must exclude that first
+# claim for the whole guarded mutation, while a home without the opt-in keeps
+# taking no lock at all.
+test_host_home_unmarked_guard_excludes_the_first_claim() {
+  local home operation_pid claim_pid claim_status out
+  home="$TMP_ROOT/host-first-claim-home"
+  mkdir -p "$home/state" "$home/config"
+  printf '%s\n' "$$" > "$home/state/.lock"
+
+  # Without the opt-in the unmarked guard stays lock-free for an unleased task.
+  # The positional parameter belongs to the nested shell.
+  # shellcheck disable=SC2016
+  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR CLAUDECODE=1 FM_HOME="$home" STATE="$home/state" bash -c '
+    . "$1"
+    fm_lease_guard task-first "probe"
+    if [ -e "$STATE/.fm-lease-command.lock" ]; then echo lock-taken; else echo no-lock; fi
+  ' _ "$ROOT/bin/fm-lease-lib.sh" 2>&1)
+  [ "$out" = no-lock ] || fail "a home without config/supervision-host engaged the lease-command lock: $out"
+
+  : > "$home/config/supervision-host"
+  # The positional parameter belongs to the nested shell.
+  # shellcheck disable=SC2016
+  env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR CLAUDECODE=1 FM_HOME="$home" STATE="$home/state" \
+    FM_TEST_READY="$home/operation-ready" FM_TEST_RELEASE="$home/operation-release" bash -c '
+      . "$1"
+      fm_lease_guard task-first "probe"
+      trap "fm_lease_guard_release" EXIT
+      : > "$FM_TEST_READY"
+      i=0
+      while [ ! -e "$FM_TEST_RELEASE" ] && [ "$i" -lt 1500 ]; do sleep 0.01; i=$((i + 1)); done
+    ' _ "$ROOT/bin/fm-lease-lib.sh" >/dev/null 2>&1 &
+  operation_pid=$!
+  while [ ! -e "$home/operation-ready" ]; do sleep 0.01; done
+  [ ! -e "$home/state/.lease-task-first" ] || fail "the guard created a lease for an unleased task"
+
+  env -u PI_CODING_AGENT FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ \
+    "$ROOT/bin/fm-lease.sh" claim task-first --actor branch >/dev/null 2>&1 &
+  claim_pid=$!
+  sleep 0.2
+  kill -0 "$claim_pid" 2>/dev/null \
+    || fail "the host branch took the first claim while main's guarded mutation was still running"
+  [ ! -e "$home/state/.lease-task-first" ] \
+    || fail "the first claim published a lease before main's guarded mutation ended"
+
+  : > "$home/operation-release"
+  wait "$operation_pid" || fail "host-home guarded mutation fixture failed"
+  wait "$claim_pid"; claim_status=$?
+  [ "$claim_status" -eq 0 ] || fail "the first claim did not proceed after main's guarded mutation ended: $claim_status"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-lease.sh" check task-first) || fail "the first claim left no lease"
+  case "$out" in
+    "branch $$ "*" live") ;;
+    *) fail "the first claim recorded: $out" ;;
+  esac
+  pass "an opted-in home's unmarked main excludes the host's first claim for its whole mutation, and other homes take no lock"
+}
+
 # --- session-bound staleness and the loud accidental-override guard ---------
 
 test_lease_liveness_binds_to_the_session_lock() {
@@ -1241,6 +1298,7 @@ test_main_owned_actions_refuse_the_branch_actor
 test_home_without_branch_is_untouched
 test_unmarked_main_honors_a_live_branch_lease
 test_unmarked_guard_with_a_lease_file_holds_exclusivity_through_mutation
+test_host_home_unmarked_guard_excludes_the_first_claim
 test_lease_liveness_binds_to_the_session_lock
 test_concurrent_stale_lease_claims_have_one_winner
 test_guard_stale_clear_cannot_delete_a_new_claim

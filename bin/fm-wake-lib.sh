@@ -2125,6 +2125,18 @@ fm_wake_actor_pending_count() {  # <actor> [<rows-file> <owner-file>]
   printf '%s\n' "$count"
 }
 
+# Print which of the given sequence numbers are still queued, one per line.
+# Read without the queue lock, like the count above, so it answers for a
+# caller that asks only after the actor that could consume those rows is done.
+# Fails when the queue exists but cannot be read.
+fm_wake_rows_queued() {  # <seq>...
+  [ -f "$FM_WAKE_QUEUE" ] || return 0
+  awk -F '\t' -v seqs="$*" '
+    BEGIN { n = split(seqs, list, " "); for (i = 1; i <= n; i++) want[list[i]] = 1 }
+    NF >= 5 && $2 ~ /^[0-9]+$/ && ($2 in want) { print $2 }
+  ' "$FM_WAKE_QUEUE"
+}
+
 # --- signal announcement signatures -----------------------------------------
 #
 # The watcher's per-file signal scan (bin/fm-watch.sh scan_signals) detects a

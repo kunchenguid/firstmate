@@ -1,7 +1,7 @@
 # Grok Build
 
 The xAI `grok` TUI is Claude-Code-compatible.
-Verified initially on 2026-06-29 with 0.2.73, slash submission on 2026-07-03 with 0.2.82, effort on 2026-07-13 with 0.2.99, and exit on 2026-07-19 with 0.2.103.
+Verified initially on 2026-06-29 with 0.2.73, slash submission on 2026-07-03 with 0.2.82, effort on 2026-07-13 with 0.2.99, exit on 2026-07-19 with 0.2.103, and folder trust, the training opt-in, and unsent composer delivery on 2026-09-24 with 1.0.41.
 Launch shape: `grok --always-approve "$(cat <brief>)"`.
 
 ## Operating facts
@@ -31,9 +31,33 @@ Old Herdr logic treated any pane delta as submission, including popup closure an
 Tmux and Herdr now route captures through `../../../bin/fm-composer-lib.sh`, which classifies real text on every proven content row.
 `../../../docs/herdr-backend.md` owns the boundary and `../../../tests/fm-backend-herdr.test.sh` covers it.
 
+On 2026-09-24, on the first dispatches after Grok was added to this fleet, a steer landed in the Grok 1.0.41 composer unsent.
+The pane showed `Enter:send now` and the text stayed pending.
+Verify delivery by peeking at the pane rather than trusting the send result, on anything time-critical to this harness.
+A hold that silently does not arrive is the worst message to lose.
+
 The "Run Grok Build in a project directory?" picker appears only outside a project, such as home, Desktop, Downloads, or `/tmp`.
-The spawn starts in the isolated git root, so Grok trusts it and needs no key.
+The spawn starts in the isolated git root, so that picker stays absent and needs no key.
 For unavoidable non-project launch, `[hints] project_picker_disabled = true` in `~/.grok/config.toml` suppresses the picker.
+The project picker and the folder-trust gate are separate dialogs.
+On 2026-09-24, on those same first dispatches, Grok 1.0.41 rendered a folder-trust gate in a linked git worktree.
+The dialog printed the primary checkout path, because a linked worktree's git root resolves to the main one, so the text reads exactly like a worktree-isolation violation when isolation is intact.
+Check the worker's real location with `/proc/<pid>/cwd`, never the path the dialog prints.
+Answer the gate with the key path's Enter (`../../../bin/fm-send.sh <target> --key Enter`).
+`../../../bin/fm-send.sh` carries only Escape, Enter, and C-c, and a literal `y` has no sanctioned route.
+On 2026-09-24 Grok 1.0.41 persisted that answer to `~/.grok/trusted_folders.toml`, keyed by the path the dialog prints.
+That is the same store `../../../bin/fm-spawn.sh` deliberately does not write and calls a high-blast-radius write.
+In a linked worktree the trust therefore lands on the primary checkout, not the disposable copy, and it persists for every later Grok run there.
+This silently enables Grok project hooks for that checkout.
+Answering the gate is nonetheless the sanctioned route, because `../../../bin/fm-send.sh` has no other way to clear it.
+It is a knowing exception to the store-avoidance stance, not an oversight, so expect the new entry to appear in that file.
+
+## Training opt-in
+
+On 2026-09-24, on the first dispatches after Grok was added to this fleet, Grok 1.0.41 offered "Help improve Grok".
+That opt-in retains prompts, traces, and metrics for training.
+It is off by default and must be left off.
+This fleet writes customer-facing privacy statements saying customer data and audio are not used for training, and sending our own prompts and traces to a provider for training while publishing that is not a trade to make silently.
 
 ## Composer
 
@@ -49,7 +73,7 @@ The shared classifier locates the full box and all content rows, so border curso
 ## Worker turn-end hook
 
 Grok fires `Stop` each turn.
-Project hooks require folder trust in `~/.grok/trusted_folders.toml`, which Firstmate does not edit; global `~/.grok/hooks/` is always trusted.
+Project hooks require folder trust in `~/.grok/trusted_folders.toml`, which the spawn does not edit, though answering the folder-trust gate above writes it; global `~/.grok/hooks/` is always trusted.
 The spawn installs guarded global `fm-turn-end.json` and `fm-turn-end.sh`.
 They act only when workspace `.fm-grok-turnend` matches the registry under `~/.grok/hooks/fm-turn-end.d/`, then touch the task's `state/<id>.turn-ended` through always-set `GROK_WORKSPACE_ROOT`, which equals the worktree.
 This stays outside the worktree, needs no trust grant, and writes only Firstmate files.
