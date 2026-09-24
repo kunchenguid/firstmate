@@ -5,6 +5,10 @@
 # informational status lines, latest captain-facing statuses not covered by a
 # newer branch outcome, OPEN DECISIONS, and captain-call record divergence,
 # then assert liveness.
+# An acknowledgement that consumes a captain inbox note's wake row while the note
+# itself is still unacknowledged names that note on stderr, so a caller that
+# filtered the drain's output down to WAKE_ACK_REQUIRED still learns the note
+# is waiting; bin/fm-inbox.sh owns the note record and its acknowledgement.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
@@ -38,6 +42,7 @@ ACK_REMOVED=0
 PRESENTED_MAX=0
 ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
+ACK_INBOX_NOTES=
 PRESENTATION_LOCK_TIMEOUT=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
 case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10 ;; esac
 
@@ -239,6 +244,30 @@ inactive_outcome_fingerprints() { # <sequence> <key-prefix> [<rows-file>]
       "$prefix"*) printf '%s\n' "${key#"$prefix"}" ;;
     esac
   done < "$FM_WAKE_QUEUE"
+}
+
+# Captain inbox note rows (check, key inbox:<id>) this main acknowledgement is
+# about to consume, as id<TAB>payload.
+consumed_inbox_note_rows() { # <sequence> <rows-file>
+  awk -F '\t' -v cutoff="$1" -v seqs="$2" '
+    BEGIN { while ((getline line < seqs) > 0) owned[line]=1 }
+    NF >= 5 && $3 == "check" && $2 ~ /^[0-9]+$/ && $2 <= cutoff + 0 && ($2 in owned) && $4 ~ /^inbox:/ {
+      print substr($4, 7) "\t" $5
+    }
+  ' "$FM_WAKE_QUEUE"
+}
+
+# Name every consumed inbox note that bin/fm-inbox.sh still holds as pending.
+print_waiting_inbox_notes() { # <id<TAB>payload rows>
+  local id payload
+  while IFS=$(printf '\t') read -r id payload; do
+    case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    [ -f "$STATE/inbox/$id.note" ] || continue
+    printf 'CAPTAIN INBOX NOTE STILL WAITING: %s - its wake row was acknowledged but the note was not; read it with bin/fm-inbox.sh list, handle it, then run bin/fm-inbox.sh drain --ack %s (%s)\n' \
+      "$id" "$id" "$payload" >&2
+  done <<EOF
+$1
+EOF
 }
 
 acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
@@ -699,6 +728,7 @@ if [ -n "$ACK_THROUGH" ]; then
       BEGIN { while ((getline line < seqs) > 0) owned[line]=1 }
       NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff || !($2 in owned) { print }
     ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
+    ACK_INBOX_NOTES=$(consumed_inbox_note_rows "$ACK_THROUGH" "$MAIN_ROWS_FILE") || exit 1
     fm_wake_commit_secondmate_stall_receipts_through "$ACK_THROUGH" "$MAIN_ROWS_FILE" || {
       echo "wake drain: secondmate stall receipt could not be recorded safely" >&2
       exit 1
@@ -735,6 +765,7 @@ if [ -n "$ACK_THROUGH" ]; then
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
+  [ -z "$ACK_INBOX_NOTES" ] || print_waiting_inbox_notes "$ACK_INBOX_NOTES"
   if [ "$ACK_REMOVED" -eq 0 ] && [ "$PRESENTED_MAX" -gt "$ACK_THROUGH" ]; then
     # Nothing at or below the cutoff was this actor's to consume, while a
     # presented row above it is still waiting: the caller acknowledged an
