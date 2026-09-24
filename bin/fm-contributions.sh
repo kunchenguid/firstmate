@@ -39,10 +39,10 @@
 # budget, 15) before starting a URL, so an in-progress normal-budget observation
 # gets all three waves and a later URL waits for the next oldest-checked-first
 # poll.
-# A read that fails for any reason other than the budget is retried up to three
+# A read that fails for any reason other than the budget is retried once, two
 # attempts in total, because one transient GitHub API failure is not evidence
-# that the contribution is unobservable. The remaining budget bounds every
-# attempt, so retries can push an observation past its reserve but never past
+# that the contribution is unobservable. The remaining budget bounds both
+# attempts, so a retry can push an observation past its reserve but never past
 # the poll budget. Budget exhaustion is never retried. A retry the budget stops
 # cannot erase a failure already seen: that genuine failure is what gets
 # recorded. A head that changed during the read is a fact, not a blip, and is
@@ -98,7 +98,7 @@ EPOCH=$(jq -nr --arg now "$NOW" '$now | fromdateiso8601') || fail 'invalid obser
 MAX_AGE=${FM_CONTRIBUTIONS_MAX_AGE:-900}
 BUDGET=${FM_CONTRIBUTIONS_BUDGET:-20}
 # Total attempts per forge read, retries included; not operator-configurable.
-FORGE_ATTEMPTS=3
+FORGE_ATTEMPTS=2
 case "$MAX_AGE" in ''|*[!0-9]*) fail 'invalid freshness bound' ;; esac
 case "$BUDGET" in ''|*[!0-9]*) fail 'invalid poll budget' ;; esac
 [ "$BUDGET" -ge 1 ] && [ "$BUDGET" -le 25 ] || fail 'poll budget must be 1..25 seconds'

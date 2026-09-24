@@ -831,7 +831,7 @@ test_sustained_forge_failure_spends_retries_then_wakes_once() { # every attempt 
     || fail 'poll failed on a sustained forge failure'
   [ "$out" = "$line" ] || fail "a failure that survived every attempt did not wake: $out"
   attempts=$(grep -cF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls")
-  [ "$attempts" -ge 2 ] || fail "a sustained failure was never retried: $attempts attempt(s)"
+  [ "$attempts" = 2 ] || fail "a sustained failure did not spend exactly two attempts: $attempts"
   jq -e '.records[0].error == "forge observation unavailable or changed during read"' \
     "$home/data/delivery/contributions.json" >/dev/null \
     || fail 'a sustained failure left no error evidence'
