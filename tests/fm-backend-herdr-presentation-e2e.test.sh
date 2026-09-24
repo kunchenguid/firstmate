@@ -38,7 +38,8 @@ mkdir -p "$FAKEBIN"
 : > "$FOCUS_AUDIT_LOG"
 REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
 export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG TREEHOUSE_LOCK_DIR MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
-export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
+FOREIGN_ATTACH_CONTROL="$TMP_ROOT/foreign-attach-control"
+export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL FOREIGN_ATTACH_CONTROL TMP_ROOT
 
 # Log every production-adapter call, remove its already-validated trailing
 # session flag, and send the operation through the lab helper so that helper
@@ -114,6 +115,7 @@ arg_value() {
 }
 
 label=$(arg_value --label "$@" || true)
+worktree_path=$(arg_value --path "$@" || true)
 if [ "${1:-} ${2:-}" = "workspace list" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ]; then
   stage=$(cat "$ACTIVE_SEEDED_CONTROL/stage" 2>/dev/null || true)
   if [ "$stage" = task-created ]; then
@@ -135,6 +137,7 @@ case "${1:-} ${2:-}" in
   "tab create") mutation=tab-create; mutation_target=$label ;;
   "pane close") mutation=pane-close ;;
   "tab focus") mutation=tab-focus ;;
+  "worktree open") mutation=worktree-open; mutation_target=$worktree_path ;;
 esac
 refusal_probe=0
 if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ] \
@@ -145,7 +148,11 @@ if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ] \
 fi
 before=
 [ -z "$mutation" ] || before=$(focus_snapshot || printf ambiguous/ambiguous)
-if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"); then
+# Herdr reports a structured error on stderr, so capture both streams: the
+# abort-pane tracking below reads the error code, and stderr is replayed
+# untouched before exit so callers that merge the streams see it as before.
+herdr_err=$(mktemp "$TMP_ROOT/herdr-err.XXXXXX")
+if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@" 2>"$herdr_err"); then
   status=0
 else
   status=$?
@@ -178,11 +185,37 @@ if [ "$status" -eq 0 ] && [ "$mutation" = tab-create ]; then
       ;;
   esac
 fi
-if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+if [ "${1:-} ${2:-}" = "worktree list" ] && [ "$status" -eq 0 ] && [ -d "$FOREIGN_ATTACH_CONTROL" ]; then
+  # Treehouse never hands out a slot another process occupies, so a foreign
+  # workspace can reach the task worktree only between the lease and the
+  # attach; stand in for that occupant by reporting the seeded foreign
+  # workspace as the one open in every worktree other than the clone root.
+  foreign_ws=$(cat "$FOREIGN_ATTACH_CONTROL/workspace" 2>/dev/null || true)
+  foreign_clone=$(cat "$FOREIGN_ATTACH_CONTROL/clone" 2>/dev/null || true)
+  if [ -n "$foreign_ws" ]; then
+    out=$(printf '%s' "$out" | jq --arg ws "$foreign_ws" --arg clone "$foreign_clone" '
+      if (.result.worktrees | type) == "array" then
+        .result.worktrees |= map(if .path != $clone then .open_workspace_id = $ws else . end)
+      else . end
+    ')
+    printf '%s\n' "$*" >> "$FOREIGN_ATTACH_CONTROL/hits"
+  fi
+fi
+if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
   for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-*; do
     [ -d "$task_dir" ] || continue
     [ "${3:-}" = "$(cat "$task_dir/task-pane" 2>/dev/null || true)" ] || continue
-    out=$(printf '%s' "$out" | jq --arg cwd "$POST_CREATE_ABORT_CONTROL/not-a-worktree" '.result.pane.foreground_cwd = $cwd')
+    if [ "$({ printf '%s\n' "$out"; cat "$herdr_err"; } | jq -r 'select(type == "object") | .error.code // empty' 2>/dev/null | grep -Fx pane_not_found || true)" = pane_not_found ]; then
+      # The focus-safe emptying-close plan ends a lone idle pane shell instead
+      # of issuing pane close, so the first not-found read of a tracked abort
+      # pane is the cleanup evidence the abort sequence check orders.
+      if mkdir "$task_dir/death-seen" 2>/dev/null; then
+        death_snapshot=$(focus_snapshot || printf ambiguous/ambiguous)
+        printf 'pane-death\t%s\t%s\t%s\n' "$death_snapshot" "$death_snapshot" "${3:-}" >> "$FOCUS_AUDIT_LOG"
+      fi
+    elif [ "$status" -eq 0 ]; then
+      out=$(printf '%s' "$out" | jq --arg cwd "$POST_CREATE_ABORT_CONTROL/not-a-worktree" '.result.pane.foreground_cwd = $cwd')
+    fi
     break
   done
 fi
@@ -194,6 +227,8 @@ if [ "$refusal_probe" -eq 1 ]; then
   refusal_after=$(focus_snapshot || printf ambiguous/ambiguous)
   printf 'seeded-prune-refusal\t%s\t%s\t%s\n' "$refusal_before" "$refusal_after" "${3:-}" >> "$FOCUS_AUDIT_LOG"
 fi
+[ ! -s "$herdr_err" ] || cat "$herdr_err" >&2
+rm -f "$herdr_err"
 [ -z "$out" ] || printf '%s\n' "$out"
 exit "$status"
 SH
@@ -210,9 +245,6 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
-if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
-  exit 0
-fi
 # Treehouse's pool allocator is outside the Herdr concurrency contract under
 # test. Serialize its calls so simultaneous recovery spawns cannot race for
 # one pool slot before reaching the Herdr session lock exercised below.
@@ -350,11 +382,11 @@ focus_audit_line_count() { wc -l < "$FOCUS_AUDIT_LOG" | tr -d '[:space:]'; }
 assert_raw_presentation_mutations_preserved_since() {  # <line-count> <case-name>
   local start=$1 case_name=$2 changed
   changed=$(sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' '
-    ($1 == "workspace-create" || $1 == "tab-create" || $1 == "workspace-move" || $1 == "pane-close") && $2 != $3 {
+    ($1 == "workspace-create" || $1 == "tab-create" || $1 == "workspace-move" || $1 == "pane-close" || $1 == "worktree-open") && $2 != $3 {
       print $0
     }
   ')
-  [ -z "$changed" ] || fail "$case_name changed active workspace/tab inside a create, move, or seeded cleanup: $changed"
+  [ -z "$changed" ] || fail "$case_name changed active workspace/tab inside a create, move, attach, or seeded cleanup: $changed"
 }
 
 # The focus-safe emptying-close plan removes a last pane through Herdr's
@@ -499,6 +531,67 @@ session_presentation_lock_path() {
   ' "$ROOT" "$HERDR_LAB_SESSION"
 }
 
+# Repo worktree groups (docs/herdr-backend.md "Presentation spaces") ride on the
+# adapter's own capability gate, so every grouped assertion below is
+# release-aware: it proves the attach on a client whose schema exposes
+# worktree.open and worktree.list, and proves the flat rows with zero attach
+# calls on one that does not.
+grouping_capable() {
+  PATH="$FAKEBIN:$PATH" HERDR_SESSION="$HERDR_LAB_SESSION" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_worktree_group_capable "$1"
+  ' "$ROOT" "$HERDR_LAB_SESSION"
+}
+
+realpath_of() { (cd "$1" 2>/dev/null && pwd -P); }
+
+# assert_linked_child <workspace-id> <worktree> <clone> <case-name> [<spawn-stderr>]:
+# the workspace carries Herdr's linked-worktree provenance for exactly
+# <worktree> inside <clone>, and Herdr reports <worktree> open in exactly that
+# workspace. A failure quotes the spawn's own warnings when its stderr is given.
+assert_linked_child() {  # <workspace-id> <worktree> <clone> <case-name> [<spawn-stderr>]
+  local wsid=$1 worktree=$2 clone=$3 case_name=$4 spawn_err=${5:-} info detail=
+  info=$(lab workspace get "$wsid") || fail "$case_name: could not inspect workspace $wsid"
+  [ -z "$spawn_err" ] || detail=" (spawn stderr: $(cat "$spawn_err" 2>/dev/null); recent worktree calls: $(grep -E $'^worktree\t' "$HERDR_CALL_LOG" | tail -3 | tr '\t' ' ' | tr '\n' ';'))"
+  printf '%s' "$info" | jq -e '
+    .result.workspace.worktree.is_linked_worktree == true
+    and (.result.workspace.worktree.checkout_path | type) == "string"
+    and (.result.workspace.worktree.repo_root | type) == "string"
+  ' >/dev/null 2>&1 || fail "$case_name: workspace $wsid is not a linked-worktree child: $info$detail"
+  [ "$(realpath_of "$(printf '%s' "$info" | jq -r '.result.workspace.worktree.checkout_path')")" = "$(realpath_of "$worktree")" ] \
+    || fail "$case_name: linked child $wsid checks out somewhere other than its task worktree"
+  [ "$(realpath_of "$(printf '%s' "$info" | jq -r '.result.workspace.worktree.repo_root')")" = "$(realpath_of "$clone")" ] \
+    || fail "$case_name: linked child $wsid names a repository root other than the project clone"
+  [ "$(lab worktree list --cwd "$worktree" | jq -r --arg real "$(realpath_of "$worktree")" '[.result.worktrees[] | select(.path == $real)] | select(length == 1) | .[0].open_workspace_id // empty')" = "$wsid" ] \
+    || fail "$case_name: Herdr does not report the task worktree open in exactly workspace $wsid"
+}
+
+# assert_flat_row <workspace-id> <case-name>: the workspace carries no
+# linked-worktree provenance at all.
+assert_flat_row() {  # <workspace-id> <case-name>
+  local wsid=$1 case_name=$2
+  lab workspace get "$wsid" | jq -e '(.result.workspace.worktree.is_linked_worktree // false) != true' >/dev/null 2>&1 \
+    || fail "$case_name: workspace $wsid unexpectedly became a linked-worktree child"
+}
+
+# repo_parent_id <label> <case-name>: the exactly-one workspace carrying
+# <label> that Herdr reports as its own group source.
+repo_parent_id() {  # <label> <case-name>
+  local label=$1 case_name=$2 wsid
+  wsid=$(lab workspace list | jq -r --arg label "$label" '[.result.workspaces[] | select(.label == $label)] | select(length == 1) | .[0].workspace_id // empty')
+  [ -n "$wsid" ] || fail "$case_name: expected exactly one workspace labelled '$label': $(lab workspace list | jq -c '[.result.workspaces[].label]')"
+  [ "$(lab worktree list --workspace "$wsid" | jq -r '.result.source.source_workspace_id // empty')" = "$wsid" ] \
+    || fail "$case_name: repo parent '$label' ($wsid) is not its own group source"
+  printf '%s' "$wsid"
+}
+
+assert_no_attach_calls_since() {  # <line-count> <case-name>
+  local start=$1 name=$2
+  if sed -n "$((start + 1)),\$p" "$HERDR_CALL_LOG" | grep -E $'^worktree\topen' >/dev/null 2>&1; then
+    fail "$name ran worktree open"
+  fi
+}
+
 assert_no_ordering_lifecycle_calls_since() {  # <line-count> <case-name>
   local start=$1 name=$2 calls
   calls=$(sed -n "$((start + 1)),\$p" "$HERDR_CALL_LOG")
@@ -593,6 +686,12 @@ FLOOR_VERDICT=$(bash -c '
 ' "$ROOT" "$FLOOR_PROTOCOL" "$FLOOR_VERSION")
 [ "$FLOOR_VERDICT" = 0 ] || [ "$FLOOR_VERDICT" = 1 ] \
   || fail "herdr $FLOOR_VERSION protocol $FLOOR_PROTOCOL could not be classified against the presentation floor"
+if grouping_capable; then GROUPING_CAPABLE=1; else GROUPING_CAPABLE=0; fi
+[ "$GROUPING_CAPABLE" = 1 ] || [ "$FLOOR_VERDICT" = 1 ] || [ "$FLOOR_PROTOCOL" -lt 22 ] \
+  || fail "herdr $FLOOR_VERSION protocol $FLOOR_PROTOCOL is at the presentation floor yet reports no worktree grouping capability"
+PROJECT_REPO_LABEL=$(basename "$PROJECT_DIR")
+RECOVERY_REPO_LABEL=$(basename "$RECOVERY_PROJECT_DIR")
+DEFAULT_ON_LOG_START=$(log_line_count)
 spawn_task default-on "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/default-on.out" 2> "$TMP_ROOT/default-on.err" \
   || fail "default-on spawn failed: $(cat "$TMP_ROOT/default-on.err")"
 DEFAULT_ON_META="$HOME_DIR/state/default-on.meta"
@@ -609,7 +708,21 @@ if [ "$FLOOR_VERDICT" = 0 ]; then
   [ "$DEFAULT_ON_LABEL" = "└ default-on · p:$DEFAULT_ON_TOKEN" ] \
     || fail "default-on projection used an unexpected workspace label: $DEFAULT_ON_LABEL"
   pass "real Herdr lab: a home that configured nothing is projected by default on herdr $FLOOR_VERSION"
+  if [ "$GROUPING_CAPABLE" = 1 ]; then
+    REPO_PARENT_WSID=$(repo_parent_id "$PROJECT_REPO_LABEL" "first grouped spawn")
+    assert_linked_child "$DEFAULT_ON_WSID" "$(grep '^worktree=' "$DEFAULT_ON_META" | cut -d= -f2-)" "$PROJECT_DIR" "first grouped spawn" "$TMP_ROOT/default-on.err"
+    sed -n "$((DEFAULT_ON_LOG_START + 1)),\$p" "$HERDR_CALL_LOG" \
+      | grep -F $'worktree\topen\t--workspace\t'"$REPO_PARENT_WSID"$'\t--path\t'"$(grep '^worktree=' "$DEFAULT_ON_META" | cut -d= -f2-)"$'\t--no-focus' >/dev/null 2>&1 \
+      || fail "first grouped spawn did not attach through the exact repo parent with --no-focus"
+    [ "$(sed -n "$((DEFAULT_ON_LOG_START + 1)),\$p" "$HERDR_CALL_LOG" | grep -c $'^workspace\tcreate\t--cwd\t'"$PROJECT_DIR"$'\t--label\t'"$PROJECT_REPO_LABEL"$'\t--no-focus')" = 1 ] \
+      || fail "first grouped spawn did not create exactly one repo parent with --no-focus"
+    pass "real Herdr lab: the first projected task on a repository creates its home's repo parent and attaches as a linked-worktree child"
+  else
+    assert_no_attach_calls_since "$DEFAULT_ON_LOG_START" "projected spawn without worktree grouping"
+    pass "real Herdr lab: a projected task stays a flat row with zero attach calls when herdr $FLOOR_VERSION exposes no worktree grouping"
+  fi
 else
+  assert_no_attach_calls_since "$DEFAULT_ON_LOG_START" "flat below-floor spawn"
   [ ! -e "$DEFAULT_ON_JOURNAL" ] \
     || fail "an unconfigured home published a presentation journal on below-floor herdr $FLOOR_VERSION"
   [ "$DEFAULT_ON_WSID" = "$FIRSTMATE_WSID" ] \
@@ -622,6 +735,15 @@ teardown_task default-on "$HOME_DIR" > "$TMP_ROOT/default-on-teardown.out" 2> "$
   || fail "default-on teardown failed: $(cat "$TMP_ROOT/default-on-teardown.err")"
 if [ "$FLOOR_VERDICT" = 0 ] && lab workspace get "$DEFAULT_ON_WSID" >/dev/null 2>&1; then
   fail "default-on teardown left its disposable workspace behind"
+fi
+if [ "$FLOOR_VERDICT" = 0 ] && [ "$GROUPING_CAPABLE" = 1 ]; then
+  lab workspace get "$REPO_PARENT_WSID" | jq -e --arg root "$(realpath_of "$PROJECT_DIR")" '
+    .result.workspace.label == "'"$PROJECT_REPO_LABEL"'"
+    and .result.workspace.worktree.is_linked_worktree == false
+  ' >/dev/null 2>&1 || fail "the repo parent did not persist as a non-linked root after its only child was cleaned up"
+  [ "$(realpath_of "$(lab workspace get "$REPO_PARENT_WSID" | jq -r '.result.workspace.worktree.checkout_path')")" = "$(realpath_of "$PROJECT_DIR")" ] \
+    || fail "the persisted repo parent checks out somewhere other than the project clone"
+  pass "real Herdr lab: the repo parent persists with root provenance after its only child is cleaned up"
 fi
 # The ordering scenarios below read the whole move log cumulatively against the
 # projected workspaces that are still live, so this retired one starts them clean.
@@ -646,6 +768,7 @@ assert_focus_is "$CAPTAIN_FOCUS" "focused secondmate fixture"
 # so no home that had already enabled the projection is turned off by the default.
 : > "$HOME_DIR/config/herdr-presentation-spaces"
 SHAPE_FOCUS_AUDIT_START=$(focus_audit_line_count)
+SHAPE_LOG_START=$(log_line_count)
 spawn_task shape "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/on.out" 2> "$TMP_ROOT/on.err" \
   || fail "projected spawn failed: $(cat "$TMP_ROOT/on.err")"
 assert_focus_is "$CAPTAIN_FOCUS" "projected spawn"
@@ -655,6 +778,20 @@ cp "$HOME_DIR/state/shape.meta" "$ON_META"
 ON_WT=$(remember_meta_worktree "$ON_META")
 cmp -s "$TMP_ROOT/off-treehouse.log" "$TREEHOUSE_CALL_LOG" \
   || fail "Treehouse command sequence changed between opted-out and projected spawns"
+# A Herdr spawn takes its slot as a durable lease under the task's own name and
+# walks the pane's root shell into it, never through the interactive get whose
+# subshell would leave the root shell in the clone (docs/herdr-backend.md
+# "Watching and task containers"); the slot reads leased to fm-shape while the
+# task lives and is free again once teardown's ordinary return runs.
+grep -Fx $'get\t--lease\t--lease-holder\tfm-shape' "$TREEHOUSE_CALL_LOG" >/dev/null 2>&1 \
+  || fail "projected spawn did not lease its Treehouse slot under the task's name: $(cat "$TREEHOUSE_CALL_LOG")"
+if grep -Fx 'get' "$TREEHOUSE_CALL_LOG" >/dev/null 2>&1; then
+  fail "projected spawn still ran the interactive treehouse get: $(cat "$TREEHOUSE_CALL_LOG")"
+fi
+(cd "$PROJECT_DIR" && "$REAL_TREEHOUSE" status 2>/dev/null) | grep -F 'held by fm-shape' >/dev/null 2>&1 \
+  || fail "Treehouse does not report the projected task's slot leased to fm-shape: $(cd "$PROJECT_DIR" && "$REAL_TREEHOUSE" status 2>&1)"
+[ "$(realpath_of "$ON_WT")" = "$(realpath_of "$(lab pane get "$(grep '^herdr_pane_id=' "$ON_META" | cut -d= -f2-)" | jq -r '.result.pane.foreground_cwd // empty')")" ] \
+  || fail "the projected task pane's foreground shell is not in the recorded leased worktree"
 JOURNAL="$HOME_DIR/state/shape.herdr-presentation"
 [ -f "$JOURNAL" ] || fail "projected spawn did not publish its presentation journal"
 TOKEN=$(grep '^projection_id=' "$JOURNAL" | cut -d= -f2-)
@@ -682,6 +819,18 @@ SECOND_TWO_INFO=$(lab workspace get "$SECOND_TWO_WSID") || fail "focused secondm
 [ "$(printf '%s' "$SECOND_TWO_INFO" | jq -r '.result.workspace.focused')" = true ] \
   || fail "projected create or workspace.move stole focus from the captain's current space"
 pass "real Herdr lab: every projected create, task-tab create, seeded prune, and move preserves active workspace and tab"
+if [ "$GROUPING_CAPABLE" = 1 ]; then
+  [ "$(repo_parent_id "$PROJECT_REPO_LABEL" "second grouped spawn")" = "$REPO_PARENT_WSID" ] \
+    || fail "a later spawn on the same repository did not adopt the existing repo parent"
+  [ "$(sed -n "$((SHAPE_LOG_START + 1)),\$p" "$HERDR_CALL_LOG" | grep -c $'^workspace\tcreate\t--cwd\t'"$PROJECT_DIR"$'\t--label\t'"$PROJECT_REPO_LABEL"$'\t')" = 0 ] \
+    || fail "a later spawn on the same repository created a second repo parent"
+  assert_linked_child "$PROJECTED_WSID" "$ON_WT" "$PROJECT_DIR" "second grouped spawn" "$TMP_ROOT/on.err"
+  grep -F "herdr repo grouping" "$TMP_ROOT/on.err" >/dev/null 2>&1 \
+    && fail "a successful grouped spawn warned about grouping: $(cat "$TMP_ROOT/on.err")"
+  pass "real Herdr lab: a later projected task adopts the existing repo parent without creating, renaming, or focusing anything"
+else
+  assert_no_attach_calls_since "$SHAPE_LOG_START" "projected spawn without worktree grouping"
+fi
 
 mkdir -p "$ACTIVE_SEEDED_CONTROL"
 printf '%s\n' requested > "$ACTIVE_SEEDED_CONTROL/stage"
@@ -794,9 +943,17 @@ remember_meta_worktree "$ORDER_B_META" >/dev/null
 
 ORDER_LIST=$(lab workspace list) || fail "could not inspect concurrent presentation ordering"
 CREATED_LABELS=$(projection_labels_from_log "$PROJECTION_ORDER_START")
-EXPECTED_LABELS=$(printf 'firstmate\n%s\n%s\n2ndmate-alpha\n2ndmate-bravo' "$PROJECTED_LABEL" "$CREATED_LABELS")
+if [ "$GROUPING_CAPABLE" = 1 ]; then
+  # The repo parent row was created right after the home workspace and is a
+  # member of the home block, so the projected children follow it.
+  EXPECTED_LABELS=$(printf 'firstmate\n%s\n%s\n%s\n2ndmate-alpha\n2ndmate-bravo' "$PROJECT_REPO_LABEL" "$PROJECTED_LABEL" "$CREATED_LABELS")
+  EXPECTED_MOVE_INDEXES=$'2\n3\n4'
+else
+  EXPECTED_LABELS=$(printf 'firstmate\n%s\n%s\n2ndmate-alpha\n2ndmate-bravo' "$PROJECTED_LABEL" "$CREATED_LABELS")
+  EXPECTED_MOVE_INDEXES=$'1\n2\n3'
+fi
 ACTUAL_LABELS=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[].label')
-[ "$ACTUAL_LABELS" = "$EXPECTED_LABELS" ] || fail "workspace order was not firstmate, stable primary block, secondmates: $ACTUAL_LABELS"
+[ "$ACTUAL_LABELS" = "$EXPECTED_LABELS" ] || fail "workspace order was not firstmate, repo parent when grouped, stable primary block, secondmates: $ACTUAL_LABELS"
 PRIMARY_IDS=$(printf '%s' "$ORDER_LIST" | jq -r '
   .result.workspaces[]
   | select((.label | startswith("└ ")) or (.label | startswith("firstmate/")))
@@ -806,7 +963,7 @@ MOVE_TARGETS=$(cut -f2 "$MOVE_CALL_LOG")
 [ "$MOVE_TARGETS" = "$PRIMARY_IDS" ] \
   || fail "workspace.move targeted something other than each exact current projected-create id"
 MOVE_INDEXES=$(cut -f3 "$MOVE_CALL_LOG")
-[ "$MOVE_INDEXES" = $'1\n2\n3' ] \
+[ "$MOVE_INDEXES" = "$EXPECTED_MOVE_INDEXES" ] \
   || fail "concurrent primary workers did not append stably to the contiguous block: $MOVE_INDEXES"
 SECOND_ORDER_AFTER=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[] | select(.label | startswith("2ndmate-")) | .workspace_id')
 [ "$SECOND_ORDER_AFTER" = "$SECOND_ORDER_BEFORE" ] \
@@ -815,6 +972,19 @@ SECOND_ORDER_AFTER=$(printf '%s' "$ORDER_LIST" | jq -r '.result.workspaces[] | s
   || fail "concurrent primary workspace ordering stole focus"
 assert_no_ordering_lifecycle_calls_since "$PROJECTION_ORDER_START" "successful presentation ordering"
 pass "real Herdr lab: concurrent primary workers form one stable contiguous block without active workspace/tab drift"
+if [ "$GROUPING_CAPABLE" = 1 ]; then
+  ORDER_A_WSID=$(grep '^herdr_workspace_id=' "$ORDER_A_META" | cut -d= -f2-)
+  ORDER_B_WSID=$(grep '^herdr_workspace_id=' "$ORDER_B_META" | cut -d= -f2-)
+  assert_linked_child "$ORDER_A_WSID" "$(grep '^worktree=' "$ORDER_A_META" | cut -d= -f2-)" "$PROJECT_DIR" "two tasks on one repository" "$TMP_ROOT/order-a.err"
+  assert_linked_child "$ORDER_B_WSID" "$(grep '^worktree=' "$ORDER_B_META" | cut -d= -f2-)" "$PROJECT_DIR" "two tasks on one repository" "$TMP_ROOT/order-b.err"
+  [ "$(lab workspace get "$ORDER_A_WSID" | jq -r '.result.workspace.worktree.repo_key')" = "$(lab workspace get "$ORDER_B_WSID" | jq -r '.result.workspace.worktree.repo_key')" ] \
+    || fail "two tasks on one repository were attached under different repository keys"
+  [ "$(lab worktree list --workspace "$REPO_PARENT_WSID" | jq -r --arg a "$ORDER_A_WSID" --arg b "$ORDER_B_WSID" '[.result.worktrees[] | select(.open_workspace_id == $a or .open_workspace_id == $b)] | length')" = 2 ] \
+    || fail "the repo parent's own group listing does not carry both concurrent children"
+  [ "$(repo_parent_id "$PROJECT_REPO_LABEL" "two tasks on one repository")" = "$REPO_PARENT_WSID" ] \
+    || fail "concurrent grouped spawns created a second repo parent"
+  pass "real Herdr lab: two concurrent tasks on one repository attach as linked children of the same single repo parent"
+fi
 
 # Force only the raw move transport to fail after a safe projected create.
 # The spawn must remain successful in Herdr's default appended order, with its
@@ -863,19 +1033,34 @@ if wait "$ABORT_B_PID"; then ABORT_B_STATUS=0; else ABORT_B_STATUS=$?; fi
 finish_concurrent_expected_abort abort-a "$ABORT_A_STATUS" "$TMP_ROOT/abort-a.out" "$TMP_ROOT/abort-a.err"
 finish_concurrent_expected_abort abort-b "$ABORT_B_STATUS" "$TMP_ROOT/abort-b.out" "$TMP_ROOT/abort-b.err"
 # The forced foreground_cwd is a plain non-git directory, which the discovery
-# poll now screens out on every read rather than adopting, so the armed failure
-# arrives as the poll's own deadline refusal naming that path.
+# poll screens out on every read rather than adopting, so the armed failure
+# arrives as the poll's own deadline refusal naming that path - after the
+# spawn has already leased its slot, which the abort must give back.
 grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-a.err" >/dev/null 2>&1 \
   || fail "post-create abort fixture A did not reach the armed validation failure"
 grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1 \
   || fail "post-create abort fixture B did not reach the armed validation failure"
+for ABORT_TASK in abort-a abort-b; do
+  grep -Fx "get	--lease	--lease-holder	fm-$ABORT_TASK" "$TREEHOUSE_CALL_LOG" >/dev/null 2>&1 \
+    || fail "post-create abort fixture $ABORT_TASK did not lease its slot before the armed failure: $(cat "$TREEHOUSE_CALL_LOG")"
+done
+if (cd "$PROJECT_DIR" && "$REAL_TREEHOUSE" status 2>/dev/null) | grep -E 'held by fm-abort-(a|b)' >/dev/null 2>&1; then
+  fail "post-create abort left a Treehouse slot leased to a task no record describes: $(cd "$PROJECT_DIR" && "$REAL_TREEHOUSE" status 2>&1)"
+fi
+if grep -F 'leaving task abort-' "$TMP_ROOT/abort-a.err" "$TMP_ROOT/abort-b.err" >/dev/null 2>&1; then
+  fail "post-create abort could not return a leased slot: $(cat "$TMP_ROOT/abort-a.err" "$TMP_ROOT/abort-b.err")"
+fi
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
+# Each abort pane holds a lone idle root shell sitting in its leased worktree,
+# so cleanup normally removes it through the pane-death path (the fake herdr's
+# pane-death row) and falls back to an explicit pane close only when that
+# proof fails; either row is the close evidence whose order matters here.
 ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
   $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
   $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
-  $1 == "pane-close" && $4 == a { print "close-a" }
-  $1 == "pane-close" && $4 == b { print "close-b" }
+  ($1 == "pane-close" || $1 == "pane-death") && $4 == a { print "close-a" }
+  ($1 == "pane-close" || $1 == "pane-death") && $4 == b { print "close-b" }
 ')
 case "$ABORT_SEQUENCE" in
   $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;
@@ -904,6 +1089,9 @@ pass "real Herdr lab: concurrent post-create abort cleanup stays serialized with
 SHAPE_CLEANUP_AUDIT_START=$(focus_audit_line_count)
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/on-teardown.out" 2> "$TMP_ROOT/on-teardown.err" \
   || fail "projected teardown failed: $(cat "$TMP_ROOT/on-teardown.err")"
+if (cd "$PROJECT_DIR" && "$REAL_TREEHOUSE" status 2>/dev/null) | grep -F 'held by fm-shape' >/dev/null 2>&1; then
+  fail "projected teardown left the task's Treehouse lease held: $(cd "$PROJECT_DIR" && "$REAL_TREEHOUSE" status 2>&1)"
+fi
 assert_focus_is "$CAPTAIN_FOCUS" "projected teardown"
 assert_cleanup_focus_preserved "$SHAPE_CLEANUP_AUDIT_START" "$PROJECTED_PANE" "$CAPTAIN_FOCUS"
 pass "real Herdr lab: Treehouse commands and metadata shape are byte-identical except for endpoint IDs and spawn incarnation"
@@ -969,10 +1157,64 @@ for ROUND in 1 2 3; do
   finish_concurrent_teardown "focus-$ROUND-b" "$WAVE_B_TEARDOWN_STATUS" "$TMP_ROOT/focus-$ROUND-b-teardown.out" "$TMP_ROOT/focus-$ROUND-b-teardown.err"
   assert_focus_is "$CAPTAIN_FOCUS" "focus wave $ROUND concurrent teardowns"
   WAVE_REMAINING=$(lab workspace list | jq -r '.result.workspaces[].label')
-  [ "$WAVE_REMAINING" = $'firstmate\n2ndmate-alpha\n2ndmate-bravo' ] \
+  if [ "$GROUPING_CAPABLE" = 1 ]; then
+    WAVE_REMAINING_EXPECTED=$(printf 'firstmate\n%s\n2ndmate-alpha\n2ndmate-bravo' "$PROJECT_REPO_LABEL")
+  else
+    WAVE_REMAINING_EXPECTED=$'firstmate\n2ndmate-alpha\n2ndmate-bravo'
+  fi
+  [ "$WAVE_REMAINING" = "$WAVE_REMAINING_EXPECTED" ] \
     || fail "focus wave $ROUND cleanup left a projected workspace behind: $WAVE_REMAINING"
 done
 pass "real Herdr lab: three repeated concurrent create/order/cleanup waves have zero active workspace or tab drift"
+
+# A foreign workspace whose root shell sits in the task worktree is the one
+# Herdr would nest under the repo parent, so the attach must skip with one
+# warning, run no worktree open at all, and leave both workspaces exactly as
+# they were. Treehouse never hands out a slot another process occupies (an
+# available slot holding a foreign shell reads in-use and the next slot is
+# leased instead), so that occupant can only arrive between the lease and the
+# attach; the fake herdr stands in for it there by reporting the seeded
+# foreign workspace as the one open in the task worktree, while the real
+# answer after the spawn names the task's own workspace.
+if [ "$GROUPING_CAPABLE" = 1 ]; then
+  FOREIGN_OUT=$(lab workspace create --cwd "$PROJECT_DIR" --label foreign-human --no-focus) \
+    || fail "could not seed a foreign workspace"
+  FOREIGN_WSID=$(printf '%s' "$FOREIGN_OUT" | jq -r '.result.workspace.workspace_id // empty')
+  [ -n "$FOREIGN_WSID" ] || fail "foreign workspace seed returned no id"
+  mkdir -p "$FOREIGN_ATTACH_CONTROL" "$HOME_DIR/data/foreign-skip"
+  printf '%s\n' "$FOREIGN_WSID" > "$FOREIGN_ATTACH_CONTROL/workspace"
+  realpath_of "$PROJECT_DIR" > "$FOREIGN_ATTACH_CONTROL/clone"
+  write_ship_brief "$HOME_DIR" foreign-skip 'Foreign workspace attach-skip fixture.'
+  FOREIGN_LOG_START=$(log_line_count)
+  FOREIGN_FOCUS_START=$(focus_audit_line_count)
+  spawn_task foreign-skip "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/foreign-skip.out" 2> "$TMP_ROOT/foreign-skip.err" \
+    || fail "foreign-workspace spawn failed: $(cat "$TMP_ROOT/foreign-skip.err")"
+  [ -s "$FOREIGN_ATTACH_CONTROL/hits" ] \
+    || fail "the foreign-workspace fixture never answered a worktree list read, so the case is inconclusive"
+  rm -rf "$FOREIGN_ATTACH_CONTROL"
+  FOREIGN_META="$HOME_DIR/state/foreign-skip.meta"
+  FOREIGN_WT=$(remember_meta_worktree "$FOREIGN_META")
+  FOREIGN_TASK_WSID=$(grep '^herdr_workspace_id=' "$FOREIGN_META" | cut -d= -f2-)
+  grep -F "open in $FOREIGN_WSID rather than this task's space $FOREIGN_TASK_WSID; leaving this task's space flat" "$TMP_ROOT/foreign-skip.err" >/dev/null 2>&1 \
+    || fail "a foreign workspace in the task worktree did not warn once and leave the task flat: $(cat "$TMP_ROOT/foreign-skip.err")"
+  [ "$(grep -cE 'herdr repo grouping|herdr reports worktree' "$TMP_ROOT/foreign-skip.err")" = 1 ] \
+    || fail "the foreign-workspace skip warned more than once: $(cat "$TMP_ROOT/foreign-skip.err")"
+  assert_no_attach_calls_since "$FOREIGN_LOG_START" "foreign-workspace skip"
+  assert_flat_row "$FOREIGN_TASK_WSID" "foreign-workspace skip"
+  assert_flat_row "$FOREIGN_WSID" "foreign-workspace skip"
+  [ "$(lab workspace get "$FOREIGN_WSID" | jq -r '.result.workspace.label')" = foreign-human ] \
+    || fail "the foreign workspace was renamed or replaced"
+  [ "$(lab worktree list --cwd "$FOREIGN_WT" | jq -r --arg real "$(realpath_of "$FOREIGN_WT")" '[.result.worktrees[] | select(.path == $real)] | .[0].open_workspace_id // empty')" = "$FOREIGN_TASK_WSID" ] \
+    || fail "Herdr does not report the task's own workspace as the one open in its leased worktree"
+  assert_focus_is "$CAPTAIN_FOCUS" "foreign-workspace skip"
+  assert_raw_presentation_mutations_preserved_since "$FOREIGN_FOCUS_START" "foreign-workspace skip"
+  lab workspace close "$FOREIGN_WSID" >/dev/null \
+    || fail "could not remove the seeded foreign workspace"
+  teardown_task foreign-skip "$HOME_DIR" > "$TMP_ROOT/foreign-skip-teardown.out" 2> "$TMP_ROOT/foreign-skip-teardown.err" \
+    || fail "foreign-workspace fixture teardown failed: $(cat "$TMP_ROOT/foreign-skip-teardown.err")"
+  assert_focus_is "$CAPTAIN_FOCUS" "foreign-workspace fixture cleanup"
+  pass "real Herdr lab: a foreign workspace reported open in the task worktree makes the attach skip with one warning and zero worktree open calls"
+fi
 
 # ------------------------------------------------------------------
 # Multi-home topology: real secondmate FM_HOME spawn paths, inheritance,
@@ -1106,6 +1348,23 @@ MULTI_EXPECTED=$(printf '%s\n' \
 [ "$MULTI_LABELS" = "$MULTI_EXPECTED" ] \
   || fail "multi-home topology was not owning-parent grouped: $MULTI_LABELS"
 pass "real Herdr lab: primary and two secondmate homes each own a top-level contiguous child block"
+if [ "$GROUPING_CAPABLE" = 1 ]; then
+  ALPHA_REPO_PARENT_WSID=$(repo_parent_id "2ndmate-alpha · $PROJECT_REPO_LABEL" "secondmate repo parents")
+  BRAVO_REPO_PARENT_WSID=$(repo_parent_id "2ndmate-bravo · $PROJECT_REPO_LABEL" "secondmate repo parents")
+  [ "$(repo_parent_id "$PROJECT_REPO_LABEL" "secondmate repo parents")" = "$REPO_PARENT_WSID" ] \
+    || fail "secondmate spawns disturbed the primary's repo parent"
+  [ "$ALPHA_REPO_PARENT_WSID" != "$BRAVO_REPO_PARENT_WSID" ] && [ "$ALPHA_REPO_PARENT_WSID" != "$REPO_PARENT_WSID" ] \
+    || fail "secondmate homes did not get their own distinct repo parents"
+  for META_X in p1 p2 a1 a2 b1 b2; do
+    case "$META_X" in
+      p*) META_PATH="$HOME_DIR/state/$META_X.meta" ;;
+      a*) META_PATH="$SECOND_HOME_A/state/$META_X.meta" ;;
+      b*) META_PATH="$SECOND_HOME_B/state/$META_X.meta" ;;
+    esac
+    assert_linked_child "$(grep '^herdr_workspace_id=' "$META_PATH" | cut -d= -f2-)" "$(grep '^worktree=' "$META_PATH" | cut -d= -f2-)" "$PROJECT_DIR" "multi-home grouped children ($META_X)" "$TMP_ROOT/$META_X.err"
+  done
+  pass "real Herdr lab: each secondmate home groups its tasks under its own home-qualified repo parent while the primary keeps its own"
+fi
 
 # Concurrent cross-home wave under the one session lock.
 mkdir -p "$HOME_DIR/data/pcw" "$SECOND_HOME_A/data/acw" "$SECOND_HOME_B/data/bcw"
@@ -1221,6 +1480,12 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   if lab agent get "$OLD_RESTART_PANE" >/dev/null 2>&1; then
     fail "$RESTART_ID restart fixture unexpectedly retained a registered agent"
   fi
+  if [ "$GROUPING_CAPABLE" = 1 ]; then
+    RECOVERY_REPO_PARENT_WSID=$(repo_parent_id "$RECOVERY_REPO_LABEL" "$RESTART_ID restart provenance")
+    assert_linked_child "$OLD_RESTART_WSID" "$OLD_RESTART_WT" "$RECOVERY_PROJECT_DIR" "$RESTART_ID restart provenance" "$TMP_ROOT/$RESTART_ID-first.err"
+    lab workspace get "$RECOVERY_REPO_PARENT_WSID" | jq -e '.result.workspace.worktree.is_linked_worktree == false' >/dev/null 2>&1 \
+      || fail "$RESTART_ID restart lost the repo parent's root provenance"
+  fi
   RECLAIM_FOCUS=$(focus_snapshot)
   spawn_task "$RESTART_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/$RESTART_ID-reclaim.out" 2> "$TMP_ROOT/$RESTART_ID-reclaim.err" \
     || fail "$RESTART_ID same-identity reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-reclaim.err")"
@@ -1239,6 +1504,13 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   [ "$(grep '^pane_id=' "$HOME_DIR/state/$RESTART_ID.herdr-presentation" | cut -d= -f2-)" = "$NEW_RESTART_PANE" ] \
     || fail "$RESTART_ID reclaim did not advance the exact journal binding"
   assert_focus_is "$RECLAIM_FOCUS" "$RESTART_ID same-identity reclaim"
+  if [ "$GROUPING_CAPABLE" = 1 ]; then
+    lab workspace get "$NEW_RESTART_WSID" | jq -e '.result.workspace.worktree.is_linked_worktree == true' >/dev/null 2>&1 \
+      || fail "$RESTART_ID reclaim detached the reclaimed workspace from its repo parent"
+    [ "$(repo_parent_id "$RECOVERY_REPO_LABEL" "$RESTART_ID reclaim")" = "$RECOVERY_REPO_PARENT_WSID" ] \
+      || fail "$RESTART_ID reclaim created or replaced the repo parent"
+    RESTART_PROVENANCE_CHECKED=1
+  fi
 
   if [ "$RESTART_ID" = fm-hibit-resume-r1 ]; then
     PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
@@ -1269,6 +1541,9 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   "$REAL_TREEHOUSE" return --force "$NEW_RESTART_WT" >/dev/null 2>&1 || true
 done
 pass "real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence"
+if [ "${RESTART_PROVENANCE_CHECKED:-0}" = 1 ]; then
+  pass "real Herdr lab: linked-worktree children and their repo parent keep their provenance across stop and provision, and reclaim leaves both untouched"
+fi
 
 # A secondmate child binds and reclaims only inside its own home and parent.
 CROSS_RESTART_ID=wheel-child-resume

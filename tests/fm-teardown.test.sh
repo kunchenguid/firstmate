@@ -2997,6 +2997,8 @@ case "${1:-} ${2:-}" in
       printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":false}]}}'
     elif [ -e "${FM_FAKE_HERDR_CLOSED:?}" ]; then
       printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":true}]}}'
+    elif [ "${FM_FAKE_HERDR_WORKSPACE_GONE:-0}" = 1 ]; then
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":false}]}}'
     else
       printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t2","label":"firstmate/task-x1 · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":false}]}}'
     fi
@@ -3094,6 +3096,62 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
   assert_not_contains "$(cat "$log")" "workspace close" \
     "unconfirmed projected close must not escalate to workspace cleanup"
   pass "herdr projection teardown retains every record when post-close presence is unknown"
+}
+
+test_herdr_projection_teardown_retires_journal_when_pane_already_gone() {
+  local case_dir log closed restored
+  case_dir=$(make_case herdr-projection-already-gone)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  # A Herdr task pane's root shell sits inside its leased slot, so the
+  # worktree return that precedes the close ends that shell and Herdr removes
+  # the exact pane and its emptied workspace before teardown reaches the
+  # close: the pane already reads not-found and no workspace carries the token.
+  : > "$closed"
+
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "herdr-projection-already-gone: teardown failed: $(cat "$case_dir/stderr")"
+  [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
+    || fail "herdr-projection-already-gone: a pane already confirmed gone left its presentation journal quarantined"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "herdr-projection-already-gone: teardown retained the metadata of a confirmed-gone endpoint"
+  assert_not_contains "$(cat "$log")" "pane close" \
+    "herdr-projection-already-gone: teardown issued a close for a pane it had already confirmed gone"
+  assert_not_contains "$(cat "$log")" "workspace close" \
+    "herdr-projection-already-gone: teardown must never call workspace close"
+  assert_not_contains "$(cat "$log")" "tab focus" \
+    "herdr-projection-already-gone: teardown moved focus with nothing to close"
+  if grep -F "quarantined" "$case_dir/stderr" >/dev/null 2>&1; then
+    fail "herdr-projection-already-gone: teardown warned about a quarantined journal it had every reason to retire"
+  fi
+  pass "herdr projection teardown retires its journal without any close once the exact pane is gone and no workspace carries its token"
+}
+
+test_herdr_projection_teardown_keeps_journal_when_token_workspace_is_gone_but_pane_lives() {
+  local case_dir log closed restored
+  case_dir=$(make_case herdr-projection-token-gone-pane-live)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+
+  # No workspace carries the token while the recorded pane is still present:
+  # that is a renamed or relabelled workspace, not a removed one, so the
+  # ordinary close runs and the journal stays quarantined for inspection.
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    FM_FAKE_HERDR_WORKSPACE_GONE=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "herdr-projection-token-gone-pane-live: teardown failed: $(cat "$case_dir/stderr")"
+  [ -e "$closed" ] \
+    || fail "herdr-projection-token-gone-pane-live: teardown did not close the still-present pane"
+  [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
+    || fail "herdr-projection-token-gone-pane-live: a journal whose pane was still live was retired as already gone"
+  assert_grep "remains quarantined" "$case_dir/stderr" \
+    "herdr-projection-token-gone-pane-live: teardown did not explain why the journal was retained"
+  assert_not_contains "$(cat "$log")" "workspace close" \
+    "herdr-projection-token-gone-pane-live: teardown must never call workspace close"
+  pass "herdr projection teardown keeps a journal quarantined when its token is gone but the exact pane still lives"
 }
 
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup() {
@@ -4666,6 +4724,8 @@ test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
+test_herdr_projection_teardown_retires_journal_when_pane_already_gone
+test_herdr_projection_teardown_keeps_journal_when_token_workspace_is_gone_but_pane_lives
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_teardown_retires_task_watcher_markers_and_orphan_journal
 test_teardown_retains_journal_bound_to_another_pane

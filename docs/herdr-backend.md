@@ -163,6 +163,15 @@ Existing task operations use recorded endpoint ids and do not move a live task w
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
+### Treehouse slot entry
+
+A Herdr crewmate or scout enters its Treehouse slot differently from the other session-provider backends.
+The spawn leases the slot durably under the holder `fm-<task-id>` with `treehouse get --lease` and sends the pane's root shell a plain `cd` into it, instead of the interactive `treehouse get` whose subshell leaves that root shell in the project clone.
+Herdr matches a worktree to a workspace by the root shell's working directory and offers no way to set it, so this entry shape is what lets the repository grouping under "Presentation spaces" attach the task at all (measured on Herdr 0.9.1 - [verification](verification/runtime-backends.md#repo-worktree-groups)).
+Both shapes leave the slot at the same detached default-branch base, and the spawn accepts only a pane read of that exact leased worktree before recording it.
+The lease is released by cleanup's ordinary `treehouse return`, and a spawn that fails before publishing its task record returns its still-clean slot itself rather than leaving it leased to a task no record describes.
+The lease also keeps the slot while a Herdr server restart has ended the task's pane, so a same-identity resume takes a fresh slot rather than one a still-recorded task's dead pane held only by occupancy, which the interactive shape could hand to another task.
+
 ## Presentation spaces
 
 Each new crewmate or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.
@@ -291,10 +300,32 @@ Ordering failure never fails the task spawn.
 Firstmate does not retry, adopt, reuse, close, delete, or rename anything in response to an unavailable method, lock contention, ambiguous socket, lost response, failed move, or verification mismatch.
 The worker remains on the ordinary flat or Herdr-current-order path.
 
+### Repository worktree groups
+
+Projected tasks are additionally grouped by repository through Herdr's native worktree groups, so the spaces and agents sidebars show one collapsible per-repository parent row per home with its tasks indented beneath it and their agent state rolled up.
+Every task runs in a linked git worktree of its project clone that the pane's root shell enters through the leased slot entry described under [Treehouse slot entry](#treehouse-slot-entry), so once that entry is proven the projected workspace is attached, through `worktree open --no-focus`, to a repo parent workspace labelled exactly `<repo>` in the primary home and `<home-label> · <repo>` in a secondmate home, where `<repo>` is the repository name Herdr itself reports for the clone.
+
+The parent is resolved or created before the task workspace exists, so it is older than every child Herdr could otherwise elect as the repository's group source, and it counts as a member of its home's contiguous block for ordering and for the restart binding.
+Only one exact repo parent is ever used: the sole workspace carrying that label that Herdr reports as its own group source at the clone root is adopted, two such workspaces are left alone as ambiguous, and a missing one is created with `--no-focus` under the same focus snapshot and restore as every other projected mutation.
+A repository named like a home label, such as the firstmate repository in the primary home, never gets a second home-labelled workspace: only the launcher's own home workspace may serve as that parent, and only while Herdr elects it as the clone's group source.
+The attach runs only after Herdr already reports the task worktree open in exactly this task's workspace, because `worktree open` on a path with a foreign workspace would nest that workspace instead and on an unopened path would create a stray one; only a same-id `already_open` answer counts as attached.
+Treehouse never hands out a pool slot that another process occupies, so such a foreign workspace can reach a task's worktree only between the lease and the attach, and the pre-check refuses it there.
+
+Grouping is gated on the 0.8.0 presentation floor plus the client's API schema exposing `worktree.open` and `worktree.list`, which Herdr 0.9.1 (protocol 22) is the measured release for, and it rides on the existing `config/herdr-presentation-spaces` setting with no configuration of its own.
+Every gate refusal, parent ambiguity, foreign occupant, or unexpected Herdr answer warns once and leaves that task in the flat row it has today; Firstmate never renames, closes, moves, retries, or re-focuses anything on grouping's behalf, and a grouping refusal never fails the spawn.
+
+Repo parents persist: cleanup removes only the exact task pane, so an emptied child disappears through the same pane-death path while the parent row, which carries Herdr's own non-linked provenance after its first attach, stays for the next task and survives a server restart together with each child's linked-worktree provenance.
+Two Herdr UI actions on those rows need care because they act on the repository rather than on one task, and both are confirmation-gated in Herdr: the per-child "Delete worktree checkout..." menu item removes the task's git worktree from disk, which Firstmate would otherwise return to the Treehouse pool, and closing the parent row closes every task workspace of that repository in that home.
+Neither action is issued by Firstmate; a parent row that a human closes is simply recreated by the next spawn, and a deleted checkout surfaces as that task's ordinary missing-worktree failure.
+
+Herdr keeps electing the oldest workspace at the clone root as the repository's group source in its own `worktree list` reads; when the flat home workspace was created for that same project it remains that source, and the attach still names the exact repo parent it was given.
+Packing an existing parent into its home block with `workspace.move_block`, dropping the `└ ` child prefix, and recording the parent in the presentation journal are deliberate follow-ups, not part of this behavior.
+
 ### Cleanup and focus safety
 
 Normal task metadata remains the sole endpoint authority after creation.
 Cleanup closes only the exact recorded task pane and never calls `workspace close`.
+Because a task pane's root shell sits inside its leased slot, the worktree return that precedes the endpoint close ends that shell, so the exact pane and its emptied workspace ordinarily disappear through Herdr's pane-death path before the explicit close runs; cleanup then retires the presentation journal once the recorded pane reads structured not-found and no workspace carries the journal's token, and otherwise runs the explicit close exactly as before.
 
 Herdr 0.7.5's explicit close moves focus to a neighbor whenever it empties a non-focused workspace.
 Its pane-death removal preserves the focused workspace whenever the dying workspace sits behind it or the focused workspace is last.
@@ -474,18 +505,21 @@ Any of these preserves the candidate and lets session startup continue with at m
 - Every stale-looking space outside that narrow startup proof still requires manual cleanup in Herdr's UI after human inspection.
 - Regaining a dedicated space after degradation requires stopping the flat task, manually checking the stale projection, and clearing its journal before a genuinely fresh launch.
 - The visible token is only a restart-stable correlator and never substitutes for the exact binding.
+- A repo parent is created where Herdr appends it and is never moved afterwards, so a parent first created while other homes already had rows sits after them in raw order while its children still land inside their home block; a repo parent with no child ever attached carries no provenance yet and is recognized only through the exact id the spawn that created it holds.
+- A restart reclaim reattaches nothing: the reclaimed workspace keeps its own persisted linked-worktree provenance, and a task whose attach was skipped stays flat after a restart too.
 
 ### Presentation tests
 
 | Test | What it covers |
 | --- | --- |
-| `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path. |
+| `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, exact-pane cleanup, and the repo worktree groups (release-aware parent creation and adoption, two tasks on one repository, the foreign-occupant skip, per-home secondmate parents, and provenance across a restart) through the guarded lab path. |
 | `tests/fm-herdr-session-cleanup.test.sh` | Every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary. |
 | `tests/fm-herdr-session-cleanup-e2e.test.sh` | The restored-shell cleanup in a guarded non-default named lab. |
 | `tests/fm-backend-herdr-focus-flash-e2e.test.sh` | Reproduces the raw explicit-close focus steal on the installed release, and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval. |
 | `tests/fm-backend-herdr-stale-active-tab-e2e.test.sh` | Proves a persisted-focused tab still closes when no foreground client is attached. |
 | `tests/fm-herdr-attached-viewer-live-e2e.test.sh` | Proves the other half against a real attached viewer, which `bin/fm-herdr-lab.sh viewer start` supplies over a pty sized before the fork. |
 
+[`verification/runtime-backends.md`](verification/runtime-backends.md#repo-worktree-groups) owns the active versioned evidence for the repo worktree groups.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#workspace-removal-focus-safety) owns the active versioned evidence for the focus-flash test.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#attached-foreground-viewer) owns the active versioned evidence and the re-run trigger for the attached-viewer test.
 
@@ -680,7 +714,8 @@ This prevents closing the workspace's last tab before a replacement exists.
 A registration alone never proves an agent.
 Herdr keeps a Pi registration after the Pi process has exited to a plain shell, whenever a nested interactive shell sits under the pane's top shell.
 In that case `agent get` still reports `agent=pi` with its last status.
-That nested shell is the crew shape `treehouse get` leaves behind (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
+That nested shell is the shape an interactive `treehouse get` leaves behind (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
+A Herdr spawn now enters its slot with a root-shell `cd` rather than that subshell, so a nested shell under a task pane's top shell is one the worker or a human opened, and the process-level proof below applies either way.
 
 So before a registered agent counts as live, the pane classifier reads `pane process-info` and the real process table.
 It uses the shared harness-process classifier in `bin/fm-agent-process-lib.sh`, the same rule the tmux adapter proves liveness with:

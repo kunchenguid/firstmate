@@ -158,7 +158,11 @@
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
 # read-only token correlation agrees with that endpoint and pane closure is
-# confirmed. Otherwise the journal stays quarantined for manual inspection.
+# confirmed, or when the exact recorded pane already reads structured
+# not-found and no workspace carries the journal's token - the state the
+# worktree return leaves on a Herdr task, whose pane root shell sits inside
+# the returned slot (docs/herdr-backend.md "Watching and task containers").
+# Otherwise the journal stays quarantined for manual inspection.
 # Projected closes share the presentation-order lock, refuse to close the
 # captain's active tab, and restore the exact response-derived pre-close tab
 # if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
@@ -3637,6 +3641,7 @@ teardown_herdr_journal_orphaned() {
   fi
 }
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
+HERDR_PRESENTATION_ALREADY_GONE=0
 HERDR_PRESENTATION_SESSION=
 HERDR_PRESENTATION_PANE=
 if [ "$BACKEND" = herdr ] \
@@ -3648,11 +3653,20 @@ if [ "$BACKEND" = herdr ] \
   if [ -n "$HERDR_PRESENTATION_SESSION" ] \
      && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
      && [ -n "$HERDR_PRESENTATION_PANE" ] \
-     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
-     && fm_backend_herdr_projection_endpoint_matches_journal \
+     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ]; then
+    if fm_backend_herdr_projection_endpoint_matches_journal \
        "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
        "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
-    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+      HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+    elif fm_backend_herdr_projection_journal_already_gone \
+       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" \
+       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+      # The worktree return above ended the pane's root shell, which a Herdr
+      # task keeps inside its leased slot, so Herdr already removed the exact
+      # pane and its emptied workspace through the pane-death path: nothing
+      # is left to close, and the journal describes nothing live.
+      HERDR_PRESENTATION_ALREADY_GONE=1
+    fi
   fi
 fi
 
@@ -3673,6 +3687,9 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   else
     echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
   fi
+elif [ "$HERDR_PRESENTATION_ALREADY_GONE" = 1 ]; then
+  # Confirmed gone before any close: there is no pane to mutate.
+  :
 elif [ "$BACKEND" = herdr ]; then
   if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
     fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
@@ -3689,6 +3706,8 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   else
     echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
   fi
+elif [ "$HERDR_PRESENTATION_ALREADY_GONE" = 1 ]; then
+  rm -f "$HERDR_PRESENTATION_JOURNAL"
 elif [ "$BACKEND" = herdr ] \
      && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   echo "warning: herdr presentation journal for $ID was not retired by its close; no workspace cleanup was attempted" >&2

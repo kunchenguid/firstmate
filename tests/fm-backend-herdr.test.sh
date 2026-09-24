@@ -485,7 +485,7 @@ test_recovery_grade_read_widens_only_at_its_own_boundary() {
 #
 # Herdr keeps a Pi registration (`agent get` -> agent=pi, agent_status=idle)
 # after the Pi process has exited to a plain shell whenever a nested interactive
-# shell sits under the pane's top shell (the `treehouse get` crew shape;
+# shell sits under the pane's top shell (the interactive `treehouse get` shape;
 # reproduced on Herdr 0.9.0 - docs/verification/runtime-backends.md "Stale agent
 # registration"). Trusting that registration alone classified the pane `live`,
 # so every relaunch and recovery was refused forever. The classifier must now
@@ -3472,6 +3472,402 @@ SH
   pass "herdr presentation ordering: malformed socket metadata is warning-only and read-only"
 }
 
+# --- repo worktree groups: capability gate, parent ensure, exact attach ------
+#
+# The fixtures below use the JSON shapes Herdr 0.9.1 (protocol 22) returns for
+# `worktree list --cwd`, `worktree open`, and workspace rows with worktree
+# provenance, as recorded in docs/verification/runtime-backends.md.
+
+# shellcheck disable=SC2016 # $defs is a literal JSON Schema key.
+REPO_TREE_SCHEMA='{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"worktree.open"}}},{"properties":{"method":{"const":"worktree.list"}}},{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorktreeOpenParams":{"required":["workspace_id","path"],"properties":{"workspace_id":{"type":"string"},"path":{"type":"string"},"focus":{"type":"boolean"}}},"WorktreeListParams":{"properties":{"cwd":{"type":"string"}}},"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}'
+
+# repo_tree_focus_fixture <responses-dir> <first-call-number>: script the two
+# canned reads one focus snapshot consumes (workspace list, then tab list) at
+# <n> and <n>+1, so a snapshot before and after an operation reads identical
+# focus and the restore path has nothing to do.
+repo_tree_focus_fixture() {  # <resp> <n>
+  local resp=$1 n=$2
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"}]}}' > "$resp/$n.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","workspace_id":"w1","focused":true}]}}' > "$resp/$((n + 1)).out"
+}
+
+test_worktree_group_capable_gates_on_protocol_and_schema() {
+  local dir log resp fb status
+  # Below the presentation floor: refused before the schema is read.
+  dir="$TMP_ROOT/wt-group-cap-old"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"client":{"version":"0.7.9","protocol":18},"server":{"running":true}}' > "$resp/1.out"
+  printf '%s\n' "$REPO_TREE_SCHEMA" > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_worktree_group_capable fmtest' "$ROOT" && status=0 || status=$?
+  expect_code 3 "$status" "worktree grouping below the presentation protocol floor"
+  assert_not_contains "$(cat "$log")" $'api\x1fschema' "an old protocol still read the API schema"
+
+  # Current protocol with worktree.open and worktree.list in the schema.
+  dir="$TMP_ROOT/wt-group-cap-ok"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"client":{"version":"0.9.1","protocol":22},"server":{"running":true}}' > "$resp/1.out"
+  printf '%s\n' "$REPO_TREE_SCHEMA" > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_worktree_group_capable fmtest' "$ROOT" && status=0 || status=$?
+  expect_code 0 "$status" "worktree grouping on protocol 22 with worktree.open and worktree.list"
+
+  # Same protocol, but the schema lacks the focus parameter the attach passes.
+  dir="$TMP_ROOT/wt-group-cap-schema"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' '{"client":{"version":"0.9.1","protocol":22},"server":{"running":true}}' > "$resp/1.out"
+  printf '%s\n' "$REPO_TREE_SCHEMA" | jq -c 'del(.schemas.request["$defs"].WorktreeOpenParams.properties.focus)' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_worktree_group_capable fmtest' "$ROOT" && status=0 || status=$?
+  expect_code 5 "$status" "worktree grouping with a schema missing the focus parameter"
+
+  # Unreadable status.
+  dir="$TMP_ROOT/wt-group-cap-status"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf 'not json\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_worktree_group_capable fmtest' "$ROOT" && status=0 || status=$?
+  expect_code 2 "$status" "worktree grouping with an unreadable client protocol"
+  pass "herdr repo grouping: capability gate requires the presentation protocol floor plus worktree.open and worktree.list in the schema"
+}
+
+test_repo_parent_label_follows_home_grammar() {
+  local out
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_label firstmate project' "$ROOT")
+  [ "$out" = "project" ] || fail "primary home repo parent label was '$out', expected 'project'"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_label 2ndmate-alpha project' "$ROOT")
+  [ "$out" = "2ndmate-alpha · project" ] || fail "secondmate home repo parent label was '$out'"
+  pass "herdr repo grouping: parent label is <repo> in the primary home and <home-label> · <repo> in a secondmate home"
+}
+
+# repo_tree_ensure <dir> <clone> <home-label> [<home-ws>]: run the ensure call
+# against $dir/responses, leaving its stdout in REPO_TREE_OUT, its exit status
+# in REPO_TREE_STATUS, and its warnings in REPO_TREE_ERR.
+repo_tree_ensure() {  # <dir> <clone> <home-label> [<home-ws>]
+  local dir=$1 clone=$2 home_label=$3 home_ws=${4:-} fb
+  fb=$(make_herdr_fakebin "$dir")
+  : > "$dir/log"
+  REPO_TREE_OUT=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_repo_parent_ensure fmtest "$1" "$2" "$3"' "$ROOT" "$clone" "$home_label" "$home_ws" 2>"$dir/err") && REPO_TREE_STATUS=0 || REPO_TREE_STATUS=$?
+  REPO_TREE_ERR=$(cat "$dir/err")
+}
+
+test_repo_parent_ensure_adopts_only_exact_parents_and_creates_otherwise() {
+  local base clone clone_real dir resp out worktrees
+  base="$TMP_ROOT/repo-parent"; clone="$base/project"; mkdir -p "$clone"
+  clone_real=$(cd "$clone" && pwd -P)
+  # Herdr reports the repository root as a realpath while Firstmate passes the
+  # clone as registered; both spellings must compare equal.
+  worktrees=$(jq -cn --arg root "$clone_real" '{"result":{"source":{"source_workspace_id":"w1","repo_root":$root,"repo_name":"project"},"worktrees":[{"path":$root,"open_workspace_id":"w1"}]}}')
+  # group_of <id> <checkout>: the `worktree list --workspace <id>` answer of a
+  # workspace that is its own group source at <checkout>.
+  group_of() { jq -cn --arg id "$1" --arg root "$2" '{"result":{"source":{"source_workspace_id":$id,"source_checkout_path":$root,"repo_root":$root,"repo_name":"project"},"worktrees":[]}}'; }
+
+  # A fresh parent carries no provenance yet: the unique exact-label workspace
+  # that reports itself as the group source at this clone is adopted without
+  # any mutation, even though Herdr elects the older flat home workspace.
+  dir="$base/adopt"; resp="$dir/responses"; mkdir -p "$resp"
+  printf '%s\n' "$worktrees" > "$resp/1.out"
+  jq -cn --arg root "$clone_real" '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"wL","label":"project","focused":false,"worktree":{"is_linked_worktree":true,"repo_name":"project","checkout_path":($root + "/../pool/1/project")}},{"workspace_id":"wP","label":"project","focused":false}]}}' > "$resp/2.out"
+  group_of wP "$clone" > "$resp/3.out"
+  repo_tree_ensure "$dir" "$clone" firstmate w1; out=$REPO_TREE_OUT
+  expect_code 0 "$REPO_TREE_STATUS" "adopting the exact repo parent"
+  [ "$out" = "wP" ] || fail "the exact repo parent was not adopted (got '$out'; stderr: $REPO_TREE_ERR)"
+  assert_contains "$(cat "$dir/log")" $'worktree\x1flist\x1f--workspace\x1fwP' "adoption did not ask Herdr for the candidate's own group"
+  assert_not_contains "$(cat "$dir/log")" $'worktree\x1flist\x1f--workspace\x1fwL' "a linked worktree was asked for its group"
+  assert_not_contains "$(cat "$dir/log")" $'workspace\x1fcreate' "adopting the exact parent still created a workspace"
+
+  # After its first child attaches the parent carries non-linked provenance;
+  # the same read adopts it.
+  dir="$base/adopt-provenance"; resp="$dir/responses"; mkdir -p "$resp"
+  printf '%s\n' "$worktrees" > "$resp/1.out"
+  jq -cn --arg root "$clone_real" '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"wR","label":"project","focused":false,"worktree":{"is_linked_worktree":false,"repo_name":"project","checkout_path":$root}}]}}' > "$resp/2.out"
+  group_of wR "$clone_real" > "$resp/3.out"
+  repo_tree_ensure "$dir" "$clone" firstmate w1; out=$REPO_TREE_OUT
+  expect_code 0 "$REPO_TREE_STATUS" "adopting the provenance-carrying repo parent"
+  [ "$out" = "wR" ] || fail "the provenance-carrying repo parent was not adopted (got '$out'; stderr: $REPO_TREE_ERR)"
+
+  # An exact-label workspace whose own group read names another source or
+  # another checkout is not this clone's parent: it is neither adopted nor
+  # touched, and the parent is created beside it.
+  dir="$base/label-elsewhere"; resp="$dir/responses"; mkdir -p "$resp" "$base/other"
+  printf '%s\n' "$worktrees" > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"wO","label":"project","focused":false}]}}' > "$resp/2.out"
+  group_of wO "$base/other" > "$resp/3.out"
+  repo_tree_focus_fixture "$resp" 4
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"wN","label":"project"}}}' > "$resp/6.out"
+  repo_tree_focus_fixture "$resp" 7
+  repo_tree_ensure "$dir" "$clone" firstmate w1; out=$REPO_TREE_OUT
+  expect_code 0 "$REPO_TREE_STATUS" "creating beside a same-label workspace of another checkout"
+  [ "$out" = "wN" ] || fail "a same-label workspace of another checkout was adopted or blocked creation (got '$out'; stderr: $REPO_TREE_ERR)"
+  assert_contains "$(cat "$dir/log")" $'workspace\x1fcreate\x1f--cwd\x1f'"$clone"$'\x1f--label\x1fproject\x1f--no-focus' "repo parent create did not pass the clone, the exact label, and --no-focus"
+
+  # Two exact matches at the clone are ambiguous: nothing is chosen or created.
+  dir="$base/ambiguous"; resp="$dir/responses"; mkdir -p "$resp"
+  printf '%s\n' "$worktrees" > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"wR","label":"project","focused":false},{"workspace_id":"wQ","label":"project","focused":false}]}}' > "$resp/2.out"
+  group_of wR "$clone_real" > "$resp/3.out"
+  group_of wQ "$clone" > "$resp/4.out"
+  repo_tree_ensure "$dir" "$clone" firstmate w1; out=$REPO_TREE_OUT
+  expect_code 1 "$REPO_TREE_STATUS" "two exact repo parents"
+  [ -z "$out" ] || fail "an ambiguous repo parent printed an id: $out"
+  assert_contains "$REPO_TREE_ERR" "found 2 workspaces labelled 'project'" "ambiguous repo parents did not warn"
+  assert_not_contains "$(cat "$dir/log")" $'workspace\x1fcreate' "ambiguous repo parents created a third"
+
+  # No candidate creates the parent with --no-focus under the focus snapshot,
+  # and prints the exact id from the create response.
+  dir="$base/create"; resp="$dir/responses"; mkdir -p "$resp"
+  printf '%s\n' "$worktrees" > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"}]}}' > "$resp/2.out"
+  repo_tree_focus_fixture "$resp" 3
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"wN","label":"project"}}}' > "$resp/5.out"
+  repo_tree_focus_fixture "$resp" 6
+  repo_tree_ensure "$dir" "$clone" firstmate w1; out=$REPO_TREE_OUT
+  expect_code 0 "$REPO_TREE_STATUS" "creating the repo parent"
+  [ "$out" = "wN" ] || fail "created repo parent id was '$out' (stderr: $REPO_TREE_ERR)"
+  [ -z "$REPO_TREE_ERR" ] || fail "successful create warned: $REPO_TREE_ERR"
+  assert_contains "$(cat "$dir/log")" $'workspace\x1fcreate\x1f--cwd\x1f'"$clone"$'\x1f--label\x1fproject\x1f--no-focus' "repo parent create did not pass the clone, the exact label, and --no-focus"
+  assert_not_contains "$(cat "$dir/log")" $'tab\x1ffocus' "an unchanged focus was still re-focused"
+
+  # A secondmate home labels its own parent and never adopts the primary's.
+  dir="$base/secondmate"; resp="$dir/responses"; mkdir -p "$resp"
+  printf '%s\n' "$worktrees" > "$resp/1.out"
+  jq -cn --arg root "$clone_real" '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true,"active_tab_id":"w1:t1"},{"workspace_id":"wP","label":"project","focused":false,"worktree":{"is_linked_worktree":false,"repo_name":"project","checkout_path":$root}},{"workspace_id":"w3","label":"2ndmate-alpha","focused":false}]}}' > "$resp/2.out"
+  repo_tree_focus_fixture "$resp" 3
+  printf '%s\n' '{"result":{"workspace":{"workspace_id":"wA","label":"2ndmate-alpha · project"}}}' > "$resp/5.out"
+  repo_tree_focus_fixture "$resp" 6
+  repo_tree_ensure "$dir" "$clone" 2ndmate-alpha w3; out=$REPO_TREE_OUT
+  expect_code 0 "$REPO_TREE_STATUS" "creating a secondmate repo parent"
+  [ "$out" = "wA" ] || fail "secondmate repo parent id was '$out' (stderr: $REPO_TREE_ERR)"
+  assert_contains "$(cat "$dir/log")" $'--label\x1f2ndmate-alpha · project\x1f--no-focus' "secondmate repo parent did not carry the home-qualified label"
+  assert_not_contains "$(cat "$dir/log")" $'worktree\x1flist\x1f--workspace\x1fwP' "a secondmate home asked the primary's parent for its group"
+
+  # A clone inside a repository rather than at its root is never grouped.
+  dir="$base/nested"; resp="$dir/responses"; mkdir -p "$resp" "$clone/nested"
+  printf '%s\n' "$worktrees" > "$resp/1.out"
+  repo_tree_ensure "$dir" "$clone/nested" firstmate w1; out=$REPO_TREE_OUT
+  expect_code 1 "$REPO_TREE_STATUS" "a nested clone path"
+  assert_contains "$REPO_TREE_ERR" "inside repository root" "a nested clone path did not explain the refusal"
+  assert_not_contains "$(cat "$dir/log")" $'workspace\x1flist' "a nested clone path still read the workspace list"
+
+  # A path Herdr cannot read as a repository is never grouped.
+  dir="$base/not-a-repo"; resp="$dir/responses"; mkdir -p "$resp"
+  printf '%s\n' '{"error":{"code":"not_a_git_repository","message":"no repository"}}' > "$resp/1.out"
+  repo_tree_ensure "$dir" "$clone" firstmate w1; out=$REPO_TREE_OUT
+  expect_code 1 "$REPO_TREE_STATUS" "a path Herdr does not report as a repository"
+  assert_contains "$REPO_TREE_ERR" "could not read the repository" "an unreadable repository did not explain the refusal"
+  pass "herdr repo grouping: parent ensure adopts only the exact-label workspace that is its own group source at the clone, creates with --no-focus otherwise, and refuses ambiguity"
+}
+
+test_repo_parent_ensure_never_creates_a_home_labelled_parent() {
+  local base clone clone_real dir resp out worktrees
+  # The firstmate repository's own tasks would need a parent labelled
+  # "firstmate", which is the primary home's label: the launcher's exact home
+  # workspace may serve as that parent, and nothing else is ever created.
+  base="$TMP_ROOT/repo-parent-collision"; clone="$base/firstmate"; mkdir -p "$clone"
+  clone_real=$(cd "$clone" && pwd -P)
+  worktrees=$(jq -cn --arg root "$clone_real" '{"result":{"source":{"source_workspace_id":"w1","repo_root":$root,"repo_name":"firstmate"},"worktrees":[{"path":$root,"open_workspace_id":"w1"}]}}')
+
+  dir="$base/adopt-home"; resp="$dir/responses"; mkdir -p "$resp"
+  printf '%s\n' "$worktrees" > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"w7","label":"firstmate","focused":false}]}}' > "$resp/2.out"
+  repo_tree_ensure "$dir" "$clone" firstmate w1; out=$REPO_TREE_OUT
+  expect_code 0 "$REPO_TREE_STATUS" "adopting the launcher home workspace as the firstmate repo parent"
+  [ "$out" = "w1" ] || fail "the launcher home workspace was not adopted (got '$out'; stderr: $REPO_TREE_ERR)"
+  assert_not_contains "$(cat "$dir/log")" $'workspace\x1fcreate' "a colliding label created a second home workspace"
+
+  # The election points at a workspace that is not the launcher's home: refuse.
+  dir="$base/refuse-other"; resp="$dir/responses"; mkdir -p "$resp"
+  printf '%s\n' "$worktrees" | jq -c '.result.source.source_workspace_id = "w7"' > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"w7","label":"firstmate","focused":false}]}}' > "$resp/2.out"
+  repo_tree_ensure "$dir" "$clone" firstmate w1; out=$REPO_TREE_OUT
+  expect_code 1 "$REPO_TREE_STATUS" "a colliding label whose election is not the launcher home"
+  [ -z "$out" ] || fail "a colliding label printed an id: $out"
+  assert_contains "$REPO_TREE_ERR" "home label grammar" "a colliding label did not explain the refusal"
+  assert_not_contains "$(cat "$dir/log")" $'workspace\x1fcreate' "a colliding label created a second home workspace"
+
+  # No launcher identity at all: refuse without creating.
+  dir="$base/refuse-no-home"; resp="$dir/responses"; mkdir -p "$resp"
+  printf '%s\n' "$worktrees" > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true}]}}' > "$resp/2.out"
+  repo_tree_ensure "$dir" "$clone" firstmate ""; out=$REPO_TREE_OUT
+  expect_code 1 "$REPO_TREE_STATUS" "a colliding label with no launcher identity"
+  assert_not_contains "$(cat "$dir/log")" $'workspace\x1fcreate' "a colliding label without a launcher created a workspace"
+  pass "herdr repo grouping: a repository named like a home only ever adopts the launcher's own home workspace and never creates a second one"
+}
+
+# repo_tree_attach <dir> <parent> <task-ws> <worktree> -> exit status, with
+# warnings in REPO_TREE_ERR. The caller has already scripted $dir/responses.
+repo_tree_attach() {  # <dir> <parent> <task-ws> <worktree>
+  local dir=$1 fb status
+  fb=$(make_herdr_fakebin "$dir")
+  : > "$dir/log"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_attach_worktree fmtest "$1" "$2" "$3"' "$ROOT" "$2" "$3" "$4" 2>"$dir/err" && status=0 || status=$?
+  REPO_TREE_ERR=$(cat "$dir/err")
+  return "$status"
+}
+
+test_attach_worktree_requires_exact_open_workspace_and_already_open() {
+  local base wt wt_real dir resp worktrees status
+  base="$TMP_ROOT/repo-attach"; wt="$base/pool/1/project"; mkdir -p "$wt"
+  wt_real=$(cd "$wt" && pwd -P)
+  worktrees=$(jq -cn --arg wt "$wt_real" '{"result":{"source":{"source_workspace_id":"wP","repo_root":"/repo","repo_name":"project"},"worktrees":[{"path":"/repo","open_workspace_id":"wP"},{"path":$wt,"open_workspace_id":"w8"}]}}')
+
+  # Exact: the worktree is open in this task's workspace, Herdr answers
+  # already_open for the same id as a linked worktree, focus is untouched.
+  dir="$base/exact"; resp="$dir/responses"; mkdir -p "$resp"
+  printf '%s\n' "$worktrees" > "$resp/1.out"
+  repo_tree_focus_fixture "$resp" 2
+  printf '%s\n' '{"result":{"type":"worktree_opened","already_open":true,"workspace":{"workspace_id":"w8","label":"└ task · p:ZyXwVuTsRqPoNmLkJiHgFe","worktree":{"is_linked_worktree":true,"repo_name":"project"}}}}' > "$resp/4.out"
+  repo_tree_focus_fixture "$resp" 5
+  repo_tree_attach "$dir" wP w8 "$wt" && status=0 || status=$?
+  expect_code 0 "$status" "exact attach"
+  [ -z "$REPO_TREE_ERR" ] || fail "exact attach warned: $REPO_TREE_ERR"
+  assert_contains "$(cat "$dir/log")" $'worktree\x1fopen\x1f--workspace\x1fwP\x1f--path\x1f'"$wt"$'\x1f--no-focus' "attach did not pass the parent, the worktree path, and --no-focus"
+  assert_not_contains "$(cat "$dir/log")" $'tab\x1ffocus' "attach re-focused an unchanged focus"
+  assert_not_contains "$(cat "$dir/log")" $'workspace\x1fclose' "attach closed a workspace"
+  assert_not_contains "$(cat "$dir/log")" $'workspace\x1frename' "attach renamed a workspace"
+
+  # A foreign workspace already sits in the worktree: Herdr would nest that one
+  # instead, so nothing is opened.
+  dir="$base/foreign"; resp="$dir/responses"; mkdir -p "$resp"
+  printf '%s\n' "$worktrees" | jq -c '.result.worktrees[1].open_workspace_id = "wX"' > "$resp/1.out"
+  repo_tree_attach "$dir" wP w8 "$wt" && status=0 || status=$?
+  expect_code 0 "$status" "a foreign workspace in the worktree must not fail the spawn"
+  assert_contains "$REPO_TREE_ERR" "open in wX rather than this task's space w8" "a foreign workspace did not explain the skip"
+  assert_not_contains "$(cat "$dir/log")" $'worktree\x1fopen' "a foreign workspace still ran worktree open"
+
+  # Herdr does not report the worktree open anywhere: `worktree open` would
+  # create a stray workspace, so nothing is opened.
+  dir="$base/unopened"; resp="$dir/responses"; mkdir -p "$resp"
+  printf '%s\n' "$worktrees" | jq -c '.result.worktrees[1].open_workspace_id = null' > "$resp/1.out"
+  repo_tree_attach "$dir" wP w8 "$wt" && status=0 || status=$?
+  expect_code 0 "$status" "an unopened worktree must not fail the spawn"
+  assert_contains "$REPO_TREE_ERR" "open in no workspace rather than" "an unopened worktree did not explain the skip"
+  assert_not_contains "$(cat "$dir/log")" $'worktree\x1fopen' "an unopened worktree still ran worktree open"
+
+  # Herdr opened a different workspace: reported, never adopted.
+  dir="$base/other-id"; resp="$dir/responses"; mkdir -p "$resp"
+  printf '%s\n' "$worktrees" > "$resp/1.out"
+  repo_tree_focus_fixture "$resp" 2
+  printf '%s\n' '{"result":{"type":"worktree_opened","already_open":false,"workspace":{"workspace_id":"w9","label":"project","worktree":{"is_linked_worktree":true,"repo_name":"project"}}}}' > "$resp/4.out"
+  repo_tree_focus_fixture "$resp" 5
+  repo_tree_attach "$dir" wP w8 "$wt" && status=0 || status=$?
+  expect_code 0 "$status" "a mismatched attach result must not fail the spawn"
+  assert_contains "$REPO_TREE_ERR" "did not confirm attaching w8 under repo parent wP (already_open false for workspace w9)" "a mismatched attach result was not reported exactly"
+  assert_not_contains "$(cat "$dir/log")" $'workspace\x1fclose' "a mismatched attach result closed a workspace"
+
+  # An API error is reported by code and left alone.
+  dir="$base/error"; resp="$dir/responses"; mkdir -p "$resp"
+  printf '%s\n' "$worktrees" > "$resp/1.out"
+  repo_tree_focus_fixture "$resp" 2
+  printf '%s\n' '{"error":{"code":"workspace_not_found","message":"no such workspace"}}' > "$resp/4.out"
+  repo_tree_focus_fixture "$resp" 5
+  repo_tree_attach "$dir" wP w8 "$wt" && status=0 || status=$?
+  expect_code 0 "$status" "an attach API error must not fail the spawn"
+  assert_contains "$REPO_TREE_ERR" "(error workspace_not_found)" "an attach API error was not reported by code"
+  [ "$(grep -c $'worktree\x1fopen' "$dir/log")" -eq 1 ] || fail "an attach API error was retried"
+  pass "herdr repo grouping: attach opens only a worktree Herdr already reports in this task's workspace and accepts only the same-id already_open answer"
+}
+
+test_projection_order_repo_parent_counts_as_home_block_member() {
+  local dir log resp fb mover mover_log out status layout
+  layout='{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":false},{"workspace_id":"wR","label":"project","focused":false,"worktree":{"is_linked_worktree":false,"repo_name":"project","checkout_path":"/repo"}},{"workspace_id":"w2","label":"firstmate/old · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w3","label":"2ndmate-alpha","focused":true},{"workspace_id":"wS","label":"2ndmate-alpha · project","focused":false,"worktree":{"is_linked_worktree":false,"repo_name":"project","checkout_path":"/repo"}},{"workspace_id":"w4","label":"└ a1 · p:QwErTyUiOpAsDfGhJkLzXc","focused":false},{"workspace_id":"w5","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}'
+  cat > "$TMP_ROOT/repo-order-mover" <<'SH'
+#!/usr/bin/env bash
+printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$FM_FAKE_MOVER_LOG"
+printf '%s\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","workspaces":[{"workspace_id":"w1","label":"firstmate","focused":false},{"workspace_id":"wR","label":"project","focused":false},{"workspace_id":"w2","label":"firstmate/old · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w5","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false},{"workspace_id":"w3","label":"2ndmate-alpha","focused":true},{"workspace_id":"wS","label":"2ndmate-alpha · project","focused":false},{"workspace_id":"w4","label":"└ a1 · p:QwErTyUiOpAsDfGhJkLzXc","focused":false}]}}'
+SH
+  chmod +x "$TMP_ROOT/repo-order-mover"
+  mover="$TMP_ROOT/repo-order-mover"
+
+  # A repo parent with Herdr's own non-linked provenance and this home's label
+  # is a block member, and another home's repo parent keeps that home's
+  # remainder valid; the new child lands after the primary block.
+  dir="$TMP_ROOT/repo-order-provenance"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover_log="$dir/mover.log"; : > "$log"; : > "$mover_log"
+  printf '%s\n' "$layout" > "$resp/1.out"
+  printf '%s\n' '{"client":{"version":"0.9.1","protocol":22},"server":{"running":true}}' > "$resp/2.out"
+  printf '%s\n' "$REPO_TREE_SCHEMA" > "$resp/3.out"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w3\tw3:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w5 firstmate w1' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "repo-parent ordering must not fail the spawn"
+  [ -z "$out" ] || fail "repo-parent ordering emitted a warning: $out"
+  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w5"$'\t'"3" ] \
+    || fail "the new child did not land after the primary block including its repo parent (mover log: $(cat "$mover_log"))"
+
+  # The exact repo parent id passed by the spawn counts even when the row
+  # carries no provenance the layout read can see.
+  dir="$TMP_ROOT/repo-order-by-id"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover_log="$dir/mover.log"; : > "$log"; : > "$mover_log"
+  printf '%s\n' "$layout" | jq -c 'del(.result.workspaces[1].worktree)' > "$resp/1.out"
+  printf '%s\n' '{"client":{"version":"0.9.1","protocol":22},"server":{"running":true}}' > "$resp/2.out"
+  printf '%s\n' "$REPO_TREE_SCHEMA" > "$resp/3.out"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w3\tw3:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w5 firstmate w1 wR' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "id-anchored repo-parent ordering must not fail the spawn"
+  [ -z "$out" ] || fail "id-anchored repo-parent ordering emitted a warning: $out"
+  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w5"$'\t'"3" ] \
+    || fail "the exact repo parent id was not counted as a block member (mover log: $(cat "$mover_log"))"
+
+  # A label-only "project" row with neither provenance nor the exact id is an
+  # unknown row, exactly as before: the layout is ambiguous and nothing moves.
+  dir="$TMP_ROOT/repo-order-label-only"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover_log="$dir/mover.log"; : > "$log"; : > "$mover_log"
+  printf '%s\n' "$layout" | jq -c 'del(.result.workspaces[1].worktree)' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_order_best_effort fmtest w5 firstmate w1' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "label-only ordering must not fail the spawn"
+  assert_contains "$out" "ambiguous workspace layout" "a label-only repo row was treated as a block member"
+  [ ! -s "$mover_log" ] || fail "a label-only repo row still moved the new child"
+  pass "herdr presentation ordering: a repo parent of this home is a block member by provenance or exact id, never by label alone"
+}
+
+test_live_binding_accepts_repo_parent_between_home_and_child() {
+  local dir log resp fb status layout token
+  token=ZyXwVuTsRqPoNmLkJiHgFe
+  layout='{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate","focused":true},{"workspace_id":"wR","label":"project","focused":false,"worktree":{"is_linked_worktree":false,"repo_name":"project","checkout_path":"/repo"}},{"workspace_id":"w5","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe","focused":false}]}}'
+  # With provenance the repo parent row is part of the home block.
+  dir="$TMP_ROOT/repo-binding-provenance"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' "$layout" > "$resp/1.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w5:t1","workspace_id":"w5","label":"new","focused":true}]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w5:t1:p1","tab_id":"w5:t1"}]}}' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_live_binding_matches fmtest "$1" w5 w5:t1 w5:t1:p1 w1 firstmate "└ new · p:$1" new' "$ROOT" "$token" && status=0 || status=$?
+  expect_code 0 "$status" "binding with a provenance-carrying repo parent between home and child"
+
+  # Without provenance the row is foreign unless the spawn names its exact id.
+  dir="$TMP_ROOT/repo-binding-label-only"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' "$layout" | jq -c 'del(.result.workspaces[1].worktree)' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_live_binding_matches fmtest "$1" w5 w5:t1 w5:t1:p1 w1 firstmate "└ new · p:$1" new' "$ROOT" "$token" && status=0 || status=$?
+  expect_code 1 "$status" "binding with a label-only row between home and child"
+
+  dir="$TMP_ROOT/repo-binding-by-id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' "$layout" | jq -c 'del(.result.workspaces[1].worktree)' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w5:t1","workspace_id":"w5","label":"new","focused":true}]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w5:t1:p1","tab_id":"w5:t1"}]}}' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_live_binding_matches fmtest "$1" w5 w5:t1 w5:t1:p1 w1 firstmate "└ new · p:$1" new wR' "$ROOT" "$token" && status=0 || status=$?
+  expect_code 0 "$status" "binding with the exact repo parent id between home and child"
+  pass "herdr presentation binding: a repo parent of this home may sit between the home workspace and its child by provenance or exact id"
+}
+
 test_projection_reclaim_refusal_matrix_is_non_mutating() {
   local dir state home other_home home_real journal legacy token label out mutation_log
   dir="$TMP_ROOT/projection-reclaim-refusals"; state="$dir/state"; home="$dir/home"; other_home="$dir/other-home"
@@ -5980,6 +6376,13 @@ test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
 test_presentation_session_lock_path_rejects_malformed_socket
 test_projection_order_rejects_malformed_socket
+test_worktree_group_capable_gates_on_protocol_and_schema
+test_repo_parent_label_follows_home_grammar
+test_repo_parent_ensure_adopts_only_exact_parents_and_creates_otherwise
+test_repo_parent_ensure_never_creates_a_home_labelled_parent
+test_attach_worktree_requires_exact_open_workspace_and_already_open
+test_projection_order_repo_parent_counts_as_home_block_member
+test_live_binding_accepts_repo_parent_between_home_and_child
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
