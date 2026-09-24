@@ -4010,7 +4010,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # Enter the isolated copy without fetching: treehouse fetch time counts against the 60s entry timeout below, and fantasy-strategy proves it exceeds that window while freshen_spawn_worktree_base already owns base freshness after entry.
+  spawn_send_text_line "$WT_TARGET" 'treehouse get --no-fetch'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
