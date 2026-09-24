@@ -13,6 +13,48 @@
 # state, and adds two things that document does not carry: the named pipeline
 # step each agent is on, and its GitHub check rollup.
 #
+# Top-level fields:
+#   schema: stable schema id, `fm-flow-snapshot.v1`.
+#   generated: UTC observation time, derived from generated_epoch.
+#   generated_epoch: that same instant in epoch seconds, the document's only
+#     clock.
+#   fm_home: resolved operational home.
+#   agents[]: one record per drawn agent, pipeline agents first.
+#     id, branch, project, worktree, window: the task's identity and where it
+#       runs, every one of them read from the fleet document.
+#     kind: the fleet document's task kind. mode: its dispatch mode.
+#     pipeline: whether this agent carries a no-mistakes run.
+#     state: {ok,value,source,detail,reason} - the fleet document's own
+#       current_state, carried by a `pipeline:false` agent. It is null for a
+#       `pipeline:true` agent, whose journey is its steps instead.
+#     endpoint_alive: true, false, or "unknown" when liveness was never
+#       established.
+#     agent_alive: bin/fm-fleet-snapshot.sh's own probe result, passed through
+#       rather than re-probed, so `not_checked` stays its answer here too.
+#     worker: {harness,model,effort}. A field the record does not state, or
+#       states as the `default` the harness resolved, is null.
+#     pr: {url,number}, both null when no pull request is recorded.
+#     collection: {ok,reason,source,at,epoch} - whether this agent's pipeline
+#       read succeeded, and when it was made. ok false means nothing in run,
+#       steps or active_steps was established.
+#     run: {present,id,status,error,head} - the no-mistakes run attributed to
+#       this task's branch. error is the failed read's own first line.
+#     steps[]: {step,status,findings,duration_ms}, the run's own steps behind
+#       the synthetic `building` step described under the limits below.
+#     active_steps[]: {step,status,active_for,active_ms,last_activity,
+#       agent_pid,round}, one per step still running. active_for is the tool's
+#       humanised elapsed and active_ms is that value in milliseconds.
+#     ci: {collection:{ok,reason}, checks[], total, passed, failed, pending,
+#       skipped, head, pr_state}. Each check is
+#       {kind,workflow,name,started,status,conclusion,verdict}, where verdict
+#       is one of passed, failed, pending or skipped and the four counts are
+#       its tally. head is the commit those checks describe, and pr_state the
+#       pull request's own OPEN, MERGED or CLOSED.
+#   omitted[]: {id,kind,window,reason}, one per task dropped from agents[].
+#
+# A numeric cell the running build did not declare is null, never zero: zero is
+# a measured value here.
+#
 # An agent here is a task with a worker behind it, whatever its kind. A
 # `state/<id>.meta` outlives the window it names, so membership is decided by
 # `endpoint.exists`, bin/fm-fleet-snapshot.sh's own reading of
@@ -22,11 +64,13 @@
 # established as dead - which is every REMOTE worker, since that reader does
 # not probe one - so those are drawn with `endpoint_alive: "unknown"`, the
 # same three-way reading bin/fm-fleet-view.sh renders. Omitting them would
-# make this view disagree with the rest of firstmate about who is running. Kind decides only what an agent CARRIES:
-# a `pipeline:true` agent carries a no-mistakes run, its steps and its GitHub
-# checks, and a `pipeline:false` agent - a scout, a second mate - carries the
-# fleet document's own `current_state` instead. Pipeline agents are emitted
-# first, so the wire order is the draw order.
+# make this view disagree with the rest of firstmate about who is running.
+#
+# Kind decides only what an agent CARRIES: a `pipeline:true` agent carries a
+# no-mistakes run, its steps and its GitHub checks, and a `pipeline:false`
+# agent - a scout, a second mate - carries the fleet document's own
+# `current_state` instead. Pipeline agents are emitted first, so the wire order
+# is the draw order.
 #
 # Run attribution goes through bin/fm-nm-run-lib.sh, the repository's single
 # owner of which no-mistakes run belongs to a branch. A worker cannot forge that
@@ -163,16 +207,11 @@ path_mtime() {  # <path>
 # `round_active_for` arrives fourth in active_steps on some builds and not at
 # all on others - and a positional read silently relabels every column after it,
 # so the row would still parse and every value in it would be wrong.
+#
 # ONE prelude serves both block parsers below, because they read the same
 # emitter and drifted apart once already: the row splitter, the header column
 # map and the field accessor live here, so a hardening applied to one is applied
 # to both by construction.
-#
-# Rows are indexed by the COLUMN NAMES the header declares, never by position.
-# The tool has inserted a column mid-block between versions - `round_active_for`
-# arrives fourth in active_steps on some builds and not at all on others - and a
-# positional read silently relabels every column after it, so the row still
-# parses and every value in it is wrong.
 #
 # Splitting is quote-aware for the same reason. A field may be quoted and may
 # itself contain commas, and a plain comma split shifts every later column, so
@@ -364,8 +403,8 @@ ci_json() {  # <pr-url>
   #    passing. That is SKIPPED, and NEUTRAL with it: `gh pr checks` puts both
   #    in its skipping bucket and bin/fm-pr-merge.sh groups them the same way
   #    as merely non-blocking, so counting NEUTRAL as a pass disagrees with
-  #    both. A job GitHub reports
-  #    SKIPPED verified nothing, so it is never folded into passing.
+  #    both, and with this script's own rule that a job which verified nothing
+  #    is never folded into passing.
   #
   # A StatusContext, a commit status rather than a check run, carries `state`
   # and `context` instead; gh counts those too, so they are normalised rather

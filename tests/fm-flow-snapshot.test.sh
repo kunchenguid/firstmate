@@ -131,8 +131,8 @@ run:
     ci,running,1h2m3s,"37s ago: log: waiting, then polling","",starting
 TOON
 
-# An `active_for` carrying a unit the parser does not know must yield null
-# rather than a partial sum, which would understate the elapsed materially.
+# A project that registered its own ship-branch prefix: its run is attributed by
+# the branch the fleet document publishes, not by a rebuilt `fm/<id>`.
 cat > "$TOON_DIR/01FLOWRUNAAAAAAAAAAAAAAAA9.txt" <<'TOON'
 run:
   id: "01FLOWRUNAAAAAAAAAAAAAAAA9"
@@ -143,6 +143,8 @@ run:
     review,running,0,0
 TOON
 
+# An `active_for` carrying a unit the parser does not know must yield null
+# rather than a partial sum, which would understate the elapsed materially.
 cat > "$TOON_DIR/01FLOWRUNAAAAAAAAAAAAAAAA4.txt" <<'TOON'
 run:
   id: "01FLOWRUNAAAAAAAAAAAAAAAA4"
