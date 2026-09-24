@@ -559,10 +559,7 @@ fm_lock_claim() {
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
-  # Set when this attempt could not even write its own private, uniquely named
-  # candidate beside the lock (a sandbox write denial, a read-only filesystem, a
-  # full disk): no holder's release can change that, so
-  # fm_lock_acquire_wait_unless_refused stops waiting on it.
+  # Set when we cannot write our own candidate (sandbox, read-only or full disk).
   FM_LOCK_CREATE_REFUSED=
   if ! ownerdir=$(fm_lock_owner_dir "$lockdir"); then
     FM_LOCK_CREATE_REFUSED=1
@@ -958,36 +955,13 @@ fm_lock_try_acquire() {  # <lockdir> [recursion-depth]
   steal="$lockdir.steal"
   if { [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; } \
     && { [ ! -e "$steal" ] && [ ! -L "$steal" ]; }; then
-    # Creation failed even though nothing currently holds this lock OR its
-    # steal mutex: either a hard, non-contention failure preparing our own
-    # candidate (permission denied, a sandboxed filesystem, disk full), or a
-    # benign race where the prior holder released between
-    # fm_lock_try_create's existence check and now. Either way there is
-    # nothing here to reclaim or wait on, so recursing into the .steal path
-    # below cannot help - it hits the identical failure on a longer path and
-    # did, unbounded, turn a persistent hard failure into runaway
-    # ".steal.steal..." recursion and a stack-overflow crash. Fail this
-    # attempt outright: a benign race is retried by the caller's own loop
-    # (fm_lock_acquire_wait) next cycle, while a persistent hard failure now
-    # fails fast on every cycle instead of crashing, and a caller that must
-    # not block on it waits with fm_lock_acquire_wait_unless_refused.
-    #
-    # When the steal mutex DOES exist, another acquirer is actively resolving
-    # a claim race on this exact lock (for example it won the create, lost
-    # fm_lock_claim to an in-progress steal, and rolled its own candidate
-    # back - see fm_lock_claim's cleanup - leaving $lockdir absent but
-    # $lockdir.steal live). That is genuine, bounded contention to wait on
-    # through the ordinary recursion below, not a hard failure.
+    # Nothing to reclaim: recursing into .steal would only repeat the failure.
     FM_LOCK_HELD_PID=
     return 1
   fi
 
   if [ "$depth" -ge 8 ]; then
-    # Structural backstop: even genuine stale-owner contention should never
-    # need to reclaim a .steal lock this many levels deep. Bail rather than
-    # keep recursing, so any other unforeseen cause of runaway regress (for
-    # example a long-abandoned chain of .steal.steal... artifacts left by a
-    # prior crash of this same bug) fails bounded instead of unbounded.
+    # Backstop: a stale .steal chain this deep is abandoned, not contention.
     FM_LOCK_HELD_PID=
     FM_LOCK_STEAL_DEPTH_EXHAUSTED=1
     return 1
@@ -1090,16 +1064,8 @@ fm_lock_acquire_wait() {
 }
 
 # fm_lock_acquire_wait_unless_refused <lockdir>
-#
-# fm_lock_acquire_wait for a lock whose parent can refuse creation outright,
-# such as the machine-wide process-event claim root outside FM_HOME, which a
-# harness sandbox (Codex's workspace-write profile denies writes under $HOME),
-# a read-only filesystem, or a full disk can make unwritable. It waits through
-# contention exactly as fm_lock_acquire_wait does, but returns 1 when an attempt
-# cannot write its own candidate or exhausts the stale-chain recursion bound,
-# because retrying either unchanged condition would block its caller forever.
-# Only callers that handle a failed acquisition may use it; fm_lock_acquire_wait
-# keeps returning only once the lock is held, for callers that do not check.
+# Like fm_lock_acquire_wait, but returns 1 when waiting cannot help (creation
+# refused or steal depth exhausted); only for callers that check the result.
 fm_lock_acquire_wait_unless_refused() {
   local lockdir=$1
   while ! fm_lock_try_acquire "$lockdir"; do

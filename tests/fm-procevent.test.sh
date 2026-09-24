@@ -4347,14 +4347,8 @@ pass "a group whose leader died to something else is still refused, not signalle
 kill -KILL -"$CRASH_PID" 2>/dev/null || true
 
 # --- a claim root that refuses writes -----------------------------------------
-# A harness sandbox leaves the machine-wide claim root present but unwritable:
-# Codex's workspace-write sandbox denies writes under $HOME, where the default
-# root lives, while the firstmate home it runs in stays writable. Every source
-# lock then fails to create. The watcher runs reconcile inline on every cycle,
-# so reconcile must skip the source and return, rather than recurse into
-# ".steal.steal..." until bash overflows its stack or wait forever on a lock
-# nothing holds. On macOS the denial is a Seatbelt profile, the mechanism that
-# sandbox uses; elsewhere a mode-0500 root stands in for it.
+# A sandboxed watcher (e.g. Codex workspace-write) cannot write the claim root;
+# reconcile must skip the source and return. Seatbelt on macOS, mode 0500 elsewhere.
 HDENY="$TMP_ROOT/denied-home"; new_home "$HDENY"
 DENY_ROOT="$TMP_ROOT/denied-claims"
 fm_test_track_procevent_home "$HDENY" "$DENY_ROOT"

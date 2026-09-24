@@ -480,19 +480,8 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   pass "paused mid-acquire claimant backs off to active stealer"
 }
 
-# Minimal unit reproduction of the watcher segfault, with a mode-0500 parent
-# standing in for the real causes: a harness sandbox denying writes outside its
-# workspace, a read-only filesystem, or a full disk (tests/fm-procevent.test.sh
-# drives the production path through a real Seatbelt denial on macOS). Any of
-# them makes every attempt to prepare our own candidate fail even though
-# nothing holds the lock. Before the fix, fm_lock_try_acquire read that as
-# ordinary stale-owner contention and recursed into an ever-longer
-# ".steal.steal..." chain that never terminated, overflowing bash's call
-# stack and crashing with SIGSEGV - hit in
-# production via bin/fm-watch.sh's inline `fm-procevent.sh reconcile` call
-# against a machine-wide claim lock the watcher's sandbox could not write.
-# The fix must fail the attempt outright instead, since there is nothing to
-# steal.
+# A write-denied parent (mode 0500 standing in for a sandbox) must fail fast,
+# not recurse into ".steal.steal..." until bash overflows its stack.
 test_lock_create_hard_failure_fails_fast_without_recursion() {
   local dir state lockdir pid rc out steal_count
   dir=$(make_case lock-create-hard-failure)
@@ -520,11 +509,7 @@ test_lock_create_hard_failure_fails_fast_without_recursion() {
   pass "a lock-creation failure with nothing to steal fails fast instead of recursing"
 }
 
-# Structural backstop: even genuine stale-owner contention must not recurse
-# through an arbitrarily deep chain of nested .steal locks. Build a chain of
-# already-stale, already-dead-pid lock directories deeper than the fixed bound
-# of eight and confirm the walk refuses past that bound instead of reclaiming
-# an unbounded distance.
+# A stale .steal chain deeper than the fixed bound of 8 is refused, not walked.
 test_lock_steal_recursion_is_depth_bounded() {
   local dir state lockdir dead path i out pid rc
   dir=$(make_case lock-steal-depth-bound)
@@ -564,10 +549,7 @@ test_lock_steal_recursion_is_depth_bounded() {
   pass "steal recursion and refusal-aware wait halt at the fixed depth bound"
 }
 
-# fm_lock_acquire_wait_unless_refused refuses only a lock it cannot create: a
-# live holder is ordinary contention it waits through exactly as
-# fm_lock_acquire_wait does, while a write-denied parent is refused promptly
-# instead of waited on forever.
+# The refusal-aware wait still waits for a live holder but refuses a denied parent.
 test_lock_wait_unless_refused_waits_for_holder_but_refuses_denied_parent() {
   local dir state lockdir holder i out pid rc
   dir=$(make_case lock-wait-unless-refused)
