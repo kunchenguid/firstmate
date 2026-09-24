@@ -1447,7 +1447,6 @@ HREPLY="$TMP_ROOT/hreply"; new_home "$HREPLY"
 REPLY_ART="$TMP_ROOT/reply-retry-board.html"
 printf '<h1>reply retry</h1>\n' > "$REPLY_ART"
 lavish_session "$REPLY_ART"
-reply_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REPLY_ART")
 fm_test_track_procevent_home "$HREPLY"
 new_task_endpoint "$HREPLY" worker-9
 printf 'applied round one\n' > "$TMP_ROOT/reply-retry.txt"
