@@ -23,7 +23,7 @@ BASE_RULES="$TMP_ROOT/rules.json"
 RULES="$HOME_DIR/config/crew-dispatch.json"
 QUOTA="$TMP_ROOT/quota.json"
 BASE_PATH=$PATH
-mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN"
+mkdir -p "$HOME_DIR/config" "$HOME_DIR/state" "$LOG" "$NO_CURL_BIN"
 for command_name in bash chmod cp dirname jq mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
 done
@@ -245,6 +245,12 @@ assert_not_contains "$body" 'SECRET-WHY-TEXT' "why text never leaves the machine
 assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
+LONG_WHEN="$(printf '%081d' 0)full-rule-identity"
+jq --arg when "$LONG_WHEN" '.rules[3].when = $when' "$BASE_RULES" > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_equals "$LONG_WHEN" "$(jq -r 'select(.kind == "decision") | .choice_when' "$HOME_DIR/state/jev-decisions.jsonl" | tail -n 1)" "decision stores the complete rule text"
+cp "$BASE_RULES" "$RULES"
 
 # --- rules are snapshotted and line output is injection-safe -------------------
 MUTATED_RULES="$TMP_ROOT/mutated-rules.json"
@@ -360,6 +366,7 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "a top rule below its own floor falls to a runner-up that clears its floor"
 assert_contains "$out" '  rule: rule_2 (The task generates images.)   confidence: 0.76' "the model's own pick stays visible"
 assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 0.18 clears its floor 0.1; rule_2 probability 0.76 is below its floor 0.9' "the fallback names both floors"
+assert_equals 'The task generates images.|A simple bug fix with a stated root cause.|rule_4' "$(jq -r '[.choice_when,.resolved_when,.resolved] | join("|")' "$HOME_DIR/state/jev-decisions.jsonl" | tail -n 1)" "decision evidence retains the original pick and the resolved class"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the runner-up rule's profiles are resolved"
 assert_not_contains "$(cat "$LOG/body")" 'min_confidence' "the model never sees confidence floors"
 

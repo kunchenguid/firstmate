@@ -118,7 +118,7 @@ log_decision() { # <status> <reason>
       if $c == null then null
       elif $c == "default" then $none
       elif ($c | test("^rule_[1-9][0-9]*$")) and $rules != null then ($rules.rules[($c | ltrimstr("rule_") | tonumber) - 1].when // null)
-      else null end | if . == null then null else .[0:80] end;
+      else null end;
     {schema_version: 1, kind: "decision", decision_id: $id, at: now | floor,
      surface: "dispatch-resolve", question_id: "dispatch.rule",
      question_digest: opt($qd), state_digest: opt($sd),
@@ -127,7 +127,7 @@ log_decision() { # <status> <reason>
      tokens: ($resp.usage // null),
      choice: ($a.choice // null), choice_when: when_of($a.choice // null),
      confidence: ($a.confidence // null), probabilities: ($a.probabilities // null),
-     resolved: ($result.resolved // null),
+     resolved: ($result.resolved // null), resolved_when: when_of($result.resolved // null),
      status: $status, reason: opt($reason),
      profile: ($result.chosen.profile // null)}' 2>/dev/null) || return 0
   printf '%s\n' "$record" | FM_HOME=$FM_HOME "$SCRIPT_DIR/fm-jev-decisions.sh" append 2>/dev/null || return 0

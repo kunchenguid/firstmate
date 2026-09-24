@@ -12,6 +12,7 @@ TMP_ROOT=$(fm_test_tmproot fm-jev-decisions)
 HOME_DIR="$TMP_ROOT/home"
 JEV_LOG="$HOME_DIR/state/jev-decisions.jsonl"
 mkdir -p "$HOME_DIR/state"
+umask 022
 
 jev() { FM_HOME="$HOME_DIR" "$TOOL" "$@"; }
 
@@ -33,6 +34,7 @@ expect_code 1 "$?" "append refuses a record that is not a decision"
 printf 'not json\n' | jev append 2>/dev/null
 expect_code 1 "$?" "append refuses malformed input"
 assert_equals '1' "$(wc -l < "$JEV_LOG" | tr -d ' ')" "only the valid decision was written"
+assert_equals '600' "$(stat -c %a "$JEV_LOG")" "the log is private despite a permissive umask"
 pass "append writes only well-formed decision records"
 
 # --- spawned records what the dispatch actually launched -----------------------
@@ -71,15 +73,25 @@ jev outcome jd-3 --took held --harness claude 2>/dev/null
 expect_code 2 "$?" "only dispatched carries a profile"
 jev outcome jd-3 --took maybe 2>/dev/null
 expect_code 2 "$?" "an unknown outcome word is a usage error"
+lines=$(wc -l < "$JEV_LOG" | tr -d ' ')
+jev spawned adj-1 claude sonnet high
+jev spawned adj-2 claude sonnet high
+jev spawned adj-3 claude sonnet high
+assert_equals "$lines" "$(wc -l < "$JEV_LOG" | tr -d ' ')" "a later spawn cannot overwrite a held, dispatched, or declined fate"
 pass "outcome records the supervisor's own fate for a decision"
 
 # --- report: per-class rates, no spend figure ----------------------------------
+LONG_PREFIX=$(printf '%081d' 0)
+decision jd-long-1 long-1 clear "${LONG_PREFIX}alpha" | jq --arg when "${LONG_PREFIX}alpha" '.resolved = "rule_1" | .resolved_when = $when' | jev append
+decision jd-long-2 long-2 escalate "${LONG_PREFIX}alpha" | jq --arg when "${LONG_PREFIX}beta" '.resolved = "rule_2" | .resolved_when = $when' | jev append
 printf 'garbage line\n' >> "$JEV_LOG"
 out=$(jev report)
 expect_code 0 "$?" "report exits 0"
-assert_contains "$out" '  decisions: 5   with outcome: 5' "report counts decisions and joined outcomes, skipping malformed lines"
+assert_contains "$out" '  decisions: 7   with outcome: 5' "report counts decisions and joined outcomes, skipping malformed lines"
 assert_contains "$out" "  class: $BUG   n=2   clear=100% ambiguous=0% escalate=0% error=0%   outcomes=2 followed=1 overridden=1 held=0 declined=0" "report gives the bug-fix class its own rates"
 assert_contains "$out" "  class: $E1   n=3   clear=33.3% ambiguous=33.3% escalate=33.3% error=0%   outcomes=3 followed=0 overridden=0 held=1 declined=1" "report gives the escalation class its own rates"
+assert_contains "$out" "  class: ${LONG_PREFIX}alpha   n=1   clear=100%" "the full resolved class is preserved"
+assert_contains "$out" "  class: ${LONG_PREFIX}beta   n=1   clear=0% ambiguous=0% escalate=100%" "fallback groups under its resolved class"
 assert_not_contains "$out" '900' "report makes no token-based figure"
 assert_contains "$out" 'not a spend measure' "report says tokens are not a spend measure"
 rm -f "$JEV_LOG"

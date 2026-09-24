@@ -18,8 +18,7 @@
 #     model call was made), task (the <id> of a data/<id>/brief.md brief, else
 #     null), project, brief_kind (ship | scout | whole), model_requested, model
 #     (the version the API reported), latency_ms, tokens (as reported; never a
-#     spend measure), choice, choice_when (the picked option's text, 80
-#     characters), confidence, probabilities, resolved (the rule after any
+#     spend measure), choice, choice_when (the picked option's full text), confidence, probabilities, resolved (the rule after any
 #     fallback), status (clear | ambiguous | escalate | error), reason, and
 #     profile (the resolver's profile on clear, else null).
 #   outcome (what the supervisor actually took):
@@ -39,10 +38,10 @@
 # append validates the record's schema_version, kind, and decision_id and
 # appends it. spawned is bin/fm-spawn.sh's best-effort hook after a fresh ship
 # or scout launch: it records a dispatched outcome for the newest decision whose
-# task is <task>, and writes nothing when there is none. outcome is the
+# task is <task> and has no outcome yet, and writes nothing otherwise. outcome is the
 # supervisor's manual record for any other fate, such as holding the decision
 # for the captain or dispatching by hand. report prints, per class (the option
-# Jev picked), the clear/ambiguous/escalate/error rates and how often the
+# actually resolved), the clear/ambiguous/escalate/error rates and how often the
 # supervisor's recorded outcome followed the resolver's profile; it prints no
 # token or cost figure, because token counts alone support no spend claim.
 #
@@ -87,7 +86,12 @@ locked_append() { # <json line>
     [ "$tries" -lt "$LOCK_TRIES" ] || return 1
     sleep 0.1
   done
-  printf '%s\n' "$1" >> "$LOG" || rc=1
+  if [ ! -e "$LOG" ]; then
+    (umask 077; : > "$LOG") || rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$1" >> "$LOG" || rc=1
+  fi
   fm_lock_release "$LOCK"
   return "$rc"
 }
@@ -127,9 +131,9 @@ case "$cmd" in
     # shellcheck disable=SC2016 # $t and $id are jq variables, not shell ones.
     decision=$(newest_decision '.task == $t' --arg t "$2")
     [ -n "$decision" ] || exit 0
-    # A second spawn outcome for one decision would double-count one dispatch.
+    # Any recorded fate closes this decision to later spawns.
     if jq -e -R --arg id "$(jq -r .decision_id <<<"$decision")" \
-      'fromjson? | select(.kind == "outcome" and .source == "spawn" and .decision_id == $id)' "$LOG" >/dev/null 2>&1; then
+      'fromjson? | select(.kind == "outcome" and .decision_id == $id)' "$LOG" >/dev/null 2>&1; then
       exit 0
     fi
     write_outcome "$decision" spawn dispatched "$3" "${4#-}" "${5#-}" "" || exit 1
@@ -179,8 +183,8 @@ case "$cmd" in
       (reduce ($all[] | select(.kind == "outcome")) as $o ({}; .[$o.decision_id] = $o)) as $last |
       "jev-decisions:",
       "  decisions: \($d | length)   with outcome: \([$d[] | select($last[.decision_id] != null)] | length)",
-      ($d | group_by(.choice_when // "(no model answer)")[] |
-        length as $n | (.[0].choice_when // "(no model answer)") as $class |
+      ($d | group_by(.resolved_when // .choice_when // "(no model answer)")[] |
+        length as $n | (.[0].resolved_when // .[0].choice_when // "(no model answer)") as $class |
         [.[] | $last[.decision_id] | select(. != null)] as $outs |
         "  class: \($class | flat)   n=\($n)"
         + "   clear=\(pct([.[] | select(.status == "clear")] | length; $n))"
