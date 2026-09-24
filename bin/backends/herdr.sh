@@ -3249,10 +3249,9 @@ fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered>
   fi
 }
 
-# fm_backend_herdr_proof_lines: how many tail rows the pre-Enter payload proof
-# captures. A literal payload wraps, and a tail-only capture of a complete
-# wrap would look like the truncation this proof exists to refuse. The bound
-# stays inside the selected composer extraction; it is not a whole-pane search.
+# fm_backend_herdr_proof_lines: how many rows a refused payload can cover, so
+# how many Ctrl+U presses fm_backend_herdr_composer_clear may need. A literal
+# payload wraps, so the count grows with the payload.
 fm_backend_herdr_proof_lines() {  # <text>
   local text=$1 lines
   lines=$(( (${#text} / 40) + 8 ))
@@ -3329,24 +3328,27 @@ fm_backend_herdr_composer_clear() {  # <target> <text>
 
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
-  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 proof_lines content
+  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 content
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   # Claude on Herdr is the live-verified truncation shape: Enter is withheld
   # unless the composer, empty before the send, shows this payload. A suffix
   # that then starts a turn must not report empty. Other harnesses keep the
-  # unproven type-then-Enter path.
+  # unproven type-then-Enter path. The proof reads the whole fetched capture,
+  # not a tail: a `/` payload opens Claude's slash-command completion list
+  # below the composer (live Claude 2.1.281, Herdr 0.9.1), and with many
+  # skills that list alone fills any short tail read. The extraction still
+  # selects the lowest composer shape.
   identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || identity=
   if [ "${identity%%$'\t'*}" = claude ]; then
     proof=1
-    proof_lines=$(fm_backend_herdr_proof_lines "$text")
-    content=$(fm_backend_herdr_composer_content "$target" "$proof_lines") \
+    content=$(fm_backend_herdr_composer_content "$target" 200) \
       || { printf 'send-failed'; return 0; }
     [ -z "${content//[$' \t\r\n\v\f']/}" ] || { printf 'send-failed'; return 0; }
   fi
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   if [ "$proof" = 1 ]; then
-    if ! content=$(fm_backend_herdr_composer_content "$target" "$proof_lines") \
+    if ! content=$(fm_backend_herdr_composer_content "$target" 200) \
       || ! fm_backend_herdr_composer_payload_shown "$text" "$content"; then
       if fm_backend_herdr_composer_clear "$target" "$text"; then
         printf 'send-failed'

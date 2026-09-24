@@ -32,9 +32,19 @@
 #              an idle agent (Devin's revert picker) sends its later presses
 #              only after the first press rendered a running turn, and
 #              otherwise reports `cancel=not-running` having sent one press.
+#              An interrupt key that is also the harness's leave-text-entry key
+#              (Claude's Escape with vim editor mode on) leaves the composer
+#              reading the next typed line as editor commands, so the composer
+#              is put back into text entry before this verb returns and the
+#              restore is proven from the harness's own rendered indicator.
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
-#              busy, then submits the harness's exit command. Postcondition:
+#              busy, then submits the harness's exit command. A backend that
+#              proves what the composer received refuses a command a modal
+#              composer left in command mode reduced to a stray character,
+#              having submitted nothing; the command is typed once more when
+#              that composer reads as taking text again, so an earlier
+#              interrupt cannot strand the agent. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent). An endpoint that reads
 #              `missing` is put through the control plane's per-backend absence
@@ -426,6 +436,55 @@ dismiss_interrupt_hazard() {  # <key> <ere>
   INTERRUPT_HAZARD=dismissed
 }
 
+# insert_mode_state <signal>: whether the viewport renders the composer's
+# text-entry indicator. `unreadable` is its own answer, never folded into
+# `other`, because acting on a missing read would type a mode key blind.
+insert_mode_state() {  # <signal>
+  local screen
+  screen=$(fm_backend_visible_capture "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
+    || { printf 'unreadable'; return 0; }
+  if printf '%s\n' "$screen" | grep -Eq -- "$1"; then
+    printf 'insert'
+  else
+    printf 'other'
+  fi
+}
+
+# restore_insert_mode: return a modal composer to text-entry mode and prove it.
+# A composer left in command mode reads the next typed line as editor commands
+# rather than text - claude's vim mode turns the `/exit` exit command into the
+# single character `t` - so an interrupt whose key also left text entry must
+# undo that before anything else is typed. Its caller establishes that the
+# composer WAS in text entry beforehand, which is what makes typing the key
+# here safe; nothing else may call this on an unproven composer.
+# 0 only when the harness's indicator is rendered afterwards AND the composer
+# is still empty, which together prove the key was consumed as a mode change.
+# Any other outcome clears the composer back to empty and returns nonzero, so a
+# key that was inserted as text instead never survives into the next send; a
+# composer that will not go back to empty is a refusal, because the exit
+# command would otherwise concatenate onto it.
+restore_insert_mode() {
+  local signal key composer_state
+  signal=$(fm_control_interrupt_insert_signal "$HARNESS") || return 1
+  key=$(fm_control_interrupt_insert_key "$HARNESS") || return 1
+  [ -n "$signal" ] && [ -n "$key" ] || return 1
+  fm_backend_visible_capture_supported "$BACKEND" || return 1
+  [ "$(insert_mode_state "$signal")" = other ] || return 1
+  fm_backend_send_literal "$BACKEND" "$T" "$key" "$LABEL" || return 1
+  if wait_rendered "$signal" "$ARM_WAIT"; then
+    composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
+      || composer_state=unknown
+    [ "$composer_state" = empty ] && return 0
+  fi
+  fm_control_backend_supports_key "$BACKEND" C-u \
+    && fm_backend_send_key "$BACKEND" "$T" C-u "$LABEL" >/dev/null 2>&1
+  composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
+    || composer_state=unknown
+  [ "$composer_state" = empty ] \
+    || die "task $ID's composer did not take the $HARNESS text-entry key as a mode change, and it is now '$composer_state' rather than proven empty; clear it before the next lifecycle action"
+  return 1
+}
+
 # send_interrupt_keys: deliver the harness's interrupt key the verified number
 # of times, then the composer-clear key when the adapter needs one. Refuses
 # before sending anything when the backend cannot deliver either key, because
@@ -435,14 +494,21 @@ dismiss_interrupt_hazard() {  # <key> <ere>
 # only after the viewport proves the first one armed a running turn, and never
 # sooner than its press gap; without that proof INTERRUPT_ARMED=no and no
 # further press is sent. Its hazard surface is then closed before returning.
+# The same postcondition covers a modal composer: an interrupt key that was
+# also the harness's leave-text-entry key is undone before returning, because
+# the next submitted line would otherwise be read as editor commands instead
+# of text. Only a text-entry indicator that was rendered before the presses
+# and is gone afterwards authorizes that restore, and only on a still-running
+# agent, so an interrupt that stopped the agent types nothing into it.
 send_interrupt_keys() {
-  local key repeat clear arm hazard gap i=0
+  local key repeat clear arm hazard gap insert entry_before=no i=0
   key=$(fm_control_interrupt_key "$HARNESS")
   repeat=$(fm_control_interrupt_repeat "$HARNESS")
   clear=$(fm_control_interrupt_clear_key "$HARNESS")
   arm=$(fm_control_interrupt_arm_signal "$HARNESS")
   hazard=$(fm_control_interrupt_hazard_signal "$HARNESS")
   gap=$(fm_control_interrupt_press_gap "$HARNESS")
+  insert=$(fm_control_interrupt_insert_signal "$HARNESS")
   fm_control_backend_supports_key "$BACKEND" "$key" \
     || die "harness $HARNESS interrupts with $key, which the $BACKEND backend cannot deliver; refusing to send a different key"
   [ -z "$clear" ] || fm_control_backend_supports_key "$BACKEND" "$clear" \
@@ -451,6 +517,10 @@ send_interrupt_keys() {
     || die "harness $HARNESS must see its screen between interrupt presses, because a repeated $key on an idle agent opens its revert picker, and the $BACKEND backend has no verified viewport read; refusing to press blind"
   INTERRUPT_ARMED=yes
   INTERRUPT_HAZARD=none
+  if [ -n "$insert" ] && fm_backend_visible_capture_supported "$BACKEND" \
+     && [ "$(insert_mode_state "$insert")" = insert ]; then
+    entry_before=yes
+  fi
   while [ "$i" -lt "$repeat" ]; do
     fm_backend_send_key "$BACKEND" "$T" "$key" "$LABEL" \
       || die "interrupt key $key was not delivered to task $ID on $BACKEND"
@@ -465,6 +535,11 @@ send_interrupt_keys() {
   [ -z "$hazard" ] || dismiss_interrupt_hazard "$key" "$hazard"
   [ -z "$clear" ] || fm_backend_send_key "$BACKEND" "$T" "$clear" "$LABEL" \
     || die "interrupt key $key reached task $ID, but $clear did not, so its composer still holds the cancelled prompt; clear it before the next lifecycle action"
+  if [ "$entry_before" = yes ] && [ "$(agent_state)" = alive ] \
+     && [ "$(insert_mode_state "$insert")" = other ]; then
+    restore_insert_mode \
+      || die "interrupt key $key left task $ID's composer out of $HARNESS text-entry mode, where the next line typed into it is read as editor commands rather than text, and it could not be put back; restore it before the next lifecycle action"
+  fi
 }
 
 prepare_interrupt_ack() {
@@ -557,7 +632,7 @@ retire_busy_incarnation() {
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
-  local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed
+  local state cmd hazard verdict composer_state cancel absence insert_signal entry_before=insert interrupt_result=not-needed
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -635,6 +710,13 @@ do_exit() {
       die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
       ;;
   esac
+  # A modal composer's mode before the command is typed, so a refusal can be
+  # attributed to it afterwards. Read only, and only where the viewport can be
+  # read: nothing is typed to find this out.
+  insert_signal=$(fm_control_interrupt_insert_signal "$HARNESS") || insert_signal=
+  if [ -n "$insert_signal" ] && fm_backend_visible_capture_supported "$BACKEND"; then
+    entry_before=$(insert_mode_state "$insert_signal")
+  fi
   # The submit verdict is NOT the postcondition here: a successful exit command
   # destroys the composer the verdict is read from, so a post-exit read can
   # legitimately report anything. Only a hard transport failure aborts; the
@@ -643,6 +725,23 @@ do_exit() {
   # swallows the first Enter.
   verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL") \
     || die "the exit command could not be sent to task $ID on $BACKEND"
+  # A refused send means the composer did not take the command as typed text,
+  # and the backend already put it back to empty rather than submitting the
+  # fragment it did take - so typing the command again is a first delivery, not
+  # a duplicate. It is retried exactly once, and only on the evidence that the
+  # mode was the cause and is no longer: the composer was not in text entry
+  # when the command was typed, and it is now. Claude's `/exit` from vim
+  # command mode is consumed as the search, end-of-word, delete-char and insert
+  # commands, and that last one is what leaves the composer taking text again,
+  # so an earlier interrupt cannot strand the agent. Nothing is typed to
+  # establish this, so a composer with no modal editor - which renders no
+  # indicator in either mode - is never touched on a refusal it did not cause,
+  # and a refusal with any other cause is still reported.
+  if [ "$verdict" = send-failed ] && [ "$entry_before" = other ] \
+     && [ "$(insert_mode_state "$insert_signal")" = insert ]; then
+    verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL") \
+      || die "the exit command could not be sent to task $ID on $BACKEND"
+  fi
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
   state=$(wait_agent_state "$EXIT_WAIT" dead) || {

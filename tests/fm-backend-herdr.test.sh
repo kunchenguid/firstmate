@@ -4983,7 +4983,79 @@ test_send_text_submit_non_claude_skips_the_payload_proof() {
   pass "fm_backend_herdr_send_text_submit: non-Claude and unidentified panes keep the pre-proof type-then-Enter behavior"
 }
 
+# The live shape behind the lost-recovery incident (claude 2.1.x with
+# `editorMode: vim`, Herdr 0.9.1): the interrupt key is Escape, which is also
+# vim's leave-text-entry key, so a composer an interrupt already touched reads
+# the next typed line as editor commands. `/exit` is then consumed as the
+# search, end-of-word, delete-char and insert commands, and only the trailing
+# `t` reaches the composer. The payload proof is what keeps that fragment from
+# being submitted as a prompt; bin/fm-control.sh owns putting the composer
+# back and retrying the command once.
+test_send_text_submit_claude_command_mode_fragment_is_refused() {
+  local dir log resp fb out enter_count text
+  dir="$TMP_ROOT/submit-claude-command-mode"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text='/exit'
+  herdr_submit_claude_prefix "$resp" "$text"
+  printf '  \xe2\x9d\xaf t\n' > "$resp/4.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = send-failed ] || fail "an exit command a vim command-mode composer reduced to a stray character should report send-failed, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 0 ] || fail "the stray character must never be submitted as a prompt, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 1 ] || fail "the refused fragment should be cleared out of the composer"
+  pass "fm_backend_herdr_send_text_submit: an exit command a modal composer reduced to a stray character is refused, not submitted"
+}
+
+# Live Claude 2.1.281 on Herdr 0.9.1: typing `/exit` opens the slash-command
+# completion list BELOW the composer, and with many skills and plugins the
+# list is taller than a tail read. The proof must still find the composer row
+# above it, or every fm-control exit and relaunch is refused as send-failed.
+test_send_text_submit_claude_slash_completion_list_below_composer_submits() {
+  local dir log resp fb out enter_count text rule i
+  dir="$TMP_ROOT/submit-claude-slash-list"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  text='/exit'
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
+  herdr_submit_claude_prefix "$resp" "$text"
+  rule=$(printf '\xe2\x94\x80%.0s' $(seq 1 60))
+  {
+    printf ' Claude Code v2.1.281\n'
+    printf '%s\n' "$rule"
+    printf '\xe2\x9d\xaf %s\n' "$text"
+    printf '%s\n' "$rule"
+    for i in $(seq 1 40); do
+      printf '  /skill-%s                  Use this skill when working on item %s\n' "$i" "$i"
+    done
+  } > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = empty ] || fail "an exit command shown above a tall slash-completion list should be submitted, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "the exit command should be submitted once, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "a proven exit command must not be cleared"
+  pass "fm_backend_herdr_send_text_submit: a slash command shown above a completion list taller than the tail read is still proven and submitted"
+}
+
 # --- fm-backend.sh dispatch wiring -------------------------------------------
+
+# fm_backend_send_literal is the raw, unsubmitted text path the lifecycle
+# control plane uses for a single mode-changing character a modal composer
+# consumes instead of inserting. It must reach the adapter's own literal send
+# and press no Enter of its own.
+test_dispatch_routes_herdr_send_literal() {
+  local dir log resp fb
+  dir="$TMP_ROOT/dispatch-send-literal"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_literal herdr default:w1:p2 i' "$ROOT" \
+    || fail "fm_backend_send_literal should route to the herdr adapter"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f''i' "send_literal did not type the character through the herdr adapter"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-keys' "$log")" -eq 0 ] || fail "send_literal must submit nothing of its own"
+  pass "fm_backend_send_literal: routes raw unsubmitted text to the herdr adapter and presses no Enter"
+}
 
 test_dispatch_routes_herdr_backend() {
   fm_backend_validate herdr 2>/dev/null || fail "fm_backend_validate should accept herdr (P2 adds it to FM_BACKEND_KNOWN)"
@@ -5786,6 +5858,9 @@ test_send_text_submit_multiline_paste_placeholder_submits_the_long_payload
 test_send_text_submit_refuses_placeholder_followed_by_a_literal_remainder
 test_send_text_submit_three_paste_placeholders_submit_the_long_payload
 test_send_text_submit_non_claude_skips_the_payload_proof
+test_send_text_submit_claude_command_mode_fragment_is_refused
+test_send_text_submit_claude_slash_completion_list_below_composer_submits
+test_dispatch_routes_herdr_send_literal
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend

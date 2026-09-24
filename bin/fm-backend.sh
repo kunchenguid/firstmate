@@ -778,6 +778,25 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   esac
 }
 
+# fm_backend_send_literal: type text into the composer RAW and unsubmitted.
+# The lifecycle control plane uses it for the single mode-changing character a
+# modal composer consumes instead of inserting; ordinary text delivery goes
+# through fm_backend_send_text_submit, which proves what the composer received
+# before it presses Enter.
+fm_backend_send_literal() {  # <backend> <target> <text> [expected-label]
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_send_literal "$@" ;;
+    herdr) fm_backend_herdr_send_literal "$@" ;;
+    zellij) fm_backend_zellij_send_literal "$@" ;;
+    orca) fm_backend_orca_send_literal "$@" ;;
+    cmux) fm_backend_cmux_send_literal "$@" ;;
+    *) echo "error: no send-literal implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+}
+
 # fm_backend_send_text_submit: type text once, then submit and verify,
 # retrying only the submission (never retyping). Echoes the backend's
 # proof-carrying verdict; callers require exact empty for confirmed delivery.

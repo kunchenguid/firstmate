@@ -8,7 +8,7 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 |---|---|
 | Busy | Owned hooks: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. |
 | Exit | `/exit`. |
-| Interrupt | Single Escape. |
+| Interrupt | Single Escape. With `editorMode: vim` that same Escape also leaves the composer's text entry, so lifecycle control restores it and proves the restore from the `-- INSERT --` indicator; command mode renders no indicator, exactly like a Claude without vim mode. |
 | Skill | `/<skill>`, for example `/no-mistakes`. |
 | Model | `--model <model>`; discover through the interactive `/model` picker, with alias or full-name shape documented by `claude --help`. |
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |

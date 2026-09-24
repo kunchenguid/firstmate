@@ -70,6 +70,24 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
 #   pane     optional capture-pane override, for an adapter whose busy verdict
 #            is read from the rendered tail.
 #   key-times  every named key with its wall-clock send time.
+#   vim      optional modal-composer model for a claude whose vim editor mode
+#            is on: `insert` while the composer takes typed text, `normal`
+#            after an Escape. capture-pane renders `-- INSERT --` only in
+#            insert mode, exactly as live claude does - command mode renders
+#            no indicator at all, which is also what a claude WITHOUT vim mode
+#            renders. A literal typed in command mode is consumed as editor
+#            commands instead of reaching the composer, so it is recorded in
+#            `literal-command-mode` and drives no lifecycle transition. A
+#            payload containing `i` - vim's insert command, and a character of
+#            `/exit` - leaves the composer taking text again, exactly as live
+#            claude does. FM_FAKE_VIM_REFUSES_SEND additionally makes that
+#            swallowed literal fail the send outright, which is the
+#            `send-failed` verdict herdr's Claude payload proof produces for
+#            the same screen (tmux's own submit core has no payload proof and
+#            cannot produce it). FM_FAKE_VIM_STAYS_NORMAL keeps the composer in
+#            command mode whatever is typed, which is both a command carrying
+#            no insert command and, for the control plane's read, a composer
+#            with no modal editor at all.
 #   devin    optional Devin screen model, which capture-pane renders as the
 #            rows devin 3000.11.1 draws: `running`, `armed`, `cancelled`,
 #            `idle`, `primed`, or `picker`. Escape moves running->armed (the
@@ -89,6 +107,19 @@ make_tmux_stub() {  # <dir> -> echoes fakebin dir
 #!/usr/bin/env bash
 set -u
 D=$FM_FAKE_DIR
+# The rows a vim-mode claude renders. The mode indicator is present only while
+# the composer takes typed text (live capture, claude 2.1.x on Herdr 0.9.1).
+claude_vim_screen() {  # <insert|normal>
+  printf '\xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\n'
+  printf '\xe2\x94\x82 %s  \xe2\x94\x82\n' "$(cat "$D/composer" 2>/dev/null || true)"
+  printf '\xe2\x95\xb0\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xaf\n'
+  if [ "$1" = insert ]; then
+    printf '  -- INSERT -- bypass permissions on (shift+tab to cycle)\n'
+  else
+    printf '  bypass permissions on (shift+tab to cycle)\n'
+  fi
+}
+
 # The rows devin 3000.11.1 renders for each modelled screen (live capture).
 devin_screen() {  # <running|armed|cancelled|idle|picker>
   # The idle placeholder is dark truecolor text, as Devin draws it.
@@ -126,6 +157,15 @@ case "${1:-}" in
     done
     payload=${1:-}
     if [ "$literal" = 1 ]; then
+      if [ -f "$D/vim" ] && [ "$(cat "$D/vim")" = normal ]; then
+        printf '%s\n' "$payload" >> "$D/literal-command-mode"
+        case "$payload" in
+          *i*) [ -n "${FM_FAKE_VIM_STAYS_NORMAL:-}" ] || printf insert > "$D/vim" ;;
+        esac
+        [ "$payload" = i ] && exit 0
+        [ -z "${FM_FAKE_VIM_REFUSES_SEND:-}" ] || exit 1
+        exit 0
+      fi
       printf '%s\n' "$payload" >> "$D/literal"
       if [ -z "${FM_FAKE_NEVER_DIES:-}" ] \
          && { [ "$payload" = /exit ] || [ "$payload" = /quit ]; }; then
@@ -137,6 +177,9 @@ case "${1:-}" in
     else
       printf '%s\n' "$payload" >> "$D/keys"
       printf '%s %s\n' "$(perl -MTime::HiRes=time -e 'printf "%.3f", time')" "$payload" >> "$D/key-times"
+      if [ "$payload" = Escape ] && [ -f "$D/vim" ]; then
+        printf normal > "$D/vim"
+      fi
       if [ "$payload" = Escape ] && [ -f "$D/devin" ]; then
         case "$(cat "$D/devin")" in
           running) printf armed > "$D/devin" ;;
@@ -175,7 +218,7 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
-    if [ -f "$D/devin" ]; then devin_screen "$(cat "$D/devin")"; elif [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi
+    if [ -f "$D/devin" ]; then devin_screen "$(cat "$D/devin")"; elif [ -f "$D/vim" ]; then claude_vim_screen "$(cat "$D/vim")"; elif [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi
     exit 0 ;;
   list-windows)
     if [ -f "$D/windows" ]; then cat "$D/windows"; fi
@@ -187,6 +230,7 @@ SH
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 if [ -f "$FM_FAKE_DIR/devin" ]; then exec /bin/sleep "$@"; fi
+if [ -f "$FM_FAKE_DIR/vim" ]; then exec /bin/sleep "$@"; fi
 if [ -n "${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" ] \
    && [ -e "$FM_FAKE_DIR/muse-ack-pending" ]; then
   rm -f "$FM_FAKE_DIR/muse-ack-pending"
@@ -249,6 +293,8 @@ run_control() {
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
     FM_FAKE_DEVIN_PICKER_STUCK="${FM_FAKE_DEVIN_PICKER_STUCK:-}" \
+    FM_FAKE_VIM_REFUSES_SEND="${FM_FAKE_VIM_REFUSES_SEND:-}" \
+    FM_FAKE_VIM_STAYS_NORMAL="${FM_FAKE_VIM_STAYS_NORMAL:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -264,6 +310,19 @@ literals() {  # <case-dir>
 # text send rather than a control-plane key.
 keys_sent() {  # <case-dir>
   grep -v '^Enter$' "$1/fake/keys" || true
+}
+
+# Literals the modelled composer consumed as editor commands instead of text.
+command_mode_literals() {  # <case-dir>
+  cat "$1/fake/literal-command-mode" 2>/dev/null || true
+}
+
+# vim_task <case-dir> <id> <insert|normal>: a claude task whose composer is
+# modelled with vim editor mode on, starting in the given mode.
+vim_task() {  # <case-dir> <id> <mode>
+  add_task "$1" "$2" claude
+  alive_as "$1" claude
+  printf '%s' "$3" > "$1/fake/vim"
 }
 
 # --- 1. adapter contract across every verified harness -----------------------
@@ -1031,6 +1090,101 @@ test_fm_send_still_marks_the_same_secondmate_task() {
   pass "fm-control's arrival leaves fm-send's from-firstmate marking untouched"
 }
 
+# --- 7. modal composer: an interrupt must not leave it in command mode -------
+#
+# Claude's optional vim editor mode makes Escape - which is also its interrupt
+# key - leave the composer in command mode, where the next line typed into it
+# is read as editor commands rather than text: the live shape is `/exit`
+# collapsing into the single character `t`, so the exit command never reaches
+# the agent and the worker cannot be recovered. The interrupt's postcondition
+# therefore includes putting the composer back, the same contract the composer
+# clear key already carries.
+
+test_interrupt_restores_a_modal_composer_to_text_entry() {
+  local dir out rc
+  dir=$(new_case vim-interrupt)
+  vim_task "$dir" t1 insert
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "interrupting a vim-mode claude should succeed"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = "Escape" ] \
+    || fail "the interrupt key should still be exactly one Escape, got: $(keys_sent "$dir")"
+  [ "$(command_mode_literals "$dir")" = "i" ] \
+    || fail "the interrupt should type the insert key once into the command-mode composer, got: $(command_mode_literals "$dir")"
+  [ "$(cat "$dir/fake/vim")" = insert ] \
+    || fail "the composer was left in command mode after the interrupt"
+  [ -z "$(literals "$dir")" ] \
+    || fail "restoring text entry must type nothing into the composer itself, got: $(literals "$dir")"
+  pass "fm-control interrupt: a modal composer the interrupt key left in command mode is put back into text entry"
+}
+
+test_interrupt_leaves_a_single_mode_composer_alone() {
+  local dir out rc
+  dir=$(new_case vim-absent)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "interrupting a claude without vim mode should succeed"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = "Escape" ] \
+    || fail "the interrupt key should be exactly one Escape, got: $(keys_sent "$dir")"
+  [ -z "$(literals "$dir")" ] && [ -z "$(command_mode_literals "$dir")" ] \
+    || fail "a claude with no rendered text-entry indicator must receive no insert key: $(literals "$dir") / $(command_mode_literals "$dir")"
+  pass "fm-control interrupt: a composer that never rendered a text-entry indicator receives no insert key"
+}
+
+test_busy_exit_types_its_command_after_the_interrupt_changed_the_mode() {
+  local dir out rc gen
+  dir=$(new_case vim-busy-exit)
+  vim_task "$dir" t1 insert
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting a busy vim-mode claude should succeed"$'\n'"$out"
+  [ "$(literals "$dir")" = "/exit" ] \
+    || fail "the exit command did not reach the composer as text, got: $(literals "$dir")"
+  pass "fm-control exit: the exit command still reaches a modal composer the busy interrupt put into command mode"
+}
+
+test_exit_retries_its_command_once_after_a_command_mode_refusal() {
+  local dir out rc gen
+  dir=$(new_case vim-stale-exit)
+  vim_task "$dir" t1 normal
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1 --state idle --source fm-spawn --event seed)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  # The refusal an earlier interrupt leaves behind for every later exit: the
+  # backend proves the composer did not take the command and puts it back to
+  # empty rather than submitting the fragment it did take. The refused
+  # command's own characters end in vim's insert command, so the composer is
+  # taking text again by the time the verdict is read.
+  out=$(FM_FAKE_VIM_REFUSES_SEND=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting a composer already in command mode should be retried, not refused"$'\n'"$out"
+  [ "$(command_mode_literals "$dir")" = "/exit" ] \
+    || fail "the command-mode composer should have swallowed the exit command exactly once, got: $(command_mode_literals "$dir")"
+  [ "$(literals "$dir")" = "/exit" ] \
+    || fail "the exit command should be typed exactly once more, got: $(literals "$dir")"
+  [ -z "$(keys_sent "$dir")" ] \
+    || fail "an idle agent needs no interrupt, got keys: $(keys_sent "$dir")"
+  pass "fm-control exit: a command the composer refused in command mode is typed once more after that composer takes text again"
+}
+
+test_exit_reports_a_refusal_the_mode_does_not_explain() {
+  local dir out rc gen
+  dir=$(new_case vim-stale-stuck)
+  vim_task "$dir" t1 normal
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1 --state idle --source fm-spawn --event seed)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  # The composer never reads as text entry, which is equally a command that
+  # carried no insert command and a composer with no modal editor at all. The
+  # refusal is reported, and nothing more is typed either way.
+  out=$(FM_FAKE_VIM_REFUSES_SEND=1 FM_FAKE_VIM_STAYS_NORMAL=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "a refusal the composer's mode does not explain must be reported"$'\n'"$out"
+  assert_contains "$out" "could not be sent" "the exit refusal was not reported"
+  [ "$(command_mode_literals "$dir")" = "/exit" ] \
+    || fail "nothing more should be typed after an unexplained refusal, got: $(command_mode_literals "$dir")"
+  [ -z "$(literals "$dir")" ] \
+    || fail "an unexplained refusal must not retype the exit command, got: $(literals "$dir")"
+  pass "fm-control exit: a refusal the composer's mode does not explain is reported with nothing more typed"
+}
+
 test_exit_types_each_harness_verified_command
 test_interrupt_sends_each_harness_verified_key
 test_devin_interrupt_invalidates_busy
@@ -1069,5 +1223,10 @@ test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
+test_interrupt_restores_a_modal_composer_to_text_entry
+test_interrupt_leaves_a_single_mode_composer_alone
+test_busy_exit_types_its_command_after_the_interrupt_changed_the_mode
+test_exit_retries_its_command_once_after_a_command_mode_refusal
+test_exit_reports_a_refusal_the_mode_does_not_explain
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task

@@ -45,8 +45,10 @@ An interrupt whose first press shows no running turn stops there and reports `ca
 [`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh) owns the arm signal, press gap, and picker signal.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
 
-An interrupt is not complete until the composer is empty.
+An interrupt is not complete until the composer is empty and still takes typed text.
 muse is the one verified adapter that restores the cancelled prompt back into its composer as real text, so its interrupt key is followed by a Ctrl+U clear; without it the next submitted line - including this plane's own exit command - would concatenate onto the restored prompt and submit both as one line.
+Claude is the one verified adapter whose composer has a modal editor: with `editorMode: vim` on, the Escape that interrupts it is also the key that leaves text entry, so the composer keeps reading the next typed line as editor commands - `/exit` collapses into the single character `t` - and the worker can no longer be stopped.
+The control plane therefore restores text entry after such an interrupt, and `exit` repairs the same condition once when a backend that proves what the composer received refuses the command; a Claude without vim mode renders no mode indicator at all, so nothing is typed into it.
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
 
 `exit` reads the composer's state before typing the exit command and requires the exact `empty` verdict; a `pending` verdict refuses by naming the pending text, and any other verdict (`unknown`, `pending-unproven`, or an unreadable read) refuses as not proven empty, matching the fail-safe contract every other consumer that can overwrite composer input follows.
