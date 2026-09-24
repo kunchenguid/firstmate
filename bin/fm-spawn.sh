@@ -311,7 +311,9 @@
 #   refuses before any endpoint, worktree, or record exists when the file is
 #   malformed, the root is unusable, or the runner's own check says it is not
 #   signed in. A pinned Claude launch sheds the environment credentials Claude
-#   ranks above the root's login; a pinned Pi launch needs --model
+#   ranks above the root's login, and a home that authenticates Claude only
+#   through those credentials is refused until the file names an account. A
+#   pinned Pi launch needs --model
 #   <provider>/<id> for a declared provider and also carries --provider, and a
 #   raw Pi command refuses. The pin is recorded as account= (and Pi's
 #   account_provider=) in the task record and on the spawned line. A local
@@ -2273,7 +2275,7 @@ WORKER_ACCOUNT_DECLARED=${WORKER_ACCOUNT%%$'\t'*}
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT#*$'\t'}
 WORKER_ACCOUNT_PROVIDER=${WORKER_ACCOUNT_ROOT#*$'\t'}
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT_ROOT%%$'\t'*}
-if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ] && [ "$WORKER_ACCOUNT_DECLARED" != environment ]; then
+if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
   if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
     export CLAUDE_CONFIG_DIR=$WORKER_ACCOUNT_ROOT
   else
@@ -4754,16 +4756,11 @@ claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo 
 esac
 # The launch names the pinned root (or unsets the variable for the ordinary
 # Claude account) and sheds the environment credentials Claude ranks above the
-# root's login. Crewmate panes are created by a long-lived tmux/herdr daemon
-# that does not inherit firstmate's current environment, so an environment
-# account forwards firstmate's own CLAUDE_CONFIG_DIR: the trust registration
-# above wrote that store, and the worker must read the same one.
+# root's login. There is no selection that keeps those credentials.
 if [ -n "$WORKER_ACCOUNT" ]; then
   case "$HARNESS" in
   claude)
-    if [ "$WORKER_ACCOUNT_DECLARED" = environment ]; then
-      [ -z "${CLAUDE_CONFIG_DIR:-}" ] || LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
-    elif [ -n "$WORKER_ACCOUNT_ROOT" ]; then
+    if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
       LAUNCH="$(fm_worker_account_claude_shed) CLAUDE_CONFIG_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
     else
       LAUNCH="$(fm_worker_account_claude_shed) -u CLAUDE_CONFIG_DIR $LAUNCH"

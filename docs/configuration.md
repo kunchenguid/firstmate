@@ -397,7 +397,7 @@ Both files are local and gitignored.
 | `claude` | `config/claude-account` | `CLAUDE_CONFIG_DIR` | the variable unset, so Claude uses its default login |
 | `pi`, `pi-signed` | `config/pi-account` | `PI_CODING_AGENT_DIR` | `~/.pi/agent` |
 
-`config/claude-account` holds one line: `ordinary`, `environment`, or the absolute path of an existing Claude config directory.
+`config/claude-account` holds one line: `ordinary`, or the absolute path of an existing Claude config directory.
 `config/pi-account` holds that same root on line 1 and, on line 2, the providers this home may spend, separated by spaces, for example `openai-codex anthropic`.
 A final newline is optional; any other line, a relative path, or a control character such as a CR refuses.
 For Claude, `ordinary` unsets `CLAUDE_CONFIG_DIR` rather than pointing it at `~/.claude`, because Claude reads `$CLAUDE_CONFIG_DIR/.claude.json` and keys its macOS Keychain entry to any directory that is set ([authentication, "Credential management"](https://code.claude.com/docs/en/authentication#credential-management)).
@@ -413,9 +413,8 @@ The check runs with only `HOME`, `PATH`, `TMPDIR`, `USER`, `LOGNAME`, and the pi
 A pinned Claude launch also unsets the environment credentials Claude ranks above a stored login, such as `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and the Bedrock and Vertex switches ([authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence)).
 Pi ranks a root's stored logins above environment variables, so a pinned Pi launch unsets nothing.
 Writing `ordinary` is that explicit selection of the vendor default, and it still unsets those environment credentials so they cannot outrank the selected login.
-A home that runs Claude on environment credentials, such as Bedrock, Vertex, Foundry, `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN`, writes `environment` instead.
-That selection keeps those credentials: the launch unsets none of them and runs no `claude auth status` check, because they leave no stored login to ask about.
-The worker receives firstmate's own `CLAUDE_CONFIG_DIR` when it is set, so it reads the store that holds its workspace trust.
+A home that authenticates Claude only through environment credentials, such as Bedrock, Vertex, Foundry, `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN`, is refused until `config/claude-account` names `ordinary` or an absolute config directory.
+That file has no value that keeps those credentials, and every accepted selection still unsets them.
 
 A malformed file, a root that is not a readable directory, or a signed-out account refuses the launch and names the file to fix; Firstmate never falls back to the ambient account and never changes a global login or copies a credential.
 The spawn prints the pin as `account=` (plus `account_provider=` for Pi) and records the same fields in the task record, so the session-start digest shows which account each worker launched on.

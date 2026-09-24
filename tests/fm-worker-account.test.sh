@@ -199,30 +199,22 @@ test_claude_ordinary_pin_unsets_the_config_root() {
   pass "an ordinary Claude pin selects the default login and drops an ambient root"
 }
 
-test_claude_environment_pin_keeps_environment_credentials() {
+test_environment_token_is_not_an_account_selection() {
   local out rc id=acct-environment
   new_case environment claude
   printf 'environment\n' > "$HOME_DIR/config/claude-account"
   out=$(spawn_ship "$id"); rc=$?
-  expect_code 0 "$rc" "an environment pin should launch with no stored login: $out"
-  assert_contains "$out" "account=environment" "the spawn should report the environment account"
-  assert_absent "$CASE/claude-checks" "an environment pin must not run a stored-login check"
-  assert_contains "$(cat "$CASE/ambient-claude/.claude.json" 2>/dev/null)" "$WT" \
-    "trust should land in firstmate's own Claude store"
-  run_pane
-  assert_grep "CLAUDE_CONFIG_DIR=$CASE/ambient-claude" "$CASE/claude-worker" \
-    "the worker should read firstmate's own Claude store"
-  assert_grep "ANTHROPIC_API_KEY=ambient-pane-key" "$CASE/claude-worker" "an environment pin must keep the API key"
-  assert_grep "CLAUDE_CODE_OAUTH_TOKEN=ambient-pane-token" "$CASE/claude-worker" "an environment pin must keep the OAuth token"
-  assert_grep "CLAUDE_CODE_USE_BEDROCK=1" "$CASE/claude-worker" "an environment pin must keep the cloud-provider switch"
-  pass "an environment Claude pin keeps environment credentials and skips the stored-login check"
+  expect_code 1 "$rc" "the word environment must not select an account: $out"
+  assert_refused_before_launch "$id" "$out" "config/claude-account must hold 'ordinary' or one absolute path"
+  assert_absent "$CASE/claude-checks" "a refused environment token must not run a stored-login check"
+  pass "a Claude account file of environment refuses, including when environment credentials are set"
 }
 
 test_malformed_pins_refuse_before_launch() {
   local out rc id=acct-bad n=0 body
   new_case malformed claude
   mkdir -p "$CASE/work"
-  for body in 'relative/root' "$CASE/work"$'\r' '' 'ordinary'$'\n''environment' "$CASE/missing-root"; do
+  for body in 'relative/root' "$CASE/work"$'\r' '' 'ordinary'$'\n''second' "$CASE/missing-root"; do
     n=$((n + 1))
     printf '%s' "$body" > "$HOME_DIR/config/claude-account"
     out=$(spawn_ship "$id-$n"); rc=$?
@@ -400,7 +392,7 @@ test_absent_account_refuses_claude_and_pi
 test_claude_pin_selects_the_root_and_sheds_ambient_credentials
 test_claude_pin_refuses_a_signed_out_root_despite_an_ambient_login
 test_claude_ordinary_pin_unsets_the_config_root
-test_claude_environment_pin_keeps_environment_credentials
+test_environment_token_is_not_an_account_selection
 test_malformed_pins_refuse_before_launch
 test_pi_pin_selects_the_root_and_the_declared_provider
 test_pi_pin_refusals

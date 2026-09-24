@@ -20,12 +20,11 @@
 # that is CLAUDE_CONFIG_DIR unset, because Claude reads $CLAUDE_CONFIG_DIR/
 # .claude.json and keys its macOS Keychain entry to any CLAUDE_CONFIG_DIR that
 # is set, even $HOME/.claude; for Pi it is $HOME/.pi/agent. Any other value is
-# one absolute path to an existing readable, searchable directory. For Claude
-# only, `environment` selects the credentials in the launch environment
-# (Bedrock, Vertex, Foundry, an API key, or an OAuth token): the launch sheds
-# nothing and runs no sign-in check, because those credentials leave no stored
-# login to ask about. Firstmate never copies credentials or changes a global
-# login.
+# one absolute path to an existing readable, searchable directory. A home that
+# authenticates Claude only through environment credentials (Bedrock, Vertex,
+# Foundry, an API key, or an OAuth token) is refused until the file names
+# ordinary or a directory. There is no selection that keeps those credentials.
+# Firstmate never copies credentials or changes a global login.
 #
 # A Pi root can hold several provider identities, so config/pi-account names
 # the root on line 1 and the providers that home may spend on line 2,
@@ -81,8 +80,7 @@ fm_worker_account_file() {
 
 # fm_worker_account_read <harness> <file>
 # Prints "declared<TAB>providers" for a valid pin, where declared is
-# `ordinary`, `environment` (Claude only), or the absolute path and providers
-# is empty for Claude. The final
+# `ordinary` or the absolute path and providers is empty for Claude. The final
 # newline is optional; any other control byte, including a CR, is malformed.
 # Parses bytes before the shell can drop NULs or trailing newlines; paths are
 # literal, never shell expressions. Returns 0 on success, 3 when the file does
@@ -100,7 +98,7 @@ fm_worker_account_read() {
     open(my $fh, "<", $f) or exit 5;
     my $body = do { local $/; <$fh> } // "";
     if ($harness eq "claude") {
-      $body =~ /\A(ordinary|environment|\/[^\x00-\x1f\x7f]*)\n?\z/ or exit 6;
+      $body =~ /\A(ordinary|\/[^\x00-\x1f\x7f]*)\n?\z/ or exit 6;
       print $1, "\t";
     } else {
       $body =~ /\A(ordinary|\/[^\x00-\x1f\x7f]*)\n([A-Za-z0-9][A-Za-z0-9._-]*(?: +[A-Za-z0-9][A-Za-z0-9._-]*)*)\n?\z/ or exit 6;
@@ -112,8 +110,7 @@ fm_worker_account_read() {
 # fm_worker_account_resolve <harness> <config-dir>
 # Prints "declared<TAB>root<TAB>providers" for a valid pin, where root is the
 # directory the launch selects (empty for ordinary Claude, meaning
-# CLAUDE_CONFIG_DIR unset, and for environment Claude, meaning left as the
-# launch environment has it). Prints nothing and returns 0 when the runner is
+# CLAUDE_CONFIG_DIR unset). Prints nothing and returns 0 when the runner is
 # not pinnable. An absent pin file refuses: a Claude or Pi launch needs an
 # explicit selection. On refusal prints one error naming the file and returns 1.
 fm_worker_account_resolve() {
@@ -142,7 +139,7 @@ fm_worker_account_resolve() {
     if [ "$file" = pi-account ]; then
       echo "error: config/$file must hold 'ordinary' or one absolute path on line 1 and the providers this home may spend on line 2, separated by spaces, with no other lines or control characters: $cfg" >&2
     else
-      echo "error: config/$file must hold 'ordinary', 'environment', or one absolute path on a single line with no control characters: $cfg" >&2
+      echo "error: config/$file must hold 'ordinary' or one absolute path on a single line with no control characters: $cfg" >&2
     fi
     return 1
     ;;
@@ -154,7 +151,7 @@ fm_worker_account_resolve() {
   claude) fallback='~/.claude with CLAUDE_CONFIG_DIR unset' ;;
   *) fallback='~/.pi/agent' ;;
   esac
-  if [ "$declared" = ordinary ] || [ "$declared" = environment ]; then
+  if [ "$declared" = ordinary ]; then
     case "$harness" in
     claude) root= ;;
     *) root="${HOME:?HOME is required to resolve an ordinary Pi account}/.pi/agent" ;;
@@ -279,8 +276,7 @@ fm_worker_account_select() {
       ;;
     esac
   fi
-  [ "$declared" = environment ] ||
-    fm_worker_account_check "$harness" "$declared" "$root" "$executable" "$provider" || return 1
+  fm_worker_account_check "$harness" "$declared" "$root" "$executable" "$provider" || return 1
   printf '%s\t%s\t%s\n' "$declared" "$root" "$provider"
 }
 
