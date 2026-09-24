@@ -91,10 +91,10 @@
 # naming Firstmate as the tool that dispatched the brief, because a worker whose
 # harness prompt carries no Firstmate context otherwise reads the identity
 # assertion that follows as prompt injection; that sentence names no path and
-# grants no authority. Like
-# fm_brief_intent_overlay it is a distinctly titled launch section that states
-# its own precedence, so a brief or project instruction that authors a
-# conflicting role is superseded rather than duplicated.
+# grants no authority. Like fm_brief_intent_overlay it is a distinctly titled
+# launch section that states its own precedence, so a brief or project
+# instruction that authors a conflicting role is superseded rather than
+# duplicated.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
 # It takes the same optional trailing forge argument, because the rule that keeps
