@@ -872,6 +872,8 @@ for _ in $(seq 1 100); do
 done
 assert_present "$OWNER_STARTED" "the replacement worker's command did not start"
 OWNER_JOB_SUPERVISOR=$(cat "$OWNER_STATE/jobs/$FM_REMOTE_JOB_ID/.claim/supervisor")
+printf 'replacement guard\n' > "$OWNER_STATE/worker.lock/quarantine"
+OWNER_QUARANTINE_INODE=$(file_inode "$OWNER_STATE/worker.lock/quarantine")
 LATE_BURST=0
 while [ "$LATE_BURST" -lt 10 ]; do
   kill -TERM "$LOST_TERM_PID" 2>/dev/null || true
@@ -895,6 +897,10 @@ kill -0 "$OWNER_JOB_SUPERVISOR" 2>/dev/null \
   || fail "terminating the old worker stopped the replacement owner's command"
 [ "$(cat "$OWNER_STATE/worker.lock/pid" 2>/dev/null || true)" = "$REPLACEMENT_OWNER_PID" ] \
   || fail "the old worker's cleanup removed the replacement owner's lock"
+[ "$(cat "$OWNER_STATE/worker.lock/quarantine" 2>/dev/null || true)" = "replacement guard" ] \
+  && [ "$(file_inode "$OWNER_STATE/worker.lock/quarantine")" = "$OWNER_QUARANTINE_INODE" ] \
+  || fail "the old worker's TERM rewrote or removed the replacement owner's quarantine"
+rm -f -- "$OWNER_STATE/worker.lock/quarantine"
 assert_absent "$OWNER_SIDE_EFFECT" "the replacement command finished during the ownership handoff"
 kill -TERM "$REPLACEMENT_OWNER_PID"
 for _ in $(seq 1 100); do

@@ -411,18 +411,12 @@ worker_stop_active_execution() {
 # KILL, which no disposition can block.
 worker_shutdown() {
   trap '' HUP INT TERM
-  if ! worker_publish_quarantine; then
-    worker_error "cannot guard worker ownership for shutdown"
-    # Still our lock: a transient publish failure must not abandon the
-    # directory. Re-arm and keep serving so a later signal can quarantine it.
-    if worker_shutdown_owns_lock; then
-      trap worker_shutdown HUP INT TERM
-      return 0
-    fi
-    # The ownership directory is gone. TERM stays authoritative: stop only
-    # this process's command tree, then exit. Drop the in-memory hold first
-    # so exit cleanup cannot remove a replacement's lock. Signals stay
-    # ignored until exit, so a repeat during this cleanup is a no-op.
+  # The ownership directory is gone or a replacement owns it. TERM stays
+  # authoritative: stop only this process's command tree, then exit without
+  # touching the directory, whose quarantine now guards the replacement. Drop
+  # the in-memory hold first so exit cleanup cannot release a replacement's
+  # lock. Signals stay ignored until exit, so a repeat is a no-op.
+  if ! worker_shutdown_owns_lock; then
     WORKER_RELEASE_OWNERSHIP=0
     WORKER_LOCK_HELD=0
     worker_stop_active_execution || {
@@ -431,6 +425,13 @@ worker_shutdown() {
     }
     exit 0
   fi
+  # Still our lock: a transient publish failure must not abandon the
+  # directory. Re-arm and keep serving so a later signal can quarantine it.
+  worker_publish_quarantine || {
+    worker_error "cannot guard worker ownership for shutdown"
+    trap worker_shutdown HUP INT TERM
+    return 0
+  }
   worker_stop_active_execution || {
     worker_error "could not stop the active command tree"
     WORKER_RELEASE_OWNERSHIP=0
