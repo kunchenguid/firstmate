@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # fm-flow-snapshot.sh - read-only per-agent pipeline snapshot.
 #
-# Output contract: `--json` prints one object with schema
-# `fm-flow-snapshot.v1`. This header owns that wire format, the flags, the
-# environment knobs, and the exit codes.
+# Output contract: one JSON object on stdout with schema `fm-flow-snapshot.v1`.
+# This header owns that wire format, the flags, the environment knobs, and the
+# exit codes.
 #
 # The command is read-only. It takes no session lock, drains no wakes, arms no
 # watcher, and writes nothing. Nothing in firstmate calls it; it exists to be
@@ -45,10 +45,8 @@
 #     keeps one owner for each, at the cost of a state as old as the document.
 #
 # Usage:
-#   fm-flow-snapshot.sh [--json] [--no-ci] [--task <id>]
+#   fm-flow-snapshot.sh [--no-ci] [--task <id>]
 #
-#   --json        emit the snapshot (default; accepted explicitly for symmetry
-#                 with bin/fm-fleet-snapshot.sh)
 #   --no-ci       skip every GitHub read this command can reach, so the whole
 #                 snapshot is local. It suppresses the check read here and sets
 #                 FM_CREW_STATE_NO_FORGE for the fleet read, whose crew-state
@@ -80,13 +78,15 @@ GH_TIMEOUT=${FM_FLOW_SNAPSHOT_GH_TIMEOUT:-20}
 WANT_CI=1
 ONLY_TASK=
 
+# The header IS the help, printed by walking the leading comment block until the
+# first line that is not one. A line range would have to be edited in step with
+# every header change, and when it is not the help simply stops mid-sentence.
 usage() {
-  sed -n '2,69p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
 }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --json) ;;
     --no-ci) WANT_CI=0 ;;
     --task)
       shift
@@ -168,12 +168,18 @@ TOON_AWK_PRELUDE='
       }
       return m
     }
-    # Splits on commas that sit outside quotes, and sets the global n.
-    function split_row(line,   i, c, cur, q) {
-      n = 0; cur = ""; q = 0
+    # Splits on commas that sit outside quotes, and sets the global n. The
+    # escape handling is not optional: this emitter escapes a quote inside a
+    # quoted cell, and toggling on every quote closes the field early and
+    # shifts every later column. bin/fm-nm-run-lib.sh row_fields reads rows from
+    # the same emitter the same way.
+    function split_row(line,   i, c, cur, q, esc) {
+      n = 0; cur = ""; q = 0; esc = 0
       for (i in f) delete f[i]
       for (i = 1; i <= length(line); i++) {
         c = substr(line, i, 1)
+        if (esc) { cur = cur c; esc = 0; continue }
+        if (q && c == "\\") { esc = 1; continue }
         if (c == "\"") { q = !q; continue }
         if (c == "," && !q) { f[++n] = cur; cur = ""; continue }
         cur = cur c
@@ -268,16 +274,6 @@ active_steps_json() {  # <axi-status-output>
         field("round")
     }
   ' | awk 'BEGIN { printf "[" } { printf "%s", $0 } END { printf "]\n" }'
-}
-
-toon_field() {  # <axi-status-output> <key>
-  printf '%s\n' "$1" | awk -v key="$2" '
-    $0 ~ "^  " key ": " {
-      sub("^  " key ": ", "")
-      gsub(/^"|"$/, "")
-      print
-      exit
-    }'
 }
 
 CI_EMPTY='{"collection":{"ok":false,"reason":""},"checks":[],"total":0,"passed":0,"failed":0,"pending":0,"skipped":0,"head":"","pr_state":""}'
@@ -558,9 +554,14 @@ agent_json() {  # <task-json>
     if [ "$collect_ok" = true ]; then
       steps=$(steps_json "$axi")
       actives=$(active_steps_json "$axi")
-      run_head=$(toon_field "$axi" head)
-      run_error=$(toon_field "$axi" error)
-      [ -n "$pr_url" ] || pr_url=$(toon_field "$axi" pr)
+      # fm_nm_field, not a reader of this script's own: these scalars are not
+      # all at one indentation. `head` is a child of the run block while
+      # `error` and `outcome` sit at column 0, so a reader keyed on two leading
+      # spaces returns the empty string for the error text of every failed run.
+      # tests/captures/no-mistakes-v1.70.1/failed.toon is that shape.
+      run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$axi" head)")
+      run_error=$(fm_nm_strip_quotes "$(fm_nm_field "$axi" error)")
+      [ -n "$pr_url" ] || pr_url=$(fm_nm_strip_quotes "$(fm_nm_field "$axi" pr)")
     fi
   fi
 
@@ -582,7 +583,9 @@ agent_json() {  # <task-json>
     [ "$since" -ge 0 ] || since=0
     build_active="{\"step\":\"building\",\"status\":\"running\",\"active_for\":\"\",\"active_ms\":$since,\"last_activity\":\"\",\"agent_pid\":\"\",\"round\":\"\"}"
   else
-    build_step='{"step":"building","status":"unknown","findings":0,"duration_ms":0}'
+    # Reached precisely because no start time could be read, so its duration is
+    # not zero, it is unknown - the same rule the numeric cells above follow.
+    build_step='{"step":"building","status":"unknown","findings":0,"duration_ms":null}'
   fi
 
   # Only when the pipeline read succeeded. `collection.ok` false means the whole

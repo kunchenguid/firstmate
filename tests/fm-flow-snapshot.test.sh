@@ -60,6 +60,7 @@ write_task ship-badrun ship no-mistakes fm:7
 write_task ship-odd    ship no-mistakes fm:8
 write_task ship-wide   ship no-mistakes fm:9
 write_task ship-readfail ship no-mistakes fm:11
+write_task ship-captured ship no-mistakes fm:12
 write_task scout-one   scout local-only fm:10
 # No window at all, which is how the fleet document reports a task it could not
 # observe as well as one that never had an endpoint.
@@ -77,14 +78,15 @@ write_task gone-one    ship no-mistakes fm:99
 cat > "$TMP_ROOT/overview.txt" <<'TOON'
 current_branch: main
 runs_on_current_branch: 0
-count: 6 of 6 total
-runs[6]{id,branch,status,head,pr}:
+count: 7 of 7 total
+runs[7]{id,branch,status,head,pr}:
   "01FLOWRUNAAAAAAAAAAAAAAAA1",fm/ship-run,running,"bb73f233","https://github.com/example/project/pull/25"
   "01FLOWRUNAAAAAAAAAAAAAAAA2",fm/ship-run,failed,"a1b2c3d4",""
   "01FLOWRUNAAAAAAAAAAAAAAAA3",fm/ship-badrun,running,"c0ffee11",""
   "01FLOWRUNAAAAAAAAAAAAAAAA4",fm/ship-odd,running,"d00d1234",""
   "01FLOWRUNAAAAAAAAAAAAAAAA5",fm/ship-merged,completed,"feedbeef",""
   "01FLOWRUNAAAAAAAAAAAAAAAA6",fm/ship-wide,running,"ab12cd34",""
+  "01FLOWRUNAAAAAAAAAAAAAAAA7",fm/ship-captured,failed,"9b76c588",""
 TOON
 
 cat > "$TOON_DIR/01FLOWRUNAAAAAAAAAAAAAAAA1.txt" <<'TOON'
@@ -129,10 +131,11 @@ run:
   branch: fm/ship-merged
   status: completed
   head: feedbeef
-  error: "step review failed: agent fix: exit status 1"
   steps[2]{step,status,findings,duration_ms}:
     intent,completed,0,10
     review,completed,0,20
+outcome: completed
+error: "step review failed: agent fix: exit status 1"
 TOON
 
 # The tool has inserted a column mid-block between versions: `round_active_for`
@@ -146,13 +149,21 @@ run:
   branch: fm/ship-wide
   status: running
   head: ab12cd34
-  steps[3]{step,status,detail,attempt,findings,duration_ms}:
+  steps[4]{step,status,detail,attempt,findings,duration_ms}:
     "intent",completed,,1,0,44
     review,running,"failed, then fixed",2,3,0
     test,completed,"two, commas, here",1,5,176257
+    lint,completed,"he said \"go, then stop\"",1,7,999
   active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
     review,running,2m30s,30s,"9s ago: log: still going","4242",second
 TOON
+
+# The repository's own captured output from this emitter, served unchanged. The
+# hand-written fixtures above encode what the shape is believed to be; this one
+# is what it actually was, which is how the `error` key was found to sit at
+# column 0 rather than inside the run block.
+cp "$ROOT/tests/captures/no-mistakes-v1.70.1/failed.toon" \
+  "$TOON_DIR/01FLOWRUNAAAAAAAAAAAAAAAA7.txt"
 
 cat > "$FAKEBIN/no-mistakes" <<SH
 #!/usr/bin/env bash
@@ -252,6 +263,7 @@ case "${1:-}" in
     printf 'fm:1 fm-ship-run\nfm:2 fm-ship-norun\nfm:3 fm-ship-direct\nfm:4 fm-ship-merged\n'
     printf 'fm:5 fm-ship-closed\nfm:6 fm-ship-gitlab\nfm:7 fm-ship-badrun\nfm:8 fm-ship-odd\n'
     printf 'fm:9 fm-ship-wide\nfm:10 fm-scout-one\nfm:11 fm-ship-readfail\n'
+    printf 'fm:12 fm-ship-captured\n'
     ;;
   list-panes)
     printf '%s\n' "${target##*:}"
@@ -280,7 +292,7 @@ snapshot() {  # <flags...>
     "$SNAPSHOT" "$@"
 }
 
-DOC=$(snapshot --json) || fail "the snapshot refused to emit over the fixture home"
+DOC=$(snapshot) || fail "the snapshot refused to emit over the fixture home"
 printf '%s' "$DOC" | jq -e . >/dev/null 2>&1 || fail "the snapshot did not emit valid JSON"
 
 agent() {  # <id> <jq-filter>
@@ -362,6 +374,21 @@ assert_equals "1127597" "$(agent ship-run '[.steps[] | select(.step == "lint")][
 assert_equals "2" "$(agent ship-run '[.steps[] | select(.step == "review")][0].findings')" \
   "a step's finding count is passed through unchanged"
 
+# --- read against the repository's own capture of this emitter ---------------
+
+assert_equals "true" "$(agent ship-captured '.collection.ok')" \
+  "the captured output of a real run collects cleanly"
+assert_contains "$(agent ship-captured '.run.error')" "step push failed: push to fork" \
+  "the error text is read although it sits at column 0 rather than inside the run block"
+assert_equals "9b76c588" "$(agent ship-captured '.run.head')" \
+  "and the head is read from inside the run block in the same pass"
+assert_equals "failed" \
+  "$(agent ship-captured '[.steps[] | select(.step == "push")][0].status')" \
+  "its step statuses come through"
+assert_equals "6980" \
+  "$(agent ship-captured '[.steps[] | select(.step == "push")][0].duration_ms')" \
+  "and their durations"
+
 # --- the building phase -----------------------------------------------------
 
 assert_equals "completed" "$(agent ship-run '.steps[0].status')" \
@@ -432,8 +459,16 @@ assert_equals "5" \
 assert_equals "completed" \
   "$(agent ship-wide '[.steps[] | select(.step == "intent")][0].status')" \
   "a row whose leading cell is quoted is still read"
-assert_equals "3" "$(agent ship-wide '[.steps[] | select(.step != "building")] | length')" \
+assert_equals "4" "$(agent ship-wide '[.steps[] | select(.step != "building")] | length')" \
   "and it does not take the rest of its block with it"
+# This emitter escapes a quote inside a quoted cell, so a splitter that toggles
+# on every quote closes the field early and shifts every later column.
+assert_equals "999" \
+  "$(agent ship-wide '[.steps[] | select(.step == "lint")][0].duration_ms')" \
+  "an escaped quote inside a quoted cell does not close it early"
+assert_equals "7" \
+  "$(agent ship-wide '[.steps[] | select(.step == "lint")][0].findings')" \
+  "nor shift the column before it"
 
 # --- GitHub check classes ---------------------------------------------------
 
@@ -504,7 +539,7 @@ assert_present "$TMP_ROOT/gh-calls.log" \
   "an ordinary run does reach GitHub, so the next assertion is not vacuous"
 rm -f "$TMP_ROOT/gh-calls.log"
 
-DOC=$(snapshot --json --no-ci) || fail "--no-ci refused to emit"
+DOC=$(snapshot --no-ci) || fail "--no-ci refused to emit"
 assert_absent "$TMP_ROOT/gh-calls.log" \
   "--no-ci makes no GitHub call at all, including through the fleet read it does not own"
 assert_equals "skipped" "$(agent ship-run '.ci.collection.reason')" \
@@ -515,7 +550,7 @@ assert_equals "01FLOWRUNAAAAAAAAAAAAAAAA1" "$(agent ship-run '.run.id')" \
 
 # --- --task -----------------------------------------------------------------
 
-DOC=$(snapshot --json --task ship-run) || fail "--task refused to emit"
+DOC=$(snapshot --task ship-run) || fail "--task refused to emit"
 assert_equals "1" "$(printf '%s' "$DOC" | jq -r '.agents | length')" \
   "--task restricts the snapshot to the one task"
 assert_equals "ship-run" "$(printf '%s' "$DOC" | jq -r '.agents[0].id')" \
@@ -527,7 +562,7 @@ assert_equals "ship-run" "$(printf '%s' "$DOC" | jq -r '.agents[0].id')" \
 # header drift apart silently: the help simply stops mid-sentence. Assert the
 # whole contract arrives, including its last line.
 HELP=$(snapshot --help) || fail "--help refused to run"
-for documented in --json --no-ci --task \
+for documented in --no-ci --task \
   FM_FLOW_SNAPSHOT_NM_TIMEOUT FM_FLOW_SNAPSHOT_GH_TIMEOUT \
   FM_FLOW_SNAPSHOT_NOW_EPOCH FM_FLOW_SNAPSHOT_NOW; do
   assert_contains "$HELP" "$documented" "--help documents $documented"
@@ -543,6 +578,11 @@ done
 
 snapshot --not-a-flag >/dev/null 2>&1
 expect_code 2 $? "the collector refuses an unknown flag"
+
+# --json was a no-op alias for the default behavior and is gone, so it is now an
+# unknown flag like any other rather than a silently accepted one.
+snapshot --json >/dev/null 2>&1
+expect_code 2 $? "--json is no longer accepted"
 
 snapshot --task >/dev/null 2>&1
 expect_code 2 $? "--task refuses to run with no id"
@@ -560,7 +600,7 @@ if [ "$(id -u)" != 0 ]; then
     "harness=claude" "kind=ship" "mode=no-mistakes"
   chmod 000 "$FAIL_HOME/state/unreadable.meta"
   PATH="$FAKEBIN:$PATH" FM_HOME="$FAIL_HOME" FM_ROOT_OVERRIDE="$ROOT" \
-    "$SNAPSHOT" --json >/dev/null 2>&1
+    "$SNAPSHOT" >/dev/null 2>&1
   expect_code 1 $? "a fleet read that fails refuses rather than emitting an empty fleet"
   chmod 644 "$FAIL_HOME/state/unreadable.meta"
 fi
