@@ -592,15 +592,23 @@ fm_backlog_codebase_mr_url() {  # <url>
 # discarding the delivery artifact. The durable close marker keeps the original
 # --pr pair, so a future backend that supports Codebase links can still see the
 # source semantics; only the tasks-axi compatibility boundary is adapted.
+fm_backlog_adapt_artifact_args() {
+  FM_BACKLOG_ADAPTED_ARTIFACT_ARGS=("$@")
+  if [ "${#FM_BACKLOG_ADAPTED_ARTIFACT_ARGS[@]}" -eq 2 ] \
+     && [ "${FM_BACKLOG_ADAPTED_ARTIFACT_ARGS[0]}" = --pr ] \
+     && fm_backlog_codebase_mr_url "${FM_BACKLOG_ADAPTED_ARTIFACT_ARGS[1]}"; then
+    FM_BACKLOG_ADAPTED_ARTIFACT_ARGS=(
+      --note "Codebase MR ${FM_BACKLOG_ADAPTED_ARTIFACT_ARGS[1]}"
+    )
+  fi
+}
+
 fm_backlog_done() {  # <data-dir> <id> [flag...]
   local data=$1 id=$2
   local -a args=()
   shift 2
-  args=("$@")
-  if [ "${#args[@]}" -eq 2 ] && [ "${args[0]}" = --pr ] \
-     && fm_backlog_codebase_mr_url "${args[1]}"; then
-    args=(--note "Codebase MR ${args[1]}")
-  fi
+  fm_backlog_adapt_artifact_args "$@"
+  args=("${FM_BACKLOG_ADAPTED_ARTIFACT_ARGS[@]+"${FM_BACKLOG_ADAPTED_ARTIFACT_ARGS[@]}"}")
   fm_backlog_mutate "$data" "done" "$id" "${args[@]}"
 }
 

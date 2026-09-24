@@ -962,6 +962,12 @@ apply_pending_retained_artifact() {  # <task-id>
     || { report_retained_artifact_failure "$id" "$marker"; return 1; }
   [ "$FM_BACKLOG_CLOSE_VALIDATED_MODE" = retain ] || return 0
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
+  if [ "${#args[@]}" -eq 2 ] && [ "${args[0]}" = --pr ] \
+     && fm_backlog_codebase_mr_url "${args[1]}"; then
+    fm_backlog_done "$DATA" "$id" "${args[@]}" \
+      || { report_retained_artifact_failure "$id" "$marker"; return 1; }
+    return 0
+  fi
   case "${args[0]-}" in
     --pr|--report)
       fm_backlog_row_artifact_supported "$id" "${args[@]}" || return 0
