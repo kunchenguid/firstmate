@@ -70,6 +70,8 @@
 # adding speaker labels or direct address: the heading supplies provenance and
 # is not part of --intent. A legacy mixed Task instead marks each captain line
 # with `[captain] `; the selector returns its words, not that metadata prefix.
+# That selector skips fenced blocks and indented examples like the heading
+# reader, so a quoted `Captain:` sample is never authorized intent.
 # Previously stored speaker labels remain readable for compatibility only.
 # Never scrub literal examples or other content the captain actually supplied.
 # The string passed must be self-sufficient - it plus the codebase reconstructs
@@ -175,11 +177,40 @@ fm_brief_task_placeholders_present() {  # <file>
   return 1
 }
 
+# Print the words of every provenance-marked line in a legacy `# Task` body.
+# The marker is read the way bin/fm-brief-heading-lib.sh reads a heading: a
+# line inside a ``` or ~~~ fenced block, or indented four spaces or a tab as an
+# indented example, is never a marked line, so a fenced `Captain:` sample cannot
+# pass the provenance gate as the ship contract's intent (issue 3608).
 fm_brief_marked_captain_words() {  # <task-body>
   printf '%s\n' "$1" | awk '
-    match($0, /^[[:space:]]*(\[captain\]|Captain('\''s (words|ask|intent))?:)[[:space:]]*/) {
-      words = substr($0, RLENGTH + 1)
-      if (words ~ /[^[:space:]]/) print words
+    {
+      scan = $0
+      spaces = 0
+      while (spaces < 3 && substr(scan, 1, 1) == " ") {
+        scan = substr(scan, 2)
+        spaces++
+      }
+      marker = substr(scan, 1, 1)
+      marker_len = 0
+      if (marker == "`" || marker == "~") {
+        while (substr(scan, marker_len + 1, 1) == marker) marker_len++
+      }
+      if (marker_len >= 3) {
+        if (!fenced) {
+          fenced = 1
+          fence_marker = marker
+          fence_len = marker_len
+        } else if (marker == fence_marker && marker_len >= fence_len && substr(scan, marker_len + 1) ~ /^[[:space:]]*$/) {
+          fenced = 0
+        }
+        next
+      }
+      if (fenced || substr(scan, 1, 1) ~ /^[ \t]$/) next
+      if (match(scan, /^(\[captain\]|Captain('\''s (words|ask|intent))?:)[[:space:]]*/)) {
+        words = substr(scan, RLENGTH + 1)
+        if (words ~ /[^[:space:]]/) print words
+      }
     }
   '
 }
