@@ -605,6 +605,12 @@ assert_equals "1" "$(agent ship-direct '.ci.failed')" \
 assert_equals "codecov/project" \
   "$(agent ship-direct '[.ci.checks[] | select(.verdict == "failed")][0].name')" \
   "and it is the one reported failing"
+# Without the discriminator the two are identical in every field a reader could
+# tell them apart by, so it stays on the wire rather than being counted with and
+# then stripped.
+assert_equals "check,status" \
+  "$(agent ship-direct '[.ci.checks[] | select(.name == "codecov/project") | .kind] | sort | join(",")')" \
+  "a commit status and an app check run of one name stay distinguishable on the wire"
 
 # --- the pull request's own lifecycle ---------------------------------------
 
@@ -676,10 +682,19 @@ assert_equals "ship-run" "$(printf '%s' "$DOC" | jq -r '.agents[0].id')" \
 # header drift apart silently: the help simply stops mid-sentence. Assert the
 # whole contract arrives, including its last line.
 HELP=$(snapshot --help) || fail "--help refused to run"
+# Matched as whole words. A plain substring check let FM_FLOW_SNAPSHOT_NOW pass
+# on the strength of FM_FLOW_SNAPSHOT_NOW_EPOCH containing it, so the suite went
+# on claiming coverage of a knob that had been deleted.
+help_documents() {  # <token>
+  printf '%s\n' "$HELP" | grep -qE "(^|[^A-Za-z0-9_-])$1([^A-Za-z0-9_-]|\$)"
+}
 for documented in --no-ci --task \
   FM_FLOW_SNAPSHOT_NM_TIMEOUT FM_FLOW_SNAPSHOT_GH_TIMEOUT \
-  FM_FLOW_SNAPSHOT_NOW_EPOCH FM_FLOW_SNAPSHOT_NOW; do
-  assert_contains "$HELP" "$documented" "--help documents $documented"
+  FM_FLOW_SNAPSHOT_NOW_EPOCH; do
+  help_documents "$documented" || fail "--help documents $documented"
+done
+for gone in FM_FLOW_SNAPSHOT_NOW FM_FLOW_SNAPSHOT_STATE_TIMEOUT FM_FLOW_SNAPSHOT_FLEET_JSON; do
+  ! help_documents "$gone" || fail "--help still documents $gone, which this command no longer has"
 done
 assert_contains "$HELP" "fm-flow-snapshot.sh - read-only per-agent pipeline snapshot." \
   "--help starts at the first header line"

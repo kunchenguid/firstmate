@@ -342,6 +342,8 @@ ci_json() {  # <pr-url>
   #    check run's name would supersede it and one of the two would vanish.
   #    They are different checks and gh counts both. The rollup keeps EVERY
   #    attempt of a key; the latest wins and the rest are counted nowhere.
+  #    `kind` stays on the wire, because without it two such entries are
+  #    identical in every field a reader could tell them apart by.
   # 2. Exclusive buckets. Reading `conclusion` without first checking `status`
   #    counts a re-running check as both passed and pending, on a conclusion
   #    left over from its previous attempt.
@@ -362,7 +364,7 @@ ci_json() {  # <pr-url>
           workflow: "", name: (.context // ""), started: (.createdAt // ""),
           status: (if (.state // "") == "PENDING" or (.state // "") == "EXPECTED"
                    then "IN_PROGRESS" else "COMPLETED" end),
-          conclusion: (if (.state // "") == "SUCCESS" then "SUCCESS" else (.state // "") end) }
+          conclusion: (.state // "") }
       else
         { kind: "check",
           workflow: (.workflowName // ""), name: (.name // ""),
@@ -376,7 +378,7 @@ ci_json() {  # <pr-url>
     | group_by([.kind, .workflow, .name])
     | map(max_by([.started, .seq]))
     | sort_by(.seq)
-    | map(del(.seq, .kind))
+    | map(del(.seq))
     | map(. + {verdict:
         (if .status != "COMPLETED" then "pending"
          elif .conclusion == "SKIPPED" or .conclusion == "NEUTRAL" then "skipped"
