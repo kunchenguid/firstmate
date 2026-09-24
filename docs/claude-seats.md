@@ -21,6 +21,9 @@ Creating one named seat per account, and leaving the default alone, keeps every 
 
 ## Adding a second seat
 
+If your machine is set up from the metaplanet-dev repository, build the seat with that repository's `claude-seats.sh setup`, documented in its `SETUP.md`, and then continue at step 2 below.
+That script creates the seat directory and symlinks the shared body into it from your own `~/.claude`, so the seat carries your settings, hooks, skills, and agents while billing to its own account; it also verifies that two seats are not logged into the same account, and can undo itself.
+
 Three steps, and only the second one needs the account owner.
 
 **1. Create the seat.**
@@ -31,6 +34,8 @@ bin/fm-seat.sh add work
 
 This creates an empty profile directory (by default `~/.claude-seats/work`) and prints the login command for step 2.
 It writes nothing else and reads no credential.
+`add` creates a bare directory and nothing more: a seat built this way has **none** of the owner's settings, hooks, skills, or agents, so it works but starts empty.
+Use the `claude-seats.sh setup` route above when the seat should carry the shared body.
 
 **2. The account owner logs in.**
 
@@ -130,6 +135,9 @@ Two things in the setup flow above are **written from Claude Code's documented b
 
 Treat step 2 as the shape of the flow rather than a transcript, and expect the sign-in screens to be whatever the installed Claude Code shows.
 What *was* verified directly is the part the mechanism depends on: a profile directory that was never logged into does not fall back to the default account, it stops with `Not logged in`, and each profile gets its own Keychain entry derived from its directory path.
+
+This page is verified on macOS only, and its probe and login behaviour are described in terms of the macOS Keychain: seats are separated because Claude Code derives a Keychain service name from the profile directory's path, and the `unknown` verdict and one-time approval above are Keychain behaviours.
+On Linux, where Claude Code keeps credentials in a file inside the profile directory rather than in the Keychain, the same directory separation applies but those Keychain-specific readings do not; that platform is unverified here, and Windows is out of scope.
 
 Seat switching covers Claude workers only.
 Other harnesses have their own credential stores and are unaffected by these settings.

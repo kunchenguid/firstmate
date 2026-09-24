@@ -39,6 +39,7 @@ A caller that disconnects or whose caller-side wait expires before its job compl
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
 A worker stops itself once its configured code root stops being a Firstmate checkout, so a worker started from a worktree cannot outlive that worktree, and `bin/fm-remote-job-reap-orphans.sh` clears any worker already left behind that way without ever touching one whose checkout still exists.
 The remote account must provide the required toolchain, the selected worker runtime, the selected session backend, and credentials that work on that host.
+A [worker account pin](configuration.md#worker-account-pin-configclaude-account-configpi-account) for the second mate or its workers lives in the remote home's own configuration on that host.
 The origin URL named for each project must be reachable from the remote account because projects are cloned on that host rather than copied from the primary.
 
 ## Non-interactive tool contract
@@ -135,7 +136,7 @@ Seeding a project this machine has never cloned needs no clone under `projects/`
 A bare `<project>` is still accepted when this machine happens to have `projects/<project>`, whose configured origin is then read instead of being retyped.
 [`bin/fm-project-origin-lib.sh`](../bin/fm-project-origin-lib.sh) owns which URLs are accepted; it decides on structure and safety alone, so no forge, domain, or host is privileged and a self-hosted server works exactly as a hosted one does.
 The primary validates every resolved origin before transport, and the receiving host validates it again before cloning.
-The project's registered delivery mode still comes from this machine's `data/projects.md`, so an unregistered or `local-only` project is refused rather than provisioned.
+The project's registered delivery mode still comes from this machine's `data/projects.md`, so an unregistered or `local-only` project, or one whose registry entry does not resolve to a delivery posture at all, is refused rather than provisioned.
 
 The seed records `host:`, `root:`, and `home:` in `data/secondmates.md`, gates the host on readiness, sends a bounded manifest, and lets the remote host clone its own Firstmate home and project origins.
 In the primary home, its durable registration effects are limited to that route and the charter brief under `data/<id>`; launch records are created only when the secondmate is launched.

@@ -122,9 +122,16 @@
 #                          while the mate was not in an active turn (a busy mate
 #                          is exempt only until the queue has been frozen for
 #                          BUSY_TURN_MAX_SECS); declared external-wait pause
-#                          rows do not feed this escalation, observation is
-#                          read-only, and one parent notification covers each
-#                          no-progress episode
+#                          rows do not feed this escalation; a mate whose
+#                          semantic busy class is exactly idle, whose agent is
+#                          alive, and whose composer is not pending is rung
+#                          once so its own home can drain, and the parent
+#                          notification is withheld until that same row stays
+#                          frozen for another stall interval; unknown or
+#                          ring-unsafe panes keep the parent alarm; empty
+#                          inbox and a fresh child beacon are not idle proof;
+#                          the foreign queue itself stays read-only, and one
+#                          parent notification covers each no-progress episode
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -770,6 +777,60 @@ secondmate_in_active_turn() {  # <window> <idle>
   window_is_busy "$w" "$tail40"
 }
 
+# First token of the semantic busy classification for <window>: busy, idle,
+# unknown, or dead. Capture failure and a missing window are unknown, never
+# idle. Empty inbox and a fresh watcher beacon are not consulted.
+secondmate_busy_class() {  # <window>
+  local w=$1 task meta tail40 verdict
+  task=$(window_to_task "$w" "$STATE")
+  meta="$STATE/$task.meta"
+  if [ -z "$w" ] || [ -z "$task" ] || [ ! -f "$meta" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
+  printf '%s' "${verdict%% *}"
+}
+
+# 0 iff a child ring is authorized: exact idle, a live agent, and a composer
+# that is not proven pending. Busy, unknown, dead, missing, and pending
+# composer all refuse, so a Kimi or Claude pane without an exact idle
+# verdict is never typed into.
+secondmate_idle_ring_safe() {  # <window>
+  local w=$1 backend agent_state cstate
+  [ -n "$w" ] || return 1
+  [ "$(secondmate_busy_class "$w")" = idle ] || return 1
+  backend=$(window_backend "$w")
+  agent_state=$(fm_backend_agent_state "$backend" "$w" 2>/dev/null || true)
+  [ "$agent_state" = alive ] || return 1
+  cstate=$(fm_backend_composer_state "$backend" "$w" "$(window_label "$w")" 2>/dev/null) || cstate=unknown
+  [ "$cstate" != pending ] || return 1
+  return 0
+}
+
+# Write one fire-and-forget drain steer and ring the child's doorbell. The
+# steer carries the same from-firstmate fire-and-forget carrier fm-send uses
+# for a secondmate (marker, then delivery=<16-hex-id>, then the text), so the
+# mate reads it as a parent request that expects no reply, never as captain
+# intervention. The worker's ordinary wake-handling turn drains its own home's
+# wake queue; this parent never rewrites that foreign queue. 0 iff the ring
+# call returned 0.
+secondmate_ring_to_drain() {  # <task> <window>
+  local task=$1 w=$2 rec backend delivery_id
+  backend=$(window_backend "$w")
+  delivery_id=$(LC_ALL=C od -An -v -tx1 -N 8 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
+  case "$delivery_id" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#delivery_id}" -eq 16 ] || return 1
+  rec=$(fm_task_inbox_write "$STATE" "$task" \
+    "${FM_FROMFIRST_MARK}delivery=${delivery_id} Drain pending rows in this home's wake queue, then resume idle supervision." \
+    fire-and-forget) || return 1
+  fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")"
+}
+
 # Surface one durable parent check when the foreign queue's drain position has
 # not moved for the bounded interval. The progress marker records that position
 # as the same epoch-sequence row identity the stall receipts use, so the timer
@@ -782,12 +843,17 @@ secondmate_in_active_turn() {  # <window> <idle>
 # a later genuine freeze remains visible. A mate demonstrably inside an active
 # turn defers its escalation, but only while this same interval is under
 # BUSY_TURN_MAX_SECS, so a turn that never ends cannot hide a frozen queue.
+# A mate whose busy class is exactly idle, whose agent is alive, and whose
+# composer is not pending is rung once so its own home can drain, and the
+# parent notification is withheld until that same row stays frozen for another
+# stall interval. Unknown, busy-over-bound, and ring-unsafe panes keep the
+# parent alarm. Empty inbox and a fresh child beacon are not idle proof.
 # Receipts close the append-before-marker crash window without changing the
 # foreign queue.
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
-  local meta task kind remote_host home queue row epoch seq row_key marker progress_marker progress observed_at observed_key
-  local receipt receipt_dir notify_key queued idle reason episode_alerted
+  local meta task kind remote_host home queue row epoch seq row_key marker progress_marker ring_marker progress observed_at observed_key
+  local receipt receipt_dir notify_key queued idle reason episode_alerted already_rung w
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -806,9 +872,10 @@ secondmate_wake_stall_tick() {
     row=$(secondmate_oldest_queue_row "$queue")
     marker="$STATE/.secondmate-wake-stall-$task"
     progress_marker="$STATE/.secondmate-wake-progress-$task"
+    ring_marker="$STATE/.secondmate-wake-ring-$task"
     receipt_dir="$STATE/.secondmate-wake-stall-receipts/$task"
     if [ -z "$row" ]; then
-      rm -f "$marker" "$progress_marker"
+      rm -f "$marker" "$progress_marker" "$ring_marker"
       if [ -e "$receipt_dir" ] || [ -L "$receipt_dir" ]; then
         [ -d "$receipt_dir" ] && [ ! -L "$receipt_dir" ] || return 1
         rm -rf -- "$receipt_dir" || return 1
@@ -840,12 +907,26 @@ EOF
       || [ "$now" -lt "$observed_at" ] || [ "$row_key" != "$observed_key" ]; then
       fm_wake_secondmate_progress_marker_write "$task" "$now" "$row_key" || return 1
       [ "$episode_alerted" -eq 0 ] || rm -f "$marker" || return 1
+      rm -f "$ring_marker" || return 1
       continue
     fi
     [ "$episode_alerted" -eq 0 ] || continue
     idle=$((now - observed_at))
     [ "$idle" -ge "$threshold" ] || continue
-    ! secondmate_in_active_turn "$(fm_backend_target_of_meta "$meta")" "$idle" || continue
+    w=$(fm_backend_target_of_meta "$meta")
+    ! secondmate_in_active_turn "$w" "$idle" || continue
+    already_rung=0
+    if [ -e "$ring_marker" ] || [ -L "$ring_marker" ]; then
+      [ -f "$ring_marker" ] && [ ! -L "$ring_marker" ] || return 1
+      [ "$(cat "$ring_marker" 2>/dev/null || true)" = "$row_key" ] && already_rung=1
+    fi
+    if [ "$already_rung" -eq 0 ] && secondmate_idle_ring_safe "$w"; then
+      if secondmate_ring_to_drain "$task" "$w"; then
+        fm_wake_secondmate_ring_marker_write "$task" "$row_key" || return 1
+        fm_wake_secondmate_progress_marker_write "$task" "$now" "$row_key" || return 1
+        continue
+      fi
+    fi
     receipt="$receipt_dir/$row_key"
     if [ "$(cat "$receipt" 2>/dev/null || true)" = "$row_key" ]; then
       fm_wake_secondmate_stall_marker_write "$task" "$row_key" || return 1
@@ -1710,6 +1791,10 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # -nt comparison.
 # Status signatures include observable file and readability state, while turn-end
 # markers retain their size-and-mtime signature.
+# A status file is asked the wider wake question instead, so it also stays quiet
+# when the only bytes it grew past the classified offset are this home's own
+# bookkeeping appends; fm_wake_signal_seen_current (bin/fm-wake-lib.sh) owns that
+# rule and every other signature change still reads as unreported.
 # Pure read: prints one "<seen-file>\t<sig>\t<file>" line per changed file.
 # The caller records reported state only after surfacing or intentional absorption,
 # and commits a status classification position only after a successful span read.
@@ -1852,6 +1937,20 @@ fm_active_check_stop() {
   FM_ACTIVE_CHECK_PGID=
 }
 
+# Stop-signal dispositions, installed with the EXIT trap below. HUP and TERM
+# keep bash's native fatal-signal handling, which runs watcher_cleanup through
+# the EXIT trap and then exits on every supported bash. A trap body such as
+# 'exit 1' is not reliable for them: bash 5.2 runs a pending trap inside the
+# parse of the next command substitution, the body then fails to parse ("trap:
+# line 2: unexpected EOF while looking for matching `)'", or nothing at all),
+# and the signal is consumed, so a stop request could leave this watcher
+# polling forever while its stopper waits (fixed upstream in bash 5.3). INT
+# keeps its trap because bash ignores a direct SIGINT while a child runs.
+watcher_stop_signals() {
+  trap - HUP TERM
+  trap 'exit 1' INT
+}
+
 run_check_capture() {
   local pgid
   fm_check_output_cleanup
@@ -1859,20 +1958,23 @@ run_check_capture() {
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
   chmod 0600 "$FM_CHECK_OUTPUT" || { fm_check_output_cleanup; return 1; }
   FM_CHECK_SIGNAL_PENDING=
+  # Defer stop signals only until the check's process group is recorded for
+  # watcher_cleanup. Keep command substitutions out of this window: bash 5.2
+  # can drop a trap that is pending when one is parsed (watcher_stop_signals).
   trap 'FM_CHECK_SIGNAL_PENDING=1' HUP INT TERM
   set -m
   ( FM_CHECK_OWNED_GROUP=1 run_check_process "$@" ) > "$FM_CHECK_OUTPUT" 2>/dev/null &
   FM_ACTIVE_CHECK_PID=$!
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
+  watcher_stop_signals
+  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
-  trap 'exit 1' HUP INT TERM
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true
     fm_check_output_cleanup
     return 1
   fi
-  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
   wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
@@ -2217,7 +2319,7 @@ watcher_cleanup() {
   return "$cleanup_status"
 }
 trap watcher_cleanup EXIT
-trap 'exit 1' HUP INT TERM
+watcher_stop_signals
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
@@ -2307,6 +2409,10 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
+  # status lines before this cycle can exit on a wake. Off costs one file test.
+  [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" capture || true
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
