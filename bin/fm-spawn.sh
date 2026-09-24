@@ -312,15 +312,19 @@
 # Worker account pin (config/claude-account, config/pi-account):
 #   Opt-in. With no file, a Claude or Pi launch is unchanged: Claude still
 #   receives this process's own CLAUDE_CONFIG_DIR when it is set, and Pi the
-#   destination pane's ambient account. A present file pins every launch of
-#   that runner from this home - ship, scout, local secondmate, raw Claude
-#   command, and relaunch - to the declared account root, and the spawn
-#   refuses before any endpoint, worktree, or record exists when the file is
-#   malformed, the root is unusable, or the runner's own check says it is not
-#   signed in. A pinned Claude launch sheds the environment credentials Claude
-#   ranks above the root's login; a pinned Pi launch needs --model
-#   <provider>/<id> for a declared provider and also carries --provider, and a
-#   raw Pi command refuses. The pin is recorded as account= (and Pi's
+#   destination pane's ambient account. A present file pins every new launch of
+#   that runner from this home - ship, scout, local secondmate, and raw Claude
+#   command - to the declared account root, and the spawn refuses before any
+#   endpoint, worktree, or record exists when the file is malformed, the root is
+#   unusable, or the runner's own check says it is not signed in. A --relaunch
+#   keeps its task on the account already recorded for it instead, and refuses
+#   when the pin has moved to a different account directory since that launch,
+#   because the replacement would start without the outgoing worker's session
+#   state, which stays under the recorded root
+#   (fm_worker_account_relaunch_guard). A pinned Claude launch sheds the
+#   environment credentials Claude ranks above the root's login; a pinned Pi
+#   launch needs --model <provider>/<id> for a declared provider and also
+#   carries --provider, and a raw Pi command refuses. The pin is recorded as account= (and Pi's
 #   account_provider=) in the task record and on the spawned line. A local
 #   secondmate reads this launching home's file; pins are never inherited.
 #   bin/fm-worker-account-lib.sh owns parsing, the check, and the shed list.
@@ -2311,6 +2315,13 @@ fi
 # trust registration below writes the store the worker will actually read.
 RAW_COMMAND=
 [ "$RAW_LAUNCH" = 0 ] || RAW_COMMAND=$ARG3
+# A relaunch keeps the task on the account it was launched on, so the shared
+# guard runs here as well as in bin/fm-control.sh: reached directly, this is
+# the only place that refusal can still be made.
+if [ "$RELAUNCH" -eq 1 ]; then
+  fm_worker_account_relaunch_guard "$HARNESS" "$CONFIG" "$ID" \
+    "$RELAUNCH_PRIOR_HARNESS" "$(fm_meta_get "$RELAUNCH_META" account)" || exit 1
+fi
 WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" "$RAW_COMMAND") || exit 1
 WORKER_ACCOUNT_DECLARED=${WORKER_ACCOUNT%%$'\t'*}
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT#*$'\t'}

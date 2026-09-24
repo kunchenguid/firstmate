@@ -418,7 +418,11 @@ A Pi root can hold several provider logins at once, so the root alone does not s
 A pinned Pi launch therefore needs `--model <provider>/<id>` naming a declared provider, and Firstmate also passes `--provider <that provider>` so Pi cannot resolve the model under another signed-in provider.
 An unqualified model, an undeclared provider, or a raw Pi launch command, which cannot receive that flag, refuses; Firstmate never guesses a provider.
 
-When a file is present, every launch of that runner from this home uses it: ships, scouts, local secondmate agents, raw Claude launch commands, and relaunches.
+When a file is present, every new launch of that runner from this home uses it: ships, scouts, local secondmate agents, and raw Claude launch commands.
+A relaunch is the exception, because it replaces the worker on a task that already has an account: a task stays on the account it was launched on.
+The spawn records that account on the task, and a relaunch whose current pin selects a different account directory refuses, naming the recorded account, the account the pin now selects, and both ways forward: set the file back, or leave the task where it is and start a fresh task on the new account.
+This replaces the earlier behaviour, in which a relaunch followed the home's current file and rewrote the task's recorded account to match, so a pin changed for an unrelated reason silently moved an existing task to another account directory and left the outgoing worker's session state unreachable under the previous root.
+A pin change therefore reaches new work immediately and existing tasks never; the same recorded account, a relaunch onto a harness that reads the other pin file, and a home that no longer pins the runner at all each relaunch exactly as before.
 A raw Claude launch command whose leading assignments set `CLAUDE_CONFIG_DIR` or one of the credentials a pinned launch unsets, such as `ANTHROPIC_API_KEY`, would override the pin, so it refuses and names the variable; remove the assignment from the raw command, or change or remove `config/claude-account`.
 Before any worker endpoint, local copy, or task record exists, and before a relaunch stops the running worker, Firstmate asks the runner itself whether the pinned account is signed in: `claude auth status` for Claude, and `pi auth check --provider <provider> --json --no-refresh` for Pi, falling back to `pi --list-models <provider>` for a provider an extension registers.
 The check runs with only `HOME`, `PATH`, `TMPDIR`, `USER`, `LOGNAME`, and the pinned root in its environment, so a credential variable in firstmate's own environment cannot answer for an empty root.
@@ -427,7 +431,7 @@ Pi ranks a root's stored logins above environment variables, so a pinned Pi laun
 A home that authenticates Claude through environment credentials on purpose should leave the pin absent.
 
 A malformed file, a root that is not a readable directory, or a signed-out account refuses the launch and names the file to fix; Firstmate never falls back to the ambient account and never changes a global login or copies a credential.
-The spawn prints the pin as `account=` (plus `account_provider=` for Pi) and records the same fields in the task record, so the session-start digest shows which account each worker launched on.
+The spawn prints the pin as `account=` (plus `account_provider=` for Pi) and records the same fields in the task record, so the session-start digest shows which account each worker launched on, and a relaunch is measured against that recorded account.
 Pins are not inherited into secondmate homes: a local secondmate agent launches on the launching home's pin, while the secondmate's own workers read the secondmate home's files.
 A remote secondmate is launched on its host from its own home's configuration, so create the file in that remote home.
 [`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns parsing, the sign-in check, and the full list of credentials a Claude launch unsets; [runtime backend verification](verification/runtime-backends.md#worker-account-pin-sign-in-check) records the check against the real runners.

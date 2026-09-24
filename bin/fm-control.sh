@@ -74,8 +74,12 @@
 #              command, so relaunch requires an explicit --harness for it.
 #              A replacement Claude or Pi profile must also pass this home's
 #              worker account pin (bin/fm-worker-account-lib.sh) here, so a pin
-#              that no longer resolves or is signed out refuses before the old
-#              agent stops.
+#              that no longer resolves, is signed out, or now selects a
+#              different account directory than the one this task is recorded
+#              on refuses before the old agent stops. A task stays on the
+#              account it was launched on: its session state lives under that
+#              root, so a pin changed since the spawn moves new tasks, never
+#              this one.
 #              --note is required for a ship or scout, whose replacement
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
@@ -852,11 +856,16 @@ resolve_relaunch_profile() {
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
   fi
   # The launch owner applies this home's worker account pin too, but only after
-  # the old agent has been stopped, so a pin that no longer resolves or is
-  # signed out must refuse here, while nothing has changed yet.
-  local account_model=$TARGET_MODEL
+  # the old agent has been stopped, so a pin that no longer resolves, is signed
+  # out, or has moved off this task's recorded account must refuse here, while
+  # nothing has changed yet. The guard runs first: a pin now naming a different
+  # account is a move this task never asked for, whoever is signed in there.
+  local account_model=$TARGET_MODEL account_config
   [ "$account_model" != default ] || account_model=
-  fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
+  account_config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
+  fm_worker_account_relaunch_guard "$TARGET_HARNESS" "$account_config" "$ID" \
+    "$PRIOR_HARNESS" "$(fm_meta_get "$META" account)" || return 1
+  fm_worker_account_select "$TARGET_HARNESS" "$account_config" \
     "$account_model" "$TARGET_HARNESS" >/dev/null || return 1
 }
 
