@@ -77,16 +77,17 @@
 #                          agent, for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
-#   stale: <window> (quota-exhausted: <provider>, resets <estimate>)
+#   stale: <window> (quota-exhausted: <provider>, observed <UTC>, resets no later than <UTC> (<delay>))
 #   stale: <window> (blocked-at-prompt: <harness> trust)
 #                          recognized idle stops from fm-pane-stop-lib.sh bypass
 #                          ordinary stale/wedge triage, including declared pauses,
 #                          after two unchanged-hash polls. Secondmates and
 #                          away-silenced captain holds are excluded; positive
 #                          working evidence or a dead/missing agent rejects a stop.
-#                          A known reset is estimated from detection time plus the
-#                          rendered delay, printed as UTC ISO with that delay in
-#                          parentheses; otherwise it is 'unknown', not inferred.
+#                          A rendered delay is observed at detection time; that
+#                          time plus the delay is only an upper bound on reset,
+#                          printed with the observation time and raw delay.
+#                          Otherwise the reset is 'unknown', not inferred.
 #                          .pane-stop-<key> stores hash<TAB>busy-generation, so an
 #                          unchanged stop skips repeat probes and wakes. Pane
 #                          churn or busy activity clears it; a new generation
@@ -418,7 +419,7 @@ window_backend() {
 . "$SCRIPT_DIR/fm-pane-stop-lib.sh"
 
 pane_stop_stale_check() {
-  local w=$1 task=$2 h=$3 pane=$4 key record parsed provider delay display now reset kind reason gen agent_state
+  local w=$1 task=$2 h=$3 pane=$4 key record parsed provider delay display now observed reset kind reason gen agent_state
   key=$(window_key "$w")
   record="$STATE/.pane-stop-$key"
   parsed=$(fm_pane_stop "$(window_harness "$w")" "$pane") || { rm -f "$record"; return 1; }
@@ -432,10 +433,13 @@ pane_stop_stale_check() {
     now=$(date +%s)
     reset=$(date -u -r "$((now + delay))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
       || date -u -d "@$((now + delay))" +%Y-%m-%dT%H:%M:%SZ) || return 1
-    display="$reset ($display)"
+    observed=$(date -u -r "$now" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+      || date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ) || return 1
+    display="observed $observed, resets no later than $reset ($display)"
   fi
   if [ "$kind" = quota-exhausted ]; then
-    reason="stale: $w ($kind: $provider, resets $display)"
+    if [ "$delay" = - ]; then display="resets unknown"; fi
+    reason="stale: $w ($kind: $provider, $display)"
   else
     reason="stale: $w ($kind: $provider $display)"
   fi
