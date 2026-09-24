@@ -7,7 +7,6 @@ TMP_ROOT=$(fm_test_tmproot fm-contributions)
 NOW=2026-09-16T08:00:00Z
 HEAD_A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 HEAD_B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-CUT='observation cut short by poll budget'
 
 new_home() {
   local home="$TMP_ROOT/$1"
@@ -581,7 +580,7 @@ SH
   chmod +x "$home/fakebin/gh" "$home/fakebin/date"
 }
 
-test_budget_exhaustion_rotates_record_unchecked() { # exhaust|stall
+test_budget_exhaustion_records_only_the_attempt() { # exhaust|stall
   local mode=$1 home out
   home=$(new_home "budget-$mode")
   forge_home "$home"
@@ -597,16 +596,17 @@ test_budget_exhaustion_rotates_record_unchecked() { # exhaust|stall
   [ -z "$out" ] || fail "budget exhaustion ($mode) printed a wake line: $out"
   grep -F 'api repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
     || fail "budget exhaustion ($mode) never started the observation"
-  jq -e --arg now "$NOW" --arg cut "$CUT" --slurpfile prior "$home/prior.json" '.records[0]
-    | .checked_at == $now and .error == $cut and .observation == $prior[0].records[0].observation' \
+  jq -e --arg now "$NOW" --slurpfile prior "$home/prior.json" '.records[0] as $r | $prior[0].records[0] as $p
+    | $r.attempted_at == $now and $r.checked_at == $p.checked_at and $r.error == null
+    and $r.observation == $p.observation' \
     "$home/data/delivery/contributions.json" >/dev/null \
-    || fail "budget exhaustion ($mode) did not rotate the record as unchecked: $(cat "$home/data/delivery/contributions.json")"
+    || fail "budget exhaustion ($mode) changed more than the read attempt: $(cat "$home/data/delivery/contributions.json")"
   [ ! -s "$home/state/.wake-queue" ] || fail "budget exhaustion ($mode) enqueued a wake"
-  pass "budget exhausted mid-observation ($mode) rotates the record as unchecked and stays silent"
+  pass "budget exhausted mid-observation ($mode) records only the read attempt and stays silent"
 }
 
-test_budget_refusal_between_calls() { test_budget_exhaustion_rotates_record_unchecked exhaust; }
-test_budget_bounded_call_timeout() { test_budget_exhaustion_rotates_record_unchecked stall; }
+test_budget_refusal_between_calls() { test_budget_exhaustion_records_only_the_attempt exhaust; }
+test_budget_bounded_call_timeout() { test_budget_exhaustion_records_only_the_attempt stall; }
 
 test_genuine_failure_near_deadline_is_unavailable() {
   local home out
@@ -811,7 +811,7 @@ test_intermittent_time_cut_never_opens_an_episode() { # failing, healthy, failin
     woke="$woke$out"
   done
   [ -z "$woke" ] || fail "a URL whose reads outran the budget woke the captain: $woke"
-  jq -e --arg cut "$CUT" '.records[0].error == $cut' "$home/data/delivery/contributions.json" >/dev/null \
+  jq -e '.records[0].error == null' "$home/data/delivery/contributions.json" >/dev/null \
     || fail 'a read the budget cut short was recorded as an unavailable forge'
   pass 'reads that intermittently outrun the budget never open a failure episode'
 }
@@ -824,15 +824,16 @@ stalled_read_rotates_behind_other_contributions() { # fault stalled-task other-t
   printf -- '- [ ] filed - Measured defect https://github.com/o/r/issues/9 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
   with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:00:00Z "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
     || fail "initial healthy poll failed ($fault)"
-  mutate_record "$home" "$stalled" '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  mutate_record "$home" "$stalled" '.records[0].checked_at="2026-09-15T08:00:00Z" | .records[0].attempted_at="2026-09-15T08:00:00Z"'
   printf '%s\n' "$fault" > "$home/forge/fault"
   # A frozen clock keeps the budget whole, so only the deadline's own kill ends the stalled read.
   /bin/date +%s > "$home/forge/clock"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:00:00Z FM_CONTRIBUTIONS_BUDGET=6 "$ROOT/bin/fm-contributions.sh" poll) \
     || fail "stalled poll failed ($fault)"
   [ -z "$out" ] || fail "a stalled read woke the captain ($fault): $out"
-  jq -e --arg cut "$CUT" '.records[0] | .checked_at == "2026-09-16T09:00:00Z" and .error == $cut' \
-    "$home/data/$stalled/contributions.json" >/dev/null || fail "a stalled read did not rotate as unchecked ($fault)"
+  jq -e '.records[0] | .attempted_at == "2026-09-16T09:00:00Z"
+    and .checked_at == "2026-09-15T08:00:00Z" and .error == null' \
+    "$home/data/$stalled/contributions.json" >/dev/null || fail "a stalled read did not record only its attempt ($fault)"
   jq -e '.records[0].checked_at == "2026-09-16T08:00:00Z"' "$home/data/$other/contributions.json" >/dev/null \
     || fail "the stalled poll changed a contribution it never reached ($fault)"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T10:00:00Z FM_CONTRIBUTIONS_BUDGET=6 "$ROOT/bin/fm-contributions.sh" poll) \
@@ -867,8 +868,9 @@ test_genuine_failure_wakes_once_around_time_cuts() { # cut, fail, cut, fail, suc
   [ "$out" = "$line" ] || fail "a genuine failure after a time cut did not open its episode: $out"
   out=$(poll_with stall 2026-09-16T11:00:00Z)
   [ -z "$out" ] || fail "a time cut inside a failure episode woke the captain: $out"
-  jq -e --arg error "$error" '.records[0] | .checked_at == "2026-09-16T11:00:00Z" and .error == $error' \
-    "$home/data/delivery/contributions.json" >/dev/null || fail 'a time cut erased the genuine failure evidence'
+  jq -e --arg error "$error" '.records[0] | .attempted_at == "2026-09-16T11:00:00Z"
+    and .checked_at == "2026-09-16T10:00:00Z" and .error == $error' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'a time cut changed the genuine failure evidence'
   out=$(poll_with down 2026-09-16T12:00:00Z)
   [ -z "$out" ] || fail "a time cut restarted an unchanged failure episode: $out"
   out=$(poll_with '' 2026-09-16T13:00:00Z)
@@ -896,6 +898,70 @@ test_stalled_pr_is_not_reported_checked() {
     and .contributions.counts.fleet == 1' >/dev/null \
     || fail "a PR whose read never finished was reported as checked: $out"
   pass 'a PR whose read never finished is not reported as checked or fresh'
+}
+
+test_time_cut_keeps_recent_observation_checked() {
+  local home out
+  home=$(new_home cut-keeps-fresh)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-16T07:55:00Z"'
+  /bin/date +%s > "$home/forge/clock"
+  printf 'stall\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=6 "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'time-cut poll of a recent observation failed'
+  [ -z "$out" ] || fail "a time cut woke the captain: $out"
+  out=$(bearings "$home") || fail 'Bearings could not read the time-cut contribution'
+  printf '%s' "$out" | jq -e '
+    .contributions.known == 1 and .contributions.checked == 1
+    and .contributions.complete == true' >/dev/null \
+    || fail "a time cut discarded a five-minute-old observation: $out"
+  pass 'a time cut leaves a still-fresh observation checked'
+}
+
+test_time_cut_shows_no_error_in_summary() {
+  local home out
+  home=$(new_home cut-no-error)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  /bin/date +%s > "$home/forge/clock"
+  printf 'stall\n' > "$home/forge/fault"
+  with_home "$home" env FM_CONTRIBUTIONS_BUDGET=6 "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'time-cut poll failed'
+  with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input > "$home/input.json" \
+    || fail 'could not collect contribution input'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" --all) \
+    || fail 'could not project the time-cut contribution'
+  printf '%s' "$out" | jq -e '.rows[0].reason == "contribution not recently checked"' >/dev/null \
+    || fail "a time cut surfaced error text in the summary: $out"
+  pass 'a time cut shows no error text in the summary'
+}
+
+first_observed_url() { grep -m1 -xE 'api repos/o/r/(pulls/8|issues/9)' "$1/forge/calls"; }
+
+test_legacy_record_without_attempt_sorts_by_its_check() {
+  local home
+  home=$(new_home legacy-order)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf -- '- [ ] filed - Measured defect https://github.com/o/r/issues/9 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'initial healthy poll failed'
+  # A recent attempt outranks an old check, so the legacy issue checked at 06:00 goes first.
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-14T08:00:00Z" | .records[0].attempted_at="2026-09-16T07:00:00Z"'
+  mutate_record "$home" filed '.records[0].checked_at="2026-09-16T06:00:00Z" | del(.records[0].attempted_at)'
+  : > "$home/forge/calls"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'legacy-after poll failed'
+  [ "$(first_observed_url "$home")" = 'api repos/o/r/issues/9' ] \
+    || fail "a recently attempted URL was read before an older legacy check: $(cat "$home/forge/calls")"
+  # The legacy check still counts: an attempt at 05:00 goes before it.
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-16T05:00:00Z" | .records[0].attempted_at="2026-09-16T05:00:00Z"'
+  mutate_record "$home" filed '.records[0].checked_at="2026-09-16T06:00:00Z" | del(.records[0].attempted_at)'
+  : > "$home/forge/calls"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'legacy-before poll failed'
+  [ "$(first_observed_url "$home")" = 'api repos/o/r/pulls/8' ] \
+    || fail "a legacy record without an attempt jumped the queue: $(cat "$home/forge/calls")"
+  pass 'a legacy record without an attempt sorts by its existing check'
 }
 
 test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine outage, two consecutive cycles
@@ -958,7 +1024,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_read_past_its_share_completes_inside_the_budget test_intermittent_time_cut_never_opens_an_episode test_stalled_core_read_does_not_starve_other_contributions test_stalled_closing_pr_read_does_not_starve_other_contributions test_stalled_issue_read_does_not_starve_other_contributions test_genuine_failure_wakes_once_around_time_cuts test_stalled_pr_is_not_reported_checked test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_read_past_its_share_completes_inside_the_budget test_intermittent_time_cut_never_opens_an_episode test_stalled_core_read_does_not_starve_other_contributions test_stalled_closing_pr_read_does_not_starve_other_contributions test_stalled_issue_read_does_not_starve_other_contributions test_genuine_failure_wakes_once_around_time_cuts test_stalled_pr_is_not_reported_checked test_time_cut_keeps_recent_observation_checked test_time_cut_shows_no_error_in_summary test_legacy_record_without_attempt_sorts_by_its_check test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"

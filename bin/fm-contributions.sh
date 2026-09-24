@@ -17,8 +17,10 @@
 # GitHub PRs and issues are supported; other forges remain visibly unmeasured.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
-# task and records[]. Each record contains url, kind, checked_at, error,
-# observation, verdict, seen event tokens, pending events, and notified tokens.
+# task and records[]. Each record contains url, kind, checked_at, attempted_at,
+# error, observation, verdict, seen event tokens, pending events, and notified
+# tokens. checked_at is the last completed read and drives freshness;
+# attempted_at is the last read attempt, including one the budget cut short.
 # observation is one coherent forge read (a PR head is rechecked after fetching
 # checks/reviews). Checks are normalized by name, id, started_at, status and
 # conclusion; projection picks the newest attempt per distinct name. The last
@@ -39,25 +41,25 @@
 # a contribution with many pages spends its time on its own slowest page instead
 # of losing it to a fixed share too small to finish. poll reserves min(the
 # configured budget, 15) before starting a URL, so an in-progress normal-budget
-# observation gets all three waves and a later URL waits for the next
-# oldest-checked-first poll.
+# observation gets all three waves and a later URL waits for the next poll.
+# URLs are read oldest attempted_at first, falling back to checked_at for a
+# record written before attempted_at existed.
 # A deliberately smaller configured budget remains bounded and may be
 # unmeasured, rather than being mislabeled unavailable. Each distinct URL is
 # observed once per poll and applied to every owner. A final observation applies
 # to every owner without another forge read. When the budget runs out
-# mid-observation, the poll ends with a time cut: that URL's checked_at
+# mid-observation, the poll ends with a time cut: only that URL's attempted_at
 # advances, rotating it behind the others so a read that never finishes cannot
-# starve them, and its error becomes "observation cut short by poll budget"
-# unless it already holds a genuine error. That marker keeps the old
-# observation from counting as checked, never wakes, and never opens or ends a
-# failure episode; a successful read clears it. Only a genuine forge failure or
-# head change records a genuine error.
+# starve them. A time cut records no error, never wakes, and leaves checked_at,
+# the error, and the last observation as they were, so a still-fresh
+# observation stays checked until it expires. Only a genuine forge failure or
+# head change records an error.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
 # never re-read, stays fresh, and a stale error beside it is cleared once.
 # A genuine failure prints its unavailable line only when it starts an episode
-# (no prior owner has a genuine error); a successful read ends the episode.
+# (no prior owner has an error); a successful read ends the episode.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
 # ready-for-pr. Labels are matched case-insensitively and exactly.
@@ -192,7 +194,6 @@ write_record() { # task record-json-file
 # A read the poll's own clock stopped is time we did not have, not a verdict on
 # the forge. The marker file carries it out of the background reads of a wave.
 time_cut() { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; }
-TIME_CUT='observation cut short by poll budget'
 
 forge() {
   local remaining rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
@@ -345,7 +346,7 @@ poll() {
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
   # One line per distinct URL: the URL, then every owning task.
   jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
-    known($input[0];$saved[0]) | map(. as $k | . + {at:([$saved[0][] | select(.task == $k.task) | .records[] | select(.url == $k.url) | .checked_at] | first // "")})
+    known($input[0];$saved[0]) | map(. as $k | . + {at:([$saved[0][] | select(.task == $k.task) | .records[] | select(.url == $k.url) | .attempted_at // .checked_at] | first // "")})
     | group_by(.url) | map({url:.[0].url,at:(map(.at) | min),tasks:(map(.task) | unique)})
     | sort_by(.at,.tasks[0],.url)[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
   DEADLINE=$(( $(date +%s) + BUDGET ))
@@ -364,10 +365,10 @@ poll() {
     fi
     observed=0
     observe "$url" || observed=$?
-    # Wake once per failure episode: only when no owner has a prior genuine error.
-    if [ "$BUDGET_EXHAUSTED" -eq 0 ] && [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --arg cut "$TIME_CUT" --args \
+    # Wake once per failure episode: only when no owner has a prior error.
+    if [ "$BUDGET_EXHAUSTED" -eq 0 ] && [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
       'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
-        .error == null or .error == $cut)' "${row[@]:1}" >/dev/null; then
+        .error == null)' "${row[@]:1}" >/dev/null; then
       printf 'contributions: observation unavailable for %s\n' "$url"
     fi
     case "$url" in */issues/*) kind=issue ;; *) kind="pr" ;; esac
@@ -378,22 +379,21 @@ poll() {
         ([$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first)
         // {url:$url,kind:$kind,checked_at:null,observation:null,verdict:null,seen:[],pending:[],notified:[]}' > "$old"
       if [ "$BUDGET_EXHAUSTED" -ne 0 ]; then
-        # The marker keeps the old observation from reading as fresh; a genuine error prevails.
-        jq --arg now "$NOW" --arg cut "$TIME_CUT" '.checked_at=$now | .error=(if .error == null then $cut else .error end)' \
-          "$old" > "$TMP/row.json"
+        # Only the attempt moves: the last good observation keeps its own freshness.
+        jq --arg now "$NOW" '.attempted_at=$now' "$old" > "$TMP/row.json"
       elif [ "$observed" -eq 0 ]; then
         jq -n --arg now "$NOW" --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
           $old[0] as $old | $observation[0] as $o
           | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
               [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
               else [] end)) as $events
-          | $old + {checked_at:$now,error:null,
+          | $old + {checked_at:$now,attempted_at:$now,error:null,
             observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
             seen:($events | map(.token)),
             pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
       else
         error='forge observation unavailable or changed during read'
-        jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
+        jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .attempted_at=$now | .error=$error' "$old" > "$TMP/row.json"
       fi
       write_record "$task" "$TMP/row.json"
       publish_pending "$task" "$url" "$TMP/row.json"
