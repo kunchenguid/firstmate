@@ -958,6 +958,10 @@ unit_supervision_host_claude_home_runs_no_away_daemon() {
   else
     fail "supervision host: away start-native did not refuse cleanly (rc=$rc): $out"
   fi
+  # Quiet is not the away posture and never starts beside a standing record
+  # (fm_afk_launch_posture_require), so return from away before the quiet phase.
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 \
+    || fail "supervision host: could not archive the away record before the quiet phase"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet "$LAUNCH" start-native >/dev/null 2>&1 \
     && [ "$(head -n 1 "$st/state/.afk")" = quiet ] \
     && FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
@@ -965,6 +969,16 @@ unit_supervision_host_claude_home_runs_no_away_daemon() {
     pass "supervision host: quiet start-native and a plain refresh of the quiet daemon still prepare the daemon"
   else
     fail "supervision host: quiet mode was refused or lost its mode on a claude host home"
+  fi
+  # Going /afk out of quiet mode leaves the quiet flag on disk beside the new
+  # record; the record is the away posture, so the daemon stays refused here.
+  enter_posture "$st" || fail "supervision host: could not record the away posture from quiet"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F 'runs the supervision host (config/supervision-host)' >/dev/null; then
+    pass "supervision host: an away record beside a standing quiet flag still refuses the daemon"
+  else
+    fail "supervision host: away entry from quiet was not refused (rc=$rc): $out"
   fi
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 || true
   rm -rf "$st"

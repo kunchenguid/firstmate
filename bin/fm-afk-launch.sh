@@ -205,7 +205,9 @@ fm_afk_launch_primary_harness() {
 # docs/supervision-host.md): the posture record is the whole entry there and
 # the ordinary supervision session runs in both postures. Quiet mode still
 # runs the daemon on that Claude home, so a quiet entry or a refresh of a
-# running quiet daemon is allowed.
+# running quiet daemon is allowed - which posture that is comes from
+# fm_afk_launch_posture, so a standing record still reads away while the quiet
+# flag is on disk (going /afk out of quiet mode).
 fm_afk_launch_daemon_allowed() {
   local harness mode
   harness=$(fm_afk_launch_primary_harness)
@@ -215,10 +217,7 @@ fm_afk_launch_daemon_allowed() {
       return 1 ;;
     claude)
       [ -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/supervision-host" ] || return 0
-      mode=${FM_AFK_MODE:-}
-      if [ -z "$mode" ] && [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
-        mode=$(head -n 1 "$FM_AFK_LAUNCH_STATE/.afk" 2>/dev/null || true)
-      fi
+      mode=$(fm_afk_launch_posture)
       [ "$mode" != quiet ] || return 0
       fm_afk_launch_log "the away daemon is not launched on this claude home, which runs the supervision host (config/supervision-host); the away-posture record is the posture here (run bin/fm-afk-launch.sh enter and stop)"
       return 1 ;;
