@@ -68,6 +68,16 @@ SH
   chmod +x "$1/cmd.exe"
 }
 
+# A cygpath that echoes its path argument back, so the junction capability
+# gates pass on a POSIX host too and the faked cmd.exe decides the outcome.
+write_passthrough_cygpath() {  # <fakebin>
+  cat > "$1/cygpath" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${@: -1}"
+SH
+  chmod +x "$1/cygpath"
+}
+
 have_junction_capability() {
   command -v cmd.exe >/dev/null 2>&1 && command -v cygpath >/dev/null 2>&1
 }
@@ -142,6 +152,7 @@ test_junction_failure_latches_per_process() {
   marker="$dir/cmd-was-called"
   write_copying_ln "$fakebin"
   write_failing_cmd "$fakebin" "$marker"
+  write_passthrough_cygpath "$fakebin"
 
   # Two attempts inside one shell process: a failed junction capability is
   # latched, so cmd.exe is spawned once no matter how many creates follow.
@@ -159,11 +170,7 @@ test_occupied_lockdir_does_not_latch_junction() {
   fakebin=$(fm_fakebin "$dir")
   marker="$dir/cmd-was-called"
   write_failing_cmd "$fakebin" "$marker"
-  cat > "$fakebin/cygpath" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "${@: -1}"
-SH
-  chmod +x "$fakebin/cygpath"
+  write_passthrough_cygpath "$fakebin"
   # The first ln models a racer whose copy-fallback lands first: the lockdir
   # appears holding foreign content before this process's own copy.
   cat > "$fakebin/ln" <<SH
