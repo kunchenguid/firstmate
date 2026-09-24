@@ -2,6 +2,16 @@
 
 The files and environment variables you set to operate firstmate.
 
+## Response language (config/response-language)
+
+By default the first mate replies in the captain's language: whatever language the captain writes in, the reply matches.
+When the captain's language changes between messages, the most recent captain message wins.
+A local, gitignored `config/response-language` file under the effective Firstmate home pins a specific language instead - resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
+The file holds one non-empty line naming the language, for example `Turkish` or `Deutsch`; an empty or absent file leaves the follow-the-captain default in force.
+This knob governs chat prose only.
+Repository artifacts - commit messages, PR and issue descriptions, briefs, code, and comments - stay in the repository's existing language, and technical identifiers, paths, command names, and quoted command output are never translated.
+`AGENTS.md`'s identity section owns the captain-address rule that this setting is layered onto, not around.
+
 ## Orchestrator behavior (AGENTS.md)
 
 The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it like any prompt when the fleet is empty, or dispatch shared-repo edits to a crewmate while tasks are in flight.
