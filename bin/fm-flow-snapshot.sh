@@ -142,6 +142,9 @@ path_mtime() {  # <path>
 steps_json() {  # <axi-status-output>
   printf '%s\n' "$1" | awk '
     function read_header(line,   body, names, i, n) {
+      # Cleared first, so a column an earlier block declared cannot survive into
+      # a block whose header does not name it.
+      for (i in col) delete col[i]
       body = line
       sub(/^[^{]*\{/, "", body)
       sub(/\}:[[:space:]]*$/, "", body)
@@ -191,6 +194,9 @@ active_steps_json() {  # <axi-status-output>
       return sprintf("%d", total)
     }
     function read_header(line,   body, names, i, n) {
+      # Cleared first, so a column an earlier block declared cannot survive into
+      # a block whose header does not name it.
+      for (i in col) delete col[i]
       body = line
       sub(/^[^{]*\{/, "", body)
       sub(/\}:[[:space:]]*$/, "", body)
