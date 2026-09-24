@@ -608,7 +608,8 @@ fm_lock_try_create() {
       fm_lock_clean_known_files "$lockdir"
       rmdir "$lockdir" 2>/dev/null || true
     fi
-    if _fm_lock_try_create_junction "$lockdir" "$ownerdir"; then
+    if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
+      && _fm_lock_try_create_junction "$lockdir" "$ownerdir"; then
       if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
         FM_LOCK_OWNER_DIR=$ownerdir
         return 0

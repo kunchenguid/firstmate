@@ -153,7 +153,51 @@ test_junction_failure_latches_per_process() {
   pass "lock-junction: a failed junction attempt is latched per process"
 }
 
+test_occupied_lockdir_does_not_latch_junction() {
+  local dir fakebin marker
+  dir="$TMP_ROOT/junction-occupied"
+  fakebin=$(fm_fakebin "$dir")
+  marker="$dir/cmd-was-called"
+  write_failing_cmd "$fakebin" "$marker"
+  cat > "$fakebin/cygpath" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${@: -1}"
+SH
+  chmod +x "$fakebin/cygpath"
+  # The first ln models a racer whose copy-fallback lands first: the lockdir
+  # appears holding foreign content before this process's own copy.
+  cat > "$fakebin/ln" <<SH
+#!/usr/bin/env bash
+set -u
+dst=\${@: -1}
+src=\${@: -2:1}
+if [ ! -e "$dir/raced" ]; then
+  : > "$dir/raced"
+  mkdir -p "\$dst" && printf 'x\n' > "\$dst/foreign"
+fi
+cp -r "\$src" "\$dst"
+SH
+  chmod +x "$fakebin/ln"
+
+  # shellcheck disable=SC2016  # "$1" is the child shell's positional parameter, not this script's.
+  lib_eval "$fakebin" '
+    if fm_lock_try_create "$1/lock"; then exit 3; fi
+    [ -e "$2" ] && exit 4
+    rm -rf "$1/lock"
+    fm_lock_try_create "$1/lock"
+    true
+  ' "$dir" "$marker"
+  case $? in
+    3) fail "a lock was claimed over a lockdir holding foreign content" ;;
+    4) fail "cmd.exe ran while the lock path was still occupied" ;;
+  esac
+  [ -e "$marker" ] \
+    || fail "an occupied lock path latched the junction fallback off for the process"
+  pass "lock-junction: an occupied lock path fails closed without latching the junction"
+}
+
 test_posix_symlink_never_consults_junction
+test_occupied_lockdir_does_not_latch_junction
 test_junction_fallback_claims_the_lock
 test_junction_unavailable_fails_closed
 test_junction_failure_latches_per_process
