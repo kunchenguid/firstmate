@@ -92,6 +92,10 @@ test_brief_refuses_unusable_branch_selections() {
   expect_code 1 "$status" "a scout crew branch was accepted"
   assert_contains "$out" "applies only to ship briefs" "a scout crew branch was not refused as a ship-only flag"
 
+  out=$(FM_HOME="$home" "$BRIEF" scout-base-collision proj --scout --base-branch fm/scout-base-collision 2>&1); status=$?
+  expect_code 1 "$status" "a scout base equal to its default crew branch was accepted"
+  assert_contains "$out" "cannot be the crew branch" "a scout base collision was not refused"
+
   out=$(FM_HOME="$home" "$BRIEF" bad proj --mode local-only --base-branch 'has space' 2>&1); status=$?
   expect_code 1 "$status" "a base branch with a space was accepted"
   assert_contains "$out" "not a usable git branch name" "an unusable base was not named"
@@ -271,6 +275,17 @@ test_promote_rejects_base_changes_and_branch_collisions() {
   assert_grep 'kind=scout' "$home/state/$id.meta" "remote collision published ship metadata"
   assert_absent "$home/data/$id/ship-instructions.md" "remote collision published ship instructions"
 
+  id=named-promote-missing-remote-base
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=release\n' "$id" "$project" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch release >/dev/null
+  fill_brief "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode direct-PR --yolo off --branch-name feature/missing-base 2>&1); status=$?
+  expect_code 1 "$status" "promotion accepted a missing remote base"
+  assert_contains "$out" "does not exist on origin" "a missing remote base was not refused"
+  assert_grep 'kind=scout' "$home/state/$id.meta" "missing remote base refusal published ship metadata"
+  assert_absent "$home/data/$id/ship-instructions.md" "missing remote base refusal published ship instructions"
+
   git -C "$project" push -q origin refs/heads/office:refs/heads/release
   git -C "$project" checkout -q main
   git -C "$project" branch -D office >/dev/null
@@ -278,12 +293,22 @@ test_promote_rejects_base_changes_and_branch_collisions() {
   printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=release\n' "$id" "$project" > "$home/state/$id.meta"
   FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch release >/dev/null
   fill_brief "$home/data/$id/brief.md"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode direct-PR --yolo off --branch-name feature/remote-base >/dev/null
+  assert_grep 'refs/remotes/origin/release' "$home/data/$id/ship-instructions.md" \
+    "remote promotion instructions did not name the qualified base ref"
+
+  git -C "$project" branch office main
+  id=named-promote-remote-base-local-only
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=release\n' "$id" "$project" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch release >/dev/null
+  fill_brief "$home/data/$id/brief.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
-    --mode local-only --yolo off --branch-name feature/remote-base 2>&1); status=$?
+    --mode local-only --yolo off --branch-name feature/remote-base-local-only 2>&1); status=$?
   expect_code 1 "$status" "promotion accepted a remote-only local-only base"
   assert_contains "$out" "does not exist locally" "a remote-only local-only base was not refused"
-  assert_grep 'kind=scout' "$home/state/$id.meta" "remote-only base refusal published ship metadata"
-  assert_absent "$home/data/$id/ship-instructions.md" "remote-only base refusal published ship instructions"
+  assert_grep 'kind=scout' "$home/state/$id.meta" "remote-only local-only refusal published ship metadata"
+  assert_absent "$home/data/$id/ship-instructions.md" "remote-only local-only refusal published ship instructions"
   pass "fm-promote: changed bases and occupied crew branches are refused"
 }
 
@@ -311,6 +336,33 @@ test_local_merge_lands_on_the_recorded_base() {
   [ "$(git -C "$proj" branch --show-current)" = scratch ] || fail "named-base merge changed the active checkout"
   assert_contains "$out" "merged feature/widget into local office" "named-base merge did not name office"
   pass "fm-merge-local: a recorded base is the landing branch"
+}
+
+test_local_merge_refuses_a_linked_landing_checkout() {
+  local home proj linked id out status old
+  home="$TMP_ROOT/merge-linked/home"
+  proj="$TMP_ROOT/merge-linked/proj"
+  linked="$TMP_ROOT/merge-linked/office-worktree"
+  id=named-merge-linked
+  mkdir -p "$home/data" "$home/state" "$proj"
+  git init -q -b main "$proj"
+  git_identity "$proj"
+  commit_file "$proj" base base base
+  git -C "$proj" checkout -qb office
+  commit_file "$proj" office office office
+  git -C "$proj" checkout -qb feature/widget
+  commit_file "$proj" change change change
+  git -C "$proj" checkout -qb scratch
+  git -C "$proj" worktree add -q "$linked" office
+  old=$(git -C "$proj" rev-parse refs/heads/office)
+  printf 'project=%s\nmode=local-only\nbranch=feature/widget\nbase_branch=office\n' "$proj" \
+    > "$home/state/$id.meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$id" 2>&1); status=$?
+  expect_code 1 "$status" "a linked landing checkout was advanced"
+  assert_contains "$out" "checked out in linked worktree" "a linked landing checkout was not refused"
+  [ "$(git -C "$proj" rev-parse refs/heads/office)" = "$old" ] \
+    || fail "linked landing refusal changed the landing ref"
+  pass "fm-merge-local: a linked landing checkout is protected"
 }
 
 test_local_merge_fast_forwards_a_bare_repository() {
@@ -345,7 +397,7 @@ test_local_merge_fast_forwards_a_bare_repository() {
 }
 
 test_review_uses_the_recorded_base() {
-  local home proj remote id out
+  local home proj remote id out feature
   home="$TMP_ROOT/review/home"
   proj="$TMP_ROOT/review/proj"
   id=named-review
@@ -357,6 +409,7 @@ test_review_uses_the_recorded_base() {
   commit_file "$proj" office office office
   git -C "$proj" checkout -qb feature/widget
   commit_file "$proj" change change change
+  feature=$(git -C "$proj" rev-parse HEAD)
   remote="$TMP_ROOT/review/remote.git"
   git init -q --bare "$remote"
   git -C "$proj" remote add origin "$remote"
@@ -367,6 +420,15 @@ test_review_uses_the_recorded_base() {
     || fail "named-base review failed: $out"
   assert_contains "$out" "diff base: office" "review did not use the recorded base"
   assert_not_contains "$out" "diff base: main" "review fell back to main"
+
+  git -C "$proj" branch origin/main "$feature"
+  id=named-review-qualified
+  printf 'worktree=%s\nproject=%s\nmode=direct-PR\nbranch=feature/widget\nbase_branch=main\n' "$proj" "$proj" \
+    > "$home/state/$id.meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REVIEW" "$id" --stat) \
+    || fail "qualified remote-base review failed: $out"
+  assert_contains "$out" "diff base: origin/main" "qualified remote-base review did not name origin/main"
+  assert_not_contains "$out" "no changes vs origin/main" "review used the shadowing local origin/main branch"
   pass "fm-review-diff: a recorded base is the compare ref"
 }
 
@@ -377,5 +439,6 @@ test_spawn_checks_the_named_base_and_crew_branch_before_launch
 promote_keeps_the_named_branches
 test_promote_rejects_base_changes_and_branch_collisions
 test_local_merge_lands_on_the_recorded_base
+test_local_merge_refuses_a_linked_landing_checkout
 test_local_merge_fast_forwards_a_bare_repository
 test_review_uses_the_recorded_base

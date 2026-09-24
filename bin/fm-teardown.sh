@@ -1621,7 +1621,7 @@ work_is_landed() {
 # other ship carries the PR recorded on its own record.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
-  local data_relative
+  local data_relative landing
   BACKLOG_DONE_ARGS=()
   case "$KIND" in
     scout)
@@ -1630,7 +1630,8 @@ backlog_done_args() {
       ;;
     *)
       if [ "$MODE" = local-only ]; then
-        BACKLOG_DONE_ARGS=(--note "local main")
+        landing=$(landing_branch) || return 1
+        BACKLOG_DONE_ARGS=(--note "local $landing")
       elif [ -n "$PR_URL" ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")
       fi
