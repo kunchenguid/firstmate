@@ -184,6 +184,7 @@ KEY='test-key-9f1c2d3e-never-on-argv'
 code='' out='' err=''
 
 if [[ ${FM_TEST_DECISION_ONLY:-0} != 1 ]]; then
+if [ "${FM_TEST_DECISION_LOG_ONLY:-0}" != 1 ]; then
 # --- absent key: off, silent on stdout, no network, no quota read -----------
 reset_log
 write_response "$RESPONSE" rule_4 0.9
@@ -923,6 +924,7 @@ expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
 
+fi
 fi
 # --- decision log: one envelope line per opted-in call, never the key --------
 JEV_LOG="$HOME_DIR/state/jev-decisions.jsonl"
