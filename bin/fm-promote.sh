@@ -223,6 +223,7 @@ grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (ki
 # captain's project binding, so promotion takes it from the registry rather than
 # from a flag firstmate must remember.
 PROMOTE_PROJECT=$(sed -n 's/^project=//p' "$META" | head -n 1)
+PROMOTE_WORKTREE=$(sed -n 's/^worktree=//p' "$META" | head -n 1)
 if [ -n "$PROMOTE_PROJECT" ]; then
   PROMOTE_PROJECT_NAME=$(basename "$PROMOTE_PROJECT")
   if ! PROMOTE_STANDING_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROMOTE_PROJECT_NAME"); then
@@ -264,8 +265,12 @@ if [ -n "$BASE_BRANCH" ] && [ "$MODE" != local-only ]; then
       echo "error: remote base '$BASE_BRANCH' does not exist on origin; refusing promotion" >&2
       exit 1
     }
-    git -C "$PROMOTE_PROJECT" rev-parse --verify --quiet "refs/remotes/origin/$BASE_BRANCH^{commit}" >/dev/null || {
-      echo "error: remote base '$BASE_BRANCH' is not available in the scout project checkout; refusing promotion" >&2
+    [ -n "$PROMOTE_WORKTREE" ] && [ -d "$PROMOTE_WORKTREE" ] || {
+      echo "error: cannot verify remote base '$BASE_BRANCH' without the scout's recorded worktree; refusing promotion" >&2
+      exit 1
+    }
+    git -C "$PROMOTE_WORKTREE" rev-parse --verify --quiet "refs/remotes/origin/$BASE_BRANCH^{commit}" >/dev/null || {
+      echo "error: remote base '$BASE_BRANCH' is not available in the scout worktree; refusing promotion" >&2
       exit 1
     }
     PROMOTE_BASE_REMOTE=1
@@ -446,6 +451,16 @@ $PROMOTION_SHIP_SPEC
 EOF
   promote_delivery_contract
 } > "$TMP" || { echo "error: could not render ship instructions for mode=$MODE" >&2; exit 1; }
+if [ "$PROMOTE_BASE_REMOTE" = 1 ]; then
+  [ -n "$PROMOTE_WORKTREE" ] && [ -d "$PROMOTE_WORKTREE" ] || {
+    echo "error: cannot verify remote base '$BASE_BRANCH' without the scout's recorded worktree; refusing promotion" >&2
+    exit 1
+  }
+  git -C "$PROMOTE_WORKTREE" rev-parse --verify --quiet "refs/remotes/origin/$BASE_BRANCH^{commit}" >/dev/null || {
+    echo "error: remote base '$BASE_BRANCH' is no longer available in the scout worktree; refusing promotion" >&2
+    exit 1
+  }
+fi
 mv "$TMP" "$INSTRUCTIONS"
 TMP=
 [ -f "$INSTRUCTIONS" ] && [ -r "$INSTRUCTIONS" ] || { echo "error: ship instructions were not published as a readable file: $INSTRUCTIONS" >&2; exit 1; }
@@ -476,12 +491,6 @@ if ! mv "$BRIEF_REPLACEMENT" "$SCOUT_BRIEF"; then
   exit 1
 fi
 BRIEF_REPLACEMENT=
-
-if [ "$PROMOTE_BASE_REMOTE" = 1 ] &&
-  ! git -C "$PROMOTE_PROJECT" rev-parse --verify --quiet "refs/remotes/origin/$BASE_BRANCH^{commit}" >/dev/null; then
-  echo "error: remote base '$BASE_BRANCH' is no longer available in the scout project checkout; refusing promotion" >&2
-  exit 1
-fi
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
 grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' -e '^base_branch=' "$META" > "$TMP"
