@@ -98,6 +98,22 @@ test_brief_refuses_unusable_branch_selections() {
   pass "fm-brief: unusable crew and base selections are refused"
 }
 
+test_bare_originless_project_lock_resolves() {
+  local home bare lock
+  home="$TMP_ROOT/lock/home"
+  bare="$TMP_ROOT/lock/project.git"
+  mkdir -p "$home/state" "$home/data" "$home/config"
+  git init -q --bare "$bare"
+  lock=$(FM_HOME="$home" bash -c '. "$1"; fm_treehouse_project_lock_path "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$bare") \
+    || fail "an origin-less bare project's shared lock could not be resolved"
+  case "$lock" in
+    "$home/state/"*) ;;
+    *) fail "an origin-less bare project's lock escaped the local root: $lock" ;;
+  esac
+  pass "project locking resolves an origin-less bare repository"
+}
+
 test_spawn_checks_the_named_base_and_crew_branch_before_launch() {
   local home proj fakebin remote id out status
   home="$TMP_ROOT/spawn/home"
@@ -254,6 +270,20 @@ test_promote_rejects_base_changes_and_branch_collisions() {
   assert_contains "$out" "already exists on origin" "a remote promotion branch collision was not refused"
   assert_grep 'kind=scout' "$home/state/$id.meta" "remote collision published ship metadata"
   assert_absent "$home/data/$id/ship-instructions.md" "remote collision published ship instructions"
+
+  git -C "$project" push -q origin refs/heads/office:refs/heads/release
+  git -C "$project" checkout -q main
+  git -C "$project" branch -D office >/dev/null
+  id=named-promote-remote-base
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=release\n' "$id" "$project" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch release >/dev/null
+  fill_brief "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode local-only --yolo off --branch-name feature/remote-base 2>&1); status=$?
+  expect_code 1 "$status" "promotion accepted a remote-only local-only base"
+  assert_contains "$out" "does not exist locally" "a remote-only local-only base was not refused"
+  assert_grep 'kind=scout' "$home/state/$id.meta" "remote-only base refusal published ship metadata"
+  assert_absent "$home/data/$id/ship-instructions.md" "remote-only base refusal published ship instructions"
   pass "fm-promote: changed bases and occupied crew branches are refused"
 }
 
@@ -342,6 +372,7 @@ test_review_uses_the_recorded_base() {
 
 test_brief_names_the_crew_and_base_branches
 test_brief_refuses_unusable_branch_selections
+test_bare_originless_project_lock_resolves
 test_spawn_checks_the_named_base_and_crew_branch_before_launch
 promote_keeps_the_named_branches
 test_promote_rejects_base_changes_and_branch_collisions
