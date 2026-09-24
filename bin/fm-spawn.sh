@@ -2280,30 +2280,15 @@ fi
 # workspace trust was pre-registered in the SEAT's profile - launching the
 # worker against a store that holds no trust entry for its own copy. Refuse the
 # spawn here, before any endpoint, worktree, or record exists, rather than
-# letting either mechanism quietly take the other's launch. A claude relaunch
-# of a task whose record names a seat's profile directory keeps that seat
-# whatever the home's active seat now reads (below), so the pin conflicts with
-# it the same way and is refused the same way. A recorded ambient or pin root
-# is no seat and relaunches as before.
-if [ -f "$CONFIG/claude-account" ]; then
-  if [ "$(fm_seat_active)" != "$FM_SEAT_DEFAULT_NAME" ]; then
-    {
-      echo "error: this home configures a worker account pin and an active Claude seat, and both choose a Claude worker's configuration directory:"
-      echo "  $CONFIG/claude-account"
-      echo "  $CONFIG/claude-seat"
-      echo "remove either file to resolve the conflict"
-    } >&2
-    exit 1
-  fi
-  if [ "$HARNESS" = claude ] && [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = claude ] \
-    && [ -n "$RELAUNCH_SEAT" ] && [ "$(fm_seat_dir "${RELAUNCH_SEAT##*/}")" = "$RELAUNCH_SEAT" ]; then
-    {
-      echo "error: task $ID was launched on the Claude seat $RELAUNCH_SEAT, and this home now configures a worker account pin that also chooses a Claude worker's configuration directory:"
-      echo "  $CONFIG/claude-account"
-      echo "a relaunch keeps the seat its task was launched on, so it cannot also follow the pin; relaunch it with the pin absent, or finish it and spawn the work as a new task"
-    } >&2
-    exit 1
-  fi
+# letting either mechanism quietly take the other's launch.
+if [ -f "$CONFIG/claude-account" ] && [ "$(fm_seat_active)" != "$FM_SEAT_DEFAULT_NAME" ]; then
+  {
+    echo "error: this home configures a worker account pin and an active Claude seat, and both choose a Claude worker's configuration directory:"
+    echo "  $CONFIG/claude-account"
+    echo "  $CONFIG/claude-seat"
+    echo "remove either file to resolve the conflict"
+  } >&2
+  exit 1
 fi
 # Worker account pin (header above): resolved before any endpoint, worktree, or
 # record exists. An absent pin selects nothing and leaves every later launch
@@ -2322,6 +2307,27 @@ if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
   else
     unset CLAUDE_CONFIG_DIR
   fi
+fi
+# A claude relaunch keeps the directory its task's record names whatever the
+# home now configures (below), and pre-registers workspace trust there, while
+# the pin launches the worker on the directory it selects. Refuse, still before
+# any endpoint, worktree, or record is touched, only when those are different
+# stores - the split that would leave the worker without a trust entry.
+spawn_same_dir() {
+  local a=$1 b=$2
+  [ -z "$a" ] || a=$(cd "$a" 2>/dev/null && pwd -P) || a=$1
+  [ -z "$b" ] || b=$(cd "$b" 2>/dev/null && pwd -P) || b=$2
+  [ "$a" = "$b" ]
+}
+if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ] && [ "$RELAUNCH" -eq 1 ] \
+  && [ "$RELAUNCH_PRIOR_HARNESS" = claude ] && [ -n "$RELAUNCH_SEAT" ] \
+  && ! spawn_same_dir "$RELAUNCH_SEAT" "$WORKER_ACCOUNT_ROOT"; then
+  {
+    echo "error: task $ID was launched on the Claude seat $RELAUNCH_SEAT, and this home's worker account pin selects a different Claude configuration directory:"
+    echo "  $CONFIG/claude-account"
+    echo "a relaunch keeps the seat its task was launched on, so it cannot also follow the pin; relaunch it with the pin absent or pointing at that seat, or finish it and spawn the work as a new task"
+  } >&2
+  exit 1
 fi
 
 secondmate_registry_value() {

@@ -961,6 +961,7 @@ test_account_pin_and_recorded_seat_refuse_the_relaunch() {
   # work seat, which a relaunch keeps.
   rm "$HOME_DIR/config/claude-seat"
   printf 'ordinary\n' > "$HOME_DIR/config/claude-account"
+  fm_fake_exit0 "$FAKEBIN" claude
   make_dead_endpoint_tmux "$FAKEBIN" "fm-$id"
   meta_before="$CASE_DIR/meta.before"
   cp "$HOME_DIR/state/$id.meta" "$meta_before"
@@ -1003,6 +1004,29 @@ test_pin_only_home_still_relaunches_a_claude_task() {
   pass "a pin-only home with no seat file still relaunches a claude task under its pin"
 }
 
+test_pin_at_a_seat_directory_still_relaunches_a_claude_task() {
+  local rec id out
+  id=seat-pin-at-seat-relaunch-1
+  rec=$(spawn_case spawn-pin-at-seat-relaunch "$id")
+  read_spawn_case "$rec"
+  fm_fake_exit0 "$FAKEBIN" claude
+  mkdir -p "$SEATS_DIR/work"
+  printf '%s\n' "$SEATS_DIR/work" > "$HOME_DIR/config/claude-account"
+  out=$(run_spawn_here "$HOME_DIR" "$WT_DIR" "$FAKEBIN" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  expect_code 0 "$?" "a spawn under a pin at a seat directory should succeed: $out"
+  assert_grep "claude_seat=$SEATS_DIR/work" "$HOME_DIR/state/$id.meta" \
+    "the task record must carry the pinned seat directory it launched on"
+  make_dead_endpoint_tmux "$FAKEBIN" "fm-$id"
+  : > "$LAUNCH_LOG"
+
+  out=$(CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+    fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN" "$id" --relaunch)
+  expect_code 0 "$?" "a pin at the task's own seat directory must still relaunch it: $out"
+  assert_contains "$(cat "$LAUNCH_LOG")" "CLAUDE_CONFIG_DIR='$SEATS_DIR/work'" \
+    "the relaunched worker must launch on the pinned seat directory"
+  pass "a pin pointing at a seat directory still relaunches a task recorded on that directory"
+}
+
 test_absent_setting_is_the_default_seat
 test_switch_to_logged_in_seat_updates_only_the_setting
 test_switch_to_seat_that_is_not_logged_in_is_refused
@@ -1038,5 +1062,6 @@ test_non_claude_spawn_records_no_seat
 test_account_pin_and_active_seat_refuse_the_spawn
 test_account_pin_and_recorded_seat_refuse_the_relaunch
 test_pin_only_home_still_relaunches_a_claude_task
+test_pin_at_a_seat_directory_still_relaunches_a_claude_task
 
 echo "# all fm-seat tests passed"
