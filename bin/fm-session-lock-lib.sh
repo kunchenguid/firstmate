@@ -113,10 +113,10 @@ fm_harness_process_matches() {  # <comm> <args>
 # bridges the Cygwin fork-stub gap and the Cygwin/Win32 pid spaces, so this
 # walk only applies the contiguous-run rule per hop.
 _fm_harness_ancestry_pids_win32() {
-  local winpid ppid comm args extending=0 printed=0
+  local winpid comm args extending=0 printed=0
   fm_win32_proc_load || return 1
   for winpid in $(fm_win32_ancestor_winpids); do
-    fm_win32_proc_get "$winpid" ppid comm args || break
+    fm_win32_proc_get "$winpid" _ comm args || break
     if fm_harness_process_matches "$comm" "$args"; then
       printf '%s\n' "$winpid"
       printed=1
@@ -133,10 +133,10 @@ _fm_harness_ancestry_pids_win32() {
 # Win32 process table. The Windows-side counterpart of fm_harness_pid_alive,
 # used only once its own kill -0/ps -o evidence has already failed.
 _fm_win32_pid_alive() {  # <pid>
-  local pid=$1 ppid comm args line
+  local pid=$1 comm args line
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   line=$(fm_win32_proc_fields "$pid") || return 1
-  IFS=$'\t' read -r ppid comm args <<EOF
+  IFS=$'\t' read -r _ comm args <<EOF
 $line
 EOF
   fm_harness_process_matches "$comm" "$args"

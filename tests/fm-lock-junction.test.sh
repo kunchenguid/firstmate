@@ -80,6 +80,7 @@ test_posix_symlink_never_consults_junction() {
   write_symlinking_ln "$fakebin"
   write_failing_cmd "$fakebin" "$marker"
 
+  # shellcheck disable=SC2016  # "$1" is the child shell's positional parameter, not this script's.
   lib_eval "$fakebin" 'fm_lock_try_create "$1/lock"' "$dir" \
     || fail "a working ln -s did not create the lock"
   [ -L "$dir/lock" ] || fail "the lock is not a link after a successful ln -s"
@@ -95,6 +96,7 @@ test_junction_fallback_claims_the_lock() {
     || { pass "lock-junction: junction fallback claims the lock (skipped - no cmd.exe/cygpath here)"; return; }
   write_copying_ln "$fakebin"
 
+  # shellcheck disable=SC2016  # "$1" is the child shell's positional parameter, not this script's.
   lib_eval "$fakebin" 'fm_lock_try_create "$1/lock"' "$dir" \
     || fail "the junction fallback did not claim the lock after ln -s copied"
   [ -L "$dir/lock" ] || fail "the junction lock is not link-shaped for test -L"
@@ -122,6 +124,7 @@ test_junction_unavailable_fails_closed() {
   write_copying_ln "$fakebin"
   write_failing_cmd "$fakebin" "$marker"
 
+  # shellcheck disable=SC2016  # "$1" is the child shell's positional parameter, not this script's.
   if lib_eval "$fakebin" 'fm_lock_try_create "$1/lock"' "$dir"; then
     fail "a lock was created with no working symlink or junction primitive"
   fi
@@ -142,6 +145,7 @@ test_junction_failure_latches_per_process() {
 
   # Two attempts inside one shell process: a failed junction capability is
   # latched, so cmd.exe is spawned once no matter how many creates follow.
+  # shellcheck disable=SC2016  # "$1" is the child shell's positional parameter, not this script's.
   lib_eval "$fakebin" \
     'fm_lock_try_create "$1/lock"; fm_lock_try_create "$1/lock"; true' "$dir" >/dev/null
   [ "$(wc -l < "$marker" | tr -d ' ')" = 1 ] \

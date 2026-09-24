@@ -56,6 +56,7 @@ SH
 }
 
 lib_eval() {  # <fakebin> <expression>
+  # shellcheck disable=SC2016  # $1/$2 are the child bash's positional parameters, not this script's.
   env PATH="$1:$PATH" bash -c '. "$1"; eval "$2"' _ "$LIB" "$2"
 }
 
@@ -209,6 +210,7 @@ test_no_powershell_pays_nothing() {
   local fakebin bashbin
   fakebin=$(make_fakebin absent)
   bashbin=$(command -v bash) || fail "no bash on PATH for the empty-PATH probe"
+  # shellcheck disable=SC2016  # "$1" is the child bash's positional parameter, not this script's.
   if env PATH="$fakebin" "$bashbin" -c '. "$1"; fm_win32_proc_available' _ "$LIB" 2>/dev/null; then
     fail "available reported a powershell capability on an empty PATH"
   fi

@@ -761,12 +761,12 @@ test_pool_slot_teardown_under_a_noncanonical_state_spelling() {
   mkdir -p "$case_dir/config"
   printf '%s\n' manual > "$case_dir/config/backlog-backend"
   # The same state dir under a second spelling: drive-letter form on MSYS
-  # (the production failure mode), a symlink elsewhere.
+  # (the production failure mode), a dot component elsewhere - a symlink
+  # would be refused outright by fm_backlog_directory_present's -L check.
   if command -v cygpath >/dev/null 2>&1; then
     alias_state=$(cygpath -m "$case_dir/state")
   else
-    ln -s "$case_dir/state" "$TMP_ROOT/noncanon-state"
-    alias_state="$TMP_ROOT/noncanon-state"
+    alias_state="$case_dir/./state"
   fi
   set +e
   out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \

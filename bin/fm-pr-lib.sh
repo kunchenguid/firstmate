@@ -346,8 +346,8 @@ fm_pr_sha256() {
 # POSIX-faithful filesystem (chmod 000 reports 0) and false on any probe
 # failure, so undetermined cases stay refused.
 fm_pr_mode_bits_unfaithful() {  # <dir>
-  local dir=$1 probe after
-  probe=$(mktemp "$dir/.fm-pr-modeprobe.XXXXXX" 2>/dev/null) || return 1
+  local probe_dir=$1 probe after
+  probe=$(mktemp "$probe_dir/.fm-pr-modeprobe.XXXXXX" 2>/dev/null) || return 1
   chmod 000 "$probe" 2>/dev/null || { rm -f "$probe"; return 1; }
   after=$(fm_pr_file_mode "$probe") || after=
   rm -f "$probe"

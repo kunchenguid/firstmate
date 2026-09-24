@@ -24,9 +24,9 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 
 TMP_ROOT=$(fm_test_tmproot fm-spawn-win32-herdr)
 
-# A herdr pane id the fake CLI answers for; the spawn resolves it through the
-# adopted home workspace and `tab create`, never through a real server.
-FAKE_PANE_ID=w9:p2
+# The fake CLI answers for herdr pane w9:p2 (embedded in the FM_FAKE_* JSON
+# literals below); the spawn resolves it through the adopted home workspace
+# and `tab create`, never through a real server.
 
 # make_win32_fakebin <dir> -> fakebin with:
 #   herdr     - logs every invocation to $FM_HERDR_LOG (unit-separated args)

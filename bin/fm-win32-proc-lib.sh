@@ -69,6 +69,7 @@ fm_win32_proc_load() {
   declare -gA _FM_WIN32_ROW=() 2>/dev/null || { _FM_WIN32_UNAVAILABLE=1; return 1; }
   local bin=powershell.exe
   command -v powershell.exe >/dev/null 2>&1 || bin=powershell
+  # shellcheck disable=SC2016  # $_.ProcessId et al. are PowerShell pipeline variables, not bash expansions.
   _FM_WIN32_TABLE=$("$bin" -NoProfile -NonInteractive -Command \
     'Get-CimInstance Win32_Process | ForEach-Object { "{0}`t{1}`t{2}`t{3}`t{4}" -f $_.ProcessId,$_.ParentProcessId,$_.Name,$_.ExecutablePath,$_.CommandLine }' \
     2>/dev/null | tr -d '\r')

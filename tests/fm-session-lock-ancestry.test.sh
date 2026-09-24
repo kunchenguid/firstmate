@@ -1055,7 +1055,7 @@ expect_phase_foreign() {  # <dir> <n> <expected-arms> <owner-pid> <label>
 }
 
 test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
-  local dir frontend daemon ptyhost spare frontend_cyg daemon_cyg ptyhost_cyg spare_cyg i
+  local dir frontend ptyhost spare frontend_cyg daemon_cyg ptyhost_cyg spare_cyg i
   dir="$TMP_ROOT/e2e-background-session"
   make_background_session_home "$dir"
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
@@ -1065,7 +1065,6 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   wait_for_file "$dir/state/frontend-lock.rc" "the front-end's lock result"
   wait_for_file "$dir/state/spare-pid" "the bg-spare"
   frontend=$(tr -d '[:space:]' < "$dir/state/frontend-pid")
-  daemon=$(tr -d '[:space:]' < "$dir/state/daemon-pid")
   ptyhost=$(tr -d '[:space:]' < "$dir/state/ptyhost-pid")
   spare=$(tr -d '[:space:]' < "$dir/state/spare-pid")
   frontend_cyg=$(tr -d '[:space:]' < "$dir/state/frontend-cygpid")

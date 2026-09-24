@@ -177,12 +177,12 @@ ancestry_names_omp() {
 # omp ancestry, so the same table decides it. Kept to the same eight hops
 # the POSIX walk allows.
 _fm_ancestry_names_omp_win32() {
-  local winpid ppid comm args hops=0
+  local winpid comm args hops=0
   fm_win32_proc_load || return 1
   for winpid in $(fm_win32_ancestor_winpids); do
     [ "$hops" -lt 8 ] || break
     hops=$((hops + 1))
-    fm_win32_proc_get "$winpid" ppid comm args || break
+    fm_win32_proc_get "$winpid" _ comm args || break
     [ "$(basename -- "$comm")" = omp ] && return 0
   done
   return 1
@@ -197,7 +197,7 @@ _fm_ancestry_names_omp_win32() {
 #          (any node process holding a harness-shaped path matches it), so it is
 #          used only when no marker is present.
 harness_process_verdict() {  # <pid>
-  local pid=$1 comm args= argv0
+  local pid=$1 comm args='' argv0
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 0
   case "$(basename -- "$comm")" in
     node*|python*) args=$(ps -o args= -p "$pid" 2>/dev/null) ;;
@@ -315,10 +315,10 @@ harness_ancestry() {  # [<pid>]
 # ancestor list already bridges the Cygwin fork-stub gap and the Cygwin/Win32
 # pid spaces, so this walk only applies the shared verdict per hop.
 _fm_harness_ancestry_win32() {  # [<pid>]
-  local winpid ppid comm args verdict
+  local winpid comm args verdict
   fm_win32_proc_load || return 0
   for winpid in $(fm_win32_ancestor_winpids ${1:+"$1"}); do
-    fm_win32_proc_get "$winpid" ppid comm args || break
+    fm_win32_proc_get "$winpid" _ comm args || break
     verdict=$(harness_verdict_for_fields "$comm" "$args" "${args%% *}")
     [ -z "$verdict" ] || { echo "$verdict"; return; }
   done

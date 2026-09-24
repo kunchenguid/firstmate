@@ -566,13 +566,6 @@ _fm_lock_try_create_junction() {  # <lockdir> <ownerdir>
   [ "$_FM_LOCK_JUNCTION_STATE" = unavailable ] && return 1
   command -v cmd.exe >/dev/null 2>&1 || { _FM_LOCK_JUNCTION_STATE=unavailable; return 1; }
   command -v cygpath >/dev/null 2>&1 || { _FM_LOCK_JUNCTION_STATE=unavailable; return 1; }
-  # A copy-fallback ln -s leaves a real directory where the link belongs.
-  # Only its known files are removed so rmdir still refuses over foreign
-  # content, keeping the fallback unable to overwrite a stranger's lockdir.
-  if [ -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
-    fm_lock_clean_known_files "$lockdir"
-    rmdir "$lockdir" 2>/dev/null || return 1
-  fi
   wlock=$(cygpath -w "$lockdir" 2>/dev/null) || return 1
   wowner=$(cygpath -w "$ownerdir" 2>/dev/null) || return 1
   # //c and //J survive MSYS argument conversion, which would otherwise turn
@@ -608,6 +601,13 @@ fm_lock_try_create() {
     fi
   else
     fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
+    # A copy-fallback ln -s leaves a real directory where the link belongs.
+    # Only its known files are removed so rmdir still refuses over foreign
+    # content, keeping the fallback unable to overwrite a stranger's lockdir.
+    if [ -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+      fm_lock_clean_known_files "$lockdir"
+      rmdir "$lockdir" 2>/dev/null || true
+    fi
     if _fm_lock_try_create_junction "$lockdir" "$ownerdir"; then
       if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
         FM_LOCK_OWNER_DIR=$ownerdir
