@@ -137,6 +137,7 @@ until [ -s "$PROBE_OUT" ]; do
 done
 tmux -L "$SOCKET" send-keys -t "$SESSION" Escape
 
+# shellcheck disable=SC2016 # Literal JavaScript; its template expressions are not shell expansions.
 missing=$(node -e '
 const probe = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
 const missing = [];
