@@ -61,6 +61,12 @@ write_task ship-odd    ship no-mistakes fm:8
 write_task ship-wide   ship no-mistakes fm:9
 write_task ship-readfail ship no-mistakes fm:11
 write_task ship-captured ship no-mistakes fm:12
+write_task ship-ansi     ship no-mistakes fm:13
+# A project can register its own ship-branch prefix, so this task's branch is
+# not fm/<id>. bin/fm-spawn.sh records the branch it actually built and
+# bin/fm-fleet-snapshot.sh publishes it; run attribution is keyed on it.
+write_task ship-prefixed ship no-mistakes fm:14
+printf 'branch=release/ship-prefixed\n' >> "$HOME_DIR/state/ship-prefixed.meta"
 write_task scout-one   scout local-only fm:10
 # No window at all, which is how the fleet document reports a task it could not
 # observe as well as one that never had an endpoint.
@@ -78,8 +84,8 @@ write_task gone-one    ship no-mistakes fm:99
 cat > "$TMP_ROOT/overview.txt" <<'TOON'
 current_branch: main
 runs_on_current_branch: 0
-count: 7 of 7 total
-runs[7]{id,branch,status,head,pr}:
+count: 9 of 9 total
+runs[9]{id,branch,status,head,pr}:
   "01FLOWRUNAAAAAAAAAAAAAAAA1",fm/ship-run,running,"bb73f233","https://github.com/example/project/pull/25"
   "01FLOWRUNAAAAAAAAAAAAAAAA2",fm/ship-run,failed,"a1b2c3d4",""
   "01FLOWRUNAAAAAAAAAAAAAAAA3",fm/ship-badrun,running,"c0ffee11",""
@@ -87,6 +93,8 @@ runs[7]{id,branch,status,head,pr}:
   "01FLOWRUNAAAAAAAAAAAAAAAA5",fm/ship-merged,completed,"feedbeef",""
   "01FLOWRUNAAAAAAAAAAAAAAAA6",fm/ship-wide,running,"ab12cd34",""
   "01FLOWRUNAAAAAAAAAAAAAAAA7",fm/ship-captured,failed,"9b76c588",""
+  "01FLOWRUNAAAAAAAAAAAAAAAA8",fm/ship-ansi,running,"11aa22bb",""
+  "01FLOWRUNAAAAAAAAAAAAAAAA9",release/ship-prefixed,running,"33cc44dd",""
 TOON
 
 cat > "$TOON_DIR/01FLOWRUNAAAAAAAAAAAAAAAA1.txt" <<'TOON'
@@ -113,6 +121,16 @@ TOON
 
 # An `active_for` carrying a unit the parser does not know must yield null
 # rather than a partial sum, which would understate the elapsed materially.
+cat > "$TOON_DIR/01FLOWRUNAAAAAAAAAAAAAAAA9.txt" <<'TOON'
+run:
+  id: "01FLOWRUNAAAAAAAAAAAAAAAA9"
+  branch: release/ship-prefixed
+  status: running
+  head: 33cc44dd
+  steps[1]{step,status,findings,duration_ms}:
+    review,running,0,0
+TOON
+
 cat > "$TOON_DIR/01FLOWRUNAAAAAAAAAAAAAAAA4.txt" <<'TOON'
 run:
   id: "01FLOWRUNAAAAAAAAAAAAAAAA4"
@@ -193,6 +211,12 @@ if [ -n "\$run" ]; then
     cat "$TOON_DIR/\$run.txt"
     exit 0
   fi
+  # Colourised, on stderr, with nothing on stdout: the shape that makes the
+  # collector fall back to stderr for the failed read's own words.
+  if [ "\$run" = 01FLOWRUNAAAAAAAAAAAAAAAA8 ]; then
+    printf '\033[31merror: the daemon said no\033[0m\n' >&2
+    exit 1
+  fi
   echo "error: repo not initialized"
   exit 1
 fi
@@ -263,7 +287,7 @@ case "${1:-}" in
     printf 'fm:1 fm-ship-run\nfm:2 fm-ship-norun\nfm:3 fm-ship-direct\nfm:4 fm-ship-merged\n'
     printf 'fm:5 fm-ship-closed\nfm:6 fm-ship-gitlab\nfm:7 fm-ship-badrun\nfm:8 fm-ship-odd\n'
     printf 'fm:9 fm-ship-wide\nfm:10 fm-scout-one\nfm:11 fm-ship-readfail\n'
-    printf 'fm:12 fm-ship-captured\n'
+    printf 'fm:12 fm-ship-captured\nfm:13 fm-ship-ansi\nfm:14 fm-ship-prefixed\n'
     ;;
   list-panes)
     printf '%s\n' "${target##*:}"
@@ -388,6 +412,26 @@ assert_equals "failed" \
 assert_equals "6980" \
   "$(agent ship-captured '[.steps[] | select(.step == "push")][0].duration_ms')" \
   "and their durations"
+
+# --- a project that registered its own ship-branch prefix -------------------
+
+assert_equals "release/ship-prefixed" "$(agent ship-prefixed '.branch')" \
+  "the task's branch is read from the fleet document, not rebuilt from its id"
+assert_equals "01FLOWRUNAAAAAAAAAAAAAAAA9" "$(agent ship-prefixed '.run.id')" \
+  "so its run is attributed, which keying on fm/<id> would have missed entirely"
+assert_equals "true" "$(agent ship-prefixed '.collection.ok')" \
+  "and the row does not report a busy task as having no pipeline run"
+
+# --- a failed read whose diagnosis is colourised ----------------------------
+
+assert_equals "false" "$(agent ship-ansi '.collection.ok')" \
+  "a run read that fails collects as a failure"
+assert_contains "$(agent ship-ansi '.collection.reason')" "error: the daemon said no" \
+  "the command's own words are read from stderr when stdout is empty"
+assert_not_contains "$(agent ship-ansi '.collection.reason')" "[31m" \
+  "with its colour escapes stripped rather than carried onto the wire"
+assert_not_contains "$(agent ship-ansi '.collection.reason')" "u001b" \
+  "and none left encoded in the JSON either"
 
 # --- the building phase -----------------------------------------------------
 

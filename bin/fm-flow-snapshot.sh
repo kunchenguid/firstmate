@@ -383,7 +383,10 @@ axi_error() {  # <stdout> <stderr-file>
   local line
   line=$(printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | head -1)
   if [ -z "$line" ] && [ -s "$2" ]; then
-    line=$(sed 's/\x1b\[[0-9;]*m//g' "$2" 2>/dev/null |
+    # A literal escape byte, not \x1b: that is a GNU sed extension, and the BSD
+    # sed this file already branches for matches the characters "x1b" instead,
+    # so a colourised diagnosis would reach the wire with its escapes intact.
+    line=$(sed $'s/\033\\[[0-9;]*m//g' "$2" 2>/dev/null |
       grep -v -e '^[[:space:]]*$' -e 'version of no-mistakes' -e '^Run "no-mistakes update"' |
       head -1)
   fi
@@ -399,6 +402,7 @@ row_common() {  # <task-json>
   FM_ROW_ID=$(printf '%s' "$task" | jq -r '.id')
   FM_ROW_KIND=$(printf '%s' "$task" | jq -r '.kind // ""')
   FM_ROW_MODE=$(printf '%s' "$task" | jq -r '.mode // ""')
+  FM_ROW_BRANCH=$(printf '%s' "$task" | jq -r '.branch // ""')
   FM_ROW_PROJECT=$(printf '%s' "$task" | jq -r '.project // ""')
   FM_ROW_WORKTREE=$(printf '%s' "$task" | jq -r '.paths.worktree.path // ""')
   FM_ROW_WINDOW=$(printf '%s' "$task" | jq -r '.endpoint.target // ""')
@@ -454,7 +458,16 @@ agent_json() {  # <task-json>
   agent_alive=$FM_ROW_AGENT_ALIVE
   pr_url=$FM_ROW_PR_URL
   meta=$FM_ROW_META
-  branch="fm/$id"
+  # Read, never derived. Run attribution is keyed on this branch, and the ship
+  # branch is not always fm/<id>: a project can register its own branch prefix,
+  # bin/fm-spawn.sh builds the branch from it and records it, and
+  # bin/fm-fleet-snapshot.sh publishes that record. Deriving it here would key
+  # attribution on a branch no run was ever created for, and the row would
+  # report that a busy task has no pipeline run at all.
+  branch=$FM_ROW_BRANCH
+  # Only for a record written before the branch was recorded at all, where the
+  # historical default is the prefix bin/fm-spawn.sh still starts from.
+  [ -n "$branch" ] || branch="fm/$id"
 
   steps='[]'
   actives='[]'
@@ -685,7 +698,7 @@ compact_json() {  # <task-json>
 
   jq -n \
     --arg id "$FM_ROW_ID" \
-    --arg branch "fm/$FM_ROW_ID" \
+    --arg branch "${FM_ROW_BRANCH:-fm/$FM_ROW_ID}" \
     --arg project "$FM_ROW_PROJECT" \
     --arg worktree "$FM_ROW_WORKTREE" \
     --arg window "$FM_ROW_WINDOW" \
