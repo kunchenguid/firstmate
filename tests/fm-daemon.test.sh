@@ -992,6 +992,48 @@ test_housekeeping_captain_held_resurfaces_and_resets() {
   pass "housekeeping re-surfaces a forgotten captain hold on the long cadence and resets its window"
 }
 
+# Away mode honours the captain's own deferral: a captain call parked with
+# `fm-captain-hold.sh hold --until <date>` stays silent until that date, and its
+# window resets so it cannot fire the moment the date is checked again. Once the
+# date lapses, the same due window re-surfaces the forgotten hold as before.
+test_housekeeping_deferred_captain_hold_stays_silent_until_its_date() {
+  local dir state fakebin win pane key age until
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (deferred captain hold, away mode)"; return 0; }
+  dir=$(make_supercase deferred-captain-held-resurface)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-held-w15h"; pane="$dir/pane.txt"
+  mkdir -p "$dir/data" "$dir/config"
+  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml" || fail "could not copy the tasks-axi config"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
+  (cd "$dir" && tasks-axi add held-w15h 'delivered work' --file data/backlog.md) >/dev/null 2>&1 \
+    || fail "could not add the held backlog task"
+  printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$state/held-w15h.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "held-w15h" | tr ':/.' '___')
+  for until in 2999-01-01 2000-01-01; do
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
+      "$ROOT/bin/fm-captain-hold.sh" hold held-w15h --reason 'parked by the captain' --until "$until" >/dev/null 2>&1 \
+      || fail "could not park the captain call until $until"
+    rm -f "$state/.subsuper-escalations"
+    echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
+      FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+    [ -e "$state/.subsuper-paused-$key" ] || fail "captain-held marker cleared instead of reset (until $until)"
+    age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0) ))
+    [ "$age" -lt 60 ] || fail "captain-held marker was not reset to now (until $until, age ${age}s)"
+    if [ "$until" = 2999-01-01 ]; then
+      grep -F "captain-held" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+        && fail "a captain call deferred until $until re-surfaced in away mode: $(cat "$state/.subsuper-escalations")"
+    else
+      grep -F "awaiting the captain" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+        || fail "a lapsed deferral did not resume the away-mode captain-held recheck: $(cat "$state/.subsuper-escalations" 2>/dev/null || true)"
+    fi
+  done
+  pass "away mode keeps a captain call deferred with --until silent until its date, then re-surfaces it"
+}
+
 # A crew that RESUMED - whose latest status line no longer declares the wait - drops
 # its pause tracking without escalating. The dimension pinned here is that pane busy
 # state does not GATE that clear: the status append alone ends the wait, on the
@@ -2639,6 +2681,7 @@ test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_captain_held_resurfaces_and_resets
+test_housekeeping_deferred_captain_hold_stays_silent_until_its_date
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_busy_declared_wait_matures_its_window
 test_housekeeping_paused_unpaused_cleared

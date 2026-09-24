@@ -1115,7 +1115,10 @@ housekeeping() {  # <state>
       2) rm -f "$marker" ;;
       *)
         last=$(last_status_line "$state/$task.status")
-        if [ -n "$last" ] && status_is_captain_held "$last"; then
+        if [ -n "$last" ] && status_is_captain_held "$last" \
+          && FM_HOME="$FM_HOME" "$FM_DAEMON_DIR/fm-captain-hold.sh" open "$task" --deferred >/dev/null 2>&1; then
+          _now > "$marker"
+        elif [ -n "$last" ] && status_is_captain_held "$last"; then
           if escalate_add "$state" "captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $win"; then
             _now > "$marker"
           fi
