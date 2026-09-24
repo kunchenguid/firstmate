@@ -127,8 +127,9 @@ cat /dev/fd/3 > "$FAKE_CURL_LOG/header" 2>/dev/null || printf 'fd3 unreadable\n'
 if [ -n "${FAKE_CURL_MUTATE_SOURCE:-}" ]; then
   cp "$FAKE_CURL_MUTATE_SOURCE" "${FAKE_CURL_MUTATE_TARGET:?}"
 fi
-if [ "${FAKE_CURL_FAIL:-0}" = 1 ]; then
-  exit 7
+if [ "${FAKE_CURL_FAIL:-0}" != 0 ]; then
+  [ "$FAKE_CURL_FAIL" = 1 ] && exit 7
+  exit "$FAKE_CURL_FAIL"
 fi
 cp "${FAKE_CURL_RESPONSE:?}" "$out"
 printf '%s' "${FAKE_CURL_HTTP:-200}"
@@ -273,6 +274,37 @@ shadow_record=$(sed -n 's/^  shadow_record: //p' <<<"$out")
   || fail "shadow decision record was not protected with mode 600"
 assert_equals 'clear' "$(jq -r .decision.status "$shadow_record")" "shadow record preserves the decision status"
 assert_equals 'pager' "$(jq -r .project "$shadow_record")" "shadow record preserves the project"
+mkdir -p "$TMP_ROOT/data/t-42"
+cp "$BRIEF" "$TMP_ROOT/data/t-42/brief.md"
+assert_shadow_failure() {  # <label> <reason>
+  local record
+  assert_contains "$out" "  reason: $2" "shadow failure is still an error outcome: $1"
+  record=$(sed -n 's/^  shadow_record: //p' <<<"$out")
+  [ -f "$record" ] || fail "shadow did not record the failed attempt: $1"
+  assert_equals 'error' "$(jq -r .decision.status "$record")" "failed attempt is recorded as error: $1"
+  assert_contains "$(jq -r .decision.reason "$record")" "$2" "failed attempt keeps its reason: $1"
+  assert_equals 't-42' "$(jq -r .task "$record")" "failed attempt carries the task id: $1"
+}
+reset_log
+OPENROUTER_API_KEY=$KEY FAKE_CURL_HTTP=429 run code out err "$TMP_ROOT/data/t-42/brief.md" --project pager
+assert_shadow_failure http 'http 429 after'
+reset_log
+OPENROUTER_API_KEY=$KEY FAKE_CURL_FAIL=28 run code out err "$TMP_ROOT/data/t-42/brief.md" --project pager
+assert_shadow_failure timeout 'timeout after'
+reset_log
+printf '%s\n' '{"model":"jev","answers":{}}' > "$RESPONSE"
+OPENROUTER_API_KEY=$KEY run code out err "$TMP_ROOT/data/t-42/brief.md" --project pager
+assert_shadow_failure response 'response is not a rule Choice answer'
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+OPENROUTER_API_KEY=$KEY FAKE_QUOTA_FAIL=1 run code out err "$TMP_ROOT/data/t-42/brief.md" --project pager
+assert_shadow_failure quota-axi 'quota-axi --json failed'
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+OPENROUTER_API_KEY=$KEY run code out err "$TMP_ROOT/data/t-42/brief.md" --project pager
+shadow_record=$(sed -n 's/^  shadow_record: //p' <<<"$out")
+assert_equals 't-42' "$(jq -r .task "$shadow_record")" "successful record carries the task id"
+assert_not_contains "$(cat "$shadow_record")" "$(sed -n 2p "$BRIEF")" "shadow record never stores brief text"
 printf '%s\n' on > "$HOME_DIR/config/jev-mode"
 pass "shadow mode records Jev's recommendation without authorizing dispatch"
 
@@ -575,6 +607,19 @@ mv "$TMP_ROOT/malformed-usage.json" "$RESPONSE"
 OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "malformed usage is an error outcome"
 assert_contains "$out" '  reason: response is not a rule Choice answer' "malformed usage cannot break text rendering silently"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+jq '.usage = {"prompt_tokens": 700, "completion_tokens": 0}' "$RESPONSE" > "$TMP_ROOT/openrouter-usage.json"
+mv "$TMP_ROOT/openrouter-usage.json" "$RESPONSE"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "prompt_tokens/completion_tokens usage is accepted"
+assert_contains "$out" 'tokens: 700/0' "prompt_tokens/completion_tokens usage is rendered"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+jq 'del(.usage)' "$RESPONSE" > "$TMP_ROOT/no-usage.json"
+mv "$TMP_ROOT/no-usage.json" "$RESPONSE"
+OPENROUTER_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a missing usage object is accepted"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 jq 'del(.answers.rule.probabilities.default)' "$RESPONSE" > "$TMP_ROOT/malformed-probabilities.json"

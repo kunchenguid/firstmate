@@ -223,10 +223,30 @@ done < <(jq -r '
 
 RULE_COUNT=$(jq -r '(.rules // []) | length' "$RULES")
 
+write_shadow_record() {  # <decision-json>: prints the record path
+  local dir="$DATA/jev-shadow" record
+  umask 077
+  mkdir -p "$dir" || return 1
+  record=$(mktemp "$dir/decision.XXXXXX") || return 1
+  if ! chmod 600 "$record" || ! jq -n --arg recorded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg project "$PROJECT" \
+    --arg brief "$BRIEF" --argjson decision "$1" \
+    '{recorded_at: $recorded_at,
+      task: ($brief | split("/") | if length > 1 then .[-2] else null end),
+      project: $project, brief: $brief, decision: $decision}' > "$record"; then
+    rm -f "$record"
+    return 1
+  fi
+  printf '%s' "$record" | tr '\t\r\n' '   '
+}
+
 emit_error() {
-  local reason=$1
+  local reason=$1 record=''
+  if [ "$JEV_MODE" = shadow ]; then
+    record=$(write_shadow_record "$(jq -nc --arg reason "$reason" '{status: "error", reason: $reason}')") || record=''
+  fi
   echo "dispatch-resolve: error ($reason)" >&2
   printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
+  [ -z "$record" ] || printf '  shadow_record: %s\n' "$record"
   exit 0
 }
 
@@ -258,9 +278,10 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$JEV_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
     -X POST "$JEV_BASE/alpha/decisions" -H 'Content-Type: application/json' \
     -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$OPENROUTER_API_KEY_PRIVATE") \
-    --data-binary @- 2>/dev/null) || HTTP=000
+    --data-binary @- 2>/dev/null) || { CURL_RC=$?; HTTP=000; }
   T1=$(fm_timing_now_ms)
   LAT_MS=$(( T1 - T0 ))
+  [ "${CURL_RC:-0}" != 28 ] || emit_error "timeout after ${LAT_MS} ms"
   [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
 jq -e --slurpfile rules "$RULES" '
     (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
@@ -271,10 +292,10 @@ jq -e --slurpfile rules "$RULES" '
     ((.answers.rule.probabilities | keys | sort) == $choices) and
     all(.answers.rule.probabilities[]; type == "number" and . >= 0 and . <= 1) and
     ((.answers.rule.probabilities | [.[]] | add) as $total | $total >= 0.99 and $total <= 1.01) and
-    ((has("usage") | not) or
+    (.usage == null or
       ((.usage | type) == "object" and
-       (.usage.input_tokens | type) == "number" and
-       (.usage.output_tokens | type) == "number"))' \
+       (((.usage.input_tokens | type) == "number" and (.usage.output_tokens | type) == "number") or
+        ((.usage.prompt_tokens | type) == "number" and (.usage.completion_tokens | type) == "number"))))' \
   "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
 
 # ---- quota evidence: one quota-axi --json snapshot -----------------------------
@@ -370,7 +391,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
      then {source: "default", use: profiles($cfg.default // null), note: "rule \($choice) floor \($rule.floor.scope) below \($rule.floor.min_percent)%: fall through to default"}
    else {source: $choice, use: profiles($rule.use), note: "rule matched"} end) as $sel |
   {
-    model: $r.model, latency_ms: $lat, tokens: ($r.usage // null),
+    model: $r.model, latency_ms: $lat, tokens: ($r.usage | if . == null then null else {input_tokens: (.input_tokens // .prompt_tokens), output_tokens: (.output_tokens // .completion_tokens)} end),
     rule: $choice,
     rule_when: (if $rule == null then $none_criterion else $rule.when end | .[0:60]),
     confidence: $a.confidence, probabilities: $a.probabilities
@@ -421,21 +442,9 @@ TEXT=$(jq -r --arg mode "$JEV_MODE" '
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
       + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
 if [ "$JEV_MODE" = shadow ]; then
-  SHADOW_DIR="$DATA/jev-shadow"
-  umask 077
-  mkdir -p "$SHADOW_DIR" || emit_error "could not create shadow record directory"
-  SHADOW_RECORD=$(mktemp "$SHADOW_DIR/decision.XXXXXX") || emit_error "could not create shadow record"
-  chmod 600 "$SHADOW_RECORD" || emit_error "could not protect shadow record"
-  if ! jq -n --arg recorded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg project "$PROJECT" \
-    --arg brief "$BRIEF" --argjson decision "$RESULT" \
-    '{recorded_at: $recorded_at, project: $project, brief: $brief, decision: $decision}' \
-    > "$SHADOW_RECORD"; then
-    rm -f "$SHADOW_RECORD"
-    emit_error "could not write shadow record"
-  fi
-  SHADOW_DISPLAY=$(printf '%s' "$SHADOW_RECORD" | tr '\t\r\n' '   ')
+  SHADOW_RECORD=$(write_shadow_record "$RESULT") || emit_error "could not write shadow record"
   TEXT="$TEXT
-  shadow_record: $SHADOW_DISPLAY"
+  shadow_record: $SHADOW_RECORD"
 fi
 printf '%s\n' "$TEXT"
 exit 0

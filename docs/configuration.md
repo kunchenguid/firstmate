@@ -478,7 +478,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 `bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with Jev through OpenRouter's Decisions API, so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
 The gitignored `config/jev-mode` selects `off`, `shadow`, or `on`; an absent file defaults to `off`.
 `bin/fm-jev.sh` is the single status and mutation interface, exposed to the captain through `/jev`, `/jev status`, `/jev off`, `/jev shadow`, and `/jev on`.
-Shadow mode asks Jev and writes each valid recommendation under `data/jev-shadow/`, but emits no applicable `profile:` line and leaves the normal Firstmate intake authoritative.
+Shadow mode asks Jev and writes one record per attempt under `data/jev-shadow/`, carrying the task id, project, brief path, and either the decision or the failure reason (HTTP, timeout, unusable response, quota-axi), but never the brief text; it emits no applicable `profile:` line and leaves the normal Firstmate intake authoritative.
 On mode allows a clear result to emit the applicable `profile:` line.
 Both active modes require `OPENROUTER_API_KEY` in the calling environment or a non-empty `OPENROUTER_API_KEY=` line in the home's gitignored `.env`; the environment wins, matching the Relay and mail-plane contracts, and the shared accessor in `bin/fm-env-lib.sh` reads the line.
 Off or a missing key means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
