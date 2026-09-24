@@ -928,6 +928,59 @@ test_account_pin_and_active_seat_refuse_the_spawn() {
   pass "a home configuring both an account pin and an active seat is refused before anything exists"
 }
 
+# make_dead_endpoint_tmux <fakebin> <window>
+# Wraps the spawn fake tmux so <window> exists and its pane runs a bare shell:
+# the positively agent-free endpoint a relaunch requires before it may launch.
+make_dead_endpoint_tmux() {
+  local fakebin=$1 window=$2
+  mv "$fakebin/tmux" "$fakebin/tmux-spawn"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  list-windows*) printf '%s\\n' '$window'; exit 0 ;;
+  *'#{pane_tty}'*) exit 1 ;;
+  *'#{pane_current_command}'*) printf 'zsh\\n'; exit 0 ;;
+esac
+exec "$fakebin/tmux-spawn" "\$@"
+SH
+  chmod +x "$fakebin/tmux"
+}
+
+test_account_pin_and_recorded_seat_refuse_the_relaunch() {
+  local rec id out meta_before
+  id=seat-account-relaunch-1
+  rec=$(spawn_case spawn-account-relaunch "$id")
+  read_spawn_case "$rec"
+  mkdir -p "$SEATS_DIR/work"
+  printf 'work\n' > "$HOME_DIR/config/claude-seat"
+  out=$(run_spawn_here "$HOME_DIR" "$WT_DIR" "$FAKEBIN" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  expect_code 0 "$?" "the task's first spawn on the work seat should succeed: $out"
+  assert_grep "claude_seat=$SEATS_DIR/work" "$HOME_DIR/state/$id.meta" \
+    "the task record must carry the seat it launched on"
+  # The home drops its seat and adds a pin; the task's record still names the
+  # work seat, which a relaunch keeps.
+  rm "$HOME_DIR/config/claude-seat"
+  printf 'ordinary\n' > "$HOME_DIR/config/claude-account"
+  make_dead_endpoint_tmux "$FAKEBIN" "fm-$id"
+  meta_before="$CASE_DIR/meta.before"
+  cp "$HOME_DIR/state/$id.meta" "$meta_before"
+  : > "$LAUNCH_LOG"
+
+  out=$(CLAUDE_CONFIG_DIR='' FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+    fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN" "$id" --relaunch)
+  expect_code 1 "$?" "an account pin must refuse relaunching a task recorded on a seat: $out"
+  assert_contains "$out" "$HOME_DIR/config/claude-account" \
+    "the refusal must name the account pin file by path"
+  assert_contains "$out" "task $id was launched on the Claude seat $SEATS_DIR/work" \
+    "the refusal must name the recorded seat and say the task was launched on it"
+  assert_not_contains "$out" "remove either file" \
+    "the refusal must not offer removing the seat file, which leaves the recorded seat in place"
+  cmp -s "$meta_before" "$HOME_DIR/state/$id.meta" \
+    || fail "a refused relaunch must leave the task record untouched"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused relaunch must launch no worker endpoint"
+  pass "an account pin refuses relaunching a task recorded on a seat before anything is touched"
+}
+
 test_absent_setting_is_the_default_seat
 test_switch_to_logged_in_seat_updates_only_the_setting
 test_switch_to_seat_that_is_not_logged_in_is_refused
@@ -961,5 +1014,6 @@ test_ambient_config_dir_still_reaches_workers_when_no_seat_is_set
 test_active_seat_overrides_the_ambient_config_dir
 test_non_claude_spawn_records_no_seat
 test_account_pin_and_active_seat_refuse_the_spawn
+test_account_pin_and_recorded_seat_refuse_the_relaunch
 
 echo "# all fm-seat tests passed"

@@ -2280,15 +2280,28 @@ fi
 # workspace trust was pre-registered in the SEAT's profile - launching the
 # worker against a store that holds no trust entry for its own copy. Refuse the
 # spawn here, before any endpoint, worktree, or record exists, rather than
-# letting either mechanism quietly take the other's launch.
-if [ -f "$CONFIG/claude-account" ] && [ "$(fm_seat_active)" != "$FM_SEAT_DEFAULT_NAME" ]; then
-  {
-    echo "error: this home configures a worker account pin and an active Claude seat, and both choose a Claude worker's configuration directory:"
-    echo "  $CONFIG/claude-account"
-    echo "  $CONFIG/claude-seat"
-    echo "remove either file to resolve the conflict"
-  } >&2
-  exit 1
+# letting either mechanism quietly take the other's launch. A claude relaunch
+# of a task whose record carries a claude_seat keeps that seat whatever the
+# home's active seat now reads (below), so the pin conflicts with it the same
+# way and is refused the same way.
+if [ -f "$CONFIG/claude-account" ]; then
+  if [ "$(fm_seat_active)" != "$FM_SEAT_DEFAULT_NAME" ]; then
+    {
+      echo "error: this home configures a worker account pin and an active Claude seat, and both choose a Claude worker's configuration directory:"
+      echo "  $CONFIG/claude-account"
+      echo "  $CONFIG/claude-seat"
+      echo "remove either file to resolve the conflict"
+    } >&2
+    exit 1
+  fi
+  if [ "$HARNESS" = claude ] && [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = claude ] && [ -n "$RELAUNCH_SEAT" ]; then
+    {
+      echo "error: task $ID was launched on the Claude seat $RELAUNCH_SEAT, and this home now configures a worker account pin that also chooses a Claude worker's configuration directory:"
+      echo "  $CONFIG/claude-account"
+      echo "a relaunch keeps the seat its task was launched on, so it cannot also follow the pin; relaunch it with the pin absent, or finish it and spawn the work as a new task"
+    } >&2
+    exit 1
+  fi
 fi
 # Worker account pin (header above): resolved before any endpoint, worktree, or
 # record exists. An absent pin selects nothing and leaves every later launch
@@ -4823,9 +4836,10 @@ esac
 # A home's worker account pin replaces that forwarding: the launch names the
 # pinned root (or unsets the variable for the ordinary Claude account) and
 # sheds the environment credentials Claude ranks above the root's login.
-# The pin and an active seat are mutually exclusive - a home configuring both
-# is refused far above, before any endpoint, worktree or record exists - so
-# these branches can never both want CLAUDE_CONFIG_DIR at once. The seat branch
+# The pin and an active seat, or a relaunch's recorded seat, are mutually
+# exclusive - a home configuring both is refused far above, before any
+# endpoint, worktree or record exists - so these branches can never both want
+# CLAUDE_CONFIG_DIR at once. The seat branch
 # also carries the plain ambient forwarding described above, because
 # fm_seat_config_dir falls back to firstmate's own CLAUDE_CONFIG_DIR when no
 # named seat is active; a separate ambient branch would only re-assign the same
