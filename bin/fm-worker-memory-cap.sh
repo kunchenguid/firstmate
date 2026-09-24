@@ -8,14 +8,14 @@
 # MemoryMax=<cap> and MemorySwapMax=<cap>, so the kernel's cgroup OOM killer
 # stops a runaway tool inside that lane instead of letting it exhaust the host.
 # The scope holds the agent and every process it starts; systemd's default
-# OOMPolicy=stop then ends the whole scope, so the lane dies as one unit and
+# OOMPolicy=stop ends the whole scope, so the lane dies as one unit and
 # this script records that as the lane's failure.
 #
 # Config format: one rule per line, `#` comments and blank lines ignored:
-#   <harness|*> <project|*> <MiB>
+#   <harness|*> <project> <MiB>
 # <harness> is the resolved worker harness name, <project> is the basename of
-# the project clone, and <MiB> is a positive whole number of mebibytes. The
-# FIRST matching line wins, so write specific rules above general ones. A task
+# the project clone (not `*`), and <MiB> is a positive whole number of mebibytes.
+# The FIRST matching line wins, so write specific rules above general ones. A task
 # no rule matches runs uncapped. Any malformed line refuses every spawn and
 # relaunch from the home, before any endpoint, worktree, or record exists.
 #
@@ -49,7 +49,7 @@ resolve() {  # <config-file> <harness> <project>
   local file=$1 harness=$2 project=$3 line n=0 h p mib extra found=
   set -f
   if [ ! -f "$file" ] || [ ! -r "$file" ]; then
-    echo "error: config/worker-memory-max must be a readable regular file of '<harness|*> <project|*> <MiB>' lines" >&2
+    echo "error: config/worker-memory-max must be a readable regular file of '<harness|*> <project> <MiB>' lines" >&2
     return 1
   fi
   while IFS= read -r line || [ -n "$line" ]; do
@@ -60,7 +60,11 @@ resolve() {  # <config-file> <harness> <project>
     [ "$#" -gt 0 ] || continue
     h=${1-} p=${2-} mib=${3-} extra=${4-}
     if [ "$#" -ne 3 ] || [ -n "$extra" ]; then
-      echo "error: config/worker-memory-max line $n must be '<harness|*> <project|*> <MiB>'" >&2
+      echo "error: config/worker-memory-max line $n must be '<harness|*> <project> <MiB>'" >&2
+      return 1
+    fi
+    if [ "$p" = '*' ]; then
+      echo "error: config/worker-memory-max line $n: project must name a concrete project" >&2
       return 1
     fi
     case "$mib" in
@@ -70,7 +74,7 @@ resolve() {  # <config-file> <harness> <project>
       ;;
     esac
     if [ -z "$found" ] && { [ "$h" = '*' ] || [ "$h" = "$harness" ]; } &&
-      { [ "$p" = '*' ] || [ "$p" = "$project" ]; }; then
+      [ "$p" = "$project" ]; then
       found=$mib
     fi
   done <"$file"

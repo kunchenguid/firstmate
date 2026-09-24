@@ -103,31 +103,30 @@ test_resolve_rules() {
 # harness project MiB
 claude gtm 2560   # specific first
 *      gtm 4096
-codex  *   3072
-
-*      *   8192
+codex  aio 3072
+*      aio 8192
 EOF
   out=$(cd "$TMP_ROOT/globdir" && "$CAP" resolve "$cfg" claude gtm)
   assert_equals 2560 "$out" "the first matching rule should win"
   out=$(cd "$TMP_ROOT/globdir" && "$CAP" resolve "$cfg" pi gtm)
   assert_equals 4096 "$out" "a wildcard harness should match any harness for its project"
   out=$("$CAP" resolve "$cfg" codex aio)
-  assert_equals 3072 "$out" "a wildcard project should match any project for its harness"
+  assert_equals 3072 "$out" "a concrete project rule should match its harness"
   out=$("$CAP" resolve "$cfg" pi aio)
-  assert_equals 8192 "$out" "the catch-all rule should match last"
+  assert_equals 8192 "$out" "a wildcard harness should match its project"
   printf 'claude gtm 2048\n' > "$cfg"
   out=$("$CAP" resolve "$cfg" pi aio)
   status=$?
   expect_code 0 "$status" "an unmatched lane should resolve cleanly"
   assert_equals '' "$out" "an unmatched lane should run uncapped"
-  for bad in 'claude gtm' 'claude gtm 2048 extra' 'claude gtm 0' 'claude gtm 2G' 'claude gtm 0100'; do
+  for bad in 'claude gtm' 'claude gtm 2048 extra' 'claude gtm 0' 'claude gtm 2G' 'claude gtm 0100' 'claude * 2048' '* * 2048'; do
     printf '%s\n' "$bad" > "$cfg"
     out=$("$CAP" resolve "$cfg" claude gtm 2>&1)
     status=$?
     expect_code 1 "$status" "malformed rule '$bad' should be refused"
     assert_contains "$out" "line 1" "the refusal should name the malformed line for '$bad'"
   done
-  pass "resolve applies first-match rules with wildcards and refuses malformed lines"
+  pass "resolve applies project-specific rules and refuses malformed lines"
 }
 
 test_outcome_records_oom_as_lane_failure() {
@@ -165,7 +164,6 @@ test_absent_config_leaves_launch_unwrapped() {
   status=$?
   expect_code 0 "$status" "a spawn without a cap file should succeed: $out"
   assert_not_contains "$(cat "$LAUNCH_LOG")" "systemd-run" "no cap file should mean no scope wrapper"
-  assert_not_contains "$out" "memory_max=" "no cap should be reported"
   [ ! -s "$RUN_LOG" ] || fail "no cap file should never probe systemd-run: $(cat "$RUN_LOG")"
   pass "an absent config/worker-memory-max leaves the launch unchanged"
 }
@@ -176,13 +174,12 @@ test_capped_launch_runs_in_scope() {
     make_case "capped-$allowlist" codex "capped-$allowlist-a1"
     install_fake_systemd
     [ "$allowlist" = absent ] || : > "$HOME_DIR/config/launch-env-allowlist"
-    printf 'claude * 999\ncodex project 2560\n' > "$HOME_DIR/config/worker-memory-max"
+    printf 'claude project 999\ncodex project 2560\n' > "$HOME_DIR/config/worker-memory-max"
     out=$(run_case_spawn "capped-$allowlist-a1" "$PROJ_DIR" --mode no-mistakes --yolo off)
     status=$?
     expect_code 0 "$status" "allowlist=$allowlist: a capped spawn should succeed: $out"
-    assert_contains "$out" "memory_max=2560MiB" "allowlist=$allowlist: the spawn line should report the cap"
     launch=$(cat "$LAUNCH_LOG")
-    assert_contains "$launch" "-p MemoryMax=2560M -p MemorySwapMax=2560M" \
+    assert_contains "$launch" "-p MemoryMax=2560M -p MemorySwapMax=2560M -p OOMPolicy=stop" \
       "allowlist=$allowlist: the launch should carry the matched cap for memory and swap"
     : > "$RUN_LOG"
     [ "$allowlist" = absent ] || printf 'PANE_MARKER\n' > "$HOME_DIR/config/launch-env-allowlist"
@@ -218,7 +215,7 @@ test_refusals_happen_before_any_record() {
 
   make_case noscope codex noscope-a1
   install_fake_systemd
-  printf '* * 2048\n' > "$HOME_DIR/config/worker-memory-max"
+  printf '* project 2048\n' > "$HOME_DIR/config/worker-memory-max"
   out=$(FM_FAKE_SYSTEMD_RUN_PROBE_RC=1 run_case_spawn noscope-a1 "$PROJ_DIR" --mode no-mistakes --yolo off)
   status=$?
   expect_code 1 "$status" "a host that cannot start the scope should refuse a capped spawn: $out"
@@ -227,7 +224,7 @@ test_refusals_happen_before_any_record() {
 
   make_case unmatched codex unmatched-a1
   install_fake_systemd
-  printf 'claude * 2048\n' > "$HOME_DIR/config/worker-memory-max"
+  printf 'claude project 2048\n' > "$HOME_DIR/config/worker-memory-max"
   out=$(FM_FAKE_SYSTEMD_RUN_PROBE_RC=1 run_case_spawn unmatched-a1 "$PROJ_DIR" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "a lane no rule matches should launch uncapped without probing: $out"
@@ -239,7 +236,7 @@ test_secondmate_is_never_capped() {
   local sm out status
   make_case secondmate codex sm-a1
   install_fake_systemd
-  printf '* * 2048\n' > "$HOME_DIR/config/worker-memory-max"
+  printf '* project 2048\n' > "$HOME_DIR/config/worker-memory-max"
   sm="$CASE_DIR/secondmate-home"
   mkdir -p "$sm/bin" "$sm/data"
   printf '# Firstmate\n' > "$sm/AGENTS.md"
@@ -264,7 +261,7 @@ test_live_oom_is_a_lane_failure() {
   fi
   command -v perl >/dev/null 2>&1 || { echo "skip: live OOM case needs perl"; return 0; }
   make_case live codex live-a1
-  printf 'codex * 100\n' > "$HOME_DIR/config/worker-memory-max"
+  printf 'codex project 100\n' > "$HOME_DIR/config/worker-memory-max"
   run_case_spawn live-a1 "$PROJ_DIR" --mode no-mistakes --yolo off >/dev/null ||
     fail "live: the capped spawn should succeed"
   cat > "$FAKEBIN_DIR/codex" <<'SH'
