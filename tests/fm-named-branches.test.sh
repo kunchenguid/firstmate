@@ -99,7 +99,7 @@ test_brief_refuses_unusable_branch_selections() {
 }
 
 test_spawn_checks_the_named_base_and_crew_branch_before_launch() {
-  local home proj fakebin id out status
+  local home proj fakebin remote id out status
   home="$TMP_ROOT/spawn/home"
   proj="$TMP_ROOT/spawn/proj"
   fakebin="$TMP_ROOT/spawn/bin"
@@ -148,6 +148,35 @@ test_spawn_checks_the_named_base_and_crew_branch_before_launch() {
   expect_code 1 "$status" "a shared crew branch was launched"
   assert_contains "$out" "already assigned to task named-spawn-other" "the occupying task was not named"
   assert_absent "$home/state/$id.meta" "a colliding launch published a task record"
+
+  id=named-spawn-local-ref
+  git -C "$proj" branch feature/local
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode local-only \
+    --branch-name feature/local --base-branch office >/dev/null
+  fill_brief "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$proj" --mode local-only --yolo off \
+    --branch-name feature/local --base-branch office 2>&1); status=$?
+  expect_code 1 "$status" "an existing local crew branch was launched"
+  assert_contains "$out" "already exists locally" "the local crew branch was not refused"
+  assert_absent "$home/state/$id.meta" "a local branch collision published a task record"
+
+  remote="$TMP_ROOT/spawn/remote.git"
+  git init -q --bare "$remote"
+  git -C "$proj" remote add origin "$remote"
+  git -C "$proj" push -q origin refs/heads/office:refs/heads/feature/remote
+  id=named-spawn-remote-ref
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode local-only \
+    --branch-name feature/remote --base-branch office >/dev/null
+  fill_brief "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$proj" --mode local-only --yolo off \
+    --branch-name feature/remote --base-branch office 2>&1); status=$?
+  expect_code 1 "$status" "an existing remote crew branch was launched"
+  assert_contains "$out" "already exists on origin" "the remote crew branch was not refused"
+  assert_absent "$home/state/$id.meta" "a remote branch collision published a task record"
   pass "fm-spawn: named base and crew-branch occupancy are refused before launch"
 }
 
@@ -186,7 +215,7 @@ test_local_merge_lands_on_the_recorded_base() {
   git -C "$proj" checkout -qb feature/widget
   commit_file "$proj" change change change
   feature=$(git -C "$proj" rev-parse HEAD)
-  git -C "$proj" checkout -q office
+  git -C "$proj" checkout -q main
   printf 'project=%s\nmode=local-only\nbranch=feature/widget\nbase_branch=office\n' "$proj" \
     > "$home/state/$id.meta"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$id") \
