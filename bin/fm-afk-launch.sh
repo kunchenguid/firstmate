@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# fm-afk-launch.sh - the single owner of away-mode ENTRY and EXIT: the
-# same-turn entry that writes the away-posture record through
-# bin/fm-afk-contract.sh, and the away-mode daemon TERMINAL lifecycle where a
+# fm-afk-launch.sh - the single owner of away-mode ENTRY and EXIT, and of the
+# quiet-mode entry that runs the same daemon without that posture (QUIET below):
+# the same-turn entry that writes the away-posture record through
+# bin/fm-afk-contract.sh, and the daemon TERMINAL lifecycle where a
 # daemon still runs: launch it in a NON-VISIBLE tracked terminal per backend,
 # record its exact id, tear it down by that exact id, and reconcile a leaked one
 # after a crash.
