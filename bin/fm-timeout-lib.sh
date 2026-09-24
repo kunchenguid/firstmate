@@ -42,8 +42,8 @@
 #   fm_timed_out <status>
 #       0 iff <status> is how fm_run_timed or fm_exec_timed reports the bound.
 #
-# A non-positive bound is not a bound: `timeout 0` and the perl fallback's
-# `alarm 0` both disable the deadline, so callers must reject 0 before calling.
+# A non-positive bound is not a portable bound: `timeout 0` disables its
+# deadline, so callers must reject 0 before calling.
 #
 # All four fm_run_timed mechanisms terminate the whole process GROUP, not just
 # the direct child, so a hung grandchild (a vendor CLI spawned by a wrapper
@@ -159,8 +159,30 @@ fm_run_timed() {  # <seconds> <command...>
     timeout) fm_run_external_timeout timeout "$seconds" "$@" ;;
     gtimeout) fm_run_external_timeout gtimeout "$seconds" "$@" ;;
     perl)
-      perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
-        "$seconds" "$@"
+      perl -MPOSIX=WNOHANG,setpgid -MTime::HiRes=time -e '
+        my $bound = shift;
+        my $pid = fork;
+        exit 127 unless defined $pid;
+        if ($pid == 0) { setpgid(0, 0); exec @ARGV; exit 127 }
+        setpgid($pid, $pid);
+        my $deadline = time + $bound;
+        while (1) {
+          my $done = waitpid $pid, WNOHANG;
+          if ($done == $pid) {
+            my $status = $?;
+            exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
+          }
+          exit 127 if $done == -1;
+          if (time >= $deadline) {
+            kill "TERM", -$pid;
+            select undef, undef, undef, 0.2;
+            kill "KILL", -$pid;
+            waitpid $pid, 0;
+            exit 124;
+          }
+          select undef, undef, undef, 0.05;
+        }
+      ' -- "$seconds" "$@"
       ;;
     bash) fm_run_bash_timeout "$seconds" "$@" ;;
     *) return 124 ;;

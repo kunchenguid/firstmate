@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-# Behavior tests for bin/fm-timeout-lib.sh's exec-style bound, fm_exec_timed:
-# TERM to the command's process group at the bound, KILL once the grace has
-# passed, a forwarded signal, the caller replaced rather than wrapped, and a
-# refusal instead of an unbounded run when nothing on the host can enforce the
-# bound. Most cases pin the perl watchdog, the preferred mechanism and the only
-# one a stock macOS host has, under a PATH that holds no timeout variant; the
-# GNU fallback case runs only where a real timeout exists.
+# Behavior tests for bin/fm-timeout-lib.sh's bounded runners. They cover the
+# wall-clock deadline, process-group termination, signal forwarding, exit
+# status, and refusal to run unbounded. Most cases pin the Perl watchdog, the
+# only mechanism on stock macOS, under a PATH that holds no timeout variant.
 # shellcheck disable=SC2016 # each bounded bash -c script expands its own arguments
 set -u
 
@@ -34,6 +31,15 @@ exec_timed() {
   )
 }
 
+run_timed() {
+  local path=$1
+  shift
+  (
+    . "$ROOT/bin/fm-timeout-lib.sh"
+    PATH=$path fm_run_timed "$@"
+  )
+}
+
 wait_for_file() {  # <path>
   local i=0
   while [ ! -s "$1" ]; do
@@ -41,6 +47,21 @@ wait_for_file() {  # <path>
     [ "$i" -lt 500 ] || fail "timed out waiting for $1"
     sleep 0.02
   done
+}
+
+test_run_timed_perl_uses_the_wall_clock_deadline() {
+  local dir rc=0 started elapsed pid
+  dir="$TMP_ROOT/run-timed-perl"
+  mkdir -p "$dir"
+  started=$(date +%s)
+  run_timed "$PERL_ONLY" 1 bash -c 'echo $$ > "$1"; exec sleep 30' _ "$dir/pid" || rc=$?
+  elapsed=$(( $(date +%s) - started ))
+  [ "$rc" -eq 124 ] || fail "the Perl deadline did not report 124 (rc=$rc)"
+  [ "$elapsed" -ge 1 ] || fail "the Perl deadline fired before one second elapsed"
+  [ "$elapsed" -lt 10 ] || fail "the Perl deadline waited for the child to exit (${elapsed}s)"
+  pid=$(cat "$dir/pid")
+  ! kill -0 "$pid" 2>/dev/null || fail "the Perl deadline left its command running"
+  pass "fm_run_timed's Perl watchdog enforces its wall-clock deadline"
 }
 
 test_passes_the_command_status_and_output_through() {
@@ -242,6 +263,7 @@ test_timed_out_names_exactly_the_bound_statuses() {
   pass "fm_timed_out accepts 124 and 137 and nothing else"
 }
 
+test_run_timed_perl_uses_the_wall_clock_deadline
 test_passes_the_command_status_and_output_through
 test_term_ends_a_cooperative_command_at_the_bound
 test_kill_ends_a_term_ignoring_command_after_the_grace
