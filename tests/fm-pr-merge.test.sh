@@ -2754,6 +2754,226 @@ test_allow_red_requires_one_separate_name() {
   pass "fm-pr-merge accepts exactly one separately named red-check waiver"
 }
 
+# The success line reports what it read rather than a blanket all-green claim,
+# because a rollup where three plumbing checks ran and eight suites were skipped
+# by a path filter is green and must still merge, yet it is not the same fact as
+# one where every suite ran. SKIPPED stays green: nothing here refuses on it.
+test_verified_line_reports_green_and_skipped_counts() {
+  local case_dir head
+  head=a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4
+  case_dir=$(make_case github-verified-counts)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run lint COMPLETED SUCCESS)" \
+    "$(check_run build COMPLETED SUCCESS)" \
+    "$(status_context policy SUCCESS)" \
+    "$(check_run unit COMPLETED SKIPPED)" "$(check_run integration COMPLETED SKIPPED)" \
+    "$(check_run notebooks COMPLETED SKIPPED)" "$(check_run e2e COMPLETED SKIPPED)" \
+    "$(check_run docs COMPLETED SKIPPED)" "$(check_run deck COMPLETED SKIPPED)" \
+    "$(check_run eval COMPLETED SKIPPED)" "$(check_run smoke COMPLETED SKIPPED)"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/139 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-verified-counts: a green rollup with skipped suites should merge"$'\n'"$(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 139 example/repo --squash
+  assert_grep "mergeable at head $head, with no unwaived check red; of 11 checks reported there, 3 ran green, 8 were skipped without running, and 0 did not pass" "$case_dir/stderr" \
+    "github-verified-counts: the success line did not report the green and skipped counts it read"
+
+  case_dir=$(make_case github-verified-counts-waived)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run ci COMPLETED SUCCESS)" "$(check_run lint COMPLETED FAILURE)"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/140 --allow-red lint \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-verified-counts-waived: the named waiver should merge"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep "of 2 checks reported there, 1 ran green, 0 were skipped without running, and 1 did not pass but were superseded by a later green run or waived by --allow-red" "$case_dir/stderr" \
+    "github-verified-counts-waived: the success line hid the waived red check"
+  pass "fm-pr-merge reports the green, skipped, and waived counts it read when it verifies a merge"
+}
+
+# The empty-rollup window opens the instant a rebase clears a conflict: the
+# conflict had refused the merge on mergeable, the rebase moves the head and
+# GitHub reads MERGEABLE and CLEAN while it has cancelled the old checks and not
+# yet re-triggered them. The same task walks that sequence here, and only the
+# empty-rollup refusal stands between the rebased head and an unvalidated merge.
+test_post_rebase_empty_rollup_refuses_until_checks_report() {
+  local case_dir rc old_head new_head url
+  old_head=c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0
+  new_head=c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1
+  url=https://github.com/example/repo/pull/133
+  case_dir=$(make_case github-post-rebase)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$old_head"
+
+  printf '%s\n' "$old_head" > "$case_dir/github-head"
+  cat > "$case_dir/github-view.json" <<JSON
+{"state":"OPEN","isDraft":false,"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY","headRefOid":"$old_head","baseRefName":"main","statusCheckRollup":[$(check_run ci COMPLETED SUCCESS)]}
+JSON
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-post-rebase: the conflicted pull request must refuse"
+  assert_grep 'mergeable is "CONFLICTING", not MERGEABLE' "$case_dir/stderr" \
+    "github-post-rebase: the conflict was not the named refusal"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-post-rebase: gh pr merge ran on a conflicted pull request"
+
+  printf '%s\n' "$new_head" > "$case_dir/github-head"
+  cat > "$case_dir/github-view.json" <<JSON
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$new_head","baseRefName":"main","statusCheckRollup":[]}
+JSON
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-post-rebase: the rebased head with no check reported must refuse"
+  assert_grep "no check has reported at head $new_head" "$case_dir/stderr" \
+    "github-post-rebase: the refusal did not name the absent checks at the rebased head"
+  assert_no_grep 'not MERGEABLE' "$case_dir/stderr" \
+    "github-post-rebase: the rebased pull request still read as conflicted, so the fixture proves nothing"
+  assert_no_grep 'DIRTY' "$case_dir/stderr" \
+    "github-post-rebase: the rebased pull request still read as DIRTY, so the fixture proves nothing"
+  assert_no_grep 'verified:' "$case_dir/stderr" \
+    "github-post-rebase: claimed a verified merge at a head no check has run on"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-post-rebase: gh pr merge ran at a rebased head no check has validated"
+
+  cat > "$case_dir/github-view.json" <<JSON
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"$new_head","baseRefName":"main","statusCheckRollup":[$(check_run ci COMPLETED SUCCESS)]}
+JSON
+  run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-post-rebase: the re-triggered green checks should merge"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep "mergeable at head $new_head, with no unwaived check red; of 1 checks reported there, 1 ran green, 0 were skipped without running" "$case_dir/stderr" \
+    "github-post-rebase: the green merge did not report what it read"
+  assert_logged_gh_merge "$case_dir" 133 example/repo --squash
+  pass "fm-pr-merge refuses a freshly rebased pull request until its re-triggered checks report"
+}
+
+# An empty rollup is what GitHub reports between cancelling a pull request's run
+# and re-triggering it, and it reads CLEAN because nothing blocks. It yields an
+# empty red set, so it must refuse as its own condition rather than pass as
+# every check green, and no --allow-red name, including the unnamed-check
+# placeholder, can waive it.
+test_empty_check_rollup_refuses_as_its_own_condition() {
+  local case_dir rc head waiver
+  head=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
+  for waiver in none unnamed named; do
+    case_dir=$(make_case "github-empty-rollup-$waiver")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" "$head"
+    write_github_rollup_json "$case_dir" "$head"
+    set +e
+    case "$waiver" in
+      none) run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/133 ;;
+      unnamed) run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/133 --allow-red '(unnamed check)' ;;
+      named) run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/133 --allow-red ci ;;
+    esac > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "github-empty-rollup-$waiver: an empty check rollup must refuse"
+    assert_grep "no check has reported at head $head" "$case_dir/stderr" \
+      "github-empty-rollup-$waiver: the refusal did not name the absent checks"
+    assert_no_grep 'is not green' "$case_dir/stderr" \
+      "github-empty-rollup-$waiver: the absent checks were folded into the red-check set"
+    assert_no_grep 'verified:' "$case_dir/stderr" \
+      "github-empty-rollup-$waiver: claimed a verified merge with no check reported"
+    assert_no_grep 'pr merge' "$case_dir/gh.log" \
+      "github-empty-rollup-$waiver: gh pr merge ran with no check reported"
+  done
+  pass "fm-pr-merge refuses an empty GitHub check rollup as its own condition that --allow-red cannot waive"
+}
+
+# A repository that runs no CI merges only when the operator states it with
+# --allow-no-checks, and the success line then says no check ran. The flag
+# covers only the empty rollup: a reported red check still refuses.
+test_allow_no_checks_merges_an_empty_rollup_truthfully() {
+  local case_dir rc head
+  head=a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2
+  case_dir=$(make_case github-allow-no-checks)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/134 --allow-no-checks \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-allow-no-checks: the stated allowance should merge"$'\n'"$(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 134 example/repo --squash
+  assert_grep "with no check reported there; merging unvalidated under --allow-no-checks" "$case_dir/stderr" \
+    "github-allow-no-checks: the success line did not say no check ran"
+  assert_no_grep 'ran green' "$case_dir/stderr" \
+    "github-allow-no-checks: claimed a check ran green with none reported"
+
+
+  case_dir=$(make_case github-allow-no-checks-red)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_red_json "$case_dir" "$head" lint
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/136 --allow-no-checks \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-allow-no-checks-red: --allow-no-checks must not waive a red check"
+  assert_grep "check 'lint' is not green" "$case_dir/stderr" \
+    "github-allow-no-checks-red: the red check was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-allow-no-checks-red: gh pr merge ran on a red PR"
+
+  case_dir=$(make_case github-allow-no-checks-equals)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/137 --allow-no-checks=true \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "github-allow-no-checks-equals: a valued form must be refused"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-allow-no-checks-equals: gh pr merge ran for the valued form"
+  pass "fm-pr-merge merges an empty rollup only under --allow-no-checks and says no check ran"
+}
+
+test_allow_no_checks_is_refused_while_away() {
+  local case_dir rc head label
+  head=a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3
+  for label in before-view after-view; do
+    case_dir=$(make_case "github-allow-no-checks-away-$label")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" "$head"
+    write_github_rollup_json "$case_dir" "$head"
+    write_away_record "$case_dir" --words 'merge task-x1 when green'
+    [ "$label" = before-view ] || mv "$case_dir/state/.afk-contract" "$case_dir/away-record-after-view"
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/138 --allow-no-checks \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 2 "$rc" "github-allow-no-checks-away-$label: --allow-no-checks must be refused while away"
+    assert_grep '--allow-no-checks is attended-only' "$case_dir/stderr" \
+      "github-allow-no-checks-away-$label: refusal did not name attended-only"
+    assert_no_grep 'pr merge' "$case_dir/gh.log" \
+      "github-allow-no-checks-away-$label: gh pr merge ran under away --allow-no-checks"
+  done
+  pass "fm-pr-merge refuses --allow-no-checks while the away-posture record exists"
+}
+
+test_allow_no_checks_refused_on_gitlab() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-allow-no-checks pipeline=null)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" --allow-no-checks \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "gitlab-allow-no-checks: --allow-no-checks must not apply on GitLab"
+  assert_grep '--allow-no-checks does not apply to GitLab' "$case_dir/stderr" \
+    "gitlab-allow-no-checks: refusal did not name GitLab"
+  [ ! -s "$case_dir/glab.log" ] || fail "gitlab-allow-no-checks: glab ran despite --allow-no-checks"
+  pass "fm-pr-merge refuses --allow-no-checks on GitLab"
+}
+
 test_away_record_permits_any_green_merge_under_away_authority() {
   local case_dir rc url head
   head=acacacacacacacacacacacacacacacacacacacac
@@ -3245,6 +3465,11 @@ test_undated_runs_never_supersede
 test_allow_red_still_waives_only_the_current_failure
 test_allow_red_is_refused_while_away
 test_allow_red_requires_one_separate_name
+test_verified_line_reports_green_and_skipped_counts
+test_post_rebase_empty_rollup_refuses_until_checks_report
+test_empty_check_rollup_refuses_as_its_own_condition
+test_allow_no_checks_merges_an_empty_rollup_truthfully
+test_allow_no_checks_is_refused_while_away
 test_away_record_permits_any_green_merge_under_away_authority
 test_away_branch_actor_merges_green_under_the_record
 test_away_branch_refuses_when_record_archived_during_preflight
@@ -3256,3 +3481,4 @@ test_away_record_cannot_change_between_the_authority_read_and_the_merge
 test_a_record_made_unreadable_before_the_merge_refuses_it
 test_merge_refuses_when_the_away_record_cannot_be_locked
 test_allow_red_refused_on_gitlab
+test_allow_no_checks_refused_on_gitlab

@@ -15,6 +15,12 @@
 # is open, not a draft, mergeable, free of conflicts, and every unwaived check
 # is green at the exact current head commit, where github_checks_not_green below
 # owns what makes a check green and judges each one by its current run.
+# At least one check must also have reported at that head: an empty check rollup
+# is refused as its own condition, apart from the red-check set, because GitHub
+# empties it between cancelling a run and re-triggering it and an absent suite
+# means wait, not fix. A repository that runs no CI at all merges only through
+# the attended --allow-no-checks flag, which the operator states and which
+# covers only that empty-rollup condition; --allow-red never waives it.
 # Every failing condition is reported, not
 # just the first. The verified head is then passed to gh as
 # --match-head-commit, so a push that lands between that read and the merge
@@ -25,7 +31,8 @@
 # name, still requires every other check green, and still binds the head. It is
 # refused while the away-posture record exists, and it never
 # applies on GitLab, where a merge already requires the head pipeline to have
-# succeeded. After gh returns success, GitHub's live state is read back and
+# succeeded. --allow-no-checks follows the same attended-only and GitHub-only
+# rules, since an absent GitLab head pipeline is already refused. After gh returns success, GitHub's live state is read back and
 # accepted only when the pull request is merged or in the merge queue. gh's
 # GraphQL API supplies that queue-aware read; when that read fails, gh-axi's
 # own view still proves a landed merge, and every outcome it cannot prove
@@ -102,7 +109,7 @@
 # explicit captain instruction and never skips the live green check, the
 # away-record read, or a captain hold.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [-- <extra forge merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--allow-no-checks] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
@@ -162,6 +169,7 @@ fi
 shift 2
 ATTENDED_OVERRIDE=false
 ALLOW_RED=()
+ALLOW_NO_CHECKS=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --attended-override)
@@ -182,12 +190,24 @@ while [ "$#" -gt 0 ]; do
       echo "error: --allow-red requires a separate check name argument" >&2
       exit 2
       ;;
+    --allow-no-checks)
+      ALLOW_NO_CHECKS=true
+      shift
+      ;;
+    --allow-no-checks=*)
+      echo "error: --allow-no-checks takes no value" >&2
+      exit 2
+      ;;
     --) shift; break ;;
     *) break ;;
   esac
 done
 if [ "${#ALLOW_RED[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
   echo "error: --allow-red does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
+  exit 2
+fi
+if [ "$ALLOW_NO_CHECKS" = true ] && [ "$PROVIDER" = gitlab ]; then
+  echo "error: --allow-no-checks does not apply to GitLab, where a merge always requires a successful head pipeline" >&2
   exit 2
 fi
 
@@ -585,7 +605,8 @@ github_checks_not_green() {
 # Pre-merge conditions for a GitHub pull request, read from one live view.
 # Sets FM_PR_MERGE_HEAD to the verified head on success.
 github_verify_mergeable() {
-  local json fields line red name covered
+  local json fields line red name covered check_count counts
+  local green_count skipped_count other_count
   local total=0 named=0 refusals=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
 
@@ -635,6 +656,27 @@ FIELDS
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
   fi
+  # An empty rollup yields an empty red set, so it is counted separately rather
+  # than read as every check green. The same read counts what the success line
+  # reports: entries that ran green, SKIPPED check runs (green without running,
+  # as a path filter leaves them), and the rest, which reach a merge only when
+  # superseded or waived. The classes mirror github_checks_not_green's green test.
+  if ! counts=$(printf '%s' "$json" | jq -er '
+      [ .statusCheckRollup[]
+        | if .__typename == "CheckRun" then
+            if .status == "COMPLETED" and .conclusion == "SKIPPED" then "skipped"
+            elif .status == "COMPLETED" and (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL") then "green"
+            else "other" end
+          elif .state == "SUCCESS" then "green"
+          else "other" end
+      ]
+      | "\(length) \(map(select(. == "green")) | length) \(map(select(. == "skipped")) | length) \(map(select(. == "other")) | length)"
+    ' 2>/dev/null) \
+    || ! [[ "$counts" =~ ^[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+$ ]]; then
+    echo "error: could not read the GitHub pull request state before merging" >&2
+    return 1
+  fi
+  read -r check_count green_count skipped_count other_count <<<"$counts"
 
   case "$state" in
     [oO][pP][eE][nN]) ;;
@@ -651,6 +693,10 @@ FIELDS
 "
   [ "$merge_state" != DIRTY ] \
     || refusals="$refusals  - mergeStateStatus is DIRTY (conflicts)
+"
+  # Never matched against --allow-red: no check name exists here to waive.
+  [ "$check_count" -gt 0 ] || [ "$ALLOW_NO_CHECKS" = true ] \
+    || refusals="$refusals  - no check has reported at head $live_head, so nothing has validated it; wait for the checks to report (GitHub empties the rollup while it re-triggers a cancelled run), or pass --allow-no-checks only if this repository runs no CI
 "
 
   uncovered=''
@@ -677,8 +723,13 @@ EOF
     [ -z "$uncovered" ] || printf 'error: these checks are not green: %s\n' "$uncovered" >&2
     return 1
   fi
-  printf 'verified: %s is open and mergeable, with every required check green at head %s\n' \
-    "$URL" "$live_head" >&2
+  if [ "$check_count" -eq 0 ]; then
+    printf 'verified: %s is open and mergeable at head %s, with no check reported there; merging unvalidated under --allow-no-checks\n' \
+      "$URL" "$live_head" >&2
+  else
+    printf 'verified: %s is open and mergeable at head %s, with no unwaived check red; of %s checks reported there, %s ran green, %s were skipped without running, and %s did not pass but were superseded by a later green run or waived by --allow-red\n' \
+      "$URL" "$live_head" "$check_count" "$green_count" "$skipped_count" "$other_count" >&2
+  fi
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITHUB_BASE=$base
 }
@@ -948,6 +999,10 @@ require_current_away_authority() {
   resolve_merge_authority || return 1
   if [ "$FM_PR_AWAY_POSTURE" = true ] && [ "${#ALLOW_RED[@]}" -gt 0 ]; then
     echo "error: --allow-red is attended-only; while the away-posture record exists the green check is absolute" >&2
+    return 2
+  fi
+  if [ "$FM_PR_AWAY_POSTURE" = true ] && [ "$ALLOW_NO_CHECKS" = true ]; then
+    echo "error: --allow-no-checks is attended-only; while the away-posture record exists a merge needs a reported green check" >&2
     return 2
   fi
 }
