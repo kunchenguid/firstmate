@@ -2138,11 +2138,24 @@ task_id=mate
 phase=awaiting_report
 request_summary=not yet
 EOF
+  cat > "$dir/fedcba9876543210" <<EOF
+schema=fm-pending-reply.v1
+corr_id=fedcba9876543210
+task_id=mate
+phase=escalated
+request_summary=operator handled it
+parent_status=$home/state/mate.status
+EOF
+  {
+    printf 'blocked [key=pending-reply-fedcba9876543210]: pending-reply-missed: task=mate pending-reply-id=fedcba9876543210 request=operator handled it\n'
+    printf 'resolved [key=pending-reply-fedcba9876543210]: pending-reply-resolved: task=mate pending-reply-id=fedcba9876543210 via=operator-resolve-key\n'
+  } >> "$home/state/mate.status"
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e --arg key "pending-reply-$corr" '
     (.decisions_open | any(.[]; .key == $key and (.summary | contains("finish the report"))))
       and (.decisions_open | any(.[]; .key == "pending-reply-0123456789abcdef") | not)
-  ' >/dev/null || fail "escalated pending reply was missing from bearings: $json"
+      and (.decisions_open | any(.[]; .key == "pending-reply-fedcba9876543210") | not)
+  ' >/dev/null || fail "bearings did not list exactly the open escalated pending reply: $json"
   cat > "$dir/$corr" <<EOF
 schema=fm-pending-reply.v1
 corr_id=$corr
