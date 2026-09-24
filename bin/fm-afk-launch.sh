@@ -27,8 +27,9 @@
 # `start-native` needs no record, never writes one, and refuses while one stands
 # (return from away first). With FM_AFK_MODE unset, a standing record means away
 # and an on-disk quiet flag with no record means a quiet refresh
-# (fm_afk_launch_posture_require), so going /afk out of quiet mode writes away at
-# the next flag write without `enter` touching the daemon's presence gate.
+# (fm_afk_launch_posture_require), so going /afk out of quiet mode rewrites a
+# standing quiet flag to away as `enter` records the posture - a rewrite, never a
+# removal, so a live daemon keeps the presence gate it injects through.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/ when
 # one stands; a quiet stop has none to archive.
@@ -286,12 +287,20 @@ fm_afk_launch_posture_require() {
   fm_afk_launch_record_require
 }
 
-# `enter` writes the record and nothing else: state/.afk is the live daemon's
-# presence gate, and the record standing already makes the next flag write away
-# (fm_afk_launch_requested_mode).
+# The record IS the away posture, so `enter` rewrites a standing state/.afk to
+# away rather than leaving a stale `quiet` beside it - on the homes where /afk
+# launches nothing, no later flag write would ever correct it. It rewrites and
+# never removes: that file is the live daemon's presence gate
+# (bin/fm-supervise-daemon.sh afk_active), and an absent flag is not created,
+# because no daemon is running to gate.
 fm_afk_launch_enter() {
   fm_afk_launch_catchup_pending away && return 1
-  "$FM_AFK_CONTRACT_CMD" enter "$@"
+  "$FM_AFK_CONTRACT_CMD" enter "$@" || return $?
+  [ -e "$FM_AFK_LAUNCH_STATE/.afk" ] || return 0
+  fm_afk_flag_write "$FM_AFK_LAUNCH_STATE" away || {
+    fm_afk_launch_log "failed to write the away posture to the flag beside the away-posture record"
+    return 1
+  }
 }
 
 # The command run inside the created terminal. Real launch runs the shared

@@ -246,9 +246,10 @@ unit_quiet_entry_needs_no_record() {
   rm -rf "$st"
 }
 
-# Going /afk from quiet mode: the record enter writes is the away posture, so a
-# bare daemon refresh must switch the flag to away rather than preserve quiet.
-# `enter` itself leaves state/.afk alone - that file is the live daemon's
+# Going /afk from quiet mode: the record enter writes is the away posture, so
+# `enter` itself must rewrite a standing quiet flag to away - a bare daemon
+# refresh cannot be relied on, because the homes that launch no daemon never
+# reach one. It rewrites rather than removes: state/.afk is the live daemon's
 # injection gate (bin/fm-supervise-daemon.sh afk_active), and on Pi `enter` is
 # the whole entry, so clearing it there would mute a running daemon.
 unit_away_entry_from_quiet_writes_away() {
@@ -258,14 +259,15 @@ unit_away_entry_from_quiet_writes_away() {
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet "$LAUNCH" start-native >/dev/null 2>&1 \
     || fail "quiet to away: quiet entry failed"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'ship it' >/dev/null 2>&1 \
-    && [ -f "$st/state/.afk-contract" ] && [ -e "$st/state/.afk" ]; then
-    pass "quiet to away: enter writes the record without clearing the daemon's presence gate"
+    && [ -f "$st/state/.afk-contract" ] && [ -e "$st/state/.afk" ] \
+    && [ "$(read_mode "$st/state")" = away ]; then
+    pass "quiet to away: enter rewrites the quiet flag to away without clearing the daemon's presence gate"
   else
-    fail "quiet to away: enter removed state/.afk or failed to write the record"
+    fail "quiet to away: enter left '$(read_mode "$st/state")' standing, removed state/.afk, or failed to write the record"
   fi
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
     && [ "$(read_mode "$st/state")" = away ]; then
-    pass "quiet to away: an /afk entry over quiet mode writes away once the record stands"
+    pass "quiet to away: a later refresh beside the record keeps the away posture"
   else
     fail "quiet to away: the flag stayed '$(read_mode "$st/state")' beside a standing away record"
   fi
@@ -970,13 +972,21 @@ unit_supervision_host_claude_home_runs_no_away_daemon() {
   else
     fail "supervision host: quiet mode was refused or lost its mode on a claude host home"
   fi
-  # Going /afk out of quiet mode leaves the quiet flag on disk beside the new
-  # record; the record is the away posture, so the daemon stays refused here.
-  enter_posture "$st" || fail "supervision host: could not record the away posture from quiet"
+  # Going /afk out of quiet mode on the home where /afk launches nothing: the
+  # entry itself has to leave the posture reading away, because no later flag
+  # write ever runs here to correct a stale quiet flag.
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'go fix prod' >/dev/null 2>&1 \
+    || fail "supervision host: could not record the away posture from quiet"
+  if [ -f "$st/state/.afk-contract" ] && [ -e "$st/state/.afk" ] \
+    && [ "$(read_mode "$st/state")" = away ]; then
+    pass "supervision host: /quiet then /afk leaves the posture reading away with the presence gate intact"
+  else
+    fail "supervision host: the posture read '$(read_mode "$st/state")' after /quiet then /afk"
+  fi
   out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
   rc=$?
   if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F 'runs the supervision host (config/supervision-host)' >/dev/null; then
-    pass "supervision host: an away record beside a standing quiet flag still refuses the daemon"
+    pass "supervision host: an away record beside the rewritten flag still refuses the daemon"
   else
     fail "supervision host: away entry from quiet was not refused (rc=$rc): $out"
   fi

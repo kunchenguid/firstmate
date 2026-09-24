@@ -33,7 +33,7 @@ Hold-for-return is the default and the only reach profile this release records: 
      `/quiet` needs nothing extra on Pi: the attended branch already keeps routine wakes out of this conversation, so quiet-while-present is the attended posture's own shape there.
    - **Claude with `config/supervision-host`**: nothing to launch for `/afk`; go on to the announcement.
      The supervision host (`docs/supervision-host.md`) is the away session there: it runs the branch's contract on a headless engine under the record while main is parked, and `bin/fm-afk-launch.sh start-native` refuses the away daemon on that home.
-     `/quiet` is unchanged there and still launches the daemon below.
+     `/quiet` is unchanged there and still launches the daemon: run `bin/fm-afk-launch.sh start-native` for `/quiet`, then `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through claude's background bash, exactly as the native-background-tool bullet below does.
    - **Harness WITH a native in-pane tracked-background tool** (claude's background bash without the supervision host, grok's background tool): run `bin/fm-afk-launch.sh start-native`, then run `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
      This is a deliberate no-separate-terminal exception because the harness-hosted job creates no terminal or layout mutation, and a shell launcher cannot invoke a harness-native background tool.
      If the native launch fails, run `bin/fm-afk-launch.sh stop` to roll back the prepared lifecycle.
