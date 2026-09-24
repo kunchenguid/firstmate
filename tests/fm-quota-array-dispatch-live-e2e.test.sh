@@ -791,4 +791,93 @@ run_case \
   "FACT=claude|requested=explicit|insisted=yes|headroom=5|supports_horizon=yes" \
   "FACT=agy|alternative=recommended|headroom=100"
 
+write_fixture <<'JSON'
+{
+  "generatedAt": "2030-01-01T00:00:00Z",
+  "schemaVersion": 5,
+  "providers": [
+    {
+      "provider": "claude",
+      "state": { "status": "fresh", "stale": false },
+      "windows": [
+        {
+          "id": "five_hour",
+          "label": "session",
+          "kind": "session",
+          "percentRemaining": 5,
+          "resetsAt": "2030-01-01T02:00:00Z",
+          "pace": { "status": "ahead", "reservePercentPoints": -20, "burnMultiple": 1.5 }
+        },
+        {
+          "id": "seven_day",
+          "label": "week",
+          "kind": "weekly",
+          "percentRemaining": 5,
+          "resetsAt": "2030-01-07T00:00:00Z",
+          "pace": { "status": "behind", "reservePercentPoints": -30, "burnMultiple": 1.5 }
+        }
+      ],
+      "quotaSemantics": {
+        "status": "known",
+        "effectiveAvailability": [
+          {
+            "scope": "all_models",
+            "status": "known",
+            "effectivePercentRemaining": 5,
+            "boundedBy": ["five_hour", "seven_day"],
+            "limitingWindowIds": ["five_hour"],
+            "selection": { "status": "known", "spendPriority": -1.8 },
+            "runway": {
+              "status": "projected_exhaustion",
+              "usableRunwaySeconds": 15916,
+              "projectedExhaustedAt": "2030-01-01T04:25:16Z",
+              "limitingWindowId": "five_hour",
+              "projectionConfidence": "established"
+            },
+            "pace": { "status": "behind", "aheadWindowIds": ["five_hour"], "worstReservePercentPoints": -30, "worstReserveWindowId": "seven_day" }
+          }
+        ]
+      }
+    },
+    {
+      "provider": "agy",
+      "state": { "status": "fresh", "stale": false },
+      "windows": [
+        {
+          "id": "claude_gpt_5h",
+          "label": "Claude/GPT 5-hour",
+          "kind": "session",
+          "percentRemaining": 100,
+          "resetsAt": "2030-01-01T05:00:00Z",
+          "pace": { "status": "unknown", "reason": "missing_cycle" }
+        }
+      ],
+      "quotaSemantics": {
+        "status": "known",
+        "effectiveAvailability": [
+          {
+            "scope": "claude_gpt",
+            "status": "known",
+            "effectivePercentRemaining": 100,
+            "boundedBy": ["claude_gpt_5h"],
+            "limitingWindowIds": ["claude_gpt_5h"],
+            "selection": { "status": "unknown", "unmeasurableWindowIds": ["claude_gpt_5h"] },
+            "runway": { "status": "unknown", "unmeasurableWindowIds": ["claude_gpt_5h"] },
+            "pace": { "status": "unknown", "unknownWindowIds": ["claude_gpt_5h"] }
+          }
+        ]
+      }
+    }
+  ]
+}
+JSON
+run_case \
+  "explicit captain request on tight quota surfaces the abundant alternative before dispatching, with no override yet given" \
+  "SELECTED=claude" \
+  "TOON" \
+  "Resolve this matched dispatch intake now. Load quota-array-dispatch and run quota-axi with no flags (default TOON) exactly once. Do not pass --json. The task has a likely-completion horizon of two hours with established confidence. The captain explicitly requested harness=pi model=claude for this task; no override, insistence, or restatement has been given beyond that initial request, and nobody has yet mentioned any alternative provider. Claude is catalog-supported with usable authentication and known runway of 15916 seconds that supports the horizon, but has only 5% remaining quota. Antigravity (agy) is a separately configured candidate of acceptable reasoning class for this task, is catalog-supported with usable authentication, and has 100% remaining quota on an unstarted five-hour window. Your loaded skill defines a rule for when an explicit request sitting on tight quota must surface a recommendation for an abundant alternative before dispatching; apply that rule yourself to these facts without being told the conclusion. If the rule applies here, emit an exact line RECOMMENDATION=agy naming the abundant alternative; if it does not apply, emit RECOMMENDATION=none instead. Because the captain has not restated or overridden their original explicit request, honor that explicit request for final dispatch regardless of your recommendation. Return exact lines FACT=claude|requested=explicit|headroom=5|supports_horizon=yes and FACT=agy|headroom=100|reasoning=acceptable to preserve candidate accounting, then your recommendation line, then an exact final line SELECTED=<claude|agy>. Do not use other vendor or model commands and do not modify files." \
+  "FACT=claude|requested=explicit|headroom=5|supports_horizon=yes" \
+  "FACT=agy|headroom=100|reasoning=acceptable" \
+  "RECOMMENDATION=agy"
+
 echo "# all quota-array-dispatch live behavior tests passed"
