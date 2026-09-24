@@ -21,8 +21,38 @@ for name in devin devin-helper; do ln -s /bin/bash "$TMP_ROOT/names/$name"; done
 # shellcheck disable=SC2016
 out=$(CLAUDECODE=1 "$TMP_ROOT/names/devin" -c '"$1"; :' _ "$HARNESS")
 [ "$out" = devin ] || fail "native Devin ancestry must beat foreign CLAUDECODE: $out"
-# shellcheck disable=SC2016
-out=$("$TMP_ROOT/names/devin-helper" -c '"$1" ancestry "$$"; :' _ "$HARNESS")
+# The negative ancestry probe must run under a fabricated process table: the
+# verdict is the NEAREST harness ancestor, so a suite executed inside a real
+# Devin session sees the true devin.exe ancestor and this case can never be
+# negative. The fake ps dies on -o exactly like Git Bash/MSYS and answers
+# `ps -l` with a fixed WINPID; the fake powershell prints a table whose chain
+# is devin-helper.exe -> bash.exe -> explorer.exe, with no devin row - so the
+# verdict can only come from the helper's own name, which is what this case
+# isolates.
+fakebin=$(fm_fakebin "$TMP_ROOT/devin-helper-bin")
+cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  -l|-l\ -p\ *)
+    printf '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND\n'
+    printf '   1234       1    1234    %s  ?         1000 00:00:00 bash\n' "${FM_TEST_OWN_WINPID:?}"
+    ;;
+  *) echo "ps: unknown option" >&2; exit 1 ;;
+esac
+SH
+cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$FM_TEST_WIN32_TABLE"
+SH
+chmod +x "$fakebin/ps" "$fakebin/powershell.exe"
+FM_TEST_OWN_WINPID=500 \
+FM_TEST_WIN32_TABLE="$(printf '%s\t%s\t%s\t%s\t%s\n' \
+  500 600 devin-helper.exe 'C:\Tmp\devin-helper.exe' 'devin-helper.exe -c x' \
+  600 700 bash.exe 'C:\Program Files\Git\bin\bash.exe' 'bash.exe' \
+  700 0 explorer.exe 'C:\Windows\explorer.exe' explorer.exe)" \
+PATH="$fakebin:$PATH" \
+  out=$("$TMP_ROOT/names/devin-helper" -c '"$1" ancestry "$$"; :' _ "$HARNESS")
 [ "$out" != 'comm devin' ] || fail "unrelated devin-helper claimed the adapter"
 [ "$(fm_agent_process_classify_name /opt/bin/devin)" = agent ] || fail "liveness lost Devin"
 [ "$(fm_agent_process_classify_name devin-helper)" = other ] || fail "liveness claims unrelated executable"

@@ -114,6 +114,18 @@ out=$(when "$H" retire arm-test)
 assert_contains "$out" "retired: when-arm-test" "retire is idempotent"
 pass "arm binds, refuses duplicates, and retire cleans up"
 
+# Everything below needs a live detached runner, which requires POSIX process
+# groups: bin/fm-procevent.sh's require_isolated_group proves the runner leads
+# its own group through `ps -o pgid=`, and Git Bash/MSYS has neither that ps
+# form nor setsid, so every launch lands in launch-failed instead. Keep the
+# runner-free arm/retire binding above active everywhere and stop here where
+# the substrate is absent.
+if ! ps -o pgid= -p "$$" >/dev/null 2>&1; then
+  pass "detached-runner cases skipped: host cannot inspect process groups (ps -o pgid unsupported)"
+  printf 'all fm-procevent-when tests passed\n'
+  exit 0
+fi
+
 # --- concurrent arms publish exactly one complete registration ---------------
 H="$TMP_ROOT/h-concurrent-arm"; new_home "$H"
 (
