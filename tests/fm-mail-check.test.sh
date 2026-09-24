@@ -136,7 +136,7 @@ test_arm_refuses_without_the_mail_plane() {
   home="$TMP_ROOT/plane/home"
   mkdir -p "$tmpbin" "$home/state"
   cp "$ROOT/bin/fm-mail-check.sh" "$tmpbin/"
-  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh; do
+  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh fm-check-shim-lib.sh; do
     [ -e "$tmpbin/$lib" ] || ln -s "$ROOT/bin/$lib" "$tmpbin/$lib"
   done
   out=$(FM_HOME="$home" "$tmpbin/fm-mail-check.sh" arm 2>&1) || rc=$?
@@ -238,7 +238,7 @@ test_repeated_failure_that_queued_new_mail_still_wakes() {
   mkdir -p "$tmpbin" "$home/state"
   check_bin="$tmpbin/fm-mail-check.sh"
   cp "$ROOT/bin/fm-mail-check.sh" "$tmpbin/"
-  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh; do
+  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh fm-check-shim-lib.sh; do
     [ -e "$tmpbin/$lib" ] || ln -s "$ROOT/bin/$lib" "$tmpbin/$lib"
   done
   printf '%s\n' '#!/usr/bin/env bash' 'echo "fm-mail: woke for 42"' 'echo "fm-mail: connection refused" >&2' 'exit 1' > "$tmpbin/fm-mail.sh"
@@ -265,7 +265,7 @@ test_large_poll_output_is_drained() {
   tmpbin="$TMP_ROOT/large-poll/bin"
   mkdir -p "$tmpbin"
   cp "$CHECK" "$tmpbin/"
-  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh; do
+  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh fm-check-shim-lib.sh; do
     ln -s "$ROOT/bin/$lib" "$tmpbin/$lib"
   done
   cat > "$tmpbin/fm-mail.sh" <<'SH'
@@ -316,7 +316,7 @@ test_repeated_timeout_still_wakes() {
   mkdir -p "$tmpbin" "$home/state"
   check_bin="$tmpbin/fm-mail-check.sh"
   cp "$ROOT/bin/fm-mail-check.sh" "$tmpbin/"
-  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh; do
+  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh fm-check-shim-lib.sh; do
     [ -e "$tmpbin/$lib" ] || ln -s "$ROOT/bin/$lib" "$tmpbin/$lib"
   done
   printf '%s\n' '#!/usr/bin/env bash' 'exit 124' > "$tmpbin/fm-mail.sh"
@@ -393,7 +393,7 @@ test_repeated_status2_stays_queued_still_wakes() {
   mkdir -p "$tmpbin" "$home/state"
   check_bin="$tmpbin/fm-mail-check.sh"
   cp "$ROOT/bin/fm-mail-check.sh" "$tmpbin/"
-  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh; do
+  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh fm-check-shim-lib.sh; do
     [ -e "$tmpbin/$lib" ] || ln -s "$ROOT/bin/$lib" "$tmpbin/$lib"
   done
   cat > "$tmpbin/fm-mail.sh" <<EOF
@@ -446,7 +446,7 @@ test_missing_mail_plane_is_reported() {
   mkdir -p "$tmpbin" "$home/state"
   check_bin="$tmpbin/fm-mail-check.sh"
   cp "$ROOT/bin/fm-mail-check.sh" "$tmpbin/"
-  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh; do
+  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh fm-check-shim-lib.sh; do
     [ -e "$tmpbin/$lib" ] || ln -s "$ROOT/bin/$lib" "$tmpbin/$lib"
   done
   out="$home/out.txt"

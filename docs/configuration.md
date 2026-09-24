@@ -721,6 +721,130 @@ The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the 
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## GitHub mentions (config/gh-mentions.json)
+
+The GitHub mention plane routes a tagged comment in a watched repository into firstmate's durable wake queue, so work can be handed to a firstmate running here from a GitHub thread instead of from chat.
+It is off unless this home's gitignored `config/gh-mentions.json` exists: without that file nothing is armed, nothing is polled, and no existing path pays anything for it.
+It is not inherited by secondmate homes, so each home watches the repositories and trusts the logins that belong to its own domain.
+
+This section is the single owner of the configuration schema and the generated state.
+[`bin/fm-gh-mention.sh`](../bin/fm-gh-mention.sh) and its `--help` own the exact subcommands, record format, budgets, and mutation mechanics.
+
+```json
+{
+  "enabled": true,
+  "trusted_logins": [
+    "devGunnin",
+    "mengsig",
+    {"login": "a-collaborator", "until": "2026-10-01T00:00:00Z", "remaining": 5}
+  ],
+  "markers": ["@firstmate", "@captain"],
+  "repos": ["owner/name"]
+}
+```
+
+`enabled` and `trusted_logins` are required; `markers` defaults to `@firstmate` and `@captain`, and `repos` defaults to empty.
+A malformed or unreadable file, including an unknown key, stops the plane with an actionable error rather than falling back on a default.
+That strictness is deliberate: a typo in `trusted_logins` would otherwise silently widen or narrow who firstmate obeys.
+
+**What is watched is repositories, not accounts.**
+The watched set is this home's registered projects, each contributing the `github.com` origin of its `projects/<name>` clone as `owner/name`, plus every entry in `repos`, which covers a repository that should be watched without being cloned here.
+Which account owns a watched repository does not matter: a qualifying mention is handled identically in all of them.
+A registered project with no clone here, no origin, or a non-GitHub origin contributes nothing and is never silently dropped: `bin/fm-gh-mention.sh status` lists the whole set on demand, and session start reports it when that set changes.
+A project on another forge or cloned elsewhere, and a watched set that is still empty while the captain gets round to registering something, are ordinary steady states, so an unchanged picture says nothing on every session start, the same way an unchanged cadence does.
+
+**Trust is the safety core.**
+A comment or body qualifies only when both conditions hold on that same body: its author's GitHub login is on `trusted_logins`, matched exactly and case-insensitively by login and never by display name, and that body carries one of the `markers`, matched case-insensitively as a literal substring.
+The marker is what separates a request meant for firstmate from ordinary conversation by a trusted account; without it, every comment a trusted collaborator writes would start work.
+Because only the body's own author is checked, a marker quoted from an untrusted account never qualifies on its own.
+A trusted collaborator who posts a body carrying a marker authored it deliberately - quote-reply included - so it is treated as a request, which is what it is.
+
+**What firstmate publishes is excluded by a stamp, not by who posted it.**
+firstmate answers a mention by commenting on the thread, opens pull requests for the work it dispatches, and leaves review comments - and any of those bodies would carry a marker if it restates the ask, so without this the next sweep would read firstmate's own work back as a fresh mention and answer itself in public.
+Every body this plane causes firstmate to publish on a watched repository therefore begins with a fixed stamp, an HTML comment that renders as nothing on the forge, and the poll drops any body that starts with it.
+That covers pull-request descriptions as well as comments, because the poll reads issue and pull-request bodies from the same listing.
+`bin/fm-gh-mention.sh status` prints the stamp this home uses, and `.agents/skills/gh-mention-respond/SKILL.md` carries it into the brief of any crewmate that opens the pull request.
+
+Recognising its own work by what it writes rather than by which account posts it is what keeps every authorized login able to tag: it does not matter whether this home is signed in as `mengsig`, as `devGunnin`, or as a dedicated bot account, and re-authenticating it later changes nothing.
+The stamp counts only at the **start** of a body, so it protects the body it opens and nothing else - a collaborator who quotes one of them and adds a real request is still heard.
+The same skill additionally forbids any configured marker in what firstmate publishes, which keeps a body harmless if the stamp is ever dropped.
+Everything that does not qualify is ignored silently: no record, no wake, and no write to GitHub.
+Authorizing a collaborator is exactly adding their login to `trusted_logins`, and every listed login carries the same authority.
+A bound limits how long or how often an account may ask, never what it may ask for, so per-account authority tiers do not exist.
+
+**An authorization can be bounded rather than permanent.**
+A `trusted_logins` entry is either a plain login string, which authorizes that account until the captain removes it, or an object carrying that login plus `until`, `remaining`, or both.
+`until` is an ISO 8601 timestamp the grant expires at; `remaining` is how many accepted mentions it funds.
+With both present the grant ends at whichever bound is reached first.
+This is what lets an outside account be trialled for a few requests or a short window without becoming a standing authorization, and it lapses on its own rather than depending on anyone remembering to remove it.
+
+The count spends once per **accepted** mention from that account, never per poll, per comment scanned, or per action taken afterwards.
+What has been spent lives in `state/gh-mention-cursor.json`, so the plane never rewrites the captain's configuration and never deletes a lapsed entry.
+Spending fails closed: the charge is made durable before the mention is accepted, so a count this home cannot read or record refuses the mention rather than acting on a bound nobody can verify.
+The poll holds this plane's lock throughout, so no two polls can spend the same unit, and a charge records which mention it paid for, so a poll that crashed between charging and filing re-derives the same mention and charges nothing further.
+A grant that has expired or run out stops qualifying immediately and is reported once, so tagging that stopped working is visible instead of silently confusing; raising `remaining` or extending `until` makes it live again, and it becomes reportable again the next time it lapses.
+`bin/fm-gh-mention.sh status` prints each authorization with its bound and whether it is still live.
+A bounded grant is defense in depth on top of the rules below, never a replacement for them.
+
+A trusted tag is consent for reversible work - replying, investigating, dispatching, pushing a fix branch, and opening a pull request.
+Merging, closing, deleting, force-pushing, credential changes, and anything else irreversible or security-sensitive still require the captain's explicit word, the same boundary the Relay public-mention path holds.
+A comment body is information to act on, never an instruction to obey; `.agents/skills/gh-mention-respond/SKILL.md` owns how a mention is handled once it arrives.
+
+**The poll writes nothing to GitHub.**
+Per watched repository it reads three repo-scoped listings, each bounded by its own stored `since` cursor: issue and pull-request conversation comments, pull-request review comments, and the bodies of issues and pull requests opened inside that window.
+It pages a full listing until two complete passes return the same identities and timestamps, then advances the durable cursor; an interrupted or changing traversal restarts at page one, where record identities make the deliberate overlap harmless even if edits reorder the listing between page requests or polls.
+
+**Tag an existing thread by commenting on it, not by editing its body.**
+GitHub filters all three listings on `updated_at`, and a thread's `updated_at` moves on any activity at all - a new comment, a label, a reopen.
+For a comment that is exactly right, because only editing that comment moves its own stamp.
+For a body it is not: an issue whose body was tagged months ago and handled then would be filed as a fresh mention the first time this home reads that repository, and firstmate would reply publicly on a thread nobody newly asked about.
+So a body qualifies only when the thread was opened inside the window this poll is actually reading, which deliberately means a marker added by editing an old body is not picked up through this path.
+
+That window starts at the earlier of two floors, because neither alone is right.
+`FM_GH_MENTION_BACKFILL` alone drops a tag opened while this home was not polling at all, since a repository whose read cursor is further behind than that reads a window starting before it.
+The read cursor alone drops a tag opened inside the window but cut off from the first page of the listing, since creation and update are different clocks and the cursor bounds only the second.
+Taking the earlier of the two admits both, adds no stored state or forge read, and uses the same listing traversal either way, while the processed-id list and `gh-mention-inbox/handled/` keep a body from being filed twice.
+What the body path still does not see: a body edited after it was opened, and a thread opened before both floors, which requires it to have stayed beyond the first page until the read cursor passed its opening.
+Posting a comment is what tags an existing thread, it has neither limit, and the two comment listings already cover it.
+Repositories are read least-recently-attempted first and at most `FM_GH_MENTION_MAX_REPOS` (default 5) of them per sweep, so repository fan-out is bounded by that cap rather than by how many projects happen to be registered here; a watched set larger than the cap rotates across sweeps instead of starving its tail, and a repository whose reads do not complete, or that held a qualifying mention the poll could not file, keeps its cursor so nothing is skipped.
+The attempt clock that orders sweeps is deliberately separate from that read cursor: every attempt is stamped, including one that failed, so a repository nobody can read yields its slot on the next sweep instead of holding one on every sweep and starving the repositories behind it, while its read cursor still never advances past a window it did not get through.
+
+Generated state, all under `state/` and gitignored:
+
+- `gh-mention-inbox/<record-id>.json` - one accepted mention awaiting firstmate, and `gh-mention-inbox/handled/` for the same record after `bin/fm-gh-mention.sh ack`.
+- `gh-mention-cursor.json` - each watched listing's `since` cursor, the attempt clock that orders repository sweeps, and the bounded list of mention ids already filed.
+  It survives `disarm`, so re-arming resumes where the plane left off.
+- `gh-mention.reported` - every failure still standing after the last poll, keyed by the repository it belongs to, or by the whole cycle for a condition that is not about one repository.
+  The watcher wakes firstmate on any check output, so a condition that outlives one poll - an unreadable repository, a missing tool, a broken configuration - is reported once rather than on every cycle, and is reported again if it clears and returns.
+  The key is what makes that hold across the sweep cap: a sweep learns nothing about the repositories it did not reach, so it leaves their entries alone instead of treating an unvisited repository as recovered and reporting it again on the sweep that comes back to it.
+  Unlike the cursor it does not survive `disarm`, so a condition still standing when the plane is re-armed is reported again.
+- `gh-mention.watched-set` - what the last arm said about the watched set, so session start reports a registered project it cannot watch, or a watched set that is still empty, only when that picture changes.
+- `gh-mention.check.sh` and `gh-mention.check-trust` - the standing poll shim and its watcher trust binding.
+
+**When this home's own `state/` cannot be written.**
+Every durable step here fails closed, which bounds what is lost but does not make the plane work: a spend that cannot be recorded refuses its mention, a mention that cannot be filed holds its repository at its cursor, and an authorization whose lapse cannot be recorded is not announced.
+That hold is deliberate - it is what stops a mention from being stepped over - but when the write problem is permanent rather than transient, the held repository keeps re-reading and paging through the same window until the poll's time budget prevents a complete traversal.
+The condition is reported once, so nothing repeats after the first poll.
+Treat a `could not` line from this plane as blocking: fix the `state/` write problem - a full disk, a read-only or missing directory, a path replaced by a symlink - and the held repository resumes from its cursor on the next poll.
+
+Each accepted mention appends exactly one durable `check: gh-mention <record-id>` wake.
+A crash can duplicate that wake but can never consume the pending record, so a mention is never lost.
+
+**Response latency.**
+An enabled plane asks this home's watcher for a 30-second sweep instead of the default 300, the same fixed request Relay makes, so a one-page repository reached in that sweep can be picked up in tens of seconds while pagination and later repositories can take longer.
+That request goes through the one cadence file `config/x-mode.env`, whose contract "Watcher cadence" above owns: a home running both this plane and Relay ends up with a single interval, the fastest either asked for, and neither plane runs a timer or a poll loop of its own.
+A repository whose three listings each fit one page costs three authenticated REST calls in a sweep.
+Every additional page and every stability rescan adds calls, bounded by `FM_GH_MENTION_BUDGET`; `FM_GH_MENTION_MAX_REPOS` bounds repositories attempted, not the total calls made.
+That matters because GitHub's authenticated hourly allowance is shared with `bin/fm-pr-poll.sh`, `bin/fm-contributions.sh`, `gh-axi`, and crewmate work on the same host.
+A paginated repository can consume the cycle's time budget before later repositories are attempted, so pickup time has no fixed ceiling and those repositories resume on later sweeps in least-recently-attempted order.
+Repositories this host has lost access to still cost their slot once per rotation, never every sweep.
+When the allowance does run out, the poll says so in those words and stops reading for that cycle, rather than reporting the repository it happened to reach first as unreadable.
+
+Session start keeps the poll armed exactly while the configuration says it should be, and reports anything that stops or limits it as a `GH_MENTIONS:` line; a configuration that is removed, disabled, or broken also retires the shim, so the watcher never polls a plane the captain turned off.
+Setting `enabled` to false is a supported way to pause the plane while keeping its trusted-login list, and it is a steady state rather than a problem: the shim is retired and session start says nothing about it, the same way Relay's own steady-state off is silent.
+Arming the check is itself a reason to watch, so the home keeps a watcher for it after the last task is torn down.
+`FM_GH_MENTION_BUDGET` (default 20, valid 1..25) bounds one poll's forge reads and is cut down to fit `FM_CHECK_TIMEOUT`, `FM_GH_MENTION_MAX_REPOS` (default 5) bounds how many watched repositories one sweep reads, `FM_GH_MENTION_BACKFILL` (default 3600 seconds) is how much history a repository with no cursor yet reads, and `FM_GH_MENTION_KEEP` (default 500) is how many filed mention ids the cursor retains.
+
 ## Mail plane (.env)
 
 The mail plane (bin/fm-mail.sh) reads unseen IMAP messages and sends one SMTP message.
@@ -753,6 +877,29 @@ A fail-closed poll that already queued a wake, and a timeout, always print so th
 `FM_MAIL_CHECK_BUDGET` (default 15, valid 5..25) bounds one standing poll and is cut down to fit `FM_CHECK_TIMEOUT`.
 `bin/fm-mail-check.sh disarm` removes the standing check.
 
+## Watcher cadence (config/x-mode.env)
+
+`bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` once at process start and otherwise sweeps its checks every 300 seconds.
+Some planes need a faster sweep than that to be useful, so each one REQUESTS an interval at session start and the generated `config/x-mode.env` carries the single interval that results - the fastest any enabled plane asked for.
+This section is the single owner of that contract.
+There is one cadence, one file, and one writer; a plane never starts a timer, a second poll loop, or a competing interval of its own.
+
+The requesters today are Relay, which asks for 30 seconds whenever it is opted in, and the GitHub mention plane, which asks for the same 30 seconds whenever it is enabled with something to watch.
+A home with neither enabled has no such file and keeps the default 300 seconds.
+A home with both gets one interval, so opting into the second plane never doubles a home's polling.
+
+The file is generated by the locked session-start bootstrap step, and the session-start supervision operating block includes the cadence instruction whenever it exists.
+The active primary-harness supervision protocol owns how that sourced cadence reaches the watcher process.
+Because the interval is read only at watcher start, a cadence transition - a plane opted in while a watcher is already running, or opted out - is applied by restarting the home-scoped watcher through the emitted harness protocol; bootstrap deliberately never restarts the watcher itself.
+When no plane asks for a speed-up any more, the next locked session-start bootstrap step removes the file and the default cadence applies on the next supervision cycle.
+Steady-state off is silent and writes nothing.
+
+Because the file is shared, a transition to it is reported as a `WATCH_CADENCE:` line naming the plane that asked for the interval and what the watcher sweeps at as a result, not as the `FMX:` line that belongs to Relay's own poll artifacts.
+A home that never opted into Relay is therefore never told Relay removed or failed to remove something, and a cadence write that fails names the plane left polling at the default 300 seconds.
+Every transition is reported the same way - a plane opting in, and the wind-down when the last one is turned off - and each carries the supervision-repair pointer, because a watcher already running keeps sweeping at its start-time interval until it is restarted.
+Re-confirming an unchanged interval is not a transition and says nothing, so a home in steady state hears about the cadence only when it actually moves.
+That holds on a home where Relay itself arms too: its `FMX: X mode on` line repeats on every session start whether or not anything moved, so it is not a transition marker - the `WATCH_CADENCE:` line is what marks the transition and carries the repair pointer.
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
@@ -776,13 +923,13 @@ To turn it on:
 The dashboard owns account creation, identity linking, bot installation, and token issuance; this document owns only what the local firstmate home does with the token once it is in `.env`.
 
 The locked session-start bootstrap step turns the token into local generated state.
-It writes `state/x-watch.check.sh`, a byte-static identity shim for `bin/fm-x-poll.sh`, and `config/x-mode.env`, which exports `FM_CHECK_INTERVAL=30` for watcher processes in that home.
+It writes `state/x-watch.check.sh`, a byte-static identity shim for `bin/fm-x-poll.sh`, and asks for a 30-second watcher cadence.
 The watcher accepts the shim only when its bytes match the expected generated content, then invokes the trusted repository poll script directly instead of executing state-file source.
-This section is the single owner of the Relay cadence contract: a Relay instance polls every 30 seconds instead of the default 300, only a Relay instance speeds up because a non-Relay home has no `config/x-mode.env`, and the session-start supervision operating block includes the cadence instruction when that file exists.
+Relay polls every 30 seconds instead of the default 300; "Watcher cadence" above owns how that request becomes the home's one interval.
 The active primary-harness supervision protocol owns how that sourced cadence reaches the watcher process.
 Because `bin/fm-watch.sh` reads `FM_CHECK_INTERVAL` only at process start, a cadence transition - opt-in while a watcher is already running, or opt-out - is applied by restarting the home-scoped watcher through the emitted harness protocol; bootstrap deliberately never restarts the watcher itself.
 While a legacy daemon flag is active the daemon owns the watcher and its default cadence applies; on Pi the away-posture record alone leaves the ordinary Relay watcher cadence active, and daemon-backed Relay cadence remains a deferred follow-up.
-When the token is removed or empty, the next locked session-start bootstrap step removes those artifacts.
+When the token is removed or empty, the next locked session-start bootstrap step removes Relay's own shim.
 Steady-state off is silent and writes nothing.
 Relay remains additive to non-Relay lifecycle behavior: homes without the generated artifacts keep the default watcher cadence and do not run the Relay poll.
 Its request handling remains in Relay-specific `bin/` scripts and the `fmx-respond` skill, while the watcher owns authenticated dispatch from the generated local identity shim.

@@ -957,6 +957,35 @@ SH
   pass "concurrent session-lock acquisition admits exactly one live harness"
 }
 
+# config/x-mode.env is the home's ONE watcher cadence, written for whichever
+# plane asked for the fastest interval, so the closing reminder must name the
+# plane that actually asked rather than asserting Relay is on.
+test_next_step_names_the_plane_that_asked_for_the_cadence() {
+  local rec root home fakebin out jq_dir path
+  rec=$(new_world cadence-wording)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  # The mention plane reads its configuration with the real jq, which BASE_PATH
+  # alone does not resolve on every host.
+  jq_dir=$(command -v jq) || fail "test host must provide jq"
+  path="$fakebin:$(dirname "$jq_dir"):$BASE_PATH"
+  printf '%s\n' '{"enabled":true,"trusted_logins":["mengsig"],"repos":["owner/demo"]}' \
+    > "$home/config/gh-mentions.json"
+
+  out=$(run_session_start "$home" "$root" "$path")
+
+  assert_present "$home/config/x-mode.env" \
+    "the mention plane's cadence request must produce the shared cadence file"
+  assert_contains "$out" "The GitHub mention plane is active, so the emitted block's cadence instruction applies." \
+    "a home running only the mention plane must be told which plane asked for the cadence"
+  assert_not_contains "$out" "X mode is active" \
+    "a home with no relay pairing token must never be told X mode is active"
+  pass "the closing reminder names the plane that asked for the watcher cadence"
+}
+
 # --- output ordering ----------------------------------------------------------
 
 # The digest is delivered through a harness that truncates from the TAIL, so
@@ -2704,6 +2733,7 @@ test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock
 test_session_lock_concurrent_single_winner
+test_next_step_names_the_plane_that_asked_for_the_cadence
 test_output_ordering_diagnostics_lead
 test_read_once_contract_is_stated_once_before_its_subject
 test_herdr_backend_diagnostics_follow_real_session_start

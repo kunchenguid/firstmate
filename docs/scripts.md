@@ -129,7 +129,10 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
 | `fm-check-unregister.sh` | Retire a custom watcher check and its trust binding by validated task id            |
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
+| `fm-check-shim-lib.sh`   | Single owner of how a standing watcher check shim is published, rolled back, and retired |
 | `fm-tool-update-check.sh` | Report watched tooling with an update available, and updates installed but left inert by PATH order |
+| `fm-gh-mention.sh`       | GitHub mention plane: poll watched repositories for tagged comments from trusted logins and file each one as a durable wake ([configuration.md](configuration.md) "GitHub mentions") |
+| `fm-gh-mention-config.jq` | Validate and flatten `config/gh-mentions.json` for the mention plane                |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication, merge-notification identity, and retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated pull-request, merge-request, and Gerrit-change poll sidecars |
 | `fm-contributions.sh`    | Observe owned publications, retain exact-head judgments, measure required actors, and wake on maintainer signals |

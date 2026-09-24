@@ -22,7 +22,10 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#                 "FMX: X mode on ..." or "FMX: X mode off ...",
+#                 "WATCH_CADENCE: <what the home's one watcher cadence is now,
+#                 and which plane asked for it>",
+#                 "GH_MENTIONS: <what stops or limits the GitHub mention poll>".
 #          When a RUNNING secondmate home is fast-forwarded, its target is
 #          firstmate's own current default-branch commit. A local worktree uses
 #          a purely local fast-forward with no origin fetch; a remote route hands
@@ -77,6 +80,10 @@
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
+#          config/x-mode.env is the home's ONE watcher cadence, carrying the
+#          fastest interval any enabled plane asked for, so a transition that
+#          belongs to another plane prints a WATCH_CADENCE line naming that
+#          plane rather than an FMX line naming Relay.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
@@ -101,10 +108,15 @@
 #          The `code-root <file>` variant is a detect-only local check that runs
 #          even in a read-only session; detect_code_root_backlog_fork owns what
 #          it reports.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
+#          GitHub mentions are OPTIONAL and inert unless config/gh-mentions.json
+#          exists; when it does, bootstrap keeps the mention poll armed exactly
+#          while that file says it should be, and prints a GH_MENTIONS line for
+#          anything that stops or limits it. docs/configuration.md
+#          "GitHub mentions" owns the schema.
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
 #          (backlog_record_reconcile, secondmate_sync,
 #          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
-#          fleet_sync) while still
+#          gh_mentions_setup, fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
@@ -125,8 +137,8 @@
 #                 secondmate_handoff_resume, and fleet_sync.
 #            only - ONLY those network steps and nothing else. No tool detection,
 #                 no version floors, no tangle check, no backlog
-#                 reconciliation, no x_mode_setup: those already ran on the
-#                 local pass.
+#                 reconciliation, no x_mode_setup, no gh_mentions_setup: those
+#                 already ran on the local pass.
 #          FM_BOOTSTRAP_DETECT_ONLY composes with it unchanged, so `only` plus
 #          detect-only is the read-only `gh auth status` probe on its own.
 #          bin/fm-startup-network.sh owns the deferral: it runs the `only` phase
@@ -925,6 +937,50 @@ x_mode_remove_artifact() {
   ! x_mode_artifact_present "$artifact"
 }
 
+# How fast this home's watcher sweeps its checks. Relay and the GitHub mention
+# plane both need a sweep faster than fm-watch.sh's 300s default, and a home
+# running both must end up with ONE interval rather than two competing ones, so
+# each enabled plane REQUESTS an interval here and the fastest request wins.
+# config/x-mode.env keeps its name and its single writer (x_mode_setup below);
+# nothing else writes a cadence, starts a timer, or runs a second poll loop.
+WATCH_CADENCE_WANT=
+WATCH_CADENCE_OWNER=
+
+watch_cadence_request() {  # <seconds> <plane>
+  local want=$1 plane=$2
+  case "$want" in ''|*[!0-9]*|0) return 0 ;; esac
+  [ -n "$plane" ] || return 0
+  if [ -z "$WATCH_CADENCE_WANT" ] || [ "$want" -lt "$WATCH_CADENCE_WANT" ]; then
+    WATCH_CADENCE_WANT=$want
+    WATCH_CADENCE_OWNER=$plane
+  fi
+}
+
+# The interval config/x-mode.env carries right now, or empty when this home has
+# no cadence file or one bootstrap will not read through. Comparing it with the
+# interval about to be settled is what separates a real cadence transition from
+# the steady state bootstrap re-confirms on every session start.
+watch_cadence_current() {  # <cadence-file>
+  local file=$1 line value=
+  [ -f "$file" ] && [ ! -L "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      export\ FM_CHECK_INTERVAL=*) value=${line#export FM_CHECK_INTERVAL=} ;;
+    esac
+  done < "$file"
+  case "$value" in ''|*[!0-9]*) return 0 ;; esac
+  printf '%s\n' "$value"
+}
+
+watch_cadence_body() {  # <seconds>
+  printf '%s\n' \
+    '# Auto-generated by fm-bootstrap.sh - the watcher cadence for this home.' \
+    '# Source this before the active harness protocol starts a watcher process' \
+    "# so fm-watch.sh sweeps its checks every ${1}s. A home with no fast-cadence" \
+    '# plane enabled has no such file and keeps the default 300s cadence.' \
+    "export FM_CHECK_INTERVAL=$1"
+}
+
 # X mode (opt-in): when this home's .env carries a non-empty FMX_PAIRING_TOKEN,
 # wire the relay poll into the existing authenticated watcher dispatch.
 # Drops two idempotent, gitignored artifacts:
@@ -940,19 +996,76 @@ x_mode_remove_artifact() {
 # applying a cadence transition to a running watcher is the caller's job via
 # the emitted harness-aware supervision repair instruction.
 x_mode_setup() {
-  local env_file token shim cadence shim_body cadence_body tool missing shim_home
+  local env_file token shim cadence shim_body tool missing shim_home
+  local had_shim had_cadence cadence_other cadence_other_plane cadence_before
+  local shim_removed cadence_settled
   env_file="$FM_HOME/.env"
   shim="$STATE/x-watch.check.sh"
   cadence="$CONFIG/x-mode.env"
 
   token=
   [ -f "$env_file" ] && token=$(fmx_env_get FMX_PAIRING_TOKEN "$env_file")
+  # What the cadence would be if Relay asked for nothing. Relay rolling its own
+  # arm back must not keep the file alive on its own request - a rejected or
+  # unwritable cadence has to go - but it must not take the file away from
+  # another plane that is still asking for one either.
+  cadence_other=$WATCH_CADENCE_WANT
+  cadence_other_plane=$WATCH_CADENCE_OWNER
+  cadence_before=$(watch_cadence_current "$cadence")
+  had_shim=0
+  x_mode_artifact_present "$shim" && had_shim=1
+  had_cadence=0
+  x_mode_artifact_present "$cadence" && had_cadence=1
 
+  # A watcher already running keeps its start-time interval, so a cadence that
+  # just changed is only real once that watcher is restarted; the pointer is the
+  # same one the wind-down carries. An unchanged interval says nothing, because
+  # bootstrap re-confirms this file on every session start.
+  x_mode_report_cadence_set() {  # <seconds> <plane>
+    [ -n "$1" ] || return 0
+    [ "$cadence_before" != "$1" ] || return 0
+    echo "WATCH_CADENCE: $2 asked for a ${1}s sweep; config/x-mode.env now carries it, so the watcher sweeps every ${1}s from the next supervision cycle; $(x_mode_supervision_repair)"
+  }
+
+  # Every transition of the shared file is reported here and only here, always
+  # naming the plane that asked for the interval. An FMX line speaks for Relay's
+  # own shim and never for this file, because AGENTS.md routes FMX to Relay.
+  x_mode_report_cadence() {  # <settled 0|1>
+    if [ "$1" -eq 0 ]; then
+      if [ -n "$cadence_other" ]; then
+        echo "WATCH_CADENCE: could not settle config/x-mode.env for $cadence_other_plane, which asked for a ${cadence_other}s sweep; it is polled at the watcher's default interval until that write succeeds"
+      elif [ "$had_cadence" -eq 1 ]; then
+        echo "WATCH_CADENCE: no enabled plane asks for a fast watcher sweep now, but config/x-mode.env could not be removed; the watcher keeps sweeping at the stale interval that file names until it is gone"
+      fi
+      return 0
+    fi
+    if [ -n "$cadence_other" ]; then
+      x_mode_report_cadence_set "$cadence_other" "$cadence_other_plane"
+      return 0
+    fi
+    [ "$had_cadence" -eq 1 ] || return 0
+    echo "WATCH_CADENCE: no enabled plane asks for a fast watcher sweep now; removed config/x-mode.env, so checks return to the watcher's default interval on the next supervision cycle; $(x_mode_supervision_repair)"
+  }
+
+  # Relay releasing the cadence never means the home loses it: another enabled
+  # plane may still be asking for one, and there is only ever this one file.
+  x_mode_settle_cadence() {
+    if [ -n "$cadence_other" ]; then
+      mkdir -p "$CONFIG" 2>/dev/null || return 1
+      x_mode_write_if_changed "$cadence" "$(watch_cadence_body "$cadence_other")" 600
+      return
+    fi
+    x_mode_remove_artifact "$cadence"
+  }
+
+  # The shim and the shared cadence succeed or fail independently, so each
+  # outcome is kept apart: collapsing them reports a transition that did happen
+  # as failed, and swallows the repair pointer that goes with it.
   x_mode_remove_artifacts() {
-    local failed=0
-    x_mode_remove_artifact "$shim" || failed=1
-    x_mode_remove_artifact "$cadence" || failed=1
-    [ "$failed" -eq 0 ]
+    shim_removed=1
+    cadence_settled=1
+    x_mode_remove_artifact "$shim" || shim_removed=0
+    x_mode_settle_cadence || cadence_settled=0
   }
 
   x_mode_supervision_repair() {
@@ -963,13 +1076,16 @@ x_mode_setup() {
   }
 
   if [ -z "$token" ]; then
-    # Opt-out (or never opted in): drop any X artifacts; stay silent unless we
-    # actually removed something.
-    if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
-      if x_mode_remove_artifacts; then
-        echo "FMX: X mode off - removed relay poll shim and 30s cadence; default cadence applies on the next supervision cycle; $(x_mode_supervision_repair)"
+    # Opt-out (or never opted in): drop Relay's own shim and settle the shared
+    # cadence. Report only what actually changed, so a home that merely keeps
+    # the cadence for another plane hears nothing about Relay every session.
+    x_mode_remove_artifacts
+    x_mode_report_cadence "$cadence_settled"
+    if [ "$had_shim" -eq 1 ]; then
+      if [ "$shim_removed" -eq 1 ]; then
+        echo "FMX: X mode off - removed relay poll shim"
       else
-        echo "FMX: X mode off - failed to remove relay poll shim or 30s cadence"
+        echo "FMX: X mode off - failed to remove relay poll shim"
       fi
     fi
     return 0
@@ -983,24 +1099,32 @@ x_mode_setup() {
     fi
   done
   if [ "$missing" -ne 0 ]; then
-    if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
-      if x_mode_remove_artifacts; then
+    # Relay cannot arm, but another plane's cadence request still has to be
+    # settled: the cadence is the home's, not Relay's. Report only what was
+    # actually there, so a home that never armed Relay hears nothing.
+    x_mode_remove_artifacts
+    x_mode_report_cadence "$cadence_settled"
+    if [ "$had_shim" -eq 1 ]; then
+      if [ "$shim_removed" -eq 1 ]; then
         echo "FMX: X mode off - missing relay poll dependencies; install them and rerun bootstrap"
       else
-        echo "FMX: X mode off - failed to remove relay poll shim or 30s cadence after missing relay poll dependencies"
+        echo "FMX: X mode off - failed to remove relay poll shim after missing relay poll dependencies"
       fi
     fi
     return 0
   fi
 
   fmx_arm_failed() {
-    if x_mode_remove_artifacts; then
-      echo "FMX: X mode off - failed to arm relay poll shim or 30s cadence"
+    x_mode_remove_artifacts
+    x_mode_report_cadence "$cadence_settled"
+    if [ "$shim_removed" -eq 1 ]; then
+      echo "FMX: X mode off - failed to arm relay poll shim"
     else
-      echo "FMX: X mode off - failed to arm relay poll shim or 30s cadence; stale artifacts remain"
+      echo "FMX: X mode off - failed to arm relay poll shim; a stale shim remains"
     fi
   }
 
+  watch_cadence_request 30 'the relay poll'
   mkdir -p "$STATE" "$CONFIG" 2>/dev/null || { fmx_arm_failed; return 0; }
 
   case "$FM_HOME" in
@@ -1015,17 +1139,45 @@ x_mode_setup() {
   fmx_poll_shim_valid "$shim" "$shim_home" "$FM_ROOT" \
     || { fmx_arm_failed; return 0; }
 
-  cadence_body=$(cat <<'EOF'
-# Auto-generated by fm-bootstrap.sh - X mode watcher cadence.
-# Source this before the active harness protocol starts a watcher process so
-# fm-watch.sh polls the X check every 30s. Non-X instances have no such file and
-# keep the default 300s cadence.
-export FM_CHECK_INTERVAL=30
-EOF
-)
-  x_mode_write_if_changed "$cadence" "$cadence_body" 600 || { fmx_arm_failed; return 0; }
+  x_mode_write_if_changed "$cadence" "$(watch_cadence_body "$WATCH_CADENCE_WANT")" 600 \
+    || { fmx_arm_failed; return 0; }
 
-  echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
+  x_mode_report_cadence_set "$WATCH_CADENCE_WANT" "$WATCH_CADENCE_OWNER"
+  echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh"
+}
+
+# GitHub mentions (opt-in): keep this home's mention poll armed exactly while
+# config/gh-mentions.json says it should be. bin/fm-gh-mention.sh owns every
+# decision and message here - arming, its refusals, and what it cannot watch -
+# so bootstrap only decides whether to ask and relays the answer as GH_MENTIONS
+# lines. Absent configuration is a complete no-op, and a configuration that
+# stops the plane also retires any shim a previous session armed, so the watcher
+# never keeps polling a plane the captain turned off or broke.
+gh_mentions_setup() {
+  local plane="$SCRIPT_DIR/fm-gh-mention.sh" shim="$STATE/gh-mention.check.sh" out line rc=0
+  [ -x "$plane" ] || return 0
+  if [ ! -e "$CONFIG/gh-mentions.json" ]; then
+    x_mode_artifact_present "$shim" || return 0
+    "$plane" disarm >/dev/null 2>&1 \
+      || echo "GH_MENTIONS: could not retire the mention poll after its configuration was removed"
+    return 0
+  fi
+  out=$("$plane" arm 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ] && x_mode_artifact_present "$shim" \
+    && ! "$plane" disarm >/dev/null 2>&1; then
+    echo "GH_MENTIONS: could not retire the mention poll this home cannot arm"
+  fi
+  [ "$rc" -ne 0 ] || watch_cadence_request "$("$plane" cadence 2>/dev/null)" 'the GitHub mention plane'
+  while IFS= read -r line; do
+    case "$line" in
+      ''|'armed: '*|'disarmed: '*) ;;
+      'gh-mention: '*) echo "GH_MENTIONS: ${line#gh-mention: }" ;;
+      'fm-gh-mention: '*) echo "GH_MENTIONS: ${line#fm-gh-mention: }" ;;
+      *) echo "GH_MENTIONS: $line" ;;
+    esac
+  done <<EOF
+$out
+EOF
 }
 
 crew_dispatch_validate() {
@@ -1574,6 +1726,12 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
       fm_timing_record phase handoff-delivery "$__fm_timing_stamp"
     fi
   fi
+  # gh_mentions_setup only arms or retires a local check shim; the poll it arms
+  # is what talks to GitHub, on the watcher's own cadence. It runs BEFORE
+  # x_mode_setup because that is where its cadence request has to be recorded:
+  # x_mode_setup is the one writer of config/x-mode.env and needs every
+  # request before it decides the single interval to write.
+  local_phase && gh_mentions_setup
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
   local_phase && x_mode_setup
   # Adopt existing durable contribution links without making a network call.
