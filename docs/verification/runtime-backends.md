@@ -1884,6 +1884,32 @@ Scope of the earlier evidence: the installed signed `pi` CLI (0.82.0 at verifica
 The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh the SDK construction, picker, renderer, and type evidence after every Pi upgrade by rerunning the applicable live guard probes, picker regression, and strict typecheck above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists).
 The live guard now drives both extensions through the watcher-owned settlement handshake, requires rejected branch settlement before main delivery, and verifies successor-delivery confirmation; rerun it against the matching importable Pi package to refresh end-to-end fallback evidence.
 
+### 2026-09-24 Pi 0.87.1 and Codex compatibility 0.0.16
+
+On Linux x86_64 with Node v22.22.2, the user installation at `/home/chengyuhang/.npm-global/bin/pi` reported Pi 0.87.1 and the Pi user-package store reported `pi-openai-codex-compat` 0.0.16.
+The compatibility package declared the Pi peer range `>=0.87.0 <0.88.0`.
+The host system library exposed through `GLIBCXX_3.4.30`, so `tree-sitter` 0.25.1 and `tree-sitter-bash` 0.25.1 were rebuilt from their npm sources with `npm rebuild --prefix ~/.pi/agent/npm tree-sitter tree-sitter-bash --build-from-source` rather than loading the incompatible published `tree-sitter` prebuild.
+Both rebuilt bindings resolved from their `build/Release` directories and loaded successfully together with `node-pty` 1.2.0-beta.15.
+
+The following commands exercised the exact installed pair and tracked integration:
+
+```text
+$ tests/fm-pi-branch-extension.test.sh
+ok - Codex branch lazily initializes only the verified Pi 0.87.1 and compatibility 0.0.16 pair without widening tools
+ok - unsupported versions plus package identity, provenance, containment, startup, and unexpected-tool failures return Codex wakes to main before prompting
+
+$ FM_PI_PACKAGE_DIR=<installed-pi> tests/fm-pi-primary-types.test.sh
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.87.1
+
+$ FM_PI_BRANCH_LIVE_E2E=1 FM_PI_PACKAGE_DIR=<installed-pi> FM_PI_CODEX_COMPAT_NODE_MODULES=<pi-user-node-modules> tests/fm-pi-branch-live-e2e.test.sh
+ok - real Pi CLI 0.87.1 with pi-openai-codex-compat 0.0.16 inherits global SSE and connection settings without project resources or writes, preserving Luna/minimal, guarded tools, legacy outcomes and native compaction
+ok - real Pi SDK 0.87.1 mirrors only provenance-verified Feishu text before idle/streaming branch turns, once and in order across persistence and cold creation
+```
+
+A generated Herdr lab session with a fresh disposable `FM_HOME` exercised real Pi TUI startup, one accepted branch wake, `fm_branch_report`, the durable outcome, main acknowledgement through sequence 1, and a main-only check wake.
+It recorded `acceptedOffers=1`, `mainOnlyOffers=1`, `branchCalls=2`, `outcomes=1`, `processed=1`, and `visible=1`, then completed guarded teardown with `HERDR_TRIPWIRE_TEARDOWN_OK`.
+An authenticated JSON-mode smoke test used the existing authorized `openai-codex/gpt-5.6-luna` credential surface and recorded a successful `read` tool start and completion followed by an assistant stop.
+
 ### 2026-09-08 Pi branch settings and trusted Feishu mirroring
 
 On Linux x86_64 with Node v22.22.2, installed Pi 0.85.1 and `pi-openai-codex-compat` 0.0.10-alpha.7 passed the actual branch construction and provider-consumer regression.
@@ -1922,7 +1948,7 @@ On Linux x86_64 with Node v22.22.2, the installed Pi 0.85.1 CLI and an isolated 
 The fixture starts with delivered legacy endpoint outcomes and no branch pointer, lets the real primary extension reconcile history, then offers its first eligible synthetic notification through Pi's event bus.
 The fixture pins `minimal`; Pi retains its supported-level clamp, producing `low` in the current Luna request.
 It verifies lazy branch creation, provider startup, the exact `read`, guarded `bash`, and `fm_branch_report` request payload, a new report in the durable store and main's active session tree, and a persisted native compaction checkpoint.
-The portable suite separately checks that cache migration preserves authoritative history and unprocessed captain results, and that mismatched, non-semver, missing, and future version declarations do not prevent valid runtime startup.
+The portable suite at that time separately checked that cache migration preserved authoritative history and unprocessed captain results, and that mismatched, non-semver, missing, and future version declarations did not prevent valid runtime startup; the [current exact-pair admission evidence](#2026-09-24-pi-0871-and-codex-compatibility-0016) supersedes that historical admission behavior.
 Package identity, provenance, containment, startup, failed tool restoration, and unexpected tool mutations retain their safe fallback regressions.
 
 ```sh

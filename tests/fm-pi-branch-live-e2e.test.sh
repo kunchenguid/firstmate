@@ -23,7 +23,7 @@
 # pi-openai-codex-compat package is driven through the branch dispatch boundary.
 # The real Pi CLI uses intercepted SSE responses to prove lazy creation after
 # legacy outcome reconciliation, startup before prompting, and persistence of
-# the native remote-compaction checkpoint, regardless of version declarations.
+# the native remote-compaction checkpoint after the exact verified-pair check.
 # A final real-SDK probe uses synthetic accepted Feishu records and the native
 # encoder with Pi's actual custom-message queue to verify trusted captain
 # mirroring before persistence, on idle/streaming paths and cold branch creation.
@@ -1163,7 +1163,7 @@ export default async function compatProbe(pi) {
     assert.equal(options.timeoutMs, 23000);
     assert.equal(options.maxRetries, 0);
     assert.equal(options.maxRetryDelayMs, 1234);
-    assert(!context.systemPrompt.includes("UNWANTED_CONTEXT"));
+    assert(!JSON.stringify(context.messages).includes("UNWANTED_CONTEXT"));
     return originalStream.call(this, model, context, options);
   };
   let websocketAttempts = 0;
