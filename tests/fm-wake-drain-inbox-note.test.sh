@@ -113,7 +113,7 @@ test_note_above_cutoff_is_not_named() {
   pass "a note whose wake arrived after presentation keeps its row and is not named early"
 }
 
-test_branch_ack_releases_pending_note_to_main() {
+test_branch_ack_releases_pending_note_for_next_grant() {
   local dir state note_out id seq generation
   dir=$(make_case branch-note)
   state="$dir/state"
@@ -127,12 +127,13 @@ test_branch_ack_releases_pending_note_to_main() {
   generation=$(grep -o 'recovery-generation [^ ]*' "$dir/branch.err" | head -1 | cut -d' ' -f2)
   FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$seq" --recovery-generation "$generation" > "$dir/branch-ack.out" 2> "$dir/branch-ack.err" || fail "branch ack failed: $(cat "$dir/branch-ack.err")"
   grep -F "inbox:$id" "$state/.wake-queue" >/dev/null || fail "branch consumed pending note wake"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/main.out" 2> "$dir/main.err" || fail "main drain failed"
-  grep -F "check: captain inbox note $id" "$dir/main.out" >/dev/null || fail "main did not receive released note wake"
-  pass "branch ack releases pending note wake to main"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-grant.sh" publish branch-note "$seq" >/dev/null || fail "pending note was not grantable again"
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/again.out" 2> "$dir/again.err" || fail "next branch drain failed"
+  grep -F "check: captain inbox note $id" "$dir/again.out" >/dev/null || fail "next branch grant did not present note wake"
+  pass "branch ack leaves pending note available for next branch grant"
 }
 
-test_branch_ack_releases_pending_note_to_main
+test_branch_ack_releases_pending_note_for_next_grant
 test_note_among_status_wakes_is_presented_and_survives_ack
 test_handled_note_is_not_renamed_at_ack
 test_note_above_cutoff_is_not_named
