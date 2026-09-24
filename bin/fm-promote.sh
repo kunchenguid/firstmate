@@ -173,6 +173,8 @@ CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
 META_LOCK=
 META_LOCK_HELD=0
+PROMOTE_PROJECT_LOCK=
+PROMOTE_PROJECT_LOCK_HELD=0
 TMP=
 META=
 SCOUT_BRIEF=
@@ -192,6 +194,10 @@ promote_cleanup() {
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     CONTROL_LOCK_HELD=0
     fm_lock_release "$CONTROL_LOCK" || true
+  fi
+  if [ "$PROMOTE_PROJECT_LOCK_HELD" = 1 ]; then
+    PROMOTE_PROJECT_LOCK_HELD=0
+    fm_lock_release "$PROMOTE_PROJECT_LOCK" || true
   fi
   return "$status"
 }
@@ -248,12 +254,32 @@ if [ -n "$BASE_BRANCH" ] && [ "$BASE_BRANCH" = "$BRANCH" ]; then
 fi
 
 refuse_promoted_branch_collision() {
-  local remote_refs
+  local meta other_branch other_project other_kind other_real proj_real other_id remote_refs
   [ "$BRANCH_NAME_SET" -eq 1 ] || return 0
   [ -n "$PROMOTE_PROJECT" ] && [ -d "$PROMOTE_PROJECT" ] || {
     echo "error: cannot verify crew branch $BRANCH without the scout's project checkout; refusing promotion" >&2
     return 1
   }
+  proj_real=$(cd "$PROMOTE_PROJECT" 2>/dev/null && pwd -P) || proj_real=$PROMOTE_PROJECT
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    other_id=${meta##*/}
+    other_id=${other_id%.meta}
+    [ "$other_id" = "$ID" ] && continue
+    other_kind=$(fm_meta_get "$meta" kind)
+    [ "$other_kind" = ship ] || continue
+    other_branch=$(fm_meta_get "$meta" branch)
+    [ "$other_branch" = "$BRANCH" ] || continue
+    other_project=$(fm_meta_get "$meta" project)
+    [ -n "$other_project" ] || continue
+    if other_real=$(cd "$other_project" 2>/dev/null && pwd -P); then
+      [ "$other_real" = "$proj_real" ] || continue
+    else
+      [ "$other_project" = "$PROMOTE_PROJECT" ] || continue
+    fi
+    echo "error: crew branch $BRANCH is already assigned to task $other_id; refusing promotion with a shared branch" >&2
+    return 1
+  done
   if git -C "$PROMOTE_PROJECT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
     echo "error: crew branch $BRANCH already exists locally; refusing promotion with a reused branch" >&2
     return 1
@@ -270,6 +296,21 @@ refuse_promoted_branch_collision() {
   fi
 }
 
+if [ "$BRANCH_NAME_SET" -eq 1 ]; then
+  [ -n "$PROMOTE_PROJECT" ] && [ -d "$PROMOTE_PROJECT" ] || {
+    echo "error: cannot reserve crew branch $BRANCH without the scout's project checkout; refusing promotion" >&2
+    exit 1
+  }
+  PROMOTE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROMOTE_PROJECT") || {
+    echo "error: could not resolve the shared project lock for $PROMOTE_PROJECT" >&2
+    exit 1
+  }
+  if ! fm_lock_try_acquire "$PROMOTE_PROJECT_LOCK"; then
+    echo "error: another project allocation or return is in progress for $PROMOTE_PROJECT; refusing to race it" >&2
+    exit 1
+  fi
+  PROMOTE_PROJECT_LOCK_HELD=1
+fi
 refuse_promoted_branch_collision || exit 1
 PROMOTE_BASE_WORDS=default-branch
 if [ -n "$BASE_BRANCH" ]; then

@@ -154,8 +154,8 @@
 #   even when they select different backends. A fresh spawn first takes the
 #   per-home task-set lock and refuses rather than waits when forced teardown owns
 #   it; relaunch is exempt because the existing task's control lock covers it.
-#   A fresh Treehouse-backed spawn also takes the project-identity lock in the local
-#   root Firstmate home's state directory before slot allocation and holds it through
+#   A fresh ship or scout spawn also takes the project-identity lock in the local
+#   root Firstmate home's state directory before allocation checks and holds it through
 #   task metadata publication. Teardown holds that same lock while proving and
 #   returning a slot, so allocation cannot reuse a slot before its owner record
 #   is published. Under that same lock it writes the slot's owner claim, which is
@@ -2906,13 +2906,13 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
-    echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
+    echo "error: could not resolve the shared project lock for $PROJ_ABS" >&2
     exit 1
   }
   if ! fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
-    echo "error: another Treehouse slot allocation or return is in progress for $PROJ_ABS; refusing to race it" >&2
+    echo "error: another project allocation or return is in progress for $PROJ_ABS; refusing to race it" >&2
     exit 1
   fi
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
@@ -3002,7 +3002,7 @@ if [ "$KIND" = ship ]; then
   BRIEF_FORGE=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]forge=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   [ -n "$BRIEF_FORGE" ] || BRIEF_FORGE=none
   BRIEF_BRANCH=$(sed -n 's/^Ship branch: //p' "$BRIEF" | head -n 1)
-  BRIEF_BASE=$(sed -n 's/^Base branch contract: base_branch=//p' "$BRIEF" | tail -n 1)
+  BRIEF_BASE=$(sed -n 's/^Base branch contract: base_branch=//p' "$BRIEF" | head -n 1)
   if [ -n "$BRIEF_BASE" ] || [ "$BASE_BRANCH_SET" -eq 1 ]; then
     [ "$BRIEF_BASE" = "$BASE_BRANCH" ] || {
       echo "error: base mismatch for $ID: the brief says base_branch=${BRIEF_BASE:-<none>} but this spawn selected base_branch=${BASE_BRANCH:-<none>}" >&2
@@ -3073,7 +3073,7 @@ if [ "$KIND" = ship ]; then
     echo "notice: $ID ships branch=$BRANCH while $PROJ_NAME registers the ship-branch prefix '$STANDING_BRANCH' (branch $STANDING_BRANCH$ID) - the task's branch and PR will read as firstmate-authored; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi
 elif [ "$KIND" = scout ]; then
-  BRIEF_BASE=$(sed -n 's/^Base branch contract: base_branch=//p' "$BRIEF" | tail -n 1)
+  BRIEF_BASE=$(sed -n 's/^Base branch contract: base_branch=//p' "$BRIEF" | head -n 1)
   if [ -n "$BRIEF_BASE" ] || [ "$BASE_BRANCH_SET" -eq 1 ]; then
     [ "$BRIEF_BASE" = "$BASE_BRANCH" ] || {
       echo "error: base mismatch for $ID: the brief says base_branch=${BRIEF_BASE:-<none>} but this spawn selected base_branch=${BASE_BRANCH:-<none>}" >&2

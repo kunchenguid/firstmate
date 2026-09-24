@@ -271,13 +271,14 @@ test_local_merge_lands_on_the_recorded_base() {
   git -C "$proj" checkout -qb feature/widget
   commit_file "$proj" change change change
   feature=$(git -C "$proj" rev-parse HEAD)
-  git -C "$proj" checkout -q main
+  git -C "$proj" checkout -qb scratch
   printf 'project=%s\nmode=local-only\nbranch=feature/widget\nbase_branch=office\n' "$proj" \
     > "$home/state/$id.meta"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$id") \
     || fail "named-base merge failed: $out"
   office=$(git -C "$proj" rev-parse refs/heads/office)
   [ "$office" = "$feature" ] || fail "named-base merge did not fast-forward office"
+  [ "$(git -C "$proj" branch --show-current)" = scratch ] || fail "named-base merge changed the active checkout"
   assert_contains "$out" "merged feature/widget into local office" "named-base merge did not name office"
   pass "fm-merge-local: a recorded base is the landing branch"
 }
@@ -302,6 +303,7 @@ test_local_merge_fast_forwards_a_bare_repository() {
   commit_file "$seed" change change change
   feature=$(git -C "$seed" rev-parse HEAD)
   git -C "$seed" push -q origin feature/widget
+  git -C "$bare" update-ref -d refs/heads/main
   printf 'project=%s\nmode=local-only\nbranch=feature/widget\nbase_branch=office\n' "$bare" \
     > "$home/state/$id.meta"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$id") \
