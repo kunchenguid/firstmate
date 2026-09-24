@@ -9,7 +9,8 @@
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
 # FM_STATUS_PRESENTATION_LOCK_TIMEOUT sets the positive whole-second wait for
-# presentation-path locks (default 10); queue mutation locks remain blocking.
+# presentation-path locks (default 10); the acknowledgement queue-lock acquires
+# wait FM_WAKE_QUEUE_LOCK_WAIT seconds (default 30) and refuse on timeout.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -628,7 +629,10 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 if [ -n "$ACK_THROUGH" ]; then
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_lock_acquire_wait_bounded "$FM_WAKE_QUEUE_LOCK" "$FM_WAKE_QUEUE_LOCK_WAIT" || {
+    printf 'wake drain: queue lock could not be acquired safely\n' >&2
+    exit 1
+  }
 elif fm_lock_acquire_wait_bounded "$FM_WAKE_QUEUE_LOCK" "$PRESENTATION_LOCK_TIMEOUT"; then
   :
 else
@@ -686,7 +690,10 @@ if [ -n "$ACK_THROUGH" ]; then
     echo "wake drain: inactive outcome receipt could not be recorded safely" >&2
     exit 1
   fi
-  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_lock_acquire_wait_bounded "$FM_WAKE_QUEUE_LOCK" "$FM_WAKE_QUEUE_LOCK_WAIT" || {
+    printf 'wake drain: queue lock could not be acquired safely\n' >&2
+    exit 1
+  }
   DRAIN_LOCK_HELD=true
   DRAIN_TMP=$(mktemp "$STATE/.wake-queue.ack.XXXXXX") || exit 1
   chmod 0600 "$DRAIN_TMP" || exit 1

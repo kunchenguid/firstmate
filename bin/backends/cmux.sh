@@ -398,8 +398,15 @@ fm_backend_cmux_parse_target() {  # <target>
 # (fm_backend_zellij_pane_exists) rather than the design sketch's original
 # read-screen-based suggestion.
 fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
-  local wsid=$1 sfid=$2
-  fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null \
+  local wsid=$1 sfid=$2 out
+  # Capture and check the CLI call's own exit status before piping to jq: a
+  # bare `cli ... | jq -e ...` pipe (without pipefail) takes its exit status
+  # from jq alone, and jq 1.6 (still the apt-installed default on several
+  # supported Linux distros) reports success (exit 0) for `-e` on completely
+  # empty stdin instead of jq 1.7+'s failure (exit 4) - so a failed,
+  # output-less list-panes call would misreport the surface as existing.
+  out=$(fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null) || return 1
+  printf '%s' "$out" \
     | jq -e --arg s "$sfid" '[.panes[]? | select(.surface_ids // [] | index($s))] | length > 0' >/dev/null 2>&1
 }
 

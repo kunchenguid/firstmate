@@ -280,6 +280,73 @@ test_lock_single_winner_under_concurrency() {
   pass "concurrent fm_lock_try_acquire yields exactly one winner"
 }
 
+test_lock_acquire_wait_waits_for_a_live_holder() {
+  local dir state lockdir live rc err start end
+  dir=$(make_case lock-acquire-wait-live-holder)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  err="$dir/err"
+  sleep 300 &
+  live=$!
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  (sleep 2; kill "$live" 2>/dev/null || true) &
+  rc=0
+  start=$(date +%s)
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+  ' _ "$LIB" "$lockdir" 2>"$err" || rc=$?
+  end=$(date +%s)
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "fm_lock_acquire_wait should acquire once the holder is gone, got rc=$rc"
+  [ "$((end - start))" -ge 1 ] || fail "fm_lock_acquire_wait returned before the live holder was gone"
+  [ ! -s "$err" ] || fail "fm_lock_acquire_wait wrote to stderr on a successful wait: $(cat "$err")"
+  pass "fm_lock_acquire_wait: keeps waiting for a live holder and cannot fail"
+}
+
+test_queue_lock_callers_refuse_when_the_lock_stays_held() {
+  local dir state lockdir live rc err keys
+  dir=$(make_case queue-lock-callers-refuse)
+  state="$dir/state"
+  lockdir="$state/.wake-queue.lock"
+  err="$dir/err"
+  sleep 300 &
+  live=$!
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+
+  rc=0
+  FM_STATE_OVERRIDE="$state" FM_WAKE_QUEUE_LOCK_WAIT=1 "$ROOT/bin/fm-wake-grant.sh" \
+    activate "$live" gen-1 2>/dev/null || rc=$?
+  [ "$rc" -eq 1 ] || fail "fm-wake-grant activate should refuse while the queue lock is held, got rc=$rc"
+  [ ! -e "$state/.branch-eligible-owner" ] \
+    || fail "fm-wake-grant activate recorded an owner without holding the queue lock"
+
+  rc=0
+  FM_STATE_OVERRIDE="$state" FM_WAKE_QUEUE_LOCK_WAIT=1 "$DRAIN" \
+    --ack-through 0 --recovery-generation gen-1 >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -eq 1 ] || fail "fm-wake-drain --ack-through should refuse while the queue lock is held, got rc=$rc"
+  assert_grep "queue lock could not be acquired safely" "$err" \
+    "fm-wake-drain --ack-through did not report the lock it could not acquire"
+
+  rc=0
+  keys=$(FM_STATE_OVERRIDE="$state" FM_WAKE_QUEUE_LOCK_WAIT=1 bash -c '
+    . "$1"
+    fm_wake_queued_keys check
+  ' _ "$LIB" 2>/dev/null) || rc=$?
+  [ "$rc" -ne 0 ] || fail "fm_wake_queued_keys should fail while the queue lock is held"
+  [ -z "$keys" ] || fail "fm_wake_queued_keys printed keys without holding the queue lock: $keys"
+
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  FM_STATE_OVERRIDE="$state" FM_WAKE_QUEUE_LOCK_WAIT=1 "$ROOT/bin/fm-wake-grant.sh" \
+    activate $$ gen-1 2>/dev/null || fail "fm-wake-grant activate should succeed once the queue lock is free"
+  [ -s "$state/.branch-eligible-owner" ] || fail "fm-wake-grant activate recorded no owner after the lock was free"
+  pass "queue-lock callers wait boundedly and refuse when the lock stays held"
+}
+
 test_lock_steals_dead_pid_lock() {
   local dir state lockdir dead rc newpid
   dir=$(make_case lock-dead-steal)
@@ -1202,6 +1269,8 @@ test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
 test_guard_warnings
 test_lock_single_winner_under_concurrency
+test_lock_acquire_wait_waits_for_a_live_holder
+test_queue_lock_callers_refuse_when_the_lock_stays_held
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
