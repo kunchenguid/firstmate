@@ -17,8 +17,11 @@
 # stdin is captured as bounded job input. The completed worker result is relayed
 # with stdout and stderr kept separate and its exit status preserved. An SSH
 # disconnect remains unknown completion to fm-on.sh, which preserves OpenSSH's
-# exit 255 behavior. The shared library header owns job fields, bounds, PATH,
-# LaunchAgent contract, and worker environment.
+# exit 255 behavior. Before decoding the bootstrap protocol, this entrypoint
+# replaces inherited PATH with /usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin
+# so account commands cannot shadow protocol tools. The shared library header
+# owns job fields, bounds, the worker PATH, LaunchAgent contract, and worker
+# environment.
 #
 # A staged job whose caller goes away is cancelled rather than abandoned: any
 # exit after staging and before the published result marks the job cancelled
