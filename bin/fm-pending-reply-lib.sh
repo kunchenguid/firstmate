@@ -18,6 +18,8 @@
 # acknowledgement. An escalated record that is still unresolved is reminded
 # once per later live session: one check wake, no second recovery, and no
 # second status injection. Bearings lists that record until it resolves.
+# Only the operator's keyed close of the escalation (fm-send --resolve-key
+# pending-reply-<corr>) ends the reminder and the Bearings row early.
 # The same-session escalation wake is the first surface, so the reminder
 # waits for a different session token. A poll with the same token does not
 # wake again. A same-basename restatement-copy of the mate home's
