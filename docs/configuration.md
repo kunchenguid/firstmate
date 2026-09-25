@@ -307,6 +307,7 @@ A Claude, Cursor, OpenCode, omp, Grok, or Codex primary can run the host, only w
 With the file present, the primary's arm owner runs the host in place of the watcher arm.
 The host handles wakes on the engine while `state/.afk-contract` exists.
 On that home, `/afk` launches no away daemon; `/quiet` still does.
+The file also gates the primary's dialog-mirror hooks (`bin/fm-host-mirror.sh`), which record on a Claude or Cursor primary ([supervision-host.md](supervision-host.md#the-dialog-mirror)).
 
 Absence leaves the home exactly as it is without the host, on every harness; a Pi primary keeps its in-process supervision branch whether or not the file exists.
 A Grok primary reads the file when its session-start block renders, so a change takes effect at its next session start; every other owner reads it at every arm.

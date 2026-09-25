@@ -40,6 +40,7 @@ Today it runs beside a Claude, Cursor, OpenCode, omp, Grok, or Codex primary and
 
 Attended supervision on the host, `/quiet` on the host, and the daemon's retirement are later steps of the same design.
 Until they land, their current behavior stays as described in their own owners.
+The [dialog mirror](#the-dialog-mirror) is the recording groundwork for that later posture.
 
 ## Components and their owners
 
@@ -53,6 +54,7 @@ Until they land, their current behavior stays as described in their own owners.
 | The prompt | `bin/fm-branch-prompt.sh` | Emits the same byte-stable prompt the Pi branch runs; each wake names its host's report surface. |
 | The report surface | `bin/fm-branch-report.sh` | The command twin of the Pi branch's `fm_branch_report` tool, with the same task scoping; see [The report surface](#the-report-surface). |
 | Leases and authority | `bin/fm-lease-lib.sh` | Owns the per-task leases, the main-owned role partition, and the away relocation; see [Leases and authority](#leases-and-authority). |
+| The dialog mirror | `bin/fm-host-mirror.sh` | Owns the mirror files, writers, and feed; see [The dialog mirror](#the-dialog-mirror). |
 | The main side | [supervision-protocols/supervision-host.md](supervision-protocols/supervision-host.md) | What main reads at session start on an opted-in home, rendered for its harness. |
 
 ### Arm owners
@@ -92,6 +94,19 @@ The host's engine runs with these settings:
 - The primary's harness pin.
 
 So every guarded script treats it exactly as it treats the Pi branch.
+
+## The dialog mirror
+
+The engine's conversation receives nothing between wakes, so attended supervision needs a record of what the captain and main said: the same `[captain]` and `[main]` context the Pi branch receives as mirror messages.
+`bin/fm-host-mirror.sh` owns the record, writers, files, and feed; its header owns their formats, bounds, and failure contract.
+Today its writers record on opted-in Claude and Cursor primaries, but the host never calls the feed, so the mirror changes no wake.
+The writers use code-owned turn surfaces rather than model-generated messages; `bin/fm-host-mirror.sh` owns the input exclusions.
+A captain prompt whose hook write fails is not mirrored, and Claude and Cursor have no later source for it.
+
+Claude and Cursor have writers, proven against the real harness to record the session's dialog from its first captain prompt.
+Codex has no writer yet: a supervising Codex main stays inside one turn across its foreground checkpoints, so a captain message typed then fires no prompt or Stop hook, and only a reader of its transcript could record it.
+Grok and OpenCode have no writer, because their session takes the fleet lock during its first turn, so that turn's captain prompt could never be recorded.
+omp has no verified writer, because no omp was available to prove one against.
 
 ## One away wake
 
@@ -231,7 +246,7 @@ A new one opens in two cases:
 - Every `FM_SUPERVISION_HOST_ROTATE_TURNS` turns, because each wake adds history and the per-wake cost grows with it.
 
 Nothing captain-facing rides on that conversation, because the outcome store carries every result.
-The engine sees no mirror of main's dialog.
+See [The dialog mirror](#the-dialog-mirror) for the recording path intended for a later attended engine conversation.
 The away record's read-back at the tail of every wake is the captain context it acts on.
 
 ### Where engine cost is read
@@ -315,6 +330,8 @@ Each arm owner's own suite covers its host mode against a stub host.
 | `tests/fm-omp-harness.test.sh` | The omp arm owner's host mode against a stub host. |
 | `tests/fm-watch-checkpoint.test.sh` | The Codex checkpoint's host mode against a stub host. |
 | `tests/fm-supervision-instructions.test.sh` | The rendered protocol, including Grok's arm command. |
+| `tests/fm-host-mirror.test.sh` | The dialog mirror's writers through the tracked Claude and Cursor registrations, the opt-in gate, and the feed. |
 | `tests/fm-supervision-host-live-e2e.test.sh` | Runs a real engine turn; opt-in because it spends tokens. |
+| `tests/fm-host-mirror-live-e2e.test.sh` | Proves the Claude and Cursor mirror writers against the real harnesses; opt-in because it spends tokens. |
 
 [verification/supervision.md](verification/supervision.md#supervision-host) records the dated live results.
