@@ -37,6 +37,8 @@ Within a home's lane the worker preempts a running reply long-poll as soon as an
 `bin/fm-remote-job-lib.sh` owns that preemption contract and distinguishes preemption from a wait window that closes with no data, so only a genuinely quiet window proves channel freshness while either outcome can re-arm without losing data.
 A caller that disconnects or whose caller-side wait expires before its job completes cancels it instead of abandoning it: cancelled queued work is skipped, cancelled running work is stopped, and the finalized record is cleaned up, so retries never convoy behind abandoned work.
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
+Linux process ownership remains stable across wall-clock and boot-time drift when `/proc` is available; macOS retains its existing identity and mismatch recovery behavior.
+On Linux, the next worker readiness check replaces a live legacy worker from the configured code root before starting its replacement; [`bin/fm-remote-job-lib.sh`](../bin/fm-remote-job-lib.sh) owns the identity format and upgrade verification rules.
 A worker stops itself once its configured code root stops being a Firstmate checkout, so a worker started from a worktree cannot outlive that worktree, and `bin/fm-remote-job-reap-orphans.sh` clears any worker already left behind that way without ever touching one whose checkout still exists.
 The remote account must provide the required toolchain, the selected worker runtime, the selected session backend, and credentials that work on that host.
 A [worker account pin](configuration.md#worker-account-pin-configclaude-account-configpi-account) for the second mate or its workers lives in the remote home's own configuration on that host.

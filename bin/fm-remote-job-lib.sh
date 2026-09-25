@@ -13,6 +13,7 @@
 # optional caller-cancellation marker, and .claim may hold owner, owner_start,
 # supervisor, supervisor_start, group, group_start, and armed records while
 # work executes.
+# fm_remote_job_process_start below owns the platform-specific start identities.
 # Stage writes state=queued last. seq is a queue-wide monotonic staging
 # sequence reserved atomically by its persistent .seq-claims directory; the
 # counter is only a forward-moving allocation hint. If the bounded hint walk
@@ -903,7 +904,26 @@ fm_remote_job_worker_identity_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worke
 fm_remote_job_worker_lock_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.lock"; }
 
 fm_remote_job_process_start() {
-  local pid=$1 ps_bin value
+  local pid=$1 proc_root stat_line starttime ps_bin value
+  local -a stat_fields
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  # Prefer a Linux-compatible /proc when present: stat field 22 (starttime,
+  # clock ticks since boot) is immune to the wall-clock and btime drift that
+  # re-renders ps lstart (observed on WSL2 when the Windows host clock fights
+  # systemd-timesyncd). Capability-detect the files rather than keying on uname,
+  # matching fm_pid_identity. Parse after the last ")" so comm with spaces or
+  # parentheses cannot shift the field. Tests may point FM_PROC_ROOT_OVERRIDE at a
+  # fake /proc.
+  if [ -r "$proc_root/$pid/stat" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${#stat_fields[@]}" -ge 20 ] || return 1
+    starttime=${stat_fields[19]}
+    case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s\n' "$starttime"
+    return 0
+  fi
   if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
   value=$("$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ -n "$value" ] || return 1
@@ -1147,7 +1167,7 @@ fm_remote_job_reload_launchagent() { # <account-home> <uid>
 }
 
 fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 worker pid
+  local root=$1 account_home=$2 worker pid='' lock start command
   worker="$root/bin/fm-remote-job-worker.sh"
   [ -f "$worker" ] && [ ! -L "$worker" ] && [ -x "$worker" ] || {
     FM_REMOTE_JOB_ERROR="remote job worker is not a genuine executable in the configured code root"
@@ -1160,6 +1180,28 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
     # and would immediately replace a lone process kill, so stop the whole
     # worker tree through its isolated group.
     pid=$FM_REMOTE_JOB_OWNER_PID
+  elif [ "$(fm_remote_job_platform)" = linux ]; then
+    # Legacy lstart cannot prove identity after btime drift. At this Linux-only
+    # upgrade boundary, require the live command to name this root's worker
+    # before stopping its tree; ordinary identity comparisons remain exact.
+    # tests/fm-remote-job-process-start.test.sh covers the upgrade handoff.
+    lock=$(fm_remote_job_worker_lock_path)
+    start=$(fm_remote_job_read_single_line "$lock/start" 256 2>/dev/null || true)
+    if [ -d "$lock" ] && [ ! -L "$lock" ] && [[ "$start" =~ ^[A-Za-z]{3}[[:space:]][A-Za-z]{3}[[:space:]][[:space:]0-9][0-9][[:space:]][0-9]{2}:[0-9]{2}:[0-9]{2}[[:space:]][0-9]{4}$ ]]; then
+      pid=$(fm_remote_job_read_single_line "$lock/pid" 64 2>/dev/null || true)
+      case "$pid" in ''|*[!0-9]*) pid= ;; esac
+      if [ -n "$pid" ] && [ "$pid" -gt 1 ] && kill -0 "$pid" 2>/dev/null; then
+        command=$(fm_remote_job_process_command "$pid" 2>/dev/null || true)
+        case "$command" in
+          "/bin/bash $worker"|"/bin/bash $worker --serve") ;;
+          *) pid= ;;
+        esac
+      else
+        pid=
+      fi
+    fi
+  fi
+  if [ -n "$pid" ]; then
     fm_remote_job_stop_worker_tree "$pid" || {
       FM_REMOTE_JOB_ERROR="stale remote job worker did not stop safely"
       return 1
