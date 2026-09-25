@@ -61,7 +61,7 @@
 #                A bare composer's WRAP region (typed input continuing on the
 #                rows beneath the glyph row) is bounded by blank rows, by
 #                structural edges, and by the FURNITURE rows a harness draws
-#                directly below its composer - omp's status row and
+#                directly below its composer - omp's status rows and
 #                braille-only animation rows (declared once below, next to
 #                the idle placeholders) - none of which is ever typed input.
 #   left-bar   - opencode: rows prefixed by a heavy left bar `┃` with no
@@ -482,23 +482,32 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 FM_COMPOSER_MODE_HINT_RE_DEFAULT='^[[:space:]]*(⏵|⏸)'
 # omp (Oh My Pi) draws a one-row status line directly BELOW its borderless
 # composer: an identity or spinner cell, then middle-dot separated model, path,
-# git, and context cells. Verified live through Herdr on omp 18.1.11:
+# git, and context cells, plus plugin rows beneath it. Verified live through Herdr on omp 18.1.11:
 # ` π  · ◔ GPT-6-Astra · 🌳 …-workspace · ⑂ detached · ◫ 15.4%/272K ⟲ · (sub)`
 # idle under the unicode preset, ` 󰵗  ·  qwen3:8b ·  … ·  36.7%/41K` under
-# nerd, and ` ⠧ 11s  · …` while busy. Without this rule the bare composer's
-# wrap region walks straight into that row and an idle omp pane reads
+# nerd, and ` ⠧ 11s  · …` while busy; and on omp 18.2.11 (fixtures captured 2026-09-24):
+# ` ⬢ GLM-5.3-Flash · ◉ max · ⑂ fm/… · ⏱ pro · 5h 94% (2h 33m) · 7d 96% (3d 20h)`
+# with `○ 🐴 ponytail: ⚡ FULL` beneath it (a `●` leader and a `◫ 9.0%/1M ⟲`
+# context cell on the variant). Without this rule the bare composer's
+# wrap region walks straight into those rows and an idle omp pane reads
 # `pending`, the false verdict that skipped the doorbell on the first live omp
 # worker. A row is omp status furniture when it opens with omp's identity cell
 # then a middle dot (`π` under the unicode preset, `󰵗` under nerd: the
 # `icon.omp` of those omp 18.1.11 presets, never an arbitrary short token, so
-# a wrapped typed row such as `fix · tests` stays composer input; the ascii
+# a wrapped typed row such as `fix · tests` stays composer input; `⬢` under
+# 18.2.11 leads with the model cell before effort, branch, and numeric context
+# or quota cells, and under omp's default `statusLine.compactThinkingLevel` a
+# thinking glyph (`○ ◔ ◑ ◒ ◕ ◉`) replaces both `⬢` and the effort cell; the ascii
 # preset's `pi` is deliberately absent because that preset's `sep.dot` is
 # ` - `, so its status row never carries a middle dot and a `pi ·` alternative
 # could only ever match typed text), when it opens with one of omp's spinner
-# frames then an elapsed cell, or when it carries the context-usage cell after
-# a middle dot. It is consulted only as the boundary BELOW a bare composer,
+# frames then an elapsed cell, or when it carries a separated numeric context
+# or quota cell (`⏱ [<plan> · ]<n>h|<n>d <n>%`; a narrow pane truncates the
+# context cell away and may show only the 7d window). The right-aligned `⚡ <n> tok/s`
+# row needs no rule: it sits ABOVE the prompt behind a blank line, and no
+# bare-composer path ever reads above-rows. The rule is consulted only as the boundary BELOW a bare composer,
 # never on the composer row itself.
-FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K'
+FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+(\.[0-9])?K|[[:space:]]·[[:space:]][^·]+[[:space:]]·[[:space:]][^·]*(◫|)[[:space:]]+[0-9]+(\.[0-9]+)?%/[0-9]+(\.[0-9])?M([[:space:]]*($|⟲|·))|^[[:space:]]*(○|◔|◑|◒|◕|◉)[[:space:]]+[^·]+[[:space:]]·[[:space:]]+⑂[[:space:]]+[^[:space:]·]+[^·]*[[:space:]]+◫[[:space:]]+[0-9]+(\.[0-9]+)?%/[0-9]+(\.[0-9])?M([[:space:]]*($|⟲|·))|^[[:space:]]*(⬢[[:space:]]+[^·]+[[:space:]]·[[:space:]]+(○|◔|◑|◒|◕|◉|⦸|⟳)[[:space:]]+[^[:space:]]+|(○|◔|◑|◒|◕|◉)[[:space:]]+[^·]+)[[:space:]]·[[:space:]]+⑂[[:space:]]+[^·]+([[:space:]]·)?[[:space:]]+⏱[[:space:]]+([^·]+[[:space:]]·[[:space:]]+)?[0-9]+[hd][[:space:]]+[0-9]+%'
 # Braille-pattern cells (U+2800..U+28FF) are animation furniture: codex-cli
 # 0.154.0 draws an idle "starfield" of them on the row above its `›` prompt
 # row, on the `›` row itself after the dim `Ask Codex to do anything`
@@ -1190,6 +1199,22 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OMP_STATUS_RE:-$FM_COMPOSER_OMP_STATUS_RE_DEFAULT}" sensitive
 }
 
+# _fm_composer_row_is_omp_footer_status: 0 when screen row <n> of <plain> is an
+# omp status row AND no later row of the screen is one. omp draws exactly one
+# status row, in its footer beneath the composer, so a status-shaped row with
+# another status row below it is a typed multi-line draft line (`❯` then
+# `fix · tests · ◫ 9.0%/1M ⟲` above the real footer), never the boundary.
+_fm_composer_row_is_omp_footer_status() {  # <plain> <n> <trimmed-row>
+  local later
+  _fm_composer_row_is_omp_status "$3" || return 1
+  while IFS= read -r later; do
+    fm_composer_normalize_trim_var later
+    [ -n "$later" ] || continue
+    _fm_composer_row_is_omp_status "$later" && return 1
+  done < <(printf '%s\n' "$1" | sed -n "$(($2 + 2)),\$p")
+  return 0
+}
+
 # _fm_composer_row_is_braille_furniture: 0 when the row is non-blank and its
 # non-whitespace content is entirely braille cells (fm_composer_strip_braille
 # above) - an animation row that never counts as typed content and bounds a
@@ -1232,7 +1257,7 @@ _fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row>
     fm_composer_normalize_trim_var trimmed
     [ -n "$trimmed" ] || return 1
     if fm_composer_row_has_edge "$trimmed"; then return 1; fi
-    if _fm_composer_row_is_omp_status "$trimmed"; then return 1; fi
+    if _fm_composer_row_is_omp_footer_status "$plain" "$row" "$trimmed"; then return 1; fi
     if _fm_composer_row_is_braille_furniture "$trimmed"; then return 1; fi
     if fm_composer_leading_shell_glyph_var glyph "$trimmed"; then return 1; fi
     row=$((row + 1))
@@ -1323,7 +1348,7 @@ _fm_composer_leftbar_floor_row() {  # <trimmed-row>
 # a harness's own furniture drawn below its composer, given <proof-glyph> - the
 # agent glyph that proved the envelope above it. Exactly four things qualify,
 # every one of them already owned elsewhere in this file:
-#   - omp's status row and braille-only animation rows, the two furniture rows
+#   - omp's status rows and braille-only animation rows, the furniture rows
 #     that already bound a bare composer's wrap region;
 #   - claude's permission-mode hint row (FM_COMPOSER_MODE_HINT_RE_DEFAULT);
 #   - a row leading with an agent glyph OTHER than the one that proved the
@@ -1479,7 +1504,7 @@ _fm_composer_select_cursorless() {
       fm_composer_normalize_trim_var trimmed
       [ -n "$trimmed" ] || break
       fm_composer_row_has_edge "$trimmed" && break
-      _fm_composer_row_is_omp_status "$trimmed" && break
+      _fm_composer_row_is_omp_footer_status "$plain" "$next" "$trimmed" && break
       _fm_composer_row_is_braille_furniture "$trimmed" && break
       FM_COMPOSER_SELECTED_LAST=$next
       next=$((next + 1))

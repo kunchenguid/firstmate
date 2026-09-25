@@ -80,7 +80,7 @@ harness_version() {  # <binary>
 check_harness_idle_empty() {  # <name> <launch-cmd...>
   local name=$1 win="hx-$1" verdict='' i=0 budget=${FM_COMPOSER_MATRIX_LIVE_POLLS:-45} version dismissed=0 startup_screen
   shift
-  version=$(harness_version "$1")
+  version=$(harness_version "$name")
   tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$ROOT" -- "$@" \
     || fail "$name ($version): could not launch in the isolated tmux server"
   while [ "$i" -lt "$budget" ]; do
@@ -160,9 +160,16 @@ check_harness_idle_cursorless() {  # <name> <version> <target>
 }
 
 # --- 1. Every installed verified harness must reach a proven-empty composer --
-for h in claude codex opencode pi grok kimi muse; do
+for h in claude codex opencode pi omp grok kimi muse; do
   if command -v "$h" >/dev/null 2>&1; then
-    check_harness_idle_empty "$h" "$h"
+    if [ "$h" = omp ]; then
+      check_harness_idle_empty "$h" env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+        -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+        FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 omp --config "$ROOT/.omp/fm-worker-overlay.yml" \
+        --auto-approve --cwd "$ROOT"
+    else
+      check_harness_idle_empty "$h" "$h"
+    fi
   else
     note "harness absent, not verified here: $h"
   fi

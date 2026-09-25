@@ -703,6 +703,14 @@ All six installed harnesses' real idle composers reached a proven `empty` (Claud
 The strict blank-row posture held live (a blank shell row deferred injection), and a zellij pane changing for reasons unrelated to submission never confirmed a delivery, replacing the retired content-diff heuristic's false positive.
 Kimi was not installed on the verification machine; its bordered shape is pinned by the portable byte-capture regressions in `tests/fm-composer-lib.test.sh`, which also carry the other five adapters' capability profiles for every harness under both a UTF-8 locale and `LC_ALL=C`.
 This guard is the refresh command after an upgrade to any matrix-covered harness; rerun it and update the versions above rather than trusting this table across releases.
+On 2026-09-24, the guard was extended to omp and run in an isolated worktree with `FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh`.
+The guard launches omp with `.omp/fm-worker-overlay.yml`, `--auto-approve`, and the worker markers, because a plain `omp` launch without the overlay renders a bordered composer that reads `unknown` and is not Firstmate's omp posture.
+With that posture, installed omp 18.3.0 rendered a bare `❯` and a status row ending in a right-aligned `◫ 5.5%/872K ⟲`; both anchored and cursorless idle reads classified `empty`.
+That live run inherited a local omp status-line configuration with compact thinking disabled and a custom symbol preset.
+The default compact thinking row, the preset-independent M context cell, and the captured 18.2.11 `%/1M` and quota shapes are covered by portable regressions in `tests/fm-composer-lib.test.sh`, not by that live capture.
+The same full run still exited with failures: Claude 2.1.280, Pi 0.86.1, and Muse 1.3.0 stopped at workspace trust prompts in the isolated worktree, and their prompts were neither dismissed nor accepted.
+Codex 0.156.1 passed anchored and cursorless reads; OpenCode 1.18.32 passed anchored and returned cursorless `unknown`; Grok, Kimi, and Zellij were absent.
+The trust-gated harnesses need a rerun in a trusted workspace.
 The 2026-08-23 steering-inbox doorbell run observed grok 1.0.5's idle composer classifying `unknown` (and sometimes pending-family), never `empty`.
 Issue #3436's recorded idle capture reproduced the cause on 2026-09-14: Grok 1.0.5 renders the titled bottom border three columns wider than its aligned top and content rows, so the cursorless Herdr profile rejected the otherwise complete box as ambiguous.
 The classifier now accepts only that exact three-column overhang (`FM_COMPOSER_GROK_TITLE_OVERHANG` in `bin/fm-composer-lib.sh`) carrying a typed `Grok <model> (<effort>)` title; the portable regressions feed the real capture through both the shared Herdr capability profile and `fm_backend_herdr_composer_state`, and prove idle is `empty`, typed content is `pending`, and an unrecognized oversized title remains `unknown`.
