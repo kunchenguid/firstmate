@@ -78,6 +78,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Project and secondmate registries.
 - Captain preferences and optional shared captain preferences.
 - Learnings, backlog, briefs, and scout reports.
+- Personal memories and reminders under `data/memory/`.
 - Explicitly installed content-addressed extension packages under `data/extensions/packages/`.
 
 `state/` holds runtime records:
@@ -622,6 +623,36 @@ Fleet-local operational facts and gotchas live locally in `data/learnings.md`; i
 The file is created lazily on first learning and follows the internal [`stow` skill's](../.agents/skills/stow/SKILL.md) aging-tier and cold-archive contract: inspect the current file first and curate it instead of appending forever.
 
 There is no shared learnings file by captain decision.
+
+## Personal memories and reminders (data/memory)
+
+`bin/fm-memory.sh` is the local capture and retrieval surface for personal notes, small to-do items, and timed reminders that should stay inside Firstmate.
+It keeps its records under the effective home's gitignored `data/memory/records/` directory, and its script header owns the private line format and lifecycle.
+This store is separate from `data/captain.md` preferences, `data/learnings.md` operational facts, and project backlog work.
+
+Use the helper directly or have Firstmate invoke the same commands:
+
+```sh
+bin/fm-memory.sh remember "The storage-unit code is in the paper folder"
+bin/fm-memory.sh remind --in 45m "Call the repair shop"
+bin/fm-memory.sh remind --at 2026-10-05T16:30:00Z "Send the renewal note"
+bin/fm-memory.sh list
+bin/fm-memory.sh search "repair shop"
+bin/fm-memory.sh done m-<epoch>-<process>-<nonce>
+```
+
+`list` returns memories and open reminders by default, while `list --all` also returns completed reminders and `list --kind memory|reminder` narrows the result.
+`search` performs a case-insensitive literal search over open records, and `search --all` includes completed reminders.
+Reminder times accept an epoch, an exact UTC timestamp, or a positive relative duration ending in `s`, `m`, `h`, `d`, or `w`.
+
+Creating a reminder automatically writes and registers `state/memory-reminders.check.sh` through the authenticated custom-check path.
+The existing watcher polls that check on `FM_CHECK_INTERVAL`, so due delivery is bounded by the supervision cadence rather than guaranteed at the exact second.
+Each poll announces at most five newly due reminders, and any further due reminders wait for a later poll.
+A delivered reminder stays open but is not announced twice; `done` is its acknowledgement, and completing the last open reminder retires the standing check so memories alone do not keep supervision active.
+A live supervision cycle is therefore required while a reminder is open.
+
+This phase has no Jira or calendar integration, no external synchronization, no automatic contextual recall, and no provisioned memory second mate.
+A future memory mate can use the same helper against its selected `FM_HOME` instead of introducing another record format or scheduler.
 
 ## Startup memory budget (config/startup-memory-budget)
 
