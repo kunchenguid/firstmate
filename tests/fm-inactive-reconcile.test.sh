@@ -292,6 +292,29 @@ test_secondmate_unterminated_prose_reports_run_outcome() {
   pass "an unterminated continuation line does not withhold a proven child outcome"
 }
 
+# A persistent child that keeps appending routine prose after one terminal
+# outcome does not mint a fresh parent event per sentence: the inactive receipt
+# identity binds the incarnation, task, terminal state, and PR only, never the
+# child's last status line.
+test_inactive_receipt_ignores_later_status_prose() {
+  make_world prose-after-outcome; bind_secondmate local
+  write_child "$MATE" child 'working: quiet since'
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
+  [ "$(grep -c 'inactive-outcome-mate-child-failed' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "inactive fallback did not publish exactly once"
+  printf 'working: tidying up after the run\n' >> "$MATE/state/child.status"
+  age "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
+  printf 'working: still tidying\n' >> "$MATE/state/child.status"
+  age "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
+  [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 1 ] \
+    || fail "changed status prose minted a duplicate parent event: $(cat "$MAIN/state/mate.status")"
+  [ "$(outcome_count "$MATE" reported)" = 1 ] \
+    || fail "changed status prose created a second terminal receipt"
+  pass "later status prose does not change the inactive terminal receipt identity"
+}
+
 # A busy child cannot keep later ledger outcomes from being visited, and is
 # retried on the next poll after its lifecycle lock becomes available.
 test_busy_child_does_not_starve_later_ledger_outcomes() {
@@ -970,6 +993,7 @@ test_delivered_ledger_done_skips_git_gate
 test_local_secondmate_delivers_terminal_ledger_line
 test_secondmate_multiline_terminal_outcome_is_delivered_once
 test_secondmate_unterminated_prose_reports_run_outcome
+test_inactive_receipt_ignores_later_status_prose
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_pr_field_requires_recorded_pr_or_ready_signal_line
