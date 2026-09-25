@@ -287,6 +287,18 @@ test_unwritten_wake_line_does_not_mark_notified() {
   pass "a reminder is marked notified only after its wake line is written"
 }
 
+test_text_limit_counts_bytes_in_a_utf8_locale() {
+  local home out status wide
+  home=$(make_home bytes)
+  out="$home/out"
+  wide=$(printf '\303\251%.0s' {1..250})
+  status=$(LC_ALL=en_US.UTF-8 run_capture "$home" 9000 "$out" remember "$wide")
+  expect_code 0 "$status" "500-byte multibyte memory exit"
+  status=$(LC_ALL=en_US.UTF-8 run_capture "$home" 9000 "$out" remember "${wide}x")
+  expect_code 2 "$status" "501-byte multibyte memory exit"
+  pass "the text limit counts bytes, not characters"
+}
+
 test_capture_list_and_literal_search
 test_due_delivery_is_once_and_done_is_acknowledgement
 test_due_reminder_reaches_the_real_watcher
@@ -297,3 +309,4 @@ test_malformed_record_does_not_hide_a_due_reminder
 test_due_announcements_are_bounded_and_resume
 test_dead_lock_holder_does_not_wedge_the_store
 test_unwritten_wake_line_does_not_mark_notified
+test_text_limit_counts_bytes_in_a_utf8_locale

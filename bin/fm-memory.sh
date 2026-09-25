@@ -144,16 +144,13 @@ parse_due() {
 }
 
 validate_text() {
-  local text=$1 bytes
+  local text=$1
   [ -n "$text" ] || return 1
-  case "$text" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
-  # Refuse every remaining C0 control byte and DEL. The record format is
-  # deliberately line-oriented, so accepting one would make display ambiguous.
-  if printf '%s' "$text" | LC_ALL=C grep '[[:cntrl:]]' >/dev/null 2>&1; then
-    return 1
-  fi
-  bytes=$(printf '%s' "$text" | wc -c | tr -d '[:space:]')
-  [ "$bytes" -le "$MAX_TEXT_BYTES" ]
+  # Refuse every C0 control byte and DEL. The record format is deliberately
+  # line-oriented, so accepting one would make display ambiguous. LC_ALL=C makes
+  # the class and the length byte-based.
+  [[ $text != *[[:cntrl:]]* ]] || return 1
+  [ "${#text}" -le "$MAX_TEXT_BYTES" ]
 }
 
 ensure_store() {
@@ -218,24 +215,24 @@ record_id_valid() {
   [ "${#1}" -le 80 ] && [[ "$1" =~ ^m-[0-9]+-[0-9]+-[0-9]+$ ]]
 }
 
-# Populates R_ID, R_KIND, R_CREATED, R_DUE, R_STATE, R_NOTIFIED, and R_TEXT.
-record_read() {
+# Populates R_ID, R_KIND, R_CREATED, R_DUE, R_STATE, R_NOTIFIED, and R_TEXT
+# and validates every field except the text.
+record_parse() {
   local path=$1 line
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  IFS= read -r line < "$path" || return 1
-  [ "$line" = "$SCHEMA" ] || return 1
   {
-    IFS= read -r line && R_ID=${line#id=} && [ "$line" = "id=$R_ID" ]
-    IFS= read -r line && R_KIND=${line#kind=} && [ "$line" = "kind=$R_KIND" ]
-    IFS= read -r line && R_CREATED=${line#created=} && [ "$line" = "created=$R_CREATED" ]
-    IFS= read -r line && R_DUE=${line#due=} && [ "$line" = "due=$R_DUE" ]
-    IFS= read -r line && R_STATE=${line#state=} && [ "$line" = "state=$R_STATE" ]
-    IFS= read -r line && R_NOTIFIED=${line#notified=} && [ "$line" = "notified=$R_NOTIFIED" ]
-    IFS= read -r line && R_TEXT=${line#text=} && [ "$line" = "text=$R_TEXT" ]
+    IFS= read -r line && [ "$line" = "$SCHEMA" ] &&
+    IFS= read -r line && R_ID=${line#id=} && [ "$line" = "id=$R_ID" ] &&
+    IFS= read -r line && R_KIND=${line#kind=} && [ "$line" = "kind=$R_KIND" ] &&
+    IFS= read -r line && R_CREATED=${line#created=} && [ "$line" = "created=$R_CREATED" ] &&
+    IFS= read -r line && R_DUE=${line#due=} && [ "$line" = "due=$R_DUE" ] &&
+    IFS= read -r line && R_STATE=${line#state=} && [ "$line" = "state=$R_STATE" ] &&
+    IFS= read -r line && R_NOTIFIED=${line#notified=} && [ "$line" = "notified=$R_NOTIFIED" ] &&
+    IFS= read -r line && R_TEXT=${line#text=} && [ "$line" = "text=$R_TEXT" ] &&
     ! IFS= read -r _
-  } < <(tail -n +2 "$path") || return 1
+  } < "$path" || return 1
   record_id_valid "$R_ID" || return 1
-  [ "$(basename "$path")" = "$R_ID" ] || return 1
+  [ "${path##*/}" = "$R_ID" ] || return 1
   case "$R_KIND" in memory|reminder) ;; *) return 1 ;; esac
   case "$R_CREATED" in ''|*[!0-9]*) return 1 ;; esac
   case "$R_STATE" in open|"done") ;; *) return 1 ;; esac
@@ -245,7 +242,14 @@ record_read() {
   else
     case "$R_DUE" in ''|*[!0-9]*) return 1 ;; esac
   fi
-  validate_text "$R_TEXT"
+}
+
+record_read() {
+  record_parse "$1" && validate_text "$R_TEXT"
+}
+
+record_is_open_reminder() {
+  [ "$R_KIND" = reminder ] && [ "$R_STATE" = open ]
 }
 
 record_write() {
@@ -373,8 +377,8 @@ has_open_reminder() {
   local path
   for path in "$RECORDS"/*; do
     [ -e "$path" ] || continue
-    record_read "$path" || return 2
-    [ "$R_KIND" != reminder ] || [ "$R_STATE" != open ] || return 0
+    record_parse "$path" || return 2
+    ! record_is_open_reminder || return 0
   done
   return 1
 }
@@ -514,10 +518,10 @@ action_done() {
 
 truncate_wake_text() {
   local text=$1
-  if [ "$(printf '%s' "$text" | wc -c | tr -d '[:space:]')" -le "$MAX_WAKE_TEXT_BYTES" ]; then
+  if [ "${#text}" -le "$MAX_WAKE_TEXT_BYTES" ]; then
     printf '%s' "$text"
   else
-    printf '%s...' "$(printf '%s' "$text" | LC_ALL=C cut -b "1-$MAX_WAKE_TEXT_BYTES")"
+    printf '%s...' "${text:0:$MAX_WAKE_TEXT_BYTES}"
   fi
 }
 
@@ -527,12 +531,13 @@ action_check() {
   lock_acquire || { printf 'memory reminders: store busy or unavailable\n'; return 0; }
   for path in "$RECORDS"/*; do
     [ -e "$path" ] || continue
-    if ! record_read "$path"; then
-      [ -n "$malformed" ] || malformed=$(basename "$path")
+    if ! record_parse "$path" \
+      || { record_is_open_reminder && ! validate_text "$R_TEXT"; }; then
+      [ -n "$malformed" ] || malformed=${path##*/}
       continue
     fi
     [ "$count" -lt "$MAX_DUE_PER_CHECK" ] || continue
-    [ "$R_KIND" = reminder ] && [ "$R_STATE" = open ] && [ "$R_NOTIFIED" = 0 ] \
+    record_is_open_reminder && [ "$R_NOTIFIED" = 0 ] \
       && [ "$R_DUE" -le "$now" ] 2>/dev/null || continue
     due_paths+=("$path")
     text=$(truncate_wake_text "$R_TEXT")
