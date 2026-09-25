@@ -497,7 +497,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 
 ### Merges, releases, and unreadable holds
 
-- Direct PR and local-only merge entrypoint calls refuse a still-held task before reaching the forge or moving local main.
+- Direct PR and local-only merge entrypoint calls refuse a still-held task before reaching the forge or moving the recorded landing branch.
 - A released pull request passes the guarded PR entrypoint, cleanup records its artifact, and Recently Landed publishes it.
 - An ordinary release still survives zero-retention cleanup and archives when configured.
 - A ship row whose captain hold cannot be read refuses cleanup before any destructive step and surfaces the read failure.
