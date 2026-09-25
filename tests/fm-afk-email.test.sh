@@ -192,6 +192,15 @@ PY
   out=$(message "$home" 102 'owner@example.com' 'Re: Firstmate away update' "$reply_body" 2>&1) \
     || fail "replayed code handoff errored: $out"
   assert_contains "$out" 'received 0 verified and 1 untrusted' 'a one-time code cannot be replayed'
+
+  printf '{invalid json\n' > "$sent1"
+  if verification=$(run_email "$home" verify-note "$note_id" 2>&1); then
+    fail "unreadable reply state was treated as an untrusted note: $verification"
+  fi
+  assert_contains "$verification" 'verified reply state could not be read' 'state corruption leaves verification retryable'
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
+    "$REPO/bin/fm-inbox.sh" show "$note_id") || fail "reply note was acknowledged after state corruption"
+  assert_contains "$out" 'Please merge the UI pull request' 'valid reply note remains available after a state read failure'
   pass "captain outcomes batch with full URLs and redaction, while reply codes are item-bound, one-use, and sender-checked"
 }
 

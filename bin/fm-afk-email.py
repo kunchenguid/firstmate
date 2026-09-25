@@ -409,34 +409,139 @@ def inbox_note(request_id, body):
     return note_id
 
 
+def validate_handoff_state_item(path, store):
+    try:
+        item = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError) as error:
+        raise ValueError("away-email state could not be read") from error
+    if not isinstance(item, dict):
+        raise ValueError("away-email state is malformed")
+    seq = item.get("seq")
+    if (
+        type(seq) is not int
+        or seq <= 0
+        or path.stem != str(seq)
+        or not isinstance(item.get("task"), str)
+        or not item["task"].strip()
+        or not isinstance(item.get("summary"), str)
+        or not item["summary"].strip()
+        or type(item.get("away_epoch")) is not int
+        or item["away_epoch"] <= 0
+        or not isinstance(item.get("token_hash"), str)
+        or not re.fullmatch(r"[a-f0-9]{64}", item["token_hash"])
+    ):
+        raise ValueError("away-email state is malformed")
+    if store == "pending":
+        token = item.get("token")
+        if not isinstance(token, str) or not TOKEN_RE.fullmatch(token) or token_digest(token) != item["token_hash"]:
+            raise ValueError("away-email state is malformed")
+        send_fields = {"send_started_epoch", "send_expires_epoch"}
+        present_send_fields = send_fields.intersection(item)
+        if present_send_fields and present_send_fields != send_fields:
+            raise ValueError("away-email state is malformed")
+        if present_send_fields and (
+            type(item["send_started_epoch"]) is not int
+            or type(item["send_expires_epoch"]) is not int
+            or item["send_started_epoch"] <= 0
+            or item["send_expires_epoch"] <= item["send_started_epoch"]
+        ):
+            raise ValueError("away-email state is malformed")
+        if "sent_epoch" in item or "expires_epoch" in item:
+            raise ValueError("away-email state is malformed")
+    else:
+        if (
+            type(item.get("sent_epoch")) is not int
+            or type(item.get("expires_epoch")) is not int
+            or item["sent_epoch"] <= 0
+            or item["expires_epoch"] <= item["sent_epoch"]
+            or "send_started_epoch" in item
+            or "send_expires_epoch" in item
+        ):
+            raise ValueError("away-email state is malformed")
+    handoff_fields = {"handoff_request_id", "handoff_mail_key", "handoff_body_hash"}
+    present_handoff_fields = handoff_fields.intersection(item)
+    if present_handoff_fields and present_handoff_fields != handoff_fields:
+        raise ValueError("away-email state is malformed")
+    if present_handoff_fields:
+        mail_key = item["handoff_mail_key"]
+        if (
+            not isinstance(mail_key, str)
+            or not re.fullmatch(r"[a-f0-9]{24}", mail_key)
+            or item["handoff_request_id"] != f"afk-email-{seq}-{mail_key}"
+            or not isinstance(item["handoff_body_hash"], str)
+            or not re.fullmatch(r"[a-f0-9]{64}", item["handoff_body_hash"])
+        ):
+            raise ValueError("away-email state is malformed")
+    used_fields = {"used_epoch", "used_mail_key"}
+    used_handoff_fields = {"used_request_id", "used_note_id"}
+    present_used_fields = used_fields.intersection(item)
+    present_used_handoff_fields = used_handoff_fields.intersection(item)
+    if present_used_fields and present_used_fields != used_fields:
+        raise ValueError("away-email state is malformed")
+    if present_used_handoff_fields and present_used_handoff_fields != used_handoff_fields:
+        raise ValueError("away-email state is malformed")
+    if present_used_handoff_fields and present_used_fields != used_fields:
+        raise ValueError("away-email state is malformed")
+    if (
+        present_used_fields
+        and present_handoff_fields
+        and item["used_mail_key"] != item["handoff_mail_key"]
+    ):
+        raise ValueError("away-email state is malformed")
+    if present_used_fields:
+        used_mail_key = item["used_mail_key"]
+        if (
+            type(item["used_epoch"]) is not int
+            or item["used_epoch"] <= 0
+            or not isinstance(used_mail_key, str)
+            or not re.fullmatch(r"[a-f0-9]{24}", used_mail_key)
+        ):
+            raise ValueError("away-email state is malformed")
+    if present_used_fields and present_handoff_fields and item["used_mail_key"] != item["handoff_mail_key"]:
+        raise ValueError("away-email state is malformed")
+    if present_used_handoff_fields:
+        if (
+            not present_handoff_fields
+            or not isinstance(item["used_request_id"], str)
+            or item["used_request_id"] != item["handoff_request_id"]
+            or item["used_mail_key"] != item["handoff_mail_key"]
+            or not isinstance(item["used_note_id"], str)
+            or not NOTE_ID_RE.fullmatch(item["used_note_id"])
+        ):
+            raise ValueError("away-email state is malformed")
+    return item
+
+
 def handoff_record(request_id, posture):
-    if not isinstance(request_id, str) or not request_id:
-        return None
-    for directory in (SENT, PENDING):
-        matches = []
-        for path in directory.glob("*.json"):
-            item = read_json(path)
-            if not isinstance(item, dict) or item.get("handoff_request_id") != request_id:
+    requested_id = request_id if isinstance(request_id, str) and request_id else None
+    matches = []
+    with afk_state_lock():
+        for store, directory in (("sent", SENT), ("pending", PENDING)):
+            try:
+                paths = sorted(directory.iterdir())
+            except FileNotFoundError:
                 continue
-            seq = item.get("seq")
-            mail_key = item.get("handoff_mail_key")
-            body_hash = item.get("handoff_body_hash")
-            if (
-                type(seq) is int
-                and seq > 0
-                and isinstance(mail_key, str)
-                and re.fullmatch(r"[a-f0-9]{24}", mail_key)
-                and request_id == f"afk-email-{seq}-{mail_key}"
-                and isinstance(body_hash, str)
-                and re.fullmatch(r"[a-f0-9]{64}", body_hash)
-                and item.get("away_epoch") == posture["entered_epoch"]
-                and isinstance(item.get("task"), str)
-                and item["task"]
-            ):
-                matches.append(item)
-        if matches:
-            return matches[0] if len(matches) == 1 else None
-    return None
+            except OSError as error:
+                raise ValueError("away-email state directory could not be read") from error
+            for path in paths:
+                if path.suffix != ".json":
+                    continue
+                item = validate_handoff_state_item(path, store)
+                if (
+                    requested_id is not None
+                    and item.get("handoff_request_id") == requested_id
+                    and item["away_epoch"] == posture["entered_epoch"]
+                ):
+                    matches.append(item)
+    if not matches:
+        return None
+    reference = matches[0]
+    for item in matches[1:]:
+        if any(item[field] != reference[field] for field in (
+            "seq", "task", "away_epoch", "handoff_request_id", "handoff_mail_key", "handoff_body_hash",
+        )):
+            raise ValueError("away-email handoff state is ambiguous")
+    return reference
 
 
 def verify_note(note_id):
@@ -452,7 +557,11 @@ def verify_note(note_id):
         print("fm-afk-email: inbox identity could not be read", file=sys.stderr)
         return 1
     request_id = identity.get("request_id")
-    item = handoff_record(request_id, posture)
+    try:
+        item = handoff_record(request_id, posture)
+    except (OSError, ValueError):
+        print("fm-afk-email: verified reply state could not be read", file=sys.stderr)
+        return 1
     if item is None:
         print(json.dumps({"verified": False}, separators=(",", ":")))
         return 0
