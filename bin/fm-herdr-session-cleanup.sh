@@ -21,6 +21,10 @@
 # The script never closes a workspace. It removes only the matching journal,
 # and only after the exact pane is confirmed gone. Every error warns and returns
 # success so session startup continues conservatively.
+# Discovery validates each home journal once; locked mutation checks are uncached.
+# FM_HERDR_SESSION_CLEANUP_TIMEOUT bounds the complete pass (default 30 seconds);
+# after expiry the parent reclaims only recorded locks it can safely acquire.
+# Unfinished candidates are preserved and coverage is explicitly unconfirmed.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,6 +39,12 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 fm_backend_source herdr
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
+
+FM_HERDR_CLEANUP_INDEX=
+FM_HERDR_CLEANUP_INDEX_READY=0
+FM_HERDR_CLEANUP_LOCK_RECORD=${FM_HERDR_CLEANUP_LOCK_RECORD:-}
 
 fm_herdr_cleanup_warn() {
   printf 'warning: herdr session-start projection cleanup: %s\n' "$*" >&2
@@ -63,7 +73,14 @@ fm_herdr_cleanup_home_identity() {
 }
 
 fm_herdr_cleanup_journal_matches() { # <title> <session> <home-real>
-  local title=$1 session=$2 home_real=$3 journal id expected journal_home
+  local title=$1 session=$2 home_real=$3 index
+  index=$(fm_herdr_cleanup_index "$session" "$home_real") || return 1
+  fm_herdr_cleanup_index_matches "$title" "$index"
+}
+
+# The index is only a discovery accelerator, never mutation authority.
+fm_herdr_cleanup_index() { # <session> <home-real>
+  local session=$1 home_real=$2 journal id journal_home expected
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
   for journal in "$STATE"/*"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"; do
     [ -f "$journal" ] && [ ! -L "$journal" ] || continue
@@ -78,9 +95,18 @@ fm_herdr_cleanup_journal_matches() { # <title> <session> <home-real>
     fi
     expected=$(fm_backend_herdr_projection_workspace_label \
       "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
-    [ "$expected" = "$title" ] || continue
-    printf '%s\t%s\t%s\n' "$journal" "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID"
+    printf '%s\t%s\t%s\t%s\n' "$expected" "$journal" "$id" \
+      "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID"
   done
+}
+
+fm_herdr_cleanup_index_matches() { # <title> [index]
+  local title=$1 index=${2-$FM_HERDR_CLEANUP_INDEX} label record
+  while IFS= read -r record; do
+    label=${record%%$'\t'*}
+    [ "$label" = "$title" ] || continue
+    printf '%s\n' "${record#*$'\t'}"
+  done <<< "$index"
 }
 
 fm_herdr_cleanup_unique_match() { # <title> <session> <home-real>
@@ -92,7 +118,11 @@ fm_herdr_cleanup_unique_match() { # <title> <session> <home-real>
   FM_HERDR_CLEANUP_BOUND_WORKSPACE=
   FM_HERDR_CLEANUP_BOUND_TAB=
   FM_HERDR_CLEANUP_BOUND_PANE=
-  matches=$(fm_herdr_cleanup_journal_matches "$title" "$session" "$home_real") || return 1
+  if [ "${4:-fresh}" = discovery ] && [ "$FM_HERDR_CLEANUP_INDEX_READY" = 1 ]; then
+    matches=$(fm_herdr_cleanup_index_matches "$title") || return 1
+  else
+    matches=$(fm_herdr_cleanup_journal_matches "$title" "$session" "$home_real") || return 1
+  fi
   count=$(printf '%s\n' "$matches" | awk 'NF { n++ } END { print n+0 }')
   [ "$count" -eq 1 ] || return 1
   record=$(printf '%s\n' "$matches" | awk 'NF { print; exit }')
@@ -199,12 +229,47 @@ fm_herdr_cleanup_revalidate() { # <session> <workspace> <tab> <pane> <title> <to
   [ "${focus#*$'\t'}" != "$tab" ]
 }
 
-fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
+fm_herdr_cleanup_record_lock_paths() { # <id> <task-lock> <presentation-lock>
+  local id=$1 task_lock=$2 presentation_lock=$3 record=$FM_HERDR_CLEANUP_LOCK_RECORD
+  [ -n "$record" ] || return 0
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  printf '%s\t%s\t%s\n' "$id" "$task_lock" "$presentation_lock" > "$record"
+}
+
+fm_herdr_cleanup_recover_interrupted_candidate() { # <lock-record>
+  local record=$1 id task_lock presentation_lock
+  [ -f "$record" ] && [ ! -L "$record" ] || return 0
+  IFS=$'\t' read -r id task_lock presentation_lock < "$record" || return 0
+  fm_task_id_creation_valid "$id" || return 0
+  [ "$task_lock" = "$STATE/.spawn-$id.lock" ] || return 0
+  case "$presentation_lock" in
+    /tmp/firstmate-herdr-presentation/order-????????????????????????????????.lock) ;;
+    *) return 0 ;;
+  esac
+  if fm_lock_try_acquire "$task_lock"; then
+    if fm_lock_try_acquire "$presentation_lock"; then
+      fm_lock_release "$presentation_lock" || true
+    fi
+    fm_lock_release "$task_lock" || true
+  fi
+  return 0
+}
+
+fm_herdr_cleanup_one() ( # <session> <workspace> <title> <home-real>
   local session=$1 workspace=$2 title=$3 home_real=$4 token journal id task_lock
   local version bound_workspace bound_tab bound_pane presentation_lock snapshot
   local tab pane state close_status=0
+  task_lock='' presentation_lock=''
+  # A deadline may interrupt lock acquisition or a backend read.
+  # fm_lock_release verifies this process owns each path, so unconditional cleanup
+  # closes the signal window before the held flags could be set.
+  trap '[ -z "$presentation_lock" ] || fm_lock_release "$presentation_lock" || true
+    [ -z "$task_lock" ] || fm_lock_release "$task_lock" || true' EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  trap 'exit 129' HUP
   token=$(fm_herdr_cleanup_title_token "$title") || return 0
-  if ! fm_herdr_cleanup_unique_match "$title" "$session" "$home_real"; then
+  if ! fm_herdr_cleanup_unique_match "$title" "$session" "$home_real" discovery; then
     return 0
   fi
   journal=$FM_HERDR_CLEANUP_JOURNAL
@@ -215,24 +280,24 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   bound_pane=$FM_HERDR_CLEANUP_BOUND_PANE
   [ "$FM_HERDR_CLEANUP_TOKEN" = "$token" ] || return 0
   task_lock="$STATE/.spawn-$id.lock"
+  presentation_lock=$(fm_backend_herdr_presentation_session_lock_path "$session" 2>/dev/null) || {
+    fm_herdr_cleanup_warn "$id skipped because the shared presentation lock is unavailable"
+    return 0
+  }
+  fm_herdr_cleanup_record_lock_paths "$id" "$task_lock" "$presentation_lock" || {
+    fm_herdr_cleanup_warn "$id skipped because deadline lock recovery could not be recorded"
+    return 0
+  }
   if ! fm_lock_try_acquire "$task_lock"; then
     fm_herdr_cleanup_warn "$id skipped because its task lock is busy"
     return 0
   fi
-  presentation_lock=$(fm_backend_herdr_presentation_session_lock_path "$session" 2>/dev/null) || {
-    fm_lock_release "$task_lock" || true
-    fm_herdr_cleanup_warn "$id skipped because the shared presentation lock is unavailable"
-    return 0
-  }
   if ! fm_lock_try_acquire "$presentation_lock"; then
-    fm_lock_release "$task_lock" || true
     fm_herdr_cleanup_warn "$id skipped because the shared presentation lock is busy"
     return 0
   fi
 
   if [ -e "$STATE/$id.meta" ] || [ -L "$STATE/$id.meta" ]; then
-    fm_lock_release "$presentation_lock" || true
-    fm_lock_release "$task_lock" || true
     return 0
   fi
   snapshot=$(fm_backend_herdr_cli "$session" api snapshot 2>/dev/null) || snapshot=
@@ -241,8 +306,6 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
       "$snapshot" "$workspace" "$title" "$token" \
       "$bound_workspace" "$bound_tab" "$bound_pane"; then
     fm_herdr_cleanup_warn "$id preserved because its locked candidate snapshot was ambiguous"
-    fm_lock_release "$presentation_lock" || true
-    fm_lock_release "$task_lock" || true
     return 0
   fi
   tab=$FM_HERDR_CLEANUP_TAB
@@ -250,16 +313,12 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   if [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane")" != no-agent ] \
     || ! fm_backend_herdr_pane_idle_shell_pid "$session" "$pane" >/dev/null; then
     fm_herdr_cleanup_warn "$id preserved because its pane is not a provably idle childless shell"
-    fm_lock_release "$presentation_lock" || true
-    fm_lock_release "$task_lock" || true
     return 0
   fi
   if ! fm_herdr_cleanup_revalidate \
     "$session" "$workspace" "$tab" "$pane" "$title" "$token" "$home_real" \
     "$journal" "$id" "$version" "$bound_workspace" "$bound_tab" "$bound_pane"; then
     fm_herdr_cleanup_warn "$id preserved because immediate revalidation changed or was unreadable"
-    fm_lock_release "$presentation_lock" || true
-    fm_lock_release "$task_lock" || true
     return 0
   fi
 
@@ -287,10 +346,8 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   else
     fm_herdr_cleanup_warn "$id preserved because exact pane closure could not be confirmed"
   fi
-  fm_lock_release "$presentation_lock" || true
-  fm_lock_release "$task_lock" || true
   return 0
-}
+)
 
 fm_herdr_session_cleanup() {
   local session home_real list candidates workspace title journal found=0
@@ -324,6 +381,11 @@ fm_herdr_session_cleanup() {
     fm_herdr_cleanup_warn "session '$session' workspace discovery was unreadable; preserving every candidate"
     return 0
   }
+  FM_HERDR_CLEANUP_INDEX=$(fm_herdr_cleanup_index "$session" "$home_real") || {
+    fm_herdr_cleanup_warn 'journal discovery failed; preserving every candidate'
+    return 0
+  }
+  FM_HERDR_CLEANUP_INDEX_READY=1
   while IFS=$'\t' read -r workspace title; do
     [ -n "$workspace" ] && [ -n "$title" ] || continue
     fm_herdr_cleanup_one "$session" "$workspace" "$title" "$home_real"
@@ -332,6 +394,28 @@ fm_herdr_session_cleanup() {
 }
 
 if [ "${FM_HERDR_SESSION_CLEANUP_SOURCE_ONLY:-0}" != 1 ]; then
-  fm_herdr_session_cleanup
+  if [ "${1:-}" = --_worker ]; then
+    fm_herdr_session_cleanup
+  else
+    [ -d "$STATE" ] && [ ! -L "$STATE" ] || exit 0
+    budget=${FM_HERDR_SESSION_CLEANUP_TIMEOUT:-30}
+    case "$budget" in ''|*[!0-9]*|0) budget=30 ;; esac
+    cleanup_lock_record=$(umask 077; mktemp "$STATE/.herdr-cleanup-locks.XXXXXX") || {
+      fm_herdr_cleanup_warn 'deadline lock recovery could not be prepared; preserving every candidate'
+      exit 0
+    }
+    cleanup_rc=0
+    FM_HERDR_CLEANUP_LOCK_RECORD="$cleanup_lock_record" \
+      fm_run_timed "$budget" "$SCRIPT_DIR/fm-herdr-session-cleanup.sh" --_worker || cleanup_rc=$?
+    if [ "$cleanup_rc" -ne 0 ]; then
+      fm_herdr_cleanup_recover_interrupted_candidate "$cleanup_lock_record"
+    fi
+    if [ "$cleanup_rc" -eq 124 ]; then
+      fm_herdr_cleanup_warn "${budget}s deadline reached; unfinished candidates preserved; cleanup coverage is unconfirmed"
+    elif [ "$cleanup_rc" -ne 0 ]; then
+      fm_herdr_cleanup_warn "cleanup exited $cleanup_rc; unfinished candidates preserved; cleanup coverage is unconfirmed"
+    fi
+    rm -f -- "$cleanup_lock_record" 2>/dev/null || true
+  fi
   exit 0
 fi

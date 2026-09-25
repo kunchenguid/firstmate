@@ -13,8 +13,13 @@
 # composed from bounded local reads while these checks run concurrently in a
 # detached worker, and their result is reported back inline when it finishes in
 # time, or as a durable wake when it does not. The locked startup's bounded
-# inactive-outcome scan also runs here because its local current-state reads can
-# be just as slow; that scan publishes its own findings to the durable wake queue.
+# inactive-outcome scan and best-effort home-summary refresh also run here because
+# their local current-state reads can be just as slow; the scan publishes its own
+# findings to the durable wake queue. Summary publication runs concurrently with
+# the checks under its own single-flight lock and a deadline capped at the stage
+# budget. The network result is published before the summary child is reaped, and
+# that child is still reaped before the deferred stage finishes. It never inherits
+# the digest stdout.
 #
 # WHAT IS PRESERVED. Nothing is dropped. bin/fm-bootstrap.sh remains the single
 # owner of every network sweep and still runs all of them, unchanged, via its
@@ -108,6 +113,9 @@
 # The whole stage is bounded by FM_STARTUP_NETWORK_TIMEOUT (default 120s), one
 # aggregate deadline covering both the inactive-outcome scan and network sweeps
 # plus every lock the worker waits on before them.
+# Concurrent summary publication retains its own FM_HOME_SUMMARY_TIMEOUT, capped
+# at that stage budget, and is reaped before the deferred stage exits. Its cleanup
+# cannot delay publication of the network result.
 # Publication and delivery are bounded the same way by FM_SESSION_START_TIMEOUT.
 # A lock that a live process still holds at either deadline ends the worker with
 # a failed record naming that holder and the rerun command, never a wait that
@@ -224,7 +232,7 @@ worker_alive() {
 phase_label() {  # <phases>
   case "$1" in
     probe) printf 'GitHub authentication' ;;
-    probe,sweeps) printf 'GitHub authentication, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, project clone refresh with its drift reporting, and inactive terminal-outcome reconciliation' ;;
+    probe,sweeps) printf 'GitHub authentication, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, project clone refresh with its drift reporting, inactive terminal-outcome reconciliation, and home-summary publication' ;;
     *) printf 'the deferred network checks' ;;
   esac
 }
@@ -478,7 +486,7 @@ publish_lock_held() {  # <generation> <phases> <locked> <started> <lockdir> <out
 }
 
 cmd_run() {  # <locked> <lock-pid> <generation>
-  local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started stage_deadline
+  local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started stage_deadline summary_pid='' summary_budget
   mkdir -p "$STATE" 2>/dev/null || return 1
   started=$(now)
   budget=$(stage_budget)
@@ -569,9 +577,20 @@ EOF
   # need no report translation: the scan writes its ordinary durable
   # inactive-outcome wakes directly. A child shell composes the two executable
   # owners only so fm_run_timed can govern them as one process group.
-  # The sweeps get whatever the lock waits above left of the stage budget.
+  # The best-effort summary is single-flight and runs alongside the checks, not
+  # in front of them. Keep its bounded wrapper outside the network process group:
+  # killing that wrapper at the network deadline could strand the separate
+  # process group it owns. Both budgets start together; the network result is
+  # published before reaping the summary child. The sweeps get whatever the lock
+  # waits above left of the stage budget.
   budget=$(seconds_until "$stage_deadline")
   if [ "$sweep_locked" -eq 1 ]; then
+    summary_budget=${FM_HOME_SUMMARY_TIMEOUT:-60}
+    case "$summary_budget" in ''|*[!0-9]*|0) summary_budget=60 ;; esac
+    [ "$summary_budget" -le "$budget" ] || summary_budget=$budget
+    FM_HOME_SUMMARY_TIMEOUT="$summary_budget" FM_HOME_SUMMARY_IF_IDLE=1 \
+      "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort </dev/null >/dev/null 2>&1 &
+    summary_pid=$!
     # shellcheck disable=SC2016  # Child-shell variables expand inside the bound.
     fm_run_timed "$budget" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_NETWORK_LOCK_PID="$lock_pid" \
@@ -606,6 +625,7 @@ EOF
       ;;
   esac
   rc=$?
+  [ -z "$summary_pid" ] || wait "$summary_pid" || true
   run_cleanup "$out" "$timings"
   return "$rc"
 }
@@ -613,6 +633,7 @@ EOF
 run_cleanup() {  # <output-file> <timing-file>
   rm -f "$1" 2>/dev/null || true
   [ -z "${2:-}" ] || rm -f "$2" 2>/dev/null || true
+}
 }
 
 # --- harvest / report --------------------------------------------------------

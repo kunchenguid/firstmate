@@ -166,6 +166,8 @@ Firstmate immediately revalidates the same journal, metadata absence, workspace 
 It closes only that pane, never a workspace.
 The matching journal is retired only after the exact pane is positively confirmed gone; an unconfirmed close retains the journal, while a confirmed close may retire it even when focus restoration reported an error after the close.
 A second run finds no matching title or journal and is a no-op.
+Discovery validates this home's journals once per pass, but every locked mutation check rereads them.
+`FM_HERDR_SESSION_CLEANUP_TIMEOUT` bounds the complete pass; at the deadline Firstmate reclaims only the recorded locks it can safely acquire, preserves every unfinished candidate, and warns that cleanup coverage is unconfirmed.
 A malformed or missing title or token, duplicate token, zero or multiple journal matches, cross-home version 2 binding, current metadata, registered or unknown agent, extra tab or pane, active target, busy lock, changed revalidation, unreadable check, or any error preserves the candidate and lets session startup continue with at most a concise warning.
 
 Operational compromises:

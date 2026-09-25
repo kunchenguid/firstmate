@@ -169,6 +169,9 @@ fm_backend_herdr_cli() {
       esac
       ;;
     "api snapshot")
+      if [ -e "$FIXTURE_DIR/journal-race" ]; then
+        write_v1 "$ID" ZbCdEfGhIjKlMnOpQrStUv
+      fi
       : > "$FIXTURE_DIR/snapshotted"
       printf '{"result":{"snapshot":{"focused_workspace_id":"w1","focused_tab_id":"%s","focused_pane_id":"w1:p1","workspaces":' "$(cat "$FIXTURE_DIR/active-tab")"
       fixture_workspaces
@@ -325,5 +328,106 @@ FM_HOME="$INTEGRATION_ROOT/home" FM_ROOT_OVERRIDE="$INTEGRATION_ROOT" \
   || fail "read-only session start failed"
 [ ! -s "$TRACE" ] || fail "read-only session start ran stale projection cleanup"
 pass "session start runs cleanup only after acquiring its home lock"
+
+# Cached discovery cannot authorize retirement after the journal changes.
+reset_fixture
+: > "$FIXTURE_DIR/journal-race"
+assert_preserved "journal identity changed after indexed discovery"
+[ "$(fm_backend_herdr_projection_journal_field "$FM_STATE_OVERRIDE/$ID.herdr-presentation" projection_id)" = ZbCdEfGhIjKlMnOpQrStUv ] \
+  || fail "journal race did not change the identity under review"
+pass "fresh locked revalidation rejects journal identity changes after indexed discovery"
+
+# Observe journal I/O through the executable cleanup interface. Increasing
+# foreign projection titles must not reread this home's journals per workspace.
+(
+  reset_fixture
+  for n in 1 2 3 4 5 6 7 8 9 10; do write_v1 "owned-$n"; done
+  export FM_TEST_REAL_GREP
+  FM_TEST_REAL_GREP=$(command -v grep)
+  export FM_TEST_JOURNAL_READ_LOG="$TMP_ROOT/journal-reads"
+  cat > "$FAKEBIN/grep" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in *.herdr-presentation) printf '%s\n' "$arg" >> "$FM_TEST_JOURNAL_READ_LOG" ;; esac
+done
+exec "$FM_TEST_REAL_GREP" "$@"
+SH
+  chmod +x "$FAKEBIN/grep"
+  # shellcheck disable=SC2329 # invoked indirectly by the fake herdr workspace list.
+  fixture_workspaces() {
+    local n=1
+    printf '['
+    while [ "$n" -le "$FM_TEST_PROJECTION_COUNT" ]; do
+      [ "$n" -eq 1 ] || printf ','
+      printf '{"workspace_id":"foreign-%s","label":"└ foreign-%s · p:%s"}' "$n" "$n" "$TOKEN"
+      n=$((n + 1))
+    done
+    printf ']'
+  }
+  : > "$FM_TEST_JOURNAL_READ_LOG"
+  FM_TEST_PROJECTION_COUNT=1 fm_herdr_session_cleanup
+  single_reads=$(wc -l < "$FM_TEST_JOURNAL_READ_LOG" | tr -d '[:space:]')
+  : > "$FM_TEST_JOURNAL_READ_LOG"
+  FM_TEST_PROJECTION_COUNT=20 fm_herdr_session_cleanup
+  fleet_reads=$(wc -l < "$FM_TEST_JOURNAL_READ_LOG" | tr -d '[:space:]')
+  [ "$single_reads" -gt 0 ] || fail "journal I/O probe checked nothing"
+  [ "$fleet_reads" -eq "$single_reads" ] \
+    || fail "foreign projections multiplied journal reads: $single_reads -> $fleet_reads"
+  [ ! -s "$CLOSE_LOG" ] || fail "foreign projection discovery closed a pane"
+  rm -f "$FAKEBIN/grep"
+) || exit 1
+pass "fleet discovery reads home journals once regardless of foreign projection count"
+
+# Exercise the actual executable deadline, not the sourced worker alone.
+(
+  reset_fixture
+  cp "$FM_STATE_OVERRIDE/$ID.herdr-presentation" "$TMP_ROOT/deadline-journal"
+  export FM_TEST_HERDR_PID="$TMP_ROOT/deadline-herdr.pid"
+  export FM_TEST_HERDR_SOCKET="$TMP_ROOT/deadline-session.sock"
+  export FM_TEST_HERDR_TITLE="$TITLE"
+  cat > "$FAKEBIN/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "session list")
+    printf '{"sessions":[{"name":"test","running":true,"socket_path":"%s"}]}\n' "$FM_TEST_HERDR_SOCKET"
+    ;;
+  "workspace list")
+    printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"%s","tab_count":1,"pane_count":1}]}}\n' "$FM_TEST_HERDR_TITLE"
+    ;;
+  "api snapshot")
+    printf '%s\n' "$$" > "$FM_TEST_HERDR_PID"
+    trap 'exit 143' TERM
+    sleep 30
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$FAKEBIN/herdr"
+  presentation_lock=$(PATH="$FAKEBIN:$PATH" HERDR_SESSION=test FM_HOME="$FM_HOME" \
+    FM_ROOT_OVERRIDE="$ROOT" bash -c \
+    '. "$1/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_presentation_session_lock_path test' \
+    _ "$ROOT") || fail "could not resolve the isolated fixture presentation lock"
+  started=$SECONDS
+  HERDR_SESSION=test FM_HERDR_SESSION_CLEANUP_TIMEOUT=10 \
+    "$ROOT/bin/fm-herdr-session-cleanup.sh" > "$TMP_ROOT/deadline.out" 2>&1 \
+    || fail "cleanup deadline blocked startup"
+  [ "$((SECONDS - started))" -lt 25 ] || fail "cleanup deadline did not bound execution"
+  grep -q 'unfinished candidates preserved; cleanup coverage is unconfirmed' "$TMP_ROOT/deadline.out" \
+    || fail "cleanup deadline did not report unconfirmed coverage"
+  cmp -s "$TMP_ROOT/deadline-journal" "$FM_STATE_OVERRIDE/$ID.herdr-presentation" \
+    || fail "cleanup deadline changed an unfinished journal"
+  [ -s "$FM_TEST_HERDR_PID" ] || fail "deadline never reached the backend read after acquiring locks"
+  task_lock="$FM_STATE_OVERRIDE/.spawn-$ID.lock"
+  [ ! -e "$task_lock" ] && [ ! -L "$task_lock" ] \
+    || fail "cleanup deadline left the candidate task lock held: $(ls -ld "$task_lock" 2>/dev/null) owner=$(cat "$task_lock/pid" 2>/dev/null)"
+  [ ! -e "$presentation_lock" ] && [ ! -L "$presentation_lock" ] \
+    || fail "cleanup deadline left the shared presentation lock held: $(ls -ld "$presentation_lock" 2>/dev/null) owner=$(cat "$presentation_lock/pid" 2>/dev/null)"
+  backend_pid=$(cat "$FM_TEST_HERDR_PID")
+  if kill -0 "$backend_pid" 2>/dev/null; then
+    backend_state=$(ps -p "$backend_pid" -o stat= 2>/dev/null || true)
+    case "$backend_state" in Z*) ;; *) fail "deadline left the backend process running" ;; esac
+  fi
+) || exit 1
+pass "executable deadline preserves journals and releases both locks after interruption"
 
 printf 'all fm-herdr-session-cleanup tests passed\n'
