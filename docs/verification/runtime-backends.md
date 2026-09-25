@@ -1081,7 +1081,8 @@ ok - real Pi SDK 0.84.4 immediately renders appendEntry in the active transcript
 ```
 
 The focused regression recreates the two 2026-08-31 incident shapes against the real store scripts: a delivered decision outcome whose processing turn returns an empty assistant message, and one whose turn repeats an unrelated prior answer.
-In both, the processed marker holds, the same sequence is presented again at the run boundary and after a session replacement, the triggered-turn budget gives way to a next-prompt copy without duplicates, and only `fm_branch_processed` with the presented sequence closes the outcome; a routine outcome never enters the path, and delivered history from before the marker existed is migrated once rather than re-presented.
+In both, the processed marker holds, the same sequence is presented again at the run boundary and after a session replacement, and the triggered-turn budget gives way to a next-prompt copy without duplicates.
+Only `fm_branch_processed` with the presented sequence closes the outcome, and it now refuses until `fm_branch_outcomes` has loaded every acknowledged sequence from the durable store since the latest session start or compaction; a routine outcome never enters the path, and delivered history from before the marker existed is migrated once rather than re-presented.
 On this machine the globally installed npm package is 0.81.1, whose stock `ToolExecutionComponent` rendering differs from the 0.84 line and fails the suite's first rendering-consumer case before any delivery case runs, which is why `FM_PI_PACKAGE_DIR` points at the 0.84.4 install above.
 
 ### 2026-09-02 historical post-construction provider-error fallback

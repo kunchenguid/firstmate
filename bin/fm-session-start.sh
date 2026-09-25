@@ -6,8 +6,8 @@
 # instead of the six-plus separate reads the old docs required: run
 # fm-bootstrap.sh, then separately read data/projects.md, data/secondmates.md,
 # data/captain.md, data/captain-shared.md, data/learnings.md, then run
-# fm-lock.sh, fm-wake-drain.sh, then read data/backlog.md, every state/*.meta,
-# and every state/*.status.
+# fm-lock.sh, fm-wake-drain.sh, then read data/backlog.md, selected identity
+# fields from every state/*.meta, and the newest event from every state/*.status.
 # Every one of those reads is UNCONDITIONAL at every session start, so they
 # belong in a script, not in N agent turns.
 #
@@ -148,7 +148,8 @@
 # and hold_reason, never body. The groups are the tool's own filters
 # (`--state in_flight`, `--state held`, `--state queued --blocked`, and
 # `tasks-axi ready`), so this script never reimplements task state; the groups
-# can overlap, because an in-flight item that is also held appears under both.
+# can overlap; the inventory de-duplicates those memberships into one row and
+# labels that row with every matching category.
 # When manual mode is selected, or tasks-axi is unavailable or incompatible,
 # this script prints only backlog section headings and item title lines, so
 # title-line hold and blocked-by metadata remain visible while indented bodies
@@ -159,11 +160,11 @@
 # compatible tasks-axi is available, or `data/backlog.md` when the file body is
 # truly needed.
 #
-# STATUS TAILS: FM_SESSION_START_STATUS_TAIL bounds how many lines each task's
-# tail prints, and bin/fm-line-cap-lib.sh bounds how long each of those lines
-# may be. Both bounds are safe because the section prints every task's full
-# status log path, and AGENTS.md section 8 treats a status line as a wake EVENT
-# rather than current state - bin/fm-crew-state.sh owns current state.
+# LATEST STATUS EVENTS: each task contributes only its newest status line, and
+# bin/fm-line-cap-lib.sh bounds that line's length. This projection is safe
+# because the section prints every task's full status log path, and AGENTS.md
+# section 8 treats a status line as a wake EVENT rather than current state -
+# bin/fm-crew-state.sh owns current state.
 #
 # RUNTIME BOUND: the digest is now executed through a native session-open
 # adapter (see bin/fm-sessionstart-run.sh), which blocks either hook-driven
