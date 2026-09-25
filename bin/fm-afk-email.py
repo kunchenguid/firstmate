@@ -32,6 +32,7 @@ MAX_REPLY_CHARS = 8000
 TOKEN_RE = re.compile(r"^FM-AFK-[A-Za-z0-9_-]{16}$")
 NOTE_ID_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9._-]+$")
 REPLY_LINE_RE = re.compile(r"^FM-AFK-REPLY (FM-AFK-[A-Za-z0-9_-]{16})$")
+QUOTED_HEADER_RE = re.compile(r"^(?:From|Sent|To|Subject):", re.IGNORECASE)
 EMAIL_RE = re.compile(r"^[^\s@<>]+@[^\s@<>]+$")
 SECRET_ENV_RE = re.compile(
     r"(?:^|_)(?:PASS(?:WORD)?|TOKEN|SECRET|API.?KEY|CREDENTIALS?)(?:_|$)",
@@ -332,7 +333,12 @@ def extract_reply(body):
     answer_lines = []
     for line in lines[first + 1:]:
         stripped = line.lstrip()
-        if stripped.startswith(">") or stripped.startswith("On ") and stripped.endswith("wrote:") or stripped == "-----Original Message-----":
+        if (
+            stripped.startswith(">")
+            or stripped.startswith("On ") and stripped.endswith("wrote:")
+            or stripped == "-----Original Message-----"
+            or QUOTED_HEADER_RE.match(stripped)
+        ):
             break
         answer_lines.append(line)
     answer = "\n".join(answer_lines).strip()
@@ -448,9 +454,6 @@ def verify_note(note_id):
     request_id = identity.get("request_id")
     item = handoff_record(request_id, posture)
     if item is None:
-        if isinstance(request_id, str) and re.fullmatch(r"afk-email-[1-9][0-9]*-[a-f0-9]{24}", request_id):
-            print("fm-afk-email: verified reply state could not be read", file=sys.stderr)
-            return 1
         print(json.dumps({"verified": False}, separators=(",", ":")))
         return 0
     body = inbox_note_body(note_id)
