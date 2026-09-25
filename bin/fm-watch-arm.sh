@@ -308,14 +308,20 @@ cycle_link_reconcile() {
           print file > retireout
           continue
         }
-        if (claimed_at > 0 && now - claimed_at > horizon) {
-          print file > retireout
-          continue
-        }
         key = predecessor SUBSEP identity
-        if (key in want) print claimfile[key] > retireout
+        if (key in want) {
+          if (claimed_at > claimtime[key] \
+            || (claimed_at == claimtime[key] && file > claimfile[key])) {
+            print claimfile[key] > retireout
+          } else {
+            print file > retireout
+            continue
+          }
+        }
         want[key] = successor
         claimfile[key] = file
+        claimtime[key] = claimed_at
+        expired[key] = (claimed_at > 0 && now - claimed_at > horizon)
       }
       close(claims)
     }
@@ -339,9 +345,12 @@ cycle_link_reconcile() {
         row = rows[i]
         if (i in rowkey) {
           key = rowkey[i]
-          if (sub(/\tsuccessor=none$/, "\tsuccessor=" want[key], row)) print claimfile[key] > retireout
+          if (sub(/\tsuccessor=none$/, "\tsuccessor=" want[key], row)) applied[key] = 1
         }
         print row
+      }
+      for (key in want) {
+        if (applied[key] || expired[key]) print claimfile[key] > retireout
       }
       close(retireout)
     }
