@@ -1277,47 +1277,71 @@ test_reaper_stops_a_tracked_watcher() {
 # command - must not reopen into a fresh generation and resurface forever on
 # every plain restart. Past FM_RECOVERY_REOPEN_LIMIT reopens, the episode must
 # settle on its own so the watcher can finally hold the lock and stay live.
-test_stuck_unacked_recovery_settles_after_bounded_reopen() {
-  local dir home state fakebin i
-  dir=$(make_case bounded-reopen)
+# With queued rows still unacknowledged, settling must not re-announce them on
+# a watcher start either: the rows stay durable for the next session's drain.
+check_stuck_unacked_recovery_settles() {  # <case-name> <queued:0|1>
+  local dir home state fakebin queued=$2 i
+  local FM_RECOVERY_REOPEN_LIMIT=2
+  export FM_RECOVERY_REOPEN_LIMIT
+  dir=$(make_case "$1")
   home="$dir/home"
   state="$dir/state"
   fakebin="$dir/fakebin"
   mkdir -p "$home/data"
-  export FM_RECOVERY_REOPEN_LIMIT=2
 
   printf 'announced:downtime:seedgen1\n' > "$state/.watcher-down"
   chmod 0600 "$state/.watcher-down"
+  if [ "$queued" = 1 ]; then
+    printf '%s\t1\tcheck\tstuck-queued\tcheck: stuck queued row\n' "$(date +%s)" > "$state/.wake-queue"
+    printf '1\n' > "$state/.wake-queue.seq"
+  fi
 
   i=0
   while [ "$i" -lt "$FM_RECOVERY_REOPEN_LIMIT" ]; do
     i=$((i + 1))
     start_rearm_arm "$home" "$state" "$fakebin" "$dir/reopen-$i-arm.out"
     wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" \
-      || fail "reopen attempt $i did not resolve to an exit: $(cat "$dir/reopen-$i-arm.out")"
+      || fail "$1: reopen attempt $i did not resolve to an exit: $(cat "$dir/reopen-$i-arm.out")"
     grep -F 'check: rearm-resurface' "$dir/reopen-$i-arm.out" >/dev/null \
-      || fail "reopen attempt $i did not resurface the stuck episode: $(cat "$dir/reopen-$i-arm.out")"
+      || fail "$1: reopen attempt $i did not resurface the stuck episode: $(cat "$dir/reopen-$i-arm.out")"
     case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
       announced:*) ;;
-      *) fail "reopen attempt $i left an unexpected recovery marker: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+      *) fail "$1: reopen attempt $i left an unexpected recovery marker: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
     esac
   done
 
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/settled-arm.out"
   is_live_non_zombie "$ARM_PID" \
-    || fail "watcher did not survive once the reopen bound settled the stuck episode: $(cat "$dir/settled-arm.out")"
+    || fail "$1: watcher did not survive once the reopen bound settled the stuck episode: $(cat "$dir/settled-arm.out")"
   ! grep -F 'check: rearm-resurface' "$dir/settled-arm.out" >/dev/null \
-    || fail "watcher spuriously resurfaced an already-bounded episode: $(cat "$dir/settled-arm.out")"
+    || fail "$1: watcher spuriously resurfaced an already-bounded episode: $(cat "$dir/settled-arm.out")"
   case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
     acked:*) ;;
-    *) fail "stuck episode did not settle to acked: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+    *) fail "$1: stuck episode did not settle to acked: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
   esac
   [ ! -e "$state/.watcher-down.reopen-count" ] \
-    || fail "reopen counter was not cleared once the episode settled"
-
+    || fail "$1: reopen counter was not cleared once the episode settled"
   kill "$ARM_PID" 2>/dev/null || true
   wait "$ARM_PID" 2>/dev/null || true
+
+  if [ "$queued" = 1 ]; then
+    grep "$(printf '\tcheck\tstuck-queued\t')" "$state/.wake-queue" >/dev/null \
+      || fail "$1: settling the stuck episode dropped its queued row"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2>/dev/null \
+      || fail "$1: next session drain failed after the episode settled"
+    grep "$(printf '\tcheck\tstuck-queued\t')" "$dir/drain.out" >/dev/null \
+      || fail "$1: next session drain did not present the settled episode's queued row"
+  fi
+}
+
+test_stuck_unacked_recovery_settles_after_bounded_reopen() {
+  check_stuck_unacked_recovery_settles bounded-reopen 0
   pass "watch-arm: a stuck unacknowledged recovery episode settles after a bounded number of reopens instead of looping forever"
+}
+
+test_stuck_unacked_recovery_with_queued_rows_stays_up_after_settling() {
+  check_stuck_unacked_recovery_settles bounded-reopen-queued 1
+  pass "watch-arm: a settled recovery episode with queued rows keeps the watcher up and leaves the rows for the next drain"
 }
 
 test_attached_arm_reports_the_delivered_wake
@@ -1333,6 +1357,7 @@ test_watcher_exits_when_its_state_directory_is_removed
 test_watcher_exits_when_its_home_is_removed
 test_reaper_stops_a_tracked_watcher
 test_stuck_unacked_recovery_settles_after_bounded_reopen
+test_stuck_unacked_recovery_with_queued_rows_stays_up_after_settling
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_rearm_resurfaces_durable_queue_and_remote_open_decision
 test_slow_rearm_recovery_is_still_surfaced

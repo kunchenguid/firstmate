@@ -798,6 +798,7 @@ _fm_recovery_marker_arm_check() {
         fm_lock_release "$FM_WAKE_QUEUE_LOCK"
         return 1
       fi
+      rm -f -- "${marker}.reopen-count" 2>/dev/null || true
       FM_RECOVERY_MARKER_ACTION='recover'
     fi
     fm_lock_release "$lock"
@@ -818,6 +819,7 @@ _fm_recovery_marker_arm_check() {
       fm_lock_release "$FM_WAKE_QUEUE_LOCK"
       return 1
     fi
+    rm -f -- "${marker}.reopen-count" 2>/dev/null || true
     FM_RECOVERY_MARKER_ACTION='recover'
     fm_lock_release "$lock"
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -838,18 +840,8 @@ _fm_recovery_marker_arm_check() {
         return 1
       fi
       FM_RECOVERY_MARKER_TOKEN="announced:downtime:${line##*:}"
+      # shellcheck disable=SC2034 # Output read by callers after this function returns.
       FM_RECOVERY_MARKER_ACTION='recover'
-      ;;
-    acked:*)
-      if [ -s "$FM_WAKE_QUEUE" ]; then
-        if ! _fm_recovery_marker_write_locked "$marker" downtime "" announced; then
-          fm_lock_release "$lock"
-          fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-          return 1
-        fi
-        # shellcheck disable=SC2034 # Output read by callers after this function returns.
-        FM_RECOVERY_MARKER_ACTION='recover'
-      fi
       ;;
   esac
   fm_lock_release "$lock"
@@ -869,8 +861,11 @@ _fm_recovery_marker_arm_check() {
 # that: past FM_RECOVERY_REOPEN_LIMIT consecutive reopens of one episode with
 # no intervening explicit acknowledgement, settle it to acked directly instead
 # of minting yet another generation nobody is watching, so a watcher can start
-# and stay up. A real acknowledgement (_fm_recovery_marker_ack) or a fresh
-# downtime episode both clear the counter, so this bound never shortens the
+# and stay up. A settled episode's queued rows stay durable: arm-check never
+# re-announces an acked marker just because the queue is non-empty, and the
+# next session's drain presents them. A real acknowledgement
+# (_fm_recovery_marker_ack) or arm-check minting a fresh episode from a missing
+# or invalid marker both clear the counter, so this bound never shortens the
 # once-per-genuine-generation resurface a live, attentive session relies on.
 FM_RECOVERY_REOPEN_LIMIT=${FM_RECOVERY_REOPEN_LIMIT:-3}
 
