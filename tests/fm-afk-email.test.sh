@@ -37,16 +37,16 @@ printf '%s\n' "${FM_TEST_HARNESS:-pi}"
 SH
 chmod 700 "$REPO/bin/fm-harness.sh"
 
-make_home() {  # <name> [configured]
+make_home() {  # <name> [configured] [recipient]
   local home="$TMP_ROOT/$1"
   mkdir -p "$home/state"
   if [ "${2:-}" = configured ]; then
-    cat > "$home/.env" <<'ENV'
+    cat > "$home/.env" <<ENV
 FM_MAIL_USER=owner@example.com
 FM_MAIL_PASS=mail-secret-not-to-leak
 FM_IMAP_HOST=imap.example.test
 FM_SMTP_HOST=smtp.example.test
-FM_AFK_EMAIL_TO=owner@example.com
+FM_AFK_EMAIL_TO=${3:-owner@example.com}
 ENV
   fi
   printf '%s\n' "$home"
@@ -353,7 +353,7 @@ EOF
 
 test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit() {
   local home entered token token2 send_index
-  home=$(make_home body-scope configured)
+  home=$(make_home body-scope configured johnpoyser@gmail.com)
   run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
   entered=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field entered_epoch)
   write_outcomes "$home" "$entered"
@@ -382,7 +382,7 @@ os.environ.update({
     "FM_STATE_OVERRIDE": str(state),
     "FM_ROOT_OVERRIDE": str(root),
     "FM_AFK_POSTURE": "1",
-    "FM_AFK_EMAIL_TO": "owner@example.com",
+    "FM_AFK_EMAIL_TO": "johnpoyser@gmail.com",
     "FM_MAIL_USER": "owner@example.com",
     "FM_MAIL_PASS": "test-secret",
     "FM_IMAP_HOST": "imap.example.test",
@@ -400,33 +400,48 @@ mail = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mail)
 headers = {
     "1": b"From: outsider@example.com\r\nSubject: outside\r\n\r\n",
-    "2": b"From: owner@example.com\r\nSubject: captain\r\n\r\n",
-    "3": b"From: owner@example.com\r\nSubject: oversized\r\n\r\n",
-    "4": b"From: owner@example.com\r\nSubject: long answer\r\n\r\n",
-    "5": b"From: owner@example.com\r\nSubject: reply during config outage\r\n\r\n",
+    "2": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=gmail.com\r\nSubject: captain\r\n\r\n",
+    "3": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.i=@gmail.com\r\nSubject: oversized\r\n\r\n",
+    "4": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=gmail.com\r\nSubject: long answer\r\n\r\n",
+    "5": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dmarc=pass header.from=gmail.com\r\nSubject: reply during config outage\r\n\r\n",
+    "6": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: spoof.example; dkim=pass header.d=gmail.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=gmail.com\r\nSubject: forged authentication\r\n\r\n",
+    "7": b"From: other@example.com\r\nAuthentication-Results: mx.google.com; dmarc=pass header.from=gmail.com\r\nSubject: other sender\r\n\r\n",
+    "8": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=fail header.d=gmail.com; dmarc=fail header.from=gmail.com\r\nSubject: forged From\r\n\r\n",
+    "9": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=attacker.com; dmarc=fail header.from=gmail.com\r\nSubject: unaligned signer\r\n\r\n",
 }
 bodies = {
     "1": b"From: outsider@example.com\r\nSubject: outside\r\nContent-Type: text/plain\r\n\r\nprivate body",
     "2": (
-        b"From: owner@example.com\r\nSubject: captain\r\nContent-Type: text/plain\r\n\r\n"
+        b"From: johnpoyser@gmail.com\r\nSubject: captain\r\nContent-Type: text/plain\r\n\r\n"
         + f"FM-AFK-REPLY {reply_token}\n".encode()
         + b"a" * 8000
+        + b"\nOn Monday, someone wrote:\n> quoted history must not reach the answer"
     ),
-    "3": b"From: owner@example.com\r\nSubject: oversized\r\nContent-Type: text/plain\r\n\r\nreply text",
+    "3": b"From: johnpoyser@gmail.com\r\nSubject: oversized\r\nContent-Type: text/plain\r\n\r\nreply text",
     "4": (
-        b"From: owner@example.com\r\nSubject: long answer\r\nContent-Type: text/plain\r\n\r\n"
+        b"From: johnpoyser@gmail.com\r\nSubject: long answer\r\nContent-Type: text/plain\r\n\r\n"
         + f"FM-AFK-REPLY {reply_token}\n".encode()
         + b"b" * 8001
     ),
     "5": (
-        b"From: owner@example.com\r\nSubject: reply during config outage\r\nContent-Type: text/plain\r\n\r\n"
+        b"From: johnpoyser@gmail.com\r\nMIME-Version: 1.0\r\n"
+        b"Subject: reply during config outage\r\nContent-Type: multipart/mixed; boundary=reply-boundary\r\n\r\n"
+        b"--reply-boundary\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
         + f"FM-AFK-REPLY {recovery_token}\nrecovered answer".encode()
+        + b"\r\n--reply-boundary\r\nContent-Type: message/rfc822\r\n"
+        b"Content-Disposition: attachment; filename=forwarded.eml\r\n\r\n"
+        b"From: attacker@example.net\r\nContent-Type: text/plain\r\n\r\n"
+        b"FORWARDED_ATTACHMENT_SECRET\r\n--reply-boundary--\r\n"
     ),
+    "6": b"From: johnpoyser@gmail.com\r\nSubject: forged authentication\r\nContent-Type: text/plain\r\n\r\nshould not be read",
+    "7": b"From: other@example.com\r\nSubject: other sender\r\nContent-Type: text/plain\r\n\r\nshould not be read",
+    "8": b"From: johnpoyser@gmail.com\r\nSubject: forged From\r\nContent-Type: text/plain\r\n\r\nshould not be read",
+    "9": b"From: johnpoyser@gmail.com\r\nSubject: unaligned signer\r\nContent-Type: text/plain\r\n\r\nshould not be read",
 }
 class FakeMailbox:
     untagged_responses = {"UIDVALIDITY": [b"44"]}
     body_fetches = []
-    search_ids = b"1 2 3 4"
+    search_ids = b"1 2 3 4 6 7 8 9"
     fail_body_fetch = False
 
     def login(self, *_): pass
@@ -458,6 +473,8 @@ with redirect_stdout(initial_output), redirect_stderr(initial_error):
     assert mail.cmd_poll_list() == 0
 initial_lines = initial_output.getvalue().splitlines()
 initial_rows = {fields[0]: fields for fields in (line.split("\t") for line in initial_lines[1:])}
+assert set(initial_rows) == {"1", "2", "3", "4", "6", "7", "8", "9"}, initial_rows
+assert all(initial_rows[uid][4] == "ignored" for uid in ("1", "6", "7", "8", "9")), initial_rows
 assert initial_rows["3"][4] == "ok", initial_rows["3"]
 assert "body exceeds 256 KiB" in initial_rows["3"][3], initial_rows["3"]
 assert initial_rows["4"][4] == "ok", initial_rows["4"]
@@ -477,8 +494,8 @@ with redirect_stdout(poll_output):
 poll_lines = poll_output.getvalue().splitlines()
 assert poll_lines[0] == "uidvalidity\t44", poll_lines
 poll_rows = {fields[0]: fields for fields in (line.split("\t") for line in poll_lines[1:])}
-assert set(poll_rows) == {"1", "2", "3", "4"}, poll_rows
-assert poll_rows["1"][4] == "ok", poll_rows["1"]
+assert set(poll_rows) == {"1", "2", "3", "4", "6", "7", "8", "9"}, poll_rows
+assert all(poll_rows[uid][4] == "ignored" for uid in ("1", "6", "7", "8", "9")), poll_rows
 assert poll_rows["2"][4] == "degraded", poll_rows["2"]
 assert poll_rows["3"][4] == "ok", poll_rows["3"]
 assert poll_rows["4"][4] == "degraded", poll_rows["4"]
@@ -491,7 +508,8 @@ with redirect_stdout(recovery_output), redirect_stderr(recovery_error):
     assert mail.cmd_poll_list() == 0
 recovery_lines = recovery_output.getvalue().splitlines()
 recovery_rows = {fields[0]: fields for fields in (line.split("\t") for line in recovery_lines[1:])}
-assert set(recovery_rows) == {"1", "2", "3", "4"}, recovery_rows
+assert set(recovery_rows) == {"1", "2", "3", "4", "6", "7", "8", "9"}, recovery_rows
+assert all(recovery_rows[uid][4] == "ignored" for uid in ("1", "6", "7", "8", "9")), recovery_rows
 assert recovery_rows["2"][4] == "ok", recovery_rows["2"]
 assert recovery_rows["4"][4] == "ok", recovery_rows["4"]
 assert "reply in mail UID 4 rejected; answer exceeds 8000 characters" in recovery_error.getvalue()
@@ -499,8 +517,8 @@ assert mailbox.body_fetches == ["2", "4"], mailbox.body_fetches
 recipient = os.environ.pop("FM_AFK_EMAIL_TO")
 try:
     assert mail.afk_email_context() == (None, True)
-    (state / ".mail-seen").write_text("uidvalidity=44\n1\n2\n3\n4\n", encoding="utf-8")
-    mailbox.search_ids = b"1 2 3 4 5"
+    (state / ".mail-seen").write_text("uidvalidity=44\n1\n2\n3\n4\n6\n7\n8\n9\n", encoding="utf-8")
+    mailbox.search_ids = b"1 2 3 4 5 6 7 8 9"
     mailbox.body_fetches.clear()
     outage_output = StringIO()
     with redirect_stdout(outage_output):
@@ -511,7 +529,7 @@ try:
     assert outage_rows["5"][4] == "degraded", outage_rows["5"]
     assert mailbox.body_fetches == [], mailbox.body_fetches
 
-    (state / ".mail-seen").write_text("uidvalidity=44\n1\n2\n3\n4\n5\n", encoding="utf-8")
+    (state / ".mail-seen").write_text("uidvalidity=44\n1\n2\n3\n4\n5\n6\n7\n8\n9\n", encoding="utf-8")
     (state / ".mail-retry").write_text("5\n", encoding="utf-8")
     retry_output = StringIO()
     with redirect_stdout(retry_output):
@@ -535,10 +553,13 @@ assert restored_rows["5"][4] == "retry", restored_rows["5"]
 assert mailbox.body_fetches == ["5"], mailbox.body_fetches
 notes = list((state / "inbox").glob("*.note"))
 assert len(notes) == 2, notes
-assert any("recovered answer" in note.read_text(encoding="utf-8") for note in notes)
+recovered_note = next(note.read_text(encoding="utf-8") for note in notes if "recovered answer" in note.read_text(encoding="utf-8"))
+recovered_words = recovered_note.split("Captain's words:\n", 1)[1].rstrip("\n")
+assert recovered_words == "recovered answer", recovered_words
+assert "FORWARDED_ATTACHMENT_SECRET" not in recovered_note
 (state / ".mail-seen").unlink()
 (state / ".mail-retry").unlink()
-mailbox.search_ids = b"1 2 3 4"
+mailbox.search_ids = b"1 2 3 4 6 7 8 9"
 real_run = mail.subprocess.run
 def fail_handoff(command, *args, **kwargs):
     if isinstance(command, list) and command[-1] == "receive-batch":
@@ -555,7 +576,7 @@ finally:
     mail.subprocess.run = real_run
 handoff_lines = handoff_output.getvalue().splitlines()
 handoff_rows = {fields[0]: fields for fields in (line.split("\t") for line in handoff_lines[1:])}
-assert set(handoff_rows) == {"1", "2", "3", "4"}, handoff_rows
+assert set(handoff_rows) == {"1", "2", "3", "4", "6", "7", "8", "9"}, handoff_rows
 assert handoff_rows["2"][4] == "degraded", handoff_rows["2"]
 assert handoff_rows["4"][4] == "degraded", handoff_rows["4"]
 assert "away-email reply handoff failed" in handoff_error.getvalue(), handoff_error.getvalue()
@@ -565,7 +586,7 @@ mailbox.body_fetches.clear()
 assert mail.cmd_poll_list() == 0
 assert mailbox.body_fetches == [], mailbox.body_fetches
 PY
-  pass "mail polling bounds sender-scoped body reads and retries failed fetches"
+  pass "mail polling authenticates owner replies and bounds body reads"
 }
 
 test_over_limit_reply_is_explicitly_rejected() {

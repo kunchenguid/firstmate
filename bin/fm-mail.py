@@ -54,6 +54,7 @@ socket.setdefaulttimeout(MAIL_TIMEOUT)
 MAX_PREVIEW = 200
 READ_LIMIT = 20
 MAX_AFK_BODY_BYTES = 256 * 1024
+AFK_OWNER_EMAIL = 'johnpoyser@gmail.com'
 
 
 class AfkBodyFetchError(Exception):
@@ -105,6 +106,8 @@ def afk_email_context():
     recipient = configured.stdout.strip()
     if configured.returncode != 0 or not recipient:
         return None, True
+    if recipient.casefold() != AFK_OWNER_EMAIL:
+        return None, True
     return recipient, True
 
 
@@ -128,6 +131,42 @@ def fetched_size(data):
 def from_is_configured(header, recipient):
     addresses = getaddresses([header or ''])
     return len(addresses) == 1 and addresses[0][1].strip().casefold() == recipient.casefold()
+
+
+def authentication_property(clause, name):
+    match = re.search(
+        rf'(?<![A-Za-z0-9_-]){re.escape(name)}=([^;\s]+)', clause, re.IGNORECASE
+    )
+    return match.group(1).strip("\"'") if match else None
+
+
+def gmail_aligned(domain):
+    domain = str(domain or '').strip().strip("\"'").casefold()
+    if '@' in domain:
+        domain = domain.rsplit('@', 1)[1]
+    domain = domain.rstrip('.')
+    return domain == 'gmail.com' or domain.endswith('.gmail.com')
+
+
+def gmail_authentication_pass(message):
+    results = message.get_all('Authentication-Results', [])
+    if not results:
+        return False
+    clauses = str(results[0]).split(';')
+    authserv = clauses[0].strip().split()
+    if not authserv or authserv[0].casefold() != 'mx.google.com':
+        return False
+    for clause in clauses[1:]:
+        if re.match(r'\s*dkim=pass(?:\s|$)', clause, re.IGNORECASE):
+            domain = authentication_property(clause, 'header.d')
+            if domain is None:
+                domain = authentication_property(clause, 'header.i')
+            if gmail_aligned(domain):
+                return True
+        if re.match(r'\s*dmarc=pass(?:\s|$)', clause, re.IGNORECASE):
+            if gmail_aligned(authentication_property(clause, 'header.from')):
+                return True
+    return False
 
 
 def dec(s):
@@ -154,22 +193,32 @@ def connect_mailbox():
 
 
 def plain_body(msg):
-    """Return decoded text/plain content only; replies are never inferred from HTML."""
-    if msg is None:
-        return ''
-    parts = msg.walk() if msg.is_multipart() else [msg]
+    """Return inline text/plain content, excluding attachments and embedded mail."""
     chunks = []
-    for part in parts:
-        if part.get_content_type() != 'text/plain' or part.get_filename():
-            continue
+
+    def collect(part):
+        if part.get_content_disposition() == 'attachment' or part.get_filename():
+            return
+        if part.get_content_type() == 'message/rfc822':
+            return
+        payload = part.get_payload()
+        if isinstance(payload, list):
+            for child in payload:
+                collect(child)
+            return
+        if part.get_content_type() != 'text/plain':
+            return
         payload = part.get_payload(decode=True)
         if payload is None:
-            continue
+            return
         charset = part.get_content_charset() or 'utf-8'
         try:
             chunks.append(payload.decode(charset, 'replace'))
         except LookupError:
             chunks.append(payload.decode('utf-8', 'replace'))
+
+    if msg is not None:
+        collect(msg)
     return '\n'.join(chunks)
 
 
@@ -477,7 +526,11 @@ def cmd_poll_list():
                 idate = clean(dec(mi.get('Date')))
                 subj = clean(dec(mi.get('Subject')))
                 fr = clean(dec(mi.get('From')))
-                if afk_enabled and from_is_configured(fr, recipient):
+                ignored = afk_email_active and (
+                    not from_is_configured(fr, AFK_OWNER_EMAIL)
+                    or not gmail_authentication_pass(mi)
+                )
+                if afk_enabled and not ignored and from_is_configured(fr, recipient):
                     try:
                         message_size = fetched_size(msg)
                         if message_size is None:
@@ -510,14 +563,23 @@ def cmd_poll_list():
                 new_emitted += 1
                 continue
             except Exception:
+                if afk_email_active:
+                    out.append((clean(u), '', '(unverified sender)', '', 'deferred'))
+                    if is_retry:
+                        retry_emitted += 1
+                        if first_retry_emitted_index == -1:
+                            first_retry_emitted_index = retry_idx
+                    else:
+                        new_emitted += 1
+                    continue
                 if is_retry:
                     continue
                 out.append((clean(u), '', '(no header)',
                             'unfetchable header - see fm-mail read', 'degraded'))
                 new_emitted += 1
                 continue
-            status = 'retry' if is_retry else 'ok'
-            if afk_email_active and not afk_enabled:
+            status = 'ignored' if ignored else ('retry' if is_retry else 'ok')
+            if not ignored and afk_email_active and not afk_enabled:
                 status = 'degraded'
             out.append((uid, idate, fr, subj, status))
             if is_retry:

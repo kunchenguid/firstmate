@@ -190,6 +190,46 @@ SH
   pass "fm-mail: poll surfaces each new uid exactly once"
 }
 
+test_poll_records_ignored_and_deferred_without_waking() {
+  local fakebin ignored_home out rc=0 wakeq cursor retry
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  ignored_home="$TMP_ROOT/ignored-status-home"
+  mkdir -p "$ignored_home/bin" "$ignored_home/state"
+  ln -s "$ROOT/bin/fm-wake-lib.sh" "$ignored_home/bin/fm-wake-lib.sh"
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'uidvalidity\t54321\n'
+printf '41\t\tjohnpoyser@gmail.com\tforged\tignored\n'
+printf '42\t\t(unverified sender)\t\tdeferred\n'
+printf '43\t\tjohnpoyser@gmail.com\tverified\tok\n'
+SH
+  chmod +x "$fakebin/python3"
+
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$ignored_home" PATH="$fakebin:$PATH" "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "poll with ignored and deferred rows must succeed"
+  assert_contains "$out" "woke for 43" "authenticated owner mail remains wakeable"
+  assert_not_contains "$out" "woke for 41" "forged sender is never woken"
+  assert_not_contains "$out" "woke for 42" "unverified sender is never woken"
+  cursor=$(cat "$ignored_home/state/.mail-seen")
+  assert_contains "$cursor" "41" "ignored uid is durably cursor-recorded"
+  assert_contains "$cursor" "42" "unverified uid is durably cursor-recorded"
+  retry=$(cat "$ignored_home/state/.mail-retry")
+  assert_contains "$retry" "42" "unverified uid remains retryable without a wake"
+  wakeq=$(cat "$ignored_home/state/.wake-queue")
+  assert_contains "$wakeq" "mail from johnpoyser@gmail.com - verified" "only accepted owner mail reaches the wake queue"
+  assert_not_contains "$wakeq" "forged" "forged From never reaches the wake queue"
+  assert_not_contains "$wakeq" "unverified" "unverified mail never reaches the wake queue"
+
+  rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$ignored_home" PATH="$fakebin:$PATH" "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "repeat poll of ignored and deferred rows must succeed"
+  assert_not_contains "$out" "woke for 43" "already surfaced owner mail never re-wakes"
+  assert_contains "$out" "no new mail" "silent rows do not create durable wakes"
+  pass "fm-mail: ignored and unverified messages stay silent"
+}
+
 test_poll_resurfaces_uid_after_generation_change() {
   local fakebin homedir_bin
   fakebin=$(fm_fakebin "$TMP_ROOT")
@@ -2609,6 +2649,7 @@ test_no_secret_leaked_to_status
 test_send_passes_body
 test_poll_error_propagates
 test_poll_dedupes_surfaces_by_uid
+test_poll_records_ignored_and_deferred_without_waking
 test_poll_resurfaces_uid_after_generation_change
 test_poll_heals_wake_without_cursor_record
 test_poll_duplicate_wakes_on_interrupted_poll

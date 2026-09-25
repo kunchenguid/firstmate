@@ -204,6 +204,12 @@ mail_seen() {
   grep -Fqx "$1" "$CURSOR"
 }
 
+mail_cursor_add() {
+  local id=$1
+  [ -n "$id" ] || return 1
+  mail_seen "$id" || printf '%s\n' "$id" >> "$CURSOR"
+}
+
 mail_retry_add() {
   # $1 = uid; record that a degraded surfacing should be retried.
   local id=$1
@@ -554,6 +560,25 @@ mail_poll() {
     [ -z "$status" ] && status=ok
     need_wake=0
     case "$status" in
+      ignored)
+        if ! mail_cursor_add "$uid"; then
+          echo "fm-mail: could not record ignored uid $uid; retried on next poll" >&2
+          fm_lock_release "$STATE_DIR/.mail-seen.lock"
+          return 1
+        fi
+        if ! mail_retry_remove "$uid"; then
+          echo "fm-mail: could not clear ignored uid $uid from retry set" >&2
+          fm_lock_release "$STATE_DIR/.mail-seen.lock"
+          return 1
+        fi
+        ;;
+      deferred)
+        if ! mail_retry_add "$uid" || ! mail_cursor_add "$uid"; then
+          echo "fm-mail: could not retain unverified uid $uid for retry" >&2
+          fm_lock_release "$STATE_DIR/.mail-seen.lock"
+          return 1
+        fi
+        ;;
       retry)
         # Already cursor-recorded from the degraded wake. Surface recovered
         # metadata once; if a recovery/ok publish is already journaled, retry
