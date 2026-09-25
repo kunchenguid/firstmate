@@ -1790,6 +1790,35 @@ test_reminder_skips_session_lookup_without_escalations() {
   pass "the reminder skips the session lookup when nothing needs reminding"
 }
 
+# A new session in the same harness process keeps the lock pid and only
+# refreshes the recorded session id, and is still reminded once.
+test_new_session_in_same_harness_process_is_reminded() {
+  local home state corr holder same_wakes new_wakes repeat_wakes
+  home=$(setup_parent same-process)
+  state="$home/state"
+  ( exec -a "$home/agent-bin/claude" bash -c 'trap "kill \$!; exit 0" TERM; sleep 300 & wait' ) \
+    </dev/null >/dev/null 2>&1 &
+  holder=$!
+  printf '%s\n' "$holder" > "$state/.lock"
+  printf 'session-one\n' > "$state/.lock-session"
+  unset FM_PENDING_REPLY_SESSION
+  export FM_PENDING_REPLY_NOW=1000
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  corr=$(escalate_new "$home" "$state" "survive a clear")
+  fm_pending_reply_tick "$state"
+  same_wakes=$(grep -c $'\tcheck\tpending-reply-escalated\t' "$state/.wake-queue" 2>/dev/null || true)
+  printf 'session-two\n' > "$state/.lock-session"
+  fm_pending_reply_tick "$state"
+  new_wakes=$(grep -c "pending-reply-id=$corr" "$state/.wake-queue" 2>/dev/null || true)
+  fm_pending_reply_tick "$state"
+  repeat_wakes=$(grep -c $'\tcheck\tpending-reply-escalated\t' "$state/.wake-queue" 2>/dev/null || true)
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  [ "${same_wakes:-0}" = 0 ] || fail "the escalating session was reminded again"
+  [ "${new_wakes:-0}" = 1 ] || fail "a new session in the same harness process was not reminded"
+  [ "${repeat_wakes:-0}" = 1 ] || fail "the new session was reminded ${repeat_wakes:-0} times"
+  pass "a new session in the same harness process is reminded once"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -1801,6 +1830,7 @@ test_escalated_record_is_reminded_once_per_later_session
 test_operator_closed_escalation_is_not_reminded
 test_other_closes_do_not_dismiss_escalation
 test_reminder_skips_session_lookup_without_escalations
+test_new_session_in_same_harness_process_is_reminded
 test_escalation_wakes_and_its_close_stays_quiet
 test_escalation_publication_failure_retries
 test_legacy_escalation_closes_default_decision
