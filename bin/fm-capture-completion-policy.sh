@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Capture the current registered completion policy on one legacy in-flight ship task.
-# Usage: fm-capture-completion-policy.sh <task-id> --if-absent
+# Usage: fm-capture-completion-policy.sh <task-id> --if-absent [--completion-policy landed|verified-production]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,10 +20,22 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 
-[ "$#" -eq 2 ] && fm_task_id_path_safe "$1" && [ "$2" = --if-absent ] || {
-  echo "usage: fm-capture-completion-policy.sh <task-id> --if-absent" >&2
+[ "$#" -eq 2 ] || [ "$#" -eq 4 ] || {
+  echo "usage: fm-capture-completion-policy.sh <task-id> --if-absent [--completion-policy landed|verified-production]" >&2
   exit 2
 }
+fm_task_id_path_safe "$1" && [ "$2" = --if-absent ] || {
+  echo "usage: fm-capture-completion-policy.sh <task-id> --if-absent [--completion-policy landed|verified-production]" >&2
+  exit 2
+}
+EXPLICIT_POLICY=
+if [ "$#" -eq 4 ]; then
+  [ "$3" = --completion-policy ] || { echo "error: expected --completion-policy" >&2; exit 2; }
+  case "$4" in
+    landed|verified-production) EXPLICIT_POLICY=$4 ;;
+    *) echo "error: unknown completion policy '$4'" >&2; exit 2 ;;
+  esac
+fi
 ID=$1
 META="$STATE/$ID.meta"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
@@ -65,7 +77,10 @@ EXISTING=$(fm_meta_get "$META" completion_policy)
 PROJECT=$(fm_meta_get "$META" project)
 [ -n "$PROJECT" ] || { echo "error: task $ID records no project; nothing was changed" >&2; exit 1; }
 PROJECT_NAME=$(basename "$PROJECT")
-POLICY=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" --completion-policy "$PROJECT_NAME") || exit 1
+POLICY=$EXPLICIT_POLICY
+if [ -z "$POLICY" ]; then
+  POLICY=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" --completion-policy "$PROJECT_NAME") || exit 1
+fi
 MODE=$(fm_meta_get "$META" mode)
 FORGE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROJECT_NAME") || exit 1
 fm_completion_policy_supported "$POLICY" "$MODE" "$PROJECT" "$FORGE" "task $ID policy capture" || exit 1

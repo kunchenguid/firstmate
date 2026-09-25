@@ -727,6 +727,38 @@ EOF
   pass "legacy ship completion policy is captured atomically once without rewriting in-flight policy"
 }
 
+test_legacy_capture_accepts_trusted_explicit_policy_once() {
+  local rec home proj fakebin meta out rc id policy
+  rec=$(make_home completion-policy-explicit \
+    '- proj [no-mistakes completion=verified-production] - fixture (added 2026-09-24)')
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  for id in landed verified invalid; do
+    meta="$home/state/$id.meta"
+    printf 'kind=ship\nmode=no-mistakes\nproject=%s\n' "$proj" > "$meta"
+  done
+  for policy in landed verified-production; do
+    id=landed
+    [ "$policy" = verified-production ] && id=verified
+    PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      "$ROOT/bin/fm-capture-completion-policy.sh" "$id" --if-absent --completion-policy "$policy" >/dev/null \
+      || fail "explicit $policy capture failed"
+    assert_grep "completion_policy=$policy" "$home/state/$id.meta" "explicit policy was not captured"
+  done
+  rc=0
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-capture-completion-policy.sh" invalid --if-absent --completion-policy unknown >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "invalid explicit policy was accepted"
+  assert_no_grep 'completion_policy=' "$home/state/invalid.meta" "invalid policy changed metadata"
+  rc=0
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-capture-completion-policy.sh" landed --if-absent --completion-policy verified-production >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "captured policy was changed"
+  assert_grep 'completion_policy=landed' "$home/state/landed.meta" "captured policy changed"
+  pass "legacy capture accepts closed-set explicit policy once"
+}
+
 test_verified_production_requires_positive_github_pr_capability() {
   local rec home proj fakebin out status id meta
 
@@ -1853,6 +1885,7 @@ test_project_mode_resolves_completion_policy
 test_local_only_task_cannot_capture_verified_production_policy
 test_promotion_captures_trusted_completion_policy_selection
 test_legacy_ship_can_capture_registered_completion_policy_once
+test_legacy_capture_accepts_trusted_explicit_policy_once
 test_verified_production_requires_positive_github_pr_capability
 test_project_mode_binds_the_forge_orthogonally
 test_project_mode_refuses_only_a_malformed_forge_binding
