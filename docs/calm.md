@@ -108,7 +108,7 @@ Bounds of the Claude Code support, recorded with evidence in [`calm-mode-feasibi
 
 - The function-hooks surface is early access and default-off, and Claude Code states that its API may change between releases without notice; the mod is verified on Claude Code 2.1.272, 2.1.280, and 2.1.282 and refuses nothing newer.
 - Firstmate's typed producers bound for a Claude Code pane - the away-mode daemon's escalations and a worker's launch brief - ride the record-backed doorbell, so they hide like any operational row; only an envelope that reaches Claude Code some other way as bare typed or launch-prompt text arrives without its U+2063 and stays visible.
-- Every record write prunes operational-inbox records older than 7 days; age alone does not remove a record without a later write.
+- Every record write prunes operational-inbox records once they reach about seven days of elapsed age (the boundary is approximate); age alone does not remove a record without a later write.
   Once its record is gone, a doorbell is no longer recognized: it draws as a visible user row after Calm rechecks it (for example on `/calm` toggle or `claude --continue`) and `/ahoy` treats it as a captain boundary.
 - Firstmate's watcher and turn-end wakes reach a Claude Code primary as Stop hook feedback, drawn as a `Ran 1 stop hook` row that is not one of the drawings the mods API exposes on 2.1.280, so those rows stay visible.
 - On the main-screen layout (not the fullscreen alternate screen), a toggle redraws the live screen by clearing and reprinting it, and the terminal's own scrollback keeps the earlier rendering above it; the fullscreen layout has no such stale copy.
