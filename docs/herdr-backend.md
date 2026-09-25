@@ -777,8 +777,8 @@ Recovery reconciles only the recorded exact id.
 On stop:
 
 1. The daemon receives termination while `state/.afk` still exists, so its final flush can run.
-2. The recorded terminal is closed.
-3. The AFK flag is removed last.
+2. The recorded terminal is closed by its exact id.
+3. `bin/fm-afk-launch.sh stop` owns the rest of that exit order, including when the flag is cleared and the posture record archived.
 
 A fresh entry clears stale transient escalation caches, while durable queue and task records remain authoritative.
 

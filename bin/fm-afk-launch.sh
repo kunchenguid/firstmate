@@ -33,8 +33,10 @@
 # standing quiet flag to away as `enter` records the posture - a rewrite, never a
 # removal, so a live daemon keeps the presence gate it injects through.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
-# clears state/.afk last, and archives the record under state/afk-contracts/ when
-# one stands; a quiet stop has none to archive.
+# clears state/.afk once that teardown succeeded (a failed stop leaves the flag
+# standing, so the retry still reads the real posture), and archives the record
+# under state/afk-contracts/ last when one stands; a quiet stop has none to
+# archive.
 #
 # Why the terminal lifecycle exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
