@@ -624,12 +624,15 @@ run_teardown() {
   # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
   # home's backlog item itself; without it $DATA would resolve to the real
   # repo's own home and a test could mutate live records.
+  # TREEHOUSE_ROOT is scrubbed because a crewmate spawned by a secondmate home
+  # has one exported in its pane: inherited, it would reach the fake treehouse
+  # and a pool-root assertion would measure the ambient environment instead.
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
-    "$TEARDOWN" task-x1 "$@"
+    env -u TREEHOUSE_ROOT "$TEARDOWN" task-x1 "$@"
 }
 
 # Seed a real backlog carrying task-x1 as In flight, so a teardown in this case
@@ -3884,6 +3887,97 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+# A treehouse fake that records the TREEHOUSE_ROOT it saw (or "unset") to
+# <case_dir>/treehouse-root.log, then returns the worktree normally. Models the
+# same pool-root propagation fm-spawn.sh must set up before `treehouse get`
+# (tests/fm-spawn-treehouse-root.test.sh), on the return side.
+add_root_logging_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\${TREEHOUSE_ROOT:-unset}" >> "$case_dir/treehouse-root.log"
+exit 0
+EOF
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+# A task whose meta records no treehouse_root= - every task spawned by a
+# primary home, and every task spawned before that field existed - must return
+# its worktree through the default pool: no TREEHOUSE_ROOT override.
+test_treehouse_return_primary_home_gets_no_root_override() {
+  local case_dir rc
+  case_dir=$(make_case treehouse-root-primary)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  add_root_logging_treehouse "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "treehouse-root-primary: teardown should succeed"
+  assert_equals "unset" "$(cat "$case_dir/treehouse-root.log")" \
+    "a primary home's worktree return must not override TREEHOUSE_ROOT"
+  pass "a primary home's teardown returns the worktree with the default Treehouse pool root"
+}
+
+# A task whose meta records the pool root its `treehouse get` leased from must
+# return the worktree through exactly that root - a secondmate home's spawn
+# records its own (tests/fm-spawn-treehouse-root.test.sh), and the return has to
+# reach the same pool or the slot never goes back to where it came from.
+test_treehouse_return_uses_the_root_the_spawn_recorded() {
+  local case_dir rc home
+  case_dir=$(make_case treehouse-root-recorded)
+  home="$case_dir/home"
+  mkdir -p "$home/state"
+  printf '%s\n' sm-treehouse-root > "$home/.fm-secondmate-home"
+  write_meta "$case_dir" local-only ship
+  printf 'treehouse_root=%s\n' "$home/state/treehouse-root" >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "merged work"
+  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  add_root_logging_treehouse "$case_dir"
+
+  set +e
+  FM_HOME="$home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "treehouse-root-recorded: teardown should succeed"
+  assert_equals "$home/state/treehouse-root" "$(cat "$case_dir/treehouse-root.log")" \
+    "the worktree return must use the pool root the spawn recorded"
+  pass "a teardown returns the worktree through the pool root its spawn recorded"
+}
+
+# The root is a fact of the lease, not of the home reading it back: a worktree
+# leased from the default pool (no treehouse_root= in its meta) must still be
+# returned to the default pool even when the home tearing it down is a
+# secondmate that would resolve a root of its own today. Re-deriving the root
+# from the home instead pointed the return at a pool the slot was never in, and
+# treehouse refuses a worktree it does not manage, stranding the task.
+test_treehouse_return_ignores_the_home_when_the_spawn_recorded_no_root() {
+  local case_dir rc home
+  case_dir=$(make_case treehouse-root-legacy)
+  home="$case_dir/home"
+  mkdir -p "$home/state"
+  printf '%s\n' sm-treehouse-root > "$home/.fm-secondmate-home"
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  add_root_logging_treehouse "$case_dir"
+
+  set +e
+  FM_HOME="$home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "treehouse-root-legacy: teardown should succeed"
+  assert_equals "unset" "$(cat "$case_dir/treehouse-root.log")" \
+    "a worktree leased with no recorded pool root must be returned to the default pool"
+  pass "a teardown never re-derives a pool root the lease did not record"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
@@ -3975,3 +4069,6 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_treehouse_return_primary_home_gets_no_root_override
+test_treehouse_return_uses_the_root_the_spawn_recorded
+test_treehouse_return_ignores_the_home_when_the_spawn_recorded_no_root

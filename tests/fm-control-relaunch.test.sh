@@ -474,6 +474,10 @@ test_relaunch_preserves_durable_task_metadata() {
     printf '%s\n' 'pr_head=feature/relaunch'
     printf '%s\n' 'x_request=request-19'
     printf '%s\n' 'decisions_reviewed=1'
+    # The Treehouse pool root this task's worktree was actually leased from. A
+    # relaunch never repeats `treehouse get`, so losing it here would send the
+    # later teardown's `treehouse return` to a pool the slot was never in.
+    printf '%s\n' 'treehouse_root=/tmp/sm-home/state/treehouse-root'
   } >> "$dir/home/state/rl19.meta"
 
   out=$(run_control "$dir" rl19 relaunch --note "continuing review work"); rc=$?
@@ -486,6 +490,8 @@ test_relaunch_preserves_durable_task_metadata() {
     || fail "the task X request must survive relaunch"
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
+  [ "$(meta_field "$dir" rl19 treehouse_root)" = "/tmp/sm-home/state/treehouse-root" ] \
+    || fail "the leased Treehouse pool root must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 

@@ -276,6 +276,12 @@ Crewmates never intentionally touch your project clone; [treehouse](https://gith
 The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns ship/scout worktree isolation and fresh-base refusal rules, including spawns from linked homes.
 Portable regressions live in [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh) for spawn isolation and base freshness, and [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) for preserving the recorded copy on relaunch.
 
+Treehouse pools a project by its origin URL under one machine-wide root (`TREEHOUSE_ROOT`, or its own default when unset), so two homes cloning the same origin land in the same pool and `treehouse get` hands back a worktree bound to whichever clone created it first.
+A secondmate home therefore needs its own pool root, bound to its own clones, instead of inheriting the primary's: `fm-wake-lib.sh`'s `fm_treehouse_root_for_home` is the single owner of that resolution (a secondmate's `.fm-secondmate-home` marker selects `state/treehouse-root`; a primary gets no override).
+`fm-spawn.sh` resolves it once, exports it into the pane immediately before sending `treehouse get`, and records it as `treehouse_root=` in that task's own `state/<id>.meta`; `fm-teardown.sh` reads that recorded value back and passes it into the matching `treehouse return`, so a slot always goes back to the pool it was actually leased from rather than to one re-derived from the home at teardown time (a worktree leased before that field existed records nothing and correctly gets the default pool).
+A secondmate's own home lease (`fm-home-seed.sh`) is unaffected, because its `treehouse get --lease` and `treehouse return` never set `TREEHOUSE_ROOT` in any context, so a home lease always stays on the single default pool - including when a secondmate home seeds a nested one.
+Portable regressions live in [`tests/fm-spawn-treehouse-root.test.sh`](../tests/fm-spawn-treehouse-root.test.sh) and the `test_treehouse_return_*` cases in [`tests/fm-teardown.test.sh`](../tests/fm-teardown.test.sh).
+
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.

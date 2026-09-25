@@ -1255,6 +1255,21 @@ fm_treehouse_project_lock_path() {  # <project-dir>
   printf '%s/.treehouse-project-%s.lock\n' "$root/state" "$hash"
 }
 
+# Treehouse pools by the project's origin URL under one machine-wide root
+# (TREEHOUSE_ROOT, or its own default when unset), so two homes cloning the
+# same origin land in the same pool and `treehouse get` hands back a worktree
+# bound to whichever clone created it - the primary's, when the primary seeded
+# the pool first. A secondmate home needs its own pool, bound to its own
+# clones, so it gets a distinct root instead; the primary keeps the default
+# (no override), so its pool and existing worktrees are unchanged. Prints
+# nothing and fails for a primary home (no `.fm-secondmate-home` marker).
+fm_treehouse_root_for_home() {  # <home>
+  local home=$1
+  [ -n "$home" ] || return 1
+  [ -f "$home/.fm-secondmate-home" ] && [ ! -L "$home/.fm-secondmate-home" ] || return 1
+  printf '%s/state/treehouse-root\n' "$home"
+}
+
 # A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.
 # Require both its pool state and the same Git common directory as the recorded
 # project; an ordinary linked worktree is not evidence that Treehouse owns it.

@@ -422,6 +422,12 @@
 # success line and state/<id>.meta omit them.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
 # consumers can distinguish a replacement worker that reuses the same task id.
+# A fresh Treehouse-backed spawn whose home resolves its own pool root (bin/fm-wake-lib.sh's
+# fm_treehouse_root_for_home; a secondmate home does, a primary home does not) exports that
+# root into the pane before `treehouse get` and records it as treehouse_root=, which
+# bin/fm-teardown.sh passes back into the matching `treehouse return` so the slot goes to the
+# pool it was leased from. Absent means the default pool, and relaunch never recomputes the
+# value: it carries whatever the original lease recorded.
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
@@ -4010,6 +4016,16 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  # A secondmate home gets its own Treehouse pool root, so `treehouse get`
+  # binds this pane's worktree to this home's own project clone instead of
+  # whichever clone first created a pool shared by origin URL alone (see
+  # fm_treehouse_root_for_home). Sent before `treehouse get` itself so the
+  # exported value is in effect for that very command; a primary home gets no
+  # override and keeps its existing pool untouched.
+  spawn_treehouse_root=$(fm_treehouse_root_for_home "$FM_HOME") || spawn_treehouse_root=
+  if [ -n "$spawn_treehouse_root" ]; then
+    spawn_send_text_line "$WT_TARGET" "export TREEHOUSE_ROOT=$(shell_quote "$spawn_treehouse_root")"
+  fi
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -4652,6 +4668,11 @@ preserve_relaunch_meta() {
   [ -z "$WORKER_ACCOUNT_PROVIDER" ] || echo "account_provider=$WORKER_ACCOUNT_PROVIDER"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  # The pool root this spawn's `treehouse get` actually leased from, so teardown
+  # returns the slot to that same pool instead of re-deriving one from whatever
+  # the home looks like then. Absent means the default pool. Not owned by
+  # preserve_relaunch_meta, so a relaunch carries the original lease's value.
+  [ -z "${spawn_treehouse_root:-}" ] || echo "treehouse_root=$spawn_treehouse_root"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
