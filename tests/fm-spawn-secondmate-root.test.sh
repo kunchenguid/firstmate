@@ -27,10 +27,14 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-secondmate-root)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
-TASK_TMPS=()
+# Every task id a case below spawns. Listed here rather than collected in
+# new_case, which runs inside $(...) and so cannot append to a parent array.
+TASK_IDS=(smr1 smr2 smr3 smr4 smr5 smr6 smr7)
 cleanup() {
-  local t
-  for t in "${TASK_TMPS[@]}"; do rm -rf -- "$t"; done
+  local id
+  # Each spawn owns /tmp/fm-<id> and stages its launch file in
+  # /tmp/fm-<id>+<home-token>.
+  for id in "${TASK_IDS[@]}"; do rm -rf -- "/tmp/fm-$id" "/tmp/fm-$id"+*; done
   fm_test_remove_tree "$TMP_ROOT"
 }
 trap cleanup EXIT
@@ -140,7 +144,6 @@ JSON
   printf '%s' '%none' >"$dir/fake/pane"
   : >"$dir/fake/herdr-log"
   make_herdr_stub "$dir"
-  TASK_TMPS+=("/tmp/fm-$id")
   printf '%s\n' "$dir"
 }
 
