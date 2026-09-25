@@ -455,7 +455,7 @@ def cmd_poll_list():
                 retry_examined += 1
             elif new_emitted >= new_budget:
                 continue
-            # A raised or empty FETCH is treated as a failure for THIS uid only,
+            # A raised or empty header FETCH is treated as a failure for THIS uid only,
             # so one bad message can never abort the bounded scan: a new uid is
             # surfaced degraded, a retry uid is left for a later scan step, and
             # the scan advances.
@@ -499,20 +499,12 @@ def cmd_poll_list():
                         'body': body,
                     })
             except AfkBodyFetchError:
-                raise
+                continue
             except Exception:
                 if is_retry:
                     continue
                 out.append((clean(u), '', '(no header)',
                             'unfetchable header - see fm-mail read', 'degraded'))
-                if afk_enabled:
-                    afk_messages.append({
-                        'uidvalidity': uidv,
-                        'uid': clean(u),
-                        'from': '',
-                        'subject': '(unavailable)',
-                        'body': '',
-                    })
                 new_emitted += 1
                 continue
             status = 'retry' if is_retry else 'ok'
