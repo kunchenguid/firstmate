@@ -411,6 +411,93 @@ git_fixture() {
   printf '%s\n' "$work"
 }
 
+# git_pending_fixture <name>: a clone one commit behind its origin branch which
+# has not fetched that commit, so it does not hold the object yet. That is the
+# shape a watched repository is in the moment an update lands upstream, and the
+# update is pushed from a separate clone so the watched one learns nothing of it.
+git_pending_fixture() {
+  local name=$1 bare work pusher
+  bare="$TMP_ROOT/$name.git"
+  work="$TMP_ROOT/$name"
+  pusher="$TMP_ROOT/$name.push"
+  git init -q --bare --initial-branch=main "$bare"
+  git clone -q "$bare" "$work" 2>/dev/null
+  printf 'one\n' > "$work/f1"
+  git -C "$work" add f1
+  git -C "$work" commit -qm one
+  git -C "$work" push -q origin main
+  git -C "$work" remote set-head origin main >/dev/null 2>&1
+  git clone -q "$bare" "$pusher" 2>/dev/null
+  git_pending_push "$name" f2
+  printf '%s\n' "$work"
+}
+
+# git_pending_push <name> <file>: one more commit on that fixture's origin
+# branch, pushed from the separate clone, so the watched clone stays unaware.
+git_pending_push() {
+  local name=$1 file=$2 pusher
+  pusher="$TMP_ROOT/$name.push"
+  printf '%s\n' "$file" > "$pusher/$file"
+  git -C "$pusher" add "$file"
+  git -C "$pusher" commit -qm "$file"
+  git -C "$pusher" push -q origin main
+}
+
+test_one_pending_commit_is_reported_once_however_it_reads() {
+  local home work out
+  # The regression this pair of cases exists for. One pending commit reads as a
+  # bare sha while the clone lacks the object and as a count of commits once a
+  # fetch has landed it. Both sentences name the same commit, so the second is
+  # not news and must not cost a second wake.
+  home=$(make_home git-once)
+  work=$(git_pending_fixture git-once-repo)
+  write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\",\"remote\":\"origin\",\"branch\":\"main\"}}]}"
+  out="$home/out.txt"
+
+  run_check "$home" "$PATH" "$out"
+  assert_contains "$(cat "$out")" "firstmate update available: origin/main is at" \
+    "the pending commit was not reported before the clone had fetched it"
+
+  # Anything that fetches the watched clone - a fleet sync, or the operator at a
+  # terminal - lands the object and makes the exact count knowable, which is what
+  # changed the wording and produced the duplicate wake.
+  git -C "$work" fetch -q origin main
+  run_check "$home" "$PATH" "$out"
+  [ ! -s "$out" ] || fail "one pending commit was reported twice: $(cat "$out")"
+
+  # That silence has to be the dedup and not the check having gone quiet for some
+  # unrelated reason, so the same state is asked again with the record cleared.
+  # It speaks, and it speaks in the other wording: the very sentence that used to
+  # arrive as a second wake.
+  rm -f "$home/state/.tool-updates"
+  run_check "$home" "$PATH" "$out"
+  assert_contains "$(cat "$out")" "firstmate update available: local main is 1 commit behind origin/main" \
+    "the fetched clone did not report that same pending commit as a count"
+  pass "one pending commit is reported once however the finding reads"
+}
+
+test_a_newly_pending_commit_is_still_news() {
+  local home work out
+  # Keying the record on what is pending must not swallow a genuinely new
+  # upstream commit: a different target is a different update and owes one wake.
+  home=$(make_home git-news)
+  work=$(git_pending_fixture git-news-repo)
+  write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\",\"remote\":\"origin\",\"branch\":\"main\"}}]}"
+  out="$home/out.txt"
+
+  run_check "$home" "$PATH" "$out"
+  assert_contains "$(cat "$out")" "firstmate update available" "the first pending commit was not reported"
+  run_check "$home" "$PATH" "$out"
+  [ ! -s "$out" ] || fail "the first pending commit was reported twice: $(cat "$out")"
+
+  git_pending_push git-news-repo f3
+  run_check "$home" "$PATH" "$out"
+  assert_contains "$(cat "$out")" "firstmate update available" "a newly pending commit was suppressed as already reported"
+  run_check "$home" "$PATH" "$out"
+  [ ! -s "$out" ] || fail "the newly pending commit was reported twice: $(cat "$out")"
+  pass "a newly pending commit is still news, and is itself reported once"
+}
+
 test_commits_behind_origin_are_reported() {
   local home work out head_before
   home=$(make_home git-behind)
@@ -744,7 +831,7 @@ test_probes_are_skipped_between_intervals() {
   FM_HOME="$home" PATH="$(fixture_path "$dir")" FM_CHECK_TIMEOUT=30 FM_TOOL_UPDATE_INTERVAL=900 FM_TOOL_UPDATE_NOW="$now" \
     "$CHECK" >"$out" 2>&1 || status=$?
   expect_code 0 "$status" "first cadence run exit"
-  assert_grep 'fm-tool-updates-v1' "$home/state/.tool-updates" "the first run did not record its sweep"
+  assert_grep 'fm-tool-updates-v2' "$home/state/.tool-updates" "the first run did not record its sweep"
 
   # A finding appears, but the interval has not elapsed, so no probe runs.
   make_copy "$dir" "$TOOL" 'no version here'
@@ -1018,6 +1105,8 @@ test_one_broken_pattern_does_not_blind_the_rest_of_the_sweep
 test_an_unchecked_announcement_source_is_not_read_as_current
 test_an_announcement_probe_that_does_not_answer_is_reported
 test_quiet_tool_with_announce_pattern_is_silent
+test_one_pending_commit_is_reported_once_however_it_reads
+test_a_newly_pending_commit_is_still_news
 test_commits_behind_origin_are_reported
 test_default_branch_is_detected_when_branch_is_omitted
 test_default_branch_is_asked_of_the_remote_when_the_clone_has_no_record

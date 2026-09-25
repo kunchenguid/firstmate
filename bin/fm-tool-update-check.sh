@@ -57,11 +57,18 @@
 # refused outright.
 #
 # The report record state/.tool-updates is written only when a sweep runs to its
-# end, and it carries the whole finding set the last report was made from,
-# uncut, so the same pending update is reported once rather than on every poll
-# while a new finding that lands past the one-line cut is still news. A sweep
-# killed part way through leaves no record and is retried, instead of
+# end, and it carries the whole set of finding identities the last report was
+# made from, uncut, so the same pending update is reported once rather than on
+# every poll while a new finding that lands past the one-line cut is still news.
+# A sweep killed part way through leaves no record and is retried, instead of
 # suppressing its finding.
+#
+# An identity is what the finding is, which is not always how it reads. A watched
+# git repository is the case that forced the distinction: one pending commit
+# reads as "origin/main is at <sha> which this copy does not have" while the
+# clone lacks the object and as "local main is N commits behind origin/main"
+# once a fetch has landed it, so a record keyed on the sentence woke firstmate
+# twice for one commit. Both readings key on that commit, so it is reported once.
 set -u
 export LC_ALL=C
 # A watched git remote must never stop to ask for credentials; an unauthenticated
@@ -77,7 +84,7 @@ CHECK_ID=tool-updates
 CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
 CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
-RECORD_SCHEMA=fm-tool-updates-v1
+RECORD_SCHEMA=fm-tool-updates-v2
 # Wider than the digest default because one finding names two absolute paths and
 # their two versions, and several tools can report in the same sweep.
 MAX_LINE=1000
@@ -191,18 +198,28 @@ record_epoch_now() {
 real_epoch() { date +%s; }
 
 FINDINGS=
+FINDING_KEYS=
 DEADLINE=0
 INCOMPLETE_REPORTED=0
 
 # Each finding is flattened to a single line here, because the whole report must
 # stay one line for the wake record.
+#
+# The optional second argument is what the finding IS, for the report record,
+# when that differs from how the finding reads. A pending git update is the one
+# case: the same commit reads as a count of commits once the clone holds the
+# object and as a bare sha before it does, so a record keyed on the sentence
+# reported one pending update twice.
 emit() {
-  local text
+  local text key
   text=$(printf '%s' "$1" | tr '\t\r\n' '   ')
+  key=$(printf '%s' "${2:-$text}" | tr '\t\r\n' '   ')
   if [ -z "$FINDINGS" ]; then
     FINDINGS=$text
+    FINDING_KEYS=$key
   else
     FINDINGS="$FINDINGS; $text"
+    FINDING_KEYS="$FINDING_KEYS; $key"
   fi
 }
 
@@ -542,7 +559,7 @@ git_probe_answered() {
 # budget check, so the sweep cannot outrun its deadline here.
 git_findings() {
   local name=$1 repo=$2 remote=$3 branch=$4
-  local status remote_sha local_sha local_label count short symref
+  local status remote_sha local_sha local_label count short symref pending
 
   if ! command -v git >/dev/null 2>&1; then
     emit "$name check failed: git is not installed"
@@ -616,6 +633,9 @@ git_findings() {
   [ "$local_sha" != "$remote_sha" ] || return 0
 
   short=$(printf '%s' "$remote_sha" | cut -c1-12)
+  # What is pending is this commit, whichever way the finding below ends up
+  # reading, so the report record keys on the commit and not on the sentence.
+  pending="$name update available: $remote/$branch is at $remote_sha"
 
   git_probe "$repo" cat-file -e "$remote_sha^{commit}" 2>/dev/null
   status=$?
@@ -633,24 +653,24 @@ git_findings() {
       ''|*[!0-9]*|0) count= ;;
     esac
     if [ -n "$count" ]; then
-      emit "$name update available: $local_label is $(commit_phrase "$count") behind $remote/$branch"
+      emit "$name update available: $local_label is $(commit_phrase "$count") behind $remote/$branch" "$pending"
       return 0
     fi
   fi
 
-  emit "$name update available: $remote/$branch is at $short which this copy does not have"
+  emit "$name update available: $remote/$branch is at $short which this copy does not have" "$pending"
   return 0
 }
 
 # --- report record ----------------------------------------------------------
 
 RECORD_EPOCH=0
-RECORD_REPORTED=
+RECORD_PENDING=
 
 record_read() {
   local line first=1
   RECORD_EPOCH=0
-  RECORD_REPORTED=
+  RECORD_PENDING=
   [ -f "$RECORD" ] || return 0
   while IFS= read -r line; do
     if [ "$first" = 1 ]; then
@@ -666,20 +686,20 @@ record_read() {
           *) RECORD_EPOCH=$line ;;
         esac
         ;;
-      reported=*) RECORD_REPORTED=${line#reported=} ;;
+      pending=*) RECORD_PENDING=${line#pending=} ;;
     esac
   done < "$RECORD"
   return 0
 }
 
 record_write() {
-  local reported=$1 tmp
+  local pending=$1 tmp
   tmp=$(mktemp "$RECORD.XXXXXX" 2>/dev/null) || return 1
   chmod 0600 "$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
   {
     printf '%s\n' "$RECORD_SCHEMA"
     printf 'epoch=%s\n' "$(record_epoch_now)"
-    printf 'reported=%s\n' "$reported"
+    printf 'pending=%s\n' "$pending"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$RECORD" || { rm -f -- "$tmp"; return 1; }
   return 0
@@ -726,16 +746,18 @@ action_check() {
     line=$FM_LINE_CAP_LINE
   fi
 
-  # The cut line is what gets printed, but the whole finding set is what decides
-  # whether this is news, because a finding that lands past the cut leaves the
-  # printed line unchanged and would otherwise be suppressed for good.
+  # The cut line is what gets printed, but what decides whether this is news is
+  # the whole set of finding identities, uncut: uncut because a finding that
+  # lands past the cut leaves the printed line unchanged and would otherwise be
+  # suppressed for good, and identities because one pending update that reads two
+  # ways is still one pending update and owes the operator one wake.
   #
   # Report before recording, so a record that cannot be written costs a repeated
   # report rather than a lost one.
-  if [ -n "$line" ] && [ "$FINDINGS" != "$RECORD_REPORTED" ]; then
+  if [ -n "$line" ] && [ "$FINDING_KEYS" != "$RECORD_PENDING" ]; then
     printf '%s\n' "$line"
   fi
-  record_write "$FINDINGS" || true
+  record_write "$FINDING_KEYS" || true
   return 0
 }
 
