@@ -2,6 +2,7 @@
 
 The watcher remains intentionally one-shot: one actionable reason closes one watcher cycle.
 Must-work continuity now lives above that process boundary instead of depending on the model remembering a re-arm step.
+Every mechanism below is session-owned; the session-independent backstop that repairs a home whose session stopped re-arming is [`liveness-guardian.md`](liveness-guardian.md).
 
 ## Ownership
 
