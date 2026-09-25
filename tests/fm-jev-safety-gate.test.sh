@@ -5,6 +5,7 @@ TEST_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mkdir -p "$TEST_ROOT/.no-mistakes/jev-safety-tests"
 TMPDIR="$TEST_ROOT/.no-mistakes/jev-safety-tests"
 export TMPDIR
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-jev-safety-gate)

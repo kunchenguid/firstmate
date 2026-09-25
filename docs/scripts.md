@@ -153,7 +153,13 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-harness.sh`          | Detect the running harness, resolve crew or secondmate harness, model, and effort, and validate the native-only `ultra` effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared Relay config, relay, and reply-threading helpers                              |
-| `fm-x-poll.sh`           | One bounded Relay poll: stash newly offered mentions, emit their once-only wake, and raise queued public-followup rejection wakes at least once |
+| `fm-x-poll.sh`           | One bounded Relay poll: stash newly offered mentions and emit their once-only wake   |
+| `fm-discord-lib.sh`      | Shared self-hosted Discord configuration and channel selection                      |
+| `fm-discord-notify.sh`   | Push a keyed captain decision to the configured self-hosted Discord channel and retry pending sends |
+| `fm-discord-notify-status.sh` | Map an ask-user gate or yolo-off PR-ready status line to a Discord decision notification |
+| `fm-discord-notify.js`   | Persist and deliver self-hosted Discord decision notifications through the REST API  |
+| `fm-discord-poll.sh`     | Invoke the bounded self-hosted Discord poll for mentions and authorized decision replies |
+| `fm-discord-poll.js`     | Poll Discord messages, capture authorized decision replies, and emit inbox wakes     |
 | `fm-x-reply.sh`          | Post or dry-run preview a composed Relay reply or follow-up                          |
 | `fm-x-dismiss.sh`        | Dismiss a skipped Relay mention at the relay without replying                        |
 | `fm-x-link.sh`           | Link a spawned task to its originating Relay mention in task meta                    |

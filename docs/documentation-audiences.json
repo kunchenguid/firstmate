@@ -421,8 +421,8 @@
       "audience": "maintainer-verification"
     },
     {
-      "path": "docs/fleet-ledger.md",
-      "audience": "operator-current"
+      "path": "docs/jev-tools-adoption.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/herdr-backend.md",

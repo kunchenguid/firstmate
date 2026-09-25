@@ -2411,6 +2411,23 @@ SH
   pass "the chat channel feeds the same keyed-answer intake a captured review does"
 }
 
+test_answer_one_keeps_multiline_reply_in_one_field() {
+  local home show
+  home=$(make_home answer-one)
+  run_captain "$home" hold sample-answer-one --title "Choose an answer" \
+    --reason "captain answer pending" --repo sample >/dev/null \
+    || fail "could not register answer-one fixture"
+  run_captain "$home" answer-one sample-answer-one $'Continue\tActually\nstop' "Discord reply" \
+    --source discord-selfhosted >/dev/null \
+    || fail "answer-one did not resolve the captain hold"
+  show=$(tasks_in "$home" show sample-answer-one --full)
+  assert_contains "$show" "Answer: Continue Actually stop" \
+    "tabs or line breaks escaped the single answer field"
+  assert_not_contains "$show" "Answer: Actually" \
+    "a line break created a second keyed answer row"
+  pass "answer-one folds embedded separators before keyed resolution"
+}
+
 test_origin_slug_validation_precedes_path_construction() {
   local home
   home=$(make_home slug-validation)
@@ -4660,6 +4677,7 @@ test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
 test_board_answer_reaches_the_keyed_answer_intake
 test_chat_channel_feeds_the_same_keyed_answer_intake
+test_answer_one_keeps_multiline_reply_in_one_field
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal

@@ -1433,7 +1433,16 @@ Optional configuration variables in `.env`:
 - `FM_DISCORD_CHANNEL_ID` / `FM_DISCORD_ALLOWED_CHANNELS`: comma-separated channel IDs to poll.
 - `FM_DISCORD_EXCLUDE_CHANNELS`: comma-separated channel IDs to ignore (defaults to `1551134713727426570` for collision prevention with gajae-way).
 - `FM_DISCORD_ALLOW_DMS`: `true` or `false` (defaults to `true`).
+- `FM_DISCORD_AUTHORIZED_USER_IDS`: comma-separated Discord user IDs allowed to answer pushed decisions, including the captain and any trusted operators; unset or empty authorizes nobody.
 Replies and follow-ups for self-hosted Discord mentions post directly to Discord's REST API using `FM_DISCORD_BOT_TOKEN`.
+
+When the self-hosted connector is enabled, firstmate also posts captain decisions to the first configured channel: a newly recorded captain hold, an `nm-` ask-user gate, or a pull request ready for review when `yolo=off`.
+Each message includes the task id, a plain-language summary, and the available choices.
+Keep the configured channel private to the captain and trusted operators; only IDs in `FM_DISCORD_AUTHORIZED_USER_IDS` can answer decisions, and replies from other channel members are ignored.
+Reply directly to a decision message.
+The watcher captures that reply into the existing `state/x-inbox/` flow and `fmx-respond` applies it through `fm-captain-hold.sh answer-one` for a held task, or `fm-send.sh --resolve-key` for other keyed decisions.
+Replies to ordinary messages do not resolve decisions.
+Failed sends remain in private state for watcher retries, including recovery of interrupted sends without reposting a notification already accepted by Discord.
 
 ## Relay (.env)
 

@@ -190,6 +190,8 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Install uv for Jev safety tests
+        uses: astral-sh/setup-uv@v6
       - name: Install pinned ShellCheck
         run: |
           set -eu

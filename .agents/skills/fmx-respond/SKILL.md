@@ -146,6 +146,14 @@ Images are only for actual visual artifacts - a generated illustration, a screen
 
 ## Procedure
 
+Before classifying an inbox item as a new mention, check whether `source` is `discord-selfhosted-decision`.
+Such an item is an answer to a specific pushed decision: use its `.decision` object and `.text`, and do not reply publicly or treat it as fresh work.
+For `trigger=captain-hold`, call `bin/fm-captain-hold.sh answer-one "$key" "$answer" "Discord reply" --source discord-selfhosted`; it folds tabs and line breaks in the answer into spaces before keyed resolution.
+For `trigger=ask-user` or `trigger=pr-ready`, invoke `bin/fm-send.sh <status_task_id> --resolve-key <key> "$answer"` with the captured answer as one quoted argument.
+These are the existing keyed-answer paths; never edit status files directly.
+Remove the inbox record only after the matching command confirms success.
+On failure leave it for retry and report the exact error.
+
 This is a drain over the inbox, not a single reply.
 The watcher coalesces same-key `check:` wakes, so one `x-mention` wake can stand in for several pending mentions.
 Treat `state/x-inbox/` as the source of truth and process **every** file you find there, not just the `request_id` named in the wake.

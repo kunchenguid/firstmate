@@ -2227,6 +2227,30 @@ signal_files_actionable() {  # <status-file> ...
   return "$found"
 }
 
+# Push only the two additional captain-facing transitions that originate in
+# worker status logs. Captain holds and local PR registration publish directly
+# at their durable mutation sites, where their identities are authoritative.
+signal_discord_decision_notifications() {  # <status-file> ...
+  local f start size chunk line task
+  for f in "$@"; do
+    case "$f" in *.status) ;; *) continue ;; esac
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    start=$(fm_wake_signal_seen_size "$STATE" "$f") || continue
+    size=$(wc -c < "$f" | tr -d '[:space:]')
+    case "$start:$size" in *[!0-9:]*) continue ;; esac
+    [ "$start" -le "$size" ] || start=0
+    [ "$start" -lt "$size" ] || continue
+    chunk=$(_fm_status_read_span "$f" "$start" "$((size - start))") || continue
+    task=$(basename "$f"); task=${task%.status}
+    while IFS= read -r line || [ -n "$line" ]; do
+      "$SCRIPT_DIR/fm-discord-notify-status.sh" "$task" "$line" >/dev/null \
+        || triage_log "Discord status notification failed for $task"
+    done <<EOF
+$chunk
+EOF
+  done
+}
+
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
 # fm-push-transition-lib.sh because push and poll paths must write one format.
 # Mark each actionable status log through the endpoint captured by the heartbeat
@@ -2663,9 +2687,8 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
-  # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
-  # status lines before this cycle can exit on a wake. Off costs one file test.
-  [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" capture || true
+  "$SCRIPT_DIR/fm-discord-notify.sh" --retry-pending >/dev/null \
+    || triage_log "Discord decision notification retry failed"
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
@@ -2937,6 +2960,10 @@ EOF
       done <<EOF
 $pending
 EOF
+      # Push newly received ask-user gates and yolo-off PR approvals before
+      # advancing the status cursor, so a retry still sees the same decision.
+      # shellcheck disable=SC2086  # $files is a validated space-separated path list.
+      signal_discord_decision_notifications $files || true
       # The wake signature advances for every file in this batch, including one
       # whose span could not be classified: it has now been reported, and this is
       # what bounds an unreadable log to one report per distinct file state. Only

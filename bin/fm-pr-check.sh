@@ -247,4 +247,22 @@ case "$READY_RC" in
   0|1) ;;
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
 esac
+if [ "$PR_YOLO" = off ]; then
+  if command -v sha256sum >/dev/null 2>&1; then
+    PR_DECISION_HASH=$(printf '%s' "$ID" | sha256sum | awk '{print substr($1,1,16)}')
+  else
+    PR_DECISION_HASH=$(printf '%s' "$ID" | shasum -a 256 | awk '{print substr($1,1,16)}')
+  fi
+  PR_DECISION_KEY="pr-ready-$PR_DECISION_HASH"
+  PR_DECISION_LINE="needs-decision [key=$PR_DECISION_KEY]: task=$ID yolo=off pull request ready: $URL choose merge or leave open"
+  PR_CHANNEL_RC=0
+  fm_parent_channel_destination "$FM_HOME" "$STATE" >/dev/null || PR_CHANNEL_RC=$?
+  if [ "$PR_CHANNEL_RC" -eq 1 ]; then
+    fm_parent_channel_append_once "$STATE/$ID.status" "$(status_stamp_line "$PR_DECISION_LINE")" \
+      || { echo "error: could not record the PR approval decision" >&2; exit 1; }
+  else
+    fm_parent_channel_report "$FM_HOME" "$STATE" "$PR_DECISION_LINE" \
+      || { echo "error: could not publish the PR approval decision" >&2; exit 1; }
+  fi
+fi
 printf 'armed: state/%s.check.sh\n' "$ID"

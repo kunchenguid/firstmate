@@ -1008,6 +1008,10 @@ command_hold() {
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  release_task_control_lock || fail "cannot release task control for $id"
+  "$SCRIPT_DIR/fm-discord-notify.sh" captain-hold "$id" "captain-hold-$id-$occurrence" \
+    "A task is waiting for your decision." "Continue with the request|Leave it on hold" >/dev/null \
+    || printf 'actionable: captain hold %s was recorded but Discord notification failed\n' "$id" >&2
   printf '%s\n' "$id"
 }
 
@@ -2038,9 +2042,30 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   exit 2
 }
 
+command_answer_one() {
+  local key=${1:-} answer=${2:-} label=${3:-} source=''
+  [ "$#" -ge 3 ] || { usage >&2; exit 2; }
+  shift 3
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --source) shift; source=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  [ -n "$source" ] || fail "--source provenance is required so the durable decision records where the answer came from"
+  validate_slug task-id "$key"
+  [ "${#key}" -le 128 ] || fail "task-id must be at most 128 characters"
+  answer=$(sanitize_field "$answer")
+  label=$(sanitize_field "$label")
+  printf '%s\t%s\t%s\n' "$key" "$answer" "$label" \
+    | command_answers --any-origin --source "$source"
+}
+
 case "${1:-}" in
   hold) shift; command_hold "$@" ;;
   answer) shift; command_answer "$@" ;;
+  answer-one) shift; command_answer_one "$@" ;;
   answers) shift; command_answers "$@" ;;
   reconcile-requests) shift; command_reconcile_requests "$@" ;;
   bind) shift; command_bind "$@" ;;
