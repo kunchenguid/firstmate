@@ -34,10 +34,10 @@
 #
 # THE ONE AUTHORIZED EXCEPTION - a disposable lab home: a gate agent may drive
 # lifecycle against an FM_HOME that carries the FM_GATE_LAB_MARKER file, because
-# that file can only ever be stamped on a FRESH empty dir by bin/fm-lab-home.sh
-# (fm_gate_lab_mark refuses a populated dir, so no call path marks a real home).
-# The allowance additionally requires every FM_*_OVERRIDE to be unset, so the
-# lab call always uses the marked home's stock layout and no override can split
+# bin/fm-lab-home.sh stamps it only on an empty directory
+# (fm_gate_lab_mark refuses a populated dir, so the helper cannot mark a real home).
+# The allowance additionally requires every FM_*_OVERRIDE to be empty or unset,
+# so the lab call uses the marked home's stock layout and no override can split
 # part of the "lab" back onto the real fleet. The threat model stays a CONFUSED
 # agent: a hostile agent that would hand-forge the marker file is the
 # adversarial case no-mistakes' neutral-execution-context and the
@@ -102,7 +102,7 @@ fm_gate_lab_mark() {
 
 # fm_gate_lab_permitted: return 0 when the current call targets a marked lab
 # home through a stock layout - $FM_HOME carries the marker and no
-# FM_*_OVERRIDE relocation is set.
+# FM_*_OVERRIDE relocation has a nonempty value.
 fm_gate_lab_permitted() {
   local v
   fm_gate_lab_home "${FM_HOME:-}" || return 1
@@ -139,9 +139,10 @@ fm_is_gate_agent() {
 }
 
 # fm_refuse_if_gate_agent: exit FM_GATE_REFUSE_EXIT with a clear stderr message if
-# this process looks like a no-mistakes gate agent. Call before any fleet
-# mutation. No-ops (returns 0) for a normal firstmate session, or when firstmate's
-# own test harness sets FM_GATE_REFUSE_BYPASS=1 (see the header).
+# this process looks like a no-mistakes gate agent without a permitted lab home.
+# Call before any fleet mutation. No-ops (returns 0) for a normal firstmate
+# session, a permitted lab home, or when firstmate's own test harness sets
+# FM_GATE_REFUSE_BYPASS=1 (see the header).
 fm_refuse_if_gate_agent() {
   fm_is_gate_agent "${1:-.}" || return 0
   if fm_gate_lab_permitted; then
