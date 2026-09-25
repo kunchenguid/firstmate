@@ -1561,7 +1561,11 @@ backlog_done_args() {
       ;;
     *)
       if [ "$MODE" = local-only ]; then
-        landing=$(landing_branch) || return 1
+        if [ -n "$(meta_value "$META" base_branch)" ]; then
+          landing=$(landing_branch) || return 1
+        else
+          landing=main
+        fi
         BACKLOG_DONE_ARGS=(--note "local $landing")
       elif [ -n "$PR_URL" ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")
