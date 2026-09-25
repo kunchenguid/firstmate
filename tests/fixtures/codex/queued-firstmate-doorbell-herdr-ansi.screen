@@ -1,0 +1,8 @@
+[1m>_ OpenAI Codex[0m [2m(v0.155.1)[0m
+
+[2mMessages to be submitted after next tool call (press esc to interrupt and send immediately)[0m
+  [2m[3m↳ : Firstmate instruction waiting: list '@@INBOX_DIR@@'/*.msg and, in numeric order, read and act on each, then mv each handled file to '@@INBOX_DIR@@'/handled/.[0m
+
+[1m›[0m [2mAsk Codex to do anything[0m
+
+  [2mgpt-5.5 xhigh · 100% left · ~/repo[0m

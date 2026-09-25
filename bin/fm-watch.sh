@@ -452,7 +452,8 @@ inbox_steer_check() {  # <window> <task>
       ;;
   esac
   tail40=$(fm_backend_capture "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
-  if window_is_busy "$w" "$tail40"; then
+  if window_is_busy "$w" "$tail40" \
+    || fm_task_inbox_codex_busy "$backend" "$w" "$STATE/$task.meta" "$tail40"; then
     return 0
   fi
   case "$verb" in

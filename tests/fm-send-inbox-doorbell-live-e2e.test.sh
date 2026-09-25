@@ -11,11 +11,14 @@
 # idle in an isolated tmux server, steered through the REAL fm-send (durable
 # record + doorbell), and must both ACT on the instruction (create a named
 # file) and ACKNOWLEDGE it (the mv into handled/), failing loudly with the
-# harness name and version.
+# harness name and version. Codex also holds a real shell tool while a second
+# doorbell is queued, then verifies that either Codex or the idle retry submits
+# it and the worker acts on and acknowledges it.
 #
 # Run explicitly with FM_SEND_INBOX_LIVE_E2E=1. This test spends a small
-# number of real model tokens per installed harness (one short turn each) -
-# authorized by the harness-dependent-checks rule. An absent harness is
+# number of real model tokens per installed harness (one short turn each, plus
+# two short Codex turns for the queued-state case) - authorized by the
+# harness-dependent-checks rule. An absent harness is
 # reported explicitly and skipped; a run that verified nothing fails rather
 # than passing vacuously. Restrict with
 # FM_SEND_INBOX_LIVE_HARNESSES="claude codex ..." when needed, and tune the
@@ -122,6 +125,106 @@ wait_ready() {  # <window>
   return 2
 }
 
+check_codex_queued_doorbell() {  # <home> <task> <window> <version>
+  local home=$1 task=$2 win=$3 version=$4
+  local started="$LAB/codex-queued-started" release="$LAB/codex-queued-release"
+  local acted="$LAB/codex-queued-acted" queued_rec="$home/state/$task.inbox/003.msg"
+  local handled="$home/state/$task.inbox/handled/003.msg" long_prompt queued_prompt
+  local i=0 screen queue_seen=0 ring_rc=0 ring_sent=0
+  while [ "$i" -lt "$TIMEOUT" ]; do
+    screen=$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null || true)
+    if ! printf '%s\n' "$screen" | grep -qiE 'Working[[:space:]]+\([0-9]+[smh].*esc to interrupt' \
+      && [ "$(fm_tmux_composer_state "$SESSION:$win")" = empty ]; then
+      break
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  if [ "$i" -ge "$TIMEOUT" ]; then
+    FAILED=1
+    printf 'not ok - codex (%s): the worker did not return to an idle composer before the queue check\n' "$version" >&2
+    return 0
+  fi
+  i=0
+  long_prompt="Run this exact shell command as your next tool call: \`touch '$started'; while [ ! -e '$release' ]; do sleep 0.2; done; printf released\`. Do not make any further tool calls after it returns. Reply only ready."
+  if ! FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-send.sh" "$task" "$long_prompt" >/dev/null 2>&1; then
+    touch "$release"
+    FAILED=1
+    printf 'not ok - codex (%s): could not start the held tool call for the queued-doorbell check\n' "$version" >&2
+    return 0
+  fi
+  while [ "$i" -lt "$TIMEOUT" ] && [ ! -e "$started" ]; do
+    sleep 1
+    i=$((i + 1))
+  done
+  if [ ! -e "$started" ]; then
+    touch "$release"
+    FAILED=1
+    printf 'not ok - codex (%s): the held shell tool did not start within %ss\n' "$version" "$TIMEOUT" >&2
+    return 0
+  fi
+  queued_prompt="Firstmate live check: run exactly this shell command now: touch $acted - then follow the mv instruction you were given for this message. Reply with one short line."
+  if ! FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-send.sh" "$task" "$queued_prompt" >/dev/null 2>&1; then
+    touch "$release"
+    FAILED=1
+    printf 'not ok - codex (%s): fm-send refused the queued-state steer\n' "$version" >&2
+    return 0
+  fi
+  i=0
+  while [ "$i" -lt "$TIMEOUT" ]; do
+    screen=$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null || true)
+    if printf '%s\n' "$screen" | grep -Fq 'Messages to be submitted after next tool call' \
+      && printf '%s\n' "$screen" | grep -Fq 'Firstmate instruction waiting:'; then
+      queue_seen=1
+      break
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  touch "$release"
+  if [ "$queue_seen" -ne 1 ]; then
+    FAILED=1
+    printf 'not ok - codex (%s): the real TUI did not show its queued firstmate doorbell\n' "$version" >&2
+    printf '%s\n' "$screen" | grep '[^[:space:]]' | tail -10 | sed 's/^/#   /' >&2
+    return 0
+  fi
+  i=0
+  while [ "$i" -lt "$TIMEOUT" ]; do
+    screen=$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null || true)
+    if [ "$ring_sent" -eq 0 ] && [ -f "$queued_rec" ] \
+      && ! printf '%s\n' "$screen" | grep -qiE 'Working[[:space:]]+\([0-9]+[smh].*esc to interrupt'; then
+      ring_rc=0
+      fm_task_inbox_ring tmux "$SESSION:$win" "$queued_rec" || ring_rc=$?
+      case "$ring_rc" in
+        0) ring_sent=1; note "codex ($version): submitted the retained queue with the watcher re-ring" ;;
+        1) : ;;
+        *)
+          FAILED=1
+          ring_sent=1
+          printf 'not ok - codex (%s): the idle queued-doorbell re-ring failed (result=%s)\n' "$version" "$ring_rc" >&2
+          ;;
+      esac
+    fi
+    [ -f "$handled" ] && [ -e "$acted" ] && break
+    sleep 1
+    i=$((i + 1))
+  done
+  if [ -f "$handled" ] && [ -e "$acted" ]; then
+    CHECKED=$((CHECKED + 1))
+    if [ "$ring_sent" -eq 1 ]; then
+      pass "codex ($version): the idle re-ring submitted the queued doorbell, which the worker acted on and acked with the mv"
+    else
+      pass "codex ($version): the queued doorbell reached the worker without an idle re-ring, and the worker acted and acked with the mv"
+    fi
+  else
+    FAILED=1
+    printf 'not ok - codex (%s): queued doorbell was not honored within %ss (acted=%s acked=%s)\n' \
+      "$version" "$TIMEOUT" "$([ -e "$acted" ] && echo yes || echo no)" \
+      "$([ -f "$handled" ] && echo yes || echo no)" >&2
+    tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null | grep '[^[:space:]]' | tail -10 | sed 's/^/#   /' >&2
+  fi
+}
+
 check_harness_doorbell() {  # <name>
   local name=$1 version cmd win="hx-$1" home task acted rec handled i ready_rc
   version=$(harness_version "$name")
@@ -175,6 +278,9 @@ check_harness_doorbell() {  # <name>
   if [ -f "$handled" ] && [ -e "$acted" ]; then
     CHECKED=$((CHECKED + 1))
     pass "$name ($version): the doorbell reached a real worker, which acted and acked with the mv"
+    if [ "$name" = codex ]; then
+      check_codex_queued_doorbell "$home" "$task" "$win" "$version"
+    fi
   else
     FAILED=1
     printf 'not ok - %s (%s): doorbell not honored within %ss (acted=%s acked=%s)\n' \

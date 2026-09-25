@@ -1,0 +1,6 @@
+ OpenAI Codex v0.155.1
+
+Messages to be submitted after next tool call (press esc to interrupt and send immediately)
+↳ : Firstmate instruction waiting: list '@@INBOX_DIR@@'/*.msg and, in numeric order, read and act on each, then mv each handled file to '@@INBOX_DIR@@'/handled/.
+
+›

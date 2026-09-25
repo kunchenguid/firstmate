@@ -506,6 +506,33 @@ Two findings from the run shaped the shipped behavior: an OpenCode vendor update
 Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
 This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
 
+On 2026-09-25, the portable `tests/fm-task-inbox.test.sh` regression exercised the codex-cli 0.155.1 queued-doorbell pane capture: the idle Codex re-ring sent Escape then Enter, and the fake worker's move into `handled/` was the delivery acknowledgement.
+The companion busy-state regression kept both keys and duplicate doorbell text away while the captured pane showed `Working`, and a non-Codex regression confirmed that another harness still uses the ordinary ring path.
+
+```sh
+bin/fm-test-run.sh tests/fm-task-inbox.test.sh
+```
+
+```text
+FM_TEST_BEGIN 2026-09-25T10:03:47Z tests/fm-task-inbox.test.sh family=watcher-wake-lock expected_gate_skip=none
+ok - watcher: Codex submits an already queued doorbell with Escape and Enter on an idle pane
+ok - watcher: a queued Codex doorbell waits while the Codex Working indicator is present
+ok - inbox: Codex queue recovery respects harness and backend key capabilities
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=31901
+```
+
+The opt-in live guard was run against codex-cli 0.155.1 on 2026-09-25 with `FM_SEND_INBOX_LIVE_E2E=1 FM_SEND_INBOX_LIVE_HARNESSES=codex bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh`.
+Codex displayed the queued doorbell while its held shell tool ran, then acted on and acknowledged it after the tool returned without needing the re-ring to send keys in this run.
+That live result verifies the real queued UI and delivery acknowledgement; the captured-pane regression is the direct check of the idle re-ring's Escape-then-Enter behavior.
+The herdr backend reads the composer from an ANSI pane capture, where Codex's dim `Ask Codex to do anything` hint is provably ghost text; `tests/fm-task-inbox.test.sh` replays a styled idle+queued screen (`tests/fixtures/codex/queued-firstmate-doorbell-herdr-ansi.screen`, modeled on the 0.155.1 render, not a byte capture from a stuck pane) through a stubbed `herdr` CLI and asserts Escape then Enter when idle, and no keys when native state or the Working line says busy or the composer holds typed text. A plain-text herdr fallback capture cannot prove the hint is ghost text, reads `unknown`, and is deliberately left to the ordinary ladder.
+
+```text
+ok - codex (codex-cli 0.155.1): the doorbell reached a real worker, which acted and acked with the mv
+ok - codex (codex-cli 0.155.1): the queued doorbell reached the worker without an idle re-ring, and the worker acted and acked with the mv
+ok - live steering-inbox doorbell guard: 2 harness(es) honored the doorbell contract
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=81367
+```
+
 ## Gemini
 
 The Gemini crewmate adapter was verified on 2026-09-04 with gemini-cli 0.58.0 on Linux, Node v24.20.0, tmux 3.4.

@@ -9,6 +9,7 @@ Verified on 2026-09-22 with codex-cli 0.155.1 unless a fact gives a newer versio
 | Busy state | Unknown until a semantic source is live-verified: the app-server turn lifecycle is unreachable for a pane worker, and project lifecycle hooks did not fire for a Firstmate-launched worker. |
 | Exit command | `/quit`; its slash popup needs about one second between text and Enter, which the shared submit path used by the control plane handles. |
 | Interrupt | Single Escape. |
+| Queued Firstmate doorbell | A live codex-cli 0.155.1 run showed `Messages to be submitted after next tool call (press esc to interrupt and send immediately)` above a queued Firstmate doorbell, then acted on and acknowledged it after the held tool call returned. The idle-only Escape-then-Enter re-ring is covered by the captured-pane regression; see [Steering-inbox doorbell verification](../../../../../docs/verification/runtime-backends.md#steering-inbox-doorbell). |
 | Skill invocation | `$<skill>`, for example `$no-mistakes`; `/<skill>` is Claude-only and Codex rejects it as "Unrecognized command". |
 | Resume | `codex resume <session-id>`, using the id printed on quit. |
 | Model flag | `--model <model>`. |

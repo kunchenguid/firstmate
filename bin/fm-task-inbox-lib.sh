@@ -46,7 +46,8 @@
 #
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
-# attempt may ring or be skipped to protect proven pending composer text. After
+# attempt may ring, submit an already queued idle Codex doorbell, or be skipped
+# to protect pending composer text or an active Codex turn. After
 # FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
 # caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
 # while a positively dead or missing endpoint skips delivery and the ladder and
@@ -268,28 +269,87 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     "$quoted" "$quoted"
 }
 
-# Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
-# composer pre-check, then the backend's submit machinery with a minimal retry
-# budget, verdict discarded.
-# Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
-# (the watcher re-rings later), 2 the backend send failed, 3 skipped because
-# the endpoint is positively dead or missing (nothing typed; recovery owns the
-# record). No return value is delivery proof; the acknowledgement move is the
-# only delivery signal.
-# The skip is deliberately narrow: only an exact `pending` verdict defers,
-# because there our Enter could submit someone's real half-typed content.
-# `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
-# CONSTANT line the worker recovers semantically, while skipping on ambiguous
-# verdicts would starve a harness whose idle screen the classifier cannot
-# positively identify (that classifier is advisory here by design).
+# Ring the doorbell, best-effort: one endpoint-liveness pre-check, a Codex
+# queued-doorbell recovery check, one advisory composer pre-check, then the
+# backend's submit machinery with a minimal retry budget, verdict discarded.
+# Returns 0 when it rang a new doorbell or submitted a queued Codex doorbell.
+# Returns 1 when composer text is pending, the composer is ambiguous, Codex is
+# working, or the queued state changed during confirmation; the watcher
+# re-rings later when those conditions clear.
+# Returns 2 when the backend send failed and 3 when the endpoint is dead or
+# missing (nothing typed; recovery owns the record).
+# No return value is delivery proof; the acknowledgement move is the only
+# delivery signal.
+# The ordinary path skips only an exact `pending` verdict, because there our
+# Enter could submit someone's real half-typed content. `pending-unproven` and
+# `unknown` still ring - the worst outcome is a garbled CONSTANT line the
+# worker recovers semantically, while skipping on ambiguity would starve a
+# harness whose idle screen the classifier cannot positively identify. The
+# Codex queued-doorbell path is narrower: it only sends keys when its own
+# composer check proves `empty` and the pane is not working.
+fm_task_inbox_codex_busy() {  # <backend> <target> <meta-file> <captured-tail>
+  local backend=$1 target=$2 meta=$3 tail=$4 native
+  [ "$(fm_meta_get "$meta" harness)" = codex ] || return 1
+  if [ "$backend" = herdr ]; then
+    native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
+    [ "$native" != busy ] || return 0
+  fi
+  printf '%s\n' "$tail" \
+    | grep -qiE 'Working[[:space:]]+\([0-9]+[smh].*esc to interrupt'
+}
+
+# Return 0 for the exact queued doorbell when its composer is empty and Codex
+# is not visibly working, 1 when the pane does not show this inbox doorbell,
+# 2 when Codex is busy or the queued state changes during confirmation, and 3
+# when the composer is not proven empty.
+fm_task_inbox_codex_queued_doorbell() {  # <backend> <target> <record-path> <label>
+  local backend=$1 target=$2 rec=$3 label=$4 inbox task meta line capture folded_capture folded_line cstate
+  inbox=${rec%/*}
+  task=${inbox##*/}
+  case "$task" in *.inbox) task=${task%.inbox} ;; *) return 1 ;; esac
+  meta="${inbox%/*}/$task.meta"
+  [ "$(fm_meta_get "$meta" harness)" = codex ] || return 1
+  case "$backend" in tmux|herdr|zellij|cmux) ;; *) return 1 ;; esac
+  line=$(fm_task_inbox_doorbell_line "$rec") || return 1
+  capture=$(fm_backend_capture "$backend" "$target" 40 "$label" 2>/dev/null) || return 1
+  folded_capture=$(printf '%s\n' "$capture" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g')
+  folded_line=$(printf '%s' "$line" | sed -E 's/[[:space:]]+/ /g')
+  case "$folded_capture" in
+    *'Messages to be submitted after next tool call'*"$folded_line"*) ;;
+    *) return 1 ;;
+  esac
+  cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
+  [ "$cstate" = empty ] || return 3
+  capture=$(fm_backend_capture "$backend" "$target" 40 "$label" 2>/dev/null) || return 1
+  folded_capture=$(printf '%s\n' "$capture" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g')
+  case "$folded_capture" in
+    *'Messages to be submitted after next tool call'*"$folded_line"*) ;;
+    *) return 2 ;;
+  esac
+  fm_task_inbox_codex_busy "$backend" "$target" "$meta" "$capture" && return 2
+  return 0
+}
+
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict queued_rc
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
   if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
     return 2
   fi
+  queued_rc=0
+  fm_task_inbox_codex_queued_doorbell "$backend" "$target" "$rec" "$label" || queued_rc=$?
+  case "$queued_rc" in
+    0)
+      [ -f "$rec" ] || return 0
+      fm_backend_send_key "$backend" "$target" Escape "$label" || return 2
+      sleep 0.2
+      fm_backend_send_key "$backend" "$target" Enter "$label" || return 2
+      return 0
+      ;;
+    2|3) return 1 ;;
+  esac
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending) return 1 ;;
