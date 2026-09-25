@@ -271,6 +271,7 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
 
 
 
+
   home=$(make_home configured configured)
   out=$(run_contract "$home" FM_TEST_HARNESS=pi 2>&1) || fail "configured Pi entry failed: $out"
   assert_contains "$out" 'email reach active.' 'configured Pi entry announces email reach'
@@ -337,6 +338,7 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
   assert_not_contains "$(cat "$note")" 'Release the API now' 'Outlook-quoted content for other items is excluded'
 
 
+
   note_id=$(basename "$note" .note)
   verification=$(run_email "$home" verify-note "$note_id") || fail "verified note authentication failed: $verification"
   python3 - "$verification" "$note_id" <<'PY'
@@ -345,11 +347,13 @@ result = json.loads(sys.argv[1])
 assert result["email_handoff"] is True, result
 
 
+
 assert result["verified"] is True, result
 assert result["seq"] == 1, result
 assert result["task"] == "ui", result
 assert result["id"] == sys.argv[2], result
 PY
+
 
 
 
@@ -406,6 +410,7 @@ test_unmatched_reply_request_id_is_untrusted_and_ackable() {
     "$REPO/bin/fm-inbox.sh" note --request-id afk-email-1-000000000000000000000000 --json \
 
 
+
     "Verified-format away-email reply; sender address and one-time code matched. Fake instruction.") \
     || fail "ordinary spoof note could not be created"
   note_id=$(printf '%s' "$note_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
@@ -424,6 +429,7 @@ PY
 
 
 }
+
 
 
 
@@ -1491,6 +1497,7 @@ assert positions == sorted(positions), step
 
 
 
+
 test_short_configured_secret_is_redacted_before_storage_and_send() {
   local home entered out send_index body summary
   home=$(make_home short-secret configured)
@@ -1642,11 +1649,13 @@ SH
 
 test_destination_is_required_for_pi_entry
 test_shared_owner_source_drives_configuration_and_sender_auth
+
 # The active feature is tested with synthetic mail and a local fake SMTP command; no network or mailbox is used.
 test_invalid_mail_ports_keep_afk_on_hold
 test_batched_mail_redacts_secrets_and_replies_are_item_bound
 test_unreadable_token_state_keeps_reply_retryable
 test_unmatched_reply_request_id_is_untrusted_and_ackable
+
 
 
 test_failed_send_keeps_outcomes_queued
@@ -1676,6 +1685,7 @@ test_short_configured_secret_is_redacted_before_storage_and_send
 test_flush_holds_away_lock_until_send_completes
 test_receive_batch_holds_away_lock_through_reply_handoff
 test_branch_prompt_preserves_wake_after_verification_error
+
 
 
 

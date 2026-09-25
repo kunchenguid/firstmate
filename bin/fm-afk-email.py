@@ -41,6 +41,7 @@ class AfkContractLockError(RuntimeError):
     pass
 
 
+
 NOTE_ID_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9._-]+$")
 REPLY_LINE_RE = re.compile(r"^FM-AFK-REPLY (FM-AFK-[A-Za-z0-9_-]{16})$")
 QUOTED_HEADER_RE = re.compile(r"^(?:From|Sent|To|Subject):", re.IGNORECASE)
@@ -58,6 +59,7 @@ def valid_mail_port(value):
     return bool(normalized) and (
         len(normalized) < 5 or len(normalized) == 5 and normalized <= "65535"
     )
+
 
 
 
@@ -210,12 +212,14 @@ def redact_secrets(text):
 
 
 
+
             secret_values.add(value)
     replacement = "[redacted]"
     if any(secret in replacement for secret in secret_values):
         replacement = ""
     for secret in sorted(secret_values, key=len, reverse=True):
         text = text.replace(secret, replacement)
+
 
 
 
@@ -714,9 +718,11 @@ def handoff_record(request_id, posture):
 
 
 
+
 def verify_note(note_id):
     if not isinstance(note_id, str) or not NOTE_ID_RE.fullmatch(note_id):
         print(json.dumps({"email_handoff": False, "verified": False}, separators=(",", ":")))
+
 
 
         return 0
@@ -744,6 +750,7 @@ def verify_note(note_id):
 
 
 
+
         return 0
     body = inbox_note_body(note_id)
     if body is None:
@@ -757,6 +764,7 @@ def verify_note(note_id):
         "email_handoff": True,
 
 
+
         "verified": True,
         "id": note_id,
         "request_id": request_id,
@@ -764,6 +772,7 @@ def verify_note(note_id):
         "task": item["task"],
     }, separators=(",", ":")))
     return 0
+
 
 
 
@@ -896,6 +905,7 @@ def receive_messages(messages, posture, config):
 
 
 
+
         )
         if valid:
             note = (
@@ -911,6 +921,7 @@ def receive_messages(messages, posture, config):
             if "send_started_epoch" in item:
                 item.pop("sent_epoch", None)
                 item.pop("expires_epoch", None)
+
 
 
             item["handoff_request_id"] = request_id
@@ -960,6 +971,7 @@ def main():
     if command == "verify-note" and len(sys.argv) == 3:
         return verify_note(sys.argv[2])
     print("usage: fm-afk-email.py destination|configured|queue-unprocessed|flush|receive-batch|verify-note <id>", file=sys.stderr)
+
 
 
 
