@@ -143,6 +143,7 @@ So the owner's next arm starts from the same state as without the host, and the 
 - An unreadable queue.
 - Rows main already claimed.
 - A missing engine or node.
+- A session latched after repeated engine errors, inside its cooldown; see [The broken-session latch](#the-broken-session-latch).
 - A turn that timed out or failed.
 - A turn that recorded no report.
 - A turn that reported but left any of its granted rows unacknowledged.
@@ -150,6 +151,15 @@ So the owner's next arm starts from the same state as without the host, and the 
 
 A turn that fails also starts the next wake on a fresh engine conversation.
 When the captain returned during a failed turn that recorded outcomes, the handback carries those outcomes too, for main to relay.
+
+### The broken-session latch
+
+The host copies the Pi branch's broken-session policy ([pi-supervision-branch.md](pi-supervision-branch.md#broken-branch-latch-and-recovery)), with an engine error in place of a provider error: a turn that exited nonzero, hit its bound, or ended without a complete successful result.
+Two consecutive engine errors latch the session: every away wake reaches main with a `supervision-host:` line for a five-minute cooldown, after which one wake probes the engine, and each probe that ends in another engine error doubles the cooldown up to one hour.
+A turn that records a report without an engine error clears the latch; a turn with a complete engine result but no report neither counts toward it nor clears it, while an engine error counts even if no report was recorded.
+The first trip adds one `supervision-host:` line to the failing turn's handback, and a recovery is only logged.
+The latch belongs to one main session, engine, and model, so a new main session or another engine or model starts clean.
+An attended close is untouched, because attended closes already reach main.
 
 ### Lost ownership
 
