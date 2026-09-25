@@ -693,6 +693,27 @@ test_matrix_kimi_bordered_shell_glyph_box() {
   pass "matrix: kimi's bordered shell-glyph box reads empty through the shared owner (spawn's fourth copy retired)"
 }
 
+test_matrix_kimi_2_1_1_contiguous_footer() {
+  # Kimi Code 2.1.1 draws its status row and context meter as two contiguous
+  # rows directly below its bordered composer - its own footer furniture, not
+  # the unclaimed activity that makes a cursorless envelope stale. A typed
+  # draft stays pending, an idle box reads empty, and anything else below the
+  # footer (activity, a dead-shell prompt) still refuses.
+  local idle typed stale shell_after
+  idle=$'Welcome to Kimi Code!\n╭────────────────────────╮\n│ >                      │\n╰────────────────────────╯\nNever Ask  K2.8 Preview thinking: max  /private/tmp/x\n                                                  context: 0% (0/1M)'
+  assert_screen "kimi 2.1.1 idle on tmux" empty "$CAPS_TMUX" "$idle" 2
+  assert_screen "kimi 2.1.1 idle on herdr" empty "$CAPS_STYLED" "$idle"
+  assert_screen "kimi 2.1.1 idle on zellij" empty "$CAPS_STYLED_NOID" "$idle"
+  typed=$'╭────────────────────────╮\n│ > draft unsubmitted    │\n╰────────────────────────╯\nAsk When Needed  K2.8 Preview  /private/tmp/x\ncontext: 2% (19.5k/1M)'
+  assert_screen "kimi 2.1.1 typed on tmux" pending "$CAPS_TMUX" "$typed" 2
+  assert_screen "kimi 2.1.1 typed on herdr" pending "$CAPS_STYLED" "$typed"
+  stale=$'╭────────────────────────╮\n│ >                      │\n╰────────────────────────╯\nNever Ask  K2.8 Preview  /private/tmp/x\ncontext: 2% (19.5k/1M)\nunclaimed activity below the footer'
+  assert_screen "kimi 2.1.1 footer followed by activity" unknown "$CAPS_STYLED" "$stale"
+  shell_after=$'╭────────────────────────╮\n│ >                      │\n╰────────────────────────╯\nNever Ask  K2.8 Preview  /private/tmp/x\ncontext: 2% (19.5k/1M)\n$ '
+  assert_screen "kimi 2.1.1 footer followed by a shell prompt" unknown "$CAPS_STYLED" "$shell_after"
+  pass "matrix: kimi 2.1.1's contiguous footer is furniture while activity and shell rows below it still refuse"
+}
+
 test_matrix_claude_inside_zellij_ansi_dump() {
   # Real claude captured through `zellij action dump-screen --ansi`
   # (capability established by the audit): `ESC[m` `❯` U+00A0.
@@ -931,6 +952,7 @@ test_matrix_pi_separated_needs_identity
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
+test_matrix_kimi_2_1_1_contiguous_footer
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence
 test_bare_wrap_region_classifies

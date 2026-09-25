@@ -360,6 +360,11 @@
 # each ready and dialog-free before the ordinary readiness gates can pass. A
 # blank viewport read proves nothing either way: it costs the poll and restarts
 # that count. A viewport read that fails outright fails readiness at once.
+# The delivery wait re-sends Enter on every poll the shared composer classifier
+# still proves the composer holds the brief pointer (bounded by
+# FM_KIMI_DELIVERY_RESENDS), never into an empty or unclassifiable one.
+# A kimi gate failure after the pane and worktree exist keeps the provisional
+# task record, so teardown - not hand cleanup - owns their removal.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
@@ -3818,11 +3823,38 @@ kimi_delivery_is_confirmed() { # <plain-pane-capture>
   return 1
 }
 
+# The delivery wait's re-send guard. Only a composer that provably still holds
+# the pointer (the shared classifier's pending verdicts) is evidence the last
+# Enter was swallowed. An empty composer is a submitted turn, and an
+# unclassifiable one proves nothing, so neither ever receives another Enter:
+# a confirmed or in-flight delivery is never followed by a stray keypress into
+# a live composer.
+kimi_composer_holds_unsubmitted_text() {
+  case "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" in
+    pending | pending-unproven) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Kimi's startup input-swallow window can outlive the whole submit retry
+# budget (observed on 2.0.2 behind herdr: readiness passed, the pointer sat
+# wrapped in the composer, and every Enter inside FM_KIMI_SUBMIT_RETRIES was
+# dropped, while a hand-sent Enter minutes later submitted instantly). The
+# delivery wait therefore re-sends Enter - never retypes - on every poll the
+# composer still provably holds the pointer, bounded by
+# FM_KIMI_DELIVERY_RESENDS, until kimi_delivery_is_confirmed passes or the
+# poll budget is spent. The confirmation itself stays exactly as strict.
 kimi_wait_for_delivery() {
   local pane i=0 max=${FM_KIMI_DELIVERY_POLLS:-40} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
+  local max_resends=${FM_KIMI_DELIVERY_RESENDS:-$max}
+  KIMI_DELIVERY_RESENDS_SENT=0
   while [ "$i" -lt "$max" ]; do
     pane=$(kimi_capture)
     kimi_delivery_is_confirmed "$pane" && return 0
+    if [ "$KIMI_DELIVERY_RESENDS_SENT" -lt "$max_resends" ] && kimi_composer_holds_unsubmitted_text; then
+      spawn_send_key "$T" Enter || return 1
+      KIMI_DELIVERY_RESENDS_SENT=$((KIMI_DELIVERY_RESENDS_SENT + 1))
+    fi
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
   done
@@ -3830,8 +3862,18 @@ kimi_wait_for_delivery() {
 }
 
 kimi_spawn_fail() { # <detail>
+  # Every kimi gate failure fires after the pane, worktree, slot claim, and
+  # turn-end hook token exist, while the backlog In-flight commit is still
+  # deferred. Rolling the provisional record back here (the exit trap's
+  # default for a fresh spawn) strands all four with no owner - teardown
+  # refuses a task with no record, which is exactly the 2026-09-25 hand
+  # cleanup. Keep the record instead: bin/fm-teardown.sh then owns the whole
+  # cleanup under its landed-work gates, and this path never kills a pane or
+  # removes a worktree itself, because a failed confirmation can still be a
+  # live worker that received the brief.
+  SPAWN_FRESH_COMMIT_PENDING=0
   printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
-  echo "error: $1; inspect window $T" >&2
+  echo "error: $1; inspect window $T; its task record was kept, so bin/fm-teardown.sh $ID owns the pane, local copy, slot claim, and hook-token cleanup" >&2
 }
 
 # rovo mirrors kimi's launch-then-send shape exactly: a positional brief is
@@ -5063,7 +5105,11 @@ if [ "$HARNESS" = kimi ]; then
     exit 1
   fi
   if ! kimi_wait_for_delivery; then
-    kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
+    if [ "$KIMI_DELIVERY_RESENDS_SENT" -gt 0 ]; then
+      kimi_spawn_fail "kimi brief pointer delivery was not confirmed after $KIMI_DELIVERY_RESENDS_SENT re-sent Enter(s) while the composer still held the pointer"
+    else
+      kimi_spawn_fail "kimi brief pointer delivery was not confirmed"
+    fi
     exit 1
   fi
 fi

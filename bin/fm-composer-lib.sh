@@ -1204,6 +1204,22 @@ _fm_composer_row_is_braille_furniture() {  # <row>
   [ -z "$rest" ]
 }
 
+# _fm_composer_row_is_kimi_footer: 0 when <trimmed-row> is demonstrably one of
+# the two footer rows Kimi Code 2.1.1 draws contiguously below its bordered
+# `>` composer: its status row, which opens with a permission-tier label (the
+# `Never Ask` and `Ask When Needed` tiers kimi.md documents), and its
+# right-anchored context meter (`context: N% (used/limit)`). Typed input never
+# leaves the bordered box, so neither row is ever content; a pane whose Kimi
+# exited to a shell draws the prompt BELOW them, which the ordinary staleness
+# checks still refuse.
+_fm_composer_row_is_kimi_footer() {  # <trimmed-row>
+  case $1 in
+    'Never Ask '?* | 'Ask When Needed '?*) return 0 ;;
+    context:*'% ('*')') return 0 ;;
+  esac
+  return 1
+}
+
 # _fm_composer_bare_row_strip_furniture_var: on a bare agent-glyph row, reduce
 # the row to its glyph when everything behind the glyph is braille furniture,
 # in place through the named variable; a row whose tail carries anything else,
@@ -1506,6 +1522,22 @@ _fm_composer_select_cursorless() {
     if [ "$footer" = 1 ] && [ "$FM_COMPOSER_FOOTER_AFTER" = "$boundary" ]; then
       next=$((FM_COMPOSER_FOOTER_LAST + 1))
     fi
+    # Kimi 2.1.1 draws its status row and its right-anchored context meter as
+    # contiguous rows directly below its bordered `>` composer. They are that
+    # pane's own footer furniture - typed input never leaves the box - but as
+    # contiguous non-blank rows they read exactly like the unclaimed activity
+    # that makes a cursorless envelope stale, so every kimi verdict broke the
+    # moment 2.1.1 moved its footer up against the box. Kimi's `>` is a shell
+    # glyph, which never opens the glyph-proven footer zone above, so the
+    # probe skips only rows that are demonstrably that furniture; the first
+    # other row below the box refuses exactly as before.
+    while :; do
+      raw=$(_fm_composer_screen_row "$next" "$plain")
+      trimmed=$raw
+      fm_composer_normalize_trim_var trimmed
+      _fm_composer_row_is_kimi_footer "$trimmed" || break
+      next=$((next + 1))
+    done
     raw=$(_fm_composer_screen_row "$next" "$plain")
     trimmed=$raw
     fm_composer_normalize_trim_var trimmed

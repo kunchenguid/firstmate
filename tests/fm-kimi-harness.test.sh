@@ -41,7 +41,7 @@ state=$(cat "$FM_FAKE_KIMI_STATE" 2>/dev/null || true)
 fake_screen() {
   case "$state" in
     ready)
-      printf 'Welcome to Kimi Code!\ncontext: 0%% (0/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n'
+      printf 'Welcome to Kimi Code!\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\nNever Ask  K2.8 Preview  %s\ncontext: 0%% (0/1M)\n' "$FM_FAKE_PANE_PATH"
       ;;
     trust)
       printf '╭─ Trust this folder? ─╮\n│ ↑↓ navigate · Enter select · Esc exit │\n│ %s │\n│ ❯ Trust this folder │\n│   Don'"'"'t trust │\n╰──────────────────────────────╯\n' "$FM_FAKE_PANE_PATH"
@@ -64,10 +64,10 @@ fake_screen() {
       printf '╭─ Trust this folder? ─╮\n│ ↑↓ navigate ·        │\n│ Enter select · Esc   │\n│ exit                 │\n│ %s │\n│ ❯ Trust this folder  │\n│   Don'"'"'t trust         │\n╰──────────────────────╯\n' "$FM_FAKE_PANE_PATH"
       ;;
     pointer-typed)
-      printf 'context: 0%% (0/256k)\n╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\n'
+      printf 'Welcome to Kimi Code!\n╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\nNever Ask  K2.8 Preview  %s\ncontext: 0%% (0/1M)\n' "$FM_FAKE_PANE_PATH"
       ;;
     delivered)
-      printf '✨ Read the brief at %s and follow it exactly.\ncontext: 1%% (2k/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n' "$FM_FAKE_BRIEF_REAL"
+      printf '✨ Read the brief at %s and follow it exactly.\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\nNever Ask  K2.8 Preview  %s\ncontext: 1%% (2k/1M)\n' "$FM_FAKE_BRIEF_REAL" "$FM_FAKE_PANE_PATH"
       ;;
     *)
       printf 'shell starting\n$ \n'
@@ -82,8 +82,8 @@ fake_history() {
 }
 fake_cursor_y() {
   case "$state" in
-    pointer-typed) printf '3\n' ;;
-    ready|delivered) printf '3\n' ;;
+    pointer-typed) printf '2\n' ;;
+    ready|delivered) printf '2\n' ;;
     *) printf '1\n' ;;
   esac
 }
@@ -152,9 +152,11 @@ case "${1:-}" in
             ;;
           pointer-typed)
             if [ "${FM_FAKE_KIMI_DELIVERY:-yes}" = yes ]; then
-              if [ "${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" = yes ] \
-                 && [ ! -f "$FM_FAKE_KIMI_SWALLOWED" ]; then
-                : > "$FM_FAKE_KIMI_SWALLOWED"
+              swallowed=0
+              [ ! -f "$FM_FAKE_KIMI_SWALLOWED" ] ||
+                swallowed=$(wc -l < "$FM_FAKE_KIMI_SWALLOWED" | tr -d ' ')
+              if [ "$swallowed" -lt "${FM_FAKE_KIMI_SWALLOW_ENTERS:-0}" ]; then
+                printf 'enter\n' >> "$FM_FAKE_KIMI_SWALLOWED"
               else
                 printf 'delivered\n' > "$FM_FAKE_KIMI_STATE"
               fi
@@ -238,6 +240,7 @@ EOF
   : > "$case_dir/kimi.state"
   : > "$case_dir/trust-enter.log"
   : > "$case_dir/stray-enter.log"
+  : > "$case_dir/kimi.swallowed"
   : > "$case_dir/tmux-calls.log"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
 }
@@ -261,10 +264,13 @@ run_spawn() {
     FM_FAKE_KIMI_BLANKED="$case_dir/kimi.blanked" \
     FM_FAKE_TMUX_VISIBLE_FAILS="${FM_FAKE_TMUX_VISIBLE_FAILS:-no}" \
     FM_FAKE_KIMI_SWALLOWED="$case_dir/kimi.swallowed" \
-    FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
+    FM_FAKE_KIMI_SWALLOW_ENTERS="${FM_FAKE_KIMI_SWALLOW_ENTERS:-0}" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
-    FM_KIMI_READY_POLLS="${FM_KIMI_READY_POLLS:-2}" FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
+    FM_KIMI_READY_POLLS="${FM_KIMI_READY_POLLS:-2}" \
+    FM_KIMI_DELIVERY_POLLS="${FM_KIMI_DELIVERY_POLLS:-2}" \
+    FM_KIMI_DELIVERY_RESENDS="${FM_KIMI_DELIVERY_RESENDS:-}" \
+    FM_KIMI_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@" 2>&1
 }
@@ -286,7 +292,7 @@ test_kimi_launch_then_send_is_verified() {
   launch_dir=$(kimi_launch_dir "$id" "$HOME_DIR")
   KIMI_RUNTIME_LAUNCH_DIR=$launch_dir
   rm -rf "$launch_dir"
-  out=$(FM_FAKE_KIMI_SWALLOW_FIRST=yes run_spawn \
+  out=$(FM_FAKE_KIMI_SWALLOW_ENTERS=1 run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model kimi-code/k3 --effort high)
   rc=$?
@@ -657,8 +663,20 @@ test_kimi_teardown_removes_pointer_and_registry_token() {
   pass "fm-teardown: Kimi task pointer and registry token are removed"
 }
 
+# A BASE_PATH with no kimi executable on it: the captain's 2.1.1 brew install
+# put a real kimi in python3's own directory, so the default BASE_PATH can
+# resolve a kimi the fallback and missing-binary cases need absent. Keep
+# python3 (hook TOML parsing) and jq (symlinked into each fakebin) reachable.
+make_kimi_free_base_path() { # <dir> -> prints a PATH with no kimi on it
+  local dir=$1 shim
+  shim="$dir/nokimi-bin"
+  mkdir -p "$shim"
+  ln -sf "$PYTHON_BIN" "$shim/python3"
+  printf '%s' "$shim:/usr/bin:/bin:/usr/sbin:/sbin"
+}
+
 test_kimi_falls_back_to_expanded_home_binary() {
-  local id rec out rc launch fallback
+  local id rec out rc launch fallback saved_base
   id=kimi-fallback-z4
   rec=$(make_spawn_case fallback "$id")
   read_spawn_record "$rec"
@@ -666,8 +684,11 @@ test_kimi_falls_back_to_expanded_home_binary() {
   fallback="$HOME_DIR/.kimi-code/bin/kimi"
   mkdir -p "$(dirname "$fallback")"
   fm_fake_exit0 "$(dirname "$fallback")" kimi
+  saved_base=$BASE_PATH
+  BASE_PATH=$(make_kimi_free_base_path "$CASE_DIR")
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
   rc=$?
+  BASE_PATH=$saved_base
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
   launch=$(cat "$CASE_DIR/launch.log")
   [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '$fallback' --auto" ] \
@@ -676,14 +697,17 @@ test_kimi_falls_back_to_expanded_home_binary() {
 }
 
 test_kimi_missing_binary_refuses_before_pane_creation() {
-  local id rec out rc fallback
+  local id rec out rc fallback saved_base
   id=kimi-missing-z5
   rec=$(make_spawn_case missing "$id")
   read_spawn_record "$rec"
   rm "$FAKEBIN_DIR/kimi"
   fallback="$HOME_DIR/.kimi-code/bin/kimi"
+  saved_base=$BASE_PATH
+  BASE_PATH=$(make_kimi_free_base_path "$CASE_DIR")
   rc=0
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  BASE_PATH=$saved_base
   [ "$rc" -ne 0 ] || fail "missing Kimi executable should refuse the spawn"
   assert_contains "$out" "searched PATH for 'kimi'" "missing Kimi diagnostic omitted PATH"
   assert_contains "$out" "fallback '$fallback'" "missing Kimi diagnostic omitted expanded fallback"
@@ -707,6 +731,89 @@ test_kimi_unconfirmed_delivery_fails_loudly() {
   assert_grep 'failed: kimi brief pointer delivery was not confirmed' <(sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/$id.status") \
     "unconfirmed kimi delivery did not leave a supervisor-visible failure"
   pass "fm-spawn: kimi treats a silent pointer drop as a failed spawn"
+}
+
+test_kimi_delivery_wait_resends_enter_past_the_submit_budget() {
+  # The 2026-09-25 failure shape: Kimi's startup swallow window outlived the
+  # whole submit retry budget, so the pointer sat in the composer with every
+  # Enter dropped, and the delivery poll never re-sent. The delivery wait
+  # must keep re-sending Enter - never retyping - until the window closes.
+  local id rec out rc
+  id=kimi-delivery-resend-r1
+  rec=$(make_spawn_case delivery-resend "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_SWALLOW_ENTERS=4 FM_KIMI_DELIVERY_POLLS=4 run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "a pointer swallowed past the submit budget should still be delivered: $out"
+  assert_contains "$out" "spawned $id harness=kimi" \
+    "kimi spawn did not recover from Enters swallowed past the submit retry budget"
+  [ "$(wc -l < "$CASE_DIR/kimi.swallowed" | tr -d ' ')" = 4 ] \
+    || fail "the fake did not swallow exactly the four Enters the case set up"
+  [ "$(wc -l < "$CASE_DIR/pointer.log" | tr -d ' ')" = 1 ] \
+    || fail "the brief pointer was retyped instead of only re-sending Enter"
+  [ ! -s "$CASE_DIR/stray-enter.log" ] \
+    || fail "an Enter landed in the live composer after delivery was confirmed"
+  pass "fm-spawn: kimi re-sends a swallowed Enter past the submit budget until the pointer lands"
+}
+
+test_kimi_delivery_resend_budget_is_bounded_and_the_failure_is_tearable() {
+  local id rec out rc
+  id=kimi-delivery-bound-r2
+  rec=$(make_spawn_case delivery-bound "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_SWALLOW_ENTERS=99 FM_KIMI_SUBMIT_RETRIES=1 \
+    FM_KIMI_DELIVERY_POLLS=8 FM_KIMI_DELIVERY_RESENDS=3 run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a pointer that never lands should fail the spawn"
+  assert_contains "$out" "kimi brief pointer delivery was not confirmed after 3 re-sent Enter(s)" \
+    "a bounded-out kimi delivery did not report its re-send count"
+  [ "$(wc -l < "$CASE_DIR/kimi.swallowed" | tr -d ' ')" = 4 ] \
+    || fail "the re-send budget was not bounded at the submit Enter plus FM_KIMI_DELIVERY_RESENDS=3"
+  [ ! -s "$CASE_DIR/stray-enter.log" ] \
+    || fail "an Enter landed in the live composer of a never-delivered spawn"
+  assert_present "$HOME_DIR/state/$id.meta" \
+    "a kimi delivery failure removed the task record its cleanup needs"
+  HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
+    "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "the bounded-out kimi spawn's record would not tear down"
+  assert_absent "$HOME_DIR/state/$id.meta" "teardown left the bounded-out spawn's record"
+  assert_absent "$HOME_DIR/state/$id.kimi-turnend-token" "teardown left the bounded-out spawn's hook token"
+  pass "fm-spawn: kimi delivery re-sends are bounded and a bounded-out spawn still tears down"
+}
+
+test_kimi_failed_delivery_leaves_a_tearable_task() {
+  local id rec out rc launch_dir
+  id=kimi-drop-tearable-t1
+  rec=$(make_spawn_case drop-tearable "$id")
+  read_spawn_record "$rec"
+  launch_dir=$(kimi_launch_dir "$id" "$HOME_DIR")
+  KIMI_RUNTIME_LAUNCH_DIR=$launch_dir
+  rc=0
+  out=$(FM_FAKE_KIMI_DELIVERY=no run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unconfirmed kimi delivery should fail"
+  assert_contains "$out" "kimi brief pointer delivery was not confirmed" \
+    "unconfirmed kimi delivery lacked a loud diagnostic"
+  [ ! -s "$CASE_DIR/stray-enter.log" ] \
+    || fail "kimi re-sent Enter into an empty composer while delivery stayed unconfirmed"
+  assert_present "$HOME_DIR/state/$id.meta" \
+    "failed kimi delivery removed the task record its cleanup needs"
+  assert_grep 'failed: kimi brief pointer delivery was not confirmed' <(sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/$id.status") \
+    "unconfirmed kimi delivery did not leave a supervisor-visible failure"
+  HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
+    "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "the failed kimi spawn's record would not tear down"
+  assert_absent "$HOME_DIR/state/$id.meta" "teardown left the failed spawn's record"
+  assert_absent "$HOME_DIR/state/$id.kimi-turnend-token" "teardown left the failed spawn's hook token"
+  assert_absent "$WT_DIR/.fm-kimi-turnend" "teardown left the failed spawn's token pointer"
+  assert_absent "$launch_dir" "teardown left the failed spawn's staged launch directory"
+  pass "fm-spawn: a failed kimi delivery keeps its record and tears down with no hand cleanup"
 }
 
 test_kimi_readiness_gate_precedes_pointer() {
@@ -1127,6 +1234,9 @@ test_kimi_teardown_removes_pointer_and_registry_token
 test_kimi_falls_back_to_expanded_home_binary
 test_kimi_missing_binary_refuses_before_pane_creation
 test_kimi_unconfirmed_delivery_fails_loudly
+test_kimi_delivery_wait_resends_enter_past_the_submit_budget
+test_kimi_delivery_resend_budget_is_bounded_and_the_failure_is_tearable
+test_kimi_failed_delivery_leaves_a_tearable_task
 test_kimi_readiness_gate_precedes_pointer
 test_kimi_fresh_worktree_trust_is_answered_and_verified
 test_kimi_swallowed_trust_enter_is_retried_until_the_dialog_clears
