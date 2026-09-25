@@ -809,7 +809,7 @@ The mod hides a doorbell row only when the record it names holds a current envel
 
 2.1.280 also logs the module load as `hooks module firstmate-calm@<source> loaded` (`@skills-dir` for the project auto-load path), so the live guard matches either form.
 
-Observed on 2.1.280 with the flag on, beyond the live guard below:
+Observed on 2.1.280 with the flag on, beyond the live guard:
 
 - A Stop hook that exits 2 draws `Ran 1 stop hook` with its feedback beneath; a scratch module hiding every other exposed component (`InfoNotice`, `ToolProgress`, `CommandOutput`, `TurnDuration`, `SessionMode`, `AskUserQuestion`) alongside the mod's own hooks left that row drawn, so it is not a hookable drawing on this build.
 
@@ -824,7 +824,19 @@ ok - the mod's doorbell port agrees with bin/fm-operational-input.sh doorbell-ki
 $ bash tests/fm-calm-claude-mod-plugin.test.sh
 ok - Claude Code 2.1.280 (Claude Code) validates the Calm mod strictly at its folder and its auto-load path, hooking exactly the working row, tool, user, and assistant drawings and /calm
 ok - Claude Code 2.1.280 (Claude Code) runs the Calm mod's plugin test suites clean: persisted toggle, hidden rows, working notes, and the clock-driven working ship
+```
 
+The live guard in its current form is recorded on 2.1.282 in the next section.
+
+## 2026-09-25 Claude Code 2.1.282 reproduction on the installed build
+
+The failure was reproduced end to end on the installed Claude Code 2.1.282 in a disposable lab home and project on a private tmux socket, never touching the default tmux server or any real home.
+
+- Typed path: `tmux send-keys -l` of `⁣FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate <test events>`, then Enter, left the composer showing `Removed 1 invisible character · review and press Enter to send`; a second Enter submitted it, and the stored session transcript held `FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate ...` with no U+2063 byte.
+- Launch-prompt path: launching `claude` with the encoded launch-brief envelope as the prompt argument printed `Removed 1 invisible character from the launch prompt before sending it`; the stored transcript row kept the brief text but no U+2063.
+- With the record-backed doorbell: the away-mode daemon's `inject_msg` delivered the doorbell to the real Claude pane as a composer-visible ASCII line only, and the live guard passed.
+
+```text
 $ claude --version
 2.1.282 (Claude Code)
 
