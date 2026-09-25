@@ -643,7 +643,7 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 
 # fm_backend_source: source the named backend's adapter file, once per shell.
 # Each adapter is an independently linted canonical root. The /dev/null source
-# boundaries keep runtime dispatch from importing all five adapter ASTs into
+# boundaries keep runtime dispatch from importing every adapter AST into
 # every dispatcher consumer while preserving the runtime source operations.
 # Bash 3.2 can enter an EXIT trap with status 0 after `set -e` aborts on a
 # missing or unreadable dot-sourced file, and a newer Bash can print that
