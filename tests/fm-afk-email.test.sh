@@ -283,6 +283,7 @@ test_unreadable_token_state_keeps_reply_retryable() {
   printf '{invalid json\n' > "$home/state/afk-email/sent/1.json"
   reply_body=$(printf 'FM-AFK-REPLY %s\nanswer' "$token")
   if out=$(message "$home" 301 "$AFK_OWNER_EMAIL" 'Re: Firstmate away update' "$reply_body" 2>&1); then
+
     fail "unreadable token state was treated as an untrusted message: $out"
   fi
   assert_contains "$out" 'token state could not be checked; mail poll will retry' 'token-state failure keeps mail retryable'
@@ -290,6 +291,7 @@ test_unreadable_token_state_keeps_reply_retryable() {
     || fail "reply with unreadable token state created an inbox note"
   pass "unreadable reply token state leaves mail retryable"
 }
+
 
 
 test_unmatched_reply_request_id_is_untrusted_and_ackable() {
@@ -415,6 +417,7 @@ test_processed_marker_cannot_suppress_outcomes() {
 
 
 
+
 test_invalid_away_record_does_not_enable_email() {
   local home out
   home=$(make_home invalid-record configured)
@@ -436,6 +439,7 @@ test_invalid_or_unreadable_posture_suppresses_mail() {
   home=$(make_home invalid-posture-poll configured)
   run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
   python3 - "$REPO" "$home" <<'PY' || fail "invalid or unreadable posture did not fail closed"
+
 import importlib.util
 import os
 import sys
@@ -446,6 +450,7 @@ from types import SimpleNamespace
 
 root = Path(sys.argv[1])
 home = Path(sys.argv[2])
+reply_token = sys.argv[3]
 state = home / "state"
 os.environ.update({
     "FM_HOME": str(home),
@@ -701,6 +706,7 @@ headers = {
     "7": b"From: other@example.com\r\nAuthentication-Results: mx.google.com; dmarc=pass header.from=gmail.com\r\nSubject: other sender\r\n\r\n",
     "8": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=fail header.d=gmail.com; dmarc=fail header.from=gmail.com\r\nSubject: forged From\r\n\r\n",
     "9": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=attacker.com; dmarc=fail header.from=gmail.com\r\nSubject: unaligned signer\r\n\r\n",
+
 }
 bodies = {
     "1": b"From: outsider@example.com\r\nSubject: outside\r\nContent-Type: text/plain\r\n\r\nprivate body",
@@ -731,6 +737,7 @@ bodies = {
     "8": b"From: johnpoyser@gmail.com\r\nSubject: forged From\r\nContent-Type: text/plain\r\n\r\nshould not be read",
     "9": b"From: johnpoyser@gmail.com\r\nSubject: unaligned signer\r\nContent-Type: text/plain\r\n\r\nshould not be read",
 
+
 }
 class FakeMailbox:
     untagged_responses = {"UIDVALIDITY": [b"44"]}
@@ -747,6 +754,7 @@ class FakeMailbox:
     def uid(self, command, uid, fetch_spec):
         if command == "search":
             return "OK", [self.search_ids]
+
 
         key = uid.decode()
         if "RFC822.SIZE" in fetch_spec:
@@ -778,6 +786,7 @@ assert initial_rows["3"][4] == "ok", initial_rows["3"]
 assert "body exceeds 256 KiB" in initial_rows["3"][3], initial_rows["3"]
 assert initial_rows["4"][4] == "ok", initial_rows["4"]
 assert "answer exceeds 8,000 characters" in initial_rows["4"][3], initial_rows["4"]
+
 assert "reply in mail UID 4 rejected; answer exceeds 8000 characters" in initial_error.getvalue()
 notes = list((state / "inbox").glob("*.note"))
 assert len(notes) == 1, notes
@@ -785,6 +794,7 @@ note = notes[0].read_text(encoding="utf-8").split("--\n", 1)[1]
 words = note.split("Captain's words:\n", 1)[1].rstrip("\n")
 assert words == "a" * 8000 and len(words) == 8000, len(words)
 assert mailbox.body_fetches == ["2", "4"], mailbox.body_fetches
+
 
 mailbox.body_fetches.clear()
 mailbox.fail_body_fetch = True
@@ -796,6 +806,7 @@ assert poll_lines[0] == "uidvalidity\t44", poll_lines
 poll_rows = {fields[0]: fields for fields in (line.split("\t") for line in poll_lines[1:])}
 assert set(poll_rows) == {"1", "2", "3", "4", "6", "7", "8", "9"}, poll_rows
 assert all(poll_rows[uid][4] == "ignored" for uid in ("1", "6", "7", "8", "9")), poll_rows
+
 
 assert poll_rows["2"][4] == "degraded", poll_rows["2"]
 assert poll_rows["3"][4] == "ok", poll_rows["3"]
@@ -811,10 +822,12 @@ recovery_lines = recovery_output.getvalue().splitlines()
 recovery_rows = {fields[0]: fields for fields in (line.split("\t") for line in recovery_lines[1:])}
 assert set(recovery_rows) == {"1", "2", "3", "4", "6", "7", "8", "9"}, recovery_rows
 assert all(recovery_rows[uid][4] == "ignored" for uid in ("1", "6", "7", "8", "9")), recovery_rows
+
 assert recovery_rows["2"][4] == "ok", recovery_rows["2"]
 assert recovery_rows["4"][4] == "ok", recovery_rows["4"]
 assert "reply in mail UID 4 rejected; answer exceeds 8000 characters" in recovery_error.getvalue()
 assert mailbox.body_fetches == ["2", "4"], mailbox.body_fetches
+
 
 recipient = os.environ.pop("FM_AFK_EMAIL_TO")
 try:
@@ -829,6 +842,7 @@ try:
     outage_rows = {fields[0]: fields for fields in (line.split("\t") for line in outage_lines[1:])}
     assert set(outage_rows) == {"5"}, outage_rows
     assert outage_rows["5"][4] == "degraded", outage_rows["5"]
+
     assert mailbox.body_fetches == [], mailbox.body_fetches
 
     (state / ".mail-seen").write_text("uidvalidity=44\n1\n2\n3\n4\n5\n6\n7\n8\n9\n", encoding="utf-8")
@@ -880,10 +894,12 @@ finally:
 handoff_lines = handoff_output.getvalue().splitlines()
 handoff_rows = {fields[0]: fields for fields in (line.split("\t") for line in handoff_lines[1:])}
 assert set(handoff_rows) == {"1", "2", "3", "4", "6", "7", "8", "9"}, handoff_rows
+
 assert handoff_rows["2"][4] == "degraded", handoff_rows["2"]
 assert handoff_rows["4"][4] == "degraded", handoff_rows["4"]
 assert "away-email reply handoff failed" in handoff_error.getvalue(), handoff_error.getvalue()
 assert mailbox.body_fetches == ["2", "4"], mailbox.body_fetches
+
 
 
 
@@ -1026,6 +1042,32 @@ PY
 
 }
 
+test_over_limit_reply_is_explicitly_rejected() {
+  local home entered send_index token long_answer reply_body out used
+  home=$(make_home oversized-answer configured)
+  run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
+  entered=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field entered_epoch)
+  write_outcomes "$home" "$entered"
+  run_email "$home" queue-unprocessed >/dev/null || fail "queueing outcomes failed"
+  send_index=$(count_sends)
+  run_email "$home" flush >/dev/null || fail "sending outcomes failed"
+  token=$(grep -oE 'FM-AFK-[A-Za-z0-9_-]{16}' "$CAPTURE/$send_index.txt" | sed -n '1p')
+  [ -n "$token" ] || fail "sent update omitted its reply token"
+  long_answer=$(python3 -c 'print("a" * 8001, end="")')
+  reply_body=$(printf 'FM-AFK-REPLY %s\n%s' "$token" "$long_answer")
+  out=$(message "$home" 401 'owner@example.com' 'Re: Firstmate away update' "$reply_body" 2>&1) \
+    || fail "over-limit reply could not be reported as rejected: $out"
+  assert_contains "$out" 'reply in mail UID 401 rejected; answer exceeds 8000 characters' \
+    'an over-limit answer is explicitly rejected'
+  assert_contains "$out" 'received 0 verified and 1 untrusted' 'the over-limit answer is not accepted'
+  [ -z "$(find "$home/state/inbox" -maxdepth 1 -name '*.note' -print -quit 2>/dev/null)" ] \
+    || fail "over-limit answer created a verified inbox note"
+  used=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("used_epoch", ""))' \
+    "$home/state/afk-email/sent/1.json")
+  [ -z "$used" ] || fail "over-limit answer consumed its one-time code"
+  pass "over-limit answers are explicitly rejected without consuming their code"
+}
+
 test_reply_survives_crash_after_smtp_acceptance() {
   local home entered accepted_body status token expired_token reply_body out pending pending2 note used_before used_after
   home=$(make_home send-crash configured)
@@ -1095,11 +1137,20 @@ PY
   [ -n "$note" ] || fail "pending-token reply did not enter the captain inbox"
   assert_contains "$(cat "$note")" 'Please merge the UI pull request' \
     'the pending-token reply reaches the durable captain inbox'
+  python3 - "$pending" <<'PY'
+import json, sys
+path = sys.argv[1]
+item = json.load(open(path))
+item['sent_epoch'] = item['send_started_epoch']
+item['expires_epoch'] = item['send_expires_epoch']
+json.dump(item, open(path, 'w'))
+PY
   python3 - "$pending2" <<'PY'
 import json, sys
 path = sys.argv[1]
 item = json.load(open(path))
-item['send_expires_epoch'] = 1
+item['send_started_epoch'] = 1
+item['send_expires_epoch'] = 2
 json.dump(item, open(path, 'w'))
 PY
   reply_body=$(printf 'FM-AFK-REPLY %s\nexpired pending answer' "$expired_token")
@@ -1123,6 +1174,7 @@ PY
 test_expired_and_unknown_codes_are_untrusted() {
   local home out entered token sent reply_body send_index
 
+
   home=$(make_home expiry configured)
   run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
   entered=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field entered_epoch)
@@ -1132,6 +1184,7 @@ test_expired_and_unknown_codes_are_untrusted() {
   run_email "$home" flush >/dev/null || fail "flush failed"
   sent="$home/state/afk-email/sent/1.json"
   token=$(grep -oE 'FM-AFK-[A-Za-z0-9_-]{16}' "$CAPTURE/$send_index.txt" | sed -n '1p')
+
 
   python3 - "$sent" <<'PY'
 import json, sys
@@ -1155,6 +1208,7 @@ test_branch_prompt_preserves_wake_after_verification_error() {
   local prompt
   prompt=$("$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generation failed"
   # shellcheck disable=SC2016
+
   printf '%s' "$prompt" | python3 -c '
 import sys
 steps = [line for line in sys.stdin.read().splitlines() if line.startswith("6. Acknowledge")]
@@ -1165,6 +1219,7 @@ clauses = [
     "leave both the note and its wake unacknowledged",
     "do not run the `--ack-through` command",
     "Otherwise, after handling any captain inbox note, including one with `email_handoff:false`",
+
     "run `bin/fm-inbox.sh drain --ack <id>`",
     "run the exact `--ack-through` command",
 ]
@@ -1173,6 +1228,7 @@ assert positions == sorted(positions), step
 ' || fail "generated branch prompt can consume a wake after verification failure"
   pass "the generated branch prompt preserves verification-failed wakes"
 }
+
 
 
 test_short_configured_secret_is_redacted_before_storage_and_send() {
@@ -1336,6 +1392,7 @@ test_processed_marker_cannot_suppress_outcomes
 
 
 
+
 test_invalid_away_record_does_not_enable_email
 test_invalid_or_unreadable_posture_suppresses_mail
 test_read_gates_unauthenticated_bodies_during_away
@@ -1349,6 +1406,7 @@ test_short_configured_secret_is_redacted_before_storage_and_send
 test_flush_holds_away_lock_until_send_completes
 test_receive_batch_holds_away_lock_through_reply_handoff
 test_branch_prompt_preserves_wake_after_verification_error
+
 
 
 

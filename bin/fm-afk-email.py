@@ -278,6 +278,7 @@ def queue_unprocessed():
         print("fm-afk-email: outcome markers are invalid; pending email was not queued", file=sys.stderr)
         return 1
 
+
     PENDING.mkdir(mode=0o700, parents=True, exist_ok=True)
     SENT.mkdir(mode=0o700, parents=True, exist_ok=True)
     queued = 0
@@ -571,6 +572,7 @@ def validate_handoff_state_item(path, store):
             or item["expires_epoch"] != item["send_expires_epoch"]
         ):
 
+
             raise ValueError("away-email state is malformed")
     else:
         if (
@@ -738,6 +740,7 @@ def token_record(token):
                 continue
             if store == "pending":
 
+
                 started = item.get("send_started_epoch")
                 expires = item.get("send_expires_epoch")
                 if not isinstance(started, int) or not isinstance(expires, int):
@@ -750,6 +753,7 @@ def token_record(token):
             raise ValueError("away-email token state is ambiguous")
         if matches:
             return matches[0]
+
 
     return None, None
 
@@ -803,6 +807,7 @@ def receive_messages(messages, posture, config):
         token, answer = extract_reply(str(message.get("body", ""))) if sender == configured_sender else (None, "")
         if token and len(answer) > MAX_REPLY_CHARS:
             print(f"fm-afk-event\treply-rejected\t{uid}\tanswer-too-long", file=sys.stderr)
+
             print(
                 f"fm-afk-email: reply in mail UID {uid} rejected; answer exceeds {MAX_REPLY_CHARS} characters",
                 file=sys.stderr,
@@ -814,6 +819,7 @@ def receive_messages(messages, posture, config):
         except (OSError, ValueError):
             print("fm-afk-email: away-email token state could not be checked; mail poll will retry", file=sys.stderr)
             return 1
+
 
 
         now = int(time.time())
@@ -846,6 +852,7 @@ def receive_messages(messages, posture, config):
             if "send_started_epoch" in item:
                 item.pop("sent_epoch", None)
                 item.pop("expires_epoch", None)
+
 
             item["handoff_request_id"] = request_id
             item["handoff_mail_key"] = mail_key

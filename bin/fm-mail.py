@@ -64,6 +64,7 @@ class AfkBodyFetchError(Exception):
 
 
 
+
 class AfkBodyFetchError(Exception):
     pass
 
@@ -617,6 +618,7 @@ def cmd_poll_list():
                             subj = clean(
                                 f'[away-mode reply not processed: message body exceeds 256 KiB] {subj}')
 
+
                     except AfkBodyFetchError:
                         raise
                     except Exception as error:
@@ -722,6 +724,7 @@ def cmd_poll_list():
                     ]
                 if result.stderr:
                     sys.stderr.write(result.stderr)
+
 
 
         print('uidvalidity\t%s' % uidv)

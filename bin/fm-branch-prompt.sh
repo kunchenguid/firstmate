@@ -59,6 +59,7 @@ Handle it start to finish in one turn sequence:
 6. Acknowledge only after the report succeeds. If step 4's verifier exited nonzero, leave both the note and its wake unacknowledged; do not run the `--ack-through` command. Otherwise, after handling any captain inbox note, including one with `email_handoff:false`, run `bin/fm-inbox.sh drain --ack <id>`, then run the exact `--ack-through` command the drain printed as WAKE_ACK_REQUIRED.
 
 
+
 7. Release every lease you claimed: `bin/fm-lease.sh release <task>`.
 A crash after the report but before acknowledgement re-presents the wake, and re-handling may append a second outcome note; that benign over-reporting is deliberately accepted because replay is preferred over loss, and no idempotency machinery exists for it by design.
 
