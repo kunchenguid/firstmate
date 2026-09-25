@@ -1205,7 +1205,9 @@ export default function (pi: ExtensionAPI) {
       return new Container();
     },
     execute: async () => {
-      const result = await reconcileSupervisionAfterExplicitArm(activateOwnedWatch(generation));
+      const armResult = activateOwnedWatch(generation);
+      const result = await reconcileSupervisionAfterExplicitArm(armResult);
+      if (armResult.ok && !result.ok) throw new Error(result.message);
       return {
         content: [{ type: "text", text: result.message }],
         details: result,

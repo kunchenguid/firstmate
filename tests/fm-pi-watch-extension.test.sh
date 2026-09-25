@@ -190,24 +190,26 @@ if (!tool.promptSnippet.includes("ordinary re-arming is automatic")) throw new E
 if (!tool.promptGuidelines.some((guideline) => guideline.includes("ordinary signal, stale, check, or heartbeat handling"))) {
   throw new Error(`tool guidelines omitted ordinary-notification prevention: ${tool.promptGuidelines}`);
 }
-const result = await tool.execute("tool-call-1", {}, undefined, undefined, {});
-if (!Array.isArray(result.content) || result.content[0]?.type !== "text") {
-  throw new Error(`invalid tool content: ${JSON.stringify(result)}`);
+let missingError = null;
+try {
+  await tool.execute("tool-call-1", {}, undefined, undefined, {});
+} catch (error) {
+  missingError = error;
 }
-if (!result.content[0].text.includes("started Pi extension arm child")) {
-  throw new Error(`unexpected tool text: ${result.content[0].text}`);
+if (!(missingError instanceof Error)) {
+  throw new Error("missing reconciliation owner returned successful tool semantics");
 }
-if (!result.content[0].text.includes("future ordinary re-arms are automatic")) {
-  throw new Error(`initial tool result omitted automatic continuation guidance: ${result.content[0].text}`);
+if (!missingError.message.includes("started Pi extension arm child")) {
+  throw new Error(`unexpected tool error: ${missingError.message}`);
 }
-if (!result.content[0].text.includes("only after a later notification says the cycle is missing, failed, or unhealthy")) {
-  throw new Error(`initial tool result omitted the repair-only condition: ${result.content[0].text}`);
+if (!missingError.message.includes("future ordinary re-arms are automatic")) {
+  throw new Error(`initial tool error omitted automatic continuation guidance: ${missingError.message}`);
 }
-if (result.details?.ok !== false || result.details?.message !== result.content[0].text) {
-  throw new Error(`missing reconciliation owner did not fail closed: ${JSON.stringify(result.details)}`);
+if (!missingError.message.includes("only after a later notification says the cycle is missing, failed, or unhealthy")) {
+  throw new Error(`initial tool error omitted the repair-only condition: ${missingError.message}`);
 }
-if (!result.content[0].text.includes("no supervision listener accepted the reconciliation request")) {
-  throw new Error(`missing reconciliation-owner failure: ${result.content[0].text}`);
+if (!missingError.message.includes("no supervision listener accepted the reconciliation request")) {
+  throw new Error(`missing reconciliation-owner failure: ${missingError.message}`);
 }
 let declinedRequests = 0;
 pi.events = {
@@ -215,19 +217,44 @@ pi.events = {
     if (channel === "fm-branch-supervision:reconcile") declinedRequests += 1;
   },
 };
-const declined = await tool.execute("tool-call-2", {}, undefined, undefined, {});
-if (declinedRequests !== 1 || declined.details?.ok !== false) {
-  throw new Error(`declined reconciliation did not fail closed: ${JSON.stringify(declined.details)}`);
+let declinedError = null;
+try {
+  await tool.execute("tool-call-2", {}, undefined, undefined, {});
+} catch (error) {
+  declinedError = error;
 }
-if (!declined.content[0]?.text.includes("no supervision listener accepted the reconciliation request")) {
-  throw new Error(`declined reconciliation omitted its failure: ${declined.content[0]?.text}`);
+if (declinedRequests !== 1 || !(declinedError instanceof Error)) {
+  throw new Error("declined reconciliation returned successful tool semantics");
+}
+if (!declinedError.message.includes("no supervision listener accepted the reconciliation request")) {
+  throw new Error(`declined reconciliation omitted its failure: ${declinedError.message}`);
+}
+pi.events = {
+  emit(channel, request) {
+    if (channel === "fm-branch-supervision:reconcile") {
+      request.accept(Promise.reject(new Error("reconciliation exploded")));
+    }
+  },
+};
+let rejectedError = null;
+try {
+  await tool.execute("tool-call-3", {}, undefined, undefined, {});
+} catch (error) {
+  rejectedError = error;
+}
+if (!(rejectedError instanceof Error)) {
+  throw new Error("rejected reconciliation returned successful tool semantics");
+}
+if (!rejectedError.message.includes("explicit repair could not reconcile supervision outcomes") ||
+    !rejectedError.message.includes("reconciliation exploded")) {
+  throw new Error(`rejected reconciliation omitted its failure: ${rejectedError.message}`);
 }
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi custom tool must fail closed when reconciliation is absent or declined"
+  expect_code 0 "$status" "Pi custom tool must fail when reconciliation is absent, declined, or rejected"
   [ -z "$out" ] || fail "Pi fail-closed tool test printed output: $out"
-  pass "Pi custom tool fails closed without a reconciliation owner"
+  pass "Pi custom tool reports reconciliation failures through Pi's error protocol"
 }
 
 test_pi_redundant_tool_call_is_owned_noop() {
@@ -340,6 +367,11 @@ const pi = {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
   sendUserMessage: async () => {},
+  events: {
+    emit(channel, request) {
+      if (channel === "fm-branch-supervision:reconcile") request.accept(Promise.resolve());
+    },
+  },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -421,6 +453,11 @@ const pi = {
       : 0;
     deliveryStarted = true;
     await deliveryBlocked;
+  },
+  events: {
+    emit(channel, request) {
+      if (channel === "fm-branch-supervision:reconcile") request.accept(Promise.resolve());
+    },
   },
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
@@ -515,7 +552,12 @@ const pi = {
     prompts.push(message);
     writeFileSync(process.env.FM_ARM_LOG, "delivery\n", { flag: "a" });
   },
-  events: { on() {}, emit() {} },
+  events: {
+    on() {},
+    emit(channel, request) {
+      if (channel === "fm-branch-supervision:reconcile") request.accept(Promise.resolve());
+    },
+  },
 };
 
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
@@ -596,6 +638,7 @@ async function runScenario(withAcceptor) {
       for (const handler of handlers.get(channel) ?? []) handler(data);
     },
   };
+  bus.on("fm-branch-supervision:reconcile", (request) => request.accept(Promise.resolve()));
   if (withAcceptor) {
     bus.on("fm-branch-supervision:dispatch", (offer) => {
       offers.push({ message: offer.message, projects: offer.projects });
@@ -703,6 +746,7 @@ const bus = {
     for (const handler of handlers.get(channel) ?? []) handler(data);
   },
 };
+bus.on("fm-branch-supervision:reconcile", (request) => request.accept(Promise.resolve()));
 bus.on("fm-branch-supervision:dispatch", (offer) => {
   offers.push({ message: offer.message, projects: offer.projects, heartbeat: offer.heartbeat, eligible: offer.eligible });
   offer.accept();
@@ -721,6 +765,7 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\theartbeat\theartbeat\theartbeat\n");
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+bus.on("fm-branch-supervision:reconcile", (request) => request.accept(Promise.resolve()));
 await tool.execute("tool-call-branch-heartbeat", {}, undefined, undefined, {});
 for (let i = 0; i < 250 && offers.length === 0; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -806,6 +851,7 @@ writeFileSync(
 );
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+bus.on("fm-branch-supervision:reconcile", (request) => request.accept(Promise.resolve()));
 await tool.execute("tool-call-heartbeat-mixed-queue", {}, undefined, undefined, {});
 // The offer is what this asserts on, so wait for it and then give any
 // erroneous main delivery a real chance to land before calling it absent.
@@ -906,6 +952,7 @@ writeFileSync(
 );
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+bus.on("fm-branch-supervision:reconcile", (request) => request.accept(Promise.resolve()));
 await tool.execute("tool-call-main-only-check", {}, undefined, undefined, {});
 for (let i = 0; i < 250 && !prompt; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1001,6 +1048,7 @@ writeFileSync(
 );
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+bus.on("fm-branch-supervision:reconcile", (request) => request.accept(Promise.resolve()));
 await tool.execute("tool-call-captain-held-signal", {}, undefined, undefined, {});
 for (let i = 0; i < 250 && !prompt; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1091,6 +1139,7 @@ writeFileSync(
 );
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+bus.on("fm-branch-supervision:reconcile", (request) => request.accept(Promise.resolve()));
 await tool.execute("tool-call-later-stale-alias", {}, undefined, undefined, {});
 for (let i = 0; i < 250 && offers.length === 0; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1189,6 +1238,7 @@ writeFileSync(
 );
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+bus.on("fm-branch-supervision:reconcile", (request) => request.accept(Promise.resolve()));
 await tool.execute("tool-call-distinct-mixed-batch", {}, undefined, undefined, {});
 for (let i = 0; i < 250 && offers.length === 0; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1279,6 +1329,7 @@ writeFileSync(
 );
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+bus.on("fm-branch-supervision:reconcile", (request) => request.accept(Promise.resolve()));
 await tool.execute("tool-call-heartbeat-needs-decision", {}, undefined, undefined, {});
 for (let i = 0; i < 250 && offers.length === 0; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1358,6 +1409,7 @@ const pi = {
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+bus.on("fm-branch-supervision:reconcile", (request) => request.accept(Promise.resolve()));
 await tool.execute("tool-call-heartbeat-restoration-failure", {}, undefined, undefined, {});
 for (let i = 0; i < 500 && !prompt; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1524,6 +1576,7 @@ writeFileSync(
 );
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+bus.on("fm-branch-supervision:reconcile", (request) => request.accept(Promise.resolve()));
 await tool.execute("tool-call-away", {}, undefined, undefined, {});
 for (let i = 0; i < 250 && offers.length === 0 && !prompt; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1670,6 +1723,7 @@ const pi = {
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+pi.events = { emit: (channel, request) => channel === "fm-branch-supervision:reconcile" && request.accept(Promise.resolve()) };
 await tool.execute("tool-call-handling-fail", {}, undefined, undefined, {});
 for (let i = 0; i < 250 && !prompt.includes("handling delivery confirmation was rejected"); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -1741,6 +1795,7 @@ const pi = {
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+pi.events = { emit: (channel, request) => channel === "fm-branch-supervision:reconcile" && request.accept(Promise.resolve()) };
 await tool.execute("tool-call-hung-successor", {}, undefined, undefined, {});
 // Three unready successors each cost the full readiness budget, so wait well
 // past their sum. The wait ends as soon as the wake lands.
@@ -1815,6 +1870,7 @@ const pi = {
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+pi.events = { emit: (channel, request) => channel === "fm-branch-supervision:reconcile" && request.accept(Promise.resolve()) };
 await tool.execute("tool-call-unretired-successor", {}, undefined, undefined, {});
 for (let i = 0; i < 500 && !prompt; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1903,6 +1959,7 @@ async function waitFor(predicate, message) {
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+pi.events = { emit: (channel, request) => channel === "fm-branch-supervision:reconcile" && request.accept(Promise.resolve()) };
 await tool.execute("tool-call-late-close", {}, undefined, undefined, {});
 await waitFor(
   () => existsSync(process.env.FM_UNRETIRED_READY_FILE),
@@ -1975,6 +2032,7 @@ const pi = {
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+pi.events = { emit: (channel, request) => channel === "fm-branch-supervision:reconcile" && request.accept(Promise.resolve()) };
 await tool.execute("tool-call-empty", {}, undefined, undefined, {});
 for (let i = 0; i < 250; i += 1) {
   const rows = existsSync(process.env.FM_ARM_LOG)
@@ -2030,6 +2088,7 @@ const pi = {
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+pi.events = { emit: (channel, request) => channel === "fm-branch-supervision:reconcile" && request.accept(Promise.resolve()) };
 await tool.execute("tool-call-established-empty", {}, undefined, undefined, {});
 for (let i = 0; i < 250 && !prompt; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -2084,6 +2143,7 @@ const lock = `${process.env.FM_HOME}/state/.lock`;
 writeFileSync(lock, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+pi.events = { emit: (channel, request) => channel === "fm-branch-supervision:reconcile" && request.accept(Promise.resolve()) };
 await tool.execute("tool-call-lock-close", {}, undefined, undefined, {});
 const other = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
 try {
@@ -2930,6 +2990,10 @@ const pi = {
   events: {
     on() {},
     emit(event, data) {
+      if (event === "fm-branch-supervision:reconcile") {
+        data.accept(Promise.resolve());
+        return;
+      }
       if (event !== "fm-branch-supervision:dispatch") return;
       branchAccepted = true;
       data.accept(branchSettlement);
@@ -3375,6 +3439,7 @@ const pi = {
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
+pi.events = { emit: (channel, request) => channel === "fm-branch-supervision:reconcile" && request.accept(Promise.resolve()) };
 await tool.execute("tool-call-exit", {}, undefined, undefined, {});
 for (let i = 0; i < 250 && !existsSync(process.env.FM_CHILD_PID_FILE); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -3383,6 +3448,7 @@ if (!existsSync(process.env.FM_CHILD_PID_FILE)) throw new Error("arm child did n
 const firstChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
 await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
 await handlers.get("session_start")?.({ type: "session_start" }, {});
+pi.events = { emit: (channel, request) => channel === "fm-branch-supervision:reconcile" && request.accept(Promise.resolve()) };
 await tool.execute("tool-call-replacement", {}, undefined, undefined, {});
 for (let i = 0; i < 250; i += 1) {
   const currentChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
