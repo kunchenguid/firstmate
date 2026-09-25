@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Strip AI co-author and generated-with trailers from a commit message, and
+# Strip AI co-author trailers from a commit message, and
 # install that strip as a per-task git commit-msg hook for a fleet launch.
 #
 # Usage:
@@ -70,27 +70,17 @@ trim_space() {
   printf '%s' "$s"
 }
 
-# True when this line is AI attribution that must not reach a commit object:
-# an AI Co-Authored-By trailer, or a line that begins with the generated-with
-# form. Matches known product names and exact observed bot addresses only; an
+# True when this line is an AI Co-Authored-By trailer that must not reach a
+# commit object. Matches known product names and exact observed bot addresses only; an
 # address is added when a runtime is seen emitting it, never guessed from a
 # vendor domain, so a human co-author who works at a vendor is kept. A human
-# whose name or address merely contains a substring such as "ai" is kept, as is
-# prose that merely mentions the phrase mid-line. A "Made with <product>" line
-# is deliberately not matched: no observed incident produced one, and a guessed
-# spelling list is not coverage.
+# whose name or address merely contains a substring such as "ai" is kept.
 fm_is_ai_attribution_line() {
   local raw=$1 lowered rest name email
   raw=${raw%$'\r'}
   raw=$(trim_space "$raw")
   [ -n "$raw" ] || return 1
   lowered=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
-  lowered=${lowered#"${lowered%%[[:alnum:]]*}"}
-  case "$lowered" in
-  'generated with '*claude* | 'generated-by:'*claude* | 'generated-by:'*cursor*)
-    return 0
-    ;;
-  esac
   case "$lowered" in
   co-authored-by:*) ;;
   *) return 1 ;;

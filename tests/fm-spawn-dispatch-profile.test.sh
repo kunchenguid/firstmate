@@ -90,7 +90,7 @@ make_seeded_secondmate_home() {
 ai_trailer_hooks_prefix() {  # <home> <id>
   local state
   state=$(CDPATH='' cd -- "$1/state" && pwd -P) || fail "cannot resolve state dir $1/state"
-  printf "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='%s' " "$state/$2.git-hooks"
+  printf "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='%s'; " "$state/$2.git-hooks"
 }
 
 run_spawn() {
@@ -395,6 +395,29 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   # else may rewrite the captain's own command.
   [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; $(ai_trailer_hooks_prefix "$HOME_DIR" "$id")custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
+}
+
+test_chained_raw_launch_strips_ai_trailer_in_every_step() {
+  local rec id out status launch body
+  id=chained-raw-z15
+  rec=$(make_spawn_case chained-raw claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "cd . && git commit -q --allow-empty --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: chained raw launch'")
+  status=$?
+  expect_code 0 "$status" "chained raw launch should spawn: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  (
+    cd "$WT_DIR" || exit 1
+    unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+    fm_git_identity 'Captain Tests' 'captain@example.invalid'
+    bash -c "$launch"
+  ) || fail "executing the chained raw launch failed"$'\n'"launch: $launch"
+  body=$(git -C "$WT_DIR" log -1 --format=%B)
+  assert_contains "$body" "fix: chained raw launch" "the chained launch did not commit"
+  assert_not_contains "$body" "cursoragent@cursor.com" "the AI trailer reached a commit made after the first step of a chained raw launch"
+  pass "a chained raw launch commits through the AI-trailer strip in every step"
 }
 
 test_claude_threads_model_and_effort() {
@@ -1501,6 +1524,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_threads_model_and_max_effort

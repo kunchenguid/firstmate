@@ -4916,9 +4916,10 @@ if [ "$KIND" = secondmate ]; then
 fi
 # Pane-scoped override: git in this worker reads our commit-msg strip without
 # rewriting the project's core.hooksPath. GIT_CONFIG_* takes precedence over
-# config files and is inherited by child git processes. Prefix, never export
-# into this spawn process, so firstmate's own git is unchanged.
-LAUNCH="GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=$(shell_quote "$GIT_HOOKS_DIR") $LAUNCH"
+# config files and is inherited by child git processes. An export statement
+# inside the pane command, like COMPACT_ADVISER_DISABLE below, so it reaches
+# every step of a compound raw launch while firstmate's own git is unchanged.
+LAUNCH="export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=$(shell_quote "$GIT_HOOKS_DIR"); $LAUNCH"
 # Every agent this fleet launches - crewmate, scout, and secondmate, on a fresh
 # spawn and on a relaunch alike - runs with the compact-adviser kill switch on.
 # This is an export statement rather than a forwarded ambient name or a

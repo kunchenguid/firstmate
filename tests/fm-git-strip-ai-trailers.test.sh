@@ -48,21 +48,6 @@ test_cursor_trailer_does_not_reach_the_commit_object() {
   pass "a Cursor --trailer commit object has no AI co-author and keeps the captain identity"
 }
 
-test_claude_generated_with_line_is_stripped() {
-  local repo hooks body
-  repo="$TMP_ROOT/claude-object"
-  make_repo "$repo"
-  hooks="$TMP_ROOT/hooks-claude"
-  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
-  printf 'note\n' >>"$repo/README.md"
-  git -C "$repo" add README.md
-  with_hooks_env "$hooks" git -C "$repo" commit -q -m "$(printf '%s\n' 'fix: typed clean' '' 'Co-Authored-By: Claude <noreply@anthropic.com>' '' 'Generated with [Claude Code](https://claude.com/claude-code)')"
-  body=$(git -C "$repo" log -1 --format=%B)
-  assert_not_contains "$body" "Co-Authored-By: Claude" "Claude trailer reached the commit object"
-  assert_not_contains "$body" "Generated with" "Claude generated-with line reached the commit object"
-  assert_contains "$body" "fix: typed clean" "subject was rewritten"
-  pass "a Claude generated-with commit object has no AI attribution"
-}
 
 test_human_coauthor_is_kept() {
   local repo hooks body
@@ -249,18 +234,6 @@ test_pane_hookspath_does_not_reroute_another_repository() {
   pass "a pane GIT_CONFIG hooksPath still chains the repository git is actually in"
 }
 
-test_prose_mentioning_generated_with_survives() {
-  local msg out
-  msg="$TMP_ROOT/prose.txt"
-  printf '%s\n' 'fix: subject' '' 'This paragraph was not generated with Claude Code, it was typed.' \
-    '🤖 Generated with [Claude Code](https://claude.com/claude-code)' >"$msg"
-  "$STRIP" "$msg" || fail "strip should succeed"
-  out=$(cat "$msg")
-  assert_contains "$out" "This paragraph was not generated with Claude Code, it was typed." \
-    "ordinary body prose mentioning the phrase was deleted"
-  assert_not_contains "$out" "Generated with [Claude Code]" "the real generated-with line survived"
-  pass "only a line that begins with the attribution form is stripped"
-}
 
 test_strip_msgfile_alone_does_not_rewrite_author_fields() {
   local msg
@@ -273,7 +246,6 @@ test_strip_msgfile_alone_does_not_rewrite_author_fields() {
 }
 
 test_cursor_trailer_does_not_reach_the_commit_object
-test_claude_generated_with_line_is_stripped
 test_human_coauthor_is_kept
 test_human_at_a_vendor_domain_is_kept
 test_hook_manager_cannot_displace_the_strip
@@ -283,7 +255,6 @@ test_relative_project_hookspath_still_runs
 test_inherited_hookspath_env_does_not_decide_the_chain
 test_project_hook_generated_after_install_still_runs
 test_pane_hookspath_does_not_reroute_another_repository
-test_prose_mentioning_generated_with_survives
 test_strip_msgfile_alone_does_not_rewrite_author_fields
 
 echo "# all fm-git-strip-ai-trailers tests passed"
