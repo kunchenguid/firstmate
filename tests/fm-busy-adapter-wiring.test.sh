@@ -155,6 +155,119 @@ test_pi_extension_stale_incarnation_rejected() {
   pass "pi extension events from a superseded incarnation are rejected as stale"
 }
 
+# drive_pi_ext_scenario <ext-path> <async-root>: load the generated Pi
+# extension in a plain Node host with a working pi.events bus and play one
+# pi-subagents delegation scenario, printing the busy record at each
+# checkpoint. Async run records live under <async-root>/<run>/status.json,
+# the layout pi-subagents writes.
+drive_pi_ext_scenario() {
+  EXT_PATH="$1" ASYNC_ROOT="$2" FM_PI_SUBAGENT_POLL_MS=40 node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
+const handlers = {};
+const listeners = {};
+const events = {
+  on: (name, fn) => { (listeners[name] ??= []).push(fn); },
+  emit: (name, data) => { for (const fn of listeners[name] ?? []) fn(data); },
+};
+mod.default({ on: (name, fn) => { handlers[name] = fn; }, events });
+const ctx = { isIdle: () => true };
+const stateDir = process.env.EXT_PATH.replace(/\/[^/]*$/, "");
+const id = process.env.EXT_PATH.replace(/^.*\//, "").replace(/\.pi-ext\.ts$/, "");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const rec = () => {
+  const line = readFileSync(stateDir + "/" + id + ".busy-state", "utf8").trim();
+  const f = Object.fromEntries(line.split(" ").slice(1).map((kv) => kv.split("=")));
+  return f.state + "/" + f.event;
+};
+const runDir = (run, state, pid) => {
+  const dir = process.env.ASYNC_ROOT + "/" + run;
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(dir + "/status.json", JSON.stringify({ runId: run, state, pid }));
+  return dir;
+};
+const deadPid = spawnSync("true").pid;
+const started = (run, pid, asyncDir) => events.emit("subagent:async-started", { id: run, pid, asyncDir });
+const completed = (run) => events.emit("subagent:async-complete", { runId: run, success: true });
+const settle = async () => { await handlers["agent_settled"]({}, ctx); await sleep(60); };
+const turn = async () => { await handlers["agent_start"]({}, ctx); await sleep(60); };
+const log = (label) => console.log(label + " " + rec());
+
+await turn();
+started("r1", process.pid, runDir("r1", "running", process.pid));
+await settle();
+log("delegated-settle");
+await sleep(200);
+console.log("progress-ticked " + existsSync(stateDir + "/" + id + ".progress"));
+runDir("r1", "complete", process.pid);
+await sleep(200);
+log("run-record-finished");
+
+await turn();
+started("r2", process.pid, runDir("r2", "running", process.pid));
+await settle();
+log("second-delegation");
+runDir("r2", "complete", process.pid);
+completed("r2");
+await sleep(60);
+log("completion-event");
+
+await turn();
+started("r3", deadPid, runDir("r3", "running", deadPid));
+await settle();
+log("dead-runner");
+
+await turn();
+started("r4", process.pid, runDir("r4", "paused", process.pid));
+await settle();
+log("paused-run");
+
+await turn();
+started("r5", process.pid, runDir("r5", "running", process.pid));
+await settle();
+await turn();
+log("woken-turn");
+runDir("r5", "complete", process.pid);
+completed("r5");
+await sleep(200);
+log("complete-during-turn");
+await settle();
+log("turn-settles");
+process.exit(0);
+EOF
+}
+
+test_pi_extension_counts_live_subagent_runs_as_busy() {
+  local rec id=busy-pi-deleg out state ext
+  rec=$(make_spawn_case pi-delegated pi "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "pi spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.pi-ext.ts"
+  out=$(drive_pi_ext_scenario "$ext" "$CASE_DIR/async-runs") || fail "delegation scenario failed: $out"
+  expect_scenario_line() {  # <label> <want>
+    printf '%s\n' "$out" | grep -qx "$1 $2" \
+      || fail "$1: expected '$2' in scenario output:
+$out"
+  }
+  expect_scenario_line delegated-settle busy/subagents-running
+  expect_scenario_line progress-ticked true
+  expect_scenario_line run-record-finished idle/subagents-finished
+  expect_scenario_line second-delegation busy/subagents-running
+  expect_scenario_line completion-event idle/subagents-finished
+  expect_scenario_line dead-runner idle/agent-settled
+  expect_scenario_line paused-run idle/agent-settled
+  expect_scenario_line woken-turn busy/agent-start
+  expect_scenario_line complete-during-turn busy/agent-start
+  expect_scenario_line turn-settles idle/agent-settled
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "idle pi-ext" ] || fail "after the scenario the classifier must read 'idle pi-ext', got '$out'"
+  pass "pi extension keeps a worker busy while its async subagent runs work, and settles idle when they finish, die, or pause"
+}
+
 # drive_oc_plugin <plugin-path> <events-json-lines...>: load the generated
 # OpenCode plugin in a plain Node host and feed it one event per argument, in
 # order, through the same hooks.event entry OpenCode calls.
@@ -425,6 +538,7 @@ test_kimi_and_grok_install_no_unverified_wiring() {
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
+test_pi_extension_counts_live_subagent_runs_as_busy
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle

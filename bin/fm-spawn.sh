@@ -4674,21 +4674,110 @@ EOF
 // "turn_end" fires at every inner turn boundary (one LLM response plus its
 // tool calls) and stays a wake NOTIFICATION touch for the watcher, never
 // current-state truth.
+// Delegated work: a worker that starts an async pi-subagents run ends its own
+// turn and waits to be woken when the run finishes, so a settle while any run
+// it started is still live records busy event=subagents-running instead of
+// idle, and ticks the progress marker while the runs work so the watcher's
+// busy-turn bound does not read the wait as a wedge. A run counts as live only
+// while its own status record (asyncDir/status.json) says running or queued
+// and its runner pid is alive: a runner process can outlive the run, and a
+// crashed runner never delivers its completion event. When no run is live and
+// no turn is active the record settles idle event=subagents-finished. A paused
+// run needs attention, so it does not count and the worker reads idle.
 import { execFile } from "node:child_process";
-const busyEvent = (state: string, event: string) =>
+import { readFileSync } from "node:fs";
+const writer = (args: string[]) =>
   new Promise<void>((resolve) => {
-    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
-      "apply", "$STATE_REAL", "$ID", state,
-      "--gen", "$BUSY_GEN", "--source", "pi-ext", "--event", event,
-    ], () => resolve());
+    execFile("$FM_ROOT/bin/fm-busy-event.sh", args, () => resolve());
   });
+const apply = (state: string, event: string) =>
+  writer(["apply", "$STATE_REAL", "$ID", state, "--gen", "$BUSY_GEN", "--source", "pi-ext", "--event", event]);
+const touchProgress = () => writer(["progress", "$STATE_REAL", "$ID", "--gen", "$BUSY_GEN"]);
+// Every record write runs through one queue, so a timer-driven settle can
+// never land after a newer agent_start.
+let queue: Promise<void> = Promise.resolve();
+const serial = (fn: () => Promise<void> | void): Promise<void> => (queue = queue.then(fn, fn));
+
+const POLL_MS = Number(process.env.FM_PI_SUBAGENT_POLL_MS) || 30000;
+const runs = new Map<string, { pid: number; asyncDir: string }>();
+let agentActive = false;
+let delegated = false;
+let timer: any = null;
+const pidAlive = (pid: number) => {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error: any) {
+    return Boolean(error) && error.code === "EPERM";
+  }
+};
+const runLive = (run: { pid: number; asyncDir: string }) => {
+  if (!pidAlive(run.pid)) return false;
+  if (!run.asyncDir) return true;
+  try {
+    const status = JSON.parse(readFileSync(run.asyncDir + "/status.json", "utf8"));
+    return status.state === "running" || status.state === "queued";
+  } catch (error: any) {
+    // A record being rewritten reads torn for a moment; only a missing one ends the run.
+    return !(error && error.code === "ENOENT");
+  }
+};
+const liveRuns = () => {
+  for (const [id, run] of runs) if (!runLive(run)) runs.delete(id);
+  return runs.size;
+};
+const stopTimer = () => {
+  if (timer) clearInterval(timer);
+  timer = null;
+};
+const startTimer = () => {
+  if (timer) return;
+  timer = setInterval(() => { void settleDelegation(); }, POLL_MS);
+  timer.unref?.();
+};
+// Decide the settled record; a no-op while a turn is running, since the turn owns it.
+const settleDelegation = () =>
+  serial(async () => {
+    if (agentActive) return;
+    if (liveRuns() > 0) {
+      if (!delegated) await apply("busy", "subagents-running");
+      delegated = true;
+      await touchProgress();
+      startTimer();
+      return;
+    }
+    stopTimer();
+    if (!delegated) return;
+    delegated = false;
+    await apply("idle", "subagents-finished");
+  });
+
 export default function (pi: any) {
-  pi.on("agent_start", () => busyEvent("busy", "agent-start"));
+  pi.on("agent_start", () => {
+    agentActive = true;
+    delegated = false;
+    stopTimer();
+    return serial(() => apply("busy", "agent-start"));
+  });
   pi.on("agent_settled", (_event: any, ctx: any) => {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
-    return busyEvent("idle", "agent-settled");
+    agentActive = false;
+    return serial(async () => {
+      if (liveRuns() === 0) await apply("idle", "agent-settled");
+    }).then(settleDelegation);
   });
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  pi.events?.on?.("subagent:async-started", (data: any) => {
+    if (!data || typeof data.id !== "string" || !data.id) return;
+    runs.set(data.id, { pid: Number(data.pid), asyncDir: typeof data.asyncDir === "string" ? data.asyncDir : "" });
+    if (!agentActive) void settleDelegation();
+  });
+  pi.events?.on?.("subagent:async-complete", (data: any) => {
+    const id = data && (typeof data.runId === "string" ? data.runId : data.id);
+    if (typeof id !== "string" || !runs.delete(id)) return;
+    if (!agentActive) void settleDelegation();
+  });
   // A native harness can make progress inside one Pi turn. This separate
   // marker prevents false wedge alarms without fabricating a completed turn.
   let lastProgress = 0;
