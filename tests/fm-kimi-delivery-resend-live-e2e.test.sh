@@ -5,9 +5,9 @@
 # budget (reproduced on 2.0.2 and 2.1.1: readiness passed, the pointer sat in
 # the composer, every Enter inside the budget was dropped). fm-spawn.sh's kimi
 # delivery wait re-sends Enter while the composer provably still holds the
-# pointer, and a failed delivery keeps its task record so teardown owns the
-# cleanup. A stub cannot prove any of that against the real harness: Kimi
-# 2.1.1 also moved its footer up against the composer box, which the shared
+# pointer, and a failed delivery rolls its provisional record back so the
+# backlog row stays queued. A stub cannot prove any of that against the real
+# harness: Kimi 2.1.1 also moved its footer up against the composer box, which the shared
 # composer classifier read as unclaimed activity (unknown) until it learned
 # the footer as furniture. This guard launches real Kimi in an isolated Herdr
 # lab and requires all of it, failing with the harness and version named
@@ -308,11 +308,15 @@ record_worktree "$SPAWN_HOME/state/$ID_OK.meta"
 teardown_task "$ID_OK" || fail "$NAMED: teardown of the successful live spawn failed"
 pass "live kimi spawn: $NAMED launches, delivers, and confirms its brief pointer through the real spawn"
 
-# --- Phase 4: real spawn, failed delivery leaves a tearable task ------------
+# --- Phase 4: real spawn, failed delivery rolls back and is cleaned up here -
 #
 # A zero delivery poll budget forces the delivery gate to fail after the pane
-# and worktree exist - the 2026-09-25 incident's stranding shape. The record
-# must survive and teardown must own the whole cleanup with no hand work.
+# and worktree exist - the 2026-09-25 incident's shape. The provisional record
+# is rolled back so the backlog row stays queued and re-dispatchable. The
+# pane, local copy, slot claim, and hook token then have no owner (giving them
+# one is separately filed work), so this guard locates each through the
+# spawn's own diagnostics and cleans them up itself, failing loudly if any is
+# missing or any cleanup leaves a trace.
 PROJ_FAIL="$TMP_ROOT/project-fail"
 make_scratch_project "$PROJ_FAIL"
 ID_FAIL="kimi-live-fail-$$"
@@ -323,33 +327,51 @@ case "$out" in
   *'kimi brief pointer delivery was not confirmed'*) ;;
   *) fail "$NAMED: the forced delivery failure lacked its diagnostic: $out" ;;
 esac
-[ -f "$SPAWN_HOME/state/$ID_FAIL.meta" ] \
-  || fail "$NAMED: the failed spawn removed the task record its cleanup needs"
-record_worktree "$SPAWN_HOME/state/$ID_FAIL.meta"
-fail_pane=$(grep '^herdr_pane_id=' "$SPAWN_HOME/state/$ID_FAIL.meta" | cut -d= -f2-)
-fail_wt=$(grep '^worktree=' "$SPAWN_HOME/state/$ID_FAIL.meta" | cut -d= -f2-)
-teardown_task "$ID_FAIL" || fail "$NAMED: the failed live spawn's record would not tear down"
-[ ! -e "$SPAWN_HOME/state/$ID_FAIL.meta" ] \
-  || fail "$NAMED: teardown left the failed spawn's record behind"
-if [ -n "$fail_pane" ] && lab pane get "$fail_pane" >/dev/null 2>&1; then
-  fail "$NAMED: teardown left the failed spawn's pane running"
+[ ! -e "$SPAWN_HOME/state/$ID_FAIL.meta" ] && [ ! -L "$SPAWN_HOME/state/$ID_FAIL.meta" ] \
+  || fail "$NAMED: the failed spawn kept its provisional task record instead of rolling it back"
+fail_pane=$(printf '%s\n' "$out" | sed -nE "s/.*inspect window $SESSION:([^[:space:];]+).*/\\1/p" | head -1)
+[ -n "$fail_pane" ] || fail "$NAMED: the forced delivery failure did not name its pane: $out"
+fail_wt=$(printf '%s\n' "$out" | sed -nE "s/.*leaving task $ID_FAIL's slot claim on (.*) in place;.*/\\1/p" | head -1)
+[ -n "$fail_wt" ] && [ -d "$fail_wt" ] \
+  || fail "$NAMED: the forced delivery failure did not name its stranded local copy: $out"
+fail_claim="$(dirname "$fail_wt")/.fm-slot-owner"
+grep -qx "task=$ID_FAIL" "$fail_claim" 2>/dev/null \
+  || fail "$NAMED: the stranded local copy's slot claim does not name the failed spawn"
+[ -f "$fail_wt/.fm-kimi-turnend" ] \
+  || fail "$NAMED: the stranded local copy carries no hook-token pointer"
+fail_token=$(head -1 "$SPAWN_HOME/state/$ID_FAIL.kimi-turnend-token" 2>/dev/null || true)
+case "$fail_token" in
+  ''|*[!A-Za-z0-9._-]*) fail "$NAMED: the failed spawn left no readable hook token in its state" ;;
+esac
+fail_auth="$HOME/.kimi-code/fm-turn-end.d/$fail_token"
+[ -f "$fail_auth" ] || fail "$NAMED: the failed spawn's hook token is not registered at $fail_auth"
+lab pane get "$fail_pane" >/dev/null 2>&1 \
+  || fail "$NAMED: the failed spawn's pane $fail_pane is not running"
+
+fm_backend_herdr_explicit_close_pane_confirmed "$SESSION" "$fail_pane" \
+  || fail "$NAMED: could not close the failed spawn's stranded pane $fail_pane"
+rm -f -- "$fail_auth" "$fail_wt/.fm-kimi-turnend" \
+  "$SPAWN_HOME/state/$ID_FAIL.kimi-turnend-token" "$fail_claim"
+env PATH="$ORIGINAL_PATH" treehouse return --force "$fail_wt" >"$TMP_ROOT/return-$ID_FAIL.log" 2>&1 \
+  || fail "$NAMED: could not return the failed spawn's stranded local copy: $(cat "$TMP_ROOT/return-$ID_FAIL.log")"
+
+if lab pane get "$fail_pane" >/dev/null 2>&1; then
+  fail "$NAMED: the failed spawn's pane survived its close"
 fi
-# The slot must be back in the pool: its treehouse-state entry carries no
-# owner_pid, firstmate's slot-owner claim is gone, and no task state (token
-# pointer) remains in the scrubbed slot path, which treehouse keeps as pool
-# inventory.
-if [ -n "$fail_wt" ] && [ -d "$fail_wt" ]; then
+[ ! -e "$fail_auth" ] || fail "$NAMED: the failed spawn's hook token survived its removal"
+[ ! -e "$fail_claim" ] || fail "$NAMED: the failed spawn's slot-owner claim survived its removal"
+# The slot is back in the pool: treehouse keeps the scrubbed path as pool
+# inventory, its state entry carries no owner_pid, and no task state remains.
+if [ -d "$fail_wt" ]; then
   pool_state=$(dirname "$(dirname "$fail_wt")")/treehouse-state.json
   [ ! -e "$fail_wt/.fm-kimi-turnend" ] \
-    || fail "$NAMED: teardown left the failed spawn's token pointer in its local copy"
-  [ ! -e "$(dirname "$fail_wt")/.fm-slot-owner" ] \
-    || fail "$NAMED: teardown left the failed spawn's slot-owner claim behind"
+    || fail "$NAMED: the failed spawn's token pointer survived the return of its local copy"
   if [ -f "$pool_state" ]; then
     leased=$(jq -r --arg p "$fail_wt" '.worktrees[]? | select(.path == $p) | .owner_pid // empty' "$pool_state" 2>/dev/null || true)
     [ -z "$leased" ] \
-      || fail "$NAMED: teardown left the failed spawn's slot leased to pid $leased in the pool"
+      || fail "$NAMED: the failed spawn's slot is still leased to pid $leased in the pool"
   fi
 fi
-pass "live kimi spawn failure: $NAMED keeps the failed delivery's record and tears it down with no hand cleanup"
+pass "live kimi spawn failure: $NAMED rolls the failed delivery's record back and its stranded pane, local copy, slot claim, and hook token clean up"
 
 [ "$CHECKED" -gt 0 ] || fail "FM_KIMI_DELIVERY_RESEND_LIVE=1 checked no harness"

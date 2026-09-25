@@ -269,7 +269,6 @@ run_spawn() {
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
     FM_KIMI_READY_POLLS="${FM_KIMI_READY_POLLS:-2}" \
     FM_KIMI_DELIVERY_POLLS="${FM_KIMI_DELIVERY_POLLS:-2}" \
-    FM_KIMI_DELIVERY_RESENDS="${FM_KIMI_DELIVERY_RESENDS:-}" \
     FM_KIMI_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@" 2>&1
@@ -728,6 +727,10 @@ test_kimi_unconfirmed_delivery_fails_loudly() {
   [ "$rc" -ne 0 ] || fail "an unconfirmed kimi delivery should fail"
   assert_contains "$out" "kimi brief pointer delivery was not confirmed" \
     "unconfirmed kimi delivery lacked a loud diagnostic"
+  [ ! -s "$CASE_DIR/stray-enter.log" ] \
+    || fail "kimi re-sent Enter into an empty composer while delivery stayed unconfirmed"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "unconfirmed kimi delivery kept its provisional task record instead of rolling it back"
   assert_grep 'failed: kimi brief pointer delivery was not confirmed' <(sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/$id.status") \
     "unconfirmed kimi delivery did not leave a supervisor-visible failure"
   pass "fm-spawn: kimi treats a silent pointer drop as a failed spawn"
@@ -757,63 +760,25 @@ test_kimi_delivery_wait_resends_enter_past_the_submit_budget() {
   pass "fm-spawn: kimi re-sends a swallowed Enter past the submit budget until the pointer lands"
 }
 
-test_kimi_delivery_resend_budget_is_bounded_and_the_failure_is_tearable() {
+test_kimi_delivery_resends_stop_with_the_poll_budget() {
   local id rec out rc
   id=kimi-delivery-bound-r2
   rec=$(make_spawn_case delivery-bound "$id")
   read_spawn_record "$rec"
   rc=0
   out=$(FM_FAKE_KIMI_SWALLOW_ENTERS=99 FM_KIMI_SUBMIT_RETRIES=1 \
-    FM_KIMI_DELIVERY_POLLS=8 FM_KIMI_DELIVERY_RESENDS=3 run_spawn \
+    FM_KIMI_DELIVERY_POLLS=3 run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "a pointer that never lands should fail the spawn"
   assert_contains "$out" "kimi brief pointer delivery was not confirmed after 3 re-sent Enter(s)" \
-    "a bounded-out kimi delivery did not report its re-send count"
+    "a budget-exhausted kimi delivery did not report its re-send count"
   [ "$(wc -l < "$CASE_DIR/kimi.swallowed" | tr -d ' ')" = 4 ] \
-    || fail "the re-send budget was not bounded at the submit Enter plus FM_KIMI_DELIVERY_RESENDS=3"
+    || fail "the re-sends did not stop at the submit Enter plus one per FM_KIMI_DELIVERY_POLLS=3 poll"
   [ ! -s "$CASE_DIR/stray-enter.log" ] \
     || fail "an Enter landed in the live composer of a never-delivered spawn"
-  assert_present "$HOME_DIR/state/$id.meta" \
-    "a kimi delivery failure removed the task record its cleanup needs"
-  HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
-    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
-    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
-    "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "the bounded-out kimi spawn's record would not tear down"
-  assert_absent "$HOME_DIR/state/$id.meta" "teardown left the bounded-out spawn's record"
-  assert_absent "$HOME_DIR/state/$id.kimi-turnend-token" "teardown left the bounded-out spawn's hook token"
-  pass "fm-spawn: kimi delivery re-sends are bounded and a bounded-out spawn still tears down"
-}
-
-test_kimi_failed_delivery_leaves_a_tearable_task() {
-  local id rec out rc launch_dir
-  id=kimi-drop-tearable-t1
-  rec=$(make_spawn_case drop-tearable "$id")
-  read_spawn_record "$rec"
-  launch_dir=$(kimi_launch_dir "$id" "$HOME_DIR")
-  KIMI_RUNTIME_LAUNCH_DIR=$launch_dir
-  rc=0
-  out=$(FM_FAKE_KIMI_DELIVERY=no run_spawn \
-    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
-  [ "$rc" -ne 0 ] || fail "an unconfirmed kimi delivery should fail"
-  assert_contains "$out" "kimi brief pointer delivery was not confirmed" \
-    "unconfirmed kimi delivery lacked a loud diagnostic"
-  [ ! -s "$CASE_DIR/stray-enter.log" ] \
-    || fail "kimi re-sent Enter into an empty composer while delivery stayed unconfirmed"
-  assert_present "$HOME_DIR/state/$id.meta" \
-    "failed kimi delivery removed the task record its cleanup needs"
-  assert_grep 'failed: kimi brief pointer delivery was not confirmed' <(sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/$id.status") \
-    "unconfirmed kimi delivery did not leave a supervisor-visible failure"
-  HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
-    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
-    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
-    "$TEARDOWN" "$id" --force >/dev/null 2>&1 || fail "the failed kimi spawn's record would not tear down"
-  assert_absent "$HOME_DIR/state/$id.meta" "teardown left the failed spawn's record"
-  assert_absent "$HOME_DIR/state/$id.kimi-turnend-token" "teardown left the failed spawn's hook token"
-  assert_absent "$WT_DIR/.fm-kimi-turnend" "teardown left the failed spawn's token pointer"
-  assert_absent "$launch_dir" "teardown left the failed spawn's staged launch directory"
-  pass "fm-spawn: a failed kimi delivery keeps its record and tears down with no hand cleanup"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "a budget-exhausted kimi delivery kept its provisional task record instead of rolling it back"
+  pass "fm-spawn: kimi delivery re-sends stop with the poll budget and the failed spawn rolls back"
 }
 
 test_kimi_readiness_gate_precedes_pointer() {
@@ -1235,8 +1200,7 @@ test_kimi_falls_back_to_expanded_home_binary
 test_kimi_missing_binary_refuses_before_pane_creation
 test_kimi_unconfirmed_delivery_fails_loudly
 test_kimi_delivery_wait_resends_enter_past_the_submit_budget
-test_kimi_delivery_resend_budget_is_bounded_and_the_failure_is_tearable
-test_kimi_failed_delivery_leaves_a_tearable_task
+test_kimi_delivery_resends_stop_with_the_poll_budget
 test_kimi_readiness_gate_precedes_pointer
 test_kimi_fresh_worktree_trust_is_answered_and_verified
 test_kimi_swallowed_trust_enter_is_retried_until_the_dialog_clears
