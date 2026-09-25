@@ -1904,6 +1904,10 @@ ${context.command}
     }
   });
 
+  pi.on?.("session_compact", () => {
+    loadedOutcomeSequences.clear();
+  });
+
   // Pi emits this for /model, Ctrl+P cycling, and session restore, so it is
   // the authoritative signal that "follow main" now means a different model.
   // A model change often follows a quota failure, so an unpinned supervision

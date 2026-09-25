@@ -1538,6 +1538,17 @@ const exactText = exact.content.map((item) => item.text ?? "").join("\n");
 if (exact.isError || !exactText.includes(`"seq":${seq}`) || !exactText.includes(decision)) {
   throw new Error(`exact durable outcome recovery failed after anchor compaction: ${JSON.stringify(exact)}`);
 }
+await fire("session_compact", {});
+const compactedAck = await processed.execute("ack-after-compact", { through: seq }, undefined, undefined, {});
+if (!compactedAck.isError || !compactedAck.content.some((item) => item.type === "text" && item.text.includes("load exact durable outcome evidence first"))) {
+  throw new Error(`compaction preserved stale acknowledgement evidence: ${JSON.stringify(compactedAck)}`);
+}
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("a post-compaction evidence refusal moved the marker");
+const reloaded = await outcomes.execute("read-exact-after-compact", { sequences: String(seq) }, undefined, undefined, {});
+const reloadedText = reloaded.content.map((item) => item.text ?? "").join("\n");
+if (reloaded.isError || !reloadedText.includes(`"seq":${seq}`) || !reloadedText.includes(decision)) {
+  throw new Error(`exact durable outcome reload failed after compaction: ${JSON.stringify(reloaded)}`);
+}
 const ack = await processed.execute("ack", { through: seq }, undefined, undefined, {});
 if (ack.isError) throw new Error(`acknowledgement failed: ${JSON.stringify(ack)}`);
 if (unprocessedSeqs().length !== 0) throw new Error("the acknowledgement did not close the sequence");

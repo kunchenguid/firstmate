@@ -137,8 +137,10 @@ Pi custom session entries persist in the transcript but do not enter model conte
 The store sequence is the idempotency key: reload after entry persistence but before cursor advancement finds the matching entry, avoids a duplicate, and advances the cursor; conflicting content for one sequence fails closed.
 Reconciliation runs at session start when that generation already owns the fleet lock and at the first post-lock `turn_end`, so a cold start that acquires the lock through the startup digest still delivers stored captain outcomes without waiting for another wake.
 Display is only half of a captain outcome; the other half is processing, because a blocker, a decision, or a ready PR needs main to act, not only the captain to see it.
-After the visible entry exists and the read cursor has passed it, the extension hands every still-unprocessed captain row to main as one hidden, typed `fm-branch-process` request (kind `branch-outcome`) listing each `[seq N] task: summary`, and that request opens exactly one main turn.
+After the visible entry exists and the read cursor has passed it, the extension hands every still-unprocessed captain row to main as one hidden, typed `fm-branch-process` request (kind `branch-outcome`) listing each sequence and task identity plus the highest acknowledgement sequence, and that request opens exactly one main turn without repeating the summaries.
+Before acting, main must load the request's exact sequences from the durable store through `fm_branch_outcomes`, whose returned rows are the trusted source for the outcome content.
 Main closes it only by calling `fm_branch_processed` with the highest sequence the request listed, which advances a processed marker that `bin/fm-branch-outcome.sh` keeps separately from the read cursor and never moves past it or backwards.
+Acknowledgement is refused unless every listed captain sequence through that bound has been loaded since the latest session start or compaction, so either boundary requires another exact durable-store read.
 A lower listed captain sequence is accepted only as a partial acknowledgement and leaves every newer captain sequence open.
 Nothing else advances that marker: an unrelated reply, an empty reply, or a reply that paraphrases the outcome leaves the sequence unprocessed, and the extension presents the current unprocessed sequence set again at the next main run boundary and at every session start.
 A presentation already pending its run boundary is not resent or widened; once that run settles, the extension presents the then-current sequence set.
@@ -150,7 +152,7 @@ A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=
 The branch prompt's "Verdict: routine or captain" section owns the verdict criteria, including how requested work's finished results and its mere progress updates are classified; unsolicited routine outcomes remain routine sailboat notes, unchanged fleet reviews remain silent, and doubt escalates.
 Its "Goal-directed acceptance" section owns semantic review of material task returns: intermediate and provider-terminal results continue through existing authorized lifecycle paths when evidence is incomplete, accepted research retires after the existing unresolved-decision gate, explicit stops remain stopped, and delivery or merge authority never expands.
 Its "PR identity: copy or abstain" section owns where a PR URL in a summary or tool argument may come from: the task's ready status or `pr=` metadata, verbatim, or else only the identifier the branch actually has.
-Main can read the durable outcome store on demand through its `fm_branch_outcomes` tool.
+Main can also read recent durable outcomes on demand through its `fm_branch_outcomes` tool outside the processing path.
 
 ## Heartbeat routing
 
