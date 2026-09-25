@@ -38,11 +38,11 @@
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent). An endpoint that reads
 #              `missing` is checked through the backend absence proof. Herdr's
-#              proven-gone endpoint reports `endpoint-gone`; a herdr endpoint
-#              that reappears dead reports `already-stopped`. Tmux `missing`
-#              remains unproven and refuses. A pane that is present but idle is
-#              also `already-stopped`; alive, ambiguous, and unreadable states
-#              retain their existing safety refusals.
+#              proven-gone endpoint and a herdr endpoint that reappears dead
+#              both report `already-stopped`. Tmux `missing` remains unproven
+#              and refuses. A pane that is present but idle is also
+#              `already-stopped`; alive, ambiguous, and unreadable states retain
+#              their existing safety refusals.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME worktree - and the same endpoint whenever that endpoint
 #              still exists - on the same or a newly chosen
@@ -547,7 +547,7 @@ retire_busy_incarnation() {
 }
 
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
-# `already-stopped`, `endpoint-gone`, or `stopped`.
+# `already-stopped` or `stopped`.
 do_exit() {
   local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed
   require_state_verified_backend exit
@@ -563,7 +563,7 @@ do_exit() {
       # session recheck may establish the exit postcondition.
       absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T")
       case "${absence%%$'\t'*}" in
-        gone) printf 'endpoint-gone'; return 0 ;;
+        gone) printf 'already-stopped'; return 0 ;;
         dead) printf 'already-stopped'; return 0 ;;
         alive) ;;
         *) die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one" ;;
