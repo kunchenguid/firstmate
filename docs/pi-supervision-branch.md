@@ -157,6 +157,7 @@ The effort picker may only inspect the model named by the current pointer, as th
 Nothing captain-facing rides on that conversation.
 The durable outcome store and its processed marker are what carry unacknowledged outcomes across the boundary.
 They re-present on the new main session exactly as they do after a crash.
+An explicit Pi watcher repair also requests an immediate serialized reconciliation of that store, including when the watcher arm itself was already running.
 
 #### Guarded side effects and delivery ownership
 
@@ -219,6 +220,7 @@ Its header owns the append-only format, read cursor, and bounded per-task status
 
 Outcomes are written to the store before delivery to Pi.
 A captain row advances the cursor only after its matching visible session entry exists.
+The shared event contract in `.pi/extensions/lib/fm-branch-dispatch.ts` couples an explicit watcher repair to this reconciliation without making the watcher read the outcome store itself.
 Locked session-start replay stops before the first captain row, so it cannot acknowledge that outcome through prose alone.
 
 A routine note has no such sequence-keyed record.

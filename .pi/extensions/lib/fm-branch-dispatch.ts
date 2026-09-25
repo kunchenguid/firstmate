@@ -28,6 +28,30 @@ import { runCommandAsync } from "./fm-async-exec.ts";
 // itself; parking main is a cost measure, continuity is the safety property.
 
 export const FM_BRANCH_DISPATCH_EVENT = "fm-branch-supervision:dispatch";
+export const FM_SUPERVISION_RECONCILE_EVENT = "fm-branch-supervision:reconcile";
+
+export type SupervisionReconcileRequest = {
+  accepted: boolean;
+  settlement: Promise<void>;
+  accept(settlement: Promise<void>): void;
+};
+
+// Explicit watcher repair also repairs the adjacent durable outcome-delivery
+// path. The watcher emits this request after both a new arm and an owned no-op;
+// a loaded branch accepts synchronously and supplies the reconciliation promise
+// so the repair tool does not return before missed outcomes have been checked.
+export function createSupervisionReconcileRequest(): SupervisionReconcileRequest {
+  const request: SupervisionReconcileRequest = {
+    accepted: false,
+    settlement: Promise.resolve(),
+    accept(settlement) {
+      if (request.accepted) return;
+      request.accepted = true;
+      request.settlement = settlement;
+    },
+  };
+  return request;
+}
 
 // The away-posture record's state-relative filename, exactly as
 // bin/fm-afk-contract.sh writes it. Presence is the only fact read here; the

@@ -236,8 +236,16 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 let tool = null;
+let reconciliationRequests = 0;
 const pi = {
   on() {},
+  events: {
+    emit(channel, request) {
+      if (channel !== "fm-branch-supervision:reconcile") return;
+      reconciliationRequests += 1;
+      request.accept(new Promise((resolve) => setTimeout(resolve, 25)));
+    },
+  },
   registerCommand() {},
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
@@ -252,6 +260,9 @@ if (!initial.content[0]?.text.includes("started Pi extension arm child")) {
   throw new Error(`initial call did not start the arm child: ${initial.content[0]?.text}`);
 }
 const redundant = await tool.execute("tool-call-redundant", {}, undefined, undefined, {});
+if (reconciliationRequests !== 2) {
+  throw new Error(`explicit arm did not reconcile outcomes after both start and owned no-op: ${reconciliationRequests}`);
+}
 if (!redundant.content[0]?.text.includes("Pi extension already owns an arm child; no manual re-arm needed")) {
   throw new Error(`redundant call omitted ownership-based no-op guidance: ${redundant.content[0]?.text}`);
 }

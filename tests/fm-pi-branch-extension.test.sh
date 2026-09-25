@@ -1239,6 +1239,54 @@ EOF
   pass "captain outcomes are exact and exactly once across crash, reload, busy main, compaction, and an unrelated assistant response"
 }
 
+test_explicit_watcher_repair_reconciles_missed_outcome_once() {
+  local repo home out status
+  repo="$TMP_ROOT/watcher-repair-reconcile-root"
+  home="$TMP_ROOT/watcher-repair-reconcile-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, sentToMain, mainEntries, outcomeScript, defaultSessionCtx, bus }; })()`);
+const { fire, sentToMain, mainEntries, outcomeScript, defaultSessionCtx, bus } = globalThis.__t;
+
+await fire("session_start", {}, defaultSessionCtx);
+const summary = "completed while the ordinary notification path was unavailable";
+const seq = Number(outcomeScript(["append", "--task", "repair-case", "--verdict", "captain", "--summary", summary]));
+const repair = async () => {
+  const request = {
+    accepted: false,
+    settlement: Promise.resolve(),
+    accept(settlement) {
+      if (request.accepted) return;
+      request.accepted = true;
+      request.settlement = settlement;
+    },
+  };
+  bus.emit("fm-branch-supervision:reconcile", request);
+  if (!request.accepted) throw new Error("the supervision branch did not accept explicit repair reconciliation");
+  await request.settlement;
+};
+await repair();
+await repair();
+const visible = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === seq);
+if (visible.length !== 1 || visible[0].data.summary !== summary) {
+  throw new Error(`explicit repair did not persist the missed outcome exactly once: ${JSON.stringify(visible)}`);
+}
+const requests = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
+if (requests.length !== 1 || !requests[0].message.content.includes(`[seq ${seq}] repair-case: ${summary}`)) {
+  throw new Error(`explicit repair did not present the missed outcome exactly once: ${JSON.stringify(requests)}`);
+}
+if (outcomeScript(["unread"]) !== "") throw new Error("explicit repair left the missed outcome unread");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "explicit watcher repair must reconcile and present a missed captain outcome exactly once: $out"
+  pass "explicit watcher repair reconciles a missed captain outcome exactly once"
+}
+
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented() {
   local repo home out status
   repo="$TMP_ROOT/processing-turn-root"
@@ -5407,6 +5455,7 @@ test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
+test_explicit_watcher_repair_reconciles_missed_outcome_once
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_cache_key_is_per_home_stable

@@ -43,6 +43,7 @@ Each adapter:
 - Applies bounded exponential retry after an unexpected or failed close.
 
 A failed follow-up never cancels continuity restoration.
+On Pi, an explicit `fm_watch_arm_pi` repair also waits for the supervision branch to reconcile its durable outcome store, whether the call starts a new arm or finds the owned arm already running.
 
 ### Pi session replacement
 

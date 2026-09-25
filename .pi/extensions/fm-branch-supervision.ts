@@ -115,10 +115,12 @@ import {
   branchWakePrompt,
   deactivateEligibleRowsOwner,
   FM_BRANCH_DISPATCH_EVENT,
+  FM_SUPERVISION_RECONCILE_EVENT,
   releaseEligibleRowsSnapshot,
   scopeForUnreadWake,
   writeEligibleRowsSnapshot,
   type BranchDispatchOffer,
+  type SupervisionReconcileRequest,
 } from "./lib/fm-branch-dispatch.ts";
 import {
   BRANCH_PICKER_MAX_VISIBLE,
@@ -1628,6 +1630,24 @@ ${context.command}
     if (!collectCurrentMainDialog()) return;
     if (recoveryProbe && providerRecovery) providerRecovery.probeInFlight = true;
     offer.accept(enqueueWake(offer.message, generation, recoveryProbe, offer.awayOnly === true));
+  });
+
+  // An explicit watcher repair is also a request to pull the durable outcome
+  // store immediately. The request is accepted synchronously so the watcher
+  // tool can await this serialized reconciliation before reporting success.
+  // Repeating the repair is idempotent: sequence-keyed visible entries and the
+  // processing state's pending flag prevent duplicate captain presentation.
+  pi.events?.on?.(FM_SUPERVISION_RECONCILE_EVENT, (request: SupervisionReconcileRequest) => {
+    const repairGeneration = generation;
+    if (!generationOwnsLockSync(repairGeneration)) return;
+    request.accept(enqueueDelivery(async () => {
+      if (!(await actingAsOwner(repairGeneration))) {
+        throw new Error("supervision session no longer owns the fleet lock");
+      }
+      if (!(await reconcileUnreadOutcomes(repairGeneration))) {
+        throw new Error("could not reconcile unread supervision outcomes into main");
+      }
+    }));
   });
 
   // Pi awaits every extension event handler, so an awaited ownership read

@@ -46,7 +46,9 @@ import {
   afkPostureRecordPresent,
   branchOfferForWake,
   createBranchDispatchOffer,
+  createSupervisionReconcileRequest,
   FM_BRANCH_DISPATCH_EVENT,
+  FM_SUPERVISION_RECONCILE_EVENT,
 } from "./lib/fm-branch-dispatch.ts";
 import {
   type CalmPresentationState,
@@ -1087,6 +1089,23 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
+  async function reconcileSupervisionAfterExplicitArm(result: ArmResult): Promise<ArmResult> {
+    if (!result.ok) return result;
+    const request = createSupervisionReconcileRequest();
+    pi.events?.emit?.(FM_SUPERVISION_RECONCILE_EVENT, request);
+    if (!request.accepted) return result;
+    try {
+      await request.settlement;
+      return result;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return {
+        ok: false,
+        message: `${result.message}\nwatcher: FAILED - explicit repair could not reconcile supervision outcomes\n${detail}`,
+      };
+    }
+  }
+
   function activateOwnedWatch(owner: SessionGeneration): ArmResult {
     if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
     if (lockOwnership() !== "owned") return startArm(owner);
@@ -1140,7 +1159,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand?.("fm-watch-arm-pi", {
     description: "Arm firstmate watcher supervision through the Pi extension instead of foreground bash.",
     handler: async (_args, ctx) => {
-      const result = activateOwnedWatch(generation);
+      const result = await reconcileSupervisionAfterExplicitArm(activateOwnedWatch(generation));
       ctx.ui.notify(result.message, result.ok ? "info" : "warning");
     },
   });
@@ -1181,7 +1200,7 @@ export default function (pi: ExtensionAPI) {
       return new Container();
     },
     execute: async () => {
-      const result = activateOwnedWatch(generation);
+      const result = await reconcileSupervisionAfterExplicitArm(activateOwnedWatch(generation));
       return {
         content: [{ type: "text", text: result.message }],
         details: result,
