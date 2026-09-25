@@ -427,6 +427,61 @@ test_lock_live_steal_mutex_is_not_reclaimed() {
   pass "live steal mutex is not reclaimed"
 }
 
+# A process that dies mid-steal (for example on a full disk) abandons the steal
+# mutex itself. Reclaim must retake that dead-owner mutex in place: stealing it
+# through a deeper `.steal.steal` grew one more level per failed attempt. A PATH
+# shim records every symlink and owner directory the acquirer creates, so a
+# transient deeper level is caught even though a successful release removes it.
+test_lock_dead_steal_mutex_is_reclaimed_in_place() {
+  local dir state lockdir dead shim trace out legacy
+  dir=$(make_case lock-dead-steal-mutex)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  shim="$dir/shim"
+  trace="$dir/created"
+  dead=$(dead_pid)
+  mkdir "$shim"
+  for tool in ln mktemp; do
+    cat > "$shim/$tool" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$trace'
+exec "$(command -v "$tool")" "\$@"
+EOF
+    chmod +x "$shim/$tool"
+  done
+  for legacy in "" .steal.steal; do
+    rm -rf "$lockdir" "$lockdir.steal" "$lockdir.steal.steal"
+    : > "$trace"
+    mkdir "$lockdir" "$lockdir.steal"
+    printf '%s\n' "$dead" > "$lockdir/pid"
+    printf '%s\n' "$dead" > "$lockdir.steal/pid"
+    if [ -n "$legacy" ]; then
+      # A leftover dead chain from an older build must not block the reclaim.
+      mkdir "$lockdir$legacy"
+      printf '%s\n' "$dead" > "$lockdir$legacy/pid"
+    fi
+    out=$(PATH="$shim:$PATH" FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+      printf "rc=%s pid=%s self=%s\n" "$rc" "$(cat "$2/pid" 2>/dev/null || true)" "${BASHPID:-$$}"
+    ' _ "$LIB" "$lockdir")
+    case "$out" in
+      *"rc=0"*) ;;
+      *) fail "dead primary lock behind a dead steal mutex was not reclaimed (legacy='$legacy'): $out" ;;
+    esac
+    case "$out" in
+      *"pid=$dead "*) fail "reclaimed lock still names the dead owner: $out" ;;
+    esac
+    [ -s "$trace" ] || fail "PATH shim recorded nothing; the no-deeper-level assertion is vacuous"
+    if grep -q '\.steal\.steal' "$trace"; then
+      fail "reclaim created a steal lock deeper than one level (legacy='$legacy'): $(cat "$trace")"
+    fi
+    [ -e "$lockdir.steal" ] || [ -L "$lockdir.steal" ] \
+      && fail "reclaim left its steal mutex behind (legacy='$legacy')"
+  done
+  pass "dead-owner steal mutex is reclaimed in place without a deeper steal level"
+}
+
 test_lock_does_not_steal_live_lock() {
   local dir state lockdir live out lockpid
   dir=$(make_case lock-live-noop)
@@ -1263,6 +1318,7 @@ test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
+test_lock_dead_steal_mutex_is_reclaimed_in_place
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate

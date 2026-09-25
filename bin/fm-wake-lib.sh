@@ -522,6 +522,11 @@ fm_lock_remove_stray_owner_link() {
 
 fm_lock_claim_blocked_by_steal() {
   local lockdir=$1 allowed_steal_owner=${2:-} steal
+  # A steal mutex has no steal mutex of its own (see fm_lock_try_acquire), so a
+  # leftover deeper level from an older build must never block claiming one.
+  case "$lockdir" in
+    *.steal) return 1 ;;
+  esac
   steal="$lockdir.steal"
   [ -e "$steal" ] || [ -L "$steal" ] || return 1
   if [ -n "$allowed_steal_owner" ] && fm_lock_points_to_owner "$steal" "$allowed_steal_owner"; then
@@ -971,6 +976,29 @@ fm_lock_try_acquire() {
     FM_LOCK_HELD_PID=$pid
     return 1
   fi
+
+  # A steal mutex is reclaimed in place and never through a deeper
+  # `<lock>.steal.steal`: a process dying mid-steal (for example on a full disk)
+  # would otherwise leave one more abandoned level per failed attempt. The
+  # recheck narrows the race with a concurrent in-place reclaimer, and the
+  # primary claim below still refuses any stealer whose mutex was replaced.
+  case "$lockdir" in
+    *.steal)
+      primary_owner=
+      if [ -L "$lockdir" ]; then
+        primary_owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
+      fi
+      if fm_lock_recheck_stale_owner "$lockdir" "$primary_owner" "$pid"; then
+        fm_lock_remove_path "$lockdir" || true
+        if fm_lock_try_create "$lockdir"; then
+          return 0
+        fi
+      fi
+      FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+      FM_LOCK_OWNER_DIR=
+      return 1
+      ;;
+  esac
 
   steal="$lockdir.steal"
   if ! fm_lock_try_acquire "$steal"; then
