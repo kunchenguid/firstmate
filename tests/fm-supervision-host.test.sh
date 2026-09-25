@@ -44,6 +44,8 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #               waiting when the turn ends
 #   emptyresult the same as handle, but print {} as its result
 #   noreport    drain and exit cleanly without a report
+#   fail        exit nonzero at once, with no result and no report (an engine
+#               error the latch counts)
 #   hang        start a descendant in a process group of its own, then block
 STUB="$TMP_ROOT/engine-stub"
 cat > "$STUB" <<'SH'
@@ -68,6 +70,7 @@ ack=$(printf '%s\n' "$drain" | sed -n 's/^WAKE_ACK_REQUIRED: after handling comp
 task=$(sed -n 's/^tasks=//p' "$STATE/.supervision-host-turn" | awk '{ print $1 }')
 [ -n "$task" ] || task=fleet
 case "$mode" in
+  fail) exit 3 ;;
   handle|hold-lease|return|return-fail|return-first|noack|chain|emptyresult)
     [ "$mode" != return-first ] || "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1
     "$FM_REPO/bin/fm-lease.sh" claim "$task" >> "$FM_HOME/engine-lease.log" 2>&1
@@ -187,6 +190,7 @@ watcher_live() {  # <home>
   [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
 host_exited() { [ -s "$1/host.rc" ]; }
+engine_calls() { find "$1" -maxdepth 1 -name 'engine-call.*' 2>/dev/null | wc -l | tr -d ' '; }
 handled_count() { grep -c '	handled	' "$1/state/.supervision-host.log" 2>/dev/null || true; }
 handled_at_least() { [ "$(handled_count "$1")" -ge "$2" ]; }
 append_status() {  # <home> <text>
@@ -744,6 +748,155 @@ test_first_cycle_status_streams_and_owner_options_reach_it() {
   pass "host: the first cycle's status streams once, --restart replaces a stale watcher, and an owner predecessor makes a handling successor"
 }
 
+# Main's side of a handed-back wake: drain, then run the printed acknowledgement.
+main_drain_and_ack() {  # <home>
+  local out ack
+  out=$(FM_HOME="$1" "$ROOT/bin/fm-wake-drain.sh" 2>&1)
+  ack=$(printf '%s\n' "$out" | sed -n 's/^WAKE_ACK_REQUIRED: after handling completes run bin\/fm-wake-drain.sh //p' | tail -1)
+  # shellcheck disable=SC2086 # the printed acknowledgement arguments
+  [ -z "$ack" ] || FM_HOME="$1" "$ROOT/bin/fm-wake-drain.sh" $ack >/dev/null 2>&1 || fail "main's acknowledgement failed: $ack"
+}
+
+# One main session across several parks, as a primary's arm owner runs the host
+# again at each turn end: the session lock stays this one fake harness, so the
+# host's per-session state (the latch, the engine conversation) carries
+# across its parks.
+start_session() {  # <home>
+  local home=$1
+  FM_HOME="$home" FM_CREW_STATE_BIN="$home/fakebin/fm-crew-state.sh" PATH="$home/fakebin:$PATH" \
+    "$FAKE_CLAUDE" -c '
+      printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+      printf "%s\n" "$$" >> "$FM_HOME/claude-pids"
+      while [ ! -e "$FM_HOME/session.stop" ]; do
+        if [ -e "$FM_HOME/park.go" ]; then
+          rm -f "$FM_HOME/park.go"
+          "$0" park > "$FM_HOME/host.out" 2>&1
+          printf "%s\n" "$?" > "$FM_HOME/host.rc"
+        fi
+        sleep 0.1
+      done
+    ' "$HOST" 2>> "$home/claude.err" &
+}
+
+park_again() {  # <home>
+  rm -f "$1/host.rc"
+  : > "$1/park.go"
+  wait_until 150 watcher_live "$1" \
+    || fail "the next park never started a watcher cycle: $(cat "$1/host.out"; tail -n 5 "$1/state/.supervision-host.log" 2>/dev/null)"
+}
+
+# Let the latch's cooldown pass, as the clock would, by moving its persisted
+# probe time into the past, optionally with a cooldown already grown to
+# <seconds>; the next close then probes the engine.
+end_cooldown() {  # <home> [seconds]
+  local health="$1/state/.supervision-host-health" tmp
+  grep -q '^retry_after=[1-9]' "$health" 2>/dev/null || fail "the latch recorded no probe time"
+  tmp=$(mktemp "$health.XXXXXX")
+  if ! { sed -e 's/^retry_after=.*/retry_after=1/' ${2:+-e "s/^cooldown=.*/cooldown=$2/"} "$health" > "$tmp" \
+    && mv -f "$tmp" "$health"; }; then
+    fail "fixture: could not move the latch's probe time"
+  fi
+}
+
+# Two consecutive engine errors in one main session: the second trips the latch.
+trip_latch() {  # <home>
+  echo fail > "$1/stub-mode"
+  start_session "$1"
+  park_again "$1"
+  append_status "$1" 'first'
+  wait_until 250 host_exited "$1" || fail "latch: the first engine error did not hand the wake back"
+  assert_re '^supervision-host: the away session could not take this wake: the engine turn failed \(exit 3\); this wake is yours$' \
+    "$1/host.out" "the first engine error must hand the wake back with its reason"
+  assert_no_re 'paused' "$1/host.out" "one engine error must not latch the session"
+  main_drain_and_ack "$1"
+  park_again "$1"
+  append_status "$1" 'second'
+  wait_until 250 host_exited "$1" || fail "latch: the second engine error did not hand the wake back"
+  assert_re '^supervision-host: the away session could not take this wake: the engine turn failed \(exit 3\); this wake is yours$' \
+    "$1/host.out" "the tripping handback must still say why"
+  assert_re '^supervision-host: the supervision session is paused after repeated engine errors; every wake reaches you for the next 5 minutes' \
+    "$1/host.out" "the second consecutive engine error must trip the latch with one line"
+  assert_grep 'cooldown=300' "$1/state/.supervision-host-health" "the latch must start with the Pi policy's five-minute cooldown"
+  main_drain_and_ack "$1"
+}
+
+test_latch_trips_after_two_engine_errors_then_probes_and_recovers() {
+  local home
+  home=$(make_home away-latch away)
+  trip_latch "$home"
+
+  park_again "$home"
+  append_status "$home" 'inside the cooldown'
+  wait_until 250 host_exited "$home" || fail "latch: a close inside the cooldown did not reach main"
+  assert_re '^signal: .*demo.status' "$home/host.out" "a close inside the cooldown must reach main"
+  assert_re '^supervision-host: the away session is paused after repeated engine errors until .*; this wake is yours$' \
+    "$home/host.out" "a close inside the cooldown must say why main has it"
+  [ "$(engine_calls "$home")" -eq 2 ] || fail "the engine ran inside the cooldown"
+  assert_grep 'demo.status' "$home/state/.wake-queue" "a close inside the cooldown must stay durable for main"
+  main_drain_and_ack "$home"
+
+  end_cooldown "$home"
+  park_again "$home"
+  append_status "$home" 'the probe fails'
+  wait_until 250 host_exited "$home" || fail "latch: the failed probe did not hand the wake back"
+  [ "$(engine_calls "$home")" -eq 3 ] || fail "the cooldown's end did not let one wake probe the engine"
+  assert_no_re 'paused' "$home/host.out" "a failed probe must not repeat the trip line"
+  assert_grep 'cooldown=600' "$home/state/.supervision-host-health" "a failed probe must double the cooldown"
+  main_drain_and_ack "$home"
+
+  end_cooldown "$home" 2400
+  park_again "$home"
+  append_status "$home" 'a later probe fails'
+  wait_until 250 host_exited "$home" || fail "latch: the later failed probe did not hand the wake back"
+  [ "$(engine_calls "$home")" -eq 4 ] || fail "the grown cooldown's end did not let one wake probe the engine"
+  assert_grep 'cooldown=3600' "$home/state/.supervision-host-health" "the doubled cooldown must stop at one hour"
+  main_drain_and_ack "$home"
+
+  end_cooldown "$home"
+  echo handle > "$home/stub-mode"
+  park_again "$home"
+  append_status "$home" 'the probe succeeds'
+  wait_until 250 handled_at_least "$home" 1 || fail "latch: the successful probe was not handled: $(cat "$home/host.out")"
+  [ "$(engine_calls "$home")" -eq 5 ] || fail "the cooldown's end did not let the recovering wake probe the engine"
+  host_exited "$home" && fail "an away recovery must not reach main: $(cat "$home/host.out")"
+  assert_re '	recovered	after a successful probe' "$home/state/.supervision-host.log" "the ledger must record the recovery"
+  assert_grep 'cooldown=0' "$home/state/.supervision-host-health" "a successful probe must clear the latch"
+  assert_grep 'errors=0' "$home/state/.supervision-host-health" "a successful probe must clear the error streak"
+  watcher_live "$home" || fail "the recovered host is not parked on a live successor cycle"
+  pass "host: two engine errors latch the session, main keeps every away wake in the cooldown, a failed probe doubles it up to its cap, and a report recovers it silently"
+}
+
+# The latch lives only in the opted-in host's away path: an attended close in a
+# latched session and a home that dropped config/supervision-host both reach
+# main exactly as they do without it.
+test_latch_leaves_attended_and_unopted_homes_unchanged() {
+  local home health
+  home=$(make_home latch-scope away)
+  trip_latch "$home"
+  health=$(cat "$home/state/.supervision-host-health")
+
+  FM_HOME="$home" "$CONTRACT" archive >/dev/null 2>&1 || fail "fixture: could not archive the away posture"
+  park_again "$home"
+  append_status "$home" 'attended while latched'
+  wait_until 250 host_exited "$home" || fail "latch scope: the attended close did not reach main"
+  assert_re '^signal: .*demo.status' "$home/host.out" "an attended close in a latched session must reach main"
+  assert_no_re '^supervision-host' "$home/host.out" "an attended close in a latched session must reach main exactly as the arm printed it"
+  [ "$(cat "$home/state/.supervision-host-health")" = "$health" ] || fail "an attended close changed the latch"
+  main_drain_and_ack "$home"
+
+  rm -f "$home/config/supervision-host"
+  FM_HOME="$home" "$CONTRACT" enter --words 'watch the fleet; merge nothing' >/dev/null 2>&1 \
+    || fail "fixture: could not record the away posture again"
+  park_again "$home"
+  append_status "$home" 'away without the file'
+  wait_until 250 host_exited "$home" || fail "latch scope: the close without the file did not reach main"
+  assert_re '^supervision-host: the home no longer opts into the supervision host$' "$home/host.out" \
+    "a home without the file must hand the close back as the opt-out, not the latch"
+  assert_no_re 'paused' "$home/host.out" "a home without the file must not read the latch"
+  [ "$(engine_calls "$home")" -eq 2 ] || fail "an engine ran after the latch tripped"
+  pass "host: the latch changes nothing for an attended close or a home without config/supervision-host"
+}
+
 test_unverified_engine_hands_every_away_wake_to_main() {
   local home
   home=$(make_home no-engine away 'pi')
@@ -823,6 +976,8 @@ test_next_host_clears_a_turn_its_killed_predecessor_left
 test_report_without_acknowledgement_hands_the_wake_to_main
 test_return_during_a_failed_turn_still_hands_its_outcomes_to_main
 test_incomplete_engine_result_hands_the_wake_to_main
+test_latch_trips_after_two_engine_errors_then_probes_and_recovers
+test_latch_leaves_attended_and_unopted_homes_unchanged
 test_engine_turn_is_bounded_and_its_descendants_reaped
 test_restarted_host_stops_what_a_killed_predecessor_left
 test_park_boundary_ends_the_park_before_the_hook_timeout

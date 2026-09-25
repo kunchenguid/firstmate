@@ -65,6 +65,9 @@
 # (bin/fm-branch-report.sh), so it still reaches main when the host dies at the
 # turn's end or its owner drops the handoff, as a superseded Cursor park does.
 #
+# THE LATCH. An opted-in away host persists engine health across short-lived
+# parks; docs/supervision-host.md "The broken-session latch" owns the policy.
+#
 # THE PARK BOUNDARY. Claude drops the exit 2 of a Stop hook it terminated at
 # the hook's configured timeout (docs/verification/supervision.md), Cursor's
 # stop hook carries the same tracked 28800-second registration, and a host
@@ -105,9 +108,11 @@
 # engine, model, session id, main-session key, turn count, running cost),
 # .supervision-host-turn and .supervision-host-receipts (the current turn's
 # report scope and the reports it recorded), .supervision-host-prompt and
-# .supervision-host-wake (the prompt and wake text of the current turn), and
-# .supervision-host.log (a bounded ledger of where every close went, with each
-# engine turn's usage and outcome).
+# .supervision-host-wake (the prompt and wake text of the current turn),
+# .supervision-host-health (the latch: errors, cooldown, and probe time, keyed
+# to the main session, engine, and model), and .supervision-host.log (a bounded
+# ledger of where every close went, with each engine turn's usage and
+# outcome).
 #
 # Tunables (environment): FM_SUPERVISION_HOST_PARK_SECONDS (27000; a positive
 # integer below the 28800-second registration, any other value is the default),
@@ -161,6 +166,8 @@ TURN_TIMEOUT=$(numeric_or "${FM_SUPERVISION_HOST_TURN_TIMEOUT:-}" 1200)
 ROTATE_TURNS=$(numeric_or "${FM_SUPERVISION_HOST_ROTATE_TURNS:-}" 20)
 READY_TIMEOUT=$(numeric_or "${FM_SUPERVISION_HOST_READY_TIMEOUT:-}" 25)
 POLL=$(numeric_or "${FM_SUPERVISION_HOST_POLL:-}" 1)
+COOLDOWN=300
+COOLDOWN_MAX=3600
 AUTOARM_GEN=${FM_SUPERVISION_HOST_AUTOARM_GEN:-}
 AUTOARM_OWNER=${FM_SUPERVISION_HOST_OWNER_PID:-}
 PRIMARY=${FM_SUPERVISION_HOST_PRIMARY:-}
@@ -178,12 +185,15 @@ PROMPT_FILE="$STATE/.supervision-host-prompt"
 WAKE_FILE="$STATE/.supervision-host-wake"
 HOST_LOG="$STATE/.supervision-host.log"
 ENGINE_PID_FILE="$STATE/.supervision-host.engine-pid"
+HEALTH_FILE="$STATE/.supervision-host-health"
 
 HOST_PID=$$
 HOST_STARTED=$(date +%s)
 GEN="host-$HOST_PID-$HOST_STARTED"
 TURN_SEQ=0
 LAST_TURN=
+ENGINE_ERROR=0
+HEALTH_NOTE=
 GRANT_ACTIVE=0
 ARM_PID=
 ARM_OUT=
@@ -538,13 +548,13 @@ start_successor() {  # <predecessor-arm-pid>
 # and ENGINE_MODE (new|resume).
 choose_conversation() {
   local key recorded_key recorded_session recorded_engine recorded_model turns
-  key="$(sed -n '1p' "$STATE/.lock" 2>/dev/null):$(sed -n '1p' "$STATE/.lock-session" 2>/dev/null | cksum | awk '{ print $1 }')"
+  key=$(fm_supervision_host_main_key "$STATE") || key=
   recorded_key=$(sed -n 's/^key=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)
   recorded_session=$(sed -n 's/^session=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)
   recorded_engine=$(sed -n 's/^engine=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)
   recorded_model=$(sed -n 's/^model=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)
   turns=$(numeric_or "$(sed -n 's/^turns=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)" 0)
-  if [ -n "$recorded_session" ] && [ "$recorded_key" = "$key" ] \
+  if [ -n "$key" ] && [ -n "$recorded_session" ] && [ "$recorded_key" = "$key" ] \
     && [ "$recorded_engine" = "$FM_SUPERVISION_ENGINE" ] \
     && [ "$recorded_model" = "$FM_SUPERVISION_ENGINE_MODEL" ] \
     && [ "$turns" -lt "$ROTATE_TURNS" ] && [ -s "$PROMPT_FILE" ]; then
@@ -583,14 +593,85 @@ write_engine_record() {  # <turns> <conversation-cost>
     && mv -f "$tmp" "$ENGINE_RECORD"
 }
 
+# Persist health between host parks; the main-session key prevents a recycled
+# lock pid from inheriting another session's conversation or latch.
+# docs/supervision-host.md "The broken-session latch" owns the policy.
+health_key() {
+  fm_supervision_host_health_key "$STATE"
+}
+
+# Sets HEALTH_ERRORS, HEALTH_COOLDOWN, and HEALTH_RETRY for the current key.
+health_load() {
+  local key
+  HEALTH_ERRORS=0
+  HEALTH_COOLDOWN=0
+  HEALTH_RETRY=0
+  key=$(health_key) || return 0
+  [ "$(sed -n 's/^key=//p' "$HEALTH_FILE" 2>/dev/null | head -n 1)" = "$key" ] || return 0
+  HEALTH_ERRORS=$(numeric_or "$(sed -n 's/^errors=//p' "$HEALTH_FILE" 2>/dev/null | head -n 1)" 0)
+  HEALTH_COOLDOWN=$(numeric_or "$(sed -n 's/^cooldown=//p' "$HEALTH_FILE" 2>/dev/null | head -n 1)" 0)
+  HEALTH_RETRY=$(numeric_or "$(sed -n 's/^retry_after=//p' "$HEALTH_FILE" 2>/dev/null | head -n 1)" 0)
+}
+
+health_save() {
+  local key tmp
+  key=$(health_key) || return 0
+  tmp=$(mktemp "$HEALTH_FILE.tmp.XXXXXX" 2>/dev/null) || return 0
+  printf 'key=%s\nerrors=%s\ncooldown=%s\nretry_after=%s\n' \
+    "$key" "$HEALTH_ERRORS" "$HEALTH_COOLDOWN" "$HEALTH_RETRY" > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$HEALTH_FILE" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null || true
+}
+
+# True while the latch holds main to every wake. Needs the engine config.
+health_cooling() {
+  local retry
+  health_load
+  retry=$(fm_supervision_host_paused_until "$STATE") && [ "$(date +%s)" -lt "$retry" ]
+}
+
+# Fold one finished turn into the latch. Sets HEALTH_NOTE to the one line main
+# is owed when the latch trips for the first time.
+health_record() {  # <engine-error 0|1> <reports>
+  local now
+  now=$(date +%s)
+  HEALTH_NOTE=
+  health_load
+  if [ "$1" -eq 1 ]; then
+    HEALTH_ERRORS=$((HEALTH_ERRORS + 1))
+    if [ "$HEALTH_ERRORS" -ge 2 ] || [ "$HEALTH_COOLDOWN" -gt 0 ]; then
+      if [ "$HEALTH_COOLDOWN" -eq 0 ]; then
+        HEALTH_COOLDOWN=$COOLDOWN
+        HEALTH_NOTE="supervision-host: the supervision session is paused after repeated engine errors; every wake reaches you for the next $((COOLDOWN / 60)) minutes, then one wake probes it again"
+      else
+        HEALTH_COOLDOWN=$((HEALTH_COOLDOWN * 2))
+        [ "$HEALTH_COOLDOWN" -le "$COOLDOWN_MAX" ] || HEALTH_COOLDOWN=$COOLDOWN_MAX
+      fi
+      HEALTH_RETRY=$((now + HEALTH_COOLDOWN))
+      log_line "latch	errors=$HEALTH_ERRORS	cooldown=${HEALTH_COOLDOWN}s"
+    fi
+  elif [ "$2" -gt 0 ]; then
+    [ "$HEALTH_COOLDOWN" -eq 0 ] || log_line "recovered	after a successful probe"
+    HEALTH_ERRORS=0
+    HEALTH_COOLDOWN=0
+    HEALTH_RETRY=0
+  elif [ "$HEALTH_COOLDOWN" -gt 0 ] && [ "$HEALTH_RETRY" -le "$now" ]; then
+    HEALTH_RETRY=$((now + HEALTH_COOLDOWN))
+  fi
+  health_save
+}
+
 # Handle one away-posture close on the engine. Returns 0 when the wake is
 # handled (or held nothing the branch may claim), else sets HANDLE_WHY and
-# returns 1. Runs in the host's own shell, never a subshell, because it
-# advances the host's grant and turn state.
+# returns 1; sets ENGINE_ERROR when the turn failed on the engine itself. Runs
+# in the host's own shell, never a subshell, because it advances the host's
+# grant and turn state.
 handle_away() {  # <reason-lines>
   local reason=$1 first scope status corrupted rows tasks unscoped rc turn readback
   local receipts usage result errors unacked
   LAST_TURN=
+  ENGINE_ERROR=0
+  HEALTH_NOTE=
   first=$(printf '%s\n' "$reason" | head -n 1)
   set --
   case "$first" in heartbeat*) set -- --heartbeat ;; esac
@@ -696,8 +777,11 @@ handle_away() {  # <reason-lines>
   usage=$(fm_supervision_engine_result "$FM_SUPERVISION_ENGINE" "$result" "${ENGINE_COST:-0}" 2>/dev/null || true)
   [ "$result" = /dev/null ] || rm -f "$result"
   TURN_RESULT=
-  if [ "$rc" -eq 0 ] && [ "${receipts:-0}" -gt 0 ] && [ -z "$unacked" ] \
-    && [ -n "$usage" ] && [ "${usage#error=0}" != "$usage" ]; then
+  if [ "$rc" -ne 0 ] || [ -z "$usage" ] || [ "${usage#error=0}" = "$usage" ]; then
+    ENGINE_ERROR=1
+  fi
+  health_record "$ENGINE_ERROR" "${receipts:-0}"
+  if [ "$ENGINE_ERROR" -eq 0 ] && [ "${receipts:-0}" -gt 0 ] && [ -z "$unacked" ]; then
     write_engine_record $((ENGINE_TURNS + 1)) "$(printf '%s\n' "$usage" | sed -n 's/.* conversation_cost=\([^ ]*\).*/\1/p')" \
       || rm -f "$ENGINE_RECORD"
     [ "$errors" = /dev/null ] || rm -f "$errors"
@@ -785,6 +869,9 @@ while :; do
   if ! command -v node >/dev/null 2>&1; then
     exit_to_main "node is required to compute branch eligibility; this wake is yours"
   fi
+  if health_cooling; then
+    exit_to_main "the away session is paused after repeated engine errors until $(fm_supervision_host_clock "$HEALTH_RETRY"); this wake is yours"
+  fi
 
   # A turn that could outlive the boundary would outlive the hook registration.
   turn_crosses_boundary && boundary_exit
@@ -802,9 +889,9 @@ while :; do
   if ! handle_away "$REASON"; then
     if returned_during_turn; then
       exit_to_main "the away session could not take this wake: $HANDLE_WHY; this wake is yours, and the captain returned during its turn, so relay the outcomes it recorded (store rows $RETURNED_SEQS, listed next and in bin/fm-branch-outcome.sh list) to the captain" \
-        "$(turn_outcome_lines "$LAST_TURN")"
+        "$(turn_outcome_lines "$LAST_TURN")${HEALTH_NOTE:+$'\n'$HEALTH_NOTE}"
     fi
-    exit_to_main "the away session could not take this wake: $HANDLE_WHY; this wake is yours"
+    exit_to_main "the away session could not take this wake: $HANDLE_WHY; this wake is yours" "$HEALTH_NOTE"
   fi
   if returned_during_turn; then
     exit_to_main "the captain returned while the away session was handling this wake, which it finished after the return brief was rendered; relay its outcomes (store rows $RETURNED_SEQS, listed next and in bin/fm-branch-outcome.sh list) to the captain" \
