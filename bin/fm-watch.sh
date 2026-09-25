@@ -2778,12 +2778,18 @@ while :; do
           # (bin/fm-pr-merge.sh): its own live verification is what decides the
           # PR is open, mergeable, and green, so a red or unverifiable PR is
           # refused there and the poll simply stays armed for the next cycle.
+          # While the away-posture record exists the watcher never invokes the
+          # merge path at all: the captain's words are the mandate there, and a
+          # machine-applied merge authority cannot tell a "merge it" away window
+          # from a "do not merge" one, so the poll reports and waits for the
+          # supervision session's own reading instead.
           # The merge takes this task's control lock itself, so the poll's hold
           # on it must be released first and retaken afterwards. A confirmed
           # landing is recognized by the merge-notified marker the merge path
           # commits with its durable outcome, which also covers a queued or
           # unconfirmed acceptance that must keep polling.
           if [ -z "$out" ] \
+            && ! fm_afk_contract_present "$STATE" \
             && [ "$(fm_meta_get "$STATE/$id.meta" yolo)" = on ]; then
             pr_poll_control_release || exit 1
             FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \

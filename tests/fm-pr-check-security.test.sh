@@ -3072,6 +3072,31 @@ JSON
   pass "a yolo merge refused by an unreported required check keeps the poll armed"
 }
 
+test_yolo_poll_never_merges_while_the_away_record_exists() {
+  local dir state url rc
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case yolo-poll-away)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_poll_meta "$state" task-a "$url" yolo=on
+  write_away_record "$dir"
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
+    FM_TEST_GLAB_LOG="$dir/glab.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "away watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "away did not reach the control check: $(cat "$dir/watch.out")" ;; esac
+  assert_no_grep 'pr merge' "$dir/gh.log" "a yolo task's green PR was merged while the away-posture record existed"
+  [ -f "$state/task-a.check.sh" ] || fail "away poll was retired without a merge"
+  [ ! -e "$state/task-a.pr-poll-merge-notified" ] || fail "an unmerged PR recorded a merge outcome"
+  archive_away_record "$dir"
+  pass "a yolo poll never auto-merges while the away-posture record exists"
+}
+
 test_yolo_poll_queued_merge_keeps_polling() {
   local dir state url rc
   url=https://github.com/o/r/pull/1
@@ -3676,6 +3701,7 @@ test_merged_poll_row_names_no_authority_when_no_record_grants_one
 test_yolo_poll_merges_a_green_pr
 test_yolo_poll_reports_only_for_non_yolo_and_red
 test_yolo_poll_refuses_an_unreported_required_check
+test_yolo_poll_never_merges_while_the_away_record_exists
 test_yolo_poll_queued_merge_keeps_polling
 test_yolo_poll_keeps_a_rebound_poll_armed
 test_yolo_merge_attempt_is_bounded
