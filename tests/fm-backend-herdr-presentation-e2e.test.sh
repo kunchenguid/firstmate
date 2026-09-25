@@ -530,6 +530,7 @@ write_ship_brief "$HOME_DIR" abort-a 'Projection abort fixture A.'
 write_ship_brief "$HOME_DIR" abort-b 'Projection abort fixture B.'
 write_ship_brief "$HOME_DIR" lock-contended 'Projection lock contention fixture.'
 write_ship_brief "$HOME_DIR" default-on 'Projection default-on fixture.'
+write_ship_brief "$HOME_DIR" stale 'Projection stale-journal reclaim fixture.'
 make_project "$PROJECT_DIR"
 make_project "$RECOVERY_PROJECT_DIR"
 
@@ -611,6 +612,33 @@ teardown_task default-on "$HOME_DIR" > "$TMP_ROOT/default-on-teardown.out" 2> "$
   || fail "default-on teardown failed: $(cat "$TMP_ROOT/default-on-teardown.err")"
 if [ "$FLOOR_VERDICT" = 0 ] && lab workspace get "$DEFAULT_ON_WSID" >/dev/null 2>&1; then
   fail "default-on teardown left its disposable workspace behind"
+fi
+if [ "$FLOOR_VERDICT" = 0 ]; then
+  # A stale version 2 journal with no task record, naming the workspace the
+  # teardown above just removed, is quarantined and the spawn projects afresh.
+  STALE_TOKEN=$(HERDR_SESSION="$HERDR_LAB_SESSION" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1/state" stale) || exit 1
+    home=$(fm_backend_herdr_projection_home_identity "$1") || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label stale "$token")
+    fm_backend_herdr_projection_journal_bind "$1/state/stale.herdr-presentation" stale "$home" \
+      "$(fm_backend_herdr_session)" "$2" "$2:t1" "$2:p1" "$3" firstmate "$label" fm-stale || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$HOME_DIR" "$DEFAULT_ON_WSID" "$FIRSTMATE_WSID") || fail "could not plant the stale presentation journal"
+  spawn_task stale "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/stale.out" 2> "$TMP_ROOT/stale.err" \
+    || fail "spawn over a stale presentation journal failed: $(cat "$TMP_ROOT/stale.err")"
+  remember_meta_worktree "$HOME_DIR/state/stale.meta" >/dev/null
+  STALE_WSID=$(grep '^herdr_workspace_id=' "$HOME_DIR/state/stale.meta" | cut -d= -f2-)
+  [ -n "$STALE_WSID" ] && [ "$STALE_WSID" != "$FIRSTMATE_WSID" ] \
+    || fail "spawn over a stale presentation journal fell back to the flat firstmate workspace"
+  STALE_NEW_TOKEN=$(grep '^projection_id=' "$HOME_DIR/state/stale.herdr-presentation" | cut -d= -f2-)
+  [ -n "$STALE_NEW_TOKEN" ] && [ "$STALE_NEW_TOKEN" != "$STALE_TOKEN" ] \
+    || fail "spawn over a stale presentation journal did not publish a fresh journal"
+  grep -qx "projection_id=$STALE_TOKEN" "$HOME_DIR"/state/quarantine/stale.herdr-presentation.* \
+    || fail "the stale presentation journal was not quarantined with its bytes intact"
+  teardown_task stale "$HOME_DIR" > "$TMP_ROOT/stale-teardown.out" 2> "$TMP_ROOT/stale-teardown.err" \
+    || fail "stale-journal teardown failed: $(cat "$TMP_ROOT/stale-teardown.err")"
+  pass "real Herdr lab: a stale journal naming a removed workspace is quarantined and the spawn projects afresh"
 fi
 # The ordering scenarios below read the whole move log cumulatively against the
 # projected workspaces that are still live, so this retired one starts them clean.
@@ -886,9 +914,15 @@ for ABORT_PANE in "$ABORT_A_PANE" "$ABORT_B_PANE"; do
 done
 [ ! -e "$HOME_DIR/state/abort-a.meta" ] && [ ! -e "$HOME_DIR/state/abort-b.meta" ] \
   || fail "post-create abort fixtures published task metadata before launch"
+for ABORT_ID in abort-a abort-b; do
+  if lab workspace get "$(cat "$POST_CREATE_ABORT_CONTROL/$ABORT_ID/workspace")" >/dev/null 2>&1; then
+    fail "refused spawn $ABORT_ID left its projected workspace behind"
+  fi
+  [ ! -e "$HOME_DIR/state/$ABORT_ID.herdr-presentation" ] \
+    || fail "refused spawn $ABORT_ID did not roll back its presentation journal"
+done
 rm -rf "$POST_CREATE_ABORT_CONTROL"
-rm -f "$HOME_DIR/state/abort-a.herdr-presentation" "$HOME_DIR/state/abort-b.herdr-presentation"
-pass "real Herdr lab: concurrent post-create abort cleanup stays serialized with exact focus restoration"
+pass "real Herdr lab: concurrent post-create abort cleanup stays serialized with exact focus restoration and rolls back each journal"
 
 SHAPE_CLEANUP_AUDIT_START=$(focus_audit_line_count)
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/on-teardown.out" 2> "$TMP_ROOT/on-teardown.err" \

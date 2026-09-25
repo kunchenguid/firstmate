@@ -89,6 +89,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Parent-side remote ledger copies under `state/secondmate-summary-cache/`.
 - One-shot Bearings reconcile requests under `state/reconcile-notify/`.
 - Private secondmate config-reread generations with their retry and quarantine state.
+- Stale Herdr presentation journals under `state/quarantine/` ([`herdr-backend.md`](herdr-backend.md#presentation-spaces)).
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 

@@ -115,11 +115,13 @@
 #   config/herdr-presentation-spaces file can say off to disable it or on to
 #   opt in below that floor; an empty file remains the historical opt-in form.
 #   A clean fresh task first writes state/<id>.herdr-presentation atomically,
-#   then creates a disposable
-#   workspace containing only the ordinary task pane. A successful clean create
-#   upgrades its attempt journal with exact home, session, workspace, tab, pane,
-#   parent, and label bindings. On a same-identity restart, that complete binding
-#   plus authoritative metadata may replace one exact agent-free husk in place.
+#   then creates a disposable workspace containing only the ordinary task pane.
+#   A journal with no task metadata whose exact workspace is gone is first
+#   moved to state/quarantine/, and a refused spawn removes its own journal
+#   once its workspace is gone. A successful clean create upgrades its attempt
+#   journal with exact home, session, workspace, tab, pane, parent, and label
+#   bindings. On a same-identity restart, that complete binding plus
+#   authoritative metadata may replace one exact agent-free husk in place.
 #   The journal, visible token, and labels alone are never endpoint or ownership
 #   authority, and every ambiguous recovery stays on the flat fallback after
 #   duplicate-agent risk is independently absent. Treehouse allocation and task
@@ -1145,6 +1147,8 @@ HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
+HERDR_PROJECTION_ABORT_WORKSPACE=
+HERDR_PROJECTION_ABORT_JOURNAL=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
@@ -1232,10 +1236,20 @@ spawn_abort_cleanup() {
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
     HERDR_PROJECTION_ABORT_CLEANUP=0
-    fm_backend_herdr_projection_cleanup_exact \
-      "$HERDR_PROJECTION_ABORT_SESSION" \
-      "$HERDR_PROJECTION_ABORT_TASK_PANE" \
-      "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+    if [ -n "$HERDR_PROJECTION_ABORT_JOURNAL" ]; then
+      # This spawn published the journal, so it rolls back what it created.
+      fm_backend_herdr_projection_abort_rollback \
+        "$HERDR_PROJECTION_ABORT_SESSION" \
+        "$HERDR_PROJECTION_ABORT_TASK_PANE" \
+        "$HERDR_PROJECTION_ABORT_SEEDED_PANE" \
+        "$HERDR_PROJECTION_ABORT_WORKSPACE" \
+        "$HERDR_PROJECTION_ABORT_JOURNAL" "$ID" "${HERDR_PROJECTION_ID:-}" || true
+    else
+      fm_backend_herdr_projection_cleanup_exact \
+        "$HERDR_PROJECTION_ABORT_SESSION" \
+        "$HERDR_PROJECTION_ABORT_TASK_PANE" \
+        "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+    fi
   fi
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
@@ -3444,6 +3458,20 @@ else
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
+      # A journal with no task record whose exact workspace is gone from its
+      # named session is stale: quarantine it so this spawn projects afresh
+      # instead of staying flat. Any doubt leaves it to the recovery below.
+      if { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; } &&
+        [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] &&
+        fm_backend_herdr_server_ensure "$HERDR_SES" &&
+        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES"; then
+        if fm_backend_herdr_projection_journal_orphaned "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" &&
+          HERDR_QUARANTINED_JOURNAL=$(fm_backend_herdr_projection_journal_quarantine \
+            "$STATE" "$HERDR_PRESENTATION_JOURNAL" "$ID"); then
+          echo "warning: herdr presentation journal for $ID named a workspace that no longer exists; moved it to $HERDR_QUARANTINED_JOURNAL and projecting afresh" >&2
+        fi
+        spawn_herdr_presentation_order_lock_release
+      fi
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
         fm_backend_herdr_server_ensure "$HERDR_SES" || {
           echo "error: herdr presentation recovery could not ensure its exact named session" >&2
@@ -3526,6 +3554,8 @@ else
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
                 HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
                 HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+                HERDR_PROJECTION_ABORT_WORKSPACE=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
+                HERDR_PROJECTION_ABORT_JOURNAL=$HERDR_PRESENTATION_JOURNAL
               fi
               exit 1
             fi
@@ -3538,7 +3568,10 @@ else
             HERDR_PROJECTION_ABORT_CLEANUP=1
             HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
             HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
-            HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+            # A successful create already proved the seeded tab is gone.
+            HERDR_PROJECTION_ABORT_SEEDED_PANE=""
+            HERDR_PROJECTION_ABORT_WORKSPACE=$HERDR_WORKSPACE_ID
+            HERDR_PROJECTION_ABORT_JOURNAL=$HERDR_PRESENTATION_JOURNAL
             fm_backend_herdr_projection_order_best_effort \
               "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID"
             HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)

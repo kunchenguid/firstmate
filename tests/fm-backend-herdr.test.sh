@@ -612,16 +612,30 @@ test_exhausted_settle_window_keeps_a_non_shell_foreground_live() {
   pass "herdr stale registration: an exhausted settle window still reads a non-shell foreground as live"
 }
 
+# agent_named_sleep_cmd: link <dir>/pi to sleep and print shell text that runs
+# it for 300 seconds under the kernel process name `pi`. A multicall coreutils
+# (uutils) dispatches on its exec name and refuses `pi`, so there perl, which
+# ignores its own name, stands in for sleep.
+agent_named_sleep_cmd() {  # <sleep-bin> <dir>
+  local pi="$2/pi"
+  ln -sf "$1" "$pi"
+  if "$pi" 0 2>/dev/null; then
+    printf '%q 300' "$pi"
+    return 0
+  fi
+  ln -sf "$(command -v perl)" "$pi"
+  printf "%q -e 'sleep 300'" "$pi"
+}
+
 test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_alive() {
   local lab sleep_bin shell_pid out shell_verdict
   sleep_bin=$(command -v sleep) || fail "sleep not found"
   lab="$TMP_ROOT/stale-reg-descendant-bin"; mkdir -p "$lab"
   # A symlink to a real long-running binary so the kernel records `pi` as the
   # executable identity (a copied platform binary fails code signing on macOS).
-  ln -sf "$sleep_bin" "$lab/pi"
   # A real shell whose child is that agent-named process, while the canned
   # foreground view shows only the shell (a suspended or backgrounded agent).
-  sh -c "'$lab/pi' 300; :" &
+  sh -c "$(agent_named_sleep_cmd "$sleep_bin" "$lab"); :" &
   shell_pid=$!
   sleep 0.3
   out=$(stale_registration_case descendant idle "$(shell_only_process_info "$shell_pid")")
@@ -648,8 +662,7 @@ test_agent_descendant_under_a_spaced_install_path_stays_alive() {
   # `/Library/Application Support/...` shape), so a field-split read of the
   # process table sees only a fragment of the name.
   lab="$TMP_ROOT/stale-reg-spaced-bin/Application Support/Some Dir"; mkdir -p "$lab"
-  ln -sf "$sleep_bin" "$lab/pi"
-  sh -c "'$lab/pi' 300; :" &
+  sh -c "$(agent_named_sleep_cmd "$sleep_bin" "$lab"); :" &
   shell_pid=$!
   sleep 0.3
   out=$(stale_registration_case spaced-descendant idle "$(shell_only_process_info "$shell_pid")")
@@ -3575,6 +3588,122 @@ test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
   pass "herdr presentation recovery: duplicate-token inspection is read-only and live-agent risk refuses fallback"
 }
 
+# projection_v2_journal_fixture: publish a version 2 journal for <task> bound
+# to named session fmtest and workspace w15Z, then print its token.
+projection_v2_journal_fixture() {  # <state> <home-real> <task>
+  bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" "$3") || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label "$3" "$token")
+    fm_backend_herdr_projection_journal_bind "$1/$3.herdr-presentation" "$3" "$2" fmtest \
+      w15Z w15Z:t1 w15Z:p1 w1 firstmate "$label" "fm-$3" || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$1" "$2" "$3"
+}
+
+test_projection_orphaned_journal_is_quarantined_for_a_fresh_projection() {
+  local dir state home_real log resp fb token journal before out quarantined fresh
+  dir="$TMP_ROOT/projection-orphan"; state="$dir/state"; mkdir -p "$dir/responses" "$state" "$dir/home"
+  home_real=$(cd "$dir/home" && pwd -P)
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  token=$(projection_v2_journal_fixture "$state" "$home_real" orphan1) || fail "could not create orphaned journal fixture"
+  journal="$state/orphan1.herdr-presentation"
+  before=$(cat "$journal")
+  # The recorded workspace w15Z is gone; an unrelated projection remains.
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w16A","label":"└ other · p:AAAAAAAAAAAAAAAAAAAAAA"}]}}\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_journal_orphaned fmtest "$1/orphan1.herdr-presentation" orphan1 || exit 1
+    fm_backend_herdr_projection_journal_quarantine "$1" "$1/orphan1.herdr-presentation" orphan1 || exit 2
+    printf "\n"
+    fm_backend_herdr_projection_journal_create "$1" orphan1 || exit 3
+  ' "$ROOT" "$state") || fail "an orphaned journal was not quarantined for a fresh projection (exit $?)"
+  quarantined=$(printf '%s\n' "$out" | sed -n '1p')
+  fresh=$(printf '%s\n' "$out" | sed -n '2p')
+  case "$quarantined" in
+    "$state/quarantine/orphan1.herdr-presentation."[0-9]*) ;;
+    *) fail "orphaned journal was quarantined at an unexpected path: $quarantined" ;;
+  esac
+  [ "$(cat "$quarantined")" = "$before" ] || fail "quarantine did not keep the orphaned journal bytes"
+  [ -n "$fresh" ] && [ "$fresh" != "$token" ] \
+    || fail "a fresh projection journal did not replace the quarantined one"
+  [ "$(sed -n 's/^version=//p' "$journal")" = 1 ] || fail "the fresh journal is not a new version 1 attempt"
+  [ "$(awk -F $'\x1f' '{ print $2, $3 }' "$log")" = "workspace list" ] \
+    || fail "orphan proof made calls beyond one workspace list: $(cat "$log")"
+  pass "herdr presentation reclaim: a journal whose recorded workspace is gone is quarantined and a fresh projection can start"
+}
+
+test_projection_journal_with_a_live_or_unproven_workspace_is_kept() {
+  local dir state home_real log resp fb token journal before out
+  dir="$TMP_ROOT/projection-orphan-negative"; state="$dir/state"; mkdir -p "$dir/responses" "$state/v1" "$dir/home"
+  home_real=$(cd "$dir/home" && pwd -P)
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  token=$(projection_v2_journal_fixture "$state" "$home_real" kept1) || fail "could not create kept journal fixture"
+  journal="$state/kept1.herdr-presentation"
+  before=$(cat "$journal")
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_create "$1" kept1 >/dev/null' \
+    "$ROOT" "$state/v1" || fail "could not create version 1 journal fixture"
+  # 1: recorded workspace still exists, even though it was renamed.
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w15Z","label":"renamed"}]}}\n' > "$resp/1.out"
+  # 2: the token survives under another workspace id.
+  printf '{"result":{"workspaces":[{"workspace_id":"w20B","label":"└ kept1 · p:%s"}]}}\n' "$token" > "$resp/2.out"
+  # 3: the workspace list fails; 4: it is unparseable.
+  printf '1\n' > "$resp/3.exit"
+  printf 'not json\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    check() { if fm_backend_herdr_projection_journal_orphaned "$2" "$3" kept1; then printf "%s:reclaimed\n" "$1"; else printf "%s:kept\n" "$1"; fi; }
+    check workspace-present fmtest "$1/kept1.herdr-presentation"
+    check token-present fmtest "$1/kept1.herdr-presentation"
+    check list-failed fmtest "$1/kept1.herdr-presentation"
+    check list-unparseable fmtest "$1/kept1.herdr-presentation"
+    check other-session other "$1/kept1.herdr-presentation"
+    check version-1 fmtest "$1/v1/kept1.herdr-presentation"
+  ' "$ROOT" "$state")
+  [ "$out" = $'workspace-present:kept\ntoken-present:kept\nlist-failed:kept\nlist-unparseable:kept\nother-session:kept\nversion-1:kept' ] \
+    || fail "a journal whose workspace is live or unproven was treated as orphaned: $out"
+  [ "$(cat "$journal")" = "$before" ] || fail "a kept journal was modified"
+  [ ! -e "$state/quarantine" ] || fail "a kept journal was quarantined"
+  [ "$(wc -l < "$log" | tr -d '[:space:]')" = 4 ] \
+    || fail "the other-session or version 1 case listed workspaces it cannot own: $(cat "$log")"
+  pass "herdr presentation reclaim: a still-existing, token-matched, unreadable, foreign-session, or version 1 journal is left to today's recovery"
+}
+
+test_projection_abort_rollback_removes_only_a_confirmed_gone_journal() {
+  local dir state home_real log resp fb token journal out
+  dir="$TMP_ROOT/projection-abort-rollback"; state="$dir/state"; mkdir -p "$dir/responses" "$state" "$dir/home"
+  home_real=$(cd "$dir/home" && pwd -P)
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  token=$(projection_v2_journal_fixture "$state" "$home_real" rollback1) || fail "could not create rollback journal fixture"
+  journal="$state/rollback1.herdr-presentation"
+  # 1: workspace still listed; 2: list fails; 3: gone but token mismatched; 4: gone.
+  printf '{"result":{"workspaces":[{"workspace_id":"w15Z","label":"x"}]}}\n' > "$resp/1.out"
+  printf '1\n' > "$resp/2.exit"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}\n' > "$resp/3.out"
+  cp "$resp/3.out" "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" CLOSES="$dir/closes" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_close_pane_focus_preserving() { printf "%s\n" "$2" >> "$CLOSES"; }
+    run() {
+      if fm_backend_herdr_projection_abort_rollback fmtest w15Z:p1 "" w15Z "$1" rollback1 "$3" 2>/dev/null; then r=removed; else r=kept; fi
+      if [ -e "$1" ]; then j=present; else j=absent; fi
+      printf "%s:%s:%s\n" "$2" "$r" "$j"
+    }
+    run "$1" workspace-present "$2"
+    run "$1" list-failed "$2"
+    run "$1" token-mismatch BBBBBBBBBBBBBBBBBBBBBB
+    run "$1" confirmed-gone "$2"
+  ' "$ROOT" "$journal" "$token")
+  [ "$out" = $'workspace-present:kept:present\nlist-failed:kept:present\ntoken-mismatch:kept:present\nconfirmed-gone:removed:absent' ] \
+    || fail "refused-spawn rollback removed a journal without proof, or kept a proven-gone one: $out"
+  [ "$(sort -u "$dir/closes")" = w15Z:p1 ] \
+    || fail "rollback did not close only the exact task pane through the focus-safe path: $(cat "$dir/closes" 2>/dev/null)"
+  pass "herdr presentation rollback: a refused spawn removes its journal only after its exact workspace is confirmed gone"
+}
+
 # --- workspace_find: scoped to THIS home's own label, not just any match ----
 
 test_workspace_find_matches_only_this_homes_own_label() {
@@ -5710,6 +5839,9 @@ test_projection_order_rejects_malformed_socket
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
+test_projection_orphaned_journal_is_quarantined_for_a_fresh_projection
+test_projection_journal_with_a_live_or_unproven_workspace_is_kept
+test_projection_abort_rollback_removes_only_a_confirmed_gone_journal
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target

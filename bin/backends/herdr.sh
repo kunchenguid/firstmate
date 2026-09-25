@@ -2637,6 +2637,23 @@ fm_backend_herdr_projection_cleanup_exact() {  # <session> <task-pane> <seeded-p
   fi
 }
 
+# fm_backend_herdr_projection_abort_rollback: undo a refused spawn's own fresh
+# projection. The exact panes close through cleanup_exact, and the journal is
+# removed only after the exact workspace is confirmed gone and the journal
+# still carries this spawn's token. Otherwise the journal stays so a later
+# spawn's orphan reclaim or session-start cleanup can retire it.
+fm_backend_herdr_projection_abort_rollback() {  # <session> <task-pane> <seeded-pane> <workspace> <journal> <task-id> <token>
+  local session=$1 workspace=$4 journal=$5 id=$6 token=$7
+  fm_backend_herdr_projection_cleanup_exact "$session" "$2" "$3"
+  if [ -z "$workspace" ] \
+     || [ "$(fm_backend_herdr_workspace_presence_state "$session" "$workspace")" != dead ]; then
+    echo "warning: herdr presentation workspace for $id was not confirmed gone after the refused spawn; leaving its journal for the next spawn to reclaim" >&2
+    return 1
+  fi
+  [ "$(fm_backend_herdr_projection_journal_token "$journal" "$id" 2>/dev/null)" = "$token" ] || return 1
+  rm -f "$journal"
+}
+
 # fm_backend_herdr_projection_parent_workspace_exact: resolve one exact parent
 # workspace only when its presentation label is unique in the named session.
 fm_backend_herdr_projection_parent_workspace_exact() {  # <session> <parent-label>
@@ -2934,6 +2951,37 @@ $wsids
 EOF
   echo "warning: quarantined herdr presentation for $id is dead or agent-free; exact bound reclaim may proceed, otherwise spawning flat" >&2
   return 0
+}
+
+# fm_backend_herdr_projection_journal_orphaned: read-only proof that a version 2
+# journal bound to <session> points at a workspace that no longer exists there.
+# Succeeds only when one parsed workspace list carries neither the recorded
+# workspace id nor the journal's token; any doubt keeps today's recovery path.
+fm_backend_herdr_projection_journal_orphaned() {  # <session> <journal> <task-id>
+  local session=$1 journal=$2 id=$3 list
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
+  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
+    && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] || return 1
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  printf '%s' "$list" | jq -e \
+    --arg workspace "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" \
+    --arg suffix " · p:$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" '
+      (.result.workspaces | type) == "array"
+      and ([.result.workspaces[]
+            | select(.workspace_id == $workspace
+                or ((.label | type) == "string" and (.label | endswith($suffix))))]
+           | length) == 0
+    ' >/dev/null 2>&1
+}
+
+# fm_backend_herdr_projection_journal_quarantine: move an orphaned journal
+# aside with its bytes intact and print the quarantine path. The no-clobber
+# hard link refuses rather than overwrite an earlier quarantined journal.
+fm_backend_herdr_projection_journal_quarantine() {  # <state-dir> <journal> <task-id>
+  local dir="$1/quarantine" journal=$2 dest
+  dest="$dir/$3$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX.$(date +%s)"
+  mkdir -p "$dir" && ln "$journal" "$dest" 2>/dev/null && rm -f "$journal" || return 1
+  printf '%s' "$dest"
 }
 
 # fm_backend_herdr_projection_endpoint_matches_journal: read-only correlation
