@@ -3,10 +3,10 @@
 #
 # Pooled project clones do not keep their local default branch current, so this
 # helper compares remote-backed projects against origin/<default> after fetching
-# the default branch, and local-only projects against the local default branch.
-# state/<id>.meta base_branch= replaces that default when the task shipped
-# against a named integration branch, including a branch that exists only in a
-# bare project repository.
+# the default branch, and local-only projects against the local default branch
+# when no named integration branch was selected. state/<id>.meta base_branch=
+# replaces that default when the task shipped against a named integration branch,
+# including a branch that exists only in a bare project repository.
 # When state/<id>.meta records pr= as a GitHub pull-request URL or a bare
 # number for an open PR, the compare side is ALWAYS a freshly fetched
 # refs/pull/<n>/head by default so review stays current after no-mistakes fix
