@@ -178,7 +178,12 @@ teardown_endpoint_phase() { # <expected-spawn-gen>; leaves durable metadata inta
   }
   pane_status=$(fm_backend_herdr_pane_presence_state "$ENDPOINT_SESSION" "$ENDPOINT_PANE")
   case "$pane_status" in
-    dead) teardown_endpoint_receipt pane_close confirmed already-absent || return 1 ;;
+    dead)
+      if ! fm_task_lifecycle cleanup-read "$ID" | jq -e '.phases.agent_exit.state=="confirmed"' >/dev/null; then
+        teardown_endpoint_receipt agent_exit retained agent-state-unknown || return 1
+      fi
+      teardown_endpoint_receipt pane_close confirmed already-absent || return 1
+      ;;
     present)
       teardown_endpoint_identity || { teardown_endpoint_refuse pane_close "$ENDPOINT_IDENTITY_REASON"; return 1; }
       fm_backend_herdr_projection_target_tab_mutation_allowed "$ENDPOINT_SESSION" "$ENDPOINT_TAB" || {

@@ -89,9 +89,17 @@ report_before=$(shasum -a 256 "$FM_HOME/data/mixed-task/report.md")
 call pane process-info --pane "$sibling" > "$LAB_DIR/sibling-after.json"
 diff -u "$LAB_DIR/sibling-before.json" "$LAB_DIR/sibling-after.json"
 call workspace get "$mixed" >/dev/null
-jq -e '.phases.workspace_remove.reason_code=="mixed-workspace"' "$FM_HOME/state/mixed-task.cleanup.json"
+jq -e '.phases.agent_exit.state=="confirmed" and .phases.workspace_remove.reason_code=="mixed-workspace"' "$FM_HOME/state/mixed-task.cleanup.json"
 test "$report_before" = "$(shasum -a 256 "$FM_HOME/data/mixed-task/report.md")"
 printf 'PASS mixed workspace and active sibling process preserved\n'
+
+call tab create --workspace "$mixed" --label already-absent --cwd "$ROOT" --no-focus > "$LAB_DIR/already-absent.json"
+setup_task already-absent "$LAB_DIR/already-absent.json" s-absent "$ROOT"
+absent_pane=$(jq -r '.result.pane.pane_id // .result.root_pane.pane_id' "$LAB_DIR/already-absent.json")
+call pane close "$absent_pane" >/dev/null
+"$ROOT/bin/fm-teardown.sh" already-absent --endpoint-only --expect-spawn-gen s-absent
+jq -e '.phases.agent_exit.state=="retained" and .phases.agent_exit.reason_code=="agent-state-unknown" and .phases.pane_close.state=="confirmed"' "$FM_HOME/state/already-absent.cleanup.json"
+printf 'PASS absent pane retains an independent unknown agent-exit obligation\n'
 
 call workspace create --label missing-directory --cwd "$ROOT" --no-focus > "$LAB_DIR/missing.json"
 setup_task missing-task "$LAB_DIR/missing.json" s-missing "$LAB_DIR/never-existed"

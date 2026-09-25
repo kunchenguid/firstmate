@@ -47,6 +47,9 @@ if "$CLI" reconcile a --expected-revision 4 --record "$TMP_ROOT/bad.json" >/dev/
 pass 'attempt replay is idempotent and payload mutation is rejected'
 
 "$CLI" lifecycle a | jq '.disposition="archived"' > "$TMP_ROOT/input.json"
+if "$CLI" reconcile a --expected-revision 4 --record "$TMP_ROOT/input.json" >/dev/null 2>&1; then fail 'archive accepted without stop authority'; fi
+printf 'Explicitly stop this task\n' > "$FM_HOME/data/a/stop.txt"
+"$CLI" lifecycle a | jq --arg ref "$FM_HOME/data/a/stop.txt" '.disposition="archived" | .assessment.authority_ref=$ref' > "$TMP_ROOT/input.json"
 "$CLI" reconcile a --expected-revision 4 --record "$TMP_ROOT/input.json" >/dev/null
 test "$(python3 "$LIB" mode a)" = archived
 if "$CLI" action a --action-id a.g1.a1 --phase prepared >/dev/null 2>&1; then fail 'archived action restarted'; fi
@@ -200,12 +203,18 @@ set -eu
 . "$ROOT/bin/fm-wake-lib.sh"
 fm_treehouse_slot_owner_claim "$SLOT" same "$FM_HOME" s-new
 fm_treehouse_slot_owner_state "$SLOT" same s-old
-[ "$FM_TREEHOUSE_SLOT_OWNER" = other ]
+[ "$FM_TREEHOUSE_SLOT_OWNER" = unsafe ]
 fm_treehouse_slot_owner_release "$SLOT" same s-old
 fm_treehouse_slot_owner_state "$SLOT" same s-new
 [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ]
+fm_treehouse_slot_owner_claim "$SLOT" same "$FM_HOME"
+fm_treehouse_slot_owner_state "$SLOT" same s-new
+[ "$FM_TREEHOUSE_SLOT_OWNER" = unsafe ]
+fm_treehouse_slot_owner_release "$SLOT" same s-new
+[ -f "$(fm_treehouse_slot_owner_marker "$SLOT")" ]
+fm_treehouse_slot_owner_claim "$SLOT" same "$FM_HOME" s-new
 printf 'spawn_gen=s-duplicate\n' >> "$(fm_treehouse_slot_owner_marker "$SLOT")"
 fm_treehouse_slot_owner_state "$SLOT" same s-new
 [ "$FM_TREEHOUSE_SLOT_OWNER" = unsafe ]
 SHSLOT
-pass 'old generation cannot release a reused same-task slot; duplicate claim remains unsafe'
+pass 'missing or old generation cannot release a reused same-task slot; duplicate claim remains unsafe'

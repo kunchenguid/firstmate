@@ -1212,7 +1212,7 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home> [spawn-gen]
 #   mine   - the claim names this task
 #   other  - the claim names a different task, so the slot was reassigned
 #   absent - no claim: the slot was taken before claims existed, or returned since
-#   unsafe - a claim file exists but cannot be read as a claim
+#   unsafe - a claim cannot positively bind the requested execution
 # FM_TREEHOUSE_SLOT_OWNER_ID and FM_TREEHOUSE_SLOT_OWNER_HOME carry the recorded
 # claimant as evidence. The home is reported, never matched: a home that moved
 # must not turn a task's own slot into a refusal.
@@ -1239,10 +1239,10 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id> [expected-spawn-gen]
   FM_TREEHOUSE_SLOT_OWNER_ID=$owner_id
   # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
   FM_TREEHOUSE_SLOT_OWNER_HOME=$owner_home
-  if [ "$owner_id" = "$id" ] && { [ -z "$expected" ] || [ -z "$owner_gen" ] || [ "$owner_gen" = "$expected" ]; }; then
-    FM_TREEHOUSE_SLOT_OWNER=mine
-  else
+  if [ "$owner_id" != "$id" ]; then
     FM_TREEHOUSE_SLOT_OWNER=other
+  elif [ -z "$expected" ] || { [ -n "$owner_gen" ] && [ "$owner_gen" = "$expected" ]; }; then
+    FM_TREEHOUSE_SLOT_OWNER=mine
   fi
 }
 
