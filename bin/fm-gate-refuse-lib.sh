@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# fm-gate-refuse-lib.sh - fail-closed refusal that keeps a no-mistakes GATE agent
-# out of firstmate's fleet lifecycle.
+# fm-gate-refuse-lib.sh - refuse no-mistakes gate lifecycle calls against the
+# real fleet while allowing marked disposable lab homes.
 #
 # The hazard (data/nm-gate-ambient-authority-containment-c3/report.md): a
 # no-mistakes gate agent runs inside a firstmate checkout with a free shell, so
@@ -11,12 +11,12 @@
 #
 # no-mistakes owns the authority-removal half (it neutralizes the project
 # instructions and stamps NO_MISTAKES_GATE into the gate agent's environment).
-# THIS is the firstmate capability-removal half: an enforceable script refusal,
-# not a prose rule the neutralized agent would never read. It is sourced at the
-# top of the three fleet-lifecycle entrypoints and called before any fleet
-# mutation, so a gate agent that still reaches for the fleet is stopped cold.
+# THIS is the firstmate capability boundary: an enforceable script check,
+# not a prose rule the neutralized agent would never read. It is sourced by the
+# four fleet-lifecycle entrypoints and called before their fleet mutation, so
+# a gate agent that reaches for the real fleet is stopped cold.
 #
-# Two independent signals, either of which refuses (fail closed):
+# Two independent gate-context signals, either of which triggers the check:
 #
 #   1. NO_MISTAKES_GATE set - the durable env marker no-mistakes stamps into every
 #      gate agent. This is the primary signal and covers a relocated NM_HOME.
@@ -24,7 +24,7 @@
 #      repo (.../.no-mistakes/repos/*.git) - the UNSPOOFABLE backstop. It derives
 #      from the checkout's real filesystem location, which the agent cannot
 #      relocate without breaking the gate's own git operations, so it still
-#      refuses even if the agent tampered NO_MISTAKES_GATE away. Its limit: the
+#      detects a gate even if the agent tampered NO_MISTAKES_GATE away. Its limit: the
 #      literal-path match only fires for the default NM_HOME (~/.no-mistakes); a
 #      relocated NM_HOME is covered by signal 1.
 #
@@ -32,13 +32,27 @@
 # crew worktree - has NEITHER signal and is COMPLETELY unaffected: the function
 # returns 0 and the lifecycle proceeds exactly as before.
 #
-# This mirrors the unspoofable-marker precedent in bin/fm-marker-lib.sh: a signal
-# the agent cannot forge, keyed on at a chokepoint, keeping the pattern familiar
-# to firstmate maintainers. It layers ABOVE no-mistakes' separately-shipping
-# HEAD-continuity guard, which remains the adversarial/residual backstop.
+# THE ONE AUTHORIZED EXCEPTION - a disposable lab home: a gate agent may drive
+# lifecycle against an FM_HOME that carries the FM_GATE_LAB_MARKER file, because
+# bin/fm-lab-home.sh stamps it only on an empty directory
+# (fm_gate_lab_mark refuses a populated dir, so the helper cannot mark a real home).
+# The allowance additionally requires every FM_*_OVERRIDE to be empty or unset,
+# so the lab call uses the marked home's stock layout and no override can split
+# part of the "lab" back onto the real fleet. The threat model stays a CONFUSED
+# agent: a hostile agent that would hand-forge the marker file is the
+# adversarial case no-mistakes' neutral-execution-context and the
+# HEAD-continuity guard already own, so the check is a plain token file, not a
+# bound record. This is an allowance on the CAPABILITY side only:
+# fm_is_gate_agent still reports the gate context, so the sessionstart
+# stand-downs that read it directly are unaffected by the marker.
+#
+# The gate-context backstop mirrors the unspoofable-marker precedent in
+# bin/fm-marker-lib.sh; the lab-home marker is deliberately not unspoofable.
+# This boundary layers above no-mistakes' separately-shipping HEAD-continuity
+# guard, which remains the adversarial/residual backstop.
 #
 # TEST-HARNESS ESCAPE HATCH (FM_GATE_REFUSE_BYPASS=1): firstmate's own test suite
-# must exercise the REAL fm-spawn/fm-send/fm-teardown, but the no-mistakes gate
+# must exercise the real fleet entrypoints, but the no-mistakes gate
 # runs that suite FROM a gate worktree (cwd git-common-dir under
 # .no-mistakes/repos/*.git, and possibly NO_MISTAKES_GATE set) - the exact
 # environment this guard refuses. So both signals would fire during firstmate's
@@ -53,15 +67,51 @@
 # neutral-execution-context and the HEAD-continuity guard. The dedicated
 # tests/fm-gate-refuse.test.sh strips the bypass so it still verifies real refusal.
 #
-# Sourced by bin/fm-spawn.sh, bin/fm-send.sh, bin/fm-teardown.sh,
-# bin/fm-sessionstart-nudge.sh, and the tests.
+# Sourced by the fleet lifecycle entrypoints, session-start hooks,
+# bin/fm-lab-home.sh, and the tests.
 # No side effects on source. set -u / set -e safe. The refusal is a hard exit,
-# not a return, because there is no safe way to continue a fleet mutation from a
-# gate context.
+# not a return, because an unpermitted gate call cannot safely mutate the fleet.
 
 # The exit code every refusal uses, distinct enough to recognize in a caller or
 # test as "the gate refusal fired" rather than an ordinary usage error.
 FM_GATE_REFUSE_EXIT=3
+
+# The disposable-lab-home marker file and the token line it must carry. The
+# format is owned here; bin/fm-lab-home.sh is the supported writer.
+FM_GATE_LAB_MARKER='.fm-lab-home'
+FM_GATE_LAB_TOKEN='fm-lab-home v1'
+
+# fm_gate_lab_home <dir>: return 0 when <dir> is a marked disposable lab home.
+fm_gate_lab_home() {
+  local home=${1:-}
+  [ -n "$home" ] || return 1
+  [ -f "$home/$FM_GATE_LAB_MARKER" ] || return 1
+  [ "$(sed -n '1p' "$home/$FM_GATE_LAB_MARKER" 2>/dev/null || true)" = "$FM_GATE_LAB_TOKEN" ]
+}
+
+# fm_gate_lab_mark <dir>: stamp <dir> as a disposable lab home. Fails closed on
+# any dir that is not empty, so this can never mark a populated real home.
+fm_gate_lab_mark() {
+  local home=${1:-} listing
+  [ -n "$home" ] && [ -d "$home" ] || return 1
+  listing=$(find "$home" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) || return 1
+  [ -z "$listing" ] || return 1
+  printf '%s\n' "$FM_GATE_LAB_TOKEN" > "$home/$FM_GATE_LAB_MARKER"
+}
+
+# fm_gate_lab_permitted: return 0 when the current call targets a marked lab
+# home through a stock layout - $FM_HOME carries the marker and no
+# FM_*_OVERRIDE relocation has a nonempty value.
+fm_gate_lab_permitted() {
+  local v
+  fm_gate_lab_home "${FM_HOME:-}" || return 1
+  for v in "${!FM_@}"; do
+    case "$v" in
+      *_OVERRIDE) [ -z "${!v}" ] || return 1 ;;
+    esac
+  done
+  return 0
+}
 
 # fm_is_gate_agent: return 0 without output when this process looks like a
 # no-mistakes gate agent. An optional root anchors the git-common-dir check;
@@ -88,11 +138,16 @@ fm_is_gate_agent() {
 }
 
 # fm_refuse_if_gate_agent: exit FM_GATE_REFUSE_EXIT with a clear stderr message if
-# this process looks like a no-mistakes gate agent. Call before any fleet
-# mutation. No-ops (returns 0) for a normal firstmate session, or when firstmate's
-# own test harness sets FM_GATE_REFUSE_BYPASS=1 (see the header).
+# this process looks like a no-mistakes gate agent without a permitted lab home.
+# Call before any fleet mutation. No-ops (returns 0) for a normal firstmate
+# session, a permitted lab home, or when firstmate's own test harness sets
+# FM_GATE_REFUSE_BYPASS=1 (see the header).
 fm_refuse_if_gate_agent() {
   fm_is_gate_agent "${1:-.}" || return 0
+  if fm_gate_lab_permitted; then
+    echo "fm-gate-refuse: gate agent lifecycle permitted only against lab home $FM_HOME" >&2
+    return 0
+  fi
   if [ "$FM_GATE_REFUSE_REASON" = env ]; then
     echo "error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)" >&2
   else

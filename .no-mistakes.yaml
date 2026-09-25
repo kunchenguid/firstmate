@@ -5,7 +5,7 @@
 # no-mistakes review/fix/document/test/lint/pr/rebase/ci agent never adopts that
 # identity or drives the fleet. Trusted-only: a pushed branch cannot turn this off,
 # so it is honored only from the default-branch copy of this file. Layered above
-# the NO_MISTAKES_GATE lifecycle refusal (bin/fm-gate-refuse-lib.sh) and the
+# gate-context lifecycle boundary (bin/fm-gate-refuse-lib.sh) and the
 # HEAD-continuity guard; see docs/architecture.md "No-mistakes gate authority boundary."
 disable_project_settings: true
 
@@ -40,6 +40,7 @@ test:
     Run live Herdr scenarios only through bin/fm-herdr-lab.sh with a named non-default fm-lab-* session, following that helper's prepare, provision, run, and teardown contract exactly.
     Never touch the live default Herdr session or fleet panes.
     Prefer a throwaway lab for spawn, long-launch, and Claude-path proofs, and tear it down in the same evidence turn.
+    Lifecycle calls against a throwaway firstmate home proceed inside the gate only when the home was minted by `bin/fm-lab-home.sh create <dir>` and driven as plain `FM_HOME=<dir>` with no FM_*_OVERRIDE relocations; every other home stays refused.
     Do not mutate the operator primary checkout, real fleet FM_HOME state, or production credentials, and keep git changes otherwise inside the run worktree.
     Read docs/herdr-backend.md and the bin/fm-herdr-lab.sh header as the owners of Herdr lab mechanics rather than reproducing that manual here.
     Ship or scout briefs that will drive Herdr lifecycle still require --herdr-lab at scaffold time; these Test-agent instructions are not a substitute for that brief flag.
