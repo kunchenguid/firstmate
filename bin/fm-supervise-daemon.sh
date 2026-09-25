@@ -468,7 +468,8 @@ classify_heartbeat() {
 
 # Anything unrecognized is escalated (fail-safe). A delivered unknown wake is
 # acknowledged by its exact distilled line in state/.subsuper-unknown-acked, so
-# that same identity does not escalate again. An identity still only buffered,
+# that same identity does not escalate again in this away session; the away
+# entry and return paths clear that file. An identity still only buffered,
 # or never successfully flushed, is not acknowledged and still escalates.
 classify_unknown() {  # <reason>
   printf 'escalate|unknown wake: %s' "$1"

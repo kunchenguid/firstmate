@@ -179,7 +179,8 @@ Classify each wake this way:
 - `heartbeat` -> self-handle.
   The daemon runs its own cheap bash fleet scan every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for captain-relevant events still unread by the per-wake classifier.
 - An unknown wake reason escalates fail-safe.
-  After that escalation is delivered, its exact distilled line is acknowledged and the same identity does not escalate again.
+  After that escalation is delivered, its exact distilled line is acknowledged and the same identity does not escalate again during that away session.
+  A new away session starts with no acknowledgements, so a handled identity can present once more.
   An identity that was not delivered still escalates.
   Status-read uncertainty follows the shared one-report-without-position-advance contract referenced under Dedupe below.
 

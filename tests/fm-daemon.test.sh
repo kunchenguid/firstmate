@@ -608,7 +608,8 @@ test_classify_check_and_unknown_escalate() {
 # An unrecognized wake escalates once per identity. Delivery acknowledges that
 # exact line; a later copy does not escalate again. A different identity still
 # escalates, and an identity that never flushed still escalates. Ordinary
-# escalation lines are not part of that acknowledgement.
+# escalation lines are not part of that acknowledgement. A new away session
+# clears the acknowledgements, so the same identity can fire again.
 test_unknown_wake_ack_suppresses_handled_identity() {
   local dir state fakebin sent capture out
   dir=$(make_supercase unknown-wake-ack)
@@ -658,7 +659,14 @@ test_unknown_wake_ack_suppresses_handled_identity() {
   escalate_add "$state" "done: PR https://example.test/pull/9"
   [ "$(grep -c 'done: PR https://example.test/pull/9' "$state/.subsuper-escalations")" = 2 ] \
     || fail "an ordinary escalation was deduped by unknown-wake acknowledgement"
-  pass "a delivered unknown wake is acknowledged once; a new one and ordinary escalations still fire"
+
+  bash -c '. "$1"; fm_afk_clear_stale_artifacts "$2"' _ "$AFK_START" "$state" \
+    || fail "clearing the away-session artifacts failed"
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "an unknown wake from a prior session was not handled"
+  [ "$(grep -c 'unknown wake: frobnicate: already-handled' "$state/.subsuper-escalations")" = 1 ] \
+    || fail "an unknown wake acknowledged in a prior away session did not fire again"
+  pass "a delivered unknown wake is acknowledged once per away session; a new one and ordinary escalations still fire"
 }
 
 test_stale_transient_self_records_marker() {
