@@ -13,8 +13,9 @@
 # Records live under data/memory/records in the selected FM_HOME. Each record is
 # an ordinary private file in the fm-memory-v1 line format owned by this script.
 # Memory text is one non-empty printable line, at most 500 bytes. `check` is the
-# watcher-facing operation: it marks a bounded batch of due reminders notified,
-# then prints one line when firstmate should wake. A malformed record is named
+# watcher-facing operation: it prints one line naming a bounded batch of due
+# reminders when firstmate should wake, and marks those reminders notified only
+# after that print succeeds. A malformed record is named
 # on that same line and does not suppress due reminders. Repeated checks stay
 # silent until another reminder becomes due. Marking a reminder done
 # acknowledges it. The standing check is retired when no open reminder remains,
