@@ -133,6 +133,7 @@ validate_mail_port() {
 if [ "${1:-}" != afk-email ] || [ "${2:-}" != destination ]; then
   validate_mail_port FM_IMAP_PORT "$IMAP_PORT" || exit 1
   validate_mail_port FM_SMTP_PORT "$SMTP_PORT" || exit 1
+
 fi
 MAIL_MAX_WAKES="${FM_MAIL_POLL_MAX_WAKES:-20}"
 case "$MAIL_MAX_WAKES" in
@@ -211,6 +212,7 @@ fm-mail.sh send <to> <subject> <body | ->
 fm-mail.sh poll
 fm-mail.sh status
 fm-mail.sh afk-email destination|configured|queue-unprocessed|flush|verify-note <id>
+
 
 
 

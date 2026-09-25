@@ -27,6 +27,7 @@
 
 
 
+
 #
 # ENTRY IS THE GO. `/afk` itself is the captain's go: `enter` writes the record
 # in the same turn, before any other work, and never waits for a further human
@@ -533,6 +534,7 @@ fm_afk_contract_cmd_enter() {
   FM_AFK_CONTRACT_ENTRY_MODE=away
   [ "${FM_AFK_MODE:-}" != quiet ] || FM_AFK_CONTRACT_ENTRY_MODE=quiet
 
+
   harness=$("$FM_AFK_CONTRACT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   require_owner_destination=0
   case "$harness" in
@@ -560,6 +562,7 @@ fm_afk_contract_cmd_enter() {
     fi
   fi
   if [ -f "$record" ]; then
+
 
     fm_afk_contract_validate "$record" || return 1
     standing=$(fm_afk_contract_record_mode "$record")

@@ -15,6 +15,7 @@ AFK_OWNER_EMAIL=johnpoyser@gmail.com
 
 
 
+
 mkdir -p "$CAPTURE"
 export CAPTURE
 cat > "$REPO/bin/fm-mail.sh" <<'SH'
@@ -72,6 +73,7 @@ FM_MAIL_PASS=mail-secret-not-to-leak
 FM_IMAP_HOST=imap.example.test
 FM_SMTP_HOST=smtp.example.test
 FM_AFK_EMAIL_TO=${3:-$AFK_OWNER_EMAIL}
+
 
 
 
@@ -170,6 +172,7 @@ test_destination_is_required_for_pi_entry() {
   [ ! -e "$home/state/.afk-contract" ] || fail "missing destination wrote an away record"
 
 
+
   home=$(make_home wrong-destination configured other@example.com)
   if out=$(run_contract "$home" FM_TEST_HARNESS=pi 2>&1); then
     fail "Pi entry with a different destination succeeded: $out"
@@ -266,6 +269,7 @@ PY
   assert_contains "$fetches" '(BODY.PEEK[])' 'shared owner body was fetched after authentication'
   cp "$ROOT/bin/fm-afk-owner-email" "$REPO/bin/fm-afk-owner-email"
   pass "AFK configuration and mail authentication use the shared owner value"
+
 }
 
 test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
@@ -279,6 +283,7 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
   assert_contains "$out" 'email reach active.' 'configured Pi entry announces email reach'
   assert_contains "$out" 'Captain-facing outcomes are emailed to the configured address' 'record announces email delivery'
   [ "$(run_email "$home" configured)" = "$AFK_OWNER_EMAIL" ] || fail "mail config did not return the fixed away-email destination"
+
 
 
 
@@ -326,6 +331,7 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
 
   reply_body=$(printf 'FM-AFK-REPLY %s\nPlease merge the UI pull request\n\nFrom: %s\nSent: Tuesday, June 30, 2026 9:00 AM\nTo: %s\nSubject: Firstmate away update\n\nFM-AFK-REPLY %s\nRelease the API now' "$token1" "$AFK_OWNER_EMAIL" "$AFK_OWNER_EMAIL" "$token2")
   out=$(message "$home" 101 "$AFK_OWNER_EMAIL" 'Re: Firstmate away update' "$reply_body" 2>&1) \
+
 
 
 
@@ -395,6 +401,7 @@ test_unreadable_token_state_keeps_reply_retryable() {
   printf '{invalid json\n' > "$home/state/afk-email/sent/1.json"
   reply_body=$(printf 'FM-AFK-REPLY %s\nanswer' "$token")
   if out=$(message "$home" 301 "$AFK_OWNER_EMAIL" 'Re: Firstmate away update' "$reply_body" 2>&1); then
+
 
 
 
@@ -1407,6 +1414,7 @@ test_over_limit_reply_is_explicitly_rejected() {
   long_answer=$(python3 -c 'print("a" * 8001, end="")')
   reply_body=$(printf 'FM-AFK-REPLY %s\n%s' "$token" "$long_answer")
   out=$(message "$home" 401 'owner@example.com' 'Re: Firstmate away update' "$reply_body" 2>&1) \
+
     || fail "over-limit reply could not be reported as rejected: $out"
   assert_contains "$out" 'reply in mail UID 401 rejected; answer exceeds 8000 characters' \
     'an over-limit answer is explicitly rejected'
@@ -1429,7 +1437,7 @@ test_reply_survives_crash_after_smtp_acceptance() {
   accepted_body="$home/state/accepted-body.txt"
   if FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
     FM_MAIL_USER=owner@example.com FM_MAIL_PASS=test-secret FM_IMAP_HOST=imap.example.test \
-    FM_SMTP_HOST=smtp.example.test FM_AFK_EMAIL_TO=owner@example.com \
+    FM_SMTP_HOST=smtp.example.test FM_AFK_EMAIL_TO=johnpoyser@gmail.com \
     FM_TEST_ACCEPTED_BODY="$accepted_body" python3 - "$REPO/bin/fm-afk-email.py" <<'PY'
 import importlib.util
 import os
@@ -1481,7 +1489,7 @@ PY
     || fail "the pending record did not retain the accepted reply token"
 
   reply_body=$(printf 'FM-AFK-REPLY %s\nPlease merge the UI pull request' "$token")
-  out=$(message "$home" 301 'owner@example.com' 'Re: Firstmate away update' "$reply_body" 2>&1) \
+  out=$(message "$home" 301 "$AFK_OWNER_EMAIL" 'Re: Firstmate away update' "$reply_body" 2>&1) \
     || fail "reply to ambiguously sent update errored: $out"
   assert_contains "$out" 'received 1 verified and 0 untrusted' 'a reply is accepted while its item is still pending'
   note=$(find "$home/state/inbox" -maxdepth 1 -name '*.note' -print -quit)
@@ -1505,7 +1513,7 @@ item['send_expires_epoch'] = 2
 json.dump(item, open(path, 'w'))
 PY
   reply_body=$(printf 'FM-AFK-REPLY %s\nexpired pending answer' "$expired_token")
-  out=$(message "$home" 303 'owner@example.com' 'Re: Firstmate away update' "$reply_body" 2>&1) \
+  out=$(message "$home" 303 "$AFK_OWNER_EMAIL" 'Re: Firstmate away update' "$reply_body" 2>&1) \
     || fail "expired pending-token reply errored: $out"
   assert_contains "$out" 'received 0 verified and 1 untrusted' 'pending tokens use the same expiry check as sent tokens'
   used_before=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["used_epoch"])' "$pending")
@@ -1516,7 +1524,7 @@ PY
   used_after=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["used_epoch"])' "$pending")
   [ "$used_before" = "$used_after" ] || fail "sent transition lost the pending item's consumed state"
   reply_body=$(printf 'FM-AFK-REPLY %s\nreplay after sent transition' "$token")
-  out=$(message "$home" 302 'owner@example.com' 'Re: Firstmate away update' "$reply_body" 2>&1) \
+  out=$(message "$home" 302 "$AFK_OWNER_EMAIL" 'Re: Firstmate away update' "$reply_body" 2>&1) \
     || fail "replayed reply errored: $out"
   assert_contains "$out" 'received 0 verified and 1 untrusted' 'a pending-token reply remains single-use after the sent transition'
   pass "reply tokens survive the SMTP-accepted, sent-record-crash window"
@@ -1743,6 +1751,7 @@ SH
 
 test_destination_is_required_for_pi_entry
 test_shared_owner_source_drives_configuration_and_sender_auth
+
 
 # The active feature is tested with synthetic mail and a local fake SMTP command; no network or mailbox is used.
 test_invalid_mail_ports_keep_afk_on_hold
