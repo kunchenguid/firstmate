@@ -325,7 +325,7 @@ test_every_board_list_links_its_ticket_and_pr() {
       and (.charted[0].links | newtab)
       and ([.calls[] | .links | map(.href)] == [
         ["https://tracker.example/issue/ABC-101", "https://forge.example/org/sample/pull/41"],
-        ["https://forge.example/org/sample/pull/42", "https://tracker.example/issue/ABC-102"]])
+        ["https://tracker.example/issue/ABC-102", "https://forge.example/org/sample/pull/42"]])
       and ([.calls[] | .links | newtab] | all)
   ' >/dev/null || fail "a board list did not link its ticket and PR: $out"
   pass "every board list links a supplied ticket and PR in a new tab, and no link without a URL"

@@ -519,19 +519,15 @@ __FM_BEARINGS_BOARD_DATA__
 
     if (item.type === "merge") {
       if (item.detail) pad.appendChild(el("p", "bb-decision__detail", item.detail));
-      var pr = link("bb-decision__link", item.pr_url, item.pr_url);
-      if (pr) pad.appendChild(pr);
-      var mergeTicket = ticketLink("bb-decision__link", item);
-      if (mergeTicket) pad.appendChild(mergeTicket);
     } else {
       /* the rec marker on the option itself carries the recommendation */
       var ctx = el("div", "bb-ctx");
       if (item.about) ctx.appendChild(ctxRow("about", item.about));
       if (item.decide) ctx.appendChild(ctxRow("decide", item.decide));
       pad.appendChild(ctx);
-      [ticketLink("bb-decision__link", item), link("bb-decision__link", item.pr_url, item.pr_url)]
-        .forEach(function (a) { if (a) pad.appendChild(a); });
     }
+    [ticketLink("bb-decision__link", item), link("bb-decision__link", item.pr_url, item.pr_url)]
+      .forEach(function (a) { if (a) pad.appendChild(a); });
 
     var form = document.createElement("form");
     form.setAttribute("data-lavish-question", item.key);
