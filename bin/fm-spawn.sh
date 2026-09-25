@@ -4065,18 +4065,24 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_pool_before=$(cd "$PROJ_ABS" && TREEHOUSE_NO_UPDATE_CHECK=1 fm_run_timed 15 treehouse status </dev/null 2>/dev/null) || spawn_pool_before=""
   spawn_worktrees_before=$(git -C "$PROJ_ABS" worktree list --porcelain 2>/dev/null) || spawn_worktrees_before=""
   spawn_pool_root=${TREEHOUSE_ROOT:-}
-  if [ -z "$spawn_pool_root" ]; then
-    spawn_pool_path=$(printf '%s\n' "$spawn_pool_before" | jq -er '.[0].path // empty' 2>/dev/null) || spawn_pool_path=""
-    [ -z "$spawn_pool_path" ] || spawn_pool_root=$(dirname "$(dirname "$spawn_pool_path")")
-  fi
   case "$spawn_pool_root" in
     /*) ;;
     "") ;;
     *) spawn_pool_root="$PROJ_ABS/$spawn_pool_root" ;;
   esac
+  spawn_pool_path=$(printf '%s\n' "$spawn_pool_before" | jq -er '.[0].path // empty' 2>/dev/null) || spawn_pool_path=""
+  spawn_project_pool=""
+  if [ -n "$spawn_pool_path" ]; then
+    spawn_project_pool=$(dirname "$(dirname "$spawn_pool_path")")
+  elif [ -n "$spawn_pool_root" ]; then
+    spawn_project_pool="$spawn_pool_root/$(basename "$PROJ_ABS")"
+  fi
   spawn_slot_dirs() {
-    [ -n "$spawn_pool_root" ] && [ -d "$spawn_pool_root" ] && [ ! -L "$spawn_pool_root" ] || return 1
-    find "$spawn_pool_root" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | LC_ALL=C sort
+    [ -n "$spawn_project_pool" ] && [ -d "$spawn_project_pool" ] && [ ! -L "$spawn_project_pool" ] &&
+      [ -f "$spawn_project_pool/treehouse-state.json" ] || return 1
+    local listing
+    listing=$(find "$spawn_project_pool" -mindepth 1 -maxdepth 1 -type d -printf '%f\n') || return 1
+    printf '%s\n' "$listing" | LC_ALL=C sort
   }
   spawn_slots_before=$(spawn_slot_dirs) && spawn_slots_before_valid=1 || spawn_slots_before_valid=0
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
