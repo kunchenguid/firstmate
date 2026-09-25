@@ -762,6 +762,33 @@ FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
 On 2026-09-20 that guard could not reach its new arm for either installed harness, and the same failures reproduce on the unmodified library: bare `claude` 2.1.236 opens the session picker rather than a session, and the guard's mid-budget Escape then quits it, while codex-cli 0.147.0 parks on a hooks-trust modal the guard correctly refuses to confirm.
 The Herdr captures above are therefore this entry's live evidence, and the guard's claude arm owes a separate repair before it can refresh it.
 
+### 2026-09-25 Pi Codex usage-limit banner over an empty separator pair
+
+Verified on 2026-09-25 on macOS arm64 (Darwin 25.5.0) against pi 0.85.1 with Herdr's Pi integration file at version 9, driving the installed Pi TUI in an isolated tmux server against a local stub Codex endpoint whose only answer is the `{"type":"error","message":"The usage limit has been reached"}` stream event, so no provider request leaves the machine and no model tokens are spent.
+Pi renders that turn end as one red truecolor row, `Error: Codex error: The usage limit has been reached`, then a blank row, its solid opening rule, the empty composer row, its solid closing rule, and the path and model footer; while the turn is running the opening rule is retitled `── ⠏ Working ──`, which is no longer a solid separator.
+The unmodified integration reported `working` at the prompt and `idle` once the error rendered, so on this pi and integration the status recovers; the fix covers the status that does not follow the failed turn, which is what issue #5000's two incidents left behind on the pi and integration installed before 2026-09-22.
+
+The live guard is the command that refreshes this entry:
+
+```sh
+tests/fm-composer-pi-codex-banner-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+# pi (0.85.1): rendered banner row: Error: Codex error: The usage limit has been reached
+ok - pi (0.85.1): banner screen classifies empty on the cursorless styled read with a working status
+ok - pi (0.85.1): banner screen classifies empty on the cursorless styled read with a unknown status
+ok - pi (0.85.1): banner screen classifies empty on the cursorless styled read with a idle status
+ok - pi (0.85.1): the banner over the same screen with the identity probe absent stays unknown
+ok - pi (0.85.1): banner screen classifies empty on the cursor-anchored tmux read
+ok - live pi banner guard verified 5 live surface(s)
+```
+
+On the same capture before the fix, the Herdr profile (`styled=1`, `cursor=0`, `identity=1`, `rows=20`) read `unknown` with a `pi<TAB>working` or `pi<TAB>unknown` identity and `empty` only with `pi<TAB>idle`.
+`test_matrix_pi_codex_usage_limit_banner_settles_a_stale_status` in `tests/fm-composer-lib.test.sh` pins the shape and every bound the banner does not cross, and `test_pi_parked_on_codex_usage_limit_banner_still_exits` in `tests/fm-control.test.sh` pins that `exit` types `/quit` over it while any other error text keeps the refusal.
+
 ### 2026-09-15 codex-cli 0.154.0 idle starfield and status footer through Herdr
 
 Verified on 2026-09-15 on macOS arm64 (Darwin 25.5.0) against codex-cli 0.154.0 (model gpt-6-astra, fast mode) running as a Codex second mate inside a Herdr pane, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).

@@ -77,6 +77,15 @@
 #                different, self-proving thing: real claude 2.x draws exactly
 #                that (`─` rule, `❯`+NBSP, `─` rule), so the glyph inside the
 #                pair carries the shape and no identity is needed.
+#                A live pi whose identity STATUS is stale is the one admitted
+#                exception to the idle/done requirement (issue #5000): when the
+#                last non-blank row above the pair's solid opening rule is the
+#                fixed terminal provider-error banner pi draws once a turn has
+#                ended (FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT below), the
+#                banner plus the solid rule plus the empty interior is the
+#                settled-turn proof the status failed to deliver. The identity
+#                must still name a live pi; probe-absent and foreign identities
+#                stay `unknown`.
 #
 # THE COMPOSER FOOTER ZONE (task firstmate-doorbell-vals-pending-p1): a
 # harness draws its own furniture BELOW the composer - a user statusLine, a
@@ -470,6 +479,25 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # live, devin 3000.11.1). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
 FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$'
+
+# The fixed terminal provider-error banner pi draws directly above its
+# composer once a turn has ended on Codex's usage limit: pi's `Error: ` prefix
+# followed by the exact message its Codex provider raises for that stream
+# error event (verified live, pi 0.85.1 against a stub Codex endpoint; the
+# live guard tests/fm-composer-pi-codex-banner-live-e2e.test.sh refreshes
+# it). Why it may relax the separated shape's idle/done status requirement
+# (issue #5000): herdr learns pi's status only from pi's own lifecycle
+# integration, so a status that never followed the failed turn parks at
+# `working` or at herdr's `unknown` placeholder for as long as the worker sits
+# on the banner, and every lifecycle verb then refuses a composer that is
+# provably empty. The banner is structural evidence that the turn ENDED: a
+# running pi retitles its opening rule (`── ⠏ Working ──`), which is no
+# longer a solid separator and dissolves the pair, and a new prompt pushes
+# transcript rows between the banner and the rule. The match is exact and
+# case-sensitive, so a similar message from another provider, a worker
+# discussing this text, or a wrapped copy of it never qualifies.
+# FM_COMPOSER_PI_TERMINAL_ERROR_RE overrides for an unverified rendering.
+FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT='^Error: Codex error: The usage limit has been reached$'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
@@ -1803,6 +1831,29 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
   fi
 }
 
+# _fm_composer_pi_terminal_banner_above: 0 when the last non-blank row above
+# the scanned pair's opening separator is pi's terminal provider-error banner
+# (FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT). Rows are read plain, so the red
+# styling pi gives the banner is neither required nor allowed to hide it, and
+# the row is matched whole after trimming: one transcript row, a menu, or a
+# retitled rule between the banner and the pair means the turn did not end
+# on this banner, and the caller keeps refusing.
+_fm_composer_pi_terminal_banner_above() {  # <screen>
+  local screen=$1 row raw trimmed
+  row=$((FM_COMPOSER_SCAN_PI_OPEN - 1))
+  while [ "$row" -ge 0 ]; do
+    raw=$(_fm_composer_screen_row "$row" "$screen")
+    trimmed=$(_fm_composer_row_content "$raw" 0)
+    if [ -n "$trimmed" ]; then
+      fm_composer_idle_matches "$trimmed" \
+        "${FM_COMPOSER_PI_TERMINAL_ERROR_RE:-$FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT}" sensitive
+      return $?
+    fi
+    row=$((row - 1))
+  done
+  return 1
+}
+
 # The pi separated-shape verdict: identity + structure conjunction (herdr's
 # rule, now fleet-wide). A missing identity capability keeps the shape
 # unknown; an unfetched identity on an identity-capable backend asks the
@@ -1812,6 +1863,12 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
 # is drawn above the separator pair, so the composer region looks free while the
 # keys would answer the prompt instead of composing (issue #2797). Structure
 # cannot disprove that, so a blocked pi defers rather than claiming empty.
+# The one status the structure CAN disprove is a stale one: a live pi whose
+# last non-blank row above the pair is its terminal provider-error banner
+# (_fm_composer_pi_terminal_banner_above) has ended its turn on that banner
+# whatever its integration last reported, so that shape reads empty on every
+# registered status (issue #5000). A blocked pi's menu, a running pi's
+# retitled rule, and a fresh prompt all displace the banner from that row.
 _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 agent agent_status state
   if [ "$has_identity" != 1 ]; then
@@ -1839,6 +1896,12 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   fi
   case "$agent_status" in
     idle|done) printf 'empty' ;;
-    *) printf 'unknown' ;;
+    *)
+      if _fm_composer_pi_terminal_banner_above "$screen"; then
+        printf 'empty'
+      else
+        printf 'unknown'
+      fi
+      ;;
   esac
 }

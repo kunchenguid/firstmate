@@ -670,6 +670,65 @@ test_matrix_pi_dollar_status_footer_is_empty() {
   pass "matrix: a dollar-first pi status footer reads empty; dead shells still refuse"
 }
 
+test_matrix_pi_codex_usage_limit_banner_settles_a_stale_status() {
+  # Issue #5000: pi ended its turn on Codex's usage-limit banner (rendered
+  # live by pi 0.85.1 as `Error: Codex error: The usage limit has been
+  # reached`, red, directly above the separator pair). Herdr learns pi's
+  # status only from pi's own lifecycle integration, so a status that never
+  # followed the failed turn stays `working` (or herdr's `unknown`
+  # placeholder) for as long as the worker sits there, and the pair used to
+  # read `unknown` on exactly the pane fm-control must reclaim. The banner
+  # plus a solid opening rule plus an empty interior is the settled-turn proof
+  # the status failed to deliver, so every registered status now reads empty.
+  local banner screen st id out
+  banner='Error: Codex error: The usage limit has been reached'
+  screen=$' hello there\n\n '"$banner"$'\n\n────────────────────────\n\n────────────────────────\n/path/to/worktree\n0.0%/272k (auto)   gpt-5.5 • medium'
+  for st in idle 'done' working unknown blocked; do
+    id=$(printf 'pi\t%s' "$st")
+    assert_screen "banner over an empty pair with pi $st on herdr" empty "$CAPS_STYLED" "$screen" '' "$id"
+    assert_screen "banner over an empty pair with pi $st on tmux" empty "$CAPS_TMUX" "$screen" 5 "$id"
+  done
+  # The styled row pi actually draws: a red truecolor banner. Styling neither
+  # hides the banner nor is required for it.
+  assert_screen "styled red banner with a stale working status" empty "$CAPS_STYLED" \
+    $' hello there\n\n \e[38;2;204;102;102m'"$banner"$'\e[39m\n\n────────────────────────\n\n────────────────────────\n/path\n0.0%/272k (auto)' \
+    '' "$(printf 'pi\tworking')"
+  # What the banner does NOT relax: the identity must still name a live pi.
+  # A dead shell replaying this screen has no pi identity, and a foreign
+  # identity is not pi's composer.
+  assert_screen "banner with the probe absent" unknown "$CAPS_STYLED" "$screen" '' probe-absent
+  assert_screen "banner with a non-pi identity" unknown "$CAPS_STYLED" "$screen" '' "$(printf 'zsh\t')"
+  assert_screen "banner without identity capability" unknown "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "banner on a plain backend" unknown "$CAPS_PLAIN" "$screen"
+  # A stale status is the ONLY thing the banner settles: a different error
+  # text, a near-miss spelling, or the banner in a transcript row that is not
+  # the last one above the pair keep the strict rule. Every divergence case
+  # is asserted so the banner match cannot go quietly vacuous.
+  id=$(printf 'pi\tworking')
+  assert_screen "another provider error stays unknown" unknown "$CAPS_STYLED" \
+    "${screen/$banner/Error: Anthropic error: The usage limit has been reached}" '' "$id"
+  assert_screen "a near-miss banner stays unknown" unknown "$CAPS_STYLED" \
+    "${screen/$banner/Error: Codex error: The usage limit has been reached. Try again later}" '' "$id"
+  assert_screen "a case-changed banner stays unknown" unknown "$CAPS_STYLED" \
+    "${screen/$banner/error: codex error: the usage limit has been reached}" '' "$id"
+  assert_screen "a worker discussing the banner stays unknown" unknown "$CAPS_STYLED" \
+    "${screen/$banner/I saw: Error: Codex error: The usage limit has been reached}" '' "$id"
+  assert_screen "a transcript row under the banner stays unknown" unknown "$CAPS_STYLED" \
+    "${screen/$banner/$banner$'\n'  retrying with a fresh prompt}" '' "$id"
+  # A RUNNING pi retitles its opening rule (`── ⠏ Working ──`, live pi
+  # 0.85.1), which is no longer a solid separator: the pair dissolves and the
+  # banner above it proves nothing, so an active turn can never read empty.
+  assert_screen "a working title in the opening rule stays unknown" unknown "$CAPS_STYLED" \
+    $' '"$banner"$'\n\n── ⠏ Working ──────────────\n\n────────────────────────\n/path' '' "$id"
+  # Typed text under the banner is still pending, never empty.
+  assert_screen "typed text under the banner stays pending" pending "$CAPS_STYLED" \
+    $' '"$banner"$'\n\n────────────────────────\nfix the flaky test\n────────────────────────\n/path' '' "$id"
+  # The exact banner is declared once; a caller that respells it drifts.
+  out=$(printf '%s' "$banner" | grep -cE "$FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT")
+  [ "$out" = 1 ] || fail "the declared banner pattern must match pi's rendering exactly, got $out matches"
+  pass "matrix: pi's Codex usage-limit banner over an empty pair settles a stale status; probe-absent, foreign, near-miss, displaced, running, and typed shapes keep refusing"
+}
+
 test_matrix_opencode_leftbar_signals() {
   # Real idle opencode: `┃`-prefixed rows holding an "Ask anything" hint,
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
@@ -980,6 +1039,7 @@ test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty
+test_matrix_pi_codex_usage_limit_banner_settles_a_stale_status
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
