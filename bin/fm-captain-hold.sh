@@ -198,9 +198,10 @@
 # publishes `needs-decision [key=captain-hold-<task>-<n>]` and `answer` (and
 # `answers`) the matching `resolved` line on the parent channel through
 # bin/fm-parent-channel-lib.sh, whether or not the mate model appends anything.
-# A deferral publishes its dated resolution without retiring a pending reconcile
-# request, because the captain's call remains open.
-# <n> is the count of resolution records the body already carries plus one, so
+# A deferral publishes a dated `note` on the same key, leaving that parent
+# decision open and any pending reconcile request in place.
+# <n> is the count of terminal (non-deferred) resolution records the body
+# already carries plus one, so
 # a released and re-held task opens and closes a distinct parent decision with
 # no new persisted state, and an exact retry republishes the same line, which
 # the channel deduplicates. A main home has no channel and publishes nothing.
@@ -480,12 +481,17 @@ recorded_decision_digest() {  # <task-body>
   printf '%s' "$rest"
 }
 
-# How many resolution records the shown body carries, in either record format.
+# How many terminal resolution records the shown body carries, in either record
+# format. A deferred record leaves the call open, so it is not counted.
 resolution_record_count() {  # <task-body>
   local body
   body=$(decode_shown_value "$1") || return 1
-  printf '%s\n' "$body" \
-    | grep -Ec '^Resolution recorded by fm-(captain|decision)-hold\.$' || true
+  printf '%s\n' "$body" | awk '
+    /^Resolution recorded by fm-(captain|decision)-hold\.$/ { n++; header = 1; next }
+    header && /^Resolution mode: deferred$/ { n--; header = 0; next }
+    /^$/ { header = 0 }
+    END { print n + 0 }
+  '
 }
 
 # The newest record's `Resolution mode:` value; empty for a record predating it.
@@ -1052,13 +1058,13 @@ command_defer_answer() {  # <task-id> <decision-file> <until>
     [ "$recorded_mode" = deferred ] \
       || fail "task $id records this resolution with mode ${recorded_mode:-unknown}; it is not a captain-answer replay"
     defer_answered "$id" "$until" "$reason"
-    publish_parent_resolution "$id" $((occurrence - 1)) "deferred until $until"
+    publish_parent_hold "$id" "$occurrence" note "deferred until $until"
     printf 'deferred: %s until %s\n' "$id" "$until"
     return 0
   fi
   write_resolution_record "$id" deferred "$body" "$until"
   defer_answered "$id" "$until" "$reason"
-  publish_parent_resolution "$id" "$occurrence" "deferred until $until"
+  publish_parent_hold "$id" "$occurrence" note "deferred until $until"
   printf 'deferred: %s until %s\n' "$id" "$until"
 }
 
@@ -1526,18 +1532,14 @@ reconcile_request_retire() {  # <task-id>
     || fail "could not retire the pending reconcile request for $1"
 }
 
-publish_parent_resolution() {  # <task-id> <occurrence> <note>
+publish_parent_resolution_then_retire() {  # <task-id> <occurrence> <note>
   local id=$1 occurrence=$2 note=$3 request
   request=$(reconcile_request_path "$id")
   publish_parent_hold "$id" "$occurrence" resolved "$note"
   if [ -e "$request" ] && [ "$PARENT_HOLD_PUBLISHED" != 1 ]; then
     fail "could not publish the answered captain-held task $id to its parent"
   fi
-}
-
-publish_parent_resolution_then_retire() {  # <task-id> <occurrence> <note>
-  publish_parent_resolution "$1" "$2" "$3"
-  reconcile_request_retire "$1"
+  reconcile_request_retire "$id"
 }
 
 command_reconcile_requests() {

@@ -87,6 +87,9 @@ It then works in this order:
 If an answer or deferral is interrupted, the still-held task keeps its original age basis.
 A matching retry completes the selected transition without adding another resolution record.
 
+In a secondmate home, a deferral publishes a dated `note` on the call's open parent key instead of resolving it.
+Deferred records do not count toward the parent key's occurrence, so the later terminal answer resolves that same key.
+
 ### Answer retries and tasks closed elsewhere
 
 - An exact retry is idempotent only when the answer and requested mode match the newest record.
@@ -534,6 +537,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
 - Direct and keyed `--defer-until` answers preserve the hold-set age, record the exact date, and leave the task open until it is due.
+- A secondmate deferral keeps its parent key open past the due date, and only the final answer resolves that same key.
 
 ### Legacy paths
 

@@ -1673,6 +1673,46 @@ test_secondmate_reconcile_publishes_before_request_retirement() {
   pass "secondmate resolutions publish before retiring durable retry triggers"
 }
 
+# A deferral is not a parent resolution: the hold's parent key stays open
+# through the deferral and past its date, and only the final answer resolves it.
+test_secondmate_deferral_keeps_parent_key_open() {
+  local parent mate channel open FM_CAPTAIN_HOLD_NOW=2026-09-20T12:00:00Z
+  export FM_CAPTAIN_HOLD_NOW
+  parent=$(make_home defer-parent-channel)
+  mate=$(make_home defer-channel-mate)
+  printf 'defer-channel-mate\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$mate/.fm-secondmate-parent"
+  channel="$parent/state/defer-channel-mate.status"
+
+  run_captain "$mate" hold defer-call --title "Choose the deferred release" \
+    --reason "deferred release choice" --repo sample >/dev/null \
+    || fail "could not hold the deferral channel call"
+  printf 'Revisit after the sample launch.\n' > "$mate/defer.txt"
+  run_captain "$mate" answer defer-call --decision-file "$mate/defer.txt" \
+    --defer-until 2026-12-01 >/dev/null || fail "the secondmate deferral failed"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$channel")
+  assert_contains "$open" "captain-hold-defer-call-1" \
+    "the deferral closed the parent decision: $(cat "$channel")"
+  assert_grep 'note [key=captain-hold-defer-call-1]: captain hold defer-call: deferred until 2026-12-01' \
+    <(sed -E 's/ \[at=[0-9]+\]//' "$channel") "the deferral did not publish its dated note"
+
+  FM_CAPTAIN_HOLD_NOW=2026-12-02T12:00:00Z
+  run_captain "$mate" open defer-call >/dev/null || fail "the due deferral is no longer an open call"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$channel")
+  assert_contains "$open" "captain-hold-defer-call-1" "the parent decision closed before the final answer"
+  printf 'Ship the release now.\n' > "$mate/answer.txt"
+  run_captain "$mate" answer defer-call --decision-file "$mate/answer.txt" >/dev/null \
+    || fail "the final answer after the deferral date failed"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$channel")
+  [ -z "$open" ] || fail "the final answer left a parent decision open: $open"
+  [ "$(grep -c 'resolved \[key=captain-hold-defer-call-1\]: captain hold defer-call: answered' \
+    <(sed -E 's/ \[at=[0-9]+\]//' "$channel"))" -eq 1 ] \
+    || fail "the final answer did not resolve the original parent key: $(cat "$channel")"
+  assert_no_grep 'captain-hold-defer-call-2' "$channel" "the final answer named an unopened parent key"
+  pass "a secondmate deferral keeps its parent decision open until the final answer"
+}
+
 # The one keyed-answer intake, fed through the real process-event runner by a
 # fixture channel that knows nothing about captain holds: task-id keys close at
 # answer time, a card-declared release mode frees held work, freeform prose can
@@ -4188,6 +4228,7 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
 test_secondmate_reconcile_publishes_before_request_retirement
+test_secondmate_deferral_keeps_parent_key_open
 test_bound_channel_answers_close_at_answer_time
 test_reconcile_never_closes_through_the_keyed_answer_intake
 test_normal_answers_retire_pending_reconcile_requests

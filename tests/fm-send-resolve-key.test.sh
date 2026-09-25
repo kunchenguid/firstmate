@@ -168,10 +168,8 @@ test_answer_send_closes_open_decision() {
   pass "fm-send --resolve-key: the answer send itself closes the open decision"
 }
 
-# The answerer's close is this home's own bookkeeping: it must not re-wake the
-# session that wrote it, while any other writer's later line on the same task
-# still must. Both directions are read through the production seen-signature
-# gate the watcher's signal scan consumes (bin/fm-wake-lib.sh).
+# A keyed --defer-until records the captain's answer on a held task without
+# closing it.
 test_defer_flag_answers_captain_held_key() {
   local dir fb log home rc show FM_CAPTAIN_HOLD_NOW=2026-09-20T12:00:00Z
   command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; return 0; }
@@ -212,6 +210,10 @@ test_defer_flag_answers_captain_held_key() {
   pass "fm-send --defer-until records a keyed captain deferral after delivering the answer"
 }
 
+# The answerer's close is this home's own bookkeeping: it must not re-wake the
+# session that wrote it, while any other writer's later line on the same task
+# still must. Both directions are read through the production seen-signature
+# gate the watcher's signal scan consumes (bin/fm-wake-lib.sh).
 test_answer_close_is_self_announced() {
   local dir fb log home rc
   dir="$TMP_ROOT/self-announced"; mkdir -p "$dir"
