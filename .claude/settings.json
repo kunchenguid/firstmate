@@ -2,9 +2,6 @@
   "env": {
     "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"
   },
-  "disabledMcpjsonServers": [
-    "jev"
-  ],
   "hooks": {
     "SessionStart": [
       {
@@ -75,7 +72,7 @@
     ]
   },
   "enabledPlugins": {
-    "jev-safe@firstmate-jev": false
+    "jev-safe@firstmate-jev": true
   },
   "extraKnownMarketplaces": {
     "firstmate-jev": {
@@ -84,5 +81,8 @@
         "path": "./.claude/jev-marketplace"
       }
     }
-  }
+  },
+  "enabledMcpjsonServers": [
+    "jev"
+  ]
 }

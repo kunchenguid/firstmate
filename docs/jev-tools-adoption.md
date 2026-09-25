@@ -27,14 +27,17 @@ Each Jev caller runs the shared scanner as a local child process before sending
 the request body. No local HTTP listener receives payloads, so a port collision
 cannot impersonate the safety gate.
 
-The plugin and MCP server registrations are retained, but live activation is
-disabled in `.claude/settings.json`. The path gate does not establish coverage
-for shell-quoted paths assembled at execution or Python paths assembled wholly
-inside a call expression. Per Firstmate's decision, keep both integrations
-inactive until that raw-command scope is separately verified. The canonical
-25-fixture set and remaining account quota were unavailable; quota consumption
-for the synthetic sample is reported below, but remaining quota was not
-exposed by the tools.
+The plugin and MCP server registrations are active. The path gate does not
+establish coverage for shell-quoted paths assembled at execution (e.g. Bash
+ANSI-C `$'...'` escapes) or Python paths assembled wholly inside a call
+expression (e.g. string concatenation); both are structural limits of static
+text matching, not fixable by extending the same parser, and were independently
+verified as unfixable-by-this-mechanism on 2026-09-26. Layer-2 (this path gate)
+is a supplementary, best-effort filter over literal path tokens, not an
+execution-aware sandbox; layer-1 Yelp detect-secrets remains the actual
+secret-detection control. The canonical 25-fixture set and remaining account
+quota were unavailable; quota consumption for the synthetic sample is
+reported below, but remaining quota was not exposed by the tools.
 
 ## Pinned upstream revisions
 

@@ -31,8 +31,8 @@ import sys
 
 with open(sys.argv[1], encoding="utf-8") as settings_file:
     settings = json.load(settings_file)
-assert "jev" in settings.get("disabledMcpjsonServers", []), settings
-assert settings.get("enabledPlugins", {}).get("jev-safe@firstmate-jev") is False, settings
+assert "jev" in settings.get("enabledMcpjsonServers", []), settings
+assert settings.get("enabledPlugins", {}).get("jev-safe@firstmate-jev") is True, settings
 PY
 UV_CACHE_DIR="$PROJECT/.uv-cache" uv run --project "$PROJECT" --quiet python "$GUARD" <<'JSON' > "$TMP_ROOT/secret.json"
 {"content":"test token ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
