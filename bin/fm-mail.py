@@ -209,6 +209,8 @@ def afk_email_context():
     recipient = configured.stdout.strip()
     if configured.returncode != 0 or not recipient:
         return None, True, False
+    if recipient.casefold() != AFK_OWNER_EMAIL:
+        return None, True, True
     return recipient, True, False
 
 
