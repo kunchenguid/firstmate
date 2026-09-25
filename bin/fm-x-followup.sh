@@ -25,6 +25,9 @@
 # Post (after composing the reply to a file or stdin):
 #   fm-x-followup.sh <task-id> [--image <path>] [--final] --text-file <path>
 #   fm-x-followup.sh <task-id> [--image <path>] [--final] -
+#   Parsing is strict: an unknown dash-leading argument or a dash-leading task
+#   id is a usage error before the link is even checked; the text source itself
+#   is validated by fm-x-reply.sh at post time, per its contract.
 #     Linked, within window, and under the cap: posts ONE follow-up via
 #       fm-x-reply.sh --followup.
 #       On success: increments the counter and KEEPS the link, unless --final
@@ -127,35 +130,48 @@ if [ "${1:-}" = --clear ]; then
   if [ "$#" -eq 4 ] && [ "${3:-}" = --expect-request ]; then
     EXPECT_REQUEST_SET=1
     EXPECT_REQUEST=${4-}
+    case "$EXPECT_REQUEST" in
+      ''|-*) usage; exit 2 ;;
+    esac
   elif [ "$#" -ne 2 ]; then
     usage
     exit 2
   fi
-  if [ -z "$ID" ]; then usage; exit 2; fi
+  case "$ID" in ''|-*) usage; exit 2 ;; esac
 elif [ "${1:-}" = --check ]; then
   MODE=check
   ID=${2:-}
-  if [ -z "$ID" ] || [ "$#" -gt 2 ]; then usage; exit 2; fi
+  if [ "$#" -gt 2 ]; then usage; exit 2; fi
+  case "$ID" in ''|-*) usage; exit 2 ;; esac
 else
   ID=${1:-}
-  if [ -z "$ID" ]; then usage; exit 2; fi
+  case "$ID" in ''|-*) usage; exit 2 ;; esac
   shift
   TS_ARGS=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --help|-h) help; exit 0 ;;
       --final)
         FINAL=1
         ;;
       --image)
         TS_ARGS+=("$1")
         shift
-        if [ "$#" -lt 1 ] || [ -z "$1" ]; then
-          echo "fm-x-followup: missing --image path" >&2
-          usage
-          exit 2
-        fi
+        case "${1:-}" in
+          ''|-*) echo "fm-x-followup: missing --image path" >&2; usage; exit 2 ;;
+        esac
         TS_ARGS+=("$1")
         ;;
+      --text-file)
+        TS_ARGS+=("$1")
+        shift
+        case "${1:-}" in
+          ''|-*) echo "fm-x-followup: missing --text-file path" >&2; usage; exit 2 ;;
+        esac
+        TS_ARGS+=("$1")
+        ;;
+      -) TS_ARGS+=("$1") ;;
+      -*) echo "fm-x-followup: unknown option '$1' (follow-up text comes only from --text-file or stdin)" >&2; usage; exit 2 ;;
       *) TS_ARGS+=("$1") ;;
     esac
     shift

@@ -41,8 +41,16 @@ usage() {
   echo "usage: fm-x-dismiss.sh <request_id>" >&2
 }
 
+case "${1:-}" in
+  --help|-h) echo "usage: fm-x-dismiss.sh <request_id>"; exit 0 ;;
+esac
+
 REQ=${1:-}
-if [ -z "$REQ" ] || [ "$#" -gt 1 ]; then
+case "$REQ" in
+  '') usage; exit 2 ;;
+  -*) echo "fm-x-dismiss: unknown option '$REQ'" >&2; usage; exit 2 ;;
+esac
+if [ "$#" -gt 1 ]; then
   usage
   exit 2
 fi
