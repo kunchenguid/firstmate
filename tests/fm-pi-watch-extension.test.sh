@@ -253,13 +253,17 @@ import { pathToFileURL } from "node:url";
 
 let tool = null;
 let reconciliationRequests = 0;
+let reconciliationSettlements = 0;
 const pi = {
   on() {},
   events: {
     emit(channel, request) {
       if (channel !== "fm-branch-supervision:reconcile") return;
       reconciliationRequests += 1;
-      request.accept(new Promise((resolve) => setTimeout(resolve, 25)));
+      request.accept(new Promise((resolve) => setTimeout(() => {
+        reconciliationSettlements += 1;
+        resolve();
+      }, 25)));
     },
   },
   registerCommand() {},
@@ -272,12 +276,18 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 const initial = await tool.execute("tool-call-first", {}, undefined, undefined, {});
+if (reconciliationSettlements !== 1) {
+  throw new Error(`initial arm returned before reconciliation settled: ${reconciliationSettlements}`);
+}
 if (!initial.content[0]?.text.includes("started Pi extension arm child")) {
   throw new Error(`initial call did not start the arm child: ${initial.content[0]?.text}`);
 }
 const redundant = await tool.execute("tool-call-redundant", {}, undefined, undefined, {});
 if (reconciliationRequests !== 2) {
   throw new Error(`explicit arm did not reconcile outcomes after both start and owned no-op: ${reconciliationRequests}`);
+}
+if (reconciliationSettlements !== 2) {
+  throw new Error(`owned no-op returned before reconciliation settled: ${reconciliationSettlements}`);
 }
 if (!redundant.content[0]?.text.includes("Pi extension already owns an arm child; no manual re-arm needed")) {
   throw new Error(`redundant call omitted ownership-based no-op guidance: ${redundant.content[0]?.text}`);
