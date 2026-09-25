@@ -226,6 +226,11 @@ Herdr passes its server startup environment to every later pane, so retaining th
 An already-running server is reused without restart or environment changes.
 Explicit named-session routing and unrelated launch environment remain intact.
 
+Every synchronous Herdr CLI read or write runs under a hard per-call bound (`FM_BACKEND_HERDR_CLI_TIMEOUT`, default 10 seconds) through the repo-wide bounded runner in `bin/fm-timeout-lib.sh`, so a wedged server or a hung pane read cannot block a supervisor indefinitely or leak the shell that made the call.
+The bound kills the whole child process group and reports Herdr timeout as exit 124.
+The long-lived `herdr server` launch is the one exemption, because its purpose is to outlive the call and a bound would kill the server.
+`tests/fm-backend-herdr-probe-timeout.test.sh` pins the bound, the process reaping, and the server exemption against a TERM-ignoring fake herdr.
+
 Literal text and Enter are separate operations on `fm-send.sh`'s typed plane; ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
 Enter, Escape, and Ctrl-C are supported.

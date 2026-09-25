@@ -93,6 +93,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-agent-process-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-agent-process-lib.sh"
 
+# The repo-wide bounded runner (bin/fm-timeout-lib.sh), the single owner of how
+# this repo bounds a subprocess. Every synchronous Herdr CLI call below runs
+# through it; see fm_backend_herdr_bounded.
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-timeout-lib.sh"
+
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # events.subscribe (the native pane.agent_status_changed push stream) and its
 # subscription_event schema first shipped at protocol 16 (verified: herdr
@@ -369,6 +375,23 @@ fm_backend_herdr_workspace_label() {
   printf 'firstmate'
 }
 
+# FM_BACKEND_HERDR_CLI_TIMEOUT: the hard per-call bound in whole seconds on
+# every synchronous Herdr CLI read or write. Without it a wedged server or a
+# hung pane read blocks the supervisor that made the call forever and leaks the
+# shell it ran in, one per probe. The long-lived `server` launch is exempt: its
+# whole purpose is to outlive the call. Invalid or zero values fall back to 10.
+FM_BACKEND_HERDR_CLI_TIMEOUT=${FM_BACKEND_HERDR_CLI_TIMEOUT:-10}
+
+# fm_backend_herdr_bounded: run <command...> under the adapter's hard bound via
+# the repo-wide bounded runner (bin/fm-timeout-lib.sh). Returns the command's
+# own status, or 124 when the bound fires, and kills the whole child process
+# group so a hung herdr and anything it spawned cannot outlive the call.
+fm_backend_herdr_bounded() {  # <command...>
+  local bound=$FM_BACKEND_HERDR_CLI_TIMEOUT
+  case "$bound" in ''|*[!0-9]*|0) bound=10 ;; esac
+  fm_run_timed "$bound" "$@"
+}
+
 # fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>, setting
 # BOTH the HERDR_SESSION env var AND appending a trailing `--session <name>`
 # CLI flag. Verified empirically (docs/herdr-backend.md "Session targeting: the
@@ -393,21 +416,24 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   # stderr is buffered (stdout streams untouched) so a protocol_mismatch
   # refusal can be recognized and retried once on a compatible client; see
   # "client selection" below. A failed command's stderr is replayed verbatim.
-  # The long-lived `server` launch is exec'd straight through: buffering its
-  # stderr would hold this call open for the server's whole lifetime.
+  # Every call below runs under fm_backend_herdr_bounded (the
+  # FM_BACKEND_HERDR_CLI_TIMEOUT contract) so a hung server cannot wedge the
+  # caller. The long-lived `server` launch is the one exemption: it is exec'd
+  # straight through, because buffering its stderr would hold this call open
+  # for the server's whole lifetime and a bound would kill the server.
   if [ "${1:-}" = server ]; then
     HERDR_SESSION="$session" "$client_bin" "$@" --session "$session"
     return $?
   fi
   failed_bin=$client_bin
-  { err=$(HERDR_SESSION="$session" "$failed_bin" "$@" --session "$session" 2>&1 1>&3 3>&-) || rc=$?; } 3>&1
+  { err=$(fm_backend_herdr_bounded env HERDR_SESSION="$session" "$failed_bin" "$@" --session "$session" 2>&1 1>&3 3>&-) || rc=$?; } 3>&1
   if [ "$rc" -ne 0 ]; then
     case "$err" in
       *protocol_mismatch*)
         fm_backend_herdr_client_select "$session" force
         selected_bin=$(fm_backend_herdr_bin)
         if [ "$selected_bin" != "$failed_bin" ]; then
-          HERDR_SESSION="$session" "$selected_bin" "$@" --session "$session"
+          fm_backend_herdr_bounded env HERDR_SESSION="$session" "$selected_bin" "$@" --session "$session"
           return $?
         fi
         ;;
@@ -468,7 +494,7 @@ fm_backend_herdr_client_candidates() {
 # client did not report. Never fails.
 fm_backend_herdr_client_status() {  # <bin> <session>
   local bin=$1 session=$2 out
-  out=$(HERDR_SESSION="$session" "$bin" status --json --session "$session" 2>/dev/null) || out=
+  out=$(fm_backend_herdr_bounded env HERDR_SESSION="$session" "$bin" status --json --session "$session" 2>/dev/null) || out=
   printf '%s' "$out" | jq -r '
     [ (if (.server | type) == "object" and .server.running != null then (.server.running | tostring) else "" end),
       (if (.server | type) == "object" and (.server | has("compatible"))
@@ -520,7 +546,7 @@ fm_backend_herdr_tool_check() {
 fm_backend_herdr_version_check() {
   fm_backend_herdr_tool_check || return 1
   local status protocol version
-  status=$(herdr status --json 2>/dev/null) || { echo "error: 'herdr status --json' failed; is herdr installed correctly?" >&2; return 1; }
+  status=$(fm_backend_herdr_bounded herdr status --json 2>/dev/null) || { echo "error: 'herdr status --json' failed; is herdr installed correctly?" >&2; return 1; }
   protocol=$(printf '%s' "$status" | jq -r '.client.protocol // empty' 2>/dev/null)
   version=$(printf '%s' "$status" | jq -r '.client.version // empty' 2>/dev/null)
   case "$protocol" in
@@ -3667,7 +3693,7 @@ fm_backend_herdr_pane_for_tab() {  # <session> <workspace_id> <tab_id>
 # normally carry meta), best-effort.
 fm_backend_herdr_resolve_bare_selector() {  # <name>
   local name=$1 sessions session tabs tab_id wsid pane_id
-  sessions=$(herdr session list --json 2>/dev/null | jq -r '.sessions[]? | select(.running == true) | .name' 2>/dev/null)
+  sessions=$(fm_backend_herdr_bounded herdr session list --json 2>/dev/null | jq -r '.sessions[]? | select(.running == true) | .name' 2>/dev/null)
   while IFS= read -r session; do
     [ -n "$session" ] || continue
     tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || continue
@@ -3731,7 +3757,7 @@ fm_backend_herdr_list_live() {  # <session>
 # ~/.config/herdr/sessions/<name>/herdr.sock). Empty on any failure.
 fm_backend_herdr_socket_path() {  # <session>
   local session=$1
-  herdr session list --json 2>/dev/null \
+  fm_backend_herdr_bounded herdr session list --json 2>/dev/null \
     | jq -r --arg name "$session" '.sessions[]? | select(.name == $name) | .socket_path // empty' 2>/dev/null \
     | head -1
 }
@@ -3755,10 +3781,10 @@ fm_backend_herdr_events_capable() {  # <session>
   if [ -z "${FM_BACKEND_HERDR_EVENT_READER:-}" ]; then
     command -v python3 >/dev/null 2>&1 || return 1
   fi
-  protocol=$(herdr status --json 2>/dev/null | jq -r '.client.protocol // empty' 2>/dev/null)
+  protocol=$(fm_backend_herdr_bounded herdr status --json 2>/dev/null | jq -r '.client.protocol // empty' 2>/dev/null)
   case "$protocol" in ''|*[!0-9]*) return 1 ;; esac
   [ "$protocol" -ge "$FM_BACKEND_HERDR_MIN_EVENTS_PROTOCOL" ] || return 1
-  schema=$(herdr api schema --json 2>/dev/null) || return 1
+  schema=$(fm_backend_herdr_bounded herdr api schema --json 2>/dev/null) || return 1
   printf '%s' "$schema" | grep -Fq 'events.subscribe' || return 1
   printf '%s' "$schema" | grep -Fq 'pane.agent_status_changed' || return 1
   return 0
