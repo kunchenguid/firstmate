@@ -65,16 +65,8 @@
 # (bin/fm-branch-report.sh), so it still reaches main when the host dies at the
 # turn's end or its owner drops the handoff, as a superseded Cursor park does.
 #
-# THE LATCH. The Pi branch's broken-session policy, kept in a state file
-# because each host process is short-lived: two consecutive engine errors (a
-# turn that exited nonzero, hit its bound, or ended without a complete
-# successful result) latch the session; every away wake then reaches main with
-# a "supervision-host:" line for a cooldown, after which one wake probes the
-# engine, and each probe that ends in another engine error doubles the
-# cooldown up to its cap. A turn that records a report without an engine error
-# clears the latch. The first trip adds one "supervision-host:" line to the
-# failing turn's handback; a recovery is only logged. The state belongs to one
-# main session, engine, and model.
+# THE LATCH. An opted-in away host persists engine health across short-lived
+# parks; docs/supervision-host.md "The broken-session latch" owns the policy.
 #
 # THE PARK BOUNDARY. Claude drops the exit 2 of a Stop hook it terminated at
 # the hook's configured timeout (docs/verification/supervision.md), Cursor's
@@ -601,15 +593,9 @@ write_engine_record() {  # <turns> <conversation-cost>
     && mv -f "$tmp" "$ENGINE_RECORD"
 }
 
-# The broken-session latch, the Pi branch's policy (docs/pi-supervision-branch.md
-# "Broken-branch latch and recovery") kept in HEALTH_FILE because each host
-# process is short-lived: two consecutive engine errors latch the session,
-# every away wake then reaches main during a cooldown (COOLDOWN seconds), after
-# which one wake probes the engine; each probe that ends in another engine
-# error doubles the cooldown up to COOLDOWN_MAX. A turn that records a report
-# without an engine error clears the latch and the error streak. The state
-# belongs to one main session and one engine and model, so a new main session
-# or another engine or model starts clean.
+# Persist health between host parks; the main-session key prevents a recycled
+# lock pid from inheriting another session's conversation or latch.
+# docs/supervision-host.md "The broken-session latch" owns the policy.
 health_key() {
   fm_supervision_host_health_key "$STATE"
 }
