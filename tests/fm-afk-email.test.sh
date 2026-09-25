@@ -386,6 +386,7 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
 
 
 
+
     || fail "valid reply handoff errored: $out"
   assert_contains "$out" 'received 1 verified and 0 untrusted' 'matching sender and code are accepted'
   note=$(find "$inbox" -maxdepth 1 -name '*.note' -print -quit)
@@ -393,6 +394,7 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
   assert_contains "$(cat "$note")" 'outcome seq 1 on task ui only' 'the reply is bound to its exact outcome'
   assert_contains "$(cat "$note")" 'Please merge the UI pull request' 'the captain words reach the inbox'
   assert_not_contains "$(cat "$note")" 'Release the API now' 'Outlook-quoted content for other items is excluded'
+
 
 
 
@@ -474,12 +476,14 @@ test_unreadable_token_state_keeps_reply_retryable() {
 
 
 
+
 test_unmatched_reply_request_id_is_untrusted_and_ackable() {
   local home note_json note_id verification out
   home=$(make_home unverified-prefix configured)
   run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
   note_json=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
     "$REPO/bin/fm-inbox.sh" note --request-id afk-email-1-000000000000000000000000 --json \
+
 
 
 
@@ -500,6 +504,7 @@ PY
     "$REPO/bin/fm-inbox.sh" drain --ack "$note_id") || fail "untrusted note could not be acknowledged: $out"
   assert_contains "$out" "acked $note_id" 'an unmatched reply-shaped note can be acknowledged'
   pass "an unmatched reply-shaped note remains an ordinary non-email inbox note"
+
 
 
 
@@ -2032,6 +2037,7 @@ test_away_mail_requires_gmail_and_nonblank_settings
 test_batched_mail_redacts_secrets_and_replies_are_item_bound
 test_unreadable_token_state_keeps_reply_retryable
 test_unmatched_reply_request_id_is_untrusted_and_ackable
+
 
 
 

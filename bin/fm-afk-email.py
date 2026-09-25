@@ -545,6 +545,7 @@ def extract_reply(body):
 
 
 
+
             break
         answer_lines.append(line)
     answer = "\n".join(answer_lines).strip()
@@ -799,6 +800,7 @@ def verify_note(note_id):
         return 1
     if item is None:
         print(json.dumps({"email_handoff": False, "verified": False}, separators=(",", ":")))
+
 
 
 
