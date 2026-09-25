@@ -595,6 +595,20 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 
 [`architecture.md`](architecture.md) owns the wait-evidence contract and which records may take the ladder away; `bin/fm-watch.sh`'s `wedge_wait_evidence` owns the exact derivation and its fail-closed boundaries.
 
+## Jev stale-escalation triage (config/jev-wake-triage)
+
+The local, gitignored `config/jev-wake-triage` file opts a home out of the default-on Jev classifier on the watcher's stale-escalation path.
+Absent, empty, or `on` keeps the gate; a first line of `off` disables it and the watcher escalates exactly as it did before Jev.
+`FM_JEV_WAKE_TRIAGE` overrides the file: `off`/`0`/`false`/`no` disables, `on`/`1`/`true`/`yes` enables, and unset defers to the file.
+The gate runs only at the moment a provably-working stale pane would otherwise escalate, after the wait, worktree-write, and dead-record probes.
+It asks typesafe.ai's System One model (Jev) to classify `pipeline_wait`, `true_wedge`, or `healthy_idle`, plus a `wedge_probability` Noul, and escalates only on `true_wedge`.
+Any missing key, timeout, HTTP error, or malformed answer fail-opens to today's escalate path and stamps `jev_triage.unavailable`.
+The key is `TYPESAFE_API_KEY` from the watcher process environment only, vault-injected at runtime, never from `.env`.
+Telemetry under `state/.jev-triage-telemetry` records `jev_triage.suppressed|escalated|unavailable` with the task class (`ship`, `scout`, `secondmate`, or `unknown`) and no status content.
+The first 20 decisions append `state/.jev-triage-calibration.jsonl` so the captain can audit precision before the gate becomes load-bearing.
+The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
+[`architecture.md`](architecture.md) owns the triage contract, `bin/fm-jev-wake-triage.sh`'s header owns the request, output, telemetry, and calibration log, and [`verification/jev-wake-triage.md`](verification/jev-wake-triage.md) records the portable tests.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh`, the same owner CI invokes.
@@ -2272,7 +2286,7 @@ FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainl
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
-TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment or .env; absent means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution")
+TYPESAFE_API_KEY=       # typesafe.ai System One key: typed dispatch resolution opt-in from the environment or .env, and Jev stale-escalation triage from the environment only (docs/configuration.md "Typed dispatch resolution" and "Jev stale-escalation triage")
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
@@ -2309,6 +2323,7 @@ FM_SECONDMATE_LIVENESS_TIMEOUT=120   # seconds bounding one watcher-driven relau
 FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS=3   # automatic relaunch attempts allowed per mate inside the window before the watcher parks auto-relaunch behind state/.secondmate-relaunch-bound-<id> and escalates once; a later live probe clears the marker and restores the full attempt budget (the ledger keeps its history behind a `rearmed` row); zero or invalid values use 3
 FM_SECONDMATE_LIVENESS_WINDOW_SECS=3600   # window the relaunch bound counts state/.secondmate-relaunch-<id> attempt lines over; the file is also the durable per-mate relaunch record; zero or invalid values use 3600
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
+FM_JEV_WAKE_TRIAGE=                # override config/jev-wake-triage; off disables the default-on Jev stale-escalation gate, on enables it, unset defers to the file
 FM_WORKTREE_WRITE_PRUNE='.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'   # directory names the wedge detector's task-worktree write probe skips; the default keeps .git out so a supervisor's own read-only git command can never look like crew progress; set it to the empty string to prune nothing, which widens the probe to the whole depth-bounded tree rather than disabling it
 FM_WORKTREE_WRITE_MAXDEPTH=6       # depth that same probe walks below the recorded worktree; it runs only at the moment a wedge escalation would otherwise fire, never on every poll; no probe knob applies to a secondmate, whose recorded worktree is a provisioned home the probe skips entirely
 FM_WORKTREE_WRITE_TIMEOUT=10       # wall-clock seconds that one walk may take, so a worktree on a hung mount cannot stall the watcher poll that started it; hitting the bound reads as no write evidence, which leaves the escalation schedule exactly as it was; a value that is not a positive integer falls back to the default
