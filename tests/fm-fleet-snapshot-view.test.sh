@@ -581,7 +581,7 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [x] done-bracket-pr - Done Bracket PR - <https://github.com/kunchenguid/firstmate/pull/43> (repo: gamma, merged 2026-07-12) (kind: ship)
 - [x] reported-comma - Reported Scout data/reported-comma/report.md (repo: gamma, reported 2026-07-10) (kind: scout)
 - [x] done-note - Done Note local main (repo: delta, done 2026-07-11) (kind: ship)
-- [x] done-named-note - Done Named Note local office (repo: delta, done 2026-07-11) (kind: ship)
+- [x] done-title-local - Release local office (repo: delta, done 2026-07-11) (kind: ship)
 EOF
   printf '# Bold Scout\n' > "$data/bold-task/report.md"
   fm_write_meta "$home/state/bold-task.meta" \
@@ -686,12 +686,12 @@ EOF
       and .completion == {verb:"done",date:"2026-07-11"}
   ' >/dev/null || fail "done closure metadata did not parse"
   printf '%s' "$out" | jq -e '
-    .backlog.records[] | select(.id == "done-named-note")
-    | .title == "Done Named Note"
-      and .local_note == "local office"
+    .backlog.records[] | select(.id == "done-title-local")
+    | .title == "Release local office"
+      and .local_note == null
       and .done == "2026-07-11"
       and .completion == {verb:"done",date:"2026-07-11"}
-  ' >/dev/null || fail "named local landing metadata did not parse"
+  ' >/dev/null || fail "an ordinary completed title was mistaken for a local landing note"
   printf '%s' "$out" | jq -e --arg data "$data" '
     .tasks[] | select(.id == "bold-task")
     | .backlog.id == "bold-task"
@@ -707,8 +707,8 @@ EOF
     "view should render bracketed PR artifact outside the title"
   assert_contains "$view" "| done-note | Done Note | delta | ship | - | local main |" \
     "view should render local-only done artifact outside the title"
-  assert_contains "$view" "| done-named-note | Done Named Note | delta | ship | - | local office |" \
-    "view should render named local-only done artifact outside the title"
+  assert_contains "$view" "| done-title-local | Release local office | delta | ship | - | - |" \
+    "view should preserve an ordinary completed title ending in local office"
   pass "snapshot parses tasks-axi rows and respects operational overrides"
 }
 
