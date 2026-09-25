@@ -6,8 +6,10 @@
 #   1. With CLAUDE_CODE_ENABLE_FUNCTION_HOOKS unset, the mod is a complete no-op even
 #      with the per-home preference already on: no hooks module loads, /calm is not a
 #      command, the stock working row shows, and tool rows draw as stock.
-#   2. With the flag on, the sailboat replaces the working row and moves, tool rows and
-#      an exact operational user row draw at zero height, /calm restores them and
+#   2. With the flag on, the sailboat replaces the working row and moves, no row draws
+#      for a turn whose stored transcript holds thinking, tool rows and a record-backed
+#      operational doorbell (the carrier Firstmate types into Claude Code, which strips
+#      U+2063 from submitted prompts) draw at zero height, /calm restores them and
 #      persists off, /calm hides them again and persists on, all without a Calm output
 #      row in the transcript.
 #   3. `claude --continue` restores the transcript with those rows still hidden.
@@ -36,6 +38,9 @@ SESSION="fm-calm-claude-e2e"
 HULL='╲▁▁▁╱'
 SAIL='◿│◣'
 
+# Claude Code stores the lab project's transcripts under its sanitized path.
+TRANSCRIPTS="$HOME/.claude/projects/$(printf '%s' "$PROJECT" | sed 's/[^A-Za-z0-9]/-/g')"
+
 cleanup() {
   local i=0
   tmux -L "$SOCKET" kill-server 2>/dev/null || true
@@ -44,7 +49,7 @@ cleanup() {
     sleep 0.25
     i=$((i + 1))
   done
-  rm -rf "$LAB" 2>/dev/null || true
+  rm -rf "$LAB" "$TRANSCRIPTS" 2>/dev/null || true
   fm_test_cleanup
 }
 trap cleanup EXIT
@@ -69,7 +74,7 @@ launch() {  # <debug-log> <flag: 1|0> [claude args...]
   [ "$flag" = 1 ] && flag_env="CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1"
   tmux -L "$SOCKET" kill-session -t "$SESSION" 2>/dev/null || true
   tmux -L "$SOCKET" new-session -d -s "$SESSION" -x 160 -y 44 -c "$PROJECT" \
-    "env $(unset_inherited) $flag_env FM_HOME='$FM_HOME_DIR' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --model haiku --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --debug-file '$log' $*; printf '\nCLAUDE_EXIT=%s\n' \"\$?\"; sleep 30"
+    "env $(unset_inherited) $flag_env FM_HOME='$FM_HOME_DIR' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --model haiku --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"alwaysThinkingEnabled\":true}' --debug-file '$log' $*; printf '\nCLAUDE_EXIT=%s\n' \"\$?\"; sleep 30"
 }
 
 screen() {
@@ -205,12 +210,16 @@ wait_settled() {  # <what> [iterations]
   fail "Claude Code $CLAUDE_VERSION never settled $what"
 }
 
+# Claude Code 2.1.280 logs `hooks module firstmate-calm@<source> loaded`; 2.1.272 had no
+# source suffix.
+MODULE_LOADED='hooks module firstmate-calm(@[^ ]+)? loaded'
+
 # --- 1. Flag off: a complete no-op even with the preference on --------------------
 launch "$DEBUG_LOG_OFF" 0
 wait_idle
 grep -q 'hooks modules not loaded' "$DEBUG_LOG_OFF" \
   || fail "Claude Code $CLAUDE_VERSION did not report hooks modules off with the flag unset"
-if grep -q 'hooks module firstmate-calm loaded' "$DEBUG_LOG_OFF"; then
+if grep -Eq "$MODULE_LOADED" "$DEBUG_LOG_OFF"; then
   fail "Claude Code $CLAUDE_VERSION loaded the Calm hooks module although the flag was unset"
 fi
 if command_listed calm; then
@@ -263,11 +272,11 @@ pass "Claude Code $CLAUDE_VERSION with the flag unset: no hooks module, no /calm
 launch "$DEBUG_LOG_ON" 1
 wait_idle
 i=0
-while [ "$i" -lt 100 ] && ! grep -q 'hooks module firstmate-calm loaded' "$DEBUG_LOG_ON"; do
+while [ "$i" -lt 100 ] && ! grep -Eq "$MODULE_LOADED" "$DEBUG_LOG_ON"; do
   sleep 0.1
   i=$((i + 1))
 done
-grep -q 'hooks module firstmate-calm loaded' "$DEBUG_LOG_ON" \
+grep -Eq "$MODULE_LOADED" "$DEBUG_LOG_ON" \
   || fail "Claude Code $CLAUDE_VERSION did not load the Calm hooks module from the project's .claude/skills path with the flag on"
 # The engine logs one benign notice for every options-less hooks module ("options
 # requested but its manifest declares no userConfig"); anything else is a real problem.
@@ -308,20 +317,48 @@ case "$on_settled" in
     printf '%s\n' "$on_settled" >&2
     fail "a tool row drew while Calm was on"
     ;;
+  *'∴'*|*'Thinking'*|*'Thought for'*)
+    printf '%s\n' "$on_settled" >&2
+    fail "a thinking row drew while Calm was on"
+    ;;
 esac
+# The thinking check is vacuous unless the settled turn really stored thinking.
+on_transcript=$(ls -t "$TRANSCRIPTS"/*.jsonl 2>/dev/null | head -1)
+grep -qs '"type":"thinking"' "$on_transcript" \
+  || fail "Claude Code $CLAUDE_VERSION stored no thinking block for the flag-on turn, so hidden thinking cannot be judged"
 
-# An exact operational user row draws at zero height while the answer stays visible.
-operational=$(printf 'signal: %s/state/probe.status changed. Reply with exactly OPERATIONAL_PROCESSED and nothing else.' "$LAB" | "$OPERATIONAL_INPUT" encode watcher) \
-  || fail "could not encode the operational probe"
+# Claude Code strips U+2063 from submitted prompts, so Firstmate types a plain doorbell
+# naming a record that holds the envelope; that doorbell row draws at zero height while
+# the answer stays visible. The answer token lives only in the record.
+DOORBELL_TEXT='Firstmate operational input waiting'
+operational=$(printf 'signal: %s/state/probe.status changed. Reply with exactly OPERATIONAL_PROCESSED and nothing else.' "$LAB" \
+  | FM_HOME="$FM_HOME_DIR" "$OPERATIONAL_INPUT" record watcher) \
+  || fail "could not publish the operational probe record"
+case "$operational" in
+  *"$DOORBELL_TEXT"*) : ;;
+  *) fail "the operational probe is not a record-backed doorbell: $operational" ;;
+esac
 send "$operational"
+sleep 1
 enter
+# A long line typed in one burst can leave Claude Code's first Enter inside its paste
+# handling; like Firstmate's own submit primitive, retry Enter only, never retype.
+i=0
+while [ "$i" -lt 4 ]; do
+  sleep 2
+  case "$(screen)" in
+    *"❯ : $DOORBELL_TEXT"*) enter ;;
+    *) break ;;
+  esac
+  i=$((i + 1))
+done
 wait_screen 'OPERATIONAL_PROCESSED' 'the operational answer' 600
 sleep 1
 operational_screen=$(screen)
 case "$operational_screen" in
-  *'probe.status changed'*)
+  *"$DOORBELL_TEXT"*|*'invisible character'*)
     printf '%s\n' "$operational_screen" >&2
-    fail "the operational user row drew while Calm was on"
+    fail "the operational doorbell row drew while Calm was on"
     ;;
 esac
 
@@ -332,7 +369,7 @@ wait_screen 'shell command' 'the restored tool row after /calm off' 200
 [ "$(cat "$FM_HOME_DIR/config/calm")" = off ] || fail "/calm did not persist off"
 restored=$(screen)
 case "$restored" in
-  *'probe.status changed'*) : ;;
+  *"$DOORBELL_TEXT"*) : ;;
   *)
     printf '%s\n' "$restored" >&2
     fail "/calm off did not restore the operational user row"
@@ -371,14 +408,14 @@ i=0
 while [ "$i" -lt 200 ]; do
   hidden_again=$(screen)
   case "$hidden_again" in
-    *'Bash('*|*'probe.status changed'*) ;;
+    *'Bash('*|*'shell command'*|*"$DOORBELL_TEXT"*) ;;
     *) break ;;
   esac
   sleep 0.1
   i=$((i + 1))
 done
 case "$hidden_again" in
-  *'Bash('*|*'probe.status changed'*)
+  *'Bash('*|*'shell command'*|*"$DOORBELL_TEXT"*)
     printf '%s\n' "$hidden_again" >&2
     fail "/calm on did not hide the rows again"
     ;;
@@ -391,7 +428,7 @@ esac
 send '/exit'
 enter
 sleep 2
-pass "Claude Code $CLAUDE_VERSION with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, tool and operational rows draw at zero height, /calm restores and re-hides them while persisting the shared preference"
+pass "Claude Code $CLAUDE_VERSION with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, a thinking turn draws no thinking row, tool rows and the record-backed operational doorbell draw at zero height, /calm restores and re-hides them while persisting the shared preference"
 
 # --- 3. Resume: the restored transcript keeps the hidden rows hidden ---------------
 launch "$DEBUG_LOG_RESUME" 1 --continue
@@ -399,7 +436,7 @@ wait_screen 'gamma' 'the resumed transcript' 400
 sleep 1
 resumed=$(screen)
 case "$resumed" in
-  *'Bash('*|*'probe.status changed'*)
+  *'Bash('*|*'shell command'*|*"$DOORBELL_TEXT"*)
     printf '%s\n' "$resumed" >&2
     fail "the resumed transcript drew a row Calm hides"
     ;;

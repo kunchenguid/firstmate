@@ -85,17 +85,21 @@ On Claude Code the boat is painted in Claude Code's own theme colors rather than
 The family follows the `theme` setting by its prefix, `dark` or `light`, is re-read when the theme changes, and uses the light set as the both-readable fallback for `auto`, custom, missing, or unreadable values; the Pi extension keeps its standard ANSI blue and yellow.
 Tool rows, tool result blocks, and folded tool groups draw at zero height, so a turn that used tools takes the same space as one that did not.
 A user row whose text the canonical operational-input parser recognizes, a Firstmate session-start, watcher, turn-end guard, away-supervisor, launch-brief, or branch-outcome envelope, a from-firstmate routed message, or one of the narrow pre-protocol shapes kept for old transcripts, draws at zero height; every other user row, including near misses such as a quoted or ASCII-only marker, stays visible.
+Claude Code removes the U+2063 that starts those envelopes from every submitted prompt, so Firstmate delivers its away-mode escalations to a Claude Code primary as the record-backed doorbell `bin/fm-operational-input.sh` owns: a plain line naming a record under the home's `state/operational-inbox` that holds the envelope.
+Calm reads that record once through the mod's file API and hides the doorbell row only when the record holds a current envelope, so the doorbell text alone, typed by anyone, stays visible.
 Assistant text follows the shared per-block preservation rule above, including when `claude --continue` restores the transcript.
 Toggling Calm redraws every hooked row already on screen, so rows drawn before the toggle hide or restore retroactively, and the preference is read before the first row draws.
 Nothing is rewritten: hidden rows remain in the message, model context, session storage, and exports, and the mod never touches tool execution, prompts, or the stored transcript.
 
 Bounds of the Claude Code support, each recorded with evidence in [`calm-mode-feasibility.md`](calm-mode-feasibility.md#2026-09-15-claude-code-21272-mods-feasibility-and-the-shipped-mod):
 
-- The function-hooks surface is early access and default-off, and Claude Code states that its API may change between releases without notice; the mod is verified on Claude Code 2.1.272 and refuses nothing newer.
+- The function-hooks surface is early access and default-off, and Claude Code states that its API may change between releases without notice; the mod is verified on Claude Code 2.1.272 and 2.1.280 and refuses nothing newer.
+- An envelope that still reaches Claude Code as typed or launch-prompt text, such as a worker's launch brief, arrives without its U+2063 and so stays visible; only record-backed doorbells are recognized there.
+- Firstmate's watcher and turn-end wakes reach a Claude Code primary as Stop hook feedback, drawn as a `Ran 1 stop hook` row that is not one of the drawings the mods API exposes on 2.1.280, so those rows stay visible.
 - On the main-screen layout (not the fullscreen alternate screen), a toggle redraws the live screen by clearing and reprinting it, and the terminal's own scrollback keeps the earlier rendering above it; the fullscreen layout has no such stale copy.
 - The sailboat is painted through Claude Code's Raster element, whose colors are RGB quantized to 256-color escapes rather than the standard 16-color ANSI codes Pi's widget emits.
 - The detailed transcript view (`ctrl+o`) keeps its per-message timestamp and model headers where hidden assistant rows sat, because those headers are not a hookable drawing.
-- Collapsed thinking never appears in Claude Code's default view, and the mod has no thinking drawing to hide in other views.
+- Thinking never draws a transcript row in Claude Code's default view, verified on 2.1.280 for turns whose stored transcript holds thinking blocks, and the working row that names the thinking effort is the one the sailboat replaces; the detailed `ctrl+o` view can show thinking, and the mods API offers no thinking drawing to hide there.
 
 Regression entry points:
 
