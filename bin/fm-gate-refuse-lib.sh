@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# fm-gate-refuse-lib.sh - fail-closed refusal that keeps a no-mistakes GATE agent
-# out of firstmate's fleet lifecycle.
+# fm-gate-refuse-lib.sh - refuse no-mistakes gate lifecycle calls against the
+# real fleet while allowing marked disposable lab homes.
 #
 # The hazard (data/nm-gate-ambient-authority-containment-c3/report.md): a
 # no-mistakes gate agent runs inside a firstmate checkout with a free shell, so

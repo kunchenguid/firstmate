@@ -5,7 +5,7 @@
 # no-mistakes review/fix/document/test/lint/pr/rebase/ci agent never adopts that
 # identity or drives the fleet. Trusted-only: a pushed branch cannot turn this off,
 # so it is honored only from the default-branch copy of this file. Layered above
-# the NO_MISTAKES_GATE lifecycle refusal (bin/fm-gate-refuse-lib.sh) and the
+# gate-context lifecycle boundary (bin/fm-gate-refuse-lib.sh) and the
 # HEAD-continuity guard; see docs/architecture.md "No-mistakes gate authority boundary."
 disable_project_settings: true
 
