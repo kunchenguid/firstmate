@@ -33,7 +33,8 @@
 # state/operational-inbox and only a plain doorbell line naming it is typed.
 # Firstmate's contract: a message that starts with the current prefix, a
 # legacy bare-marker daemon escalation, or a doorbell whose record this home
-# holds is internal (stay afk); any other message means the captain is back
+# holds (a verbatim pasted copy of a live doorbell included) is internal (stay
+# afk); any other message means the captain is back
 # (exit afk, flush catch-up, resume per-wake responsiveness). The prefix and busy-guard solve the same problem - the
 # daemon and the human share one input channel - so they live together under
 # /afk.

@@ -21,7 +21,9 @@
 # FM_OPERATIONAL_RECORD_HARNESSES a producer instead writes the complete current
 # envelope to a durable record and types only a constant ASCII doorbell naming
 # it. The doorbell text alone proves nothing: it counts as Firstmate input only
-# when the record it names exists and holds a current generic envelope.
+# when the record it names exists and holds a current generic envelope. Records
+# are not consumed on delivery, so a verbatim copy of a live doorbell line,
+# pasted back by anyone while its record exists, is treated as Firstmate's.
 #   Record:   <state>/operational-inbox/<name>.msg, <name> matching [0-9a-z-]+,
 #             exactly the encoded envelope bytes, published by atomic rename.
 #             Records are never re-rung or acknowledged; every write prunes
