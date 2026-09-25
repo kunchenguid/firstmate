@@ -1204,6 +1204,39 @@ EOF
   pass "hold and release mirror the hold on the status log the classifier reads"
 }
 
+# A settlement retracts a hold mirror even after firstmate answered another key
+# on top of it, so the pause the worker declared before the hold is found again
+# once the hold is released or closed.
+test_settlement_retracts_a_buried_hold_mirror() {
+  local home id how wait
+  local -a release
+  home=$(make_home buried-mirror)
+  printf 'Proceed as planned.\n' > "$home/go.txt"
+  for how in released answered; do
+    id=sample-buried-$how
+    tasks_in "$home" add "$id" "Scout the buried $how sample" --kind scout --repo sample >/dev/null \
+      || fail "could not create the $how lane"
+    write_origin_meta "$home" "$id"
+    printf 'paused: waiting on the sample upstream\n' > "$home/state/$id.status"
+    run_captain "$home" hold "$id" --reason "operator review pending" >/dev/null \
+      || fail "could not hold the $how lane"
+    printf 'resolved [key=api]: answered\n' >> "$home/state/$id.status"
+    release=()
+    [ "$how" = answered ] || release=(--release)
+    run_captain "$home" answer "$id" --decision-file "$home/go.txt" "${release[@]}" >/dev/null \
+      || fail "the $how answer failed on the buried lane"
+    run_captain "$home" answer "$id" --decision-file "$home/go.txt" "${release[@]}" >/dev/null \
+      || fail "the $how answer retry was not idempotent"
+    [ "$(grep -cE "^resolved \\[key=captain-hold-$id-1\\]( \\[at=[0-9]+\\])?: captain call $how by fm-captain-hold$" "$home/state/$id.status")" = 1 ] \
+      || fail "the $how settlement did not retract the buried mirror exactly once: $(cat "$home/state/$id.status")"
+    wait=$(bash -c '. "$1"; status_declared_wait_line "$2"' _ \
+      "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+    [ "$wait" = "paused: waiting on the sample upstream" ] \
+      || fail "the $how settlement left the pause hidden under the buried mirror: '$wait'"
+  done
+  pass "release and close retract a hold mirror buried under a later answer"
+}
+
 # The hold-set stamp must be durable before the captain hold becomes visible.
 # A wrapper observes the real tasks-axi hold boundary, and a forced stamp-write
 # failure proves the command never publishes the hold without its timestamp.
@@ -4284,6 +4317,7 @@ test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
 test_hold_and_release_reach_the_status_log
+test_settlement_retracts_a_buried_hold_mirror
 test_hold_stamp_precedes_hold_visibility
 test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due
