@@ -191,9 +191,10 @@ append_entry() {  # <captain|main> <text> [<id>]
     fi
   done
   seq=$((last + 1))
-  record=$(jq -cn --argjson seq "$seq" --argjson epoch "$(date +%s)" --arg key "$key" --arg id "$id" \
-    --arg tag "$tag" --arg text "$text" --argjson cap "$MIRROR_CAP" '
-      def note($n): "\n[mirror truncated: \($n) characters omitted]\n";
+  record=$(printf '%s' "$text" | jq -cRs --argjson seq "$seq" --argjson epoch "$(date +%s)" --arg key "$key" \
+    --arg id "$id" --arg tag "$tag" --argjson cap "$MIRROR_CAP" '
+      . as $text
+      | def note($n): "\n[mirror truncated: \($n) characters omitted]\n";
       def capped: if length <= $cap then .
         else length as $len
           | ($cap - (note($len - $cap + (note($len - $cap) | length)) | length)) as $keep

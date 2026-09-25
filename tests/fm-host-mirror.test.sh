@@ -251,6 +251,35 @@ test_mirror_is_owner_only_under_an_open_umask() {
   pass "mirror: the captain's dialog lands only in an owner-only mirror, even when the file already existed readable by others"
 }
 
+# A jq on PATH that appends its own argv to $FM_HOME/jq-argv.log, then runs
+# the real jq.
+JQ_SHIM="$TMP_ROOT/jq-shim"
+mkdir -p "$JQ_SHIM"
+{
+  printf '#!/usr/bin/env bash\nREAL_JQ=%q\n' "$(command -v jq)"
+  cat <<'SH'
+printf '%s\n' "$@" >> "$FM_HOME/jq-argv.log"
+exec "$REAL_JQ" "$@"
+SH
+} > "$JQ_SHIM/jq"
+chmod +x "$JQ_SHIM/jq"
+
+test_dialog_text_never_enters_process_arguments() {
+  local home
+  home=$(make_home argv)
+  PATH="$JQ_SHIM:$PATH" as_session "$home" '
+    printf "%s" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt_id\":\"p1\",\"prompt\":\"captain-secret-7f3a\"}" \
+      | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude
+    printf "%s" "{\"hook_event_name\":\"Stop\",\"prompt_id\":\"p1\",\"last_assistant_message\":\"main-secret-9c1e\"}" \
+      | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude
+  ' || fail "a writer failed"
+  assert_equals "captain|captain-secret-7f3a
+main|main-secret-9c1e" "$(entries "$home")" "both entries must be recorded"
+  [ -s "$home/jq-argv.log" ] || fail "the writers must have run through the recording jq"
+  ! grep -q 'secret' "$home/jq-argv.log" || fail "dialog text must never appear in a jq argument list"
+  pass "mirror: captain prompts and main replies reach the mirror without ever entering a process argument list"
+}
+
 test_feed_resumes_reanchors_and_is_bounded() {
   local home out
   home=$(make_home feed)
@@ -395,6 +424,7 @@ test_entries_are_deduplicated_and_capped
 test_a_later_session_may_reuse_an_entry_id
 test_a_failed_append_leaves_the_mirror_valid
 test_mirror_is_owner_only_under_an_open_umask
+test_dialog_text_never_enters_process_arguments
 test_feed_resumes_reanchors_and_is_bounded
 test_feed_bound_includes_its_omitted_note
 test_recycled_lock_pid_is_a_new_main_session
