@@ -522,10 +522,11 @@ fm_lock_remove_stray_owner_link() {
 
 fm_lock_claim_blocked_by_steal() {
   local lockdir=$1 allowed_steal_owner=${2:-} steal
-  # A steal mutex has no steal mutex of its own (see fm_lock_try_acquire), so a
-  # leftover deeper level from an older build must never block claiming one.
+  # The steal guard `<lock>.steal.steal` has no steal mutex of its own (see
+  # fm_lock_try_acquire_steal_guard), so a leftover deeper level from an older
+  # build must never block claiming one.
   case "$lockdir" in
-    *.steal) return 1 ;;
+    *.steal.steal) return 1 ;;
   esac
   steal="$lockdir.steal"
   [ -e "$steal" ] || [ -L "$steal" ] || return 1
@@ -940,8 +941,32 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
+# The steal mutex `<lock>.steal` is itself reclaimed under the steal guard
+# `<lock>.steal.steal`, which is taken only by plain creation and never stolen
+# through a deeper level, so a process dying mid-steal (for example on a full
+# disk) can never grow the chain past two levels. A guard left by another
+# process is reclaimed only once it has aged past the guard grace and while it
+# still names that same dead owner; one this process abandoned in an
+# interrupted frame is reclaimed at once, as fm_lock_try_acquire does.
+fm_lock_try_acquire_steal_guard() {
+  local guard=$1 pid owner current
+  fm_lock_try_create "$guard" && return 0
+  fm_current_pid current || return 1
+  owner=
+  if [ -L "$guard" ]; then
+    owner=$(fm_lock_link_owner "$guard" 2>/dev/null || true)
+  fi
+  pid=$(cat "$guard/pid" 2>/dev/null || true)
+  if [ "$pid" != "$current" ]; then
+    [ "$(fm_path_age "$guard")" -ge "${FM_GUARD_GRACE:-300}" ] || return 1
+    fm_lock_recheck_stale_owner "$guard" "$owner" "$pid" || return 1
+  fi
+  fm_lock_remove_path "$guard" || true
+  fm_lock_try_create "$guard"
+}
+
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner current
+  local lockdir=$1 pid steal cur rc steal_owner primary_owner current acquire_steal
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
@@ -977,31 +1002,12 @@ fm_lock_try_acquire() {
     return 1
   fi
 
-  # A steal mutex is reclaimed in place and never through a deeper
-  # `<lock>.steal.steal`: a process dying mid-steal (for example on a full disk)
-  # would otherwise leave one more abandoned level per failed attempt. The
-  # recheck narrows the race with a concurrent in-place reclaimer, and the
-  # primary claim below still refuses any stealer whose mutex was replaced.
-  case "$lockdir" in
-    *.steal)
-      primary_owner=
-      if [ -L "$lockdir" ]; then
-        primary_owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
-      fi
-      if fm_lock_recheck_stale_owner "$lockdir" "$primary_owner" "$pid"; then
-        fm_lock_remove_path "$lockdir" || true
-        if fm_lock_try_create "$lockdir"; then
-          return 0
-        fi
-      fi
-      FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
-      FM_LOCK_OWNER_DIR=
-      return 1
-      ;;
-  esac
-
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  case "$lockdir" in
+    *.steal) acquire_steal=fm_lock_try_acquire_steal_guard ;;
+    *) acquire_steal=fm_lock_try_acquire ;;
+  esac
+  if ! "$acquire_steal" "$steal"; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
