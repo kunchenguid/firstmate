@@ -359,12 +359,13 @@ DEVELOPMENT_META="$PRES_HOME/state/development-to-staging.meta"
 record_worktree "$DEVELOPMENT_META"
 DEVELOPMENT_WS=$(grep '^herdr_workspace_id=' "$DEVELOPMENT_META" | cut -d= -f2-)
 
-move_workspace_to "$PROJECT_DIVIDER" 0 \
-  && move_workspace_to "$PROJECT_FIRSTMATE" 1 \
-  && move_workspace_to "$PROJECT_PARENT" 2 \
-  && move_workspace_to "$AIDDROP_WS" 3 \
-  && move_workspace_to "$DEVELOPMENT_WS" 4 \
-  || fail "could not scramble the existing project clusters"
+if ! move_workspace_to "$PROJECT_DIVIDER" 0 \
+  || ! move_workspace_to "$PROJECT_FIRSTMATE" 1 \
+  || ! move_workspace_to "$PROJECT_PARENT" 2 \
+  || ! move_workspace_to "$AIDDROP_WS" 3 \
+  || ! move_workspace_to "$DEVELOPMENT_WS" 4; then
+  fail "could not scramble the existing project clusters"
+fi
 FM_HOME="$PRES_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRES_HOME/state" \
   "$ROOT/bin/fm-herdr-session-cleanup.sh" >"$TMP_ROOT/startup-reconcile.out" 2>&1 \
   || fail "locked session-start reconciliation failed"
@@ -379,12 +380,13 @@ MIGRATED_ORDER=$(lab workspace list 2>/dev/null | jq -c \
   || fail "locked session start did not migrate existing project clusters: $MIGRATED_ORDER"
 pass "real herdr E2E: locked session start migrates existing journal-owned clusters without a fresh spawn"
 
-move_workspace_to "$PROJECT_DIVIDER" 0 \
-  && move_workspace_to "$PROJECT_FIRSTMATE" 1 \
-  && move_workspace_to "$PROJECT_PARENT" 2 \
-  && move_workspace_to "$AIDDROP_WS" 3 \
-  && move_workspace_to "$DEVELOPMENT_WS" 4 \
-  || fail "could not rescramble project clusters before the fresh spawn"
+if ! move_workspace_to "$PROJECT_DIVIDER" 0 \
+  || ! move_workspace_to "$PROJECT_FIRSTMATE" 1 \
+  || ! move_workspace_to "$PROJECT_PARENT" 2 \
+  || ! move_workspace_to "$AIDDROP_WS" 3 \
+  || ! move_workspace_to "$DEVELOPMENT_WS" 4; then
+  fail "could not rescramble project clusters before the fresh spawn"
+fi
 spawn_from_launcher "$PROJECT_LAUNCHER" "$PRES_HOME" public-profile-header "$PROJ" --mode no-mistakes --yolo off
 [ "$SPAWN_RC" -eq 0 ] \
   || fail "project reconciliation spawn failed"$'\n'"$(cat "$SPAWN_ERR")"
