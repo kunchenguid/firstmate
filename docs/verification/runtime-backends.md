@@ -141,7 +141,8 @@ Claude
 ```
 
 A session started that way held no lowercase `claude` anywhere in its name surfaces, so the session lock, the ancestry walk, and the liveness classifier all failed to recognize it.
-They now match the claude name in any letter case, which `tests/fm-session-lock-ancestry.test.sh`, `tests/fm-harness-precedence.test.sh`, and `tests/fm-tmux-agent-liveness.test.sh` pin with real processes.
+They now match the claude process name in any letter case, which `tests/fm-session-lock-ancestry.test.sh`, `tests/fm-harness-precedence.test.sh`, and `tests/fm-tmux-agent-liveness.test.sh` pin with real processes.
+The install-path component and bare-interpreter argument checks still match only lowercase `claude`, so a `node` script that merely lives under a `Claude` directory is not a harness.
 Other harness names are still matched only in the spelling their vendors ship.
 
 ## tmux
