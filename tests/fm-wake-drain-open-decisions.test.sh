@@ -313,6 +313,41 @@ SH
   pass "drain presentation fails soft with ready=unknown when tasks-axi times out"
 }
 
+test_ready_count_survives_presentation_lock_contention() {
+  local dir state out fakebin holder i
+  dir=$(make_case ready-count-contended)
+  state="$dir/state"
+  out="$dir/drain.out"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin" "$dir/data"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf 'count: 7\n'
+SH
+  chmod +x "$fakebin/tasks-axi"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    printf "ready\n" > "$3"
+    exec sleep 30
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.status-presentation-lock" "$dir/lock.ready" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/lock.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/lock.ready" ] || { kill "$holder" 2>/dev/null || true; fail "presentation lock not acquired"; }
+  PATH="$fakebin:$PATH" FM_DATA_OVERRIDE="$dir/data" FM_STATE_OVERRIDE="$state" \
+    FM_STATUS_PRESENTATION_LOCK_TIMEOUT=1 "$DRAIN" > "$out" \
+    || { kill "$holder" 2>/dev/null || true; fail "contended drain failed"; }
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  grep -F 'STATUS PRESENTATION SKIPPED:' "$out" >/dev/null || fail "contention was not exercised"
+  [ "$(grep -Fxc 'ready=7' "$out")" -eq 1 ] || fail "contended drain omitted ready count: $(cat "$out")"
+  pass "presentation lock contention does not suppress ready count"
+}
+
 test_wake_drain_release_wake_and_ready_count() {
   local dir state out err fakebin seq gen
   dir=$(make_case release-wake-and-ready)
@@ -369,3 +404,4 @@ test_wake_drain_prints_ready_count_zero
 test_wake_drain_ready_count_fails_soft_when_unavailable
 test_wake_drain_ready_count_fails_soft_on_timeout
 test_wake_drain_release_wake_and_ready_count
+test_ready_count_survives_presentation_lock_contention

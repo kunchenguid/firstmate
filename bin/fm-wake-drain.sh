@@ -600,7 +600,7 @@ print_status_sections() {
   rm -f -- "$prepared"
 }
 
-print_status_presentation() {  # [<deduped-raw-rows>]
+print_locked_status_presentation() {  # [<deduped-raw-rows>]
   local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
   local lock_rc holder_pid
   if fm_lock_acquire_wait_bounded "$lock" "$PRESENTATION_LOCK_TIMEOUT"; then
@@ -628,8 +628,14 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     fi
   fi
   if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
-  print_ready_count_section || rc=1
   fm_lock_release "$lock"
+  return "$rc"
+}
+
+print_status_presentation() {
+  local rc=0
+  print_locked_status_presentation "$@" || rc=$?
+  print_ready_count_section || rc=1
   return "$rc"
 }
 
