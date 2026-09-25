@@ -1398,10 +1398,13 @@ fm_pending_reply_restatement_copy_same_basename() {  # <state-dir> <corr_id> <se
 }
 
 # Live session token for escalation reminders. FM_PENDING_REPLY_SESSION, when
-# set, is the token (tests). Otherwise a held session lock's pid, or empty
-# when no live session should be woken.
+# set, is the token (tests). Otherwise a held session lock's pid, joined with
+# the session id recorded beside it when there is one, or empty when no live
+# session should be woken. The pid alone is not enough: bin/fm-lock.sh keeps it
+# across a new session in the same harness process (a Claude /clear) and only
+# refreshes the recorded id.
 fm_pending_reply_session_token() {  # <state-dir>
-  local state=$1
+  local state=$1 recorded
   if [ -n "${FM_PENDING_REPLY_SESSION+x}" ]; then
     printf '%s' "$FM_PENDING_REPLY_SESSION"
     return 0
@@ -1409,8 +1412,10 @@ fm_pending_reply_session_token() {  # <state-dir>
   # shellcheck source=bin/fm-session-lock-lib.sh
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-session-lock-lib.sh"
   fm_session_lock_inspect "$state"
-  if [ "${FM_LOCK_INSPECT_STATE:-}" = held ]; then
-    printf '%s' "$FM_LOCK_INSPECT_PID"
+  [ "${FM_LOCK_INSPECT_STATE:-}" = held ] || return 0
+  printf '%s' "$FM_LOCK_INSPECT_PID"
+  if recorded=$(fm_session_lock_recorded_session_id "$state"); then
+    printf ':%s' "$recorded"
   fi
 }
 
