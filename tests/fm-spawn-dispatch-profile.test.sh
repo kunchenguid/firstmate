@@ -141,9 +141,47 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="export COMPACT_ADVISER_DISABLE=1; $(ai_trailer_hooks_prefix "$HOME_DIR" "$id")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
+  expected="export COMPACT_ADVISER_DISABLE=1; $(ai_trailer_hooks_prefix "$HOME_DIR" "$id")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$(FM_STATE_OVERRIDE='$HOME_DIR/state' '${ROOT}/bin/fm-operational-input.sh' record launch-brief < '$HOME_DIR/data/$id/launch-brief.md' || '${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
+}
+
+# Claude Code strips U+2063 from the launch-prompt argument, so a claude launch
+# publishes the launch-brief envelope as a record in the receiving home's
+# operational inbox and passes only a printable doorbell naming it. Running the
+# captured substitution the way the destination pane's shell would proves the
+# argument it emits and the record it publishes.
+test_claude_launch_brief_publishes_record_doorbell() {
+  local rec id out status launch subst doorbell record
+  id="brief-doorbell-z1"
+  rec=$(make_spawn_case brief-doorbell claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn for the doorbell check should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  # shellcheck disable=SC2016 # the pane shell, not this test, expands the substitution
+  subst=$(printf '%s' "$launch" | sed -n 's/.*"$(\(.*\))"$/\1/p')
+  [ -n "$subst" ] || fail "the claude launch carries no brief substitution: $launch"
+  doorbell=$(eval "$subst") || fail "the brief substitution could not run: $subst"
+  case "$doorbell" in
+    *'⁣'*) fail "the doorbell carries the U+2063 marker Claude strips: $doorbell" ;;
+  esac
+  printf '%s' "$doorbell" | LC_ALL=C grep -q '[^[:print:]]' \
+    && fail "the doorbell is not one printable-ASCII line: $doorbell"
+  [ "$(printf '%s' "$doorbell" | "$ROOT/bin/fm-operational-input.sh" doorbell-kind)" = launch-brief ] \
+    || fail "the published record does not hold a launch-brief envelope: $doorbell"
+  record=$(printf '%s' "$doorbell" | sed -n "s/.*: Firstmate operational input waiting: read '\([^']*\)'.*/\1/p")
+  [ -n "$record" ] || fail "the doorbell names no record: $doorbell"
+  [ "$(cd "$(dirname "$record")" && pwd -P)" = "$(cd "$HOME_DIR/state/operational-inbox" && pwd -P)" ] \
+    || fail "the launch record is not in this home's operational inbox: $record"
+  grep -q 'Current worker role contract' "$record" \
+    || fail "the launch record lost the worker brief: $(cat "$record")"
+  [ "$(printf '%s' "$doorbell" | FM_STATE_OVERRIDE="$HOME_DIR/state" "$ROOT/bin/fm-operational-input.sh" open "$record")" \
+    = "$(cat "$HOME_DIR/data/$id/launch-brief.md")" ] \
+    || fail "open did not return the launch brief body"
+  pass "a claude launch publishes the brief as an operational-inbox record and passes only the doorbell"
 }
 
 test_non_cursor_launch_clears_inherited_cursor_markers() {
@@ -1424,7 +1462,7 @@ SH
 # permission flag, and any other token refuses before endpoint or metadata.
 claude_expected_launch() {  # <home> <id> <permission-flag>
   local home=$1 id=$2 flag=$3
-  printf '%s' "export COMPACT_ADVISER_DISABLE=1; $(ai_trailer_hooks_prefix "$home" "$id")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $flag --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$home/data/$id/launch-brief.md')\""
+  printf '%s' "export COMPACT_ADVISER_DISABLE=1; $(ai_trailer_hooks_prefix "$home" "$id")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $flag --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$(FM_STATE_OVERRIDE='$home/state' '${ROOT}/bin/fm-operational-input.sh' record launch-brief < '$home/data/$id/launch-brief.md' || '${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$home/data/$id/launch-brief.md')\""
 }
 
 test_claude_permission_mode_bypass_matches_absent_launch() {
@@ -1514,6 +1552,7 @@ test_non_claude_harness_ignores_claude_permission_mode() {
 
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
+test_claude_launch_brief_publishes_record_doorbell
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths

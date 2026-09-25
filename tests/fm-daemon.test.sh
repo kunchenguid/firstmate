@@ -2339,7 +2339,7 @@ test_oversized_digest_is_bounded_and_kept_durable() {
   LOG="$dir/daemon.log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_SEND_MAX_BYTES=131071 FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" \
     || fail "oversized digest was not delivered: $(cat "$dir/daemon.log" 2>/dev/null)"
-  digest=$(grep -F 'Supervisor escalate' "$sent")
+  digest=$(delivered_digest "$sent" | grep -F 'Supervisor escalate')
   [ "$(printf '%s\n' "$digest" | wc -l | tr -d ' ')" -eq 1 ] || fail "expected exactly one typed digest"
   [ "$(printf '%s' "$digest" | LC_ALL=C wc -c | tr -d ' ')" -le 16384 ] \
     || fail "delivered digest is not bounded well below the transport ceilings"
@@ -2368,7 +2368,7 @@ test_digest_budget_counts_omitted_events() {
   afk_enter "$state"
   LOG="$dir/daemon.log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
     FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" || fail "many-event digest was not delivered"
-  digest=$(grep -F 'Supervisor escalate' "$sent")
+  digest=$(delivered_digest "$sent" | grep -F 'Supervisor escalate')
   assert_contains "$digest" 'Supervisor escalate (20 event(s)): event 1: x' "digest header must count every buffered event"
   more=$(printf '%s' "$digest" | sed -n 's/.* | +\([0-9][0-9]*\) more event(s).*/\1/p')
   [ -n "$more" ] || fail "an exhausted budget left no '+K more event(s)' tail: $digest"
@@ -2452,7 +2452,7 @@ test_bounded_digest_full_text_kept_after_typing() {
     escalate_flush "$state"; then
     fail "escalate_flush reported success on a swallowed Enter"
   fi
-  digest=$(grep -F 'Supervisor escalate' "$sent")
+  digest=$(delivered_digest "$sent" | grep -F 'Supervisor escalate')
   full=$(printf '%s' "$digest" | sed -n 's/.*full text of every event: \([^ )]*\).*/\1/p')
   [ -n "$full" ] && [ -f "$full" ] || fail "a typed bounded digest names a full-text file that was removed: $digest"
   cmp -s "$full" "$dir/buffer.orig" || fail "kept full-text file does not hold the buffered event verbatim"
