@@ -601,6 +601,11 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL=""
   FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL=""
   FM_BACKEND_HERDR_JOURNAL_TASK_LABEL=""
+  FM_BACKEND_HERDR_JOURNAL_SPAWN_GEN=""
+  FM_BACKEND_HERDR_JOURNAL_TERMINAL_ID=""
+  FM_BACKEND_HERDR_JOURNAL_SESSION_INSTANCE=""
+  FM_BACKEND_HERDR_JOURNAL_SHELL_PID=""
+  FM_BACKEND_HERDR_JOURNAL_SHELL_START=""
   [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
   lines=$(wc -l < "$journal" 2>/dev/null | tr -d '[:space:]')
   FM_BACKEND_HERDR_JOURNAL_VERSION=$(fm_backend_herdr_projection_journal_field "$journal" version) || return 1
@@ -613,7 +618,7 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   esac
   case "$FM_BACKEND_HERDR_JOURNAL_VERSION:$lines" in
     1:3) return 0 ;;
-    2:12) ;;
+    2:12|3:17) ;;
     *) return 1 ;;
   esac
   FM_BACKEND_HERDR_JOURNAL_HOME=$(fm_backend_herdr_projection_journal_field "$journal" home) || return 1
@@ -625,6 +630,18 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL=$(fm_backend_herdr_projection_journal_field "$journal" parent_label) || return 1
   FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL=$(fm_backend_herdr_projection_journal_field "$journal" workspace_label) || return 1
   FM_BACKEND_HERDR_JOURNAL_TASK_LABEL=$(fm_backend_herdr_projection_journal_field "$journal" task_label) || return 1
+  if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 3 ]; then
+    FM_BACKEND_HERDR_JOURNAL_SPAWN_GEN=$(fm_backend_herdr_projection_journal_field "$journal" spawn_gen) || return 1
+    FM_BACKEND_HERDR_JOURNAL_TERMINAL_ID=$(fm_backend_herdr_projection_journal_field "$journal" terminal_id) || return 1
+    FM_BACKEND_HERDR_JOURNAL_SESSION_INSTANCE=$(fm_backend_herdr_projection_journal_field "$journal" session_instance) || return 1
+    FM_BACKEND_HERDR_JOURNAL_SHELL_PID=$(fm_backend_herdr_projection_journal_field "$journal" shell_pid) || return 1
+    FM_BACKEND_HERDR_JOURNAL_SHELL_START=$(fm_backend_herdr_projection_journal_field "$journal" shell_start) || return 1
+    for exact in "$FM_BACKEND_HERDR_JOURNAL_SPAWN_GEN" "$FM_BACKEND_HERDR_JOURNAL_TERMINAL_ID" "$FM_BACKEND_HERDR_JOURNAL_SESSION_INSTANCE"; do
+      case "$exact" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    done
+    case "$FM_BACKEND_HERDR_JOURNAL_SHELL_PID" in ''|*[!0-9]*) return 1 ;; esac
+    [ -n "$FM_BACKEND_HERDR_JOURNAL_SHELL_START" ] || return 1
+  fi
   case "$FM_BACKEND_HERDR_JOURNAL_HOME" in
     /*) ;;
     *) return 1 ;;
@@ -646,6 +663,49 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   expected_task_label="fm-$id"
   [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$expected_label" ] \
     && [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" = "$expected_task_label" ]
+}
+
+# v3 adds launch-time positive identity to the existing presentation journal.
+# Only the launch owner may bind a freshly created/replaced endpoint; ordinary
+# cleanup must never upgrade a legacy journal from present-day labels or cwd.
+# Socket inode/timestamps bind one server instance, not a restart-stable UUID.
+fm_backend_herdr_session_instance() { # <session>
+  local session=$1 status socket
+  status=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null) || return 1
+  socket=$(printf '%s' "$status" | jq -er --arg session "$session" \
+    'select(.server.running == true and .server.session == $session) | .server.socket | select(type == "string" and startswith("/"))') || return 1
+  python3 - "$socket" <<'PY'
+import hashlib,os,stat,sys
+s=os.lstat(sys.argv[1])
+if not stat.S_ISSOCK(s.st_mode) or s.st_uid != os.getuid(): sys.exit(1)
+print(hashlib.sha256(repr((s.st_dev,s.st_ino,s.st_mtime_ns,s.st_ctime_ns)).encode()).hexdigest())
+PY
+}
+
+fm_backend_herdr_projection_bind_execution() { # <journal> <task> <spawn-gen>
+  local journal=$1 id=$2 generation=$3 session pane info process terminal shell_pid shell_start instance tmp
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
+  case "$FM_BACKEND_HERDR_JOURNAL_VERSION" in 2|3) ;; *) return 1 ;; esac
+  session=$FM_BACKEND_HERDR_JOURNAL_SESSION
+  pane=$FM_BACKEND_HERDR_JOURNAL_PANE_ID
+  info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  terminal=$(printf '%s' "$info" | jq -er --arg pane "$pane" \
+    --arg ws "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" --arg tab "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" \
+    '.result.pane | select(.pane_id==$pane and .workspace_id==$ws and .tab_id==$tab) | .terminal_id | select(type=="string" and length>0)') || return 1
+  process=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+  shell_pid=$(printf '%s' "$process" | jq -er --arg pane "$pane" '.result.process_info | select(.pane_id==$pane) | .shell_pid | select(type=="number" and .>1)') || return 1
+  shell_start=$(LC_ALL=C ps -p "$shell_pid" -o lstart=) || return 1
+  [ -n "$shell_start" ] || return 1
+  instance=$(fm_backend_herdr_session_instance "$session") || return 1
+  tmp=$(mktemp "${journal}.binding.XXXXXX") || return 1
+  {
+    sed -e 's/^version=2$/version=3/' -e '/^spawn_gen=/d' -e '/^terminal_id=/d' \
+      -e '/^session_instance=/d' -e '/^shell_pid=/d' -e '/^shell_start=/d' "$journal"
+    printf 'spawn_gen=%s\nterminal_id=%s\nsession_instance=%s\nshell_pid=%s\nshell_start=%s\n' \
+      "$generation" "$terminal" "$instance" "$shell_pid" "$shell_start"
+  } > "$tmp"
+  if ! fm_backend_herdr_projection_journal_snapshot "$tmp" "$id"; then rm -f "$tmp"; return 1; fi
+  mv -f "$tmp" "$journal"
 }
 
 # fm_backend_herdr_projection_journal_token: validate and read either journal
@@ -707,8 +767,8 @@ fm_backend_herdr_projection_journal_bind() {  # <journal> <task-id> <home> <sess
 fm_backend_herdr_projection_journal_replace_endpoint() {  # <journal> <task-id> <old-tab> <old-pane> <new-tab> <new-pane>
   local journal=$1 id=$2 old_tab=$3 old_pane=$4 new_tab=$5 new_pane=$6
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
-  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
-    && [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" = "$old_tab" ] \
+  case "$FM_BACKEND_HERDR_JOURNAL_VERSION" in 2|3) ;; *) return 1 ;; esac
+  [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" = "$old_tab" ] \
     && [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$old_pane" ] || return 1
   fm_backend_herdr_projection_journal_write_v2 \
     "$journal" "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
@@ -2658,9 +2718,14 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=""
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=""
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
-  if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 2 ]; then
+  if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 2 ] && [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 3 ]; then
     echo "warning: herdr presentation journal for $id has no exact restart binding; spawning flat" >&2
     return 2
+  fi
+  if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 3 ] && \
+      [ "$(fm_backend_herdr_session_instance "$session")" != "$(fm_backend_herdr_projection_journal_field "$journal" session_instance)" ]; then
+    echo 'warning: herdr launch session instance changed; retaining its prior projection' >&2
+    return 1
   fi
   canonical_home=$(fm_backend_herdr_projection_home_identity "$home") || {
     echo "warning: herdr presentation home for $id could not be resolved exactly; spawning flat" >&2

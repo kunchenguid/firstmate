@@ -22,7 +22,12 @@
 # an unbounded wait (for example a live-held wake-queue lock), so the clean
 # deadline path is not racing its own backstop.
 #
-# It considers only a direct ordinary crewmate whose newest meta, status, or
+# Structured task goals additionally use their disposition, assessment revision,
+# bounded next-action due time and fresh artifact fingerprint. They remain
+# supervised without an executor; terminal goals publish only cleanup/evidence
+# obligations, never permission to resume execution. Their pending receipts add
+# lifecycle_revision and cannot be acknowledged before durable reconciliation.
+# Legacy records consider only a direct ordinary crewmate whose newest meta, status, or
 # turn-ended mtime is older than that interval and whose last status is not
 # captain-held. It then uses
 # fm-crew-state.sh as the sole current-state source.
@@ -64,6 +69,8 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-task-lifecycle-lib.sh
+. "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
 
 FM_INACTIVE_RECONCILE_SECS=${FM_INACTIVE_RECONCILE_SECS:-900}
 case "$FM_INACTIVE_RECONCILE_SECS" in
@@ -291,9 +298,30 @@ pr_for_task() { # <meta> [preferred-line]
 
 reconcile_direct_child_locked() { # <id> <meta> <timeout>
   local id=$1 meta=$2 timeout=$3 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
+  # Lifecycle obligations share this scan's cursor, deadline, durable queue
+  # and post-handling acknowledgement. They never execute actions here.
+  local lifecycle_mode lifecycle_due lifecycle_revision lifecycle_expired
+  lifecycle_mode=$(fm_task_lifecycle mode "$id" 2>/dev/null) || lifecycle_mode=unknown
+  if [ "$lifecycle_mode" != legacy ]; then
+    lifecycle_due=$(fm_task_lifecycle due "$id" 2>/dev/null) || lifecycle_due='{"due":true,"record":null}'
+    [ "$(printf '%s' "$lifecycle_due" | jq -r '.due')" = true ] || return 0
+    lifecycle_revision=$(printf '%s' "$lifecycle_due" | jq -r '.record.revision // "unknown"')
+    lifecycle_expired=$(printf '%s' "$lifecycle_due" | jq -r '.expired // false')
+    if [ -f "$meta" ]; then incarnation=$(meta_incarnation "$meta"); else incarnation=unassigned; fi
+    fingerprint=$(sha256_text "$incarnation|$id|lifecycle|$lifecycle_revision|$lifecycle_expired|$(printf '%s' "$lifecycle_due" | jq -r '.observed_evidence_key // "unknown"')")
+    outcome_key="inactive-outcome-lifecycle-$id"
+    ensure_record "$fingerprint" "$id" "$incarnation" lifecycle "$outcome_key" direct upstream '' '' || return 1
+    [ -n "$RECORD_PENDING" ] || return 0
+    record_field_set "$RECORD_PENDING" lifecycle_revision "$lifecycle_revision" || return 1
+    record_phase_set "$RECORD_PENDING" presentation || return 1
+    queue_presentation "$RECORD_PENDING" "$fingerprint" \
+      "task goal requires reconciliation: child=$id disposition=$lifecycle_mode revision=$lifecycle_revision deadline_reached=$lifecycle_expired; read fm-task-state.sh lifecycle; preserve unconfirmed actions" || true
+    return 0
+  fi
+  [ -f "$meta" ] || return 0
   status="$STATE/$id.status"
   turn="$STATE/$id.turn-ended"
   last=$(last_status_line "$status")
@@ -337,9 +365,8 @@ reconcile_direct_child() { # <id> <meta> <timeout>
 # write_scan_marker had already advanced the cursor past the skipped child.
 scan_pass() { # <cursor> <after|through> <deadline>
   local cursor=$1 range=$2 deadline=$3 meta id remaining rc first
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    id=$(basename "$meta" .meta)
+  while IFS= read -r id; do
+    meta="$STATE/$id.meta"
     valid_id "$id" || continue
     case "$range" in
       after) [ -z "$cursor" ] || [[ "$id" > "$cursor" ]] || continue ;;
@@ -364,7 +391,7 @@ scan_pass() { # <cursor> <after|through> <deadline>
       [ "$rc" -eq 3 ] && return 3
       return "$rc"
     }
-  done
+  done <<< "$SCAN_TASK_IDS"
 }
 
 scan() {
@@ -378,6 +405,32 @@ scan() {
   valid_id "$cursor" || cursor=''
   write_scan_marker "$cursor" || return 1
   deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
+  # Existing task owners are the only discovery sources: metadata, cleanup
+  # receipts and the current backlog. Never traverse historical task data.
+  local meta id backlog_ids='' listing remaining
+  SCAN_TASK_IDS=$(
+    for meta in "$STATE"/*.meta "$STATE"/*.cleanup.json; do
+      [ -f "$meta" ] || [ -L "$meta" ] || continue
+      id=${meta##*/}; id=${id%.meta}; id=${id%.cleanup.json}
+      valid_id "$id" && printf '%s\n' "$id"
+    done
+  )
+  remaining=$((deadline - $(date +%s)))
+  if [ "$remaining" -gt 1 ] && [ -d "${FM_DATA_OVERRIDE:-$FM_HOME/data}" ]; then
+    if ! listing=$(fm_run_timed 1 "$SCRIPT_DIR/fm-tasks-axi.sh" list --limit 10000 2>/dev/null); then
+      echo 'RECONCILE: current backlog discovery unavailable within one second; metadata/cleanup scan continues, undispatched goals remain unconfirmed' >&2
+      listing=''
+    fi
+    # tasks-axi owns the TOON row shape; IDs are the unquoted first field.
+    backlog_ids=$(printf '%s\n' "$listing" | awk '
+      /^tasks\[[0-9]+\]\{id,state,/ { rows=1; next }
+      rows && /^  [A-Za-z0-9][A-Za-z0-9._-]*,/ { line=$0; sub(/^  /,"",line); sub(/,.*/,"",line); print line; next }
+      rows { rows=0 }')
+    if [ "$(printf '%s\n' "$backlog_ids" | wc -l)" -ge 10000 ]; then
+      echo 'RECONCILE: current backlog discovery reached 10000-row bound; undiscovered goals require a narrower supported backlog read' >&2
+    fi
+  fi
+  SCAN_TASK_IDS=$(printf '%s\n%s\n' "$SCAN_TASK_IDS" "$backlog_ids" | LC_ALL=C sort -u)
   SCAN_FIRST_VISIT_PENDING=1
   scan_pass "$cursor" after "$deadline" || rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$cursor" ]; then
@@ -391,7 +444,7 @@ scan() {
 }
 
 acknowledge() { # <fingerprint>
-  local fingerprint=$1 pending presented phase
+  local fingerprint=$1 pending presented phase observed current task
   case "$fingerprint" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
   [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 1
   pending=$(record_path "$fingerprint" pending)
@@ -399,6 +452,18 @@ acknowledge() { # <fingerprint>
   [ -f "$pending" ] && [ ! -L "$pending" ] || return 0
   phase=$(record_value "$pending" phase)
   [ "$phase" = presentation ] || return 0
+  observed=$(record_value "$pending" lifecycle_revision)
+  case "$observed" in
+    ''|unknown) ;;
+    *)
+      task=$(record_value "$pending" task_id)
+      current=$(fm_task_lifecycle read "$task" 2>/dev/null | jq -r '.revision // 0') || return 1
+      if [ "$current" -le "$observed" ]; then
+        printf 'REFUSED: reconcile task %s revision %s before acknowledging its goal wake\n' "$task" "$observed" >&2
+        return 1
+      fi
+      ;;
+  esac
   mv -f "$pending" "$presented"
 }
 

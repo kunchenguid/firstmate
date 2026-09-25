@@ -266,11 +266,15 @@ fi
 ID=$1
 FORCE=
 LEGACY_RECORD_GIVEN=0
+ENDPOINT_ONLY=0
+ENDPOINT_EXPECTED_GEN=
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --endpoint-only) ENDPOINT_ONLY=1 ;;
+    --expect-spawn-gen) [ "$#" -ge 2 ] || exit 2; ENDPOINT_EXPECTED_GEN=$2; shift ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -278,6 +282,7 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+[ "$ENDPOINT_ONLY" != 1 ] || { [ -n "$ENDPOINT_EXPECTED_GEN" ] && [ -z "$FORCE" ] && [ "$LEGACY_RECORD_GIVEN" = 0 ]; } || exit 2
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -326,7 +331,7 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
   }
   TEARDOWN_LOCK_WT=$(fm_meta_get "$META" worktree)
   TEARDOWN_LOCK_PROJECT=$(fm_meta_get "$META" project)
-  if fm_treehouse_pool_slot "$TEARDOWN_LOCK_PROJECT" "$TEARDOWN_LOCK_WT"; then
+  if [ "$ENDPOINT_ONLY" = 0 ] && fm_treehouse_pool_slot "$TEARDOWN_LOCK_PROJECT" "$TEARDOWN_LOCK_WT"; then
     TREEHOUSE_SLOT_LOCK_REQUIRED=1
     TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$TEARDOWN_LOCK_PROJECT") || {
       echo "REFUSED: cannot resolve the shared Treehouse project lock for ${TEARDOWN_LOCK_PROJECT:-<missing>}; nothing was changed" >&2
@@ -344,7 +349,12 @@ CONTROL_LOCK_HELD=0
 META_LOCK=
 META_LOCK_HELD=0
 teardown_release_locks() {
-  local status=$?
+  # shellcheck disable=SC2319 # EXIT trap status or explicit manual release status.
+  local status=${1:-$?} i
+  if [ -n "${ENDPOINT_SESSION_LOCK:-}" ]; then
+    fm_lock_release "$ENDPOINT_SESSION_LOCK" || true
+    ENDPOINT_SESSION_LOCK=
+  fi
   fm_short_owner_release || true
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
     teardown_release_herdr_locks || true
@@ -387,6 +397,36 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
   exit 1
 }
 fm_control_require_recoverable_harness "$(fm_meta_get "$META" harness)" || exit 1
+# shellcheck source=bin/fm-task-lifecycle-lib.sh
+. "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
+TEARDOWN_LIFECYCLE_MODE=$(fm_task_lifecycle mode "$ID") || exit 1
+case "$TEARDOWN_LIFECYCLE_MODE" in
+  open|unknown) echo 'REFUSED: task goal still requires reconciliation; no cleanup performed' >&2; exit 1 ;;
+esac
+ENDPOINT_PHASE_DONE=0
+if [ "$ENDPOINT_ONLY" = 1 ] || { [ "$TEARDOWN_LIFECYCLE_MODE" != legacy ] && [ "$(fm_meta_get "$META" backend)" = herdr ]; }; then
+  # This branch is before all worktree, slot, branch and record retirement
+  # operations. It owns only positive endpoint identity and its receipts.
+  # shellcheck source=bin/fm-teardown-endpoint-lib.sh
+  . "$SCRIPT_DIR/fm-teardown-endpoint-lib.sh"
+  [ -n "$ENDPOINT_EXPECTED_GEN" ] || ENDPOINT_EXPECTED_GEN=$(fm_meta_get "$META" spawn_gen)
+  endpoint_rc=0
+  teardown_endpoint_phase "$ENDPOINT_EXPECTED_GEN" || endpoint_rc=$?
+  if [ "$endpoint_rc" = 11 ] && [ "${FM_ENDPOINT_EXIT_ATTEMPTED:-0}" != 1 ]; then
+    teardown_release_locks 0
+    "$SCRIPT_DIR/fm-control.sh" "$ID" exit --expect-spawn-gen "$ENDPOINT_EXPECTED_GEN" || exit 1
+    if [ "$ENDPOINT_ONLY" = 1 ]; then
+      FM_ENDPOINT_EXIT_ATTEMPTED=1 exec "$0" "$ID" --endpoint-only --expect-spawn-gen "$ENDPOINT_EXPECTED_GEN"
+    else
+      FM_ENDPOINT_EXIT_ATTEMPTED=1 exec "$0" "$ID" --expect-spawn-gen "$ENDPOINT_EXPECTED_GEN"
+    fi
+  fi
+  [ "$endpoint_rc" = 0 ] || exit "$endpoint_rc"
+  [ "$ENDPOINT_ONLY" = 0 ] || exit 0
+  fm_lock_release "$ENDPOINT_SESSION_LOCK"
+  ENDPOINT_SESSION_LOCK=
+  ENDPOINT_PHASE_DONE=1
+fi
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
 [ "$TEARDOWN_META_KIND" != secondmate ] || {
@@ -1475,9 +1515,14 @@ require_exclusive_task_worktree_slot() {
 # would strand every task in flight across the change for no evidence at all.
 # Those keep exactly the record-scan protection they had before.
 TEARDOWN_SLOT_REASSIGNED_RC=3
-require_owned_worktree_slot_record() {  # <task-id> <worktree>
-  local record_id=$1 worktree=$2 marker
-  fm_treehouse_slot_owner_state "$worktree" "$record_id"
+require_owned_worktree_slot_record() {  # <task-id> <worktree> <spawn-gen>
+  local record_id=$1 worktree=$2 generation=$3 marker
+  case "$generation" in
+    ''|.*|*[!A-Za-z0-9._-]*)
+      echo "REFUSED: task $record_id has a missing or invalid execution generation; retain its cleanup obligation and the recorded slot unchanged." >&2
+      return 1 ;;
+  esac
+  fm_treehouse_slot_owner_state "$worktree" "$record_id" "$generation"
   case "$FM_TREEHOUSE_SLOT_OWNER" in
     mine|absent) return 0 ;;
     other)
@@ -1486,8 +1531,8 @@ require_owned_worktree_slot_record() {  # <task-id> <worktree>
       ;;
   esac
   marker=$(fm_treehouse_slot_owner_marker "$worktree" 2>/dev/null) || marker="beside $worktree"
-  echo "REFUSED: task $record_id's recorded worktree $worktree carries a slot-owner claim that cannot be read, so the slot cannot be proved to still be this task's; nothing was changed - not even with --force." >&2
-  echo "Inspect or repair the claim file at $marker (task= and home= lines), then re-run teardown." >&2
+  echo "REFUSED: task $record_id's recorded worktree $worktree carries a slot-owner claim that cannot be bound to this execution, so the slot cannot be proved to still be this task's; nothing was changed - not even with --force." >&2
+  echo "Inspect or repair the claim file at $marker (task=, home=, and spawn_gen= lines), then re-run teardown." >&2
   return 1
 }
 
@@ -1500,7 +1545,7 @@ TEARDOWN_SLOT_REASSIGNED_HOME=
 require_owned_task_worktree_slot() {
   local slot rc=0
   slot=$(teardown_live_slot_path) || return 0
-  require_owned_worktree_slot_record "$ID" "$slot" || rc=$?
+  require_owned_worktree_slot_record "$ID" "$slot" "$(fm_meta_get "$META" spawn_gen)" || rc=$?
   case "$rc" in
     0) return 0 ;;
     "$TEARDOWN_SLOT_REASSIGNED_RC")
@@ -1831,7 +1876,14 @@ elif [ -d "$WT" ]; then
   # it here - and only after a return that succeeded - keeps a returned slot
   # unclaimed until its next holder claims it, and leaves the claim in place
   # whenever the return did not actually happen.
-  fm_treehouse_slot_owner_release "$WT" "$ID"
+  fm_treehouse_slot_owner_release "$WT" "$ID" "$(fm_meta_get "$META" spawn_gen)"
+fi
+if [ "$ENDPOINT_PHASE_DONE" = 1 ]; then
+  if teardown_owns_worktree; then
+    teardown_endpoint_receipt directory_return confirmed existing-directory-guards-passed || exit 1
+  else
+    teardown_endpoint_receipt directory_return retained reassigned-slot || exit 1
+  fi
 fi
 
 fm_short_owner_effect || exit 1
@@ -1856,7 +1908,9 @@ if [ "$BACKEND" = herdr ] \
   fi
 fi
 
-if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+if [ "$ENDPOINT_PHASE_DONE" = 1 ]; then
+  : # The exact pane absence was already verified and durably receipted.
+elif [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   # The presentation lock was acquired before the worktree return above; a
   # contended lock already refused this teardown while everything was intact.
   if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
@@ -1882,7 +1936,9 @@ elif [ "$BACKEND" = herdr ]; then
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
-    rm -f "$HERDR_PRESENTATION_JOURNAL"
+    # Structured cleanup needs this exact binding until bookkeeping commits;
+    # an interrupted retry must still prove the already-absent endpoint.
+    [ "$ENDPOINT_PHASE_DONE" = 1 ] || rm -f "$HERDR_PRESENTATION_JOURNAL"
   else
     echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
   fi
@@ -1957,6 +2013,10 @@ fm_task_lifecycle_owner_receipt "$ID" "$TEARDOWN_META_SPAWN_GEN" cleanup \
   echo 'actionable: cleanup completed but lifecycle receipt recording failed; read back before retrying effects' >&2
   exit 1
 }
+if [ "$ENDPOINT_PHASE_DONE" = 1 ]; then
+  teardown_endpoint_receipt record_close confirmed metadata-removed-report-retained || exit 1
+  rm -f "$HERDR_PRESENTATION_JOURNAL"
+fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "${FM_SUPERVISION_ACTOR:-}" != short ] && [ "$KIND" != scout ] && [ "$MODE" != local-only ]; then

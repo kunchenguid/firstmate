@@ -302,3 +302,32 @@ test_key_path_never_touches_inbox
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
 test_empty_message_refused
+
+test_goal_action_replay() {
+  local dir payload
+  dir=$(setup_case goal-action)
+  mkdir -p "$dir/home/data/t1"
+  printf 'Deliver all requested artifacts' > "$dir/home/data/t1/brief.md"
+  printf 'spawn_gen=s1\n' >> "$dir/home/state/t1.meta"
+  payload='Please finish the remaining artifact'
+  printf '%s' "$payload" > "$dir/home/data/t1/next.txt"
+  FM_HOME="$dir/home" python3 "$ROOT/bin/fm-task-lifecycle.py" init t1 >/dev/null || fail 'init goal'
+  python3 - "$dir/home" <<'PY'
+import json,sys,hashlib,pathlib
+h=pathlib.Path(sys.argv[1]);d=json.loads((h/'data/t1/lifecycle.json').read_text())
+d['next_action']={'id':'t1.g1.a1','kind':'steer','phase':'prepared','expected_execution_generation':'s1',
+'payload_ref':'data/t1/next.txt','payload_sha256':hashlib.sha256((h/'data/t1/next.txt').read_bytes()).hexdigest(),
+'receipt_ref':None,'attempts':0,'attempt_limit':2,'recheck_at':'2000-01-01T00:00:00Z','deadline':'2099-01-01T00:00:00Z'}
+d['next_action_seq']=2
+p=h/'candidate.json';p.write_text(json.dumps(d));p.chmod(0o600)
+PY
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" reconcile t1 --expected-revision 1 --record "$dir/home/candidate.json" >/dev/null || fail 'prepare action'
+  run_send "$dir" "$dir/error" -- t1 --action-id t1.g1.a1 --expected-generation s1 "$payload" || fail "send goal: $(cat "$dir/error")"
+  mv "$dir/home/state/t1.inbox/001.msg" "$dir/home/state/t1.inbox/handled/"
+  run_send "$dir" "$dir/error" -- t1 --action-id t1.g1.a1 --expected-generation s1 "$payload" || fail 'replay confirmed goal'
+  [ ! -e "$dir/home/state/t1.inbox/002.msg" ] || fail 'duplicate action enqueued'
+  if run_send "$dir" "$dir/error" -- t1 --action-id t1.g1.a1 --expected-generation s1 changed; then fail 'action collision accepted'; fi
+  jq -e '.next_action.phase=="confirmed" and .next_action.attempts==1' "$dir/home/data/t1/lifecycle.json" >/dev/null || fail 'missing action receipt'
+  pass 'goal action replay finds handled receipt; changed body refuses; one actual enqueue'
+}
+test_goal_action_replay

@@ -24,7 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mode=${1-}
 input=${2-}
 case "$mode:$#" in
-  capabilities:1) mcp_tool=list_commands ;;
+  capabilities:1|capabilities-followup:1) mcp_tool=list_commands ;;
   ida_deep_research_create:2) mcp_tool=run_command ;;
   *) printf 'usage: fm-bytedcli-mcp-call.sh capabilities | ida_deep_research_create <private-arguments.json>\n' >&2; exit 2 ;;
 esac
@@ -46,12 +46,13 @@ if [ "$mode" = ida_deep_research_create ] && ! {
     && [ "$(file_owner "$input")" = "$(id -u)" ] \
     && jq -e '
       type == "object"
-      and ((keys - ["agentId","content","model","name","timeoutMs"]) | length == 0)
+      and ((keys - ["agentId","content","model","name","timeoutMs","sessionId"]) | length == 0)
       and (.content | type == "string" and length > 0 and length <= 262144)
       and (.name | type == "string" and test("^firstmate:[A-Za-z0-9._-]+:[0-9a-f]{16}$") and length <= 220)
       and (.timeoutMs | type == "string" and test("^[1-9][0-9]*$"))
       and ((has("agentId") | not) or (.agentId | type == "string" and test("^[0-9]+$")))
       and ((has("model") | not) or (.model | type == "string" and test("^[A-Za-z0-9._:/+-]+$") and length <= 160))
+      and ((has("sessionId") | not) or (.sessionId | type == "string" and test("^[1-9][0-9]*$")))
     ' "$input" >/dev/null 2>&1
 }; then
   printf 'error: MCP arguments must match the safe iDA create schema in a mode-0600 JSON object\n' >&2
@@ -64,7 +65,7 @@ trap 'rm -rf -- "$root"' EXIT
 request="$root/request.ndjson"
 response="$root/response.ndjson"
 error="$root/error"
-if [ "$mode" = capabilities ]; then
+if [ "$mode" = capabilities ] || [ "$mode" = capabilities-followup ]; then
   jq -cn '{domain:"ida",verbose:true}' >"$root/arguments.json" \
     || { printf 'error: cannot build MCP capability request\n' >&2; exit 1; }
 else
@@ -74,6 +75,7 @@ else
       "--name",.name,"--timeout-ms",.timeoutMs]
      + (if has("agentId") then ["--agent-id",.agentId] else [] end)
      + (if has("model") then ["--model",.model] else [] end))
+    + (if has("sessionId") then ["--session-id",.sessionId,"--no-wait"] else [] end)
     | map(@sh) | join(" ")
   ' "$input" >"$root/command" || { printf 'error: cannot build private iDA command\n' >&2; exit 1; }
   jq -cn --rawfile command "$root/command" '{command:($command | rtrimstr("\n"))}' >"$root/arguments.json" \
@@ -111,7 +113,7 @@ if printf '%s\n' "$line" | jq -e '.error | type == "object"' >/dev/null 2>&1; th
   exit 1
 fi
 text=$(printf '%s\n' "$line" | jq -r '[.result.content[]? | select(.type == "text") | .text] | join("\n")')
-if [ "$mode" = capabilities ]; then
+if [ "$mode" = capabilities ] || [ "$mode" = capabilities-followup ]; then
   capability_ready=true
   if printf '%s\n' "$line" | jq -e '.result.isError == true' >/dev/null 2>&1; then capability_ready=false; fi
   for required in \
@@ -121,6 +123,11 @@ if [ "$mode" = capabilities ]; then
       'bytedcli ida chat completion close'; do
     case "$text" in *"$required"*) ;; *) capability_ready=false ;; esac
   done
+  if [ "$mode" = capabilities-followup ]; then
+    for required in '--session-id' '--no-wait' 'bytedcli ida deep-research list' 'bytedcli ida deep-research get'; do
+      case "$text" in *"$required"*) ;; *) capability_ready=false ;; esac
+    done
+  fi
   if [ "$capability_ready" = true ]; then
     jq -cn '{status:"success",data:{command:"bytedcli ida deep-research create",required_options:["--content","--name","--model","--timeout-ms"]},error:null}'
   else

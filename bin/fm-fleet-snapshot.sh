@@ -143,6 +143,8 @@ esac
 # shellcheck source=bin/fm-task-disposition-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-task-disposition-lib.sh"
+# shellcheck source=bin/fm-task-lifecycle-lib.sh
+. "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed: the shared hard bound
@@ -603,6 +605,7 @@ prefetch_task_current_states() {
 }
 
 task_json_lines() {
+  local lifecycle_mode cleanup_json
   local meta original_meta id kind executor provider task_type cloud_state remote_task_state harness mode yolo project worktree spawn_gen backend target status_log report_path
   local current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json cloud_state_json remote_state_json
@@ -680,7 +683,13 @@ task_json_lines() {
     # A parked/blocked state, or a non-authoritative status-log/none read on a
     # still-live task, keeps the fold's open decision surfacing.
     open_decisions_tsv=$(status_open_decisions "$status_log")
-    if { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ] \
+    lifecycle_mode=$(fm_task_lifecycle mode "$id" 2>/dev/null) || lifecycle_mode=unknown
+    cleanup_json=null
+    if [ -e "$STATE/$id.cleanup.json" ] || [ -L "$STATE/$id.cleanup.json" ]; then
+      cleanup_json=$(fm_task_lifecycle cleanup-read "$id" 2>/dev/null) || cleanup_json='{"state":"unknown","reason_code":"invalid-cleanup-receipt"}'
+    fi
+    if [ "$lifecycle_mode" = legacy ] && \
+       { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ] \
              || [ "$current_source" = cloud-state ] || [ "$current_source" = cloud-readback ] \
              || [ "$current_source" = remote-state ] || [ "$current_source" = remote-readback ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
@@ -733,6 +742,8 @@ task_json_lines() {
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
       --argjson current_state "$current_json" \
+      --arg lifecycle_disposition "$lifecycle_mode" \
+      --argjson cleanup "$cleanup_json" \
       --argjson meta_path "$meta_json" \
       --argjson status_log "$status_json" \
       --argjson report "$report_json" \
@@ -765,6 +776,8 @@ task_json_lines() {
           report:$report
         },
         current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
+        lifecycle_disposition:$lifecycle_disposition,
+        cleanup:$cleanup,
         endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
           status:(if ($executor == "cloud-worker" or $executor == "remote-agent") then "not_applicable"
                   elif $endpoint_exists == false then "absent"

@@ -693,6 +693,7 @@ test_stopped_terminal_unavailable_retires_generations_and_report() {
     "$ADAPTER" prepare-retire "$id" >/dev/null \
     || fail "second terminal-unavailable retirement preparation retry was not idempotent"
 
+  fm_test_archive_goal "$home" "$id"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   before=$(file_sha256 "$report")
   FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
@@ -748,6 +749,7 @@ test_existing_result_unavailable_guarded_archival() {
   chmod 0600 "$report"
   capture_unpublished_bytes "$home" aime "$source" '{existing-malformed-one'
   capture_unpublished_bytes "$home" aime "$source" '{existing-malformed-two'
+  fm_test_archive_goal "$home" "$id"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
 
   FM_AIME_FAKE_REPLAY=terminal FM_AIME_FAKE_OUTPUT_MODE=unavailable \
@@ -835,6 +837,7 @@ test_terminal_unavailable_retry_and_refusal_boundaries() {
     "$ADAPTER" prepare-retire "$id" >/dev/null \
     || fail "completed retirement preparation was not idempotent"
 
+  fm_test_archive_goal "$home" "$id"
   rc=0
   FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
     "$ROOT/bin/fm-task-retire.sh" "$id" >"$home/decision.out" 2>"$home/decision.err" || rc=$?
@@ -843,6 +846,7 @@ test_terminal_unavailable_retry_and_refusal_boundaries() {
     "incomplete decision review did not remain the archival blocker"
   assert_present "$(state_file "$home" "$id")" \
     "decision-gate refusal removed terminal-unavailable state"
+  fm_test_archive_goal "$home" "$id"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
     "$ROOT/bin/fm-task-retire.sh" "$id" >/dev/null \
@@ -973,8 +977,9 @@ test_restart_adoption_and_cancellation() {
     "$ROOT/bin/fm-task-retire.sh" restart-task \
     >"$home/running-retire.out" 2>"$home/running-retire.err" || rc=$?
   [ "$rc" -ne 0 ] || fail "submitted AIME task was retired"
-  assert_grep 'phase=submitted' "$home/running-retire.err" \
-    "submitted retirement refusal did not retain the live phase"
+  assert_grep 'goal is unfinished' "$home/running-retire.err" \
+    "unfinished remote goal did not block retirement"
+  [ "$(phase_of "$home" restart-task)" = submitted ] || fail 'retirement changed live provider phase'
   run_aime "$home" "$fakebin" interrupt-wait restart-task >"$home/interrupt.out" \
     || fail "local waiter interrupt failed"
   assert_contains "$(cat "$home/interrupt.out")" "may still be running" \
@@ -1109,8 +1114,9 @@ test_acceptance_unknown_and_explicit_failures() {
       "$ROOT/bin/fm-task-retire.sh" "$id" \
       >"$home/$id-retire.out" 2>"$home/$id-retire.err" || retire_rc=$?
     [ "$retire_rc" -ne 0 ] || fail "$id acceptance uncertainty was retired"
-    assert_grep "phase=$phase" "$home/$id-retire.err" \
-      "$id retirement refusal did not preserve acceptance uncertainty"
+    assert_grep 'goal is unfinished' "$home/$id-retire.err" \
+      "$id retirement refusal did not preserve unfinished goal"
+    [ "$(phase_of "$home" "$id")" = "$phase" ] || fail 'retirement changed ambiguous provider phase'
     rc=0
     FM_AIME_FAKE_FAILURE='' run_aime "$home" "$fakebin" adopt "$id" \
       >"$home/$id-adopt.out" 2>"$home/$id-adopt.err" || rc=$?
@@ -1248,6 +1254,7 @@ test_transient_readback_rearms_and_state_is_unknown() {
   printf '# Synthetic provider-uncertainty report\n\nNo provider result is available.\n' \
     >"$home/data/uncertain-terminal/report.md"
   chmod 0600 "$home/data/uncertain-terminal/report.md"
+  fm_test_archive_goal "$home" uncertain-terminal
   rc=0
   FM_AIME_FAKE_REPLAY=unavailable \
     retire_aime "$home" "$fakebin" uncertain-terminal \
@@ -1317,6 +1324,7 @@ test_cloud_retirement_preserves_report() {
   report="$home/data/$id/report.md"
   [ -s "$report" ] || fail "retirement fixture has no durable report"
 
+  fm_test_archive_goal "$home" "$id"
   saved="$home/data/$id/report.saved"
   mv "$report" "$saved"
   rc=0
@@ -1346,6 +1354,7 @@ test_cloud_retirement_preserves_report() {
   [ "$rc" -ne 0 ] || fail "AIME retirement bypassed incomplete decision review"
   assert_grep 'decision completion gate has not passed' "$home/decision-report.err" \
     "AIME retirement did not preserve the decision gate after report checks"
+  fm_test_archive_goal "$home" "$id"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
 
   FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
@@ -1369,6 +1378,7 @@ test_cloud_retirement_preserves_report() {
     || fail "ordinary provider failure was changed by terminal-unavailable handling"
   assert_grep "Error class: \`provider-terminal-failure\`" "$home/data/$id/report.md" \
     "ordinary provider failure report changed classification"
+  fm_test_archive_goal "$home" "$id"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
     "$ROOT/bin/fm-task-retire.sh" "$id" >/dev/null \
@@ -1387,6 +1397,7 @@ test_cloud_retirement_preserves_report() {
   wait_phase "$home" "$id" terminal-success 400
   assert_grep '## Provider Result' "$home/data/$id/report.md" \
     "readable stopped-provider output was not preserved as success"
+  fm_test_archive_goal "$home" "$id"
   printf 'decisions_reviewed=1\ndecision_keys=\n' >>"$home/state/$id.meta"
   FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
     "$ROOT/bin/fm-task-retire.sh" "$id" >/dev/null \
@@ -1401,6 +1412,7 @@ test_local_executor_wrappers_delegate_unchanged() {
   mkdir -p "$root/bin" "$root/home/state"
   cp "$ROOT/bin/fm-task-dispatch.sh" "$root/bin/"
   cp "$ROOT/bin/fm-task-state.sh" "$root/bin/"
+  cp "$ROOT/bin/fm-task-lifecycle-lib.sh" "$root/bin/"
   cp "$ROOT/bin/fm-task-retire.sh" "$root/bin/"
   cat >"$root/bin/fm-spawn.sh" <<'SH'
 #!/usr/bin/env bash

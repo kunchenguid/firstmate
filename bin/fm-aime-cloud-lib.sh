@@ -29,6 +29,9 @@
 # State schema fm-aime-task-state.v1 is the proven AIME execution record. New
 # native AIME tasks use executor=remote-agent; legacy records remain
 # executor=cloud-worker and are never migrated.
+# New executions add an immutable execution_generation token before create;
+# it binds goal assessments across restart and metadata adoption. Legacy state
+# without that token remains readable but supplies no new cleanup authority.
 # It never contains local worktree, window, harness, backend, endpoint, prompt
 # bytes, credential, or token fields.
 # Every transition is serialized by a per-task lock and published atomically at
@@ -274,6 +277,7 @@ fm_aime_state_validate_file() {
     and (.task_id | type == "string" and length > 0)
     and (.executor == "cloud-worker" or .executor == "remote-agent")
     and .provider == "aime"
+    and ((has("execution_generation") | not) or (.execution_generation | type=="string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")))
     and (.revision | type == "number" and . >= 1 and floor == .)
     and (.phase == "create-not-started"
       or .phase == "create-unknown"
@@ -374,11 +378,13 @@ fm_aime_state_initialize() {
     --arg instruction_sha256 "$instruction_sha" \
     --arg bytedcli_version "$version" \
     --arg executor "$executor" \
+    --arg generation "aime-$(date +%s).${BASHPID:-$$}.$RANDOM" \
     --arg now "$now" \
     '{
       schema:$schema,
       task_id:$task_id,
       executor:$executor,
+      execution_generation:$generation,
       provider:"aime",
       site:$site,
       space_id:$space_id,

@@ -18,6 +18,9 @@
 #   terminal-cancelled. Provider identity and checkpoints live in the bounded
 #   provider_state object. Prompt bytes, credentials, tokens, and raw streams
 #   are forbidden from both metadata and state.
+# generation starts at 1 (also the legacy default); a followup atomically
+# freezes the old state under generations/<generation>.json, then advances it.
+# The provider-specific parent/action/turn bindings belong to fm-ida-remote-lib.
 #
 # Existing executor=cloud-worker/provider=aime metadata and
 # fm-aime-task-state.v1 records are a permanent read-compatibility path. They
@@ -174,6 +177,7 @@ fm_remote_state_validate_file() {
       or .phase == "terminal-failure"
       or .phase == "terminal-cancelled")
     and (.revision | type == "number" and . >= 1 and floor == .)
+    and ((has("generation") | not) or (.generation | type=="number" and .>=1 and .<=9007199254740991 and floor==.))
     and (.instruction_file | type == "string" and length > 0)
     and (.instruction_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
     and ((has("bytedcli_version") | not)
@@ -257,10 +261,44 @@ fm_remote_state_initialize() {
        instruction_file:$instruction_file,instruction_sha256:$instruction_sha256,
        phase:"submission-not-started",outcome:null,error_class:null,provider_checkpoint:"dispatch-durable",
        waiter:"not-armed",result_availability:null,result_path:null,report_path:null,provider_state:$provider_state,
-       revision:1,created_at:$now,updated_at:$now}' >"$staged" || { rm -f -- "$staged"; return 1; }
+       generation:1,revision:1,created_at:$now,updated_at:$now}' >"$staged" || { rm -f -- "$staged"; return 1; }
   fm_remote_state_publish "$id" "$staged"
   local rc=$?
   rm -f -- "$staged"
+  return "$rc"
+}
+
+# Freeze the old terminal execution before publishing a new, independently
+# identified provider turn. Caller holds the task meta and provider locks.
+# The provider adapter supplies the new provider identity; this owner never
+# creates a remote request and never re-labels the previous terminal record.
+fm_remote_state_begin_followup() { # <task> <expected-generation> <instructions> <sha> <provider-state-json>
+  local id=$1 generation=$2 instructions=$3 sha=$4 provider=$5 dir snapshot staged
+  fm_remote_state_load "$id" || return 1
+  [ "$(jq -r '.generation // 1' "$REMOTE_STATE_FILE")" = "$generation" ] || return 1
+  case "$REMOTE_STATE_PHASE" in terminal-success|terminal-failure|terminal-cancelled) ;; *) return 1 ;; esac
+  dir=$(fm_remote_task_dir "$id") || return 1
+  mkdir -p "$dir/generations" || return 1
+  [ ! -L "$dir/generations" ] || return 1
+  snapshot="$dir/generations/$generation.json"
+  staged=$(umask 077; mktemp "$dir/generations/.terminal.XXXXXX") || return 1
+  jq --arg report "$(printf '%s' "$provider" | jq -r '.parent_report_ref // ""')" \
+    'if $report!="" then .report_path=$report else . end' "$REMOTE_STATE_FILE" > "$staged" || { rm -f "$staged"; return 1; }
+  if [ -e "$snapshot" ] || [ -L "$snapshot" ]; then
+    if ! fm_remote_private_file_safe "$snapshot" || ! cmp -s "$snapshot" "$staged"; then rm -f "$staged"; return 1; fi
+    rm -f "$staged"
+  else
+    mv "$staged" "$snapshot" || return 1
+  fi
+  staged=$(umask 077; mktemp "$dir/.followup.XXXXXX") || return 1
+  jq --arg instruction "$instructions" --arg sha "$sha" --argjson provider "$provider" '
+    .generation=((.generation // 1)+1) | .revision+=1 | .instruction_file=$instruction | .instruction_sha256=$sha
+    | .phase="submission-unknown" | .outcome="followup-submission-unconfirmed" | .error_class=null
+    | .provider_checkpoint="followup-attempted" | .waiter="not-armed"
+    | .result_availability=null | .result_path=null | .report_path=null | .provider_state=$provider
+  ' "$snapshot" > "$staged" && fm_remote_state_publish "$id" "$staged"
+  local rc=$?
+  rm -f "$staged"
   return "$rc"
 }
 

@@ -306,6 +306,7 @@ Fleet supervision is an always-loaded operational contract; `docs/architecture.m
 
 Whenever work is under way, keep exactly one live supervision cycle using the emitted protocol for this primary harness.
 At each actionable review, re-read the task's durable goal contract, compare its acceptance evidence with the current artifacts, identify the remaining gap, and take or route the next authorized action before yielding.
+At intake, finalize the brief and initialize its durable assessment through `bin/fm-task-state.sh init`; [task lifecycle](docs/task-lifecycle.md) routes reconciliation, bounded continuation, archive migration and residual cleanup through their existing owners.
 An empty worker inbox, process exit, provider success, status `done`, implementation commit, report, or intermediate milestone never closes that comparison by itself.
 Do not broaden authority to close a goal gap: stop only at a genuine permission boundary, a decision the captain must make, an explicit stop, or an evidenced external blocker whose bounded retries and materially different authorized recovery path are exhausted.
 Relay may require that same live cycle with no fleet work.

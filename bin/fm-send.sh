@@ -235,6 +235,9 @@ fi
 # must precede --key or the message text; everything after the last flag is the
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
+FIRE_AND_FORGET_ID=
+ACTION_ID=
+EXPECTED_GENERATION=
 fm_send_add_resolve_key() { # <key>
   local k=$1
   case "$k" in
@@ -253,6 +256,14 @@ fm_send_add_resolve_key() { # <key>
 }
 while :; do
   case "${1:-}" in
+  --action-id|--expected-generation)
+    [ $# -ge 2 ] || exit 2
+    case "$1" in
+      --action-id) [ -z "$ACTION_ID" ] || exit 2; ACTION_ID=$2 ;;
+      --expected-generation) [ -z "$EXPECTED_GENERATION" ] || exit 2; EXPECTED_GENERATION=$2 ;;
+    esac
+    shift 2
+    ;;
   --resolve-key)
     [ $# -ge 2 ] || {
       echo "error: --resolve-key requires a key" >&2
@@ -273,7 +284,24 @@ while :; do
   esac
 done
 
-fm_backend_validate "$TARGET_BACKEND" || exit 1
+if [ -n "$ACTION_ID$EXPECTED_GENERATION" ]; then
+  [ -n "$ACTION_ID" ] && [ -n "$EXPECTED_GENERATION" ] && [ -n "$TARGET_META" ] || exit 2
+  [ "$TARGET_BACKEND" != remote ] && [ -z "$FIRE_AND_FORGET_ID$RESOLVE_KEYS" ] || exit 2
+  [ "$(fm_meta_get "$TARGET_META" kind)" != secondmate ] || exit 2
+  [ "${1-}" != --key ] || exit 2
+  FM_SEND_EXPECTED_SPAWN_GEN=$EXPECTED_GENERATION
+fi
+if [ -n "$TARGET_META" ] && [ -z "$RESOLVE_KEYS" ]; then
+  # shellcheck source=bin/fm-task-lifecycle-lib.sh
+  . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
+  fm_task_lifecycle_execution_allowed "$(fm_send_id_from_meta "$TARGET_META")" || exit 1
+fi
+
+if [ "$TARGET_BACKEND" != remote ]; then
+  fm_backend_validate "$TARGET_BACKEND" || exit 1
+fi
+
+
 
 # Validate the answerer-closes request before any durable mutation or send: the
 # target must have a task ledger in THIS home, the send must carry an answer

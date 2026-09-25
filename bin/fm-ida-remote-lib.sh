@@ -130,6 +130,16 @@ fm_ida_provider_state_validate() {
     and (.provider_state.model == null or (.provider_state.model | type == "string" and length <= 160))
     and (.provider_state.provider_status == null or (.provider_state.provider_status | type == "string" and length <= 120))
     and (.provider_state.local_readback_blocked == null or (.provider_state.local_readback_blocked | type == "boolean"))
+    and (if .provider_state.followup_action_id == null then true else
+      (.provider_state.followup_action_id | type=="string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$"))
+      and (.provider_state.parent_generation | type=="number" and .>=1 and .<9007199254740991 and floor==.)
+      and .generation==(.provider_state.parent_generation+1)
+      and (.provider_state.parent_task_id | type=="string" and test("^[0-9]+$"))
+      and (.provider_state.session_id | type=="string" and test("^[0-9]+$"))
+      and .provider_state.submit_attempted==true
+      and (.provider_state.baseline_task_ids | type=="array" and length<=10000 and all(.[]; type=="string" and test("^[0-9]+$")))
+      and (.provider_state.parent_report_ref | type=="string")
+      end)
   ' "$file" >/dev/null 2>&1
 }
 

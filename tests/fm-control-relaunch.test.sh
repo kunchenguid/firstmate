@@ -289,6 +289,31 @@ SH
 
 # --- 1. same-harness relaunch -----------------------------------------------
 
+test_durable_action_relaunch_replay() {
+  local dir before out rc
+  dir=$(new_case goal-replay rlgoal)
+  add_ship_task "$dir" rlgoal pi
+  printf 'spawn_gen=s-original\n' >> "$dir/home/state/rlgoal.meta"
+  printf 'Continue the missing acceptance work' > "$dir/home/data/rlgoal/note.txt"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" init rlgoal >/dev/null || fail 'goal init'
+  python3 - "$dir/home" <<'PYGOAL'
+import json,sys,hashlib,os
+h=sys.argv[1]; p=h+'/data/rlgoal/lifecycle.json'; d=json.load(open(p)); note=h+'/data/rlgoal/note.txt'
+d['next_action']={'id':'rlgoal.g1.a1','kind':'relaunch','phase':'prepared','expected_execution_generation':'s-original','payload_ref':note,'payload_sha256':hashlib.sha256(open(note,'rb').read()).hexdigest(),'receipt_ref':None,'attempts':0,'attempt_limit':2,'recheck_at':'2000-01-01T00:00:00Z','deadline':'2099-01-01T00:00:00Z'}
+d['next_action_seq']=2
+p=h+'/candidate.json';json.dump(d,open(p,'w'));os.chmod(p,0o600)
+PYGOAL
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" reconcile rlgoal --expected-revision 1 --record "$dir/home/candidate.json" >/dev/null || fail 'prepare relaunch'
+  out=$(run_control "$dir" rlgoal relaunch --note 'Continue the missing acceptance work' --action-id rlgoal.g1.a1 --expected-generation s-original); rc=$?
+  expect_code 0 "$rc" "durable relaunch failed: $out"
+  before=$(cat "$dir/fake/literal")
+  out=$(run_control "$dir" rlgoal relaunch --note 'Continue the missing acceptance work' --action-id rlgoal.g1.a1 --expected-generation s-original); rc=$?
+  expect_code 0 "$rc" "durable relaunch replay failed: $out"
+  [ "$before" = "$(cat "$dir/fake/literal")" ] || fail 'replay issued another agent effect'
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle rlgoal | jq -e '.next_action.phase=="confirmed" and .next_action.attempts==1 and .next_action.expected_execution_generation=="s-original" and .next_action.result_execution_generation==.execution_generation and .execution_generation!="s-original"' >/dev/null || fail 'replacement lost its expected/result generation binding'
+  pass 'durable relaunch preserves original generation and replays without duplicate exit or launch'
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   local dir out rc gen_before gen_after
   dir=$(new_case same rl1)
@@ -1252,6 +1277,8 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
     || fail "a relaunch left its item at $(backlog_state "$dir" rl41)"
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
+
+test_durable_action_relaunch_replay
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text

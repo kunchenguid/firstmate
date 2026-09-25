@@ -155,6 +155,8 @@ mkdir -p "$STATE"
 # (inbox_steer_check below).
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-task-lifecycle-lib.sh
+. "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
 # The away-posture record (state/.afk-contract) is the posture in both the
 # attended and the afk session; bin/fm-afk-contract.sh owns its schema and this
 # watcher reads only its presence (afk_record_present below).
@@ -1936,6 +1938,14 @@ EOF
   # crossed turn bound already handed to the away-mode daemon).
   while IFS= read -r w; do
     task=$(window_to_task "$w" "$STATE")
+    # Status/result publication above remains active for stopped tasks. Only
+    # execution liveness and re-ringing are excluded by the shared reader.
+    if [ -n "$task" ]; then
+      lifecycle_mode=$(fm_task_lifecycle mode "$task" 2>/dev/null) || lifecycle_mode=unknown
+      case "$lifecycle_mode" in open|legacy) ;; *) continue ;; esac
+    fi
+    # Steering-inbox loss detection runs before the secondmate stale
+    # exemption below, because a mate's steers land in an inbox too.
     [ -z "$task" ] || inbox_steer_check "$w" "$task"
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")

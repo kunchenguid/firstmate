@@ -48,6 +48,7 @@ Do not block the conversational turn with provider polling or output readback.
 Keep ordinary supervision live because a registered process-event source is active work even though no local endpoint exists.
 
 Provider completion is an executor fact, not business-level acceptance of the research goal.
+Persist the assessment through the [task lifecycle owner](../../../docs/task-lifecycle.md) before retiring or preparing an automatic continuation.
 On every provider-terminal observation, compare the bound report and artifacts with the intended outcome and acceptance evidence in the durable brief.
 If an authorized gap remains, keep the task unfinished and continue only through the recorded provider's existing supported lifecycle; never rewrite a terminal provider identity as running, create a duplicate session, bypass a one-create or adoption guard, or accept a provider compliance statement in place of observable evidence.
 If the provider has no supported continuation from that terminal state, record the exact remaining gap, the attempts and evidence, and the specific new authority or external change required instead of pretending the goal completed.

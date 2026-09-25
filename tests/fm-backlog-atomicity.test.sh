@@ -1058,8 +1058,17 @@ test_immediate_child_absolute_data_dispatches_and_completes() {
     || fail "immediate-child-data spawn failed: $out"
   [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = in_flight ] \
     || fail "immediate-child absolute dispatch mutated a different backlog"
+  # This case tests path addressing after a real dispatch. Keep its execution
+  # generation and explicitly accept the fixture before testing completion.
+  local generation assessment
+  generation=$(sed -n 's/^spawn_gen=//p' "$(home_of "$case_dir")/state/$id.meta")
   rm -f "$(home_of "$case_dir")/state/$id.meta"
-  write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=spawn-immediate-child"
+  write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=$generation"
+  assessment="$case_dir/accepted.json"
+  jq '.disposition="accepted" | .assessment.remaining_gap=""' "$data/$id/lifecycle.json" > "$assessment"
+  chmod 600 "$assessment"
+  FM_HOME="$(home_of "$case_dir")" FM_DATA_OVERRIDE="$data" "$ROOT/bin/fm-task-state.sh" \
+    reconcile "$id" --expected-revision 1 --record "$assessment" >/dev/null || fail 'fixture acceptance failed'
   out=$(FM_DATA_OVERRIDE="$data" run_teardown "$case_dir" "$id") \
     || fail "immediate-child-data teardown failed: $out"
   [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
@@ -1083,8 +1092,17 @@ test_bare_relative_data_dispatches_and_completes() {
     || fail "bare-relative-data spawn failed: $out"
   [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = in_flight ] \
     || fail "bare relative dispatch mutated a different backlog"
+  # This case tests path addressing after a real dispatch. Keep its execution
+  # generation and explicitly accept the fixture before testing completion.
+  local generation assessment
+  generation=$(sed -n 's/^spawn_gen=//p' "$(home_of "$case_dir")/state/$id.meta")
   rm -f "$(home_of "$case_dir")/state/$id.meta"
-  write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=spawn-bare-relative"
+  write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=$generation"
+  assessment="$case_dir/accepted.json"
+  jq '.disposition="accepted" | .assessment.remaining_gap=""' "$data/$id/lifecycle.json" > "$assessment"
+  chmod 600 "$assessment"
+  FM_HOME="$(home_of "$case_dir")" FM_DATA_OVERRIDE="$data" "$ROOT/bin/fm-task-state.sh" \
+    reconcile "$id" --expected-revision 1 --record "$assessment" >/dev/null || fail 'fixture acceptance failed'
   out=$(cd "$case_dir" && FM_DATA_OVERRIDE=records run_teardown "$case_dir" "$id") \
     || fail "bare-relative-data teardown failed: $out"
   [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
@@ -1755,6 +1773,10 @@ test_interrupted_destructive_cleanup_leaves_a_recoverable_close() {
   home=$(home_of "$case_dir")
   add_item "$case_dir" "$id"
   out=$(run_ship_spawn "$case_dir" "$id") || fail "spawn failed: $out"
+  local assessment="$case_dir/accepted.json"
+  jq '.disposition="accepted" | .assessment.remaining_gap=""' "$home/data/$id/lifecycle.json" > "$assessment"
+  chmod 600 "$assessment"
+  FM_HOME="$home" "$ROOT/bin/fm-task-state.sh" reconcile "$id" --expected-revision 1 --record "$assessment" >/dev/null || fail 'fixture acceptance failed'
   marker="$home/state/$id.backlog-close"
   interrupt_teardown_during_treehouse_return "$case_dir"
 
@@ -2798,6 +2820,7 @@ EOF
   out=$(run_ship_spawn "$case_dir" "$id") || fail "no-backlog spawn failed: $out"
   assert_present "$(home_of "$case_dir")/state/$id.meta" \
     "no-backlog spawn did not publish its task record"
+  fm_test_archive_goal "$(home_of "$case_dir")" "$id"
   out=$(run_teardown "$case_dir" "$id") || fail "no-backlog teardown failed: $out"
   assert_absent "$(home_of "$case_dir")/state/$id.meta" \
     "no-backlog teardown retained its task record"
@@ -2922,6 +2945,7 @@ test_dispatch_and_completion_are_structural() {
 
   meta="$home/state/$id.meta"
   printf 'pr=%s\n' "$pr" >> "$meta"
+  fm_test_archive_goal "$home" "$id"
   out=$(run_teardown "$case_dir" "$id") \
     || fail "structural teardown failed: $out"
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
@@ -2944,6 +2968,7 @@ test_refused_teardown_leaves_the_item_live() {
   git -C "$case_dir/wt" add unlanded.txt
   git -C "$case_dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
     commit -q -m "unlanded fixture work"
+  fm_test_archive_goal "$home" "$id"
   out=$(run_teardown "$case_dir" "$id") || rc=$?
 
   [ "$rc" -ne 0 ] || fail "teardown accepted unlanded work"
@@ -2983,6 +3008,7 @@ test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog()
     || fail "manual-backend spawn failed: $out"
   assert_contains "$out" "spawned $id" "manual-backend spawn did not report success"
 
+  FM_DATA_OVERRIDE="$data" fm_test_archive_goal "$(home_of "$case_dir")" "$id"
   out=$(FM_DATA_OVERRIDE="$data" run_teardown "$case_dir" "$id") \
     || fail "manual-backend teardown failed: $out"
   assert_contains "$out" "Update $data_resolved/backlog.md" \

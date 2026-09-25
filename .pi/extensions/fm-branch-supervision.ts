@@ -110,6 +110,7 @@ import {
   readLiveEligibleRows,
   releaseEligibleRowsSnapshot,
   scopeForUnreadWake,
+  lifecycleModesForWake,
   writeEligibleRowsSnapshot,
   type BranchDispatchOffer,
 } from "./lib/fm-branch-dispatch.ts";
@@ -1745,7 +1746,9 @@ ${context.command}
         await flushMirror(session, acceptedGeneration);
         if (!(await actingAsOwner(acceptedGeneration))) throw new Error("supervision session no longer owns the fleet lock");
         const heartbeat = /^heartbeat($|:)/.test(message);
-        const scope = scopeForUnreadWake(state, heartbeat);
+        const modes = await lifecycleModesForWake(fmRoot, fmHome, state);
+        if (!(await actingAsOwner(acceptedGeneration))) throw new Error("supervision session no longer owns the fleet lock");
+        const scope = scopeForUnreadWake(state, heartbeat, modes);
         const disposition = dispositionForWakeTrigger(message, scope);
         // A newly-arrived main-owned (check-kind) row never bounces this
         // whole recheck back to main - scopeForUnreadWake excludes it from
