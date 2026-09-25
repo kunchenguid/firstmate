@@ -317,11 +317,12 @@ status_retract_hold() {  # <task-id> <note>
 }
 
 status_retract_mirrors() {  # <task-id> <note>
-  local id=$1 note=$2 f standing mirror line key retracted=$'\n'
+  local id=$1 note=$2 f standing mirror hold line key retracted=$'\n'
   f="$STATE/$id.status"
   [ -f "$f" ] || return 0
   mirror=$(_fm_hold_mirror_line_ere "$f" 'captain-held')
-  standing=$(_fm_hold_settled_drop "$(_fm_hold_line_ere "$f")" < "$f") || return 0
+  hold=$(_fm_hold_line_ere "$f")
+  standing=$(_fm_hold_settled_drop "$hold" < "$f") || return 0
   while IFS= read -r line; do
     _fm_hold_unstamped_match "$line" "$mirror" || continue
     key=$(_fm_decision_key "$line") || continue
