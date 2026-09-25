@@ -340,10 +340,10 @@ test_pr_based_dod_requires_non_draft() {
       continue
     fi
     # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-    assert_grep 'confirm it is not a draft (`gh pr view <url> --json isDraft` must print false)' "$brief" \
+    assert_grep 'confirm it is not a draft (`gh-axi pr view <number>` must print `draft: no`' "$brief" \
       "$mode: done must require reading the PR back from the forge as non-draft"
     # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-    assert_grep 'mark it ready with `gh-axi pr ready`' "$brief" \
+    assert_grep 'mark it ready with `gh-axi pr ready <number>`' "$brief" \
       "$mode: a draft must be marked ready before done"
     assert_grep "If you deliberately keep the PR a draft, append \`paused" "$brief" \
       "$mode: a deliberate draft must declare a wait instead of done"
