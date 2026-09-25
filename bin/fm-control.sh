@@ -603,10 +603,12 @@ submit_exit_command() {  # <cmd> <diag-file>
 }
 
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
-# `already-stopped`, `endpoint-gone`, or `stopped`.
+# `already-stopped`, `endpoint-gone`, or `stopped`; a stop that took a resent
+# exit command appends a tab and the first refusal's note, which the caller
+# reports only after its own outcome line.
 do_exit() {
   local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed
-  local diag_file diag attempts
+  local diag_file diag attempts refusal_note=
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -703,20 +705,21 @@ do_exit() {
     verdict=transport-error
     attempts=1
   fi
-  diag=$(sed -n '/./p' "$diag_file" | tail -1 | tr -s '[:space:]' ' ')
+  diag=$(sed -n '/./p' "$diag_file" | tail -1 | tr -s '[:space:]' ' ' | sed 's/ $//')
   rm -f "$diag_file"
   case "$verdict" in
     send-failed|transport-error)
       die "the exit command could not be sent to task $ID on $BACKEND (attempts=$attempts${diag:+; $diag})"
       ;;
   esac
+  [ "$attempts" -lt 2 ] || refusal_note="first exit command refused${diag:+: $diag}"
   state=$(wait_agent_state "$EXIT_WAIT" dead) || {
-    die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
+    die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s${refusal_note:+ ($refusal_note)}"
   }
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.
   retire_busy_incarnation
-  printf 'stopped'
+  printf 'stopped%s' "${refusal_note:+$'\t'$refusal_note}"
 }
 
 # --- transactional relaunch -------------------------------------------------
@@ -1025,7 +1028,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result exit_note state note_line
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -1064,6 +1067,10 @@ do_relaunch() {
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
   exit_result=$(do_exit)
+  exit_note=
+  case "$exit_result" in
+    *$'\t'*) exit_note=${exit_result#*$'\t'}; exit_result=${exit_result%%$'\t'*} ;;
+  esac
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
@@ -1107,6 +1114,7 @@ do_relaunch() {
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  [ -z "$exit_note" ] || printf 'note: %s\n' "$exit_note" >&2
 }
 
 # --- verbs ------------------------------------------------------------------
@@ -1130,7 +1138,8 @@ case "$VERB" in
     ;;
   exit)
     result=$(do_exit)
-    echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
+    echo "${result%%$'\t'*} $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
+    [ "$result" = "${result#*$'\t'}" ] || printf 'note: %s\n' "${result#*$'\t'}" >&2
     ;;
   relaunch)
     do_relaunch

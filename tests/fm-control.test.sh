@@ -968,7 +968,31 @@ test_refused_exit_command_is_resent_once() {
   assert_contains "$out" "stopped t1 harness=claude" "the resent exit command should stop the agent"
   [ "$(cat "$dir/fake/refused-literal")" = /exit ] || fail "the first exit command should have been refused"
   [ "$(literals "$dir")" = /exit ] || fail "the exit command should be sent a second time, got: $(literals "$dir")"
+  assert_contains "$out" "note: first exit command refused: fake tmux: refused /exit" \
+    "the refused first attempt's diagnostic should survive a successful resend"
+  [ "$(printf '%s\n' "$out" | sed -n '/./{p;q;}')" != "note: first exit command refused: fake tmux: refused /exit" ] \
+    || fail "the refusal note should follow the confirmed stop, not lead the output"
   pass "fm-control exit: a refused exit command is resent once"
+}
+
+# When the resent exit command is delivered but the agent does not stop, the
+# first refusal rides inside the did-not-stop error rather than as its own
+# leading stderr line that a caller would report as the failure reason.
+test_resent_exit_that_does_not_stop_carries_the_refusal_in_its_error() {
+  local dir out rc
+  dir=$(new_case exit-resend-stubborn)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  printf '1\n' > "$dir/fake/exit-refusals"
+  out=$(env FM_FAKE_NEVER_DIES=1 PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
+    FM_FAKE_DIR="$dir/fake" FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 \
+    "$CONTROL" t1 exit 2>&1); rc=$?
+  expect_code 1 "$rc" "a resent exit command the agent ignores should fail closed"$'\n'"$out"
+  assert_contains "$out" "did not stop within 0.05s (first exit command refused: fake tmux: refused /exit)" \
+    "the did-not-stop error should carry the first refusal"
+  assert_not_contains "$out" "note: first exit command refused" \
+    "the refusal must not be printed as a separate note when the agent did not stop"
+  pass "fm-control exit: a resent exit that does not stop carries the refusal in its error"
 }
 
 # Two refusals stop the verb, and the error carries the attempt count and the
@@ -1162,6 +1186,7 @@ test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
 test_exit_accepts_agent_stopped_by_busy_interrupt
 test_refused_exit_command_is_resent_once
+test_resent_exit_that_does_not_stop_carries_the_refusal_in_its_error
 test_twice_refused_exit_command_reports_its_diagnostic
 test_exit_after_interrupt_waits_for_a_quiet_empty_composer
 test_exit_after_interrupt_still_refuses_a_composer_that_stays_pending
