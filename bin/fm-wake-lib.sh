@@ -935,22 +935,49 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
-# Reclaim the short-lived steal mutex without recursively creating another
-# steal mutex. Recheck that its owner path and pid still identify the dead
-# claimant immediately before removing the abandoned claim, then let ordinary
-# exclusive link creation choose one successor.
-fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
-  local lockdir=$1 owner pid
-  FM_LOCK_OWNER_DIR=
-  fm_lock_try_create "$lockdir" && return 0
+# fm_lock_reap_dead_link <lockdir>
+# Remove a link lock whose owner is dead without a nested mutex. Renaming the
+# dead owner directory to this process's tombstone elects exactly one reaper,
+# so a competing reaper that verified the same dead owner cannot remove a
+# successor's link. A reaper that died after winning leaves its tombstone; a
+# later reaper re-elects itself by renaming that dead reaper's tombstone.
+fm_lock_reap_dead_link() {
+  local lockdir=$1 owner pid token tomb current
   [ -L "$lockdir" ] || return 1
   owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null) || return 1
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  fm_lock_recheck_stale_owner "$lockdir" "$owner" "$pid" || return 1
-  fm_lock_points_to_owner "$lockdir" "$owner" || return 1
-  [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$pid" ] || return 1
-  fm_pid_alive "$pid" && return 1
-  fm_lock_remove_path "$lockdir" || return 1
+  fm_current_pid current || return 1
+  if [ -d "$owner" ]; then
+    pid=$(cat "$owner/pid" 2>/dev/null || true)
+    fm_lock_recheck_stale_owner "$lockdir" "$owner" "$pid" || return 1
+    token=$owner
+  else
+    token=
+    for tomb in "$owner".reaped.*; do
+      [ -d "$tomb" ] || continue
+      fm_pid_alive "${tomb##*.reaped.}" && return 1
+      token=$tomb
+    done
+    [ -n "$token" ] || return 1
+  fi
+  tomb="$owner.reaped.$current"
+  mv -- "$token" "$tomb" 2>/dev/null || return 1
+  if fm_lock_points_to_owner "$lockdir" "$owner"; then
+    rm -f "$lockdir" 2>/dev/null || true
+  fi
+  fm_lock_discard_owner "$tomb"
+}
+
+# Acquire the short-lived steal mutex without recursively creating another
+# steal mutex. A dead holder is reaped once; a dead nested steal marker left by
+# the former recursive reclaim is reaped too so it cannot block the claim.
+fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
+  local lockdir=$1
+  FM_LOCK_OWNER_DIR=
+  fm_lock_try_create "$lockdir" && return 0
+  fm_lock_reap_dead_link "$lockdir.steal" || true
+  if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
+    fm_lock_reap_dead_link "$lockdir" || return 1
+  fi
   fm_lock_try_create "$lockdir"
 }
 
