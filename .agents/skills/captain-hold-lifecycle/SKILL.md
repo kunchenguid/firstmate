@@ -31,7 +31,7 @@ Never close anything the captain owns without recording what he actually said: `
 A merge approval uses that existing release path because approval permits the merge to proceed; cleanup closes the work only after it lands and records what shipped.
 Closing a held row at merge approval instead records completion before landing, so the backlog claims completion before the work actually ships.
 When the answer changes what a task must build, follow `AGENTS.md` section 7's Validate contract to preserve the captain's words in the brief and steer the worker.
-When the captain says "later", that is an answer too: re-hold with `bin/fm-captain-hold.sh hold <id> --reason "<reason>" --until <date>` so the item leaves the live Captain's Call and resurfaces on its date, instead of leaving a live-looking card or fabricating a closure.
+When the captain says "later", that is an answer too: re-hold with `bin/fm-captain-hold.sh hold <id> --reason "<reason>" --until <date>`, or record the captain's words with `answer <id> --decision-file <path> --defer-until <date>` (`fm-send --resolve-key <id> --defer-until <date>` in chat), so the item leaves the live Captain's Call and resurfaces on its date, instead of leaving a live-looking card or fabricating a closure.
 "A keyed answer resolves its matching captain-held task" is one capability with one owner, `bin/fm-captain-hold.sh answers`, and every channel that carries a captain answer feeds it the same task id and answer; a channel never maps keys to tasks, records a decision, or resolves anything itself.
 Chat already feeds it through `bin/fm-send.sh --resolve-key`, and a captured-answer source feeds it once bound with `bin/fm-captain-hold.sh bind <source-id>`; bind before arming the source, and key each structured question by the held task's id.
 An unbound source and a key that names no captain-held task both simply feed nothing: the answer is still captured and firstmate is still woken, and closing falls back to the direct command above.
@@ -40,7 +40,7 @@ A bound captured source uses a separate seam: its adapter omits reconcile from k
 A remote-secondmate card whose task is absent from the main backlog therefore remains announced but cannot create a main-home request; owner-aware request and mutation routing to the authoritative secondmate home is a separate follow-up.
 That board-created request is yours to work off in the turn that receives it: `bin/fm-captain-hold.sh reconcile close <id> --evidence-file <path>` records the EVIDENCE and closes a moot call, while `reconcile note <id> --note-file <path>` annotates a genuinely active call and leaves it held.
 Both outcomes refuse unless that task still has the pending request created by the captain's board selection, so neither is a standalone way to mutate a captain call.
-A normal captain answer also retires any pending request because the call is settled, including close, release, and idempotent replay paths.
+A terminal captain answer also retires any pending request because the call is settled, including close, release, and idempotent replay paths; an answer-time deferral leaves the request open.
 A retirement failure makes the command fail without reversing the already-durable answer, close, or note, and `reconcile list` keeps the surviving request visible for retry.
 `reconcile list` names every request still outstanding.
 Never use `answer` for an evidence-only moot call: `answer` records what the captain said, while `reconcile close` records verified evidence.
