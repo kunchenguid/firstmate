@@ -1,0 +1,10 @@
+# Non-Claude harness (codex) spawn keeps the typed U+2063 launch-brief marker:
+spawned livecodex harness=codex kind=ship mode=no-mistakes yolo=off window=firstmate:fm-livecodex worktree=/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T//fm-lab.OZGvSi/spawn-codex/wt
+spawn_rc=0
+encode launch-brief < '/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T//fm-lab.OZGvSi/spawn-codex/home/data/livecodex/launch-brief.md'
+operational-inbox created: no
+
+# Record retention: a write prunes records older than ~7 days, keeps fresh ones
+: Firstmate operational input waiting: read '/private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.OZGvSi/prune/state/operational-inbox/1790379440-125fd0c7143598d4.msg' and handle its contents as Firstmate operational input.
+1790379440-125fd0c7143598d4.msg
+2-fresh.msg

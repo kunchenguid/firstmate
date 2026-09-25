@@ -1,0 +1,8 @@
+  The work is recorded as completed with a PR link. If this is real fleet work requiring action, I can proceed with merge authority or post-completion handling once you return to
+  normal mode or provide an explicit instruction. For now, the escalation is acknowledged and held for your review.
+✻ Baked for 10s · done 4:33 PM
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate typed-marker probe
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Haiku 4.5 ctx window                 54.8k / 200.0k
+  ⏸ manual mode on

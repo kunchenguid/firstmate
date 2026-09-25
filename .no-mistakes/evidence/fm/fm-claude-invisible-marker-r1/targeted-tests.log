@@ -1,0 +1,35 @@
+== fm-afk-inject-e2e
+ok - Scenario A: partial input defers injection; digest arrives clean after idle
+ok - Scenario B: swallowed Enter produces exactly one clean digest
+ok - Scenario C: a normal captain status injects exactly one clean single-line sentinel digest
+ok - Scenario D: a claude primary receives one plain doorbell whose record the away-mode return check reads as internal
+all e2e injection tests passed
+exit=
+== fm-operational-input
+ok - operational input: every current generic envelope retains its exact structured kind
+ok - operational input: the established from-firstmate carrier remains structurally typed and byte-compatible
+ok - operational input: untyped landed FIRSTMATE_OP transcripts are explicit legacy-operational input
+ok - operational input: historical prose compatibility is isolated from current parsing
+ok - operational input: quoted, ASCII-only, arbitrary-U+2063, altered-legacy, and label-only near misses stay genuine
+ok - operational input: the OpenCode adapter constructs through the canonical owner
+ok - operational input: current construction rejects legacy kinds and empty bodies
+ok - record-backed carrier: Claude-only selection, an ASCII doorbell naming an exact envelope record, home-bound open, and no recognition without the record
+ok - record pruning: expired records past one argument list are all pruned on a write
+exit=
+== fm-claude-trust
+ok - fm-claude-trust.sh: refuses a subdirectory of the worktree
+ok - fm-claude-trust.sh: a project argument that is itself a linked worktree resolves to the primary checkout
+ok - fm-claude-trust.sh: preserves unrelated store content
+ok - fm-claude-trust.sh: refuses a store symlinked to another user's file
+ok - fm-claude-trust.sh: follows a store symlink to this user's own file and leaves the link intact
+ok - fm-claude-trust.sh: refuses an unparseable store and leaves it untouched
+ok - fm-claude-trust.sh: a missing node is refused rather than degraded
+ok - fm-claude-trust.sh: a scope refusal stays fail-closed without node
+ok - fm-spawn.sh: a claude spawn pre-trusts its worktree and launches with a readable brief doorbell
+ok - fm-spawn.sh: a trust-refused claude spawn leaves no task state behind
+ok - fm-spawn.sh: a claude secondmate spawn pre-trusts a standalone-clone home
+ok - fm-spawn.sh: a claude secondmate spawn pre-trusts a leased worktree home
+ok - fm-claude-trust.sh: home-level trust is refused for everything but a home seeded for this secondmate
+ok - fm-claude-trust.sh: worktree mode still refuses a secondmate home
+ok - fm-spawn.sh: a claude secondmate spawn refuses when home trust cannot be recorded
+exit=
