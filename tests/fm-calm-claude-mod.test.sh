@@ -104,18 +104,22 @@ for (const width of [0, 1, 2, 3, 4, 5, 6, 9, 12, 24, 40, 80, 121]) {
         check(cells(row).length <= width, \`a row overflowed width \${width}\`);
         for (const run of row) check(["plain", "water", "boat"].includes(run.color), \`unknown color \${run.color}\`);
       }
-      if (width >= 5) {
+      if (width >= 6) {
         check(frame.length === 2, \`width \${width} did not paint two rows\`);
-        check(JSON.stringify(frame[0].slice(1)) === JSON.stringify([{ text: "◿│◣", color: "boat" }]), "the sail is not one boat-colored run");
-        check(frame[0][0].color === "plain" && /^ +$/.test(frame[0][0].text), "sail padding is not plain spaces");
-        const hullAt = frame[1].findIndex((run) => run.text === "╲▁▁▁╱");
-        check(hullAt >= 0, "the hull is not one run");
-        check(frame[1][hullAt].color === "boat", "the hull is not boat-colored");
-        check(frame[1].filter((_run, index) => index !== hullAt).every((run) => run.text.length === 1 && run.color === "water"), "water outside the hull is not one water-colored bar per cell");
+        const joined = frame.map(cells);
+        const walking = joined[1].includes("/|\\\\") || joined[1].includes(" |/");
+        const titled = joined.join(" ").includes("Van Buren") || joined.join(" ").includes("1838");
+        check(walking || titled, \`width \${width} painted neither the walk nor the title: \${JSON.stringify(joined)}\`);
+        if (walking) {
+          const bodyAt = frame[1].findIndex((run) => run.color === "boat");
+          check(bodyAt >= 0, "the walkers are not one boat-colored run");
+          check(frame[1].filter((_run, index) => index !== bodyAt).every((run) => run.color === "water" && /^─+$/.test(run.text)), "ground outside the walkers is not a path");
+        }
       } else if (width >= 3) {
-        check(frame.length === 1 && cells(frame[0]).includes("◿│◣"), \`width \${width} lost the sail-only fallback\`);
+        check(frame.length === 1, \`width \${width} fallback was not a single row\`);
+        check(/o\\/\\||o\\|\\/|─/.test(cells(frame[0])), \`width \${width} lost the compact walker fallback: \${cells(frame[0])}\`);
       } else {
-        check(frame.length === 1 && /^[▁▂▃▄]+$/.test(cells(frame[0])), \`width \${width} lost the water-only fallback\`);
+        check(frame.length === 1 && /^─+$/.test(cells(frame[0])), \`width \${width} lost the ground-only fallback\`);
       }
     }
     animation.tick();
@@ -135,7 +139,7 @@ for (const width of [0, 1, 2, 3, 4, 5, 6, 9, 12, 24, 40, 80, 121]) {
   check(animation.position() === sprite.position() && animation.waterPhase() === sprite.waterPhase(), "restore diverged");
   check(sprite.waterPhase() === 1 && sprite.position() === 2, \`restore landed at phase \${sprite.waterPhase()} column \${sprite.position()}\`);
   sprite.clampToWidth(6);
-  check(sprite.position() === 1 && sprite.direction() === -1, "a hidden clamp did not turn the boat at the new edge");
+  check(sprite.position() === 0 && sprite.direction() === 1, "a hidden clamp did not keep the walkers on the shortened track");
   sprite.reset();
   check(sprite.position() === 0 && sprite.direction() === 1 && sprite.waterPhase() === 0, "reset did not restore the initial state");
 }

@@ -150,30 +150,28 @@ The current exact marker and the narrow bare-U+2063 `Supervisor escalate (` comp
 
 ## Calm working presentation
 
-Calm replaces Pi's stock working row with a small animated boat while Calm is on and one logical agent run is active.
+Calm replaces Pi's stock working row with a small two-row memorial sequence while Calm is on and one logical agent run is active.
 This path uses only public extension API and patches nothing: `ExtensionUIContext.setWorkingVisible(false)` hides the stock row, and `setWidget()` installs a temporary component factory above the editor.
 Pi's documented custom working-indicator frames are static and width-blind, so they cannot own responsive geometry; a widget component receives `render(width)` and can.
 
-`.pi/extensions/fm-calm.ts` remains the sole owner of the presentation choice and the only caller of `setWorkingVisible()`, while `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's ANSI painting and the widget over the sprite geometry, bounce track, cadences, and freeze/resume state in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`, the harness-neutral core the Claude Code mod also draws from (reached from the Pi tree through a tracked symlink, because Claude Code refuses a hooks-module import from outside the plugin folder).
+`.pi/extensions/fm-calm.ts` remains the sole owner of the presentation choice and the only caller of `setWorkingVisible()`, while `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's ANSI painting and the widget over the sprite geometry, one-way track, walk-then-title sequence, cadences, and freeze/resume state in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`, the harness-neutral core the Claude Code mod also draws from (reached from the Pi tree through a tracked symlink, because Claude Code refuses a hooks-module import from outside the plugin folder).
 Visibility follows `agent_start` through `agent_settled` rather than turns or tool calls.
-Pi emits `agent_settled` from a `finally` block once a run will not continue automatically, so retries, automatic continuations, queued follow-ups, and compaction inside one run never remove the boat, while settle, abort, and failure all reach the same cleanup.
+Pi emits `agent_settled` from a `finally` block once a run will not continue automatically, so retries, automatic continuations, queued follow-ups, and compaction inside one run never remove the working presentation, while settle, abort, and failure all reach the same cleanup.
 Repeated `agent_start` events inside one run are idempotent, and Pi disposes the previous component before installing a replacement under the same key and when it clears extension widgets, so the frame timer cannot duplicate or outlive the widget.
-Pi's above-editor widget container reserves one spacer row whether or not a widget is present, so removing the boat leaves no residual blank row.
+Pi's above-editor widget container reserves one spacer row whether or not a widget is present, so removing the working presentation leaves no residual blank row.
 
-The sprite is two rows when the usable width admits the complete hull: an asymmetric three-cell `◿│◣` sail centered over a five-cell `╲▁▁▁╱` hull that sits inside the water row rather than adding a third row.
-The sail is the same in both travel directions, and its one-cell quarter triangle keeps the left sail visibly smaller than the full right sail.
-The hull's three inner cells are zero-height water glyphs, so the swell reads as continuous beneath the boat instead of being interrupted by it.
-Direction reverses the moment the boat lands on an endpoint, so the endpoint frame itself already carries the new heading and the trough follows the next boat movement without a discontinuity.
-The water row fills the complete supplied width, the track is recomputed and clamped from that width on every frame so a resize cannot wrap or strand the boat offscreen, and widths too narrow for the hull fall back to a deterministic single row.
+The sprite is two rows when the usable width admits the procession: geometric ` o  o  o ` heads over `/|\/|\/|\` bodies on a `─` path, with a forced-removal label when space remains.
+Figures walk away to the right; when they reach the right edge, a separate title names President Martin Van Buren for a short hold, then the walk restarts from the left.
+The title never shares the path with the walkers, so the drawing does not place him in the Cherokee forced removal of 1838-1839.
+The ground row fills the complete supplied width, the track is recomputed and clamped from that width on every frame so a resize cannot wrap or strand the figures offscreen, and widths too narrow for the procession fall back to a deterministic compact walker.
 
 One scheduler drives two linked cadences.
-Every tick advances the wave by one quarter-cell, and only every fourth tick moves the boat one whole cell, so at a 220ms tick the swell advances one cell per 880ms boat step and the boat stays phase-locked inside the same trough.
+Every tick advances the walking gait, and only every fourth tick moves the procession one whole cell, so at a 220ms tick the gait advances between 880ms steps.
 Ticks rather than wall-clock timestamps drive every state change, so tests seek animation time exactly, and disposing the widget stops both cadences together.
-The water is the lower half of the bottom-aligned one-cell bars that Pi Dictation uses for its level history, `▁▂▃▄`, so advancing the phase never changes visible width, adds a row, or moves the hull column.
-The swell is a deterministic field of smoothstep half-waves whose lengths vary between nine and thirteen cells from a fixed hash, surrounding a broad zero-height trough five cells either side of the hull center, so the boat never rides a crest and the surface still avoids a mechanical fixed period.
+The ground path uses a single `─` glyph, so advancing the gait never changes visible width or adds a row.
 
-Colors are standard ANSI foreground codes rather than theme lookups: every water cell is blue whatever its height, so the swell reads through glyph height alone rather than a crest-versus-trough color split, and the whole boat, both sail halves, the mast, and the complete hull including its zero-height interior, is one yellow, with no bright variant, 256-color, or RGB escape.
-Each colored run is closed with a default-foreground reset so styling cannot bleed into the sail row's padding, neighbouring UI, or a later frame, and geometry is always computed from visible cells rather than escape bytes.
+Colors are standard ANSI foreground codes rather than theme lookups: every ground cell is blue, and the walkers are one yellow, with no bright variant, 256-color, or RGB escape.
+Each colored run is closed with a default-foreground reset so styling cannot bleed into the head row's padding, neighbouring UI, or a later frame, and geometry is always computed from visible cells rather than escape bytes.
 
 The presentation is TUI-only and visual-only.
 It adds no session entry, transcript row, model context, or export or share content, and its widget takes no keyboard input, so editor focus and Escape abort are unchanged.

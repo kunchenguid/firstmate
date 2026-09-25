@@ -1,13 +1,14 @@
 // Firstmate's Calm-only animated working presentation for Pi.
 //
-// Calm replaces Pi's stock working row with a tiny SSHHIP-derived boat while one
-// logical agent run is active. The sprite geometry, bounce track, two animation
-// cadences, palette classes, and freeze/resume state are owned by the harness-neutral
-// ./fm-calm-working-ship-sprite.ts (a tracked symlink into the Claude Code Calm mod,
-// which both harnesses share); this module owns only Pi's rendering of those frames
-// as standard ANSI escapes and the temporary TUI widget. `.pi/extensions/fm-calm.ts`
-// owns when the presentation is installed and removed, and stays the sole caller of
-// setWorkingVisible(). docs/calm.md owns the captain-facing contract.
+// Calm replaces Pi's stock working row with a two-row historical sequence while one
+// logical agent run is active. The sprite geometry, one-way track, walk-then-title
+// sequence, two animation cadences, palette classes, and freeze/resume state are owned
+// by the harness-neutral ./fm-calm-working-ship-sprite.ts (a tracked symlink into the
+// Claude Code Calm mod, which both harnesses share); this module owns only Pi's
+// rendering of those frames as standard ANSI escapes and the temporary TUI widget.
+// `.pi/extensions/fm-calm.ts` owns when the presentation is installed and removed, and
+// stays the sole caller of setWorkingVisible(). docs/calm.md owns the captain-facing
+// contract.
 //
 // Continuity: one extension-owned animation instance survives hide/show within the same
 // Pi process and Calm extension lifetime. Disposing the widget freezes column,
@@ -35,8 +36,8 @@ import {
 export { CALM_WORKING_SHIP_TICK_MS, CALM_WORKING_SHIP_TICKS_PER_MOVE };
 
 // Standard ANSI foreground codes only: no theme lookup, bright variant, or 256/RGB.
-// Water is a single blue so the swell reads through glyph height alone; the boat is a
-// single yellow so its sail halves, mast, and hull never split into mismatched colors.
+// Ground is a single blue path; the walkers are a single yellow so a figure never
+// splits into mismatched colors. Historical labels stay uncolored (plain).
 const ANSI_FOREGROUND: Record<Exclude<CalmWorkingShipColor, "plain">, string> = {
   water: "\u001b[34m",
   boat: "\u001b[33m",

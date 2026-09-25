@@ -16,16 +16,16 @@
 // drawings and leaves the stored transcript, model context, and session storage alone.
 //
 // Presentation while Calm is on, sharing Pi Calm's goals where the mods API allows:
-// the stock working row (`Spinner`) becomes the two-row sailboat, repainted through
-// `$.ui.blit` on the sprite's own tick; `ToolUse`, `ToolResult`, and `ToolGroup` rows
-// draw as zero-height boxes; a `UserMessage` whose text the canonical operational-input
+// the stock working row (`Spinner`) becomes the two-row memorial sequence, repainted
+// through `$.ui.blit` on the sprite's own tick; `ToolUse`, `ToolResult`, and `ToolGroup`
+// rows draw as zero-height boxes; a `UserMessage` whose text the canonical operational-input
 // classifier recognizes, or a record-backed doorbell whose record holds a current
 // envelope (read through `$.fs.read`, cached until Calm next invalidates its drawings),
 // draws as zero height; an `AssistantMessage` block recorded as a mid-turn working note
 // draws as zero height. Calm off returns every drawing to the
 // engine. A toggle invalidates every hooked drawing, so rows already on screen redraw.
-// The boat is painted in Claude Code's own theme colors: the family is read from the
-// `theme` setting at load and re-read when a `config.set` changes it.
+// Walkers and ground are painted in Claude Code's own theme colors: the family is read
+// from the `theme` setting at load and re-read when a `config.set` changes it.
 //
 // Loading is lazy and cached within a session: a resumed transcript or a hot reload can
 // draw restored rows before `session.start`, so every hook awaits that session's load of
@@ -155,7 +155,7 @@ function invalidateDrawings($: EngineInterface): void {
   $.ui.invalidate("ui.render");
 }
 
-/** One scheduler tick: advance the sprite, then repaint every mounted boat in place. */
+/** One scheduler tick: advance the sprite, then repaint every mounted working site in place. */
 async function repaintShip($: EngineInterface): Promise<void> {
   if (!calm || sites.size === 0) return;
   sprite.tick();

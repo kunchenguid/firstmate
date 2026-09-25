@@ -34,8 +34,7 @@ DEBUG_LOG_ON="$LAB/debug-on.log"
 DEBUG_LOG_RESUME="$LAB/debug-resume.log"
 SOCKET="fm-calm-claude-$$"
 SESSION="fm-calm-claude-e2e"
-HULL='╲▁▁▁╱'
-SAIL='◿│◣'
+HEADS=' o  o  o '
 
 cleanup() {
   local i=0
@@ -163,8 +162,8 @@ command_listed() {  # <command>
   return $((1 - listed))
 }
 
-hull_column() {  # <screen text>
-  printf '%s\n' "$1" | awk -v hull="$HULL" 'index($0, hull) { print index($0, hull); exit }'
+heads_column() {  # <screen text>
+  printf '%s\n' "$1" | awk -v heads="$HEADS" 'index($0, heads) { print index($0, heads); exit }'
 }
 
 # The answer names words that live only in notes.txt, so the settled turn is told apart
@@ -193,7 +192,7 @@ wait_settled() {  # <what> [iterations]
       *'gamma'*)
         if ! working_row_shown "$shot"; then
           case "$shot" in
-            *"$HULL"*) ;;
+            *"$HEADS"*) ;;
             *) return 0 ;;
           esac
         fi
@@ -230,7 +229,7 @@ i=0
 while [ "$i" -lt 600 ]; do
   off_frame=$(screen)
   case "$off_frame" in
-    *"$HULL"*|*"$SAIL"*)
+    *"$HEADS"*|*"Van Buren"*)
       printf '%s\n' "$off_frame" >&2
       fail "the working ship appeared although the flag is unset"
       ;;
@@ -282,21 +281,21 @@ fi
 command_listed calm || fail "Claude Code $CLAUDE_VERSION does not list /calm with the flag on"
 send "$PROMPT"
 enter
-wait_screen "$HULL" 'the working ship during a real turn' 200
+wait_screen "$HEADS" 'the working presentation during a real turn' 200
 boat_one=$(screen)
 case "$boat_one" in
-  *"$SAIL"*) : ;;
+  *"$HEADS"*) : ;;
   *)
     printf '%s\n' "$boat_one" >&2
-    fail "the working ship lost its sail"
+    fail "the working presentation lost its walkers"
     ;;
 esac
-column_one=$(hull_column "$boat_one")
+column_one=$(heads_column "$boat_one")
 column_two=$column_one
 i=0
 while [ "$i" -lt 120 ]; do
   boat_two=$(screen)
-  column_two=$(hull_column "$boat_two")
+  column_two=$(heads_column "$boat_two")
   if [ -n "$column_two" ] && [ "$column_two" != "$column_one" ]; then
     break
   fi
@@ -304,11 +303,11 @@ while [ "$i" -lt 120 ]; do
   i=$((i + 1))
 done
 [ -n "$column_two" ] && [ "$column_two" != "$column_one" ] \
-  || fail "the working ship never moved (hull stayed at column $column_one)"
+  || fail "the working presentation never moved (walkers stayed at column $column_one)"
 wait_settled 'the turn with the flag on'
 on_settled=$(screen)
 case "$on_settled" in
-  *"$HULL"*|*"$SAIL"*) fail "the working ship stayed on screen after the turn settled" ;;
+  *"$HEADS"*|*"Van Buren"*) fail "the working presentation stayed on screen after the turn settled" ;;
   *'Bash('*|*'shell command'*|*'notes.txt)'*)
     printf '%s\n' "$on_settled" >&2
     fail "a tool row drew while Calm was on"

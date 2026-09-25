@@ -8,16 +8,18 @@ It hides a block only when its raw text contains no newline and its trimmed leng
 
 ## Pi
 
-While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place, and no separate Calm status row is added.
-The water fills the usable width with low one-cell Unicode bars, all in standard ANSI blue, so the swell shows through bar height alone.
-The asymmetric three-cell `◿│◣` sail is centered over the five-cell `╲▁▁▁╱` hull, and the whole boat, both sail halves, mast, and hull, is one standard ANSI yellow, with the hull's zero-height interior keeping the swell continuous beneath the boat.
-The boat is deliberately calm: it moves one column every 880ms, while the long smooth wave advances one quarter-cell every 220ms so the surface stays alive between boat steps.
-Deterministically varied half-waves stay between nine and thirteen cells, and the boat remains phase-locked inside a broad zero-height trough through movement and edge reversals.
+While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row memorial sequence in its place, and no separate Calm status row is added.
+Geometric stick figures walk one way along a ground path under a forced-removal label, then a separate title names President Martin Van Buren.
+The title never shares the path with the walkers, so the drawing does not place him in the Cherokee forced removal of 1838-1839.
+Walkers are one standard ANSI yellow; the ground path is one standard ANSI blue; labels stay uncolored.
+The procession moves one column every 880ms, while the walking gait advances every 220ms so the row stays alive between steps.
+Figures walk away, the title holds, and the walk restarts from the left.
 Every resize reflows the sprite without wrapping, and it disappears when the run settles, aborts, or fails.
-Within one Pi session and Calm extension lifetime, the next working period resumes the boat from its last rendered column and travel direction rather than restarting at the left edge.
-Hidden elapsed time does not advance the animation, and a resize while hidden clamps the frozen boat to the new width without changing its valid travel direction.
+Within one Pi session and Calm extension lifetime, the next working period resumes from its last rendered column, gait, and title hold rather than restarting at the left edge.
+Hidden elapsed time does not advance the animation, and a resize while hidden clamps the frozen column to the new width without reversing the walk.
 A fresh Pi session or new Calm extension lifetime starts at the normal initial position.
-Very narrow terminals fall back to a smaller deterministic sprite.
+Very narrow terminals fall back to a smaller deterministic walker, and the Van Buren title appears once the width can name him.
+A recorded preview of the frames is at [`assets/calm-working-presentation-preview.html`](../assets/calm-working-presentation-preview.html).
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 Calm hides collapsed thinking labels, the mid-turn assistant working-note blocks governed by the shared preservation rule above, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` and `fm_branch_outcomes` tool shells, and canonically classified Firstmate operational user rows.
 Pi applies that rule independently to each text block, so a short working note can hide beside preserved substantive content in the same message.
@@ -80,8 +82,8 @@ The trusted project auto-loads the mod through the `.claude/skills/firstmate-cal
 
 With the flag on, the mod registers `/calm`, which toggles the same per-home preference Pi's `/calm` uses, so one choice applies on both harnesses.
 The toggle answers with a transient "Calm on" or "Calm off" notice under the prompt rather than a transcript row, and a preference that cannot be written leaves the current choice unchanged and says so in that notice.
-While Calm is on, the stock working row (`Sauteing... (12s · 300 tokens)`) becomes the same two-row sailboat Pi draws, from the same shared sprite geometry: it fills the row inside the transcript margin, repaints on the boat's 220ms cadence with the hull moving every 880ms, reflows on resize, and appears and disappears exactly where the stock row would.
-On Claude Code the boat is painted in Claude Code's own theme colors rather than Pi's standard ANSI codes: every water cell takes the spinner blue of the active theme family (`#93a5ff` on a dark theme, `#5769f7` on a light one) and the whole boat, both sail halves, mast, and hull, takes the Claude orange of the stock spinner (`#d77757`).
+While Calm is on, the stock working row (`Sauteing... (12s · 300 tokens)`) becomes the same two-row memorial sequence Pi draws, from the same shared sprite geometry: it fills the row inside the transcript margin, repaints on the 220ms cadence with the procession moving every 880ms, reflows on resize, and appears and disappears exactly where the stock row would.
+On Claude Code the walkers and ground are painted in Claude Code's own theme colors rather than Pi's standard ANSI codes: every ground cell takes the spinner blue of the active theme family (`#93a5ff` on a dark theme, `#5769f7` on a light one) and the walkers take the Claude orange of the stock spinner (`#d77757`).
 The family follows the `theme` setting by its prefix, `dark` or `light`, is re-read when the theme changes, and uses the light set as the both-readable fallback for `auto`, custom, missing, or unreadable values; the Pi extension keeps its standard ANSI blue and yellow.
 Tool rows, tool result blocks, and folded tool groups draw at zero height, so a turn that used tools takes the same space as one that did not.
 A user row whose text the canonical operational-input parser recognizes, a Firstmate session-start, watcher, turn-end guard, away-supervisor, launch-brief, or branch-outcome envelope, a from-firstmate routed message, or one of the narrow pre-protocol shapes kept for old transcripts, draws at zero height; other user rows, including near misses such as a quoted or ASCII-only marker, stay visible unless backed by an operational record as described below.
@@ -99,7 +101,7 @@ Bounds of the Claude Code support, recorded with evidence in [`calm-mode-feasibi
 - Every record write prunes operational-inbox records once they reach about seven days of elapsed age (the boundary is approximate); age alone does not remove a record without a later write.
   Once its record is gone, a doorbell is no longer recognized: it draws as a visible user row after Calm rechecks it (for example on `/calm` toggle or `claude --continue`) and `/ahoy` treats it as a captain boundary.
 - On the main-screen layout (not the fullscreen alternate screen), a toggle redraws the live screen by clearing and reprinting it, and the terminal's own scrollback keeps the earlier rendering above it; the fullscreen layout has no such stale copy.
-- The sailboat is painted through Claude Code's Raster element, whose colors are RGB quantized to 256-color escapes rather than the standard 16-color ANSI codes Pi's widget emits.
+- The memorial sequence is painted through Claude Code's Raster element, whose colors are RGB quantized to 256-color escapes rather than the standard 16-color ANSI codes Pi's widget emits.
 - The detailed transcript view (`ctrl+o`) keeps its per-message timestamp and model headers where hidden assistant rows sat, because those headers are not a hookable drawing.
 - Collapsed thinking never appears in Claude Code's default view, and the mod has no thinking drawing to hide in other views.
 

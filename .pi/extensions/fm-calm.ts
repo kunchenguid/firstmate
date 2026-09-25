@@ -131,8 +131,8 @@ export default function (pi: ExtensionAPI) {
   let exportRendering = false;
   let removeTerminalInputHandler: (() => void) | undefined;
   // One logical agent run, tracked from agent_start through agent_settled rather than
-  // from turns or tool calls, so the boat never flickers between tool calls, automatic
-  // continuations, retries, or compaction that stay inside the same run.
+  // from turns or tool calls, so the working presentation never flickers between tool
+  // calls, automatic continuations, retries, or compaction that stay inside the same run.
   let agentRunActive = false;
   let workingShipShown = false;
   // One animation instance per extension lifetime. Hiding the working widget freezes
