@@ -356,6 +356,42 @@ test_lock_steals_dead_pid_lock() {
   pass "dead-pid stale lock is reclaimed by a single acquirer"
 }
 
+test_lock_reclaims_dead_steal_owner_without_nested_markers() {
+  local dir state lockdir holder i rc output
+  dir=$(make_case lock-dead-steal-owner)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  mkdir "$lockdir"
+  printf '%s\n' "$(dead_pid)" > "$lockdir/pid"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2.steal" || exit 7
+    exec sleep 30
+  ' _ "$LIB" "$lockdir" >/dev/null 2>&1 &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$lockdir.steal/pid" ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -s "$lockdir.steal/pid" ] || fail "steal mutex owner did not publish its pid"
+  kill -KILL "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  rc=0
+  output=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 8
+    printf "owner=%s nested=%s\\n" "$(cat "$2/pid")" "$([ -e "$2.steal.steal" ] && echo yes || echo no)"
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir") || rc=$?
+  [ "$rc" -eq 0 ] || fail "acquirer could not reclaim dead steal owner (rc=$rc)"
+  case "$output" in *'nested=no'*) ;; *) fail "dead steal owner caused another nested marker: $output" ;; esac
+  [ ! -e "$lockdir.steal" ] || [ ! -L "$lockdir.steal" ] \
+    || fail "dead steal mutex remained linked after successful reclaim"
+  pass "dead steal owner is reclaimed once without a nested steal marker"
+}
+
 test_lock_stale_steal_single_winner_under_concurrency() {
   local dir state lockdir dead marker i pids pid wins
   dir=$(make_case lock-stale-concurrency)
@@ -755,6 +791,50 @@ test_attached_arm_signal_is_recorded_in_cycle_ledger() {
   is_live_non_zombie "$wpid" || fail "signaling an attached arm terminated the peer watcher"
   stop_seed_watcher "$wpid" "$out"
   pass "attached arm signals record a classified lifecycle entry"
+}
+
+test_arm_term_during_steal_waits_for_watcher_cleanup_trap() {
+  local dir state fakebin armout armpid i dead pidfile status
+  dir=$(make_case arm-term-mid-steal)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  pidfile="$dir/arm.pid"
+  mkdir "$state/.watch.lock"
+  dead=$(dead_pid)
+  printf '%s\n' "$dead" > "$state/.watch.lock/pid"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg do last=$arg; done
+case "$last" in
+  *.watch.lock.steal)
+    sleep 0.2
+    arm_pid=$(cat "$FM_TEST_ARM_PID_FILE" 2>/dev/null || true)
+    [ -n "$arm_pid" ] && kill -TERM "$arm_pid" 2>/dev/null || true
+    ;;
+esac
+exec /bin/ln "$@"
+SH
+  chmod +x "$fakebin/ln"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_TEST_ARM_PID_FILE="$pidfile" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" 2>&1 &
+  armpid=$!
+  printf '%s\n' "$armpid" > "$pidfile"
+  i=0
+  while [ "$i" -lt 100 ] && is_live_non_zombie "$armpid"; do
+    [ -e "$state/.watch.lock.steal" ] && break
+    sleep 0.02
+    i=$((i + 1))
+  done
+  status=0
+  wait_for_exit "$armpid" 150 || status=$?
+  [ "$status" -eq 143 ] || fail "arm did not finish with TERM after stale-lock recovery (status $status)"
+  [ ! -e "$state/.watch.lock.steal" ] && [ ! -L "$state/.watch.lock.steal" ] \
+    || fail "TERM during startup left the steal marker behind"
+  pass "arm defers TERM until startup watcher can run its lock cleanup"
 }
 
 test_arm_starts_and_self_heals() {
@@ -1262,6 +1342,7 @@ test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
+test_lock_reclaims_dead_steal_owner_without_nested_markers
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
@@ -1275,6 +1356,7 @@ test_arm_attaches_and_waits_for_live_fresh_watcher
 test_attached_arm_signal_is_recorded_in_cycle_ledger
 test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
+test_arm_term_during_steal_waits_for_watcher_cleanup_trap
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable

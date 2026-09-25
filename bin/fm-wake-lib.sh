@@ -935,6 +935,25 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
+# Reclaim the short-lived steal mutex without recursively creating another
+# steal mutex. Recheck that its owner path and pid still identify the dead
+# claimant immediately before removing the abandoned claim, then let ordinary
+# exclusive link creation choose one successor.
+fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
+  local lockdir=$1 owner pid
+  FM_LOCK_OWNER_DIR=
+  fm_lock_try_create "$lockdir" && return 0
+  [ -L "$lockdir" ] || return 1
+  owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null) || return 1
+  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  fm_lock_recheck_stale_owner "$lockdir" "$owner" "$pid" || return 1
+  fm_lock_points_to_owner "$lockdir" "$owner" || return 1
+  [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$pid" ] || return 1
+  fm_pid_alive "$pid" && return 1
+  fm_lock_remove_path "$lockdir" || return 1
+  fm_lock_try_create "$lockdir"
+}
+
 fm_lock_try_acquire() {
   local lockdir=$1 pid steal cur rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
@@ -973,7 +992,7 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  if ! fm_lock_try_acquire_steal_mutex "$steal"; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
