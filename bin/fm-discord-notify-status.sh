@@ -18,8 +18,8 @@ key=$(_fm_decision_key "$line" 2>/dev/null) || key=
 case "$verb:$key" in
   needs-decision:nm-*)
     "$SCRIPT_DIR/fm-discord-notify.sh" ask-user "$task_id" "$key" \
-      "A proposed change needs your decision." \
-      "Approve the proposed change|Keep the current behavior"
+      "제안된 변경 사항에 대한 결정이 필요합니다." \
+      "제안된 변경 사항 승인|현재 동작 유지"
     ;;
   needs-decision:pr-ready-*)
     note=$(status_line_note "$line")
@@ -33,10 +33,10 @@ case "$verb:$key" in
     case "$detail" in
       *" pull request ready: "*) url=${detail#* pull request ready: }; url=${url%% choose *} ;;
     esac
-    summary="A pull request is ready for your review."
+    summary="검토할 풀 리퀘스트가 준비되었습니다."
     [ -z "$url" ] || summary="$summary $url"
     "$SCRIPT_DIR/fm-discord-notify.sh" pr-ready "$route_task_id" "$key" \
-      "$summary" "Merge|Leave it open" "$task_id"
+      "$summary" "병합|열어 두기" "$task_id"
     ;;
   *) exit 0 ;;
 esac

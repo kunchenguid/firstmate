@@ -1010,7 +1010,7 @@ command_hold() {
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
   release_task_control_lock || fail "cannot release task control for $id"
   "$SCRIPT_DIR/fm-discord-notify.sh" captain-hold "$id" "captain-hold-$id-$occurrence" \
-    "A task is waiting for your decision." "Continue with the request|Leave it on hold" >/dev/null \
+    "작업에 대한 결정이 필요합니다." "요청대로 진행|보류 상태로 두기" >/dev/null \
     || printf 'actionable: captain hold %s was recorded but Discord notification failed\n' "$id" >&2
   printf '%s\n' "$id"
 }

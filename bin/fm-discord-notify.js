@@ -45,6 +45,22 @@ async function priorMessage(record, botId) {
 	}
 }
 
+function localize(value) {
+	if (value.startsWith("A pull request is ready for your review.")) {
+		return `풀 리퀘스트 검토가 필요합니다.${value.slice("A pull request is ready for your review.".length)}`;
+	}
+	return ({
+		"A proposed change needs your decision.": "제안된 변경 사항에 대한 결정이 필요합니다.",
+		"A task is waiting for your decision.": "작업에 대한 결정이 필요합니다.",
+		"Approve the proposed change": "제안된 변경 사항 승인",
+		"Keep the current behavior": "현재 동작 유지",
+		"Merge": "병합",
+		"Leave it open": "열린 상태로 두기",
+		"Continue with the request": "요청대로 계속 진행",
+		"Leave it on hold": "보류 상태로 두기",
+	})[value] || value;
+}
+
 async function sendRecord(path, record, botId, recover) {
 	if (recover) {
 		const message = await priorMessage(record, botId);
@@ -56,7 +72,7 @@ async function sendRecord(path, record, botId, recover) {
 	const sending = { ...record, state: "sending", attempted_at: Math.floor(Date.now() / 1000) };
 	saveRecord(path, sending);
 	const payload = {
-		content: `Task: ${record.task_id}\n${record.summary}\nOptions: ${record.options.join("; ")}\nReply directly to this message with your answer.`,
+		content: `작업: ${record.task_id}\n${localize(record.summary)}\n선택지: ${record.options.map(localize).join(" / ")}\n이 메시지에 바로 답장해 주세요.`,
 		allowed_mentions: { parse: [] },
 		nonce: record.nonce,
 		enforce_nonce: true,

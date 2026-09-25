@@ -97,6 +97,8 @@ test_failed_notification_retries_from_durable_outbox() {
   fi
   record=$(find "$home/state/x-context" -maxdepth 1 -name 'discord-notify-*.json' -print -quit)
   assert_equals "failed" "$(jq -r '.state' "$record")" "failed send remains pending"
+  jq '.summary = "A proposed change needs your decision." | .options = ["Approve the proposed change", "Keep the current behavior"]' \
+    "$record" > "$record.tmp" && mv "$record.tmp" "$record"
   FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" FM_DISCORD_FAKE_MESSAGES='[]' \
     PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
@@ -105,6 +107,8 @@ test_failed_notification_retries_from_durable_outbox() {
   state=$(jq -r '.state' "$record")
   assert_equals "sent" "$state" "retry completes the retained notification"
   assert_equals "2" "$(wc -l < "$log" | tr -d ' ')" "one initial failed POST and one retry POST"
+  assert_contains "$(sed -n '2p' "$log" | jq -r '.payload.content')" "제안된 변경 사항 승인 / 현재 동작 유지" "legacy retry options are localized"
+  assert_contains "$(sed -n '2p' "$log" | jq -r '.payload.content')" "제안된 변경 사항에 대한 결정이 필요합니다." "legacy retry summary is localized"
   pass "failed decision notifications retry after their source cursor advances"
 }
 
@@ -180,7 +184,7 @@ test_captain_hold_triggers_push() {
   record=$(find "$home/state/x-context" -name 'discord-notify-*.json' -print -quit)
   assert_equals "captain-hold" "$(jq -r '.trigger' "$record")" "captain-hold trigger type"
   assert_equals "task-hold" "$(jq -r '.task_id' "$record")" "captain-hold task id"
-  assert_equals "A task is waiting for your decision." "$(jq -r '.summary' "$record")" "hold summary uses plain language"
+  assert_equals "작업에 대한 결정이 필요합니다." "$(jq -r '.summary' "$record")" "hold summary uses plain language"
   pass "a durable captain hold triggers a Discord decision push"
 }
 test_reply_to_notification_enters_existing_inbox() {
