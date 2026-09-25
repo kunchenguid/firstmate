@@ -186,16 +186,16 @@ test_helper_lab_home_admits() {
 }
 
 test_lab_home_helper() {
-  local lab populated unlistable out rc
-  # create on an absent path mints the marker and the stock layout, and is
-  # idempotent on an existing lab home.
+  local lab populated unlistable newline out rc
+  # create on an absent path mints the marker and the stock layout.
   lab=$("$LABHOME" create "$TMP/lab-new"); rc=$?
   expect_code 0 "$rc" "lab-home: create must succeed on a fresh path"
   assert_present "$lab/.fm-lab-home" "lab-home: create must write the marker"
   for d in state data config projects; do
     [ -d "$lab/$d" ] || fail "lab-home: missing stock dir $d"
   done
-  "$LABHOME" create "$lab" >/dev/null || fail "lab-home: create must be idempotent on a lab home"
+  out=$("$LABHOME" create "$lab" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "lab-home: create on an existing lab home must refuse"
   # refuses a populated dir and leaves it unmarked.
   populated="$TMP/populated"; mkdir -p "$populated/state"; echo x > "$populated/state/x.meta"
   out=$("$LABHOME" create "$populated" 2>&1); rc=$?
@@ -207,7 +207,12 @@ test_lab_home_helper() {
   chmod 700 "$unlistable"
   [ "$rc" -ne 0 ] || fail "lab-home: create on an unlistable dir must refuse"
   assert_absent "$unlistable/.fm-lab-home" "lab-home: unlistable create must not write the marker"
-  pass "fm-lab-home: create mints marked stock homes idempotently; populated dirs are refused"
+  # refuses a dir whose only entry has a newline-only name.
+  newline="$TMP/newline-entry"; mkdir -p "$newline/"$'\n'
+  out=$("$LABHOME" create "$newline" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "lab-home: create on a dir holding a newline-named entry must refuse"
+  assert_absent "$newline/.fm-lab-home" "lab-home: newline-entry create must not write the marker"
+  pass "fm-lab-home: create mints marked stock homes only on fresh empty dirs; anything else is refused"
 }
 
 # --- fm-spawn ---------------------------------------------------------------

@@ -9,8 +9,7 @@
 #
 # Usage:
 #   fm-lab-home.sh create <dir>   make <dir> a marked lab home and print it;
-#                                 idempotent on an existing lab home, refused
-#                                 on a populated non-lab dir
+#                                 refused on any existing non-empty dir
 #
 # A lab home is the stock layout only - state/, data/, config/, projects/ - and
 # callers remove it with ordinary rm -rf when done. Drive it with plain
@@ -34,12 +33,10 @@ case "${1:-}" in
       exit 1
     fi
     mkdir -p "$dir" || exit 1
-    if ! fm_gate_lab_home "$dir"; then
-      fm_gate_lab_mark "$dir" || {
-        fm_lab_home_error "refusing '$dir': a lab marker is only ever stamped on a fresh empty dir"
-        exit 1
-      }
-    fi
+    fm_gate_lab_mark "$dir" || {
+      fm_lab_home_error "refusing '$dir': a lab marker is only ever stamped on a fresh empty dir"
+      exit 1
+    }
     mkdir -p "$dir/state" "$dir/data" "$dir/config" "$dir/projects" || exit 1
     printf '%s\n' "$dir"
     ;;
