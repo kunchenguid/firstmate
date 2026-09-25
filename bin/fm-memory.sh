@@ -15,8 +15,11 @@
 # Memory text is one non-empty printable line, at most 500 bytes. `check` is the
 # watcher-facing operation: it prints one line naming a bounded batch of due
 # reminders when firstmate should wake, and marks those reminders notified only
-# after that print succeeds. A malformed record is named
-# on that same line and does not suppress due reminders. Repeated checks stay
+# after that print succeeds. A structurally malformed record, or an open
+# reminder with invalid text, is named on that same line and does not suppress
+# due reminders. `check` skips text validation for other records so its sweep
+# stays cheap as the store grows; `list`, `search`, and `done` still validate
+# text on every record they read. Repeated checks stay
 # silent until another reminder becomes due. Marking a reminder done
 # acknowledges it. The standing check is retired when no open reminder remains,
 # and a retirement failure is reported so a later `done` retries it. The check
