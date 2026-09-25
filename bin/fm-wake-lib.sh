@@ -778,7 +778,7 @@ _fm_recovery_marker_ack() {
   # A genuine acknowledgement proves this episode was actually seen, so a
   # later down stretch's reopen starts with a fresh FM_RECOVERY_REOPEN_LIMIT
   # budget rather than inheriting this one's count.
-  rm -f -- "${marker}.reopen-count" 2>/dev/null || true
+  rm -f -- "${marker}.reopen-count" "${marker}.reopen-settled" 2>/dev/null || true
   fm_lock_release "$lock"
 }
 
@@ -840,8 +840,19 @@ _fm_recovery_marker_arm_check() {
         return 1
       fi
       FM_RECOVERY_MARKER_TOKEN="announced:downtime:${line##*:}"
-      # shellcheck disable=SC2034 # Output read by callers after this function returns.
       FM_RECOVERY_MARKER_ACTION='recover'
+      ;;
+    acked:*)
+      if [ -s "$FM_WAKE_QUEUE" ] \
+        && [ "$(cat "${marker}.reopen-settled" 2>/dev/null || true)" != "${line##*:}" ]; then
+        if ! _fm_recovery_marker_write_locked "$marker" downtime "" announced; then
+          fm_lock_release "$lock"
+          fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+          return 1
+        fi
+        # shellcheck disable=SC2034 # Output read by callers after this function returns.
+        FM_RECOVERY_MARKER_ACTION='recover'
+      fi
       ;;
   esac
   fm_lock_release "$lock"
@@ -861,9 +872,11 @@ _fm_recovery_marker_arm_check() {
 # that: past FM_RECOVERY_REOPEN_LIMIT consecutive reopens of one episode with
 # no intervening explicit acknowledgement, settle it to acked directly instead
 # of minting yet another generation nobody is watching, so a watcher can start
-# and stay up. A settled episode's queued rows stay durable: arm-check never
-# re-announces an acked marker just because the queue is non-empty, and the
-# next session's drain presents them. A real acknowledgement
+# and stay up. The settle records its generation in .watcher-down.reopen-settled
+# so arm-check does not re-announce that bound-settled episode just because the
+# queue is non-empty: its queued rows stay durable for the next session's
+# drain, while a genuinely acked episode with queued rows still resurfaces.
+# A real acknowledgement
 # (_fm_recovery_marker_ack) or arm-check minting a fresh episode from a missing
 # or invalid marker both clear the counter, so this bound never shortens the
 # once-per-genuine-generation resurface a live, attentive session relies on.
@@ -886,6 +899,10 @@ _fm_recovery_marker_reopen_announced() {
       if [ "$count" -gt "$FM_RECOVERY_REOPEN_LIMIT" ]; then
         generation=${FM_RECOVERY_MARKER_TOKEN##*:}
         if ! _fm_recovery_marker_write_locked "$marker" downtime "$generation" acked; then
+          fm_lock_release "$lock"
+          return 1
+        fi
+        if ! printf '%s\n' "$generation" > "${marker}.reopen-settled" 2>/dev/null; then
           fm_lock_release "$lock"
           return 1
         fi

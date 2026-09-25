@@ -221,8 +221,9 @@ Nothing else ever retires that generation when no live session runs the printed 
 So a plain restart with no re-arm loop and no session would otherwise reopen the same stuck episode into a fresh generation forever, one resurface-then-exit cycle per restart.
 `state/.watcher-down.reopen-count` bounds that.
 Past `FM_RECOVERY_REOPEN_LIMIT` (default 3) consecutive reopens of one episode with no intervening explicit acknowledgement, the next reopen settles the episode to acked directly instead of minting another generation, so the watcher can finally start and stay up.
-A settled episode's queued rows stay durable.
-A watcher start never re-announces an acked marker just because the queue is non-empty, so those rows cannot make the watcher exit; the next session's drain presents them.
+The settle records that generation in `state/.watcher-down.reopen-settled`.
+A watcher start does not re-announce that bound-settled episode just because the queue is non-empty, so its queued rows cannot make the watcher exit; they stay durable and the next session's drain presents them.
+A genuinely acknowledged episode with queued rows still re-announces and resurfaces them on the next arm.
 A real acknowledgement, or a watcher start that mints a fresh episode from a missing or invalid marker, clears the counter, so this bound never shortens the once-per-genuine-generation resurface a live, attentive session relies on.
 
 ### Generation reuse

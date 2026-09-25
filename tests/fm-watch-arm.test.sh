@@ -1334,6 +1334,33 @@ check_stuck_unacked_recovery_settles() {  # <case-name> <queued:0|1>
   fi
 }
 
+# Only the reopen bound's own settle suppresses the acked-plus-queue
+# re-announce. A genuinely acknowledged episode that still has a queued row
+# must keep resurfacing it on the next arm, so a lost delivery is not buried.
+test_genuinely_acked_recovery_with_queued_row_still_resurfaces() {
+  local dir home state fakebin
+  dir=$(make_case acked-queued-resurface)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  printf 'acked:downtime:ackedgen1\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+  printf '%s\t1\tcheck\tacked-queued\tcheck: acked queued row\n' "$(date +%s)" > "$state/.wake-queue"
+  printf '1\n' > "$state/.wake-queue.seq"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/arm.out"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" \
+    || fail "a genuinely acked episode with a queued row did not resurface: $(cat "$dir/arm.out")"
+  grep -F 'check: rearm-resurface' "$dir/arm.out" >/dev/null \
+    || fail "a genuinely acked episode with a queued row was not re-announced: $(cat "$dir/arm.out")"
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    announced:downtime:*) ;;
+    *) fail "a genuinely acked episode with a queued row left marker: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+  esac
+  pass "watch-arm: a genuinely acknowledged episode with a queued row still resurfaces on re-arm"
+}
+
 test_stuck_unacked_recovery_settles_after_bounded_reopen() {
   check_stuck_unacked_recovery_settles bounded-reopen 0
   pass "watch-arm: a stuck unacknowledged recovery episode settles after a bounded number of reopens instead of looping forever"
@@ -1358,6 +1385,7 @@ test_watcher_exits_when_its_home_is_removed
 test_reaper_stops_a_tracked_watcher
 test_stuck_unacked_recovery_settles_after_bounded_reopen
 test_stuck_unacked_recovery_with_queued_rows_stays_up_after_settling
+test_genuinely_acked_recovery_with_queued_row_still_resurfaces
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_rearm_resurfaces_durable_queue_and_remote_open_decision
 test_slow_rearm_recovery_is_still_surfaced
