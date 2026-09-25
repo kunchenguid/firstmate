@@ -428,7 +428,7 @@ New spawns choose the backend in this order:
 5. Default `tmux`.
 
 If more than one runtime marker is present, detection resolves innermost-first: `$TMUX` is checked before `HERDR_ENV=1`, which is checked before cmux's primary `CMUX_WORKSPACE_ID` marker and its documented fallback signals - tmux or herdr started from inside a cmux terminal is the innermost, currently-executing layer, while cmux itself (a terminal application, not a nestable multiplexer) is always checked last.
-Alongside `HERDR_ENV=1`, `$TMUX` wins only when `$TMUX` and `$TMUX_PANE` describe the tmux pane this process runs in: the pane exists on the server `$TMUX` names, that server's pid matches `$TMUX`, and the pane's process is an ancestor of this one.
+Alongside `HERDR_ENV=1`, `$TMUX` wins only when `$TMUX` and `$TMUX_PANE` describe the tmux pane this process runs in: the pane exists on the server `$TMUX` names, that server's pid matches `$TMUX`, and the pane's process is this process or one of its ancestors.
 A Herdr server started from a tmux shell hands that shell's `$TMUX` and `$TMUX_PANE` to every Herdr pane, so those inherited variables fall through to Herdr, even while that tmux pane is still open, instead of sending spawns to an unrelated tmux session.
 See [`docs/cmux-backend.md`](cmux-backend.md#runtime-detection) for why cmux can be selected when `CMUX_WORKSPACE_ID` is absent.
 

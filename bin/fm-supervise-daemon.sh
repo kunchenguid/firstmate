@@ -85,7 +85,7 @@
 #                                   way bin/fm-backend.sh's fm_backend_detect
 #                                   resolves the runtime firstmate itself is
 #                                   executing inside - $TMUX_PANE selects tmux
-#                                   unless it is stale under herdr,
+#                                   unless herdr masks it,
 #                                   $HERDR_ENV=1 selects herdr - falling back to
 #                                   tmux). zellij, orca, and cmux are not yet
 #                                   supported as supervisor backends; the daemon

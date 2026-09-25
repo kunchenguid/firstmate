@@ -63,7 +63,7 @@ discover_supervisor_target() {
 # which primitives (tmux vs herdr) to dispatch through. Priority mirrors
 # discover_supervisor_target and bin/fm-backend.sh's fm_backend_detect:
 #   1. FM_SUPERVISOR_BACKEND env (explicit override).
-#   2. $TMUX_PANE set and not stale under herdr (as for the target) - tmux.
+#   2. $TMUX_PANE set and not masked by herdr (as for the target) - tmux.
 #   3. $HERDR_ENV=1 (with $HERDR_PANE_ID present) - herdr.
 #   4. FM_SUPERVISOR_BACKEND_DEFAULT (tmux) - matches the target fallback. Returns 1.
 discover_supervisor_backend() {
