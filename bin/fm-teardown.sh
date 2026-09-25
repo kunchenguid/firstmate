@@ -1537,20 +1537,33 @@ EOF
 # current work is not contained in the PR head, no PR is found, or any gh error
 # occurs - the caller then falls back to the content check.
 pr_is_merged() {
-  local branch=$1 target view state remainder head resolved_url current landed=0
+  local branch=$1 target view state remainder head resolved_url current landed=0 merge_revision evidence_revision
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
     target=$(pr_number_from_branch "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+  if [ "$TEARDOWN_COMPLETION_POLICY" = verified-production ] && [ "$FORCE" != --force ]; then
+    view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url,mergeCommit -q '.state + "\t" + .headRefOid + "\t" + .url + "\t" + (.mergeCommit.oid // "")' 2>/dev/null) || return 1
+  else
+    view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+  fi
   state=${view%%$'\t'*}
   remainder=${view#*$'\t'}
   [ "$state" != "$view" ] || return 1
   head=${remainder%%$'\t'*}
   resolved_url=${remainder#*$'\t'}
   [ "$head" != "$remainder" ] || return 1
+  if [ "$TEARDOWN_COMPLETION_POLICY" = verified-production ] && [ "$FORCE" != --force ]; then
+    merge_revision=${resolved_url#*$'\t'}
+    [ "$merge_revision" != "$resolved_url" ] || return 1
+    resolved_url=${resolved_url%%$'\t'*}
+    [ "$resolved_url" = "$PR_URL" ] && [ "$head" = "$(fm_meta_get "$META" pr_head)" ] || return 1
+    printf '%s' "$merge_revision" | LC_ALL=C grep -Eq '^[0-9a-f]{40}$' || return 1
+    evidence_revision=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release"]["merge_revision"])' "$OUTCOME_EVIDENCE" 2>/dev/null) || return 1
+    [ "$evidence_revision" = "$merge_revision" ] || return 1
+  fi
   case "$state" in
     MERGED|merged) ;;
     *) return 1 ;;
@@ -3443,6 +3456,13 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
 fi
 
 if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+  if [ "$TEARDOWN_META_KIND" = ship ] && [ "$TEARDOWN_COMPLETION_POLICY" = verified-production ]; then
+    branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null) || exit 1
+    pr_is_merged "$branch" || {
+      echo "REFUSED: verified-production outcome does not match the recorded merged PR and canonical merge revision" >&2
+      exit 1
+    }
+  fi
   if validate_worktree_teardown_safety; then
     :
   else

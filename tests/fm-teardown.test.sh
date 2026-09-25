@@ -246,6 +246,15 @@ test_verified_production_requires_exact_outcome_evidence() {
   write_verified_production_meta "$case_dir" "$head"
   merge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   evidence="$case_dir/outcome-evidence.json"
+  add_gh_pr_merged_for_head "$case_dir" "$head"
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"state,headRefOid,url,mergeCommit"*) printf '%s\\t%s\\t%s\\t%s\\n' MERGED '$head' 'https://github.com/example/repo/pull/7' '$merge' ; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
 
   rc=0
   run_teardown "$case_dir" > "$case_dir/no-evidence.stdout" 2> "$case_dir/no-evidence.stderr" || rc=$?
@@ -266,6 +275,14 @@ test_verified_production_requires_exact_outcome_evidence() {
   run_teardown "$case_dir" --outcome-evidence "$evidence" > "$case_dir/stale.stdout" 2> "$case_dir/stale.stderr" || rc=$?
   expect_code 1 "$rc" "stale source evidence should refuse"
   assert_present "$case_dir/state/task-x1.meta" "stale evidence removed task metadata"
+
+  write_outcome_evidence "$evidence" VERIFIED REC-2127 \
+    https://github.com/example/repo/pull/7 "$head" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  rc=0
+  run_teardown "$case_dir" --outcome-evidence "$evidence" > "$case_dir/wrong-merge.stdout" 2> "$case_dir/wrong-merge.stderr" || rc=$?
+  expect_code 1 "$rc" "wrong canonical merge revision should refuse"
+  assert_present "$case_dir/state/task-x1.meta" "wrong merge revision removed task metadata"
+  assert_present "$case_dir/wt" "wrong merge revision removed the isolated copy"
 
   write_outcome_evidence "$evidence" VERIFIED REC-2127 \
     https://github.com/example/repo/pull/7 "$head" "$merge" "$merge"
