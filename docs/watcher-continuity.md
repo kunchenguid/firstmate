@@ -380,7 +380,7 @@ That bound stays well under the extension's `FM_WATCH_ARM_RETIRE_TIMEOUT_MS`, be
 An abandoned cycle record is reported on the arm's stderr under the `watcher-ledger:` prefix rather than dropped, because a record missing entirely is indistinguishable from a cycle that never happened.
 The prefix is deliberately not `watcher:`: that prefix selects the arm's verdict lines for the repair payload relayed to the model, and a diagnostic must never crowd a verdict out of it.
 
-A successor link is never abandoned, only deferred.
+A successor link that loses the race for the ledger lock is deferred, never abandoned.
 Before it contests the ledger lock at all, a successor publishes its claim as its own file under `state/.watch-cycle-links`, written to a temporary name and renamed into place, so the claim is durable and lock-free.
 Every ledger write then applies whatever claims are still outstanding while it already holds the log's lock, and retires a claim only after the rewritten ledger is committed.
 A claim is enumerated by directory listing rather than read out of a shared file, so a claim renamed in during a reconcile is simply picked up by the next one instead of being lost to a read-modify-write.
@@ -388,6 +388,7 @@ The arm applies outstanding claims immediately after appending its own record, s
 A claim names its predecessor by arm PID **and** the pid-identity that arm recorded, resolved once at successor startup from the live predecessor or from its already-written ledger row, so a recycled PID can never collect another cycle's link.
 A claim whose target row never appears (the predecessor was killed outright, or its row rotated away) is retired after `FM_WATCH_CYCLE_LINK_HORIZON_S` seconds rather than kept forever.
 A claim that could not be read is left in place for the next reconcile rather than retired, because an unreadable claim is not an invalid one.
+A link is genuinely given up only where the claim cannot be published at all or can no longer apply, and no such exit is silent: an unresolvable predecessor pid-identity, a claim directory that could not be created, and a claim file that could not be written each print `watcher-ledger: successor claim dropped - <reason>` on the arm's stderr, and the horizon above retires a claim no record can take.
 Known limitation: two claims for the same predecessor are resolved by `claimed_at`, which has second resolution, so a sub-second retry leaves the tie to the claim filename and the ledger can name an earlier successor's watcher; the row is still linked, never `successor=none`.
 So a busy ledger can delay a link but never drop it, which keeps `successor=none` meaning "no successor" instead of "a successor whose link lost a race".
 `state/.watch-triage.log` remains only the watcher's bounded absorbed-wake debug log and carries no lifecycle semantics.
