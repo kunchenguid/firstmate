@@ -1793,8 +1793,8 @@ test_reminder_leaves_state_alone_without_escalations() {
   pass "the reminder leaves records and queue alone when nothing needs reminding"
 }
 
-# A watcher tick over only resolved records starts no reminder process; once a
-# record is escalated, the tick starts it.
+# A watcher tick over only resolved or dismissed records starts no reminder
+# process; once a record is escalated and not dismissed, the tick starts it.
 test_tick_starts_reminder_only_for_escalated_records() {
   local home state corr stub
   home=$(setup_parent tick-remind)
@@ -1809,6 +1809,11 @@ test_tick_starts_reminder_only_for_escalated_records() {
   fm_pending_reply_set "$(fm_pending_reply_path "$state" "$corr")" phase resolved
   ( _FM_PENDING_REPLY_LIB_DIR=$stub; fm_pending_reply_tick "$state" ) || fail "resolved-only tick failed"
   [ ! -e "$stub/started" ] || fail "a tick over only resolved records started the reminder"
+  corr=$(fm_pending_reply_create "$home" "$state" mate "dismissed by the operator")
+  fm_pending_reply_set "$(fm_pending_reply_path "$state" "$corr")" phase escalated
+  fm_pending_reply_set "$(fm_pending_reply_path "$state" "$corr")" escalation_dismissed_epoch 900
+  ( _FM_PENDING_REPLY_LIB_DIR=$stub; fm_pending_reply_tick "$state" ) || fail "dismissed tick failed"
+  [ ! -e "$stub/started" ] || fail "a tick over only a dismissed escalation started the reminder"
   corr=$(fm_pending_reply_create "$home" "$state" mate "never answered")
   fm_pending_reply_set "$(fm_pending_reply_path "$state" "$corr")" phase escalated
   ( _FM_PENDING_REPLY_LIB_DIR=$stub; fm_pending_reply_tick "$state" ) || fail "escalated tick failed"

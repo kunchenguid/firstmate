@@ -1614,6 +1614,7 @@ fm_pending_reply_tick() {  # <state-dir>
   done
   for rec in ${live[@]+"${live[@]}"}; do
     [ "$(fm_pending_reply_get "$rec" phase)" = escalated ] || continue
+    [ -z "$(fm_pending_reply_get "$rec" escalation_dismissed_epoch)" ] || continue
     "$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-remind.sh" "$state" || true
     break
   done
