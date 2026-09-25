@@ -1,0 +1,6 @@
+{"seq":1,"epoch":1790378361,"key":"98107:1736926179:794245015","id":"4c38913d-f718-4cba-b6b4-a614f9a97aa5","tag":"captain","text":"Live mirror check: reply with exactly the words mirror-live-ok and nothing else. Do not run any tools."}
+{"seq":2,"epoch":1790378364,"key":"98107:1736926179:794245015","id":"4c38913d-f718-4cba-b6b4-a614f9a97aa5","tag":"main","text":"mirror-live-ok"}
+{"seq":3,"epoch":1790378382,"key":"98107:1736926179:794245015","id":"1f273225-855c-4875-9037-5958d5614f71","tag":"captain","text":"\n\n<pasted_content id=\"a846\">\nSecond live check, line one ends in spaces   \nline two\n\n  indented line three\nReply with exactly mirror-multi-ok and nothing else, no tools.\n</pasted_content id=\"a846\">"}
+{"seq":4,"epoch":1790378383,"key":"98107:1736926179:794245015","id":"1f273225-855c-4875-9037-5958d5614f71","tag":"main","text":"mirror-multi-ok"}
+{"seq":5,"epoch":1790378398,"key":"98107:1736926179:794245015","id":"d83cd4d7-ab93-4e07-8065-7b07940f2e50","tag":"captain","text":"Third check: reply with exactly mirror-third-ok, no tools."}
+{"seq":6,"epoch":1790378400,"key":"98107:1736926179:794245015","id":"d83cd4d7-ab93-4e07-8065-7b07940f2e50","tag":"main","text":"mirror-third-ok"}

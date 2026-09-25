@@ -1,0 +1,50 @@
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │                                                                                                                                                                                                  │
+  │  ⚠ Workspace Trust Required                                                                                                                                                                      │
+  │                                                                                                                                                                                                  │
+  │  Cursor Agent can execute code and access files in this directory.                                                                                                                               │
+  │                                                                                                                                                                                                  │
+  │  Do you trust the contents of this directory?                                                                                                                                                    │
+  │                                                                                                                                                                                                  │
+  │    /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.xehUeP/checkout                                                                                                               │
+  │                                                                                                                                                                                                  │
+  │                                                                                                                                                                                                  │
+  │    [a] Trust this workspace                                                                                                                                                                      │
+  │    [q] Quit                                                                                                                                                                                      │
+  │                                                                                                                                                                                                  │
+  │  ⏳ Trusting workspace...                                                                                                                                                                        │
+  │                                                                                                                                                                                                  │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+  Cursor Agent
+  v2026.09.23-86fc751
+  Tip: Hit shift+tab to enable Plan Mode for large or complex changes.
+
+
+  Cursor mirror check: reply with exactly the words mirror-cursor-ok and nothing else. Do not run any tools.
+
+
+  mirror-cursor-ok
+
+
+
+
+  → Add a follow-up
+
+
+  Grok 4.7 256K High · 16.7%
+  /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.xehUeP/checkout · c78c820
+
+
+
+
+
+
+
+
+
+
+
+

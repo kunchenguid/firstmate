@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.283
+▝▜██████▀  Opus 4.8 with high effort · Claude Max
+ ▝▝   ▝▝   /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.xehUeP/checkout
+
+
+❯ Live mirror check: reply with exactly the words mirror-live-ok and nothing else. Do not run any tools.
+
+⏺ mirror-live-ok
+
+✻ Crunched for 4s · done 4:19 PM
+
+❯ Second live check, line one ends in spaces
+  line two
+
+    indented line three
+  Reply with exactly mirror-multi-ok and nothing else, no tools.
+
+⏺ mirror-multi-ok
+
+✻ Cogitated for 2s · done 4:19 PM
+
+❯ Third check: reply with exactly mirror-third-ok, no tools.
+
+⏺ mirror-third-ok
+
+✻ Worked for 3s · done 4:20 PM
+
+❯ Optout check: reply with exactly mirror-optout-ok, no tools.
+
+⏺ mirror-optout-ok
+
+✻ Cooked for 2s · done 4:20 PM
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ mirror-optout-check done
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 4.8 ctx window   ▉               59.8k / 1.0M
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents
