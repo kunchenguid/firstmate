@@ -12,14 +12,15 @@
 # none of them restates the format.
 #
 # Design (captain-adopted, data/fm-send-reliability-reframe-s1/report.md): the
-# payload moves to the filesystem, which is reliable; the terminal carries only
-# a short constant doorbell line. While the endpoint remains available, that
+# payload moves to the filesystem, which is reliable; the endpoint receives only
+# a short constant doorbell. Pane backends type its line, while T3 Code starts a
+# native turn with the same text. While the endpoint remains available, that
 # line does not need to be reliable because ringing it again is free. A
 # duplicated doorbell is a no-op by construction (the worker finds the inbox
 # empty or already handled), and a swallowed doorbell is detected by the
 # absence of the worker's acknowledgement and re-rung on a bounded schedule.
 # A positively dead or missing endpoint bypasses that schedule without being
-# typed into, and its unhandled record surfaces through the ordinary stale wake
+# rung, and its unhandled record surfaces through the ordinary stale wake
 # into stuck-crewmate-recovery.
 #
 # Layout under <state-dir>:
@@ -49,7 +50,7 @@
 # attempt may ring or be skipped to protect another draft in a proven pending
 # composer; an unsubmitted copy of this doorbell is retried. After
 # FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
-# caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
+# caller owns the busy and recovery-grade endpoint checks: a busy endpoint waits,
 # while a positively dead or missing endpoint skips delivery and the ladder and
 # escalates directly. This library owns only the schedule and escalation marker.
 # If attempt bookkeeping cannot be persisted while the record remains unhandled,
@@ -60,7 +61,7 @@
 # a wake.
 #
 # Inbox paths containing bytes outside printable ASCII are unsupported. The
-# doorbell refuses them rather than sending terminal control bytes to a pane.
+# doorbell refuses them before any backend transport receives the text.
 #
 # fm_task_inbox_ring requires bin/fm-backend.sh's dispatch (sourced below); the
 # other helpers are dependency-light. Sourced by bin/fm-send.sh, bin/fm-watch.sh,
@@ -254,10 +255,9 @@ fm_task_inbox_body() {  # <record-path>
 # The constant self-describing doorbell line for the inbox containing a record.
 # Self-describing on purpose: a worker whose brief predates the inbox contract
 # still receives the complete instruction in the line itself. The leading `: `
-# is the POSIX shell no-op, so the same line typed into a pane whose agent has
-# exited (a bare shell) runs nothing; see the dead-pane note in the header.
-# A non-printable path fails without output so terminal controls never reach
-# the pane's line discipline.
+# is the POSIX shell no-op, so on pane backends the same line typed after the
+# agent exits to a bare shell runs nothing. A non-printable path fails without
+# output so terminal controls never reach a pane's line discipline.
 fm_task_inbox_doorbell_line() {  # <record-path>
   local dir=${1%/*} abs quoted LC_ALL=C
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
@@ -309,10 +309,11 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
       return 0
       ;;
   esac
-  # Accepted residual race: terminal input and Enter are separate delivery
-  # steps, so an agent exiting after the liveness check could leave a bare
-  # shell only a suffix; the `: ` prefix protects complete lines only. Do not
-  # add process-bound atomic delivery here unless an incident reopens this.
+  # Accepted pane-backend residual race: terminal input and Enter are separate
+  # delivery steps, so an agent exiting after the liveness check could leave a
+  # bare shell only a suffix; the `: ` prefix protects complete lines only. T3
+  # Code's native turn is one operation. Do not add process-bound atomic
+  # delivery here unless an incident reopens this.
   if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 2 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi

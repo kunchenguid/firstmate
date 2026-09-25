@@ -76,6 +76,9 @@
 #                          agent, for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
+#                          At escalation time a T3 Code session the server still
+#                          reports running resets the timer instead
+#                          (wedge_defer_t3code_running).
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement
@@ -356,7 +359,7 @@ PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT
 # connect/subscribe failure) before the push fast-path is disabled for the rest
 # of this watcher process and the loop reverts to pure polling (report section
 # 5c trigger 3: proven-unreliable-at-runtime). A watcher restart re-probes
-# capability, so a transient herdr hiccup self-heals on the next cycle chain.
+# capability, so a transient backend hiccup self-heals on the next cycle chain.
 EVENT_CAP_FAIL_MAX=${FM_EVENT_CAP_FAIL_MAX:-3}
 # Per-process memo for the push-capability probe (fm_backend_events_capable runs
 # a ~220KB `herdr api schema` read, too heavy to repeat every poll). Keyed by
@@ -1460,7 +1463,10 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # account for its own quiet has nothing to prove through its worktree. The dead-record probe
 # runs last of the three, so the two cheaper deferrals keep the panes they
 # already own on their existing bounded cadences and only a pane that would
-# otherwise alarm pays for a backend read.
+# otherwise alarm pays for a backend read. A T3 Code window gets one more
+# consult after those (wedge_defer_t3code_running): its transcript can stay
+# byte-identical through a long tool call, so the server's own session status
+# is read before a still-running turn is reported as a wedge.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -1486,6 +1492,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task"; then
           return 0
         fi
+        if wedge_defer_t3code_running "$win" "$since_file" "$label" "$age"; then
+          return 0
+        fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
@@ -1499,6 +1508,25 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       fi
       ;;
   esac
+}
+
+# wedge_defer_t3code_running: the T3 Code consult of the wedge ladder. A T3
+# window's capture is the thread's messages plus a session line, so it stays
+# byte-identical through a long tool call where a pane would keep repainting;
+# a still-running session is therefore read from the server itself before the
+# quiet transcript is reported. Only `running` defers: `starting`, a settled
+# session, a stopped or failed one, and an unreadable server all keep the
+# unchanged escalation, so a leftover status can never excuse a dead thread.
+# Returns 0 when it has handled the window, 1 to escalate on the unchanged path.
+wedge_defer_t3code_running() {  # <window> <since-file> <triage-label> <idle-age>
+  local win=$1 since_file=$2 label=$3 age=$4
+  [ "$(window_backend "$win")" = t3code ] || return 1
+  fm_backend_source t3code || return 1
+  [ "$(fm_backend_t3code_probe "$win")" = running ] || return 1
+  clear_write_tracking "$(window_key "$win")"
+  date +%s > "$since_file"
+  triage_log "absorbed $label (T3 session still running, idle ${age}s), timer reset: $win"
+  return 0
 }
 
 # busy_turn_over_age: 0 iff the last completed turn or explicit native-harness
@@ -2223,7 +2251,7 @@ heartbeat_scan_finds_actionable() {
 }
 
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
-# with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
+# with push-capable windows (herdr or t3code), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
 # `blocked` wakes the supervisor sub-second instead of after the stale-pane
 # wedge timer. For every other home - no push-capable window, backend not
@@ -2244,7 +2272,7 @@ event_wait_or_sleep() {
     # they are excluded from the fast escalation exactly as the stale loop skips
     # them.
     [ "$(window_kind "$w")" = secondmate ] && continue
-    session=${w%%:*}
+    session=$(fm_backend_event_session "$b" "$w")
     if [ -z "$first_backend" ]; then first_backend=$b; first_session=$session; fi
     # One socket connection covers one backend+session; a home normally has a
     # single herdr session. A window in a different backend/session stays on the
@@ -3122,7 +3150,7 @@ EOF
     fi
   fi
 
-  # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
+  # Terminal wait: a bounded native-event wait for push-capable homes (herdr or t3code),
   # else the blind poll sleep. See event_wait_or_sleep.
   event_wait_or_sleep
 done

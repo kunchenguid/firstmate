@@ -1914,6 +1914,7 @@ window_to_task() {
       [ -e "$meta" ] || continue
       mw=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
       mt=$(grep '^terminal=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      [ -n "$mt" ] || mt=$(grep '^t3_thread_id=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
       [ "$mw" = "$w" ] || [ "$mt" = "$w" ] || continue
       t=$(basename "$meta")
       t=${t%.meta}

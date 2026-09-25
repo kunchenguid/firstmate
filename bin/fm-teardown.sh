@@ -2577,6 +2577,13 @@ remove_firstmate_home() {
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
   [ -n "$abs_home_path" ] || return 0
+  # A secondmate can carry the same tracked Codex overlay as a worker.
+  # Restore it after home validation and before returning its pooled Git index.
+  local codex_git_dir
+  codex_git_dir=$(git -C "$abs_home_path" rev-parse --absolute-git-dir 2>/dev/null || true)
+  if [ -n "$codex_git_dir" ] && [ -e "$codex_git_dir/fm-t3code-codex-env.json" ]; then
+    "$SCRIPT_DIR/fm-t3code-codex-env.sh" cleanup "$abs_home_path" || return 1
+  fi
   process_event_backup=$(snapshot_firstmate_home_process_events "$abs_home_path" "$label") || return 1
   if ! cleanup_firstmate_home_process_events "$abs_home_path" "$label"; then
     restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
@@ -3198,6 +3205,10 @@ cleanup_firstmate_home_children() {
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+        if [ "$child_backend" = t3code ]; then
+          "$SCRIPT_DIR/fm-t3code-codex-env.sh" cleanup "$child_wt" || return 1
+          rm -f "$child_wt/CLAUDE.local.md"
+        fi
         if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
           if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
             fm_treehouse_slot_owner_release "$child_wt" "$child_id"
@@ -3486,6 +3497,22 @@ fi
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
+# A t3code thread is stopped and archived BEFORE its slot goes back to the pool
+# or, for a secondmate, before its home is removed: a live thread whose
+# worktreePath disappears re-creates it on the next turn, so returning the slot
+# first would hand T3 a path another task may take, and the archived transcript
+# is the only record of a secondmate once its home is gone. The kill is
+# idempotent (an archived or deleted thread is already the end state), so a
+# re-run after a failed return converges; an unreachable server refuses rather
+# than returning a slot a live thread still points at. The secondmate's fm-
+# T3 project is deliberately left in place: project.delete refuses while the
+# archived thread exists and would take that transcript with it under force.
+if [ "$BACKEND" = t3code ]; then
+  fm_backend_kill t3code "$T" || {
+    echo "error: could not stop and archive T3 thread $T for $ID; start T3 Code (or archive the thread there) and re-run teardown" >&2
+    endpoint_close_refusal "$ID" t3code "$T" 0 || exit 1
+  }
+fi
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
@@ -3517,9 +3544,15 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
       git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
     fi
   fi
-  # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
+  # Remove our hook and environment files so a reused pool worktree cannot fire
+  # signals for a dead task or hand a t3code env block or channel statement to
+  # its next holder.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+  if [ "$BACKEND" = t3code ]; then
+    "$SCRIPT_DIR/fm-t3code-codex-env.sh" cleanup "$WT" || exit 1
+    rm -f "$WT/CLAUDE.local.md"
+  fi
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
@@ -3583,7 +3616,7 @@ elif [ "$BACKEND" = herdr ]; then
   else
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
-elif [ "$BACKEND" != orca ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
+elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
 fi

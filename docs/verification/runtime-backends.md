@@ -1809,6 +1809,73 @@ FM_CMUX_CLAUDE_COMPOSER_LIVE=1 bin/fm-test-run.sh tests/fm-cmux-claude-composer-
 That guard still addresses the worker by task selector, so it no longer reaches the typed submit path and is not a current refresh entry point for this guarantee.
 The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
 
+## T3 Code
+
+### Live lifecycle guard
+
+Verified on 2026-09-15 against T3 Code `0.0.41-nightly.20260914.1722`.
+The token-free guard checks the descriptor and strict version floor, project registration, thread creation and read, native state, capture, stop, and deletion of its own thread and project.
+It also opens the real `/ws` shell subscription with a short-lived ticket, requires its synchronized snapshot to contain the owned thread, and checks the reader completes its budget successfully.
+It uses only a fresh temporary project and never starts a model turn unless `FM_T3CODE_PROMPT_LIVE=1` or `FM_LIVE=1` is set.
+Refresh with the configured Firstmate home:
+
+```sh
+FM_CONFIG_OVERRIDE=<home>/config bin/fm-test-run.sh tests/fm-backend-t3code-live-e2e.test.sh
+```
+
+```text
+ok - T3 Code 0.0.41-nightly.20260914.1722 live lifecycle and cleanup
+```
+
+The optional prompt arm also passed on 2026-09-15 against that version:
+
+```sh
+FM_CONFIG_OVERRIDE=<home>/config FM_T3CODE_PROMPT_LIVE=1 bin/fm-test-run.sh tests/fm-backend-t3code-live-e2e.test.sh
+```
+
+```text
+ok - T3 Code 0.0.41-nightly.20260914.1722 prompt and capture
+ok - T3 Code 0.0.41-nightly.20260914.1722 live lifecycle and cleanup
+```
+
+### Portable regression coverage
+
+```sh
+tests/fm-backend-t3code.test.sh
+tests/fm-backend.test.sh
+tests/fm-daemon.test.sh
+```
+
+The fake-server suite covers the token and version gates, project matching, create and turn-start payloads, effort option ids, capture, keys, native status, stop-then-archive cleanup, per-directory environment, worker and secondmate spawn, the secondmate bearer link, launch-setting refusals, abort cleanup lease retention, tracked Codex configuration preservation, teardown ordering, native exit, relaunch refusal, and away-target lookup.
+It also drives the watcher through the T3 wedge and dead-agent paths.
+`tests/fm-daemon.test.sh` covers discovery precedence and native busy state.
+
+The tracked Codex configuration guard passed on 2026-09-15 with `codex-cli 0.154.0` and Python 3.14.7.
+It proves the project model survives, `FM_TASK_ID` reaches `command/exec`, ordinary staging and commits retain the original configuration blob, and teardown restores the original CRLF bytes and Git flag.
+It capability-skips when Codex is absent and fails on absence when explicitly requested:
+
+```sh
+FM_T3_CODEX_CONFIG_LIVE=1 bin/fm-test-run.sh tests/fm-backend-t3code.test.sh
+```
+
+```text
+ok - codex-cli 0.154.0: project config retained; shell FM_TASK_ID=t3codextrk2
+```
+
+### Additional live evidence
+
+The initial API probe ran on 2026-09-14 against the verified floor, T3 Code `0.0.41-nightly.20260914.1707`.
+It proved bearer authorization, project and external-worktree binding, Claude mid-turn steering, interrupt, the `null` to `starting` to `running` to `ready` to `stopped` status sequence, and that thread archive or deletion does not remove the worktree.
+
+Additional adapter smokes ran on 2026-09-15 against T3 Code `0.0.41-nightly.20260914.1722`.
+Claude and Codex scouts ran in Treehouse-pooled worktrees, reported `t3code-native` busy state, and stopped and archived before their leases returned.
+Claude and Codex both received per-directory environment through their native project configuration, and a Claude secondmate ran as the home's unique worktree-less thread before teardown archived it and removed the home while retaining the T3 project and transcript.
+Captain-thread discovery resolved the home to its own T3 thread, and a native away-mode drill delivered one blocked-worker escalation as an `away-supervisor` turn after the captain had settled.
+The control smoke proved `relaunch` refuses without stopping the session, `exit` stops it idempotently, and teardown then archives it and returns the slot.
+Claude required the task-worker statement in the worktree's git-excluded `CLAUDE.local.md` to accept the encoded launch brief.
+A Codex mid-turn steer joined the running turn, and a new turn restarted a stopped thread under the same driver while a driver switch ended in the server's bound-driver error.
+Local paths, thread ids, and one-off task chronology are intentionally not retained here.
+
 ## Codex App host tools
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.

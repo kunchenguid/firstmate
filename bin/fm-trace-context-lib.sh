@@ -2,9 +2,9 @@
 # Native W3C trace-context propagation for firstmate spawns (default-off).
 #
 # When enabled, firstmate resolves one W3C `traceparent` carrier for a task,
-# injects it into the agent's pane shell as the TRACEPARENT environment variable
-# before launch (bin/fm-spawn.sh, alongside GOTMPDIR, so it reaches every spawn
-# backend and every harness for ship, scout, and secondmate spawns), and records
+# delivers it as the TRACEPARENT environment variable before launch
+# (bin/fm-spawn.sh, alongside GOTMPDIR, through a pane shell or T3 Code's
+# per-directory harness configuration), and records
 # the identical value as `traceparent=` in state/<id>.meta. Because the injected
 # carrier and the recorded carrier are the same string, an observer that reads
 # the metadata sees exactly the identity the child received - no collector,

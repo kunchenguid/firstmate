@@ -266,9 +266,9 @@ cmd_send() {
     fm_lock_release "$meta_lock"
     die "$REMOTE_ENDPOINT_ERROR"
   fi
-  # A remote steer is delivered by durable record, never by typing its payload
-  # into the pane: write it into this secondmate's host-local steering inbox,
-  # then ring the constant self-describing doorbell into the recorded pane,
+  # A remote steer is delivered by durable record, never by submitting its payload
+  # directly: write it into this secondmate's host-local steering inbox, then ring
+  # the constant self-describing doorbell through the recorded backend endpoint,
   # best-effort (bin/fm-task-inbox-lib.sh owns the record and doorbell). The
   # write is idempotent - re-running the same request after an ambiguous
   # transport failure lands on the existing record instead of a duplicate - so

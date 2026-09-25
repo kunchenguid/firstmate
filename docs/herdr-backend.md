@@ -325,7 +325,7 @@ There is still one watcher process; the event reader is a bounded child of that 
 
 ## Away-mode supervisor support
 
-The away daemon supports tmux and Herdr supervisor panes only.
+The away daemon supports tmux and Herdr supervisor panes, and a T3 Code thread through [`t3code-backend.md`](t3code-backend.md#away-mode).
 It refuses Zellij, Orca, and cmux as supervisor backends rather than applying the wrong transport.
 For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).

@@ -45,15 +45,18 @@
 #                    unknown invalidation fm-control writes after a Devin interrupt
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
+#   endpoint-gone, herdr-native, t3code-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target, launch-prompt
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
 # with the producing source as the second token. Precedence:
 #   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
-#   2. standalone Kimi before verification       -> unknown kimi-unverified
-#   3. a valid, gen-matching, source-trusted record -> its state and source,
+#   2. a t3code task: the T3 server's own session status when it reads busy
+#      or idle (the provider reports it for claude and codex alike, and no
+#      shell sits in front of the agent); an unreadable server falls through
+#   3. standalone Kimi before verification       -> unknown kimi-unverified
+#   4. a valid, gen-matching, source-trusted record -> its state and source,
 #      UNLESS the record is still the untouched seed fm-spawn wrote at arm
 #      time (state=busy source=fm-spawn - no adapter hook has posted since
 #      launch) AND the caller supplied a captured tail that matches that
@@ -66,12 +69,12 @@
 #      this way, however its rendered tail looks, so a genuinely working turn
 #      keeps its ordinary busy verdict and the general BUSY_TURN_MAX_SECS
 #      bound is unchanged.
-#   4. no record at all: herdr's native busy verdict is trusted as busy
+#   5. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log and cursor transcript pull sources, then the
 #      Grok/Rovo/AGY temporary regex fallbacks classify a grok, rovo, or agy
 #      task from its rendered tail, then unknown missing
-#   5. malformed, stale, or untrusted records -> unknown, never a fallback
+#   6. malformed, stale, or untrusted records -> unknown, never a fallback
 #
 # fm_busy_launch_prompt_parked (the launch-prompt classifier-only source): a
 # launch whose busy record never advanced past the fm-spawn seed is
@@ -1020,6 +1023,18 @@ fm_busy_launch_prompt_parked() {  # <harness>
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
   local out rc r_state r_source native log
+  # t3code first: the T3 server reports the session status for claude and
+  # codex alike, so a codex crew is classified from it instead of falling to
+  # the codex-unverified gate below; only an unreadable server falls through.
+  if [ "$backend" = t3code ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
+    native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
+    case "$native" in
+      busy|idle)
+        printf '%s t3code-native' "$native"
+        return 0
+        ;;
+    esac
+  fi
   case "$harness" in
     kimi*)
       if ! fm_busy_kimi_verified; then

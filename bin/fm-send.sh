@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
-# inbox and ring a constant doorbell line into its terminal, best-effort.
+# inbox and ring a constant doorbell through its backend endpoint, best-effort.
 # Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
@@ -8,12 +8,13 @@
 #   tmux window search, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
 # The text must be nonempty: an empty or whitespace-only message is refused
-# before anything is marked, recorded, or typed, because an empty marked
+# before anything is marked, recorded, or submitted, because an empty marked
 # secondmate request delivers only marker and correlation bytes and leaves the
 # parent waiting on a reply to nothing.
 # Special keys instead of text: fm-send.sh <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
-# Orca currently supports Enter and C-c only, and rejects Escape.
+# Orca supports Enter and C-c only; T3 Code maps Escape and C-c to a native
+# turn interrupt and treats Enter as a no-op.
 #
 # Two data planes:
 #
@@ -21,8 +22,9 @@
 # remote alike. The message is appended as a durable sequenced record under
 # the task's steering inbox (newlines are legal) - state/<id>.inbox/ for a
 # local task, or the remote home's host-local inbox reached through fm-on.sh
-# for a remote secondmate - and the terminal receives only one short constant
-# self-describing doorbell line plus Enter, best-effort. The durable record IS
+# for a remote secondmate - and the endpoint receives only one short constant
+# self-describing doorbell, best-effort. Pane backends type its line plus Enter;
+# T3 Code starts one native turn. The durable record IS
 # the delivery, so the record's fate alone governs the exit: 0 = the steer is
 # durably sent (recorded); nonzero = nothing was confirmed delivered and a
 # resend is appropriate (unresolvable target, an endpoint that cannot be
@@ -50,26 +52,24 @@
 # ordinary record by the worker's acknowledgement move into handled/. The
 # watcher re-rings an unacknowledged message while its endpoint remains
 # available, escalates after the bounded ladder, and instead routes a positively
-# dead or missing endpoint directly to recovery without typing. An explicit
+# dead or missing endpoint directly to recovery without ringing. An explicit
 # fire-and-forget record is excluded from that ladder.
 # bin/fm-task-inbox-lib.sh owns the record format, the doorbell line, and the
-# re-ring ladder. The composer pre-check before the ring is ADVISORY only: when
-# the composer visibly holds pending text the ring is skipped with a notice and
-# the watcher re-rings an ordinary record later; no composer verdict is
-# delivery proof on this plane, and a failed ring never fails the send.
+# re-ring ladder. On pane backends, the composer pre-check before the ring is
+# ADVISORY only: when the composer visibly holds pending text the ring is skipped
+# with a notice and the watcher re-rings an ordinary record later; no composer
+# verdict is delivery proof on this plane, and a failed ring never fails the send.
 #
-# TYPED - the LOCAL text that must reach the terminal itself: a harness-native
-# invocation (a leading "/", or a leading "$" to a codex target) must reach
-# the harness's own parser, and an explicit backend target names an endpoint,
-# not a task, so it stays typed even when local metadata happens to match it
-# (the same boundary that keeps it unmarked and outside --resolve-key). These
-# type the literal
-# text through the target backend's verified submit core: typed ONCE, then
-# Enter retried (never retyped) until the backend confirms a submit or reports
-# an inconclusive send. Typed-plane exit contract: 0 = submit confirmed;
-# 3 = the text was typed into the live endpoint and
-# Enter was sent, but the submit read-back stayed unconfirmed (verify the pane
-# before any resend, and never re-type blindly; a marked request's
+# TYPED - the LOCAL text submitted directly instead of through the inbox. On a
+# pane backend, a harness-native invocation (a leading "/", or a leading "$" to
+# a codex target) must reach the harness's own parser. An explicit backend
+# target names an endpoint, not a task, so it stays on this plane even when
+# local metadata happens to match it (the same boundary that keeps it unmarked
+# and outside --resolve-key). Pane backends type the literal text ONCE, then
+# retry Enter without retyping; T3 Code starts one native turn. Typed-plane exit
+# contract: 0 = submit confirmed; 3 = the text reached the live endpoint and
+# submission was attempted, but the read-back stayed unconfirmed (verify the endpoint
+# before any resend, and never submit blindly; a marked request's
 # pending-reply expectation stays armed because this outcome is not a proven
 # failure); any other nonzero = the send failed and nothing may be assumed
 # delivered. Submission dispatches through the target's recorded backend; the
@@ -82,8 +82,7 @@
 # every remote text steer rides the inbox (a marked secondmate request already
 # reaches the harness as marker-prefixed chat rather than a parser command, so
 # routing a remote "/..." or "$..." through the record changes nothing the
-# parser would have seen); only --key still crosses to the remote pane as a
-# keystroke.
+# parser would have seen); only --key still crosses to the remote endpoint.
 #
 # Stage-1 compatibility boundary: classification uses the original pre-marker
 # text, but secondmate marking still precedes every typed submission. Therefore

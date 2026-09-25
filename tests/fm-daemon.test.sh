@@ -2588,8 +2588,11 @@ test_discover_supervisor_backend_precedence() {
   out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
   [ "$out" = herdr ] || fail "HERDR_ENV=1 with HERDR_PANE_ID present should resolve to herdr: $out"
 
-  if out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend); then
-    fail "bare fallback (no override, no TMUX_PANE, no HERDR_ENV) should return non-zero"
+  # The adapter reads its bearer from FM_BACKEND_CONFIG_DIR (pinned when
+  # fm-backend.sh was sourced); pointing it at no bearer keeps the t3code rule
+  # closed whatever T3 state this dev box carries.
+  if out=$(FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' FM_BACKEND_CONFIG_DIR="$TMP_ROOT/no-t3" discover_supervisor_backend); then
+    fail "bare fallback (no override, no TMUX_PANE, no HERDR_ENV, no T3 bearer) should return non-zero"
   fi
   [ "$out" = tmux ] || fail "bare fallback should still print tmux: $out"
 
@@ -2610,12 +2613,113 @@ test_discover_supervisor_target_herdr() {
   out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION=iso1 discover_supervisor_target)
   [ "$out" = "iso1:w1:p9" ] || fail "herdr target should use an explicit HERDR_SESSION: $out"
 
-  if out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
+  if out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' FM_BACKEND_CONFIG_DIR="$TMP_ROOT/no-t3" discover_supervisor_target); then
     fail "bare fallback should return non-zero"
   fi
   [ "$out" = "firstmate:0" ] || fail "bare fallback should still print firstmate:0: $out"
 
   pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
+}
+
+# --- t3code supervisor discovery and busy verdict --------------------------
+# The real adapter is sourced once so fm_backend_source's sourced flag keeps it
+# from re-sourcing over the stub; the stub records every home it is asked about
+# and answers from FM_FAKE_T3_THREAD (empty: no live thread, `ambiguous`: the
+# adapter's two-threads error, anything else: that thread id).
+t3_discovery_stub() {
+  fm_backend_source t3code || fail "could not source the t3code adapter"
+  fm_backend_t3code_thread_for_home() {
+    printf '%s\n' "$1" >> "${FM_FAKE_T3_CALLS:?}"
+    case "${FM_FAKE_T3_THREAD:-}" in
+      '') return 1 ;;
+      ambiguous) echo "error: 2 live T3 threads run in $1 (t-a, t-b); set FM_SUPERVISOR_TARGET to the captain thread id" >&2; return 2 ;;
+      *) printf '%s' "$FM_FAKE_T3_THREAD" ;;
+    esac
+  }
+}
+
+test_discover_supervisor_t3code_after_env_tmux_and_herdr() {
+  local dir
+  dir=$(make_supercase discover-t3code)
+  mkdir -p "$dir/config"
+  printf 'tok\n' > "$dir/config/t3code-token"
+  (
+    t3_discovery_stub
+    export FM_FAKE_T3_CALLS="$dir/calls" FM_FAKE_T3_THREAD=thread-captain
+    export FM_HOME="$dir" FM_BACKEND_CONFIG_DIR="$dir/config" FM_T3CODE_ORIGIN=http://127.0.0.1:9
+    local out
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target) \
+      || fail "one live T3 thread in the home must resolve the target cleanly"
+    [ "$out" = thread-captain ] || fail "the target should be the live thread id, got '$out'"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend) \
+      || fail "one live T3 thread in the home must resolve the backend cleanly"
+    [ "$out" = t3code ] || fail "the backend should be t3code, got '$out'"
+    [ "$(sort -u "$dir/calls")" = "$dir" ] || fail "the adapter must be asked about this home only, got '$(cat "$dir/calls")'"
+
+    : > "$dir/calls"
+    out=$(FM_SUPERVISOR_TARGET=explicit:target FM_SUPERVISOR_BACKEND=herdr TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target)
+    [ "$out" = explicit:target ] || fail "explicit FM_SUPERVISOR_TARGET must win over a live T3 thread: $out"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND=herdr TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend)
+    [ "$out" = herdr ] || fail "explicit FM_SUPERVISOR_BACKEND must win over a live T3 thread: $out"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='%3' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target)
+    [ "$out" = '%3' ] || fail "TMUX_PANE must win over a live T3 thread: $out"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='%3' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend)
+    [ "$out" = tmux ] || fail "TMUX_PANE must resolve tmux ahead of t3code: $out"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION='' discover_supervisor_target)
+    [ "$out" = default:w1:p9 ] || fail "herdr markers must win over a live T3 thread: $out"
+    out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV=1 HERDR_PANE_ID=w1:p9 discover_supervisor_backend)
+    [ "$out" = herdr ] || fail "herdr markers must resolve herdr ahead of t3code: $out"
+    [ ! -s "$dir/calls" ] || fail "the explicit env, tmux, and herdr rules must win before the adapter is consulted"
+
+    export FM_FAKE_T3_THREAD=
+    if out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
+      fail "no live T3 thread must fall through to the default with a non-zero status"
+    fi
+    [ "$out" = firstmate:0 ] || fail "no live T3 thread should still print the tmux default target: $out"
+    if out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_backend); then
+      fail "no live T3 thread must fall through to the default backend with a non-zero status"
+    fi
+    [ "$out" = tmux ] || fail "no live T3 thread should still print the tmux default backend: $out"
+
+    export FM_FAKE_T3_THREAD=ambiguous
+    if out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target 2>"$dir/ambiguous.err"); then
+      fail "two live T3 threads must not resolve a target"
+    fi
+    [ "$out" = firstmate:0 ] || fail "an ambiguous home falls through to the default target: $out"
+    assert_contains "$(cat "$dir/ambiguous.err")" "t-a, t-b" "the ambiguity error must reach stderr naming the ids"
+    assert_contains "$(cat "$dir/ambiguous.err")" "FM_SUPERVISOR_TARGET" "the ambiguity error must tell the operator how to pin the target"
+
+    : > "$dir/calls"
+    export FM_FAKE_T3_THREAD=thread-captain
+    rm -f "$dir/config/t3code-token"
+    if out=$(FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
+      fail "without a bearer the t3code rule must stay closed"
+    fi
+    [ "$out" = firstmate:0 ] || fail "without a bearer the default target stands: $out"
+    [ ! -s "$dir/calls" ] || fail "without a bearer the adapter must not be consulted"
+  ) || fail "t3code discovery subshell failed"
+  pass "discover_supervisor_*: t3code resolves from the home's live thread after env, TMUX_PANE, and herdr; zero, ambiguous, and no-bearer fall through"
+}
+
+test_pane_is_busy_t3code_trusts_native_verdict_without_capture() {
+  local dir
+  dir=$(make_supercase primary-t3code-busy)
+  (
+    fm_backend_capture() { fail "capture must never be consulted for a t3code supervisor"; }
+    fm_backend_busy_state() {
+      [ "$1" = t3code ] && [ "$2" = thread-captain ] || fail "unexpected busy_state args: $1 $2"
+      printf '%s' "${FM_FAKE_T3_NATIVE:?}"
+    }
+    FM_FAKE_T3_NATIVE=busy FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy thread-captain t3code \
+      || fail "a running T3 session must read busy"
+    if FM_FAKE_T3_NATIVE=idle FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy thread-captain t3code; then
+      fail "a ready T3 session must read idle without a rendered-tail fallback"
+    fi
+    if FM_FAKE_T3_NATIVE=unknown FM_STATE_OVERRIDE="$dir/state" FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy thread-captain t3code; then
+      fail "an unreadable T3 server must not read busy"
+    fi
+  ) || fail "t3code pane_is_busy subshell failed"
+  pass "pane_is_busy: t3code trusts the native verdict for busy and idle and never reads a rendered tail"
 }
 
 test_pane_is_busy_herdr_native_busy_state() {
@@ -2897,6 +3001,8 @@ test_fm_send_exits_nonzero_on_initial_send_failure
 test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
+test_discover_supervisor_t3code_after_env_tmux_and_herdr
+test_pane_is_busy_t3code_trusts_native_verdict_without_capture
 test_pane_is_busy_herdr_native_busy_state
 test_primary_busy_guard_is_harness_scoped
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted

@@ -237,7 +237,9 @@ fm_control_exit_command() {  # <harness>
 # Which named keys a backend adapter can deliver. Every session provider
 # normalizes Enter, Ctrl+C, and the Ctrl+U composer clear; Orca's terminal API
 # exposes only an interrupt and an Enter, so it can deliver neither Escape nor
-# Ctrl+U (bin/backends/orca.sh's fm_backend_orca_send_key).
+# Ctrl+U (bin/backends/orca.sh's fm_backend_orca_send_key). T3 has no composer
+# to clear, so Ctrl+U has nothing to do there; Escape and Ctrl+C are both a
+# turn interrupt (bin/backends/t3code.sh's fm_backend_t3code_send_key).
 fm_control_backend_supports_key() {  # <backend> <key>
   local backend=${1-} key=${2-}
   case "$backend" in
@@ -247,16 +249,46 @@ fm_control_backend_supports_key() {  # <backend> <key>
     orca)
       case "$key" in Enter|C-c) return 0 ;; esac
       ;;
+    t3code)
+      case "$key" in Escape|Enter|C-c) return 0 ;; esac
+      ;;
   esac
   return 1
 }
 
-# Whether <backend> has a recovery-grade agent-state classifier. Only tmux and
-# herdr implement fm_backend_agent_state; zellij, orca, and cmux report
+# Whether <backend> has a recovery-grade agent-state classifier. tmux, herdr,
+# and t3code implement fm_backend_agent_state; zellij, orca, and cmux report
 # `unverified`, so no reading of theirs can prove an agent stopped. The control
 # plane refuses a stop-proving verb there instead of reporting an unprovable
 # transition as success.
 fm_control_backend_state_verified() {  # <backend>
+  case "${1-}" in
+    tmux|herdr|t3code) return 0 ;;
+  esac
+  return 1
+}
+
+# Whether <backend> stops an agent natively, through its own session API,
+# instead of through the harness exit command typed into the composer. T3 has
+# no composer: `thread.session.stop` is its exit, and the session reading
+# `stopped` afterwards is the same recovery-grade proof the typed path waits
+# for (bin/backends/t3code.sh's fm_backend_t3code_agent_stop).
+fm_control_backend_native_exit() {  # <backend>
+  case "${1-}" in
+    t3code) return 0 ;;
+  esac
+  return 1
+}
+
+# Whether <backend> can launch a REPLACEMENT agent into an existing task's
+# endpoint. A T3 thread is bound to the driver that first ran it (the server
+# answers "is bound to driver 'codex' and cannot switch to 'claudeAgent'"),
+# and a turn on a stopped thread restarts the same agent with its transcript
+# rather than a fresh one, so t3code has no replacement to launch and a
+# relaunch is refused before anything is stopped (docs/t3code-backend.md
+# "Active limits"). zellij, orca, and cmux never reach this table: they fail
+# fm_control_backend_state_verified first.
+fm_control_backend_relaunch_supported() {  # <backend>
   case "${1-}" in
     tmux|herdr) return 0 ;;
   esac
@@ -293,6 +325,9 @@ fm_control_backend_state_verified() {  # <backend>
 #     passes `--session <session>`, so the recheck starts and reads the session
 #     the RECORD names, through that session's own socket. The answer is about
 #     the task's endpoint and nothing else.
+#   t3code CAN prove it for exit. `missing` means archived or HTTP 404, while
+#     an unreachable server reads `unreadable`; the proof re-reads the thread.
+#     Relaunch still refuses because the thread cannot host a replacement.
 #   tmux CANNOT. `list-windows -a` describes only the server the CURRENT
 #     process addresses (its TMUX_TMPDIR/socket), and a task's record does not
 #     carry the endpoint's socket identity - so a different but running server
@@ -320,6 +355,17 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target>
         alive) printf 'alive\t' ;;
         missing) printf 'gone\t' ;;
         *) printf 'unproven\tthe recorded herdr session'"'"'s server could not be started, or its pane could not be classified once it was running' ;;
+      esac
+      ;;
+    t3code)
+      # A T3 `missing` is the server's own answer (an archived thread or an
+      # HTTP 404), never a reachability guess: an unreachable server reads
+      # `unreadable` instead. Re-read the thread so the verdict is current.
+      case "$(fm_backend_t3code_agent_state "$target")" in
+        dead) printf 'dead\t' ;;
+        alive) printf 'alive\t' ;;
+        missing) printf 'gone\t' ;;
+        *) printf 'unproven\tthe T3 server could not be reached to re-read thread %s' "$target" ;;
       esac
       ;;
     *)
