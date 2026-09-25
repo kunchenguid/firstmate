@@ -3012,6 +3012,55 @@ test_projection_label_builder_uses_corner_and_strips_owner_prefixes() {
   pass "herdr presentation labels: └ concise-task · p:<full-token> for primary and secondmate children"
 }
 
+test_projection_order_refreshes_focus_before_each_move() {
+  local dir mover restore_log focus_state mover_log out
+  dir="$TMP_ROOT/projection-order-focus-refresh"
+  mkdir -p "$dir"
+  mover="$dir/mover"
+  restore_log="$dir/restores.log"
+  focus_state="$dir/focus"
+  mover_log="$dir/mover.log"
+  : > "$restore_log"
+  : > "$mover_log"
+  printf 'workspace-a\ttab-a\n' > "$focus_state"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+printf '%s\t%s\n' "$2" "$3" >> "$FM_FAKE_MOVER_LOG"
+case "$(wc -l < "$FM_FAKE_MOVER_LOG" | tr -d '[:space:]')" in
+  1) printf '%s\n' '{"result":{"type":"workspace_list","workspaces":[{"workspace_id":"w1"},{"workspace_id":"w2"},{"workspace_id":"w3"},{"workspace_id":"w4"},{"workspace_id":"w5"}]}}' ;;
+  2) printf '%s\n' '{"result":{"type":"workspace_list","workspaces":[{"workspace_id":"w1"},{"workspace_id":"w4"},{"workspace_id":"w5"},{"workspace_id":"w2"},{"workspace_id":"w3"}]}}' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$mover"
+  out=$(ROOT="$ROOT" FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" \
+    FM_FAKE_MOVER_LOG="$mover_log" RESTORE_LOG="$restore_log" FOCUS_STATE="$focus_state" bash -c '
+      . "$ROOT/bin/backends/herdr.sh"
+      fm_backend_herdr_cli() {
+        printf "%s\n" '\''{"result":{"workspaces":[{"workspace_id":"w2","label":"Project A"},{"workspace_id":"w3","label":"└ A task · p:AbCdEfGhIjKlMnOpQrStUv"},{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w4","label":"Project B"},{"workspace_id":"w5","label":"└ B task · p:ZyXwVuTsRqPoNmLkJiHgFe"}]}}'\''
+      }
+      fm_backend_herdr_projection_owned_children_json() {
+        printf "%s\n" '\''[{"child":"w3","parent":"w2","journal":"","task":""},{"child":"w5","parent":"w4","journal":"","task":""}]'\''
+      }
+      fm_backend_herdr_workspace_move_capable() { return 0; }
+      fm_backend_herdr_presentation_session_socket_path() { printf /tmp/fake.sock; }
+      fm_backend_herdr_projection_focus_snapshot() { cat "$FOCUS_STATE"; }
+      fm_backend_herdr_projection_focus_restore() {
+        printf "%s\n" "$2" >> "$RESTORE_LOG"
+        if [ "$(wc -l < "$RESTORE_LOG" | tr -d "[:space:]")" = 1 ]; then
+          printf "workspace-b\\ttab-b\\n" > "$FOCUS_STATE"
+        fi
+      }
+      fm_backend_herdr_projection_order_best_effort test "" firstmate "" /tmp/state /tmp/home
+    ' 2>&1)
+  [ -z "$out" ] || fail "multi-move ordering emitted a warning: $out"
+  [ "$(cat "$mover_log")" = $'w1\t0\nw4\t1' ] \
+    || fail "multi-move ordering did not execute the expected move plan: $(cat "$mover_log")"
+  [ "$(cat "$restore_log")" = $'workspace-a\ttab-a\nworkspace-b\ttab-b' ] \
+    || fail "multi-move ordering restored a stale focus snapshot: $(cat "$restore_log")"
+  pass "herdr presentation ordering refreshes focus around every workspace move"
+}
+
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order() {
   local dir log resp fb mover mover_log out status
   dir="$TMP_ROOT/projection-order"; mkdir -p "$dir/responses"
@@ -5715,6 +5764,7 @@ test_endpoint_confirmed_gone_gates_on_structured_presence
 test_kill_refuses_when_presentation_lock_is_unavailable
 test_projection_seeded_prune_refuses_active_tab
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes
+test_projection_order_refreshes_focus_before_each_move
 test_presentation_session_lock_path_is_shared_across_homes
 test_presentation_session_lock_path_rejects_malformed_socket
 test_projection_reclaim_refusal_matrix_is_non_mutating

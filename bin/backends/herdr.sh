@@ -1566,10 +1566,6 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
       echo "warning: herdr presentation ordering found an ambiguous named session socket; leaving worker in Herdr's current order" >&2
       return 0
     }
-    focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
-      echo "warning: herdr presentation ordering could not capture exact active workspace and tab; leaving worker in Herdr's current order" >&2
-      return 0
-    }
     mover=${FM_BACKEND_HERDR_WORKSPACE_MOVER:-$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-workspace-move.py}
     count=$(printf '%s' "$desired" | jq 'length')
     index=0
@@ -1577,6 +1573,10 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
       target=$(printf '%s' "$desired" | jq -r --argjson index "$index" '.[$index]')
       actual=$(printf '%s' "$current" | jq -r --argjson index "$index" '.[$index]')
       if [ "$target" != "$actual" ]; then
+        focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
+          echo "warning: herdr presentation ordering could not capture exact active workspace and tab; leaving worker in Herdr's current order" >&2
+          return 0
+        }
         if response=$("$mover" "$socket" "$target" "$index" 2>/dev/null); then move_status=0; else move_status=$?; fi
         fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "workspace move" || true
         if [ "$move_status" -ne 0 ]; then
