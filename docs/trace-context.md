@@ -16,7 +16,7 @@ This feature adds only that carrier seam.
 When enabled, for each spawn Firstmate resolves one W3C `traceparent` carrier for the task - minted as a fresh root on the task's first spawn and reused verbatim from the meta on relaunch - and:
 
 - forms it as `00-<32 hex trace id>-<16 hex span id>-<2 hex flags>`, with random ids for a new root;
-- injects it into the agent's pane shell as the `TRACEPARENT` environment variable immediately before launch, through the same `spawn_send_text_line` channel that already ships `GOTMPDIR`; and
+- injects it into the agent's pane shell as the `TRACEPARENT` environment variable immediately before launch, through the same setup channel that already ships `GOTMPDIR`; and
 - records the identical value as `traceparent=` in `state/<id>.meta`.
 
 `TRACEPARENT` as an environment variable is a Firstmate convention carrying a W3C-formatted value: W3C Trace Context standardizes the `traceparent` HTTP header, not an env var, and OpenTelemetry SDKs do not read it from the environment automatically, so a downstream observer must explicitly read this env value or the `traceparent=` meta field.
@@ -100,8 +100,9 @@ This is a deliberate, source-owned choice:
   There is no configured provider command, no network, and no watchdog.
   The normal cost is small, but `od`/`tr` are external processes, so there is no hard latency guarantee - this is not a guaranteed-negligible bound.
   Any entropy or self-validation failure that returns omits the carrier for that spawn without aborting source work; a corrupt recorded carrier is re-minted as a fresh root rather than propagated (it is not an omission).
-  If the pre-launch carrier export fails, Firstmate omits the `traceparent=` metadata claim and still launches the task.
-  If the backend reports that failed trace input could not be cleared, Firstmate refuses to append the launch command rather than risk launching with an unknown partial carrier.
+  On backends that submit exports separately, a failed pre-launch carrier export omits the `traceparent=` metadata claim and still permits launch if the failed input was safely cleared.
+  If that input could not be cleared, Firstmate refuses to append the launch command rather than risk launching with an unknown partial carrier.
+  Herdr records the carrier only after its shared setup succeeds; its [launch setup refusal](herdr-backend.md#current-transport-behavior) also applies when tracing is enabled.
   If recording the carrier fails after export, Firstmate unsets `TRACEPARENT` in the launch command and still launches the task, so the child never receives an identity absent from its metadata.
 - **Metadata-only.**
   The value lives in the ephemeral pane shell and in `state/<id>.meta`; teardown removes state as before, so there is no new durable surface and no schema migration.

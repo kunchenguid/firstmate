@@ -91,6 +91,15 @@ case "${1:-} ${2:-}" in
       '.tabs |= [.[]|select(.pane_id != $p)]
        | .typed |= with_entries(select(.key != $p))
        | .working |= with_entries(select(.key != $p))' | save ;;
+  "pane run")
+    [ ! -f "$SEND_FAIL" ] || exit 1
+    # fm-spawn batches Herdr's pre-launch exports into one shell command whose
+    # final operation creates a private completion marker. Model that shell
+    # execution so the public remote launch observes the same ordering barrier.
+    case "${4:-}" in
+      *"launch-setup."*".ready"*) /bin/sh -c "${4:-}" ;;
+    esac
+    ;;
   "pane send-text")
     [ ! -f "$SEND_FAIL" ] || exit 1
     jq_state --arg p "${3:-}" '.typed[$p] = true' | save ;;

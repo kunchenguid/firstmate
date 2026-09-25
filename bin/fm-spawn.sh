@@ -270,6 +270,11 @@
 #   This keeps commands beyond the terminal's roughly 1,024-byte input boundary
 #   intact, prevents a delayed source line from being rebound by a relaunch, and
 #   prevents equal task ids in different Firstmate homes from sharing a file.
+#   Herdr's pre-launch pane exports are one compound run ending in a private
+#   completion marker; spawn waits for and retires that marker before it types
+#   the staged source line, because pane-run acceptance is not shell completion.
+#   It polls for up to ten seconds and refuses launch if submission fails, the
+#   marker already exists, completion is unconfirmed, or retirement fails.
 #   Spawn refuses an unsafe pre-existing task temp root or launch namespace, and
 #   task teardown removes only the current home's launch namespace.
 # Launch environment (config/launch-env-allowlist):
@@ -4919,16 +4924,33 @@ spawn_record_traceparent() {
   return "$status"
 }
 
+# Herdr accepts `pane run` before the pane shell has executed it.
+# Separate setup calls followed by a literal staged-launch source line can therefore overtake one another in the terminal input stream.
+# Keep every other backend's proven sequence unchanged, but batch Herdr's setup into one compound command ending in a private completion marker.
+# The staged source line is not typed until that marker proves the pane shell executed every setup export.
+SPAWN_HERDR_SETUP=
+spawn_deliver_setup_line() { # <shell-line>
+  local line=$1
+  if [ "$BACKEND" = herdr ]; then
+    if [ -n "$SPAWN_HERDR_SETUP" ]; then
+      SPAWN_HERDR_SETUP="$SPAWN_HERDR_SETUP && $line"
+    else
+      SPAWN_HERDR_SETUP=$line
+    fi
+    return 0
+  fi
+  spawn_send_text_line "$T" "$line"
+}
+
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# process (go build, go test, ...) inherit it.
+spawn_deliver_setup_line "export GOTMPDIR=$TASK_TMP/gotmp"
 # Export the compact-adviser kill switch into the pane shell through the same
 # pre-launch channel, so later commands in that shell inherit it too. The launch
 # command independently establishes the value for the agent process itself.
-spawn_send_text_line "$T" "export COMPACT_ADVISER_DISABLE=1"
+spawn_deliver_setup_line "export COMPACT_ADVISER_DISABLE=1"
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
-  spawn_send_text_line "$T" "export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST")"
+  spawn_deliver_setup_line "export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST")"
 fi
 # Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
 # suite in the repository's primary checkout. Ship and scout workers are the
@@ -4936,14 +4958,17 @@ fi
 # The id reached a validated bare-slug charset above, so it carries no shell
 # syntax of its own.
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
-  spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
+  spawn_deliver_setup_line "export FM_TASK_ID=$ID"
 fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
 # entirely when trace context is off.
+SPAWN_HERDR_TRACE_SETUP_PENDING=0
 if [ -n "$SPAWN_TRACEPARENT" ]; then
-  if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
-    if ! spawn_record_traceparent; then
+  if spawn_deliver_setup_line "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
+    if [ "$BACKEND" = herdr ]; then
+      SPAWN_HERDR_TRACE_SETUP_PENDING=1
+    elif ! spawn_record_traceparent; then
       LAUNCH="unset TRACEPARENT; $LAUNCH"
     fi
   else
@@ -4952,6 +4977,34 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
       echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
       exit 1
     fi
+    LAUNCH="unset TRACEPARENT; $LAUNCH"
+  fi
+fi
+if [ "$BACKEND" = herdr ]; then
+  SPAWN_HERDR_SETUP_READY="$TASK_TMP/launch-setup.$SPAWN_GEN.ready"
+  if [ -e "$SPAWN_HERDR_SETUP_READY" ] || [ -L "$SPAWN_HERDR_SETUP_READY" ]; then
+    echo "error: herdr launch setup marker already exists at $SPAWN_HERDR_SETUP_READY; refusing an ambiguous launch" >&2
+    exit 1
+  fi
+  spawn_deliver_setup_line ": > $(shell_quote "$SPAWN_HERDR_SETUP_READY")"
+  if ! spawn_send_text_line "$T" "$SPAWN_HERDR_SETUP"; then
+    echo "error: herdr launch setup could not be submitted for $W; refusing to append the launch command" >&2
+    exit 1
+  fi
+  SPAWN_HERDR_SETUP_POLL=0
+  while [ ! -e "$SPAWN_HERDR_SETUP_READY" ] && [ "$SPAWN_HERDR_SETUP_POLL" -lt 100 ]; do
+    sleep 0.1
+    SPAWN_HERDR_SETUP_POLL=$((SPAWN_HERDR_SETUP_POLL + 1))
+  done
+  if [ ! -f "$SPAWN_HERDR_SETUP_READY" ] || [ -L "$SPAWN_HERDR_SETUP_READY" ]; then
+    echo "error: herdr launch setup did not complete in the pane for $W; refusing to append the launch command" >&2
+    exit 1
+  fi
+  if ! rm -f "$SPAWN_HERDR_SETUP_READY"; then
+    echo "error: herdr launch setup marker could not be retired for $W; refusing to append the launch command" >&2
+    exit 1
+  fi
+  if [ "$SPAWN_HERDR_TRACE_SETUP_PENDING" = 1 ] && ! spawn_record_traceparent; then
     LAUNCH="unset TRACEPARENT; $LAUNCH"
   fi
 fi

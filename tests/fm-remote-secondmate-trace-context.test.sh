@@ -152,6 +152,13 @@ freeze_parent_session() {
 remote_injected_traceparent() {
   sed -n 's/.*export TRACEPARENT=\([0-9a-f-]*\).*/\1/p' "$HERDR_LOG" | tail -1
 }
+remote_setup_lines() {
+  # Herdr receives the pre-launch exports as one completion-marked command.
+  # Split that payload only so the test can assert its internal shell order.
+  sed -n 's/^pane run [^ ]* \(.*\) --session [^ ]*$/\1/p' "$HERDR_LOG" \
+    | tail -1 \
+    | awk '{ gsub(/ && /, "\n"); print }'
+}
 remote_staged_launch() {
   local staged
   staged=$(sed -n "s/^pane send-text [^ ]* \\. '\([^']*\)' --session [^ ]*\$/\1/p" "$HERDR_LOG" | tail -1)
@@ -210,15 +217,16 @@ fm_trace_context_valid "$INJECTED_TP" \
   || fail "an enabled remote spawn must deliver FM_TRACE_CONTEXT=on (got '$(remote_launch_snapshot)')"
 assert_present "$REMOTE_HOME/config/trace-context" \
   "an enabled remote launch did not inherit the enablement flag into the remote home"
-GOTMP_LINE=$(grep -n 'export GOTMPDIR=' "$HERDR_LOG" | tail -1 | cut -d: -f1)
-TP_LINE=$(grep -n 'export TRACEPARENT=' "$HERDR_LOG" | tail -1 | cut -d: -f1)
+GOTMP_POS=$(remote_setup_lines | grep -n '^export GOTMPDIR=' | tail -1 | cut -d: -f1)
+TP_POS=$(remote_setup_lines | grep -n '^export TRACEPARENT=' | tail -1 | cut -d: -f1)
+SETUP_LINE=$(grep -n '^pane run [^ ]* .*launch-setup\..*\.ready.* --session ' "$HERDR_LOG" | tail -1 | cut -d: -f1)
 LAUNCH_LINE=$(grep -n "^pane send-text [^ ]* \\. '.*' --session " "$HERDR_LOG" | tail -1 | cut -d: -f1)
-[ -n "$GOTMP_LINE" ] && [ -n "$TP_LINE" ] && [ -n "$LAUNCH_LINE" ] \
-  || fail "remote pane log missing GOTMPDIR/TRACEPARENT/launch lines"
-[ "$TP_LINE" -gt "$GOTMP_LINE" ] \
-  || fail "the remote TRACEPARENT export must ride the GOTMPDIR pre-launch site (gotmp=$GOTMP_LINE tp=$TP_LINE)"
-[ "$TP_LINE" -lt "$LAUNCH_LINE" ] \
-  || fail "the remote TRACEPARENT export must be sent before the launch command (tp=$TP_LINE launch=$LAUNCH_LINE)"
+[ -n "$GOTMP_POS" ] && [ -n "$TP_POS" ] && [ -n "$SETUP_LINE" ] && [ -n "$LAUNCH_LINE" ] \
+  || fail "remote pane log missing GOTMPDIR/TRACEPARENT/setup/launch entries"
+[ "$TP_POS" -gt "$GOTMP_POS" ] \
+  || fail "the remote TRACEPARENT export must follow GOTMPDIR inside the setup command (gotmp=$GOTMP_POS tp=$TP_POS)"
+[ "$SETUP_LINE" -lt "$LAUNCH_LINE" ] \
+  || fail "the completion-marked remote setup must be submitted before the launch command (setup=$SETUP_LINE launch=$LAUNCH_LINE)"
 pass "enabled: a remote-routed second mate receives one carrier in its pane, identical to the parent's recorded identity, before launch"
 
 # --- relaunch stability on the remote path ----------------------------------

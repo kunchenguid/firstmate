@@ -2984,10 +2984,10 @@ fm_backend_herdr_current_path() {  # <target>
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
 }
 
-# fm_backend_herdr_send_text_line: send one line of TEXT then submit,
-# ATOMICALLY - mirrors tmux's `send-keys -t T text Enter`. Used for the fixed
-# spawn-time commands (treehouse get, the GOTMPDIR export). `pane run` types
-# the command and submits it in one call (verified).
+# fm_backend_herdr_send_text_line: send one line of TEXT then submit in one
+# API call, mirroring tmux's `send-keys -t T text Enter`.
+# `pane run` acceptance is not shell-execution completion: a later input call can race its deferred terminal delivery.
+# Callers that require completed ordering must observe their own postcondition; fm-spawn's pre-launch setup ends in a private marker for that reason.
 fm_backend_herdr_send_text_line() {  # <target> <text>
   fm_backend_herdr_target_ready "$1" || return 1
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1

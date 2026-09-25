@@ -1152,6 +1152,30 @@ Observed 2026-08-19:
 ok - live Herdr submit confirm: Claude Code (2.1.236 (Claude Code)) on herdr 0.8.0 reports empty for a landed idle steer
 ```
 
+### Worker launch setup ordering
+
+Measured 2026-09-25 on macOS 26.6 arm64 with Herdr 0.9.1 and tmux 3.6a.
+The real-Herdr regression below drives `fm-spawn.sh --relaunch`, requires `FM_TASK_ID`, `GOTMPDIR`, and `COMPACT_ADVISER_DISABLE=1` in the launched worker, and verifies that worker remains the pane's foreground process:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  bin/fm-test-run.sh tests/fm-herdr-launch-setup-e2e.test.sh
+```
+
+```text
+ok - real herdr: public relaunch completes setup before submitting the staged launch and starts the worker
+FM_TEST_END ... tests/fm-herdr-launch-setup-e2e.test.sh exit=0 duration_ms=2902 gate_skip=false
+```
+
+`tests/fm-control-relaunch.test.sh` models Herdr's asynchronous acceptance through the same public relaunch interface and fails if the staged source arrives before the delayed setup marker.
+The operator-facing guarantee and its readiness boundary are owned by [Herdr transport behavior](../herdr-backend.md#current-transport-behavior).
+
+On 2026-09-25, a development-only evaluation also exercised the public relaunch with real Pi 0.87.1 (`openai-codex/gpt-6-sol`, low thinking) on Herdr 0.9.1 in a named isolated lab.
+After accepting Pi's folder-trust prompt for the disposable candidate, the worker processed the generated launch brief, called its read tool on an untracked challenge file, and returned `LAUNCH_READY 33884 ae32d47623a4e47e`, the expected sum and nonce that were absent from the brief.
+Pi's persisted assistant and tool-result messages proved brief processing beyond process startup.
+This model evaluation is development evidence, not a live-LLM CI test.
+Claude brief processing remains untested: its earlier real launch stopped at the external-import consent dialog, and this Pi evaluation neither requested nor supplied that consent.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

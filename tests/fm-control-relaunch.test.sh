@@ -1992,6 +1992,24 @@ case "${1:-} ${2:-}" in
     printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"claude","argv":["claude"],"cmdline":"claude"}]}}}\n' \
       "$(cat "$D/herdr-pane")"
     exit 0 ;;
+  'pane run')
+    # Real Herdr acknowledges pane.run before its shell executes the command.
+    # Model that asynchronous boundary for the public relaunch path: only the
+    # completion marker at the end of the compound setup proves the shell got
+    # through every export, and the marker becomes visible after a delay.
+    payload=${4:-}
+    case "$payload" in
+      *": > '"*"launch-setup."*".ready'")
+        marker=${payload##*": > '"}
+        marker=${marker%"'"}
+        (
+          /bin/sleep 0.2
+          : > "$D/herdr-setup-complete"
+          : > "$marker"
+        ) >/dev/null 2>&1 &
+        ;;
+    esac
+    exit 0 ;;
   'pane send-text')
     # Mirrors the tmux fake's `becomes`: delivering the launch brief is what
     # makes an agent exist on this pane, so the control plane's alive-wait can
@@ -1999,6 +2017,9 @@ case "${1:-} ${2:-}" in
     # the staged launch file rather than the literal command, so read that file
     # back before deciding what was delivered - exactly as the tmux fake above
     # and tests/fixtures.sh do.
+    # Record an ordering failure if Firstmate types that source line before the
+    # asynchronous setup command has reached its terminal postcondition.
+    [ -f "$D/herdr-setup-complete" ] || : > "$D/herdr-launch-joined"
     payload=${4:-}
     case "$payload" in
       ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || payload=$(cat "$staged") ;;
@@ -2126,6 +2147,10 @@ test_herdr_reclaim_adopts_a_pane_that_outlived_its_server() {
     || fail "the adopted record's endpoint moved, got $(meta_field "$dir" rl68 window)"
   assert_contains "$log" "pane send-text %7 " \
     "the replacement's launch brief must be delivered into the adopted pane"
+  assert_present "$dir/fake/herdr-setup-complete" \
+    "the public relaunch must wait for Herdr's pane shell to complete its pre-launch setup"
+  assert_absent "$dir/fake/herdr-launch-joined" \
+    "the staged launch source must not overtake Herdr's asynchronously delivered setup"
   pass "reclaim: a herdr pane that outlived its stopped server is adopted, never orphaned beside a new tab"
 }
 

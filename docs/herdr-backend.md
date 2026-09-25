@@ -227,7 +227,10 @@ An already-running server is reused without restart or environment changes.
 Explicit named-session routing and unrelated launch environment remain intact.
 
 Literal text and Enter are separate operations on `fm-send.sh`'s typed plane; ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
-Spawn-time fixed commands may use Herdr's atomic run primitive.
+Herdr's atomic run primitive packages command text and Enter in one API request, but its successful return acknowledges acceptance rather than shell execution.
+Worker launch waits for confirmed pane-shell setup and refuses to submit the launch command when setup cannot be confirmed, preventing deferred terminal delivery from joining an export to the source path.
+This confirms the launch environment, not that the harness has processed its brief; the post-spawn confirmation remains necessary.
+`bin/fm-spawn.sh`'s header owns the Herdr-specific completion barrier mechanics.
 Enter, Escape, and Ctrl-C are supported.
 Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
 Typed-plane text is typed once; only Enter is retried.
@@ -351,7 +354,7 @@ Immediately before every destructive call it re-queries the named session and re
 Its before/after tripwire requires the live default-session snapshot to remain byte-identical.
 
 The helper's header and `--help` own exact commands.
-Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never duplicate the destructive policy.
+Tests call the helper directly or through thin compatibility wrappers in `tests/herdr-test-safety.sh` and never duplicate the destructive policy.
 
 ## Active limits
 
@@ -367,6 +370,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 tests/fm-backend-herdr.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-herdr-submit-confirm-live-e2e.test.sh
+tests/fm-herdr-launch-setup-e2e.test.sh
 tests/fm-backend-herdr-smoke.test.sh
 tests/fm-backend-herdr-prune-safety-e2e.test.sh
 tests/fm-backend-herdr-respawn-idem-e2e.test.sh
