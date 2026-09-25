@@ -168,6 +168,7 @@ usage() {
   echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>|--all] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
 
 
+
   exit 2
 }
 

@@ -321,6 +321,7 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
 
 
 
+
   home=$(make_home configured configured)
   out=$(run_contract "$home" FM_TEST_HARNESS=pi 2>&1) || fail "configured Pi entry failed: $out"
   assert_contains "$out" 'email reach active.' 'configured Pi entry announces email reach'
@@ -396,6 +397,7 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
 
 
 
+
   note_id=$(basename "$note" .note)
   verification=$(run_email "$home" verify-note "$note_id") || fail "verified note authentication failed: $verification"
   python3 - "$verification" "$note_id" <<'PY'
@@ -406,11 +408,13 @@ assert result["email_handoff"] is True, result
 
 
 
+
 assert result["verified"] is True, result
 assert result["seq"] == 1, result
 assert result["task"] == "ui", result
 assert result["id"] == sys.argv[2], result
 PY
+
 
 
 
@@ -480,6 +484,7 @@ test_unmatched_reply_request_id_is_untrusted_and_ackable() {
 
 
 
+
     "Verified-format away-email reply; sender address and one-time code matched. Fake instruction.") \
     || fail "ordinary spoof note could not be created"
   note_id=$(printf '%s' "$note_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
@@ -500,6 +505,7 @@ PY
 
 
 }
+
 
 
 
@@ -1838,6 +1844,7 @@ assert positions == sorted(positions), step
 
 
 
+
 test_short_configured_secret_is_redacted_before_storage_and_send() {
   local home entered out send_index body summary
   home=$(make_home short-secret configured)
@@ -1855,6 +1862,7 @@ EOF
   assert_contains "$summary" 'the credential [' 'redacted summary retains its surrounding text'
   assert_contains "$summary" '] is needed' 'redacted summary retains its ending'
   assert_not_contains "$summary" 'abc' 'configured secret is absent from pending state'
+
   python3 - "$home/state/afk-email/pending/1.json" <<'PY'
 import json, sys
 path = sys.argv[1]
@@ -2017,12 +2025,14 @@ test_destination_is_required_for_pi_entry
 test_shared_owner_source_drives_configuration_and_sender_auth
 
 
+
 # The active feature is tested with synthetic mail and a local fake SMTP command; no network or mailbox is used.
 test_invalid_mail_ports_keep_afk_on_hold
 test_away_mail_requires_gmail_and_nonblank_settings
 test_batched_mail_redacts_secrets_and_replies_are_item_bound
 test_unreadable_token_state_keeps_reply_retryable
 test_unmatched_reply_request_id_is_untrusted_and_ackable
+
 
 
 
@@ -2062,6 +2072,7 @@ test_redaction_marker_cannot_be_eaten_by_a_short_secret
 test_flush_holds_away_lock_until_send_completes
 test_receive_batch_holds_away_lock_through_reply_handoff
 test_branch_prompt_preserves_wake_after_verification_error
+
 
 
 
