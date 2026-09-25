@@ -23,7 +23,7 @@
 # success so session startup continues conservatively.
 # Discovery validates each home journal once; locked mutation checks are uncached.
 # FM_HERDR_SESSION_CLEANUP_TIMEOUT bounds the complete pass (default 30 seconds);
-# after expiry the parent reclaims only recorded locks it can safely acquire.
+# after expiry the parent reclaims only locks still provably owned by the timed-out worker.
 # Unfinished candidates are preserved and coverage is explicitly unconfirmed.
 set -u
 
@@ -229,36 +229,92 @@ fm_herdr_cleanup_revalidate() { # <session> <workspace> <tab> <pane> <title> <to
   [ "${focus#*$'\t'}" != "$tab" ]
 }
 
-fm_herdr_cleanup_record_lock_paths() { # <id> <task-lock> <presentation-lock>
-  local id=$1 task_lock=$2 presentation_lock=$3 record=$FM_HERDR_CLEANUP_LOCK_RECORD
+# Linux zombies lose cmdline but retain stat starttime, so this recovery token stays checkable after a hard timeout.
+fm_herdr_cleanup_process_identity() { # <pid>
+  local pid=$1 proc_root stat_line starttime
+  local -a stat_fields
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${#stat_fields[@]}" -ge 20 ] || return 1
+    starttime=${stat_fields[19]}
+    case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
+    printf 'linux-starttime=%s\n' "$starttime"
+    return 0
+  fi
+  fm_pid_identity "$pid"
+}
+
+fm_herdr_cleanup_pid_is_zombie() { # <pid>
+  local state
+  state=$(ps -p "$1" -o stat= 2>/dev/null) || return 1
+  case "$state" in Z*) return 0 ;; *) return 1 ;; esac
+}
+
+fm_herdr_cleanup_record_lock_paths() { # <id> <task-lock> <presentation-lock> <owner-pid> <owner-identity>
+  local id=$1 task_lock=$2 presentation_lock=$3 owner_pid=$4 owner_identity=$5
+  local record=$FM_HERDR_CLEANUP_LOCK_RECORD
   [ -n "$record" ] || return 0
   [ -f "$record" ] && [ ! -L "$record" ] || return 1
-  printf '%s\t%s\t%s\n' "$id" "$task_lock" "$presentation_lock" > "$record"
+  case "$owner_pid" in ''|*[!0-9]*|0) return 1 ;; esac
+  case "$owner_identity" in ''|*$'\t'*|*$'\n'*) return 1 ;; esac
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$id" "$task_lock" "$presentation_lock" "$owner_pid" "$owner_identity" > "$record"
+}
+
+fm_herdr_cleanup_reclaim_recorded_lock() { # <lock-path> <owner-pid> <owner-identity>
+  local lockdir=$1 owner_pid=$2 owner_identity=$3 steal
+  if fm_lock_try_acquire "$lockdir"; then
+    fm_lock_release "$lockdir" || true
+    return 0
+  fi
+  [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$owner_pid" ] || return 1
+  fm_herdr_cleanup_pid_is_zombie "$owner_pid" || return 1
+  [ "$(fm_herdr_cleanup_process_identity "$owner_pid" 2>/dev/null || true)" = "$owner_identity" ] || return 1
+
+  # Serialize with the ordinary stale-owner path, then prove the same timed-out
+  # process still owns this lock before removing its zombie-backed record.
+  steal="$lockdir.steal"
+  fm_lock_try_acquire "$steal" || return 1
+  if [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$owner_pid" ] \
+    && fm_herdr_cleanup_pid_is_zombie "$owner_pid" \
+    && [ "$(fm_herdr_cleanup_process_identity "$owner_pid" 2>/dev/null || true)" = "$owner_identity" ]; then
+    fm_lock_remove_path "$lockdir" || {
+      fm_lock_release "$steal" || true
+      return 1
+    }
+    fm_lock_release "$steal" || true
+    return 0
+  fi
+  fm_lock_release "$steal" || true
+  return 1
 }
 
 fm_herdr_cleanup_recover_interrupted_candidate() { # <lock-record>
-  local record=$1 id task_lock presentation_lock
+  local record=$1 id task_lock presentation_lock owner_pid owner_identity
   [ -f "$record" ] && [ ! -L "$record" ] || return 0
-  IFS=$'\t' read -r id task_lock presentation_lock < "$record" || return 0
+  case "$record" in "$STATE"/.herdr-cleanup-locks.*) ;; *) return 0 ;; esac
+  IFS=$'\t' read -r id task_lock presentation_lock owner_pid owner_identity < "$record" || return 0
   fm_task_id_creation_valid "$id" || return 0
   [ "$task_lock" = "$STATE/.spawn-$id.lock" ] || return 0
   case "$presentation_lock" in
     /tmp/firstmate-herdr-presentation/order-????????????????????????????????.lock) ;;
     *) return 0 ;;
   esac
-  if fm_lock_try_acquire "$task_lock"; then
-    if fm_lock_try_acquire "$presentation_lock"; then
-      fm_lock_release "$presentation_lock" || true
-    fi
-    fm_lock_release "$task_lock" || true
-  fi
+  case "$owner_pid" in ''|*[!0-9]*|0) return 0 ;; esac
+  case "$owner_identity" in ''|*$'\t'*|*$'\n'*) return 0 ;; esac
+  fm_herdr_cleanup_reclaim_recorded_lock "$task_lock" "$owner_pid" "$owner_identity" ||
+    fm_herdr_cleanup_warn "$id timed out; its task lock could not be reclaimed safely"
+  fm_herdr_cleanup_reclaim_recorded_lock "$presentation_lock" "$owner_pid" "$owner_identity" ||
+    fm_herdr_cleanup_warn "$id timed out; its presentation lock could not be reclaimed safely"
   return 0
 }
 
 fm_herdr_cleanup_one() ( # <session> <workspace> <title> <home-real>
   local session=$1 workspace=$2 title=$3 home_real=$4 token journal id task_lock
   local version bound_workspace bound_tab bound_pane presentation_lock snapshot
-  local tab pane state close_status=0
+  local tab pane state close_status=0 cleanup_owner_pid cleanup_owner_identity
   task_lock='' presentation_lock=''
   # A deadline may interrupt lock acquisition or a backend read.
   # fm_lock_release verifies this process owns each path, so unconditional cleanup
@@ -279,12 +335,21 @@ fm_herdr_cleanup_one() ( # <session> <workspace> <title> <home-real>
   bound_tab=$FM_HERDR_CLEANUP_BOUND_TAB
   bound_pane=$FM_HERDR_CLEANUP_BOUND_PANE
   [ "$FM_HERDR_CLEANUP_TOKEN" = "$token" ] || return 0
+  fm_current_pid cleanup_owner_pid || {
+    fm_herdr_cleanup_warn "$id skipped because its lock-owner process could not be identified"
+    return 0
+  }
+  cleanup_owner_identity=$(fm_herdr_cleanup_process_identity "$cleanup_owner_pid") || {
+    fm_herdr_cleanup_warn "$id skipped because its lock-owner identity could not be recorded"
+    return 0
+  }
   task_lock="$STATE/.spawn-$id.lock"
   presentation_lock=$(fm_backend_herdr_presentation_session_lock_path "$session" 2>/dev/null) || {
     fm_herdr_cleanup_warn "$id skipped because the shared presentation lock is unavailable"
     return 0
   }
-  fm_herdr_cleanup_record_lock_paths "$id" "$task_lock" "$presentation_lock" || {
+  fm_herdr_cleanup_record_lock_paths \
+    "$id" "$task_lock" "$presentation_lock" "$cleanup_owner_pid" "$cleanup_owner_identity" || {
     fm_herdr_cleanup_warn "$id skipped because deadline lock recovery could not be recorded"
     return 0
   }
@@ -394,7 +459,9 @@ fm_herdr_session_cleanup() {
 }
 
 if [ "${FM_HERDR_SESSION_CLEANUP_SOURCE_ONLY:-0}" != 1 ]; then
-  if [ "${1:-}" = --_worker ]; then
+  if [ "${1:-}" = --_recover-interrupted ]; then
+    fm_herdr_cleanup_recover_interrupted_candidate "${2:-}"
+  elif [ "${1:-}" = --_worker ]; then
     fm_herdr_session_cleanup
   else
     [ -d "$STATE" ] && [ ! -L "$STATE" ] || exit 0
