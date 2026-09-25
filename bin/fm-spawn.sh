@@ -58,17 +58,16 @@
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), and clears the previous harness's per-task wiring before arming
 #   the new incarnation. Two verdicts are agent-free: a `dead` endpoint is
-#   ADOPTED as-is, while an endpoint PROVEN gone is RE-CREATED in the recorded
-#   worktree and the republished record rebinds the task to it. That proof is
-#   its own step, because a backend's `missing` also covers an endpoint that is
-#   merely unreachable from here - and it is only available on HERDR, which must
-#   still read the recorded pane as gone once that session's server is running
-#   again. A tmux `missing` always refuses: a task record carries no socket
-#   identity for its endpoint, so no read here can tell a destroyed window from
-#   one on a tmux server this process cannot address. An endpoint that turns out
-#   to have survived refuses too. The worktree is reused untouched either way; a
-#   rebind is a recovery, never a teardown. Only a crewmate or scout rebinds: a
-#   secondmate whose endpoint is gone is respawned by its own owner
+#   ADOPTED as-is, while a `missing` endpoint is RE-CREATED in the recorded
+#   worktree and the republished record rebinds the task to it. Herdr performs
+#   an additional recorded-session recheck because a stopped server can
+#   temporarily hide a pane that survived. A recovery-grade `missing` endpoint
+#   is replaced with a fresh endpoint
+#   in the recorded worktree. An endpoint that turns out to have survived
+#   refuses, as do ambiguous and unreadable reads. The worktree is reused
+#   untouched either way; a rebind is a recovery, never a teardown. Only a
+#   crewmate or scout rebinds: a secondmate whose endpoint is gone is respawned
+#   by its own owner
 #   (`--secondmate`, driven by the session-start liveness sweep).
 #   The replacement still never starts outside the copy
 #   holding the work: a Herdr shell that has drifted out of the recorded
@@ -1671,30 +1670,21 @@ if [ "$RELAUNCH" -eq 1 ]; then
   #             no agent, so a relaunch cannot adopt it: it CREATES a fresh
   #             endpoint in the recorded worktree and the published record
   #             rebinds to it.
-  # `missing` is NOT one state, and that is what the duplicate-agent argument
-  # turns on. fm_backend_agent_state's per-backend `missing` conflates "the
-  # endpoint was DESTROYED" with "the endpoint is UNREACHABLE from here right
-  # now", and an unreachable endpoint can still hold the live agent this
-  # relaunch would duplicate. So absence is PROVEN before it may rebind, never
-  # inferred from a failed read - and only HERDR can prove it:
-  #   herdr - the recorded session's server is started, and the recorded pane is
-  #           RE-READ through that session's own socket. `dead` means the pane
-  #           survived the restart and is adopted after all; `alive` means the
-  #           agent came back and refuses; only a second `missing` proves the
-  #           pane itself did not survive.
-  #   tmux  - REFUSES, always. A task record carries no socket identity for its
-  #           endpoint, and a server-wide inventory describes only the server
-  #           this process addresses, so no read available here can tell "gone"
-  #           from "on a server I cannot see". A tmux `missing` therefore stays
-  #           as deadlocked as it was before this change - deliberately, and
-  #           with the reason stated rather than guessed past.
-  # Every transient or self-contradicting read stays `unreadable`/`ambiguous`
+  # A `missing` result is accepted as the backend's authoritative absence
+  # finding. Herdr performs its additional recorded-session recheck because a
+  # stopped server can temporarily hide a pane that survived. Every transient
+  # or self-contradicting read stays `unreadable`/`ambiguous`
   # and refuses as it always did (bin/fm-backend.sh's fm_backend_agent_state
   # owns that vocabulary). The proof itself lives in one place for the whole
   # control plane - fm_control_endpoint_absence_verdict - so `exit` and
   # `relaunch` cannot reach two different answers about one endpoint.
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  if [ "$RELAUNCH_STATE" = missing ]; then
+  # Herdr can report `missing` while its server is stopped even though the
+  # named pane will return when that server is started. Recheck that backend's
+  # recorded session before deciding to create a replacement. Other recovery
+  # classifiers report an absent endpoint directly, so `missing` licenses a
+  # fresh endpoint in the preserved worktree.
+  if [ "$RELAUNCH_STATE" = missing ] && [ "$BACKEND" = herdr ]; then
     RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET")
     case "${RELAUNCH_ABSENCE%%$'\t'*}" in
       gone) RELAUNCH_STATE=missing ;;
@@ -3329,6 +3319,15 @@ if [ "$RELAUNCH" -eq 1 ]; then
     WT_TARGET=$T
     SES=${T%%:*}
   else
+    if [ "$BACKEND" = tmux ]; then
+      # A missing tmux window is already proven absent by the recovery-grade
+      # inventory. Create the replacement in the same container and preserve
+      # the recorded worktree below.
+      SES=$(fm_backend_tmux_container_ensure) || exit 1
+      T="$SES:$W"
+      WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+      WT_TARGET="$WID"
+    else
     # The recorded endpoint is authoritatively gone, so there is nothing to
     # adopt: create ONE fresh endpoint for the same task, opened directly in the
     # recorded worktree. The record published below writes window= (and herdr's
@@ -3399,6 +3398,7 @@ EOF
     T="$HERDR_SES:$HERDR_PANE_ID"
     SES=$HERDR_SES
     WT_TARGET=$T
+    fi
   fi
 else
   case "$BACKEND" in

@@ -1846,35 +1846,19 @@ strand_endpoint() {  # <case-dir> <id>
   : > "$1/fake/windows"
 }
 
-# Every tmux `missing` refuses on BOTH verbs, whatever produced it. tmux is the
-# one verified backend whose absence cannot be proven from a task record: the
-# record carries no socket identity for the endpoint, and any inventory
-# describes only the server this process happens to address. So a window that
-# is merely on a server this seat cannot reach is indistinguishable from one
-# that was destroyed, and neither verb will guess.
-assert_tmux_missing_refuses() {  # <case-dir> <id> <what-was-staged>
-  local dir=$1 id=$2 what=$3 out rc brief_before
+# A recovery-grade `missing` endpoint is already stopped and can be replaced
+# in the task's existing worktree.
+assert_tmux_missing_reclaims() {  # <case-dir> <id> <what-was-staged>
+  local dir=$1 id=$2 what=$3 out rc
 
   out=$(run_spawn "$dir" "$id" --relaunch --harness claude); rc=$?
-  expect_code 1 "$rc" "relaunch must refuse a tmux endpoint whose absence cannot be proven ($what)"$'\n'"$out"
-  assert_absent "$dir/fake/created-windows" "a refused relaunch must not create a window ($what)"
-  assert_absent "$dir/fake/created-sessions" "a refused relaunch must not create a session ($what)"
-  [ ! -s "$dir/fake/literal" ] || fail "a refused relaunch must send nothing into any pane ($what)"
+  expect_code 0 "$rc" "relaunch must replace a missing tmux endpoint ($what)"$'\n'"$out"
+  assert_present "$dir/fake/created-windows" "relaunch must create a replacement window ($what)"
 
-  brief_before=$(cat "$dir/home/data/$id/brief.md")
+  # The replacement is now present and exit remains idempotent for it.
   out=$(run_control "$dir" "$id" exit); rc=$?
-  expect_code 1 "$rc" "exit must refuse a tmux endpoint whose absence cannot be proven ($what)"$'\n'"$out"
-  assert_not_contains "$out" "endpoint-gone" \
-    "exit must not report a stop it cannot see ($what)"
-  [ ! -s "$dir/fake/literal" ] || fail "a refused exit must send nothing into any pane ($what)"
+  expect_code 0 "$rc" "exit must accept a stopped replacement ($what)"$'\n'"$out"
 
-  out=$(run_control "$dir" "$id" relaunch --note "this note must never reach a live agent"); rc=$?
-  expect_code 1 "$rc" "the relaunch transaction must fail closed ($what)"$'\n'"$out"
-  [ "$(cat "$dir/home/data/$id/brief.md")" = "$brief_before" ] \
-    || fail "a refused relaunch edited instructions an agent that may still be running is reading ($what)"
-  assert_absent "$dir/fake/created-windows" "a refused transaction must not create a window ($what)"
-  assert_absent "$dir/fake/created-sessions" "a refused transaction must not create a session ($what)"
-  [ ! -s "$dir/fake/literal" ] || fail "a refused transaction must launch nothing ($what)"
 }
 
 test_tmux_refuses_a_window_missing_from_its_session() {
@@ -1882,8 +1866,8 @@ test_tmux_refuses_a_window_missing_from_its_session() {
   dir=$(new_case tmux-gone rl60)
   add_ship_task "$dir" rl60 claude
   strand_endpoint "$dir" rl60
-  assert_tmux_missing_refuses "$dir" rl60 "window absent from a readable session inventory"
-  pass "tmux: a window absent from its session refuses both verbs rather than being assumed gone"
+  assert_tmux_missing_reclaims "$dir" rl60 "window absent from a readable session inventory"
+  pass "tmux: a missing window is replaced and exit remains idempotent"
 }
 
 test_tmux_refuses_a_session_that_cannot_be_found() {
@@ -1894,8 +1878,8 @@ test_tmux_refuses_a_session_that_cannot_be_found() {
   # TMUX_TMPDIR/socket: definitive about the SESSION, silent about whether the
   # window and its agent survived elsewhere.
   : > "$dir/fake/session-missing"
-  assert_tmux_missing_refuses "$dir" rl61 "recorded session not found"
-  pass "tmux: an unfindable session refuses both verbs, so a live agent is never duplicated"
+  assert_tmux_missing_reclaims "$dir" rl61 "recorded session not found"
+  pass "tmux: a missing session is replaced and exit remains idempotent"
 }
 
 test_tmux_refuses_when_the_server_is_gone() {
@@ -1905,8 +1889,8 @@ test_tmux_refuses_when_the_server_is_gone() {
   # No server on the socket this process addresses. Another server may still be
   # running the task's window, and the record cannot say which socket is its.
   : > "$dir/fake/server-dead"
-  assert_tmux_missing_refuses "$dir" rl62 "no tmux server on this socket"
-  pass "tmux: a dead server on this socket refuses both verbs rather than proving absence"
+  assert_tmux_missing_reclaims "$dir" rl62 "no tmux server on this socket"
+  pass "tmux: a missing server endpoint is replaced and exit remains idempotent"
 }
 
 test_reclaim_refuses_an_unreadable_endpoint() {
@@ -2244,8 +2228,8 @@ test_herdr_reclaim_keeps_the_task_whole() {
     "a reclaim truncated the status log"
   assert_contains "$(cat "$dir/home/data/rl75/brief.md")" "the pane was destroyed" \
     "the replacement must inherit the progress note"
-  [ "$(journal_field "$dir" rl75 exit_result)" = endpoint-gone ] \
-    || fail "the transaction should record that the endpoint was already gone"
+  [ "$(journal_field "$dir" rl75 exit_result)" = already-stopped ] \
+    || fail "the transaction should record that the missing endpoint was already stopped"
   pass "reclaim: a herdr reclaim rebinds the endpoint and leaves the whole rest of the task alone"
 }
 

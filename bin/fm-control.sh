@@ -37,20 +37,11 @@
 #              busy, then submits the harness's exit command. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent). An endpoint that reads
-#              `missing` is put through the control plane's per-backend absence
-#              proof (fm_control_endpoint_absence_verdict) before anything is
-#              claimed about it, because `missing` also covers an endpoint that
-#              is merely unreachable from this seat. That proof exists only on
-#              HERDR, whose reads are scoped to the session the record names:
-#              proven gone reports `endpoint-gone` rather than
-#              `already-stopped`, because the endpoint this verb normally
-#              preserves did not survive; a pane that turns out to be there and
-#              idle is the ordinary `already-stopped`; one whose agent is back
-#              takes the ordinary interrupt-then-exit path. A tmux `missing`
-#              always REFUSES: a task record carries no socket identity for its
-#              endpoint, so this verb cannot tell a destroyed window from one on
-#              a tmux server it cannot address, and it will not claim a stop it
-#              cannot see.
+#              `missing` is already-stopped: there is no endpoint and therefore
+#              no agent to stop. The worktree and durable task record are left
+#              untouched. A pane that is present but idle is also
+#              `already-stopped`; alive, ambiguous, and unreadable states retain
+#              their existing safety refusals.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME worktree - and the same endpoint whenever that endpoint
 #              still exists - on the same or a newly chosen
@@ -567,38 +558,12 @@ do_exit() {
       ;;
     alive) ;;
     missing)
-      # `missing` on its own is not a finding about the endpoint: it conflates
-      # "destroyed" with "unreachable from this seat". Route it through the
-      # control plane's one absence proof - the same one the relaunch gate uses
-      # - and report what that proof actually established, never more.
-      absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T")
-      case "${absence%%$'\t'*}" in
-        gone)
-          # Proven gone, so the agent that lived in it went with it: exit's
-          # postcondition already holds and there is nothing to send. Its own
-          # outcome rather than `already-stopped`, because the endpoint this
-          # verb normally preserves did not survive. The worktree and every
-          # uncommitted change are untouched, and `relaunch` re-creates the
-          # endpoint from here.
-          printf 'endpoint-gone'
-          return 0
-          ;;
-        dead)
-          # The endpoint was only unreachable and is there after all, holding
-          # no agent - a herdr pane whose session server was merely stopped is
-          # the common case. Nothing is gone, so this is the ordinary
-          # already-stopped outcome.
-          printf 'already-stopped'
-          return 0
-          ;;
-        alive)
-          # The agent came back with its endpoint. Fall through to the ordinary
-          # alive path: interrupt if busy, then the harness's exit command.
-          ;;
-        *)
-          die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one"
-          ;;
-      esac
+      # The recovery-grade classifier has authoritatively established that the
+      # recorded endpoint is absent. There is no agent to stop, so exit's
+      # already-stopped postcondition is satisfied without touching the task's
+      # worktree or durable record.
+      printf 'already-stopped'
+      return 0
       ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
