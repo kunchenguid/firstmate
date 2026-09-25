@@ -451,16 +451,6 @@ $PROMOTION_SHIP_SPEC
 EOF
   promote_delivery_contract
 } > "$TMP" || { echo "error: could not render ship instructions for mode=$MODE" >&2; exit 1; }
-if [ "$PROMOTE_BASE_REMOTE" = 1 ]; then
-  [ -n "$PROMOTE_WORKTREE" ] && [ -d "$PROMOTE_WORKTREE" ] || {
-    echo "error: cannot verify remote base '$BASE_BRANCH' without the scout's recorded worktree; refusing promotion" >&2
-    exit 1
-  }
-  git -C "$PROMOTE_WORKTREE" rev-parse --verify --quiet "refs/remotes/origin/$BASE_BRANCH^{commit}" >/dev/null || {
-    echo "error: remote base '$BASE_BRANCH' is no longer available in the scout worktree; refusing promotion" >&2
-    exit 1
-  }
-fi
 mv "$TMP" "$INSTRUCTIONS"
 TMP=
 [ -f "$INSTRUCTIONS" ] && [ -r "$INSTRUCTIONS" ] || { echo "error: ship instructions were not published as a readable file: $INSTRUCTIONS" >&2; exit 1; }
@@ -501,6 +491,18 @@ grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' -e '^base_branch=' "$M
   echo "branch=$BRANCH"
   [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
 } >> "$TMP"
+if [ "$PROMOTE_BASE_REMOTE" = 1 ]; then
+  [ -n "$PROMOTE_WORKTREE" ] && [ -d "$PROMOTE_WORKTREE" ] || {
+    rm -f -- "$INSTRUCTIONS" 2>/dev/null || true
+    echo "error: cannot verify remote base '$BASE_BRANCH' without the scout's recorded worktree; refusing promotion" >&2
+    exit 1
+  }
+  git -C "$PROMOTE_WORKTREE" rev-parse --verify --quiet "refs/remotes/origin/$BASE_BRANCH^{commit}" >/dev/null || {
+    rm -f -- "$INSTRUCTIONS" 2>/dev/null || true
+    echo "error: remote base '$BASE_BRANCH' is no longer available in the scout worktree; refusing promotion" >&2
+    exit 1
+  }
+fi
 if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE"; then
   rm -f -- "$TMP"
   TMP=
