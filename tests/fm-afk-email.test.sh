@@ -352,7 +352,7 @@ EOF
 }
 
 test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit() {
-  local home entered token send_index
+  local home entered token token2 send_index
   home=$(make_home body-scope configured)
   run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
   entered=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field entered_epoch)
@@ -361,8 +361,9 @@ test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit() {
   send_index=$(count_sends)
   run_email "$home" flush >/dev/null || fail "sending outcomes failed"
   token=$(grep -oE 'FM-AFK-[A-Za-z0-9_-]{16}' "$CAPTURE/$send_index.txt" | sed -n '1p')
-  [ -n "$token" ] || fail "sent update omitted its reply token"
-  python3 - "$ROOT" "$home" "$token" <<'PY'
+  token2=$(grep -oE 'FM-AFK-[A-Za-z0-9_-]{16}' "$CAPTURE/$send_index.txt" | sed -n '2p')
+  [ -n "$token" ] && [ -n "$token2" ] || fail "sent update omitted a reply token"
+  python3 - "$ROOT" "$home" "$token" "$token2" <<'PY'
 import importlib.util
 import os
 import sys
@@ -374,6 +375,7 @@ from types import SimpleNamespace
 root = Path(sys.argv[1])
 home = Path(sys.argv[2])
 reply_token = sys.argv[3]
+recovery_token = sys.argv[4]
 state = home / "state"
 os.environ.update({
     "FM_HOME": str(home),
@@ -401,6 +403,7 @@ headers = {
     "2": b"From: owner@example.com\r\nSubject: captain\r\n\r\n",
     "3": b"From: owner@example.com\r\nSubject: oversized\r\n\r\n",
     "4": b"From: owner@example.com\r\nSubject: long answer\r\n\r\n",
+    "5": b"From: owner@example.com\r\nSubject: reply during config outage\r\n\r\n",
 }
 bodies = {
     "1": b"From: outsider@example.com\r\nSubject: outside\r\nContent-Type: text/plain\r\n\r\nprivate body",
@@ -415,10 +418,15 @@ bodies = {
         + f"FM-AFK-REPLY {reply_token}\n".encode()
         + b"b" * 8001
     ),
+    "5": (
+        b"From: owner@example.com\r\nSubject: reply during config outage\r\nContent-Type: text/plain\r\n\r\n"
+        + f"FM-AFK-REPLY {recovery_token}\nrecovered answer".encode()
+    ),
 }
 class FakeMailbox:
     untagged_responses = {"UIDVALIDITY": [b"44"]}
     body_fetches = []
+    search_ids = b"1 2 3 4"
     fail_body_fetch = False
 
     def login(self, *_): pass
@@ -427,7 +435,7 @@ class FakeMailbox:
 
     def uid(self, command, uid, fetch_spec):
         if command == "search":
-            return "OK", [b"1 2 3 4"]
+            return "OK", [self.search_ids]
         key = uid.decode()
         if "RFC822.SIZE" in fetch_spec:
             size = mail.MAX_AFK_BODY_BYTES + 1 if key == "3" else len(bodies[key])
@@ -453,6 +461,7 @@ initial_rows = {fields[0]: fields for fields in (line.split("\t") for line in in
 assert initial_rows["3"][4] == "ok", initial_rows["3"]
 assert "body exceeds 256 KiB" in initial_rows["3"][3], initial_rows["3"]
 assert initial_rows["4"][4] == "ok", initial_rows["4"]
+assert "answer exceeds 8,000 characters" in initial_rows["4"][3], initial_rows["4"]
 assert "reply in mail UID 4 rejected; answer exceeds 8000 characters" in initial_error.getvalue()
 notes = list((state / "inbox").glob("*.note"))
 assert len(notes) == 1, notes
@@ -489,17 +498,47 @@ assert "reply in mail UID 4 rejected; answer exceeds 8000 characters" in recover
 assert mailbox.body_fetches == ["2", "4"], mailbox.body_fetches
 recipient = os.environ.pop("FM_AFK_EMAIL_TO")
 try:
-    assert mail.afk_email_recipient() is None
+    assert mail.afk_email_context() == (None, True)
+    (state / ".mail-seen").write_text("uidvalidity=44\n1\n2\n3\n4\n", encoding="utf-8")
+    mailbox.search_ids = b"1 2 3 4 5"
     mailbox.body_fetches.clear()
-    missing_config_output = StringIO()
-    with redirect_stdout(missing_config_output):
+    outage_output = StringIO()
+    with redirect_stdout(outage_output):
         assert mail.cmd_poll_list() == 0
-    missing_config_lines = missing_config_output.getvalue().splitlines()
-    missing_config_rows = {fields[0]: fields for fields in (line.split("\t") for line in missing_config_lines[1:])}
-    assert set(missing_config_rows) == {"1", "2", "3", "4"}, missing_config_rows
+    outage_lines = outage_output.getvalue().splitlines()
+    outage_rows = {fields[0]: fields for fields in (line.split("\t") for line in outage_lines[1:])}
+    assert set(outage_rows) == {"5"}, outage_rows
+    assert outage_rows["5"][4] == "degraded", outage_rows["5"]
     assert mailbox.body_fetches == [], mailbox.body_fetches
+
+    (state / ".mail-seen").write_text("uidvalidity=44\n1\n2\n3\n4\n5\n", encoding="utf-8")
+    (state / ".mail-retry").write_text("5\n", encoding="utf-8")
+    retry_output = StringIO()
+    with redirect_stdout(retry_output):
+        assert mail.cmd_poll_list() == 0
+    retry_lines = retry_output.getvalue().splitlines()
+    retry_rows = {fields[0]: fields for fields in (line.split("\t") for line in retry_lines[1:])}
+    assert retry_rows["5"][4] == "degraded", retry_rows["5"]
+    assert mailbox.body_fetches == [], mailbox.body_fetches
+    assert (state / ".mail-retry").read_text(encoding="utf-8").strip() == "5"
 finally:
     os.environ["FM_AFK_EMAIL_TO"] = recipient
+
+mailbox.body_fetches.clear()
+restored_output = StringIO()
+with redirect_stdout(restored_output):
+    assert mail.cmd_poll_list() == 0
+restored_lines = restored_output.getvalue().splitlines()
+restored_rows = {fields[0]: fields for fields in (line.split("\t") for line in restored_lines[1:])}
+assert set(restored_rows) == {"5"}, restored_rows
+assert restored_rows["5"][4] == "retry", restored_rows["5"]
+assert mailbox.body_fetches == ["5"], mailbox.body_fetches
+notes = list((state / "inbox").glob("*.note"))
+assert len(notes) == 2, notes
+assert any("recovered answer" in note.read_text(encoding="utf-8") for note in notes)
+(state / ".mail-seen").unlink()
+(state / ".mail-retry").unlink()
+mailbox.search_ids = b"1 2 3 4"
 real_run = mail.subprocess.run
 def fail_handoff(command, *args, **kwargs):
     if isinstance(command, list) and command[-1] == "receive-batch":

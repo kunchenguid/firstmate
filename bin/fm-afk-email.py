@@ -685,6 +685,7 @@ def receive_messages(messages, posture, config):
         configured_sender = config["recipient"].casefold()
         token, answer = extract_reply(str(message.get("body", ""))) if sender == configured_sender else (None, "")
         if token and len(answer) > MAX_REPLY_CHARS:
+            print(f"fm-afk-event\treply-rejected\t{uid}\tanswer-too-long", file=sys.stderr)
             print(
                 f"fm-afk-email: reply in mail UID {uid} rejected; answer exceeds {MAX_REPLY_CHARS} characters",
                 file=sys.stderr,
