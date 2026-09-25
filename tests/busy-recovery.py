@@ -51,6 +51,7 @@ shutil.copy2(sys.executable, native)
 gen = call(event, 'arm', state, 'worker', '--state', 'unknown')
 meta = (f'harness=traex\nkind=scout\nworktree={cwd}\nproject={cwd}\n'
         f'backend=herdr\nwindow=fm-lab-fixture:w1:p2\nbusy_gen={gen}\n'
+        'launch_state=unconfirmed\n'
         'herdr_session=fm-lab-fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t2\nherdr_pane_id=w1:p2\n')
 (state / 'worker.meta').write_text(meta)
 call('python3', reader, 'init', state, 'worker', 'traex', cwd, base / 'sessions', 'herdr', 'fm-lab-fixture:w1:p2')
@@ -79,6 +80,7 @@ try:
             'foreground_processes': [{'pid': process.pid, 'name': 'traex', 'argv': argv},
                                      {'pid': daemon.pid, 'name': 'traex', 'argv': daemon_argv}]}
     transport = base / 'transport.json'
+    send_log = base / 'send.log'
     def set_transport(p=pane, i=info):
         transport.write_text(json.dumps({'pane': p, 'process_info': i}))
     set_transport()
@@ -86,9 +88,17 @@ try:
     shim.write_text('#!/usr/bin/env python3\nimport json,sys,time\nfrom pathlib import Path\n'
                    f'data=json.loads(Path({str(transport)!r}).read_text())\n'
                    f'hold=Path({str(base / "hold")!r})\n'
+                   f'send_log=Path({str(send_log)!r})\n'
                    'if hold.exists():\n hold.with_suffix(".entered").touch(); time.sleep(4)\n'
-                   'key="pane" if sys.argv[1:3]==["pane","get"] else "process_info"\n'
-                   'print(json.dumps({"result":{key:data[key]}}))\n')
+                   'args=sys.argv[1:]\n'
+                   'if args[:2]==["pane","get"]:\n print(json.dumps({"result":{"pane":data["pane"]}}))\n'
+                   'elif args[:2]==["pane","process-info"]:\n print(json.dumps({"result":{"type":"pane_process_info","process_info":data["process_info"]}}))\n'
+                   'elif args[:2]==["agent","get"]:\n print(json.dumps({"result":{"agent":{"agent":"traex","agent_status":"idle","pane_id":data["pane"]["pane_id"],"cwd":data["pane"]["foreground_cwd"],"foreground_cwd":data["pane"]["foreground_cwd"]}}}))\n'
+                   'elif args[:2]==["pane","read"]:\n print("╭────╮\\n│    │\\n╰────╯")\n'
+                   'elif args[:2]==["pane","send-text"]:\n send_log.write_text(send_log.read_text() + args[3] + "\\n" if send_log.exists() else args[3] + "\\n")\n'
+                   'elif args[:2]==["pane","send-keys"]:\n pass\n'
+                   'elif args and args[0]=="status":\n print(json.dumps({"server":{"running":True}}))\n'
+                   'else:\n sys.exit(1)\n')
     shim.chmod(0o755)
     def reset():
         (state / 'worker.meta').write_text(meta)
@@ -103,16 +113,39 @@ try:
     reset()
     (state / 'worker.inbox').mkdir()
     (state / 'worker.inbox/001.msg').write_text('unchanged durable instruction\n')
+    (state / 'worker.inbox/.ring-state').write_text('001.msg\t3\t1\n')
+    (state / 'worker.inbox/.escalated').write_text('001.msg\n')
     before = snapshot_files()
     proof = check()
     assert snapshot_files() == before, 'preflight changed records'
     (base / 'proof.json').write_text(proof)
-    apply(); apply()
+    apply()
     assert (state / 'worker.busy-gen').read_text().strip() == gen
     assert 'spawn_gen=' not in (state / 'worker.meta').read_text()
     assert (state / 'worker.inbox/001.msg').read_text() == 'unchanged durable instruction\n'
+    assert (state / 'worker.inbox/.rearm').read_text().strip() == '001.msg'
+    watcher_env = dict(env, FM_STATE_OVERRIDE=str(state), FM_POLL='1', FM_SIGNAL_GRACE='1',
+                       FM_CHECK_INTERVAL='999999', FM_HEARTBEAT='999999',
+                       FM_TASK_INBOX_GRACE_SECS='0')
+    watcher = subprocess.Popen([str(root / 'bin/fm-watch.sh')], env=watcher_env,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    for _ in range(100):
+        if (send_log.exists() and 'Firstmate instruction waiting' in send_log.read_text()
+                and (state / 'worker.inbox/.ring-state').exists()): break
+        if watcher.poll() is not None: break
+        time.sleep(.1)
+    watcher.terminate()
+    watcher.communicate(timeout=12)
+    assert send_log.exists() and 'Firstmate instruction waiting' in send_log.read_text()
+    assert not (state / 'worker.inbox/.escalated').exists()
+    assert not (state / 'worker.inbox/.rearm').exists()
+    ring_after_watcher = (state / 'worker.inbox/.ring-state').read_bytes()
+    apply()
+    assert (state / 'worker.inbox/.ring-state').read_bytes() == ring_after_watcher
+    assert not (state / 'worker.inbox/.rearm').exists()
     call('python3', reader, 'fence-target', state, 'herdr', 'fm-lab-fixture:w1:p2')
-    print('ok - read-only legacy preflight, original-generation restore, repeated recovery and ordinary input fence')
+    print('ok - escalated inbox recovery returns delivery to the watcher and repeated recovery stays idempotent')
+    print('ok - read-only legacy preflight, original-generation restore and ordinary input fence')
     print('ok - a real same-name daemon does not replace exact root launch-argument provenance')
     reset()
     duplicate = subprocess.Popen(argv, cwd=cwd, env=worker_env)

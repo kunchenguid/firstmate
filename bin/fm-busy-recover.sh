@@ -44,9 +44,12 @@ fm_refuse_if_gate_agent
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 META="$STATE/$ID.meta"
 META_LOCK=$(fm_meta_lock_path "$META")
+LAUNCH_STATE=$(fm_meta_get "$META" launch_state || true)
 CONTROL_HELD=0
 META_HELD=0
 TMP=
@@ -81,6 +84,10 @@ esac
 TMP="$STATE/.$ID.meta.recover.$$"
 awk -F= '$1 != "launch_state"' "$META" >"$TMP"
 printf 'launch_state=confirmed\n' >>"$TMP"
+[ "$LAUNCH_STATE" = confirmed ] || fm_task_inbox_request_rearm "$STATE" "$ID" || {
+  echo 'error: binding preserved but steering inbox rearm failed' >&2
+  exit 1
+}
 fm_backlog_atomic_transition publish "$TMP" "$META" 'task record' "$STATE"
 TMP=
 printf 'recovered %s: original busy generation and live process verified; no worker restarted or input sent\n' "$ID"
