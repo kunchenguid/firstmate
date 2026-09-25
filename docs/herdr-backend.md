@@ -337,7 +337,7 @@ For another harness without native tracked background execution, `bin/fm-afk-lau
 It never splits the captain's active tab and never uses shell `&`.
 Recovery reconciles only the recorded exact id.
 
-On stop, the daemon receives termination while `state/.afk` still exists so its final flush can run, the recorded terminal is closed, and the AFK flag is removed last.
+On stop, the daemon receives termination while `state/.afk` still exists so its final flush can run, and the recorded terminal is closed by its exact id; `bin/fm-afk-launch.sh stop` owns the rest of that exit order, including when the flag is cleared and the posture record archived.
 A fresh entry clears stale transient escalation caches, while durable queue and task records remain authoritative.
 
 ## Destructive lab safety
