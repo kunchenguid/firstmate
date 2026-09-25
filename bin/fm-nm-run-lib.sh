@@ -167,6 +167,7 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree>
     /^runs\[[0-9]+\]\{id,branch,status,head,pr\}:$/ {
       if (found++) bad = 1
       expected = $0; sub(/^runs\[/, "", expected); sub(/\].*$/, "", expected)
+      expected += 0  # numeric, so a zero-row table compares seen (numeric/undefined) correctly below
       inrows = 1; next
     }
     /^runs\[/ { bad = 1; found = 1 }

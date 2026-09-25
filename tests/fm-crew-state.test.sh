@@ -39,6 +39,10 @@
 #       provably down (explicit daemon-status probe fails) reads unknown -
 #       "unverified", never failed; the same record with the daemon up stays
 #       failed.
+#   (m) capped overview + a branch with zero runs anywhere in the repo's full
+#       inventory reads absent (not unknown) and falls through to the pane
+#       verdict, pinning the awk numeric/string comparison fix in
+#       fm_nm_select_run (bin/fm-nm-run-lib.sh).
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -3010,6 +3014,70 @@ test_capped_overview_without_branch_rows_reports_both_ids() {
   pass 'same-branch identity survives both runs falling outside the overview'
 }
 
+# (m) capped overview + a branch with zero runs anywhere in the shared repo's
+# full inventory: the python fallback for a genuinely empty branch replies
+# with its own zero-row overview ("count: 0 of 0 total" and a header with no
+# data rows), which must read as absent through the SAME awk parser, not
+# misreport unreadable (2026-09 fix: an empty table left `seen` uninitialized
+# while `expected` was a plain string from `sub()`, so POSIX awk's
+# numeric-string rule compared them as strings, "" != "0").
+test_capped_overview_branch_never_ran_reads_absent() {
+  reset_fakes
+  local d; d=$(new_case capped-never-ran)
+  make_repo_on_branch "$d/wt" fm/never-ran
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/capped-never-ran.meta" "window=fm:fm-capped-never-ran" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  NM_HOME="$d/nm"
+  mkdir -p "$NM_HOME"
+  # The repo-wide active/most-recent run belongs to a different crew's
+  # branch, so the primary `axi status` gate stays non-empty and the helper
+  # reaches the capped-overview identity lookup below (the routine case once
+  # more than one crew shares one no-mistakes repo registration).
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_AXI_HOME=$(python3 - "$NM_HOME/state.sqlite" "$d/wt" <<'PY'
+import csv
+import json
+import sqlite3
+import sys
+
+database, worktree = sys.argv[1:]
+with sqlite3.connect(database) as db:
+    db.executescript("""
+        CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE);
+        CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL,
+                           status TEXT NOT NULL, head_sha TEXT NOT NULL, created_at INTEGER NOT NULL);
+    """)
+    db.execute("INSERT INTO repos VALUES (?, ?)", ("repo", worktree))
+    db.executemany("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)", [
+        ("01OTHER%02d" % i, "repo", "fm/other-%d" % i, "completed", "deadbeef", i)
+        for i in range(11)
+    ])
+    rows = db.execute(
+        "SELECT id, branch, status, head_sha FROM runs ORDER BY created_at DESC, id DESC"
+    ).fetchall()
+print("repo: " + json.dumps(worktree))
+print("count: 10 of %d total" % len(rows))
+print("runs[10]{id,branch,status,head,pr}:")
+for row in rows[:10]:
+    sys.stdout.write("  ")
+    csv.writer(sys.stdout, lineterminator="\n").writerow([*row, ""])
+PY
+  ) || fail 'could not create the never-ran capped inventory fixture'
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" capped-never-ran)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" capped-never-ran busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" capped-never-ran)
+  assert_contains "$out" "state: working" \
+    "a branch with zero runs anywhere in a capped repo inventory falls through to the pane verdict"
+  assert_contains "$out" "source: pane" \
+    "the zero-row capped inventory must not manufacture a run-step verdict"
+  assert_not_contains "$out" "unreadable runs table" \
+    "the empty-table python fallback reads as absent, never unreadable"
+  pass "a capped overview whose branch never ran reads absent and falls through to the pane verdict"
+}
+
 test_capped_replacement_keeps_gate_and_inventory_unchanged() {
   make_capped_runs_case "capped reviewer's replacement" running cancelled
   local d="$TMP_ROOT/capped reviewer's replacement" out before after
@@ -3633,6 +3701,7 @@ test_no_run_herdr_stale_registration_over_shell_reads_agent_gone
 test_no_run_herdr_stale_working_record_is_never_busy
 test_capped_competing_live_runs_report_both_ids
 test_capped_overview_without_branch_rows_reports_both_ids
+test_capped_overview_branch_never_ran_reads_absent
 test_capped_replacement_keeps_gate_and_inventory_unchanged
 test_capped_inventory_failures_report_unknown
 test_complete_inventory_ignores_unrelated_semantics
