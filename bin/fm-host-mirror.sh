@@ -33,13 +33,16 @@
 # key is the current main-session key (fm_supervision_host_main_key,
 # bin/fm-supervision-engine-lib.sh). id is the writer's own identity for the
 # entry when it has one (a prompt id or a generation id); an entry whose id is
-# already recorded is not appended again, so a surface that fires twice
-# mirrors each entry once. Each text is capped at 4000 characters (head and
-# tail kept, as the Pi mirror caps); when the file exceeds 300 entries it is
-# trimmed to its newest 200. New entries continue above both the committed and staged
+# already recorded for the same main session and tag is not appended again, so
+# a surface that fires twice mirrors each entry once. Each text is capped at
+# 4000 characters, its truncation note included (head and tail kept, as the Pi
+# mirror caps); when the file exceeds 300 entries it is trimmed to its newest
+# 200. New entries continue above both the committed and staged
 # cursor after file recreation so a later commit cannot skip them. Existing
 # mirror files are restricted to owner-only before an append; if that fails,
-# the entry is not written. Every append and feed runs under
+# the entry is not written. An append writes the whole new file beside the
+# mirror and renames it into place, so a write that fails or is interrupted
+# leaves the mirror as it was. Every append and feed runs under
 # $STATE/.host-mirror.lock.
 #
 # FEED. $STATE/.host-mirror-cursor holds "<seq>\t<engine session>": the newest
@@ -56,8 +59,8 @@
 # session's newest entries, so a fresh conversation re-anchors on this
 # session's dialog and never on an earlier session's. The feed is bounded to
 # 16000 characters, newest kept, with one line naming how many earlier entries
-# it left out. Mirrored text is context for judgment and authorizes nothing
-# (bin/fm-branch-prompt.sh "Context channels").
+# it left out counted within that bound. Mirrored text is context for
+# judgment and authorizes nothing (bin/fm-branch-prompt.sh "Context channels").
 #
 # VERIFIED WRITERS. `verified <harness>` exits 0 for a primary whose writers
 # were proven against the real harness to record a session's dialog from its
@@ -155,7 +158,7 @@ operational() {  # <text>
 # Returns 1 when the entry could not be recorded; an entry dropped by design
 # (empty, injected, operational, or already recorded) returns 0.
 append_entry() {  # <captain|main> <text> [<id>]
-  local tag=$1 text=$2 id=${3:-} key last seq tmp
+  local tag=$1 text=$2 id=${3:-} key last seq tmp record lines=0
   text=$(printf '%s' "$text" | sed -e 's/[[:space:]]*$//')
   [ -n "$(printf '%s' "$text" | tr -d '[:space:]')" ] || return 0
   if [ "$tag" = captain ]; then
@@ -171,8 +174,8 @@ append_entry() {  # <captain|main> <text> [<id>]
     return 1
   fi
   if [ -n "$id" ] && [ -f "$MIRROR" ] \
-    && jq -Rne --arg id "$id" --arg tag "$tag" \
-      'any(inputs | fromjson? | select(type == "object"); .id == $id and .tag == $tag)' "$MIRROR" >/dev/null 2>&1; then
+    && jq -Rne --arg id "$id" --arg tag "$tag" --arg key "$key" \
+      'any(inputs | fromjson? | select(type == "object"); .id == $id and .tag == $tag and .key == $key)' "$MIRROR" >/dev/null 2>&1; then
     fm_lock_release "$LOCK"
     return 0
   fi
@@ -188,17 +191,29 @@ append_entry() {  # <captain|main> <text> [<id>]
     fi
   done
   seq=$((last + 1))
-  jq -cn --argjson seq "$seq" --argjson epoch "$(date +%s)" --arg key "$key" --arg id "$id" \
+  record=$(jq -cn --argjson seq "$seq" --argjson epoch "$(date +%s)" --arg key "$key" --arg id "$id" \
     --arg tag "$tag" --arg text "$text" --argjson cap "$MIRROR_CAP" '
+      def note($n): "\n[mirror truncated: \($n) characters omitted]\n";
       def capped: if length <= $cap then .
-        else .[0:($cap / 2 | ceil)] + "\n[mirror truncated: \(length - $cap) characters omitted]\n" + .[length - ($cap / 2 | floor):]
+        else length as $len
+          | ($cap - (note($len - $cap + (note($len - $cap) | length)) | length)) as $keep
+          | .[0:($keep / 2 | ceil)] + note($len - $keep) + .[$len - ($keep / 2 | floor):]
         end;
-      {seq: $seq, epoch: $epoch, key: $key, id: $id, tag: $tag, text: ($text | capped)}' >> "$MIRROR" 2>/dev/null \
+      {seq: $seq, epoch: $epoch, key: $key, id: $id, tag: $tag, text: ($text | capped)}' 2>/dev/null) \
     || { fm_lock_release "$LOCK"; return 1; }
-  if [ "$(wc -l < "$MIRROR" 2>/dev/null | tr -d ' ')" -gt $((MIRROR_KEEP + 100)) ] 2>/dev/null; then
-    tmp=$(mktemp "$MIRROR.tmp.XXXXXX" 2>/dev/null) \
-      && tail -n "$MIRROR_KEEP" "$MIRROR" > "$tmp" 2>/dev/null && mv -f "$tmp" "$MIRROR" 2>/dev/null
-    rm -f "${tmp:-}" 2>/dev/null || true
+  tmp=$(mktemp "$MIRROR.tmp.XXXXXX" 2>/dev/null) || { fm_lock_release "$LOCK"; return 1; }
+  if [ -f "$MIRROR" ]; then
+    lines=$(wc -l < "$MIRROR" 2>/dev/null | tr -d ' ')
+    case "$lines" in ''|*[!0-9]*) lines=0 ;; esac
+  fi
+  if ! {
+    if [ "$lines" -ge $((MIRROR_KEEP + 100)) ]; then tail -n $((MIRROR_KEEP - 1)) "$MIRROR"
+    elif [ -f "$MIRROR" ]; then cat "$MIRROR"
+    fi && printf '%s\n' "$record"
+  } > "$tmp" 2>/dev/null || ! mv -f "$tmp" "$MIRROR" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null
+    fm_lock_release "$LOCK"
+    return 1
   fi
   fm_lock_release "$LOCK"
 }
@@ -280,12 +295,15 @@ if ! OUT=$(jq -Rrs --arg key "$KEY" --argjson after "$CURSOR_SEQ" --argjson cap 
     | map(select(.key == $key and .seq > $after))
     | map("[\(.tag)] \(.text)")
     | reverse
-    | reduce .[] as $entry ({kept: [], used: 0, left: 0};
+    | def omitted($n): "(\($n) earlier mirrored entries are not shown)";
+      reduce .[] as $entry ({kept: [], used: 0, left: 0};
         if .left == 0 and (.used + ($entry | length) + 1) <= $cap then
           .kept += [$entry] | .used += (($entry | length) + 1)
         else .left += 1 end)
+    | until(.left == 0 or (.used + (omitted(.left) | length) + 1) <= $cap;
+        .used -= ((.kept[-1] | length) + 1) | .kept |= .[:-1] | .left += 1)
     | (.kept | reverse) as $kept
-    | (if .left > 0 then ["(\(.left) earlier mirrored entries are not shown)"] else [] end) + $kept
+    | (if .left > 0 then [omitted(.left)] else [] end) + $kept
     | .[]' "$MIRROR" 2>/dev/null); then
   fm_lock_release "$LOCK"
   exit 1

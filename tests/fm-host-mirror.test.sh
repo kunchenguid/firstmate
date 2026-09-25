@@ -157,7 +157,7 @@ test_operational_foreign_and_unowned_input_is_dropped() {
 }
 
 test_entries_are_deduplicated_and_capped() {
-  local home long text
+  local home long text kept
   home=$(make_home capped)
   long=$(awk 'BEGIN { for (i = 0; i < 5000; i++) printf "x" }')
   LONG=$long as_session "$home" "$SAY"'
@@ -167,9 +167,49 @@ test_entries_are_deduplicated_and_capped() {
   ' || fail "a writer failed"
   [ "$(grep -c '"text":"once"' "$home/state/.host-mirror.jsonl")" -eq 1 ] || fail "an entry whose id is already recorded must not be appended again"
   text=$(jq -r 'select(.id == "long") | .text' "$home/state/.host-mirror.jsonl")
-  assert_contains "$text" "[mirror truncated: 1000 characters omitted]" "a long entry must be capped with a truncation note"
-  [ "${#text}" -lt 4100 ] || fail "a capped entry kept ${#text} characters"
-  pass "mirror: a repeated entry is recorded once, and a long entry keeps its head and tail"
+  kept=$(printf '%s' "$text" | tr -cd x | wc -c | tr -d ' ')
+  assert_contains "$text" "[mirror truncated: $((5000 - kept)) characters omitted]" "a long entry must be capped with a truncation note naming what it left out"
+  [ "${#text}" -eq 4000 ] || fail "a capped entry must hold 4000 characters with its note, got ${#text}"
+  pass "mirror: a repeated entry is recorded once, and a long entry keeps its head and tail within the cap"
+}
+
+# A hook id names an entry only within one main session: a later session
+# reusing it is new dialog.
+test_a_later_session_may_reuse_an_entry_id() {
+  local home
+  home=$(make_home reused-id)
+  as_session "$home" "$SAY"'say captain "asked in the first session" p1' || fail "the first session failed"
+  as_session "$home" "$SAY"'
+    say captain "asked in the second session" p1
+    "$MIRROR" feed s1 new > "$FM_HOME/feed.second"
+  ' || fail "the second session failed"
+  assert_equals "[captain] asked in the second session" "$(cat "$home/feed.second")" \
+    "a later session's entry must be recorded even when an earlier session used its id"
+  pass "mirror: an entry id already recorded by an earlier main session does not drop a later session's dialog"
+}
+
+# A write that fails partway (here a file-size limit, as a full disk would)
+# must leave the mirror as it was, print nothing, and let later dialog land.
+test_a_failed_append_leaves_the_mirror_valid() {
+  local home
+  home=$(make_home failed-append)
+  as_session "$home" "$SAY"'
+    say captain "asked before the disk filled" p1
+    big=$(awk "BEGIN { for (i = 0; i < 3000; i++) printf \"z\" }")
+    (ulimit -f 1; trap "" XFSZ; say main "$big" p1) > "$FM_HOME/full.out" 2>&1
+    printf "%s\n" "$?" > "$FM_HOME/full.rc"
+    "$MIRROR" check || exit 1
+    say captain "asked once space returned" p2
+    "$MIRROR" check || exit 1
+    "$MIRROR" feed s1 new > "$FM_HOME/feed.after"
+  ' || fail "the mirror did not stay valid across a failed append"
+  assert_equals "0" "$(cat "$home/full.rc")" "a failed append must still exit 0"
+  assert_equals "" "$(cat "$home/full.out")" "a failed append must print nothing"
+  assert_equals "[captain] asked before the disk filled
+[captain] asked once space returned" "$(cat "$home/feed.after")" \
+    "a failed append must record nothing and leave later dialog feedable"
+  [ -z "$(find "$home/state" -name '.host-mirror.jsonl.tmp.*')" ] || fail "a failed append left its temporary file"
+  pass "mirror: a failed append leaves the mirror valid, prints nothing, and later dialog still lands"
 }
 
 # A chmod on PATH that records, for the mirror, its entry count and mode just
@@ -244,8 +284,27 @@ test_feed_resumes_reanchors_and_is_bounded() {
   assert_contains "$(head -n 1 "$home/feed.6")" "earlier mirrored entries are not shown)" "a bounded feed must say what it left out"
   assert_contains "$out" "[main] 7 yyy" "a bounded feed must keep the newest entries"
   assert_not_contains "$out" "[captain] a later session" "a bounded feed must drop the oldest entries"
-  [ "${#out}" -le 16100 ] || fail "the feed was not bounded: ${#out} characters"
+  [ "$(wc -c < "$home/feed.6")" -le 16000 ] || fail "the feed was not bounded: $(wc -c < "$home/feed.6") characters"
   pass "mirror: the feed resumes from its committed cursor, re-anchors on a new conversation or session, and is bounded"
+}
+
+# Newest entries that alone fill the bound leave no room for the note naming
+# what was left out: the note counts within the bound, so one more entry goes.
+test_feed_bound_includes_its_omitted_note() {
+  local home out
+  home=$(make_home feed-note)
+  as_session "$home" "$SAY"'
+    say captain "the oldest ask"
+    big=$(awk "BEGIN { for (i = 0; i < 3988; i++) printf \"y\" }")
+    for n in 1 2 3 4; do say main "$n $big"; done
+    "$MIRROR" feed s1 new > "$FM_HOME/feed"
+  ' || fail "the session failed"
+  out=$(cat "$home/feed")
+  [ "$(wc -c < "$home/feed")" -le 16000 ] || fail "the feed and its note must fit 16000 characters, got $(wc -c < "$home/feed")"
+  assert_equals "(2 earlier mirrored entries are not shown)" "$(head -n 1 "$home/feed")" "the note must count every entry it left out"
+  assert_contains "$out" "[main] 4 yyy" "a bounded feed must keep the newest entry"
+  assert_not_contains "$out" "[main] 1 yyy" "a bounded feed must drop the oldest entries to fit its note"
+  pass "mirror: the feed's bound includes the note naming how many earlier entries it left out"
 }
 
 test_recycled_lock_pid_is_a_new_main_session() {
@@ -333,8 +392,11 @@ test_writers_are_inert_without_the_opt_in
 test_home_without_the_flag_is_untouched
 test_operational_foreign_and_unowned_input_is_dropped
 test_entries_are_deduplicated_and_capped
+test_a_later_session_may_reuse_an_entry_id
+test_a_failed_append_leaves_the_mirror_valid
 test_mirror_is_owner_only_under_an_open_umask
 test_feed_resumes_reanchors_and_is_bounded
+test_feed_bound_includes_its_omitted_note
 test_recycled_lock_pid_is_a_new_main_session
 test_feed_refuses_unfeedable_sequences_and_unterminated_records
 test_recreated_mirror_continues_past_both_cursors
