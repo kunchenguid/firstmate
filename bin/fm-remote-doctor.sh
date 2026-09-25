@@ -459,8 +459,10 @@ report_required_tools() {
 # Run the required-tool probe through the worker without printing anything.
 # Sets WORKER_PROBE_FAILURE to why the worker could not serve it (empty on
 # success), and on success leaves the validated facts in WORKER_PROBE_FACTS
-# and the missing tools in MISSING. When the worker answered but the result
-# failed validation, WORKER_PROBE_RESULT holds that result on one line.
+# and the missing tools in MISSING. A worker-published timeout (124) or
+# stopped-worker (125) result is a probe the worker never answered. When the
+# worker answered but the result failed validation, WORKER_PROBE_RESULT holds
+# that result on one line.
 worker_tool_probe() {
   local job_id probe_stdout probe_stderr probe_exit line fact name value result
   local expected=6 count=0 valid=1 seen=' '
@@ -480,6 +482,13 @@ worker_tool_probe() {
   probe_stdout=$FM_REMOTE_JOB_STDOUT
   probe_stderr=$FM_REMOTE_JOB_STDERR
   probe_exit=$FM_REMOTE_JOB_EXIT
+  case "$probe_exit" in
+    124|125)
+      fm_remote_job_reap "${HOME:-}" "$job_id" 2>/dev/null || true
+      WORKER_PROBE_FAILURE="did not complete the required-tool probe"
+      return 1
+      ;;
+  esac
   MISSING=()
   while IFS= read -r line; do
     case "$line" in required\ *=*) ;; *) valid=0; continue ;; esac

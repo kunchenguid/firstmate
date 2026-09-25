@@ -958,6 +958,47 @@ kill -0 "$ANSWER_WORKER_PID" 2>/dev/null || fail "--fix stopped a worker that an
 DOCTOR_WORKER_PID=
 pass "--fix keeps a worker that answers with an invalid probe result and reports that result as human"
 
+# The worker publishes its own timeout result when a probe outlives its
+# deadline. That record is a probe nobody answered, not an invalid answer, so
+# --fix must replace the worker rather than hand the gap to a person.
+new_case Linux with-herdr no-gui
+CASE_REMOTE_JOB_ACTIVE=
+CASE_PLATFORM_OVERRIDE=Linux
+rm -f "$CASE_BIN/sleep" "$CASE_BIN/uname"
+mkdir -p "$CASE_HOME/.local/bin"
+for tool in herdr treehouse claude; do
+  ln -s "$CASE_BIN/$tool" "$CASE_HOME/.local/bin/$tool"
+done
+TIMEOUT_STATE="$CASE_HOME/.firstmate/remote-job"
+doctor --fix
+TIMEOUT_WORKER_PID=$(cat "$TIMEOUT_STATE/worker.pid")
+cat > "$CASE_HOME/.local/bin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${FM_REMOTE_JOB_ACTIVE:-}" = 1 ]; then
+  /bin/sleep 30
+fi
+exec '$CASE_BIN/tasks-axi' "\$@"
+SH
+chmod +x "$CASE_HOME/.local/bin/tasks-axi"
+DOCTOR_WORKER_PID=$TIMEOUT_WORKER_PID
+FM_REMOTE_JOB_TIMEOUT=2 FM_REMOTE_JOB_WAIT_GRACE=5 doctor --fix
+expect_code 1 "$DOCTOR_RC" "--fix reported ready while every probe timed out"
+assert_contains "$DOCTOR_OUT" 'fix remote-job-probe=failed: the running remote job worker did not complete the required-tool probe; replacing it' \
+  "--fix did not replace a worker whose probe timed out"
+assert_contains "$DOCTOR_OUT" 'check remote-job-probe=human: the remote job worker still did not complete the required-tool probe after --fix replaced it' \
+  "a probe that timed out again after replacement was not named as a human gap"
+assert_not_contains "$DOCTOR_OUT" 'returned an invalid required-tool probe result' \
+  "a worker-published timeout was reported as an answered result"
+[ "$(cat "$TIMEOUT_STATE/worker.pid")" != "$TIMEOUT_WORKER_PID" ] || fail "--fix kept the worker whose probe timed out"
+TIMEOUT_WORKER_PID=$(cat "$TIMEOUT_STATE/worker.pid")
+(
+  # shellcheck source=bin/fm-remote-job-lib.sh
+  . "$ROOT/bin/fm-remote-job-lib.sh"
+  fm_remote_job_stop_worker_tree "$TIMEOUT_WORKER_PID"
+) || true
+DOCTOR_WORKER_PID=
+pass "--fix replaces a worker whose probe ends in the worker's own timeout result"
+
 # --- the entrypoint symlink is recreated when it is missing ------------------
 
 new_case Linux with-herdr no-gui
