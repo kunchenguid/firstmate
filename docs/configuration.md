@@ -704,6 +704,7 @@ The root is read from the `session.json` Herdr persists beside the socket that `
 
 The rule applies at every second-mate launch: a fresh `fm-spawn.sh --secondmate` spawn, the session-start liveness respawn, and a `fm-control.sh relaunch`, which moves the adopted pane to the root before starting the replacement.
 When the workspace reports no readable root, or reports the home itself, the second mate launches in its home exactly as before, and ordinary crewmates and scouts are unaffected.
+A root at the filesystem root, the user's home directory, or the Claude config directory cannot be trusted as a working directory, so the second mate launches in its home instead, with one warning naming the root, before any Herdr tab is opened.
 
 Starting outside the home loses the discovery a harness does from its working directory, so the launch carries the home's firstmate operating contract explicitly.
 Claude is the only harness with a verified way to do that:

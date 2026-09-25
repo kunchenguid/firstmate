@@ -3042,16 +3042,25 @@ real_path_or_raw() { # <path>
 # its home (docs/configuration.md "Second-mate working directory"). Sets
 # SECONDMATE_ROOT only when that workspace reports a root that differs from the
 # home; a workspace with no readable root, or one whose root IS the home, keeps
-# the home launch unchanged. Only claude has a verified way to load the home's
+# the home launch unchanged, and so does a root at the filesystem root, the
+# user's home directory, or the Claude config directory, which
+# bin/fm-claude-trust.sh refuses to trust. Only claude has a verified way to load the home's
 # firstmate contract, skills, and hooks while starting elsewhere, so any other
 # harness or a raw launch command refuses here, before the endpoint is used.
 SECONDMATE_ROOT=
 resolve_secondmate_root() { # <herdr-session> <workspace-id>
-  local root
+  local root root_real
   SECONDMATE_ROOT=
   root=$(fm_backend_herdr_workspace_root "$1" "$2")
   [ -n "$root" ] || return 0
-  [ "$(real_path_or_raw "$root")" != "$(real_path_or_raw "$PROJ_ABS")" ] || return 0
+  root_real=$(real_path_or_raw "$root")
+  [ "$root_real" != "$(real_path_or_raw "$PROJ_ABS")" ] || return 0
+  case "$root_real" in
+    / | "$(real_path_or_raw "${HOME:-/}")" | "$(real_path_or_raw "${CLAUDE_CONFIG_DIR:-${HOME:-/}}")")
+      echo "warning: secondmate $ID's herdr workspace root $root is the filesystem root, the home directory, or the Claude config directory, which cannot be trusted as a working directory; launching in its home $PROJ_ABS instead" >&2
+      return 0
+      ;;
+  esac
   if [ "$RAW_LAUNCH" != 0 ] || [ "$HARNESS" != claude ]; then
     echo "error: secondmate $ID's herdr workspace root is $root, and ${HARNESS:-this launch command} has no verified way to load the second mate's firstmate contract from its home $PROJ_ABS while starting there; launch it on claude, or give the workspace the home as its root" >&2
     exit 1

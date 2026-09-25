@@ -11,9 +11,10 @@
 # have started with, not the command text.
 #
 # Covers: a workspace root that differs from the home, a workspace that reports
-# no root, a harness that cannot carry the home's contract (refused before any
-# tab exists), a relaunch into an adopted pane, and Firstmate script home
-# resolution from the foreign working directory.
+# no root, a root the trust store refuses (home fallback), a harness that
+# cannot carry the home's contract (refused before any tab exists), a relaunch
+# into an adopted pane, and Firstmate script home resolution from the foreign
+# working directory.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -240,6 +241,35 @@ test_root_absent_keeps_the_home_launch() {
   pass "a workspace with no root, or with the home as its root, keeps the home launch unchanged"
 }
 
+test_untrustable_root_falls_back_to_the_home() {
+  local dir out rc=0 probe
+  dir=$(new_case root-user-home smr6)
+  write_session_root "$dir" wsroot "$dir/user-home"
+  out=$(run_spawn "$dir" smr6 "$dir/smhome" claude --secondmate --backend herdr) || rc=$?
+  expect_code 0 "$rc" "a second mate whose workspace root is the user's home should still spawn"$'\n'"$out"
+  assert_equals 1 "$(grep -c "^warning: secondmate smr6's herdr workspace root $dir/user-home" <<<"$out")" \
+    "the fallback should warn exactly once, naming the root"
+  assert_equals 1 "$(grep -c '^tab create' "$dir/fake/herdr-log")" "exactly one tab should be opened"
+  assert_equals "$dir/smhome" "$(cat "$dir/fake/cwd")" "the tab should be opened in the home, never in the untrustable root"
+  probe=$(run_launch "$dir") || fail "the emitted launch did not run: $probe"
+  assert_contains "$probe" "cwd=$dir/smhome" "the agent should start in its home"
+  assert_not_contains "$probe" "arg=--add-dir" "the home launch should carry no root flags"
+  assert_equals null "$(jq -r --arg p "$dir/user-home" '.projects[$p]' "$dir/user-home/.claude.json" 2>/dev/null || echo null)" \
+    "the user's home must never be registered as trusted"
+
+  # A codex second mate whose root is the filesystem root falls back too,
+  # rather than refusing.
+  dir=$(new_case root-slash smr7)
+  write_session_root "$dir" wsroot /
+  rc=0
+  out=$(run_spawn "$dir" smr7 "$dir/smhome" codex --secondmate --backend herdr) || rc=$?
+  expect_code 0 "$rc" "a second mate whose workspace root is / should still spawn"$'\n'"$out"
+  assert_contains "$out" "warning: secondmate smr7's herdr workspace root / " "the fallback should warn"
+  assert_not_contains "$out" "has no verified way" "a fallback to the home is not a refusal"
+  assert_equals "$dir/smhome" "$(cat "$dir/fake/cwd")" "the tab should be opened in the home"
+  pass "a workspace root at the user's home or / falls back to the home with one warning before any tab"
+}
+
 test_unsupported_harness_refuses_before_any_tab() {
   local dir out rc=0
   dir=$(new_case root-codex smr4)
@@ -309,6 +339,7 @@ test_scripts_resolve_the_home_from_fm_home_in_a_foreign_cwd() {
 
 test_root_present_starts_in_the_workspace_root
 test_root_absent_keeps_the_home_launch
+test_untrustable_root_falls_back_to_the_home
 test_unsupported_harness_refuses_before_any_tab
 test_relaunch_moves_the_adopted_pane_to_the_root
 test_scripts_resolve_the_home_from_fm_home_in_a_foreign_cwd
