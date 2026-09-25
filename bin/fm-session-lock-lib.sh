@@ -434,6 +434,12 @@ fm_session_lock_refuse_displaced() {  # <state>
     [ "$owner" != "$FM_BOOTSTRAP_NETWORK_LOCK_PID" ] || return 0
   fi
   [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 0
+  if [ "${FM_SUPERVISION_ACTOR:-}" = branch ] && [ -n "${FM_LEASE_HOLDER_PID:-}" ]; then
+    owner=$(sed -n '1p' "$state/.lock" 2>/dev/null || true)
+    if [ "$owner" = "$FM_LEASE_HOLDER_PID" ] && fm_session_identity_liveness "$owner"; then
+      return 0
+    fi
+  fi
   fm_session_identity >/dev/null 2>&1 || return 0
   fm_session_lock_owned_by_self "$state" && return 0
   owner=$(cat "$state/.lock" 2>/dev/null) || return 0

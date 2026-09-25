@@ -229,3 +229,20 @@ run_as "$new" "$ROOT/bin/fm-lock.sh" > "$LAB/nonregular.out" 2>&1 && fail "non-r
 assert_contains "$(cat "$LAB/nonregular.out")" 'not a regular file' "non-regular refusal changed"
 rmdir "$STATE/.lock"
 pass "genuine lock refusal remains read-only"
+
+printf '%s\n' "$new" > "$STATE/.lock"
+run_as "$old" env FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID="$new" \
+  "$ROOT/bin/fm-wake-drain.sh" > "$LAB/branch-ok.out" 2>&1
+assert_not_contains "$(cat "$LAB/branch-ok.out")" 'displaced' "a branch actor for the live holder was refused as displaced"
+for holder in "$third" 99999999 ""; do
+  if run_as "$old" env FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID="$holder" \
+    "$ROOT/bin/fm-wake-drain.sh" > "$LAB/branch-bad.out" 2>&1; then
+    fail "a branch actor naming holder '$holder' was allowed while the lock names $new"
+  fi
+  assert_contains "$(cat "$LAB/branch-bad.out")" 'displaced' "branch actor with holder '$holder' was not refused as displaced"
+done
+if run_as "$old" env FM_LEASE_HOLDER_PID="$new" "$ROOT/bin/fm-wake-drain.sh" > "$LAB/plain.out" 2>&1; then
+  fail "a plain displaced pane was allowed by naming the holder"
+fi
+assert_contains "$(cat "$LAB/plain.out")" 'this session was displaced' "plain displaced pane refusal changed"
+pass "a holder's own supervision branch actor is exempt from the displaced refusal and nothing broader is"
