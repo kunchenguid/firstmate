@@ -53,9 +53,12 @@
 # under its own prefix, so a missing record is never mistaken for a hand-over
 # that produced no successor.
 # A successor disposition is not written under that race at all. The successor
-# records its claim in state/.watch-cycle-links with one lock-free atomic append
-# before it touches the ledger, and every later ledger write re-applies whatever
-# is still outstanding while it already holds the log's lock. Contention can
+# publishes its claim as its own file under state/.watch-cycle-links with one
+# lock-free atomic rename before it touches the ledger, and every later ledger
+# write re-applies whatever is still outstanding while it already holds the
+# log's lock, retiring a claim only once the applied ledger is committed. A
+# claim names its predecessor by arm pid AND recorded pid-identity, so a
+# recycled pid can never collect another cycle's link. Contention can
 # therefore delay a link but can never lose it, which is what keeps
 # successor=none meaning "no successor" instead of "a successor whose link lost
 # a race" - and the wait is never lengthened, because waiting longer cannot fix
@@ -126,16 +129,18 @@ CYCLE_LOG_KEEP_LINES=${FM_WATCH_CYCLE_LOG_KEEP_LINES:-1000}
 # inside that retire budget, or contention on a diagnostic log turns a healthy
 # hand-over into a killed successor - the outage this ledger exists to expose.
 CYCLE_LOG_LOCK_WAIT_MS=400
-# Durable successor claims: written without the ledger lock, applied under it.
+# Durable successor claims: one file per claim, written without the ledger lock
+# and applied under it. A directory is what makes the claim lock-free: a claim
+# renamed in while a reconcile is running is simply not in that reconcile's
+# listing, so it survives to the next one instead of being overwritten by a
+# read-modify-write of a shared file.
 CYCLE_LINK="$STATE/.watch-cycle-links"
-CYCLE_LINK_KEEP_LINES=${FM_WATCH_CYCLE_LINK_KEEP_LINES:-200}
 # A claim whose predecessor record never appears (rotated away, or a hand-over
 # that never completed) is retired rather than kept forever.
 CYCLE_LINK_HORIZON_S=${FM_WATCH_CYCLE_LINK_HORIZON_S:-300}
 ARM_PID=${BASHPID:-$$}
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
-case "$CYCLE_LINK_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LINK_KEEP_LINES=200 ;; esac
 case "$CYCLE_LINK_HORIZON_S" in ''|*[!0-9]*|0) CYCLE_LINK_HORIZON_S=300 ;; esac
 
 # The lifecycle ledger is diagnostic evidence, not a supervision dependency.
@@ -146,6 +151,36 @@ case "$CYCLE_LINK_HORIZON_S" in ''|*[!0-9]*|0) CYCLE_LINK_HORIZON_S=300 ;; esac
 cycle_clean_field() {
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-512
 }
+
+# An arm pid alone is not a durable key for "the arm cycle that closed": the
+# ledger and its claims outlive the process, so a recycled pid would match the
+# wrong record. Every row therefore carries the same pid-identity discipline the
+# supervision locks use, and a claim names its predecessor by pid AND identity.
+ARM_IDENTITY=$(cycle_clean_field "$(fm_pid_identity "$ARM_PID" 2>/dev/null || true)")
+
+# Resolve the predecessor's identity once, at startup, while it is still
+# resolvable: either the predecessor is alive and its identity recomputes, or it
+# has already closed and its ledger row carries the identity it recorded. A
+# predecessor that is gone without a row has nothing a claim could ever link.
+cycle_predecessor_identity() {
+  local predecessor=$1 identity=
+  identity=$(fm_pid_identity "$predecessor" 2>/dev/null || true)
+  if [ -z "$identity" ] && [ -f "$CYCLE_LOG" ]; then
+    identity=$(awk -F'\t' -v pid="arm_pid=$predecessor" '
+      $1 == pid {
+        for (i = 1; i <= NF; i += 1) if ($i ~ /^arm_identity=/) found = substr($i, 14)
+      }
+      END { if (found != "") print found }
+    ' "$CYCLE_LOG" 2>/dev/null || true)
+  fi
+  cycle_clean_field "$identity"
+}
+
+PREDECESSOR_IDENTITY=
+case "${FM_WATCH_PREDECESSOR_ARM_PID:-}" in
+  ''|*[!0-9]*) ;;
+  *) PREDECESSOR_IDENTITY=$(cycle_predecessor_identity "$FM_WATCH_PREDECESSOR_ARM_PID") ;;
+esac
 
 lock_snapshot() {
   local pid identity
@@ -203,86 +238,114 @@ cycle_log_lock_acquire() {
   done
 }
 
-# Record a successor claim durably, before any ledger lock is contested. A
-# single small O_APPEND write is atomic, so two arms cannot interleave here and
-# no lock is needed on this path.
+# Record a successor claim durably, before any ledger lock is contested. The
+# claim is this arm's own file, published by rename, so it cannot collide with
+# another arm's claim and cannot be clobbered by a concurrent reconcile; no lock
+# is needed on this path.
 cycle_link_claim() {
-  local successor=$1 predecessor=${FM_WATCH_PREDECESSOR_ARM_PID:-}
+  local successor=$1 predecessor=${FM_WATCH_PREDECESSOR_ARM_PID:-} tmp
   case "$predecessor" in
     ''|*[!0-9]*) return 0 ;;
   esac
-  printf 'predecessor=%s\tsuccessor=%s\tclaimed_at=%s\n' \
-    "$predecessor" "$(cycle_clean_field "$successor")" "$(date +%s)" >> "$CYCLE_LINK" 2>/dev/null || true
+  [ -n "$PREDECESSOR_IDENTITY" ] || return 0
+  [ -d "$CYCLE_LINK" ] || rm -f "$CYCLE_LINK" 2>/dev/null || true
+  mkdir -p "$CYCLE_LINK" 2>/dev/null || return 0
+  tmp="$CYCLE_LINK/.pending.$ARM_PID"
+  printf 'predecessor=%s\tpredecessor_identity=%s\tsuccessor=%s\tclaimed_at=%s\n' \
+    "$predecessor" "$PREDECESSOR_IDENTITY" "$(cycle_clean_field "$successor")" "$(date +%s)" \
+    > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$CYCLE_LINK/$ARM_PID.claim" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null || true
 }
 
 # Apply every outstanding claim to the ledger, and retire the ones that are
 # applied or expired. The caller must already hold the ledger lock, so this
 # never waits on anything and never runs on a critical path.
 cycle_link_reconcile() {
-  local log_tmp claim_tmp now
-  [ -s "$CYCLE_LINK" ] || return 0
+  local log_tmp claims_tmp retire_tmp now claim_file
+  [ -d "$CYCLE_LINK" ] || return 0
   [ -f "$CYCLE_LOG" ] || return 0
-  now=$(date +%s)
   log_tmp="$CYCLE_LOG.reconcile.$ARM_PID"
-  claim_tmp="$CYCLE_LINK.reconcile.$ARM_PID"
-  if ! awk -v claims="$CYCLE_LINK" -v claimout="$claim_tmp" \
-    -v horizon="$CYCLE_LINK_HORIZON_S" -v now="$now" -v keep="$CYCLE_LINK_KEEP_LINES" '
+  claims_tmp="$CYCLE_LINK/.claims.$ARM_PID"
+  retire_tmp="$CYCLE_LINK/.retire.$ARM_PID"
+  : > "$claims_tmp" 2>/dev/null || return 0
+  for claim_file in "$CYCLE_LINK"/*.claim; do
+    [ -f "$claim_file" ] || continue
+    printf '%s\t%s\n' "$claim_file" "$(head -n 1 "$claim_file" 2>/dev/null)" >> "$claims_tmp" 2>/dev/null || true
+  done
+  if [ ! -s "$claims_tmp" ]; then
+    rm -f "$claims_tmp" 2>/dev/null || true
+    return 0
+  fi
+  now=$(date +%s)
+  : > "$retire_tmp" 2>/dev/null || { rm -f "$claims_tmp" 2>/dev/null || true; return 0; }
+  if awk -v claims="$claims_tmp" -v retireout="$retire_tmp" \
+    -v horizon="$CYCLE_LINK_HORIZON_S" -v now="$now" '
     BEGIN {
-      pending = 0
       while ((getline claim < claims) > 0) {
         if (claim == "") continue
-        predecessor = ""; successor = ""; claimed_at = 0
         count = split(claim, part, "\t")
-        for (i = 1; i <= count; i += 1) {
+        if (count < 2) continue
+        file = part[1]
+        predecessor = ""; identity = ""; successor = ""; claimed_at = 0
+        for (i = 2; i <= count; i += 1) {
           if (part[i] ~ /^predecessor=/) predecessor = substr(part[i], 13)
+          else if (part[i] ~ /^predecessor_identity=/) identity = substr(part[i], 22)
           else if (part[i] ~ /^successor=/) successor = substr(part[i], 11)
           else if (part[i] ~ /^claimed_at=/) claimed_at = substr(part[i], 12) + 0
         }
-        if (predecessor !~ /^[0-9]+$/ || successor == "") continue
-        if (claimed_at > 0 && now - claimed_at > horizon) continue
-        if (!(predecessor in want)) order[++pending] = predecessor
-        want[predecessor] = successor
-        kept[predecessor] = claim
+        if (predecessor !~ /^[0-9]+$/ || identity == "" || successor == "") {
+          print file > retireout
+          continue
+        }
+        if (claimed_at > 0 && now - claimed_at > horizon) {
+          print file > retireout
+          continue
+        }
+        key = predecessor SUBSEP identity
+        if (key in want) print claimfile[key] > retireout
+        want[key] = successor
+        claimfile[key] = file
       }
       close(claims)
     }
     {
       rows[NR] = $0
+      row_pid = ""; row_identity = ""; unlinked = 0
       count = split($0, field, "\t")
       if (count < 1 || field[1] !~ /^arm_pid=/) next
-      candidate = substr(field[1], 9)
-      if (!(candidate in want)) next
+      row_pid = substr(field[1], 9)
       for (i = 1; i <= count; i += 1) {
-        if (field[i] == "successor=none") { target[candidate] = NR; break }
+        if (field[i] ~ /^arm_identity=/) row_identity = substr(field[i], 14)
+        else if (field[i] == "successor=none") unlinked = 1
       }
+      if (row_identity == "" || !unlinked) next
+      key = row_pid SUBSEP row_identity
+      if (key in want) target[key] = NR
     }
     END {
+      for (key in target) rowkey[target[key]] = key
       for (i = 1; i <= NR; i += 1) {
         row = rows[i]
-        row_pid = ""
-        count = split(row, field, "\t")
-        if (count >= 1 && field[1] ~ /^arm_pid=/) row_pid = substr(field[1], 9)
-        if (row_pid != "" && target[row_pid] == i) {
-          sub(/\tsuccessor=none$/, "\tsuccessor=" want[row_pid], row)
-          applied[row_pid] = 1
+        if (i in rowkey) {
+          key = rowkey[i]
+          if (sub(/\tsuccessor=none$/, "\tsuccessor=" want[key], row)) print claimfile[key] > retireout
         }
         print row
       }
-      first = pending - keep + 1
-      if (first < 1) first = 1
-      for (i = first; i <= pending; i += 1) {
-        predecessor = order[i]
-        if (applied[predecessor]) continue
-        print kept[predecessor] > claimout
-      }
-      close(claimout)
+      close(retireout)
     }
   ' "$CYCLE_LOG" > "$log_tmp" 2>/dev/null; then
-    rm -f "$log_tmp" "$claim_tmp" 2>/dev/null || true
-    return 0
+    # Claims are retired only once the rewritten ledger is committed, so an
+    # application that never reached the file cannot delete its own evidence.
+    if mv -f "$log_tmp" "$CYCLE_LOG" 2>/dev/null; then
+      while IFS= read -r claim_file; do
+        [ -n "$claim_file" ] || continue
+        rm -f "$claim_file" 2>/dev/null || true
+      done < "$retire_tmp"
+    fi
   fi
-  mv -f "$log_tmp" "$CYCLE_LOG" 2>/dev/null || rm -f "$log_tmp" 2>/dev/null || true
-  mv -f "$claim_tmp" "$CYCLE_LINK" 2>/dev/null || rm -f "$claim_tmp" 2>/dev/null || true
+  rm -f "$log_tmp" "$claims_tmp" "$retire_tmp" 2>/dev/null || true
 }
 
 cycle_log_append() {
@@ -293,9 +356,9 @@ cycle_log_append() {
   lock_after=$(lock_snapshot)
 
   cycle_log_lock_acquire 'cycle record' || return 0
-  cycle_link_reconcile
-  printf 'arm_pid=%s\twatcher_pid=%s\torigin=%s\tstarted_at=%s\tended_at=%s\texit_code=%s\tsignal=%s\treason=%s\tbeacon_age=%s\tlock_before=%s\tlock_after=%s\tsuccessor=%s\n' \
+  printf 'arm_pid=%s\tarm_identity=%s\twatcher_pid=%s\torigin=%s\tstarted_at=%s\tended_at=%s\texit_code=%s\tsignal=%s\treason=%s\tbeacon_age=%s\tlock_before=%s\tlock_after=%s\tsuccessor=%s\n' \
     "$ARM_PID" \
+    "$ARM_IDENTITY" \
     "$(cycle_clean_field "$cycle_watcher_pid")" \
     "$(cycle_clean_field "$cycle_origin")" \
     "$cycle_started_at" \
@@ -307,6 +370,10 @@ cycle_log_append() {
     "$(cycle_clean_field "$cycle_lock_before")" \
     "$(cycle_clean_field "$lock_after")" \
     "$(cycle_clean_field "$successor")" >> "$CYCLE_LOG" 2>/dev/null || true
+
+  # After this arm's own row exists, so a predecessor that is still running its
+  # close can link the row it just wrote instead of deferring it to a horizon.
+  cycle_link_reconcile
 
   size=$(wc -c < "$CYCLE_LOG" 2>/dev/null | tr -d '[:space:]')
   case "$size" in

@@ -1126,6 +1126,63 @@ SH
   pass "a verified successor link survives a busy lifecycle ledger"
 }
 
+# On the adapter paths that start the successor from a child-close handler, the
+# predecessor is still running its own close when the successor claims it, so its
+# record does not exist yet and the successor can never apply the claim itself.
+# The predecessor must therefore apply outstanding claims against the record it
+# has just written, or the hand-over expires unlinked at the claim horizon.
+test_cycle_successor_link_lands_on_a_predecessor_still_closing() {
+  local dir state fakebin armout succout first_arm successor_arm watcher_pid i
+  dir=$(make_case cycle-ledger-link-self)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/first-arm.out"
+  succout="$dir/successor-arm.out"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  first_arm=$!
+  i=0
+  while [ "$i" -lt 200 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$watcher_pid" "$armout" \
+    || fail "self-link predecessor cycle did not start: $(cat "$armout")"
+
+  # The successor claims a predecessor that is still live and has written no
+  # record at all, which is the interleaving a successor can never resolve.
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_PREDECESSOR_ARM_PID="$first_arm" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$succout" &
+  successor_arm=$!
+  i=0
+  while [ "$i" -lt 200 ]; do
+    grep -qF "watcher: attached pid=$watcher_pid" "$succout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$watcher_pid" "$succout" \
+    || fail "successor did not attach to the still-running predecessor's watcher: $(cat "$succout")"
+  ! grep -q "arm_pid=$first_arm" "$state/.watch-cycle-exits.log" 2>/dev/null \
+    || fail "the predecessor recorded its cycle before the claim, so this interleaving was not exercised"
+
+  kill -HUP "$first_arm" 2>/dev/null || true
+  wait "$first_arm" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 200 ]; do
+    grep -q "arm_pid=$first_arm" "$state/.watch-cycle-exits.log" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -q "arm_pid=$first_arm.*successor=attached:$watcher_pid" "$state/.watch-cycle-exits.log" \
+    || fail "a predecessor closing after its successor claimed it was left unlinked: $(tail -3 "$state/.watch-cycle-exits.log" 2>/dev/null)"
+
+  kill -HUP "$successor_arm" 2>/dev/null || true
+  wait "$successor_arm" 2>/dev/null || true
+  drain_and_ack "$state" || fail "recovery drain after a self-linked predecessor close failed"
+  pass "a predecessor still closing links the successor that already claimed it"
+}
+
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   local dir state fakebin armout armpid watcher_pid i status
   dir=$(make_case stopped-watcher)
@@ -1382,4 +1439,5 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_cycle_successor_link_survives_a_busy_ledger
+test_cycle_successor_link_lands_on_a_predecessor_still_closing
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
