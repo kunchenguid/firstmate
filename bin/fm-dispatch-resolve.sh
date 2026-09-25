@@ -4,6 +4,8 @@
 #
 # Usage:
 #   fm-dispatch-resolve.sh <brief-file> [--project <name>]
+#   fm-dispatch-resolve.sh --record-dispatch <brief-file> --harness <name> \
+#       [--model <name>] [--effort <level>]
 #
 # Opt-in gate: TYPESAFE_API_KEY non-empty in this process environment, else a
 #   TYPESAFE_API_KEY= line in $FM_HOME/.env read with fmx_env_get, the same
@@ -48,9 +50,21 @@
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
 #   error     -> API, network, response, or quota-axi failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
+#   A keyed run appends one best-effort resolution receipt to
+#   $FM_HOME/state/dispatch-receipts.jsonl after the block above is printed.
+#   On clear only, once fm-spawn has accepted the dispatched profile, a
+#   separate --record-dispatch run appends a second receipt joined to the
+#   latest resolution for the same brief content hash, and names on stderr
+#   why a join did not land. A resolve-path receipt that cannot be written
+#   prints one fixed stderr line, "dispatch-resolve: no resolution receipt
+#   for this run", on every outcome and changes neither resolver stdout nor
+#   exit status; it does cost the run's own process lifetime, bounded in
+#   docs/configuration.md. The JSONL file is append-only and waits only
+#   briefly for the lock, so a contended resolve receipt is dropped rather
+#   than delaying the block already printed.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
-#   existing unreadable rules file, malformed rules, or missing jq), which is
-#   actionable, never selected around.
+#   existing unreadable rules file, malformed rules, or missing jq once a rules
+#   file exists to match against), which is actionable, never selected around.
 #
 # Environment:
 #   TYPESAFE_API_KEY is the only resolver-specific environment setting.
@@ -85,10 +99,205 @@ TS_MODEL=jev-latest
 TS_BASE=https://api.typesafe.ai
 TS_TIMEOUT=5
 DEFAULT_WHEN="No listed rule applies to this task."
+RESOLVE_LOCK_ATTEMPTS=7
+DISPATCH_LOCK_ATTEMPTS=21
+RECEIPTS="$FM_HOME/state/dispatch-receipts.jsonl"
+RECEIPT_LOCK="$FM_HOME/state/.dispatch-receipts.lock"
+
+RULES='' BRIEF_SNAPSHOT='' RESP_FILE='' RESP_HEADERS='' QUOTA='' TASK_TEXT=''
+RULES_SHA256='' BRIEF_SHA256='' REQUEST_ID=''
+LAT_MS=null RECEIPT_LOCK_HELD=0
+
+# shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap.
+cleanup() {
+  [ -z "$RULES" ] || rm -f -- "$RULES"
+  [ -z "$BRIEF_SNAPSHOT" ] || rm -f -- "$BRIEF_SNAPSHOT"
+  [ -z "$RESP_FILE" ] || rm -f -- "$RESP_FILE"
+  [ -z "$RESP_HEADERS" ] || rm -f -- "$RESP_HEADERS"
+  [ -z "$QUOTA" ] || rm -f -- "$QUOTA"
+  [ -z "$TASK_TEXT" ] || rm -f -- "$TASK_TEXT"
+  if [ "$RECEIPT_LOCK_HELD" -eq 1 ]; then
+    rm -f -- "$RECEIPT_LOCK" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
+sha256_file() { # <path>
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+sha256_text() { # <text>
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 2>/dev/null | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+receipt_lock_acquire() { # <attempt-budget>
+  local budget=$1 attempt=0 owner
+  mkdir -p "$FM_HOME/state" 2>/dev/null || return 1
+  while [ "$attempt" -lt "$budget" ]; do
+    if ln -s "$$" "$RECEIPT_LOCK" 2>/dev/null; then
+      RECEIPT_LOCK_HELD=1
+      return 0
+    fi
+    owner=$(readlink "$RECEIPT_LOCK" 2>/dev/null) || owner=''
+    case "$owner" in
+      ''|*[!0-9]*) : ;;
+      *) kill -0 "$owner" 2>/dev/null || rm -f -- "$RECEIPT_LOCK" 2>/dev/null || true ;;
+    esac
+    attempt=$((attempt + 1))
+    sleep 0.005
+  done
+  return 1
+}
+
+receipt_lock_release() {
+  [ "$RECEIPT_LOCK_HELD" -eq 1 ] || return 0
+  rm -f -- "$RECEIPT_LOCK" 2>/dev/null || return 1
+  RECEIPT_LOCK_HELD=0
+}
+
+receipt_append_locked() { # <one-line-json>
+  local record=$1
+  # Tested before -e, which dereferences: a dangling symlink is invisible to the
+  # checks below and would have the append create its target outside state/.
+  [ ! -L "$RECEIPTS" ] || return 1
+  if [ -e "$RECEIPTS" ]; then
+    [ -f "$RECEIPTS" ] || return 1
+  fi
+  (umask 077; printf '%s\n' "$record" >> "$RECEIPTS") 2>/dev/null
+}
+
+receipt_append() { # <one-line-json>
+  local record=$1 rc=0
+  receipt_lock_acquire "$RESOLVE_LOCK_ATTEMPTS" || return 1
+  receipt_append_locked "$record" || rc=1
+  receipt_lock_release || rc=1
+  return "$rc"
+}
+
+write_resolution_receipt() { # <result-json>
+  local result=$1 timestamp resolution_id record
+  [ -n "$BRIEF_SHA256" ] || return 1
+  timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || return 1
+  resolution_id=$(sha256_text "$timestamp|$$|$RANDOM|$BRIEF_SHA256|$REQUEST_ID") || return 1
+  record=$(jq -cn \
+    --arg timestamp "$timestamp" --arg resolution_id "sha256:$resolution_id" \
+    --arg brief_path "$BRIEF" --arg brief_sha "$BRIEF_SHA256" \
+    --arg rules_sha "$RULES_SHA256" \
+    --arg requested_model "$TS_MODEL" --arg request_id "$REQUEST_ID" \
+    --argjson result "$result" '
+      {
+        receipt_type: "resolution",
+        resolution_id: $resolution_id,
+        timestamp_utc: $timestamp,
+        brief_path: $brief_path,
+        brief_sha256: $brief_sha,
+        rules_sha256: (if $rules_sha == "" then null else $rules_sha end),
+        requested_model: $requested_model,
+        answering_model: ($result.model // null),
+        request_id: (if $request_id == "" then null else $request_id end),
+        usage: ($result.tokens // null),
+        latency_ms: ($result.latency_ms // null),
+        probabilities: ($result.probabilities // null),
+        confidence: ($result.confidence // null),
+        status: $result.status,
+        reason: ($result.reason // null),
+        chosen_profile: ($result.chosen.profile // null)
+      }') || return 1
+  receipt_append "$record"
+}
+
+join_failed() { # <reason>
+  printf 'dispatch-resolve: no dispatch receipt (%s)\n' "$1" >&2
+  return 1
+}
+
+receipt_failed() {
+  printf 'dispatch-resolve: no resolution receipt for this run\n' >&2
+}
+
+record_actual_dispatch() {
+  local timestamp profile base record rc=0
+  [ -n "$BRIEF_SHA256" ] || join_failed "the brief could not be hashed" || return 1
+  profile=$(jq -cn --arg harness "$DISPATCH_HARNESS" --arg model "$DISPATCH_MODEL" --arg effort "$DISPATCH_EFFORT" '
+    {harness: $harness}
+    + (if $model == "" then {} else {model: $model} end)
+    + (if $effort == "" then {} else {effort: $effort} end)' 2>/dev/null) ||
+    join_failed "the dispatched profile could not be built" || return 1
+  timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || join_failed "no timestamp" || return 1
+  receipt_lock_acquire "$DISPATCH_LOCK_ATTEMPTS" || join_failed "the receipts lock stayed busy" || return 1
+  if [ ! -s "$RECEIPTS" ]; then
+    receipt_lock_release || true
+    join_failed "this home has no resolution receipts yet"
+    return 1
+  fi
+  base=$(jq -sc --arg brief_sha "$BRIEF_SHA256" '
+    [.[] | select(.receipt_type == "resolution" and .brief_sha256 == $brief_sha)]
+    | last // empty' "$RECEIPTS" 2>/dev/null) || base=''
+  if [ -z "$base" ]; then
+    receipt_lock_release || true
+    join_failed "no resolution receipt carries this brief's current content hash; it may have been edited after the resolve"
+    return 1
+  fi
+  record=$(jq -c --arg timestamp "$timestamp" \
+    --argjson profile "$profile" '
+      . + {
+        receipt_type: "dispatch",
+        timestamp_utc: $timestamp,
+        dispatched_profile: $profile
+      }' 2>/dev/null <<<"$base") || record=''
+  if [ -z "$record" ] || ! receipt_append_locked "$record"; then
+    join_failed "the receipt could not be appended; the file may be full, replaced, or unwritable"
+    rc=1
+  fi
+  receipt_lock_release || rc=1
+  return "$rc"
+}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
+
+# Send Jev only the task-specific sections parsed by the shared brief-heading library.
+# A brief with neither section goes whole. Ship delivery mode is deliberately not sent.
+brief_kind() {
+  if grep -qxF 'This is a SCOUT task: the deliverable is a written report, not a PR.' "$BRIEF_SNAPSHOT"; then
+    printf 'Brief kind: scout (report only)\n\n'
+  fi
+}
+task_sections() {
+  local heading
+  for heading in "## Captain's intent" "## Firstmate spec"; do
+    fm_brief_task_heading_present "$BRIEF_SNAPSHOT" "$heading" || continue
+    printf '%s\n%s\n\n' "$heading" "$(fm_brief_task_heading_body "$BRIEF_SNAPSHOT" "$heading")"
+  done
+}
+prepare_task_text() {
+  local sections
+  TASK_TEXT=$(mktemp) || die "mktemp failed"
+  sections=$(task_sections)
+  if [ -n "$sections" ]; then
+    { brief_kind; printf '%s\n' "$sections"; } > "$TASK_TEXT" || die "could not prepare brief text: $BRIEF"
+  else
+    cp "$BRIEF_SNAPSHOT" "$TASK_TEXT" || die "could not read brief snapshot: $BRIEF"
+  fi
+  BRIEF_SHA256=$(sha256_file "$TASK_TEXT") || BRIEF_SHA256=''
+}
+
 no_rules() {
+  local result
+  result=$(jq -cn '{status:"escalate", reason:"no rules to match", model:null, latency_ms:null, tokens:null, probabilities:null, confidence:null}' 2>/dev/null)
   printf 'dispatch-resolve:\n  status: escalate\n  reason: no rules to match\n'
+  write_resolution_receipt "$result" >/dev/null 2>&1 || receipt_failed || true
   exit 0
 }
 usage() {
@@ -99,9 +308,14 @@ usage() {
   ' "$0"
 }
 
-BRIEF='' PROJECT='' RULES_PATH="$CONFIG/crew-dispatch.json" RULES=''
+BRIEF='' PROJECT='' RULES_PATH="$CONFIG/crew-dispatch.json"
+MODE=resolve DISPATCH_HARNESS='' DISPATCH_MODEL='' DISPATCH_EFFORT=''
 while [ $# -gt 0 ]; do
   case "$1" in
+    --record-dispatch) MODE=dispatch; shift ;;
+    --harness) [ $# -ge 2 ] || die "--harness needs a value"; DISPATCH_HARNESS=$2; shift 2 ;;
+    --model) [ $# -ge 2 ] || die "--model needs a value"; DISPATCH_MODEL=$2; shift 2 ;;
+    --effort) [ $# -ge 2 ] || die "--effort needs a value"; DISPATCH_EFFORT=$2; shift 2 ;;
     --project) [ $# -ge 2 ] || die "--project needs a value"; PROJECT=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     -*) die "unknown flag $1" ;;
@@ -121,13 +335,24 @@ fi
 # ---- inputs --------------------------------------------------------------------
 [ -n "$BRIEF" ] || die "brief file required (see --help)"
 [ -r "$BRIEF" ] || die "brief file not readable: $BRIEF"
+BRIEF_SNAPSHOT=$(mktemp) || die "mktemp failed"
+cp "$BRIEF" "$BRIEF_SNAPSHOT" || die "could not snapshot brief file: $BRIEF"
+chmod 400 "$BRIEF_SNAPSHOT" || die "could not protect brief snapshot"
+prepare_task_text
+
+if [ "$MODE" = dispatch ]; then
+  [ -n "$DISPATCH_HARNESS" ] || die "--record-dispatch needs --harness"
+  record_actual_dispatch >/dev/null || true
+  exit 0
+fi
+[ -z "$DISPATCH_HARNESS$DISPATCH_MODEL$DISPATCH_EFFORT" ] || die "dispatch profile flags need --record-dispatch"
 [ -e "$RULES_PATH" ] || [ -L "$RULES_PATH" ] || no_rules
-[ -r "$RULES_PATH" ] || die "rules file not readable: $RULES_PATH"
 command -v jq >/dev/null 2>&1 || die "jq required"
+[ -r "$RULES_PATH" ] || die "rules file not readable: $RULES_PATH"
 RULES=$(mktemp) || die "mktemp failed"
-trap 'rm -f "$RULES"' EXIT
 cp "$RULES_PATH" "$RULES" || die "could not snapshot rules file: $RULES_PATH"
 chmod 400 "$RULES" || die "could not protect rules snapshot"
+RULES_SHA256=$(sha256_file "$RULES") || RULES_SHA256=''
 VERIFIED_HARNESSES=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
 
 # The fields this tool consumes must be well formed; bootstrap owns the wider
@@ -218,9 +443,25 @@ done < <(jq -r '
 RULE_COUNT=$(jq -r '(.rules // []) | length' "$RULES")
 
 emit_error() {
-  local reason=$1
+  local reason=$1 result default_result
+  default_result=$(jq -cn --arg reason "$reason" --argjson latency "$LAT_MS" '
+    {status:"error", reason:$reason, model:null, latency_ms:$latency, tokens:null, probabilities:null, confidence:null}')
+  result=$default_result
+  if [ -n "$RESP_FILE" ] && [ -s "$RESP_FILE" ]; then
+    result=$(jq -c --arg reason "$reason" --argjson latency "$LAT_MS" '
+      {
+        status:"error",
+        reason:$reason,
+        model:(if (.model | type) == "string" then .model else null end),
+        latency_ms:$latency,
+        tokens:(if (.usage | type) == "object" then .usage else null end),
+        probabilities:(if (.answers.rule.probabilities | type) == "object" then .answers.rule.probabilities else null end),
+        confidence:(if (.answers.rule.confidence | type) == "number" then .answers.rule.confidence else null end)
+      }' "$RESP_FILE" 2>/dev/null) || result=$default_result
+  fi
   echo "dispatch-resolve: error ($reason)" >&2
   printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
+  write_resolution_receipt "$result" >/dev/null 2>&1 || receipt_failed || true
   exit 0
 }
 
@@ -229,33 +470,8 @@ if [ "$RULE_COUNT" -eq 0 ]; then
 fi
 
 RESP_FILE=$(mktemp) || die "mktemp failed"
-QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
-TASK_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA"; die "mktemp failed"; }
-trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT"' EXIT
-
-# Send Jev only the task-specific sections bin/fm-brief.sh scaffolds, plus a
-# scout tag from the scout contract line; the rest of a scaffolded brief is
-# standard boilerplate whose safety language reads as high stakes on every task.
-# A brief with neither section goes whole. Ship delivery mode is deliberately
-# not sent: live runs showed it pushing routine ship briefs to the top tier.
-brief_kind() {
-  if grep -qxF 'This is a SCOUT task: the deliverable is a written report, not a PR.' "$BRIEF"; then
-    printf 'Brief kind: scout (report only)\n\n'
-  fi
-}
-task_sections() {
-  local heading
-  for heading in "## Captain's intent" "## Firstmate spec"; do
-    fm_brief_task_heading_present "$BRIEF" "$heading" || continue
-    printf '%s\n%s\n\n' "$heading" "$(fm_brief_task_heading_body "$BRIEF" "$heading")"
-  done
-}
-SECTIONS=$(task_sections)
-if [ -n "$SECTIONS" ]; then
-  { brief_kind; printf '%s\n' "$SECTIONS"; } > "$TASK_TEXT" || die "could not read brief: $BRIEF"
-else
-  cp "$BRIEF" "$TASK_TEXT" || die "could not read brief: $BRIEF"
-fi
+RESP_HEADERS=$(mktemp) || die "mktemp failed"
+QUOTA=$(mktemp) || die "mktemp failed"
 LAT_MS=null
 command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   REQUEST=$(jq -n --rawfile brief "$TASK_TEXT" --arg project "$PROJECT" --arg model "$TS_MODEL" \
@@ -274,12 +490,20 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
       }
     }')
   T0=$(fm_timing_now_ms)
-  HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
+  HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -D "$RESP_HEADERS" -o "$RESP_FILE" -w '%{http_code}' \
     -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
     -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$TYPESAFE_API_KEY_PRIVATE") \
     --data-binary @- 2>/dev/null) || HTTP=000
   T1=$(fm_timing_now_ms)
   LAT_MS=$(( T1 - T0 ))
+  REQUEST_ID=$(awk '
+    tolower($0) ~ /^x-typesafe-request-id:[[:space:]]*/ {
+      sub(/^[^:]*:[[:space:]]*/, "")
+      sub(/\r$/, "")
+      value = $0
+    }
+    END { print value }
+  ' "$RESP_HEADERS" 2>/dev/null) || REQUEST_ID=''
   [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
 jq -e --slurpfile rules "$RULES" '
     (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
@@ -468,4 +692,5 @@ TEXT=$(jq -r '
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
       + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
 printf '%s\n' "$TEXT"
+write_resolution_receipt "$RESULT" >/dev/null 2>&1 || receipt_failed || true
 exit 0

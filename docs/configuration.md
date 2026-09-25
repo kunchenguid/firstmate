@@ -1160,6 +1160,16 @@ By accepted design, a `clear` result does not enforce catalog/authentication, re
 
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
+**Resolution and dispatch receipts**
+
+A keyed resolve that produces a structured outcome appends a best-effort resolution record to the home's gitignored `state/dispatch-receipts.jsonl`.
+Its `brief_sha256` identifies exactly the bytes in `state.task.brief` sent to TypeSafe: the selected task sections with any scout tag, or the complete brief snapshot when no sections exist.
+The resolver builds that text from one protected snapshot for both the API request and receipt; `--record-dispatch` rebuilds it from a fresh snapshot and joins the latest matching resolution by hash, so edits to the task text are not mistaken for the resolved input.
+Resolution records retain the brief path and content hash, rules hash, requested and answering models, request id, usage, latency, decision probabilities, confidence, outcome, reason, and chosen profile; they never store the API key, brief body, or rule `why`.
+After `fm-spawn` accepts a `clear` profile, rerun the tool with `--record-dispatch` and the profile actually used; other outcomes never record a dispatch.
+A missing matching resolution or failed append is reported on stderr, but `--record-dispatch` exits 0 and a failed resolution receipt does not change normal resolver stdout or exit status.
+The append-only file is protected by a brief home-local lock and a symlink at the receipt path is refused.
+
 **Key handling and fixed settings**
 
 - The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.

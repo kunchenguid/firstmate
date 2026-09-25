@@ -22,6 +22,7 @@ BRIEF="$TMP_ROOT/brief.md"
 BASE_RULES="$TMP_ROOT/rules.json"
 RULES="$HOME_DIR/config/crew-dispatch.json"
 QUOTA="$TMP_ROOT/quota.json"
+RECEIPTS="$HOME_DIR/state/dispatch-receipts.jsonl"
 BASE_PATH=$PATH
 mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN"
 for command_name in bash chmod cp dirname jq mktemp rm; do
@@ -58,7 +59,7 @@ cat > "$BASE_RULES" <<'JSON'
       "when": "A simple bug fix with a stated root cause.",
       "use": [
         { "harness": "claude", "model": "sonnet", "effort": "high" },
-        { "harness": "cursor", "model": "cursor-grok-4.6-medium" },
+        { "harness": "cursor", "model": "cursor-grok-4.6-medium", "provider": "cursor" },
         { "harness": "kimi", "model": "kimi-code/k3" }
       ]
     }
@@ -115,9 +116,10 @@ if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; the
 else
   printf 'curl:clean\n' >> "${CHILD_ENV_LOG:?}"
 fi
-out=''
+out='' headers=''
 while [ $# -gt 0 ]; do
   case "$1" in
+    -D) headers=$2; shift 2 ;;
     -o) out=$2; shift 2 ;;
     *) printf '%s\n' "$1" >> "${FAKE_CURL_LOG:?}/argv"; shift ;;
   esac
@@ -131,6 +133,7 @@ if [ "${FAKE_CURL_FAIL:-0}" = 1 ]; then
   exit 7
 fi
 cp "${FAKE_CURL_RESPONSE:?}" "$out"
+[ -z "$headers" ] || printf 'HTTP/1.1 %s Fake\r\nx-typesafe-request-id: request-test-123\r\n\r\n' "${FAKE_CURL_HTTP:-200}" > "$headers"
 printf '%s' "${FAKE_CURL_HTTP:-200}"
 SH
 chmod +x "$FAKEBIN/curl"
@@ -158,12 +161,20 @@ reset_log() {
   mkdir -p "$LOG"
 }
 
+test_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
 # run <exit-var> <out-var> <err-var> [args...]: the tool with fakebin first on
 # PATH and an isolated FM_HOME; TYPESAFE_API_KEY comes from the caller's env.
 run() {
   local __exit=$1 __out=$2 __err=$3 _out _code
   shift 3
-  _out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
+  _out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" FAKE_CP_MUTATE_SOURCE="${FAKE_CP_MUTATE_SOURCE:-}" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
   _code=$?
   printf -v "$__exit" '%s' "$_code"
   printf -v "$__out" '%s' "$_out"
@@ -181,7 +192,7 @@ run_without_curl() {
 }
 
 KEY='test-key-9f1c2d3e-never-on-argv'
-code='' out='' err=''
+code='' out='' err='' baseline_out='' baseline_err=''
 
 # --- absent key: off, silent on stdout, no network, no quota read -----------
 reset_log
@@ -192,6 +203,7 @@ assert_equals '' "$out" "absent key prints nothing on stdout"
 assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and' "absent key explains itself on stderr"
 assert_absent "$LOG/argv" "absent key never calls curl"
 assert_absent "$LOG/quota-axi.calls" "absent key never reads quota-axi"
+assert_absent "$RECEIPTS" "absent key creates no receipt file"
 pass "absent key is off: one stderr line, exit 0, no network call"
 
 # --- .env key, and the environment wins over it ------------------------------
@@ -234,7 +246,7 @@ assert_contains "$argv" '@/dev/fd/3' "the header is read from a file descriptor"
 assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "curl receives the bearer header on fd 3"
 assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "the API key is absent from every child environment"
 body=$(cat "$LOG/body")
-assert_equals 'jev-latest' "$(jq -r .model <<<"$body")" "default model is jev-latest"
+assert_equals 'jev-latest' "$(jq -r .model <<<"$body")" "request keeps the Jev model alias unpinned"
 assert_equals 'pager' "$(jq -r .state.task.project <<<"$body")" "project rides in the state"
 assert_contains "$(jq -r .state.task.brief <<<"$body")" 'off-by-one in the pager' "a brief without task headings rides whole in the state"
 assert_equals '["rule"]' "$(jq -c '.questions | keys' <<<"$body")" "only the rule Choice is asked"
@@ -244,7 +256,123 @@ assert_equals 'A simple bug fix with a stated root cause.' "$(jq -r '.questions.
 assert_not_contains "$body" 'SECRET-WHY-TEXT' "why text never leaves the machine"
 assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
-pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
+clear_receipt=$(jq -sc '[.[] | select(.receipt_type == "resolution")] | last' "$RECEIPTS")
+assert_equals 'clear' "$(jq -r .status <<<"$clear_receipt")" "clear writes a resolution receipt"
+assert_equals 'jev-latest' "$(jq -r .requested_model <<<"$clear_receipt")" "receipt carries the unpinned requested model alias"
+assert_equals 'jev-1.13.0' "$(jq -r .answering_model <<<"$clear_receipt")" "receipt carries the answering model"
+assert_equals 'request-test-123' "$(jq -r .request_id <<<"$clear_receipt")" "receipt carries the response request id"
+assert_equals '812' "$(jq -r .usage.input_tokens <<<"$clear_receipt")" "receipt carries token usage"
+assert_equals '0.9' "$(jq -r .confidence <<<"$clear_receipt")" "receipt carries confidence"
+assert_equals '0.96' "$(jq -r .probabilities.rule_4 <<<"$clear_receipt")" "receipt carries full probabilities"
+assert_equals 'cursor' "$(jq -r .chosen_profile.harness <<<"$clear_receipt")" "receipt carries the chosen profile"
+brief_hash=$(test_sha256 "$BRIEF")
+rules_hash=$(test_sha256 "$BASE_RULES")
+assert_equals "$brief_hash" "$(jq -r .brief_sha256 <<<"$clear_receipt")" "brief hash matches an independent computation"
+assert_equals "$rules_hash" "$(jq -r .rules_sha256 <<<"$clear_receipt")" "rules snapshot hash matches an independent computation"
+assert_not_contains "$(cat "$RECEIPTS")" "$KEY" "receipts never contain the API key"
+assert_not_contains "$(cat "$RECEIPTS")" 'SECRET-WHY-TEXT' "receipts never contain rule rationale text"
+pass "clear: unpinned request plus content-bound, secret-free resolution receipt"
+
+# --- actual dispatch is a separate joined receipt -------------------------------
+before_dispatch_bytes=$(wc -c < "$RECEIPTS")
+cp "$RECEIPTS" "$TMP_ROOT/receipts-before-dispatch"
+TYPESAFE_API_KEY=$KEY run code out err --record-dispatch "$BRIEF" --harness claude --model sonnet --effort high
+expect_code 0 "$code" "actual-dispatch receipt exits 0"
+assert_equals '' "$out" "actual-dispatch receipt writes no stdout"
+dispatch_receipt=$(jq -sc '[.[] | select(.receipt_type == "dispatch")] | last' "$RECEIPTS")
+assert_equals "$(jq -r .resolution_id <<<"$clear_receipt")" "$(jq -r .resolution_id <<<"$dispatch_receipt")" "dispatch receipt joins its resolution"
+assert_equals '{"harness":"cursor","model":"cursor-grok-4.6-medium","effort":null}' "$(jq -c '.chosen_profile | {harness, model, effort}' <<<"$dispatch_receipt")" "dispatch receipt retains the resolver choice"
+assert_equals '{"harness":"claude","model":"sonnet","effort":"high"}' "$(jq -c '.dispatched_profile | {harness, model, effort}' <<<"$dispatch_receipt")" "dispatch receipt carries the profile actually dispatched"
+assert_equals 'cursor' "$(jq -r .chosen_profile.provider <<<"$dispatch_receipt")" "chosen_profile keeps the declared provider the rules file carried"
+assert_equals 'false' "$(jq -r '(.chosen_profile | {harness, model, effort}) == (.dispatched_profile | {harness, model, effort})' <<<"$dispatch_receipt")" "a dispatch that overrode the resolver disagrees under the projection"
+head -c "$before_dispatch_bytes" "$RECEIPTS" > "$TMP_ROOT/receipt-prefix"
+cmp "$TMP_ROOT/receipts-before-dispatch" "$TMP_ROOT/receipt-prefix" || fail "the dispatch join left earlier receipt rows unchanged"
+pass "actual dispatch is separately recorded and joined without changing earlier rows"
+
+# --- agreement is the {harness, model, effort} projection, not the whole object -
+TYPESAFE_API_KEY=$KEY run code out err --record-dispatch "$BRIEF" --harness cursor --model cursor-grok-4.6-medium
+expect_code 0 "$code" "dispatching exactly what the resolver chose exits 0"
+agreeing_receipt=$(jq -sc '[.[] | select(.receipt_type == "dispatch")] | last' "$RECEIPTS")
+assert_equals "$(jq -c '.chosen_profile | {harness, model, effort}' <<<"$agreeing_receipt")" "$(jq -c '.dispatched_profile | {harness, model, effort}' <<<"$agreeing_receipt")" "a dispatch of the chosen profile agrees under the projection"
+assert_not_equals "$(jq -c .chosen_profile <<<"$agreeing_receipt")" "$(jq -c .dispatched_profile <<<"$agreeing_receipt")" "whole-object equality would read this agreeing dispatch as a disagreement"
+pass "chosen and dispatched profiles are compared by harness, model, and effort"
+
+# --- the dispatch join is by brief content, not by path spelling ---------------
+dispatch_count_before_spelling=$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")
+RELATIVE_BRIEF=$(basename "$BRIEF")
+(cd "$TMP_ROOT" && PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" \
+  "$TOOL" --record-dispatch "./$RELATIVE_BRIEF" --harness claude >/dev/null 2>&1)
+spelling_receipt=$(jq -sc '[.[] | select(.receipt_type == "dispatch")] | last' "$RECEIPTS")
+assert_equals "$((dispatch_count_before_spelling + 1))" "$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")" "a differently spelled brief path still joins its resolution"
+assert_equals "$(jq -r .resolution_id <<<"$clear_receipt")" "$(jq -r .resolution_id <<<"$spelling_receipt")" "the join is the brief content hash"
+pass "the dispatch join survives any spelling of the same brief path"
+
+# --- brief_path is display only, recorded as the caller spelled it -------------
+(cd "$TMP_ROOT" && PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" \
+  "$TOOL" "./$RELATIVE_BRIEF" >/dev/null 2>&1)
+assert_equals "./$RELATIVE_BRIEF" "$(jq -sr '[.[] | select(.receipt_type == "resolution")] | last | .brief_path' "$RECEIPTS")" "brief_path is the path as spelled on the command line"
+pass "brief_path records the caller's spelling and nothing else"
+
+# --- a join that does not land says so, once, on stderr -----------------------
+EDITED_BRIEF="$TMP_ROOT/edited-brief.md"
+printf '# Task\nA brief that was never resolved.\n' > "$EDITED_BRIEF"
+dispatch_count_before_miss=$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")
+TYPESAFE_API_KEY=$KEY run code out err --record-dispatch "$EDITED_BRIEF" --harness claude
+expect_code 0 "$code" "a failed join still exits 0"
+assert_equals '' "$out" "a failed join writes no stdout"
+assert_contains "$err" 'dispatch-resolve: no dispatch receipt' "a failed join names itself on stderr"
+assert_contains "$err" "content hash" "a failed join names why it did not land"
+assert_equals '1' "$(grep -c 'no dispatch receipt' <<<"$err")" "a failed join reports exactly one line"
+assert_not_contains "$err" "$KEY" "the failed-join line never carries the API key"
+assert_not_contains "$err" 'SECRET-WHY-TEXT' "the failed-join line never carries rule rationale"
+assert_equals "$dispatch_count_before_miss" "$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")" "a failed join appends nothing"
+TYPESAFE_API_KEY=$KEY run code out err --record-dispatch "$BRIEF" --harness claude
+assert_equals '' "$err" "a join that lands stays silent"
+pass "a dispatch join that does not land is distinguishable from one that agrees"
+
+# --- the resolve invocation form, reused verbatim for the join -----------------
+project_join_before=$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")
+TYPESAFE_API_KEY=$KEY run code out err --record-dispatch "$BRIEF" --project demo-project --harness claude --model sonnet
+expect_code 0 "$code" "--project alongside --record-dispatch is accepted"
+assert_equals '' "$err" "--project alongside --record-dispatch reports no failure"
+assert_equals "$((project_join_before + 1))" "$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")" "--project alongside --record-dispatch records the dispatch"
+pass "the documented resolve invocation form still joins when reused after the spawn"
+
+# --- a blocked receipt cannot delay the resolver block ------------------------
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+ln -s "$$" "$HOME_DIR/state/.dispatch-receipts.lock"
+blocked_before=$(jq -s 'length' "$RECEIPTS")
+ORDERING_OUT="$TMP_ROOT/ordering-stdout"
+: > "$ORDERING_OUT"
+PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" \
+  "$TOOL" "$BRIEF" > "$ORDERING_OUT" 2>/dev/null &
+resolver_pid=$!
+stdout_arrived=no
+while kill -0 "$resolver_pid" 2>/dev/null; do
+  if [ -s "$ORDERING_OUT" ]; then stdout_arrived=yes; break; fi
+  sleep 0.01
+done
+wait "$resolver_pid"
+expect_code 0 "$?" "a receipt blocked behind a live lock exits 0"
+assert_equals 'yes' "$stdout_arrived" "the resolver block is readable while the receipt path is still blocked on the lock"
+assert_contains "$(cat "$ORDERING_OUT")" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the blocked run still prints its whole block"
+assert_equals "$blocked_before" "$(jq -s 'length' "$RECEIPTS")" "a receipt that never gets the lock is dropped, not retried into the output path"
+rm -f "$HOME_DIR/state/.dispatch-receipts.lock"
+pass "the receipt path is behind the resolver block it must never delay"
+
+# --- a lock left by a dead owner does not stall receipts forever ---------------
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+DEAD_PID=$(bash -c 'echo $$')
+while kill -0 "$DEAD_PID" 2>/dev/null; do DEAD_PID=$((DEAD_PID + 1)); done
+ln -s "$DEAD_PID" "$HOME_DIR/state/.dispatch-receipts.lock"
+stalled_before=$(jq -s 'length' "$RECEIPTS")
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "a stale lock leaves the resolver exit 0"
+assert_equals "$((stalled_before + 1))" "$(jq -s 'length' "$RECEIPTS")" "a lock owned by a dead process is broken and the receipt is written"
+assert_equals 'absent' "$([ -L "$HOME_DIR/state/.dispatch-receipts.lock" ] && echo present || echo absent)" "the resolver releases the lock it recovered"
+pass "receipt writes recover from a lock whose owner died"
 
 # --- rules are snapshotted and line output is injection-safe -------------------
 MUTATED_RULES="$TMP_ROOT/mutated-rules.json"
@@ -282,6 +410,25 @@ assert_contains "$out" '  reason: no rules to match' "absent rules file returns 
 assert_not_contains "$out" '  profile:' "absent rules file emits no profile"
 assert_absent "$LOG/argv" "absent rules file never calls curl"
 assert_absent "$LOG/quota-axi.calls" "absent rules file never reads quota"
+
+# --- an absent rules file needs no jq -------------------------------------------
+NO_JQ_BIN="$TMP_ROOT/no-jq-bin"
+mkdir -p "$NO_JQ_BIN"
+for command_name in awk bash chmod cp date dirname mktemp rm sha256sum shasum; do
+  jq_free_command=$(command -v "$command_name") && ln -sf "$jq_free_command" "$NO_JQ_BIN/$command_name"
+done
+[ ! -e "$NO_JQ_BIN/jq" ] || fail "the jq-free PATH must not carry jq"
+reset_log
+out=$(PATH="$NO_JQ_BIN" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" "$TOOL" "$BRIEF" 2> "$TMP_ROOT/stderr")
+code=$?
+err=$(cat "$TMP_ROOT/stderr")
+expect_code 0 "$code" "absent rules with no jq still exits 0"
+assert_equals 'dispatch-resolve:
+  status: escalate
+  reason: no rules to match' "$out" "absent rules with no jq still prints the escalate block"
+assert_equals 'dispatch-resolve: no resolution receipt for this run' "$err" "absent rules with no jq lose the receipt and nothing else"
+assert_absent "$LOG/argv" "absent rules with no jq never calls curl"
+pass "an absent rules file returns control to firstmate without jq"
 
 DEFAULT_ONLY="$TMP_ROOT/default-only.json"
 EMPTY_RULES="$TMP_ROOT/empty-rules.json"
@@ -340,6 +487,7 @@ assert_contains "$out" '  reason: confidence 0.41 below floor 0.6' "ambiguous na
 assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627  runway=projected_exhaustion  -> eligible' "ambiguous preserves matched candidate evidence"
 assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "ambiguous preserves eligible unranked candidate evidence"
 assert_not_contains "$out" '  profile:' "ambiguous emits no profile line"
+assert_equals 'ambiguous' "$(jq -rs '[.[] | select(.receipt_type == "resolution")] | last.status' "$RECEIPTS")" "ambiguous writes a receipt"
 pass "ambiguous: confidence below the fixed floor hands the decision back"
 
 # --- per-rule confidence floor ------------------------------------------------
@@ -484,6 +632,93 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_equals "$(cat "$BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a brief with neither heading is sent whole"
 pass "only the brief's task sections and scout tag reach the model, with a whole-brief fallback"
 
+# --- exact immutable prompt bytes identify the resolution receipt --------------
+REAL_CP=$(command -v cp)
+export REAL_CP
+cat > "$FAKEBIN/cp" <<'SH'
+#!/usr/bin/env bash
+set -u
+"$REAL_CP" "$@"
+rc=$?
+if [ "$rc" -eq 0 ] && [ "${1:-}" = "${FAKE_CP_MUTATE_SOURCE:-}" ]; then
+  cat > "$1" <<'MD'
+# Task
+## Captain's intent
+Mutated after snapshot.
+## Firstmate spec
+Mutated spec.
+# Definition of done
+MD
+fi
+exit "$rc"
+SH
+chmod +x "$FAKEBIN/cp"
+
+SNAPSHOT_SECTION_BRIEF="$TMP_ROOT/snapshot-section-brief.md"
+cat > "$SNAPSHOT_SECTION_BRIEF" <<'MD'
+# Task
+## Captain's intent
+Original intent from snapshot.
+
+## Firstmate spec
+Original Firstmate spec from snapshot.
+
+# Definition of done
+This is a SCOUT task: the deliverable is a written report, not a PR.
+MD
+SNAPSHOT_SECTION_HASH=$(test_sha256 "$SNAPSHOT_SECTION_BRIEF")
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY FAKE_CP_MUTATE_SOURCE="$SNAPSHOT_SECTION_BRIEF" run code out err "$SNAPSHOT_SECTION_BRIEF"
+expect_code 0 "$code" "a brief changed after its snapshot still resolves"
+sent=$(jq -r .state.task.brief "$LOG/body")
+assert_equals $'Brief kind: scout (report only)\n\n## Captain\'s intent\nOriginal intent from snapshot.\n\n## Firstmate spec\nOriginal Firstmate spec from snapshot.' "$sent" "the request uses snapshot sections and scout classification"
+assert_contains "$(cat "$SNAPSHOT_SECTION_BRIEF")" 'Mutated after snapshot.' "the test changes the original brief after the snapshot copy"
+jq -jr '.state.task.brief' "$LOG/body" > "$TMP_ROOT/sent-task-text"
+SENT_SECTION_HASH=$(test_sha256 "$TMP_ROOT/sent-task-text")
+section_receipt=$(jq -sr '[.[] | select(.receipt_type == "resolution")] | last' "$RECEIPTS")
+assert_equals "$SENT_SECTION_HASH" "$(jq -r .brief_sha256 <<<"$section_receipt")" "the receipt hashes exactly the task text sent to the model"
+[ "$SENT_SECTION_HASH" != "$SNAPSHOT_SECTION_HASH" ] || fail "the section receipt hash must exclude the unsent scaffold text"
+
+WHOLE_BRIEF="$TMP_ROOT/snapshot-whole-brief.md"
+cat > "$WHOLE_BRIEF" <<'MD'
+# Task
+No recognized task subsections.
+This complete brief must be sent as-is.
+MD
+WHOLE_EXPECTED=$(cat "$WHOLE_BRIEF")
+WHOLE_BRIEF_HASH=$(test_sha256 "$WHOLE_BRIEF")
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY FAKE_CP_MUTATE_SOURCE="$WHOLE_BRIEF" run code out err "$WHOLE_BRIEF"
+expect_code 0 "$code" "the whole-brief fallback uses the original snapshot"
+sent=$(jq -r .state.task.brief "$LOG/body")
+assert_equals "$WHOLE_EXPECTED" "$sent" "the whole-brief fallback copies the immutable snapshot"
+assert_contains "$(cat "$WHOLE_BRIEF")" 'Mutated after snapshot.' "the fallback test changes the original brief after the snapshot copy"
+jq -jr '.state.task.brief' "$LOG/body" > "$TMP_ROOT/sent-task-text"
+SENT_WHOLE_HASH=$(test_sha256 "$TMP_ROOT/sent-task-text")
+whole_receipt=$(jq -sr '[.[] | select(.receipt_type == "resolution")] | last' "$RECEIPTS")
+assert_equals "$WHOLE_BRIEF_HASH" "$SENT_WHOLE_HASH" "the fallback request retains the whole snapshot bytes"
+assert_equals "$SENT_WHOLE_HASH" "$(jq -r .brief_sha256 <<<"$whole_receipt")" "the fallback receipt hashes exactly the whole text sent"
+
+MATCHING_SECTION_BRIEF="$TMP_ROOT/matching-section-brief.md"
+cat > "$MATCHING_SECTION_BRIEF" <<'MD'
+# Task
+## Captain's intent
+Keep the task-scoped prompt stable.
+
+## Firstmate spec
+Use only the resolver snapshot.
+MD
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$MATCHING_SECTION_BRIEF"
+matching_resolution=$(jq -sr '[.[] | select(.receipt_type == "resolution")] | last' "$RECEIPTS")
+TYPESAFE_API_KEY=$KEY run code out err --record-dispatch "$MATCHING_SECTION_BRIEF" --harness claude
+matching_dispatch=$(jq -sr '[.[] | select(.receipt_type == "dispatch")] | last' "$RECEIPTS")
+assert_equals "$(jq -r .resolution_id <<<"$matching_resolution")" "$(jq -r .resolution_id <<<"$matching_dispatch")" "dispatch recording recomputes the same task-section hash"
+pass "receipt hashes bind to the immutable task text sent for section and whole-brief requests"
+
 # --- escalate: captain approval ------------------------------------------------
 reset_log
 write_response "$RESPONSE" rule_3 0.95
@@ -493,6 +728,7 @@ assert_contains "$out" '  status: escalate' "approval-gated rule escalates"
 assert_contains "$out" "  reason: rule requires the captain's explicit approval before dispatch" "escalate names the approval gate"
 assert_contains "$out" 'candidate: claude:fable  provider=claude  scope=model:fable  remaining=15%  spendPriority=-0.79  runway=projected_exhaustion  bounds=all_models:79%/projected_exhaustion,model:fable:15%/projected_exhaustion  -> eligible' "approval escalation preserves matched candidate evidence"
 assert_not_contains "$out" '  profile:' "escalate emits no profile line"
+assert_equals 'escalate' "$(jq -rs '[.[] | select(.receipt_type == "resolution")] | last.status' "$RECEIPTS")" "escalate writes a receipt"
 pass "escalate: a rule declared approval: captain never yields a profile"
 
 # --- rule floor fails: fall through to default -------------------------------
@@ -786,6 +1022,19 @@ assert_contains "$out" '  status: error' "quota-axi failure is an error outcome"
 assert_contains "$out" '  reason: quota-axi --json failed' "quota-axi failure is named"
 pass "quota evidence comes from one quota-axi --json read, and its failure is an error outcome"
 
+# --- the answering model is recorded, never an acceptance gate -----------------
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+jq '.model = "jev-1.14.0"' "$RESPONSE" > "$TMP_ROOT/drift-response.json"
+mv "$TMP_ROOT/drift-response.json" "$RESPONSE"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "an unexpected answering model exits 0"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "an unexpected answering model does not disable selection"
+drift_receipt=$(jq -sc '[.[] | select(.receipt_type == "resolution")] | last' "$RECEIPTS")
+assert_equals 'jev-latest' "$(jq -r .requested_model <<<"$drift_receipt")" "the receipt carries the unpinned requested model alias"
+assert_equals 'jev-1.14.0' "$(jq -r .answering_model <<<"$drift_receipt")" "the receipt carries the answering model that actually replied"
+pass "answering-model drift is observable in the receipt without gating dispatch"
+
 # --- API and response failures are error outcomes, exit 0 ----------------------
 reset_log
 run_without_curl code out err "$BRIEF"
@@ -799,6 +1048,8 @@ expect_code 0 "$code" "http 429 exits 0"
 assert_contains "$out" '  status: error' "http 429 is an error outcome"
 assert_contains "$out" '  reason: http 429 after' "http status is reported"
 assert_contains "$err" 'dispatch-resolve: error (http 429' "error also goes to stderr"
+assert_equals 'error' "$(jq -rs '[.[] | select(.receipt_type == "resolution")] | last.status' "$RECEIPTS")" "error writes a receipt"
+assert_contains "$(jq -rs '[.[] | select(.receipt_type == "resolution")] | last.reason' "$RECEIPTS")" 'http 429 after' "an error receipt carries the reason the block printed"
 reset_log
 TYPESAFE_API_KEY=$KEY FAKE_CURL_FAIL=1 run code out err "$BRIEF"
 expect_code 0 "$code" "curl failure exits 0"
@@ -853,6 +1104,72 @@ reset_log
 TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=500 run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "http 500 is a TOON error outcome"
 pass "API, transport, and response failures are error outcomes with exit 0"
+
+# --- receipt failures, concurrency, and the fixed size bound -------------------
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code baseline_out baseline_err "$BRIEF"
+mv "$RECEIPTS" "$TMP_ROOT/receipts-before-failure"
+mkdir "$RECEIPTS"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "receipt write failure leaves resolver exit 0"
+normalized_baseline=$(sed -E 's/latency_ms: [0-9]+/latency_ms: N/' <<<"$baseline_out")
+normalized_failure=$(sed -E 's/latency_ms: [0-9]+/latency_ms: N/' <<<"$out")
+assert_equals "$normalized_baseline" "$normalized_failure" "receipt write failure leaves stdout untouched"
+assert_equals '' "$baseline_err" "a receipt that lands says nothing on stderr"
+assert_equals 'dispatch-resolve: no resolution receipt for this run' "$err" "receipt write failure names itself on exactly one stderr line"
+rmdir "$RECEIPTS"
+mv "$TMP_ROOT/receipts-before-failure" "$RECEIPTS"
+
+DANGLING_TARGET="$TMP_ROOT/receipts-symlink-target"
+mv "$RECEIPTS" "$TMP_ROOT/receipts-before-failure"
+ln -s "$DANGLING_TARGET" "$RECEIPTS"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "a dangling receipts symlink leaves resolver exit 0"
+assert_equals "$normalized_baseline" "$(sed -E 's/latency_ms: [0-9]+/latency_ms: N/' <<<"$out")" "a dangling receipts symlink leaves stdout untouched"
+assert_equals 'dispatch-resolve: no resolution receipt for this run' "$err" "a dangling receipts symlink names itself on exactly one stderr line"
+assert_absent "$DANGLING_TARGET" "a dangling receipts symlink is never followed to create its target"
+rm -f "$RECEIPTS"
+mv "$TMP_ROOT/receipts-before-failure" "$RECEIPTS"
+pass "a receipts path that is a symlink is refused rather than followed"
+
+reset_log
+TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=429 run code baseline_out baseline_err "$BRIEF"
+assert_contains "$baseline_out" '  status: error' "the 429 baseline is a non-clear outcome"
+mv "$RECEIPTS" "$TMP_ROOT/receipts-before-failure"
+mkdir "$RECEIPTS"
+TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=429 run code out err "$BRIEF"
+expect_code 0 "$code" "a non-clear receipt failure leaves resolver exit 0"
+assert_equals "$(sed -E 's/[0-9]+ ms/N ms/g' <<<"$baseline_out")" "$(sed -E 's/[0-9]+ ms/N ms/g' <<<"$out")" "a non-clear receipt failure leaves stdout untouched"
+assert_equals '1' "$(grep -c 'no resolution receipt for this run' <<<"$err")" "a non-clear receipt failure names itself on exactly one stderr line"
+assert_contains "$err" 'dispatch-resolve: error (http 429' "the outcome's own stderr line is still there"
+assert_not_contains "$err" "$KEY" "the dropped-receipt line never carries the API key"
+assert_not_contains "$err" 'SECRET-WHY-TEXT' "the dropped-receipt line never carries rule rationale"
+rmdir "$RECEIPTS"
+mv "$TMP_ROOT/receipts-before-failure" "$RECEIPTS"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+
+dispatch_count_before=$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")
+CONCURRENT_ERR="$TMP_ROOT/concurrent-stderr"
+: > "$CONCURRENT_ERR"
+for _ in 1 2 3; do
+  PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" \
+    "$TOOL" --record-dispatch "$BRIEF" --harness claude --model sonnet --effort high \
+    >/dev/null 2>>"$CONCURRENT_ERR" &
+done
+wait
+dispatch_count_after=$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")
+concurrent_appended=$((dispatch_count_after - dispatch_count_before))
+concurrent_dropped=$(grep -c 'no dispatch receipt' "$CONCURRENT_ERR")
+assert_equals '3' "$((concurrent_appended + concurrent_dropped))" "each concurrent run either appends its dispatch record or says it dropped one"
+assert_equals '' "$(grep -v 'no dispatch receipt' "$CONCURRENT_ERR")" "a concurrent run has no third outcome to report"
+jq -e -s 'all(.[]; type == "object")' "$RECEIPTS" >/dev/null || fail "concurrent receipt appends remain valid JSONL"
+assert_equals "$(wc -l < "$RECEIPTS")" "$(jq -s 'length' "$RECEIPTS")" "concurrent appends leave no partial or interleaved line"
+
+assert_not_contains "$(cat "$RECEIPTS")" "$KEY" "concurrent receipts never contain the API key"
+assert_not_contains "$(cat "$RECEIPTS")" 'SECRET-WHY-TEXT' "concurrent receipts never contain rule rationale"
+pass "receipt writes are best-effort, concurrent-safe, and append-only"
 
 # --- configuration errors exit 2 and select nothing ----------------------------------
 reset_log
