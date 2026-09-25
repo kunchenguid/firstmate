@@ -567,6 +567,7 @@ def cmd_poll_list():
                 else:
                     new_emitted += 1
                 continue
+
             # A raised or empty header FETCH is treated as a failure for THIS uid only,
             # so one bad message can never abort the bounded scan: a new uid is
             # surfaced degraded, a retry uid is left for a later scan step, and
@@ -625,6 +626,7 @@ def cmd_poll_list():
 
 
 
+
             except Exception:
                 if afk_email_active:
                     out.append((clean(u), '', '(unverified sender)', '', 'deferred'))
@@ -639,14 +641,6 @@ def cmd_poll_list():
                     continue
                 out.append((clean(u), '', '(no header)',
                             'unfetchable header - see fm-mail read', 'degraded'))
-                if afk_enabled:
-                    afk_messages.append({
-                        'uidvalidity': uidv,
-                        'uid': clean(u),
-                        'from': '',
-                        'subject': '(unavailable)',
-                        'body': '',
-                    })
                 new_emitted += 1
                 continue
             status = 'ignored' if ignored else ('retry' if is_retry else 'ok')
