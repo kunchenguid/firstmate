@@ -670,7 +670,7 @@ fm_backend_source() {  # <name>
     orca)
       siblings="fm-composer-lib.sh"
       ;;
-    cmux)
+    cmux|paseo)
       siblings="fm-backend-hometag-lib.sh fm-composer-lib.sh"
       ;;
     *)
@@ -722,7 +722,7 @@ fm_backend_source() {  # <name>
     paseo)
       if [ -z "${_FM_BACKEND_PASEO_SOURCED:-}" ]; then
         # shellcheck source=/dev/null
-        . "$FM_BACKEND_LIB_DIR/backends/paseo.sh" || return 1
+        . "$adapter" || return 1
         _FM_BACKEND_PASEO_SOURCED=1
       fi
       ;;
