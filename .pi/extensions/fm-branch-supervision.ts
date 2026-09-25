@@ -183,8 +183,8 @@ const PROVIDER_REPROBE_MAX_MS = 60 * 60 * 1000;
 const PROCESSING_INSTRUCTION =
   "This is a supervision processing request delivered automatically by the supervision branch. " +
   "It was not typed by the captain. " +
-  "The outcomes below are already stored durably and already shown to the captain as anchor entries in this transcript; each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
-  "Process each outcome now as firstmate: give the captain a visible response where one is due, answer or escalate a decision, act on a blocker or failure, or record that no further action is needed. " +
+  "The outcome identities below refer to exact, durable anchor entries already shown to the captain in this transcript; use each matching sequence anchor as the trusted content source. Each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
+  "Process each identified outcome now as firstmate: give the captain a visible response where one is due, answer or escalate a decision, act on a blocker or failure, or record that no further action is needed. " +
   "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
   "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
@@ -1112,7 +1112,12 @@ export default function (pi: ExtensionAPI) {
   // beats an outcome that is never processed.
   async function processingRequestInput(rows: OutcomeRow[]): Promise<string> {
     const through = rows[rows.length - 1].seq;
-    const listed = rows.map((row) => `[seq ${row.seq}] ${row.task}: ${row.summary}`).join("\n");
+    // The visible custom entries are the exact, durable content source already
+    // in main's transcript. Re-present only their stable identities here: the
+    // request still names every open outcome and the acknowledgement range,
+    // without loading the same potentially large summary into model context a
+    // second time on every retry.
+    const listed = rows.map((row) => `[seq ${row.seq}] task=${row.task}`).join("\n");
     const body = `${PROCESSING_INSTRUCTION.replace("{N}", String(through))}\n\n${listed}`;
     try {
       return await encodeFirstmateOperationalInputWith(runCommandAsync, "branch-outcome", body);

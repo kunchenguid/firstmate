@@ -173,6 +173,26 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
   *" ida --region sg model list "*)
     success '{"models":[{"name":"ida-research-test"},{"name":"ida-explicit-test"}]}'
     ;;
+  *" ida --region sg deep-research artifact list "*)
+    case "$mode" in
+      artifact-list-error) error HTTP_503 'service unavailable'; exit 1 ;;
+      artifact-list-malformed) success '{"session_id":70001,"task_id":80001,"artifacts":"not-an-array"}'; exit 0 ;;
+      artifact-list-missing) success '{"session_id":70001,"task_id":80001}'; exit 0 ;;
+      artifact-list-mismatch) success '{"session_id":70002,"task_id":80001,"artifacts":[]}'; exit 0 ;;
+      artifact-list-empty) success '{"session_id":70001,"task_id":80001,"artifacts":[]}'; exit 0 ;;
+      artifact-list-partial) truncated=true ;;
+      *) truncated=false ;;
+    esac
+    jq -cn --argjson truncated "$truncated" '
+      {status:"success",data:{session_id:70001,task_id:80001,truncated:$truncated,artifacts:[{
+        task_id:80001,artifact_id:"artifact-92",name:"research-output",description:"PRIVATE_DESCRIPTION_BODY",
+        content_type:"document",files:[
+          {name:"report.csv",mime_type:"text/csv",uri:"https://ida.example/artifact-92/report.csv",size:4242},
+          {name:"analysis.js",mime_type:"text/javascript",uri:"https://ida.example/artifact-92/analysis.js",size:31337}
+        ],tables:[{columns:["secret-column"],rows:[["PRIVATE_TABLE_CELL"]]}],
+        text:"PRIVATE_DOCUMENT_TEXT",script:"PRIVATE_SCRIPT_BODY"
+      }]},error:null}'
+    ;;
   *" ida --region sg session raw list "*)
     case "$mode" in list-unavailable) error HTTP_503 'service unavailable'; exit 1 ;; esac
     rows="[]"
@@ -317,6 +337,70 @@ dispatch_ida() {
   FM_IDA_FAKE_SESSION_ID="$SESSION_ID" FM_IDA_FAKE_TASK_ID="$REMOTE_TASK_ID" \
   FM_IDA_FAKE_MODE="${FM_IDA_FAKE_MODE:-success}" PATH="$fakebin:$BASE_PATH" \
     "$DISPATCH" remote-agent/ida "$id" --instructions "$home/data/$id/instructions.txt" "$@"
+}
+
+test_artifact_discovery_projects_before_stdout() {
+  local home fakebin id=ida-artifact-discovery sha marker provider out rc variant
+  home=$(new_home artifact-discovery); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"
+  new_task "$home" "$id"; : >"$home/bytedcli.log"; : >"$home/sessions.tsv"
+  sha=$(sha256sum "$home/data/$id/instructions.txt" | awk '{print $1}')
+  marker="firstmate:$id:${sha:0:16}"
+  provider=$(jq -cn --arg marker "$marker" \
+    '{region:"sg",identity:"user",session_marker:$marker,session_id:"70001",task_id:"80001",
+      agent_id:"9001",agent_name:"iDA Test",model:null,provider_status:"completed"}')
+  FM_HOME="$home" bash -c '
+    set -u
+    . "$1/bin/fm-remote-agent-lib.sh"
+    STATE="$2/state"; DATA="$2/data"
+    fm_remote_state_initialize "$3" ida research "$2/data/$3/instructions.txt" "$4" "$5" || exit 10
+    fm_remote_meta_write "$3" ida research || exit 11
+  ' _ "$ROOT" "$home" "$id" "$sha" "$provider" || fail "artifact discovery state fixture failed"
+
+  out=$(FM_IDA_FAKE_MODE=artifact-list FM_IDA_FAKE_LOG="$home/bytedcli.log" \
+    FM_IDA_FAKE_SESSIONS="$home/sessions.tsv" FM_IDA_FAKE_SESSION_ID="$SESSION_ID" \
+    FM_IDA_FAKE_TASK_ID="$REMOTE_TASK_ID" FM_HOME="$home" PATH="$fakebin:$BASE_PATH" \
+    "$IDA" artifacts "$id") || fail "task-bound artifact discovery failed"
+  printf '%s\n' "$out" >"$home/projected-artifacts.json"
+  jq -e --arg id "$id" '
+    .schema == "fm-ida-artifact-discovery.v1" and .task_id == $id
+    and .session_id == "70001" and .remote_task_id == "80001"
+    and .availability == "available" and .provider_truncated == false
+    and .artifact_count == 1 and .error_class == null
+    and .artifacts[0] == {
+      task_id:"80001",artifact_id:"artifact-92",name:"research-output",content_type:"document",
+      table_count:1,has_text:true,files:[
+        {file_name:"report.csv",mime_type:"text/csv",uri:"https://ida.example/artifact-92/report.csv",size:4242},
+        {file_name:"analysis.js",mime_type:"text/javascript",uri:"https://ida.example/artifact-92/analysis.js",size:31337}
+      ]}
+  ' "$home/projected-artifacts.json" >/dev/null || fail "artifact discovery lost selected identities, URIs, sizes, types, or counts"
+  if printf '%s\n' "$out" | grep -E 'PRIVATE_|secret-column|"description":|"tables":|"rows":|"script":' >/dev/null; then
+    fail "artifact discovery leaked provider document, table, script, or unrelated description content"
+  fi
+  assert_grep 'ida --region sg deep-research artifact list --session-id 70001 --task-id 80001' "$home/bytedcli.log" \
+    "artifact discovery was not bound to the recorded session and remote task"
+
+  out=$(FM_IDA_FAKE_MODE=artifact-list-empty run_ida "$home" "$fakebin" artifacts "$id") \
+    || fail "an empty artifact list was treated as a provider failure"
+  printf '%s\n' "$out" | jq -e '.availability == "empty" and .artifact_count == 0 and .artifacts == []' >/dev/null \
+    || fail "empty artifact availability was not preserved"
+  out=$(FM_IDA_FAKE_MODE=artifact-list-partial run_ida "$home" "$fakebin" artifacts "$id") \
+    || fail "a partial artifact list was discarded"
+  printf '%s\n' "$out" | jq -e '.availability == "partial" and .provider_truncated == true and .artifact_count == 1' >/dev/null \
+    || fail "provider truncation was not explicit in artifact discovery"
+
+  for variant in artifact-list-malformed artifact-list-missing artifact-list-mismatch artifact-list-error; do
+    rc=0
+    out=$(FM_IDA_FAKE_MODE="$variant" run_ida "$home" "$fakebin" artifacts "$id") || rc=$?
+    [ "$rc" -ne 0 ] || fail "$variant artifact response was accepted"
+    printf '%s\n' "$out" | jq -e '
+      .schema == "fm-ida-artifact-discovery.v1" and .availability == "error"
+      and .artifacts == [] and (.error_class | type == "string" and length > 0)
+    ' >/dev/null || fail "$variant did not return a bounded structured error projection"
+    if printf '%s\n' "$out" | grep -E 'PRIVATE_|service unavailable' >/dev/null; then
+      fail "$variant leaked raw provider content through its error projection"
+    fi
+  done
+  pass "artifact discovery retains exact task/file selection fields and availability while dropping raw bodies before stdout"
 }
 
 test_dispatch_model_selection_and_validation() {
@@ -1408,6 +1492,7 @@ SH
   pass "new AIME tasks explicitly select remote-agent while the legacy schema and lifecycle remain intact"
 }
 
+test_artifact_discovery_projects_before_stdout
 test_dispatch_model_selection_and_validation
 test_ida_usage_help_boundary
 test_dispatch_success_and_redaction

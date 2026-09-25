@@ -6,6 +6,7 @@
 #   fm-remote-agent-ida.sh dispatch <task-id> --instructions <private-file> [--model <name>] [--document]
 #   fm-remote-agent-ida.sh adopt <task-id>
 #   fm-remote-agent-ida.sh state <task-id>
+#   fm-remote-agent-ida.sh artifacts <task-id>
 #   fm-remote-agent-ida.sh interrupt-wait <task-id>
 #   fm-remote-agent-ida.sh cancel <task-id> --authorize-provider-cancel
 #   fm-remote-agent-ida.sh abandon <task-id> --authorize-abandon
@@ -28,6 +29,11 @@
 # confirms it. After that confirmation, the command replaces any older local
 # waiter before the normalized terminal observation enters durable capture.
 # `interrupt-wait` stops only Firstmate's local waiter.
+# `artifacts` performs a read-only, task-bound discovery call and projects the
+# provider response to artifact/file identities, sizes, types, and availability
+# before stdout. Artifact text, tables, rows, scripts, and embedded bodies never
+# cross this consumer boundary; fetch a selected file URI separately only when
+# its content is actually needed.
 #
 # `abandon` is the only escape for an ambiguous or submission-unknown task
 # whose session marker authoritatively yields a complete non-truncated
@@ -250,6 +256,90 @@ cmd_state() (
     "$state" "$REMOTE_STATE_PHASE" "${status:-unknown}" "$(jq -r '.terminal' "$observation")" "$availability" "${class:-none}"
 )
 
+emit_artifact_discovery_error() { # <task-id> <session-id> <remote-task-id> <class>
+  local id=$1 session_id=$2 remote_task_id=$3 class=$4 revision
+  revision=$(jq -r '.revision' "$REMOTE_STATE_FILE" 2>/dev/null || printf 'null')
+  jq -n --arg id "$id" --arg session "$session_id" --arg remote_task "$remote_task_id" \
+    --arg class "$class" --argjson revision "$revision" \
+    '{schema:"fm-ida-artifact-discovery.v1",task_id:$id,provider:"ida",region:"sg",
+      state_revision:$revision,session_id:$session,remote_task_id:$remote_task,
+      availability:"error",provider_truncated:null,artifact_count:null,
+      artifacts:[],error_class:$class}'
+}
+
+cmd_artifacts() (
+  local id=${1-} root out err projected rc=0 class revision
+  [ "$#" -eq 1 ] || usage
+  fm_ida_state_load "$id" || die "iDA task state is missing or invalid"
+  fm_ida_numeric_id "$IDA_STATE_SESSION_ID" || die "iDA artifact discovery requires a reconciled session id"
+  fm_ida_numeric_id "$IDA_STATE_TASK_ID" || die "iDA artifact discovery requires a reconciled remote task id"
+  if fm_ida_resolve_bytedcli >/dev/null 2>&1; then :; else
+    rc=$?
+    [ "$rc" -eq 126 ] && class=cli-not-executable || class=cli-not-found
+    emit_artifact_discovery_error "$id" "$IDA_STATE_SESSION_ID" "$IDA_STATE_TASK_ID" "$class"
+    return 1
+  fi
+  root=$(temp_root); out="$root/artifacts.out"; err="$root/artifacts.err"; projected="$root/projected.json"
+  trap 'rm -rf -- "$root"' EXIT
+  if fm_ida_run_bytedcli --json --as user ida --region sg deep-research artifact list \
+      --session-id "$IDA_STATE_SESSION_ID" --task-id "$IDA_STATE_TASK_ID" >"$out" 2>"$err"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  class=$(fm_ida_read_error_classify "$out" "$err" "$rc")
+  if [ -n "$class" ]; then
+    emit_artifact_discovery_error "$id" "$IDA_STATE_SESSION_ID" "$IDA_STATE_TASK_ID" "$class"
+    return 1
+  fi
+  revision=$(jq -r '.revision' "$REMOTE_STATE_FILE")
+  if ! jq -e --arg session "$IDA_STATE_SESSION_ID" --arg task "$IDA_STATE_TASK_ID" '
+      (.data.session_id | tostring) == $session
+      and (.data.task_id | tostring) == $task
+      and (.data.artifacts | type == "array")
+      and ((.data.truncated == null) or (.data.truncated | type == "boolean"))
+      and ((.truncated == null) or (.truncated | type == "boolean"))
+      and all(.data.artifacts[];
+        type == "object"
+        and ((.task_id // $task) | tostring) == $task
+        and ((.files // []) | type == "array")
+        and all((.files // [])[]; type == "object")
+        and ((.tables // []) | type == "array")
+        and (.text == null or (.text | type == "string")))
+    ' "$out" >/dev/null 2>&1; then
+    emit_artifact_discovery_error "$id" "$IDA_STATE_SESSION_ID" "$IDA_STATE_TASK_ID" response-invalid-structure
+    return 1
+  fi
+  if ! jq --arg id "$id" --arg session "$IDA_STATE_SESSION_ID" --arg task "$IDA_STATE_TASK_ID" \
+      --argjson revision "$revision" '
+      def nullable_scalar: if . == null or (type == "string") or (type == "number") or (type == "boolean") then . else null end;
+      (.data.truncated // .truncated // false) as $provider_truncated
+      | (.data.artifacts | map({
+          task_id: ((.task_id // $task) | tostring),
+          artifact_id: ((.artifact_id // null) | nullable_scalar),
+          name: ((.name // null) | nullable_scalar),
+          content_type: ((.content_type // .type // null) | nullable_scalar),
+          table_count: (if (.tables // null) | type == "array" then (.tables | length) else (.table_count // 0) end),
+          has_text: (if (.text // null) | type == "string" then (.text | length > 0) else (.has_text // false) end),
+          files: ((.files // []) | map({
+            file_name: ((.name // .file_name // null) | nullable_scalar),
+            mime_type: ((.mime_type // null) | nullable_scalar),
+            uri: ((.uri // .file_uri // null) | nullable_scalar),
+            size: ((.size // null) | nullable_scalar)
+          }))
+        })) as $artifacts
+      | {schema:"fm-ida-artifact-discovery.v1",task_id:$id,provider:"ida",region:"sg",
+          state_revision:$revision,session_id:$session,remote_task_id:$task,
+          availability:(if $provider_truncated then "partial" elif ($artifacts|length)>0 then "available" else "empty" end),
+          provider_truncated:$provider_truncated,artifact_count:($artifacts|length),
+          artifacts:$artifacts,error_class:null}
+    ' "$out" >"$projected"; then
+    emit_artifact_discovery_error "$id" "$IDA_STATE_SESSION_ID" "$IDA_STATE_TASK_ID" response-invalid-structure
+    return 1
+  fi
+  cat "$projected"
+)
+
 cmd_interrupt_wait() {
   local id=${1-} source lock session_id
   [ "$#" -eq 1 ] || usage
@@ -381,6 +471,7 @@ case "${1-}" in
   dispatch) shift; cmd_dispatch "$@" ;;
   adopt) shift; cmd_adopt "$@" ;;
   state) shift; cmd_state "$@" ;;
+  artifacts) shift; cmd_artifacts "$@" ;;
   interrupt-wait) shift; cmd_interrupt_wait "$@" ;;
   cancel) shift; cmd_cancel "$@" ;;
   abandon) shift; cmd_abandon "$@" ;;
