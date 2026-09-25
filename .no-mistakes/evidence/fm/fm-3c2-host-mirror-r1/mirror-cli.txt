@@ -1,0 +1,6 @@
+Verified writer set: claude=yes cursor=yes codex=no grok=no opencode=no omp=no 
+No opt-in hook stdout bytes: 0; mirror exists: no
+Opted-in hook from non-primary worktree stdout bytes: 0; mirror exists: no
+Valid mirror check: 0
+Prior session feed bytes: 0
+Invalid record rejected; staged cursor exists: no

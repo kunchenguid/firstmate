@@ -1,0 +1,8 @@
+New engine feed:
+[captain] captain asked
+[main] main answered
+Same engine resumed after commit (bytes): 0
+Different engine re-anchors:
+[captain] captain asked
+[main] main answered
+Cursor: 2|engine-a

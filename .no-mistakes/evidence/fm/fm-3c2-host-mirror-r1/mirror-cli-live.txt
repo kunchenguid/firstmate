@@ -1,0 +1,13 @@
+SCENARIO: opt-out hook from a home without supervision-host
+RESULT: no mirror file
+SCENARIO: CLI feed/commit/resume using valid persisted dialog
+new: [captain] first ask
+resume: [main] first reply
+SCENARIO: malformed mirror is refused and does not stage a cursor
+check refused malformed record
+feed refused malformed record
+no staged cursor
+SCENARIO: verified harness selection
+claude verified
+cursor verified
+codex not verified
