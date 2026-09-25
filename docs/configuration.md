@@ -1052,7 +1052,7 @@ This single-provider table is separate from the frozen legacy mapping used by `f
 **Model, effort, and fallback behavior**
 
 - `ultra` is native-only: the model-aware validation contract and launch mapping are owned by `bin/fm-harness.sh validate-native-effort` and `bin/fm-spawn.sh` respectively.
-- Codex `max` is valid for any model; per-model support is left to launch, where `bin/fm-spawn.sh` passes it only when the installed Codex catalog advertises `max` for the launched model and otherwise omits it with a warning.
+- Codex `max` is valid for any model; whether a launch receives it depends on that model's installed catalog entry, which [the Codex adapter reference](../.agents/skills/harness-adapters/references/harness/codex.md) owns.
 - An omitted model or effort means the selected harness uses its own default for that axis.
 - Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 - If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
