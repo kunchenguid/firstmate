@@ -15,6 +15,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (the herdr adapter parses its JSON)"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (plistlib parses the owned launch-agent contract)"; exit 0; }
+command -v perl >/dev/null 2>&1 || { echo "skip: perl not found (a holder runs under the launch agent's perl supervisor)"; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-remote-doctor)
 LABEL=dev.firstmate.herdr.fm-remote
@@ -60,6 +61,24 @@ hold FM_REMOTE_JOB_ACTIVE=1
 WORKER_HOLDER_PID=$HOLDER_PID
 hold SSH_CONNECTION='100.102.217.78 51234 100.100.1.2 22' SSH_CLIENT='100.102.217.78 51234 22'
 SSH_HOLDER_PID=$HOLDER_PID
+# The launchd marker again, on a holder bin/fm-remote-herdr-supervisor.pl
+# started as the leader of its own session, the shape the launch agent gives
+# the server.
+SUPERVISED_FIFO="$TMP_ROOT/holder-$HOLDER_FD.fifo"
+mkfifo "$SUPERVISED_FIFO"
+eval "exec ${HOLDER_FD}<>\"\$SUPERVISED_FIFO\""
+HOLDER_FD=$((HOLDER_FD + 1))
+perl "$ROOT/bin/fm-remote-herdr-supervisor.pl" env -i XPC_SERVICE_NAME=dev.firstmate.herdr.fm-remote "$JQ" . "$SUPERVISED_FIFO" 2>> "$TMP_ROOT/supervisor.log" &
+SUPERVISOR_PID=$!
+HOLDER_PIDS+=("$SUPERVISOR_PID")
+SESSION_LEADER_HOLDER_PID=
+for _ in $(seq 1 100); do
+  SESSION_LEADER_HOLDER_PID=$(ps -A -o pid=,ppid=,command= | awk -v parent="$SUPERVISOR_PID" -v jq="$JQ" '$2 == parent && $3 == jq { print $1; exit }')
+  [ -z "$SESSION_LEADER_HOLDER_PID" ] || break
+  sleep 0.05
+done
+[ -n "$SESSION_LEADER_HOLDER_PID" ] || fail "the supervisor did not start its holder"
+HOLDER_PIDS+=("$SESSION_LEADER_HOLDER_PID")
 
 # new_case <Darwin|Linux> [with-herdr] [gui] [login-shell]
 # Builds one isolated account fixture and points the module-level CASE_*
@@ -296,36 +315,71 @@ SH
 
 # doctor [args...] -> runs the real doctor against the current fixture,
 # capturing merged output in DOCTOR_OUT and its status in DOCTOR_RC.
-doctor() {
-  set +e
-  DOCTOR_OUT=$(
-    HOME="$CASE_HOME" \
-    FM_HOME="$CASE_PROJECT_HOME" \
-    PATH="$CASE_HOME/.local/bin:$CASE_BIN:$BASE_PATH" \
-    FM_FAKE_STATE="$CASE_STATE" \
-    FM_FAKE_LAUNCHCTL_LOG="$CASE_LAUNCHCTL_LOG" \
-    FM_FAKE_FORBIDDEN_LOG="$CASE_FORBIDDEN_LOG" \
-    FM_FAKE_HERDR_RUNNING="$CASE_HERDR_RUNNING" \
-    FM_FAKE_HERDR_BIN="$CASE_BIN/herdr" \
-    FM_FAKE_HERDR_SOCKET="$CASE_STATE/herdr.sock" \
-    FM_FAKE_GUARD="$GUARD" \
-    FM_FAKE_AQUA_PID="$AQUA_HOLDER_PID" \
-    FM_FAKE_PLIST="$CASE_PLIST" \
-    FM_FAKE_JOB_PLIST="$CASE_JOB_PLIST" \
-    FM_FAKE_JOB_WORKER="$ROOT/bin/fm-remote-job-worker.sh" \
-    FM_FAKE_LAUNCH_AGENT_LOG="$CASE_HOME/Library/Logs/$LABEL.log" \
-    FM_FAKE_LOGIN_SHELL="${CASE_LOGIN_SHELL:-/bin/sh}" \
-    FM_FAKE_SECOND_LOGIN_SHELL="${CASE_SECOND_LOGIN_SHELL:-}" \
-    FM_FAKE_DSCL_FAIL="${CASE_DSCL_FAIL:-0}" \
-    FM_FAKE_DSCL_HANG="${CASE_DSCL_HANG:-0}" \
-    FM_LAUNCH_AGENT_SHELL="$([ "${CASE_RESOLVE_DSCL:-0}" = 1 ] || printf '%s' "$CASE_LOGIN_SHELL")" \
-    SHELL="${CASE_ENV_SHELL-${SHELL-}}" \
-    FM_REMOTE_JOB_PLATFORM_OVERRIDE="${CASE_PLATFORM_OVERRIDE-}" \
-    FM_REMOTE_JOB_ACTIVE="${CASE_REMOTE_JOB_ACTIVE-1}" \
-    "$ROOT/bin/fm-remote-doctor.sh" "$@" 2>&1
+doctor_env() { # -> DOCTOR_ENV: the environment every doctor run gets in this case
+  DOCTOR_ENV=(
+    HOME="$CASE_HOME"
+    FM_HOME="$CASE_PROJECT_HOME"
+    PATH="$CASE_HOME/.local/bin:$CASE_BIN:$BASE_PATH"
+    FM_FAKE_STATE="$CASE_STATE"
+    FM_FAKE_LAUNCHCTL_LOG="$CASE_LAUNCHCTL_LOG"
+    FM_FAKE_FORBIDDEN_LOG="$CASE_FORBIDDEN_LOG"
+    FM_FAKE_HERDR_RUNNING="$CASE_HERDR_RUNNING"
+    FM_FAKE_HERDR_BIN="$CASE_BIN/herdr"
+    FM_FAKE_HERDR_SOCKET="$CASE_STATE/herdr.sock"
+    FM_FAKE_GUARD="$GUARD"
+    FM_FAKE_AQUA_PID="$AQUA_HOLDER_PID"
+    FM_FAKE_PLIST="$CASE_PLIST"
+    FM_FAKE_JOB_PLIST="$CASE_JOB_PLIST"
+    FM_FAKE_JOB_WORKER="$ROOT/bin/fm-remote-job-worker.sh"
+    FM_FAKE_LAUNCH_AGENT_LOG="$CASE_HOME/Library/Logs/$LABEL.log"
+    FM_FAKE_LOGIN_SHELL="${CASE_LOGIN_SHELL:-/bin/sh}"
+    FM_FAKE_SECOND_LOGIN_SHELL="${CASE_SECOND_LOGIN_SHELL:-}"
+    FM_FAKE_DSCL_FAIL="${CASE_DSCL_FAIL:-0}"
+    FM_FAKE_DSCL_HANG="${CASE_DSCL_HANG:-0}"
+    FM_LAUNCH_AGENT_SHELL="$([ "${CASE_RESOLVE_DSCL:-0}" = 1 ] || printf '%s' "$CASE_LOGIN_SHELL")"
+    SHELL="${CASE_ENV_SHELL-${SHELL-}}"
+    FM_REMOTE_JOB_PLATFORM_OVERRIDE="${CASE_PLATFORM_OVERRIDE-}"
+    FM_REMOTE_JOB_ACTIVE="${CASE_REMOTE_JOB_ACTIVE-1}"
   )
+}
+
+doctor() {
+  doctor_env
+  set +e
+  DOCTOR_OUT=$(env "${DOCTOR_ENV[@]}" "$ROOT/bin/fm-remote-doctor.sh" "$@" 2>&1)
   DOCTOR_RC=$?
   set -e
+}
+
+# doctor_route <dir>: an fm-on.sh in <dir> that runs this case's doctor for
+# any route, so bin/fm-remote-readiness-lib.sh can be driven against the case.
+doctor_route() {
+  local assignment
+  doctor_env
+  mkdir -p "$1"
+  {
+    printf '#!/usr/bin/env bash\n'
+    # shellcheck disable=SC2016 # ${2:-} belongs to the generated fm-on.sh and expands when it runs.
+    printf '[ "${2:-}" = fm-remote-doctor.sh ] || exit 64\n'
+    printf 'shift 2\n'
+    printf 'exec env'
+    for assignment in "${DOCTOR_ENV[@]}"; do printf ' %q' "$assignment"; done
+    printf ' %q "$@"\n' "$ROOT/bin/fm-remote-doctor.sh"
+  } > "$1/fm-on.sh"
+  chmod +x "$1/fm-on.sh"
+}
+
+# login_shell_with_path <path>: a login shell for this case that runs its -c
+# command through /bin/sh with exactly <path> on PATH, so a case can present a
+# login shell whose PATH has no perl, or a perl that cannot compile anything.
+login_shell_with_path() {
+  CASE_LOGIN_SHELL="$CASE_DIR/login-shell"
+  cat > "$CASE_LOGIN_SHELL" <<SH
+#!/bin/sh
+[ "\$1" = -l ] && [ "\$2" = -c ] || exit 64
+PATH='$1' exec /bin/sh -c "\$3"
+SH
+  chmod +x "$CASE_LOGIN_SHELL"
 }
 
 write_loaded_contract() { # <herdr-path> [properties] [exec-command]
@@ -616,6 +670,30 @@ doctor --fix
 expect_code 0 "$DOCTOR_RC" "the Aqua-owner fixture could not be initialized"
 assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote is running in the Aqua login session (pid $AQUA_HOLDER_PID, launchd)" \
   "a launchd-born owner was not reported with its pid and birth"
+assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote is running in the Aqua login session (pid $AQUA_HOLDER_PID, launchd), which is all a remote second mate needs; that server does not lead its own session, so Herdr saved SSH machines refuse it until it is restarted" \
+  "an owner that does not lead its own session was not reported ready with the saved-machine difference"
+assert_contains "$DOCTOR_OUT" "run 'herdr server stop --session fm-remote && launchctl kickstart -k gui/$(id -u)/$LABEL' on that account" \
+  "the consent-required restart was not named with the account's uid and the agent label"
+assert_contains "$DOCTOR_OUT" 'neither updating Firstmate nor --fix restarts a running Aqua-born server because the restart closes its panes' \
+  "the report did not say that no automatic path restarts the server, or what the restart costs"
+assert_not_contains "$DOCTOR_OUT" 'action: herdr-server:' "a running Aqua-born server was presented as a readiness gap"
+: > "$CASE_LAUNCHCTL_LOG"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix over a running Aqua-born server that does not lead its own session was not ready"
+assert_not_contains "$DOCTOR_OUT" 'fix herdr-server=' "--fix acted on a running Aqua-born server that does not lead its own session"
+assert_no_grep "kickstart -k gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" \
+  "--fix restarted a running Aqua-born server that does not lead its own session"
+assert_no_grep "bootout gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" \
+  "--fix booted out the launch agent over a running Aqua-born server that does not lead its own session"
+assert_contains "$DOCTOR_OUT" "(pid $AQUA_HOLDER_PID, launchd), which is all a remote second mate needs" \
+  "--fix changed the verdict on a running Aqua-born server that does not lead its own session"
+
+printf '%s\n' "$SESSION_LEADER_HOLDER_PID" > "$CASE_STATE/socket-owner"
+doctor
+expect_code 0 "$DOCTOR_RC" "an Aqua-born owner that leads its own session was not reported ready"
+assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote is running in the Aqua login session (pid $SESSION_LEADER_HOLDER_PID, launchd); it leads its own session, as Herdr saved SSH machines require" \
+  "an Aqua-born owner that leads its own session was not reported as Herdr saved SSH machines require"
+pass "session leadership is reported on an Aqua-born owner without changing its readiness, and the restart that would give it one is named, never applied"
 
 printf '%s\n' "$BACKGROUND_HOLDER_PID" > "$CASE_STATE/socket-owner"
 printf 'background job\n' > "$CASE_STATE/user-loaded-$LABEL"
@@ -693,6 +771,100 @@ assert_contains "$DOCTOR_OUT" 'error: this host is not ready for a remote second
   "a remaining human gap did not fail the readiness verdict"
 assert_no_dangerous_calls "the doctor tried to create a login session by force"
 pass "human gaps are reported with their operator step and never claimed as fixed"
+
+# --- a login shell without a usable perl is a human gap, never a --fix loop -
+
+# shellcheck source=bin/fm-remote-readiness-lib.sh
+. "$ROOT/bin/fm-remote-readiness-lib.sh"
+SUPERVISOR="$ROOT/bin/fm-remote-herdr-supervisor.pl"
+mkdir -p "$TMP_ROOT/empty-bin" "$TMP_ROOT/broken-perl"
+printf '#!/bin/sh\nexit 2\n' > "$TMP_ROOT/broken-perl/perl"
+chmod +x "$TMP_ROOT/broken-perl/perl"
+
+new_case Darwin with-herdr gui
+login_shell_with_path "$TMP_ROOT/empty-bin"
+touch "$CASE_STATE/bootstrap-does-not-start" "$CASE_STATE/kickstart-fail"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "a host whose login shell has no perl was reported ready"
+assert_herdr_launch_agent_contract "$CASE_PLIST" "$CASE_BIN/herdr" "$CASE_LOGIN_SHELL"
+assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=ok:' "the launch agent, which converges once perl resolves, was not installed and loaded"
+assert_contains "$DOCTOR_OUT" "check herdr-server=human: the herdr server for session fm-remote is not running; the launch agent starts a server only through a perl that compiles $SUPERVISOR, and '$CASE_LOGIN_SHELL -l -c' found none (exit 127)" \
+  "a login shell with no perl was not reported as a human gap naming the interpreter"
+assert_contains "$DOCTOR_OUT" 'action: herdr-server: install perl on that account (macOS ships /usr/bin/perl) or put a working one on the login-shell PATH of' \
+  "the interpreter gap came with no operator step"
+assert_not_contains "$DOCTOR_OUT" 'rerun this command with --fix to start it' "a server the launch agent cannot start was offered to --fix"
+assert_not_contains "$DOCTOR_OUT" 'fix herdr-server=' "--fix tried to start a server the launch agent cannot start"
+assert_no_dangerous_calls "the interpreter gap sent the doctor toward the keychain or login settings"
+
+rm -f "$CASE_STATE/kickstart-fail"
+: > "$CASE_LAUNCHCTL_LOG"
+doctor
+expect_code 1 "$DOCTOR_RC" "the read-only run reported a host whose launch agent cannot start a server as ready"
+assert_contains "$DOCTOR_OUT" 'check herdr-server=human: the herdr server for session fm-remote is not running; the launch agent starts a server only through a perl' \
+  "the read-only run lost the interpreter gap"
+for mutation in bootstrap bootout kickstart; do
+  assert_no_grep "$mutation" "$CASE_LAUNCHCTL_LOG" "a read-only run ran launchctl $mutation over an interpreter gap"
+done
+
+doctor_route "$CASE_DIR/route-bin"
+: > "$CASE_LAUNCHCTL_LOG"
+set +e
+FM_REMOTE_READINESS_OUT=
+fm_remote_readiness_ensure "$CASE_DIR/route-bin" ios
+rc=$?
+set -e
+expect_code 1 "$rc" "the readiness gate passed a host whose launch agent cannot start a server"
+assert_contains "$FM_REMOTE_READINESS_OUT" "check herdr-server=human: the herdr server for session fm-remote is not running; the launch agent starts a server only through a perl that compiles $SUPERVISOR" \
+  "the readiness gate's verdict does not carry the interpreter gap"
+assert_contains "$FM_REMOTE_READINESS_OUT" 'action: herdr-server: install perl on that account' \
+  "the readiness gate's verdict does not carry the operator step"
+assert_not_contains "$FM_REMOTE_READINESS_OUT" 'rerun this command with --fix' \
+  "the readiness gate recommends another --fix for a gap --fix cannot close"
+for mutation in bootstrap bootout kickstart; do
+  assert_no_grep "$mutation" "$CASE_LAUNCHCTL_LOG" "the readiness gate's --fix pass ran launchctl $mutation over an interpreter gap"
+done
+
+printf 'true\n' > "$CASE_HERDR_RUNNING"
+printf '%s\n' "$SSH_HOLDER_PID" > "$CASE_STATE/socket-owner"
+: > "$CASE_LAUNCHCTL_LOG"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "a foreign server the launch agent cannot replace was reported ready"
+assert_contains "$DOCTOR_OUT" "check herdr-server=human: session fm-remote is served by pid $SSH_HOLDER_PID born outside the Aqua login session (ssh), so its panes cannot reach the login keychain; the launch agent starts a server only through a perl" \
+  "a foreign server the launch agent cannot replace was not reported as the interpreter gap"
+assert_not_contains "$DOCTOR_OUT" 'fix herdr-server=' "--fix tried to take over a session the launch agent cannot serve"
+assert_no_grep kickstart "$CASE_LAUNCHCTL_LOG" "--fix restarted the launch agent over a foreign server it cannot replace"
+assert_no_grep bootout "$CASE_LAUNCHCTL_LOG" "--fix booted out the launch agent over a foreign server it cannot replace"
+
+new_case Darwin with-herdr gui
+login_shell_with_path "$TMP_ROOT/broken-perl"
+doctor
+expect_code 1 "$DOCTOR_RC" "a host whose perl cannot compile the supervisor was reported ready"
+assert_contains "$DOCTOR_OUT" "check herdr-server=human: the herdr server for session fm-remote is not running; the launch agent starts a server only through a perl that compiles $SUPERVISOR, and '$CASE_LOGIN_SHELL -l -c' found none (exit 2)" \
+  "a perl that cannot compile the supervisor was not reported as a human gap with its exit status"
+
+new_case Darwin with-herdr gui
+CASE_LOGIN_SHELL="$CASE_DIR/login-shell"
+printf '#!/bin/sh\nexec /bin/sleep 30\n' > "$CASE_LOGIN_SHELL"
+chmod +x "$CASE_LOGIN_SHELL"
+SECONDS=0
+doctor
+elapsed=$SECONDS
+expect_code 1 "$DOCTOR_RC" "a host whose login shell stalls at startup was reported ready"
+[ "$elapsed" -lt 20 ] || fail "a stalled login shell blocked doctor for ${elapsed}s"
+assert_contains "$DOCTOR_OUT" "check herdr-server=human: the herdr server for session fm-remote is not running; the launch agent starts a server only through a perl that compiles $SUPERVISOR, and '$CASE_LOGIN_SHELL -l -c' did not finish running perl -c on it within 5s" \
+  "a login shell that stalls at startup was not reported as an unverified interpreter within the bound"
+assert_contains "$DOCTOR_OUT" "action: herdr-server: inspect what makes '$CASE_LOGIN_SHELL -l' slow or block at startup on that account" \
+  "a stalled login shell's action does not point at its startup"
+assert_contains "$DOCTOR_OUT" 'the perl there is unverified rather than missing' \
+  "a stalled login shell's action does not say the interpreter is unverified"
+assert_not_contains "$DOCTOR_OUT" 'install perl' "a stalled login shell was prescribed a perl install"
+
+new_case Darwin with-herdr gui
+login_shell_with_path "$TMP_ROOT/empty-bin:/usr/bin:/bin"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "a login shell whose PATH has a working perl was not ready"
+assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "a login shell whose PATH has a working perl did not get its server started"
+pass "a login shell without a perl that compiles the supervisor is a human gap the readiness gate preserves, a stalled one is an unverified gap, and --fix never loops on either"
 
 # --- a non-zsh login shell is rendered with separate -l and -c --------------
 
