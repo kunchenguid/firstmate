@@ -605,6 +605,92 @@ test_classify_check_and_unknown_escalate() {
   pass "check + unknown escalate; heartbeat self-handles"
 }
 
+# An unrecognized wake escalates once per identity. Delivery acknowledges that
+# exact line; a later copy does not escalate again. A different identity still
+# escalates, and an identity that never flushed still escalates. Ordinary
+# escalation lines are not part of that acknowledgement. A new away session
+# clears the acknowledgements, so the same identity can fire again.
+test_unknown_wake_ack_suppresses_handled_identity() {
+  local dir state fakebin sent capture out
+  dir=$(make_supercase unknown-wake-ack)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "the first unknown wake was not handled"
+  [ ! -e "$state/.subsuper-unknown-acked" ] \
+    || fail "an undelivered unknown wake was acknowledged"
+
+  : > "$state/.subsuper-escalations"
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "an undelivered unknown wake did not escalate again after its buffer was lost"
+  [ "$(grep -c 'unknown wake: frobnicate: already-handled' "$state/.subsuper-escalations")" = 1 ] \
+    || fail "a lost undelivered unknown wake did not escalate again"
+
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "unknown-wake flush failed"
+  grep -F 'unknown wake: frobnicate: already-handled' "$state/.subsuper-unknown-acked" >/dev/null \
+    || fail "a delivered unknown wake was not acknowledged"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "delivered unknown wake stayed buffered"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "an acknowledged unknown wake was not handled"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "an acknowledged unknown wake escalated again: $(cat "$state/.subsuper-escalations")"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: brand-new" "$state" \
+    || fail "a new unknown wake was not handled"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in
+    "unknown wake: frobnicate: brand-new") ;;
+    *) fail "a new unknown wake did not escalate on its own: $out" ;;
+  esac
+  escalate_add "$state" "done: PR https://example.test/pull/9"
+  [ "$(grep -c 'done: PR https://example.test/pull/9' "$state/.subsuper-escalations")" = 1 ] \
+    || fail "an ordinary escalation was swallowed by unknown-wake acknowledgement"
+  escalate_add "$state" "done: PR https://example.test/pull/9"
+  [ "$(grep -c 'done: PR https://example.test/pull/9' "$state/.subsuper-escalations")" = 2 ] \
+    || fail "an ordinary escalation was deduped by unknown-wake acknowledgement"
+
+  bash -c '. "$1"; fm_afk_clear_stale_artifacts "$2"' _ "$AFK_START" "$state" \
+    || fail "clearing the away-session artifacts failed"
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "an unknown wake from a prior session was not handled"
+  [ "$(grep -c 'unknown wake: frobnicate: already-handled' "$state/.subsuper-escalations")" = 1 ] \
+    || fail "an unknown wake acknowledged in a prior away session did not fire again"
+  pass "a delivered unknown wake is acknowledged once per away session; a new one and ordinary escalations still fire"
+}
+
+# A digest that inject_msg already delivered must not be injected again just
+# because the acknowledgement write failed afterwards.
+test_unknown_wake_ack_failure_still_clears_delivered_digest() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase unknown-wake-ack-failure)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
+  mkdir -p "$state/.subsuper-unknown-acked"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: ack-write-fails" "$state" \
+    || fail "the unknown wake was not handled"
+  escalate_add "$state" "done: PR https://example.test/pull/10"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" 2>/dev/null \
+    || fail "a delivered digest was reported undelivered after its acknowledgement write failed"
+  grep -F 'unknown wake: frobnicate: ack-write-fails' "$sent" >/dev/null \
+    || fail "the digest was not delivered: $(cat "$sent")"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a delivered digest stayed buffered for re-injection: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-escalations.since" ] || fail "a delivered digest kept its batch timer"
+  pass "a failed unknown-wake acknowledgement write does not re-inject a delivered digest"
+}
+
 test_stale_transient_self_records_marker() {
   local dir state out key
   dir=$(make_supercase stale-transient)
@@ -819,6 +905,29 @@ test_stale_paused_classifies_pause() {
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9" "$state")
   case "$out" in pause\|*) ;; *) fail "declared pause did not classify as pause: $out" ;; esac
   pass "paused reasons with captain phrases remain pause-classified"
+}
+
+# A resolved line for another phase key, including the stated default key that
+# `fm-send --resolve-key default` writes for a keyless decision, lands after the
+# pause without ending it. The worker's own keyless resolved line does end it.
+test_stale_pause_survives_a_foreign_resolved_line() {
+  local dir state out
+  dir=$(make_supercase stale-paused-foreign-resolved)
+  state="$dir/state"
+  printf 'needs-decision: which color\npaused: waiting on the vendor release\nresolved [key=default]: answered: blue\n' \
+    > "$state/held-w9r.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9r" "$state" '' 1)
+  case "$out" in pause\|*"paused: waiting on the vendor release") ;; *) fail "a default-key answer cleared the pause: $out" ;; esac
+  printf 'paused: waiting on the vendor release\nresolved [key=legal]: counsel answered\n' > "$state/held-w9r.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9r" "$state" '' 1)
+  case "$out" in pause\|*) ;; *) fail "a differently keyed resolved line cleared the pause: $out" ;; esac
+  printf 'paused: waiting on the vendor release\nresolved: the vendor shipped\n' > "$state/held-w9r.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9r" "$state" '' 1)
+  case "$out" in pause\|*) fail "the worker's own keyless resolved line did not retract the pause: $out" ;; esac
+  printf 'captain-held [key=route]: tracked by task-decision-route\nresolved [key=default]: answered: blue\n' > "$state/held-w9r.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9r" "$state" '' 1)
+  case "$out" in pause\|*) fail "a later resolved line no longer retracted a captain-held declaration: $out" ;; esac
+  pass "a foreign resolved line keeps a pause, while the worker's own resolved line retracts it"
 }
 
 # A verified captain-held transfer is the other declaration that leaves an idle pane
@@ -2788,12 +2897,15 @@ test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
+test_unknown_wake_ack_suppresses_handled_identity
+test_unknown_wake_ack_failure_still_clears_delivered_digest
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_enriched_wedge_under_declared_wait_uses_pause_cadence
 test_stale_terminal_escalates
 test_stale_actionable_wait_escalates_and_keeps_pause_cadence
 test_stale_paused_classifies_pause
+test_stale_pause_survives_a_foreign_resolved_line
 test_stale_captain_held_classifies_pause
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker

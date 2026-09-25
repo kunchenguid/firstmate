@@ -18,10 +18,12 @@
 # On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
 # on Pi, the ordinary supervision session keeps running in both postures, and
 # `start` refuses on those harnesses. The same holds for away mode (not quiet
-# mode) on a Claude primary whose home opted into the supervision host
-# (config/supervision-host), where the host runs the away session. Every other
-# harness still runs the daemon for now, so an away `start` or `start-native`
-# requires the record `enter` wrote before it launches the daemon.
+# mode) on a claude, cursor, opencode, omp, grok, or codex primary whose home
+# opted into the supervision host (config/supervision-host), where the host
+# runs the away session; `enter` there adds one line when the host has no
+# engine, because every away wake then reaches main. Every other harness still
+# runs the daemon for now, so an away `start` or `start-native` requires the
+# record `enter` wrote before it launches the daemon.
 # QUIET mode (FM_AFK_MODE=quiet, the /quiet skill) is the same daemon for a
 # captain who stays present, so it is NOT the away posture: a quiet `start` or
 # `start-native` needs no record, never writes one, and refuses while one stands
@@ -202,12 +204,21 @@ fm_afk_launch_primary_harness() {
   "$FM_AFK_LAUNCH_DIR/fm-harness.sh" 2>/dev/null || printf unknown
 }
 
-# The away daemon is no longer launched on Pi, nor for away mode on a Claude
-# primary whose home opted into the supervision host (config/supervision-host,
+# The primary harnesses whose arm owner runs the supervision host when the
+# home opted in (docs/supervision-host.md).
+fm_afk_launch_host_primary() {  # <harness>
+  case "$1" in
+    claude|cursor|opencode|omp|grok|codex) return 0 ;;
+  esac
+  return 1
+}
+
+# The away daemon is no longer launched on Pi, nor for away mode on a primary
+# whose home opted into the supervision host (config/supervision-host,
 # docs/supervision-host.md): the posture record is the whole entry there and
 # the ordinary supervision session runs in both postures. Quiet mode still
-# runs the daemon on that Claude home, so a quiet entry or a refresh of a
-# running quiet daemon is allowed - which posture that is comes from
+# runs the daemon on that home, so a quiet entry or a refresh of a running
+# quiet daemon is allowed - which posture that is comes from
 # fm_afk_launch_posture, so a standing record still reads away while the quiet
 # flag is on disk (going /afk out of quiet mode).
 fm_afk_launch_daemon_allowed() {
@@ -217,14 +228,31 @@ fm_afk_launch_daemon_allowed() {
     pi|pi-signed)
       fm_afk_launch_log "the away daemon is no longer launched on $harness; the away-posture record is the posture there (run bin/fm-afk-launch.sh enter and stop), and quiet mode launches nothing at all here, so never run enter for /quiet"
       return 1 ;;
-    claude)
-      [ -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/supervision-host" ] || return 0
-      mode=$(fm_afk_launch_posture)
-      [ "$mode" != quiet ] || return 0
-      fm_afk_launch_log "the away daemon is not launched on this claude home, which runs the supervision host (config/supervision-host); the away-posture record is the posture here (run bin/fm-afk-launch.sh enter and stop)"
-      return 1 ;;
   esac
-  return 0
+  fm_afk_launch_host_primary "$harness" || return 0
+  [ -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/supervision-host" ] || return 0
+  mode=$(fm_afk_launch_posture)
+  [ "$mode" != quiet ] || return 0
+  fm_afk_launch_log "the away daemon is not launched on this $harness home, which runs the supervision host (config/supervision-host); the away-posture record is the posture here (run bin/fm-afk-launch.sh enter and stop)"
+  return 1
+}
+
+# One line for the entry when this home runs the supervision host but the host
+# has no engine (bin/fm-supervision-engine-lib.sh owns the opt-in parse), so
+# the away posture would hand every wake to main.
+fm_afk_launch_host_engine_note() {
+  local harness config
+  [ "${FM_AFK_MODE:-}" != quiet ] || return 0
+  config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
+  [ -f "$config/supervision-host" ] || return 0
+  harness=$(fm_afk_launch_primary_harness)
+  fm_afk_launch_host_primary "$harness" || return 0
+  # shellcheck source=bin/fm-supervision-engine-lib.sh
+  . "$FM_AFK_LAUNCH_DIR/fm-supervision-engine-lib.sh" || return 0
+  fm_supervision_host_config "$config" "$harness" || return 0
+  [ -z "$FM_SUPERVISION_ENGINE" ] || return 0
+  printf 'Supervision host: no engine runs the away session on this home (%s), so every away wake reaches this conversation; name a verified engine in config/supervision-host (for example "claude").\n' \
+    "$FM_SUPERVISION_ENGINE_PROBLEM"
 }
 
 fm_afk_launch_catchup_pending() {  # [posture]
@@ -320,7 +348,8 @@ fm_afk_launch_enter() {
     fi
     rm -f "$backup"
   fi
-  return "$rc"
+  [ "$rc" -eq 0 ] || return "$rc"
+  fm_afk_launch_host_engine_note
 }
 
 # The command run inside the created terminal. Real launch runs the shared
@@ -538,11 +567,12 @@ fm_afk_launch_restore_backup() {  # <backup> <had-afk>
   rm -f "$FM_AFK_LAUNCH_STATE/.afk" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
-    "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" || result=1
+    "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" \
+    "$FM_AFK_LAUNCH_STATE/.subsuper-unknown-acked" || result=1
   if [ "$had_afk" -eq 1 ]; then
     cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked; do
     if [ -e "$backup/$artifact" ]; then
       cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
     fi
@@ -666,7 +696,7 @@ fm_afk_launch_start() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
@@ -723,7 +753,7 @@ fm_afk_launch_start_native() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged .subsuper-unknown-acked; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi

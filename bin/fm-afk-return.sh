@@ -280,7 +280,8 @@ clear_delivery_artifacts() {
   rm -f \
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
-    "$STATE/.subsuper-inject-wedged"
+    "$STATE/.subsuper-inject-wedged" \
+    "$STATE/.subsuper-unknown-acked"
 }
 
 # The lifecycle retention reasons the gate kept, one per line, empty when the
@@ -562,7 +563,7 @@ EOF
 
   # 6. handled while away. Every outcome the away session recorded in the
   # store during the window counts as handled. On Pi the supervision branch,
-  # and on a Claude home the supervision host (docs/supervision-host.md), took
+  # and on an opted-in home the supervision host (docs/supervision-host.md), took
   # every safe actionable wake it could while main was parked; wakes it
   # declined still fell back to main. The captain rows are listed above.
   printf 'Handled while away:\n'

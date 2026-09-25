@@ -369,7 +369,65 @@ test_sweep_respawns_confirmed_dead_secondmate() {
     "the stale endpoint must be killed before respawn (tmux refuses a same-named window over a live one)"
   assert_contains "$(cat "$log")" "new-window" \
     "a confirmed-dead secondmate should actually be relaunched"
+  assert_grep 'relaunched' "$w/home/state/.secondmate-relaunch-sm1" \
+    "the shared library did not leave the durable per-mate relaunch record"
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
+}
+
+test_sweep_skips_mate_whose_liveness_lock_is_held() {
+  local w fb tmuxfb log out holder i=0
+  w=$(new_world sweep-lock-held)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  # A concurrent liveness episode (the watcher's tick) owns the per-mate lock;
+  # the sweep must skip rather than probe or relaunch a moving target.
+  ( STATE="$w/home/state" bash -c \
+      '. "$1" && fm_lock_acquire_wait "$2" && sleep 30' \
+      _ "$ROOT/bin/fm-wake-lib.sh" "$w/home/state/.secondmate-liveness-sm1.lock" ) &
+  holder=$!
+  while [ ! -d "$w/home/state/.secondmate-liveness-sm1.lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -d "$w/home/state/.secondmate-liveness-sm1.lock" ] || fail "the fixture never acquired the liveness lock"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: another liveness check is already in progress" \
+    "a mate under an active liveness lock should be skipped, not probed"
+  [ ! -s "$log" ] || fail "a locked mate must never be killed or respawned: $(cat "$log")"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "sweep: a mate mid-episode under the shared liveness lock is skipped entirely"
+}
+
+test_sweep_refuses_relaunch_on_ledger_errors() {
+  local w fb tmuxfb log out mode ledger word
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "sweep: ledger permission errors skipped (root ignores file modes)"
+    return 0
+  fi
+  for mode in 200 444; do
+    case "$mode" in 200) word=unreadable ;; *) word=unwritable ;; esac
+    w=$(new_world "sweep-ledger-$mode")
+    add_sm_home "$w" sm1 firstmate:fm-sm1
+    fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+    log="$w/calls.log"; : > "$log"
+    ledger="$w/home/state/.secondmate-relaunch-sm1"
+    : > "$ledger"
+    chmod "$mode" "$ledger"
+
+    out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+    chmod 644 "$ledger"
+
+    assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: relaunch ledger $ledger is $word" \
+      "a mode-$mode relaunch ledger should skip the relaunch with its reason"
+    [ ! -s "$log" ] || fail "a mode-$mode relaunch ledger still killed or spawned: $(cat "$log")"
+    [ ! -s "$ledger" ] || fail "a mode-$mode ledger gained rows: $(cat "$ledger")"
+  done
+  pass "sweep: an unreadable or unwritable relaunch ledger refuses to kill or spawn"
 }
 
 test_sweep_leaves_alive_secondmate_untouched() {
@@ -542,6 +600,106 @@ test_sweep_noop_with_no_secondmate_meta() {
   pass "sweep: a silent no-op with no kind=secondmate meta present (a secondmate home's own natural scoping)"
 }
 
+# --- library level: the watcher's poll-mode remote probe ---------------------
+# bin/fm-secondmate-liveness-lib.sh's `poll` mode is the read-only probe the
+# watcher tick runs per cadence: exactly one remote `state` call, `dead` and
+# `missing` alone authorize relaunch, and transport failure (ssh exit 255) is
+# never evidence of death. Full-mode remote readiness repair and route
+# revalidation remain the startup sweep's own behavior, covered by the sweep
+# tests above and tests/fm-remote-secondmate-lifecycle-e2e.test.sh.
+
+# make_remote_probe_world <name>: a parent home carrying one remote-route
+# secondmate meta plus a fake ssh that logs every call and answers with
+# FM_FAKE_REMOTE_REPLY on FM_FAKE_REMOTE_RC.
+make_remote_probe_world() {
+  local name=$1 w fakebin
+  w="$TMP_ROOT/$name"
+  fakebin=$(fm_fakebin "$w")
+  mkdir -p "$w/home/state" "$w/home/data" "$w/home/config"
+  cat > "$w/home/state/rsm1.meta" <<EOF
+window=remote:rsm1
+kind=secondmate
+harness=claude
+remote_host=lab-host
+remote_backend=herdr
+remote_herdr_session=fm-remote
+remote_target=fm-remote:w1:p1
+home=/remote/rsm1-home
+EOF
+  cat > "$w/home/data/secondmates.md" <<EOF
+- rsm1 - Remote mate (host: lab-host; root: /remote/root; home: /remote/rsm1-home; scope: remote work; projects: alpha; added 2026-01-01)
+EOF
+  cat > "$fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_SSH_LOG:?}"
+[ -z "${FM_FAKE_REMOTE_REPLY:-}" ] || printf '%s\n' "$FM_FAKE_REMOTE_REPLY"
+exit "${FM_FAKE_REMOTE_RC:-0}"
+SH
+  chmod +x "$fakebin/ssh"
+  printf '%s\n' "$w"
+}
+
+# probe_remote <w> <mode> [env...] -> "<status>|<state>|<kill>|<cause>|<where>|<reason>"
+probe_remote() {
+  local w=$1 mode=$2; shift 2
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  env STATE="$w/home/state" FM_HOME="$w/home" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_SSH_BIN="$w/fakebin/ssh" FM_FAKE_SSH_LOG="$w/ssh.log" "$@" \
+    bash -c '
+      . "$0/bin/fm-secondmate-liveness-lib.sh"
+      fm_secondmate_liveness_probe "$1" rsm1 "$2"
+      printf "%s|%s|%s|%s|%s|%s\n" \
+        "$FM_SM_LIVE_STATUS" "$FM_SM_LIVE_STATE" "$FM_SM_LIVE_KILL" \
+        "$FM_SM_LIVE_CAUSE" "$FM_SM_LIVE_WHERE" "$FM_SM_LIVE_REASON"
+    ' "$ROOT" "$w/home/state/rsm1.meta" "$mode"
+}
+
+test_remote_poll_probe_maps_states() {
+  local w out
+  w=$(make_remote_probe_world probe-states)
+
+  out=$(probe_remote "$w" poll FM_FAKE_REMOTE_REPLY=dead)
+  [ "$out" = 'relaunchable|dead|0|remote endpoint dead on its configured host|host=lab-host|' ] \
+    || fail "a dead remote reply should authorize relaunch on its own host, got: $out"
+
+  out=$(probe_remote "$w" poll FM_FAKE_REMOTE_REPLY=missing)
+  [ "$out" = 'relaunchable|missing|0|remote endpoint missing on its configured host|host=lab-host|' ] \
+    || fail "a missing remote reply should authorize relaunch on its own host, got: $out"
+
+  out=$(probe_remote "$w" poll FM_FAKE_REMOTE_REPLY=alive)
+  [ "$out" = 'alive|alive|0|||' ] || fail "an alive remote reply should be a quiet no-op, got: $out"
+
+  out=$(probe_remote "$w" poll FM_FAKE_REMOTE_REPLY=ambiguous)
+  [ "$out" = 'skipped|ambiguous|0|||remote endpoint state is ambiguous on lab-host' ] \
+    || fail "an ambiguous remote reply must preserve the endpoint, got: $out"
+
+  out=$(probe_remote "$w" poll FM_FAKE_REMOTE_REPLY=unverified)
+  [ "$out" = 'skipped|unverified|0|||remote endpoint state is unverified on lab-host' ] \
+    || fail "an unverified remote reply must preserve the endpoint, got: $out"
+
+  out=$(probe_remote "$w" poll FM_FAKE_REMOTE_REPLY=bogus)
+  [ "$out" = 'skipped|bogus|0|||remote endpoint returned an invalid state' ] \
+    || fail "an invalid remote reply must preserve the endpoint, got: $out"
+
+  [ "$(wc -l < "$w/ssh.log" | tr -d ' ')" -eq 6 ] \
+    || fail "each poll-mode probe should spend exactly one remote state call: $(cat "$w/ssh.log")"
+  pass "poll probe: remote states map to the same contract as local, one call each"
+}
+
+test_remote_poll_probe_unreachable_preserves_route() {
+  local w out
+  w=$(make_remote_probe_world probe-unreachable)
+
+  out=$(probe_remote "$w" poll FM_FAKE_REMOTE_RC=255)
+  [ "$out" = 'skipped|unknown|0|||remote host unavailable or endpoint state unknown; route preserved on lab-host' ] \
+    || fail "ssh exit 255 must never read as a dead endpoint, got: $out"
+
+  out=$(probe_remote "$w" poll FM_FAKE_REMOTE_RC=1)
+  [ "$out" = 'skipped|unknown|0|||remote endpoint probe unreadable on lab-host' ] \
+    || fail "a non-transport remote probe failure must stay inconclusive, got: $out"
+  pass "poll probe: unreachable or inconclusive remote reads preserve the route"
+}
+
 test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
@@ -557,5 +715,9 @@ test_sweep_never_acts_on_unverified_harness_dead_reading
 test_sweep_converges_no_retouch_once_alive
 test_sweep_skipped_under_detect_only
 test_sweep_noop_with_no_secondmate_meta
+test_sweep_skips_mate_whose_liveness_lock_is_held
+test_sweep_refuses_relaunch_on_ledger_errors
+test_remote_poll_probe_maps_states
+test_remote_poll_probe_unreachable_preserves_route
 
 echo "# all fm-secondmate-liveness tests passed"

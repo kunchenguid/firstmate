@@ -307,8 +307,8 @@ Neither the stopped-server exception nor the stale-registration verdict widens h
 Native registration still identifies Pi by name where tmux would see a generic interpreter; the process-level proof only decides whether that registration is backed by a running process.
 `tests/fm-backend-herdr-agent-exit-shell-e2e.test.sh` pins the live-Pi versus leftover-shell distinction; [`verification/runtime-backends.md`](verification/runtime-backends.md#agent-lifecycle-control) owns the versioned evidence.
 
-The session-start sweep uses this probe.
-Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
+The session-start sweep and the watcher's dedicated secondmate liveness tick use this probe; idle secondmates remain exempt from stale-pane escalation.
+[Secondmate endpoint recovery](architecture.md) owns the shared supervision mechanism.
 
 ## Push events and polling fallback
 
@@ -332,7 +332,7 @@ The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-a
 
 Harnesses with native tracked background execution can run the daemon in their terminal.
 Pi and pi-signed no longer launch the away daemon; their ordinary supervision session continues under the posture record.
-An opted-in Claude home also skips the daemon for `/afk`; see [supervision-host.md](supervision-host.md).
+An opted-in non-Pi home also skips the daemon for `/afk`; see [supervision-host.md](supervision-host.md).
 For another harness without native tracked background execution, `bin/fm-afk-launch.sh` creates a dedicated unfocused Herdr workspace, runs the daemon there with an explicit supervisor target and backend, records the exact daemon pane, and closes only that pane on stop.
 It never splits the captain's active tab and never uses shell `&`.
 Recovery reconciles only the recorded exact id.
@@ -359,7 +359,6 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - Mutable labels can collide; they are never placement or destructive authority.
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.
-- Mid-session secondmate agent-process liveness is not implemented.
 - Only tmux and Herdr can host the away-mode supervisor terminal.
 
 ## Regression entry points
