@@ -117,7 +117,7 @@ If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable 
 ### Built-in tool override collisions
 
 Calm's built-in tool presentation (`bash`, `read`, `edit`, `write`, `grep`, `find`, `ls`) shares Pi's single, unmerged override slot per name with any other extension that overrides the same tool.
-How Calm handles that shared slot depends on whether Calm was already on when the session started.
+How Calm handles that shared slot depends on whether Calm was already on when the session started or reloaded.
 
 **Session started with Calm off**
 
