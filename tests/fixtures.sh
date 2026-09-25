@@ -291,15 +291,59 @@ Exercise the spawn behavior under test.
 EOF
 }
 
+# fm_test_fake_treehouse_spawn <fakebin>
+# Spawn-world treehouse: `get --help` advertises --lease, `get --lease` prints
+# FM_FAKE_TREEHOUSE_LEASE or FM_FAKE_PANE_PATH, and `return` succeeds. When
+# FM_FAKE_TREEHOUSE_LOG is set, every invocation is appended there.
+fm_test_fake_treehouse_spawn() {
+  local fakebin=$1
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_FAKE_TREEHOUSE_LOG:-}" ]; then
+  printf 'treehouse %s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
+fi
+if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
+  exit 0
+fi
+if [ "${1:-}" = get ]; then
+  lease=0
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --lease) lease=1 ;;
+      --lease-holder) shift ;;
+      --help)
+        printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
+        exit 0
+        ;;
+    esac
+    shift || true
+  done
+  if [ "$lease" = 1 ]; then
+    path=${FM_FAKE_TREEHOUSE_LEASE:-${FM_FAKE_PANE_PATH:-}}
+    [ -n "$path" ] || exit 1
+    printf '%s\n' "$path"
+    exit 0
+  fi
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+}
+
 # fm_test_make_spawn_fakebin <dir> [extra-exit0-tool...]
-# Creates <dir>/fakebin with the spawn tmux stub, a no-op treehouse, and any
-# extra exit-0 tools. Echoes the fakebin path.
+# Creates <dir>/fakebin with the spawn tmux stub, a lease-aware treehouse, and
+# any extra exit-0 tools. Echoes the fakebin path.
 fm_test_make_spawn_fakebin() {
   local dir=$1 fakebin
   shift
   fakebin=$(fm_fakebin "$dir")
   fm_test_fake_tmux_spawn "$fakebin"
-  fm_fake_exit0 "$fakebin" treehouse "$@"
+  fm_test_fake_treehouse_spawn "$fakebin"
+  [ $# -eq 0 ] || fm_fake_exit0 "$fakebin" "$@"
   printf '%s\n' "$fakebin"
 }
 
