@@ -288,6 +288,7 @@ Reconciliation runs when all of these are verifiable:
 
 A project workspace used as the launcher owns that project's task block; without a project-specific launcher, the Firstmate workspace owns the task block.
 A child whose recorded parent disappeared is moved and rebound under the unique Firstmate workspace.
+`Firstmate` and `firstmate` are one candidate set; multiple matches skip Firstmate rotation and orphan rebinding rather than choosing by spelling.
 Exact journal bindings are the only cluster ownership source; adjacent legacy, foreign, or merely child-shaped workspaces are never adopted into a project block.
 Other homes' workspaces keep their relative order.
 

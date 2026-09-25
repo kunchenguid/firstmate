@@ -3544,6 +3544,7 @@ else
               fm_backend_herdr_projection_order_best_effort \
                 "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" \
                 "$HERDR_PARENT_WORKSPACE_ID" "$STATE" "$HERDR_HOME_ID"
+              HERDR_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_ORDER_PARENT_WORKSPACE_ID
             fi
             if [ -n "$HERDR_HOME_ID" ] &&
               fm_backend_herdr_projection_live_binding_matches \

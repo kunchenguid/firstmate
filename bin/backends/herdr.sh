@@ -1493,7 +1493,8 @@ fm_backend_herdr_projection_owned_children_json() {  # <session> <state> <home> 
 fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspace-id> <home-label> <parent-workspace-id> <state> <home>
   local session=$1 created=$2 home_label=$3 parent_ws=$4 state=$5 home=$6
   local list owned plan current desired socket mover response move_status focus_before move_capable count index target actual
-  local orphan journal id
+  local orphan journal id resolved_parent
+  FM_BACKEND_HERDR_PROJECTION_ORDER_PARENT_WORKSPACE_ID=$parent_ws
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || {
     echo "warning: herdr presentation ordering could not list workspaces; leaving worker in Herdr's current order" >&2
     return 0
@@ -1502,18 +1503,15 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     echo "warning: herdr presentation ordering found ambiguous journal ownership; leaving worker in Herdr's current order" >&2
     return 0
   }
-  plan=$(printf '%s' "$list" | jq -c --argjson owned "$owned" --arg home_label "$home_label" '
+  plan=$(printf '%s' "$list" | jq -c --argjson owned "$owned" --arg home_label "$home_label" --arg created "$created" '
     (.result.workspaces // null) as $spaces
     | select(($spaces | type) == "array" and ($spaces | length) > 0)
     | [$spaces[].workspace_id] as $ids
     | [$owned[] | .parent as $parent | select(($ids | index($parent)) != null) | $parent] | unique as $bound_parents
-    | (if $home_label == "firstmate" then
-         ([$spaces[] | select(.label == "Firstmate") | .workspace_id]) as $display
-         | ([$spaces[] | select(.label == "firstmate") | .workspace_id]) as $canonical
-         | if ($display | length) == 1 then $display[0]
-           elif ($canonical | length) == 1 then $canonical[0]
-           else null end
-       else null end) as $firstmate
+    | (if $home_label == "firstmate"
+       then [$spaces[] | select(.label == "Firstmate" or .label == "firstmate") | .workspace_id]
+       else [] end) as $firstmates
+    | (if ($firstmates | length) == 1 then $firstmates[0] else null end) as $firstmate
     | ([$spaces[].workspace_id as $id | select($id == $firstmate or ($bound_parents | index($id)) != null) | $id]) as $parents
     | (if $firstmate != null and ($parents | index($firstmate)) != null then
          ($parents | index($firstmate)) as $first
@@ -1536,7 +1534,9 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     | {
         current: $ids,
         desired: ($remaining[0:$anchor] + $cluster + $remaining[$anchor:]),
-        orphans: [$resolved[] | select(.parent != .resolved and .journal != "")]
+        orphans: [$resolved[] | select(.parent != .resolved and .journal != "")],
+        current_parent: ([$resolved[] | select(.child == $created)] | if length == 1 then .[0].resolved else null end),
+        firstmate_ambiguous: (($firstmates | length) > 1)
       }
     | select((.desired | length) == (.current | length) and (.desired | unique | length) == (.desired | length))
   ' 2>/dev/null) || plan=
@@ -1544,6 +1544,9 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     echo "warning: herdr presentation ordering found an ambiguous workspace layout; leaving worker in Herdr's current order" >&2
     return 0
   }
+  if printf '%s' "$plan" | jq -e '.firstmate_ambiguous' >/dev/null; then
+    echo "warning: herdr presentation ordering found ambiguous Firstmate workspaces; skipping Firstmate rotation and orphan rebinding" >&2
+  fi
   current=$(printf '%s' "$plan" | jq -c '.current')
   desired=$(printf '%s' "$plan" | jq -c '.desired')
   if [ "$current" != "$desired" ]; then
@@ -1601,6 +1604,8 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
       "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" || \
       echo "warning: herdr presentation ordering could not rebind an orphan task under Firstmate" >&2
   done < <(printf '%s' "$plan" | jq -r '.orphans[] | [.journal, .task, .resolved] | @tsv')
+  resolved_parent=$(printf '%s' "$plan" | jq -r '.current_parent // empty')
+  [ -z "$resolved_parent" ] || FM_BACKEND_HERDR_PROJECTION_ORDER_PARENT_WORKSPACE_ID=$resolved_parent
   return 0
 }
 
