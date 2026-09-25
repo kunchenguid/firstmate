@@ -1237,6 +1237,36 @@ test_settlement_retracts_a_buried_hold_mirror() {
   pass "release and close retract a hold mirror buried under a later answer"
 }
 
+# A transfer's key is the worker's own, so once the worker asks it again after
+# the transfer, settling the transferred call must not answer that newer
+# question.
+test_settlement_keeps_a_reasked_transfer_key_open() {
+  local home lane open
+  home=$(make_home reasked-transfer)
+  lane=sample-reasked-lane
+  tasks_in "$home" add "$lane" "Scout the reasked sample" --kind scout --repo sample >/dev/null \
+    || fail "could not create the reasked lane"
+  write_origin_meta "$home" "$lane"
+  printf 'needs-decision [key=route]: choose route north or route south\n' > "$home/state/$lane.status"
+  run_captain "$home" hold sample-reasked-choice --title "Choose the reasked route" \
+    --reason "route choice pending" >/dev/null || fail "could not hold the route call"
+  run_captain "$home" complete "$lane" sample-reasked-choice >/dev/null \
+    || fail "could not transfer the reasked lane's decision"
+  printf 'needs-decision [key=route]: choose route east or route west\n' >> "$home/state/$lane.status"
+  printf 'Take route north.\n' > "$home/route.txt"
+  run_captain "$home" answer sample-reasked-choice --decision-file "$home/route.txt" >/dev/null \
+    || fail "answer could not close the route call"
+  ! grep -q '^resolved \[key=route\]' "$home/state/$lane.status" \
+    || fail "settlement retracted a transfer the worker had since re-asked: $(cat "$home/state/$lane.status")"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
+  case "$open" in
+    route$'\t'needs-decision$'\t'*) ;;
+    *) fail "the re-asked route question did not stay open after settlement: '$open'" ;;
+  esac
+  pass "settling a transferred call leaves a re-asked transfer key open"
+}
+
 # The hold-set stamp must be durable before the captain hold becomes visible.
 # A wrapper observes the real tasks-axi hold boundary, and a forced stamp-write
 # failure proves the command never publishes the hold without its timestamp.
@@ -4318,6 +4348,7 @@ test_answer_records_and_closes
 test_release_frees_held_work
 test_hold_and_release_reach_the_status_log
 test_settlement_retracts_a_buried_hold_mirror
+test_settlement_keeps_a_reasked_transfer_key_open
 test_hold_stamp_precedes_hold_visibility
 test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due

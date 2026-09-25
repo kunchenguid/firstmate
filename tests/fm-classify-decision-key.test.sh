@@ -607,9 +607,30 @@ test_declared_wait_survives_settled_hold_then_answer() {
   pass "a settled hold stays read past after another key's answer lands on top of it"
 }
 
+# A settlement reads as the hold's own only while no worker event sits between
+# the declaration and its retraction.
+test_hold_settled_only_without_worker_event_between() {
+  local dir f
+  dir=$(case_dir hold-settled-worker-between)
+  f="$dir/held.status"
+  printf 'paused: waiting on upstream\n' > "$f"
+  printf 'captain-held [key=captain-hold-held-1]: operator review\n' >> "$f"
+  printf 'resolved [key=captain-hold-held-1]: captain call released by fm-captain-hold\n' >> "$f"
+  status_hold_settled "$f" \
+    || fail "a retraction right after its declaration did not read as the hold's own settlement"
+  printf 'paused: waiting on upstream\n' > "$f"
+  printf 'captain-held [key=captain-hold-held-1]: operator review\n' >> "$f"
+  printf 'working: resumed\n' >> "$f"
+  printf 'resolved [key=captain-hold-held-1]: captain call released by fm-captain-hold\n' >> "$f"
+  ! status_hold_settled "$f" \
+    || fail "a retraction over a worker's newer line read as the hold's own settlement"
+  pass "a hold settlement is the hold's own only with no worker event between"
+}
+
 test_keyless_wait_survives_stated_default_retraction
 test_declared_wait_survives_answers_past_the_event_window
 test_declared_wait_survives_settled_hold_mirror
 test_declared_wait_stops_at_standing_hold_mirror
 test_declared_wait_survives_settled_hold_then_answer
+test_hold_settled_only_without_worker_event_between
 test_bare_prose_cannot_open_or_close_a_decision

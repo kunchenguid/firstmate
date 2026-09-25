@@ -230,11 +230,29 @@ _fm_hold_settled_drop() {  # <hold-line-ere>
   [ "${#lines[@]}" -eq 0 ] || printf '%s\n' "${lines[@]}"
 }
 
-# 0 when the log's latest raw event is a hold-command retraction - the settled
-# bookkeeping last_status_line reads through - so a caller can tell a lane
-# whose only lifted wait was the hold from a worker that moved on.
+# 0 when the log's latest event is a hold-command retraction - the settled
+# bookkeeping last_status_line reads through - and no worker event sits between
+# it and the declaration it retracts, so a caller can tell a lane whose only
+# lifted wait was the hold from a worker that moved on, even when the
+# retraction landed after the worker's newer line.
 status_hold_settled() {  # <status-file>
-  _fm_hold_unstamped_match "$(_fm_last_status_event '' '' "$1")" "$FM_HOLD_RETRACTION_ERE"
+  local hold line key='' legacy_re
+  hold=$(_fm_hold_line_ere "$1")
+  legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
+  while IFS= read -r line; do
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    _fm_status_line_is_event "$line" "$legacy_re" || continue
+    _fm_hold_unstamped_match "$line" "$hold" || return 1
+    if _fm_hold_unstamped_match "$line" "$FM_HOLD_RETRACTION_ERE"; then
+      [ -n "$key" ] || key=$(_fm_decision_key "$line") || return 1
+    elif [ -z "$key" ]; then
+      return 1
+    elif [ "$(_fm_decision_key "$line")" = "$key" ]; then
+      return 0
+    fi
+  done < <(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$1" 2>/dev/null \
+    | awk '{ l[NR] = $0 } END { for (i = NR; i > 0; i--) print l[i] }')
+  return 1
 }
 
 # status_observed_signature of the log as its worker left it: the hold

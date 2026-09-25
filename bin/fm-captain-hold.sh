@@ -289,59 +289,69 @@ status_declare_hold() {  # <task-id> <occurrence> <reason>
   return 0
 }
 
-# Retract what still declares the call once it is settled, wherever that
-# declaration stands on a log: each retraction settles only its own key, so a
-# worker line appended over a mirror or transfer keeps reading as the latest
-# event while the settled pair under it stops hiding what the worker declared
-# before the hold. A declaration already retracted is not standing, so a
-# matching retry appends nothing. Two declarations qualify. Every mirror on the
-# task's own log takes a retraction under its own key. And a command_complete
-# transfer (`captain-held [key=<k>]: tracked by <ids>`) takes
-# `resolved [key=<k>]` once neither a task it names nor the lane's own task is
-# still an open captain call, when this task is either of those: the transfer
-# already closed <k>, so the retraction changes no decision, a lane waiting on
-# several calls keeps reading as held until the last one is answered, and a
-# lane held itself while its transfer was the last line (so status_declare_hold
-# wrote no mirror) keeps that transfer as its only declaration until the lane's
-# own call settles too.
+# Retract what still declares the call once it is settled. Two declarations
+# qualify. Every mirror on the task's own log takes a retraction under its own
+# key wherever it stands: each retraction settles only its own key and no worker
+# ever writes a captain-hold-<task>-<n> key, so a worker line appended over the
+# mirror keeps reading as the latest event while the settled pair under it
+# stops hiding what the worker declared before the hold, and a mirror already
+# retracted is not standing, so a matching retry appends nothing. A
+# command_complete transfer (`captain-held [key=<k>]: tracked by <ids>`) is
+# retracted only while it is a log's last event line, because <k> is the
+# worker's own key and a worker that already moved on - asking <k> again, say -
+# owns its own newer state. It takes `resolved [key=<k>]` once neither a task
+# it names nor the lane's own task is still an open captain call, when this
+# task is either of those: the transfer already closed <k>, so the retraction
+# changes no decision, a lane waiting on several calls keeps reading as held
+# until the last one is answered, and a lane held itself while its transfer
+# was the last line (so status_declare_hold wrote no mirror) keeps that
+# transfer as its only declaration until the lane's own call settles too.
 status_retract_hold() {  # <task-id> <note>
   local id=$1 note=$2 f
-  status_retract_standing "$id" "$STATE/$id.status" "$note"
+  status_retract_mirrors "$id" "$note"
   for f in "$STATE"/*.status; do
-    [ -f "$f" ] && [ ! -L "$f" ] && [ "$f" != "$STATE/$id.status" ] || continue
-    status_retract_standing "$id" "$f" "$note"
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    status_retract_top_transfers "$id" "$f" "$note"
   done
   return 0
 }
 
-status_retract_standing() {  # <task-id> <status-file> <note>
-  local id=$1 f=$2 note=$3 standing line key lane ids named rc retracted=$'\n'
-  local -a names
+status_retract_mirrors() {  # <task-id> <note>
+  local id=$1 note=$2 f standing mirror line key retracted=$'\n'
+  f="$STATE/$id.status"
   [ -f "$f" ] || return 0
-  lane=${f##*/}
-  lane=${lane%.status}
+  mirror=$(_fm_hold_mirror_line_ere "$f" 'captain-held')
   standing=$(_fm_hold_settled_drop "$(_fm_hold_line_ere "$f")" < "$f") || return 0
   while IFS= read -r line; do
-    if [ "$lane" = "$id" ] \
-      && _fm_hold_unstamped_match "$line" "$(_fm_hold_mirror_line_ere "$f" 'captain-held')"; then
-      key=$(_fm_decision_key "$line") || continue
-    elif _fm_hold_unstamped_match "$line" "$FM_HOLD_TRANSFER_ERE"; then
-      key=${BASH_REMATCH[1]}
-      ids="${BASH_REMATCH[2]},$lane"
-      case ",$ids," in *",$id,"*) ;; *) continue ;; esac
-      IFS=, read -r -a names <<< "$ids"
-      for named in "${names[@]}"; do
-        rc=0
-        (command_open "$named") >/dev/null 2>&1 || rc=$?
-        [ "$rc" -eq 1 ] || continue 2
-      done
-    else
-      continue
-    fi
+    _fm_hold_unstamped_match "$line" "$mirror" || continue
+    key=$(_fm_decision_key "$line") || continue
     case "$retracted" in *$'\n'"$key"$'\n'*) continue ;; esac
     retracted="$retracted$key"$'\n'
     status_append_retraction "$id" "$f" "$key" "$note"
   done <<< "$standing"
+}
+
+status_retract_top_transfers() {  # <task-id> <status-file> <note>
+  local id=$1 f=$2 note=$3 last before key lane ids named rc
+  local -a names
+  lane=${f##*/}
+  lane=${lane%.status}
+  last=$(last_status_line "$f")
+  while _fm_hold_unstamped_match "$last" "$FM_HOLD_TRANSFER_ERE"; do
+    key=${BASH_REMATCH[1]}
+    ids="${BASH_REMATCH[2]},$lane"
+    case ",$ids," in *",$id,"*) ;; *) return 0 ;; esac
+    IFS=, read -r -a names <<< "$ids"
+    for named in "${names[@]}"; do
+      rc=0
+      (command_open "$named") >/dev/null 2>&1 || rc=$?
+      [ "$rc" -eq 1 ] || return 0
+    done
+    status_append_retraction "$id" "$f" "$key" "$note"
+    before=$last
+    last=$(last_status_line "$f")
+    [ "$last" != "$before" ] || return 0
+  done
 }
 
 status_append_retraction() {  # <task-id> <status-file> <key> <note>
