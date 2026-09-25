@@ -440,6 +440,7 @@ test_invalid_or_unreadable_posture_suppresses_mail() {
   run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
   python3 - "$REPO" "$home" <<'PY' || fail "invalid or unreadable posture did not fail closed"
 
+
 import importlib.util
 import os
 import sys
@@ -451,6 +452,7 @@ from types import SimpleNamespace
 root = Path(sys.argv[1])
 home = Path(sys.argv[2])
 reply_token = sys.argv[3]
+recovery_token = sys.argv[4]
 state = home / "state"
 os.environ.update({
     "FM_HOME": str(home),
@@ -707,6 +709,7 @@ headers = {
     "8": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=fail header.d=gmail.com; dmarc=fail header.from=gmail.com\r\nSubject: forged From\r\n\r\n",
     "9": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=attacker.com; dmarc=fail header.from=gmail.com\r\nSubject: unaligned signer\r\n\r\n",
 
+
 }
 bodies = {
     "1": b"From: outsider@example.com\r\nSubject: outside\r\nContent-Type: text/plain\r\n\r\nprivate body",
@@ -738,11 +741,13 @@ bodies = {
     "9": b"From: johnpoyser@gmail.com\r\nSubject: unaligned signer\r\nContent-Type: text/plain\r\n\r\nshould not be read",
 
 
+
 }
 class FakeMailbox:
     untagged_responses = {"UIDVALIDITY": [b"44"]}
     body_fetches = []
     search_ids = b"1 2 3 4 6 7 8 9"
+
     fail_body_fetch = False
 
 
@@ -754,6 +759,7 @@ class FakeMailbox:
     def uid(self, command, uid, fetch_spec):
         if command == "search":
             return "OK", [self.search_ids]
+
 
 
         key = uid.decode()
@@ -786,6 +792,7 @@ assert initial_rows["3"][4] == "ok", initial_rows["3"]
 assert "body exceeds 256 KiB" in initial_rows["3"][3], initial_rows["3"]
 assert initial_rows["4"][4] == "ok", initial_rows["4"]
 assert "answer exceeds 8,000 characters" in initial_rows["4"][3], initial_rows["4"]
+
 
 assert "reply in mail UID 4 rejected; answer exceeds 8000 characters" in initial_error.getvalue()
 notes = list((state / "inbox").glob("*.note"))
@@ -834,6 +841,7 @@ try:
     assert mail.afk_email_context() == (None, True, False)
     (state / ".mail-seen").write_text("uidvalidity=44\n1\n2\n3\n4\n6\n7\n8\n9\n", encoding="utf-8")
     mailbox.search_ids = b"1 2 3 4 5 6 7 8 9"
+
     mailbox.body_fetches.clear()
     outage_output = StringIO()
     with redirect_stdout(outage_output):
@@ -846,6 +854,7 @@ try:
     assert mailbox.body_fetches == [], mailbox.body_fetches
 
     (state / ".mail-seen").write_text("uidvalidity=44\n1\n2\n3\n4\n5\n6\n7\n8\n9\n", encoding="utf-8")
+
     (state / ".mail-retry").write_text("5\n", encoding="utf-8")
     retry_output = StringIO()
     with redirect_stdout(retry_output):
@@ -876,6 +885,7 @@ assert "FORWARDED_ATTACHMENT_SECRET" not in recovered_note
 (state / ".mail-seen").unlink()
 (state / ".mail-retry").unlink()
 mailbox.search_ids = b"1 2 3 4 6 7 8 9"
+
 
 real_run = mail.subprocess.run
 def fail_handoff(command, *args, **kwargs):

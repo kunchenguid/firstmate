@@ -86,6 +86,7 @@ def afk_record_field(name):
 def afk_email_context():
     if os.environ.get('FM_AFK_POSTURE') != '1':
         return None, False, False
+
     contract = os.path.join(os.path.dirname(__file__), 'fm-afk-contract.sh')
     env = os.environ.copy()
     env.setdefault('FM_HOME', os.path.dirname(os.path.dirname(__file__)))
@@ -108,6 +109,7 @@ def afk_email_context():
     helper = os.path.join(os.path.dirname(__file__), 'fm-afk-email.py')
     try:
 
+
         configured = subprocess.run(
             [sys.executable, helper, 'configured'],
             stdout=subprocess.PIPE,
@@ -121,6 +123,7 @@ def afk_email_context():
     if configured.returncode != 0 or not recipient:
         return None, True, False
     return recipient, True, False
+
 
 
 
@@ -513,6 +516,7 @@ def cmd_poll_list():
         retry_window = retry_scan_window(retry_order, retry_pos, window)
         retry_candidates = [u for u in retry_window if u in seen]
         recipient, afk_email_active, invalid_posture = afk_email_context()
+
         afk_enabled = recipient is not None
 
 
@@ -651,6 +655,7 @@ def cmd_poll_list():
                 continue
             status = 'ignored' if ignored else ('retry' if is_retry else 'ok')
             if not ignored and afk_email_active and not afk_enabled:
+
                 status = 'degraded'
             out.append((uid, idate, fr, subj, status))
             if is_retry:
@@ -724,6 +729,7 @@ def cmd_poll_list():
                     ]
                 if result.stderr:
                     sys.stderr.write(result.stderr)
+
 
 
 

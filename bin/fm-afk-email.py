@@ -808,6 +808,7 @@ def receive_messages(messages, posture, config):
         if token and len(answer) > MAX_REPLY_CHARS:
             print(f"fm-afk-event\treply-rejected\t{uid}\tanswer-too-long", file=sys.stderr)
 
+
             print(
                 f"fm-afk-email: reply in mail UID {uid} rejected; answer exceeds {MAX_REPLY_CHARS} characters",
                 file=sys.stderr,
