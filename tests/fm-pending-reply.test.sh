@@ -1643,7 +1643,7 @@ test_escalated_record_is_reminded_once_per_later_session() {
   [ "$wakes" = 1 ] || fail "same session polled the reminder again, got ${wakes:-0}"
 
   : > "$state/.wake-queue"
-  fm_pending_reply_remind_escalated "$state" || fail "acked same-session remind failed"
+  "$ROOT/bin/fm-pending-reply-remind.sh" "$state" || fail "acked same-session remind failed"
   [ ! -s "$state/.wake-queue" ] || fail "acking the wake must not re-arm the same session"
 
   printf 'resolved: looked at it\n' >> "$state/mate.status"
@@ -1779,11 +1779,11 @@ test_reminder_skips_session_lookup_without_escalations() {
   unset FM_PENDING_REPLY_SESSION
   corr=$(fm_pending_reply_create "$home" "$state" mate "still waiting")
   (
-    fm_pending_reply_session_token() { : > "$state/token-looked-up"; }
-    fm_pending_reply_remind_escalated "$state"
+    export FM_PENDING_REPLY_TOKEN_HOOK=": > \"$state/token-looked-up\""
+    "$ROOT/bin/fm-pending-reply-remind.sh" "$state"
     fm_pending_reply_set "$(fm_pending_reply_path "$state" "$corr")" phase escalated
     fm_pending_reply_set "$(fm_pending_reply_path "$state" "$corr")" escalation_dismissed_epoch 900
-    fm_pending_reply_remind_escalated "$state"
+    "$ROOT/bin/fm-pending-reply-remind.sh" "$state"
   ) || fail "remind without live escalations failed"
   [ ! -e "$state/token-looked-up" ] || fail "the session token was looked up with nothing to remind"
   [ ! -s "$state/.wake-queue" ] || fail "a reminder was enqueued with nothing to remind"

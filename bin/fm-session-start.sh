@@ -741,11 +741,7 @@ else
   # One reminder for escalations a previous session left unresolved. The same
   # session token and an empty token do not enqueue. This drain presents it.
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    bash -c '. "$1"; . "$2"; . "$3"; fm_pending_reply_remind_escalated "$4" "$(fm_pending_reply_session_token "$4")"' _ \
-    "$SCRIPT_DIR/fm-session-lock-lib.sh" \
-    "$SCRIPT_DIR/fm-wake-lib.sh" \
-    "$SCRIPT_DIR/fm-pending-reply-lib.sh" \
-    "$STATE" || true
+    "$SCRIPT_DIR/fm-pending-reply-remind.sh" "$STATE" || true
   DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
   if [ -n "$DRAIN_OUT" ]; then
     printf '%s\n' "$DRAIN_OUT"
