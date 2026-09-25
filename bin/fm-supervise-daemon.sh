@@ -295,8 +295,9 @@ afk_exit() {  # <state>
 #                           -> 1 (internal escalation; stay afk)
 #   message is /afk command -> 1 (re-entering/extending afk; stay afk)
 #   anything else           -> 0 (captain is back; exit afk)
-# Bias toward exit: only the marker and an explicit /afk invocation keep afk
-# alive. A false exit is self-correcting (the captain re-runs /afk).
+# Bias toward exit: only the marker, a doorbell this home's record backs, and an
+# explicit /afk invocation keep afk alive. A false exit is self-correcting (the
+# captain re-runs /afk).
 should_exit_afk() {  # <state> <message-text>
   local state=$1 msg=$2
   afk_active "$state" || fm_afk_contract_present "$state" || return 1

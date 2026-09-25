@@ -91,7 +91,7 @@ Assistant text follows the shared per-block preservation rule above, including w
 Toggling Calm redraws every hooked row already on screen, so rows drawn before the toggle hide or restore retroactively, and the preference is read before the first row draws.
 Nothing is rewritten: hidden rows remain in the message, model context, session storage, and exports, and the mod never touches tool execution, prompts, or the stored transcript.
 
-Bounds of the Claude Code support, each recorded with evidence in [`calm-mode-feasibility.md`](calm-mode-feasibility.md#2026-09-15-claude-code-21272-mods-feasibility-and-the-shipped-mod):
+Bounds of the Claude Code support, recorded with evidence in [`calm-mode-feasibility.md`](calm-mode-feasibility.md#2026-09-15-claude-code-21272-mods-feasibility-and-the-shipped-mod) and, for 2.1.280 and the record-backed doorbell, its [2026-09-25 record](calm-mode-feasibility.md#2026-09-25-claude-code-21280-verification-and-the-record-backed-operational-doorbell):
 
 - The function-hooks surface is early access and default-off, and Claude Code states that its API may change between releases without notice; the mod is verified on Claude Code 2.1.272 and 2.1.280 and refuses nothing newer.
 - An envelope that still reaches Claude Code as typed or launch-prompt text, such as a worker's launch brief, arrives without its U+2063 and so stays visible; only record-backed doorbells are recognized there.
