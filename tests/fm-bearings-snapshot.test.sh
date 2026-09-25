@@ -1745,6 +1745,7 @@ test_landed_accepts_only_kind_owned_delivery_artifacts() {
 - [x] ship-reported-path - Ship naming data/ship-reported-path/report.md (repo: firstmate) (kind: ship) (reported 2026-07-12)
 - [x] reported-scout - Report with $report_pr context $report_path (repo: firstmate) (kind: scout) (reported 2026-07-12)
 - [x] local-delivery - Local with https://github.com/o/r/pull/9 context local main (repo: firstmate) (kind: ship) (done 2026-07-12)
+  local main
 EOF
 
   : > "$home/net.log"

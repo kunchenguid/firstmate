@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Perform the approved local merge for a local-only ship task: fast-forward the
-# project's default branch to the crewmate's immutable ship branch recorded in
+# project's landing branch to the crewmate's immutable ship branch recorded in
 # state/<task-id>.meta ("fm/<id>" for records created before that field existed).
+# The landing branch is meta base_branch= when that field is set, and otherwise
+# the repository default (origin/HEAD, then local main or master). A bare
+# project repository has no checkout to merge into, so the same fast-forward
+# updates refs/heads/<landing> in place.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
@@ -59,7 +63,9 @@ fi
 MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
 
 MERGE_CONTROL_LOCK=
+MERGE_PROJECT_LOCK=
 merge_control_cleanup() {
+  [ -z "$MERGE_PROJECT_LOCK" ] || fm_lock_release "$MERGE_PROJECT_LOCK" || true
   [ -z "$MERGE_CONTROL_LOCK" ] || fm_lock_release "$MERGE_CONTROL_LOCK" || true
 }
 trap merge_control_cleanup EXIT
@@ -77,6 +83,11 @@ fi
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ "$MODE" = local-only ] || { echo "error: task $ID is mode=$MODE, not local-only; merge PR tasks with bin/fm-pr-merge.sh <id> <PR url> after approval" >&2; exit 1; }
+MERGE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ") || {
+  echo "error: could not resolve the shared project lock for $PROJ; refusing to merge" >&2
+  exit 1
+}
+fm_lock_acquire_wait "$MERGE_PROJECT_LOCK"
 
 default_branch() {
   local ref branch
@@ -102,15 +113,36 @@ if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
 fi
 git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+RECORDED_BASE=$(grep '^base_branch=' "$META" | tail -n 1 | cut -d= -f2- || true)
+BARE=false
+if [ "$(git -C "$PROJ" rev-parse --is-bare-repository 2>/dev/null || echo false)" = true ]; then
+  BARE=true
+fi
+if [ -n "$RECORDED_BASE" ]; then
+  if ! git check-ref-format --branch "$RECORDED_BASE" >/dev/null 2>&1; then
+    echo "error: task $ID has an invalid recorded base branch '$RECORDED_BASE'" >&2
+    exit 1
+  fi
+  DEFAULT=$RECORDED_BASE
+else
+  DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+fi
+git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$DEFAULT" >/dev/null || { echo "error: landing branch $DEFAULT does not exist in $PROJ" >&2; exit 1; }
 
-# The project's main checkout must be on its default branch and clean, so the
-# fast-forward lands predictably (firstmate never writes here otherwise).
-cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
-[ "$cur" = "$DEFAULT" ] || { echo "error: $PROJ is on '$cur', expected default branch '$DEFAULT'; cannot merge safely" >&2; exit 1; }
-if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then
-  echo "error: $PROJ has a dirty working tree; refusing to merge into it" >&2
-  exit 1
+# A non-bare checkout must be clean, so the fast-forward lands predictably
+# (firstmate never writes here otherwise).
+# A bare repository has no worktree; the ref update below is the landing.
+if [ "$BARE" = false ]; then
+  cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
+  if [ -z "$RECORDED_BASE" ]; then
+    [ "$cur" = "$DEFAULT" ] || { echo "error: $PROJ is on '$cur', expected landing branch '$DEFAULT'; cannot merge safely" >&2; exit 1; }
+  else
+    [ -n "$cur" ] || { echo "error: $PROJ is detached; expected a clean checkout branch to preserve while landing '$DEFAULT'" >&2; exit 1; }
+  fi
+  if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then
+    echo "error: $PROJ has a dirty working tree; refusing to merge into it" >&2
+    exit 1
+  fi
 fi
 
 # Clean fast-forward only: DEFAULT must be an ancestor of BRANCH.
@@ -136,7 +168,34 @@ case "$hold_status" in
     ;;
 esac
 merge_status=0
-git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null || merge_status=$?
+if [ "$BARE" = true ] || { [ -n "$RECORDED_BASE" ] && [ "$cur" != "$DEFAULT" ]; }; then
+  landing_worktree=
+  worktree_path=
+  while IFS= read -r worktree_line; do
+    case "$worktree_line" in
+      worktree\ *) worktree_path=${worktree_line#worktree } ;;
+      branch\ *)
+        if [ "${worktree_line#branch }" = "refs/heads/$DEFAULT" ]; then
+          landing_worktree=$worktree_path
+          break
+        fi
+        ;;
+    esac
+  done < <(git -C "$PROJ" worktree list --porcelain 2>/dev/null)
+  if [ -n "$landing_worktree" ]; then
+    echo "error: landing branch '$DEFAULT' is checked out in linked worktree '$landing_worktree'; refusing to update its ref" >&2
+    exit 1
+  fi
+fi
+if [ "$BARE" = true ] || { [ -n "$RECORDED_BASE" ] && [ "$cur" != "$DEFAULT" ]; }; then
+  old=$(git -C "$PROJ" rev-parse "refs/heads/$DEFAULT")
+  new=$(git -C "$PROJ" rev-parse "refs/heads/$BRANCH")
+  git -C "$PROJ" update-ref "refs/heads/$DEFAULT" "$new" "$old" >/dev/null || merge_status=$?
+else
+  git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null || merge_status=$?
+fi
+fm_lock_release "$MERGE_PROJECT_LOCK" || true
+MERGE_PROJECT_LOCK=
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
 [ "$merge_status" -eq 0 ] || exit "$merge_status"

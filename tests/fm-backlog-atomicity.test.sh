@@ -37,6 +37,12 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
 TMP_ROOT=$(fm_test_tmproot fm-backlog-atomicity)
 
+TASKS_AXI_BIN=$(command -v tasks-axi || true)
+if command -v asdf >/dev/null 2>&1; then
+  TASKS_AXI_BIN=$(asdf which tasks-axi 2>/dev/null || printf '%s\n' "$TASKS_AXI_BIN")
+fi
+TASKS_AXI_DIR=${TASKS_AXI_BIN%/*}
+
 command -v tasks-axi >/dev/null 2>&1 || {
   printf 'ok - skipped (tasks-axi is not installed; the fused transitions are inert without it)\n'
   exit 0
@@ -148,7 +154,7 @@ SH
 # without faking the reads around it.
 require_show_cwd() {  # <case-dir> <expected-dir>
   local case_dir=$1 expected=$2 real
-  real=$(command -v tasks-axi)
+  real=$TASKS_AXI_BIN
   cat > "$case_dir/fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
 case "\${1:-}" in
@@ -166,7 +172,7 @@ SH
 
 record_tasks_axi_calls() {  # <case-dir>
   local case_dir=$1 real
-  real=$(command -v tasks-axi)
+  real=$TASKS_AXI_BIN
   cat > "$case_dir/fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$case_dir/tasks-axi-calls"
@@ -213,7 +219,7 @@ SH
 
 make_tasks_axi_incompatible() {  # <case-dir>
   local case_dir=$1 real
-  real=$(command -v tasks-axi)
+  real=$TASKS_AXI_BIN
   cat > "$case_dir/fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
 [ "\${1:-}" != --version ] || exit 1
@@ -224,7 +230,7 @@ SH
 
 break_verb() {  # <case-dir> <verb>
   local case_dir=$1 verb=$2 real
-  real=$(command -v tasks-axi)
+  real=$TASKS_AXI_BIN
   cat > "$case_dir/fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = "$verb" ]; then
@@ -238,7 +244,7 @@ SH
 
 interrupt_spawn_during_start() {  # <case-dir> <before|after>
   local case_dir=$1 timing=$2 real
-  real=$(command -v tasks-axi)
+  real=$TASKS_AXI_BIN
   cat > "$case_dir/fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = start ] && [ ! -f "$case_dir/start-interrupted" ]; then
@@ -268,7 +274,7 @@ SH
 # repair) can move the row, or fails too.
 lie_start_then_interrupt() {  # <case-dir> <repair: works|fails>
   local case_dir=$1 repair=$2 real
-  real=$(command -v tasks-axi)
+  real=$TASKS_AXI_BIN
   cat > "$case_dir/fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = start ]; then
@@ -296,7 +302,7 @@ SH
 # attempted wording instead of holding the per-task meta lock open forever.
 hang_start_after_first() {  # <case-dir>
   local case_dir=$1 real
-  real=$(command -v tasks-axi)
+  real=$TASKS_AXI_BIN
   cat > "$case_dir/fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = start ]; then
@@ -421,7 +427,7 @@ test_fm_tasks_axi_gnu_timeout_forces_termination_of_a_sigterm_ignoring_child() {
 
 change_row_on_second_show() {  # <case-dir> <done|rm>
   local case_dir=$1 action=$2 real
-  real=$(command -v tasks-axi)
+  real=$TASKS_AXI_BIN
   cat > "$case_dir/fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = show ]; then
@@ -600,7 +606,7 @@ run_spawn() {  # <case-dir> <args...>
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" HOME="$case_dir/user-home" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' \
-    PATH="$case_dir/fakebin:$PATH" \
+    PATH="$case_dir/fakebin:$TASKS_AXI_DIR:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -616,7 +622,7 @@ run_teardown() {  # <case-dir> <id> [args...]
   local case_dir=$1
   shift
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" \
-    PATH="$case_dir/fakebin:$PATH" \
+    PATH="$case_dir/fakebin:$TASKS_AXI_DIR:$PATH" \
     "$TEARDOWN" "$@" 2>&1
 }
 
@@ -624,7 +630,7 @@ run_bootstrap() {  # <case-dir>
   local case_dir=$1
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" \
     FM_BOOTSTRAP_NETWORK=skip \
-    PATH="$case_dir/fakebin:$PATH" \
+    PATH="$case_dir/fakebin:$TASKS_AXI_DIR:$PATH" \
     "$BOOTSTRAP" 2>&1
 }
 
@@ -751,7 +757,7 @@ test_captain_hold_preserves_relocated_backlog_on_backend_error() {
       readable) printf '%s\n' 'backend = "markdown"' > "$home/.tasks.toml" ;;
     esac
     rc=0
-    out=$(env -u TASKS_AXI_BACKEND HOME="$case_dir/user-home" FM_HOME="$home" \
+    out=$(env -u TASKS_AXI_BACKEND HOME="$case_dir/user-home" PATH="$TASKS_AXI_DIR:$PATH" FM_HOME="$home" \
       FM_DATA_OVERRIDE="$data" "$ROOT/bin/fm-captain-hold.sh" hold "$id" \
       --title "Hold regression" --reason "Captain must choose" 2>&1) || rc=$?
     if [ "$config_state" = dangling ]; then
@@ -1482,7 +1488,7 @@ test_deferred_signal_verification_outlives_an_unresponsive_tasks_axi() {
   out=$(fm_run_timed 30 env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" \
     HOME="$case_dir/user-home" FM_SPAWN_NO_GUARD=1 \
     FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" CLAUDE_CONFIG_DIR='' \
-    FM_TASKS_AXI_TIMEOUT=3 PATH="$case_dir/fakebin:$PATH" \
+    FM_TASKS_AXI_TIMEOUT=3 PATH="$case_dir/fakebin:$TASKS_AXI_DIR:$PATH" \
     "$SPAWN" "$id" "$case_dir/project" \
     --mode no-mistakes --yolo off 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "an interrupted spawn reported success"
@@ -2028,6 +2034,26 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open() {
   assert_not_contains "$out" "endpoint or local copy may remain" \
     "recovery claimed incomplete cleanup without task metadata"
   pass "session start finishes a close an interrupted cleanup recorded but never landed"
+}
+
+test_recovery_preserves_a_named_local_landing_note() {
+  local case_dir id out
+  id=atomic-heal-named-local-note-b9
+  case_dir=$(make_home heal-named-local-note)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-local-note\narg=--note\narg=local office\n' \
+    "$id" "$(home_of "$case_dir")/data" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start did not replay a named local landing note: $out"
+  assert_grep 'local office' "$(backlog_of "$case_dir")" \
+    "the replayed close rewrote a named local landing note"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed named local landing note left its record behind"
+  pass "session start preserves a named local landing note"
 }
 
 test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
@@ -3054,6 +3080,7 @@ test_recovery_marks_an_owned_record_in_flight
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
+test_recovery_preserves_a_named_local_landing_note
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning

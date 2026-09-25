@@ -6,8 +6,8 @@
 # data/<task-id>/ship-instructions.md, appends that same superseding contract to
 # data/<task-id>/brief.md for future relaunches, and prints the fm-send.sh command
 # that delivers it to the current worker. Those instructions carry the
-# scratch-state inventory, the clean
-# default-branch base, the immutable ship branch, and - rendered from
+# scratch-state inventory, the clean selected integration base, the immutable
+# ship branch, and - rendered from
 # bin/fm-dod-lib.sh, the single owner an ordinary ship brief also uses - the
 # mode-specific Definition of done, so a promoted worker receives exactly the same
 # delivery contract as a briefed one, including the no-mistakes mode's ask-user
@@ -22,7 +22,9 @@
 # never passes the provenance gate as the ask (bin/fm-dod-lib.sh).
 # A scout records no delivery posture, so promotion is where this task's delivery
 # contract is decided: --mode, --yolo, and the ship branch resolved from
-# --branch-prefix are written into the meta alongside the kind= flip. Firstmate resolves all three at promotion time, having just
+# --branch-prefix or --branch-name are written into the meta alongside the kind= flip.
+# --base-branch names the integration branch; omitted, a base already recorded
+# on the scout is kept. Firstmate resolves these at promotion time, having just
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks that posture
 # up. The registry IS read for one thing only: the project's forge binding, which
@@ -35,7 +37,7 @@
 # its value against the registry; bin/fm-project-mode.sh's header owns the
 # binding and bin/fm-dod-lib.sh owns what it changes for the worker, including
 # the refusal of a forge on local-only.
-# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>]
+# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>|--branch-name <name>] [--base-branch <branch>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,8 +66,13 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 MODE=
 YOLO=
 BRANCH_PREFIX=fm/
+BRANCH_NAME=
+BASE_BRANCH=
 MODE_SET=0
 YOLO_SET=0
+BRANCH_PREFIX_SET=0
+BRANCH_NAME_SET=0
+BASE_BRANCH_SET=0
 FORGE=none
 POS=()
 want_value=
@@ -77,7 +84,9 @@ for a in "$@"; do
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
-      branch-prefix) BRANCH_PREFIX=$a ;;
+      branch-prefix) BRANCH_PREFIX=$a; BRANCH_PREFIX_SET=1 ;;
+      branch-name) BRANCH_NAME=$a; BRANCH_NAME_SET=1 ;;
+      base-branch) BASE_BRANCH=$a; BASE_BRANCH_SET=1 ;;
     esac
     want_value=
     continue
@@ -88,11 +97,21 @@ for a in "$@"; do
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --branch-prefix) want_value="branch-prefix" ;;
-    --branch-prefix=*) BRANCH_PREFIX=${a#--branch-prefix=} ;;
+    --branch-prefix=*) BRANCH_PREFIX=${a#--branch-prefix=}; BRANCH_PREFIX_SET=1 ;;
+    --branch-name) want_value="branch-name" ;;
+    --branch-name=*) BRANCH_NAME=${a#--branch-name=}; BRANCH_NAME_SET=1 ;;
+    --base-branch) want_value="base-branch" ;;
+    --base-branch=*) BASE_BRANCH=${a#--base-branch=}; BASE_BRANCH_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+[ "$BRANCH_NAME_SET" -eq 0 ] || [ -n "$BRANCH_NAME" ] || { echo "error: --branch-name requires a non-empty value" >&2; exit 1; }
+[ "$BASE_BRANCH_SET" -eq 0 ] || [ -n "$BASE_BRANCH" ] || { echo "error: --base-branch requires a non-empty value" >&2; exit 1; }
+if [ "$BRANCH_NAME_SET" -eq 1 ] && [ "$BRANCH_PREFIX_SET" -eq 1 ]; then
+  echo "error: --branch-name and --branch-prefix are mutually exclusive; pass the full crew branch or the prefix, not both" >&2
+  exit 1
+fi
 [ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>" >&2; exit 1; }
 [ "$MODE_SET" -eq 1 ] || {
   echo "error: promotion requires --mode <no-mistakes|direct-PR|local-only>; decide it now from the scout's findings and the project's registered posture in data/projects.md" >&2
@@ -132,9 +151,21 @@ refuse_impossible_forge_posture || exit 1
 
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
-BRANCH="$BRANCH_PREFIX$ID"
-if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
-  echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
+if [ "$BRANCH_NAME_SET" -eq 1 ]; then
+  BRANCH=$BRANCH_NAME
+  if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+    echo "error: --branch-name is not a usable git branch name: $BRANCH" >&2
+    exit 1
+  fi
+else
+  BRANCH="$BRANCH_PREFIX$ID"
+  if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+    echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
+    exit 1
+  fi
+fi
+if [ "$BASE_BRANCH_SET" -eq 1 ] && ! git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1; then
+  echo "error: --base-branch is not a usable git branch name: $BASE_BRANCH" >&2
   exit 1
 fi
 printf -v BRANCH_Q '%q' "$BRANCH"
@@ -142,6 +173,8 @@ CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
 META_LOCK=
 META_LOCK_HELD=0
+PROMOTE_PROJECT_LOCK=
+PROMOTE_PROJECT_LOCK_HELD=0
 TMP=
 META=
 SCOUT_BRIEF=
@@ -161,6 +194,10 @@ promote_cleanup() {
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     CONTROL_LOCK_HELD=0
     fm_lock_release "$CONTROL_LOCK" || true
+  fi
+  if [ "$PROMOTE_PROJECT_LOCK_HELD" = 1 ]; then
+    PROMOTE_PROJECT_LOCK_HELD=0
+    fm_lock_release "$PROMOTE_PROJECT_LOCK" || true
   fi
   return "$status"
 }
@@ -186,6 +223,7 @@ grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (ki
 # captain's project binding, so promotion takes it from the registry rather than
 # from a flag firstmate must remember.
 PROMOTE_PROJECT=$(sed -n 's/^project=//p' "$META" | head -n 1)
+PROMOTE_WORKTREE=$(sed -n 's/^worktree=//p' "$META" | head -n 1)
 if [ -n "$PROMOTE_PROJECT" ]; then
   PROMOTE_PROJECT_NAME=$(basename "$PROMOTE_PROJECT")
   if ! PROMOTE_STANDING_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROMOTE_PROJECT_NAME"); then
@@ -198,6 +236,138 @@ fi
 # An unbound project keeps the exact wording it always had.
 PROMOTE_FORGE_WORDS=
 [ "$FORGE" = none ] || PROMOTE_FORGE_WORDS=" forge=$FORGE"
+if [ "$BASE_BRANCH_SET" -eq 0 ]; then
+  BASE_BRANCH=$(sed -n 's/^base_branch=//p' "$META" | tail -n 1)
+else
+  RECORDED_BASE=$(sed -n 's/^base_branch=//p' "$META" | tail -n 1)
+  [ "$BASE_BRANCH" = "$RECORDED_BASE" ] || {
+    echo "error: --base-branch cannot change the scout's recorded base during promotion; promote with base_branch=${RECORDED_BASE:-<none>} to preserve the existing worktree" >&2
+    exit 1
+  }
+fi
+if [ -n "$BASE_BRANCH" ] && ! git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1; then
+  echo "error: task $ID has an invalid base branch '$BASE_BRANCH'" >&2
+  exit 1
+fi
+PROMOTE_BASE_REMOTE=0
+PROMOTE_REMOTE_BASE_REFS=
+if [ -n "$BASE_BRANCH" ] && [ "$MODE" != local-only ]; then
+  [ -n "$PROMOTE_PROJECT" ] && [ -d "$PROMOTE_PROJECT" ] || {
+    echo "error: cannot verify remote base '$BASE_BRANCH' without the scout's project checkout; refusing promotion" >&2
+    exit 1
+  }
+  if git -C "$PROMOTE_PROJECT" remote get-url origin >/dev/null 2>&1; then
+    PROMOTE_REMOTE_BASE_REFS=$(git -C "$PROMOTE_PROJECT" ls-remote --heads origin "refs/heads/$BASE_BRANCH" 2>/dev/null) || {
+      echo "error: could not check remote base '$BASE_BRANCH' on origin; refusing promotion" >&2
+      exit 1
+    }
+    [ -n "$PROMOTE_REMOTE_BASE_REFS" ] || {
+      echo "error: remote base '$BASE_BRANCH' does not exist on origin; refusing promotion" >&2
+      exit 1
+    }
+    [ -n "$PROMOTE_WORKTREE" ] && [ -d "$PROMOTE_WORKTREE" ] || {
+      echo "error: cannot verify remote base '$BASE_BRANCH' without the scout's recorded worktree; refusing promotion" >&2
+      exit 1
+    }
+    git -C "$PROMOTE_WORKTREE" rev-parse --verify --quiet "refs/remotes/origin/$BASE_BRANCH^{commit}" >/dev/null || {
+      echo "error: remote base '$BASE_BRANCH' is not available in the scout worktree; refusing promotion" >&2
+      exit 1
+    }
+    PROMOTE_BASE_REMOTE=1
+  elif [ -n "$PROMOTE_PROJECT" ] && [ -d "$PROMOTE_PROJECT" ] &&
+    ! git -C "$PROMOTE_PROJECT" rev-parse --verify --quiet "refs/heads/$BASE_BRANCH^{commit}" >/dev/null; then
+    echo "error: base '$BASE_BRANCH' does not exist locally in $PROMOTE_PROJECT; refusing promotion" >&2
+    exit 1
+  fi
+fi
+if [ "$MODE" = local-only ] && [ -n "$BASE_BRANCH" ]; then
+  [ -n "$PROMOTE_PROJECT" ] && [ -d "$PROMOTE_PROJECT" ] || {
+    echo "error: cannot verify local-only base '$BASE_BRANCH' without the scout's project checkout; refusing promotion" >&2
+    exit 1
+  }
+  if ! git -C "$PROMOTE_PROJECT" rev-parse --verify --quiet "refs/heads/$BASE_BRANCH^{commit}" >/dev/null; then
+    echo "error: local-only base '$BASE_BRANCH' does not exist locally in $PROMOTE_PROJECT; refusing promotion" >&2
+    exit 1
+  fi
+fi
+if [ -n "$BASE_BRANCH" ] && [ "$BASE_BRANCH" = "$BRANCH" ]; then
+  echo "error: --base-branch cannot be the crew branch ($BRANCH); choose a different --branch-name" >&2
+  exit 1
+fi
+
+promote_meta_value() {
+  local meta=$1 key=$2
+  sed -n "s/^${key}=//p" "$meta" | tail -n 1
+}
+
+refuse_promoted_branch_collision() {
+  local meta other_branch other_project other_kind other_real proj_real other_id remote_refs
+  [ "$BRANCH_NAME_SET" -eq 1 ] || return 0
+  [ -n "$PROMOTE_PROJECT" ] && [ -d "$PROMOTE_PROJECT" ] || {
+    echo "error: cannot verify crew branch $BRANCH without the scout's project checkout; refusing promotion" >&2
+    return 1
+  }
+  proj_real=$(cd "$PROMOTE_PROJECT" 2>/dev/null && pwd -P) || proj_real=$PROMOTE_PROJECT
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    other_id=${meta##*/}
+    other_id=${other_id%.meta}
+    [ "$other_id" = "$ID" ] && continue
+    other_kind=$(promote_meta_value "$meta" kind)
+    [ "$other_kind" = ship ] || continue
+    other_branch=$(promote_meta_value "$meta" branch)
+    [ "$other_branch" = "$BRANCH" ] || continue
+    other_project=$(promote_meta_value "$meta" project)
+    [ -n "$other_project" ] || continue
+    if other_real=$(cd "$other_project" 2>/dev/null && pwd -P); then
+      [ "$other_real" = "$proj_real" ] || continue
+    else
+      [ "$other_project" = "$PROMOTE_PROJECT" ] || continue
+    fi
+    echo "error: crew branch $BRANCH is already assigned to task $other_id; refusing promotion with a shared branch" >&2
+    return 1
+  done
+  if git -C "$PROMOTE_PROJECT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    echo "error: crew branch $BRANCH already exists locally; refusing promotion with a reused branch" >&2
+    return 1
+  fi
+  [ "$MODE" = local-only ] && return 0
+  if git -C "$PROMOTE_PROJECT" remote get-url origin >/dev/null 2>&1; then
+    if ! remote_refs=$(git -C "$PROMOTE_PROJECT" ls-remote --heads origin "refs/heads/$BRANCH" 2>/dev/null); then
+      echo "error: could not check whether crew branch $BRANCH exists on origin; refusing promotion" >&2
+      return 1
+    fi
+    if [ -n "$remote_refs" ]; then
+      echo "error: crew branch $BRANCH already exists on origin; refusing promotion with a reused branch" >&2
+      return 1
+    fi
+  fi
+}
+
+if [ "$BRANCH_NAME_SET" -eq 1 ]; then
+  [ -n "$PROMOTE_PROJECT" ] && [ -d "$PROMOTE_PROJECT" ] || {
+    echo "error: cannot reserve crew branch $BRANCH without the scout's project checkout; refusing promotion" >&2
+    exit 1
+  }
+  PROMOTE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROMOTE_PROJECT") || {
+    echo "error: could not resolve the shared project lock for $PROMOTE_PROJECT" >&2
+    exit 1
+  }
+  if ! fm_lock_try_acquire "$PROMOTE_PROJECT_LOCK"; then
+    echo "error: another project allocation or return is in progress for $PROMOTE_PROJECT; refusing to race it" >&2
+    exit 1
+  fi
+  PROMOTE_PROJECT_LOCK_HELD=1
+fi
+refuse_promoted_branch_collision || exit 1
+PROMOTE_BASE_WORDS=default-branch
+if [ -n "$BASE_BRANCH" ]; then
+  if [ "$PROMOTE_BASE_REMOTE" = 1 ]; then
+    PROMOTE_BASE_WORDS="\`refs/remotes/origin/$BASE_BRANCH\`"
+  else
+    PROMOTE_BASE_WORDS="\`$BASE_BRANCH\`"
+  fi
+fi
 
 SCOUT_BRIEF="$DATA/$ID/brief.md"
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
@@ -237,7 +407,7 @@ IFS= read -r -d '' PROMOTION_SHIP_SPEC <<EOF || true
 If these promotion steps were already completed before a relaunch, preserve the existing \`$BRANCH_Q\` branch and continue from its current state; do not repeat them destructively.
 1. **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from. If either does not resolve to the worktree you were launched in, stop and escalate to firstmate.
 2. Inventory this worktree's scratch state with \`git status\` and \`git log\` before changing anything.
-3. Return to a clean default-branch base, then create your branch: \`git checkout -b $BRANCH_Q --\`.
+3. Return to a clean $PROMOTE_BASE_WORDS base, then create your branch: \`git checkout -b $BRANCH_Q --\`.
 4. Carry over only the intended fix changes. Leave scratch commits, debug edits, and experiment files behind.
 5. If you reproduced a bug, turn that reproduction into a regression test.
 6. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or current ship-time instructions.
@@ -254,13 +424,13 @@ The mode-specific Definition of done below is the current delivery contract.
 
 # Current ship safety rule
 EOF
-  fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE"
+  fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH"
   if [ -n "$PROMOTION_ASK_USER_BLOCK" ]; then
     printf '\nThe no-mistakes ask-user escalation below supersedes the scout rule 6 escalation shape.\n'
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
   fi
   printf '\n'
-  fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE"
+  fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH"
 }
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
@@ -313,13 +483,26 @@ fi
 BRIEF_REPLACEMENT=
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' "$META" > "$TMP"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' -e '^base_branch=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "branch=$BRANCH"
+  [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
 } >> "$TMP"
+if [ "$PROMOTE_BASE_REMOTE" = 1 ]; then
+  [ -n "$PROMOTE_WORKTREE" ] && [ -d "$PROMOTE_WORKTREE" ] || {
+    rm -f -- "$INSTRUCTIONS" 2>/dev/null || true
+    echo "error: cannot verify remote base '$BASE_BRANCH' without the scout's recorded worktree; refusing promotion" >&2
+    exit 1
+  }
+  git -C "$PROMOTE_WORKTREE" rev-parse --verify --quiet "refs/remotes/origin/$BASE_BRANCH^{commit}" >/dev/null || {
+    rm -f -- "$INSTRUCTIONS" 2>/dev/null || true
+    echo "error: remote base '$BASE_BRANCH' is no longer available in the scout worktree; refusing promotion" >&2
+    exit 1
+  }
+fi
 if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE"; then
   rm -f -- "$TMP"
   TMP=

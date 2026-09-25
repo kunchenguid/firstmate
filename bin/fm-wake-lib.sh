@@ -1234,7 +1234,7 @@ fm_firstmate_root_home() {
 # separate clones of one origin share a single lock; an origin-less local-only
 # project falls back to its own worktree top instead of failing to resolve.
 fm_treehouse_project_lock_path() {  # <project-dir>
-  local project=$1 root origin identity hash top
+  local project=$1 root origin identity hash top bare
   [ -d "$project" ] || return 1
   root=$(fm_firstmate_root_home "$FM_HOME") || return 1
   origin=$(git -C "$project" remote get-url origin 2>/dev/null || true)
@@ -1246,9 +1246,15 @@ fm_treehouse_project_lock_path() {  # <project-dir>
     esac
     identity=$origin
   else
-    top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || return 1
-    top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
-    identity=$top
+    bare=$(git -C "$project" rev-parse --is-bare-repository 2>/dev/null || echo false)
+    if [ "$bare" = true ]; then
+      identity=$(git -C "$project" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+      identity=$(CDPATH='' cd -- "$identity" 2>/dev/null && pwd -P) || return 1
+    else
+      top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || return 1
+      top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
+      identity=$top
+    fi
   fi
   hash=$(printf '%s' "$identity" | git hash-object --stdin 2>/dev/null) || return 1
   [ -d "$root/state" ] || return 1
