@@ -952,8 +952,7 @@ if [ "$MODE" = fix ]; then
   # then states whether that worked.
   if [ "${FM_REMOTE_JOB_ACTIVE:-}" != 1 ] && remote_job_identity_ok && ! worker_tool_probe; then
     fix_report remote-job-probe failed "the running remote job worker $WORKER_PROBE_FAILURE; replacing it"
-    REMOTE_JOB_PROBE_REPLACED=1
-    fix_remote_job_worker --replace || true
+    fix_remote_job_worker --replace && REMOTE_JOB_PROBE_REPLACED=1
     run_checks "$LAUNCH_AGENT_SHELL"
   fi
 fi
