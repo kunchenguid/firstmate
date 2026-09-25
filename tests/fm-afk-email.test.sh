@@ -439,7 +439,7 @@ test_invalid_or_unreadable_posture_suppresses_mail() {
 import importlib.util
 import os
 import sys
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -796,6 +796,7 @@ assert poll_lines[0] == "uidvalidity\t44", poll_lines
 poll_rows = {fields[0]: fields for fields in (line.split("\t") for line in poll_lines[1:])}
 assert set(poll_rows) == {"1", "2", "3", "4", "6", "7", "8", "9"}, poll_rows
 assert all(poll_rows[uid][4] == "ignored" for uid in ("1", "6", "7", "8", "9")), poll_rows
+
 assert poll_rows["2"][4] == "degraded", poll_rows["2"]
 assert poll_rows["3"][4] == "ok", poll_rows["3"]
 assert poll_rows["4"][4] == "degraded", poll_rows["4"]
@@ -861,6 +862,7 @@ assert "FORWARDED_ATTACHMENT_SECRET" not in recovered_note
 (state / ".mail-seen").unlink()
 (state / ".mail-retry").unlink()
 mailbox.search_ids = b"1 2 3 4 6 7 8 9"
+
 real_run = mail.subprocess.run
 def fail_handoff(command, *args, **kwargs):
     if isinstance(command, list) and command[-1] == "receive-batch":
@@ -882,6 +884,7 @@ assert handoff_rows["2"][4] == "degraded", handoff_rows["2"]
 assert handoff_rows["4"][4] == "degraded", handoff_rows["4"]
 assert "away-email reply handoff failed" in handoff_error.getvalue(), handoff_error.getvalue()
 assert mailbox.body_fetches == ["2", "4"], mailbox.body_fetches
+
 
 
 (state / ".afk-contract").write_text("version: 99\nentered_epoch: 1\nreach_channels: email\n")

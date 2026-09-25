@@ -106,6 +106,7 @@ def afk_email_context():
         return None, True, True
     helper = os.path.join(os.path.dirname(__file__), 'fm-afk-email.py')
     try:
+
         configured = subprocess.run(
             [sys.executable, helper, 'configured'],
             stdout=subprocess.PIPE,
@@ -119,6 +120,7 @@ def afk_email_context():
     if configured.returncode != 0 or not recipient:
         return None, True, False
     return recipient, True, False
+
 
 
 
@@ -592,6 +594,7 @@ def cmd_poll_list():
                     or not gmail_authentication_pass(mi)
                 )
                 if afk_enabled and not ignored and from_is_configured(fr, recipient):
+
                     try:
                         message_size = fetched_size(msg)
                         if message_size is None:
@@ -613,6 +616,7 @@ def cmd_poll_list():
                         else:
                             subj = clean(
                                 f'[away-mode reply not processed: message body exceeds 256 KiB] {subj}')
+
                     except AfkBodyFetchError:
                         raise
                     except Exception as error:
@@ -718,6 +722,7 @@ def cmd_poll_list():
                     ]
                 if result.stderr:
                     sys.stderr.write(result.stderr)
+
 
         print('uidvalidity\t%s' % uidv)
         for uid, idate, fr, subj, status in out:
