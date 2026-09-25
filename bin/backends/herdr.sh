@@ -3136,6 +3136,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
 # mirroring the capture fallback of fm_backend_herdr_composer_state above, for
 # callers that must compare content rather than classify it (fm-send.sh's
 # post-interrupt clear proof).
+# shellcheck disable=SC2329  # reached through bin/fm-backend.sh's fm_backend_composer_content dispatcher
 fm_backend_herdr_composer_content() {  # <target>
   local target=$1 cap caps
   fm_backend_herdr_parse_target "$target" || return 1
