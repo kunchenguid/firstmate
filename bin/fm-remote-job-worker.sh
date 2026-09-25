@@ -39,6 +39,10 @@
 # consecutive-failure backoff, but not that total restart guard, so a child
 # that dies just past the healthy threshold cannot restart without bound
 # either. fm-on's ensure path restarts a worker that gave up.
+#
+# Each serving iteration first confirms the ownership lock still names this
+# process; one that lost it stops its lanes and exits 0 without touching the
+# real owner's records, so its supervisor stops too instead of racing claims.
 set -u
 
 # A non-numeric override falls back to the default rather than crashing the
@@ -1116,6 +1120,10 @@ main() {
   worker_publish_identity "$account_home" || { worker_error "cannot publish worker code identity"; exit 1; }
   worker_publish_pid || { worker_error "cannot publish worker pid"; exit 1; }
   while :; do
+    if ! worker_shutdown_owns_lock; then
+      worker_error "worker ownership now belongs to $(fm_remote_job_read_single_line "$WORKER_LOCK/pid" 64 2>/dev/null || printf nobody); this worker stops serving"
+      worker_exit_lost_lock
+    fi
     worker_write_heartbeat || { worker_error "cannot update worker heartbeat"; exit 1; }
     # Checked right after a fresh heartbeat, so the grace window cannot make a
     # still-healthy worker read as unready to a concurrent probe.

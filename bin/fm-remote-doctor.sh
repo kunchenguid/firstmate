@@ -107,6 +107,7 @@ CHECK_NAMES=()
 CHECK_VALUES=()
 CHECK_ACTIONS=()
 REMOTE_JOB_FIX_ERROR=
+REMOTE_JOB_PROBE_REPLACED=0
 
 record() { # <name> <value> [operator-action]
   CHECK_NAMES+=("$1")
@@ -506,7 +507,7 @@ report_required_tools_from_worker() {
     set_check remote-job-probe "ok: the remote job worker completed the required-tool probe"
     return 0
   fi
-  if [ "$MODE" = fix ]; then
+  if [ "$REMOTE_JOB_PROBE_REPLACED" -eq 1 ]; then
     # --fix already replaced the worker once for this failure, so another
     # --fix cannot help; name what is still wrong instead of looping on it.
     set_check remote-job-probe "human: the remote job worker still $WORKER_PROBE_FAILURE after --fix replaced it" \
@@ -951,6 +952,7 @@ if [ "$MODE" = fix ]; then
   # then states whether that worked.
   if [ "${FM_REMOTE_JOB_ACTIVE:-}" != 1 ] && remote_job_identity_ok && ! worker_tool_probe; then
     fix_report remote-job-probe failed "the running remote job worker $WORKER_PROBE_FAILURE; replacing it"
+    REMOTE_JOB_PROBE_REPLACED=1
     fix_remote_job_worker --replace || true
     run_checks "$LAUNCH_AGENT_SHELL"
   fi

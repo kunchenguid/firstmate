@@ -84,11 +84,12 @@
 # orphaned that way.
 #
 # fm_remote_job_ensure_worker never starts a Linux replacement while a live
-# worker still holds the ownership lock: it stops that holder's tree first,
-# even when the lock record no longer verifies it, and fails naming the
-# holder when it cannot. A replacement that does not become the verified
-# owner within its startup window is stopped before ensure fails, so no call
-# can leave a tree behind. --replace also replaces a healthy-looking owner,
+# worker still holds the ownership lock: it stops that holder's tree first
+# when the lock record no longer verifies it or its identity is stale, and
+# fails naming the holder when it cannot. A verified current-identity holder
+# is only waited for, never stopped for a late heartbeat. A replacement that
+# does not become the verified owner within its startup window is stopped
+# before ensure fails, so no call can leave a tree behind. --replace also replaces a healthy-looking owner,
 # for a worker that heartbeats but cannot serve jobs.
 
 FM_REMOTE_JOB_LABEL=dev.firstmate.remote-job
@@ -1233,6 +1234,9 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home> [--replace]
   if fm_remote_job_worker_owned_alive "$root" "$account_home"; then
     if [ "$replace" != --replace ] && fm_remote_job_worker_identity_matches "$root" "$account_home"; then return 0; fi
     holder=$FM_REMOTE_JOB_OWNER_PID
+  elif [ "$replace" != --replace ] && fm_remote_job_lock_owner_matches_process "$account_home" &&
+    fm_remote_job_worker_identity_matches "$root" "$account_home"; then
+    return 0
   else
     holder=$(fm_remote_job_live_lock_holder "$account_home" 2>/dev/null || true)
   fi
