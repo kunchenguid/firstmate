@@ -231,6 +231,15 @@ file_inode() {
   fi
 }
 
+# The one-letter run state of <pid>. macOS ps appends modifier flags to the
+# state (a stopped process under load reads "TN"), so only the leading letter
+# is compared.
+process_state_code() { # <pid>
+  local state
+  state=$(ps -o state= -p "$1" 2>/dev/null | tr -d ' ') || true
+  printf '%s\n' "${state:0:1}"
+}
+
 printf 'first line\nsecond line\n' > "$TMP_ROOT/stdin"
 # shellcheck disable=SC2016 # Literal shell-looking argv is an injection probe.
 TOP_SECRET=must-not-cross fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
@@ -770,10 +779,10 @@ assert_present "$LOST_STATE/worker.ready" "the ownership-loss worker did not bec
 assert_present "$LOST_STATE/worker.lock" "the ownership-loss worker did not publish its lock"
 kill -STOP "$LOST_TERM_PID"
 for _ in $(seq 1 100); do
-  [ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | tr -d ' ')" = T ] && break
+  [ "$(process_state_code "$LOST_TERM_PID")" = T ] && break
   sleep 0.05
 done
-[ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | tr -d ' ')" = T ] \
+[ "$(process_state_code "$LOST_TERM_PID")" = T ] \
   || fail "the ownership-loss worker did not stop"
 rm -rf -- "$LOST_STATE/worker.lock"
 kill -CONT "$LOST_TERM_PID"
@@ -828,7 +837,7 @@ done
 assert_present "$HOLD_STARTED" "the held command did not start before ownership loss"
 kill -STOP "$LOST_TERM_PID"
 for _ in $(seq 1 100); do
-  [ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | tr -d ' ')" = T ] && break
+  [ "$(process_state_code "$LOST_TERM_PID")" = T ] && break
   sleep 0.05
 done
 rm -rf -- "$LOST_STATE/worker.lock"
@@ -864,7 +873,7 @@ done
 assert_present "$OWNER_STATE/worker.ready" "the worker that will lose ownership did not become ready"
 kill -STOP "$LOST_TERM_PID"
 for _ in $(seq 1 100); do
-  [ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | tr -d ' ')" = T ] && break
+  [ "$(process_state_code "$LOST_TERM_PID")" = T ] && break
   sleep 0.05
 done
 rm -rf -- "$OWNER_STATE/worker.lock"
@@ -1007,11 +1016,11 @@ STALL_QUARANTINE_INODE=$(file_inode "$STALL_STATE/worker.lock/quarantine")
 # worker has finished.
 kill -STOP "$STALL_REPLACEMENT_PID"
 STALL_DEADLINE=$((SECONDS + 30))
-until [ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | tr -d ' ')" = T ] \
+until [ "$(process_state_code "$STALL_REPLACEMENT_PID")" = T ] \
   || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
   sleep 0.05
 done
-[ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | tr -d ' ')" = T ] \
+[ "$(process_state_code "$STALL_REPLACEMENT_PID")" = T ] \
   || fail "the replacement could not be held while the ousted worker resumed"
 kill -KILL -- "-$STALL_JOB_GROUP" 2>/dev/null || true
 STALL_DEADLINE=$((SECONDS + 30))
@@ -1022,11 +1031,11 @@ done
   || fail "the job's command group was still alive after the test stopped it"
 rm -f -- "$STALL_HOLD"
 STALL_DEADLINE=$((SECONDS + 30))
-until [ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | tr -d ' ')" = Z ] \
+until [ "$(process_state_code "$STALL_WORKER_PID")" = Z ] \
   || ! kill -0 "$STALL_WORKER_PID" 2>/dev/null || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
   sleep 0.05
 done
-[ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | tr -d ' ')" = Z ] \
+[ "$(process_state_code "$STALL_WORKER_PID")" = Z ] \
   || ! kill -0 "$STALL_WORKER_PID" 2>/dev/null \
   || fail "the ousted worker did not exit after shutdown resumed"
 STALL_WORKER_RC=0
@@ -1044,11 +1053,11 @@ kill -0 "$STALL_REPLACEMENT_PID" 2>/dev/null \
   || fail "the ousted worker wrote or cleared the replacement quarantine during shutdown"
 kill -TERM "$STALL_REPLACEMENT_PID"
 STALL_DEADLINE=$((SECONDS + 30))
-until [ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | tr -d ' ')" = Z ] \
+until [ "$(process_state_code "$STALL_REPLACEMENT_PID")" = Z ] \
   || ! kill -0 "$STALL_REPLACEMENT_PID" 2>/dev/null || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
   sleep 0.05
 done
-[ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | tr -d ' ')" = Z ] \
+[ "$(process_state_code "$STALL_REPLACEMENT_PID")" = Z ] \
   || ! kill -0 "$STALL_REPLACEMENT_PID" 2>/dev/null \
   || fail "the replacement did not finish its own TERM shutdown"
 wait "$STALL_REPLACEMENT_PID" 2>/dev/null || true
