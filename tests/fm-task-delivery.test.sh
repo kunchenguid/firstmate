@@ -1426,6 +1426,24 @@ EOF
   assert_not_contains "$out" "registers the ship-branch prefix" \
     "a spawn matching the registered prefix was announced as a deviation"
 
+  # With config/ship-branch-ticket-case the branch's ticket is uppercased, and a
+  # spawn on the default fm/ prefix is still no deviation.
+  rec=$(make_home prefix-deviation-ticket "- proj [no-mistakes] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  : > "$home/config/ship-branch-ticket-case"
+  FM_HOME="$home" "$BRIEF" ve1262-backoff-retry proj --mode no-mistakes >/dev/null \
+    || fail "a ticket-id brief should scaffold"
+  fill_brief_subsections "$home/data/ve1262-backoff-retry/brief.md" "Run the review loop." "Ship it."
+  out=$(run_spawn "$home" "$fakebin" ve1262-backoff-retry "$proj" claude --mode no-mistakes --yolo off)
+  grep -qx 'Ship branch: fm/VE-1262-backoff-retry' "$home/data/ve1262-backoff-retry/brief.md" \
+    || fail "the ticket-case brief did not carry the normalized branch"
+  assert_not_contains "$out" "branch mismatch" \
+    "the ticket-case spawn selected a branch other than the brief's"
+  assert_not_contains "$out" "registers the ship-branch prefix" \
+    "a ticket-case spawn on the registered prefix was announced as a deviation"
+
   pass "fm-spawn: a ship branch that deviates from the registered prefix is announced, never blocked"
 }
 
