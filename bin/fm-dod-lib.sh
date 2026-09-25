@@ -142,7 +142,8 @@ fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
 
 # fm_attribution_rule owns the crewmate rule forbidding AI self-attribution in
 # commits and PRs, shared by the ship and scout scaffolds in bin/fm-brief.sh.
-# A claude worker's guard hook (bin/fm-attribution-pretool-check.sh) enforces it.
+# The task worktree's commit-msg hook (bin/fm-worktree-git-hook.sh) enforces it
+# on every harness.
 fm_attribution_rule() {  # <rule-number>
   printf '%s\n' "$1. Never put AI or model self-attribution in a commit message, PR title, or PR body: no \`Co-Authored-By\` trailer naming an AI or agent, no \"Generated with\" line, and no session or tool link. Write commit messages and PR bodies the way a human developer would. If a hook refuses a commit or PR command for this, remove the attribution and run it again; never work around the hook."
 }

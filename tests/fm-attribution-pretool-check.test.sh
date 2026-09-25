@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016
-# Behavior tests for bin/fm-attribution-pretool-check.sh, the Bash PreToolUse
-# guard that refuses AI self-attribution in a worker's commits and PRs, and for
-# its wiring into a claude task worker's worktree hooks by bin/fm-spawn.sh.
+# Behavior tests for bin/fm-attribution-pretool-check.sh, the matcher that
+# refuses AI self-attribution in a worker's commits and PRs, for the task
+# worktree commit-msg hook that runs it on every harness, and for its wiring
+# into a claude task worker's worktree PreToolUse hooks by bin/fm-spawn.sh.
 #
 # No harness is spawned: the guard is driven with Claude-shaped payloads, and
-# the spawn case runs the real fm-spawn against a fake tmux pane and then runs
-# the exact hook command it registered. The live proof that real Claude Code
-# honors the hook's denial is tests/fm-attribution-guard-live.test.sh.
+# the spawn cases run the real fm-spawn against a fake tmux pane, then run the
+# exact PreToolUse command it registered and make real git commits in the task
+# worktree, its primary checkout, and a sibling worktree. The live proof that
+# real Claude Code is refused is tests/fm-attribution-guard-live-e2e.test.sh.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -58,6 +60,11 @@ test_allows_human_messages_and_reads() {
   expect_allow 'git log --format=%B | grep -i "Co-Authored-By: Claude"' "searching history for the pattern"
   expect_allow 'grep -rn "Co-Authored-By: Claude" docs' "grepping for the pattern outside git"
   expect_allow 'echo "Co-Authored-By: Claude <noreply@anthropic.com>" > notes.txt' "a command that writes no commit or PR"
+  expect_allow 'git log --oneline --grep="Co-Authored-By: Claude <x>" | grep merge' "a git read whose pipeline names a writing verb"
+  expect_allow 'echo "git commit" | grep -c "Co-Authored-By: Claude <x>"' "a writing verb that is only an argument"
+  expect_deny $'cd /repo && git -c user.name=x --no-pager commit -m "a\n\nCo-Authored-By: Claude <x>"' \
+    "a commit after a separator and git global options"
+  expect_deny $'/usr/bin/git tag -a v1 -m "Generated with Claude Code"' "a tag through an absolute git path"
   pass "human-written messages and read-only searches are allowed"
 }
 
@@ -68,7 +75,14 @@ test_scans_message_files_the_command_names() {
   printf 'fix: plain\n' >"$dir/clean.txt"
   expect_deny "git commit -F $dir/msg.txt" "an attributed message file passed to -F"
   expect_deny "gh pr create --title t --body-file=$dir/msg.txt" "an attributed --body-file=path"
+  printf 'fix\n\nGenerated with [Claude Code](https://claude.com/claude-code)\n' >"$dir/body.md"
   expect_allow "git commit -F $dir/clean.txt" "a clean message file"
+  expect_deny "git commit --file=$dir/msg.txt" "an attributed --file=path"
+  expect_deny "gh pr create -t t -F $dir/body.md" "an attributed gh -F body file"
+  expect_deny "gh api repos/o/r/pulls -f title=t --field body=@$dir/body.md" "an attributed gh api body=@file field"
+  expect_allow "git add $dir/msg.txt && git commit -m 'docs: refresh verification notes'" \
+    "a clean message alongside a staged file that quotes the pattern"
+  expect_allow "git commit $dir/msg.txt -m 'docs: plain'" "a clean message with a pathspec that quotes the pattern"
   assert_equals 2 "$(guard_code 'git commit -F msg.txt' "$dir")" \
     "a relative message file was not resolved from the payload cwd"
   pass "message files named by the command are scanned, relative to the payload cwd"
@@ -84,10 +98,106 @@ test_transport_edges() {
   out=$("$GUARD" --command $'git commit -m "x\n\nCo-Authored-By: Claude <noreply@anthropic.com>"' 2>&1)
   rc=$?
   expect_code 2 "$rc" "--command mode must deny an attributed commit"
-  assert_contains "$out" "Remove that text and run the command again" "the denial did not tell the model how to recover"
+  assert_contains "$out" "Remove these lines and try again" "the denial did not tell the model how to recover"
+  assert_contains "$out" "Co-Authored-By: Claude <noreply@anthropic.com>" "the denial did not name the line to remove"
   out=$(payload $'git commit -m "x\n\nCo-Authored-By: Claude <a@b>"' | "$GUARD" 2>/dev/null)
   [ -z "$out" ] || fail "a denial must keep stdout empty for Claude, got: $out"
   pass "empty, unparsable, and --command inputs behave as documented"
+}
+
+test_message_file_mode() {
+  local dir=$TMP_ROOT/msgmode out
+  mkdir -p "$dir"
+  printf 'fix: x\n\nCo-authored-by: Claude Sonnet 4 <noreply@anthropic.com>\n' >"$dir/bad"
+  printf 'fix: x\n# ------------------------ >8 ------------------------\n+Co-Authored-By: Claude <x>\n' >"$dir/verbose"
+  out=$("$GUARD" --message-file "$dir/bad" 2>&1)
+  expect_code 2 $? "--message-file must reject an attributed message"
+  assert_contains "$out" "Co-authored-by: Claude Sonnet 4 <noreply@anthropic.com>" "the rejection did not name the line to remove"
+  "$GUARD" --message-file "$dir/verbose" >/dev/null 2>&1
+  expect_code 0 $? "a diff below the scissors line of git commit -v is not the message"
+  "$GUARD" --message-file "$dir/missing" >/dev/null 2>&1
+  expect_code 0 $? "a missing message file has nothing to reject"
+  pass "--message-file rejects an attributed commit message and names what to remove"
+}
+
+# commit <dir> <message> [git commit args...] -> commits and returns git's status
+commit_in() {
+  local dir=$1 msg=$2
+  shift 2
+  git -C "$dir" commit -q --allow-empty -m "$msg" "$@" 2>"$TMP_ROOT/commit.err"
+}
+
+test_worktree_commit_msg_hook_on_any_harness() {
+  local case_dir=$TMP_ROOT/hook home proj wt sib fakebin out id=attr-hook-1 bad
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  sib="$case_dir/sibling"
+  bad=$'fix: x\n\nCo-Authored-By: Claude <noreply@anthropic.com>'
+  fm_git_identity fmtest fmtest@example.invalid
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" codex)
+  fm_test_spawn_home "$home" codex
+  fm_git_worktree "$proj" "$wt" wt-hook
+  git -C "$proj" worktree add --quiet -b sib-hook "$sib"
+  mkdir -p "$proj/.git/hooks"
+  printf '#!/bin/sh\necho "pre-commit $(pwd)" >>"%s"\n' "$case_dir/project-hooks.log" >"$proj/.git/hooks/pre-commit"
+  printf '#!/bin/sh\necho "commit-msg $1" >>"%s"\n! grep -q "^WIP" "$1"\n' "$case_dir/project-hooks.log" >"$proj/.git/hooks/commit-msg"
+  chmod +x "$proj/.git/hooks/pre-commit" "$proj/.git/hooks/commit-msg"
+  fm_test_spawn_brief "$home" "$id"
+  out=$(fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" --mode no-mistakes --yolo off)
+  expect_code 0 $? "codex spawn should succeed: $out"
+
+  commit_in "$wt" "$bad"
+  expect_code 1 $? "an attributed -m commit in the task worktree was not rejected"
+  assert_contains "$(cat "$TMP_ROOT/commit.err")" "Co-Authored-By: Claude <noreply@anthropic.com>" \
+    "the commit-msg rejection did not name the line to remove"
+  printf '%s\n' "$bad" >"$case_dir/msg.txt"
+  git -C "$wt" commit -q --allow-empty -F "$case_dir/msg.txt" 2>/dev/null
+  expect_code 1 $? "an attributed -F commit in the task worktree was not rejected"
+  printf '#!/bin/sh\nprintf "fix: y\\n\\nCo-Authored-By: Codex <codex@openai.com>\\n" >"$1"\n' >"$case_dir/editor"
+  chmod +x "$case_dir/editor"
+  GIT_EDITOR="$case_dir/editor" git -C "$wt" commit -q --allow-empty 2>/dev/null
+  expect_code 1 $? "an editor-written attributed commit in the task worktree was not rejected"
+  printf 'quoted: Co-Authored-By: Claude <noreply@anthropic.com>\n' >"$wt/rule.md"
+  git -C "$wt" add rule.md
+  printf '#!/bin/sh\n{ echo "docs: quote the rule"; cat "$1"; } >"$1.new" && mv "$1.new" "$1"\n' >"$case_dir/verbose-editor"
+  chmod +x "$case_dir/verbose-editor"
+  GIT_EDITOR="$case_dir/verbose-editor" git -C "$wt" commit -q -v 2>"$TMP_ROOT/commit.err"
+  expect_code 0 $? "a clean verbose commit of a file quoting the pattern was rejected: $(cat "$TMP_ROOT/commit.err")"
+  assert_not_contains "$(git -C "$wt" log --format=%B)" "Co-Authored-By" "an attributed commit landed in the task worktree"
+  : >"$case_dir/project-hooks.log"
+  commit_in "$wt" "fix: clean"
+  expect_code 0 $? "a clean commit in the task worktree was rejected: $(cat "$TMP_ROOT/commit.err")"
+  assert_contains "$(cat "$case_dir/project-hooks.log")" "pre-commit $wt" "the project's own pre-commit did not run from the task worktree"
+  assert_contains "$(cat "$case_dir/project-hooks.log")" "commit-msg " "the project's own commit-msg did not run from the task worktree"
+  commit_in "$wt" "WIP: nope"
+  expect_code 1 $? "the project's own commit-msg refusal did not propagate"
+
+  commit_in "$proj" "$bad"
+  expect_code 0 $? "the primary checkout's commits must not be guarded"
+  commit_in "$sib" "$bad"
+  expect_code 0 $? "a sibling worktree's commits must not be guarded"
+  assert_equals "" "$(git -C "$proj" config --get core.hooksPath)" "the primary checkout sees a core.hooksPath"
+  assert_equals "" "$(git -C "$sib" config --get core.hooksPath)" "the sibling worktree sees a core.hooksPath"
+
+  git -C "$proj" config core.hooksPath .githooks
+  mkdir -p "$wt/.githooks"
+  printf '#!/bin/sh\necho "project-path commit-msg" >>"%s"\n' "$case_dir/project-hooks.log" >"$wt/.githooks/commit-msg"
+  chmod +x "$wt/.githooks/commit-msg"
+  : >"$case_dir/project-hooks.log"
+  commit_in "$wt" "fix: clean again"
+  expect_code 0 $? "a clean commit failed under the project's own core.hooksPath"
+  assert_contains "$(cat "$case_dir/project-hooks.log")" "project-path commit-msg" \
+    "the hook under the project's relative core.hooksPath did not run"
+  commit_in "$wt" "$bad"
+  expect_code 1 $? "the attribution check stopped once the project set its own core.hooksPath"
+  git -C "$proj" config --unset core.hooksPath
+
+  (. "$ROOT/bin/fm-worktree-hooks-lib.sh" && fm_worktree_git_hooks_clear "$wt")
+  assert_equals "" "$(git -C "$wt" config --get core.hooksPath)" "teardown's clear left the task worktree's core.hooksPath"
+  commit_in "$wt" "$bad"
+  expect_code 0 $? "a cleared worktree still ran the attribution hook"
+  pass "a task worktree on any harness rejects attributed commits, keeps the project's hooks, and leaves other checkouts alone"
 }
 
 test_claude_spawn_registers_the_guard() {
@@ -118,4 +228,6 @@ test_denies_attributed_commit_and_pr_commands
 test_allows_human_messages_and_reads
 test_scans_message_files_the_command_names
 test_transport_edges
+test_message_file_mode
+test_worktree_commit_msg_hook_on_any_harness
 test_claude_spawn_registers_the_guard

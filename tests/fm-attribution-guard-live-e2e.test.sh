@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Opt-in credentialed Claude live regression for the commit-attribution guard
-# (bin/fm-attribution-pretool-check.sh).
-# The real fm-spawn writes a claude task worker's worktree hook settings against
-# a fake pane; the real installed Claude Code then runs in that worktree with
+# (bin/fm-attribution-pretool-check.sh) and the task worktree's commit-msg hook.
+# The real fm-spawn writes a claude task worker's worktree hook settings and git
+# hooks against a fake pane; the real installed Claude Code then runs in that worktree with
 # the same attribution --settings and permission bypass every claude worker
 # launch carries, and is told to run one commit command whose message carries a
 # Co-Authored-By: Claude trailer, then one clean commit.
-# It passes only when Claude's own tool result shows the guard's denial, no
+# It passes only when Claude's own tool result shows a refusal, no
 # commit carries the trailer, and the clean commit landed, so a model that
 # silently drops the trailer, or a hook that blocks every command, cannot pass.
 # The lab is isolated; Claude keeps using its existing managed authentication.
@@ -47,8 +47,8 @@ stream="$TMP_ROOT/claude.jsonl"
 rc=$?
 [ "$rc" -eq 0 ] || fail "claude $CLAUDE_VERSION: claude -p exited $rc: $(tail -5 "$TMP_ROOT/claude.err")"
 
-grep -q 'Refused: this command writes a commit or PR message containing AI self-attribution' "$stream" \
-  || fail "claude $CLAUDE_VERSION: no tool result carried the guard's denial, so the attributed command never reached the hook"
+grep -q 'contains AI self-attribution' "$stream" \
+  || fail "claude $CLAUDE_VERSION: no tool result carried a refusal, so the attributed command never reached the guard or the commit-msg hook"
 log=$(git -C "$wt" log --format=%B)
 assert_not_contains "$log" 'Co-Authored-By: Claude' "claude $CLAUDE_VERSION: an attributed commit landed despite the guard"
 assert_contains "$log" 'chore: clean probe' "claude $CLAUDE_VERSION: the clean commit did not land, so the guard blocked more than attribution"

@@ -964,7 +964,11 @@ This applies only to agents Firstmate launches; the captain's own primary Firstm
 [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the delivery mechanics, with focused regression coverage in [`tests/fm-spawn-compact-adviser-disable.test.sh`](../tests/fm-spawn-compact-adviser-disable.test.sh) and [`tests/fm-spawn-compact-adviser-disable-remote.test.sh`](../tests/fm-spawn-compact-adviser-disable-remote.test.sh).
 
 Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so Claude Code's own instructions never ask a spawned worker for a Co-Authored-By trailer, Claude-Session link, or generated-with line, regardless of which settings scopes end up loaded.
-That setting does not stop the model typing such a line itself, so a claude task worker's worktree hooks also run [`fm-attribution-pretool-check.sh`](../bin/fm-attribution-pretool-check.sh), which denies a commit or PR command carrying AI self-attribution, and every ship brief's rules forbid it.
+That setting does not stop the model typing such a line itself, so the enforcement is harness-neutral: every ship and scout worktree, on every harness, gets its own `core.hooksPath` (in that worktree's `config.worktree`, after `extensions.worktreeConfig` is enabled in the project's shared config) pointed at firstmate's [`bin/git-hooks`](../bin/git-hooks), and a failed install refuses the spawn.
+Its `commit-msg` rejects a message carrying AI self-attribution and names the lines to remove, then runs the project's own `commit-msg`; every other hook runs the project's own hook of the same name, so the project's hooks keep working and the primary checkout and sibling worktrees are unaffected.
+[`fm-worktree-hooks-lib.sh`](../bin/fm-worktree-hooks-lib.sh) owns that scoping, and teardown removes the worktree's `core.hooksPath` with the rest of the per-task wiring.
+A claude task worker's worktree hooks also run [`fm-attribution-pretool-check.sh`](../bin/fm-attribution-pretool-check.sh), the same matcher, as a Bash PreToolUse guard that additionally covers PR titles and bodies written through `gh` or `gh-axi`, and every ship and scout brief's rules forbid attribution.
+The hook does not cover commits made by no-mistakes' own pipeline agents: they run in no-mistakes' own worktrees (`~/.no-mistakes/worktrees`), outside the task worktree's git context.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

@@ -621,8 +621,11 @@ The guard submits no prompt and spends no tokens, so it runs by default wherever
 
 Claude Code's `attribution` setting only empties the attribution text its own commit and PR instructions ask the model to append; Claude Code does not rewrite a commit afterwards.
 A claude task worker launched with `"attribution":{"commit":"","pr":"","sessionUrl":false}` on Claude Code 2.1.282 still typed `Co-Authored-By: Claude <noreply@anthropic.com>` into its own `git commit -m` string.
-`bin/fm-attribution-pretool-check.sh`, registered by `bin/fm-spawn.sh` as a Bash PreToolUse hook in a claude task worker's worktree `.claude/settings.local.json`, denies such a command.
-`tests/fm-attribution-guard-live-e2e.test.sh` writes those worktree hooks with the real fm-spawn, then runs the real installed Claude Code there with the same attribution settings and permission bypass, asks it to run an attributed commit and then a clean one, and requires the guard's denial in Claude's tool result, no attributed commit, and the clean commit.
+The harness-neutral enforcement is the task worktree's `commit-msg` hook: `bin/fm-spawn.sh` points every ship and scout worktree's own `core.hooksPath` at `bin/git-hooks` on every harness, and its `commit-msg` runs `bin/fm-attribution-pretool-check.sh --message-file` to reject an attributed message before delegating to the project's own hook.
+For a claude task worker the same matcher also runs as a Bash PreToolUse hook in the worktree `.claude/settings.local.json`, which denies such a command before it runs and also covers PR titles and bodies.
+Neither covers commits made by no-mistakes' own pipeline agents, which run in no-mistakes' own worktrees (`~/.no-mistakes/worktrees`) outside the task worktree's git context.
+`tests/fm-attribution-guard-live-e2e.test.sh` wires a worktree with the real fm-spawn, then runs the real installed Claude Code there with the same attribution settings and permission bypass, asks it to run an attributed commit and then a clean one, and requires a refusal in Claude's tool result, no attributed commit, and the clean commit.
+`tests/fm-attribution-pretool-check.test.sh` covers the commit-msg hook without a harness: real commits in a spawned task worktree, its project's own hooks, and an unaffected primary checkout and sibling worktree.
 
 Verified 2026-09-25 on Claude Code 2.1.282 on macOS.
 
