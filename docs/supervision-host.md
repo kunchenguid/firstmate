@@ -40,7 +40,7 @@ Today it runs beside a Claude, Cursor, OpenCode, omp, Grok, or Codex primary and
 
 Attended supervision on the host, `/quiet` on the host, and the daemon's retirement are later steps of the same design.
 Until they land, their current behavior stays as described in their own owners.
-The [dialog mirror](#the-dialog-mirror) that attended supervision will read already records on opted-in Claude and Cursor primaries, but nothing reads it yet.
+The [dialog mirror](#the-dialog-mirror) is the recording groundwork for that later posture.
 
 ## Components and their owners
 
@@ -100,7 +100,7 @@ So every guarded script treats it exactly as it treats the Pi branch.
 The engine's conversation receives nothing between wakes, so attended supervision needs a record of what the captain and main said: the same `[captain]` and `[main]` context the Pi branch receives as mirror messages.
 `bin/fm-host-mirror.sh` owns the record, writers, files, and feed; its header owns their formats, bounds, and failure contract.
 Today its writers record on opted-in Claude and Cursor primaries, but the host never calls the feed, so the mirror changes no wake.
-The writers use code-owned turn surfaces rather than model-generated messages, and drop operational input, harness-started prompts, and tool traffic.
+The writers use code-owned turn surfaces rather than model-generated messages; `bin/fm-host-mirror.sh` owns the input exclusions.
 A captain prompt whose hook write fails is not mirrored, and Claude and Cursor have no later source for it.
 
 A primary's mirror is verified (`bin/fm-host-mirror.sh verified`) only when its writers were proven against the real harness to record the session's dialog from its first captain prompt, which today means Claude and Cursor.
@@ -246,7 +246,7 @@ A new one opens in two cases:
 - Every `FM_SUPERVISION_HOST_ROTATE_TURNS` turns, because each wake adds history and the per-wake cost grows with it.
 
 Nothing captain-facing rides on that conversation, because the outcome store carries every result.
-Today the engine sees no mirror of main's dialog; the [dialog mirror](#the-dialog-mirror) is recorded but not yet fed to it.
+See [The dialog mirror](#the-dialog-mirror) for the recording path intended for a later attended engine conversation.
 The away record's read-back at the tail of every wake is the captain context it acts on.
 
 ### Where engine cost is read
