@@ -723,6 +723,17 @@ _fm_recovery_marker_begin_handling() {
   fi
   case "$line" in
     pending:handling:*|announced:handling:*) ;;
+    acked:handling:*|acked:downtime:*)
+      # An already-retired episode confirms as a no-op when the caller names
+      # its generation: the drain acknowledged it after the successor started
+      # but before the delivery confirmation ran. Without a named generation
+      # there is nothing to match, so keep the rejection.
+      # docs/watcher-continuity.md owns the recovery-episode contract.
+      if [ -z "$expected_generation" ]; then
+        fm_lock_release "$lock"
+        return 1
+      fi
+      ;;
     pending:downtime:*)
       if ! _fm_recovery_marker_write_locked "$marker" handling "$generation"; then
         fm_lock_release "$lock"

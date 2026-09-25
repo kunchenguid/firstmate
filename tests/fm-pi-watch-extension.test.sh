@@ -1660,6 +1660,274 @@ EOF
   pass "Pi refused handling handshake is classified and not swallowed"
 }
 
+test_pi_confirm_failure_retires_arm_with_distinct_watcher_pid() {
+  local repo home plugin log stop retired out status
+  repo="$TMP_ROOT/pi-confirm-distinct-root"
+  home="$TMP_ROOT/pi-confirm-distinct-home"
+  log="$TMP_ROOT/pi-confirm-distinct.log"
+  stop="$TMP_ROOT/pi-confirm-distinct.stop"
+  retired="$TMP_ROOT/pi-confirm-distinct.retired"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'refused generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 1
+fi
+printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: synthetic actionable close\n'
+  exit 0
+fi
+sleep 0.02 & dead=$!; wait "$dead" 2>/dev/null || true
+if [ "$dead" = "$$" ]; then dead=1; fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-distinct\n' "$dead"
+trap 'printf "retired\n" > "${FM_RETIRED_FILE:?}"; exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_RETIRED_FILE="$retired" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-confirm-distinct", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && !prompt.includes("handling delivery confirmation was rejected"); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!prompt.includes("handling delivery confirmation was rejected")) {
+  throw new Error(`failed handshake was swallowed: ${prompt}`);
+}
+let retired = false;
+for (let i = 0; i < 250 && !retired; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  retired = existsSync(process.env.FM_RETIRED_FILE);
+}
+if (!retired) {
+  const rows = existsSync(process.env.FM_ARM_LOG)
+    ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+    : [];
+  throw new Error(`broken arm survived a failed confirmation with a distinct watcher pid: ${rows.join(" | ")}`);
+}
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+const armRows = rows.filter((row) => row.startsWith("arm="));
+if (armRows.length !== 2) throw new Error(`expected one successor arm, got ${armRows.length}: ${rows.join(" | ")}`);
+const watcherPid = rows.find((row) => row.startsWith("refused "))?.split("watcher=")[1];
+const armPid = armRows[1].split(" ")[0].slice("arm=".length);
+if (!watcherPid || watcherPid === armPid) {
+  throw new Error(`fixture did not use distinct arm and watcher pids: ${rows.join(" | ")}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must retire the failed arm when the watcher pid differs from the arm pid: $out"
+  [ -z "$out" ] || fail "Pi confirm-distinct test printed output: $out"
+  pass "Pi confirm failure retires the named arm with distinct watcher pid"
+}
+
+# A marker that advanced mid-restore supersedes the in-flight delivery: the
+# shell reports a generation mismatch (status 3), so the wake must be
+# delivered with no rejection appendix, nothing may be retired, and the
+# attempt plus the confirm result must land in the bounded extension log.
+test_pi_superseded_delivery_has_no_rejection_appendix() {
+  local repo home plugin log stop out status extension_log
+  repo="$TMP_ROOT/pi-handling-superseded-root"
+  home="$TMP_ROOT/pi-handling-superseded-home"
+  log="$TMP_ROOT/pi-handling-superseded.log"
+  stop="$TMP_ROOT/pi-handling-superseded.stop"
+  extension_log="$home/state/.watch-extension.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'superseded generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 3
+fi
+printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: synthetic actionable close\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompt = "";
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt += message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-handling-superseded", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && !prompt.includes("FIRSTMATE WATCHER WAKE"); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!prompt.includes("FIRSTMATE WATCHER WAKE")) throw new Error(`missing follow-up: ${prompt}`);
+if (prompt.includes("handling delivery confirmation was rejected")) {
+  throw new Error(`a superseded delivery carried a rejection appendix: ${prompt}`);
+}
+if ((prompt.match(/FIRSTMATE WATCHER WAKE/g) || []).length !== 1) {
+  throw new Error(`a superseded delivery was not a single plain message: ${prompt}`);
+}
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+if (rows.filter((row) => row.startsWith("superseded ")).length < 1) {
+  throw new Error(`handling-delivered was never attempted: ${rows.join(" | ")}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must deliver a superseded wake with no rejection appendix: $out"
+  [ -z "$out" ] || fail "Pi superseded-delivery test printed output: $out"
+  [ -f "$extension_log" ] || fail "Pi extension recorded no bounded restore/confirm log"
+  grep -qF "restore attempt=" "$extension_log" \
+    || fail "extension log has no restore attempt: $(cat "$extension_log")"
+  grep -qF "result=superseded" "$extension_log" \
+    || fail "extension log has no superseded confirm result: $(cat "$extension_log")"
+  pass "Pi superseded handling delivery carries no rejection appendix and is logged"
+}
+
+# A repair call must not no-op on an arm child whose process is already dead
+# while its close event is still pending (stdio pipe held): the first arm
+# below exits at once but leaves a pipe holder behind, so the extension still
+# holds the handle with no close fired. The repair must start a fresh arm
+# rather than answer unchanged.
+test_pi_repair_starts_fresh_arm_over_dead_child() {
+  local repo home plugin log stop holder out status
+  repo="$TMP_ROOT/pi-stale-child-root"
+  home="$TMP_ROOT/pi-stale-child-home"
+  log="$TMP_ROOT/pi-stale-child.log"
+  stop="$TMP_ROOT/pi-stale-child.stop"
+  holder="$TMP_ROOT/pi-stale-child-holder.sh"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$holder" <<'SH'
+#!/usr/bin/env bash
+while [ ! -e "${1:?}" ]; do sleep 0.05; done
+SH
+  chmod +x "$holder"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+  ("${FM_HOLDER:?}" "${FM_STOP_FILE:?}" >&1 2>/dev/null &)
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_HOLDER="$holder" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {},
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const first = await tool.execute("tool-call-first-arm", {}, undefined, undefined, {});
+if (!first.content[0].text.includes("started Pi extension arm child")) {
+  throw new Error(`first arm did not start: ${first.content[0].text}`);
+}
+const armRows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+let armPid = "";
+for (let i = 0; i < 250 && !armPid; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const row = armRows().find((line) => line.startsWith("arm="));
+  if (row) armPid = row.split(" ")[0].slice("arm=".length);
+}
+if (!armPid) throw new Error("first arm never logged its pid");
+let dead = false;
+for (let i = 0; i < 250 && !dead; i += 1) {
+  try {
+    process.kill(Number(armPid), 0);
+  } catch {
+    dead = true;
+  }
+  if (!dead) await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!dead) throw new Error(`first arm pid ${armPid} never exited`);
+const second = await tool.execute("tool-call-repair", {}, undefined, undefined, {});
+const text = second.content[0].text;
+if (!text.includes("started Pi extension arm child")) {
+  throw new Error(`repair did not start a fresh arm: ${text}`);
+}
+if (text.includes("unchanged")) {
+  throw new Error(`repair no-opped on a dead child: ${text}`);
+}
+let rearmed = false;
+for (let i = 0; i < 250 && !rearmed; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  rearmed = armRows().filter((line) => line.startsWith("arm=")).length >= 2;
+}
+if (!rearmed) {
+  throw new Error(`repair started no second arm: ${armRows().join(" | ")}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi repair must start a fresh arm over a dead child handle: $out"
+  [ -z "$out" ] || fail "Pi stale-child repair test printed output: $out"
+  pass "Pi repair starts a fresh arm instead of no-opping on a dead child"
+}
+
 test_pi_hung_successor_falls_back_to_typed_wake() {
   local repo home plugin log out status
   repo="$TMP_ROOT/pi-hung-successor-root"
@@ -4411,6 +4679,9 @@ test_pi_heartbeat_restoration_failure_stays_on_main
 test_pi_watcher_failure_never_offered_to_branch
 test_pi_away_record_collapses_eligibility_and_keeps_vetoes_on_main
 test_pi_handling_delivery_failure_is_typed_once
+test_pi_confirm_failure_retires_arm_with_distinct_watcher_pid
+test_pi_superseded_delivery_has_no_rejection_appendix
+test_pi_repair_starts_fresh_arm_over_dead_child
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
