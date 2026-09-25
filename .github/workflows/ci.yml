@@ -453,20 +453,13 @@ jobs:
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
-    # Hang tripwire: the invariant checks are seconds-long file comparisons.
+    # Hang tripwire: the invariant checks are seconds-long repository checks.
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
-      - name: Compatibility pointers must stay intact
+      - name: Project memory must be a regular file
         run: |
-          set -eu
-          [ ! -L CLAUDE.md ] || { echo "::error::CLAUDE.md must be a real @AGENTS.md pointer file, not a symlink"; exit 1; }
-          tmp=$(mktemp)
-          trap 'rm -f "$tmp"' EXIT
-          printf '%s\n' \
-            '<!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->' \
-            '@AGENTS.md' >"$tmp"
-          cmp -s CLAUDE.md "$tmp" || { echo "::error::CLAUDE.md must be the canonical @AGENTS.md pointer"; exit 1; }
+          [ -f AGENTS.md ] && [ ! -L AGENTS.md ] || { echo "::error::AGENTS.md must be a real project-memory file"; exit 1; }
       - name: Personal fleet paths must not be tracked
         run: |
           set -eu
