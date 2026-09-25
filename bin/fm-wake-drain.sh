@@ -551,17 +551,40 @@ EOF
   printf 'RECORD DIVERGENCE: reconcile each one - record the captain'"'"'s own words with bin/fm-captain-hold.sh answer <task> --decision-file <path>, or re-open the status decision when that resolution was not the captain'"'"'s word.\n' || return 1
 }
 
+# Print the measured dispatchable-now count so the admission line has a measured
+# input in the same wake: `tasks-axi ready` is the same tool the root-admission
+# audit compares against, read through bin/fm-tasks-axi.sh so the drain
+# addresses this home's own backlog from any working directory. The line is
+# `ready=N` for machine parsing: nothing else on it, exactly one decimal
+# count, because session consumers grep that shape beside the admission line.
+# Best-effort and always soft: a slow, wedged, or absent backlog tool costs
+# the drain one bounded read, never the presentation of its own wakes and
+# never a nonzero exit. `ready=unknown` is honest absence, not zero.
+print_ready_count_section() {
+  local ready bound count
+  bound=${FM_READY_COUNT_TIMEOUT:-20}
+  case "$bound" in ''|*[!0-9]*|0) bound=20 ;; esac
+  if ready=$(fm_run_timed "$bound" "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>/dev/null); then
+    count=$(printf '%s\n' "$ready" | LC_ALL=C sed -n 's/^count: \([0-9][0-9]*\)$/\1/p' | head -1)
+    case "$count" in ''|*[!0-9]*) count=unknown ;; esac
+  else
+    count=unknown
+  fi
+  printf 'ready=%s\n' "$count"
+}
+
 print_status_sections() {
   local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
-  [ -n "$snapshot" ] || return 0
+  [ -n "$snapshot" ] || { print_ready_count_section || return 1; return 0; }
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
   prepared=$(mktemp "$STATE/.status-presentation.prepared.XXXXXX") || return 1
   if ! {
     print_unread_status_section "$snapshot" \
       && print_status_outcome_backstop_section "$snapshot" \
       && print_open_decisions_section "$snapshot" \
-      && print_record_divergence_section
+      && print_record_divergence_section \
+      && print_ready_count_section
   } > "$prepared"; then
     rm -f -- "$prepared"
     return 1
