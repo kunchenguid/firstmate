@@ -397,10 +397,15 @@
 # scope test for both shapes and every refusal; a failed registration stops this
 # spawn rather than launching a worker that would wedge on the dialog.
 # Every claude launch also carries the attribution-off policy in its per-launch
-# --settings JSON, so a spawned worker never writes a Co-Authored-By trailer,
-# Claude-Session link, or generated-with line into a commit or PR body;
-# launch_template() below owns the reason it cannot come from the captain's own
-# settings.
+# --settings JSON, which stops Claude Code's own prompt from asking for a
+# Co-Authored-By trailer, Claude-Session link, or generated-with line; it cannot
+# stop the model typing one itself. So every ship and scout worktree, on every
+# harness, gets its own core.hooksPath pointed at firstmate's git hooks
+# (bin/fm-worktree-hooks-lib.sh), whose commit-msg rejects an attributed commit
+# message; a failed install refuses the spawn. A claude task worker's worktree
+# hooks also run bin/fm-attribution-pretool-check.sh as a PreToolUse guard,
+# which additionally covers PR titles and bodies. launch_template() below owns
+# why the policy rides the launch.
 # Publishing the record and moving this home's backlog item to In flight are one
 # step, not two: bin/fm-backlog-transition-lib.sh owns that invariant, and this
 # script performs the transition under the task's own meta lock before it reports
@@ -596,6 +601,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-worktree-hooks-lib.sh
+. "$SCRIPT_DIR/fm-worktree-hooks-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1912,13 +1919,18 @@ launch_template() {
   # leaves the other in force. Both are per-launch, scoped to this invocation only,
   # and never touch the captain's global ~/.claude/settings.json.
   # The same inline --settings JSON also carries the attribution policy
-  # ("attribution": {"commit": "", "pr": "", "sessionUrl": false}), which
-  # suppresses Claude Code's Co-Authored-By trailer, Claude-Session link, and
-  # generated-with line in commits and PR bodies. The captain sets that
-  # policy in the `user` settings scope, but a launched worker's settings
-  # sources are not guaranteed to load that scope, so a worker would
-  # otherwise run with attribution back on; carrying it per launch keeps the
-  # policy in force regardless of which settings scopes end up loaded.
+  # ("attribution": {"commit": "", "pr": "", "sessionUrl": false}). That policy
+  # only empties the attribution text Claude Code's own commit and PR
+  # instructions ask the model to append; Claude Code never rewrites a commit,
+  # so nothing in it stops the model typing a Co-Authored-By trailer into its
+  # own `git commit -m` by habit, which a real worker commit did on Claude Code
+  # 2.1.282. The task worktree's commit-msg hook, installed below for every
+  # harness, is the enforcement for that gap, the Bash PreToolUse guard in a
+  # claude task worker's worktree settings supplements it for PR text, and the
+  # ship brief's rules forbid it outright.
+  # The captain sets the policy in the `user` settings scope, but a launched
+  # worker's settings sources are not guaranteed to load that scope, so
+  # carrying it per launch keeps it in force whichever scopes end up loaded.
   # __CLAUDEPERMFLAG__ is the permission flag config/claude-permission-mode
   # selects (header above): --dangerously-skip-permissions by default, or
   # --permission-mode auto for a captain who refuses bypass mode.
@@ -4194,6 +4206,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
 if [ "$KIND" != secondmate ]; then
+  # Point this worktree's own git hooks at firstmate's, whose commit-msg rejects
+  # AI self-attribution on every harness (bin/fm-worktree-hooks-lib.sh owns the
+  # scoping); a relaunch re-applies it. An unguarded worker is never launched.
+  fm_worktree_git_hooks_install "$WT" "$FM_ROOT" || {
+    echo "error: could not install the commit-attribution git hook in worktree $WT; refusing to launch an unguarded worker; inspect window $T" >&2
+    exit 1
+  }
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
   # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
@@ -4251,6 +4270,9 @@ if [ "$KIND" != secondmate ]; then
     # the turn-ended NOTIFICATION touch for the watcher. Every
     # hook command tolerates a refused event (|| true) so a stale-gen writer
     # can never break Claude's own lifecycle.
+    # PreToolUse on Bash runs the commit-attribution guard, which denies a
+    # commit or PR command carrying AI self-attribution before it runs; it
+    # supplements the worktree's commit-msg hook and also covers PR text.
     mkdir -p "$WT/.claude"
     busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
     busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
@@ -4258,8 +4280,9 @@ if [ "$KIND" != secondmate ]; then
     j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
     j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
     j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+    j_attribution=$(json_escape "$(shell_quote "$FM_ROOT/bin/fm-attribution-pretool-check.sh")")
     cat >"$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
+{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"$j_attribution"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
     exclude_path '.claude/settings.local.json'
     ;;

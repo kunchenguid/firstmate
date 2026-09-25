@@ -520,6 +520,9 @@ IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
    `blocked [at=<epoch>]: {what you need}` and stop; firstmate arranges it.
 EOF
 SHARED_INFRA_RULE=${SHARED_INFRA_RULE%$'\n'}
+# A scout's scratch commits can be carried into a ship at promotion, so the
+# attribution rule is shared by both scaffolds too.
+ATTRIBUTION_RULE=$(fm_attribution_rule 8)
 
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
@@ -566,6 +569,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+$ATTRIBUTION_RULE
 
 $INBOX_SECTION
 
@@ -647,6 +651,7 @@ $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+$ATTRIBUTION_RULE
 
 $INBOX_SECTION
 

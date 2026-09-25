@@ -7,6 +7,7 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Fact | Value |
 |---|---|
 | Busy | Owned hooks: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. |
+| Commit attribution | The launch's `attribution` settings only stop Claude Code asking for a trailer. The harness-neutral enforcement is the task worktree's commit-msg hook (`../../../bin/fm-worktree-hooks-lib.sh`), which rejects an attributed commit message on every harness; a claude task worker's worktree hooks also run `../../../bin/fm-attribution-pretool-check.sh` as a PreToolUse supplement that denies an attributed commit or PR command, PR text included. `../../../../../docs/verification/runtime-backends.md` "Commit attribution guard" records the live check. |
 | Exit | `/exit`. |
 | Interrupt | Single Escape. |
 | Skill | `/<skill>`, for example `/no-mistakes`. |
