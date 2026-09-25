@@ -66,11 +66,13 @@ make_crewmate_worktree_dir() {
 }
 
 # Run the hook as a child of the fake harness holding the fixture home's
-# session lock. $1 = fixture dir. Any extra env assignments must be exported
-# before invocation. Captures stdout+stderr; exit code on stdout of the caller.
+# session lock. $1 = fixture dir. $2 = optional Stop payload, defaulting to a
+# bare Claude-shaped payload with no transcript_path. Any extra env
+# assignments must be exported before invocation. Captures stdout+stderr;
+# exit code on stdout of the caller.
 run_autoarm() {
-  local dir=$1 rc=0
-  printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
+  local dir=$1 payload=${2:-'{"session_id":"sess-autoarm","stop_hook_active":false}'} rc=0
+  printf '%s\n' "$payload" \
     | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
         "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
@@ -82,11 +84,28 @@ run_autoarm() {
 # Arm fixture variants, installed per test as <dir>/bin/fm-watch-arm.sh.
 write_arm_fixture() {
   local dir=$1 kind=$2
+  # Every fixture records the hook's foreground arms in state/arm-ran. A handling
+  # successor (FM_WATCH_PREDECESSOR_ARM_PID set) is recorded apart in
+  # state/successor-ran so attempt counts stay about the foreground; it confirms
+  # a started watcher and exits, parks while state/successor-park exists, or
+  # fails while state/successor-fail exists.
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  printf 'arm=%s predecessor=%s\n' "$$" "$FM_WATCH_PREDECESSOR_ARM_PID" >> "$FM_HOME/state/successor-ran"
+  if [ -e "$FM_HOME/state/successor-fail" ]; then
+    printf 'watcher: FAILED - no live watcher with a fresh beacon\n'
+    exit 1
+  fi
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  while [ -e "$FM_HOME/state/successor-park" ]; do sleep 0.05; done
+  exit 0
+fi
+echo "$$" >> "$FM_HOME/state/arm-ran"
+SH
   case "$kind" in
     actionable)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
@@ -95,33 +114,25 @@ exit 0
 SH
       ;;
     failed)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 printf 'watcher: FAILED - no live watcher with a fresh beacon\n'
 exit 1
 SH
       ;;
     clean)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
 exit 0
 SH
       ;;
     benign-live)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 printf 'watcher: FAILED - cycle ended without an actionable reason\n'
 exit 1
 SH
       ;;
     actionable-many)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
@@ -130,9 +141,7 @@ exit 0
 SH
       ;;
     reset-boundary)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 : > "$FM_HOME/state/arm-waiting"
 while [ ! -e "$FM_HOME/state/arm-release" ]; do sleep 0.02; done
 printf 'watcher: FAILED - cycle ended without an actionable reason\n'
@@ -140,9 +149,7 @@ exit 1
 SH
       ;;
     slow-actionable)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 sleep 2
 printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
@@ -152,9 +159,7 @@ exit 0
 SH
       ;;
     blocking-actionable)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 sleep 6
 printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
@@ -164,9 +169,7 @@ exit 0
 SH
       ;;
     supersede-then-fail)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 printf 'epoch=999 owner_pid=1 outcome=arming updated_at=%s\nfixture-superseder-identity\n' "$(date +%s)" \
   > "$FM_HOME/state/.claude-autoarm-epoch"
 printf 'watcher: FAILED - no live watcher with a fresh beacon\n'
@@ -174,9 +177,7 @@ exit 1
 SH
       ;;
     meta-vanishes)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 rm -f "$FM_HOME/state/task.meta"
 printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
@@ -186,9 +187,7 @@ exit 0
 SH
       ;;
     afk-appears)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 : > "$FM_HOME/state/.afk"
 printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
@@ -198,11 +197,17 @@ exit 0
 SH
       ;;
     records-grace)
-      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
-#!/usr/bin/env bash
-echo "$$" >> "$FM_HOME/state/arm-ran"
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 printf '%s\n' "${FM_GUARD_GRACE:-unset}" > "$FM_HOME/state/arm-received-grace"
 printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
+exit 0
+SH
+      ;;
+    attached-delivered)
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
+printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+printf 'signal: task.status done: fixture peer cycle ended\n'
 exit 0
 SH
       ;;
@@ -425,6 +430,41 @@ test_actionable_close_rewakes_with_reason() {
   pass "auto-arm: actionable close translates to exactly one exit-2 rewake with reason"
 }
 
+# pi-code (Pi's Claude-hook compatibility extension) delivers a Claude-shaped
+# Stop payload but awaits the hook with no asyncRewake support, so the hook
+# must stand down or it wedges Pi's turn for the declared timeout (issue
+# #3343). The discriminator is the payload's transcript_path: pi-code stamps
+# Pi's own session file under .pi/, which a Claude transcript path never
+# contains, so the stand-down must not overmatch a genuine Claude payload or a
+# payload with no transcript_path at all.
+test_stands_down_only_on_pi_code_transcript_path() {
+  local dir out status
+
+  dir=$(make_primary_dir "$TMP_ROOT/picode-pi")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" '{"session_id":"sess-pi","stop_hook_active":false,"transcript_path":"/home/u/.pi/agent/sessions/s.jsonl"}' 2>/dev/null); status=$?
+  expect_code 0 "$status" "hook must stand down silently on a pi-code-delivered transcript_path"
+  [ -z "$out" ] || fail "pi-code stand-down printed output: $out"
+  [ ! -e "$dir/state/arm-ran" ] || fail "hook armed on a pi-code-delivered payload"
+
+  dir=$(make_primary_dir "$TMP_ROOT/picode-claude")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" '{"session_id":"sess-claude","stop_hook_active":false,"transcript_path":"/home/u/.claude/projects/-home-u--pi-proj/s.jsonl"}' 2>/dev/null); status=$?
+  expect_code 2 "$status" "a Claude-shaped transcript_path must still arm and rewake"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm with a Claude-shaped transcript_path present"
+
+  dir=$(make_primary_dir "$TMP_ROOT/picode-none")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a payload without transcript_path must still arm"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm without a transcript_path"
+
+  pass "auto-arm: stands down only on a pi-code-delivered transcript_path (/.pi/)"
+}
+
 test_actionable_close_with_live_successor_rewakes_once() {
   local dir out out2 status status2 pid identity
   dir=$(make_primary_dir "$TMP_ROOT/actionable-live-successor")
@@ -453,6 +493,58 @@ test_actionable_close_with_live_successor_rewakes_once() {
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   pass "auto-arm: actionable close survives a healthy successor without duplicate delivery"
+}
+
+# An arm that attached to a peer cycle returns when that cycle ends with the wake
+# the peer delivered. Pi, omp, and OpenCode start the next arm before notifying
+# the model; the hook must do the same, naming the closed arm as the successor's
+# predecessor, and the successor must outlive the hook's exit-2 rewake.
+test_attached_cycle_end_starts_handling_successor() {
+  local dir out status foreground predecessor successor i
+  dir=$(make_primary_dir "$TMP_ROOT/attached-successor")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" attached-delivered
+  : > "$dir/state/successor-park"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an attached cycle's delivered wake must still rewake"
+  assert_contains "$out" "signal: task.status done: fixture peer cycle ended" "rewake must carry the delivered reason"
+  [ -s "$dir/state/successor-ran" ] \
+    || fail "the hook returned from the ended attached cycle without starting a handling successor"
+  [ "$(wc -l < "$dir/state/successor-ran" | tr -d ' ')" -eq 1 ] \
+    || fail "exactly one handling successor must start per actionable close: $(cat "$dir/state/successor-ran")"
+  [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 1 ] || fail "the foreground arm must run once"
+  foreground=$(cat "$dir/state/arm-ran")
+  predecessor=$(sed -n 's/^arm=[0-9]* predecessor=\([0-9]*\)$/\1/p' "$dir/state/successor-ran")
+  [ "$predecessor" = "$foreground" ] \
+    || fail "the successor must name the closed foreground arm $foreground as its predecessor, got: $(cat "$dir/state/successor-ran")"
+  successor=$(sed -n 's/^arm=\([0-9]*\) .*$/\1/p' "$dir/state/successor-ran")
+  kill -0 "$successor" 2>/dev/null || fail "the handling successor did not outlive the hook's rewake"
+  rm -f "$dir/state/successor-park"
+  i=0
+  while kill -0 "$successor" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$(printf '%s\n' "$out" | grep -c '^firstmate watcher wake')" -eq 1 ] \
+    || fail "the successor start must not change the single wake banner: $out"
+  assert_not_contains "$out" "did not confirm" "a confirmed successor adds nothing to the rewake"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "epoch must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  pass "auto-arm: an attached cycle's end starts a handling successor named after the closed arm before the rewake"
+}
+
+test_unconfirmed_handling_successor_still_rewakes() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/successor-unconfirmed")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" attached-delivered
+  : > "$dir/state/successor-fail"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a failed handling successor must never withhold the delivered wake"
+  assert_contains "$out" "signal: task.status done: fixture peer cycle ended" "rewake must still carry the delivered reason"
+  assert_contains "$out" "did not confirm a live watcher" "the rewake must say this turn runs uncovered"
+  assert_contains "$out" "watcher: FAILED - no live watcher with a fresh beacon" "the rewake must carry the successor's own failure line"
+  [ "$(wc -l < "$dir/state/successor-ran" | tr -d ' ')" -eq 1 ] || fail "the failed successor must not be retried inside the rewake path"
+  pass "auto-arm: an unconfirmed handling successor is reported in the rewake instead of blocking it"
 }
 
 test_failed_close_rewakes_with_failure_banner() {
@@ -1419,6 +1511,8 @@ test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
 test_actionable_close_with_live_successor_rewakes_once
+test_attached_cycle_end_starts_handling_successor
+test_unconfirmed_handling_successor_still_rewakes
 test_failed_close_rewakes_with_failure_banner
 test_failed_cycles_notify_once_and_keep_retrying
 test_failure_notice_marker_write_refuses_delivery_and_retries
@@ -1458,3 +1552,4 @@ test_host_handback_carries_every_host_line
 test_host_stand_down_is_silent
 test_host_crash_is_retried_then_reported
 test_fm_lock_status_still_works_with_shared_lib
+test_stands_down_only_on_pi_code_transcript_path
