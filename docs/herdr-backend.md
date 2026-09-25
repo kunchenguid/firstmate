@@ -542,6 +542,8 @@ Typed-plane text is typed once; only Enter is retried.
 When native `agent get` identity is Claude, the adapter types only into an empty composer.
 A Claude composer that already holds text, or cannot be read, before the send is refused with nothing typed.
 Before that Enter, the adapter continues only when the selected composer shows the typed payload, or only Claude paste placeholders with no literal remainder.
+The composer is read two ways from one capture: ghost-stripped, and with only escape sequences removed, because ghost stripping assumes a dark theme and Claude's light theme draws a typed slash command dark enough to be stripped; either reading can prove the payload.
+A read that could still be the payload being drawn - unreadable, with no composer selected, empty, or a strict prefix of the payload - is repeated after the caller's settle, up to `FM_BACKEND_HERDR_PROOF_READS` reads in all, before the refusal below; any other shape is refused on its first read.
 
 That comparison ignores whitespace and U+2063, the invisible mark that starts operational inputs and ends the from-firstmate label.
 It ignores U+2063 because Claude's Herdr read-back never shows it.
@@ -549,8 +551,9 @@ It ignores U+2063 because Claude's Herdr read-back never shows it.
 A composer that holds a shorter suffix, or a placeholder plus a literal remainder, does not receive Enter.
 Instead:
 
-1. The adapter presses Ctrl+U until the shared classifier reads the composer as empty.
-2. It then reports `send-failed`, so a resend starts from a clean composer.
+1. The adapter prints one diagnostic line on stderr naming the target, the read count, both readings, the last captured row, and the payload, each escaped byte for byte.
+2. The adapter presses Ctrl+U until the shared classifier reads the composer as empty.
+3. It then reports `send-failed`, so a resend starts from a clean composer.
 
 Ctrl+C is not used for this, because Claude documents it as interrupting a running operation.
 If the composer cannot be verified empty again, the submit reports `unknown` instead, because text may still be in the composer.

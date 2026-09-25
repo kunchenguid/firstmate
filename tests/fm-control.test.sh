@@ -126,6 +126,14 @@ case "${1:-}" in
     done
     payload=${1:-}
     if [ "$literal" = 1 ]; then
+      # Model an exit command the pane refuses unsent, as many times as asked.
+      if [ "$payload" = /exit ] && [ -s "$D/exit-refusals" ] \
+         && [ "$(cat "$D/exit-refusals")" -gt 0 ]; then
+        printf '%s\n' "$(( $(cat "$D/exit-refusals") - 1 ))" > "$D/exit-refusals"
+        printf '%s\n' "$payload" >> "$D/refused-literal"
+        echo "fake tmux: refused $payload" >&2
+        exit 1
+      fi
       printf '%s\n' "$payload" >> "$D/literal"
       if [ -z "${FM_FAKE_NEVER_DIES:-}" ] \
          && { [ "$payload" = /exit ] || [ "$payload" = /quit ]; }; then
@@ -137,6 +145,7 @@ case "${1:-}" in
     else
       printf '%s\n' "$payload" >> "$D/keys"
       printf '%s %s\n' "$(perl -MTime::HiRes=time -e 'printf "%.3f", time')" "$payload" >> "$D/key-times"
+      [ "$payload" != Escape ] || : > "$D/pane-seq-armed"
       if [ "$payload" = Escape ] && [ -f "$D/devin" ]; then
         case "$(cat "$D/devin")" in
           running) printf armed > "$D/devin" ;;
@@ -175,7 +184,17 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
-    if [ -f "$D/devin" ]; then devin_screen "$(cat "$D/devin")"; elif [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi
+    # pane-seq/<n> answers the n-th capture after the first Escape, and its
+    # last file keeps answering once the sequence runs out.
+    if [ -d "$D/pane-seq" ] && [ -f "$D/pane-seq-armed" ]; then
+      n=$(( $(cat "$D/pane-seq-count" 2>/dev/null || echo 0) + 1 ))
+      if [ -f "$D/pane-seq/$n" ]; then
+        printf '%s\n' "$n" > "$D/pane-seq-count"
+      else
+        n=$(cat "$D/pane-seq-count")
+      fi
+      cat "$D/pane-seq/$n"
+    elif [ -f "$D/devin" ]; then devin_screen "$(cat "$D/devin")"; elif [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi
     exit 0 ;;
   list-windows)
     if [ -f "$D/windows" ]; then cat "$D/windows"; fi
@@ -935,6 +954,82 @@ test_exit_accepts_agent_stopped_by_busy_interrupt() {
   pass "fm-control exit: an interrupt-stopped agent satisfies the gone-state postcondition"
 }
 
+# An exit command the backend refuses unsent - for Claude on Herdr, a composer
+# that had not drawn it by read-back - is sent once more, not reported as a
+# failure on the first refusal.
+test_refused_exit_command_is_resent_once() {
+  local dir out rc
+  dir=$(new_case exit-resend)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  printf '1\n' > "$dir/fake/exit-refusals"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "one refused exit command should be resent and succeed"$'\n'"$out"
+  assert_contains "$out" "stopped t1 harness=claude" "the resent exit command should stop the agent"
+  [ "$(cat "$dir/fake/refused-literal")" = /exit ] || fail "the first exit command should have been refused"
+  [ "$(literals "$dir")" = /exit ] || fail "the exit command should be sent a second time, got: $(literals "$dir")"
+  pass "fm-control exit: a refused exit command is resent once"
+}
+
+# Two refusals stop the verb, and the error carries the attempt count and the
+# backend's own diagnostic rather than a blind sentence.
+test_twice_refused_exit_command_reports_its_diagnostic() {
+  local dir out rc
+  dir=$(new_case exit-refused-twice)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  printf '5\n' > "$dir/fake/exit-refusals"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "an exit command refused twice should fail"$'\n'"$out"
+  assert_contains "$out" "the exit command could not be sent to task t1 on tmux (attempts=2; " \
+    "the failure should keep its sentence and name both attempts"
+  assert_contains "$out" "fake tmux: refused /exit" "the failure should carry the backend's diagnostic"
+  [ "$(grep -c . "$dir/fake/refused-literal")" -eq 2 ] || fail "the exit command should be attempted exactly twice"
+  [ "$(cat "$dir/fake/exit-refusals")" = 3 ] || fail "no third exit command may be sent"
+  pass "fm-control exit: an exit command refused twice fails with its attempt count and diagnostic"
+}
+
+# After an interrupt the composer can still be redrawing. The exit command is
+# typed only once two consecutive reads find it empty, instead of refusing on
+# a transient first read.
+test_exit_after_interrupt_waits_for_a_quiet_empty_composer() {
+  local dir out rc gen
+  dir=$(new_case exit-quiet)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  mkdir -p "$dir/fake/pane-seq"
+  printf '╭────╮\n│ > half-drawn prompt │\n╰────╯\n' > "$dir/fake/pane-seq/1"
+  printf '╭────╮\n│    │\n╰────╯\n' > "$dir/fake/pane-seq/2"
+  cp "$dir/fake/pane-seq/2" "$dir/fake/pane-seq/3"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit should wait for the composer to settle after an interrupt"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = Escape ] || fail "the busy agent should be interrupted first"
+  [ "$(literals "$dir")" = /exit ] || fail "the exit command should be typed once the composer is quiet"
+  [ "$(cat "$dir/fake/pane-seq-count")" -ge 3 ] \
+    || fail "the composer should be read until two consecutive empty reads, read $(cat "$dir/fake/pane-seq-count") time(s)"
+  pass "fm-control exit: after an interrupt the exit command waits for two consecutive empty composer reads"
+}
+
+# A composer that keeps holding text after the interrupt still refuses once
+# the settle bound runs out: the wait never types over pending text.
+test_exit_after_interrupt_still_refuses_a_composer_that_stays_pending() {
+  local dir out rc gen
+  dir=$(new_case exit-quiet-pending)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  mkdir -p "$dir/fake/pane-seq"
+  printf '╭────╮\n│ > a draft the captain typed │\n╰────╯\n' > "$dir/fake/pane-seq/1"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "a composer that stays pending should still refuse"$'\n'"$out"
+  assert_contains "$out" "refusing to type the /exit exit command" "the refusal should name the held-back exit command"
+  [ -z "$(literals "$dir")" ] || fail "nothing may be typed over pending text, got: $(literals "$dir")"
+  pass "fm-control exit: the post-interrupt wait still refuses a composer that stays pending"
+}
+
 test_agent_that_does_not_stop_fails_closed() {
   local dir out rc gen
   dir=$(new_case stubborn)
@@ -1066,6 +1161,10 @@ test_interrupt_without_acknowledgement_preserves_busy_state
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
 test_exit_accepts_agent_stopped_by_busy_interrupt
+test_refused_exit_command_is_resent_once
+test_twice_refused_exit_command_reports_its_diagnostic
+test_exit_after_interrupt_waits_for_a_quiet_empty_composer
+test_exit_after_interrupt_still_refuses_a_composer_that_stays_pending
 test_agent_that_does_not_stop_fails_closed
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation

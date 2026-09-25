@@ -34,7 +34,10 @@
 #              otherwise reports `cancel=not-running` having sent one press.
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
-#              busy, then submits the harness's exit command. Postcondition:
+#              busy, then submits the harness's exit command - after an
+#              interrupt, only once the agent reads quiet with an empty
+#              composer twice, bounded by FM_CONTROL_SETTLE_WAIT - and resends
+#              it once when the backend refused it unsent. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent). An endpoint that reads
 #              `missing` is put through the control plane's per-backend absence
@@ -129,6 +132,9 @@
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
+#   FM_CONTROL_EXIT_SETTLE       wait after typing the exit command before it
+#                                is read back and submitted, and before the one
+#                                resend of a refused exit command (1.2)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -183,6 +189,7 @@ ARM_WAIT=${FM_CONTROL_ARM_WAIT:-1.5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
+EXIT_SETTLE=${FM_CONTROL_EXIT_SETTLE:-1.2}
 
 die() {  # <message>
   echo "error: $1" >&2
@@ -554,10 +561,52 @@ retire_busy_incarnation() {
   fi
 }
 
+# quiet_composer_state: after an interrupt, wait up to SETTLE_WAIT for the
+# agent to go quiet before its exit command is typed - the backend's native
+# state no longer busy and two consecutive composer reads both `empty` - since
+# a harness may still be redrawing its prompt right after a cancel. Prints the
+# last composer verdict; do_exit's checks own what anything but empty means.
+quiet_composer_state() {
+  local elapsed=0 composer previous=
+  while :; do
+    composer=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
+      || composer=unknown
+    if [ "$composer" = empty ] && [ "$previous" = empty ] \
+       && [ "$(fm_backend_busy_state "$BACKEND" "$T" 2>/dev/null)" != busy ]; then
+      break
+    fi
+    previous=$composer
+    awk -v e="$elapsed" -v t="$SETTLE_WAIT" 'BEGIN{exit !(e < t)}' || break
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  printf '%s' "$composer"
+}
+
+# submit_exit_command: type <cmd> and submit it, printing the adapter's
+# verdict and appending its diagnostics to <diag-file>. A send-failed verdict
+# means the adapter proved nothing was submitted and left the composer empty,
+# so it is sent once more after EXIT_SETTLE while the composer still reads
+# empty: a harness that draws the typed command late refuses the first
+# read-back without having received anything. Returns 1 on a transport error.
+submit_exit_command() {  # <cmd> <diag-file>
+  local cmd=$1 diag=$2 verdict attempt=1
+  while :; do
+    verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" \
+      "$EXIT_SETTLE" "$LABEL" 2>>"$diag") || return 1
+    [ "$verdict" = send-failed ] && [ "$attempt" -lt 2 ] || break
+    sleep "$EXIT_SETTLE"
+    [ "$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null)" = empty ] || break
+    attempt=$((attempt + 1))
+  done
+  printf '%s %s' "$verdict" "$attempt"
+}
+
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
   local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed
+  local diag_file diag attempts
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -624,8 +673,12 @@ do_exit() {
   if [ -n "$hazard" ] && rendered_matches "$hazard"; then
     die "task $ID shows the $HARNESS revert picker, where typed text becomes a search and Enter reverts file changes; refusing to type the $cmd exit command. Close it with $(fm_control_interrupt_key "$HARNESS"), never Enter, then retry '$VERB'"
   fi
-  composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
-    || composer_state=unknown
+  if [ "$interrupt_result" = not-needed ]; then
+    composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
+      || composer_state=unknown
+  else
+    composer_state=$(quiet_composer_state)
+  fi
   case "$composer_state" in
     empty) ;;
     pending)
@@ -641,10 +694,22 @@ do_exit() {
   # authoritative proof is the agent-state wait below. The retried Enter still
   # matters, because a slash command opens a completion popup on some TUIs that
   # swallows the first Enter.
-  verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL") \
-    || die "the exit command could not be sent to task $ID on $BACKEND"
-  [ "$verdict" != send-failed ] \
-    || die "the exit command could not be sent to task $ID on $BACKEND"
+  diag_file=$(mktemp "${TMPDIR:-/tmp}/fm-control-exit.XXXXXX") \
+    || die "could not create a scratch file for task $ID's exit command diagnostics"
+  if verdict=$(submit_exit_command "$cmd" "$diag_file"); then
+    attempts=${verdict##* }
+    verdict=${verdict% *}
+  else
+    verdict=transport-error
+    attempts=1
+  fi
+  diag=$(sed -n '/./p' "$diag_file" | tail -1 | tr -s '[:space:]' ' ')
+  rm -f "$diag_file"
+  case "$verdict" in
+    send-failed|transport-error)
+      die "the exit command could not be sent to task $ID on $BACKEND (attempts=$attempts${diag:+; $diag})"
+      ;;
+  esac
   state=$(wait_agent_state "$EXIT_WAIT" dead) || {
     die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }

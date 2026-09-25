@@ -4992,6 +4992,102 @@ test_send_text_submit_three_paste_placeholders_submit_the_long_payload() {
   pass "fm_backend_herdr_send_text_submit: three paste placeholders with no literal remainder submit the long payload"
 }
 
+# A Claude composer that draws a typed slash command late is re-read, a
+# bounded number of times, before the refusal that clears it. A composer that
+# never shows the payload is still refused and cleared, and the refusal names
+# what it read on stderr instead of reporting send-failed blind.
+test_send_text_submit_claude_rereads_a_late_drawn_payload_before_refusing() {
+  local dir log resp fb out err enter_count
+  dir="$TMP_ROOT/submit-late-draw"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/2.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/4.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/5.out"
+  printf '  \xe2\x9d\xaf /exit\n' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/9.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 /exit 3 0.01 0.01' "$ROOT" 2>"$dir/err" )
+  err=$(cat "$dir/err")
+  [ "$out" = empty ] || fail "a payload drawn on the third read should be submitted and confirmed, got '$out'"$'\n'"$err"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 4 ] || fail "the proof should read the composer three times after the pre-send read, log: $(cat "$log")"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a late-drawn payload should be submitted once, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "a late-drawn payload must not be cleared before it is proven"
+  [ -z "$err" ] || fail "a proven payload should print no diagnostic, got: $err"
+  pass "fm_backend_herdr_send_text_submit: a Claude composer that reads empty, empty, then /exit submits the exit command"
+}
+
+test_send_text_submit_claude_refuses_a_payload_that_never_draws_with_a_diagnostic() {
+  local dir log resp fb out err enter_count
+  dir="$TMP_ROOT/submit-never-draws"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/2.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/4.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/5.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/6.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/8.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 /exit 3 0.01 0.01' "$ROOT" 2>"$dir/err" )
+  err=$(cat "$dir/err")
+  [ "$out" = send-failed ] || fail "a payload that never draws should be refused as send-failed, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 5 ] || fail "the proof should stop after three post-type reads before clearing, log: $(cat "$log")"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 0 ] || fail "an unproven payload must never be submitted, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 1 ] || fail "the refused composer should be cleared, sent $(herdr_ctrl_u_count "$log") Ctrl+U"
+  [ "$(printf '%s\n' "$err" | grep -c .)" -eq 1 ] || fail "the refusal should print exactly one diagnostic line, got: $err"
+  assert_contains "$err" "composer on default:w1:p2 did not show the typed payload after 3 read(s)" \
+    "the diagnostic should name the target and the bounded read count"
+  assert_contains "$err" "read=selected styled='' plain='' tail='  \xE2\x9D\xAF' payload='/exit'" \
+    "the diagnostic should show both readings, the captured row escaped, and the payload"
+  pass "fm_backend_herdr_send_text_submit: a Claude composer that reads empty three times is refused, cleared, and diagnosed on stderr"
+}
+
+# A shape that cannot be a payload still being drawn - here a suffix - is
+# refused on its first read rather than waited on.
+test_send_text_submit_claude_refuses_a_finished_wrong_shape_without_rereading() {
+  local dir log resp fb out err
+  dir="$TMP_ROOT/submit-wrong-shape"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/2.out"
+  printf '  \xe2\x9d\xaf xit\n' > "$resp/4.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 /exit 3 0.01 0.01' "$ROOT" 2>"$dir/err" )
+  err=$(cat "$dir/err")
+  [ "$out" = send-failed ] || fail "a suffix should be refused, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 3 ] || fail "a suffix must be refused after one post-type read, log: $(cat "$log")"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")" -eq 0 ] || fail "a suffix must not be submitted"
+  assert_contains "$err" "after 1 read(s); read=selected styled='xit' plain='xit'" \
+    "the diagnostic should show the refused suffix"
+  pass "fm_backend_herdr_send_text_submit: a finished wrong shape is refused on its first read without waiting"
+}
+
+# Ghost stripping assumes a dark theme, and Claude's light theme draws a typed
+# slash command dark enough to be stripped. The plain reading of the same
+# capture still shows the payload, so it is submitted, not cleared.
+test_send_text_submit_claude_plain_reading_proves_a_light_theme_slash_command() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/submit-light-theme"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/2.out"
+  printf '\xe2\x9d\xaf\xc2\xa0\033[0m\033[38;2;87;105;247m/no-mistakes\033[0m\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  [ -z "$( bash -c '. "$0/bin/backends/herdr.sh"; fm_composer_extract_selected_content "$(printf "styled=1\ncursor=0\nidentity=0\nrows=20")" "$(cat "$1")"' "$ROOT" "$resp/4.out")" ] \
+    || fail "the light-theme fixture should be stripped by the styled reading, or this case proves nothing"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 /no-mistakes 3 0.01 0.01' "$ROOT" 2>/dev/null )
+  [ "$out" = empty ] || fail "a light-theme slash command proven by the plain reading should be submitted, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")" -eq 1 ] || fail "the proven payload should be submitted once"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "a payload the plain reading proves must not be cleared"
+  pass "fm_backend_herdr_send_text_submit: a light-theme slash command stripped as ghost text is proven by the plain reading"
+}
+
 # A non-Claude harness keeps the unproven type-then-Enter path: its composer
 # is never read before Enter, so a harness-specific placeholder or an
 # unselectable composer cannot turn a landed send into send-failed.
@@ -5822,6 +5918,10 @@ test_send_text_submit_lone_paste_placeholder_submits_the_long_payload
 test_send_text_submit_multiline_paste_placeholder_submits_the_long_payload
 test_send_text_submit_refuses_placeholder_followed_by_a_literal_remainder
 test_send_text_submit_three_paste_placeholders_submit_the_long_payload
+test_send_text_submit_claude_rereads_a_late_drawn_payload_before_refusing
+test_send_text_submit_claude_refuses_a_payload_that_never_draws_with_a_diagnostic
+test_send_text_submit_claude_refuses_a_finished_wrong_shape_without_rereading
+test_send_text_submit_claude_plain_reading_proves_a_light_theme_slash_command
 test_send_text_submit_non_claude_skips_the_payload_proof
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux

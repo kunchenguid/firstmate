@@ -62,6 +62,14 @@ case "${1:-}" in
     done
     payload=${1:-}
     if [ "$literal" = 1 ]; then
+      # Model an exit command the pane refuses unsent, as many times as asked.
+      if [ "$payload" = /exit ] && [ -s "$D/exit-refusals" ] \
+         && [ "$(cat "$D/exit-refusals")" -gt 0 ]; then
+        printf '%s\n' "$(( $(cat "$D/exit-refusals") - 1 ))" > "$D/exit-refusals"
+        printf '%s\n' "$payload" >> "$D/refused-literal"
+        echo "fake tmux: refused $payload" >&2
+        exit 1
+      fi
       case "$payload" in
         ". '"*"'")
           staged=${payload#". '"}
@@ -247,6 +255,7 @@ run_restart() {  # <case-dir> <args...>
     FM_SPAWN_NO_GUARD=1 FM_SECONDMATE_PERSIST_POLL=1 \
     FM_SECONDMATE_PERSIST_WAIT="${FM_TEST_PERSIST_WAIT:-30}" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    FM_SECONDMATE_RESTART_RETRY_PAUSE=0 \
     FM_SSH_BIN="${FM_TEST_SSH_BIN:-ssh}" \
     "$RESTART" "$@" 2>&1
 }
@@ -653,7 +662,45 @@ test_post_stop_failure_is_reported_unreached() {
   assert_not_contains "$out" "nudged: sm1" "a durable enqueue must not masquerade as a running mate's nudge"
   assert_contains "$out" "summary: 0 of 1 restarted, 0 nudged, 1 unreached" \
     "the summary must not claim that a stopped mate remains on older instructions with a message"
+  [ "$(grep -c '^/exit$' "$dir/fake/literal")" -eq 1 ] \
+    || fail "a failure after the agent stopped must not be retried as a second relaunch"
   pass "T11 post-stop restart failure is never misreported as a nudge"
+}
+
+# --- T11b: an exit command refused unsent is retried as a whole relaunch -----
+test_refused_exit_is_retried_as_a_relaunch() {
+  local dir out rc
+  dir=$(new_case exit-retry)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  # The control plane resends a refused exit command once, so two refusals
+  # fail the first relaunch whole; the second relaunch then goes through.
+  printf '2\n' > "$dir/fake/exit-refusals"
+
+  out=$(run_restart "$dir" sm1); rc=$?
+
+  expect_code 0 "$rc" "a relaunch whose exit command was refused should be retried and succeed"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1 (claude)" "the retried relaunch should be reported as a restart"
+  [ "$(grep -c . "$dir/fake/refused-literal")" -eq 2 ] || fail "the first relaunch should have had both exit commands refused"
+  [ "$(grep -c '^/exit$' "$dir/fake/literal")" -eq 1 ] || fail "the retried relaunch should deliver one exit command"
+  pass "T11b a relaunch whose exit command was refused unsent is retried once and restarts the mate"
+}
+
+test_persistently_refused_exit_is_reported_after_one_retry() {
+  local dir out rc
+  dir=$(new_case exit-refused)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  printf '9\n' > "$dir/fake/exit-refusals"
+
+  out=$(run_restart "$dir" sm1); rc=$?
+
+  expect_code 3 "$rc" "a mate whose exit command is always refused must stay accounted for"$'\n'"$out"
+  assert_contains "$out" "unreached: sm1: the restart outcome is unknown after a second attempt: the exit command could not be sent to task sm1 on tmux (attempts=2; fake tmux: refused /exit" \
+    "the report should say it retried and carry the backend's diagnostic"
+  [ "$(grep -c . "$dir/fake/refused-literal")" -eq 4 ] || fail "exactly two relaunches of two exit attempts each should run, got $(grep -c . "$dir/fake/refused-literal")"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the mate's agent must be left running"
+  pass "T11c a persistently refused exit command is retried once, then reported with its diagnostic"
 }
 
 # --- T12: relaunch work does not stop polling other persist answers ----------
@@ -853,6 +900,8 @@ test_unreachable_host_is_reported_unknown
 test_concurrent_reply_cannot_release_persist_gate
 test_persist_waits_are_polled_together
 test_post_stop_failure_is_reported_unreached
+test_refused_exit_is_retried_as_a_relaunch
+test_persistently_refused_exit_is_reported_after_one_retry
 test_relaunches_do_not_block_persist_polling
 test_unpublished_worker_result_is_accounted_for
 test_result_published_while_reaping_is_honored
