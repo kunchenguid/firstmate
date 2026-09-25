@@ -632,10 +632,37 @@ test_hold_settled_only_without_worker_event_between() {
   pass "a hold settlement is the hold's own only with no worker event between"
 }
 
+# A standing hold mirror is the declared wait only under answers for other
+# keys: a worker event of any other verb after it is what the lane reports.
+test_worker_event_after_standing_hold_mirror_replaces_it() {
+  local dir f verb current
+  dir=$(case_dir worker-after-standing-mirror)
+  f="$dir/lane.status"
+  for verb in done failed working blocked needs-decision; do
+    printf 'working: start\n' > "$f"
+    printf 'captain-held [key=captain-hold-lane-1]: operator review\n' >> "$f"
+    printf '%s: latest worker report\n' "$verb" >> "$f"
+    [ -z "$(status_declared_wait_line "$f")" ] \
+      || fail "a standing mirror outranked a later $verb line: '$(status_declared_wait_line "$f")'"
+    current=$(status_current_line "$f" ship)
+    case "$current" in
+      "$verb"[:\ ]*"latest worker report") ;;
+      *) fail "a standing mirror displaced the lane's current $verb line: '$current'" ;;
+    esac
+  done
+  printf 'working: start\n' > "$f"
+  printf 'captain-held [key=captain-hold-lane-1]: operator review\n' >> "$f"
+  printf 'paused: waiting on upstream\n' >> "$f"
+  [ "$(status_declared_wait_line "$f")" = 'paused: waiting on upstream' ] \
+    || fail "a pause after a standing mirror was not the declared wait: '$(status_declared_wait_line "$f")'"
+  pass "a worker event after a standing hold mirror replaces it as the declared wait"
+}
+
 test_keyless_wait_survives_stated_default_retraction
 test_declared_wait_survives_answers_past_the_event_window
 test_declared_wait_survives_settled_hold_mirror
 test_declared_wait_keeps_standing_hold_mirror
 test_declared_wait_survives_settled_hold_then_answer
 test_hold_settled_only_without_worker_event_between
+test_worker_event_after_standing_hold_mirror_replaces_it
 test_bare_prose_cannot_open_or_close_a_decision

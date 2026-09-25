@@ -482,45 +482,39 @@ status_is_paused_or_captain_held() {  # <status-line>
 # including the stated default key a keyless decision shares - does not end the
 # pause. Only a resolved line for the pause's own phase key (the keyed
 # activity fold's key, where a keyless line is its own phase) retracts it, as
-# does any other later event. A hold mirror bin/fm-captain-hold.sh wrote stays
-# the wait until a retraction of its own key follows it, whatever else lands on
-# top, because only settling the captain's call lifts that hold; any other
-# captain-held line, such as a complete transfer, counts only while it is the
-# latest event. Bounded like last_status_line, and like it reads past a settled
+# does any other later event. A hold mirror bin/fm-captain-hold.sh wrote with
+# no retraction of its own key after it holds the same way: resolved lines for
+# other keys on top of it do not end it, and any other later event does. Any
+# other captain-held line, such as a complete transfer, counts only while it is
+# the latest event. Bounded like last_status_line, and like it reads past a settled
 # hold: only a tail window made wholly of resolved events widens the read to the
 # whole file.
 status_declared_wait_line() {  # <status-file>
-  local f=$1 last verb resolve legacy_re hold mirror line standing=''
+  local f=$1 last verb resolve legacy_re hold mirror
   last=$(last_status_line "$f")
   if status_is_paused_or_captain_held "$last"; then
     printf '%s\n' "$last"
-    return 0
-  fi
-  hold=$(_fm_hold_line_ere "$f")
-  mirror=$(_fm_hold_mirror_line_ere "$f" 'captain-held')
-  while IFS= read -r line; do
-    ! _fm_hold_unstamped_match "$line" "$mirror" || standing=$line
-  done < <(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null | _fm_hold_settled_drop "$hold")
-  if [ -n "$standing" ]; then
-    printf '%s\n' "$standing"
     return 0
   fi
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   status_line_verb "$last" verb
   [ "$verb" = "$resolve" ] || return 0
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
+  hold=$(_fm_hold_line_ere "$f")
+  mirror=$(_fm_hold_mirror_line_ere "$f" 'captain-held')
   tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null | _fm_hold_settled_drop "$hold" \
-    | _fm_status_declared_wait_scan "$resolve" "$legacy_re" \
+    | _fm_status_declared_wait_scan "$resolve" "$legacy_re" "$mirror" \
     || _fm_hold_settled_drop "$hold" < "$f" \
-    | _fm_status_declared_wait_scan "$resolve" "$legacy_re" || :
+    | _fm_status_declared_wait_scan "$resolve" "$legacy_re" "$mirror" || :
 }
 
 # Walk the status lines on stdin back from the newest event past resolved lines
-# to the first other event, and print it when it is a pause none of those
-# resolved lines share a phase key with. Returns 1 when every event is a
-# resolved line, so a caller reading a bounded window knows to widen it.
-_fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re>
-  local resolve=$1 legacy_re=$2 line verb key keys=$'\n' i=0
+# to the first other event, and print it when it is a hold mirror (matching
+# <mirror-ere>) or a pause none of those resolved lines share a phase key with.
+# Returns 1 when every event is a resolved line, so a caller reading a bounded
+# window knows to widen it.
+_fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re> <mirror-ere>
+  local resolve=$1 legacy_re=$2 mirror=$3 line verb key keys=$'\n' i=0
   local -a lines=()
   while IFS= read -r line || [ -n "$line" ]; do
     lines[i]=$line
@@ -531,6 +525,10 @@ _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re>
     line=${lines[i]}
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
     _fm_status_line_is_event "$line" "$legacy_re" || continue
+    if _fm_hold_unstamped_match "$line" "$mirror"; then
+      printf '%s\n' "$line"
+      return 0
+    fi
     status_line_verb "$line" verb
     case "$verb" in
       "$resolve") ;;
