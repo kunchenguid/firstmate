@@ -1093,7 +1093,12 @@ export default function (pi: ExtensionAPI) {
     if (!result.ok) return result;
     const request = createSupervisionReconcileRequest();
     pi.events?.emit?.(FM_SUPERVISION_RECONCILE_EVENT, request);
-    if (!request.accepted) return result;
+    if (!request.accepted) {
+      return {
+        ok: false,
+        message: `${result.message}\nwatcher: FAILED - explicit repair could not reconcile supervision outcomes\nno supervision listener accepted the reconciliation request`,
+      };
+    }
     try {
       await request.settlement;
       return result;

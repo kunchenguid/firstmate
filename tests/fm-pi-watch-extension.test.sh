@@ -152,7 +152,7 @@ EOF
   pass "Pi extension reports external healthy watcher output"
 }
 
-test_pi_tool_returns_agent_tool_result() {
+test_pi_tool_fails_closed_without_reconciliation_owner() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-tool-result-root"
   home="$TMP_ROOT/pi-tool-result-home"
@@ -203,15 +203,31 @@ if (!result.content[0].text.includes("future ordinary re-arms are automatic")) {
 if (!result.content[0].text.includes("only after a later notification says the cycle is missing, failed, or unhealthy")) {
   throw new Error(`initial tool result omitted the repair-only condition: ${result.content[0].text}`);
 }
-if (result.details?.ok !== true || result.details?.message !== result.content[0].text) {
-  throw new Error(`invalid tool details: ${JSON.stringify(result.details)}`);
+if (result.details?.ok !== false || result.details?.message !== result.content[0].text) {
+  throw new Error(`missing reconciliation owner did not fail closed: ${JSON.stringify(result.details)}`);
+}
+if (!result.content[0].text.includes("no supervision listener accepted the reconciliation request")) {
+  throw new Error(`missing reconciliation-owner failure: ${result.content[0].text}`);
+}
+let declinedRequests = 0;
+pi.events = {
+  emit(channel) {
+    if (channel === "fm-branch-supervision:reconcile") declinedRequests += 1;
+  },
+};
+const declined = await tool.execute("tool-call-2", {}, undefined, undefined, {});
+if (declinedRequests !== 1 || declined.details?.ok !== false) {
+  throw new Error(`declined reconciliation did not fail closed: ${JSON.stringify(declined.details)}`);
+}
+if (!declined.content[0]?.text.includes("no supervision listener accepted the reconciliation request")) {
+  throw new Error(`declined reconciliation omitted its failure: ${declined.content[0]?.text}`);
 }
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi custom tool must expose first-cycle or repair-only metadata and return Pi's AgentToolResult shape"
-  [ -z "$out" ] || fail "Pi tool-result test printed output: $out"
-  pass "Pi custom tool exposes repair-only metadata and returns automatic-continuation guidance"
+  expect_code 0 "$status" "Pi custom tool must fail closed when reconciliation is absent or declined"
+  [ -z "$out" ] || fail "Pi fail-closed tool test printed output: $out"
+  pass "Pi custom tool fails closed without a reconciliation owner"
 }
 
 test_pi_redundant_tool_call_is_owned_noop() {
@@ -2106,6 +2122,11 @@ const pi = {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
   sendUserMessage: async () => {},
+  events: {
+    emit(event, request) {
+      if (event === "fm-branch-supervision:reconcile") request.accept(Promise.resolve());
+    },
+  },
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
@@ -2215,7 +2236,12 @@ function makePi() {
       if (candidate.name === "fm_watch_arm_pi") tool = candidate;
     },
     sendUserMessage: async () => {},
-    events: { on() {} },
+    events: {
+      on() {},
+      emit(event, request) {
+        if (event === "fm-branch-supervision:reconcile") request.accept(Promise.resolve());
+      },
+    },
   };
   return { pi, handlers, getTool: () => tool };
 }
@@ -2485,6 +2511,10 @@ function makePi(blockDelivery = false) {
         eventHandlers.set(event, [...(eventHandlers.get(event) ?? []), handler]);
       },
       emit(event, data) {
+        if (event === "fm-branch-supervision:reconcile") {
+          data.accept(Promise.resolve());
+          return;
+        }
         if (blockDelivery && event === "fm-branch-supervision:dispatch") {
           oldDeliveryStarted = true;
           data.accept(oldDeliveryRelease);
@@ -2650,7 +2680,12 @@ function makePi() {
     sendUserMessage: async (message) => {
       prompts.push(message);
     },
-    events: { on() {}, emit() {} },
+    events: {
+      on() {},
+      emit(event, request) {
+        if (event === "fm-branch-supervision:reconcile") request.accept(Promise.resolve());
+      },
+    },
   };
   return { pi, handlers, prompts, getTool: () => tool };
 }
@@ -2974,7 +3009,12 @@ function makePi() {
     sendUserMessage: async (message) => {
       prompts.push(message);
     },
-    events: { on() {}, emit() {} },
+    events: {
+      on() {},
+      emit(event, request) {
+        if (event === "fm-branch-supervision:reconcile") request.accept(Promise.resolve());
+      },
+    },
   };
   return { pi, handlers, getTool: () => tool, prompts };
 }
@@ -3081,7 +3121,12 @@ function makePi() {
       if (candidate.name === "fm_watch_arm_pi") tool = candidate;
     },
     sendUserMessage: async () => {},
-    events: { on() {}, emit() {} },
+    events: {
+      on() {},
+      emit(event, request) {
+        if (event === "fm-branch-supervision:reconcile") request.accept(Promise.resolve());
+      },
+    },
   };
   return { pi, handlers, getTool: () => tool };
 }
@@ -3193,7 +3238,12 @@ const pi = {
     deliveryStarted = true;
     prompts.push(message);
   },
-  events: { on() {}, emit() {} },
+  events: {
+    on() {},
+    emit(event, request) {
+      if (event === "fm-branch-supervision:reconcile") request.accept(Promise.resolve());
+    },
+  },
 };
 
 async function waitFor(pred, label) {
@@ -4405,7 +4455,7 @@ EOF
 }
 
 test_pi_extension_reports_external_healthy_watcher
-test_pi_tool_returns_agent_tool_result
+test_pi_tool_fails_closed_without_reconciliation_owner
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
