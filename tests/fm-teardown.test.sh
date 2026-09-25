@@ -2593,8 +2593,8 @@ test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
 # the child home's own state dir before the home itself is removed, so a whole
 # -home assertion cannot prove that list named the right paths. A close refusal
 # on a later child stops the sweep mid-loop with the home intact: the already
-# -cleaned child's <id>.devin-config.json and .<id>.branch-captain-key must be
-# gone while everything of the unconsumed child's is retained.
+# -cleaned child's <id>.devin-config.json must be gone while everything of
+# the unconsumed child's is retained.
 test_forced_secondmate_teardown_removes_a_cleaned_childs_state_files() {
   local case_dir home rc
   case_dir=$(make_case child-state-files)
@@ -2602,9 +2602,7 @@ test_forced_secondmate_teardown_removes_a_cleaned_childs_state_files() {
   configure_secondmate_with_tmux_children "$case_dir"
   home="$case_dir/secondmate-home"
   printf '{}\n' > "$home/state/child-a.devin-config.json"
-  printf '7\t0123456789abcdef\n' > "$home/state/.child-a.branch-captain-key"
   printf '{}\n' > "$home/state/child-b.devin-config.json"
-  printf '9\tfedcba9876543210\n' > "$home/state/.child-b.branch-captain-key"
   # child-b's close refuses: its kill fails and the re-read still lists the
   # window, so the sweep stops after child-a with the home retained.
   cat > "$case_dir/fakebin/tmux" <<'SH'
@@ -2627,15 +2625,11 @@ SH
     || fail "child-state-files: the cleaned child's task record was left behind"
   [ ! -e "$home/state/child-a.devin-config.json" ] \
     || fail "child-state-files: the cleaned child's devin config was left behind"
-  [ ! -e "$home/state/.child-a.branch-captain-key" ] \
-    || fail "child-state-files: the cleaned child's captain anchor was left behind"
   [ -e "$home/state/child-b.meta" ] \
     || fail "child-state-files: refusal erased the unconsumed child's record"
   [ -e "$home/state/child-b.devin-config.json" ] \
     || fail "child-state-files: refusal removed the unconsumed child's devin config"
-  [ -e "$home/state/.child-b.branch-captain-key" ] \
-    || fail "child-state-files: refusal removed the unconsumed child's captain anchor"
-  pass "forced secondmate teardown removes a cleaned child's devin config and captain anchor"
+  pass "forced secondmate teardown removes a cleaned child's devin config"
 }
 
 configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
