@@ -25,9 +25,8 @@
 # Post (after composing the reply to a file or stdin):
 #   fm-x-followup.sh <task-id> [--image <path>] [--final] --text-file <path>
 #   fm-x-followup.sh <task-id> [--image <path>] [--final] -
-#   Parsing is strict: an unknown dash-leading argument or a dash-leading task
-#   id is a usage error before the link is even checked; the text source itself
-#   is validated by fm-x-reply.sh at post time, per its contract.
+#   Parsing is strict: an unknown dash-leading argument, a dash-leading task id,
+#   or more than one text source is a usage error before the link is even read.
 #     Linked, within window, and under the cap: posts ONE follow-up via
 #       fm-x-reply.sh --followup.
 #       On success: increments the counter and KEEPS the link, unless --final
@@ -148,9 +147,9 @@ else
   case "$ID" in ''|-*) usage; exit 2 ;; esac
   shift
   TS_ARGS=()
+  TEXT_SOURCES=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --help|-h) help; exit 0 ;;
       --final)
         FINAL=1
         ;;
@@ -169,14 +168,20 @@ else
           ''|-*) echo "fm-x-followup: missing --text-file path" >&2; usage; exit 2 ;;
         esac
         TS_ARGS+=("$1")
+        TEXT_SOURCES=$((TEXT_SOURCES + 1))
         ;;
-      -) TS_ARGS+=("$1") ;;
+      -) TS_ARGS+=("$1"); TEXT_SOURCES=$((TEXT_SOURCES + 1)) ;;
       -*) echo "fm-x-followup: unknown option '$1' (follow-up text comes only from --text-file or stdin)" >&2; usage; exit 2 ;;
-      *) TS_ARGS+=("$1") ;;
+      *) TS_ARGS+=("$1"); TEXT_SOURCES=$((TEXT_SOURCES + 1)) ;;
     esac
     shift
   done
-  if [ "${#TS_ARGS[@]}" -lt 1 ]; then usage; exit 2; fi
+  if [ "$TEXT_SOURCES" -gt 1 ]; then
+    echo "fm-x-followup: unexpected extra arguments (exactly one text source: --text-file <path> or -)" >&2
+    usage
+    exit 2
+  fi
+  if [ "$TEXT_SOURCES" -lt 1 ]; then usage; exit 2; fi
 fi
 
 case "$ID" in

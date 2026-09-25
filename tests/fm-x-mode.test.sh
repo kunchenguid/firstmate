@@ -2365,9 +2365,6 @@ test_dismiss_rejects_dash_leading_request_id() {
   assert_grep "unknown option '--bogus'" "$err" "dismiss must name the unknown option it refused"
   [ -z "$out" ] || fail "a refused dismiss must not echo the request_id (got: $out)"
   assert_absent "$home/state/x-outbox" "a refused dismiss must never write a dry-run outbox"
-  out=$(PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-dismiss.sh" --help 2>/dev/null); rc=$?
-  expect_code 0 "$rc" "dismiss --help exit"
-  assert_contains "$out" "usage: fm-x-dismiss.sh <request_id>" "dismiss --help must print usage"
   pass "fm-x-dismiss refuses a dash-leading request_id before recording anything"
 }
 
@@ -3089,12 +3086,11 @@ test_followup_usage_errors() {
   pass "fm-x-followup rejects malformed invocations"
 }
 
-# An unknown dash-leading argument or a dash-leading task id must be a usage
-# error before the link is even checked, and a --help after the task id must be
-# answered locally - forwarding it to fm-x-reply.sh would print help yet count
-# as a posted follow-up and mutate the link.
+# An unknown dash-leading argument (including a --help after the task id), a
+# dash-leading task id, or more than one text source must be a usage error
+# before the link is even read, so a refused call never posts or clears a link.
 test_followup_rejects_flag_like_arguments() {
-  local home fakebin log out rc err meta
+  local home fakebin log out rc err meta now id
   home="$TMP_ROOT/fu-arg-guard"; mkdir -p "$home/state"
   err="$home/err.txt"
   printf 'kind=ship\n' > "$home/state/plain.meta"
@@ -3125,25 +3121,38 @@ test_followup_rejects_flag_like_arguments() {
   expect_code 2 "$rc" "followup flag-swallowing --image value exit"
   assert_grep "missing --image path" "$err" "followup must refuse a dash-leading --image value"
 
-  out=$(PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" plain --help 2>/dev/null); rc=$?
-  expect_code 0 "$rc" "followup --help after task id exit"
-  assert_contains "$out" "--final" "followup --help after task id must print local help"
+  PATH="$BASE_PATH" FM_HOME="$home" "$ROOT/bin/fm-x-followup.sh" plain --help >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "followup --help after task id exit"
+  assert_grep "unknown option '--help'" "$err" "followup must refuse --help after the task id"
 
-  # A surplus positional forwarded to a LIVE link is refused by fm-x-reply.sh
-  # before its dry-run outbox write, and the link must survive untouched.
+  # Surplus text sources are refused before the link is read: an unlinked task
+  # must not report a no-op success, and a live or expired link must survive.
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-followup.sh" plain one two 2>"$err"); rc=$?
+  expect_code 2 "$rc" "followup surplus positionals on an unlinked task exit"
+  assert_grep "unexpected extra arguments" "$err" "followup must refuse extra positionals when unlinked"
+  PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-x-followup.sh" plain --text-file /dev/null - <<<"hi" >/dev/null 2>"$err"; rc=$?
+  expect_code 2 "$rc" "followup two text sources exit"
+  assert_grep "unexpected extra arguments" "$err" "followup must refuse two text sources"
+
   fakebin=$(make_fake_curl "$home")
   log="$home/curl.log"
-  mk_linked_task "$home" task-g req-g 1700000000
-  meta="$home/state/task-g.meta"
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=1700003600 \
-    FAKE_CURL_LOG="$log" \
-    "$ROOT/bin/fm-x-followup.sh" task-g one two 2>"$err"); rc=$?
-  [ "$rc" -ne 0 ] || fail "followup surplus positionals on a live link must fail"
-  assert_grep "unexpected extra arguments" "$err" "the reply client must refuse extra positionals at post time"
+  for id in task-g task-e; do
+    mk_linked_task "$home" "$id" "req-$id" 1700000000
+    meta="$home/state/$id.meta"
+    if [ "$id" = task-g ]; then now=1700003600; else now=$((1700000000 + 8*86400)); fi
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 FMX_NOW_OVERRIDE=$now \
+      FAKE_CURL_LOG="$log" \
+      "$ROOT/bin/fm-x-followup.sh" "$id" one two 2>"$err"); rc=$?
+    expect_code 2 "$rc" "followup surplus positionals on $id exit"
+    assert_grep "unexpected extra arguments" "$err" "followup must refuse extra positionals on $id"
+    [ -z "$out" ] || fail "a refused follow-up must not echo a request_id (got: $out)"
+    assert_grep "x_request=req-$id" "$meta" "a refused follow-up must keep the $id link"
+    assert_grep "x_followups=0" "$meta" "a refused follow-up must not change the $id counter"
+  done
   assert_absent "$log" "a refused follow-up must never reach the relay"
   assert_absent "$home/state/x-outbox" "a refused follow-up must never write a dry-run outbox"
-  assert_grep "x_request=req-g" "$meta" "a refused follow-up must keep the link"
-  assert_grep "x_followups=0" "$meta" "a refused follow-up must not increment the counter"
   pass "fm-x-followup refuses unknown options and surplus positionals without touching the link"
 }
 

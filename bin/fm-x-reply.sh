@@ -185,7 +185,6 @@ while [ "$#" -gt 0 ]; do
       esac
       RECEIPT_FILE=$1
       ;;
-    --help|-h) help; exit 0 ;;
     --text-file|-) ARGS+=("$1") ;;
     -*) echo "fm-x-reply: unknown option '$1' (reply text starting with '-' needs --text-file or stdin)" >&2; usage; exit 2 ;;
     *) ARGS+=("$1") ;;

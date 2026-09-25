@@ -41,10 +41,6 @@ usage() {
   echo "usage: fm-x-dismiss.sh <request_id>" >&2
 }
 
-case "${1:-}" in
-  --help|-h) echo "usage: fm-x-dismiss.sh <request_id>"; exit 0 ;;
-esac
-
 REQ=${1:-}
 case "$REQ" in
   '') usage; exit 2 ;;
