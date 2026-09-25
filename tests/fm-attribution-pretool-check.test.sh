@@ -48,6 +48,10 @@ test_denies_attributed_commit_and_pr_commands() {
   expect_deny $'git commit -m "a\n\nCo-Authored-By: Claude"' "a bare Claude trailer at the end of the message"
   expect_deny $'gh pr create --title x --body "stuff\n\n\xf0\x9f\xa4\x96 Generated with [Claude Code](https://claude.com/claude-code)"' \
     "a Generated with line in a PR body"
+  expect_deny $'gh pr create --title t --body $\'## Summary\\n- x\\n\\n\xf0\x9f\xa4\x96 Generated with [Claude Code](https://claude.com/claude-code)\'' \
+    "a Generated with line after escaped newlines in an ANSI-C quoted PR body"
+  expect_deny 'gh pr create --title t --body "x\r\nGenerated with Claude Code"' \
+    "a Generated with line after an escaped CRLF in a double-quoted PR body"
   expect_deny 'gh-axi pr edit 12 --body "see https://claude.ai/code/session_abc"' "a Claude session link through gh-axi"
   expect_deny $'git commit -m "x\n\nClaude-Session: abc"' "a Claude-Session trailer"
   pass "attributed commit and PR commands are denied"
