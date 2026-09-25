@@ -669,6 +669,32 @@ test_unknown_wake_ack_suppresses_handled_identity() {
   pass "a delivered unknown wake is acknowledged once per away session; a new one and ordinary escalations still fire"
 }
 
+# A digest that inject_msg already delivered must not be injected again just
+# because the acknowledgement write failed afterwards.
+test_unknown_wake_ack_failure_still_clears_delivered_digest() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase unknown-wake-ack-failure)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
+  mkdir -p "$state/.subsuper-unknown-acked"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: ack-write-fails" "$state" \
+    || fail "the unknown wake was not handled"
+  escalate_add "$state" "done: PR https://example.test/pull/10"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" 2>/dev/null \
+    || fail "a delivered digest was reported undelivered after its acknowledgement write failed"
+  grep -F 'unknown wake: frobnicate: ack-write-fails' "$sent" >/dev/null \
+    || fail "the digest was not delivered: $(cat "$sent")"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a delivered digest stayed buffered for re-injection: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-escalations.since" ] || fail "a delivered digest kept its batch timer"
+  pass "a failed unknown-wake acknowledgement write does not re-inject a delivered digest"
+}
+
 test_stale_transient_self_records_marker() {
   local dir state out key
   dir=$(make_supercase stale-transient)
@@ -2853,6 +2879,7 @@ test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
 test_unknown_wake_ack_suppresses_handled_identity
+test_unknown_wake_ack_failure_still_clears_delivered_digest
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_enriched_wedge_under_declared_wait_uses_pause_cadence

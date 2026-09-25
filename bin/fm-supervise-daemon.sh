@@ -496,8 +496,7 @@ unknown_wake_buffered() {  # <state> <line>
 }
 
 # Record every unknown-wake line from a flush that already reached the supervisor.
-# Ordinary escalation lines are left alone. Failure leaves the caller holding
-# the buffer so an undelivered identity can still escalate.
+# Ordinary escalation lines are left alone.
 unknown_wake_acknowledge_flushed() {  # <state> <buffer>
   local state=$1 buf=$2 line ack="$1/.subsuper-unknown-acked"
   while IFS= read -r line || [ -n "$line" ]; do
@@ -756,7 +755,8 @@ escalate_flush() {  # <state>
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
   if inject_msg "$msg" "$state"; then
-    unknown_wake_acknowledge_flushed "$state" "$buf" || return 1
+    unknown_wake_acknowledge_flushed "$state" "$buf" \
+      || log "unknown-wake acknowledgement write failed; a delivered unknown wake may escalate again"
     : > "$buf"
     rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
     return 0
