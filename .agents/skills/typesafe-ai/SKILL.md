@@ -11,6 +11,8 @@ description: >
   Applications include routing, ranking, extraction, verification, and
   interactive experiences; these are starting points, not the limits.
   Read live docs and cookbooks to find useful patterns and discover new combinations.
+metadata:
+  internal: true
 ---
 
 # Build with TypeSafe

@@ -636,10 +636,11 @@ Standing `yolo` merge authority is not a substitute for a current explicit capta
 
 ## Jev decision layer
 
+This section applies only when the `jev` router exists at `~/.local/bin/jev` and the playbook exists at `~/Documents/muse-jev-playbook/skill/jev-decision-layer.SKILL.md`; if either is missing, skip this section entirely.
 Before substantial browser research, repeating a failed approach, loading several tools or skills, spawning agents, choosing between materially different execution routes, or proposing a consequential action, consider whether a small bounded Jev decision would change the next step.
 If yes, build a compact state without secrets, call the installed router, interpret its action, and continue the original task.
 Skip Jev for simple answers, deterministic calculations, routine file edits, and situations where the call adds no useful decision.
-Respect `bypass_jev` - the router's own kill switch is `enabled: false` or the literal markers `bypass jev` and `no jev` in the state text.
+Respect the router's own kill switch, `enabled: false`, and the literal markers `bypass jev` and `no jev` in the state text.
 Keep irreversible actions behind human confirmation; a Jev answer is never permission to skip one.
 
 The invocation this agent can actually perform is `jev '<compact state JSON>'`, on PATH at `~/.local/bin/jev`.
