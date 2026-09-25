@@ -282,6 +282,57 @@ herdr_env() {  # <name>
   printf '%s\n%s\n' "$dir/log" "$dir/responses"
 }
 
+# --- fm_backend_herdr_session: container socket-derived session binding -----
+# (PR #2 completeness gap / see tests/fm-backend-herdr-container-session-e2e.test.sh
+# for live herdr proof) An explicit HERDR_SESSION still wins outright.
+# Otherwise, when only HERDR_SOCKET_PATH was forwarded (the container detection
+# fallback in bin/fm-backend.sh's fm_backend_detect), the session name is derived
+# directly from the verified "<config_root>/sessions/<name>/herdr.sock"
+# socket-path shape (docs/verification/runtime-backends.md) so every
+# downstream herdr call agrees with detection about which session and socket
+# it targets, instead of silently guessing "default" and risking a
+# disconnected in-container server. Pure-function tests: no herdr binary is
+# invoked, so these do not need a fake CLI.
+
+test_session_prefers_explicit_herdr_session_over_socket_path() {
+  local out
+  out=$(HERDR_SESSION=fmtest HERDR_SOCKET_PATH=/home/x/.config/herdr/sessions/other-name/herdr.sock \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_session' "$ROOT")
+  [ "$out" = fmtest ] || fail "fm_backend_herdr_session should prefer explicit HERDR_SESSION over a disagreeing HERDR_SOCKET_PATH, got '$out'"
+  pass "fm_backend_herdr_session: explicit HERDR_SESSION wins outright over HERDR_SOCKET_PATH"
+}
+
+test_session_derives_name_from_named_session_socket_path() {
+  local out
+  out=$(unset HERDR_SESSION; HERDR_SOCKET_PATH=/home/x/.config/herdr/sessions/fm-lab-container-42/herdr.sock \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_session' "$ROOT")
+  [ "$out" = fm-lab-container-42 ] || fail "fm_backend_herdr_session should derive the session name from a named-session HERDR_SOCKET_PATH when HERDR_SESSION is unset, got '$out'"
+  pass "fm_backend_herdr_session: derives the session name from HERDR_SOCKET_PATH's verified sessions/<name>/herdr.sock shape"
+}
+
+test_session_falls_back_to_default_for_default_session_socket_shape() {
+  local out
+  out=$(unset HERDR_SESSION; HERDR_SOCKET_PATH=/home/x/.config/herdr/herdr.sock \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_session' "$ROOT")
+  [ "$out" = default ] || fail "fm_backend_herdr_session should read the default session's own socket shape (no sessions/ component) as 'default', got '$out'"
+  pass "fm_backend_herdr_session: the default session's own socket shape resolves to 'default'"
+}
+
+test_session_falls_back_to_default_for_an_unrecognized_socket_path_shape() {
+  local out
+  out=$(unset HERDR_SESSION; HERDR_SOCKET_PATH=/tmp/some-other-shape/herdr.sock \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_session' "$ROOT")
+  [ "$out" = default ] || fail "fm_backend_herdr_session should fall back to 'default' for a HERDR_SOCKET_PATH that does not match either verified shape, got '$out'"
+  pass "fm_backend_herdr_session: an unrecognized HERDR_SOCKET_PATH shape falls back to 'default' rather than misreading a name"
+}
+
+test_session_falls_back_to_default_without_any_signal() {
+  local out
+  out=$(unset HERDR_SESSION HERDR_SOCKET_PATH; bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_session' "$ROOT")
+  [ "$out" = default ] || fail "fm_backend_herdr_session should fall back to 'default' with neither HERDR_SESSION nor HERDR_SOCKET_PATH set, got '$out'"
+  pass "fm_backend_herdr_session: falls back to 'default' with no session signal at all"
+}
+
 # --- version_check / tool_check ----------------------------------------------
 
 test_version_check_accepts_current_protocol() {
@@ -5585,6 +5636,11 @@ test_wait_transition_clean_timeout_returns_1() {
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
+test_session_prefers_explicit_herdr_session_over_socket_path
+test_session_derives_name_from_named_session_socket_path
+test_session_falls_back_to_default_for_default_session_socket_shape
+test_session_falls_back_to_default_for_an_unrecognized_socket_path_shape
+test_session_falls_back_to_default_without_any_signal
 test_version_check_accepts_current_protocol
 test_version_check_refuses_old_protocol
 test_version_check_refuses_missing_herdr

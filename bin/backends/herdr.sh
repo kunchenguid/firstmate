@@ -536,14 +536,51 @@ fm_backend_herdr_version_check() {
   return 0
 }
 
+# fm_backend_herdr_socket_session_name: derive the session name encoded in a
+# herdr control-socket path, for the container case where HERDR_SESSION is not
+# forwarded but HERDR_SOCKET_PATH is (bin/fm-backend.sh's HERDR_SOCKET_PATH
+# detection fallback). Verified shape (docs/verification/runtime-backends.md,
+# fm_backend_herdr_socket_path's own comment): a NAMED session's socket is
+# exactly "<config_root>/sessions/<name>/herdr.sock", while the default
+# session's socket has no "sessions" component at all
+# ("<config_root>/herdr.sock"). Prints the derived name only when the path
+# matches the named-session shape; prints nothing for the default shape or any
+# path that does not match (callers fall back to "default", which is already
+# correct for both of those cases).
+fm_backend_herdr_socket_session_name() {  # <socket_path>
+  local path=$1 name
+  case "$path" in
+    */sessions/*/herdr.sock)
+      name=$(basename "$(dirname "$path")")
+      [ -n "$name" ] && printf '%s' "$name"
+      ;;
+  esac
+}
+
 # fm_backend_herdr_session: resolve which named herdr session this normal
 # spawn/op uses. HERDR_SESSION mirrors tmux's $TMUX ambient-selection for
 # adapter workspace/tab/pane operations: an operator (or firstmate's own
-# isolated test harness) sets it explicitly; absent means herdr's own
-# "default" session. Do not use HERDR_SESSION alone for destructive test
-# cleanup; tests/herdr-test-safety.sh documents and guards that path.
+# isolated test harness) sets it explicitly and wins outright. Otherwise, when
+# HERDR_SESSION is unset but HERDR_SOCKET_PATH is (the container fallback
+# bin/fm-backend.sh's fm_backend_detect uses when HERDR_ENV=1 was not
+# forwarded), the session name is derived directly from that socket path so
+# every downstream herdr call (fm_backend_herdr_server_ensure and everything
+# built on it) provably targets the SAME session fm_backend_detect just
+# verified the socket belongs to, rather than independently guessing "default"
+# and risking a silent, disconnected in-container server. See
+# tests/fm-backend-herdr-container-session-e2e.test.sh for the regression test
+# proof. Only when neither is set (or the socket path does not match the known
+# shape) does this fall back to herdr's own "default" session. Do not use
+# HERDR_SESSION alone for destructive test cleanup; tests/herdr-test-safety.sh
+# documents and guards that path.
 fm_backend_herdr_session() {
-  printf '%s' "${HERDR_SESSION:-default}"
+  local derived
+  [ -n "${HERDR_SESSION:-}" ] && { printf '%s' "$HERDR_SESSION"; return 0; }
+  if [ -n "${HERDR_SOCKET_PATH:-}" ]; then
+    derived=$(fm_backend_herdr_socket_session_name "$HERDR_SOCKET_PATH")
+    [ -n "$derived" ] && { printf '%s' "$derived"; return 0; }
+  fi
+  printf 'default'
 }
 
 # fm_backend_herdr_projection_id: generate a compact 128-bit base64url token.
