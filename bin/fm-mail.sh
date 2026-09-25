@@ -195,7 +195,7 @@ fm-mail.sh read
 fm-mail.sh send <to> <subject> <body | ->
 fm-mail.sh poll
 fm-mail.sh status
-fm-mail.sh afk-email <configured|queue-unprocessed|flush>
+fm-mail.sh afk-email configured|queue-unprocessed|flush|verify-note <id>
 EOF
 }
 

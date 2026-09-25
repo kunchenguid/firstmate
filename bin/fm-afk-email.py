@@ -30,8 +30,13 @@ MAX_BATCH_ITEMS = 25
 MAX_BATCH_BYTES = 24000
 MAX_REPLY_CHARS = 8000
 TOKEN_RE = re.compile(r"^FM-AFK-[A-Za-z0-9_-]{16}$")
+NOTE_ID_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9._-]+$")
 REPLY_LINE_RE = re.compile(r"^FM-AFK-REPLY (FM-AFK-[A-Za-z0-9_-]{16})$")
 EMAIL_RE = re.compile(r"^[^\s@<>]+@[^\s@<>]+$")
+SECRET_ENV_RE = re.compile(
+    r"(?:^|_)(?:PASS(?:WORD)?|TOKEN|SECRET|API.?KEY|CREDENTIALS?)(?:_|$)",
+    re.IGNORECASE,
+)
 
 
 def mail_configuration():
@@ -124,27 +129,33 @@ def safe_text(value, limit=4000):
 def redact_secrets(text):
     secret_values = set()
     for key, value in os.environ.items():
-        if re.search(r"(PASS|TOKEN|SECRET|API.?KEY|CREDENTIAL)", key, re.IGNORECASE) and len(value) >= 8:
+        if SECRET_ENV_RE.search(key) and value:
             secret_values.add(value)
+    replacement = "[redacted]"
+    if any(secret in replacement for secret in secret_values):
+        replacement = ""
     for secret in sorted(secret_values, key=len, reverse=True):
-        text = text.replace(secret, "[redacted]")
+        text = text.replace(secret, replacement)
     return text
 
 
 def outcomes_by_seq():
-    path = STATE / "branch-outcomes.jsonl"
+    result = subprocess.run(
+        [str(ROOT / "bin" / "fm-branch-outcome.sh"), "list", "--all"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        env=os.environ.copy(),
+    )
+    if result.returncode != 0:
+        return None
     rows = {}
     try:
-        contents = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return rows
-    except (OSError, ValueError):
-        return None
-    try:
-        for line in contents.splitlines():
+        for line in result.stdout.splitlines():
             row = json.loads(line)
-            if isinstance(row, dict) and isinstance(row.get("seq"), int):
-                rows[row["seq"]] = row
+            if not isinstance(row, dict) or type(row.get("seq")) is not int:
+                return None
+            rows[row["seq"]] = row
     except ValueError:
         return None
     return rows
@@ -193,7 +204,7 @@ def queue_unprocessed():
         token = "FM-AFK-" + secrets.token_urlsafe(12)
         item = {
             "seq": seq,
-            "task": safe_text(row.get("task"), 160),
+            "task": safe_text(redact_secrets(str(row.get("task", ""))), 160),
             "summary": safe_text(redact_secrets(str(row.get("summary", "")))),
             "token": token,
             "token_hash": token_digest(token),
@@ -222,9 +233,14 @@ def flush():
             if item.get("away_epoch") != posture["entered_epoch"]:
                 path.unlink(missing_ok=True)
                 continue
+            item["task"] = safe_text(redact_secrets(str(item.get("task", ""))), 160)
+            item["summary"] = safe_text(redact_secrets(str(item.get("summary", ""))))
             sent_item = read_json(SENT / path.name)
             if isinstance(sent_item, dict) and sent_item.get("token_hash") == item.get("token_hash"):
-                for field in ("used_epoch", "used_mail_key"):
+                for field in (
+                    "used_epoch", "used_mail_key", "used_request_id", "used_note_id",
+                    "handoff_request_id", "handoff_mail_key", "handoff_body_hash",
+                ):
                     if field in sent_item:
                         item[field] = sent_item[field]
             candidates.append((path, item))
@@ -289,7 +305,10 @@ def flush():
                 "sent_epoch": sent_epoch,
                 "expires_epoch": sent_epoch + TOKEN_TTL,
             }
-            for field in ("used_epoch", "used_mail_key"):
+            for field in (
+                "used_epoch", "used_mail_key", "used_request_id", "used_note_id",
+                "handoff_request_id", "handoff_mail_key", "handoff_body_hash",
+            ):
                 if field in item:
                     sent_item[field] = item[field]
             atomic_json(SENT / path.name, sent_item)
@@ -320,13 +339,136 @@ def extract_reply(body):
     return match.group(1), answer
 
 
+def inbox_identity(note_id):
+    result = subprocess.run(
+        [str(ROOT / "bin" / "fm-inbox.sh"), "identity", note_id],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=os.environ.copy(),
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        identity = json.loads(result.stdout)
+    except ValueError:
+        return None
+    if (
+        not isinstance(identity, dict)
+        or identity.get("schema") != "fm-inbox-identity.v1"
+        or identity.get("id") != note_id
+    ):
+        return None
+    return identity
+
+
+def inbox_note_body(note_id):
+    result = subprocess.run(
+        [str(ROOT / "bin" / "fm-inbox.sh"), "show", note_id],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=os.environ.copy(),
+    )
+    return result.stdout if result.returncode == 0 else None
+
+
 def inbox_note(request_id, body):
-    command = [str(ROOT / "bin" / "fm-inbox.sh"), "note", "--request-id", request_id, "-"]
+    command = [str(ROOT / "bin" / "fm-inbox.sh"), "note", "--request-id", request_id, "--json", "-"]
     result = subprocess.run(command, input=body, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=os.environ.copy())
-    if result.returncode not in (0,):
+    try:
+        receipt = json.loads(result.stdout)
+    except ValueError:
+        receipt = None
+    note_id = receipt.get("id") if isinstance(receipt, dict) else None
+    valid_receipt = (
+        result.returncode == 0
+        and isinstance(receipt, dict)
+        and receipt.get("schema") == "fm-inbox-note.v1"
+        and receipt.get("request_id") == request_id
+        and receipt.get("saved") is True
+        and (receipt.get("announced") is True or receipt.get("acknowledged") is True)
+        and isinstance(note_id, str)
+        and NOTE_ID_RE.fullmatch(note_id)
+    )
+    identity = inbox_identity(note_id) if valid_receipt else None
+    saved_body = inbox_note_body(note_id) if identity else None
+    if (
+        not identity
+        or identity.get("request_id") != request_id
+        or saved_body != body
+    ):
         print("fm-afk-email: inbox handoff could not be confirmed; mail poll will retry", file=sys.stderr)
-        return False
-    return True
+        return None
+    return note_id
+
+
+def handoff_record(request_id, posture):
+    if not isinstance(request_id, str) or not request_id:
+        return None
+    for directory in (SENT, PENDING):
+        matches = []
+        for path in directory.glob("*.json"):
+            item = read_json(path)
+            if not isinstance(item, dict) or item.get("handoff_request_id") != request_id:
+                continue
+            seq = item.get("seq")
+            mail_key = item.get("handoff_mail_key")
+            body_hash = item.get("handoff_body_hash")
+            if (
+                type(seq) is int
+                and seq > 0
+                and isinstance(mail_key, str)
+                and re.fullmatch(r"[a-f0-9]{24}", mail_key)
+                and request_id == f"afk-email-{seq}-{mail_key}"
+                and isinstance(body_hash, str)
+                and re.fullmatch(r"[a-f0-9]{64}", body_hash)
+                and item.get("away_epoch") == posture["entered_epoch"]
+                and isinstance(item.get("task"), str)
+                and item["task"]
+            ):
+                matches.append(item)
+        if matches:
+            return matches[0] if len(matches) == 1 else None
+    return None
+
+
+def verify_note(note_id):
+    if not isinstance(note_id, str) or not NOTE_ID_RE.fullmatch(note_id):
+        print(json.dumps({"verified": False}, separators=(",", ":")))
+        return 0
+    posture = live_record()
+    if posture is None:
+        print(json.dumps({"verified": False}, separators=(",", ":")))
+        return 0
+    identity = inbox_identity(note_id)
+    if identity is None:
+        print("fm-afk-email: inbox identity could not be read", file=sys.stderr)
+        return 1
+    request_id = identity.get("request_id")
+    item = handoff_record(request_id, posture)
+    if item is None:
+        if isinstance(request_id, str) and re.fullmatch(r"afk-email-[1-9][0-9]*-[a-f0-9]{24}", request_id):
+            print("fm-afk-email: verified reply state could not be read", file=sys.stderr)
+            return 1
+        print(json.dumps({"verified": False}, separators=(",", ":")))
+        return 0
+    body = inbox_note_body(note_id)
+    if body is None:
+        print("fm-afk-email: inbox note could not be read", file=sys.stderr)
+        return 1
+    body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    if body_hash != item["handoff_body_hash"]:
+        print(json.dumps({"verified": False}, separators=(",", ":")))
+        return 0
+    print(json.dumps({
+        "verified": True,
+        "id": note_id,
+        "request_id": request_id,
+        "seq": item["seq"],
+        "task": item["task"],
+    }, separators=(",", ":")))
+    return 0
 
 
 def token_record(token):
@@ -398,6 +540,7 @@ def receive_messages(messages, posture, config):
             and not item.get("used_epoch")
             and bool(answer.strip())
             and len(answer) <= MAX_REPLY_CHARS
+            and item.get("handoff_mail_key", mail_key) == mail_key
         )
         if valid:
             note = (
@@ -405,10 +548,22 @@ def receive_messages(messages, posture, config):
                 f"This is the captain's reply for outcome seq {item['seq']} on task {item['task']} only.\n"
                 f"Captain's words:\n{answer.strip()}\n"
             )
-            if not inbox_note(f"afk-email-{item['seq']}-{mail_key}", note):
+            request_id = f"afk-email-{item['seq']}-{mail_key}"
+            body_hash = hashlib.sha256(note.encode("utf-8")).hexdigest()
+            if item.get("handoff_request_id") not in (None, request_id) or item.get("handoff_body_hash") not in (None, body_hash):
+                print("fm-afk-email: verified reply handoff state conflicts; mail poll will retry", file=sys.stderr)
+                return 1
+            item["handoff_request_id"] = request_id
+            item["handoff_mail_key"] = mail_key
+            item["handoff_body_hash"] = body_hash
+            atomic_json(record_path, item)
+            note_id = inbox_note(request_id, note)
+            if note_id is None:
                 return 1
             item["used_epoch"] = now
             item["used_mail_key"] = mail_key
+            item["used_request_id"] = request_id
+            item["used_note_id"] = note_id
             atomic_json(record_path, item)
             accepted += 1
             continue
@@ -439,7 +594,9 @@ def main():
         return flush()
     if command == "receive-batch":
         return receive_batch()
-    print("usage: fm-afk-email.py configured|queue-unprocessed|flush|receive-batch", file=sys.stderr)
+    if command == "verify-note" and len(sys.argv) == 3:
+        return verify_note(sys.argv[2])
+    print("usage: fm-afk-email.py configured|queue-unprocessed|flush|receive-batch|verify-note <id>", file=sys.stderr)
     return 2
 
 

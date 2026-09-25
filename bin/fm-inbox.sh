@@ -31,6 +31,7 @@
 #   fm-inbox.sh ask  <question>...
 #   fm-inbox.sh list
 #   fm-inbox.sh show <id>
+#   fm-inbox.sh identity <id>
 #   fm-inbox.sh drain [--ack <id>...]
 #
 # `note --request-id` is the idempotent capture path: a repeat of the same
@@ -82,18 +83,18 @@
 # An absent profile means the call uses whatever credentials are already in the
 # environment, which is also what FM_INBOX_PROFILE= (empty) forces.
 #
-# `note`, `announce`, `reply`, `receipts`, `ready`, `status`, `list`, `show`
-# and `drain` need NO configuration at all, because they make no model call. The voice
-# handover depends on `note`, so it keeps working in a home that has configured
-# nothing. `--json` / `receipts` / `ready` require python3, which a firstmate
-# home already uses for other tools.
+# `note`, `announce`, `reply`, `receipts`, `ready`, `status`, `list`, `show`,
+# `identity` and `drain` need NO configuration at all, because they make no model
+# call. The voice handover depends on `note`, so it keeps working in a home
+# that has configured nothing. `--json`, `identity`, `receipts` and `ready`
+# require python3, which a firstmate home already uses for other tools.
 #
 # Environment:
 #   FM_HOME              operational home whose state/ and data/ are used.
 #
 # PRIVACY: `say` sends your audio and `ask` sends your question to Bedrock.
-# `note`, `announce`, `reply`, `receipts`, `ready`, `status`, `list`, `show`
-# and `drain` make no network call at all.
+# `note`, `announce`, `reply`, `receipts`, `ready`, `status`, `list`, `show`,
+# `identity` and `drain` make no network call at all.
 #
 # `note` is also the queueing half of the spoken interface: when the voice agent
 # in bin/fm-voice-relay.py hands real work over to firstmate, it runs this
@@ -1110,6 +1111,25 @@ cmd_show() {
   read_note_body "$path"
 }
 
+cmd_identity() {
+  [ "$#" -eq 1 ] || die "usage: fm-inbox.sh identity <id>"
+  valid_note_id "$1" || die "invalid note id: $1"
+  local path request_id
+  path=$(note_path "$1") || die "no such note: $1"
+  request_id=$(awk '/^--$/ { exit } /^request_id=/ { sub(/^request_id=/, ""); print }' "$path")
+  need_python
+  python3 - "$1" "$request_id" <<'PY'
+import json, sys
+note_id, request_id = sys.argv[1:3]
+json.dump({
+    "schema": "fm-inbox-identity.v1",
+    "id": note_id,
+    "request_id": request_id or None,
+}, sys.stdout, separators=(",", ":"))
+sys.stdout.write("\n")
+PY
+}
+
 cmd_list() {
   [ -d "$INBOX" ] || { printf '(inbox empty)\n'; return 0; }
   local any=0
@@ -1155,6 +1175,7 @@ case "${1:-}" in
   ask)      shift; cmd_ask "$@" ;;
   list)     shift; cmd_list ;;
   show)     shift; cmd_show "$@" ;;
+  identity) shift; cmd_identity "$@" ;;
   drain)    shift; cmd_drain "$@" ;;
   ''|-h|--help|help)
     # The whole header block, found rather than counted: everything after the

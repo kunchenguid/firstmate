@@ -109,14 +109,14 @@
 #     section and the Pi branch's processing request, because a row main never
 #     acknowledged can be presented again long after its situation settled.
 #   fm-branch-outcome.sh processed-init [--held-lock]
-#     Validate the read cursor and the processed marker without changing them,
-#     then rebuild the bounded per-task outcome indexes. --held-lock is only
-#     for a descendant of the process holding $STATE/.branch-outcomes.lock
-#     (fm-wake-drain.sh may run its redirected presentation body in a subshell
-#     on Bash 3.2); it skips the nested acquire so drain's bounded lock wait
-#     remains the deadline.
-#   fm-branch-outcome.sh list [--recent <n>]
-#     Print the last n records (default 20), read or not.
+#     Rebuild the bounded per-task outcome indexes, then create the processed
+#     marker at the current read cursor when it does not exist yet; validate a
+#     present marker without changing it. --held-lock is only for a descendant
+#     of the process holding $STATE/.branch-outcomes.lock (fm-wake-drain.sh may
+#     run its redirected presentation body in a subshell on Bash 3.2); it skips
+#     the nested acquire so drain's bounded lock wait remains the deadline.
+#   fm-branch-outcome.sh list [--recent <n>|--all]
+#     Print the last n records (default 20), or all validated records.
 #   fm-branch-outcome.sh lookup --seqs <n,...>
 #     Print the requested records in sequence order only when every sequence
 #     exists; validate the full store while holding its lock.
@@ -163,7 +163,7 @@ RECORDED_AGO_JQ='def recorded_ago: ([$now - .epoch, 0] | max) as $s
     else "\($s / 86400 | floor)d" end;'
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>|--all] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
   exit 2
 }
 
@@ -700,11 +700,15 @@ case "$CMD" in
     ;;
   list)
     RECENT=20
-    if [ "${1:-}" = --recent ]; then
-      RECENT=${2:-}
-      case "$RECENT" in ''|*[!0-9]*|0) usage ;; esac
-      shift 2 || usage
-    fi
+    ALL=0
+    case "${1:-}" in
+      --all) ALL=1; shift ;;
+      --recent)
+        RECENT=${2:-}
+        case "$RECENT" in ''|*[!0-9]*|0) usage ;; esac
+        shift 2 || usage
+        ;;
+    esac
     [ "$#" -eq 0 ] || usage
     fm_lock_acquire_wait "$LOCK"
     if ! last_seq >/dev/null; then
@@ -713,7 +717,11 @@ case "$CMD" in
       exit 1
     fi
     if [ -s "$STORE" ]; then
-      tail -n "$RECENT" "$STORE"
+      if [ "$ALL" -eq 1 ]; then
+        cat "$STORE"
+      else
+        tail -n "$RECENT" "$STORE"
+      fi
     fi
     fm_lock_release "$LOCK"
     ;;
