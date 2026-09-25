@@ -618,7 +618,7 @@ test_park_boundary_holds_under_back_to_back_closes() {
     # holding it until host-start + park - turn-bound - grace lands its end in
     # the refusal window: the queued close can never take a turn of its own,
     # however loaded the machine is. The start epoch is the host's own record.
-    deadline=$(awk -F '\t' '$2 == "start" { g = $3; sub(/^gen=host-[0-9]+-/, "", g); print g + 75 - 51; exit }' \
+    deadline=$(awk -F '\t' '$2 == "start" { g = $3; sub(/^gen=host-[0-9]+-/, "", g); printf "%d\n", g + 75 - 51; exit }' \
       "$home/state/.supervision-host.log")
     case "$deadline" in ''|*[!0-9]*) fail "boundary-busy: the ledger has no start record" ;; esac
     wait_until 600 sh -c '[ "$(date +%s)" -ge "$1" ]' _ "$deadline" \
