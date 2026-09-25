@@ -61,7 +61,11 @@ assert_shared_readonly() {
 
 assert_secondmate_write_fails() {
   local path=$1
-  if ( printf '%s\n' "secondmate edit" >> "$path" ) 2>/dev/null; then
+  # A root writer (a CI runner running as root) walks straight past
+  # the file's read-only mode via CAP_DAC_OVERRIDE; fm_run_without_dac_override
+  # drops it so this write is checked against the mode bits like anyone else.
+  # shellcheck disable=SC2016 # Positional parameters expand inside the child bash, not here.
+  if fm_run_without_dac_override bash -c '{ printf "%s\n" "secondmate edit" >> "$1"; } 2>/dev/null' _ "$path"; then
     fail "ordinary write unexpectedly succeeded for read-only shared captain file"
   fi
 }
@@ -194,7 +198,8 @@ test_unsafe_artifacts_and_failure_restore_readonly_mode() {
   before_mode=$(file_mode "$second/data/captain-shared.md")
   chmod 500 "$second/data"
   err="$TMP_ROOT/restore-readonly.err"
-  propagate_secondmate_inheritance "$primary" "$second" >/dev/null 2>"$err"; rc=$?
+  # shellcheck disable=SC2016 # Positional parameters expand inside the child bash, not here.
+  fm_run_without_dac_override bash -c '. "$1/bin/fm-config-inherit-lib.sh"; propagate_secondmate_inheritance "$2" "$3"' _ "$ROOT" "$primary" "$second" >/dev/null 2>"$err"; rc=$?
   chmod 700 "$second/data"
   [ "$rc" -ne 0 ] || fail "unwritable destination directory should make quarantine fail"
   [ "$(file_mode "$second/data/captain-shared.md")" = "$before_mode" ] \
