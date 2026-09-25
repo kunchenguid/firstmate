@@ -4,10 +4,9 @@ This doc is for operators who need to know which harnesses run `bin/fm-session-s
 AGENTS.md section 3 is the authoritative behavioral contract for session start.
 This file owns how the tracked native session-open adapters deliver it, and the compatibility limits that force two tiers rather than one.
 
-Two terms recur throughout:
+One term recurs throughout:
 
 - The digest is the ordered startup report that `bin/fm-session-start.sh` prints.
-- Taking the helm means running the full digest, which acquires the session lock.
 
 ## Find a topic
 
@@ -211,7 +210,7 @@ The run wrapper's internal `--pi-prerequisite` mode uses silent exit 3 only for 
 That exit lets Pi distinguish ineligibility from an eligible empty native result.
 It does not change any harness hook's exit contract.
 
-These conditions therefore surface without refusing to open the session:
+These conditions therefore surface as follows:
 
 - A lock another session holds surfaces as digest text.
 - A truncated digest surfaces as digest text.
