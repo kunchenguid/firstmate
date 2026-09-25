@@ -93,9 +93,10 @@ fm_gate_lab_home() {
 # fm_gate_lab_mark <dir>: stamp <dir> as a disposable lab home. Fails closed on
 # any dir that is not empty, so this can never mark a populated real home.
 fm_gate_lab_mark() {
-  local home=${1:-}
+  local home=${1:-} listing
   [ -n "$home" ] && [ -d "$home" ] || return 1
-  [ -z "$(ls -A "$home" 2>/dev/null)" ] || return 1
+  listing=$(ls -A "$home" 2>/dev/null) || return 1
+  [ -z "$listing" ] || return 1
   printf '%s\n' "$FM_GATE_LAB_TOKEN" > "$home/$FM_GATE_LAB_MARKER"
 }
 

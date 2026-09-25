@@ -186,7 +186,7 @@ test_helper_lab_home_admits() {
 }
 
 test_lab_home_helper() {
-  local lab populated out rc
+  local lab populated unlistable out rc
   # create on an absent path mints the marker and the stock layout, and is
   # idempotent on an existing lab home.
   lab=$("$LABHOME" create "$TMP/lab-new"); rc=$?
@@ -201,6 +201,12 @@ test_lab_home_helper() {
   out=$("$LABHOME" create "$populated" 2>&1); rc=$?
   [ "$rc" -ne 0 ] || fail "lab-home: create on a populated dir must refuse"
   assert_absent "$populated/.fm-lab-home" "lab-home: refused create must not write the marker"
+  # refuses a populated dir it cannot list, rather than reading it as empty.
+  unlistable="$TMP/unlistable"; mkdir -p "$unlistable/state"; chmod 300 "$unlistable"
+  out=$("$LABHOME" create "$unlistable" 2>&1); rc=$?
+  chmod 700 "$unlistable"
+  [ "$rc" -ne 0 ] || fail "lab-home: create on an unlistable dir must refuse"
+  assert_absent "$unlistable/.fm-lab-home" "lab-home: unlistable create must not write the marker"
   pass "fm-lab-home: create mints marked stock homes idempotently; populated dirs are refused"
 }
 
