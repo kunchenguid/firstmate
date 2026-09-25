@@ -20,6 +20,11 @@ OTHER_PID=
 RECOVERY_WORKER_PID=
 REPEAT_WORKER_PID=
 RESTART_SUPERVISOR_PID=
+LOST_TERM_PID=
+REPLACEMENT_OWNER_PID=
+STALL_WORKER_PID=
+STALL_REPLACEMENT_PID=
+STALL_JOB_GROUP=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -29,6 +34,15 @@ cleanup_remote_job_fixture() {
   [ -z "$RECOVERY_WORKER_PID" ] || kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
   [ -z "$REPEAT_WORKER_PID" ] || kill "$REPEAT_WORKER_PID" 2>/dev/null || true
   [ -z "$RESTART_SUPERVISOR_PID" ] || kill -KILL "$RESTART_SUPERVISOR_PID" 2>/dev/null || true
+  [ -z "$LOST_TERM_PID" ] || kill -KILL "$LOST_TERM_PID" 2>/dev/null || true
+  [ -z "$REPLACEMENT_OWNER_PID" ] || kill -KILL "$REPLACEMENT_OWNER_PID" 2>/dev/null || true
+  local stall_pid
+  for stall_pid in "$STALL_WORKER_PID" "$STALL_REPLACEMENT_PID"; do
+    [ -n "$stall_pid" ] || continue
+    kill -KILL "$stall_pid" 2>/dev/null || true
+    wait "$stall_pid" 2>/dev/null || true
+  done
+  [ -z "$STALL_JOB_GROUP" ] || kill -KILL -- "-$STALL_JOB_GROUP" 2>/dev/null || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -201,6 +215,14 @@ file_mode() {
     stat -f %Lp "$1"
   else
     stat -c %a "$1"
+  fi
+}
+
+file_inode() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %i "$1" 2>/dev/null || true
+  else
+    stat -c %i "$1" 2>/dev/null || true
   fi
 }
 
@@ -715,6 +737,319 @@ kill -TERM "$REPEAT_WORKER_PID"
 wait "$REPEAT_WORKER_PID" 2>/dev/null || true
 REPEAT_WORKER_PID=
 pass "a repeatedly signalled shutdown still releases ownership for the next worker"
+
+cat > "$REMOTE_ROOT/bin/fm-hold-job.sh" <<'SH'
+#!/bin/bash
+trap '' HUP INT TERM
+printf 'started\n' > "$1"
+sleep 30
+printf 'ran\n' > "$2"
+SH
+chmod +x "$REMOTE_ROOT/bin/fm-hold-job.sh"
+git -C "$REMOTE_ROOT" add bin/fm-hold-job.sh
+git -C "$REMOTE_ROOT" commit -qm 'hold job'
+
+LOST_HOME="$TMP_ROOT/lost-term-account"
+LOST_STATE="$TMP_ROOT/lost-term-jobs"
+mkdir -p "$LOST_HOME"
+chmod 700 "$LOST_HOME"
+HOME="$LOST_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$LOST_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+  > "$TMP_ROOT/lost-term.out" 2> "$TMP_ROOT/lost-term.err" &
+LOST_TERM_PID=$!
+for _ in $(seq 1 300); do
+  [ -f "$LOST_STATE/worker.ready" ] && break
+  sleep 0.05
+done
+assert_present "$LOST_STATE/worker.ready" "the ownership-loss worker did not become ready"
+assert_present "$LOST_STATE/worker.lock" "the ownership-loss worker did not publish its lock"
+kill -STOP "$LOST_TERM_PID"
+for _ in $(seq 1 100); do
+  [ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | tr -d ' ')" = T ] && break
+  sleep 0.05
+done
+[ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | tr -d ' ')" = T ] \
+  || fail "the ownership-loss worker did not stop"
+rm -rf -- "$LOST_STATE/worker.lock"
+kill -CONT "$LOST_TERM_PID"
+LOST_READY_BEFORE=$(file_inode "$LOST_STATE/worker.ready")
+for _ in $(seq 1 100); do
+  LOST_READY_AFTER=$(file_inode "$LOST_STATE/worker.ready")
+  [ -n "$LOST_READY_AFTER" ] && [ "$LOST_READY_AFTER" != "$LOST_READY_BEFORE" ] && break
+  sleep 0.05
+done
+[ -n "${LOST_READY_AFTER:-}" ] && [ "$LOST_READY_AFTER" != "$LOST_READY_BEFORE" ] \
+  || fail "a worker with no ownership lock stopped publishing heartbeats before TERM"
+assert_absent "$LOST_STATE/worker.lock" "the ownership lock reappeared before TERM"
+kill -TERM "$LOST_TERM_PID"
+for _ in $(seq 1 100); do
+  kill -0 "$LOST_TERM_PID" 2>/dev/null || break
+  sleep 0.05
+done
+if kill -0 "$LOST_TERM_PID" 2>/dev/null; then
+  fail "TERM after ownership loss left the serving worker alive"
+fi
+wait "$LOST_TERM_PID" 2>/dev/null || true
+LOST_TERM_PID=
+LOST_READY_SETTLED=$(file_inode "$LOST_STATE/worker.ready")
+sleep 0.3
+[ "$(file_inode "$LOST_STATE/worker.ready")" = "$LOST_READY_SETTLED" ] \
+  || fail "a worker that lost ownership kept replacing its heartbeat after TERM"
+pass "TERM after ownership loss stops the serving worker"
+
+HOLD_STARTED="$TMP_ROOT/hold-started"
+HOLD_SIDE_EFFECT="$TMP_ROOT/hold-side-effect"
+rm -f -- "$HOLD_STARTED" "$HOLD_SIDE_EFFECT"
+LOST_HOME="$TMP_ROOT/lost-cleanup-account"
+LOST_STATE="$TMP_ROOT/lost-cleanup-jobs"
+mkdir -p "$LOST_HOME"
+chmod 700 "$LOST_HOME"
+HOME="$LOST_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$LOST_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+  > "$TMP_ROOT/lost-cleanup.out" 2> "$TMP_ROOT/lost-cleanup.err" &
+LOST_TERM_PID=$!
+for _ in $(seq 1 300); do
+  [ -f "$LOST_STATE/worker.ready" ] && break
+  sleep 0.05
+done
+assert_present "$LOST_STATE/worker.ready" "the cleanup worker did not become ready"
+FM_REMOTE_JOB_STATE_ROOT="$LOST_STATE" FM_REMOTE_JOB_TIMEOUT=20 \
+  fm_remote_job_stage "$LOST_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+  fm-hold-job.sh "$HOLD_STARTED" "$HOLD_SIDE_EFFECT" < /dev/null > /dev/null
+for _ in $(seq 1 100); do
+  [ -f "$HOLD_STARTED" ] && break
+  sleep 0.05
+done
+assert_present "$HOLD_STARTED" "the held command did not start before ownership loss"
+kill -STOP "$LOST_TERM_PID"
+for _ in $(seq 1 100); do
+  [ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | tr -d ' ')" = T ] && break
+  sleep 0.05
+done
+rm -rf -- "$LOST_STATE/worker.lock"
+kill -TERM "$LOST_TERM_PID"
+kill -CONT "$LOST_TERM_PID"
+for _ in $(seq 1 100); do
+  kill -0 "$LOST_TERM_PID" 2>/dev/null || break
+  sleep 0.05
+done
+if kill -0 "$LOST_TERM_PID" 2>/dev/null; then
+  fail "TERM after ownership loss did not stop a worker with an active command"
+fi
+wait "$LOST_TERM_PID" 2>/dev/null || true
+LOST_TERM_PID=
+sleep 0.5
+assert_absent "$HOLD_SIDE_EFFECT" "the active command kept running after an unowned TERM"
+pass "TERM after ownership loss still stops the active command tree"
+
+OWNER_HOME="$TMP_ROOT/replacement-owner-account"
+OWNER_STATE="$TMP_ROOT/replacement-owner-jobs"
+OWNER_STARTED="$TMP_ROOT/replacement-started"
+OWNER_SIDE_EFFECT="$TMP_ROOT/replacement-side-effect"
+mkdir -p "$OWNER_HOME"
+chmod 700 "$OWNER_HOME"
+HOME="$OWNER_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$OWNER_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+  > "$TMP_ROOT/replacement-lost.out" 2> "$TMP_ROOT/replacement-lost.err" &
+LOST_TERM_PID=$!
+for _ in $(seq 1 300); do
+  [ -f "$OWNER_STATE/worker.ready" ] && break
+  sleep 0.05
+done
+assert_present "$OWNER_STATE/worker.ready" "the worker that will lose ownership did not become ready"
+kill -STOP "$LOST_TERM_PID"
+for _ in $(seq 1 100); do
+  [ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | tr -d ' ')" = T ] && break
+  sleep 0.05
+done
+rm -rf -- "$OWNER_STATE/worker.lock"
+HOME="$OWNER_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$OWNER_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+  > "$TMP_ROOT/replacement-owner.out" 2> "$TMP_ROOT/replacement-owner.err" &
+REPLACEMENT_OWNER_PID=$!
+for _ in $(seq 1 300); do
+  [ -f "$OWNER_STATE/worker.lock/pid" ] && [ "$(cat "$OWNER_STATE/worker.lock/pid")" = "$REPLACEMENT_OWNER_PID" ] && break
+  sleep 0.05
+done
+[ "$(cat "$OWNER_STATE/worker.lock/pid" 2>/dev/null || true)" = "$REPLACEMENT_OWNER_PID" ] \
+  || fail "the replacement worker did not take ownership"
+FM_REMOTE_JOB_STATE_ROOT="$OWNER_STATE" FM_REMOTE_JOB_TIMEOUT=20 \
+  fm_remote_job_stage "$OWNER_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+  fm-hold-job.sh "$OWNER_STARTED" "$OWNER_SIDE_EFFECT" < /dev/null > /dev/null
+for _ in $(seq 1 100); do
+  [ -f "$OWNER_STARTED" ] && break
+  sleep 0.05
+done
+assert_present "$OWNER_STARTED" "the replacement worker's command did not start"
+OWNER_JOB_SUPERVISOR=$(cat "$OWNER_STATE/jobs/$FM_REMOTE_JOB_ID/.claim/supervisor")
+printf 'replacement guard\n' > "$OWNER_STATE/worker.lock/quarantine"
+OWNER_QUARANTINE_INODE=$(file_inode "$OWNER_STATE/worker.lock/quarantine")
+LATE_BURST=0
+while [ "$LATE_BURST" -lt 10 ]; do
+  kill -TERM "$LOST_TERM_PID" 2>/dev/null || true
+  LATE_BURST=$((LATE_BURST + 1))
+done
+kill -CONT "$LOST_TERM_PID"
+for _ in $(seq 1 100); do
+  kill -0 "$LOST_TERM_PID" 2>/dev/null || break
+  sleep 0.05
+done
+if kill -0 "$LOST_TERM_PID" 2>/dev/null; then
+  fail "a burst of TERMs after ownership loss left the old worker alive"
+fi
+wait "$LOST_TERM_PID" 2>/dev/null || true
+LOST_DEAD_PID=$LOST_TERM_PID
+LOST_TERM_PID=
+kill -TERM "$LOST_DEAD_PID" 2>/dev/null || true
+kill -0 "$REPLACEMENT_OWNER_PID" 2>/dev/null \
+  || fail "terminating the old worker also terminated the replacement owner"
+kill -0 "$OWNER_JOB_SUPERVISOR" 2>/dev/null \
+  || fail "terminating the old worker stopped the replacement owner's command"
+[ "$(cat "$OWNER_STATE/worker.lock/pid" 2>/dev/null || true)" = "$REPLACEMENT_OWNER_PID" ] \
+  || fail "the old worker's cleanup removed the replacement owner's lock"
+[ "$(cat "$OWNER_STATE/worker.lock/quarantine" 2>/dev/null || true)" = "replacement guard" ] \
+  && [ "$(file_inode "$OWNER_STATE/worker.lock/quarantine")" = "$OWNER_QUARANTINE_INODE" ] \
+  || fail "the old worker's TERM rewrote or removed the replacement owner's quarantine"
+rm -f -- "$OWNER_STATE/worker.lock/quarantine"
+assert_absent "$OWNER_SIDE_EFFECT" "the replacement command finished during the ownership handoff"
+kill -TERM "$REPLACEMENT_OWNER_PID"
+for _ in $(seq 1 100); do
+  kill -0 "$REPLACEMENT_OWNER_PID" 2>/dev/null || break
+  sleep 0.05
+done
+if kill -0 "$REPLACEMENT_OWNER_PID" 2>/dev/null; then
+  fail "the replacement owner did not finish its own TERM shutdown"
+fi
+wait "$REPLACEMENT_OWNER_PID" 2>/dev/null || true
+REPLACEMENT_OWNER_PID=
+assert_absent "$OWNER_STATE/worker.lock" \
+  "the replacement owner's shutdown left its lock behind"
+sleep 0.5
+assert_absent "$OWNER_SIDE_EFFECT" \
+  "the replacement owner's command kept running after its own shutdown"
+pass "a lost owner terminates without stopping the replacement owner's work"
+
+# Shutdown publishes quarantine, then stops the command, then clears quarantine.
+# Steal the lock in that gap: the ousted worker must not write or clear the
+# replacement's quarantine when it resumes.
+STALL_HOME="$TMP_ROOT/stall-owner-account"
+STALL_STATE="$TMP_ROOT/stall-owner-jobs"
+STALL_STARTED="$TMP_ROOT/stall-started"
+STALL_SIDE_EFFECT="$TMP_ROOT/stall-side-effect"
+STALL_BIN="$TMP_ROOT/stall-bin"
+STALL_HOLD="$TMP_ROOT/stall-hold"
+STALL_HELD="$TMP_ROOT/stall-held"
+mkdir -p "$STALL_HOME" "$STALL_BIN"
+chmod 700 "$STALL_HOME"
+# The stop loop gives up after a bounded number of retries, so pausing the
+# worker from outside races that bound on a slow runner. This sleep holds the
+# worker's own shell at its first stop-loop retry instead: that is the only
+# sleep it runs while its quarantine exists. Removing the hold file (or the
+# whole fixture) releases it.
+cat > "$STALL_BIN/sleep" <<SH
+#!/bin/sh
+if [ "\$PPID" = "\$(cat '$STALL_HOLD' 2>/dev/null)" ] && [ -e '$STALL_STATE/worker.lock/quarantine' ]; then
+  : > '$STALL_HELD'
+  while [ -e '$STALL_HOLD' ]; do '$(command -v sleep)' 0.05; done
+fi
+exec '$(command -v sleep)' "\$@"
+SH
+chmod +x "$STALL_BIN/sleep"
+HOME="$STALL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STALL_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux PATH="$STALL_BIN:$PATH" \
+  "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+  > "$TMP_ROOT/stall-lost.out" 2> "$TMP_ROOT/stall-lost.err" &
+STALL_WORKER_PID=$!
+printf '%s\n' "$STALL_WORKER_PID" > "$STALL_HOLD"
+STALL_DEADLINE=$((SECONDS + 30))
+until [ -f "$STALL_STATE/worker.ready" ] || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do sleep 0.05; done
+assert_present "$STALL_STATE/worker.ready" "the worker stalled in shutdown did not become ready"
+FM_REMOTE_JOB_STATE_ROOT="$STALL_STATE" FM_REMOTE_JOB_TIMEOUT=20 \
+  fm_remote_job_stage "$STALL_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+  fm-hold-job.sh "$STALL_STARTED" "$STALL_SIDE_EFFECT" < /dev/null > /dev/null
+STALL_DEADLINE=$((SECONDS + 30))
+until [ -f "$STALL_STARTED" ] || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do sleep 0.05; done
+assert_present "$STALL_STARTED" "the command that keeps shutdown in its stop loop did not start"
+STALL_JOB="$STALL_STATE/jobs/$FM_REMOTE_JOB_ID"
+# An unreadable start record keeps the worker from signalling the job's own
+# command group while it still counts that group as alive, so shutdown waits in
+# its stop loop until the test stops the group.
+STALL_JOB_GROUP=$(cat "$STALL_JOB/.claim/group")
+printf 'unconfirmed\nstart\n' > "$STALL_JOB/.claim/group_start"
+kill -TERM "$STALL_WORKER_PID"
+STALL_DEADLINE=$((SECONDS + 30))
+until [ -f "$STALL_HELD" ] || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do sleep 0.05; done
+assert_present "$STALL_HELD" "shutdown did not reach its stop loop behind its own quarantine"
+assert_present "$STALL_STATE/worker.lock/quarantine" \
+  "the worker held in its stop loop did not hold its own quarantine"
+rm -rf -- "$STALL_STATE/worker.lock"
+HOME="$STALL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STALL_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
+  > "$TMP_ROOT/stall-replacement.out" 2> "$TMP_ROOT/stall-replacement.err" &
+STALL_REPLACEMENT_PID=$!
+STALL_DEADLINE=$((SECONDS + 30))
+until [ "$(cat "$STALL_STATE/worker.lock/pid" 2>/dev/null || true)" = "$STALL_REPLACEMENT_PID" ] \
+  || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
+  sleep 0.05
+done
+[ "$(cat "$STALL_STATE/worker.lock/pid" 2>/dev/null || true)" = "$STALL_REPLACEMENT_PID" ] \
+  || fail "the replacement did not take ownership while the old worker was stopped in shutdown"
+printf 'replacement guard\n' > "$STALL_STATE/worker.lock/quarantine"
+STALL_QUARANTINE_INODE=$(file_inode "$STALL_STATE/worker.lock/quarantine")
+# Both workers stop the job's recorded execution and then delete its records.
+# A worker resumed while the other is deleting can lose a record read and exit
+# before its quarantine clear, so freeze the replacement until the ousted
+# worker has finished.
+kill -STOP "$STALL_REPLACEMENT_PID"
+STALL_DEADLINE=$((SECONDS + 30))
+until [ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | tr -d ' ')" = T ] \
+  || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
+  sleep 0.05
+done
+[ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | tr -d ' ')" = T ] \
+  || fail "the replacement could not be held while the ousted worker resumed"
+kill -KILL -- "-$STALL_JOB_GROUP" 2>/dev/null || true
+STALL_DEADLINE=$((SECONDS + 30))
+until ! kill -0 -- "-$STALL_JOB_GROUP" 2>/dev/null || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
+  sleep 0.05
+done
+! kill -0 -- "-$STALL_JOB_GROUP" 2>/dev/null \
+  || fail "the job's command group was still alive after the test stopped it"
+rm -f -- "$STALL_HOLD"
+STALL_DEADLINE=$((SECONDS + 30))
+until [ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | tr -d ' ')" = Z ] \
+  || ! kill -0 "$STALL_WORKER_PID" 2>/dev/null || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
+  sleep 0.05
+done
+[ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | tr -d ' ')" = Z ] \
+  || ! kill -0 "$STALL_WORKER_PID" 2>/dev/null \
+  || fail "the ousted worker did not exit after shutdown resumed"
+STALL_WORKER_RC=0
+wait "$STALL_WORKER_PID" 2>/dev/null || STALL_WORKER_RC=$?
+STALL_WORKER_PID=
+[ "$STALL_WORKER_RC" -eq 0 ] \
+  || fail "the ousted worker did not finish shutdown through its lost-ownership exit (exit $STALL_WORKER_RC: $(cat "$TMP_ROOT/stall-lost.err"))"
+kill -CONT "$STALL_REPLACEMENT_PID"
+kill -0 "$STALL_REPLACEMENT_PID" 2>/dev/null \
+  || fail "the ousted worker's resumed shutdown terminated the replacement"
+[ "$(cat "$STALL_STATE/worker.lock/pid" 2>/dev/null || true)" = "$STALL_REPLACEMENT_PID" ] \
+  || fail "the ousted worker's resumed shutdown removed the replacement lock"
+[ "$(cat "$STALL_STATE/worker.lock/quarantine" 2>/dev/null || true)" = "replacement guard" ] \
+  && [ "$(file_inode "$STALL_STATE/worker.lock/quarantine")" = "$STALL_QUARANTINE_INODE" ] \
+  || fail "the ousted worker wrote or cleared the replacement quarantine during shutdown"
+kill -TERM "$STALL_REPLACEMENT_PID"
+STALL_DEADLINE=$((SECONDS + 30))
+until [ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | tr -d ' ')" = Z ] \
+  || ! kill -0 "$STALL_REPLACEMENT_PID" 2>/dev/null || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
+  sleep 0.05
+done
+[ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | tr -d ' ')" = Z ] \
+  || ! kill -0 "$STALL_REPLACEMENT_PID" 2>/dev/null \
+  || fail "the replacement did not finish its own TERM shutdown"
+wait "$STALL_REPLACEMENT_PID" 2>/dev/null || true
+STALL_REPLACEMENT_PID=
+STALL_JOB_GROUP=
+pass "an ousted worker in shutdown leaves the replacement quarantine untouched"
 
 # A child that stays up for FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears the
 # consecutive-failure backoff, so a child that dies just past that threshold
