@@ -812,28 +812,49 @@ test_signal_crew_provably_working_classifier() {
   pass "signal_crew_provably_working: benign only when every referenced crew is provably working"
 }
 
-test_secondmate_status_signal_never_absorbed_classifier() {
-  local dir fakebin state
+test_secondmate_status_routine_absorbed_routed_surfaced_classifier() {
+  local dir fakebin state line
   dir=$(make_case secondmate-signal-classify); fakebin="$dir/fakebin"; state="$dir/state"
   export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
-  # Even PROVABLY working, a secondmate's .status signal is its routed-reply
-  # channel and must surface; its bare turn-ended keeps the ordinary absorb.
   export FM_FAKE_CREW_STATE_sm='state: working · source: run-step · running'
   printf 'kind=secondmate\n' > "$state/sm.meta"
-  printf 'working: routed reply for the parent\n' > "$state/sm.status"
-  ! signal_crew_provably_working "$state/sm.status" \
-    || fail "a working secondmate's status signal was treated as absorbable"
+  # Unmarked routine progress from a PROVABLY working mate absorbs like any crew.
+  printf 'working: step 2 of 5\npaused [at=1]: waiting on CI\n' > "$state/sm.status"
+  signal_crew_provably_working "$state/sm.status" \
+    || fail "a working secondmate's routine working/paused progress was not absorbed"
   signal_crew_provably_working "$state/sm.turn-ended" \
     || fail "a working secondmate's bare turn-end lost its ordinary absorb"
-  # An ordinary crewmate with the same verdict stays absorbable: the rule is
-  # keyed on recorded kind, not on task naming or content guessing.
+  # A terminal outcome surfaces even from a healthy mate: an unmarked resolved:
+  # line self-closing a decision must still wake the primary.
+  printf 'working: routine\nresolved: took A\n' > "$state/sm.status"
+  ! signal_crew_provably_working "$state/sm.status" \
+    || fail "a healthy secondmate's unmarked resolved: line was absorbed as routine progress"
+  # Parent-directed content surfaces regardless of busy evidence: decisions,
+  # blockers, terminal outcomes, notes, correlation-marked lines (both forms the
+  # fleet writes), and any verb the classifier does not know.
+  for line in 'needs-decision [key=k2]: pick one' 'blocked [key=k3]: need access' \
+      'done [at=1]: shipped' 'failed [at=1]: broke' 'note: routed reply for the parent' \
+      'resolved corr=0123456789abcdef [key=k4]: answered' \
+      'working [corr=0123456789abcdef]: mirrored remote line' \
+      'shrug: an unknown verb'; do
+    printf 'working: routine\n%s\nworking: routine again\n' "$line" > "$state/sm.status"
+    ! signal_crew_provably_working "$state/sm.status" \
+      || fail "a busy secondmate's '$line' was absorbed as routine progress"
+  done
+  # Routine progress from a mate that is NOT provably working still surfaces.
+  export FM_FAKE_CREW_STATE_sm='state: unknown · source: none · idle worker'
+  printf 'working: step 3 of 5\n' > "$state/sm.status"
+  ! signal_crew_provably_working "$state/sm.status" \
+    || fail "an unproven secondmate's routine progress was absorbed"
+  # An ordinary crewmate keeps the plain provably-working rule: the marker and
+  # verb read is keyed on recorded kind, not on task naming or content guessing.
   export FM_FAKE_CREW_STATE_crew='state: working · source: run-step · running'
   printf 'kind=ship\n' > "$state/crew.meta"
   printf 'working: progress\n' > "$state/crew.status"
   signal_crew_provably_working "$state/crew.status" \
     || fail "the secondmate rule leaked onto an ordinary crewmate status"
   unset FM_FAKE_CREW_STATE_sm FM_FAKE_CREW_STATE_crew
-  pass "a secondmate's status signal is never absorbed as provably working; crewmates are unaffected"
+  pass "a secondmate's unmarked routine progress absorbs when provably working; routed, terminal, note, marked, and unknown lines surface"
 }
 
 # --- benign wakes are absorbed ONLY when the crew is provably working ---------
@@ -1648,9 +1669,9 @@ test_secondmate_status_note_surfaced_despite_busy_agent() {
   dir=$(make_case secondmate-note-surfaced); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   printf 'kind=secondmate\n' > "$state/mate.meta"
-  printf 'working: routed reply landed in the parent stream\n' > "$state/mate.status"
-  # Busy evidence that would absorb an ordinary crewmate's no-verb note must
-  # not absorb a secondmate's: its status stream is the routed-reply channel.
+  printf 'note: routed reply landed in the parent stream\n' > "$state/mate.status"
+  # Busy evidence that absorbs routine progress must not absorb a secondmate's
+  # parent-directed note: its status stream is the routed-reply channel.
   export FM_FAKE_CREW_STATE='state: working · source: run-step · running'
   FM_CONFIG_OVERRIDE="$(churn_config "$dir")" watch_bg "$state" "$fakebin" "$out"
   pid=$!
@@ -1661,6 +1682,33 @@ test_secondmate_status_note_surfaced_despite_busy_agent() {
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/mate.status" >/dev/null \
     || fail "surfaced secondmate note was not queued"
   pass "a secondmate's status note surfaces even while its own agent is busy"
+}
+
+test_secondmate_routine_progress_absorbed_then_note_surfaced() {
+  local dir state fakebin out pid
+  dir=$(make_case secondmate-routine-absorbed); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  printf 'kind=secondmate\n' > "$state/mate.meta"
+  printf 'working: step 2 of 5\n' > "$state/mate.status"
+  # A provably working mate's unmarked routine progress is absorbed exactly like
+  # an ordinary crewmate's (no exit, no durable wake, suppressor advanced)...
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · running'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher surfaced a busy secondmate's routine working: progress: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "routine secondmate progress printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "routine secondmate progress enqueued a durable wake"; }
+  [ -s "$state/.seen-mate_status" ] || { reap "$pid"; fail "absorbed secondmate progress did not advance its .seen-* suppressor"; }
+  # ...while a note: from the SAME still-busy mate surfaces on the next append.
+  printf 'note: routed reply for the parent\n' >> "$state/mate.status"
+  wait_for_exit "$pid" 100 || fail "watcher absorbed a busy secondmate's note after absorbing its routine progress"
+  grep -F "signal: $state/mate.status" "$out" >/dev/null \
+    || fail "watcher did not print the surfaced secondmate note"
+  grep -F "$state/mate.status" "$state/.wake-queue" >/dev/null \
+    || fail "surfaced secondmate note was not durably queued"
+  pass "a busy secondmate's routine working: is absorbed while its later note: still surfaces"
 }
 
 test_secondmate_buried_block_wakes_despite_busy_agent() {
@@ -1850,10 +1898,10 @@ test_self_announced_close_after_fold_still_surfaces_folded_worker_failure() {
 
 test_self_announced_close_after_fold_still_surfaces_folded_secondmate_lines() {
   local dir state fakebin out status_file pid rc lagging n=0
-  # A secondmate's pause carries no captain verb, and a decision the mate
+  # A secondmate's note carries no captain verb, and a decision the mate
   # raised and closed itself is never listed as open; the fold shows neither,
-  # yet every secondmate append is parent-directed and must still wake.
-  for lagging in 'paused: waiting on vendor quote' \
+  # yet both are parent-directed content and must still wake.
+  for lagging in 'note: vendor quote arrived, holding it for the parent' \
     $'needs-decision [key=vendor]: vendor A or B?\nresolved [key=vendor]: picked vendor B myself, cheaper'; do
     n=$((n + 1))
     dir=$(make_case "self-close-folded-mate-$n"); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
@@ -6290,7 +6338,7 @@ test_empty_write_prune_widens_the_probe
 test_empty_write_prune_from_the_environment_widens_the_probe
 test_worktree_write_probe_is_wall_clock_bounded
 test_signal_crew_provably_working_classifier
-test_secondmate_status_signal_never_absorbed_classifier
+test_secondmate_status_routine_absorbed_routed_surfaced_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
@@ -6316,6 +6364,7 @@ test_turn_ended_invalid_churn_deadline_surfaced
 test_turn_ended_surfaced_batch_opens_no_partial_deadline
 test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
+test_secondmate_routine_progress_absorbed_then_note_surfaced
 test_secondmate_buried_block_wakes_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
 test_self_announced_close_after_open_decisions_fold_does_not_rewake
