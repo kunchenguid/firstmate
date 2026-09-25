@@ -4205,6 +4205,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       fi
       fm_treehouse_slot_owner_state "$spawn_first_slot" "$ID"
       if [ "$FM_TREEHOUSE_SLOT_OWNER" != mine ]; then
+        # Fresh hung gets lack authoritative Treehouse-side slot ownership, so interrupt and refuse rather than release; safe retry awaits treehouse-reselect-returned-slot.
         echo "error: observed slot '$spawn_first_slot' has no verified claim for task $ID; refusing return and retry in window $T" >&2
         exit 1
       fi
