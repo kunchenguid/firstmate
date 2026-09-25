@@ -75,3 +75,12 @@ Exposes 11 typed Jev judgment tools (`jev_verify`, `jev_gate`, `jev_review`, `je
 These two tools rely on Claude Code in-process function hooks (`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`):
 - **Claude Code**: Uses `winnow` (PostToolExecution hook wrapping `Read`/`Bash`/`Grep`) and `fast-jev-compaction` (TurnComplete hook).
 - **Codex & AGY**: Do not support Claude's in-process tool-rewrite hooks. Codex relies on its native command output folding and `compact-adviser` (in `~/.codex/config.toml`), while AGY relies on standard large-window handling and `/stow` state persistence. Both harnesses invoke Jev judgment capabilities through `jev-mcp` on demand.
+
+## Evaluated and not adopted
+
+`jev-review` adds staged JS/TS source screening, evidence selection, severity scoring, reviewer routing, and a local report dashboard.
+Its judgments overlap `jev-mcp`'s `jev_review`, `jev_screen`, and `jev_gate` tools and the no-mistakes review pipeline.
+It runs no compiler diagnostics, tests, or static analyzers, so its findings are review prompts rather than proof of defects.
+It sends full patch and source content to TypeSafe Jev without a local secret/path scanner or payload-size guard, unlike the existing jev-mcp request-body scanner.
+We will not add it as a standing gate or dependency.
+Reconsider only for a concrete JS/TS repository needing recurring baseline scans or severity-ranked triage, after a bounded internal-only comparison of latency, token use, and review usefulness against the existing Jev review path.
