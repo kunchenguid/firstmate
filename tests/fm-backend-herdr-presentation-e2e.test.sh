@@ -1349,6 +1349,70 @@ teardown_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" > "$TMP_ROOT/bravo-wave-teardown
 "$REAL_TREEHOUSE" return --force "$BRAVO_WAVE_NEW_WT" >/dev/null 2>&1 || true
 pass "real Herdr lab: concurrent cross-home recoveries replace exact husks under one session lock with no focus drift"
 
+# An exact resume must WAIT for session lock contention rather than treat a
+# short bounded window as fatal: the concurrent-recovery race above exercises
+# this under real timing but does not reliably outlast a fixed bound. Hold
+# the shared session lock from an unrelated process for a duration well past
+# any plausible bounded-retry window so the assertion below is deterministic
+# rather than a race that could pass by luck on a fast machine.
+LOCK_WAIT_ID=lock-wait-resume-r1
+mkdir -p "$HOME_DIR/data/$LOCK_WAIT_ID"
+write_ship_brief "$HOME_DIR" "$LOCK_WAIT_ID" 'Resume lock-wait fixture.'
+spawn_task "$LOCK_WAIT_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/lock-wait-first.out" 2> "$TMP_ROOT/lock-wait-first.err" \
+  || fail "lock-wait recovery fixture failed: $(cat "$TMP_ROOT/lock-wait-first.err")"
+LOCK_WAIT_META="$HOME_DIR/state/$LOCK_WAIT_ID.meta"
+LOCK_WAIT_OLD_WT=$(remember_meta_worktree "$LOCK_WAIT_META")
+LOCK_WAIT_WSID=$(grep '^herdr_workspace_id=' "$LOCK_WAIT_META" | cut -d= -f2-)
+LOCK_WAIT_OLD_PANE=$(grep '^herdr_pane_id=' "$LOCK_WAIT_META" | cut -d= -f2-)
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
+  || fail "could not stop the isolated session for resume lock-wait"
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+  || fail "could not reprovision the isolated session for resume lock-wait"
+
+LOCK_WAIT_READY="$TMP_ROOT/lock-wait-ready"
+LOCK_WAIT_HOLD_SECONDS=30
+LOCK_WAIT_PATH=$(session_presentation_lock_path) \
+  || fail "could not resolve session lock for resume lock-wait"
+ROOT="$ROOT" READY="$LOCK_WAIT_READY" HOLD="$LOCK_WAIT_HOLD_SECONDS" LOCK="$LOCK_WAIT_PATH" bash -c '
+  . "$ROOT/bin/fm-wake-lib.sh"
+  fm_lock_try_acquire "$LOCK" || exit 1
+  : > "$READY"
+  sleep "$HOLD"
+  fm_lock_release "$LOCK"
+' &
+LOCK_WAIT_HOLDER_PID=$!
+while [ ! -e "$LOCK_WAIT_READY" ] && kill -0 "$LOCK_WAIT_HOLDER_PID" 2>/dev/null; do sleep 0.01; done
+[ -e "$LOCK_WAIT_READY" ] || fail "could not hold the session presentation lock for resume lock-wait"
+
+LOCK_WAIT_FOCUS=$(focus_snapshot)
+LOCK_WAIT_START=$(date +%s)
+if spawn_task "$LOCK_WAIT_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/lock-wait-resume.out" 2> "$TMP_ROOT/lock-wait-resume.err"; then
+  LOCK_WAIT_STATUS=0
+else
+  LOCK_WAIT_STATUS=$?
+fi
+LOCK_WAIT_ELAPSED=$(( $(date +%s) - LOCK_WAIT_START ))
+wait "$LOCK_WAIT_HOLDER_PID" || fail "resume lock-wait lock holder failed"
+[ "$LOCK_WAIT_STATUS" -eq 0 ] \
+  || fail "a resumed identity refused instead of waiting out session lock contention: $(cat "$TMP_ROOT/lock-wait-resume.err")"
+[ "$LOCK_WAIT_ELAPSED" -ge $((LOCK_WAIT_HOLD_SECONDS - 5)) ] \
+  || fail "resumed recovery returned after ${LOCK_WAIT_ELAPSED}s, too soon to have genuinely waited out a ${LOCK_WAIT_HOLD_SECONDS}s hold"
+LOCK_WAIT_NEW_WT=$(remember_meta_worktree "$LOCK_WAIT_META")
+[ "$(grep '^herdr_workspace_id=' "$LOCK_WAIT_META" | cut -d= -f2-)" = "$LOCK_WAIT_WSID" ] \
+  || fail "resume lock-wait flattened the task into a different workspace"
+LOCK_WAIT_NEW_PANE=$(grep '^herdr_pane_id=' "$LOCK_WAIT_META" | cut -d= -f2-)
+[ "$LOCK_WAIT_NEW_PANE" != "$LOCK_WAIT_OLD_PANE" ] \
+  || fail "resume lock-wait reused the old husk pane"
+if lab pane get "$LOCK_WAIT_OLD_PANE" >/dev/null 2>&1; then
+  fail "resume lock-wait left the old husk pane behind"
+fi
+assert_focus_is "$LOCK_WAIT_FOCUS" "resume lock-wait"
+teardown_task "$LOCK_WAIT_ID" "$HOME_DIR" > "$TMP_ROOT/lock-wait-teardown.out" 2> "$TMP_ROOT/lock-wait-teardown.err" \
+  || fail "resume lock-wait fixture teardown failed: $(cat "$TMP_ROOT/lock-wait-teardown.err")"
+"$REAL_TREEHOUSE" return --force "$LOCK_WAIT_OLD_WT" >/dev/null 2>&1 || true
+"$REAL_TREEHOUSE" return --force "$LOCK_WAIT_NEW_WT" >/dev/null 2>&1 || true
+pass "real Herdr lab: a resumed identity waits out session lock contention instead of refusing"
+
 # Seed a legacy old-format primary projection and a flat secondmate tab; correction must not migrate them.
 LEGACY_OUT=$(lab workspace create --cwd "$PROJECT_DIR" --label "firstmate/legacy-seed · p:AbCdEfGhIjKlMnOpQrStUv" --no-focus) \
   || fail "could not seed a legacy old-format presentation space"

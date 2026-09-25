@@ -172,7 +172,7 @@ Operational compromises:
 
 - Grouping is best-effort; only an exact same-identity version 2 binding survives a Herdr restart in place.
 - A failed journal publication or projected workspace create stops that spawn instead of falling back flat, so a Herdr create failure surfaces as a spawn failure in every Herdr home rather than only in homes that opted in; every earlier degradation on the fresh projected-create path (no session server, contended presentation lock, absent or ambiguous parent) still warns and continues flat.
-- Recovery of an existing presentation journal deliberately refuses the spawn when the shared presentation lock is contended rather than falling back flat, and default-on makes that refusal reachable in any Herdr home.
+- Recovery of an existing presentation journal waits for the shared presentation lock instead of falling back flat or refusing, so concurrent recoveries serialize and a recovery spawn can block while another holder keeps the lock; dead-owner reclaim stops the wait when a holder crashed.
 - Existing layouts are not force-renamed or rearranged.
 - Missing or ambiguous restart bindings fall back to the ordinary home workspace while the old projection remains untouched.
 - Crashes, lost responses, failed exact-pane cleanup, or human renames can leave quarantined spaces; session start removes only the exact home-local, uniquely journal-correlated, childless idle-shell shape above.

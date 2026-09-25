@@ -124,14 +124,17 @@
 #   authority, and every ambiguous recovery stays on the flat fallback after
 #   duplicate-agent risk is independently absent. Treehouse allocation and task
 #   metadata are unchanged.
-#   A clean projected create or exact resume makes one bounded attempt to hold
-#   the one session-scoped presentation-order lock (keyed by named session plus
-#   canonical socket, outside any home's state/) through launch handoff. Lock
-#   contention warns and falls back to the ordinary flat layout before any
-#   projection mutation. The exact response-derived new workspace is inserted
-#   immediately after its owning parent (firstmate or 2ndmate-<id>) contiguous
-#   child block. Ordering never authorizes lifecycle cleanup, and any
-#   unavailable, ambiguous, or failed move warns while the spawn continues.
+#   A clean projected create and an exact resume both hold the one
+#   session-scoped presentation-order lock (keyed by named session plus
+#   canonical socket, outside any home's state/) through launch handoff, but
+#   differ on contention: a create makes one bounded attempt and falls back to
+#   the ordinary flat layout before any projection mutation, while a resume
+#   waits for the lock so two concurrent recoveries genuinely serialize and
+#   each still replaces its own exact husk. The exact response-derived new
+#   workspace is inserted immediately after its owning parent (firstmate or
+#   2ndmate-<id>) contiguous child block. Ordering never authorizes lifecycle
+#   cleanup, and any unavailable, ambiguous, or failed move warns while the
+#   spawn continues.
 #   Every projected create, prune, and move captures and verifies the named
 #   session's exact active workspace and tab. A detected focus change restores
 #   only that exact tab id; an ambiguous pre-operation snapshot refuses the
@@ -1332,14 +1335,31 @@ spawn_abort_cleanup() {
 }
 trap spawn_abort_cleanup EXIT
 
-# One bounded lock per live Herdr session/socket, shared across all homes.
-# <session> is required so secondmate and primary spawns serialize against the
-# same session without writing any other home's state directory.
+# One lock per live Herdr session/socket, shared across all homes. <session>
+# is required so secondmate and primary spawns serialize against the same
+# session without writing any other home's state directory.
+#
+# A clean create has no prior state to strand, so it makes one BOUNDED attempt
+# (the default here) and falls back to the ordinary flat layout on contention.
+# An exact resume is recovering a specific existing identity that another
+# concurrent recovery may legitimately be holding the lock for; giving up
+# there does not degrade to a flat layout, it hard-fails the resume. Passing
+# `wait` makes this call WAIT for the lock instead (`fm_lock_acquire_wait`,
+# the same unbounded-wait idiom this file already uses for its other
+# fleet-shared locks), so two concurrent recoveries genuinely serialize and
+# both succeed rather than one spuriously losing a short race. Dead-owner
+# reclaim inside `fm_lock_try_acquire` still bounds the wait against a holder
+# that crashed mid-hold.
 spawn_herdr_presentation_order_lock_acquire() {
-  local session=${1:-} attempt lock_path
+  local session=${1:-} mode=${2:-} attempt lock_path
   [ -n "$session" ] || session=$(fm_backend_herdr_session)
   lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
   HERDR_PRESENTATION_ORDER_LOCK="$lock_path"
+  if [ "$mode" = wait ]; then
+    fm_lock_acquire_wait "$HERDR_PRESENTATION_ORDER_LOCK"
+    HERDR_PRESENTATION_ORDER_LOCK_HELD=1
+    return 0
+  fi
   attempt=0
   while [ "$attempt" -lt 50 ]; do
     if fm_lock_try_acquire "$HERDR_PRESENTATION_ORDER_LOCK"; then
@@ -3449,8 +3469,8 @@ else
           echo "error: herdr presentation recovery could not ensure its exact named session" >&2
           exit 1
         }
-        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
-          echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
+        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" wait || {
+          echo "error: herdr presentation recovery could not resolve its session lock" >&2
           exit 1
         }
         if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
