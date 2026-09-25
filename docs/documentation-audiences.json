@@ -238,14 +238,6 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/readable-documents/references/technical-designs.md",
-      "audience": "agent-runtime"
-    },
-    {
-      "path": ".agents/skills/technical-design-docs/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
       "audience": "agent-runtime"
     },

@@ -13,7 +13,7 @@ metadata:
 This skill owns the portable authoring workflow for technical documents that must be accurate and understandable to their intended readers.
 It does not grant implementation, architecture expansion, publishing, sharing, or review authority.
 The document format owner still owns API mechanics, revision preconditions, comments, and remote readback.
-This file is the single normative authoring owner for both general readability and implementation-ready technical-design rigor; old skill names and references only redirect here.
+This file is the single normative authoring owner for both general readability and implementation-ready technical-design rigor.
 For a Feishu document, load `lark-doc` before content operations, `lark-drive` before comment operations, and `lark-whiteboard` before independent whiteboard operations at their respective triggers.
 Load `captain-hold-lifecycle` when its decision-routing or completion trigger applies.
 
