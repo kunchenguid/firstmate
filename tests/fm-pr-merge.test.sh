@@ -2738,20 +2738,67 @@ test_allow_red_requires_one_separate_name() {
   expect_code 2 "$rc" "github-allow-red-equals: equals form must be refused"
   assert_no_grep 'pr merge' "$case_dir/gh.log" \
     "github-allow-red-equals: gh pr merge ran for the equals alias"
+  pass "fm-pr-merge accepts each red-check waiver only as one separate name"
+}
 
-  case_dir=$(make_case github-allow-red-duplicate)
+# Two red checks each waived by their own --allow-red merge; waiving only one
+# still refuses and names the other. A waiver that matches no red check changes
+# nothing: a green pull request still merges and a red one still refuses.
+test_allow_red_accumulates_across_repeated_flags() {
+  local case_dir rc head
+  head=bebebebebebebebebebebebebebebebebebebebe
+
+  case_dir=$(make_case github-allow-red-two-waivers)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run lint COMPLETED FAILURE 2026-01-01T00:00:09Z)" \
+    "$(check_run unit COMPLETED FAILURE 2026-01-01T00:00:09Z)"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/88 \
+    --allow-red lint --allow-red unit > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-allow-red-two-waivers: two named waivers should merge"$'\n'"$(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 88 example/repo --squash
+
+  case_dir=$(make_case github-allow-red-one-of-two)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run lint COMPLETED FAILURE 2026-01-01T00:00:09Z)" \
+    "$(check_run unit COMPLETED FAILURE 2026-01-01T00:00:09Z)"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/89 \
+    --allow-red lint > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-allow-red-one-of-two: waiving one of two red checks must refuse"
+  assert_grep "check 'unit' is not green" "$case_dir/stderr" \
+    "github-allow-red-one-of-two: the unwaived red check was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-allow-red-one-of-two: gh pr merge ran with an unwaived red check"
+
+  case_dir=$(make_case github-allow-red-green-check)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/91 \
+    --allow-red lint > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-allow-red-green-check: a waiver matching no red check must not block a green merge"$'\n'"$(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 91 example/repo --squash
+
+  case_dir=$(make_case github-allow-red-absent-check)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" "$head"
   write_github_red_json "$case_dir" "$head" lint
   set +e
-  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/88 \
-    --allow-red lint --allow-red unit > "$case_dir/stdout" 2> "$case_dir/stderr"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/92 \
+    --allow-red unit > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 2 "$rc" "github-allow-red-duplicate: duplicate waiver must be refused"
+  expect_code 1 "$rc" "github-allow-red-absent-check: a waiver naming an absent check must not merge"
+  assert_grep "check 'lint' is not green" "$case_dir/stderr" \
+    "github-allow-red-absent-check: the unwaived red check was not named"
   assert_no_grep 'pr merge' "$case_dir/gh.log" \
-    "github-allow-red-duplicate: gh pr merge ran for duplicate waivers"
-  pass "fm-pr-merge accepts exactly one separately named red-check waiver"
+    "github-allow-red-absent-check: gh pr merge ran with an unwaived red check"
+  pass "fm-pr-merge accumulates repeated --allow-red waivers, each still scoped to its exact name"
 }
 
 test_away_record_permits_any_green_merge_under_away_authority() {
@@ -3245,6 +3292,7 @@ test_undated_runs_never_supersede
 test_allow_red_still_waives_only_the_current_failure
 test_allow_red_is_refused_while_away
 test_allow_red_requires_one_separate_name
+test_allow_red_accumulates_across_repeated_flags
 test_away_record_permits_any_green_merge_under_away_authority
 test_away_branch_actor_merges_green_under_the_record
 test_away_branch_refuses_when_record_archived_during_preflight
