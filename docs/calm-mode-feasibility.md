@@ -809,8 +809,6 @@ For the current delivery and presentation contracts, see [`fm-operational-input.
 
 Observed on 2.1.280 with the flag on, beyond the live guard:
 
-- A Stop hook that exits 2 draws `Ran 1 stop hook` with its feedback beneath; a scratch module hiding every other exposed component (`InfoNotice`, `ToolProgress`, `CommandOutput`, `TurnDuration`, `SessionMode`, `AskUserQuestion`) alongside the mod's own hooks left that row drawn, so it is not a hookable drawing on this build.
-
 ```text
 $ claude --version
 2.1.280 (Claude Code)
