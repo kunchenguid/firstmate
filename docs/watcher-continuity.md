@@ -145,11 +145,8 @@ A failed confirmation is never swallowed.
 
 ### Readiness timeout and retry
 
-For each successor attempt, the adapter:
-
-1. Waits at most one readiness timeout.
-2. Sends TERM and waits a bounded retirement confirmation.
-3. Starts the next lock-verified exponential retry.
+The adapter waits at most one readiness timeout per attempt.
+If the successor is not ready in that time, the adapter sends TERM and waits a bounded retirement confirmation before the next lock-verified exponential retry.
 
 If the unready arm does not retire within that bound, the adapter keeps ownership, starts no overlapping retry, and delivers the typed fallback immediately.
 When that retained arm later closes, its actual close is classified as a new supervised event without replaying the earlier fallback.
