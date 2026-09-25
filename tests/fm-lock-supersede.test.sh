@@ -123,7 +123,7 @@ codex_root="$LAB/codex-home"
 mkdir -p "$codex_root/thread-writer-locks"
 codex_lock="$codex_root/thread-writer-locks/old-thread.lock"
 : > "$codex_lock"
-flock -x "$codex_lock" sleep 300 & codex_writer=$!
+( exec 9>>"$codex_lock"; flock -x 9; exec sleep 300 ) & codex_writer=$!
 sleep 0.1
 printf 'codex:old-thread:%s\n' "$codex_root" > "$STATE/.lock"
 printf 'codex:old-thread:%s\n' "$codex_root" > "$STATE/.session-start-complete"
@@ -137,7 +137,7 @@ pass "a live Codex writer identity and a live PID holder use the same takeover p
 
 codex_new_lock="$codex_root/thread-writer-locks/new-thread.lock"
 : > "$codex_new_lock"
-flock -x "$codex_new_lock" sleep 300 & codex_new_writer=$!
+( exec 9>>"$codex_new_lock"; flock -x 9; exec sleep 300 ) & codex_new_writer=$!
 sleep 0.1
 printf '%s\n' "$old" > "$STATE/.lock"
 printf '%s\n' "$old" > "$STATE/.session-start-complete"

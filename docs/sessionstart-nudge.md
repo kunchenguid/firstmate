@@ -112,6 +112,7 @@ The lock command prints one `lock takeover:` line naming the displaced identity 
 A worker task marker, linked worker checkout, secondmate home, or different home cannot supersede a live primary.
 Non-regular or unreadable locks, failed publication, uncertain ownership, and an unfinished deferred startup sweep retain their read-only refusals.
 The displaced pane's mutating command entry points reject its old identity, and an arm-launched watcher exits when its launch identity differs from the current lock.
+The one exemption is the holder's own supervision-branch actor: `FM_SUPERVISION_ACTOR=branch` with an `FM_LEASE_HOLDER_PID` byte-equal to the current lock line and positively live, checked by `fm_session_lock_refuse_displaced` in `bin/fm-session-lock-lib.sh`.
 [`fm-lock-supersede.test.sh`](../tests/fm-lock-supersede.test.sh) is the deterministic old-idle-pane regression and covers both PID and Codex holders.
 
 ### Nudge wrapper on a run-tier harness
