@@ -1,0 +1,16 @@
+== primary .watch.lock owned by dead pid 70943
+== child is mid-steal; sending TERM to arm 70962
+arm exit=143 after 1s
+16:47:32 child 71113 creating .watch.lock.steal (stalled)
+-- arm1 output:
+== residue after interrupted arm
+drwxr-xr-x@  3 kunchen  staff   96 Sep 25 16:47 .watch.lock
+lrwxr-xr-x@  1 kunchen  staff  107 Sep 25 16:47 .watch.lock.steal -> /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.qZlQgP/state/.watch.lock.steal.owner.Ka4Fwq
+drwx------@  3 kunchen  staff   96 Sep 25 16:47 .watch.lock.steal.owner.Ka4Fwq
+.watch.lock present pid=70943 alive=no
+.watch.lock.steal present pid=71113 alive=no
+== re-arm same home (no shim)
+watcher: started pid=74002 (beacon fresh)
+check: rearm-resurface
+nested .steal.steal ever present: no
+arm2 exit=0

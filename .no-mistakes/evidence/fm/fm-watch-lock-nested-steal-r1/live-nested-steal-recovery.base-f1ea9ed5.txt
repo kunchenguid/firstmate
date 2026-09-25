@@ -1,0 +1,19 @@
+== residue before arm (holder pid 86288 killed, primary owner pid 86267 dead)
+drwxr-xr-x@ 3 kunchen  staff   96 Sep 25 16:46 .watch.lock
+lrwxr-xr-x@ 1 kunchen  staff  107 Sep 25 16:46 .watch.lock.steal -> /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.NbNSAH/state/.watch.lock.steal.owner.i4jolB
+drwx------@ 3 kunchen  staff   96 Sep 25 16:46 .watch.lock.steal.owner.i4jolB
+lrwxr-xr-x@ 1 kunchen  staff  113 Sep 25 16:46 .watch.lock.steal.steal -> /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-lab.NbNSAH/state/.watch.lock.steal.steal.owner.3B2tIC
+drwx------@ 3 kunchen  staff   96 Sep 25 16:46 .watch.lock.steal.steal.owner.3B2tIC
+== running bin/fm-watch-arm.sh in the lab home (FM_GATE_REFUSE_BYPASS=1 only lifts the disposable-checkout refusal, as tests/lib.sh does)
+== arm status line
+watcher: started pid=87350 (beacon fresh)
+== lock state after arm
+started watcher pid=87350 alive=no
+lock pid= alive=no
+nested .steal.steal present: no
+steal present: no
+== full arm output so far
+watcher: started pid=87350 (beacon fresh)
+check: rearm-resurface
+== teardown: TERM the arm
+arm exit=0

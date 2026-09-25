@@ -1,0 +1,23 @@
+== SIGKILL watcher child ? while it holds .watch.lock.steal
+arm1 exit=1
+watcher: FAILED - no live watcher with a fresh beacon
+== residue left by killed child
+.watch.lock pid=64894 alive=no
+.watch.lock.steal pid=64976 alive=no
+== re-arm same home with ln trace
+watcher: started pid=73171 (beacon fresh)
+check: rearm-resurface
+-- lock links created during re-arm:
+   1 ln -> .home-summary-refresh.lock
+   1 ln -> .wake-queue.lock
+   1 ln -> .watch-cycle-exits.lock
+   1 ln -> .watch-deliveries.lock
+   1 ln -> .watch.lock
+   1 ln -> .watch.lock.steal
+   1 ln -> .watch.lock.steal.steal
+   4 ln -> .watcher-down.lock
+NESTED .steal.steal CREATED
+-- residue after re-arm:
+(none)
+
+NOTE: the stalled child outlived FM_ARM_CONFIRM_TIMEOUT=3, so the arm itself failed the start and terminated it mid-steal before the scripted SIGKILL (pgrep found no child); the resulting dead .watch.lock.steal owner is the incident residue the re-arm then faces.

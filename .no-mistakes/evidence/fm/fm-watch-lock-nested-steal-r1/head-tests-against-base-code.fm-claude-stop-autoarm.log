@@ -1,0 +1,26 @@
+ok - auto-arm: inert in a linked child worktree even when in-flight
+ok - auto-arm: inert with no session lock
+ok - auto-arm: a demonstrably dead recorded session owner is reclaimed through fm-lock.sh before arming
+ok - auto-arm: inert without arm, rewake, or lock replacement when another live harness owns the home
+ok - auto-arm: inert while AFK owns supervision
+ok - auto-arm: stale-owner recovery leaves the AFK and supervision-need gates unchanged
+ok - auto-arm: resolves the outermost pid of a nested contiguous claude ancestry (bg-spare chain)
+ok - auto-arm: inert with nothing in flight and no X-mode need
+ok - auto-arm: actionable close translates to exactly one exit-2 rewake with reason
+ok - auto-arm: actionable close survives a healthy successor without duplicate delivery
+ok - auto-arm: an attached cycle's end starts a handling successor named after the closed arm before the rewake
+ok - auto-arm: an unconfirmed handling successor is reported in the rewake instead of blocking it
+ok - auto-arm: bounded failure verification emits one automatic-mechanism alarm
+ok - auto-arm: consecutive failures keep Stop-owned retry without repeating notice
+ok - auto-arm: marker-write refusal defers delivery until one successor commits the notice
+ok - auto-arm: unverified clean close exhausts retries and fails closed
+ok - auto-arm: post-alarm actionable outcomes cannot continue or reset failure state
+ok - auto-arm: benign cycle end with a live watcher and fresh beacon stays silent across the next cycle
+ok - auto-arm: budget contention preserves the episode and forces a reset retry
+ok - auto-arm: owner-mutex contention preserves successor episode state
+ok - auto-arm: X-mode poll need arms the cycle even with no tasks in flight
+ok - auto-arm: a registered custom check arms the cycle even with no tasks in flight
+ok - auto-arm: concurrent firings admit one owner and one rewake translation
+ok - auto-arm: TERM mid-arm commits a durable failure and exits 2 for rewake
+ok - auto-arm: an abandoned owner claim is reclaimed so a lapsed cycle re-arms
+not ok - reclaiming past a dead steal owner created a nested steal marker: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-claude-stop-autoarm.LZ1rHn/abandoned-claim-dead-steal/state/.claude-autoarm.lock.steal.steal /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-claude-stop-autoarm.LZ1rHn/abandoned-claim-dead-steal/state/.claude-autoarm.lock.steal /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-claude-stop-autoarm.LZ1rHn/abandoned-claim-dead-steal/state/.claude-autoarm.lock /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-claude-stop-autoarm.LZ1rHn/abandoned-claim-dead-steal/state/.watcher-down.lock /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-claude-stop-autoarm.LZ1rHn/abandoned-claim-dead-steal/state/.claude-autoarm.lock 

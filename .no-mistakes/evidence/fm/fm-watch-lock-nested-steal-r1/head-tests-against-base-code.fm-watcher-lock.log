@@ -1,0 +1,28 @@
+ok - wait deadline diagnoses and reaps a stopped test child without hanging
+ok - simultaneous watcher starts leave exactly one live process
+ok - fm_pid_identity real ps fallback is locale-invariant
+ok - fm_pid_identity is locale-invariant across LC_ALL/LC_TIME
+ok - fm_pid_identity ps fallback is terminal-width-invariant
+ok - /proc process identity ignores simulated btime changes
+ok - /proc process identity detects pid reuse
+ok - MSYS /proc process identity regression skipped on non-Windows host
+ok - killed watcher stale lock is reclaimed
+tests/fm-watcher-lock.test.sh: line 1469: 46495 Killed: 9                  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_remove_path() {
+      if [ "$1" = "$STATE/.watch.lock" ]; then
+        kill -KILL "${BASHPID:-$$}"
+      fi
+      return 1
+    }
+    fm_lock_try_acquire "$2"
+  ' _ "$LIB" "$lockdir" > /dev/null 2>&1
+ok - stale watcher reclaim publishes durable recovery evidence before clear
+ok - live watcher lock with stale heartbeat is actionable
+ok - live watcher lock with a beacon past the hard bound is replaced, under it is still refused
+ok - guard banner leads when down with pending wakes (repair-after-drain) and stays silent when live and fresh
+ok - concurrent fm_lock_try_acquire yields exactly one winner
+ok - dead-pid stale lock is reclaimed by a single acquirer
+ok - concurrent stale-lock steal yields exactly one winner
+not ok - reclaiming a dead steal owner created a nested steal marker: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.JlaTaJ/lock-dead-steal-owner/state/.contend.lock.steal.steal /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.JlaTaJ/lock-dead-steal-owner/state/.contend.lock.steal /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-watcher-lock-tests.JlaTaJ/lock-dead-steal-owner/state/.contend.lock 
+exit=
