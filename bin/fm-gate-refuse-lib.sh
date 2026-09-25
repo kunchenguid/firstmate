@@ -32,6 +32,20 @@
 # crew worktree - has NEITHER signal and is COMPLETELY unaffected: the function
 # returns 0 and the lifecycle proceeds exactly as before.
 #
+# THE ONE AUTHORIZED EXCEPTION - a disposable lab home: a gate agent may drive
+# lifecycle against an FM_HOME that carries the FM_GATE_LAB_MARKER file, because
+# that file can only ever be stamped on a FRESH empty dir by bin/fm-lab-home.sh
+# (fm_gate_lab_mark refuses a populated dir, so no call path marks a real home).
+# The allowance additionally requires every FM_*_OVERRIDE to be unset, so the
+# lab call always uses the marked home's stock layout and no override can split
+# part of the "lab" back onto the real fleet. The threat model stays a CONFUSED
+# agent: a hostile agent that would hand-forge the marker file is the
+# adversarial case no-mistakes' neutral-execution-context and the
+# HEAD-continuity guard already own, so the check is a plain token file, not a
+# bound record. This is an allowance on the CAPABILITY side only:
+# fm_is_gate_agent still reports the gate context, so the sessionstart
+# stand-downs that read it directly are unaffected by the marker.
+#
 # This mirrors the unspoofable-marker precedent in bin/fm-marker-lib.sh: a signal
 # the agent cannot forge, keyed on at a chokepoint, keeping the pattern familiar
 # to firstmate maintainers. It layers ABOVE no-mistakes' separately-shipping
@@ -63,6 +77,42 @@
 # test as "the gate refusal fired" rather than an ordinary usage error.
 FM_GATE_REFUSE_EXIT=3
 
+# The disposable-lab-home marker file and the token line it must carry. The
+# format is owned here; bin/fm-lab-home.sh is the only writer.
+FM_GATE_LAB_MARKER='.fm-lab-home'
+FM_GATE_LAB_TOKEN='fm-lab-home v1'
+
+# fm_gate_lab_home <dir>: return 0 when <dir> is a marked disposable lab home.
+fm_gate_lab_home() {
+  local home=${1:-}
+  [ -n "$home" ] || return 1
+  [ -f "$home/$FM_GATE_LAB_MARKER" ] || return 1
+  [ "$(sed -n '1p' "$home/$FM_GATE_LAB_MARKER" 2>/dev/null || true)" = "$FM_GATE_LAB_TOKEN" ]
+}
+
+# fm_gate_lab_mark <dir>: stamp <dir> as a disposable lab home. Fails closed on
+# any dir that is not empty, so this can never mark a populated real home.
+fm_gate_lab_mark() {
+  local home=${1:-}
+  [ -n "$home" ] && [ -d "$home" ] || return 1
+  [ -z "$(ls -A "$home" 2>/dev/null)" ] || return 1
+  printf '%s\n' "$FM_GATE_LAB_TOKEN" > "$home/$FM_GATE_LAB_MARKER"
+}
+
+# fm_gate_lab_permitted: return 0 when the current call targets a marked lab
+# home through a stock layout - $FM_HOME carries the marker and no
+# FM_*_OVERRIDE relocation is set.
+fm_gate_lab_permitted() {
+  local v
+  fm_gate_lab_home "${FM_HOME:-}" || return 1
+  for v in "${!FM_@}"; do
+    case "$v" in
+      *_OVERRIDE) [ -z "${!v}" ] || return 1 ;;
+    esac
+  done
+  return 0
+}
+
 # fm_is_gate_agent: return 0 without output when this process looks like a
 # no-mistakes gate agent. An optional root anchors the git-common-dir check;
 # callers that omit it retain the historical current-worktree behavior.
@@ -93,6 +143,10 @@ fm_is_gate_agent() {
 # own test harness sets FM_GATE_REFUSE_BYPASS=1 (see the header).
 fm_refuse_if_gate_agent() {
   fm_is_gate_agent "${1:-.}" || return 0
+  if fm_gate_lab_permitted; then
+    echo "fm-gate-refuse: gate agent lifecycle permitted only against lab home $FM_HOME" >&2
+    return 0
+  fi
   if [ "$FM_GATE_REFUSE_REASON" = env ]; then
     echo "error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)" >&2
   else
