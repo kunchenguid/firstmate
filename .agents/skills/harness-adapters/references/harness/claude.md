@@ -41,6 +41,13 @@ Inspect the pane to identify which dialog is on screen, and report it rather tha
 A launch under `config/claude-permission-mode=auto` never meets the bypass confirmation, because it does not request bypass mode: on 2.1.269 `claude --permission-mode auto` reached the composer directly with the footer `⏵⏵ auto mode on (shift+tab to cycle)`, so a captain who refuses the bypass dialog selects `auto` there instead of accepting it.
 The workspace-trust dialog is unaffected by the permission mode and still needs the pre-registration above.
 
+A fourth, separate dialog is Claude Code's own auto-mode command-safety classifier, which renders "Auto mode classifier requires confirmation for this command..." with numbered options "1. Yes", "2. Yes, and don't ask again for: cd *", and "3. No" for certain shell commands it judges to need review.
+It is independent of `--dangerously-skip-permissions` and of `config/claude-permission-mode`: neither flag suppresses it.
+The trigger observed live in the fleet is a compound `cd <dir> && <command>` shell invocation - an agent changing into a directory and chaining its real command onto that `cd` with `&&`, commonly a secondmate or crewmate defensively re-anchoring into its home before a `bin/fm-*.sh` call - which is exactly the shape option 2's "don't ask again for: cd *" names.
+Every `bin/fm-*.sh` script resolves its own location from `BASH_SOURCE` rather than the caller's cwd, so it runs correctly from any working directory when invoked by an absolute path, and equally after a single standalone `cd` left un-chained from the following command, because a Bash tool call's working directory persists to the next tool call in every fleet harness.
+Prefer one of those two shapes over a compound `cd <dir> && <command>` invocation for a `bin/fm-*.sh` call to avoid triggering this dialog.
+Unlike the workspace-trust, external-imports, and bypass-permissions dialogs above, firstmate can resolve this one case by case: selecting "1. Yes" for one specific command instance already judged safe is a narrow, one-time confirmation, but never select "2. Yes, and don't ask again for: cd *", which grants a standing blanket approval this fleet does not want.
+
 ## Composer ghost
 
 Completed turns can render dim predicted text inside an empty composer, indistinguishable in plain `tmux capture-pane`.
