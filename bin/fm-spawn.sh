@@ -351,7 +351,7 @@
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
-# Kimi 2.0.0 also gates a fresh worktree on an interactive folder-trust dialog.
+# Kimi (2.0.0 through 2.1.1) also gates a fresh worktree on an interactive folder-trust dialog.
 # Its launch-readiness loop reads the visible viewport - so the spawn refuses at
 # preflight on a backend with no viewport-bounded capture - recognizes the
 # complete dialog, re-selects the already highlighted affirmative option on

@@ -55,6 +55,10 @@
 #                writes its model name there); a titled bottom border that
 #                still starts and ends with the family's rule glyph is
 #                tolerated, including Grok 1.0.5's three-column title overhang.
+#                Kimi 2.1.1 draws its permission-tier status row and its
+#                `context: N%` meter directly below the box; the cursorless
+#                staleness probe skips exactly those two rows as furniture
+#                (_fm_composer_row_is_kimi_footer, declared below).
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
 #                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
