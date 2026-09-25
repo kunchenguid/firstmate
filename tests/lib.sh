@@ -68,6 +68,13 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# Clear the herdr runtime marker. Suites simulate a tmux primary with a fake
+# $TMUX that names no live pane, and an operator shell inside herdr exports
+# HERDR_ENV=1, which outranks such a $TMUX (bin/fm-backend.sh's
+# fm_backend_tmux_env_masked_by_herdr) and would silently switch those cases
+# to herdr. A case that exercises herdr detection sets HERDR_ENV itself.
+unset HERDR_ENV
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
@@ -377,6 +384,22 @@ fm_live_gate() {
   done
 
   return 0
+}
+
+# fm_test_tmux_live_pane <socket>: start a detached real tmux server on the
+# private <socket> path (no user config) and print "<TMUX value> <pane id>" for
+# its only pane - the exact pair tmux exports into a process running there.
+# Keep <socket> short (macOS caps socket paths near 104 bytes). The caller
+# stops it with `tmux -S <socket> kill-server`; a case that dies first leaves
+# it to exit with its two-minute pane command. Returns 1 when tmux is absent
+# or the server does not start.
+fm_test_tmux_live_pane() {
+  local sock=$1 pid pane
+  command -v tmux >/dev/null 2>&1 || return 1
+  tmux -S "$sock" -f /dev/null new-session -d -s fmlive 'sleep 120' >/dev/null 2>&1 || return 1
+  pid=$(tmux -S "$sock" display-message -p -t fmlive '#{pid}' 2>/dev/null) || return 1
+  pane=$(tmux -S "$sock" display-message -p -t fmlive '#{pane_id}' 2>/dev/null) || return 1
+  printf '%s,%s,0 %s\n' "$sock" "$pid" "$pane"
 }
 
 # --- fakebin / PATH shims ---------------------------------------------------

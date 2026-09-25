@@ -230,12 +230,6 @@ test_backend_detect_precedence() {
     || fail "fm_backend_detect should succeed when CMUX_WORKSPACE_ID is set"
   [ "$out" = cmux ] || fail "fm_backend_detect should report cmux for CMUX_WORKSPACE_ID alone, got '$out'"
 
-  # Nesting: tmux started inside a herdr pane carries BOTH markers. Innermost
-  # (tmux) must win, since that is the surface firstmate is actually running on.
-  out=$(unset CMUX_WORKSPACE_ID; TMUX='fake,1,0' HERDR_ENV=1 fm_backend_detect) \
-    || fail "fm_backend_detect should succeed with both markers present"
-  [ "$out" = tmux ] || fail "fm_backend_detect should resolve nesting innermost-first (tmux over herdr), got '$out'"
-
   # Nesting: tmux started inside a cmux-provided shell carries BOTH markers.
   # cmux is a terminal application, not a nestable multiplexer, so the
   # innermost multiplexer (tmux) must still win.
@@ -249,12 +243,80 @@ test_backend_detect_precedence() {
     || fail "fm_backend_detect should succeed with herdr and cmux markers present"
   [ "$out" = herdr ] || fail "fm_backend_detect should resolve nesting innermost-first (herdr over cmux), got '$out'"
 
-  # Pathological: all three markers present. tmux still wins (innermost of all).
-  out=$(TMUX='fake,1,0' HERDR_ENV=1 CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect) \
-    || fail "fm_backend_detect should succeed with all three markers present"
-  [ "$out" = tmux ] || fail "fm_backend_detect should resolve nesting innermost-first with all three markers (tmux wins), got '$out'"
-
   pass "fm_backend_detect: no markers -> undetected, HERDR_ENV=1 -> herdr, \$TMUX -> tmux, CMUX_WORKSPACE_ID -> cmux, nested combinations resolve innermost-first"
+}
+
+# fm_backend_detect with tmux AND herdr markers: $TMUX outranks HERDR_ENV=1
+# only when $TMUX_PANE resolves on the tmux server $TMUX names. A herdr server
+# started from a tmux shell hands that shell's $TMUX/$TMUX_PANE to every herdr
+# pane, where they name a pane that does not exist; auto-detection must then
+# pick herdr instead of spawning into an unrelated tmux session. Uses a REAL
+# tmux server on a private socket so the liveness probe is exercised for real,
+# including tmux's habit of printing nothing yet exiting 0 for a missing pane.
+test_backend_detect_tmux_liveness_under_herdr() {
+  local dir sock live live_tmux live_pane out errfile cfg
+  if ! command -v tmux >/dev/null 2>&1; then
+    echo "skip: tmux not found (tmux liveness under herdr)"
+    return 0
+  fi
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/fmtx.XXXXXX")
+  sock="$dir/s"
+  live=$(fm_test_tmux_live_pane "$sock") || { rm -rf "$dir"; fail "could not start a private tmux server for the liveness cases"; }
+  live_tmux=${live% *}
+  live_pane=${live#* }
+  errfile="$dir/err"
+  cfg="$dir/config-empty"
+  mkdir -p "$cfg"
+
+  # Proven path: a live tmux pane nested in herdr still resolves to tmux.
+  out=$(unset CMUX_WORKSPACE_ID; TMUX="$live_tmux" TMUX_PANE="$live_pane" HERDR_ENV=1 HERDR_PANE_ID=w1:p1 fm_backend_detect) \
+    || fail "fm_backend_detect should succeed for a live tmux pane nested in herdr"
+  [ "$out" = tmux ] || fail "a live tmux pane nested in herdr must resolve to tmux (innermost first), got '$out'"
+
+  # All three markers with a live pane: tmux still wins (innermost of all).
+  out=$(TMUX="$live_tmux" TMUX_PANE="$live_pane" HERDR_ENV=1 CMUX_WORKSPACE_ID='fake-uuid' fm_backend_detect) \
+    || fail "fm_backend_detect should succeed with all three markers present"
+  [ "$out" = tmux ] || fail "all three markers with a live tmux pane must resolve to tmux, got '$out'"
+
+  # Regression: the server $TMUX names is running but $TMUX_PANE is not on it.
+  out=$(unset CMUX_WORKSPACE_ID; TMUX="$live_tmux" TMUX_PANE='%999999' HERDR_ENV=1 HERDR_PANE_ID=w2:p1 fm_backend_detect) \
+    || fail "fm_backend_detect should still detect herdr under a stale tmux pane"
+  [ "$out" = herdr ] || fail "a stale \$TMUX_PANE under herdr must fall through to herdr, got '$out'"
+  (
+    unset CMUX_WORKSPACE_ID
+    TMUX="$live_tmux" TMUX_PANE='%999999' HERDR_ENV=1 HERDR_PANE_ID=w2:p1 fm_backend_detect >/dev/null
+    [ "$FM_BACKEND_DETECT_SIGNAL" = HERDR_ENV ] || fail "stale tmux under herdr should report the HERDR_ENV signal, got '$FM_BACKEND_DETECT_SIGNAL'"
+  ) || exit 1
+
+  # The server $TMUX names is gone entirely.
+  out=$(unset CMUX_WORKSPACE_ID; TMUX="$dir/gone,1,0" TMUX_PANE='%1' HERDR_ENV=1 fm_backend_detect) \
+    || fail "fm_backend_detect should detect herdr when \$TMUX names a dead server"
+  [ "$out" = herdr ] || fail "\$TMUX naming a dead tmux server under herdr must fall through to herdr, got '$out'"
+
+  # \$TMUX without any \$TMUX_PANE proves no pane either.
+  out=$(unset CMUX_WORKSPACE_ID TMUX_PANE; TMUX="$live_tmux" HERDR_ENV=1 fm_backend_detect) \
+    || fail "fm_backend_detect should detect herdr when \$TMUX_PANE is absent"
+  [ "$out" = herdr ] || fail "\$TMUX without \$TMUX_PANE under herdr must fall through to herdr, got '$out'"
+
+  # Plain tmux without herdr is unchanged: no liveness probe, still tmux.
+  out=$(unset HERDR_ENV CMUX_WORKSPACE_ID; TMUX="$dir/gone,1,0" TMUX_PANE='%1' fm_backend_detect) \
+    || fail "fm_backend_detect should still detect tmux from \$TMUX without herdr"
+  [ "$out" = tmux ] || fail "plain \$TMUX without herdr must keep resolving to tmux, got '$out'"
+
+  # fm_backend_name: both outcomes stay silent, and explicit settings still win.
+  : > "$errfile"
+  out=$(unset CMUX_WORKSPACE_ID; TMUX="$live_tmux" TMUX_PANE="$live_pane" HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = tmux ] || fail "nested live tmux-in-herdr should auto-detect tmux, got '$out'"
+  [ ! -s "$errfile" ] || fail "nested tmux-in-herdr auto-detect must stay silent"$'\n'"$(cat "$errfile")"
+  out=$(unset CMUX_WORKSPACE_ID; TMUX="$live_tmux" TMUX_PANE='%999999' HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = herdr ] || fail "stale tmux markers under herdr should auto-detect herdr, got '$out'"
+  [ ! -s "$errfile" ] || fail "herdr auto-detect under stale tmux markers must stay silent"$'\n'"$(cat "$errfile")"
+  out=$(unset CMUX_WORKSPACE_ID; TMUX="$live_tmux" TMUX_PANE='%999999' HERDR_ENV=1 FM_BACKEND=tmux FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name)
+  [ "$out" = tmux ] || fail "FM_BACKEND=tmux must still win over detection, got '$out'"
+
+  tmux -S "$sock" kill-server >/dev/null 2>&1 || true
+  rm -rf "$dir"
+  pass "fm_backend_detect: \$TMUX outranks HERDR_ENV=1 only for a live pane; stale or dead tmux markers under herdr fall through to herdr; plain tmux unchanged"
 }
 
 # fm_backend_detect's cmux FALLBACK signals (docs/cmux-backend.md "Runtime
@@ -441,11 +503,6 @@ test_backend_name_autodetect_notice() {
     "fm_backend_name's cmux auto-detect notice did not name the opt-out"
   assert_contains "$(cat "$errfile")" "--backend tmux" \
     "fm_backend_name's cmux auto-detect notice did not name the --backend tmux opt-out"
-
-  : > "$errfile"
-  out=$(unset CMUX_WORKSPACE_ID; TMUX='fake,1,0' HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
-  [ "$out" = tmux ] || fail "nested tmux-in-herdr should auto-detect tmux (innermost first), got '$out'"
-  [ -s "$errfile" ] && fail "nested tmux-in-herdr auto-detect (result tmux) must stay silent"$'\n'"$(cat "$errfile")"
 
   : > "$errfile"
   out=$(unset HERDR_ENV; TMUX='fake,1,0' CMUX_WORKSPACE_ID='fake-uuid' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
@@ -839,6 +896,16 @@ make_spawn_fakebin() {  # <dir> <fake-worktree-path> -> echoes fakebin dir
 #!/usr/bin/env bash
 set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
+# The \$TMUX liveness probe (tmux -S <socket> display-message -p -t <pane>
+# '#{pane_id}') proves exactly the pane FM_FAKE_TMUX_LIVE_PANE names.
+if [ "\${1:-}" = -S ]; then
+  shift 2
+  for a in "\$@"; do
+    [ "\$a" = '#{pane_id}' ] || continue
+    [ -n "\${FM_FAKE_TMUX_LIVE_PANE:-}" ] && [ "\${TMUX_PANE:-}" = "\$FM_FAKE_TMUX_LIVE_PANE" ] && printf '%s\\n' "\$TMUX_PANE"
+    exit 0
+  done
+fi
 case "\${1:-}" in
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
@@ -1170,14 +1237,15 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   mkdir -p "$state" "$config"
 
   # No --backend, no FM_BACKEND, no config/backend: nothing is explicitly
-  # configured, so auto-detect runs. $TMUX and HERDR_ENV=1 are both present
-  # (tmux nested inside a herdr pane) - the full fm-spawn.sh pipeline, not just
+  # configured, so auto-detect runs. $TMUX, a $TMUX_PANE the fake tmux proves
+  # live, and HERDR_ENV=1 are all present (tmux nested inside a herdr pane) -
+  # the full fm-spawn.sh pipeline, not just
   # fm_backend_name, must resolve this to tmux and stay completely silent about
   # it (today's default path, byte-identical).
   out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
-    FM_TMUX_LOG="$TMP_ROOT/nest.log" \
+    TMUX_PANE=%7 FM_FAKE_TMUX_LIVE_PANE=%7 FM_TMUX_LOG="$TMP_ROOT/nest.log" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
   expect_code 0 $? "fm-spawn.sh should auto-detect tmux and spawn successfully for nested tmux-in-herdr"$'\n'"$out"
   assert_no_grep 'backend=' "$state/$id.meta" \
@@ -1198,6 +1266,7 @@ backend_base_ref >/dev/null
 
 test_backend_name_precedence
 test_backend_detect_precedence
+test_backend_detect_tmux_liveness_under_herdr
 test_backend_detect_cmux_fallback_bundle_id
 test_backend_detect_cmux_fallback_requires_darwin
 test_backend_detect_cmux_fallback_tmux_nested_false_positive

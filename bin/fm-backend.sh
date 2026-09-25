@@ -94,8 +94,13 @@ fm_backend_is_known() {  # <name>
 # and returns 0, or returns 1 when nothing is detected. Nesting resolves
 # INNERMOST-first: tmux sets $TMUX in every process running inside it, even a
 # tmux started inside a herdr pane, so $TMUX is checked first and wins over
-# HERDR_ENV=1 in that nested case. herdr injects HERDR_ENV=1 (plus
-# HERDR_SOCKET_PATH/HERDR_PANE_ID) into every process it manages a pane for;
+# HERDR_ENV=1 in that nested case - but only when $TMUX_PANE resolves to a live
+# pane on the server $TMUX names (fm_backend_tmux_env_masked_by_herdr). A herdr
+# server started from a tmux shell hands that shell's now-meaningless $TMUX and
+# $TMUX_PANE to every herdr pane, so an unresolvable pane there falls through
+# to herdr instead of steering spawns into an unrelated tmux session. herdr
+# injects HERDR_ENV=1 (plus HERDR_SOCKET_PATH/HERDR_PANE_ID) into every process
+# it manages a pane for;
 # HERDR_ENV=1 alone (no $TMUX) selects herdr. cmux injects CMUX_WORKSPACE_ID
 # (plus CMUX_SURFACE_ID/CMUX_SOCKET_PATH and the legacy CMUX_TAB_ID/
 # CMUX_PANEL_ID aliases) into every terminal surface it spawns - verified from
@@ -138,10 +143,34 @@ fm_backend_is_known() {  # <name>
 # FM_BACKEND_DETECTED after a direct (non-command-substitution) call.
 FM_BACKEND_CMUX_BUNDLE_ID="com.cmuxterm.app"
 
+# fm_backend_tmux_env_live: whether the inherited $TMUX_PANE is a pane that
+# exists on the tmux server whose socket $TMUX names (its first comma field).
+# One silent `tmux display-message` probe; false when either variable is empty,
+# tmux is absent, the server is gone, or the pane is not on it.
+fm_backend_tmux_env_live() {
+  local socket=${TMUX:-} pane=${TMUX_PANE:-} out
+  socket=${socket%%,*}
+  [ -n "$socket" ] && [ -n "$pane" ] || return 1
+  command -v tmux >/dev/null 2>&1 || return 1
+  out=$(tmux -S "$socket" display-message -p -t "$pane" '#{pane_id}' 2>/dev/null) || return 1
+  [ "$out" = "$pane" ]
+}
+
+# fm_backend_tmux_env_masked_by_herdr: the one owner of when inherited tmux
+# markers must NOT outrank herdr - HERDR_ENV=1 is present and the tmux markers
+# do not prove a live pane (fm_backend_tmux_env_live). Only a herdr marker
+# triggers the probe, so plain tmux without herdr never pays for it and keeps
+# resolving to tmux exactly as before. Shared by fm_backend_detect and
+# bin/fm-supervisor-target-lib.sh's supervisor-pane discovery.
+fm_backend_tmux_env_masked_by_herdr() {
+  [ "${HERDR_ENV:-}" = "1" ] || return 1
+  ! fm_backend_tmux_env_live
+}
+
 fm_backend_detect() {
   FM_BACKEND_DETECTED=""
   FM_BACKEND_DETECT_SIGNAL=""
-  if [ -n "${TMUX:-}" ]; then
+  if [ -n "${TMUX:-}" ] && ! fm_backend_tmux_env_masked_by_herdr; then
     FM_BACKEND_DETECTED=tmux
     FM_BACKEND_DETECT_SIGNAL=TMUX
     printf 'tmux'
