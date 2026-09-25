@@ -253,9 +253,16 @@ foreign_stall_watch_leg() {  # <dir> <leg> <now> [observation]
       sleep 0.1
       i=$((i + 1))
     done
-    ! is_live_non_zombie "$pid" || kill -TERM "$pid" 2>/dev/null || true
+    # This leg tests the queue observation, not watcher shutdown/recovery.
+    # TERM can leave bash waiting in a child on some runners; stop the owned
+    # fixture process and clear only its watcher lifecycle state before the
+    # next leg starts against the same queue and progress marker.
+    ! is_live_non_zombie "$pid" || kill -KILL "$pid" 2>/dev/null || true
   fi
   wait_for_exit "$pid" 600 || true
+  if [ -n "$observation" ]; then
+    rm -rf -- "$dir/state/.watch.lock" "$dir/state/.watcher-down"
+  fi
   if [ -n "$observation" ]; then
     [ "$(cat "$marker" 2>/dev/null || true)" = "$observation" ] \
       || fail "watcher leg $leg did not record observation '$observation': $(cat "$marker" 2>/dev/null)"
