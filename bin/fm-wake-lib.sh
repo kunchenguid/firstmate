@@ -764,7 +764,11 @@ _fm_recovery_marker_ack() {
   line=$FM_RECOVERY_MARKER_TOKEN
   case "$line" in
     pending:*|announced:*) line="acked:${line#*:}" ;;
-    acked:*) fm_lock_release "$lock"; return 0 ;;
+    acked:*)
+      rm -f -- "${marker}.reopen-count" "${marker}.reopen-settled" 2>/dev/null || true
+      fm_lock_release "$lock"
+      return 0
+      ;;
     *) fm_lock_release "$lock"; return 1 ;;
   esac
   tmp=$(mktemp "${marker}.tmp.XXXXXX") || { fm_lock_release "$lock"; return 1; }
