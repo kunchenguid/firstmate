@@ -506,8 +506,8 @@ test_ship_project_memory_wording() {
     "project-memory contract still permits additions of missing knowledge"
   assert_no_grep "if this task produced durable project-intrinsic knowledge" "$brief" \
     "project-memory contract still invites additions for durable knowledge"
-  assert_grep "run \`$ROOT/bin/fm-ensure-agents-md.sh" "$brief" \
-    "project-memory contract no longer defers to the ensure helper for a correction"
+  assert_grep "A correction edits only the wrong text: do not run \`$ROOT/bin/fm-ensure-agents-md.sh\`" "$brief" \
+    "project-memory contract no longer forbids the ensure helper on a correction"
   pass "fm-brief.sh: ship project-memory wording bounds edits to corrections of wrong information"
 }
 

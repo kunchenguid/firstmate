@@ -23,11 +23,10 @@
 # filesystem (issue #389). The real-file pointer also eliminates the old
 # uppercase-literal-target dangling-symlink hazard that a CLAUDE.md -> AGENTS.md
 # link would have carried for that same mismatch.
-# This is a worktree utility for crewmates, not a supervision script, so it does
-# not call fm-guard.sh. Crewmates reach for it only alongside a correction of
-# factually wrong content in an existing memory file: AGENTS.md section 6 owns
-# the policy that worker edits correct and never add, so this script is not how
-# a task grows a project's memory.
+# This is a manual project-initialization utility, not a supervision script,
+# so it does not call fm-guard.sh. No brief calls it: the sections it inserts
+# and the pointer it creates are additions, and AGENTS.md section 6 bounds
+# crewmate edits of project memory files to correcting the wrong text only.
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
 set -eu
 
