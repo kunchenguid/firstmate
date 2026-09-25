@@ -32,6 +32,13 @@ FAKEBIN=$(fm_fakebin "$TMP_ROOT/harness-bin")
 ln -s /bin/bash "$FAKEBIN/claude"
 NAMED_CLAUDE="$FAKEBIN/claude"
 
+# A session started by typing `Claude` on macOS's case-insensitive filesystem
+# runs claude under that process name. Its own directory keeps that name apart
+# from the lowercase one on such a filesystem.
+mkdir -p "$TMP_ROOT/titled-bin"
+ln -s /bin/bash "$TMP_ROOT/titled-bin/Claude"
+TITLED_CLAUDE="$TMP_ROOT/titled-bin/Claude"
+
 # --- unit layer: identity behind a deterministic process table ---------------
 
 # Run one library expression with <fakebin> shadowing ps. kill is stubbed so
@@ -92,6 +99,58 @@ SH
       || fail "$shape: the session holding the lock did not recognize itself as the owner"
   done
   pass "session-lock: a version-named Claude Code session is identified from its install path and argv[0]"
+}
+
+# A session started by typing `Claude` (or `CLAUDE`) on macOS's case-insensitive
+# filesystem reports exactly that spelling in `ps -o comm=` and argv[0], with no
+# install path in either, so a lowercase-only name match found no harness at all
+# and every session start went read-only.
+test_capitalized_title_is_a_trusted_claude_session() {
+  local dir fakebin got
+  dir="$TMP_ROOT/capitalized-title"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  700:comm=) printf '%s\n' "$FM_TEST_TITLE" ;;
+  700:args=) printf '%s\n' "$FM_TEST_TITLE --dangerously-skip-permissions" ;;
+  700:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' /bin/zsh ;;
+  *:args=) printf '%s\n' /bin/zsh ;;
+  *:ppid=) printf '%s\n' 700 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '700\n' > "$dir/state/.lock"
+
+  for title in Claude CLAUDE; do
+    export FM_TEST_TITLE=$title
+    got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+      || fail "$title: the session was not found in the ancestry at all"
+    [ "$got" = 700 ] || fail "$title: ancestry resolved '$got', expected the session pid 700"
+    lib_eval "$fakebin" 'fm_harness_pid_alive 700' \
+      || fail "$title: a live session was not recognized as a harness"
+    lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+      || fail "$title: the session holding the lock did not recognize itself as the owner"
+    got=$(FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=700 lib_eval "$fakebin" 'fm_session_lock_trusted_session_id') \
+      || fail "$title: the model-loop process failed the trusted session-id gate"
+    [ "$got" = S1 ] || fail "$title: the trusted session id was '$got', expected S1"
+    got=$(FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=700 lib_eval "$fakebin" 'fm_session_lock_anchor_pid') \
+      || fail "$title: no anchor pid was resolved"
+    [ "$got" = 700 ] || fail "$title: the session anchored '$got', expected its model-loop pid 700"
+  done
+  unset FM_TEST_TITLE
+  pass "session-lock: a Claude Code session launched as Claude or CLAUDE is identified and anchors its lock"
 }
 
 # A harness that is pid 1 of its own PID namespace - a container, or the
@@ -533,6 +592,17 @@ test_e2e_version_named_session_claims_the_home() {
   [ -e "$dir/state/arm-ran" ] || fail "supervision never armed for a version-named session"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "no claim was recorded, got: $(epoch_outcome "$dir")"
   pass "session-lock e2e: a version-named session claims the home and arms supervision"
+}
+
+test_e2e_capitalized_title_session_claims_the_home() {
+  local dir
+  dir="$TMP_ROOT/e2e-capitalized-title"
+  make_primary_home "$dir"
+  run_fixture_tree "$dir" "$TITLED_CLAUDE"
+  expect_code 2 "$(hook_rc "$dir")" "a session titled Claude must claim its home and rewake"
+  [ -e "$dir/state/arm-ran" ] || fail "supervision never armed for a session titled Claude"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "no claim was recorded, got: $(epoch_outcome "$dir")"
+  pass "session-lock e2e: a session titled Claude claims the home and arms supervision"
 }
 
 test_e2e_daemon_parented_session_claims_the_home() {
@@ -1094,6 +1164,7 @@ test_verified_reclaim_keeps_new_sidecar() {
 }
 
 test_version_named_session_is_identified_on_both_platforms
+test_capitalized_title_is_a_trusted_claude_session
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
@@ -1101,6 +1172,7 @@ test_competing_version_named_session_is_seen_as_live
 test_same_session_id_owns_a_recycled_background_chain
 test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
 test_e2e_version_named_session_claims_the_home
+test_e2e_capitalized_title_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
 test_e2e_background_session_keeps_its_lock_across_a_recycled_chain

@@ -23,8 +23,10 @@
 
 # Known harness command names; extend when a new adapter is verified. omp is
 # anchored exactly like pi: its process name is the bare word `omp` (verified,
-# omp 18.1.11), and a substring match would claim ompd or comp.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
+# omp 18.1.11), and a substring match would claim ompd or comp. claude matches
+# in any letter case: macOS's case-insensitive filesystem runs a typed `Claude`
+# as claude, and ps then reports that spelling as the process name.
+FM_HARNESS_RE='[Cc][Ll][Aa][Uu][Dd][Ee]|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
@@ -70,7 +72,7 @@ fm_harness_process_matches() {  # <comm> <args>
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
-    case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+    case "$base" in *[Cc][Ll][Aa][Uu][Dd][Ee]*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
   argv0=${args%% *}

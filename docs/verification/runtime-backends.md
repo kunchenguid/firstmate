@@ -107,6 +107,43 @@ A single-process harness has no descendant that adds a distinct verdict, which i
 The portable regression pins every half without any harness installed: `tests/fm-harness-precedence.test.sh` asserts that this two-process topology decides at comm strength, that the descent probe reaches a strength the top-of-session probe cannot, that a sibling branch answering a foreign harness contributes no verdict, that a foreign args-only verdict at the deepest vantage leaves the comm-strength identity intact, and that equal-depth ties choose the comm-strength leaf regardless of process ordering.
 The run did not reach `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `muse`, which were not installed, and stopped at the same pre-existing liveness failure for `cursor` 3.18.9, whose resolved binary on that machine is the editor rather than `cursor-agent`; those adapters are unverified by this run.
 
+Rerun on 2026-09-25 on macOS 26.6.2 arm64 with the same command, every installed harness passed both halves:
+
+```text
+ok - harness liveness: claude 2.1.282 (Claude Code) classifies alive
+ok - harness detection: claude 2.1.282 (Claude Code) is identified by the ancestry walk at comm strength
+ok - harness liveness: codex codex-cli 0.156.1 classifies alive
+ok - harness detection: codex codex-cli 0.156.1 is identified by the ancestry walk at comm strength
+ok - harness liveness: opencode 1.18.23 classifies alive
+ok - harness detection: opencode 1.18.23 is identified by the ancestry walk at comm strength
+ok - harness liveness: pi 0.87.1 classifies alive
+ok - harness detection: pi 0.87.1 is identified by the ancestry walk at comm strength
+ok - harness liveness: kimi 0.31.1 classifies alive
+ok - harness detection: kimi 0.31.1 is identified by the ancestry walk at comm strength
+```
+
+That run reported `ancestry verdicts=[comm claude]` for Claude Code and `[comm codex;args codex]` for Codex, matching the topology above; `pi-signed`, `grok`, `cursor`, and `muse` were not installed and are unverified by it.
+
+### Launch-name spelling on case-insensitive filesystems
+
+The guard launches each harness by its installed name, so it cannot see a process name the operator chose at launch.
+macOS's default APFS volume is case-insensitive, so a typed `Claude` resolves to the installed `claude` launcher and runs it with argv[0] `Claude`, which `ps -o comm=` then reports.
+Verified 2026-09-25 on macOS 26.6.2 arm64 with Claude Code 2.1.282:
+
+```sh
+zsh -c 'SLEEP 3 & sleep 0.3; ps -o comm=,args= -p $!; wait'
+zsh -c 'Claude --version >/dev/null & p=$!; ps -o comm= -p $p; wait'
+```
+
+```text
+SLEEP SLEEP 3
+Claude
+```
+
+A session started that way held no lowercase `claude` anywhere in its name surfaces, so the session lock, the ancestry walk, and the liveness classifier all failed to recognize it.
+They now match the claude name in any letter case, which `tests/fm-session-lock-ancestry.test.sh`, `tests/fm-harness-precedence.test.sh`, and `tests/fm-tmux-agent-liveness.test.sh` pin with real processes.
+Other harness names are still matched only in the spelling their vendors ship.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
