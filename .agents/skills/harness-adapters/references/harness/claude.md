@@ -56,6 +56,13 @@ Styled capture stays internal to the boolean detector; `fm-peek` and model-facin
 The spawn disables Claude's `/bug` and `/feedback` model-drafted feedback flow for every Claude worker and secondmate, preventing a fleet-launched agent from queuing or submitting a bug report on the captain's behalf.
 The controls are scoped to the launched process and never modify the captain's global Claude settings; `launch_template()` in `../../../../../bin/fm-spawn.sh` owns their exact mechanics and defense-in-depth rationale.
 
+## Transcript saving
+
+Claude Code exports `CLAUDE_CODE_CHILD_SESSION=1` into every command its Bash tool runs, so a runtime server started from inside a Claude session passes it to every pane it hosts.
+A `claude` that inherits the marker treats itself as a child session, shows a `Transcript saving is off` footer warning naming the inherited `CLAUDE_CODE_CHILD_SESSION` marker, and writes no transcript `.jsonl` under its Claude projects directory, so it cannot be resumed or read back.
+On 2.1.280 `CLAUDE_CODE_FORCE_SESSION_PERSIST=1` did not override the marker interactively, while launching with the variable removed restored the transcript and cleared the warning.
+`launch_template()` in `../../../../../bin/fm-spawn.sh` therefore strips it with `env -u` for every Claude worker, scout, secondmate, and relaunch.
+
 ## Task control channel
 
 A Claude task worker's launch brief and Firstmate steering-inbox messages arrive as file-shaped content that is otherwise indistinguishable from indirect prompt injection.
