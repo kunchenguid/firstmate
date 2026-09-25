@@ -2,6 +2,8 @@
 # Dismiss a pending X-mode mention at the relay WITHOUT replying to it.
 #
 # Usage: fm-x-dismiss.sh <request_id>
+# A missing or dash-leading request_id, or any extra argument, is a usage error
+# before dismissing or recording anything.
 #
 # When firstmate decides NOT to reply to a mention (a pure acknowledgment, or any
 # mention it judges not worth a reply), clearing only the local inbox file is not
