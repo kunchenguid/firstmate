@@ -963,7 +963,8 @@ This applies only to agents Firstmate launches; the captain's own primary Firstm
 
 [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the delivery mechanics, with focused regression coverage in [`tests/fm-spawn-compact-adviser-disable.test.sh`](../tests/fm-spawn-compact-adviser-disable.test.sh) and [`tests/fm-spawn-compact-adviser-disable-remote.test.sh`](../tests/fm-spawn-compact-adviser-disable-remote.test.sh).
 
-Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
+Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so Claude Code's own instructions never ask a spawned worker for a Co-Authored-By trailer, Claude-Session link, or generated-with line, regardless of which settings scopes end up loaded.
+That setting does not stop the model typing such a line itself, so a claude task worker's worktree hooks also run [`fm-attribution-pretool-check.sh`](../bin/fm-attribution-pretool-check.sh), which denies a commit or PR command carrying AI self-attribution, and every ship brief's rules forbid it.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

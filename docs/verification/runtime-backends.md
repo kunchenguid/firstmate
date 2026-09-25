@@ -617,6 +617,25 @@ skip-runner: pi-signed is not installed, so its pin check was not exercised
 
 The guard submits no prompt and spends no tokens, so it runs by default wherever a runner is installed; rerun it after every Claude or Pi upgrade.
 
+## Commit attribution guard
+
+Claude Code's `attribution` setting only empties the attribution text its own commit and PR instructions ask the model to append; Claude Code does not rewrite a commit afterwards.
+A claude task worker launched with `"attribution":{"commit":"","pr":"","sessionUrl":false}` on Claude Code 2.1.282 still typed `Co-Authored-By: Claude <noreply@anthropic.com>` into its own `git commit -m` string.
+`bin/fm-attribution-pretool-check.sh`, registered by `bin/fm-spawn.sh` as a Bash PreToolUse hook in a claude task worker's worktree `.claude/settings.local.json`, denies such a command.
+`tests/fm-attribution-guard-live-e2e.test.sh` writes those worktree hooks with the real fm-spawn, then runs the real installed Claude Code there with the same attribution settings and permission bypass, asks it to run an attributed commit and then a clean one, and requires the guard's denial in Claude's tool result, no attributed commit, and the clean commit.
+
+Verified 2026-09-25 on Claude Code 2.1.282 on macOS.
+
+```sh
+FM_ATTRIBUTION_LIVE_E2E=1 bash tests/fm-attribution-guard-live-e2e.test.sh
+```
+
+```
+ok - claude 2.1.282 (Claude Code): the worktree guard denies an attributed commit and allows a clean one
+```
+
+The guard submits a prompt, so it is opt-in; rerun it after every Claude upgrade.
+
 ## Codex hook trust
 
 Verified 2026-09-16 on codex-cli 0.151.0, macOS arm64, in a fresh linked worktree of this repository.

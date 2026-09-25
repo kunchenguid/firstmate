@@ -7,6 +7,7 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Fact | Value |
 |---|---|
 | Busy | Owned hooks: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. |
+| Commit attribution | The launch's `attribution` settings only stop Claude Code asking for a trailer, so a task worker's worktree hooks also run `../../../bin/fm-attribution-pretool-check.sh`, which denies a commit or PR command carrying AI self-attribution; `../../../../../docs/verification/runtime-backends.md` "Commit attribution guard" records the live check. |
 | Exit | `/exit`. |
 | Interrupt | Single Escape. |
 | Skill | `/<skill>`, for example `/no-mistakes`. |
