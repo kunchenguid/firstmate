@@ -220,6 +220,8 @@ case "$pid:$field:${FM_TEST_PATH_SHAPE:-hookdir}" in
   810:args=:hookdir) printf '%s\n' '/home/u/.claude/hooks/notify.sh --quiet' ;;
   810:comm=:piprefix) printf '%s\n' '/opt/pipeline/bin/runner' ;;
   810:args=:piprefix) printf '%s\n' '/opt/pipeline/bin/runner --once' ;;
+  810:comm=:nodeargs) printf '%s\n' '/usr/local/bin/node' ;;
+  810:args=:nodeargs) printf '%s\n' '/usr/local/bin/node /Users/u/Library/Application Support/Claude/app/index.js' ;;
   810:ppid=:*) printf '%s\n' 1 ;;
   *:comm=:*) printf '%s\n' bash ;;
   *:args=:*) printf '%s\n' 'bash /repo/bin/fm-watch-arm.sh' ;;
@@ -232,7 +234,9 @@ SH
   # Identity may be read from an executable path, but only from whole path
   # components: anything merely living under ~/.claude, and any component that
   # merely starts with a harness name, must stay outside the harness identity.
-  for shape in hookdir piprefix; do
+  # Only the process name matches claude in any letter case, so a bare node
+  # whose script merely lives under a `Claude` directory is not a harness.
+  for shape in hookdir piprefix nodeargs; do
     if FM_TEST_PATH_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid'; then
       fail "$shape: an ordinary script path was treated as a harness process"
     fi
@@ -243,7 +247,7 @@ SH
       fail "$shape: an ordinary script path claimed the home's session lock"
     fi
   done
-  pass "session-lock: ordinary script paths under a harness directory are not harness processes"
+  pass "session-lock: ordinary script paths under a harness directory, or a Claude-named one, are not harness processes"
 }
 
 test_harness_beyond_a_gap_never_owns_the_lock() {
