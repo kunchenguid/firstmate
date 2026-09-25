@@ -561,10 +561,8 @@ EOF
 # the drain one bounded read, never the presentation of its own wakes and
 # never a nonzero exit. `ready=unknown` is honest absence, not zero.
 print_ready_count_section() {
-  local ready bound count
-  bound=${FM_READY_COUNT_TIMEOUT:-20}
-  case "$bound" in ''|*[!0-9]*|0) bound=20 ;; esac
-  if ready=$(fm_run_timed "$bound" "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>/dev/null); then
+  local ready count
+  if ready=$(fm_run_timed 20 "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>/dev/null); then
     count=$(printf '%s\n' "$ready" | LC_ALL=C sed -n 's/^count: \([0-9][0-9]*\)$/\1/p' | head -1)
     case "$count" in ''|*[!0-9]*) count=unknown ;; esac
   else
@@ -576,15 +574,14 @@ print_ready_count_section() {
 print_status_sections() {
   local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
-  [ -n "$snapshot" ] || { print_ready_count_section || return 1; return 0; }
+  [ -n "$snapshot" ] || return 0
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
   prepared=$(mktemp "$STATE/.status-presentation.prepared.XXXXXX") || return 1
   if ! {
     print_unread_status_section "$snapshot" \
       && print_status_outcome_backstop_section "$snapshot" \
       && print_open_decisions_section "$snapshot" \
-      && print_record_divergence_section \
-      && print_ready_count_section
+      && print_record_divergence_section
   } > "$prepared"; then
     rm -f -- "$prepared"
     return 1
@@ -631,6 +628,7 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     fi
   fi
   if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  print_ready_count_section || rc=1
   fm_lock_release "$lock"
   return "$rc"
 }
