@@ -83,6 +83,14 @@ case "${1:-}" in
           ;;
         *'encode launch-brief'*)
           cat "$D/becomes" > "$D/command"
+          if [ -n "${FM_CONTROL_RELAUNCH_BRIEF:-}" ] && [ -f "$FM_CONTROL_RELAUNCH_BRIEF" ]; then
+            cp "$FM_CONTROL_RELAUNCH_BRIEF" "$D/replacement-brief"
+            if [ "${FM_FAKE_CONFIRM_HANDOFF_RECEIPT:-0}" = 1 ]; then
+              receipt_command=$(grep -F 'fm-context-handoff-receipt.sh' "$FM_CONTROL_RELAUNCH_BRIEF" | tail -1)
+              [ -n "$receipt_command" ] || exit 1
+              /bin/bash -c "$receipt_command" >/dev/null
+            fi
+          fi
           [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
           ;;
       esac
@@ -229,6 +237,32 @@ EOF
   TASK_TMPS+=("/tmp/fm-$id")
 }
 
+# add_secondmate_task <case-dir> <id> -> a marked, live secondmate home.
+add_secondmate_task() {
+  local dir=$1 id=$2 home="$1/home" wt="$1/smhome"
+  fm_git_worktree "$dir/proj" "$wt" "secondmate-$id"
+  mkdir -p "$home/config" "$home/data/$id" "$wt/state" "$wt/data" "$wt/bin"
+  printf 'claude\n' > "$home/config/secondmate-harness"
+  printf '%s\n' "$id" > "$wt/.fm-secondmate-home"
+  printf '# Charter for %s\n' "$id" > "$wt/data/charter.md"
+  printf '# agents\n' > "$wt/AGENTS.md"
+  {
+    echo "window=fmses:fm-$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$wt"
+    echo "project=$wt"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$wt"
+  } > "$home/state/$id.meta"
+  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s' "$wt" > "$dir/fake/cwd"
+}
+
 run_control() {  # <case-dir> <args...>
   local dir=$1; shift
   # A claude spawn pre-registers workspace trust in the launching user's own
@@ -241,6 +275,9 @@ run_control() {  # <case-dir> <args...>
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    FM_CONTROL_HANDOFF_RECEIPT_WAIT="${FM_CONTROL_HANDOFF_RECEIPT_WAIT:-0.05}" \
+    FM_CONTROL_HANDOFF_RECEIPT_POLL="${FM_CONTROL_HANDOFF_RECEIPT_POLL:-0.01}" \
+    FM_FAKE_CONFIRM_HANDOFF_RECEIPT="${FM_FAKE_CONFIRM_HANDOFF_RECEIPT:-0}" \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
     FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL="${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" \
     FM_FAKE_META_PUBLISH_MV_FAIL="${FM_FAKE_META_PUBLISH_MV_FAIL:-}" \
@@ -924,7 +961,7 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   printf '%s\n' "fm-sm3" > "$dir/fake/windows"
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   printf 'codex' > "$dir/fake/becomes"
-  out=$(run_control "$dir" sm3 relaunch); rc=$?
+  out=$(run_control "$dir" sm3 relaunch --abandon-live-context); rc=$?
   expect_code 0 "$rc" "a configured secondmate harness should relaunch"$'\n'"$out"
   [ "$(journal_field "$dir" sm3 to_harness)" = codex ] \
     || fail "a secondmate relaunch should pick up the configured harness pin, got '$(journal_field "$dir" sm3 to_harness)'"
@@ -963,7 +1000,7 @@ test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
   printf '%s\n' "fm-sm6" > "$dir/fake/windows"
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   printf 'codex' > "$dir/fake/becomes"
-  out=$(run_control "$dir" sm6 relaunch); rc=$?
+  out=$(run_control "$dir" sm6 relaunch --abandon-live-context); rc=$?
   expect_code 0 "$rc" "an invalid configured effort should be ignored before stop"$'\n'"$out"
   assert_contains "$out" "effort token 'impossible'" \
     "relaunch should surface the same warning as a normal secondmate spawn"
@@ -1042,7 +1079,7 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes() {
   printf '%s\n' "fm-sm4" > "$dir/fake/windows"
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   printf 'codex' > "$dir/fake/becomes"
-  out=$(run_control "$dir" sm4 relaunch --harness codex); rc=$?
+  out=$(run_control "$dir" sm4 relaunch --harness codex --abandon-live-context); rc=$?
   expect_code 0 "$rc" "an explicit secondmate harness should relaunch"$'\n'"$out"
   [ "$(meta_field "$dir" sm4 model)" = default ] \
     || fail "an explicit secondmate harness must not inherit the configured model"
@@ -1438,6 +1475,140 @@ test_journal_records_the_checkpoint_it_proved() {
   pass "fm-control relaunch: the checkpoint records the exact unlanded work it preserved"
 }
 
+# --- secondmate context custody ---------------------------------------------
+
+test_live_secondmate_relaunch_requires_explicit_context_custody() {
+  local dir out rc
+  dir=$(new_case sm-custody-required smcustody)
+  add_secondmate_task "$dir" smcustody
+  cp "$dir/home/state/smcustody.meta" "$dir/meta-before"
+  out=$(run_control "$dir" smcustody relaunch); rc=$?
+  expect_code 1 "$rc" "a live secondmate must not be replaced without context custody"
+  assert_contains "$out" "still has recoverable conversation context" \
+    "the refusal should name the live conversation that would otherwise be lost"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a custody refusal must leave the old agent running"
+  [ ! -s "$dir/fake/literal" ] || fail "a custody refusal must send no lifecycle input"
+  cmp -s "$dir/meta-before" "$dir/home/state/smcustody.meta" || fail "a custody refusal changed the task record"
+  pass "fm-control relaunch: live secondmate replacement requires an explicit custody choice"
+}
+
+test_live_secondmate_handoff_waits_for_receipt_before_retiring_copies() {
+  local dir handoff digest out rc raw brief receipt
+  dir=$(new_case sm-custody-receipt smreceipt)
+  add_secondmate_task "$dir" smreceipt
+  handoff="$dir/handoff.md"
+  printf 'Persist request and exact correlated answer.\n' > "$handoff"
+  digest=$(shasum -a 256 "$handoff" | awk '{print $1}')
+  out=$(FM_FAKE_CONFIRM_HANDOFF_RECEIPT=1 run_control "$dir" smreceipt relaunch \
+    --handoff-file "$handoff" --handoff-sha256 "$digest"); rc=$?
+  expect_code 0 "$rc" "a replacement that confirms the exact handoff should relaunch"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/replacement-brief")" "Persist request and exact correlated answer." \
+    "the replacement did not receive the captured context"
+  assert_contains "$(cat "$dir/fake/replacement-brief")" "fm-context-handoff-receipt.sh" \
+    "the replacement instructions did not carry their exact receipt command"
+  [ "$(journal_field "$dir" smreceipt context_custody)" = handoff-confirmed ] \
+    || fail "the transaction should record the replacement's confirmed receipt"
+  raw=$(journal_field "$dir" smreceipt handoff_file)
+  brief=$(journal_field "$dir" smreceipt replacement_brief)
+  receipt=$(journal_field "$dir" smreceipt receipt_file)
+  [ "$raw" = retired ] || fail "confirmed receipt should retire the raw custody snapshot"
+  [ "$brief" = retired ] || fail "confirmed receipt should retire the redundant full launch copy"
+  assert_present "$receipt" "confirmed receipt should retain bounded non-content evidence"
+  [ -f "$handoff" ] || fail "direct fm-control must not delete its caller-owned source handoff"
+  pass "fm-control relaunch: exact context reaches the replacement and copies retire only after receipt"
+}
+
+test_unconfirmed_live_secondmate_handoff_retains_full_context() {
+  local dir handoff digest out rc raw brief
+  dir=$(new_case sm-custody-unconfirmed smuncertain)
+  add_secondmate_task "$dir" smuncertain
+  handoff="$dir/handoff.md"
+  printf 'Context that must survive an unconfirmed launch.\n' > "$handoff"
+  digest=$(shasum -a 256 "$handoff" | awk '{print $1}')
+  out=$(run_control "$dir" smuncertain relaunch --handoff-file "$handoff" \
+    --handoff-sha256 "$digest"); rc=$?
+  expect_code 1 "$rc" "a replacement with no receipt must remain uncertain"
+  assert_contains "$out" "did not confirm context-handoff receipt" \
+    "the failure should name the missing receipt"
+  [ "$(journal_field "$dir" smuncertain phase)" = failed:receiving ] \
+    || fail "an unconfirmed replacement should remain a recoverable receiving failure"
+  raw=$(journal_field "$dir" smuncertain handoff_file)
+  brief=$(journal_field "$dir" smuncertain replacement_brief)
+  assert_present "$raw" "uncertain delivery must retain the raw handoff snapshot"
+  assert_present "$brief" "uncertain delivery must retain the full replacement instructions"
+  [ "$(shasum -a 256 "$raw" | awk '{print $1}')" = "$digest" ] \
+    || fail "the retained raw snapshot changed after the uncertain delivery"
+  assert_absent "$(journal_field "$dir" smuncertain receipt_file)" \
+    "an unconfirmed replacement must not create a receipt"
+  pass "fm-control relaunch: failed receipt keeps every full context copy"
+}
+
+test_live_secondmate_relaunch_requires_explicit_abandonment_choice() {
+  local dir out rc
+  dir=$(new_case sm-custody-abandon smabandon)
+  add_secondmate_task "$dir" smabandon
+  out=$(run_control "$dir" smabandon relaunch --abandon-live-context); rc=$?
+  expect_code 0 "$rc" "explicit context abandonment should permit a live replacement"$'\n'"$out"
+  [ "$(journal_field "$dir" smabandon context_custody)" = abandoned ] \
+    || fail "the transaction should record explicit context abandonment"
+  pass "fm-control relaunch: live context is abandoned only by an explicit custody choice"
+}
+
+test_dead_secondmate_relaunch_needs_no_context_custody() {
+  local dir out rc
+  dir=$(new_case sm-custody-dead smdead)
+  add_secondmate_task "$dir" smdead
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_control "$dir" smdead relaunch); rc=$?
+  expect_code 0 "$rc" "dead secondmate recovery should remain custody-free"$'\n'"$out"
+  [ "$(journal_field "$dir" smdead context_custody)" = not-required-dead ] \
+    || fail "the dead recovery should record that there was no live context to hand off"
+  pass "fm-control relaunch: dead secondmate recovery remains custody-free"
+}
+
+test_dead_secondmate_relaunch_accepts_prepared_live_custody() {
+  local dir handoff digest out rc
+  dir=$(new_case sm-custody-died smdied)
+  add_secondmate_task "$dir" smdied
+  handoff="$dir/handoff.md"
+  printf 'Confirmed persist reply before the agent died.\n' > "$handoff"
+  digest=$(shasum -a 256 "$handoff" | awk '{print $1}')
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_control "$dir" smdied relaunch --handoff-file "$handoff" \
+    --handoff-sha256 "$digest"); rc=$?
+  expect_code 0 "$rc" "a persisted mate that died before relaunch should recover"$'\n'"$out"
+  [ "$(journal_field "$dir" smdied context_custody)" = not-required-dead ] \
+    || fail "a dead mate should not wait for handoff receipt"
+  assert_present "$handoff" "the caller must still own its prepared handoff"
+
+  dir=$(new_case sm-custody-abandon-died smabandondied)
+  add_secondmate_task "$dir" smabandondied
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_control "$dir" smabandondied relaunch --abandon-live-context); rc=$?
+  expect_code 0 "$rc" "a mate that died after abandonment was chosen should recover"$'\n'"$out"
+  [ "$(journal_field "$dir" smabandondied context_custody)" = not-required-dead ] \
+    || fail "dead recovery should not record live-context abandonment"
+  pass "fm-control relaunch: death after a live custody choice remains custody-free"
+}
+
+test_missing_secondmate_relaunch_reaches_backend_absence_proof_without_custody_gate() {
+  local dir handoff digest out rc
+  dir=$(new_case sm-custody-missing smmissing)
+  add_secondmate_task "$dir" smmissing
+  handoff="$dir/handoff.md"
+  printf 'Prepared context for a mate whose endpoint became missing.\n' > "$handoff"
+  digest=$(shasum -a 256 "$handoff" | awk '{print $1}')
+  : > "$dir/fake/session-missing"
+  out=$(run_control "$dir" smmissing relaunch --handoff-file "$handoff" \
+    --handoff-sha256 "$digest"); rc=$?
+  expect_code 1 "$rc" "an unprovable missing tmux endpoint should still refuse safely"
+  assert_contains "$out" "tmux absence cannot be proven" \
+    "missing recovery should reach the backend's existing absence proof"
+  assert_not_contains "$out" "recoverable conversation context" \
+    "a missing endpoint must not be blocked by live-context custody"
+  pass "fm-control relaunch: missing recovery remains custody-free and keeps the backend proof"
+}
+
 # --- secondmate child-work safety -------------------------------------------
 
 test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter() {
@@ -1471,7 +1642,7 @@ test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter() {
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   # No --note: a secondmate reconciles its own home's records at startup, so
   # the note is optional there.
-  out=$(run_control "$dir" sm1 relaunch); rc=$?
+  out=$(run_control "$dir" sm1 relaunch --abandon-live-context); rc=$?
   expect_code 0 "$rc" "a checkpointed secondmate should relaunch"$'\n'"$out"
   [ "$(journal_field "$dir" sm1 children)" = 2 ] \
     || fail "the checkpoint must account for the secondmate's child work, got '$(journal_field "$dir" sm1 children)'"
@@ -1598,7 +1769,7 @@ done
 exec "$real_find" "\$@"
 SH
   chmod +x "$dir/fakebin/find"
-  out=$(run_control "$dir" sm6 relaunch); rc=$?
+  out=$(run_control "$dir" sm6 relaunch --abandon-live-context); rc=$?
   expect_code 0 "$rc" "a vanished watcher scratch file must not refuse relaunch"$'\n'"$out"
   assert_contains "$out" "relaunched sm6" "readable child metas must still allow the replacement launch"
   [ "$(journal_field "$dir" sm6 children)" = 2 ] \
@@ -2377,6 +2548,13 @@ test_stop_transport_failure_reconciles_a_dead_agent
 test_complete_journal_failure_rolls_back_from_durable_phase
 test_prepublication_abort_retires_replacement_wiring_and_busy_state
 test_journal_records_the_checkpoint_it_proved
+test_live_secondmate_relaunch_requires_explicit_context_custody
+test_live_secondmate_handoff_waits_for_receipt_before_retiring_copies
+test_unconfirmed_live_secondmate_handoff_retains_full_context
+test_live_secondmate_relaunch_requires_explicit_abandonment_choice
+test_dead_secondmate_relaunch_needs_no_context_custody
+test_dead_secondmate_relaunch_accepts_prepared_live_custody
+test_missing_secondmate_relaunch_reaches_backend_absence_proof_without_custody_gate
 test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter
 test_secondmate_relaunch_refuses_an_unmarked_home
 test_secondmate_checkpoint_refuses_unreadable_child_state

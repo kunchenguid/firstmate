@@ -7,6 +7,8 @@
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
+#                                         [--handoff-file <path> --handoff-sha256 <hex>
+#                                          | --abandon-live-context]
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -79,7 +81,14 @@
 #              --note is required for a ship or scout, whose replacement
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
-#              standing charter is never rewritten.
+#              standing charter is never rewritten. A live secondmate also
+#              requires either an integrity-bound --handoff-file plus its
+#              --handoff-sha256, or the explicit --abandon-live-context choice.
+#              A supplied handoff is delivered in a replacement-only brief, and
+#              the old and delivered copies remain until the replacement writes
+#              a transaction-bound receipt after reading it and being ready to
+#              resume. Dead or proven-missing agents need no context custody.
+#              Context abandonment requires current explicit captain authority.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -128,6 +137,8 @@
 #                                after the press gap (1.5)
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
+#   FM_CONTROL_HANDOFF_RECEIPT_WAIT replacement receipt wait (90)
+#   FM_CONTROL_HANDOFF_RECEIPT_POLL receipt poll interval (0.5)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
 set -eu
 
@@ -182,6 +193,8 @@ SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
 ARM_WAIT=${FM_CONTROL_ARM_WAIT:-1.5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
+HANDOFF_RECEIPT_WAIT=${FM_CONTROL_HANDOFF_RECEIPT_WAIT:-90}
+HANDOFF_RECEIPT_POLL=${FM_CONTROL_HANDOFF_RECEIPT_POLL:-0.5}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
 
 die() {  # <message>
@@ -193,6 +206,19 @@ CONTROL_LOCK=
 CONTROL_LOCK_HELD=0
 RELAUNCH_ACTIVE=0
 RELAUNCH_PHASE=start
+CONTEXT_CUSTODY=
+HANDOFF_STAGE=
+REPLACEMENT_BRIEF_STAGE=
+RECEIPT_EXPECTED_STAGE=
+HANDOFF_SNAPSHOT=
+REPLACEMENT_BRIEF=
+REPLACEMENT_BRIEF_SHA256=
+RECEIPT_PATH=
+RECEIPT_EXPECTED_SHA256=
+RECEIPT_SHA256=
+HANDOFF_BYTES=
+REPLACEMENT_BRIEF_BYTES=
+CUSTODY_LINES=()
 
 control_cleanup() {
   local status=$?
@@ -200,6 +226,9 @@ control_cleanup() {
      && declare -F relaunch_rollback >/dev/null 2>&1; then
     relaunch_rollback || true
   fi
+  [ -z "$HANDOFF_STAGE" ] || rm -f -- "$HANDOFF_STAGE" 2>/dev/null || true
+  [ -z "$REPLACEMENT_BRIEF_STAGE" ] || rm -f -- "$REPLACEMENT_BRIEF_STAGE" 2>/dev/null || true
+  [ -z "$RECEIPT_EXPECTED_STAGE" ] || rm -f -- "$RECEIPT_EXPECTED_STAGE" 2>/dev/null || true
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     CONTROL_LOCK_HELD=0
     fm_lock_release "$CONTROL_LOCK" || true
@@ -238,6 +267,11 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
+HANDOFF_FILE=
+HANDOFF_SHA256=
+HANDOFF_FILE_SET=0
+HANDOFF_SHA256_SET=0
+ABANDON_LIVE_CONTEXT=0
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -254,6 +288,8 @@ for control_arg in "$@"; do
         NOTE=$(cat "$control_arg")
         NOTE_SET=1
         ;;
+      handoff_file) HANDOFF_FILE=$control_arg; HANDOFF_FILE_SET=1 ;;
+      handoff_sha256) HANDOFF_SHA256=$control_arg; HANDOFF_SHA256_SET=1 ;;
     esac
     control_want_value=
     continue
@@ -273,6 +309,11 @@ for control_arg in "$@"; do
       NOTE=$(cat "${control_arg#--note-file=}")
       NOTE_SET=1
       ;;
+    --handoff-file) control_want_value=handoff_file ;;
+    --handoff-file=*) HANDOFF_FILE=${control_arg#--handoff-file=}; HANDOFF_FILE_SET=1 ;;
+    --handoff-sha256) control_want_value=handoff_sha256 ;;
+    --handoff-sha256=*) HANDOFF_SHA256=${control_arg#--handoff-sha256=}; HANDOFF_SHA256_SET=1 ;;
+    --abandon-live-context) ABANDON_LIVE_CONTEXT=1 ;;
     *) die "unexpected argument '$control_arg'" ;;
   esac
 done
@@ -283,7 +324,17 @@ fi
 
 if [ "$VERB" != relaunch ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+    && [ "$HANDOFF_FILE_SET" = 0 ] && [ "$HANDOFF_SHA256_SET" = 0 ] && [ "$ABANDON_LIVE_CONTEXT" = 0 ] \
+    || die "--harness, --model, --effort, --note, and context-custody options apply to 'relaunch' only"
+fi
+[ "$HANDOFF_FILE_SET" = "$HANDOFF_SHA256_SET" ] \
+  || die "--handoff-file and --handoff-sha256 must be supplied together"
+[ "$ABANDON_LIVE_CONTEXT" = 0 ] \
+  || { [ "$HANDOFF_FILE_SET" = 0 ] && [ "$HANDOFF_SHA256_SET" = 0 ]; } \
+  || die "--abandon-live-context cannot be combined with a handoff"
+if [ "$HANDOFF_SHA256_SET" = 1 ]; then
+  case "$HANDOFF_SHA256" in *[!0-9a-f]*|'') die "--handoff-sha256 must be exactly 64 lowercase hexadecimal characters" ;; esac
+  [ "${#HANDOFF_SHA256}" -eq 64 ] || die "--handoff-sha256 must be exactly 64 lowercase hexadecimal characters"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
@@ -292,6 +343,16 @@ case "$NEW_EFFORT" in
   ''|default|low|medium|high|xhigh|max|ultra) ;;
   *) die "--effort must be one of default, low, medium, high, xhigh, max, ultra" ;;
 esac
+case "$HANDOFF_RECEIPT_WAIT" in
+  ''|*[!0-9.]*|*.*.*) die "FM_CONTROL_HANDOFF_RECEIPT_WAIT must be a non-negative number" ;;
+esac
+awk -v n="$HANDOFF_RECEIPT_WAIT" 'BEGIN { exit !(n >= 0) }' \
+  || die "FM_CONTROL_HANDOFF_RECEIPT_WAIT must be a non-negative number"
+case "$HANDOFF_RECEIPT_POLL" in
+  ''|*[!0-9.]*|*.*.*) die "FM_CONTROL_HANDOFF_RECEIPT_POLL must be a positive number" ;;
+esac
+awk -v n="$HANDOFF_RECEIPT_POLL" 'BEGIN { exit !(n > 0) }' \
+  || die "FM_CONTROL_HANDOFF_RECEIPT_POLL must be a positive number"
 
 # --- exact task-id resolution ----------------------------------------------
 
@@ -594,6 +655,7 @@ do_exit() {
         alive)
           # The agent came back with its endpoint. Fall through to the ordinary
           # alive path: interrupt if busy, then the harness's exit command.
+          state=alive
           ;;
         *)
           die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one"
@@ -602,6 +664,11 @@ do_exit() {
       ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
+  if [ "$VERB" = relaunch ] && [ "$KIND" = secondmate ] && [ "$state" = alive ] \
+     && [ "$CONTEXT_CUSTODY" != handoff-awaiting-receipt ] \
+     && [ "$CONTEXT_CUSTODY" != abandoned ]; then
+    die "secondmate $ID became live during relaunch without confirmed context custody; retry with an integrity-checked --handoff-file and --handoff-sha256 or explicit --abandon-live-context"
+  fi
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
     busy*)
@@ -711,6 +778,202 @@ journal_write() {  # <phase> [extra-line]...
   return 1
 }
 
+control_require_text_without_nul() {  # <file>
+  od -An -v -tu1 "$1" | awk '{ for (i = 1; i <= NF; i++) if ($i == 0) found = 1 } END { exit found }'
+}
+
+control_shell_quote() {  # <value>
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+control_publish_artifact() {  # <stage> <destination> <sha256> <description>
+  local stage=$1 destination=$2 digest=$3 description=$4
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    fm_pr_regular_destination_or_absent "$destination" \
+      || die "existing $description is not a safe single-link regular file: $destination"
+    if [ "$(fm_pr_sha256 "$destination")" != "$digest" ] \
+       || ! cmp -s "$stage" "$destination"; then
+      die "existing $description does not match its content-addressed path: $destination"
+    fi
+    rm -f -- "$stage" || die "could not retire duplicate staged $description"
+    return 0
+  fi
+  mv "$stage" "$destination" || die "could not publish $description at $destination"
+}
+
+capture_secondmate_handoff() {
+  local source_digest captured_digest source_digest_after links charter_source receipt_command
+  case "$HANDOFF_FILE" in
+    /*) ;;
+    *) die "--handoff-file must be an absolute path" ;;
+  esac
+  [ -f "$HANDOFF_FILE" ] && [ ! -L "$HANDOFF_FILE" ] && [ -r "$HANDOFF_FILE" ] \
+    || die "--handoff-file '$HANDOFF_FILE' must be a readable regular file, not a symlink"
+  links=$(fm_pr_file_link_count "$HANDOFF_FILE") || die "handoff file link count cannot be read"
+  [ "$links" = 1 ] || die "--handoff-file must not be hardlinked"
+  source_digest=$(fm_pr_sha256 "$HANDOFF_FILE") || die "handoff file cannot be hashed"
+  [ "$source_digest" = "$HANDOFF_SHA256" ] \
+    || die "--handoff-sha256 does not match the supplied handoff file"
+  HANDOFF_STAGE=$(mktemp "$STATE/.$ID.control-relaunch.handoff.XXXXXX") \
+    || die "could not stage the live secondmate context handoff"
+  (umask 077; cp "$HANDOFF_FILE" "$HANDOFF_STAGE") \
+    || die "could not snapshot the live secondmate context handoff"
+  [ -f "$HANDOFF_STAGE" ] && [ ! -L "$HANDOFF_STAGE" ] \
+    || die "captured secondmate context handoff is not a regular file"
+  [ "$(fm_pr_file_link_count "$HANDOFF_STAGE")" = 1 ] \
+    || die "captured secondmate context handoff must not be hardlinked"
+  captured_digest=$(fm_pr_sha256 "$HANDOFF_STAGE") \
+    || die "captured secondmate context handoff cannot be hashed"
+  source_digest_after=$(fm_pr_sha256 "$HANDOFF_FILE") \
+    || die "source secondmate context handoff changed during capture"
+  [ "$captured_digest" = "$HANDOFF_SHA256" ] && [ "$source_digest_after" = "$HANDOFF_SHA256" ] \
+    || die "source secondmate context handoff changed during capture"
+  control_require_text_without_nul "$HANDOFF_STAGE" \
+    || die "secondmate context handoff must be text without NUL bytes"
+
+  HANDOFF_SNAPSHOT="$JOURNAL.handoff-$HANDOFF_SHA256"
+  HANDOFF_BYTES=$(wc -c < "$HANDOFF_STAGE" | tr -d '[:space:]')
+  RECEIPT_PATH="$JOURNAL.receipt-$RELAUNCH_TX"
+  if [ -e "$RECEIPT_PATH" ] || [ -L "$RECEIPT_PATH" ]; then
+    die "context-handoff receipt path already exists before replacement launch: $RECEIPT_PATH"
+  fi
+  if [ -f "$WT/data/charter.md" ] && [ ! -L "$WT/data/charter.md" ]; then
+    charter_source="$WT/data/charter.md"
+  else
+    charter_source="$DATA/$ID/brief.md"
+  fi
+  [ -f "$charter_source" ] && [ ! -L "$charter_source" ] && [ -r "$charter_source" ] \
+    || die "secondmate $ID has no safe readable standing charter to preserve in its replacement instructions"
+  REPLACEMENT_BRIEF_STAGE=$(mktemp "$STATE/.$ID.control-relaunch.brief.XXXXXX") \
+    || die "could not stage the replacement-only secondmate instructions"
+  (umask 077; {
+    printf '# Secondmate %s relaunch context\n\n' "$ID"
+    printf '## Standing charter\n\n'
+    cat "$charter_source"
+    printf '\n\n## Preserved conversation context\n\n'
+    cat "$HANDOFF_STAGE"
+    printf '\n\n## Required context-custody confirmation\n\n'
+    printf 'Read the preserved context above and reconcile it with the durable home records before resuming work.\n'
+    printf 'Only after you have received that context intact and are ready to resume from it, run this exact command once:\n\n'
+    receipt_command="$(control_shell_quote "$SCRIPT_DIR/fm-context-handoff-receipt.sh") $(control_shell_quote "$RECEIPT_PATH") $(control_shell_quote "$ID") $(control_shell_quote "$RELAUNCH_TX") $(control_shell_quote "$HANDOFF_SHA256")"
+    printf '%s\n%s\n%s\n\n' '```sh' "$receipt_command" '```'
+    printf 'Do not run the command if the handoff is missing, incomplete, unreadable, or uncertain.\n'
+    printf 'The raw context remains retained until this explicit confirmation lands.\n'
+  } > "$REPLACEMENT_BRIEF_STAGE") \
+    || die "could not render replacement-only secondmate instructions"
+  control_require_text_without_nul "$REPLACEMENT_BRIEF_STAGE" \
+    || die "replacement-only secondmate instructions contain NUL bytes"
+  REPLACEMENT_BRIEF_SHA256=$(fm_pr_sha256 "$REPLACEMENT_BRIEF_STAGE") \
+    || die "replacement-only secondmate instructions cannot be hashed"
+  REPLACEMENT_BRIEF_BYTES=$(wc -c < "$REPLACEMENT_BRIEF_STAGE" | tr -d '[:space:]')
+  REPLACEMENT_BRIEF="$JOURNAL.brief-$REPLACEMENT_BRIEF_SHA256"
+  RECEIPT_EXPECTED_STAGE=$(mktemp "$STATE/.$ID.control-relaunch.receipt-expected.XXXXXX") \
+    || die "could not stage the expected context-handoff receipt"
+  (umask 077; {
+    printf 'v1\n'
+    printf 'task=%s\n' "$ID"
+    printf 'relaunch_tx=%s\n' "$RELAUNCH_TX"
+    printf 'handoff_sha256=%s\n' "$HANDOFF_SHA256"
+    printf 'confirmation=received-and-resumed\n'
+  } > "$RECEIPT_EXPECTED_STAGE") \
+    || die "could not stage the expected context-handoff receipt"
+  RECEIPT_EXPECTED_SHA256=$(fm_pr_sha256 "$RECEIPT_EXPECTED_STAGE") \
+    || die "expected context-handoff receipt cannot be hashed"
+  control_publish_artifact "$HANDOFF_STAGE" "$HANDOFF_SNAPSHOT" \
+    "$HANDOFF_SHA256" "handoff snapshot"
+  HANDOFF_STAGE=
+  control_publish_artifact "$REPLACEMENT_BRIEF_STAGE" "$REPLACEMENT_BRIEF" \
+    "$REPLACEMENT_BRIEF_SHA256" "replacement-only launch brief"
+  REPLACEMENT_BRIEF_STAGE=
+  CONTEXT_CUSTODY=handoff-awaiting-receipt
+  CUSTODY_LINES=(
+    "context_custody=$CONTEXT_CUSTODY"
+    "handoff_file=$HANDOFF_SNAPSHOT"
+    "handoff_sha256=$HANDOFF_SHA256"
+    "handoff_bytes=$HANDOFF_BYTES"
+    "replacement_brief=$REPLACEMENT_BRIEF"
+    "replacement_brief_sha256=$REPLACEMENT_BRIEF_SHA256"
+    "replacement_brief_bytes=$REPLACEMENT_BRIEF_BYTES"
+    "receipt_file=$RECEIPT_PATH"
+    "receipt_sha256_expected=$RECEIPT_EXPECTED_SHA256"
+  )
+}
+
+prepare_secondmate_context_custody() {
+  local state
+  [ "$KIND" = secondmate ] || return 0
+  state=$(agent_state)
+  case "$state" in
+    alive)
+      if [ "$HANDOFF_FILE_SET" = 1 ]; then
+        capture_secondmate_handoff
+      elif [ "$ABANDON_LIVE_CONTEXT" = 1 ]; then
+        CONTEXT_CUSTODY=abandoned
+        CUSTODY_LINES=("context_custody=abandoned")
+      else
+        die "live secondmate $ID still has recoverable conversation context; supply --handoff-file with --handoff-sha256 and wait for the replacement's receipt, or explicitly choose --abandon-live-context with current captain authority"
+      fi
+      ;;
+    dead|missing)
+      CONTEXT_CUSTODY="not-required-$state"
+      CUSTODY_LINES=("context_custody=$CONTEXT_CUSTODY")
+      ;;
+    *) die "secondmate $ID's endpoint reads '$state'; context custody cannot be established for an ambiguous or unreadable agent" ;;
+  esac
+}
+
+wait_for_secondmate_handoff_receipt() {
+  local elapsed=0 actual links
+  while :; do
+    if [ -e "$RECEIPT_PATH" ] || [ -L "$RECEIPT_PATH" ]; then
+      [ -f "$RECEIPT_PATH" ] && [ ! -L "$RECEIPT_PATH" ] \
+        || die "replacement context-handoff receipt is not a safe regular file: $RECEIPT_PATH"
+      links=$(fm_pr_file_link_count "$RECEIPT_PATH") \
+        || die "replacement context-handoff receipt link count cannot be read"
+      [ "$links" = 1 ] || die "replacement context-handoff receipt must not be hardlinked"
+      [ "$(wc -c < "$RECEIPT_PATH" | tr -d '[:space:]')" -le 1024 ] \
+        || die "replacement context-handoff receipt exceeds its bounded audit size"
+      control_require_text_without_nul "$RECEIPT_PATH" \
+        || die "replacement context-handoff receipt contains NUL bytes"
+      actual=$(fm_pr_sha256 "$RECEIPT_PATH") \
+        || die "replacement context-handoff receipt cannot be hashed"
+      [ "$actual" = "$RECEIPT_EXPECTED_SHA256" ] \
+        || die "replacement context-handoff receipt does not confirm this relaunch transaction"
+      RECEIPT_SHA256=$actual
+      return 0
+    fi
+    awk -v e="$elapsed" -v t="$HANDOFF_RECEIPT_WAIT" 'BEGIN { exit !(e < t) }' || break
+    sleep "$HANDOFF_RECEIPT_POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$HANDOFF_RECEIPT_POLL" 'BEGIN { printf "%.3f", e + p }')
+  done
+  die "replacement agent for $ID did not confirm context-handoff receipt and readiness to resume within ${HANDOFF_RECEIPT_WAIT}s; retained the raw handoff and full delivery copy"
+}
+
+retire_confirmed_secondmate_handoff() {
+  rm -f -- "$HANDOFF_SNAPSHOT" \
+    || die "replacement confirmed context receipt, but the raw handoff snapshot could not be retired"
+  rm -f -- "$REPLACEMENT_BRIEF" \
+    || die "replacement confirmed context receipt, but the full delivery copy could not be retired"
+  rm -f -- "$RECEIPT_EXPECTED_STAGE" \
+    || die "replacement confirmed context receipt, but its temporary expected-receipt file could not be retired"
+  RECEIPT_EXPECTED_STAGE=
+  CONTEXT_CUSTODY=handoff-confirmed
+  CUSTODY_LINES=(
+    "context_custody=$CONTEXT_CUSTODY"
+    "handoff_sha256=$HANDOFF_SHA256"
+    "handoff_bytes=$HANDOFF_BYTES"
+    "handoff_file=retired"
+    "replacement_brief_sha256=$REPLACEMENT_BRIEF_SHA256"
+    "replacement_brief_bytes=$REPLACEMENT_BRIEF_BYTES"
+    "replacement_brief=retired"
+    "receipt_file=$RECEIPT_PATH"
+    "receipt_sha256=$RECEIPT_SHA256"
+    "receipt_confirmation=received-and-resumed"
+  )
+}
+
 relaunch_rollback() {
   local state
   [ "$RELAUNCH_ACTIVE" = 1 ] || return 0
@@ -723,7 +986,7 @@ relaunch_rollback() {
       if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
         cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
       fi
-      journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored" || true
+      journal_write "failed:$RELAUNCH_PHASE" "${CUSTODY_LINES[@]}" "rollback=instructions-restored" || true
       echo "error: relaunch of $ID was refused before its agent was touched; nothing changed" >&2
       ;;
     stopping)
@@ -733,11 +996,11 @@ relaunch_rollback() {
           if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
             cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
           fi
-          journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored-agent-alive" || true
+          journal_write "failed:$RELAUNCH_PHASE" "${CUSTODY_LINES[@]}" "rollback=instructions-restored-agent-alive" || true
           echo "error: relaunch of $ID failed while stopping the old agent, which is still running; its original instructions were restored" >&2
           ;;
         dead)
-          journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept-agent-dead" || true
+          journal_write "failed:$RELAUNCH_PHASE" "${CUSTODY_LINES[@]}" "rollback=prior-record-kept-agent-dead" || true
           echo "error: $ID's agent stopped but relaunch did not reach replacement launch; no agent is running, and its work plus progress note are preserved at $WT" >&2
           ;;
         *)
@@ -749,14 +1012,27 @@ relaunch_rollback() {
           if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
             cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
           fi
-          journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored-agent-state-$state" || true
+          journal_write "failed:$RELAUNCH_PHASE" "${CUSTODY_LINES[@]}" "rollback=instructions-restored-agent-state-$state" || true
           echo "error: relaunch of $ID failed while stopping the old agent and its state is '$state', so it was not proven stopped; its original instructions were restored and the durable record was retained for recovery" >&2
           ;;
       esac
       ;;
+    receiving)
+      if [ "$CONTEXT_CUSTODY" = receipt-confirmed ]; then
+        journal_write failed:retiring "${CUSTODY_LINES[@]}" "rollback=none-receipt-confirmed-copy-retirement-incomplete" || true
+        echo "error: $ID's replacement confirmed safe resumption, but the redundant full context copies could not all be retired; any remaining copy is preserved for recovery" >&2
+      else
+        journal_write "failed:$RELAUNCH_PHASE" "${CUSTODY_LINES[@]}" "rollback=none-context-receipt-unconfirmed" || true
+        echo "error: $ID's replacement is running on $TARGET_HARNESS, but context receipt and safe resumption were not confirmed; the raw handoff and full delivery copy were retained" >&2
+      fi
+      ;;
+    retiring)
+      journal_write "failed:$RELAUNCH_PHASE" "${CUSTODY_LINES[@]}" "rollback=none-receipt-confirmed-copy-retirement-incomplete" || true
+      echo "error: $ID's replacement confirmed safe resumption, but the redundant full context copies could not all be retired; any remaining copy is preserved for recovery" >&2
+      ;;
     exited|launching)
       if [ "$RELAUNCH_AGENT_CONFIRMED" = 1 ]; then
-        journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-agent-confirmed" || true
+        journal_write "failed:$RELAUNCH_PHASE" "${CUSTODY_LINES[@]}" "rollback=none-new-agent-confirmed" || true
         echo "error: $ID's replacement is running on $TARGET_HARNESS, but transaction completion could not be persisted; its published record was retained for reconciliation" >&2
       elif [ "$RELAUNCH_META_PUBLISHED" = 1 ] \
          || { [ -n "$RELAUNCH_TX" ] \
@@ -766,10 +1042,10 @@ relaunch_rollback() {
         # harness with no agent confirmed, which is exactly what recovery
         # reconciles. Rewriting it back to the old harness would be a second,
         # worse inaccuracy.
-        journal_write "failed:$RELAUNCH_PHASE" "rollback=none-new-record-kept" || true
+        journal_write "failed:$RELAUNCH_PHASE" "${CUSTODY_LINES[@]}" "rollback=none-new-record-kept" || true
         echo "error: $ID was relaunched on $TARGET_HARNESS but no running agent could be confirmed; its work is preserved at $WT" >&2
       else
-        journal_write "failed:$RELAUNCH_PHASE" "rollback=prior-record-kept" || true
+        journal_write "failed:$RELAUNCH_PHASE" "${CUSTODY_LINES[@]}" "rollback=prior-record-kept" || true
         echo "error: $ID's agent was stopped but the replacement did not launch; no agent is running, and its work plus the recorded progress note are preserved at $WT" >&2
       fi
       ;;
@@ -966,6 +1242,10 @@ do_relaunch() {
   require_state_verified_backend relaunch
   resolve_relaunch_profile
 
+  if [ "$KIND" != secondmate ] \
+     && { [ "$HANDOFF_FILE_SET" = 1 ] || [ "$ABANDON_LIVE_CONTEXT" = 1 ]; }; then
+    die "context-custody options apply only to a secondmate relaunch"
+  fi
   case "$KIND" in
     ship|scout)
       RELAUNCH_BRIEF="$DATA/$ID/brief.md"
@@ -990,25 +1270,28 @@ do_relaunch() {
     note_line="note=none"
   fi
   safe_checkpoint
+  RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
+  prepare_secondmate_context_custody
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
-  journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line"
+  journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line" "${CUSTODY_LINES[@]}"
 
   record_note
-  journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
+  journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line" "${CUSTODY_LINES[@]}"
 
-  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
+  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line" "${CUSTODY_LINES[@]}"
   exit_result=$(do_exit)
-  journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "${CUSTODY_LINES[@]}" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
   # per-task harness wiring before arming the new one, so nothing to do here.
-  RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
-  journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
+  journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "${CUSTODY_LINES[@]}" "relaunch_tx=$RELAUNCH_TX"
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
+      FM_CONTROL_RELAUNCH_BRIEF="$REPLACEMENT_BRIEF" \
+      FM_CONTROL_RELAUNCH_BRIEF_SHA256="$REPLACEMENT_BRIEF_SHA256" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
     # $T was resolved from the record before the launch. When the recorded
@@ -1039,7 +1322,30 @@ do_relaunch() {
   }
   RELAUNCH_AGENT_CONFIRMED=1
 
-  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
+  if [ "$CONTEXT_CUSTODY" = handoff-awaiting-receipt ]; then
+    journal_write receiving "${CHECKPOINT_LINES[@]}" "$note_line" "${CUSTODY_LINES[@]}" \
+      "exit_result=$exit_result" "relaunch_tx=$RELAUNCH_TX"
+    wait_for_secondmate_handoff_receipt
+    CONTEXT_CUSTODY='receipt-confirmed'
+    CUSTODY_LINES=(
+      "context_custody=$CONTEXT_CUSTODY"
+      "handoff_file=$HANDOFF_SNAPSHOT"
+      "handoff_sha256=$HANDOFF_SHA256"
+      "handoff_bytes=$HANDOFF_BYTES"
+      "replacement_brief=$REPLACEMENT_BRIEF"
+      "replacement_brief_sha256=$REPLACEMENT_BRIEF_SHA256"
+      "replacement_brief_bytes=$REPLACEMENT_BRIEF_BYTES"
+      "receipt_file=$RECEIPT_PATH"
+      "receipt_sha256=$RECEIPT_SHA256"
+      "receipt_confirmation=received-and-resumed"
+    )
+    journal_write retiring "${CHECKPOINT_LINES[@]}" "$note_line" "${CUSTODY_LINES[@]}" \
+      "exit_result=$exit_result" "relaunch_tx=$RELAUNCH_TX" \
+      || die "replacement confirmed context receipt, but its retirement phase could not be recorded"
+    retire_confirmed_secondmate_handoff
+  fi
+
+  journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "${CUSTODY_LINES[@]}" "exit_result=$exit_result" "relaunch_tx=$RELAUNCH_TX"
   RELAUNCH_ACTIVE=0
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }

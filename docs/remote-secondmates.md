@@ -243,6 +243,9 @@ Local secondmates retain their generation-specific local pointer contract; remot
 
 A live remote second mate is restarted with `relaunch`, which runs the ordinary [control plane](agent-control.md) on that host: the endpoint record there was written by a host-local launch and carries no remote placement, so the transaction, its checkpoint, and its postconditions are the local ones.
 The primary passes `<harness> <model|default|-> <effort|default|->` explicitly, using `default` when an axis has no parent pin, because `config/secondmate-harness` is not inherited into a second mate's home and the file on that host belongs to a different home; letting the far side re-resolve it would silently move the mate onto another runtime.
+A live remote relaunch also requires a handoff digest with the context streamed over stdin, or the explicit `--abandon-live-context` choice; the remote control validates and retains its host-side copy until the replacement confirms its transaction-bound receipt and readiness to resume.
+The parent-side restart owner packages the exact successful persist request and response for this handoff, and retains its own copy while delivery or receipt is uncertain.
+Dead-agent recovery is custody-free.
 SSH exit 255 leaves completion unknown and the route preserved, exactly as every other verb here.
 
 Session start and every remote launch converge the persistent remote home on the primary's own default-branch commit rather than on the Firstmate copy that host keeps.
