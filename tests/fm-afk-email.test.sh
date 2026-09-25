@@ -658,6 +658,7 @@ from contextlib import redirect_stderr, redirect_stdout
 
 
 
+
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -1155,6 +1156,7 @@ assert all(poll_rows[uid][4] == "ignored" for uid in ("1", "6", "7", "8", "9")),
 
 
 
+
 assert poll_rows["2"][4] == "degraded", poll_rows["2"]
 assert poll_rows["3"][4] == "ok", poll_rows["3"]
 assert poll_rows["4"][4] == "degraded", poll_rows["4"]
@@ -1244,6 +1246,7 @@ mailbox.search_ids = b"1 2 3 4 6 7 8 9"
 
 
 
+
 real_run = mail.subprocess.run
 def fail_handoff(command, *args, **kwargs):
     if isinstance(command, list) and command[-1] == "receive-batch":
@@ -1269,6 +1272,7 @@ assert handoff_rows["2"][4] == "degraded", handoff_rows["2"]
 assert handoff_rows["4"][4] == "degraded", handoff_rows["4"]
 assert "away-email reply handoff failed" in handoff_error.getvalue(), handoff_error.getvalue()
 assert mailbox.body_fetches == ["2", "4"], mailbox.body_fetches
+
 
 
 
