@@ -467,7 +467,8 @@ Ship branch: $branch
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with the forge's CLI (\`gh-axi\` for GitHub, \`az repos pr\` for Azure DevOps) that is ready for review, not a draft$pr_base.
-Before you report done, read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
+Before you report done, read the PR back from the forge and confirm it is not a draft; if it is a draft, mark it ready with that forge's CLI.
+On GitHub, \`gh-axi pr view <number>\` must print \`draft: no\` and \`gh-axi pr ready <number>\` marks it ready, where <number> is the PR number from your PR URL.
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
 That \`done:\` is accepted only when this copy's HEAD - your latest commit - is pushed to your PR branch; the check tests that commit, not merely that a branch moved.
@@ -502,7 +503,8 @@ EOF
       fm_nm_driving_block "$forge"
       cat <<EOF
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back with the forge's CLI (\`gh-axi\` for GitHub, \`az repos pr\` for Azure DevOps) and confirm it is not a draft; if it is a draft, mark it ready with that forge's CLI.
+On GitHub, \`gh-axi pr view <number>\` must print \`draft: no\` and \`gh-axi pr ready <number>\` marks it ready, where <number> is the PR number from your PR URL.
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished.
 That CI-ready \`done:\` is accepted only when this copy's HEAD - your latest commit - is one the /no-mistakes run pushed, so commit nothing after the run; the check tests that commit, not merely that a branch moved.
