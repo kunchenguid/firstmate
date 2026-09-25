@@ -158,6 +158,12 @@
 # evicted with TERM after its recorded identity is re-verified, and this arm
 # starts in its place, printing "watcher: replaced stalled pid <N> (...)". A
 # holder that survives TERM keeps the refusal and the nonzero exit.
+# Once per poll the watcher also checks that its home (when it existed at
+# start), its state directory, and its own bin directory still exist; when one
+# is gone it logs "watcher: exiting - <what> no longer exists: <path>" to stderr
+# and exits 1, so a watcher whose temporary home or disposable checkout was
+# deleted stops itself instead of running on as an orphan. That check is scoped
+# to this process alone and never signals another watcher.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -166,6 +172,10 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 mkdir -p "$STATE"
+# A home that never existed (a state-only test fixture) is not a home that
+# disappeared, so the per-poll home-gone exit below applies only when it did.
+WATCH_HOME_EXISTED=0
+[ ! -d "$FM_HOME" ] || WATCH_HOME_EXISTED=1
 
 # The native event fast-path and only its true dependencies have one narrow
 # production owner. The Herdr event-wait smoke test consumes this same owner
@@ -2573,6 +2583,29 @@ resurface_after_downtime() {
 }
 
 while :; do
+  # Home-gone exit: a deleted home, state directory, or code root means this
+  # watcher's world is gone (a torn-down temporary home or a discarded
+  # disposable checkout). Exit with a logged reason rather than writing state
+  # into nothing, or into a live home from a checkout that no longer exists.
+  # A detached helper this watcher started (home-summary refresh, reconcile)
+  # can recreate a deleted state directory before the next poll, so a lock
+  # with no holder at all is read as the same teardown: only a fresh watcher
+  # ever recreates the lock, and that case is the self-eviction below.
+  # Scoped to this process alone: no other watcher is signalled.
+  if [ "$WATCH_HOME_EXISTED" -eq 1 ] && [ ! -d "$FM_HOME" ]; then
+    echo "watcher: exiting - home no longer exists: $FM_HOME" >&2
+    exit 1
+  elif [ ! -d "$STATE" ]; then
+    echo "watcher: exiting - state directory no longer exists: $STATE" >&2
+    exit 1
+  elif [ ! -e "$WATCH_LOCK/pid" ]; then
+    echo "watcher: exiting - state directory was torn down (singleton lock removed): $STATE" >&2
+    exit 1
+  elif [ ! -d "$SCRIPT_DIR" ]; then
+    echo "watcher: exiting - code root no longer exists: $SCRIPT_DIR" >&2
+    exit 1
+  fi
+
   # Self-eviction: if the singleton lock no longer names this process, a second
   # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
   # down so the rightful singleton continues alone. The EXIT trap's release

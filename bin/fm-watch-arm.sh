@@ -65,9 +65,26 @@
 # as any watcher close does; prints "watcher: stopped pid=<N>" or
 # "watcher: none running" and exits 0, or exits 1 when the watcher outlived
 # the stop.
+#
+# A copy of this script living under a disposable no-mistakes validation
+# checkout (a path containing /.no-mistakes/worktrees/) refuses every mode with
+# "watcher: FAILED - refusing to arm from a disposable validation checkout" and
+# exits 1 before touching any state: a watcher armed from there outlives the
+# validation step, holds the real home's lock, and keeps writing that home's
+# state from a checkout that is about to be deleted. Firstmate's own test suite
+# runs from exactly such a checkout during validation, so the same
+# FM_GATE_REFUSE_BYPASS=1 escape hatch tests/lib.sh already exports for
+# bin/fm-gate-refuse-lib.sh lifts this refusal for a test's sandboxed home.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ "${FM_GATE_REFUSE_BYPASS:-}" != 1 ]; then
+  case "$SCRIPT_DIR/:$(cd "$SCRIPT_DIR" && pwd -P)/" in
+    */.no-mistakes/worktrees/*)
+      echo "watcher: FAILED - refusing to arm from a disposable validation checkout: $SCRIPT_DIR"
+      exit 1 ;;
+  esac
+fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
