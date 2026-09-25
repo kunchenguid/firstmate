@@ -36,6 +36,8 @@ install_runner() {  # <case-dir>
   cp "$ROOT/bin/fm-backlog-transition-lib.sh" "$dir/bin/"
   # The merge-notification marker reader behind the brief's landed section.
   cp "$ROOT/bin/fm-pr-lib.sh" "$dir/bin/"
+  # The handled-result filter every escalation-buffer consumer shares.
+  cp "$ROOT/bin/fm-procevent-lib.sh" "$dir/bin/"
   cp "$ROOT/.tasks.toml" "$dir/home/.tasks.toml"
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/home/data/backlog.md"
   # The fake stop mirrors the real one's ordering: the away flag goes, then the
@@ -208,6 +210,35 @@ test_return_gate_owns_remediation_and_reports_catchup_to_bearings() {
   out=$(run_return "$dir" check) || fail "an already-clear repeated check should be idempotent: $out"
   [ ! -e "$gate" ] || fail "idempotent clear check recreated a gate"
   pass "return catch-up owns live blocker remediation, reports itself to Bearings as content, preserves evidence once, and clears idempotently"
+}
+
+# A board answer the away supervisor already acknowledged with
+# `fm-procevent.sh handled` must not come back in the away-return catch-up.
+test_return_catchup_omits_handled_process_event_escalations() {
+  local dir out rc gate
+  dir="$TMP_ROOT/handled-escalation"
+  install_runner "$dir"
+  seed_live_blocker "$dir" herdr synthetic-dependency
+  date +%s > "$dir/home/state/.afk"
+  {
+    printf 'check: procevent lavish lavish-5c2ce2a2bf34f617 68\n'
+    printf 'check: procevent lavish lavish-5c2ce2a2bf34f617 69\n'
+  } > "$dir/home/state/.subsuper-escalations"
+  mkdir -p "$dir/home/state/procevent-inbox"
+  : > "$dir/home/state/procevent-inbox/lavish-5c2ce2a2bf34f617.68.handled"
+
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "return begin should gate on a live blocker (rc=$rc): $out"
+  gate="$dir/home/state/.afk-return-catchup"
+  grep -F $'evidence\tescalation\tcheck: procevent lavish lavish-5c2ce2a2bf34f617 69' "$gate" >/dev/null \
+    || fail "an unhandled board result was dropped from the away-return catch-up"
+  if grep -F 'lavish-5c2ce2a2bf34f617 68' "$gate" >/dev/null; then
+    fail "an already-handled board result was presented again in the away-return catch-up"
+  fi
+  pass "the away-return catch-up omits process-event results that are already handled"
 }
 
 test_explicit_reclassification_requires_durable_reason() {
@@ -878,6 +909,7 @@ test_missing_final_archive_keeps_retained_contract_gated() {
 }
 
 test_return_gate_owns_remediation_and_reports_catchup_to_bearings
+test_return_catchup_omits_handled_process_event_escalations
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
 test_evidence_publication_failure_preserves_wake_for_redrain

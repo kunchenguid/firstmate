@@ -71,6 +71,11 @@ exec "$@"
 SH
 chmod +x "$STARTED_BLOCKER"
 
+# Most of this suite proves what reconcile re-announces, not how often, so it
+# re-announces on every reconcile; the re-announcement interval has its own
+# cases, which set it explicitly.
+export FM_PROCEVENT_REANNOUNCE_SECONDS=0
+
 pe() { FM_HOME="$1" "$ROOT/bin/fm-procevent.sh" "${@:2}"; }
 
 # Every home this suite registers a source in is tracked so teardown can stop
@@ -362,10 +367,12 @@ wait "$shared_launcher" || fail "shared caller-group fixture did not exit cleanl
 pass "public start never claims an inherited caller process group"
 
 # --- an unhandled result remains eligible for re-announcement on restart ----
-# A result is durable but nothing has ever acknowledged handling it. Every
-# reconcile call - not just the first restart after a crash - must keep
-# re-announcing it, because the only thing that stops re-announcement is an
-# explicit handled acknowledgement, never a prior publication.
+# A result is durable but nothing has ever acknowledged handling it. Reconcile
+# must keep re-announcing it - not just on the first restart after a crash -
+# because the only thing that stops re-announcement is an explicit handled
+# acknowledgement. A prior publication only spaces the repeats: one unhandled
+# board answer once queued a fresh wake on every watcher cycle, and the away
+# daemon escalated each copy.
 H2="$TMP_ROOT/h2"; new_home "$H2"
 future_status=0
 future_out=$(pe "$H2" handled src-cut 7 2>&1) || future_status=$?
@@ -381,11 +388,24 @@ assert_contains "$out" "published=1" "a durably captured but unhandled result is
 assert_contains "$(wake_payloads "$H2")" "procevent lavish src-cut 7" "durable adapter identity survives without a registration"
 assert_absent "$H2/state/procevent-inbox/src-cut.7.handled" "recovery alone never marks the recovered result handled"
 mv "$H2/state/.wake-queue" "$H2/state/.wake-queue.drained-1"
-out=$(pe "$H2" reconcile)
-assert_contains "$out" "published=1" "an unhandled result is re-announced on every reconcile, not only the first"
+out=$(FM_PROCEVENT_REANNOUNCE_SECONDS=2 pe "$H2" reconcile)
+assert_contains "$out" "published=0" "a result announced moments ago is announced again on the very next reconcile"
+assert_absent "$H2/state/.wake-queue" "a result inside its re-announcement interval queued another wake"
+out=$(FM_PROCEVENT_REANNOUNCE_SECONDS='' pe "$H2" reconcile)
+assert_contains "$out" "published=0" "the default interval does not re-announce a result on the next watcher cycle"
+sleep 2
+out=$(FM_PROCEVENT_REANNOUNCE_SECONDS=2 pe "$H2" reconcile)
+assert_contains "$out" "published=1" "an unhandled result is not re-announced once its interval has passed"
 assert_contains "$(wake_payloads "$H2")" "procevent lavish src-cut 7" "the repeat wake preserves its deduplication identity"
 [ "$(count_results "$H2" src-cut)" = 1 ] || fail "repeat re-announcement created a second durable copy"
 mv "$H2/state/.wake-queue" "$H2/state/.wake-queue.drained-2"
+out=$(FM_PROCEVENT_REANNOUNCE_SECONDS=0 pe "$H2" reconcile)
+assert_contains "$out" "published=1" "a zero interval does not re-announce on every reconcile"
+mv "$H2/state/.wake-queue" "$H2/state/.wake-queue.drained-3"
+bad_status=0
+bad_out=$(FM_PROCEVENT_REANNOUNCE_SECONDS=soon pe "$H2" reconcile 2>&1) || bad_status=$?
+[ "$bad_status" -ne 0 ] || fail "reconcile accepted an unusable re-announcement interval"
+assert_contains "$bad_out" "FM_PROCEVENT_REANNOUNCE_SECONDS must be whole seconds" "an unusable re-announcement interval is refused by name"
 
 ack_out=$(pe "$H2" handled src-cut 7)
 assert_contains "$ack_out" "handled: src-cut 7" "the owned handling interface newly authorizes the first acknowledgement"
@@ -400,7 +420,7 @@ assert_contains "$repeat_out" "already-handled: src-cut 7" "repeated acknowledge
 case "$repeat_out" in
   handled:*) fail "a repeat acknowledgement re-authorized a second handled effect: $repeat_out" ;;
 esac
-pass "an unhandled result survives restart and repeat drains, and only explicit acknowledgement stops its re-announcement"
+pass "an unhandled result survives restart and repeat drains, is re-announced once per interval, and only explicit acknowledgement stops it"
 
 HRACE="$TMP_ROOT/hrace"; new_home "$HRACE"
 mkdir -p "$HRACE/state/procevent-inbox"
@@ -1381,6 +1401,8 @@ case "${plan[$i]}" in
     printf 'error: Lavish Editor session store is unavailable\ncode: SERVER_ERROR\n'; exit 1 ;;
   feedback)
     printf 'session:\n  file: /board.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n' ;;
+  open-choice)
+    printf 'session:\n  file: /board.html\n  status: feedback\nprompts[2]{tag,text,prompt}:\n  "choice","Route choice -> north","Context data: {\\"schema\\":\\"fm-bearings-answer.v1\\",\\"question\\":\\"sample-route\\",\\"selection\\":\\"north\\",\\"note\\":\\"\\",\\"intent\\":\\"answer\\"}"\n  "message","","keep going"\n' ;;
   stream)
     printf 'x%.0s' {1..4096}
     printf 'ready\n' > "$LAVISH_STREAM_READY"
@@ -1484,6 +1506,36 @@ PATH="$LAVISH_SCRIPTED_BIN:$PATH" LAVISH_COUNT="$MISSING_REPLY_COUNT" LAVISH_SCR
 [ ! -s "$MISSING_REPLY_LOG" ] \
   || fail "a listener whose staged reply was gone still posted something: $(cat "$MISSING_REPLY_LOG")"
 pass "a listener whose staged reply is gone polls the board without one"
+
+# --- end-user-aligned regression: a board answer gets a visible receipt -------
+# The captain sent board answers and saw nothing come back: the queue emptied,
+# the listener returned to "listening", and the cards stayed until a rebuild
+# minutes later. A firstmate-owned board now stages a receipt when a round is
+# captured, and the next listener posts it as the agent reply, with no handler
+# turn in between.
+HRECEIPT="$TMP_ROOT/hreceipt"; new_home "$HRECEIPT"
+RECEIPT_ART="$TMP_ROOT/receipt-board.html"
+printf '<h1>receipt</h1>\n' > "$RECEIPT_ART"
+lavish_session "$RECEIPT_ART"
+receipt_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$RECEIPT_ART")
+fm_test_track_procevent_home "$HRECEIPT"
+LAVISH_REPLY_LOG="$TMP_ROOT/receipt-reply-log"; export LAVISH_REPLY_LOG
+LAVISH_COUNT="$TMP_ROOT/receipt-count"; LAVISH_SCRIPT="open-choice"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HRECEIPT" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$RECEIPT_ART" >/dev/null
+wait_capture "$HRECEIPT" "$receipt_id" || fail "the armed board's listener captured no round"
+[ ! -s "$LAVISH_REPLY_LOG" ] || fail "the round that carried the answers posted a reply before capture"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" pe "$HRECEIPT" start "$receipt_id" >/dev/null 2>&1
+receipt=$(cat "$LAVISH_REPLY_LOG" 2>/dev/null || true)
+assert_contains "$receipt" "Firstmate received this at" "the next listener did not post the receipt to the board"
+assert_contains "$receipt" "Sent to firstmate: Route choice." "the receipt did not name the answered card"
+assert_contains "$receipt" "Your message reached firstmate." "the receipt did not acknowledge the captain's message"
+[ "$(grep -c 'Firstmate received this at' "$LAVISH_REPLY_LOG")" = 1 ] \
+  || fail "one captured round posted its receipt more than once"
+out=$(PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HRECEIPT" "$ROOT/bin/fm-procevent-lavish.sh" retire "$RECEIPT_ART")
+assert_contains "$out" "retired: $receipt_id" "the receipt board did not retire"
+unset LAVISH_REPLY_LOG
+pass "a firstmate-owned board posts a receipt for a captured round on the next listener"
 
 # The accepted loss window is consuming-to-calling and nothing wider: a listener
 # that never reaches the board at all must leave the staged reply for the next

@@ -257,8 +257,12 @@ The Lavish adapter splits each capture between two commands:
 
 | Command | What it emits |
 | --- | --- |
-| `bin/fm-procevent-lavish.sh answers` | An exact non-reconcile selection, or a bare note when no option was selected. |
+| `bin/fm-procevent-lavish.sh answers` | An exact non-reconcile selection, or the typed words of a card that offers no answer option besides Reconcile, which the board marks `intent: answer`. |
 | `reconciles` | Only task ids whose structured selection is Reconcile, carrying their notes as request provenance. |
+
+A note sent with no option selected on a card that offers answer options is the captain's comment, not a decision.
+It feeds neither intake, the call stays held, and the note still reaches firstmate through the announced result, so a question can never close the call it asks about.
+A current-shape row without an `intent` is read the same way, so a board built before the field existed never closes a call from a bare note.
 
 Current rows require the versioned shape and the `choice` tag.
 A time-limited rollout branch accepts ordinary answers from the old question/answer shape.

@@ -1897,10 +1897,13 @@ Discovery is never a timer.
 Each registered source has its own child process blocking on that source.
 On every cycle, the watcher's `reconcile`:
 
-- Republishes every captured result without a durable handled acknowledgement, regardless of earlier publication.
+- Republishes every captured result without a durable handled acknowledgement whose last wake-queue announcement is at least `FM_PROCEVENT_REANNOUNCE_SECONDS` old (default 300, range 0..86400, 0 meaning every reconcile).
 - Restarts a source whose owner is gone.
 - Stops this home's runner if its registration disappeared unexpectedly.
 
+A result with no recorded announcement is always due, and the announcement at capture is never delayed, so the bound spaces repeats of one unhandled result without delaying its first delivery or its recovery after a crash before publication.
+Without it every supervision cycle queued another copy, and the away and quiet daemon escalated each one.
+`reconcile` refuses an unusable value by name, and `bin/fm-watch.sh` refuses to arm on one, for the same reason as the launch confirm window below.
 In supported steady state, a home with no registered source runs nothing, generates no state, and keeps its ordinary cadence.
 
 **Suppress only adapter-confirmed no-op results**
@@ -1975,6 +1978,12 @@ Some built-in sources carry the captain's answer to a captain-held task, and wha
 - External binding responses never enter either authority-bearing intake.
 
 **Machine-wide source ownership**
+
+A receipt to the person who answered uses one more built-in seam.
+Right after the feeds, a built-in source with no owner task has its result passed to `bin/fm-procevent-<adapter>.sh receipt <source-id> <result-file>` with the keyed-answer intake's report on stdin, empty for an unbound source.
+The adapter alone decides whether and how to acknowledge receipt on its own surface; a missing command or any failure changes nothing about capture, feeding, or the wake.
+For Lavish, a `feedback` round that leaves the session open stages one plain-language receipt naming the calls recorded, the calls still open, any answer to an already-closed call that was not applied, and anything else that reached firstmate, and the next listener, started by the following supervision cycle, posts it as the agent reply, so a board shows it without waiting for any handler turn.
+The staged receipt rides the same best-effort consume-once path as a task-owned re-arm's reply, and retiring the board through the adapter drops a receipt that was never posted.
 
 Ownership is machine-wide per canonical source, because separate homes can share one underlying source store.
 
@@ -2257,6 +2266,7 @@ FM_PROCEVENT_OWNER_LEASE_SECONDS=600    # how long a source runner keeps going w
 FM_PROCEVENT_OWNER_CHECK_SECONDS=15     # a runner guard's detection interval, read twice per interval; 1..3600
 FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1     # minimum interval between launches of one registration generation's source command; 1..3600
 FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=3   # how long reconcile waits for the runners it started to prove they are running; 1..600, keep well below FM_POLL
+FM_PROCEVENT_REANNOUNCE_SECONDS=300     # minimum age of an unhandled result's last queue announcement before reconcile announces it again; 0..86400, 0 = every reconcile
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CODEX_WATCH_CHECKPOINT_AWAY=3600  # requested away checkpoint bound on a home with config/supervision-host; longer of this and attended bound, capped at 27000
@@ -2340,7 +2350,7 @@ FM_PENDING_REPLY_GRACE_SECS=120   # seconds after marked-request delivery before
 FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; tmux/herdr only, otherwise detects $TMUX_PANE then HERDR_ENV/HERDR_PANE_ID before tmux fallback
 FM_SUPERVISOR_TARGET=              # optional supervisor pane target override; tmux target or herdr <session>:<pane-id>, otherwise auto-detected
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
-FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
+FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately; a buffered board answer always flushes immediately
 FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; 0 disables
 FM_WEDGE_ALARM_CHANNEL=            # override config/wedge-alarm with one active-alert directive for the wedge alarm; off|auto|osascript|herdr|command:<cmd>; absent = auto (macOS -> an OS notification)
 FM_WEDGE_ALARM_EXEC=              # notifier seam: route every channel (osascript, herdr, command:) through this command as `<cmd> <channel> <summary>`; "discard" fires nothing; unset in production; the daemon defaults it to "discard" when sourced so no test posts a real notification (docs/wedge-alarm.md)

@@ -2289,6 +2289,108 @@ SH
   pass "a board answer reaches the keyed-answer intake and wakes firstmate"
 }
 
+# A note typed on a card that has options, with no option selected, is the
+# captain's comment. Board questions such as "Show me where this tab is, and I
+# will decide from there" once closed the very call they asked about. The same
+# round also stages the receipt the board shows the captain, naming what was
+# recorded and what stays open.
+test_board_note_without_selection_keeps_the_call_open() {
+  local home sid stub out queue show receipt
+  home=$(make_home board-comment)
+  sid=lavish-c0mme0000000f1e2
+  fm_test_track_procevent_home "$home" "$home/procevent-claims"
+
+  run_captain "$home" hold sample-board-pick --title "Choose the sample board pick" \
+    --reason "captain board pick pending" --repo sample >/dev/null \
+    || fail "could not register the answered board call"
+  run_captain "$home" hold sample-board-question --title "Choose the sample export tab" \
+    --reason "captain export tab choice pending" --repo sample >/dev/null \
+    || fail "could not register the questioned board call"
+  run_captain "$home" hold sample-board-old-note --title "Choose the sample old-board call" \
+    --reason "captain old-board choice pending" --repo sample >/dev/null \
+    || fail "could not register the old-board call"
+  run_captain "$home" hold sample-board-words --title "Provide the sample credential route" \
+    --reason "captain credential route pending" --repo sample >/dev/null \
+    || fail "could not register the freeform-only board call"
+  run_captain "$home" hold sample-board-done --title "Choose the sample closed call" \
+    --reason "captain closed call pending" --repo sample >/dev/null \
+    || fail "could not register the already-answered board call"
+  printf 'south\n' > "$home/board-done.txt"
+  run_captain "$home" answer sample-board-done --decision-file "$home/board-done.txt" >/dev/null \
+    || fail "could not answer the board call before the board re-sent it"
+
+  stub="$home/board-source.sh"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+cat <<'OUT'
+session:
+  status: feedback
+  session_ended: false
+prompts[5]{tag,text,prompt}:
+  "choice","Board pick -> north","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"sample-board-pick\",\"selection\":\"north\",\"note\":\"\",\"intent\":\"answer\"}"
+  "choice","Export tab -> Show me where this tab is. I will decide from there.","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"sample-board-question\",\"selection\":\"\",\"note\":\"Show me where this tab is. I will decide from there.\",\"intent\":\"comment\"}"
+  "choice","Old board -> re-present the calls","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"sample-board-old-note\",\"selection\":\"\",\"note\":\"re-present the calls\"}"
+  "choice","Credential route -> use the staging vault","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"sample-board-words\",\"selection\":\"\",\"note\":\"use the staging vault\",\"intent\":\"answer\"}"
+  "choice","Closed call -> east","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"sample-board-done\",\"selection\":\"east\",\"note\":\"\",\"intent\":\"answer\"}"
+OUT
+SH
+  chmod +x "$stub"
+
+  run_procevent "$home" register lavish "$sid" -- "$stub" >/dev/null \
+    || fail "could not register the board source"
+  run_captain "$home" bind "$sid" >/dev/null \
+    || fail "could not bind the board source to the keyed-answer intake"
+  out=$(run_procevent "$home" start "$sid" 2>&1) \
+    || fail "the board source runner did not complete: $out"
+  assert_contains "$out" "receipt-staged: $sid" "the board round staged no receipt for the captain: $out"
+
+  show=$(tasks_in "$home" show sample-board-pick --full)
+  assert_contains "$show" "state: done" "a selected option did not close its call"
+  show=$(tasks_in "$home" show sample-board-question --full)
+  assert_contains "$show" "held: yes" "a question typed without a selection closed its call"
+  assert_not_contains "$show" "state: done" "a question typed without a selection was recorded as the decision"
+  show=$(tasks_in "$home" show sample-board-old-note --full)
+  assert_contains "$show" "held: yes" "a bare note from a board without the intent field closed its call"
+  show=$(tasks_in "$home" show sample-board-words --full)
+  assert_contains "$show" "state: done" "a freeform-only card's typed answer did not close its call"
+  assert_contains "$show" "use the staging vault" "a freeform-only card lost the captain's typed answer"
+
+  queue=$(cat "$home/state/.wake-queue" 2>/dev/null || true)
+  assert_contains "$queue" "check: procevent lavish $sid 1" \
+    "the captain's comment never reached firstmate: $queue"
+
+  receipt=$(cat "$home/state/procevent/.$sid.lavish-receipt" 2>/dev/null || true)
+  assert_contains "$receipt" "Recorded: Board pick (north); Credential route (your own words)." \
+    "the receipt did not name the recorded calls: $receipt"
+  assert_contains "$receipt" "Still open: Export tab (your comment); Old board (your comment)." \
+    "the receipt did not name the calls that stay open: $receipt"
+  assert_not_contains "$receipt" "Not recorded, still open" \
+    "the receipt called an already-closed call still open: $receipt"
+  assert_contains "$receipt" "Already recorded earlier, this answer not applied: Closed call." \
+    "the receipt did not say a changed answer to a closed call was not applied: $receipt"
+
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+cat <<'OUT'
+session:
+  status: feedback
+  session_ended: false
+prompts[1]{tag,text,prompt}:
+  "choice","Closed call -> east","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"sample-board-done\",\"selection\":\"east\",\"note\":\"\",\"intent\":\"answer\"}"
+OUT
+SH
+  rm -f "$home/state/procevent/.$sid.lavish-receipt"
+  out=$(run_procevent "$home" start "$sid" 2>&1) \
+    || fail "the second board round did not complete: $out"
+  assert_contains "$out" "receipt-staged: $sid" "the lone changed resend staged no receipt: $out"
+  receipt=$(cat "$home/state/procevent/.$sid.lavish-receipt" 2>/dev/null || true)
+  assert_contains "$receipt" "Already recorded earlier, this answer not applied: Closed call." \
+    "a lone changed resend to a closed call was not reported as not applied: $receipt"
+  assert_contains "$receipt" "Firstmate will follow up." \
+    "a lone changed resend that was not applied got no follow-up: $receipt"
+  pass "a note without a selection keeps its call open, and the receipt names recorded and open calls"
+}
+
 # The intake is channel-agnostic, so chat must reach it the same way a captured
 # review does - for a task-id key, and for a legacy composed identity.
 test_chat_channel_feeds_the_same_keyed_answer_intake() {
@@ -4058,6 +4160,7 @@ test_reconcile_outcomes_retry_partial_failures_once
 test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
 test_board_answer_reaches_the_keyed_answer_intake
+test_board_note_without_selection_keeps_the_call_open
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled

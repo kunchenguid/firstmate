@@ -227,6 +227,11 @@ a { color: inherit; text-decoration: none; }
   border-radius: var(--radius-xs); padding: 5px 9px 4px;
 }
 .is-queued .bb-queued { display: inline-flex; }
+.bb-sendbar { display: flex; align-items: center; gap: 10px; margin-top: 10px; padding: 10px 12px;
+  border: 1.5px solid var(--sea-200); border-radius: var(--radius-sm); background: var(--sea-050); }
+.bb-sendbar[hidden] { display: none; }
+.bb-sendbar__count { flex: 1 1 auto; font-size: var(--fs-xs); font-weight: 800; color: var(--sea-700);
+  text-transform: uppercase; letter-spacing: 0.07em; }
 .bb-limit { display: none; font-size: var(--fs-xs); font-weight: 700; color: var(--status-danger); }
 .bb-limit.is-visible { display: inline; }
 .bb-freeform { width: 100%; font-family: var(--font-sans); font-size: var(--fs-sm); color: var(--text-strong);
@@ -318,6 +323,11 @@ a { color: inherit; text-decoration: none; }
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
         </button>
       </div>
+      <!-- queued answers stay in this tab until they are sent -->
+      <div class="bb-sendbar" id="bb-sendbar" hidden>
+        <span class="bb-sendbar__count" id="bb-send-count"></span>
+        <button type="button" class="fm-btn fm-btn--sm fm-btn--primary" id="bb-send-btn">Send answers</button>
+      </div>
     </div>
   </section>
 
@@ -335,7 +345,7 @@ a { color: inherit; text-decoration: none; }
         <span class="bb-dispatch__count" id="bb-dispatch-count">nothing picked</span>
         <span class="bb-queued" id="bb-dispatch-queued">
           <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
-          queued
+          <span class="bb-queued__text">queued - not sent yet</span>
         </span>
         <button type="button" class="fm-btn fm-btn--sm fm-btn--gold" id="bb-dispatch-btn">Queue dispatch order</button>
       </div>
@@ -534,10 +544,17 @@ __FM_BEARINGS_BOARD_DATA__
     });
     form.appendChild(opts);
 
+    /* The reconcile option is standard board machinery, so a card whose only
+       option is reconcile is still a freeform-only card. On any other card a
+       note sent without a selected option is a comment that keeps the call
+       open, so the adapter never records it as the captain's decision. */
+    var freeformOnly = !item.options.some(function (o) { return o.value !== "reconcile"; });
     if (item.allow_freeform) {
       var ff = document.createElement("input");
       ff.type = "text"; ff.name = "note"; ff.className = "bb-freeform";
-      ff.placeholder = item.freeform_hint || "or answer in your own words…";
+      ff.placeholder = freeformOnly
+        ? (item.freeform_hint || "answer in your own words…")
+        : "note for your choice, or a comment that keeps this call open…";
       form.appendChild(ff);
     }
 
@@ -546,7 +563,8 @@ __FM_BEARINGS_BOARD_DATA__
     btn.type = "submit";
     foot.appendChild(btn);
     var q = el("span", "bb-queued");
-    q.innerHTML = CHECK_SVG + " queued";
+    q.innerHTML = CHECK_SVG;
+    q.appendChild(el("span", "bb-queued__text", "queued - not sent yet"));
     foot.appendChild(q);
     var answerLimit = el("span", "bb-limit");
     answerLimit.setAttribute("role", "alert");
@@ -561,6 +579,7 @@ __FM_BEARINGS_BOARD_DATA__
       var note = (fd.get("note") || "").trim();
       var displayAnswer = value ? (note ? value + " - " + note : value) : note;
       if (!displayAnswer) return;
+      var intent = value || freeformOnly ? "answer" : "comment";
       if (utf8ByteLength(displayAnswer) > 512) {
         answerLimit.textContent = "Answer is too long to queue (512 bytes maximum).";
         answerLimit.classList.add("is-visible");
@@ -573,16 +592,17 @@ __FM_BEARINGS_BOARD_DATA__
           schema: "fm-bearings-answer.v1",
           question: item.key,
           selection: value || "",
-          note: note
+          note: note,
+          intent: intent
         };
         if (item.close) ctxData.close = item.close;
         window.lavish.queuePrompt(
-          "Captain's Call answer - " + item.title + ": " + displayAnswer,
+          "Captain's Call " + intent + " - " + item.title + ": " + displayAnswer,
           { tag: "choice", text: item.title + " -> " + displayAnswer, element: form,
             data: ctxData }
         );
       }
-      card.classList.add("is-queued");
+      markQueued(card);
       /* deal the next card once this one is answered */
       setTimeout(function () { showCard(active < cards.length - 1 ? active + 1 : active); }, 450);
     });
@@ -611,6 +631,37 @@ __FM_BEARINGS_BOARD_DATA__
     deck.classList.toggle("bb-call--penult", active === cards.length - 2);
     deck.classList.toggle("bb-call--last", active === cards.length - 1);
   }
+  /* Queueing only adds to this tab's Lavish queue; nothing reaches firstmate
+     until the queue is sent, here or with Lavish's own Send to Agent. */
+  var sendBar = document.getElementById("bb-sendbar");
+  var sendCount = document.getElementById("bb-send-count");
+  var sendBtn = document.getElementById("bb-send-btn");
+  function refreshSendBar() {
+    var waiting = document.querySelectorAll(".is-queued:not(.is-sent)").length;
+    sendBar.hidden = !document.querySelector(".is-queued");
+    sendCount.textContent = waiting
+      ? waiting + (waiting === 1 ? " answer" : " answers") + " queued - not sent yet"
+      : "sent - watch the Lavish panel for firstmate's receipt";
+    sendBtn.disabled = !waiting;
+  }
+  function markQueued(node) {
+    node.classList.add("is-queued");
+    node.classList.remove("is-sent");
+    var text = node.querySelector(".bb-queued__text");
+    if (text) text.textContent = "queued - not sent yet";
+    refreshSendBar();
+  }
+  sendBtn.addEventListener("click", function () {
+    if (!(window.lavish && window.lavish.sendQueuedPrompts)) return;
+    window.lavish.sendQueuedPrompts();
+    Array.prototype.forEach.call(document.querySelectorAll(".is-queued"), function (node) {
+      node.classList.add("is-sent");
+      var text = node.querySelector(".bb-queued__text");
+      if (text) text.textContent = "sent";
+    });
+    refreshSendBar();
+  });
+
   if (cards.length) {
     stackPrev.addEventListener("click", function () { showCard(active - 1); });
     stackNext.addEventListener("click", function () { showCard(active + 1); });
@@ -737,7 +788,7 @@ __FM_BEARINGS_BOARD_DATA__
             data: { question: "dispatch.charted", answer: dispatchAnswer } }
         );
       }
-      bar.classList.add("is-queued");
+      markQueued(bar);
     });
   }
   } catch (e) {

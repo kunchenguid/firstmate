@@ -8,6 +8,7 @@
 #   fm-procevent-lavish.sh silent <result-file>
 #   fm-procevent-lavish.sh answers <result-file>
 #   fm-procevent-lavish.sh reconciles <result-file>
+#   fm-procevent-lavish.sh receipt <source-id> <result-file>   (keyed-answer report on stdin)
 #   fm-procevent-lavish.sh read <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
@@ -37,9 +38,20 @@
 #            transient interruption described below. A task-owned arm consumes
 #            its staged reply file once - reading and removing it before the
 #            poll - and hands the contents to the published `--agent-reply`
-#            argument; later retries poll without that reply. That post is best
+#            argument; later retries poll without that reply. A firstmate-owned
+#            arm passes no reply file, so its listener consumes this source's
+#            staged receipt (see `receipt`) the same way. That post is best
 #            effort: a crash while consuming drops that one round's reply
 #            instead of posting it twice. See the note at the consume site.
+# receipt    The generic runner's receipt seam for a firstmate-owned source.
+#            Given a captured `feedback` round that does not end the session,
+#            and the keyed-answer intake's report on stdin, it stages one
+#            plain-language receipt naming which calls were recorded, which
+#            stay open, and what else reached firstmate. The next listener
+#            posts it as the agent reply, so the board shows it within one
+#            watcher cycle with no supervisor turn. Receipts staged before a
+#            listener consumes them are kept in order. `retire` drops an
+#            unposted receipt, because nobody is left to read it.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
@@ -135,6 +147,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -265,11 +278,17 @@ cmd_arm() {
   [ -z "$task" ] || printf 'owner-task: %s\n' "$task"
 }
 
+# The one place a firstmate-owned source's staged receipt path is named.
+receipt_path() {  # <source-id>
+  printf '%s/.%s.lavish-receipt\n' "$(fm_procevent_registry_dir "$STATE")" "$1"
+}
+
 cmd_retire() {
   local artifact=${1-} id
   [ -n "$artifact" ] || usage
   id=$(cmd_source_id "$artifact") || exit 1
-  "$SCRIPT_DIR/fm-procevent.sh" retire "$id"
+  "$SCRIPT_DIR/fm-procevent.sh" retire "$id" || return
+  rm -f -- "$(receipt_path "$id")"
 }
 
 # The bounded quiet retry described in the header. The bound is a constant
@@ -369,7 +388,10 @@ cmd_poll() {
   [ -n "$artifact" ] || usage
   if [ "$#" -eq 3 ] && [ "${2-}" = --agent-reply-file ]; then
     reply_file=$3
-  elif [ "$#" -ne 1 ]; then
+  elif [ "$#" -eq 1 ]; then
+    reply_file=$(cmd_source_id "$artifact") || exit 1
+    reply_file=$(receipt_path "$reply_file")
+  else
     usage
   fi
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
@@ -399,7 +421,7 @@ cmd_poll() {
     # file and the call below drops this one round's reply rather than posting it
     # twice. A listener that starts with no staged file simply polls without one.
     # Robust delivery waits on lavish-axi's own exclusive listener; do not add a
-    # receipt, retry, or idempotency marker here.
+    # delivery confirmation, retry, or idempotency marker here.
     if [ -f "$reply_file" ] && [ ! -L "$reply_file" ]; then
       reply_text=$(cat -- "$reply_file") \
         || die "cannot read agent reply file: $reply_file"
@@ -551,19 +573,24 @@ cmd_silent() {
 # `choice`. A freeform `message` row is captain prose and is deliberately never a
 # source of decision keys. A row that does not carry both a slug-shaped `question`
 # and the versioned `selection` and `note` fields inside its `Context data:` block
-# is skipped. A time-limited rollout branch accepts the old question/answer
-# shape only for ordinary answers and rejects its bare or annotated reconcile
+# is skipped. A versioned row's optional `intent` is `answer` or `comment`: a
+# note with no selected option is an answer only under `intent: answer`, which
+# the board sends only for a card with no answer options; any other note-only
+# row is the captain's comment, which feeds neither intake, leaves the call open,
+# and still reaches firstmate through the announced result. A selection sent as
+# a comment is contradictory and skipped. A time-limited rollout branch accepts
+# the old question/answer shape only for ordinary answers and rejects its bare or annotated reconcile
 # values because old rows do not separate the selected option from its note.
 # The question cap is 128 so any task id fits, including the long legacy
 # `<origin>-decision-<key>` identities pre-collapse decks still carry; the
 # security property is the slug SHAPE, which is unchanged.
 cmd_choice_rows() {
-  local selection=$1 file=${2-}
+  local selection=$1 file=${2-} report=${3-}
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
-  perl -MJSON::PP -e '
+  perl -MJSON::PP -MPOSIX=strftime -e '
     use strict; use warnings;
-    my ($selection, $path) = @ARGV;
+    my ($selection, $path, $report) = @ARGV;
     open my $fh, "<", $path or exit 1;
     my (@fields, $want, @rows);
     while (my $line = <$fh>) {
@@ -580,6 +607,7 @@ cmd_choice_rows() {
     close $fh;
     my %seen;
     my @choices;
+    my ($messages, $others) = (0, 0);
     for my $row (@rows) {
       $row =~ s/^\s+//;
       my @vals;
@@ -596,13 +624,17 @@ cmd_choice_rows() {
       }
       my %f;
       $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
-      next unless defined $f{tag} && $f{tag} eq "choice";
+      my $tag = defined $f{tag} ? $f{tag} : "";
+      if ($tag ne "choice") {
+        $tag eq "message" ? $messages++ : $others++;
+        next;
+      }
       my $prompt = $f{prompt};
       next unless defined $prompt && $prompt =~ /Context data:\s*(\{.*\})/s;
       my $ctx = $1;
       my $data = eval { decode_json($ctx) };
       next unless ref($data) eq "HASH";
-      my ($key, $selected, $note, $answer, $legacy);
+      my ($key, $selected, $note, $answer, $legacy, $comment) = (undef, undef, undef, undef, 0, 0);
       if (defined($data->{schema}) && !ref($data->{schema})
           && $data->{schema} eq "fm-bearings-answer.v1") {
         $key = $data->{question};
@@ -613,8 +645,15 @@ cmd_choice_rows() {
         next unless $selected eq "" || $selected =~ /\A[A-Za-z0-9._-]{1,128}\z/;
         next unless length($note) <= 512;
         next unless length($selected) || length($note);
+        my $intent = "";
+        if (exists $data->{intent}) {
+          next if !defined($data->{intent}) || ref($data->{intent})
+            || ($data->{intent} ne "answer" && $data->{intent} ne "comment");
+          $intent = $data->{intent};
+        }
+        next if length($selected) && $intent eq "comment";
         $answer = length($selected) ? $selected : $note;
-        $legacy = 0;
+        $comment = !length($selected) && $intent ne "answer" ? 1 : 0;
       # Time-limited compatibility for captures from pre-change boards; remove
       # once no board carrying the old question/answer context can remain armed.
       } elsif (!exists($data->{schema}) && !exists($data->{selection})
@@ -644,8 +683,74 @@ cmd_choice_rows() {
       $seen{$key} = scalar @choices;
       push @choices, {
         key => $key, selection => $selected, note => $note, legacy => $legacy,
-        answer => $answer, label => $label, mode => $mode
+        answer => $answer, label => $label, mode => $mode, comment => $comment
       };
+    }
+    if ($selection eq "receipt") {
+      my (%closed, %skipped);
+      if (defined $report && open my $rh, "<", $report) {
+        while (my $line = <$rh>) {
+          chomp $line;
+          if ($line =~ /\Aclosed: (\S+)\z/) { $closed{$1} = 1 }
+          elsif ($line =~ /\A(?:skipped|refused): (\S+) \((.*)\)\z/) { $skipped{$1} = $2 }
+        }
+        close $rh;
+      }
+      my $short = sub {
+        my ($text) = @_;
+        return length($text) > 60 ? substr($text, 0, 57) . "..." : $text;
+      };
+      my (@recorded, @open, @unrecorded, @unapplied, @sent);
+      my $follow = ($messages || $others) ? 1 : 0;
+      for my $choice (grep { defined } @choices) {
+        my $key = $choice->{key};
+        my $title = $choice->{label};
+        $title = substr($title, 0, index($title, " -> ")) if index($title, " -> ") > 0;
+        $title = $short->(length $title ? $title : $key);
+        if ($choice->{selection} eq "reconcile") {
+          push @open, "$title (re-check requested)";
+          $follow = 1;
+          next;
+        }
+        if ($choice->{comment}) {
+          push @open, "$title (your comment)";
+          $follow = 1;
+          next;
+        }
+        my ($id) = grep { $_ eq $key || $_ =~ /-decision-\Q$key\E\z/ } sort keys %closed;
+        if (defined $id) {
+          my $what = length($choice->{selection}) ? $choice->{selection} : "your own words";
+          if (length($choice->{selection}) && length($choice->{note})) {
+            $what .= ", with your note";
+            $follow = 1;
+          }
+          push @recorded, "$title ($what)";
+          next;
+        }
+        ($id) = grep { $_ eq $key || $_ =~ /-decision-\Q$key\E\z/ } sort keys %skipped;
+        $follow = 1;
+        if (defined $id && $skipped{$id} eq "already closed") {
+          push @unapplied, $title;
+          next;
+        }
+        if (defined $id && $skipped{$id} ne "no captain-held task with that id" && $skipped{$id} ne "absent") {
+          push @unrecorded, "$title (" . $short->($skipped{$id}) . ")";
+        } else {
+          push @sent, $title;
+        }
+      }
+      exit 1 unless @recorded || @open || @unrecorded || @unapplied || @sent || $messages || $others;
+      my @parts = ("Firstmate received this at " . strftime("%H:%M", localtime) . ".");
+      push @parts, "Recorded: " . join("; ", @recorded) . "." if @recorded;
+      push @parts, "Still open: " . join("; ", @open) . "." if @open;
+      push @parts, "Not recorded, still open: " . join("; ", @unrecorded) . "." if @unrecorded;
+      push @parts, "Already recorded earlier, this answer not applied: " . join("; ", @unapplied) . "." if @unapplied;
+      push @parts, "Sent to firstmate: " . join("; ", @sent) . "." if @sent;
+      push @parts, "Your message reached firstmate." if $messages;
+      push @parts, "$others other " . ($others == 1 ? "comment" : "comments") . " reached firstmate." if $others;
+      push @parts, "Firstmate will follow up." if $follow;
+      print join(" ", @parts), "\n";
+      exit 0;
     }
     for my $choice (grep { defined } @choices) {
       if ($selection eq "reconciles") {
@@ -657,16 +762,43 @@ cmd_choice_rows() {
         }
         next;
       }
-      next if $choice->{selection} eq "reconcile";
+      next if $choice->{selection} eq "reconcile" || $choice->{comment};
       print length $choice->{mode}
         ? "$choice->{key}\t$choice->{answer}\t$choice->{label}\t$choice->{mode}\n"
         : "$choice->{key}\t$choice->{answer}\t$choice->{label}\n";
     }
-  ' "$selection" "$file"
+  ' "$selection" "$file" "$report"
 }
 
 cmd_answers() { cmd_choice_rows answers "$@"; }
 cmd_reconciles() { cmd_choice_rows reconciles "$@"; }
+
+# The receipt seam described in the header. Only a feedback round that leaves
+# the session open earns a receipt: an ended board has nobody left to read it.
+cmd_receipt() {
+  local id=${1-} file=${2-} report text path tmp
+  [ -n "$id" ] && [ -n "$file" ] || usage
+  fm_procevent_source_id_valid "$id" || die "invalid source id: $id"
+  [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
+  [ "$(cmd_classify "$file")" = feedback ] || return 1
+  ! cmd_terminal "$file" || return 1
+  report=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-lavish-receipt.XXXXXX") \
+    || die "cannot stage the keyed-answer report"
+  cat > "$report" || { rm -f -- "$report"; die "cannot read the keyed-answer report"; }
+  text=$(cmd_choice_rows receipt "$file" "$report") || text=''
+  rm -f -- "$report"
+  [ -n "$text" ] || return 1
+  path=$(receipt_path "$id")
+  [ ! -L "$path" ] || die "refusing a symlinked receipt: $path"
+  tmp=$(umask 077; mktemp "${path%/*}/.lavish-receipt.XXXXXX") || die "cannot stage the receipt"
+  if { { [ ! -f "$path" ] || { cat -- "$path" && printf '\n'; }; } \
+      && printf '%s' "$text"; } > "$tmp" && mv -f -- "$tmp" "$path"; then
+    printf 'receipt: %s\n' "$text"
+    return 0
+  fi
+  rm -f -- "$tmp"
+  die "cannot stage the receipt: $path"
+}
 
 # Present one already-captured result for a handler. Body lines are prefixed
 # so a captain-supplied string cannot forge a section label. A freeform message
@@ -819,6 +951,7 @@ case "${1-}" in
   silent)    shift; cmd_silent "$@" ;;
   answers)   shift; cmd_answers "$@" ;;
   reconciles) shift; cmd_reconciles "$@" ;;
+  receipt)   shift; cmd_receipt "$@" ;;
   read)      shift; cmd_read "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;

@@ -692,8 +692,8 @@ EOF
     wedge=$(head -1 "$STATE/.subsuper-inject-wedged" 2>/dev/null || true)
     append_evidence wedge "$wedge" "$evidence"
   fi
-  if [ -s "$STATE/.subsuper-escalations" ]; then
-    escalations=$(cat "$STATE/.subsuper-escalations" 2>/dev/null || true)
+  escalations=$(fm_procevent_unhandled_escalations "$STATE" "$STATE/.subsuper-escalations" 2>/dev/null || true)
+  if [ -n "$escalations" ]; then
     append_evidence escalation "$escalations" "$evidence"
   fi
 
@@ -770,6 +770,8 @@ main() {
   . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
   # shellcheck source=bin/fm-pr-lib.sh
   . "$SCRIPT_DIR/fm-pr-lib.sh"
+  # shellcheck source=bin/fm-procevent-lib.sh
+  . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
   mkdir -p "$STATE" || return 1
   fm_lock_acquire_wait "$LOCK"

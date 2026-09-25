@@ -195,6 +195,27 @@ fm_procevent_owner_check_seconds() {
   printf '%s\n' "$value"
 }
 
+# Minimum age of a result's last queue announcement before reconcile announces
+# it again. Without a bound, every watcher cycle appended a fresh wake for one
+# unhandled result, and the away/quiet daemon escalated each copy. 0 restores
+# announcing on every reconcile. The first announcement at capture is never
+# delayed, and a result with no recorded announcement is always due.
+FM_PROCEVENT_REANNOUNCE_DEFAULT_SECONDS=300
+FM_PROCEVENT_REANNOUNCE_MIN_SECONDS=0
+FM_PROCEVENT_REANNOUNCE_MAX_SECONDS=86400
+
+fm_procevent_reannounce_seconds() {
+  local value=${FM_PROCEVENT_REANNOUNCE_SECONDS-}
+  if [ -z "$value" ]; then
+    printf '%s\n' "$FM_PROCEVENT_REANNOUNCE_DEFAULT_SECONDS"
+    return 0
+  fi
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$value" -ge "$FM_PROCEVENT_REANNOUNCE_MIN_SECONDS" ] || return 1
+  [ "$value" -le "$FM_PROCEVENT_REANNOUNCE_MAX_SECONDS" ] || return 1
+  printf '%s\n' "$value"
+}
+
 FM_PROCEVENT_LAUNCH_FLOOR_DEFAULT_SECONDS=1
 FM_PROCEVENT_LAUNCH_FLOOR_MIN_SECONDS=1
 FM_PROCEVENT_LAUNCH_FLOOR_MAX_SECONDS=3600
@@ -1219,6 +1240,69 @@ fm_procevent_is_handled() {
   [ -f "$marker" ] && [ ! -L "$marker" ]
 }
 
+# fm_procevent_unhandled_escalations <state> <buffer>
+# Prints the away-mode escalation buffer without the process-event items whose
+# result is already handled, so no consumer of that buffer presents them again.
+fm_procevent_unhandled_escalations() {
+  local state=$1 buf=$2 item rest id seq
+  [ -s "$buf" ] || return 0
+  while IFS= read -r item; do
+    case "$item" in
+      "check: procevent "*)
+        rest=${item#check: procevent }
+        rest=${rest#* }
+        id=${rest%% *}
+        seq=${rest#* }
+        case "$id" in ''|*[!A-Za-z0-9._-]*) ;; *)
+          case "$seq" in ''|*[!0-9]*) ;; *)
+            fm_procevent_is_handled "$state" "$id" "$seq" && continue
+            ;;
+          esac
+          ;;
+        esac
+        ;;
+    esac
+    printf '%s\n' "$item"
+  done < "$buf"
+}
+
+# fm_procevent_announced_marker <state> <source-id> <sequence>
+# Records the epoch of a result's last wake-queue announcement; see
+# fm_procevent_reannounce_seconds for why re-announcement is bounded.
+fm_procevent_announced_marker() {
+  if [ "${FM_PROCEVENT_CAPTURE_PINNED_INBOX:-}" = 1 ]; then
+    printf './.%s.%s.announced\n' "$2" "$3"
+    return
+  fi
+  printf '%s/.%s.%s.announced\n' "$(fm_procevent_inbox_dir "$1")" "$2" "$3"
+}
+
+# fm_procevent_announced_record <state> <source-id> <sequence>
+fm_procevent_announced_record() {
+  local marker tmp
+  marker=$(fm_procevent_announced_marker "$1" "$2" "$3")
+  [ ! -L "$marker" ] || return 1
+  tmp=$(umask 077; mktemp "${marker%/*}/.announced.XXXXXX") || return 1
+  if ! date +%s > "$tmp" || ! mv -f -- "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+# fm_procevent_reannounce_due <state> <source-id> <sequence> <interval-seconds>
+# 0 when the result has no readable announcement record or its last
+# announcement is at least <interval-seconds> old; 1 while it is more recent.
+fm_procevent_reannounce_due() {
+  local marker last now
+  [ "$4" -gt 0 ] || return 0
+  marker=$(fm_procevent_announced_marker "$1" "$2" "$3")
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
+  IFS= read -r last < "$marker" || return 0
+  case "$last" in ''|*[!0-9]*) return 0 ;; esac
+  now=$(date +%s)
+  [ "$((now - last))" -ge "$4" ] || [ "$last" -gt "$now" ]
+}
+
 # fm_procevent_mark_handled <state> <source-id> <sequence>
 # The one durable handled acknowledgement per captured generation: keyed by the
 # exact source id and sequence, private at mode 0600, and path-safe through the
@@ -1226,7 +1310,7 @@ fm_procevent_is_handled() {
 # create uses O_EXCL so two concurrent callers can never both win - so a caller
 # pairing this with an external effect can trust the return code to authorize
 # that effect at most once per generation. This is the only terminal state:
-# announcing a result never blocks it from being re-announced, only this does.
+# announcing a result only delays its next re-announcement, while this stops it.
 # 0 = newly recorded (first-ever handling for this generation, safe to perform
 # a paired effect that has not yet run), 1 = already recorded (repeat call; do
 # not repeat a paired effect), 2 = error.
@@ -1251,7 +1335,7 @@ fm_procevent_mark_handled() {
     return 2
   fi
   if ln "$tmp" "$marker" 2>/dev/null; then
-    rm -f -- "$tmp"
+    rm -f -- "$tmp" "$(fm_procevent_announced_marker "$state" "$id" "$seq")"
     return 0
   fi
   rm -f -- "$tmp"

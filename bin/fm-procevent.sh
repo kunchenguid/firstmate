@@ -61,7 +61,8 @@
 #            registered until its owner concludes it with `handled`.
 # reconcile  Idempotent liveness entry the watcher calls on its ordinary cycle:
 #            republish every durably captured result with no handled
-#            acknowledgement yet - regardless of any earlier publication - and
+#            acknowledgement yet whose last wake-queue announcement is at least
+#            FM_PROCEVENT_REANNOUNCE_SECONDS old (or was never recorded), and
 #            start a runner for any registered source that has no live owner and
 #            no open task-owned round. This is liveness repair only - it never
 #            discovers results by
@@ -95,7 +96,7 @@
 #            "already-handled: id seq" on every repeat call, atomically
 #            deduplicated so a paired external effect is never authorized
 #            twice. Until this is called, the result stays eligible for
-#            bounded re-announcement on every reconcile. Marking a result
+#            bounded re-announcement by reconcile. Marking a result
 #            handled does not retire its source registration or claim, with one
 #            exception: acknowledging the terminal round of a task-owned source
 #            is that board's conclude step, so it also drops the registration
@@ -170,8 +171,8 @@
 # announcement and a byte-identical replay produces none at all. Every other
 # adapter keeps the strict publish-before-apply order, because without a
 # declared downstream channel an applied-and-acknowledged result would otherwise
-# go silent. An unhandled result stays eligible for bounded re-announcement on
-# every reconcile in both modes, exactly as before.
+# go silent. An unhandled result stays eligible for bounded re-announcement by
+# reconcile in both modes, exactly as before.
 #
 # Keyed captain answers from built-in adapters use one more seam of the same kind,
 # and this runner still decides nothing about them. Some sources carry the
@@ -192,6 +193,15 @@
 # and never suppresses a wake. Recording the captain's answer is transcription,
 # while ACTING on it is firstmate's judgement, so the capture stays unacknowledged
 # and its `check` wake reaches the handler exactly as it would have anyway.
+#
+# A receipt back to the person who answered is one more seam of the same kind.
+# Right after the feeds, a built-in source with no owner task has its result
+# passed to `bin/fm-procevent-<adapter>.sh receipt <source-id> <result-file>`
+# with the keyed-answer intake's own output (empty for an unbound source) on
+# stdin. The adapter decides whether and how to acknowledge receipt on its own
+# surface, so the person sees what was recorded without waiting for any
+# handler turn. Best effort and silenced like the seams above: a missing
+# command or any failure changes nothing about capture, feeding, or the wake.
 #
 # A runner is bound to the HOME that owns it, not to the one session that armed
 # it: a persistent source is meant to outlive that session, so reconcile stops a
@@ -251,6 +261,10 @@ case "${1-}" in ''|-h|--help|help) usage ;; esac
 
 REG=$(fm_procevent_registry_dir "$STATE")
 MAX_OUTPUT_BYTES=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
+# Reconcile refuses an unusable value by name; every other path, including a
+# runner publishing its own capture, keeps the default rather than failing.
+REANNOUNCE_SECONDS=$(fm_procevent_reannounce_seconds) \
+  || REANNOUNCE_SECONDS=$FM_PROCEVENT_REANNOUNCE_DEFAULT_SECONDS
 EXTENSION_HOST="$SCRIPT_DIR/fm-extension.mjs"
 EXTENSION_LIFECYCLE_LOCK="$REG/.extension-binding-lifecycle.lock"
 
@@ -442,16 +456,27 @@ adapter_autohandle() {  # <adapter> <source-id> <result-file>
 # source, an adapter with no `answers` command, and a failure on either side all
 # leave the capture untouched and still announced, because this never
 # acknowledges anything (see the keyed-answer note in the header).
+# The intake's report is kept in KEYED_ANSWERS_REPORT for the receipt seam.
 feed_keyed_answers() {  # <adapter> <source-id> <result-file>
-  local adapter=$1 id=$2 result=$3 script origin seq
+  local adapter=$1 id=$2 result=$3 script origin seq rc=0
+  KEYED_ANSWERS_REPORT=''
   script=$(adapter_script "$adapter")
   [ -f "$script" ] && [ ! -L "$script" ] || return 1
   origin=$("$SCRIPT_DIR/fm-captain-hold.sh" binding "$id" 2>/dev/null) || return 1
   [ -n "$origin" ] || return 1
   seq=$(fm_procevent_result_sequence "$result") || return 1
-  "$script" answers "$result" 2>/dev/null \
+  KEYED_ANSWERS_REPORT=$("$script" answers "$result" 2>/dev/null \
     | "$SCRIPT_DIR/fm-captain-hold.sh" answers "$origin" \
-        --source "the captured result $id sequence $seq" >/dev/null 2>&1
+        --source "the captured result $id sequence $seq" 2>/dev/null) || rc=$?
+  return "$rc"
+}
+
+# Let the adapter acknowledge receipt on its own surface; see the header.
+adapter_stage_receipt() {  # <adapter> <source-id> <result-file> <intake-report>
+  local script
+  script=$(adapter_script "$1")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  printf '%s' "$4" | "$script" receipt "$2" "$3" >/dev/null 2>&1
 }
 
 feed_reconcile_requests() {  # <adapter> <source-id> <result-file>
@@ -764,8 +789,11 @@ cmd_register_extension() {
 # events - and it republishes on every call regardless of any earlier
 # publication, so a result stays eligible for re-announcement across restarts
 # and drains until `fm_procevent_mark_handled` records it.
-publish_result() {  # <result-file>
-  local result=$1 id seq adapter line status=1 owner_task='' message='' record=''
+# With `reannounce`, a result already announced on the wake queue is skipped
+# until its last announcement is FM_PROCEVENT_REANNOUNCE_SECONDS old; the
+# capture-time announcement never passes it, so it is never delayed.
+publish_result() {  # <result-file> [reannounce]
+  local result=$1 mode=${2-} id seq adapter line status=1 owner_task='' message='' record=''
   local ring_backend ring_target ring_meta active
   id=$(fm_procevent_result_source_id "$result")
   seq=$(fm_procevent_result_sequence "$result")
@@ -838,8 +866,13 @@ publish_result() {  # <result-file>
       esac
     fi
     unset FM_PROCEVENT_CAPTURE_SOURCE_LOCK_HELD
-    if fm_wake_append check "procevent:$id:$seq" "check: $line"; then
+    if [ "$mode" = reannounce ] \
+      && ! fm_procevent_reannounce_due "$STATE" "$id" "$seq" "$REANNOUNCE_SECONDS"; then
+      :
+    elif fm_wake_append check "procevent:$id:$seq" "check: $line"; then
       status=0
+      # Best effort: a lost record only makes the next reconcile announce again.
+      fm_procevent_announced_record "$STATE" "$id" "$seq" || true
     fi
   fi
   fm_procevent_source_lock_release "$id"
@@ -851,7 +884,7 @@ publish_pending() {  # [result-file-to-skip]
   while IFS= read -r result; do
     [ -n "$result" ] || continue
     [ "$result" = "$skip" ] && continue
-    if publish_result "$result"; then
+    if publish_result "$result" reannounce; then
       published=$((published + 1))
     fi
   done < <(fm_procevent_pending "$STATE")
@@ -1247,9 +1280,14 @@ EOF
     && feed_reconcile_requests "$adapter" "$id" "$durable"; then
     printf 'reconciles-fed: %s\n' "$id"
   fi
+  KEYED_ANSWERS_REPORT=''
   if [ "$extension_owner" -eq 0 ] \
     && feed_keyed_answers "$adapter" "$id" "$durable"; then
     printf 'answers-fed: %s\n' "$id"
+  fi
+  if [ "$extension_owner" -eq 0 ] && [ -z "$task_owner" ] \
+    && adapter_stage_receipt "$adapter" "$id" "$durable" "$KEYED_ANSWERS_REPORT"; then
+    printf 'receipt-staged: %s\n' "$id"
   fi
 
   # A self-announcing adapter's autohandle announces through its own durable
@@ -1564,6 +1602,8 @@ cmd_reconcile() {
   # report a fleet of perfectly healthy runners as `failed=` and blame nothing.
   fm_procevent_launch_confirm_seconds >/dev/null \
     || die "FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS must be whole seconds from $FM_PROCEVENT_LAUNCH_CONFIRM_MIN_SECONDS to $FM_PROCEVENT_LAUNCH_CONFIRM_MAX_SECONDS"
+  fm_procevent_reannounce_seconds >/dev/null \
+    || die "FM_PROCEVENT_REANNOUNCE_SECONDS must be whole seconds from $FM_PROCEVENT_REANNOUNCE_MIN_SECONDS to $FM_PROCEVENT_REANNOUNCE_MAX_SECONDS"
   owner_lease_refresh
   published=$(publish_pending)
 

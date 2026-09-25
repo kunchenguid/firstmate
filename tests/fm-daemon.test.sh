@@ -1562,6 +1562,104 @@ test_escalate_batch_age_uses_first_append() {
   pass "batch flush measures max-delay from the first append, not the last"
 }
 
+# Capture one unhandled Lavish board result in <state> the way the runner
+# leaves it, so the real reconcile and handled interfaces can act on it.
+capture_board_result() {  # <state> <source-id> <sequence>
+  mkdir -p "$1/procevent-inbox"
+  chmod 0700 "$1" "$1/procevent-inbox"
+  printf 'session:\n  status: feedback\n' > "$1/procevent-inbox/$2.$3.result"
+  printf 'lavish\n' > "$1/procevent-inbox/$2.$3.adapter"
+  chmod 0600 "$1/procevent-inbox/$2.$3.result" "$1/procevent-inbox/$2.$3.adapter"
+}
+
+test_escalate_add_collapses_a_waiting_repeat() {
+  local dir state
+  dir=$(make_supercase escalate-repeat)
+  state="$dir/state"
+  escalate_add "$state" "check: procevent lavish lavish-00000000000000aa 68"
+  escalate_add "$state" "done: PR 1"
+  escalate_add "$state" "check: procevent lavish lavish-00000000000000aa 68"
+  escalate_add "$state" "done: PR 1"
+  [ "$(grep -c 'lavish-00000000000000aa 68' "$state/.subsuper-escalations")" = 1 ] \
+    || fail "a repeated process-event item waiting in the buffer was buffered again"
+  [ "$(grep -cxF 'done: PR 1' "$state/.subsuper-escalations")" = 2 ] \
+    || fail "a repeated ordinary escalation was collapsed"
+  pass "a process-event escalation already waiting in the buffer is not buffered twice"
+}
+
+# One unhandled board result used to be escalated on every watcher cycle: each
+# reconcile queued it again, and the daemon buffered every copy and delivered
+# them after the supervisor had already acknowledged the result.
+test_unhandled_board_result_escalates_once_and_never_after_handled() {
+  local dir state fakebin sent capture i sid=lavish-00000000000000aa
+  dir=$(make_supercase board-result-repeat)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"  # a proven-empty bare claude composer
+  capture_board_result "$state" "$sid" 68
+  for i in 1 2 3 4 5; do
+    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null \
+      || fail "reconcile failed on cycle $i"
+    # The watcher wakes the daemon only when a wake is queued.
+    [ -s "$state/.wake-queue" ] || continue
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999 handle_durable_wakes fallback "$state" \
+      || fail "the daemon could not handle cycle $i"
+  done
+  [ "$(grep -c "procevent lavish $sid 68" "$state/.subsuper-escalations")" = 1 ] \
+    || fail "one unhandled board result was escalated more than once: $(cat "$state/.subsuper-escalations")"
+  escalate_add "$state" "done: PR 1"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-procevent.sh" handled "$sid" 68 >/dev/null \
+    || fail "could not acknowledge the board result"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" escalate_flush "$state" \
+    || fail "escalate_flush failed"
+  grep -F "done: PR 1" "$sent" >/dev/null || fail "dropping a handled result lost another escalation"
+  if grep -F "$sid 68" "$sent" >/dev/null; then
+    fail "a digest delivered a board result that was already handled"
+  fi
+  escalate_add "$state" "check: procevent lavish $sid 68"
+  : > "$sent"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" escalate_flush "$state" \
+    || fail "escalate_flush failed on a buffer holding only a handled result"
+  [ ! -s "$sent" ] || fail "a digest holding only a handled result was delivered"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a handled result stayed buffered"
+  pass "an unhandled board result escalates once per re-announcement interval and never after it is handled"
+}
+
+# A board answer is the captain's own input: it goes to the supervisor as soon
+# as it is buffered, not after the batch window, while the busy and composer
+# guards still hold it back from a pane in use.
+test_board_answer_skips_the_batch_window_but_keeps_the_guards() {
+  local dir state fakebin sent capture reason="check: procevent lavish lavish-00000000000000aa 69"
+  dir=$(make_supercase board-answer-immediate)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"
+  afk_enter "$state"
+  printf '\342\235\257 half-typed captain words\n' > "$capture"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=999 handle_wake "$reason" "$state"
+  [ ! -s "$sent" ] || fail "a board answer was typed into a composer holding the captain's words"
+  grep -F "$reason" "$state/.subsuper-escalations" >/dev/null \
+    || fail "a guarded board answer was not kept for the next attempt"
+  printf '\342\235\257 \n' > "$capture"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=999 FM_HOUSEKEEPING_TICK=0 \
+    housekeeping "$state"
+  grep -F "$reason" "$sent" >/dev/null \
+    || fail "a board answer waited for the batch window once the composer was empty"
+  : > "$sent"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=999 handle_wake "$reason" "$state"
+  grep -F "$reason" "$sent" >/dev/null \
+    || fail "a board answer arriving at an empty composer was not delivered at once"
+  pass "a board answer skips the batch window and still respects the composer guard"
+}
+
 test_heartbeat_scan_dedup() {
   local dir state
   dir=$(make_supercase scan-dedup)
@@ -3083,6 +3181,9 @@ test_housekeeping_herdr_idle_busy_record_clears_stale
 test_housekeeping_herdr_resumed_stale_cleared
 test_housekeeping_orca_persistent_stale_resolves_terminal
 test_escalate_batches_into_one_digest
+test_escalate_add_collapses_a_waiting_repeat
+test_unhandled_board_result_escalates_once_and_never_after_handled
+test_board_answer_skips_the_batch_window_but_keeps_the_guards
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
