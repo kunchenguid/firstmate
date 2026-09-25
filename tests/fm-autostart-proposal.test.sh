@@ -18,7 +18,10 @@ cat "$READY_FIXTURE"
 SH
 cat > "$FAKEBIN/quota-axi" <<'SH'
 #!/usr/bin/env bash
-[ "$*" = '--full --json' ] || exit 9
+case "$*" in
+  '--full --json'|'--provider claude,codex,agy --json') ;;
+  *) exit 9 ;;
+esac
 cat "$QUOTA_FIXTURE"
 SH
 chmod +x "$FAKEBIN/tasks-axi" "$FAKEBIN/quota-axi"

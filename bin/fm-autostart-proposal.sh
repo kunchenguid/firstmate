@@ -10,6 +10,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
 die() { printf 'fm-autostart-proposal: %s\n' "$1" >&2; exit 2; }
 
+# This command is part of heartbeat handling, so enforce the low-quota stop and
+# compact policy even when there is no queued work to propose.
+FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+  "$SCRIPT_DIR/fm-quota-stop-compact.sh" || die 'low-quota session steering failed'
+
 ready=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
   "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>&1) || die "tasks-axi ready failed: $ready"
 candidate_ids=$(printf '%s\n' "$ready" | awk '
