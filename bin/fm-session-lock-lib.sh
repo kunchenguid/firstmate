@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 # Shared session-lock harness identity.
 #
-# ONE owner of the "which verified-harness process holds this home's session
-# lock, and does the current process run inside that same session?" decision.
+# ONE owner of the "which verified harness session holds this home's lock,
+# and does the current process run inside that same session?" decision.
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock and its
 # state/.lock-session sidecar; bin/fm-claude-stop-autoarm.sh uses it to prove a
 # Stop hook fires inside the lock-owning primary session before it may arm or
-# rewake. Two signals decide ownership, either one sufficient: the recorded pid
-# is a member of this process's contiguous harness ancestry, or the trusted
-# Claude session id below matches the id recorded beside a live lock. Neither
-# signal ever fails open: no id, no sidecar, an untrusted id, or a different
-# recorded id leaves the ancestry verdict exactly as it was.
+# rewake. PID ancestry, a trusted Claude id beside a live PID, and a verified
+# Codex writer lock are the supported identity proofs. The functions below
+# also own the displaced-pane mutation refusal used by fleet command entries.
 # This file is sourced by scripts and has no side effects on source.
 
 # Cursor process identity is NOT expressible as a command-name pattern and is
@@ -31,6 +29,97 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
 # loose regex would also match ordinary firstmate paths such as
 # bin/fm-claude-stop-autoarm.sh.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
+
+# Codex's writer flock identifies an interactive thread even when its sandbox
+# hides the harness process from a tool subprocess. The state root is part of
+# the identity so equal thread markers in separate Codex homes cannot collide.
+fm_codex_state_root() {
+  if [ -n "${CODEX_HOME:-}" ]; then
+    printf '%s\n' "$CODEX_HOME"
+  elif [ -n "${HOME:-}" ]; then
+    printf '%s/.codex\n' "$HOME"
+  else
+    return 1
+  fi
+}
+
+fm_codex_identity_parse() {  # <identity>; sets FM_CODEX_IDENTITY_THREAD/ROOT
+  local payload thread root
+  FM_CODEX_IDENTITY_THREAD=
+  FM_CODEX_IDENTITY_ROOT=
+  case "${1:-}" in codex:*:*) ;; *) return 1 ;; esac
+  payload=${1#codex:}
+  thread=${payload%%:*}
+  root=${payload#*:}
+  case "$thread" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$root" in ''|*[!A-Za-z0-9._/,:@%+=~-]*) return 1 ;; esac
+  FM_CODEX_IDENTITY_THREAD=$thread
+  FM_CODEX_IDENTITY_ROOT=$root
+}
+
+fm_codex_thread_id() {
+  local thread=${CODEX_THREAD_ID:-${CODEX_SESSION_ID:-}}
+  case "$thread" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  printf '%s\n' "$thread"
+}
+
+fm_session_identity_valid() {  # <identity>
+  case "${1:-}" in
+    codex:*) fm_codex_identity_parse "$1" ;;
+    ''|*[!0-9]*) return 1 ;;
+  esac
+}
+
+# Return 0 held, 1 free/absent, 2 uncertain. A possibly live writer is never
+# reclaimed as stale; takeover also requires a positively held writer.
+fm_codex_writer_lock_state() {  # <thread> <root>
+  local path rc
+  path="$2/thread-writer-locks/$1.lock"
+  [ -e "$path" ] || return 1
+  [ -f "$path" ] && [ ! -L "$path" ] || return 2
+  command -v flock >/dev/null 2>&1 || return 2
+  ( exec 9<"$path" || exit 2; flock -n -E 75 9 ) >/dev/null 2>&1
+  rc=$?
+  case "$rc" in 0) return 1 ;; 75) return 0 ;; *) return 2 ;; esac
+}
+
+fm_session_identity() {
+  local thread root pid comm args
+  pid=$(fm_session_lock_anchor_pid 2>/dev/null || true)
+  if [ -n "$pid" ]; then
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+    args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+    case "$(basename -- "$comm") ${args%% *}" in
+      codex\ *|*'/codex '*) ;;
+      *) printf '%s\n' "$pid"; return 0 ;;
+    esac
+  fi
+  if thread=$(fm_codex_thread_id) && root=$(fm_codex_state_root) \
+    && fm_codex_identity_parse "codex:$thread:$root" \
+    && fm_codex_writer_lock_state "$thread" "$root"; then
+    printf 'codex:%s:%s\n' "$thread" "$root"
+    return 0
+  fi
+  [ -n "$pid" ] || return 1
+  printf '%s\n' "$pid"
+}
+
+# Return 0 only for a verified live holder, 1 for a proven dead holder, and 2
+# for malformed or uncertain state. Callers must not treat 2 as takeover proof.
+fm_session_identity_liveness() {  # <identity>
+  case "${1:-}" in
+    codex:*)
+      fm_codex_identity_parse "$1" || return 2
+      fm_codex_writer_lock_state "$FM_CODEX_IDENTITY_THREAD" "$FM_CODEX_IDENTITY_ROOT"
+      return
+      ;;
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  fm_harness_pid_alive "$1" && return 0
+  kill -0 "$1" 2>/dev/null && return 2
+  ps -o comm= -p "$1" >/dev/null 2>&1 && return 2
+  return 1
+}
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -271,9 +360,17 @@ fm_session_lock_anchor_pid() {
 # held by a harness outside this ancestry under another (or no) session id, or
 # an ancestry that cannot be resolved all fail closed.
 fm_session_lock_owned_by_self() {
-  local state=$1 lock_pid pids pid
+  local state=$1 lock_pid pids pid thread root
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
+    codex:*)
+      fm_codex_identity_parse "$lock_pid" || return 1
+      thread=$(fm_codex_thread_id) || return 1
+      root=$(fm_codex_state_root) || return 1
+      [ "$FM_CODEX_IDENTITY_THREAD" = "$thread" ] && [ "$FM_CODEX_IDENTITY_ROOT" = "$root" ] || return 1
+      fm_codex_writer_lock_state "$thread" "$root"
+      return
+      ;;
     ''|*[!0-9]*) return 1 ;;
   esac
   pids=$(fm_harness_ancestry_pids) || return 1
@@ -298,10 +395,14 @@ fm_session_lock_foreign_owner_live() {
   FM_SESSION_LOCK_FOREIGN_OWNER_PID=
   [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
+  fm_session_identity_liveness "$lock_pid" || return 1
   case "$lock_pid" in
-    ''|*[!0-9]*) return 1 ;;
+    codex:*)
+      fm_session_lock_owned_by_self "$state" && return 1
+      FM_SESSION_LOCK_FOREIGN_OWNER_PID=$lock_pid
+      return 0
+      ;;
   esac
-  fm_harness_pid_alive "$lock_pid" || return 1
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 1
@@ -311,6 +412,35 @@ EOF
   fm_session_lock_same_session "$state" "$pids" && return 1
   # shellcheck disable=SC2034 # Output global, read by the sourcing guard caller.
   FM_SESSION_LOCK_FOREIGN_OWNER_PID=$lock_pid
+  return 0
+}
+
+# Refuse a fleet mutation issued from a pane that a live owner superseded.
+# Detached fleet helpers with no provable interactive identity retain their
+# existing lease/actor checks; watcher children use their launch identity.
+fm_session_lock_refuse_displaced() {  # <state>
+  local state=$1 owner
+  if [ -n "${FM_WATCH_SESSION_IDENTITY:-}" ]; then
+    owner=$(cat "$state/.lock" 2>/dev/null || true)
+    if [ "$owner" != "$FM_WATCH_SESSION_IDENTITY" ]; then
+      printf 'error: watcher session was displaced by fleet-lock holder %s; refusing mutation\n' "$owner" >&2
+      return 1
+    fi
+  fi
+  # The bounded startup worker carries its captured lock identity through the
+  # claim lock, not interactive ancestry; its own owner checks gate each sweep.
+  if [ "${FM_BOOTSTRAP_NETWORK:-}" = only ] && [ -n "${FM_BOOTSTRAP_NETWORK_LOCK_PID:-}" ]; then
+    owner=$(cat "$state/.lock" 2>/dev/null || true)
+    [ "$owner" != "$FM_BOOTSTRAP_NETWORK_LOCK_PID" ] || return 0
+  fi
+  [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 0
+  fm_session_identity >/dev/null 2>&1 || return 0
+  fm_session_lock_owned_by_self "$state" && return 0
+  owner=$(cat "$state/.lock" 2>/dev/null) || return 0
+  if fm_session_identity_liveness "$owner"; then
+    printf 'error: this session was displaced by live fleet-lock holder %s; refusing mutation\n' "$owner" >&2
+    return 1
+  fi
   return 0
 }
 
@@ -358,6 +488,16 @@ fm_session_lock_inspect() {  # <state>
   # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
   FM_LOCK_INSPECT_PID=$pid
   case "$pid" in
+    codex:*)
+      fm_codex_identity_parse "$pid" || { FM_LOCK_INSPECT_STATE=unknown; return 0; }
+      fm_codex_writer_lock_state "$FM_CODEX_IDENTITY_THREAD" "$FM_CODEX_IDENTITY_ROOT"
+      case "$?" in
+        0) FM_LOCK_INSPECT_STATE=held; FM_LOCK_INSPECT_LIVE_HARNESS=true ;;
+        1) FM_LOCK_INSPECT_STATE=stale; FM_LOCK_INSPECT_LIVE_HARNESS=false ;;
+        *) FM_LOCK_INSPECT_STATE=unknown ;;
+      esac
+      return 0
+      ;;
     ''|*[!0-9]*)
       FM_LOCK_INSPECT_STATE=unknown
       return 0

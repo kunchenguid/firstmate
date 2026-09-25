@@ -76,6 +76,9 @@ SECONDMATES_MD="$FM_HOME/data/secondmates.md"
 . "$SCRIPT_DIR/fm-secondmate-restart-lib.sh"
 
 "$SCRIPT_DIR/fm-guard.sh" || true
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+fm_session_lock_refuse_displaced "$STATE" || exit 1
 
 usage() { echo "usage: fm-update.sh [--help]" >&2; }
 

@@ -90,7 +90,7 @@ The full digest updates the completion record in this order:
 
 1. It acquires the lock.
 2. It clears the completion record.
-3. It republishes the lock owner's pid only after every stage completes.
+3. It republishes the lock owner's identity only after every stage completes.
 
 So `clear` or `compact` cannot skip startup sweeps after a truncated run.
 
@@ -98,9 +98,20 @@ So `clear` or `compact` cannot skip startup sweeps after a truncated run.
 
 - The shared ancestry verdict.
 - A trusted same-session Claude id.
+- A verified Codex thread writer lock bound to its state root.
 
 So a proven `clear` or `compact` re-emit re-verifies ownership and proceeds.
-A lock another live session took meanwhile still produces the ordinary read-only digest.
+A lock another live session took meanwhile prevents a re-emit and routes the new start through the full acquisition path.
+
+### Primary takeover
+
+At a full interactive primary start, `bin/fm-lock.sh` serializes acquisition through `state/.lock.acquire` and re-reads the holder under that claim.
+A different, positively live holder is superseded only when the caller proves the same unmarked primary checkout and home and the holder's full startup completion record matches its lock identity; `bin/fm-lock.sh takeover` uses that same path for an explicit attempt.
+The lock command prints one `lock takeover:` line naming the displaced identity and never signals its process.
+A worker task marker, linked worker checkout, secondmate home, or different home cannot supersede a live primary.
+Non-regular or unreadable locks, failed publication, uncertain ownership, and an unfinished deferred startup sweep retain their read-only refusals.
+The displaced pane's mutating command entry points reject its old identity, and an arm-launched watcher exits when its launch identity differs from the current lock.
+[`fm-lock-supersede.test.sh`](../tests/fm-lock-supersede.test.sh) is the deterministic old-idle-pane regression and covers both PID and Codex holders.
 
 ### Nudge wrapper on a run-tier harness
 
