@@ -44,6 +44,14 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 ## Current behavior and safety
 
+### Detached-session launch environment
+
+When Firstmate runs outside tmux and no tmux server exists yet, creating the detached `firstmate` session also births the server.
+That server hands its startup environment to every window created afterwards, and `NO_COLOR` is not in tmux's default `update-environment` set, so a later client attach does not repair it.
+Firstmate therefore drops the launcher's color control (`NO_COLOR`, `FORCE_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`) before that one `new-session`, so an agent-launched Firstmate cannot leave every crew pane monochrome.
+The list is shared with the Herdr and zellij adapters through `bin/fm-backend-launch-env-lib.sh`.
+Reusing the current session or an already-running server changes no environment: only the birth of a new server is scrubbed, and every unrelated launch variable is left intact.
+
 ### Agent liveness probe
 
 A target-existence check proves only that the pane exists.
