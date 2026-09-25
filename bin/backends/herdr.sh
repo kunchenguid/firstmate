@@ -1492,7 +1492,7 @@ fm_backend_herdr_projection_owned_children_json() {  # <session> <state> <home> 
 # This is presentation-only and always returns success.
 fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspace-id> <home-label> <parent-workspace-id> <state> <home>
   local session=$1 created=$2 home_label=$3 parent_ws=$4 state=$5 home=$6
-  local list owned plan current desired socket mover response move_status focus_before move_capable count index target actual
+  local list owned fallback plan current desired socket mover response move_status focus_before move_capable count index target actual
   local orphan journal id resolved_parent
   FM_BACKEND_HERDR_PROJECTION_ORDER_PARENT_WORKSPACE_ID=$parent_ws
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || {
@@ -1505,6 +1505,31 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
   }
   if [ -z "$created" ] && [ "$owned" = '[]' ]; then
     return 0
+  fi
+  fallback=$(printf '%s' "$list" | jq -c --argjson owned "$owned" --arg home_label "$home_label" '
+    (.result.workspaces // null) as $spaces
+    | select(($spaces | type) == "array")
+    | [$spaces[].workspace_id] as $ids
+    | {
+        missing_parent: any($owned[]; .parent as $parent | ($ids | index($parent)) == null),
+        firstmate_count: (if $home_label == "firstmate"
+          then [$spaces[] | select(.label == "Firstmate" or .label == "firstmate")] | length
+          else 0 end)
+      }
+  ' 2>/dev/null) || fallback=
+  if [ "$(printf '%s' "$fallback" | jq -r 'select(.missing_parent and .firstmate_count == 0) | "yes"' 2>/dev/null)" = yes ]; then
+    if ! FM_HOME="$home" fm_backend_herdr_workspace_ensure "$session" "$home" other-home >/dev/null; then
+      echo "warning: herdr presentation ordering could not create the missing Firstmate workspace; leaving orphan tasks in Herdr's current order" >&2
+      return 0
+    fi
+    list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || {
+      echo "warning: herdr presentation ordering could not list workspaces after creating Firstmate; leaving orphan tasks in Herdr's current order" >&2
+      return 0
+    }
+    owned=$(fm_backend_herdr_projection_owned_children_json "$session" "$state" "$home" "$list" "$created" "$parent_ws") || {
+      echo "warning: herdr presentation ordering found ambiguous journal ownership after creating Firstmate; leaving orphan tasks in Herdr's current order" >&2
+      return 0
+    }
   fi
   plan=$(printf '%s' "$list" | jq -c --argjson owned "$owned" --arg home_label "$home_label" --arg created "$created" '
     (.result.workspaces // null) as $spaces

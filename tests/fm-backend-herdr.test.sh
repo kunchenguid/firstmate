@@ -3061,6 +3061,60 @@ SH
   pass "herdr presentation ordering refreshes focus around every workspace move"
 }
 
+test_projection_order_creates_missing_firstmate_for_orphan() {
+  local dir mover ensure_log list_count mover_log out
+  dir="$TMP_ROOT/projection-order-create-firstmate"
+  mkdir -p "$dir"
+  mover="$dir/mover"
+  ensure_log="$dir/ensure.log"
+  list_count="$dir/lists"
+  mover_log="$dir/mover.log"
+  : > "$ensure_log"
+  : > "$list_count"
+  : > "$mover_log"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+printf '%s\t%s\n' "$2" "$3" >> "$FM_FAKE_MOVER_LOG"
+case "$(wc -l < "$FM_FAKE_MOVER_LOG" | tr -d '[:space:]')" in
+  1) printf '%s\n' '{"result":{"type":"workspace_list","workspaces":[{"workspace_id":"w1"},{"workspace_id":"w2"},{"workspace_id":"w3"}]}}' ;;
+  2) printf '%s\n' '{"result":{"type":"workspace_list","workspaces":[{"workspace_id":"w1"},{"workspace_id":"w3"},{"workspace_id":"w2"}]}}' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$mover"
+  out=$(ROOT="$ROOT" FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
+    ENSURE_LOG="$ensure_log" LIST_COUNT="$list_count" bash -c '
+      . "$ROOT/bin/backends/herdr.sh"
+      fm_backend_herdr_cli() {
+        printf x >> "$LIST_COUNT"
+        if [ "$(wc -c < "$LIST_COUNT" | tr -d "[:space:]")" = 1 ]; then
+          printf "%s\n" '\''{"result":{"workspaces":[{"workspace_id":"w2","label":"Project"},{"workspace_id":"w3","label":"└ orphan · p:AbCdEfGhIjKlMnOpQrStUv"}]}}'\''
+        else
+          printf "%s\n" '\''{"result":{"workspaces":[{"workspace_id":"w2","label":"Project"},{"workspace_id":"w3","label":"└ orphan · p:AbCdEfGhIjKlMnOpQrStUv"},{"workspace_id":"w1","label":"firstmate"}]}}'\''
+        fi
+      }
+      fm_backend_herdr_projection_owned_children_json() {
+        printf "%s\n" '\''[{"child":"w3","parent":"w9","journal":"","task":""}]'\''
+      }
+      fm_backend_herdr_workspace_ensure() {
+        printf "%s\t%s\t%s\n" "$1" "$2" "$3" >> "$ENSURE_LOG"
+        FM_BACKEND_HERDR_WS_ID=w1
+      }
+      fm_backend_herdr_workspace_move_capable() { return 0; }
+      fm_backend_herdr_presentation_session_socket_path() { printf /tmp/fake.sock; }
+      fm_backend_herdr_projection_focus_snapshot() { printf "focus\\tfocus:tab"; }
+      fm_backend_herdr_projection_focus_restore() { return 0; }
+      fm_backend_herdr_projection_order_best_effort test w3 firstmate w9 /tmp/state /tmp/home
+      printf "%s" "$FM_BACKEND_HERDR_PROJECTION_ORDER_PARENT_WORKSPACE_ID"
+    ' 2>&1)
+  [ "$out" = w1 ] || fail "orphan did not resolve to the created Firstmate workspace: $out"
+  [ "$(cat "$ensure_log")" = $'test\t/tmp/home\tother-home' ] \
+    || fail "orphan fallback bypassed the supported durable workspace lifecycle: $(cat "$ensure_log")"
+  [ "$(cat "$mover_log")" = $'w1\t0\nw3\t1' ] \
+    || fail "orphan was not reconciled under the created Firstmate workspace: $(cat "$mover_log")"
+  pass "herdr presentation ordering creates a durable Firstmate workspace for an orphan"
+}
+
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order() {
   local dir log resp fb mover mover_log out status
   dir="$TMP_ROOT/projection-order"; mkdir -p "$dir/responses"
@@ -5765,6 +5819,7 @@ test_kill_refuses_when_presentation_lock_is_unavailable
 test_projection_seeded_prune_refuses_active_tab
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes
 test_projection_order_refreshes_focus_before_each_move
+test_projection_order_creates_missing_firstmate_for_orphan
 test_presentation_session_lock_path_is_shared_across_homes
 test_presentation_session_lock_path_rejects_malformed_socket
 test_projection_reclaim_refusal_matrix_is_non_mutating
