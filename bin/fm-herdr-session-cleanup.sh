@@ -329,7 +329,6 @@ fm_herdr_session_cleanup() {
     fm_herdr_cleanup_warn "session '$session' workspace discovery failed; preserving every candidate"
     return 0
   }
-  fm_herdr_reconcile_existing_layout "$session" "$home_real"
   candidates=$(printf '%s' "$list" | jq -er '
     .result.workspaces
     | select(type == "array")
@@ -345,6 +344,14 @@ fm_herdr_session_cleanup() {
     [ -n "$workspace" ] && [ -n "$title" ] || continue
     fm_herdr_cleanup_one "$session" "$workspace" "$title" "$home_real"
   done <<< "$candidates"
+  found=0
+  for journal in "$STATE"/*"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"; do
+    if [ -f "$journal" ] && [ ! -L "$journal" ]; then
+      found=1
+      break
+    fi
+  done
+  [ "$found" -eq 0 ] || fm_herdr_reconcile_existing_layout "$session" "$home_real"
   return 0
 }
 

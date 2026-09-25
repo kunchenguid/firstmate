@@ -277,7 +277,8 @@ An ambiguous response grants no mutation or cleanup authority.
 Protocol 16 exposes `workspace.move` over the named session socket but no CLI subcommand.
 `bin/backends/herdr-workspace-move.py` sends only that whitelisted method and verifies the complete returned workspace order.
 
-After each fresh projected create and each locked session start, current-home children with valid version 2 journals are reconciled into project clusters: Firstmate first, then each exact parent immediately followed by its children in their existing relative order.
+After each fresh projected create, current-home children with valid version 2 journals are reconciled into project clusters: Firstmate first, then each exact parent immediately followed by its children in their existing relative order.
+At locked session start, stale projection retirement runs first and only surviving journals participate in reconciliation.
 Reconciliation runs when all of these are verifiable:
 
 - The session layout.
