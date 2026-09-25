@@ -634,7 +634,6 @@ run_cleanup() {  # <output-file> <timing-file>
   rm -f "$1" 2>/dev/null || true
   [ -z "${2:-}" ] || rm -f "$2" 2>/dev/null || true
 }
-}
 
 # --- harvest / report --------------------------------------------------------
 
