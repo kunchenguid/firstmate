@@ -57,6 +57,17 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   exit 1
 fi
 
+# A secondmate is a persistent worker, not a delivery lane: it never owns a
+# pull request of its own. A URL reported on its routed status channel belongs
+# to a task inside the mate's own home, which records and watches it there;
+# arming a merge watch here would queue the mate itself for teardown as landed
+# work once that pull request merges.
+KIND=$(grep '^kind=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ "$KIND" = secondmate ]; then
+  echo "error: $ID is a secondmate, not a delivery lane - $URL was reported on its status channel but belongs to a task in the mate's own home, which arms its own merge watch" >&2
+  exit 1
+fi
+
 # A prior exact merged result may have queued its durable wake immediately
 # before interruption.
 # Finish only its identity-bound receipt before publishing a replacement poll.
@@ -122,7 +133,6 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   fi
 fi
 
-KIND=$(grep '^kind=' "$META" | tail -1 | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PROJECT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
 # The gate is asked about the ready report this task's worker was told to give;
