@@ -277,8 +277,8 @@ An ambiguous response grants no mutation or cleanup authority.
 Protocol 16 exposes `workspace.move` over the named session socket but no CLI subcommand.
 `bin/backends/herdr-workspace-move.py` sends only that whitelisted method and verifies the complete returned workspace order.
 
-After each fresh projected create, current-home children with valid version 2 journals are reconciled into project clusters: Firstmate first, then each exact parent immediately followed by its children in their existing relative order.
-At locked session start, stale projection retirement runs first and only surviving journals participate in reconciliation.
+After each fresh projected create, the exact response-derived child and current-home children with valid version 2 journals are reconciled into project clusters: Firstmate first, then each exact parent immediately followed by its children in their existing relative order.
+At locked session start, stale projection retirement runs first and only surviving valid version 2 journals participate in reconciliation.
 Reconciliation runs when all of these are verifiable:
 
 - The session layout.
@@ -291,7 +291,7 @@ A project workspace used as the launcher owns that project's task block; without
 A child whose recorded parent disappeared is moved and rebound under the unique Firstmate workspace.
 When no Firstmate candidate exists, the normal durable workspace lifecycle creates one before orphan reconciliation.
 `Firstmate` and `firstmate` are one candidate set; multiple matches skip Firstmate rotation and orphan rebinding rather than choosing by spelling.
-Exact journal bindings are the only cluster ownership source; adjacent legacy, foreign, or merely child-shaped workspaces are never adopted into a project block.
+Exact version 2 journal bindings, plus the response-derived child during its fresh create, are the only cluster ownership sources; adjacent legacy, foreign, or merely child-shaped workspaces are never adopted into a project block.
 Other homes' workspaces keep their relative order.
 
 Ordering failure never fails the task spawn.
@@ -465,7 +465,7 @@ Any of these preserves the candidate and lets session startup continue with at m
   Every earlier degradation on the fresh projected-create path (no session server, contended presentation lock, absent or ambiguous parent) still warns and continues flat.
 - Recovery of an existing presentation journal deliberately refuses the spawn when the shared presentation lock is contended, rather than falling back flat.
   Default-on makes that refusal reachable in any Herdr home.
-- Valid current-home project clusters are rearranged after a fresh projected create; workspace labels are never changed.
+- Existing layouts may be rearranged by the project-cluster reconciliation described above; workspace labels are never changed.
 - Missing or ambiguous restart bindings fall back to the ordinary home workspace while the old projection remains untouched.
 - Crashes, lost responses, failed exact-pane cleanup, or human renames can leave quarantined spaces.
   Session start removes only the exact home-local, uniquely journal-correlated, childless idle-shell shape above.

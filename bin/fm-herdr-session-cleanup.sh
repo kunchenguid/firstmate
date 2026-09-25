@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Retire stale restored-shell Herdr presentation children at locked session start.
+# Retire stale restored-shell Herdr presentation children, then reconcile
+# surviving project clusters at locked session start.
 #
 # Usage: fm-herdr-session-cleanup.sh
 #
@@ -19,8 +20,11 @@
 # prerequisite is immediately rechecked before the existing exact-pane
 # focus-preserving close helper is called.
 # The script never closes a workspace. It removes only the matching journal,
-# and only after the exact pane is confirmed gone. Every error warns and returns
-# success so session startup continues conservatively.
+# and only after the exact pane is confirmed gone. Surviving valid version 2
+# journals then drive best-effort project-cluster reconciliation under the
+# shared presentation lock. docs/herdr-backend.md's "Presentation spaces"
+# section owns that contract.
+# Every error warns and returns success so session startup continues conservatively.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

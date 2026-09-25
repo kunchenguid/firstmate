@@ -1488,7 +1488,8 @@ fm_backend_herdr_projection_owned_children_json() {  # <session> <state> <home> 
   printf '%s' "$owned" | jq -ce 'group_by(.child) | select(all(.[]; length == 1)) | add // []'
 }
 
-# Reconcile this home's journal-owned project clusters after a projected create.
+# Reconcile this home's exact fresh child and journal-owned project clusters
+# after a projected create or at locked session start.
 # This is presentation-only and always returns success.
 fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspace-id> <home-label> <parent-workspace-id> <state> <home>
   local session=$1 created=$2 home_label=$3 parent_ws=$4 state=$5 home=$6
