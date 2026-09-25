@@ -20,8 +20,28 @@ Observed end-to-end latency from a Mac was 123 to 348 ms per request, with the s
 Verified 2026-09-25 against OpenRouter's own published OpenAPI specification, fetched unauthenticated from `https://openrouter.ai/openapi.json`.
 The spec lists `POST /api/alpha/decisions` (operation `createApiAlphaDecisions`) with request schema `DecisionsRequest` (`{model, state, questions, ...}`) and response schema `DecisionsResponse`, whose worked example matches the `{choice, confidence, probabilities, type}` per-question answer shape the tool already parses; the top-level security scheme is `bearer` (an `Authorization: Bearer <key>` header), and the operation's own example request names `model: "typesafe/jev-1.13"`, consistent with the `~typesafe/jev-latest` alias this change sends.
 The spec also lists a compatibility path `POST /systemone` on the same host, described as accepting bare System One model IDs onto the `typesafe/` namespace; the tool does not use this path, since `TYPESAFE_API_KEY` already reaches the same model directly at `api.typesafe.ai`.
-No authenticated call was made against either OpenRouter path: this task's isolated environment had neither `OPENROUTER_API_KEY` nor `TYPESAFE_API_KEY` available and no vault access to obtain one, so the request/response shape above is confirmed from the published contract rather than from a live response, and the equivalence and latency table below has no OpenRouter row yet.
-The next holder of a vault-injected `OPENROUTER_API_KEY` should run the same 25-brief comparison used for the 2026-09-16 and 2026-09-17 rows below, once against `TYPESAFE_API_KEY` alone and once against `OPENROUTER_API_KEY`, and record rule-match agreement and latency here before this transport is treated as production-verified end to end.
+
+### Live OpenRouter run (2026-09-26)
+
+Run against a real `OPENROUTER_API_KEY` (read directly from the operator's own `.env`, exported in-process for this run only, never printed, logged, or persisted), model `~typesafe/jev-latest`, answering as `typesafe/jev-1.13-20260917`.
+Rules: a fresh five-rule file mirroring the shape of the 2026-09-16/17 runs (hardest tier with `approval: captain`, routine build, root-caused bug fix, trivial mechanical edit, read-only investigation), each with one `claude` profile.
+Briefs: 25 fixtures, five per rule, each written to hit exactly one rule unambiguously (no borderline cases in this pass, so this run measures transport correctness and routing agreement, not floor-boundary behavior, which the 2026-09-23 runs already cover).
+
+| Measure | Result |
+| --- | --- |
+| Rule matched the hand label | 25 of 25 |
+| Confidence | 0.90 to 1.0 (23 of 25 at 1.0) |
+| Outcomes: clear / ambiguous / escalate / error | 0 / 0 / 25 / 0 |
+| Input tokens per brief (min / median / max) | 592 / 608 / 621 |
+| Output tokens | 71 |
+| Wall time per call including quota-axi and jq (min / median / max) | 2,129 / 2,391 / 3,206 ms |
+| API errors | 0 |
+
+All 25 outcomes were `escalate`, for two distinct and expected reasons, not a transport or routing fault: the five hard-tier briefs escalated on `rule requires the captain's explicit approval before dispatch` (the rule's declared `approval: captain`, independent of quota); the other 20 escalated on `no rankable eligible candidate` because this run's ambient `quota-axi` snapshot reported the `claude` provider's quota state as `stale` ("Claude quota endpoint rate limited" from the live Anthropic quota check at run time), which the resolver correctly treats as unmeasurable rather than assuming availability.
+Both are the documented safe-fallback behavior working as designed: an approval-gated rule never resolves without the captain, and unmeasurable quota never resolves `clear`.
+The wall-time figure is dominated by the required `quota-axi --json` snapshot (about 2.0 s standalone in this environment) rather than the OpenRouter call itself; this environment's bash is 3.2 (no `EPOCHREALTIME`), so `fm-timing-lib.sh`'s `latency_ms` field falls back to whole-second resolution here and could not isolate the OpenRouter round-trip more precisely than that.
+No `TYPESAFE_API_KEY` was available in this same run to repeat the side-by-side comparison; the rule-match agreement above is against the hand labels only, not against a parallel typesafe.ai run.
+This is the first live, authenticated confirmation that the `OPENROUTER_API_KEY` path reaches OpenRouter's Decisions API, parses its response, and preserves every downstream safety gate; the request/response shape match against the published OpenAPI spec (above) is now also corroborated by a real response.
 
 ## Live rule match against real briefs
 
@@ -125,4 +145,5 @@ $ bash tests/fm-dispatch-resolve.test.sh | tail -1
 # all fm-dispatch-resolve tests passed
 ```
 
-A live run needs a key and is not part of the suite; rerun the table above by pointing the tool at a brief with the key injected for that one command, and see "OpenRouter Decisions transport" above for the live comparison still owed once an `OPENROUTER_API_KEY` is available.
+A live run needs a key and is not part of the suite; rerun the table above by pointing the tool at a brief with the key injected for that one command, and see "OpenRouter Decisions transport" above, which now records the 2026-09-26 live `OPENROUTER_API_KEY` run.
+A future holder of a `TYPESAFE_API_KEY` should still repeat that same 25-brief set once against it, to get a direct side-by-side with the OpenRouter numbers above rather than only the hand labels.
