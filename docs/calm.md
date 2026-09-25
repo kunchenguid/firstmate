@@ -95,6 +95,7 @@ Bounds of the Claude Code support, each recorded with evidence in [`calm-mode-fe
 
 - The function-hooks surface is early access and default-off, and Claude Code states that its API may change between releases without notice; the mod is verified on Claude Code 2.1.272 and 2.1.280 and refuses nothing newer.
 - An envelope that still reaches Claude Code as typed or launch-prompt text, such as a worker's launch brief, arrives without its U+2063 and so stays visible; only record-backed doorbells are recognized there.
+- Every record write prunes operational-inbox records older than 7 days, and a doorbell whose record is gone is no longer recognized: it draws as a visible user row and `/ahoy` treats it as a captain boundary, for example when `claude --continue` resumes a session whose doorbells are more than a week old.
 - Firstmate's watcher and turn-end wakes reach a Claude Code primary as Stop hook feedback, drawn as a `Ran 1 stop hook` row that is not one of the drawings the mods API exposes on 2.1.280, so those rows stay visible.
 - On the main-screen layout (not the fullscreen alternate screen), a toggle redraws the live screen by clearing and reprinting it, and the terminal's own scrollback keeps the earlier rendering above it; the fullscreen layout has no such stale copy.
 - The sailboat is painted through Claude Code's Raster element, whose colors are RGB quantized to 256-color escapes rather than the standard 16-color ANSI codes Pi's widget emits.
