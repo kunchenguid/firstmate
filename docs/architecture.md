@@ -176,7 +176,8 @@ Text for a worker to read and commands that drive a worker's process are separat
 ## Busy state is semantic, per adapter
 
 `bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means.
-`bin/fm-busy-event.sh` owns the shared generation sidecar and pushed lifecycle records, while `bin/fm-busy-transcript.py` owns the task-bound pull source used by managed non-secondmate Codex and TraeX workers.
+`bin/fm-busy-event.sh` owns the shared generation sidecar, pushed lifecycle records, and the public entrypoint for restoring a provenance-verified original generation, while `bin/fm-busy-transcript.py` owns the task-bound pull source and live-process provenance checks used by managed non-secondmate Codex and TraeX workers.
+`bin/fm-busy-recover.sh` owns the lifecycle-locked reconciliation behind that recovery entrypoint; the entrypoint header owns the exact procedure and refusal boundaries, and the harness recovery reference routes agents to it.
 Every classification returns a verdict of busy, idle, unknown, or dead together with the source that produced it, so a consumer or a diagnostic can never confuse semantic state with a fallback.
 
 Pi reports its turn lifecycle through the Firstmate-owned extension's `agent_start` and `agent_settled`, confirmed by `ctx.isIdle()`.
