@@ -1708,6 +1708,30 @@ fm_backend_herdr_workspace_find() {  # <session>
   fm_backend_herdr_workspace_find_all "$1" | head -1
 }
 
+# fm_backend_herdr_workspace_root: the root directory herdr records for one
+# exact workspace (its identity_cwd), or empty when none can be read. Read-only.
+# The socket API does not report this field (herdr 0.9.0 workspace list/get),
+# so it is read from the session.json herdr persists beside the socket that
+# `session list --json` reports for <session>; the path is herdr's own answer,
+# never reconstructed from XDG or HOME. Every uncertain read - no running
+# session, no file, malformed JSON, zero or several matching workspaces, or a
+# value that is not an existing absolute directory - prints nothing, so a
+# caller keeps its no-root behavior rather than guessing a directory.
+fm_backend_herdr_workspace_root() {  # <session> <workspace_id>
+  local session=$1 workspace=$2 socket file root
+  [ -n "$session" ] && [ -n "$workspace" ] || return 0
+  socket=$(fm_backend_herdr_presentation_session_socket_path "$session" 2>/dev/null) || return 0
+  file="${socket%/*}/session.json"
+  [ -f "$file" ] || return 0
+  root=$(jq -r --arg want "$workspace" '
+    [.workspaces[]? | select(.id == $want) | .identity_cwd | select(type == "string")]
+    | if length == 1 then .[0] else empty end
+  ' "$file" 2>/dev/null) || return 0
+  case "$root" in /*) ;; *) return 0 ;; esac
+  [ -d "$root" ] || return 0
+  printf '%s' "$root"
+}
+
 # fm_backend_herdr_launcher_identity: the EXACT herdr workspace that the
 # process making this spawn is itself running in.
 #
