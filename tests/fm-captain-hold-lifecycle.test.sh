@@ -723,6 +723,32 @@ EOF
 # status decisions refuses --none, refuses an inventory naming absent tasks,
 # attests a verified inventory of captain-held task ids, and transfers every
 # still-open status decision to that durable inventory.
+# Recording the inventory on a task whose PR merge poll is already armed must
+# leave that poll readable: the attestation lands after the pr=/pr_head= lines
+# the PR check wrote, and the watcher's poll reads the same record.
+test_completion_keeps_an_armed_pr_poll_readable() {
+  local home id url head
+  home=$(make_home armed-pr-poll)
+  id=sample-armed-ship
+  url=https://github.com/o/r/pull/7
+  head=0123456789abcdef0123456789abcdef01234567
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Ship the sample fix" --kind ship --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id" ship
+  printf 'pr=%s\npr_head=%s\n' "$url" "$head" >> "$home/state/$id.meta"
+  printf 'done: PR %s checks green\n' "$url" > "$home/state/$id.status"
+  run_captain "$home" hold sample-ship-call --title "Choose the sample rollout" \
+    --reason "captain rollout choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the captain call on the armed ship"
+  run_captain "$home" complete "$id" sample-ship-call >/dev/null \
+    || fail "completion on the armed ship failed"
+  assert_grep "decision_keys=sample-ship-call" "$home/state/$id.meta" "inventory was not recorded"
+  bash -c '. "$1"; fm_pr_metadata_identity_parse "$2" && [ "$FM_PR_META_URL" = "$3" ]' _ \
+    "$ROOT/bin/fm-pr-lib.sh" "$home/state/$id.meta" "$url" \
+    || fail "recording the inventory made the armed PR poll unreadable: $(cat "$home/state/$id.meta")"
+  pass "recording the inventory keeps an armed PR poll readable"
+}
+
 test_completion_gate_attests_and_transfers() {
   local home id json open before after
   home=$(make_home completion-gate)
@@ -4639,6 +4665,7 @@ test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes
 test_completion_gate_attests_and_transfers
+test_completion_keeps_an_armed_pr_poll_readable
 test_answer_records_and_closes
 test_release_frees_held_work
 test_hold_stamp_precedes_hold_visibility

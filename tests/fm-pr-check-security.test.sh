@@ -287,8 +287,8 @@ write_task_meta() {
     "mode=no-mistakes"
 }
 
-# Extra "field=value" arguments are written before pr=, because
-# fm_pr_metadata_identity_parse rejects an unrecognised line after it.
+# Extra "field=value" arguments are written before pr=, matching the order
+# fm-pr-check.sh leaves a freshly armed record in.
 write_poll_meta() {
   local state=$1 id=$2 url=$3 case_dir
   case_dir=$(cd "$state/../.." && pwd)
@@ -866,6 +866,32 @@ SH
     [ ! -e "$dir/home/state/$id.meta" ] || fail "legacy task teardown retained metadata"
   done
   pass "valid direct and merge flows record exact metadata and reject multiline head metadata"
+}
+
+# Relaunch, trace context, and a legacy teardown stamp each land their keys
+# after the pr=/pr_head= lines the check wrote; the armed poll must stay valid.
+# A later line that is not key=value, or an invalid head, still refuses it.
+test_later_metadata_keys_keep_the_armed_poll_valid() {
+  local dir meta expected
+  dir=$(make_case later-metadata-keys)
+  meta=$dir/home/state/task-a.meta
+  write_task_meta "$dir"
+  expected=0123456789abcdef0123456789abcdef01234567
+  FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/o/r/pull/5 \
+    >/dev/null 2>/dev/null || fail "valid check failed"
+  printf '%s\n' control_relaunch_tx=tx-1 traceparent=00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01 \
+    spawn_gen=s1.2.3 >> "$meta"
+  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "later metadata keys made the armed poll invalid: $(cat "$meta")"
+  cp "$meta" "$dir/meta.good"
+  printf 'github.com/o/r/pull/6\n' >> "$meta"
+  ! fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "a later line that is not key=value was accepted"
+  cp "$dir/meta.good" "$meta"
+  printf 'pr_head=not-a-head\n' >> "$meta"
+  ! fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "an invalid later pr_head was accepted"
+  pass "later metadata keys keep an armed PR poll valid while malformed tails still refuse"
 }
 
 # Runs one watcher under a hang guard that TERMs it and returns 124 once it has
@@ -3469,6 +3495,7 @@ test_secondmate_record_refuses_a_pr_watch
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
 test_valid_recording_and_merge_derivation
+test_later_metadata_keys_keep_the_armed_poll_valid
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
 test_atomic_interruption_leaves_no_partial_artifact
