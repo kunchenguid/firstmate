@@ -620,6 +620,7 @@ def validate_handoff_state_item(path, store):
         ):
 
 
+
             raise ValueError("away-email state is malformed")
     else:
         if (
@@ -720,6 +721,7 @@ def handoff_record(request_id, posture):
 
 
 
+
 def verify_note(note_id):
     if not isinstance(note_id, str) or not NOTE_ID_RE.fullmatch(note_id):
         print(json.dumps({"email_handoff": False, "verified": False}, separators=(",", ":")))
@@ -739,6 +741,7 @@ def verify_note(note_id):
     if posture is None:
         print("fm-afk-email: away posture could not be validated for an email handoff", file=sys.stderr)
         return 1
+
 
 
     try:
