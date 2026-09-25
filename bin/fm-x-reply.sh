@@ -189,7 +189,14 @@ while [ "$#" -gt 0 ]; do
       esac
       RECEIPT_FILE=$1
       ;;
-    --text-file|-) ARGS+=("$1") ;;
+    --text-file)
+      shift
+      case "${1:-}" in
+        ''|-*) echo "fm-x-reply: missing --text-file path" >&2; usage; exit 2 ;;
+      esac
+      ARGS+=(--text-file "$1")
+      ;;
+    -) ARGS+=("$1") ;;
     -*) echo "fm-x-reply: unknown option '$1' (reply text starting with '-' needs --text-file or stdin)" >&2; usage; exit 2 ;;
     *) ARGS+=("$1") ;;
   esac

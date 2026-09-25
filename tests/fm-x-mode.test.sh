@@ -786,6 +786,25 @@ test_reply_rejects_flag_like_arguments() {
   expect_code 2 "$rc" "reply flag-swallowing --image value exit"
   assert_grep "missing --image path" "$err" "reply must refuse a dash-leading --image value"
 
+  # A dash-leading --text-file operand is refused whether or not a file by that
+  # name exists, so an option can never be read as the reply text's source.
+  local cwd="$home/cwd" operand
+  mkdir -p "$cwd"
+  for operand in --final --text-file -; do
+    rm -f -- "$cwd/--final" "$cwd/--text-file"
+    out=$(cd "$cwd" && PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+      "$ROOT/bin/fm-x-reply.sh" req-guard --text-file "$operand" </dev/null 2>"$err"); rc=$?
+    expect_code 2 "$rc" "reply --text-file $operand exit (no such file)"
+    assert_grep "missing --text-file path" "$err" "reply must refuse --text-file $operand with no such file"
+    printf 'file named like an option\n' > "$cwd/--final"
+    printf 'file named like an option\n' > "$cwd/--text-file"
+    out=$(cd "$cwd" && PATH="$BASE_PATH" FM_HOME="$home" FMX_DRY_RUN=1 \
+      "$ROOT/bin/fm-x-reply.sh" req-guard --text-file "$operand" </dev/null 2>"$err"); rc=$?
+    expect_code 2 "$rc" "reply --text-file $operand exit (file present)"
+    assert_grep "missing --text-file path" "$err" "reply must refuse --text-file $operand even when that file exists"
+    [ -z "$out" ] || fail "a refused reply must not echo the request_id (got: $out)"
+  done
+
   assert_absent "$home/state/x-outbox" "refused invocations must never write a dry-run outbox"
 
   # Text that legitimately starts with '-' still goes through --text-file or
