@@ -251,7 +251,6 @@ cycle_link_claim() {
     echo "watcher-ledger: successor claim dropped - predecessor $predecessor has no resolvable pid-identity" >&2
     return 1
   fi
-  [ -d "$CYCLE_LINK" ] || rm -f "$CYCLE_LINK" 2>/dev/null || true
   if ! mkdir -p "$CYCLE_LINK" 2>/dev/null; then
     echo "watcher-ledger: successor claim dropped - $CYCLE_LINK could not be created" >&2
     return 1
@@ -304,7 +303,7 @@ cycle_link_reconcile() {
           else if (part[i] ~ /^successor=/) successor = substr(part[i], 11)
           else if (part[i] ~ /^claimed_at=/) claimed_at = substr(part[i], 12) + 0
         }
-        if (predecessor !~ /^[0-9]+$/ || identity == "" || successor == "") {
+        if (predecessor !~ /^[0-9]+$/ || identity == "" || successor == "" || claimed_at <= 0) {
           print file > retireout
           continue
         }
@@ -321,7 +320,7 @@ cycle_link_reconcile() {
         want[key] = successor
         claimfile[key] = file
         claimtime[key] = claimed_at
-        expired[key] = (claimed_at > 0 && now - claimed_at > horizon)
+        expired[key] = (now - claimed_at > horizon)
       }
       close(claims)
     }
