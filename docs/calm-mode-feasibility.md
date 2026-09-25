@@ -803,9 +803,7 @@ The flag-off session's settled screen, with the preference `on` on disk, drew Cl
 Claude Code 2.1.280 removes invisible characters, U+2063 included, from every submitted prompt, whether typed, pasted, or passed as the launch prompt.
 A typed operational envelope first shows `Removed 1 invisible character · review and press Enter to send`, and the next Enter stores it as plain `FIRSTMATE_OP: ...` text that no consumer can tell apart from a human message.
 No setting or environment variable turns the removal off.
-Firstmate therefore delivers operational input to a Claude Code primary through the record-backed doorbell that `bin/fm-operational-input.sh` owns: the envelope is written to a record under the home's `state/operational-inbox`, and only a plain ASCII line naming that record is typed.
-The away-mode daemon's escalations and a worker's launch-brief launch-prompt argument are the Claude-bound typed producers; watcher and turn-end wakes reach a Claude Code primary as Stop hook feedback, not as typed prompts.
-The mod hides a doorbell row only when the record it names holds a current envelope; a verbatim copy of a live doorbell line names such a record and is treated as Firstmate's, since records are not consumed on delivery.
+For the current delivery and presentation contracts, see [`fm-operational-input.sh`](../bin/fm-operational-input.sh) and [`calm.md`](calm.md#claude-code).
 
 2.1.280 also logs the module load as `hooks module firstmate-calm@<source> loaded` (`@skills-dir` for the project auto-load path), so the live guard matches either form.
 
