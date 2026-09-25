@@ -5,6 +5,14 @@
 #
 # Subcommands:
 #
+#   recover <state-dir> <id> --check --terminal <original-terminal-id> --pid <original-pid>
+#   recover <state-dir> <id> --apply <preflight-json-file>
+#       Linux-local Herdr Codex/TraeX only. Read-only preflight proves the
+#       original generation in the live TUI argv and task transcript; apply
+#       repeats that proof under lifecycle locks, restores only that generation
+#       and reconciles the preserved launch. fm-busy-recover.sh owns the
+#       procedure. Never grants hook trust, spawns, sends or mints spawn_gen.
+#
 #   arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E]
 #       Mint a fresh incarnation gen token, write the gen sidecar, and seed
 #       the record at seq=1 (default: busy, source fm-spawn, event
@@ -47,6 +55,8 @@ usage:
   fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E
   fm-busy-event.sh progress <state-dir> <id> --gen G
   fm-busy-event.sh retire <state-dir> <id> (--gen G | --current-gen)
+  fm-busy-event.sh recover <state-dir> <id> --check --terminal <original-terminal-id> --pid <original-pid>
+  fm-busy-event.sh recover <state-dir> <id> --apply <preflight-json-file>
 See the header comment for the full contract.
 EOF
   exit 2
@@ -57,6 +67,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 
 CMD=${1:-}
+if [ "$CMD" = recover ]; then
+  shift
+  exec "$SCRIPT_DIR/fm-busy-recover.sh" "$@"
+fi
 case "$CMD" in
   arm|apply|progress|retire) shift ;;
   *) usage ;;
@@ -131,7 +145,12 @@ lock_acquire() {
       # aborting the writer - and its caller, fm-teardown.sh - under `set -u`.
       case "$mtime" in ''|*[!0-9]*) mtime=$now ;; esac
       age=$((now - mtime))
-      if [ "$age" -ge "${FM_BUSY_LOCK_STALE_SECS:-5}" ]; then
+      lock_pid=$(cat "$LOCK/pid" 2>/dev/null || true)
+      case "$lock_pid" in
+        ''|*[!0-9]*) lock_live=0 ;;
+        *) if kill -0 "$lock_pid" 2>/dev/null; then lock_live=1; else lock_live=0; fi ;;
+      esac
+      if [ "$lock_live" = 0 ] && [ "$age" -ge "${FM_BUSY_LOCK_STALE_SECS:-5}" ]; then
         rmdir "$LOCK" 2>/dev/null || rm -rf "$LOCK" 2>/dev/null || true
         mkdir "$LOCK" 2>/dev/null && break
       fi

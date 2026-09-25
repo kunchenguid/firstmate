@@ -545,4 +545,5 @@ PYTEST
 
 test_task_bound_rollouts
 
+python3 "$ROOT/tests/busy-recovery.py" "$ROOT" "$TMP_ROOT/recovery" || fail 'busy recovery regressions failed'
 echo "all fm-busy-state tests passed"

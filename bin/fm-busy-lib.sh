@@ -23,6 +23,8 @@
 # (read records). seq is a strictly increasing integer per gen, advanced
 # under the writer's lock, so an out-of-order apply can never regress a
 # newer record.
+# In-place restoration of an evidenced original generation is owned by
+# fm-busy-event.sh recover; re-arming never proves an old worker's identity.
 #
 # Pi writes generation-bound pi-ext lifecycle events. Codex and TraeX use
 # generation-bound transcript pull readers; no rendered footer proves idle.

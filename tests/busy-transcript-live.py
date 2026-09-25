@@ -36,16 +36,20 @@ def serve(root, lab, tool):
                 self.end_headers()
                 self.wfile.write(b'{"error":{"message":"FM_SIMULATED_401"}}')
                 return
-            if mode == 'hold':
-                time.sleep(25)
+            if mode in ('hold', 'launch'):
+                time.sleep(25 if mode == 'hold' else 2)
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.end_headers()
             rid, mid = 'resp_' + uuid.uuid4().hex, 'msg_' + uuid.uuid4().hex
-            if mode == 'tool':
+            if mode in ('tool', 'ack'):
                 control.write_text('success')
                 name = 'Bash' if tool == 'traex' else 'exec_command'
                 args = {'command': 'sleep 6; exit 7'} if tool == 'traex' else {'cmd': 'sleep 6; exit 7', 'yield_time_ms': 10000}
+                if mode == 'ack':
+                    inbox = lab / 'home/state/traex.inbox'
+                    command_text = 'cat ' + shlex.quote(str(inbox / '001.msg')) + '; mkdir -p ' + shlex.quote(str(inbox / 'handled')) + '; mv ' + shlex.quote(str(inbox / '001.msg')) + ' ' + shlex.quote(str(inbox / 'handled/001.msg'))
+                    args = {'command': command_text}
                 item = {'type': 'function_call', 'id': mid, 'call_id': 'call_' + uuid.uuid4().hex,
                         'name': name, 'arguments': json.dumps(args), 'status': 'completed'}
             else:
@@ -81,6 +85,8 @@ request_max_retries = 0
 stream_max_retries = 0
 base_url = "http://127.0.0.1:{server.server_port}/v1"
 '''
+    if (lab / 'enable-hooks').exists():
+        config = config.replace('hooks = false', 'hooks = true')
     (home / ('config.toml' if tool == 'codex' else 'traecli.toml')).write_text(config)
     # These are the managed fm-spawn TUI flags, including Codex's notify and
     # TraeX's environment identity. Worktree provisioning is outside this probe.
@@ -95,8 +101,12 @@ base_url = "http://127.0.0.1:{server.server_port}/v1"
                      input='Disposable isolated lifecycle probe. Reply FM_LIVE_OK. No external services.')
     gen = (lab / 'home/state' / (tool + '.busy-gen')).read_text().strip()
     args += [prompt + '\nFIRSTMATE_BUSY_GENERATION=' + gen]
+    if len(sys.argv) > 5:
+        # Spawn regression: preserve the real launch owner's exact argv.
+        args = [binary] + sys.argv[5:]
     (lab / (tool + '-argv.json')).write_text(json.dumps(args))
-    env = dict(os.environ, FM_HOME=str(lab / 'home'))
+    env = dict(os.environ, FM_HOME=str(lab / 'home'), FM_TASK_ID=tool,
+               GOTMPDIR='/tmp/fm-' + tool + '/gotmp')
     for name in ('CLAUDECODE', 'PI_CODING_AGENT', 'GROK_AGENT', 'FM_PI_HARNESS'):
         env.pop(name, None)
     if tool == 'traex':
@@ -116,6 +126,9 @@ def drive(root, lab, helper, session):
     print('versions: ' + json.dumps(versions), flush=True)
     state = lab / 'home/state'
     state.mkdir(parents=True)
+    (lab / 'home/data').mkdir()
+    (lab / 'home/config').mkdir()
+    (lab / 'home/config/backlog-backend').write_text('manual\n')
     real_home = Path.home().resolve()
     # Sandbox hides every real-home namespace. Bind only these installed
     # packages and the disposable test checkout/lab back into it.
@@ -138,6 +151,25 @@ def drive(root, lab, helper, session):
 
     def herdr(*args):
         return command(helper, 'run', session, *args)
+
+    wrap = lab / 'recovery-wrap'
+    wrap.mkdir()
+    transport = wrap / 'herdr'
+    real_herdr = shutil.which('herdr')
+    transport.write_text('''#!/usr/bin/env python3
+import os, subprocess, sys
+real, helper, session = CONFIG
+args = sys.argv[1:]
+if os.environ.get('FM_LIVE_INSIDE_HELPER') == '1':
+    os.execv(real, [real] + args)
+assert args[-2:] == ['--session', session]
+sys.exit(subprocess.call([helper, 'run', session] + args[:-2],
+    env=dict(os.environ, FM_LIVE_INSIDE_HELPER='1')))
+'''.replace('CONFIG', repr((real_herdr, helper, session))))
+    transport.chmod(0o755)
+    recovery_env = dict(os.environ, FM_HOME=str(lab / 'home'), PATH=str(wrap) + ':' + os.environ['PATH'])
+    for key in ('FM_STATE_OVERRIDE', 'FM_ROOT_OVERRIDE', 'FM_DATA_OVERRIDE', 'FM_CONFIG_OVERRIDE'):
+        recovery_env.pop(key, None)
 
     control_script = lab / 'control.sh'
     control_script.write_text('''#!/usr/bin/env bash
@@ -181,11 +213,13 @@ esac
             pane = panes[0]
             target = session + ':' + pane
             gen = command(root / 'bin/fm-busy-event.sh', 'arm', state, tool, '--state', 'unknown')
-            (state / (tool + '.meta')).write_text(f'harness={tool}\nworktree={project}\nbackend=herdr\nwindow={target}\nbusy_gen={gen}\n')
+            pane_data = json.loads(herdr('pane', 'get', pane))['result']['pane']
+            (state / (tool + '.meta')).write_text(f'harness={tool}\nkind=scout\nworktree={project}\nbackend=herdr\nwindow={target}\nbusy_gen={gen}\n'
+                f'herdr_session={session}\nherdr_workspace_id={pane_data["workspace_id"]}\nherdr_tab_id={pane_data["tab_id"]}\nherdr_pane_id={pane}\n')
             sessions = lab / (tool + '-home') / ('sessions' if tool == 'codex' else 'cli/sessions')
             command('python3', reader, 'init', state, tool, tool, project, sessions, 'herdr', target)
             def control(action):
-                return command('bash', control_script, root, lab, helper, session, tool, pane, action)
+                return command('bash', control_script, root, lab, helper, session, tool, pane, action, env=recovery_env)
             def wait(want, seconds=15):
                 deadline = time.monotonic() + seconds
                 actual = ''
@@ -202,7 +236,7 @@ esac
             mode.write_text('success')
             assert control('read').startswith(('unknown ', 'dead '))
             launcher = lab / (tool + '-launch.sh')
-            launcher.write_text('#!/bin/sh\nexec ' + shlex.join(mounts + ['--', 'python3', str(Path(__file__).resolve()), 'serve', str(root), str(lab), tool]) + '\n')
+            launcher.write_text('#!/bin/sh\nexec ' + shlex.join(mounts + ['--chdir', str(project), '--', 'python3', str(Path(__file__).resolve()), 'serve', str(root), str(lab), tool]) + '\n')
             herdr('pane', 'send-text', pane, 'bash ' + shlex.quote(str(launcher)))
             time.sleep(.3)
             herdr('pane', 'send-keys', pane, 'enter')
@@ -219,6 +253,16 @@ esac
             command('python3', reader, 'activate', state, tool)
             wait('idle ' + tool + '-transcript')
             print('ok - ' + tool + ' default TUI startup and completion', flush=True)
+            # Restore the actual original generation, then exercise subsequent
+            # text/key/state paths with the recovered process seal in place.
+            info = json.loads(herdr('pane', 'process-info', '--pane', pane))['result']['process_info']
+            pid, = [p['pid'] for p in info['foreground_processes'] if p['name'] == tool and any(arg.startswith('\u2063FIRSTMATE_OP: v1 launch-brief:') for arg in p.get('argv', []))]
+            command(root / 'bin/fm-busy-event.sh', 'retire', state, tool, '--gen', gen)
+            receipt = lab / (tool + '-recovery.json')
+            receipt.write_text(command(root / 'bin/fm-busy-event.sh', 'recover', state, tool,
+                '--check', '--terminal', pane_data['terminal_id'], '--pid', pid, env=recovery_env))
+            command(root / 'bin/fm-busy-event.sh', 'recover', state, tool, '--apply', receipt, env=recovery_env)
+            print('ok - ' + tool + ' real original-generation recovery', flush=True)
             mode.write_text('hold')
             send('Hold the simulated response.')
             wait('busy ' + tool + '-transcript')

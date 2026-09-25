@@ -29,6 +29,10 @@
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#   Once launch submission can reach the endpoint, failures preserve the task,
+#   busy generation and slot claim with launch_state=unconfirmed. They never
+#   authorize hook trust or a duplicate worker. Inspect the exact endpoint;
+#   bin/fm-busy-event.sh recover checks provenance before restoring steering.
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
@@ -916,6 +920,7 @@ SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_FRESH_COMMIT_PENDING=0
+SPAWN_LAUNCH_ATTEMPTED=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
@@ -930,6 +935,10 @@ CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
 spawn_fresh_commit_rollback() {
+  if [ "$SPAWN_LAUNCH_ATTEMPTED" = 1 ]; then
+    echo "error: launch submission was attempted; retaining $ID's original task and busy bindings for reconciliation" >&2
+    return 1
+  fi
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
     "$FM_ROOT/bin/fm-busy-event.sh" "$STATE" "$ID" "${BUSY_GEN:-}"; then
     SPAWN_FRESH_COMMIT_PENDING=0
@@ -1044,7 +1053,17 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
   if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
-    if ! spawn_fresh_commit_rollback; then
+    if [ "$SPAWN_LAUNCH_ATTEMPTED" = 1 ]; then
+      # Enter transport, trust and readiness failures cannot prove the worker
+      # never started. Keep the publication and original generations even if
+      # backlog reconciliation fails; deleting evidence cannot undo a launch.
+      SPAWN_FRESH_COMMIT_PENDING=0
+      FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-30}
+      if ! spawn_commit_backlog_transition; then
+        echo "error: preserved task $ID needs backlog reconciliation: $FM_BACKLOG_TRANSITION_ERROR" >&2
+      fi
+      echo "error: preserved unconfirmed launch $ID at $T; inspect trust and reconcile the existing worker, do not fresh-spawn" >&2
+    elif ! spawn_fresh_commit_rollback; then
       status=1
     fi
   fi
@@ -2861,7 +2880,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen launch_state traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2881,6 +2900,7 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  echo "launch_state=prepared"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -2931,7 +2951,8 @@ fi
 # the record (bin/fm-backlog-transition-lib.sh owns the invariant). It runs under
 # this task's own meta lock, so a steer or teardown racing the same id stays
 # serialized exactly as before. The call itself is deferred to the final commit
-# point below so every earlier launch-delivery failure remains unwindable.
+# point below. Only failures before launch submission remain unwindable;
+# attempted launches retain their identity even when that transition fails.
 spawn_commit_backlog_transition() {
   [ "$BACKLOG_TRANSITION" = 1 ] || return 0
   fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
@@ -3092,6 +3113,14 @@ spawn_record_traceparent() {
   return "$status"
 }
 
+spawn_record_launch_state() { # <prepared|unconfirmed|confirmed>
+  SPAWN_META_TMP="$STATE/.$ID.meta.launch.${BASHPID:-$$}"
+  awk -F= '$1 != "launch_state"' "$STATE/$ID.meta" >"$SPAWN_META_TMP" &&
+    printf 'launch_state=%s\n' "$1" >>"$SPAWN_META_TMP" &&
+    fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE" || return 1
+  SPAWN_META_TMP=
+}
+
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
@@ -3142,6 +3171,12 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
 sleep 0.3
+# Publish the uncertainty before any launch text can arrive. A signal or lost
+# transport response after this point cannot roll back the worker's identity.
+spawn_record_launch_state unconfirmed
+SPAWN_LAUNCH_ATTEMPTED=1
+# Projection rollback is endpoint destruction, so it has the same boundary.
+HERDR_PROJECTION_ABORT_CLEANUP=0
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
@@ -3211,7 +3246,7 @@ if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
     if spawn_fresh_commit_rollback; then
       echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
     else
-      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR), and failed-dispatch cleanup is incomplete; the provisional record may remain at $STATE/$ID.meta - close out endpoint $T and local copy $WT by hand, then remove the record and busy state before retrying" >&2
+      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); launch was attempted, so its record and bindings remain at $STATE/$ID.meta for reconciliation; do not remove them or spawn a duplicate worker" >&2
     fi
   else
     echo "error: task $ID was republished but its backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); fix the backlog and re-run the relaunch" >&2
@@ -3221,6 +3256,7 @@ trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
 fi
+spawn_record_launch_state confirmed
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   case "$SPAWN_DEFERRED_SIGNAL" in
   HUP) SPAWN_DEFERRED_SIGNAL_STATUS=129 ;;

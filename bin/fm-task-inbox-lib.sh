@@ -402,6 +402,17 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
   printf '%s' "$best"
 }
 
+fm_task_inbox_request_rearm() {  # <state-dir> <task-id>
+  local dir oldest tmp
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2") || return 0
+  tmp=$(mktemp "$dir/.rearm.XXXXXX") || return 1
+  if ! printf '%s\n' "${oldest##*/}" > "$tmp" || ! mv "$tmp" "$dir/.rearm"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
 # The re-ring ladder decision for one task. Prints exactly one of:
 #   quiet                     nothing due (healthy, within grace or spacing,
 #                             or already escalated for the current oldest)
@@ -410,14 +421,30 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
 # An empty inbox also resets the ladder bookkeeping so the next message starts
 # a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
-  local dir oldest base now grace max ladder rec_base count last
+  local dir oldest base now grace max ladder rec_base count last rearm launch_state
   dir=$(fm_task_inbox_dir "$1" "$2")
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
-    rm -f "$dir/.ring-state" "$dir/.escalated" 2>/dev/null || true
+    rm -f "$dir/.ring-state" "$dir/.escalated" "$dir/.rearm" 2>/dev/null || true
     printf 'quiet'
     return 0
   fi
   base=${oldest##*/}
+  rearm=$(cat "$dir/.rearm" 2>/dev/null || true)
+  if [ -n "$rearm" ] && [ "$rearm" != "$base" ]; then
+    rm -f "$dir/.rearm" 2>/dev/null || true
+  elif [ "$rearm" = "$base" ]; then
+    launch_state=$(awk -F= '$1 == "launch_state" { print substr($0, index($0, "=") + 1); exit }' "$1/$2.meta" 2>/dev/null || true)
+    if [ "$launch_state" != confirmed ]; then
+      printf 'quiet'
+      return 0
+    fi
+    if rm -f "$dir/.ring-state" "$dir/.escalated" "$dir/.rearm" 2>/dev/null; then
+      printf 'ring %s' "$oldest"
+      return 0
+    fi
+    printf 'quiet'
+    return 0
+  fi
   grace=$(fm_task_inbox_grace_secs)
   if [ "$(fm_path_age "$oldest")" -lt "$grace" ]; then
     printf 'quiet'
