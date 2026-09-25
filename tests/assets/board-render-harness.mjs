@@ -144,9 +144,13 @@ const questionRows = qContainer.children
     action: row.children[3]?.textContent ?? "",
   }));
 const questionsEmpty = qContainer.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
+const calls = (byId.get("bb-call") || new Node("div")).children.map((card) => ({
+  title: card.children[0]?.children.find((c) => c.className.includes("bb-decision__title"))?.textContent ?? "",
+  badges: card.children[0]?.children.find((c) => c.className.includes("bb-decision__top"))?.children.map((c) => c.textContent) ?? [],
+}));
 
 process.stdout.write(
   JSON.stringify({
     stats, tasks, legacyCopies, empty, omitted, omittedHidden: omittedIndicator?.hidden ?? true, error: errorText,
-    statsCost, statsFleet, questions: questionRows, questionsEmpty,
+    statsCost, statsFleet, questions: questionRows, questionsEmpty, calls,
   }) + "\n");

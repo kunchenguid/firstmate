@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Bearings - fleet board</title>
+<title>베어링 - 함대 현황판</title>
 <style>
 /* ============================================================
    Bearings board - Firstmate Design System, inlined for portability.
@@ -330,7 +330,7 @@ a { color: inherit; text-decoration: none; }
     <div class="bb-section__head">
       <span class="fm-sign fm-sign--eyebrow">
         <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg>
-        Captain's Call
+        결정 요청
       </span>
       <span class="fm-sign fm-sign--muted" id="bb-call-sub"></span>
     </div>
@@ -340,10 +340,10 @@ a { color: inherit; text-decoration: none; }
            the Charted Next card across the row -->
       <div class="bb-stacknav">
         <span class="bb-stacknav__count" id="bb-stack-count">-</span>
-        <button type="button" class="bb-stacknav__btn" id="bb-stack-prev" aria-label="Previous card">
+        <button type="button" class="bb-stacknav__btn" id="bb-stack-prev" aria-label="이전 카드">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
         </button>
-        <button type="button" class="bb-stacknav__btn" id="bb-stack-next" aria-label="Next card">
+        <button type="button" class="bb-stacknav__btn" id="bb-stack-next" aria-label="다음 카드">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
         </button>
       </div>
@@ -356,14 +356,14 @@ a { color: inherit; text-decoration: none; }
       <span class="fm-sign fm-sign--muted" id="bb-task-omitted"></span>
     </div>
     <div class="fm-card fm-card--warm">
-      <table class="bb-task-table"><thead><tr><th>ID</th><th>상태</th><th>제목</th><th>blocker</th></tr></thead><tbody id="bb-tasks"></tbody></table>
+      <table class="bb-task-table"><thead><tr><th>ID</th><th>상태</th><th>제목</th><th>차단 사유</th></tr></thead><tbody id="bb-tasks"></tbody></table>
       <div class="bb-dispatch" id="bb-dispatch" hidden>
-        <span class="bb-dispatch__count" id="bb-dispatch-count">nothing picked</span>
+        <span class="bb-dispatch__count" id="bb-dispatch-count">선택 항목 없음</span>
         <span class="bb-queued" id="bb-dispatch-queued">
           <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
-          queued
+          대기열에 추가됨
         </span>
-        <button type="button" class="fm-btn fm-btn--sm fm-btn--gold" id="bb-dispatch-btn">Queue dispatch order</button>
+        <button type="button" class="fm-btn fm-btn--sm fm-btn--gold" id="bb-dispatch-btn">작업 배정 요청</button>
       </div>
     </div>
   </section>
@@ -374,7 +374,7 @@ a { color: inherit; text-decoration: none; }
       <div class="bb-section__head">
         <span class="fm-sign fm-sign--eyebrow">
           <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.801 10A10 10 0 1 1 17 3.335"/><path d="m9 11 3 3L22 4"/></svg>
-          Recently Landed
+          최근 완료
         </span>
       </div>
       <div class="fm-card"><div class="bb-rows" id="bb-landed"></div></div>
@@ -385,7 +385,7 @@ a { color: inherit; text-decoration: none; }
     <div class="bb-section__head">
       <span class="fm-sign fm-sign--eyebrow">
         <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
-        Unanswered Questions
+        미응답 질문
       </span>
     </div>
     <div class="fm-card fm-card--warm"><table class="bb-task-table"><thead><tr><th>ID</th><th>긴급도</th><th>질문</th><th>기본 행동</th></tr></thead><tbody id="bb-questions"></tbody></table></div>
@@ -419,10 +419,10 @@ __FM_BEARINGS_BOARD_DATA__
     pad.className = "bb-decision__pad";
     var h = document.createElement("h3");
     h.className = "bb-decision__title";
-    h.textContent = "This board could not load";
+    h.textContent = "현황판을 불러올 수 없습니다";
     var d = document.createElement("p");
     d.className = "bb-decision__detail";
-    d.textContent = msg + " - ask firstmate to rebuild the board.";
+    d.textContent = msg + " - 퍼스트메이트에 현황판 재생성을 요청하세요.";
     pad.appendChild(h);
     pad.appendChild(d);
     card.appendChild(pad);
@@ -433,11 +433,11 @@ __FM_BEARINGS_BOARD_DATA__
   try {
     data = JSON.parse(document.getElementById("bearings-data").textContent);
   } catch (e) {
-    renderBoardError("The board data is not valid JSON");
+    renderBoardError("현황판 데이터가 올바른 JSON 형식이 아닙니다");
     return;
   }
   if (!data || data.schema !== "fm-bearings-board.v1") {
-    renderBoardError("Unsupported board data schema: " + (data && data.schema ? data.schema : "(none)"));
+    renderBoardError("지원하지 않는 현황판 데이터 스키마입니다: " + (data && data.schema ? data.schema : "(없음)"));
     return;
   }
   var fleetLists = [data.captains_call, data.underway, data.landed, data.charted];
@@ -449,7 +449,7 @@ __FM_BEARINGS_BOARD_DATA__
       Array.isArray(item.options);
   });
   if (!fleetLists.every(Array.isArray) || !callItemsValid) {
-    renderBoardError("The board data does not have the required structure");
+    renderBoardError("현황판 데이터의 필수 구조가 올바르지 않습니다");
     return;
   }
 
@@ -503,59 +503,59 @@ __FM_BEARINGS_BOARD_DATA__
   }
   var statsCost = document.getElementById("bt-stats-cost");
   if (metrics.cost_cumulative) {
-    btCard(statsCost, "cumulative cost", money(metrics.cost_cumulative.spent) + " / " + money(metrics.cost_cumulative.cap),
+    btCard(statsCost, "누적 비용", money(metrics.cost_cumulative.spent) + " / " + money(metrics.cost_cumulative.cap),
       false, metrics.cost_cumulative.spent / metrics.cost_cumulative.cap);
   } else {
-    btCard(statsCost, "cumulative cost", "no data", true);
+    btCard(statsCost, "누적 비용", "데이터 없음", true);
   }
   if (metrics.cost_session) {
-    btCard(statsCost, "session cost", money(metrics.cost_session.spent) + " / " + money(metrics.cost_session.cap),
+    btCard(statsCost, "세션 비용", money(metrics.cost_session.spent) + " / " + money(metrics.cost_session.cap),
       false, metrics.cost_session.spent / metrics.cost_session.cap);
   } else {
-    btCard(statsCost, "session cost", "no data", true);
+    btCard(statsCost, "세션 비용", "데이터 없음", true);
   }
   if (typeof metrics.cache_hit_rate === "number") {
-    btCard(statsCost, "cache hit rate", pct(metrics.cache_hit_rate), false);
+    btCard(statsCost, "캐시 적중률", pct(metrics.cache_hit_rate), false);
   } else {
-    btCard(statsCost, "cache hit rate", "no data", true);
+    btCard(statsCost, "캐시 적중률", "데이터 없음", true);
   }
   if (metrics.tool_error_rate) {
     var terTotal = metrics.tool_error_rate.total;
     var terPct = terTotal > 0 ? pct((metrics.tool_error_rate.errors / terTotal) * 100) : "-";
-    btCard(statsCost, "tool error rate", metrics.tool_error_rate.errors + " / " + terTotal + " (" + terPct + ")", false);
+    btCard(statsCost, "도구 오류율", metrics.tool_error_rate.errors + " / " + terTotal + " (" + terPct + ")", false);
   } else {
-    btCard(statsCost, "tool error rate", "no data", true);
+    btCard(statsCost, "도구 오류율", "데이터 없음", true);
   }
 
   var statsFleet = document.getElementById("bt-stats-fleet");
   if (typeof metrics.context_read_miss === "number") {
-    btCard(statsFleet, "context read misses", String(metrics.context_read_miss), false);
+    btCard(statsFleet, "컨텍스트 읽기 누락", String(metrics.context_read_miss), false);
   } else {
-    btCard(statsFleet, "context read misses", "no data", true);
+    btCard(statsFleet, "컨텍스트 읽기 누락", "데이터 없음", true);
   }
   if (metrics.auto_continue) {
-    btCard(statsFleet, "auto-continues", metrics.auto_continue.rejected + " reject / " + metrics.auto_continue.api_error + " api-error", false);
+    btCard(statsFleet, "자동 계속 실행", metrics.auto_continue.rejected + "회 거부 / API 오류 " + metrics.auto_continue.api_error + "회", false);
   } else {
-    btCard(statsFleet, "auto-continues", "no data", true);
+    btCard(statsFleet, "자동 계속 실행", "데이터 없음", true);
   }
   if (metrics.milestone_tasks) {
-    btCard(statsFleet, "tasks (" + metrics.milestone_tasks.label + ")",
+    btCard(statsFleet, "태스크 (" + metrics.milestone_tasks.label + ")",
       metrics.milestone_tasks.done + " / " + metrics.milestone_tasks.total, false,
       metrics.milestone_tasks.total > 0 ? metrics.milestone_tasks.done / metrics.milestone_tasks.total : 0);
   } else {
-    btCard(statsFleet, "tasks (milestone)", "no data", true);
+    btCard(statsFleet, "태스크 (마일스톤)", "데이터 없음", true);
   }
   /* Always real: every Captain's Call item is an unanswered question by
      definition, so this reads straight off captains_call - no metrics entry. */
-  btCard(statsFleet, "unanswered questions", String(data.captains_call.length), false);
+  btCard(statsFleet, "미응답 질문", String(data.captains_call.length), false);
 
   /* stat strip */
   var callTotal = data.captains_call.length;
   var stats = [
-    { n: callTotal, l: "need you", call: true },
-    { n: data.underway.length, l: "underway" },
-    { n: data.landed.length, l: "landed recently" },
-    { n: chartedQueued(data.charted).length + chartedMoreQueued, l: "charted next" }
+    { n: callTotal, l: "결정 필요", call: true },
+    { n: data.underway.length, l: "진행 중" },
+    { n: data.landed.length, l: "최근 완료" },
+    { n: chartedQueued(data.charted).length + chartedMoreQueued, l: "다음 예정" }
   ];
   var strip = document.getElementById("bb-stats");
   stats.forEach(function (s) {
@@ -565,7 +565,7 @@ __FM_BEARINGS_BOARD_DATA__
     strip.appendChild(t);
   });
   document.getElementById("bb-call-sub").textContent =
-    callTotal ? callTotal + " item" + (callTotal === 1 ? "" : "s") + " wait on you, captain" : "nothing needs you, captain";
+    callTotal ? "결정 대기 " + callTotal + "건" : "현재 결정할 항목이 없습니다";
 
   /* Captain's Call deck: every item renders as the same full card */
   var deck = document.getElementById("bb-call");
@@ -582,10 +582,11 @@ __FM_BEARINGS_BOARD_DATA__
 
     var top = el("div", "bb-decision__top");
     if (item.type === "merge") {
-      top.appendChild(badge("online", "checks green"));
-      top.appendChild(badge(item.risk === "low" ? "neutral" : "warn", "risk " + item.risk));
+      top.appendChild(badge("online", "검사 통과"));
+      var riskLabel = { low: "낮음", medium: "보통", high: "높음" }[item.risk] || item.risk;
+      top.appendChild(badge(item.risk === "low" ? "neutral" : "warn", "위험도 " + riskLabel));
     } else {
-      top.appendChild(badge("solid", "decision"));
+      top.appendChild(badge("solid", "결정 필요"));
       top.appendChild(el("span", "bb-decision__repo", item.repo));
     }
     pad.appendChild(top);
@@ -602,8 +603,8 @@ __FM_BEARINGS_BOARD_DATA__
     } else {
       /* the rec marker on the option itself carries the recommendation */
       var ctx = el("div", "bb-ctx");
-      if (item.about) ctx.appendChild(ctxRow("about", item.about));
-      if (item.decide) ctx.appendChild(ctxRow("decide", item.decide));
+      if (item.about) ctx.appendChild(ctxRow("배경", item.about));
+      if (item.decide) ctx.appendChild(ctxRow("결정 사항", item.decide));
       pad.appendChild(ctx);
     }
 
@@ -620,7 +621,7 @@ __FM_BEARINGS_BOARD_DATA__
       if (o.hint) body.appendChild(el("span", "bb-opt__hint", o.hint));
       lab.appendChild(body);
       if (item.recommend_value && o.value === item.recommend_value) {
-        lab.appendChild(el("span", "bb-opt__rec", "rec"));
+        lab.appendChild(el("span", "bb-opt__rec", "추천"));
       }
       opts.appendChild(lab);
     });
@@ -629,16 +630,16 @@ __FM_BEARINGS_BOARD_DATA__
     if (item.allow_freeform) {
       var ff = document.createElement("input");
       ff.type = "text"; ff.name = "note"; ff.className = "bb-freeform";
-      ff.placeholder = item.freeform_hint || "or answer in your own words…";
+      ff.placeholder = item.freeform_hint || "직접 답변을 입력하세요…";
       form.appendChild(ff);
     }
 
     var foot = el("div", "bb-decision__foot");
-    var btn = el("button", "fm-btn fm-btn--sm " + (item.type === "merge" ? "fm-btn--gold" : "fm-btn--primary"), "Queue answer");
+    var btn = el("button", "fm-btn fm-btn--sm " + (item.type === "merge" ? "fm-btn--gold" : "fm-btn--primary"), "답변 대기열에 추가");
     btn.type = "submit";
     foot.appendChild(btn);
     var q = el("span", "bb-queued");
-    q.innerHTML = CHECK_SVG + " queued";
+    q.innerHTML = CHECK_SVG + " 대기열에 추가됨";
     foot.appendChild(q);
     var answerLimit = el("span", "bb-limit");
     answerLimit.setAttribute("role", "alert");
@@ -654,7 +655,7 @@ __FM_BEARINGS_BOARD_DATA__
       var displayAnswer = value ? (note ? value + " - " + note : value) : note;
       if (!displayAnswer) return;
       if (utf8ByteLength(displayAnswer) > 512) {
-        answerLimit.textContent = "Answer is too long to queue (512 bytes maximum).";
+        answerLimit.textContent = "답변이 너무 깁니다. 대기열에는 최대 512바이트까지 추가할 수 있습니다.";
         answerLimit.classList.add("is-visible");
         return;
       }
@@ -695,8 +696,8 @@ __FM_BEARINGS_BOARD_DATA__
     active = Math.max(0, Math.min(cards.length - 1, i));
     cards.forEach(function (c, j) { c.hidden = j !== active; });
     var answered = deck.querySelectorAll(".is-queued").length;
-    stackCount.textContent = "card " + (active + 1) + " of " + cards.length +
-      (answered ? " · " + answered + " answered" : "");
+    stackCount.textContent = "카드 " + (active + 1) + " / " + cards.length +
+      (answered ? " · 답변 완료 " + answered + "건" : "");
     stackPrev.disabled = active === 0;
     stackNext.disabled = active === cards.length - 1;
     /* the pile thins as the deal approaches the bottom */
@@ -709,7 +710,7 @@ __FM_BEARINGS_BOARD_DATA__
     showCard(0);
   } else {
     deck.classList.add("bb-call--empty");
-    deck.appendChild(el("div", "bb-empty", "Nothing needs your action right now."));
+    deck.appendChild(el("div", "bb-empty", "현재 결정할 항목이 없습니다."));
     stackNav.hidden = true;
   }
 
@@ -727,7 +728,7 @@ __FM_BEARINGS_BOARD_DATA__
 
   /* Landed */
   var ld = document.getElementById("bb-landed");
-  if (!data.landed.length) ld.appendChild(el("div", "bb-empty", "No recent completions are in the current baseline."));
+  if (!data.landed.length) ld.appendChild(el("div", "bb-empty", "현재 기준선에 최근 완료된 항목이 없습니다."));
   data.landed.forEach(function (t) {
     var row = el("div", "bb-row");
     var chk = el("span", "bb-row__check");
@@ -756,7 +757,7 @@ __FM_BEARINGS_BOARD_DATA__
   }
   function refreshBar(limitMessage) {
     var n = pickedIds().length;
-    barCount.textContent = limitMessage || (n ? n + " picked for dispatch" : "pick queued work to dispatch");
+    barCount.textContent = limitMessage || (n ? "배정할 작업 " + n + "개 선택됨" : "배정할 대기 작업을 선택하세요");
     barBtn.disabled = !n;
   }
 
@@ -766,11 +767,11 @@ __FM_BEARINGS_BOARD_DATA__
       anyPickable = true;
       pick = document.createElement("input");
       pick.type = "checkbox"; pick.className = "bb-pick"; pick.value = t.id;
-      pick.setAttribute("aria-label", "Pick " + t.id + " for dispatch");
+      pick.setAttribute("aria-label", "배정할 작업 " + t.id + " 선택");
       pick.addEventListener("change", function () {
         if (pick.checked && utf8ByteLength(pickedIds().join(",")) > 512) {
           pick.checked = false;
-          refreshBar("Selection limit reached (512 bytes maximum). ");
+          refreshBar("선택 항목이 너무 깁니다. 최대 512바이트까지 선택할 수 있습니다. ");
           return;
         }
         refreshBar();
@@ -784,7 +785,7 @@ __FM_BEARINGS_BOARD_DATA__
     if (pick) idCell.appendChild(pick);
     row.appendChild(idCell);
     var stateCell = el("td", "");
-    if (warning) stateCell.appendChild(badge("danger", "needs repair"));
+    if (warning) stateCell.appendChild(badge("danger", "수리 필요"));
     stateCell.appendChild(el("span", "", warning || t.reason ? "대기" : "예정"));
     row.appendChild(stateCell);
     row.appendChild(el("td", "", t.title));
@@ -793,15 +794,15 @@ __FM_BEARINGS_BOARD_DATA__
   });
   var omitted = [];
   var underwayMore = data.underway_more || 0;
-  if (underwayMore > 0) omitted.push("Underway +" + underwayMore + " more");
-  if (chartedMoreQueued > 0) omitted.push("Charted Next +" + chartedMoreQueued + " more");
-  if (chartedMoreWarnings > 0) omitted.push("repair warnings +" + chartedMoreWarnings + " more");
+  if (underwayMore > 0) omitted.push("진행 중 +" + underwayMore + "건 더");
+  if (chartedMoreQueued > 0) omitted.push("다음 예정 +" + chartedMoreQueued + "건 더");
+  if (chartedMoreWarnings > 0) omitted.push("수리 경고 +" + chartedMoreWarnings + "건 더");
   var omittedIndicator = document.getElementById("bb-task-omitted");
   omittedIndicator.textContent = omitted.join(" · ");
   omittedIndicator.hidden = omitted.length === 0;
   if (!taskBody.children.length) {
     var emptyTask = el("tr", "bb-empty");
-    emptyTask.appendChild(el("td", "", "No tasks are underway or charted."));
+    emptyTask.appendChild(el("td", "", "진행 중이거나 다음 예정인 태스크가 없습니다."));
     taskBody.appendChild(emptyTask);
   }
 
@@ -813,7 +814,7 @@ __FM_BEARINGS_BOARD_DATA__
       var dispatchAnswer = ids.join(",");
       if (!ids.length) return;
       if (utf8ByteLength(dispatchAnswer) > 512) {
-        refreshBar("Selection is too long to queue (512 bytes maximum). ");
+        refreshBar("선택 항목이 너무 깁니다. 대기열에는 최대 512바이트까지 추가할 수 있습니다. ");
         return;
       }
       if (window.lavish && window.lavish.queuePrompt) {
@@ -832,11 +833,11 @@ __FM_BEARINGS_BOARD_DATA__
      question the captain has not answered yet. The default action is this fleet's real behavior
      for an item left unanswered - not a per-item stored field, because none
      exists - so it is a short fixed label per card type, not per-item prose. */
-  var DEFAULT_ACTION = { decision: "ages to Charted Next", merge: "PR stays unmerged", credential: "work stays blocked" };
+  var DEFAULT_ACTION = { decision: "다음 예정 항목으로 이동", merge: "PR 병합 보류", credential: "작업 차단 유지" };
   var qs = document.getElementById("bb-questions");
   if (!data.captains_call.length) {
     var emptyQuestion = el("tr", "bb-empty");
-    emptyQuestion.appendChild(el("td", "", "Nothing needs your action right now."));
+    emptyQuestion.appendChild(el("td", "", "현재 결정할 항목이 없습니다."));
     qs.appendChild(emptyQuestion);
   }
   data.captains_call.forEach(function (item) {
@@ -846,11 +847,11 @@ __FM_BEARINGS_BOARD_DATA__
     /* Urgency is high at age >= 3 days or when blocking is true; absent filed means unknown. */
     row.appendChild(el("td", "bb-row__urgency", age === null || !isFinite(age) || (age < 3 && typeof item.blocking !== "boolean") ? "-" : ((age >= 3 || item.blocking) ? "높음" : "보통")));
     row.appendChild(el("td", "", item.title));
-    row.appendChild(el("td", "bb-row__action", DEFAULT_ACTION[item.type] || "stays open"));
+    row.appendChild(el("td", "bb-row__action", DEFAULT_ACTION[item.type] || "미결 상태 유지"));
     qs.appendChild(row);
   });
   } catch (e) {
-    renderBoardError("The board data could not be rendered");
+    renderBoardError("현황판 데이터를 표시하지 못했습니다");
   }
 })();
 </script>

@@ -148,10 +148,10 @@ test_unified_table_keeps_all_rows_and_maps_charted_states() {
     and ([.tasks[].state] == ["예정","대기","대기"])
     and ([.tasks[].blocker] == ["-","waiting for gate","integrity issue"])
     and ([.tasks[] | select(.id == "warning") | .alarm] == [true])
-    and ([.tasks[] | select(.id == "warning") | .alarmText] == ["needs repair"])
-    and ([.stats[] | select(.label == "charted next") | .n] == [5])
+    and ([.tasks[] | select(.id == "warning") | .alarmText] == ["수리 필요"])
+    and ([.stats[] | select(.label == "다음 예정") | .n] == [5])
     and (.legacyCopies == [])
-    and (.omitted == "Underway +4 more · Charted Next +3 more · repair warnings +2 more")
+    and (.omitted == "진행 중 +4건 더 · 다음 예정 +3건 더 · 수리 경고 +2건 더")
   ' >/dev/null || fail "unified task table truncated rows or kept duplicate list paths: $out"
   pass "the unified table discloses omitted rows and marks repair warnings"
 }
@@ -160,7 +160,7 @@ test_unified_table_discloses_underway_rows_and_no_omissions() {
   local home out
   home=$(make_home underway-omissions)
   out=$(render_board "$home" '[{"id":"run-task","repo":"sample","state":"working","kind":"ship","name":"Running","doing":"testing"}]' '[]' 0 0 2)
-  printf '%s' "$out" | jq -e '.omitted == "Underway +2 more" and .tasks[0].state == "진행중" and (.tasks[0].alarm == false)' >/dev/null \
+  printf '%s' "$out" | jq -e '.omitted == "진행 중 +2건 더" and .tasks[0].state == "진행중" and (.tasks[0].alarm == false)' >/dev/null \
     || fail "underway omitted count was not disclosed: $out"
   out=$(render_board "$home" '[]' '[]')
   printf '%s' "$out" | jq -e '.omitted == "" and .omittedHidden == true' >/dev/null \
@@ -235,13 +235,13 @@ test_present_metrics_render_real_values_and_absent_ones_say_no_data() {
   }')
   printf '%s' "$out" | jq -e '
     (.error == "")
-    and ([.statsCost[] | select(.label == "cumulative cost") | .value] == ["$90.71 / $300.00"])
-    and ([.statsCost[] | select(.label == "cumulative cost") | .noData] == [false])
-    and ([.statsCost[] | select(.label == "session cost") | .value] == ["no data"])
-    and ([.statsCost[] | select(.label == "session cost") | .noData] == [true])
-    and ([.statsCost[] | select(.label == "cache hit rate") | .value] == ["72.5%"])
-    and ([.statsCost[] | select(.label == "tool error rate") | .value] == ["3 / 120 (2.5%)"])
-    and ([.statsFleet[] | select(.label == "context read misses") | .value] == ["no data"])
+    and ([.statsCost[] | select(.label == "누적 비용") | .value] == ["$90.71 / $300.00"])
+    and ([.statsCost[] | select(.label == "누적 비용") | .noData] == [false])
+    and ([.statsCost[] | select(.label == "세션 비용") | .value] == ["데이터 없음"])
+    and ([.statsCost[] | select(.label == "세션 비용") | .noData] == [true])
+    and ([.statsCost[] | select(.label == "캐시 적중률") | .value] == ["72.5%"])
+    and ([.statsCost[] | select(.label == "도구 오류율") | .value] == ["3 / 120 (2.5%)"])
+    and ([.statsFleet[] | select(.label == "컨텍스트 읽기 누락") | .value] == ["데이터 없음"])
   ' >/dev/null || fail "present metrics did not render real values or absent ones were not honestly labeled: $out"
   pass "present metrics render real values, and metrics with no data source say so instead of a fabricated number"
 }
@@ -257,12 +257,27 @@ test_unanswered_questions_count_and_table_read_off_captains_call() {
   ]' '[]' '{}')
   printf '%s' "$out" | jq -e '
     (.error == "")
-    and ([.statsFleet[] | select(.label == "unanswered questions") | .value] == ["2"])
+    and ([.statsFleet[] | select(.label == "미응답 질문") | .value] == ["2"])
     and (.questions | length) == 2
-    and (.questions[0] == {id:"decision-one", question:"Adopt the new cache?", urgency:"-", action:"ages to Charted Next"})
-    and (.questions[1] == {id:"merge.sample-task", question:"Merge: sample change", urgency:"-", action:"PR stays unmerged"})
+    and (.questions[0] == {id:"decision-one", question:"Adopt the new cache?", urgency:"-", action:"다음 예정 항목으로 이동"})
+    and (.questions[1] == {id:"merge.sample-task", question:"Merge: sample change", urgency:"-", action:"PR 병합 보류"})
   ' >/dev/null || fail "the unanswered-questions count or table did not read off captains_call: $out"
   pass "the unanswered questions table reads real call data and reports unavailable urgency honestly"
+}
+
+test_merge_risk_badges_preserve_each_level() {
+  local home out
+  home=$(make_home merge-risk-labels)
+  out=$(render_full "$home" '[
+    {"key":"merge-low","type":"merge","repo":"sample","title":"Low","risk":"low","options":[{"value":"merge","label":"Merge"}]},
+    {"key":"merge-medium","type":"merge","repo":"sample","title":"Medium","risk":"medium","options":[{"value":"merge","label":"Merge"}]},
+    {"key":"merge-high","type":"merge","repo":"sample","title":"High","risk":"high","options":[{"value":"merge","label":"Merge"}]},
+    {"key":"merge-unknown","type":"merge","repo":"sample","title":"Unknown","risk":"critical","options":[{"value":"merge","label":"Merge"}]}
+  ]' '[]' '{}')
+  printf '%s' "$out" | jq -e '
+    [.calls[].badges[1]] == ["위험도 낮음", "위험도 보통", "위험도 높음", "위험도 critical"]
+  ' >/dev/null || fail "merge risk labels did not preserve accepted levels: $out"
+  pass "merge risk badges preserve canonical levels and unknown values"
 }
 
 
@@ -299,7 +314,7 @@ test_zero_tool_calls_have_no_percentage() {
   local home out
   home=$(make_home zero-tool-calls)
   out=$(render_full "$home" '[]' '[]' '{"tool_error_rate":{"errors":0,"total":0}}')
-  printf '%s' "$out" | jq -e '[.statsCost[] | select(.label == "tool error rate") | .value] == ["0 / 0 (-)"]' >/dev/null \
+  printf '%s' "$out" | jq -e '[.statsCost[] | select(.label == "도구 오류율") | .value] == ["0 / 0 (-)"]' >/dev/null \
     || fail "zero calls rendered a percentage: $out"
   pass "zero tool calls show unavailable percentage with real counts"
 }
@@ -334,6 +349,7 @@ test_unified_table_keeps_all_rows_and_maps_charted_states
 test_unified_table_discloses_underway_rows_and_no_omissions
 test_present_metrics_render_real_values_and_absent_ones_say_no_data
 test_unanswered_questions_count_and_table_read_off_captains_call
+test_merge_risk_badges_preserve_each_level
 test_underway_and_charted_blocker_columns_render_real_or_honest_absence
 test_unified_task_table_maps_real_states_and_question_urgency
 test_zero_tool_calls_have_no_percentage
