@@ -1447,7 +1447,7 @@ fm_pending_reply_escalated_decisions_json() {  # <state-dir>
 # no second recovery and no second status line. Empty token and an unchanged
 # token are no-ops, including on every later poll of the same session.
 fm_pending_reply_remind_escalated() {  # <state-dir>
-  local state=$1 token dir rec corr task summary payload key queued
+  local state=$1 token dir rec corr task summary payload key queued rc=0
   local -a open=() recs=()
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   dir=$(fm_pending_reply_dir "$state")
@@ -1462,21 +1462,20 @@ fm_pending_reply_remind_escalated() {  # <state-dir>
   [ "${#open[@]}" -gt 0 ] || return 0
   token=$(fm_pending_reply_session_token "$state")
   [ -n "$token" ] || return 0
-  for rec in "${open[@]}"; do
-    [ "$(fm_pending_reply_get "$rec" surfaced_session)" != "$token" ] || continue
-    if fm_pending_reply_escalation_dismissed "$rec"; then
-      fm_pending_reply_set "$rec" escalation_dismissed_epoch "$(fm_pending_reply_now)" || return 1
-      continue
-    fi
-    recs+=("$rec")
-  done
-  [ "${#recs[@]}" -gt 0 ] || return 0
   STATE=$state
   if ! declare -F fm_wake_append >/dev/null 2>&1; then
     # shellcheck source=bin/fm-wake-lib.sh
     . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
   fi
-  STATE=$state
+  for rec in "${open[@]}"; do
+    [ "$(fm_pending_reply_get "$rec" surfaced_session)" != "$token" ] || continue
+    if fm_pending_reply_escalation_dismissed "$rec"; then
+      _fm_pending_reply_stamp_escalated "$state" "$rec" escalation_dismissed_epoch "$(fm_pending_reply_now)" || return 1
+      continue
+    fi
+    recs+=("$rec")
+  done
+  [ "${#recs[@]}" -gt 0 ] || return 0
   FM_WAKE_QUEUE="$state/.wake-queue"
   FM_WAKE_QUEUE_LOCK="$state/.wake-queue.lock"
   key=pending-reply-escalated
@@ -1487,19 +1486,33 @@ fm_pending_reply_remind_escalated() {  # <state-dir>
     summary=$(fm_pending_reply_get "$rec" request_summary)
     payload="$payload task=$task pending-reply-id=$corr request=$summary;"
   done
-  queued=$(fm_wake_queued_keys check)
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  queued=$(fm_wake_queued_keys_locked check)
   case "
 $queued
 " in
     *"
 $key
 "*) ;;
-    *) fm_wake_append check "$key" "$payload" || return 1 ;;
+    *) fm_wake_append_locked check "$key" "$payload" || rc=$? ;;
   esac
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  [ "$rc" -eq 0 ] || return "$rc"
   for rec in "${recs[@]}"; do
-    fm_pending_reply_set "$rec" surfaced_session "$token" || return 1
+    _fm_pending_reply_stamp_escalated "$state" "$rec" surfaced_session "$token" || return 1
   done
   return 0
+}
+
+_fm_pending_reply_stamp_escalated() {  # <state-dir> <record-path> <field> <value>
+  local state=$1 rec=$2 field=$3 value=$4 lock rc=0
+  lock="$state/.pending-reply-$(basename "$rec").lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ "$(fm_pending_reply_get "$rec" phase)" = escalated ]; then
+    fm_pending_reply_set "$rec" "$field" "$value" || rc=$?
+  fi
+  fm_lock_release "$lock"
+  return "$rc"
 }
 
 # One reconciliation tick for a single record: resolve, observe, recover, escalate.
