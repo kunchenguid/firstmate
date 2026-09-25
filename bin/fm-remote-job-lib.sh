@@ -82,6 +82,14 @@
 # it to stop itself once its root is pruned, and
 # bin/fm-remote-job-reap-orphans.sh uses it to reap workers that were already
 # orphaned that way.
+#
+# fm_remote_job_ensure_worker never starts a Linux replacement while a live
+# worker still holds the ownership lock: it stops that holder's tree first,
+# even when the lock record no longer verifies it, and fails naming the
+# holder when it cannot. A replacement that does not become the verified
+# owner within its startup window is stopped before ensure fails, so no call
+# can leave a tree behind. --replace also replaces a healthy-looking owner,
+# for a worker that heartbeats but cannot serve jobs.
 
 FM_REMOTE_JOB_LABEL=dev.firstmate.remote-job
 FM_REMOTE_JOB_MAX_BYTES=${FM_REMOTE_JOB_MAX_BYTES:-1048576}
@@ -106,6 +114,7 @@ FM_REMOTE_JOB_STDERR=
 FM_REMOTE_JOB_EXIT=
 FM_REMOTE_JOB_ERROR=
 FM_REMOTE_JOB_REPAIRED=0
+FM_REMOTE_JOB_STARTED_PID=
 
 fm_remote_job_die() {
   printf 'error: %s\n' "$1" >&2
@@ -1146,25 +1155,101 @@ fm_remote_job_reload_launchagent() { # <account-home> <uid>
   fi
 }
 
-fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 worker pid
+# The pid of a live remote job worker still recorded as the ownership lock
+# holder, even when its recorded start or command no longer verify it as the
+# owner. Such a holder keeps every replacement from taking the lock, so ensure
+# must stop it before starting anything. An unrelated process that reused the
+# recorded pid never qualifies, and a quarantined lock is left to the worker's
+# own recovery.
+fm_remote_job_live_lock_holder() { # <account-home>
+  local account_home=$1 lock pid command
+  fm_remote_job_prepare_state "$account_home" || return 1
+  lock=$(fm_remote_job_worker_lock_path)
+  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+  [ ! -e "$lock/quarantine" ] && [ ! -L "$lock/quarantine" ] || return 1
+  pid=$(fm_remote_job_read_single_line "$lock/pid" 64) || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pid" -gt 1 ] || return 1
+  command=$(fm_remote_job_process_command "$pid") || return 1
+  case "$command" in *fm-remote-job-worker.sh*) ;; *) return 1 ;; esac
+  printf '%s\n' "$pid"
+}
+
+# Remove the ownership records a stopped holder left behind, so the
+# replacement takes the lock at once instead of racing the dead holder's still
+# fresh heartbeat. Records that already name another process are left alone.
+fm_remote_job_clear_stopped_ownership() { # <stopped-pid>
+  local pid=$1 lock recorded file
+  ! kill -0 "$pid" 2>/dev/null || return 1
+  lock=$(fm_remote_job_worker_lock_path)
+  for file in "$(fm_remote_job_worker_pid_path)" "$(fm_remote_job_worker_ready_path)"; do
+    [ ! -L "$file" ] || return 1
+    recorded=$(fm_remote_job_read_single_line "$file" 64 2>/dev/null || true)
+    [ -z "$recorded" ] || [ "$recorded" = "$pid" ] || continue
+    rm -f -- "$file" || return 1
+  done
+  [ -d "$lock" ] && [ ! -L "$lock" ] || return 0
+  [ ! -e "$lock/quarantine" ] && [ ! -L "$lock/quarantine" ] || return 0
+  recorded=$(fm_remote_job_read_single_line "$lock/pid" 64 2>/dev/null || true)
+  [ -z "$recorded" ] || [ "$recorded" = "$pid" ] || return 0
+  [ ! -L "$lock/pid" ] && [ ! -L "$lock/start" ] && [ ! -L "$lock/command" ] || return 1
+  rm -f -- "$lock/pid" "$lock/start" "$lock/command" || return 1
+  rmdir "$lock" 2>/dev/null || true
+}
+
+# True once a verified owner holds the lock, heartbeats, and publishes the
+# current code identity. A fresh heartbeat alone is not enough: a surviving
+# stale holder heartbeats too. When that owner is not the tree this call
+# started (a worker's own supervisor restarted it first), the started tree
+# lost and is reaped here rather than left behind.
+fm_remote_job_wait_for_started_owner() { # <remote-root> <account-home> <started-pid>
+  local root=$1 account_home=$2 started=$3 deadline pgid
+  deadline=$(($(date +%s) + 20))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if fm_remote_job_worker_owned_alive "$root" "$account_home" &&
+      fm_remote_job_worker_identity_matches "$root" "$account_home"; then
+      pgid=$(fm_remote_job_process_pgid "$FM_REMOTE_JOB_OWNER_PID" 2>/dev/null || true)
+      [ "$pgid" != "$started" ] || return 0
+      fm_remote_job_stop_worker_tree "$started" || return 1
+      wait "$started" 2>/dev/null || true
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+fm_remote_job_start_linux_worker() { # <remote-root> <account-home> [--replace]
+  local root=$1 account_home=$2 replace=${3:-} worker pid holder=
+  FM_REMOTE_JOB_STARTED_PID=
   worker="$root/bin/fm-remote-job-worker.sh"
   [ -f "$worker" ] && [ ! -L "$worker" ] && [ -x "$worker" ] || {
     FM_REMOTE_JOB_ERROR="remote job worker is not a genuine executable in the configured code root"
     return 1
   }
   fm_remote_job_prepare_state "$account_home" || return 1
+  # A job running inside the worker must never replace the worker serving it.
+  [ "${FM_REMOTE_JOB_ACTIVE:-}" != 1 ] || return 0
   if fm_remote_job_worker_owned_alive "$root" "$account_home"; then
-    if fm_remote_job_worker_identity_matches "$root" "$account_home"; then return 0; fi
-    # The owner pid is the serving child; its restart supervisor sits above it
+    if [ "$replace" != --replace ] && fm_remote_job_worker_identity_matches "$root" "$account_home"; then return 0; fi
+    holder=$FM_REMOTE_JOB_OWNER_PID
+  else
+    holder=$(fm_remote_job_live_lock_holder "$account_home" 2>/dev/null || true)
+  fi
+  if [ -n "$holder" ]; then
+    # The holder pid is the serving child; its restart supervisor sits above it
     # and would immediately replace a lone process kill, so stop the whole
-    # worker tree through its isolated group.
-    pid=$FM_REMOTE_JOB_OWNER_PID
-    fm_remote_job_stop_worker_tree "$pid" || {
-      FM_REMOTE_JOB_ERROR="stale remote job worker did not stop safely"
+    # worker tree through its isolated group. Nothing is started while it
+    # survives: a replacement could never take the lock it still holds.
+    fm_remote_job_stop_worker_tree "$holder" || {
+      FM_REMOTE_JOB_ERROR="stale remote job worker $holder still holds $(fm_remote_job_worker_lock_path) and did not stop; no replacement was started"
       return 1
     }
-    wait "$pid" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fm_remote_job_clear_stopped_ownership "$holder" || {
+      FM_REMOTE_JOB_ERROR="stopped stale remote job worker $holder but could not clear its ownership records under $FM_REMOTE_JOB_STATE; no replacement was started"
+      return 1
+    }
     FM_REMOTE_JOB_REPAIRED=1
   fi
   # Job control puts the worker tree in its own process group, so a later stop
@@ -1180,11 +1265,12 @@ fm_remote_job_start_linux_worker() { # <remote-root> <account-home>
   pid=$!
   set +m
   case "$pid" in ''|*[!0-9]*) FM_REMOTE_JOB_ERROR="could not start the remote job worker"; return 1 ;; esac
+  FM_REMOTE_JOB_STARTED_PID=$pid
   FM_REMOTE_JOB_REPAIRED=1
 }
 
-fm_remote_job_ensure_worker() { # <remote-root> <account-home>
-  local root=$1 account_home=$2 platform uid identity_matches=0
+fm_remote_job_ensure_worker() { # <remote-root> <account-home> [--replace]
+  local root=$1 account_home=$2 replace=${3:-} platform uid identity_matches=0 started
   FM_REMOTE_JOB_ERROR=
   FM_REMOTE_JOB_REPAIRED=0
   root=$(fm_remote_job_canonical_existing_dir "$root") || {
@@ -1202,6 +1288,7 @@ fm_remote_job_ensure_worker() { # <remote-root> <account-home>
   }
   platform=$(fm_remote_job_platform)
   fm_remote_job_worker_identity_matches "$root" "$account_home" && identity_matches=1
+  [ "$replace" != --replace ] || identity_matches=0
   if [ "$platform" = darwin ]; then
     uid=$(id -u 2>/dev/null || true)
     case "$uid" in ''|*[!0-9]*) FM_REMOTE_JOB_ERROR="remote account uid is unavailable; run fm-on.sh <route> fm-remote-doctor.sh --fix"; return 1 ;; esac
@@ -1218,24 +1305,31 @@ fm_remote_job_ensure_worker() { # <remote-root> <account-home>
       fm_remote_job_reload_launchagent "$account_home" "$uid" || return 1
       FM_REMOTE_JOB_REPAIRED=1
     fi
-  else
-    fm_remote_job_start_linux_worker "$root" "$account_home" || return 1
-  fi
-  fm_remote_job_wait_for_probe "$root" "$account_home" && return 0
-  if [ "$platform" = darwin ]; then
+    fm_remote_job_wait_for_probe "$root" "$account_home" && return 0
     fm_remote_job_reload_launchagent "$account_home" "$uid" || return 1
     FM_REMOTE_JOB_REPAIRED=1
     fm_remote_job_wait_for_probe "$root" "$account_home" && return 0
-  else
-    # A replaced Linux supervisor can lose its first ownership race while the
-    # prior supervisor finishes releasing the shared worker lock. Retry the
-    # idempotent start once, matching the bounded recovery already used above
-    # for launchd, before reporting a startup failure.
-    fm_remote_job_start_linux_worker "$root" "$account_home" || return 1
-    FM_REMOTE_JOB_REPAIRED=1
-    fm_remote_job_wait_for_probe "$root" "$account_home" && return 0
+    # shellcheck disable=SC2034 # Sourceable API consumed by the entrypoint and remote doctor.
+    FM_REMOTE_JOB_ERROR="remote job worker did not report ready after startup"
+    return 1
   fi
+  fm_remote_job_start_linux_worker "$root" "$account_home" "$replace" || return 1
+  started=$FM_REMOTE_JOB_STARTED_PID
+  if [ -z "$started" ]; then
+    fm_remote_job_wait_for_probe "$root" "$account_home" && return 0
+    FM_REMOTE_JOB_ERROR="remote job worker did not report ready"
+    return 1
+  fi
+  fm_remote_job_wait_for_started_owner "$root" "$account_home" "$started" && return 0
+  # A replacement that never became the owner is reaped here rather than left
+  # to its restart supervisor: leaking one tree per call turns a single stuck
+  # lock into an unbounded process count.
+  if ! fm_remote_job_stop_worker_tree "$started"; then
+    FM_REMOTE_JOB_ERROR="replacement remote job worker $started never took ownership and did not stop; inspect $FM_REMOTE_JOB_STATE/logs/$FM_REMOTE_JOB_LABEL.log"
+    return 1
+  fi
+  wait "$started" 2>/dev/null || true
   # shellcheck disable=SC2034 # Sourceable API consumed by the entrypoint and remote doctor.
-  FM_REMOTE_JOB_ERROR="remote job worker did not report ready after startup"
+  FM_REMOTE_JOB_ERROR="replacement remote job worker never took ownership of $(fm_remote_job_worker_lock_path) (recorded holder: $(fm_remote_job_read_single_line "$(fm_remote_job_worker_lock_path)/pid" 64 2>/dev/null || printf none)); the replacement was stopped - inspect $FM_REMOTE_JOB_STATE/logs/$FM_REMOTE_JOB_LABEL.log"
   return 1
 }

@@ -863,6 +863,56 @@ fi
 DOCTOR_WORKER_PID=
 pass "doctor refreshes stale worker identity before probing tools"
 
+# A worker can own the lock, heartbeat, and publish the current identity while
+# never serving a job. Every check reads healthy, so --fix must replace it once
+# through the probe it cannot complete, not advise another --fix forever.
+new_case Linux with-herdr no-gui
+CASE_REMOTE_JOB_ACTIVE=
+CASE_PLATFORM_OVERRIDE=Linux
+rm -f "$CASE_BIN/sleep" "$CASE_BIN/uname"
+mkdir -p "$CASE_HOME/.local/bin" "$CASE_DIR/deaf"
+for tool in herdr tasks-axi treehouse claude; do
+  ln -s "$CASE_BIN/$tool" "$CASE_HOME/.local/bin/$tool"
+done
+DEAF_STATE="$CASE_HOME/.firstmate/remote-job"
+mkdir -p "$DEAF_STATE/jobs" "$DEAF_STATE/logs"
+chmod 700 "$CASE_HOME/.firstmate" "$DEAF_STATE" "$DEAF_STATE/jobs" "$DEAF_STATE/logs"
+cat > "$CASE_DIR/deaf/fm-remote-job-worker.sh" <<'SH'
+#!/bin/bash
+while :; do printf '%s\n' "$$" > "$1/worker.ready"; sleep 0.2; done
+SH
+chmod +x "$CASE_DIR/deaf/fm-remote-job-worker.sh"
+set -m
+"$CASE_DIR/deaf/fm-remote-job-worker.sh" "$DEAF_STATE" &
+DOCTOR_WORKER_PID=$!
+set +m
+mkdir -m 700 "$DEAF_STATE/worker.lock"
+printf '%s\n' "$DOCTOR_WORKER_PID" > "$DEAF_STATE/worker.lock/pid"
+ps -p "$DOCTOR_WORKER_PID" -o lstart= > "$DEAF_STATE/worker.lock/start"
+ps -p "$DOCTOR_WORKER_PID" -o command= > "$DEAF_STATE/worker.lock/command"
+printf '%s\n' "$DOCTOR_WORKER_PID" > "$DEAF_STATE/worker.pid"
+(
+  # shellcheck source=bin/fm-remote-job-lib.sh
+  . "$ROOT/bin/fm-remote-job-lib.sh"
+  fm_remote_job_code_identity "$ROOT" "$CASE_HOME"
+) > "$DEAF_STATE/worker.identity"
+FM_REMOTE_JOB_QUEUE_TIMEOUT=2 FM_REMOTE_JOB_TIMEOUT=5 FM_REMOTE_JOB_WAIT_GRACE=1 doctor --fix
+assert_contains "$DOCTOR_OUT" 'fix remote-job-probe=failed: the running remote job worker did not complete the required-tool probe; replacing it' \
+  "--fix did not act on a worker that heartbeats but never serves"
+assert_contains "$DOCTOR_OUT" 'fix remote-job-worker=applied:' "--fix did not replace the worker that never serves"
+assert_contains "$DOCTOR_OUT" 'check remote-job-probe=ok: the remote job worker completed the required-tool probe' \
+  "the replacement worker did not serve the required-tool probe"
+assert_not_contains "$DOCTOR_OUT" 'rerun this command with --fix' "--fix still advised rerunning --fix"
+! kill -0 "$DOCTOR_WORKER_PID" 2>/dev/null || fail "--fix left the worker that never serves running"
+DOCTOR_WORKER_PID=$(cat "$DEAF_STATE/worker.pid")
+(
+  # shellcheck source=bin/fm-remote-job-lib.sh
+  . "$ROOT/bin/fm-remote-job-lib.sh"
+  fm_remote_job_stop_worker_tree "$DOCTOR_WORKER_PID"
+) || true
+DOCTOR_WORKER_PID=
+pass "--fix replaces a worker that heartbeats but cannot serve, instead of advising another --fix"
+
 # --- the entrypoint symlink is recreated when it is missing ------------------
 
 new_case Linux with-herdr no-gui

@@ -3227,7 +3227,8 @@ SH
   chmod +x "$dir/fakebin/ssh"
   : > "$dir/ssh.log"
 
-  run_liveness_leg "$dir" unreachable FM_SSH_BIN="$dir/fakebin/ssh" FM_FAKE_SSH_LOG="$dir/ssh.log"; pid=$LIVENESS_PID
+  run_liveness_leg "$dir" unreachable FM_SSH_BIN="$dir/fakebin/ssh" FM_FAKE_SSH_LOG="$dir/ssh.log" \
+    FM_SECONDMATE_UNREACHABLE_PROBES=1000; pid=$LIVENESS_PID
   sleep 4
   is_live_non_zombie "$pid" \
     || fail "the watcher exited against an unreachable remote secondmate: $(cat "$dir/watch-unreachable.out" "$dir/watch-unreachable.err")"
@@ -3241,6 +3242,77 @@ SH
     || fail "an unreachable remote probe ledgered a relaunch attempt"
   [ ! -s "$dir/tmux.log" ] || fail "an unreachable remote probe touched a local endpoint"
   pass "watch liveness: an unreachable remote secondmate is probed, preserved, and never failed over"
+}
+
+# A remote host that stops completing work reads as one inconclusive probe at
+# a time, so without a count it never surfaces. Probes that hang past their
+# bound wake once after FM_SECONDMATE_UNREACHABLE_PROBES in a row, never
+# relaunch, and a completed probe starts a fresh episode.
+test_secondmate_liveness_tick_reports_remote_that_stopped_accepting_work() {
+  local dir state pid
+  dir=$(make_secondmate_liveness_case liveness-remote-deaf)
+  state="$dir/state"
+  rm -f "$state/sm1.meta"
+  cat > "$state/rsm1.meta" <<EOF
+window=remote:rsm1
+kind=secondmate
+harness=claude
+remote_host=lab-host
+remote_backend=herdr
+remote_herdr_session=fm-remote
+remote_target=fm-remote:w1:p1
+home=/remote/rsm1-home
+EOF
+  cat > "$dir/data/secondmates.md" <<EOF
+- rsm1 - Remote mate (host: lab-host; root: /remote/root; home: /remote/rsm1-home; scope: remote work; projects: alpha; added 2026-01-01)
+EOF
+  cat > "$dir/fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_SSH_LOG:?}"
+if [ -n "${FM_FAKE_REMOTE_REPLY:-}" ]; then
+  printf '%s\n' "$FM_FAKE_REMOTE_REPLY"
+  exit 0
+fi
+sleep 30
+exit 255
+SH
+  chmod +x "$dir/fakebin/ssh"
+  : > "$dir/ssh.log"
+
+  run_liveness_leg "$dir" deaf FM_SSH_BIN="$dir/fakebin/ssh" FM_FAKE_SSH_LOG="$dir/ssh.log" \
+    FM_SECONDMATE_REMOTE_PROBE_TIMEOUT=1; pid=$LIVENESS_PID
+  wait_for_exit "$pid" 600 \
+    || fail "the watcher stayed silent while every remote probe failed to complete: $(cat "$dir/watch-deaf.err")"
+  grep -F 'check: secondmate rsm1 has stopped accepting work: 3 remote probes in a row did not complete (remote endpoint probe did not complete within 1s on lab-host)' \
+    "$dir/watch-deaf.out" >/dev/null \
+    || fail "a remote host that stopped completing probes was not reported: $(cat "$dir/watch-deaf.out" "$dir/watch-deaf.err")"
+  [ "$(wc -l < "$dir/ssh.log" | tr -d ' ')" -eq 3 ] \
+    || fail "the report did not come from exactly three bounded probes: $(cat "$dir/ssh.log")"
+  [ "$(grep -c $'\tcheck\tsecondmate-unreachable-rsm1-' "$state/.wake-queue")" -eq 1 ] \
+    || fail "the stopped-accepting-work wake was not queued exactly once: $(cat "$state/.wake-queue")"
+  [ ! -e "$state/.secondmate-relaunch-rsm1" ] \
+    || fail "a host that stopped completing probes was treated as a dead endpoint"
+
+  # Later non-completing probes in the same episode stay quiet.
+  drain_liveness_wakes "$dir"
+  rm -f "$state/.secondmate-liveness-tick"
+  run_liveness_leg "$dir" deaf-again FM_SSH_BIN="$dir/fakebin/ssh" FM_FAKE_SSH_LOG="$dir/ssh.log" \
+    FM_SECONDMATE_REMOTE_PROBE_TIMEOUT=1; pid=$LIVENESS_PID
+  sleep 5
+  is_live_non_zombie "$pid" \
+    || fail "the watcher re-reported the same unreachable episode: $(cat "$dir/watch-deaf-again.out")"
+  kill_liveness_leg "$pid"
+
+  # A completed probe ends the episode.
+  drain_liveness_wakes "$dir"
+  rm -f "$state/.secondmate-liveness-tick"
+  run_liveness_leg "$dir" answered FM_SSH_BIN="$dir/fakebin/ssh" FM_FAKE_SSH_LOG="$dir/ssh.log" \
+    FM_FAKE_REMOTE_REPLY=alive; pid=$LIVENESS_PID
+  sleep 3
+  kill_liveness_leg "$pid"
+  [ ! -e "$state/.secondmate-unreachable-rsm1" ] \
+    || fail "a completed probe did not end the unreachable episode"
+  pass "watch liveness: a remote host that stops completing probes is reported once, not left silent"
 }
 
 test_self_held_lock_reclaims_instead_of_deadlocking
@@ -3306,3 +3378,4 @@ test_secondmate_liveness_tick_error_keeps_scanning_and_wakes
 test_secondmate_liveness_tick_unqueued_outcome_is_an_error_not_a_wake
 test_secondmate_liveness_tick_skips_mate_whose_lock_is_held
 test_secondmate_liveness_tick_preserves_unreachable_remote
+test_secondmate_liveness_tick_reports_remote_that_stopped_accepting_work

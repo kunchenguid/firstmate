@@ -280,6 +280,10 @@ The guard's header owns the decision table, and [`bin/fm-remote-herdr-owner-lib.
 `--fix` also takes these actions:
 
 - It starts the same workers directly on Linux.
+- It stops a stale Linux worker that still holds the ownership lock before starting its replacement, and stops a replacement that never takes ownership instead of leaving it running.
+  When either cannot be done, the repair fails naming what it could not do.
+- It replaces, once, a worker that heartbeats but cannot complete the required-tool probe.
+  If the probe still fails, the gap is reported as `human:` with its cause rather than as another `--fix`.
 - It recreates the `~/.local/bin/fm-remote-entrypoint.sh` symlink when it is absent.
 - It creates only Firstmate-owned required-tool wrappers that it can prove resolve to a version-manager target.
   It stops after one harness satisfies the at-least-one requirement, which is the harness line of the [required remote tools](#required-remote-tools).
