@@ -4143,17 +4143,20 @@ agy)
   ;;
 esac
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-# The root is private (0700) because its path is predictable under a shared
-# /tmp: a root that already exists is reused only as a real directory owned by
-# this user and writable by nobody else, then tightened, so no other local user
-# can plant or swap a file in it. The staged launch command lives in a sibling
-# directory namespaced by home identity, not in this shared per-id root.
-TASK_TMP="/tmp/fm-$ID"
+# Per-task temp root: /tmp/fm-<uid>-<id>/ with Go's build temp nested at gotmp/. Go
+# won't create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole
+# root. Nested (not a bare /tmp/fm-<uid>-<id>/gotmp) so other per-task temp can live
+# alongside later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR)
+# is the targeted knob: TMPDIR is too broad (affects every program's temp, not just
+# Go's). The numeric uid in the path keeps two local accounts from ever computing
+# the same root for the same task id, so a stale directory left behind by another
+# account can never collide with this one. The root is still private (0700)
+# because its path is predictable under a shared /tmp: a root that already exists
+# is reused only as a real directory owned by this user and writable by nobody
+# else, then tightened, so no other local user can plant or swap a file in it. The
+# staged launch command lives in a sibling directory namespaced by home identity,
+# not in this per-task root.
+TASK_TMP="/tmp/fm-$(id -u)-$ID"
 if ! (umask 077 && mkdir "$TASK_TMP") 2>/dev/null; then
   if [ -L "$TASK_TMP" ] || [ ! -d "$TASK_TMP" ] || [ ! -O "$TASK_TMP" ] ||
     [ -n "$(find "$TASK_TMP" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] ||

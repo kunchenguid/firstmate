@@ -558,7 +558,7 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   assert_grep "worktree=$wt" "$state/$id.meta" "meta missing Orca worktree path"
   assert_not_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''create' \
     "spawn should reuse the implicit terminal returned by Orca worktree creation"
-  assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \
+  assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f'"export GOTMPDIR=/tmp/fm-$(id -u)-orcaspawnz1/gotmp"$'\x1f''--enter'$'\x1f''--json' \
     "spawn did not export GOTMPDIR through the Orca terminal"
   staged=$(tr '\037' '\n' < "$log" | sed -n "s/^\. '\([^']*\)'$/\1/p" | tail -1)
   [ -n "$staged" ] && [ -f "$staged" ] \
@@ -566,7 +566,7 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   launch=$(cat "$staged")
   assert_contains "$launch" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}'" \
     "the staged launch sent through Orca did not select the Claude harness"
-  rm -rf "/tmp/fm-$id" "$(dirname "$staged")"
+  rm -rf "/tmp/fm-$(id -u)-$id" "$(dirname "$staged")"
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
 }
 

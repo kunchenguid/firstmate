@@ -585,10 +585,10 @@ test_corrupt_store_fails_closed() {
 # The busy-state generation is armed after it, and nothing between that arm and
 # the far-later rollback arming can clear it, so a record stranded here would
 # read as a task busy forever for an id that has no meta at all. The per-task
-# temp root /tmp/fm-<id> is the other resource created on the way to the arm, and
-# nothing removes it either: fm-teardown finds it through tasktmp= in the task's
-# meta, which a refused spawn never publishes. The id carries this process's pid
-# so the temp-root assertion reads only this run's path.
+# temp root /tmp/fm-<uid>-<id> is the other resource created on the way to the
+# arm, and nothing removes it either: fm-teardown finds it through tasktmp= in
+# the task's meta, which a refused spawn never publishes. The id carries this
+# process's pid so the temp-root assertion reads only this run's path.
 test_refused_spawn_leaves_no_task_state() {
   local case_dir home proj wt config fakebin out id
   case_dir="$TMP_ROOT/refused-spawn"
@@ -618,8 +618,8 @@ test_refused_spawn_leaves_no_task_state() {
     || fail "a refused spawn stranded a busy record nothing can clear"
   [ ! -e "$home/state/$id.busy-gen" ] \
     || fail "a refused spawn stranded a busy generation nothing can clear"
-  [ ! -e "/tmp/fm-$id" ] \
-    || { rm -rf "/tmp/fm-$id"; fail "a refused spawn stranded a temp root no teardown can find"; }
+  [ ! -e "/tmp/fm-$(id -u)-$id" ] \
+    || { rm -rf "/tmp/fm-$(id -u)-$id"; fail "a refused spawn stranded a temp root no teardown can find"; }
   pass "fm-spawn.sh: a trust-refused claude spawn leaves no task state behind"
 }
 
