@@ -16,6 +16,17 @@ accept_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta
   fm_dod_accept_ship_done "$@"
 }
 
+test_ready_prompt_keeps_delivery_ownership_with_firstmate() {
+  local prompt
+  prompt=$(fm_dod_block no-mistakes rec2127 fm/rec2127)
+  assert_contains "$prompt" "Firstmate owns the remaining registered delivery stages" \
+    "no-mistakes ready prompt did not retain delivery ownership after pre-merge validation"
+  case "$prompt" in
+    *"You are finished."*) fail "no-mistakes ready prompt still calls the worker finished before registered delivery completes" ;;
+  esac
+  pass "the ready prompt ends the worker turn without declaring product delivery finished"
+}
+
 write_merge_marker() {  # <state> <id> <provider> <host> <path> <number>
   printf '%s\n' fm-pr-poll-merge-notified-v1 "$3" "$4" "$5" "$6" > "$1/$2.pr-poll-merge-notified"
   chmod 600 "$1/$2.pr-poll-merge-notified"
@@ -383,6 +394,7 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
 }
 
 test_scout_done_is_not_gated
+test_ready_prompt_keeps_delivery_ownership_with_firstmate
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
 test_remote_containing_named_head_is_accepted

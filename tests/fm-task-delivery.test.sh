@@ -36,7 +36,16 @@ make_home() {  # <name> [<registry-line>...]
   mkdir -p "$home/data" "$home/state" "$home/config" "$projects/proj" "$fakebin"
   git -C "$projects/proj" init -q || fail "could not initialize project fixture"
   printf '#!/bin/sh\nexit 1\n' > "$fakebin/tmux"
-  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/gh" <<'GH'
+#!/bin/sh
+if [ "$1" = repo ] && [ "$2" = view ]; then
+  [ -z "${GH_REPO:-}" ] || exit 99
+  printf '%s\n' 'https://github.com/example/proj'
+  exit 0
+fi
+exit 1
+GH
+  chmod +x "$fakebin/tmux" "$fakebin/gh"
   if [ "$#" -gt 0 ]; then
     printf '%s\n' "$@" > "$home/data/projects.md"
   fi
@@ -400,22 +409,34 @@ STUB
 }
 
 test_promotion_persists_the_selected_ship_branch() {
-  local home id meta instructions out
+  local home id meta instructions out project fakebin
   home="$TMP_ROOT/promote-branch/home"
+  project="$TMP_ROOT/promote-branch/fixture-project"
+  fakebin="$TMP_ROOT/promote-branch/bin"
   id=promote-branch-e1
   meta="$home/state/$id.meta"
-  mkdir -p "$home/state"
-  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+  mkdir -p "$home/state" "$home/data" "$project" "$fakebin"
+  git -C "$project" init -q || fail "could not initialize promotion project fixture"
+  cat > "$fakebin/gh" <<'GH'
+#!/bin/sh
+[ -z "${GH_REPO:-}" ] || exit 99
+printf '%s\n' 'https://github.com/example/fixture-project'
+GH
+  chmod +x "$fakebin/gh"
+  printf '%s\n' '- fixture-project [no-mistakes completion=verified-production] - fixture (added 2026-09-24)' > "$home/data/projects.md"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$id" "$project" > "$meta"
   FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
     || fail "branch-prefix promotion scout brief should scaffold"
   fill_brief_subsections "$home/data/$id/brief.md" \
     "Promote the branch-prefix fixture." "Use the configured branch exactly."
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
-    --mode local-only --yolo off --branch-prefix fix/) \
+  out=$(GH_REPO=ambient/wrong PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode no-mistakes --yolo off --branch-prefix fix/) \
     || fail "branch-prefix promotion should succeed"
   instructions="$home/data/$id/ship-instructions.md"
   assert_grep "branch=fix/$id" "$meta" \
     "promotion did not persist the selected full ship branch"
+  assert_grep 'completion_policy=verified-production' "$meta" \
+    "promotion did not capture the project's verified-production completion policy"
   assert_grep "git checkout -b fix/$id --" "$instructions" \
     "promotion did not deliver the selected branch-creation command"
   assert_grep "Ship branch: fix/$id" "$instructions" \
@@ -553,6 +574,209 @@ EOF
   err=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>&1 >/dev/null)
   assert_contains "$err" "unknown mode" "a typo'd registry mode stopped warning"
   pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
+}
+
+test_project_mode_resolves_completion_policy() {
+  local rec home proj fakebin out status
+  rec=$(make_home completion-policy \
+    '- proj [no-mistakes completion=verified-production] - fixture (added 2026-09-24)')
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$PROJECT_MODE" --completion-policy proj 2>&1)
+  status=$?
+  expect_code 0 "$status" "registered completion policy should resolve"
+  [ "$out" = verified-production ] || fail "registered completion policy resolved as '$out'"
+
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$PROJECT_MODE" --completion-policy absent 2>/dev/null)
+  [ "$out" = landed ] || fail "unregistered completion policy should default to landed (got '$out')"
+
+  printf '%s\n' '- proj [no-mistakes completion=unknown] - fixture (added 2026-09-24)' > "$home/data/projects.md"
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$PROJECT_MODE" --completion-policy proj 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unknown completion policy should refuse"
+  assert_contains "$out" "unknown completion policy" "completion-policy refusal did not name the problem"
+
+  printf '%s\n' '- proj [local-only completion=verified-production] - fixture (added 2026-09-24)' > "$home/data/projects.md"
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$PROJECT_MODE" --completion-policy proj 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only accepted a completion policy that requires PR identity"
+  assert_contains "$out" "local-only records no PR or reviewed PR head" \
+    "local-only completion-policy refusal did not name the missing evidence identity"
+
+  printf '%s\n' '- proj [no-mistakes forge=gerrit completion=verified-production] - fixture (added 2026-09-24)' > "$home/data/projects.md"
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$PROJECT_MODE" --completion-policy proj 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "Gerrit accepted a completion policy that requires recorded reviewed-head identity"
+  assert_contains "$out" "Gerrit ready contract records no immutable reviewed head" \
+    "Gerrit completion-policy refusal did not name the missing evidence identity"
+  pass "fm-project-mode: completion policy is explicit, closed-set, and defaults to landed"
+}
+
+test_local_only_task_cannot_capture_verified_production_policy() {
+  local rec home proj fakebin out status
+  rec=$(make_home completion-policy-local-task \
+    '- proj [no-mistakes completion=verified-production] - fixture (added 2026-09-24)')
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  write_brief "$home" completion-local-a1 local-only
+  out=$(run_spawn "$home" "$fakebin" completion-local-a1 "$proj" claude --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local-only task captured verified-production policy"
+  assert_contains "$out" "requires the GitHub PR delivery path" \
+    "local-only task refusal did not name the missing PR evidence identity"
+  assert_absent "$home/state/completion-local-a1.meta" \
+    "refused local-only verified-production spawn wrote task metadata"
+
+  write_brief "$home" completion-local-a2 local-only
+  out=$(run_spawn "$home" "$fakebin" completion-local-a2 "$proj" claude \
+    --mode local-only --yolo off --completion-policy landed)
+  status=$?
+  [ "$status" -ne 0 ] || fail "fake tmux should still stop the explicit landed fixture"
+  assert_not_contains "$out" "requires the GitHub PR delivery path" \
+    "the trusted landed exception still inherited the project's production proof boundary"
+
+  write_brief "$home" completion-local-a3 no-mistakes
+  out=$(run_spawn "$home" "$fakebin" completion-local-a3 "$proj" claude \
+    --mode no-mistakes --yolo off --completion-policy unknown)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unknown task completion policy was accepted"
+  assert_contains "$out" "must be landed or verified-production" \
+    "unknown task completion policy refusal did not name the closed set"
+
+  write_brief "$home" completion-local-a4
+  out=$(run_spawn "$home" "$fakebin" completion-local-a4 "$proj" claude \
+    --scout --completion-policy landed)
+  status=$?
+  [ "$status" -ne 0 ] || fail "scout accepted a ship completion boundary"
+  assert_contains "$out" "applies only to ship spawns" \
+    "scout completion-policy refusal did not name the ownership boundary"
+  pass "verified-production refuses local-only unless the trusted owner selects the bounded landed exception"
+}
+
+test_promotion_captures_trusted_completion_policy_selection() {
+  local home id meta out status
+  home="$TMP_ROOT/promote-completion-selection/home"
+  id=promote-completion-c1
+  meta="$home/state/$id.meta"
+  mkdir -p "$home/state" "$home/data"
+  printf '%s\n' '- fixture-project [no-mistakes completion=verified-production] - fixture (added 2026-09-24)' > "$home/data/projects.md"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=/fixture/fixture-project\n' "$id" > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
+    || fail "completion-selection scout brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "Publish a bounded deliverable with no production surface." \
+    "Capture the trusted completion exception."
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode local-only --yolo off --completion-policy verified-production 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion accepted effective local-only plus verified-production"
+  assert_contains "$out" "requires the GitHub PR delivery path" \
+    "promotion did not validate effective mode plus completion after the owner override"
+  assert_grep 'kind=scout' "$meta" \
+    "refused effective completion selection changed the task kind"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode local-only --yolo off --completion-policy landed 2>&1) \
+    || fail "trusted landed promotion exception should succeed: $out"
+  assert_grep 'completion_policy=landed' "$meta" \
+    "promotion did not persist the trusted owner's landed selection"
+  [ "$(grep -c '^completion_policy=' "$meta")" -eq 1 ] \
+    || fail "promotion wrote more than one completion policy"
+  pass "fm-promote: trusted completion selection is closed-set and captured once"
+}
+
+test_legacy_ship_can_capture_registered_completion_policy_once() {
+  local rec home proj fakebin meta out rc
+  rec=$(make_home completion-policy-capture \
+    '- proj [no-mistakes completion=verified-production] - fixture (added 2026-09-24)')
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  meta="$home/state/rec2127.meta"
+  printf 'kind=ship\nmode=no-mistakes\nproject=%s\n' "$proj" > "$meta"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-capture-completion-policy.sh" rec2127 --if-absent) \
+    || fail "legacy ship completion-policy capture should succeed"
+  assert_grep 'completion_policy=verified-production' "$meta" \
+    "legacy ship did not capture the registered completion policy"
+  assert_contains "$out" 'completion_policy=verified-production' \
+    "capture did not report the policy it persisted"
+
+  rc=0
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-capture-completion-policy.sh" rec2127 --if-absent >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "completion-policy capture silently rewrote an already captured task"
+  [ "$(grep -c '^completion_policy=' "$meta")" -eq 1 ] \
+    || fail "completion-policy capture duplicated the task field"
+
+  meta="$home/state/rec2127-local.meta"
+  printf 'kind=ship\nmode=local-only\nproject=%s\n' "$proj" > "$meta"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-capture-completion-policy.sh" rec2127-local --if-absent 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "legacy local-only task captured verified-production"
+  assert_contains "$out" "requires the GitHub PR delivery path" \
+    "legacy local-only capture refusal did not name the missing evidence path"
+  assert_no_grep '^completion_policy=' "$meta" \
+    "refused legacy local-only capture changed task metadata"
+  pass "legacy ship completion policy is captured atomically once without rewriting in-flight policy"
+}
+
+test_verified_production_requires_positive_github_pr_capability() {
+  local rec home proj fakebin out status id meta
+
+  rec=$(make_home completion-provider-unresolved \
+    '- proj [no-mistakes completion=verified-production] - fixture (added 2026-09-24)')
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  printf '#!/bin/sh\nexit 1\n' > "$fakebin/gh"
+  chmod +x "$fakebin/gh"
+  write_brief "$home" completion-provider-g1 no-mistakes
+  out=$(run_spawn "$home" "$fakebin" completion-provider-g1 "$proj" claude --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "provider-unresolved verified-production spawn succeeded"
+  assert_contains "$out" "only when gh resolves this project as a GitHub repository" \
+    "implicit non-GitHub provider refusal did not name the positive capability boundary"
+  assert_absent "$home/state/completion-provider-g1.meta" \
+    "provider-unresolved completion spawn wrote task metadata"
+
+  rec=$(make_home completion-provider-gerrit \
+    '- proj [no-mistakes forge=gerrit] - fixture (added 2026-09-24)')
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  FM_HOME="$home" "$BRIEF" completion-provider-g2 proj --mode no-mistakes --forge gerrit >/dev/null 2>&1 \
+    || fail "Gerrit completion ship brief should scaffold"
+  fill_brief_subsections "$home/data/completion-provider-g2/brief.md" \
+    "Ship a Gerrit fixture." "Validate completion capability."
+  out=$(run_spawn "$home" "$fakebin" completion-provider-g2 "$proj" claude \
+    --mode no-mistakes --yolo off --completion-policy verified-production)
+  status=$?
+  [ "$status" -ne 0 ] || fail "explicit verified-production succeeded on Gerrit"
+  assert_contains "$out" "forge=gerrit cannot supply that evidence identity" \
+    "explicit Gerrit completion refusal did not name the unsupported evidence path"
+
+  id=completion-provider-g3
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$id" "$proj" > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
+    || fail "Gerrit completion promotion scout brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "Promote a Gerrit fixture." "Validate completion capability."
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode no-mistakes --yolo off --completion-policy verified-production 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "explicit verified-production promotion succeeded on Gerrit"
+  assert_contains "$out" "forge=gerrit cannot supply that evidence identity" \
+    "Gerrit promotion refusal did not use the shared capability boundary"
+  assert_grep 'kind=scout' "$meta" "refused Gerrit promotion changed task kind"
+  pass "verified-production uses one positive GitHub PR capability boundary across lifecycle entry points"
 }
 
 # Spawn and promotion refuse leftover Task-subsection placeholders through the
@@ -1625,6 +1849,11 @@ test_promotion_branch_command_is_shell_safe
 test_local_merge_uses_the_recorded_ship_branch
 test_project_mode_matches_whole_multiword_names
 test_project_mode_maps_the_conditional_policy
+test_project_mode_resolves_completion_policy
+test_local_only_task_cannot_capture_verified_production_policy
+test_promotion_captures_trusted_completion_policy_selection
+test_legacy_ship_can_capture_registered_completion_policy_once
+test_verified_production_requires_positive_github_pr_capability
 test_project_mode_binds_the_forge_orthogonally
 test_project_mode_refuses_only_a_malformed_forge_binding
 test_forge_gerrit_refuses_yolo
