@@ -587,8 +587,29 @@ test_declared_wait_stops_at_standing_hold_mirror() {
   pass "a standing hold mirror stops the declared-wait scan"
 }
 
+# A settled hold stays read past after the worker or firstmate appends more:
+# neither the pause right under the pair nor one under another key's answer on
+# top of it is lost.
+test_declared_wait_survives_settled_hold_then_answer() {
+  local dir f
+  dir=$(case_dir settled-hold-then-answer)
+  f="$dir/answered.status"
+  printf 'paused: waiting on upstream\n' > "$f"
+  printf 'captain-held [key=captain-hold-answered-1]: operator review\n' >> "$f"
+  printf 'resolved [key=captain-hold-answered-1]: captain call released by fm-captain-hold\n' >> "$f"
+  [ "$(status_declared_wait_line "$f")" = 'paused: waiting on upstream' ] \
+    || fail "a settled hold pair hid the pause under it: '$(status_declared_wait_line "$f")'"
+  printf 'resolved [key=api]: answered\n' >> "$f"
+  [ "$(last_status_line "$f")" = 'resolved [key=api]: answered' ] \
+    || fail "a later answer did not become the latest event: '$(last_status_line "$f")'"
+  [ "$(status_declared_wait_line "$f")" = 'paused: waiting on upstream' ] \
+    || fail "an answer after a settled hold hid the standing pause: '$(status_declared_wait_line "$f")'"
+  pass "a settled hold stays read past after another key's answer lands on top of it"
+}
+
 test_keyless_wait_survives_stated_default_retraction
 test_declared_wait_survives_answers_past_the_event_window
 test_declared_wait_survives_settled_hold_mirror
 test_declared_wait_stops_at_standing_hold_mirror
+test_declared_wait_survives_settled_hold_then_answer
 test_bare_prose_cannot_open_or_close_a_decision
