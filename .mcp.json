@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "jev": {
+      "command": "bash",
+      "args": ["-c", "exec \"$CLAUDE_PROJECT_DIR/bin/fm-jev-mcp.sh\""],
+      "cwd": "${CLAUDE_PROJECT_DIR}"
+    }
+  }
+}

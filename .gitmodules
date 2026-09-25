@@ -1,0 +1,9 @@
+[submodule ".claude/upstreams/fast-jev-compaction"]
+	path = .claude/upstreams/fast-jev-compaction
+	url = https://github.com/tamaratran/fast-jev-compaction.git
+[submodule ".claude/upstreams/jev-mcp"]
+	path = .claude/upstreams/jev-mcp
+	url = https://github.com/jkudish/jev-mcp.git
+[submodule ".claude/upstreams/winnow"]
+	path = .claude/upstreams/winnow
+	url = https://github.com/GhalebDweikat/winnow.git

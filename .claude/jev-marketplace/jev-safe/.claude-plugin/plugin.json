@@ -1,0 +1,6 @@
+{
+  "name": "jev-safe",
+  "version": "1.0.0",
+  "description": "Repository-scoped Jev tools protected by a local detect-secrets and sensitive-path gate.",
+  "author": { "name": "Firstmate" }
+}

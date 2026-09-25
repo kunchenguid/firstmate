@@ -1,0 +1,13 @@
+{
+  "name": "firstmate-jev",
+  "description": "Repository-scoped Jev tools with local safety gating.",
+  "owner": { "name": "Firstmate local project configuration" },
+  "plugins": [
+    {
+      "name": "jev-safe",
+      "source": "./jev-safe",
+      "description": "Pinned Jev tools protected by the local fail-closed outbound safety gate.",
+      "version": "1.0.0"
+    }
+  ]
+}

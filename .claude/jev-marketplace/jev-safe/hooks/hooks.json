@@ -1,0 +1,18 @@
+{
+  "modules": ["./jev.ts"],
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/bin/fm-jev-sessionstart.sh\"",
+            "timeout": 600,
+            "statusMessage": "Jev safety gate and winnow sidecar starting"
+          }
+        ]
+      }
+    ]
+  }
+}
