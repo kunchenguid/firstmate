@@ -328,7 +328,6 @@ Attended, a grant names no check row and each scan finds nothing.
 `tests/fm-wake-queue.test.sh`'s mixed-queue actor, stale-acknowledgement remedy, and presentation-deadline tests drive the real scripts and check that:
 
 - Branch acknowledgement cannot swallow a main row.
-- Branch acknowledgement retires the check-row receipts of exactly its granted sequences.
 - A concurrent main turn cannot present or acknowledge an active branch grant.
 - A no-op stale acknowledgement names the current presented wake's exact command.
 - Live-holder presentation contention stays bounded and retriable.
@@ -339,6 +338,8 @@ The same suite pins the counted-equals-presentable invariant against `bin/fm-gua
 - A branch-held row raises the held advisory rather than the ordinary queued-wake warning for main.
 - That row is presented with its acknowledgement command - with the ordinary warning restored - as soon as the grant clears.
 - Structurally unusable rows are retired by main alone while every remaining row stays presentable and acknowledgeable.
+
+Branch acknowledgement retiring the check-row receipts of exactly its granted sequences is pinned by `tests/fm-wake-queue.test.sh` for the secondmate stall receipt and by `tests/fm-inactive-reconcile.test.sh` for the inactive-outcome receipt.
 
 `tests/fm-pi-branch-extension.test.sh` pins extension-side classification, claim publication and release, and the pre-drain recheck.
 
