@@ -1460,10 +1460,11 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
 # <parent-label> is the owning FM_HOME label (firstmate or 2ndmate-<id>).
 # Optional <parent-workspace-id> is that parent's EXACT id, which the caller
 # already resolved from the launching agent's own herdr identity. When given it
-# anchors the owning parent by id, so two workspaces sharing the home label no
-# longer make the whole layout ambiguous; when omitted the parent is located by
-# label exactly as before. With a unique label the two select the same
-# workspace, so ordering behavior is unchanged in the ordinary case.
+# anchors the owning parent by id, so mutable project labels and detached or
+# foreign presentation spaces elsewhere in the session cannot strand this new
+# child at the end. Only the exact new workspace moves; every pre-existing
+# workspace keeps its relative order. When omitted, the parent is located by
+# label and the whole intervening layout must remain unambiguous as before.
 # New-format └ ... · p:<token> children and, for compatibility only, already
 # adjacent old-format firstmate/... or 2ndmate-<id>/... projections may extend
 # the block read-only; they are never renamed or moved.
@@ -1547,7 +1548,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
           .active_parent = null
         end
       )) as $remainder
-    | select($remainder.valid == true)
+    | select(($parent_ws | length) > 0 or $remainder.valid == true)
     | {
         current: $current,
         desired: ($pidx + 1 + $block),
@@ -2682,7 +2683,7 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
       | select(([$spaces[]? | select(.workspace_id == $workspace and .label == $workspace_label)] | length) == 1)
       | select(([$spaces[]? | select((.label | type) == "string" and (.label | endswith(" · p:" + $token)))] | length) == 1)
       | select(([$spaces[]? | select((.label | type) == "string" and (.label | endswith(" · p:" + $token)) and .workspace_id == $workspace)] | length) == 1)
-      | select(([$spaces[]? | select(.workspace_id == $parent_workspace and .label == $parent_label)] | length) == 1)
+      | select(([$spaces[]? | select(.workspace_id == $parent_workspace)] | length) == 1)
       | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $parent_workspace)]) as $parents
       | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $workspace)]) as $children
       | select(($parents | length) == 1 and ($children | length) == 1)

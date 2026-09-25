@@ -252,8 +252,9 @@ Creation proceeds in this order:
 
 1. Firstmate atomically publishes a three-field version 1 journal containing a random 128-bit base64url token, before asking Herdr to create anything.
 2. After the new workspace converges to one exact task endpoint beneath one exact parent workspace id, the journal advances to a version 2 binding.
-   That binding records the physical home, named session, endpoint, parent, and immutable expected labels.
+   That binding records the physical home, named session, endpoint, parent, and immutable expected task labels.
 
+The parent's visible label may be a mutable project name; exact workspace identity, not that label, binds the child.
 Another parent with the same presentation label does not prevent publication or participate in restart reclaim.
 
 The token is visible in the workspace title, because Herdr exposes no verified hidden persistent field.
@@ -276,7 +277,7 @@ An ambiguous response grants no mutation or cleanup authority.
 Protocol 16 exposes `workspace.move` over the named session socket but no CLI subcommand.
 `bin/backends/herdr-workspace-move.py` sends only that whitelisted method and verifies the complete returned workspace order.
 
-Projected children are placed in one contiguous block immediately after their owning home when all of these are verifiable:
+Projected children are placed in one contiguous block immediately after their exact owning workspace when all of these are verifiable:
 
 - The session layout.
 - The protocol.
@@ -284,8 +285,10 @@ Projected children are placed in one contiguous block immediately after their ow
 - `python3`.
 - The machine-private per-session lock.
 
+A project workspace used as the launcher owns that project's task block; without a project-specific launcher, the Firstmate workspace owns the task block.
 Existing legacy child labels may extend an already adjacent block read-only but are never renamed or migrated.
-A foreign, ambiguous, detached, or manually interleaved child makes ordering skip with a warning rather than rewriting the layout.
+Detached, foreign, and manually interleaved spaces elsewhere do not block insertion because only the exact response-derived new workspace moves and every pre-existing workspace keeps its relative order.
+A caller without an exact parent id still skips an ambiguous layout with a warning rather than guessing from labels.
 
 Ordering failure never fails the task spawn.
 Firstmate does not retry, adopt, reuse, close, delete, or rename anything in response to an unavailable method, lock contention, ambiguous socket, lost response, failed move, or verification mismatch.
@@ -385,7 +388,7 @@ These cases fall back flat without mutating the old projection when duplicate-ag
 - Version 1 journals.
 - Dead or missing panes.
 - Duplicate or absent tokens.
-- Renamed or detached spaces.
+- Renamed or detached projected spaces.
 - Cross-home mismatches.
 - Inconsistent endpoint bindings.
 - Active target tabs.

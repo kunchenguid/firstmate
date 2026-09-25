@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-backend-herdr-launcher-workspace-e2e.test.sh - mandatory ISOLATED
-# end-to-end real-Herdr test for worker PLACEMENT with presentation spaces
-# disabled.
+# end-to-end real-Herdr test for worker PLACEMENT in flat and projected
+# presentation layouts.
 #
 # The guarantee under test: a crewmate or scout is created in the exact Herdr
 # workspace of the firstmate or secondmate process that launched it, identified
@@ -182,6 +182,9 @@ printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM2_HOME/data/char
 PRES_HOME="$TMP_ROOT/presentation-home"
 mkdir -p "$PRES_HOME/state" "$PRES_HOME/config"
 : > "$PRES_HOME/config/herdr-presentation-spaces"
+PROJECT_HOME="$TMP_ROOT/project-presentation-home"
+mkdir -p "$PROJECT_HOME/state" "$PROJECT_HOME/config"
+printf 'on\n' > "$PROJECT_HOME/config/herdr-presentation-spaces"
 
 write_ship_brief() {  # <file> <id>
   cat > "$1" <<EOF
@@ -199,6 +202,10 @@ for id in uniqA uniqB dupC dupD staleF smE presU presD; do
   write_ship_brief "$PRIMARY_HOME/data/$id/brief.md" "$id"
   write_ship_brief "$SM_HOME/data/$id/brief.md" "$id"
   write_ship_brief "$PRES_HOME/data/$id/brief.md" "$id"
+done
+for id in development-to-staging public-profile-header; do
+  mkdir -p "$PROJECT_HOME/data/$id"
+  write_ship_brief "$PROJECT_HOME/data/$id/brief.md" "$id"
 done
 mkdir -p "$PRIMARY_HOME/data/$SM2_ID"
 printf 'trivial secondmate charter brief: nothing to do.\n' > "$PRIMARY_HOME/data/$SM2_ID/brief.md"
@@ -273,8 +280,72 @@ PRESU_JOURNAL="$PRES_HOME/state/presU.herdr-presentation"
   || fail "the projection bound a parent other than the launcher's own workspace ($WS_PRIMARY)"
 [ "$(journal_field "$PRESU_JOURNAL" workspace_id)" = "$PRESU_WS" ] \
   || fail "the projection journal does not name its own workspace"
+PRESU_ORDER=$(lab workspace list 2>/dev/null | jq -r --arg parent "$WS_PRIMARY" --arg child "$PRESU_WS" '
+  [.result.workspaces[].workspace_id] as $ids
+  | ($ids | index($child)) - ($ids | index($parent))
+')
+[ "$PRESU_ORDER" = 1 ] \
+  || fail "a task with no project space should sit directly under Firstmate, offset was '$PRESU_ORDER'"
 [ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a projected spawn stole focus from the captain's workspace"
-pass "real herdr E2E: presentation spaces still create the isolated child workspace and bind it under the launcher's exact parent, without stealing focus"
+pass "real herdr E2E: a task with no project space gets an isolated child directly under Firstmate without stealing focus"
+
+# --- 2c. a project-named parent plus detached historical child: two new
+#         Firstmate projections stay contiguous under the exact project -------
+
+read -r PROJECT_FIRSTMATE _ _ <<EOF
+$(make_workspace 'Firstmate')
+EOF
+read -r PROJECT_PARENT _ PROJECT_LAUNCHER <<EOF
+$(make_workspace 'Find My Matcha')
+EOF
+read -r PROJECT_DIVIDER _ _ <<EOF
+$(make_workspace 'AidDrop')
+EOF
+read -r PROJECT_DETACHED _ _ <<EOF
+$(make_workspace '└ historical-task · p:AbCdEfGhIjKlMnOpQrStUw')
+EOF
+[ -n "$PROJECT_FIRSTMATE" ] && [ -n "$PROJECT_PARENT" ] && [ -n "$PROJECT_LAUNCHER" ] \
+  && [ -n "$PROJECT_DIVIDER" ] && [ -n "$PROJECT_DETACHED" ] \
+  || fail "could not create the project-relative ordering fixture"
+
+for id in development-to-staging public-profile-header; do
+  spawn_from_launcher "$PROJECT_LAUNCHER" "$PROJECT_HOME" "$id" "$PROJ" --mode no-mistakes --yolo off
+  [ "$SPAWN_RC" -eq 0 ] \
+    || fail "project-relative projected spawn $id failed"$'\n'"$(cat "$SPAWN_ERR")"
+  if grep -E 'ambiguous workspace layout|could not publish an exact restart binding' "$SPAWN_ERR" >/dev/null 2>&1; then
+    fail "project-relative projected spawn $id left an ordering or restart-binding warning"$'\n'"$(cat "$SPAWN_ERR")"
+  fi
+  PROJECT_META="$PROJECT_HOME/state/$id.meta"
+  record_worktree "$PROJECT_META"
+  PROJECT_JOURNAL="$PROJECT_HOME/state/$id.herdr-presentation"
+  [ "$(journal_field "$PROJECT_JOURNAL" version)" = 2 ] \
+    || fail "project-relative projected spawn $id did not publish an exact binding"
+  [ "$(journal_field "$PROJECT_JOURNAL" parent_workspace_id)" = "$PROJECT_PARENT" ] \
+    || fail "project-relative projected spawn $id bound the wrong parent"
+done
+
+DEVELOPMENT_WS=$(grep '^herdr_workspace_id=' "$PROJECT_HOME/state/development-to-staging.meta" | cut -d= -f2-)
+PROFILE_WS=$(grep '^herdr_workspace_id=' "$PROJECT_HOME/state/public-profile-header.meta" | cut -d= -f2-)
+PROJECT_ORDER=$(lab workspace list 2>/dev/null | jq -c \
+  --arg firstmate "$PROJECT_FIRSTMATE" --arg parent "$PROJECT_PARENT" \
+  --arg development "$DEVELOPMENT_WS" --arg profile "$PROFILE_WS" \
+  --arg divider "$PROJECT_DIVIDER" --arg detached "$PROJECT_DETACHED" '
+    [.result.workspaces[].workspace_id] as $ids
+    | [($ids | index($firstmate)), ($ids | index($parent)), ($ids | index($development)),
+       ($ids | index($profile)), ($ids | index($divider)), ($ids | index($detached))]
+  ')
+PROJECT_ORDER_OK=$(printf '%s' "$PROJECT_ORDER" | jq -r '
+  all(.[]; . != null)
+  and .[1] == .[0] + 1
+  and .[2] == .[0] + 2
+  and .[3] == .[0] + 3
+  and .[4] == .[0] + 4
+  and .[5] == .[0] + 5
+')
+[ "$PROJECT_ORDER_OK" = true ] \
+  || fail "project task spaces were not contiguous under Find My Matcha: $PROJECT_ORDER"
+[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "project-relative projected spawns stole focus"
+pass "real herdr E2E: repeated Firstmate task spaces stay directly under a project-named parent despite a detached historical child"
 
 # --- 3. duplicate label, launcher in the NON-first match, driven from a real
 #        Herdr pane so the identity comes from Herdr's own injection ----------
