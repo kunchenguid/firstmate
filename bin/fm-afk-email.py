@@ -311,6 +311,7 @@ def queue_unprocessed():
 
 
 
+
     PENDING.mkdir(mode=0o700, parents=True, exist_ok=True)
     SENT.mkdir(mode=0o700, parents=True, exist_ok=True)
     queued = 0
@@ -621,6 +622,7 @@ def validate_handoff_state_item(path, store):
 
 
 
+
             raise ValueError("away-email state is malformed")
     else:
         if (
@@ -803,6 +805,7 @@ def token_record(token):
 
 
 
+
                 started = item.get("send_started_epoch")
                 expires = item.get("send_expires_epoch")
                 if not isinstance(started, int) or not isinstance(expires, int):
@@ -815,6 +818,7 @@ def token_record(token):
             raise ValueError("away-email token state is ambiguous")
         if matches:
             return matches[0]
+
 
 
 
@@ -878,6 +882,7 @@ def receive_messages(messages, posture, config):
             print(f"fm-afk-event\treply-rejected\t{uid}\tanswer-too-long", file=sys.stderr)
 
 
+
             print(
                 f"fm-afk-email: reply in mail UID {uid} rejected; answer exceeds {MAX_REPLY_CHARS} characters",
                 file=sys.stderr,
@@ -889,6 +894,7 @@ def receive_messages(messages, posture, config):
         except (OSError, ValueError):
             print("fm-afk-email: away-email token state could not be checked; mail poll will retry", file=sys.stderr)
             return 1
+
 
 
 
@@ -926,6 +932,7 @@ def receive_messages(messages, posture, config):
             if "send_started_epoch" in item:
                 item.pop("sent_epoch", None)
                 item.pop("expires_epoch", None)
+
 
 
 
