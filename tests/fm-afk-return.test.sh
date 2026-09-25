@@ -34,6 +34,8 @@ install_runner() {  # <case-dir>
   cp "$ROOT/bin/fm-branch-outcome.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-tasks-axi-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-backlog-transition-lib.sh" "$dir/bin/"
+  # The merge-notification marker reader behind the brief's landed section.
+  cp "$ROOT/bin/fm-pr-lib.sh" "$dir/bin/"
   cp "$ROOT/.tasks.toml" "$dir/home/.tasks.toml"
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/home/data/backlog.md"
   # The fake stop mirrors the real one's ordering: the away flag goes, then the
@@ -114,6 +116,7 @@ test_return_gate_owns_remediation_and_reports_catchup_to_bearings() {
   date +%s > "$dir/home/state/.afk"
   printf 'repair-task.status: blocked synthetic dependency\n' > "$dir/home/state/.subsuper-escalations"
   printf 'fm away-mode inject WEDGED: 4555s undelivered\n' > "$dir/home/state/.subsuper-inject-wedged"
+  printf 'unknown wake: frobnicate: handled\n' > "$dir/home/state/.subsuper-unknown-acked"
   {
     printf '1784074271\t2\tsignal\trepair-task.status\tsignal: synthetic status\n'
     printf 'wake annotation: latest wake-EVENT observed at drain, not current state: repair-task.status: blocked synthetic dependency\n'
@@ -193,6 +196,7 @@ test_return_gate_owns_remediation_and_reports_catchup_to_bearings() {
   [ ! -e "$gate" ] || fail "successful check left the return gate behind"
   [ ! -e "$dir/home/state/.subsuper-escalations" ] || fail "successful check left delivered escalation state behind"
   [ ! -e "$dir/home/state/.subsuper-inject-wedged" ] || fail "successful check left the wedge marker behind"
+  [ ! -e "$dir/home/state/.subsuper-unknown-acked" ] || fail "successful check left the away session's unknown-wake acknowledgements behind"
   [ -s "$dir/home/state/.fake-drain" ] || fail "successful return consumed its wake before handling completed"
   [ ! -e "$dir/home/state/.fake-drain-acks" ] || fail "successful return acknowledged its wake inside evidence publication"
   assert_contains "$out" 'WAKE_ACK_REQUIRED: after handling completes' "successful return did not hand acknowledgement to the handling turn"
@@ -461,6 +465,41 @@ test_return_brief_composes_from_record_store_and_held_set() {
   FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$dir/bin/fm-afk-return.sh" guard \
     || fail "guard still refused after the record was archived and the gate cleared"
   pass "the return brief renders health, the words with the session account, waiting, could-not-fix, handled, and cost from durable records, and the gate shrinks to what the away session could not fix"
+}
+
+test_return_brief_lists_landed_work_awaiting_cleanup() {
+  local dir out landed_line failed_line handled_line
+  dir="$TMP_ROOT/brief-landed"
+  install_runner "$dir"
+  contract_in "$dir" enter --words 'merge the exemption changes when green' >/dev/null 2>&1 || fail "could not confirm the away-posture record"
+  # The 2026-09-22 away window: exemption workers whose pull requests had
+  # merged were left sitting, and the return brief never listed them. Two done
+  # workers with recorded PRs: the merge outcome path marked the first merged
+  # through its own marker writer, while nothing durable proves the second
+  # landed, so the brief must list exactly the first.
+  printf 'window=synthetic:fm-landed\nbackend=tmux\nkind=ship\npr=https://github.com/example/landed/pull/7\n' > "$dir/home/state/landed.meta"
+  printf 'done [at=1]: PR https://github.com/example/landed/pull/7\n' > "$dir/home/state/landed.status"
+  printf 'window=synthetic:fm-open\nbackend=tmux\nkind=ship\npr=https://github.com/example/open/pull/8\n' > "$dir/home/state/open.meta"
+  printf 'done [at=1]: PR https://github.com/example/open/pull/8\n' > "$dir/home/state/open.status"
+  (
+    # shellcheck source=bin/fm-pr-lib.sh
+    . "$ROOT/bin/fm-pr-lib.sh"
+    fm_pr_poll_merge_mark_notified "$dir/home/state" landed github github.com example/landed 7
+  ) || fail "could not record the landed PR's merge notification through its owner"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+
+  out=$(run_return "$dir" begin) || fail "a return with only landed work should clear: $out"
+  landed_line=$(line_of "$out" 'Landed, cleanup due:')
+  failed_line=$(line_of "$out" 'Tried and failed, or could not be fixed:')
+  handled_line=$(line_of "$out" 'Handled while away:')
+  [ -n "$landed_line" ] && [ -n "$failed_line" ] && [ -n "$handled_line" ] || fail "the brief is missing a section: $out"
+  [ "$failed_line" -lt "$landed_line" ] && [ "$landed_line" -lt "$handled_line" ] \
+    || fail "landed work is out of order (failed $failed_line, landed $landed_line, handled $handled_line)"
+  assert_contains "$out" '  - landed: https://github.com/example/landed/pull/7 is merged and the worker is still up; close it with bin/fm-teardown.sh landed once catch-up clears' "the landed worker was not listed for cleanup"
+  assert_not_contains "$out" '  - open:' "a done worker with no durable merge evidence was listed as landed"
+  assert_contains "$out" 'catch-up clear' "landed work must not hold the gate"
+  pass "the return brief lists landed work whose worker is still up, from the durable merge marker only, without gating on it"
 }
 
 test_return_brief_keeps_refresh_history() {
@@ -838,6 +877,7 @@ test_check_retries_recorded_terminal_teardown
 test_unreadable_superseded_archive_keeps_return_gated
 test_missing_final_archive_keeps_retained_contract_gated
 test_return_brief_composes_from_record_store_and_held_set
+test_return_brief_lists_landed_work_awaiting_cleanup
 test_return_brief_keeps_refresh_history
 test_malformed_posture_record_keeps_catchup_gated
 test_missing_epoch_record_stays_required_after_disappearing

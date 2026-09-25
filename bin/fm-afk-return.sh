@@ -20,9 +20,13 @@
 # every action it took under them (each outcome-store row from the window whose
 # summary opens with the "per your away instructions:" marker the branch prompt
 # in bin/fm-branch-prompt.sh requires), then what is waiting on the captain,
-# then what was tried and failed or could not be fixed, then what the away
-# session handled, then cost. The health snapshot is taken BEFORE the daemon
-# shutdown so the shutdown itself cannot read as a gap.
+# then what was tried and failed or could not be fixed, then landed work whose
+# task record is still live (the recorded PR carries the
+# merge-notification marker bin/fm-pr-lib.sh owns, read from durable records
+# only, never the forge - finished work that owes an ordinary teardown, which
+# is fleet work and so waits for the gate rather than holding it), then what
+# the away session handled, then cost. The health snapshot is taken BEFORE the
+# daemon shutdown so the shutdown itself cannot read as a gap.
 #
 # THE GATE. `blocked:` is the crewmate protocol's firstmate-actionable verb. A
 # live task's open blocked event must be remediated and closed with
@@ -253,7 +257,8 @@ clear_delivery_artifacts() {
   rm -f \
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
-    "$STATE/.subsuper-inject-wedged"
+    "$STATE/.subsuper-inject-wedged" \
+    "$STATE/.subsuper-unknown-acked"
 }
 
 # The lifecycle retention reasons the gate kept, one per line, empty when the
@@ -405,9 +410,26 @@ render_words_account() {  # the away session's account of what it did under the 
   fi
 }
 
+# Live task records whose recorded PR the merge outcome path already marked
+# merged: the notification marker bin/fm-pr-lib.sh owns, written by
+# bin/fm-merge-outcome-lib.sh for a merge this home performed or observed.
+# That is landed work nobody closed. Durable records only, never the forge.
+scan_landed_awaiting_cleanup() {  # -> <task>\t<url> rows
+  local meta task
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    task=$(basename "$meta"); task=${task%.meta}
+    fm_pr_metadata_identity_parse "$meta" || continue
+    fm_pr_poll_merge_already_notified "$STATE" "$task" \
+      "$FM_PR_META_PROVIDER" "$FM_PR_META_HOST" "$FM_PR_META_PATH" "$FM_PR_META_NUMBER" \
+      || continue
+    printf '%s\t%s\n' "$task" "$FM_PR_META_URL"
+  done
+}
+
 render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
   local evidence=$1 blockers=$2 since=$3 now record superseded superseded_at archive_dir stamp
-  local tag task key summary count routine captain live held_err last verb rows status
+  local tag task key summary count routine captain live held_err last verb rows status url
   now=$(date +%s)
   printf '=== Return brief'
   if [ -n "$since" ]; then
@@ -502,9 +524,24 @@ EOF
   done
   [ "$count" -gt 0 ] || printf '  (nothing)\n'
 
-  # 5. handled while away. Every outcome the away session recorded in the
-  # store during the window counts as handled. On Pi the supervision branch
-  # took every safe actionable wake it could while main was parked; wakes it
+  # 5. landed, cleanup due: finished work whose task record is still live.
+  # Listing it keeps a landed task that remains live past the return from being
+  # overlooked. The cleanup itself is ordinary fleet work and waits for the gate.
+  printf 'Landed, cleanup due:\n'
+  count=0
+  while IFS="$(printf '\t')" read -r task url; do
+    [ -n "$task" ] || continue
+    count=$((count + 1))
+    printf '  - %s: %s is merged and the worker is still up; close it with bin/fm-teardown.sh %s once catch-up clears\n' "$task" "$url" "$task"
+  done <<EOF
+$(scan_landed_awaiting_cleanup)
+EOF
+  [ "$count" -gt 0 ] || printf '  (nothing)\n'
+
+  # 6. handled while away. Every outcome the away session recorded in the
+  # store during the window counts as handled. On Pi the supervision branch,
+  # and on an opted-in home the supervision host (docs/supervision-host.md), took
+  # every safe actionable wake it could while main was parked; wakes it
   # declined still fell back to main. The captain rows are listed above.
   printf 'Handled while away:\n'
   routine=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { n++ } END { print n + 0 }')
@@ -517,7 +554,7 @@ EOF
     printf '  (no routine outcomes recorded in the store for this window)\n'
   fi
 
-  # 6. cost.
+  # 7. cost.
   live=0
   for meta in "$STATE"/*.meta; do [ -f "$meta" ] && live=$((live + 1)); done
   printf 'Cost: %s supervision outcome(s) recorded (%s routine, %s captain); %s task(s) live at return.\n' \
@@ -728,6 +765,8 @@ main() {
   . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
   # shellcheck source=bin/fm-backlog-transition-lib.sh
   . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+  # shellcheck source=bin/fm-pr-lib.sh
+  . "$SCRIPT_DIR/fm-pr-lib.sh"
 
   mkdir -p "$STATE" || return 1
   fm_lock_acquire_wait "$LOCK"

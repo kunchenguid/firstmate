@@ -25,8 +25,12 @@ START="$ROOT/bin/fm-afk-start.sh"
 CONTRACT="$ROOT/bin/fm-afk-contract.sh"
 # The daemon paths refuse on a Pi primary, so pin a daemon-running harness for
 # every unit below; the Pi refusal has its own units (unit_pi_never_launches_the_daemon).
+# FM_TEST_HARNESS is the launch path's test-only seam (bin/fm-afk-launch.sh
+# fm_afk_launch_primary_harness): the suite calls the entrypoints directly, so a
+# real harness ancestor - a no-mistakes gate agent run under Pi - would outrank
+# the CLAUDECODE=1 marker below and refuse the daemon paths under test.
 unset PI_CODING_AGENT FM_PI_HARNESS CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI ATLASSIAN_AGENT_TYPE ROVODEV_CLI
-export CLAUDECODE=1
+export CLAUDECODE=1 FM_TEST_HARNESS=claude FM_TEST_SEAM=1
 
 FAILED=0
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILED=1; }
@@ -141,6 +145,31 @@ unit_pi_never_launches_the_daemon() {
   done
 }
 
+# A leaked FM_TEST_HARNESS in a real primary's environment must stay inert: the
+# seam fires only alongside the FM_TEST_SEAM marker that test suites set.
+unit_test_harness_seam_requires_the_marker() {
+  local ref stray pinned
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  ref=$(env -u FM_TEST_SEAM -u FM_TEST_HARNESS CLAUDECODE=1 \
+    bash -c '. "$1"; fm_afk_launch_primary_harness' _ "$LAUNCH")
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  stray=$(env -u FM_TEST_SEAM CLAUDECODE=1 FM_TEST_HARNESS=omp \
+    bash -c '. "$1"; fm_afk_launch_primary_harness' _ "$LAUNCH")
+  [ "$stray" = "$ref" ] \
+    || fail "FM_TEST_HARNESS without FM_TEST_SEAM changed harness detection ($stray != $ref)"
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  stray=$(env -u FM_TEST_SEAM CLAUDECODE=1 FM_TEST_HARNESS='1 omp' \
+    bash -c '. "$1"; fm_afk_launch_primary_harness' _ "$LAUNCH")
+  [ "$stray" = "$ref" ] \
+    || fail "a marker-shaped FM_TEST_HARNESS without FM_TEST_SEAM changed harness detection ($stray != $ref)"
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  pinned=$(FM_TEST_SEAM=1 CLAUDECODE=1 FM_TEST_HARNESS=omp \
+    bash -c '. "$1"; fm_afk_launch_primary_harness' _ "$LAUNCH")
+  [ "$pinned" = omp ] \
+    || fail "FM_TEST_SEAM-armed FM_TEST_HARNESS did not pin the harness ($pinned)"
+  pass "FM_TEST_HARNESS seam is inert without the test marker"
+}
+
 unit_pi_enter_stop_does_not_claim_a_daemon_terminal() {
   local st out rc
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-pi-stop.XXXXXX")
@@ -218,7 +247,7 @@ unit_stop_archives_the_record_last() {
 }
 
 # ---------------------------------------------------------------------------
-# UNIT 1: fm_afk_clear_stale_artifacts removes exactly the three stale artifacts.
+# UNIT 1: fm_afk_clear_stale_artifacts removes exactly the four stale artifacts.
 # ---------------------------------------------------------------------------
 unit_clear_stale() {
   local st
@@ -227,6 +256,7 @@ unit_clear_stale() {
   : > "$st/state/.subsuper-escalations"
   : > "$st/state/.subsuper-escalations.since"
   : > "$st/state/.subsuper-inject-wedged"
+  : > "$st/state/.subsuper-unknown-acked"
   : > "$st/state/.wake-queue"          # durable queue must be untouched
   # Source fm-afk-start.sh inside a child bash (it sets `set -eu` and would
   # otherwise leak that into this test shell) and call the clear helper.
@@ -234,8 +264,9 @@ unit_clear_stale() {
     bash -c '. "$1"; fm_afk_clear_stale_artifacts "$2"' _ "$START" "$st/state"
   if [ ! -e "$st/state/.subsuper-escalations" ] \
      && [ ! -e "$st/state/.subsuper-escalations.since" ] \
-     && [ ! -e "$st/state/.subsuper-inject-wedged" ]; then
-    pass "clear-stale: removes escalations buffer, sidecar, and wedge marker"
+     && [ ! -e "$st/state/.subsuper-inject-wedged" ] \
+     && [ ! -e "$st/state/.subsuper-unknown-acked" ]; then
+    pass "clear-stale: removes escalations buffer, sidecar, wedge marker, and unknown-wake acknowledgements"
   else
     fail "clear-stale: stale artifacts survived"
   fi
@@ -305,6 +336,7 @@ unit_fresh_vs_refresh() {
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
   : > "$st/state/.subsuper-inject-wedged"
+  : > "$st/state/.subsuper-unknown-acked"
   # A live "daemon": a real process whose identity the lock records, so
   # daemon_lock_held_by_live_daemon returns true (a refresh).
   sleep 600 &
@@ -315,7 +347,8 @@ unit_fresh_vs_refresh() {
   # shellcheck source=/dev/null
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$lock/pid-identity" 2>/dev/null ) || true
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$START" >/dev/null 2>&1
-  if [ -e "$st/state/.subsuper-escalations" ] && [ -e "$st/state/.subsuper-inject-wedged" ]; then
+  if [ -e "$st/state/.subsuper-escalations" ] && [ -e "$st/state/.subsuper-inject-wedged" ] \
+     && [ -e "$st/state/.subsuper-unknown-acked" ]; then
     pass "refresh: daemon already alive - stale artifacts preserved (current session's buffer kept)"
   else
     fail "refresh: incorrectly cleared the current session's buffered escalations"
@@ -804,6 +837,81 @@ unit_native_lifecycle() {
   rm -rf "$st"
 }
 
+# A Claude home opted into the supervision host has the host as its away
+# session, so away mode launches no daemon there; quiet mode still does, and a
+# plain refresh of a running quiet daemon is still allowed.
+unit_supervision_host_claude_home_runs_no_away_daemon() {
+  local st out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-host.XXXXXX")
+  mkdir -p "$st/state" "$st/config"
+  : > "$st/config/supervision-host"
+  enter_posture "$st" || fail "supervision host: could not enter fixture posture"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F 'runs the supervision host (config/supervision-host)' >/dev/null \
+    && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] && [ -f "$st/state/.afk-contract" ]; then
+    pass "supervision host: away start-native on a claude home refuses the daemon and keeps the record"
+  else
+    fail "supervision host: away start-native did not refuse cleanly (rc=$rc): $out"
+  fi
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet "$LAUNCH" start-native >/dev/null 2>&1 \
+    && [ "$(head -n 1 "$st/state/.afk")" = quiet ] \
+    && FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
+    && [ "$(head -n 1 "$st/state/.afk")" = quiet ]; then
+    pass "supervision host: quiet start-native and a plain refresh of the quiet daemon still prepare the daemon"
+  else
+    fail "supervision host: quiet mode was refused or lost its mode on a claude host home"
+  fi
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 || true
+  rm -rf "$st"
+}
+
+# Every non-Pi primary with an arm owner runs the host under the same file, so
+# away mode launches no daemon there, quiet mode still does, and a harness with
+# no arm owner (kimi) keeps the daemon. `enter` says so when the file selects
+# no engine for that primary.
+unit_supervision_host_other_harnesses_run_no_away_daemon() {
+  local st harness out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-host-harness.XXXXXX")
+  mkdir -p "$st/state" "$st/config"
+  daemon_allowed() {  # <harness> [mode]
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_TEST_HARNESS="$1" FM_AFK_MODE="${2:-}" \
+      bash -c '. "$1"; fm_afk_launch_primary_harness() { printf "%s" "$FM_TEST_HARNESS"; }; fm_afk_launch_daemon_allowed' _ "$LAUNCH" 2>&1
+  }
+  for harness in cursor opencode omp grok codex; do
+    daemon_allowed "$harness" >/dev/null || fail "$harness: a home without config/supervision-host must keep the away daemon"
+  done
+  : > "$st/config/supervision-host"
+  for harness in cursor opencode omp grok codex; do
+    out=$(daemon_allowed "$harness"); rc=$?
+    [ "$rc" -ne 0 ] || fail "$harness: an opted-in home must refuse the away daemon"
+    printf '%s' "$out" | grep -F "not launched on this $harness home, which runs the supervision host" >/dev/null \
+      || fail "$harness: the refusal must name the host: $out"
+    daemon_allowed "$harness" quiet >/dev/null || fail "$harness: quiet mode must still launch the daemon on an opted-in home"
+  done
+  daemon_allowed kimi >/dev/null || fail "kimi has no arm owner to run the host, so it must keep the away daemon"
+  pass "supervision host: away mode on an opted-in cursor, opencode, omp, grok, or codex home launches no daemon"
+
+  enter_with() {  # <harness> <config line or ->
+    rm -f "$st/state/.afk-contract" "$st/config/supervision-host"
+    [ "$2" = - ] || printf '%s\n' "$2" > "$st/config/supervision-host"
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_TEST_HARNESS="$1" \
+      bash -c '. "$1"; fm_afk_launch_primary_harness() { printf "%s" "$FM_TEST_HARNESS"; }; fm_afk_launch_main enter --words "watch the fleet"' _ "$LAUNCH" 2>&1
+  }
+  out=$(enter_with cursor ''); rc=$?
+  [ "$rc" -eq 0 ] && [ -f "$st/state/.afk-contract" ] || fail "enter on an opted-in cursor home failed (rc=$rc): $out"
+  printf '%s' "$out" | grep -F "Supervision host: no engine runs the away session on this home (the primary harness 'cursor' has no verified supervision engine)" >/dev/null \
+    || fail "enter must say when the host has no engine for this primary: $out"
+  out=$(enter_with cursor claude)
+  printf '%s' "$out" | grep -F 'Supervision host: no engine' >/dev/null && fail "enter must stay quiet when the file names a verified engine: $out"
+  out=$(enter_with cursor -)
+  printf '%s' "$out" | grep -F 'Supervision host' >/dev/null && fail "enter must stay quiet on a home without the file: $out"
+  out=$(enter_with claude '')
+  printf '%s' "$out" | grep -F 'Supervision host: no engine' >/dev/null && fail "a claude home's own engine must count as an engine: $out"
+  pass "supervision host: enter names a missing engine on an opted-in home and says nothing otherwise"
+  rm -rf "$st"
+}
+
 unit_native_entry_preserves_prepared_state() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native-entry.XXXXXX")
@@ -1236,6 +1344,7 @@ unit_clear_stale
 unit_enter_records_the_posture_in_one_step_without_a_daemon
 unit_retired_two_step_entry_is_refused
 unit_pi_never_launches_the_daemon
+unit_test_harness_seam_requires_the_marker
 unit_pi_enter_stop_does_not_claim_a_daemon_terminal
 unit_daemon_entry_requires_the_record
 unit_failed_daemon_launch_preserves_the_record
@@ -1260,6 +1369,8 @@ unit_readiness_failure_rolls_back_terminal
 unit_readiness_failure_preserves_unconfirmed_record
 unit_tmux_absence_distinguishes_probe_failure
 unit_native_lifecycle
+unit_supervision_host_claude_home_runs_no_away_daemon
+unit_supervision_host_other_harnesses_run_no_away_daemon
 unit_native_entry_preserves_prepared_state
 unit_close_failure_preserves_record
 unit_record_publication_atomic

@@ -605,6 +605,92 @@ test_classify_check_and_unknown_escalate() {
   pass "check + unknown escalate; heartbeat self-handles"
 }
 
+# An unrecognized wake escalates once per identity. Delivery acknowledges that
+# exact line; a later copy does not escalate again. A different identity still
+# escalates, and an identity that never flushed still escalates. Ordinary
+# escalation lines are not part of that acknowledgement. A new away session
+# clears the acknowledgements, so the same identity can fire again.
+test_unknown_wake_ack_suppresses_handled_identity() {
+  local dir state fakebin sent capture out
+  dir=$(make_supercase unknown-wake-ack)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "the first unknown wake was not handled"
+  [ ! -e "$state/.subsuper-unknown-acked" ] \
+    || fail "an undelivered unknown wake was acknowledged"
+
+  : > "$state/.subsuper-escalations"
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "an undelivered unknown wake did not escalate again after its buffer was lost"
+  [ "$(grep -c 'unknown wake: frobnicate: already-handled' "$state/.subsuper-escalations")" = 1 ] \
+    || fail "a lost undelivered unknown wake did not escalate again"
+
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "unknown-wake flush failed"
+  grep -F 'unknown wake: frobnicate: already-handled' "$state/.subsuper-unknown-acked" >/dev/null \
+    || fail "a delivered unknown wake was not acknowledged"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "delivered unknown wake stayed buffered"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "an acknowledged unknown wake was not handled"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "an acknowledged unknown wake escalated again: $(cat "$state/.subsuper-escalations")"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: brand-new" "$state" \
+    || fail "a new unknown wake was not handled"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in
+    "unknown wake: frobnicate: brand-new") ;;
+    *) fail "a new unknown wake did not escalate on its own: $out" ;;
+  esac
+  escalate_add "$state" "done: PR https://example.test/pull/9"
+  [ "$(grep -c 'done: PR https://example.test/pull/9' "$state/.subsuper-escalations")" = 1 ] \
+    || fail "an ordinary escalation was swallowed by unknown-wake acknowledgement"
+  escalate_add "$state" "done: PR https://example.test/pull/9"
+  [ "$(grep -c 'done: PR https://example.test/pull/9' "$state/.subsuper-escalations")" = 2 ] \
+    || fail "an ordinary escalation was deduped by unknown-wake acknowledgement"
+
+  bash -c '. "$1"; fm_afk_clear_stale_artifacts "$2"' _ "$AFK_START" "$state" \
+    || fail "clearing the away-session artifacts failed"
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "an unknown wake from a prior session was not handled"
+  [ "$(grep -c 'unknown wake: frobnicate: already-handled' "$state/.subsuper-escalations")" = 1 ] \
+    || fail "an unknown wake acknowledged in a prior away session did not fire again"
+  pass "a delivered unknown wake is acknowledged once per away session; a new one and ordinary escalations still fire"
+}
+
+# A digest that inject_msg already delivered must not be injected again just
+# because the acknowledgement write failed afterwards.
+test_unknown_wake_ack_failure_still_clears_delivered_digest() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase unknown-wake-ack-failure)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
+  mkdir -p "$state/.subsuper-unknown-acked"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: ack-write-fails" "$state" \
+    || fail "the unknown wake was not handled"
+  escalate_add "$state" "done: PR https://example.test/pull/10"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" 2>/dev/null \
+    || fail "a delivered digest was reported undelivered after its acknowledgement write failed"
+  grep -F 'unknown wake: frobnicate: ack-write-fails' "$sent" >/dev/null \
+    || fail "the digest was not delivered: $(cat "$sent")"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a delivered digest stayed buffered for re-injection: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-escalations.since" ] || fail "a delivered digest kept its batch timer"
+  pass "a failed unknown-wake acknowledgement write does not re-inject a delivered digest"
+}
+
 test_stale_transient_self_records_marker() {
   local dir state out key
   dir=$(make_supercase stale-transient)
@@ -819,6 +905,29 @@ test_stale_paused_classifies_pause() {
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9" "$state")
   case "$out" in pause\|*) ;; *) fail "declared pause did not classify as pause: $out" ;; esac
   pass "paused reasons with captain phrases remain pause-classified"
+}
+
+# A resolved line for another phase key, including the stated default key that
+# `fm-send --resolve-key default` writes for a keyless decision, lands after the
+# pause without ending it. The worker's own keyless resolved line does end it.
+test_stale_pause_survives_a_foreign_resolved_line() {
+  local dir state out
+  dir=$(make_supercase stale-paused-foreign-resolved)
+  state="$dir/state"
+  printf 'needs-decision: which color\npaused: waiting on the vendor release\nresolved [key=default]: answered: blue\n' \
+    > "$state/held-w9r.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9r" "$state" '' 1)
+  case "$out" in pause\|*"paused: waiting on the vendor release") ;; *) fail "a default-key answer cleared the pause: $out" ;; esac
+  printf 'paused: waiting on the vendor release\nresolved [key=legal]: counsel answered\n' > "$state/held-w9r.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9r" "$state" '' 1)
+  case "$out" in pause\|*) ;; *) fail "a differently keyed resolved line cleared the pause: $out" ;; esac
+  printf 'paused: waiting on the vendor release\nresolved: the vendor shipped\n' > "$state/held-w9r.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9r" "$state" '' 1)
+  case "$out" in pause\|*) fail "the worker's own keyless resolved line did not retract the pause: $out" ;; esac
+  printf 'captain-held [key=route]: tracked by task-decision-route\nresolved [key=default]: answered: blue\n' > "$state/held-w9r.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9r" "$state" '' 1)
+  case "$out" in pause\|*) fail "a later resolved line no longer retracted a captain-held declaration: $out" ;; esac
+  pass "a foreign resolved line keeps a pause, while the worker's own resolved line retracts it"
 }
 
 # A verified captain-held transfer is the other declaration that leaves an idle pane
@@ -2140,6 +2249,159 @@ test_normal_flush_clears_stale_wedge_marker() {
   pass "normal flush clears a stale wedge marker"
 }
 
+# The start-up catch-all scan turns each status log's unread span into one
+# buffered item, so a first digest can exceed the 131,071 bytes one transport
+# argument can carry. The fake tmux refuses any literal send above that.
+test_oversized_digest_is_bounded_and_kept_durable() {
+  local dir state fakebin sent raw digest full i item
+  dir=$(make_bordered_case digest-oversized)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  for i in a b c; do
+    item="secondmate-$i.status: "
+    while [ "${#item}" -lt 60000 ]; do item+="done: café fix shipped, PR https://x/y/pull/1 ; "; done
+    escalate_add "$state" "$item (catch-all scan)"
+  done
+  escalate_add "$state" "secondmate-a.status: needs-decision [key=pick]: pick A or B"
+  cp "$state/.subsuper-escalations" "$dir/buffer.orig"
+  raw=$(LC_ALL=C wc -c < "$dir/buffer.orig" | tr -d ' ')
+  [ "$raw" -gt 131071 ] || fail "fixture buffer is only $raw bytes; it must exceed one argument's 131,071-byte ceiling"
+  afk_enter "$state"
+  LOG="$dir/daemon.log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SEND_MAX_BYTES=131071 FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" \
+    || fail "oversized digest was not delivered: $(cat "$dir/daemon.log" 2>/dev/null)"
+  digest=$(grep -F 'Supervisor escalate' "$sent")
+  [ "$(printf '%s\n' "$digest" | wc -l | tr -d ' ')" -eq 1 ] || fail "expected exactly one typed digest"
+  [ "$(printf '%s' "$digest" | LC_ALL=C wc -c | tr -d ' ')" -le 16384 ] \
+    || fail "delivered digest is not bounded well below the transport ceilings"
+  assert_contains "$digest" 'Supervisor escalate (4 event(s)): secondmate-a.status: done:' "digest lost its header or first event"
+  assert_contains "$digest" 'secondmate-a.status: needs-decision [key=pick]: pick A or B' "a short event did not survive whole"
+  printf '%s' "$digest" | grep -E '\[\+[0-9]+ bytes\]' >/dev/null || fail "truncated items carry no omitted-bytes marker"
+  if command -v iconv >/dev/null 2>&1; then
+    printf '%s' "$digest" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || fail "truncation split a UTF-8 sequence"
+  fi
+  full=$(printf '%s' "$digest" | sed -n 's/.*full text of every event: \([^ )]*\).*/\1/p')
+  [ -n "$full" ] && [ -f "$full" ] || fail "bounded digest names no readable full-text file: $digest"
+  cmp -s "$full" "$dir/buffer.orig" || fail "full-text file does not hold every buffered event verbatim"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after the bounded digest was delivered"
+  pass "an oversized buffered digest is delivered bounded, with the full text kept durable"
+}
+
+test_digest_budget_counts_omitted_events() {
+  local dir state fakebin sent digest full i shown more
+  dir=$(make_bordered_case digest-many)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  for i in $(seq 1 20); do
+    escalate_add "$state" "event $i: $(printf 'x%.0s' $(seq 1 1000))"
+  done
+  cp "$state/.subsuper-escalations" "$dir/buffer.orig"
+  afk_enter "$state"
+  LOG="$dir/daemon.log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" || fail "many-event digest was not delivered"
+  digest=$(grep -F 'Supervisor escalate' "$sent")
+  assert_contains "$digest" 'Supervisor escalate (20 event(s)): event 1: x' "digest header must count every buffered event"
+  more=$(printf '%s' "$digest" | sed -n 's/.* | +\([0-9][0-9]*\) more event(s).*/\1/p')
+  [ -n "$more" ] || fail "an exhausted budget left no '+K more event(s)' tail: $digest"
+  shown=$(printf '%s' "$digest" | grep -o 'event [0-9][0-9]*: x' | wc -l | tr -d ' ')
+  [ "$((shown + more))" -eq 20 ] || fail "shown ($shown) plus omitted ($more) events do not account for all 20"
+  full=$(printf '%s' "$digest" | sed -n 's/.*full text of every event: \([^ )]*\).*/\1/p')
+  cmp -s "$full" "$dir/buffer.orig" || fail "omitted events are missing from the full-text file"
+  pass "a digest past its byte budget counts the omitted events and keeps them in the full text"
+}
+
+test_inject_send_failure_logs_stage_stderr_and_bytes() {
+  local dir state fakebin sent log item
+  dir=$(make_bordered_case digest-send-failure)
+  state="$dir/state"; fakebin="$dir/fakebin"; log="$dir/daemon.log"
+  sent="$dir/sent.log"; : > "$sent"
+  item="secondmate-b.status: "
+  while [ "${#item}" -lt 5000 ]; do item+="blocked: waiting on review ; "; done
+  escalate_add "$state" "$item"
+  cp "$state/.subsuper-escalations" "$dir/buffer.orig"
+  afk_enter "$state"
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SEND_MAX_BYTES=100 FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state"; then
+    fail "escalate_flush reported success although the transport refused the send"
+  fi
+  grep -E 'inject failed at initial send or Enter delivery \(verdict=send-failed, bytes=[0-9]+;[^)]*\): command too long' "$log" >/dev/null \
+    || fail "send failure did not log its stage, byte count, and transport stderr: $(cat "$log")"
+  if grep -F 'Enter confirmation' "$log" >/dev/null; then
+    fail "an initial-send failure was reported as an Enter-confirmation failure: $(cat "$log")"
+  fi
+  [ ! -s "$sent" ] || fail "nothing may be typed when the initial send fails"
+  cmp -s "$state/.subsuper-escalations" "$dir/buffer.orig" || fail "buffer changed after a failed send"
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SEND_MAX_BYTES=100 FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state"; then
+    fail "escalate_flush reported success on a retried refused send"
+  fi
+  [ "$(find "$state/.subsuper-digests" -type f | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "retrying an unchanged buffer must reuse one full-text file: $(ls -A "$state/.subsuper-digests")"
+  WEDGE_ALARM_LAST_EPOCH=0
+  LOG="$log" FM_WEDGE_ALARM_CHANNEL=off FM_SUPERVISOR_BACKEND=herdr inject_wedge_alarm "$state" 600
+  grep -E 'ERROR: away-mode escalation undelivered 600s; last delivery failure: initial send .*command too long' "$log" >/dev/null \
+    || fail "wedge line does not carry the last failure reason: $(cat "$log")"
+  grep -F 'Last delivery failure: initial send' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "wedge marker does not carry the last failure reason"
+  pass "an initial-send failure logs its stage, bytes, and stderr, and the wedge alarm names it"
+}
+
+test_inject_enter_failure_logs_confirmation_stage() {
+  local dir state fakebin sent log
+  dir=$(make_bordered_case digest-enter-failure)
+  state="$dir/state"; fakebin="$dir/fakebin"; log="$dir/daemon.log"
+  sent="$dir/sent.log"; : > "$sent"
+  touch "$dir/.swallow"
+  escalate_add "$state" "needs-decision: pick C"
+  afk_enter "$state"
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    escalate_flush "$state"; then
+    fail "escalate_flush reported success on a swallowed Enter"
+  fi
+  grep -E 'inject failed at Enter confirmation: submit unconfirmed after 3 retries \(verdict=pending[a-z-]*, bytes=[0-9]+, text may be in composer\)' "$log" >/dev/null \
+    || fail "Enter-confirmation failure did not log its stage and byte count: $(cat "$log")"
+  if grep -F 'initial send' "$log" >/dev/null; then
+    fail "an Enter-confirmation failure was reported as an initial-send failure"
+  fi
+  pass "an Enter-confirmation failure logs its own stage and byte count"
+}
+
+test_bounded_digest_full_text_kept_after_typing() {
+  local dir state fakebin sent log item digest full
+  dir=$(make_bordered_case digest-kept-after-typing)
+  state="$dir/state"; fakebin="$dir/fakebin"; log="$dir/daemon.log"
+  sent="$dir/sent.log"; : > "$sent"
+  touch "$dir/.swallow"
+  item="secondmate-c.status: "
+  while [ "${#item}" -lt 5000 ]; do item+="blocked: waiting on review ; "; done
+  escalate_add "$state" "$item"
+  cp "$state/.subsuper-escalations" "$dir/buffer.orig"
+  afk_enter "$state"
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    escalate_flush "$state"; then
+    fail "escalate_flush reported success on a swallowed Enter"
+  fi
+  digest=$(grep -F 'Supervisor escalate' "$sent")
+  full=$(printf '%s' "$digest" | sed -n 's/.*full text of every event: \([^ )]*\).*/\1/p')
+  [ -n "$full" ] && [ -f "$full" ] || fail "a typed bounded digest names a full-text file that was removed: $digest"
+  cmp -s "$full" "$dir/buffer.orig" || fail "kept full-text file does not hold the buffered event verbatim"
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state"; then
+    fail "escalate_flush reported success while the composer still held the typed digest"
+  fi
+  [ -f "$full" ] || fail "a deferred retry removed the full-text file the typed digest names"
+  escalate_add "$state" "needs-decision: pick D"
+  if LOG="$log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state"; then
+    fail "escalate_flush reported success while the composer still held the typed digest"
+  fi
+  [ "$(ls -A "$state/.subsuper-digests")" = "$(basename "$full")" ] \
+    || fail "a deferral before any send must leave no new full-text file: $(ls -A "$state/.subsuper-digests")"
+  pass "a bounded digest's full-text file survives a failure after typing, and a deferral writes none"
+}
+
 test_below_max_defer_does_nothing() {
   local dir state fakebin sent capture
   dir=$(make_supercase below-maxdefer)
@@ -2788,12 +3050,15 @@ test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
+test_unknown_wake_ack_suppresses_handled_identity
+test_unknown_wake_ack_failure_still_clears_delivered_digest
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_enriched_wedge_under_declared_wait_uses_pause_cadence
 test_stale_terminal_escalates
 test_stale_actionable_wait_escalates_and_keeps_pause_cadence
 test_stale_paused_classifies_pause
+test_stale_pause_survives_a_foreign_resolved_line
 test_stale_captain_held_classifies_pause
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
@@ -2870,6 +3135,11 @@ test_max_defer_empty_swallow_types_once_and_alarms
 test_max_defer_flushes_empty_idle_pane
 test_max_defer_pending_composer_alarms_without_typing
 test_normal_flush_clears_stale_wedge_marker
+test_oversized_digest_is_bounded_and_kept_durable
+test_digest_budget_counts_omitted_events
+test_inject_send_failure_logs_stage_stderr_and_bytes
+test_inject_enter_failure_logs_confirmation_stage
+test_bounded_digest_full_text_kept_after_typing
 test_below_max_defer_does_nothing
 test_max_defer_afk_inactive_does_not_flush_or_alarm
 test_wedge_alarm_library_mode_defaults_to_discard

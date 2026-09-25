@@ -35,7 +35,7 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse omp"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse omp devin"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
@@ -49,6 +49,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     pi) printf '/quit\tEscape\t1\t\n' ;;
     pi-signed) printf '/quit\tEscape\t1\t\n' ;;
     omp) printf '/quit\tEscape\t1\t\n' ;;
+    devin) printf '/quit\tEscape\t2\t\n' ;;
     grok) printf '/exit\tC-c\t1\t\n' ;;
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     cursor) printf '/exit\tEscape\t1\t\n' ;;
@@ -68,6 +69,14 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
 #   keys     every named key send, one per line.
 #   pane     optional capture-pane override, for an adapter whose busy verdict
 #            is read from the rendered tail.
+#   key-times  every named key with its wall-clock send time.
+#   devin    optional Devin screen model, which capture-pane renders as the
+#            rows devin 3000.11.1 draws: `running`, `armed`, `cancelled`,
+#            `idle`, `primed`, or `picker`. Escape moves running->armed (the
+#            `esc again` hint), armed->cancelled, primed (an idle agent whose
+#            last Escape was a moment ago) ->picker, and picker->idle unless
+#            FM_FAKE_DEVIN_PICKER_STUCK is set. Real sleeps apply while it
+#            exists, so key-times carry the true gap between presses.
 # Two transitions make it a lifecycle model rather than a recorder: a literal
 # that is the harness's exit command flips `command` to a shell (the agent
 # stopped), and a literal carrying a launch brief flips it to the value in
@@ -80,6 +89,30 @@ make_tmux_stub() {  # <dir> -> echoes fakebin dir
 #!/usr/bin/env bash
 set -u
 D=$FM_FAKE_DIR
+# The rows devin 3000.11.1 renders for each modelled screen (live capture).
+devin_screen() {  # <running|armed|cancelled|idle|picker>
+  # The idle placeholder is dark truecolor text, as Devin draws it.
+  local composer=$'❭ \e[38;2;124;124;124mAsk Devin to build features, fix bugs, or work on your code\e[0m'
+  case "$1" in
+    running|armed)
+      printf ' ○ Running command\n │ $ sleep 30\n'
+      if [ "$1" = armed ]; then
+        printf '⢀⣀ Running tools · 6s (esc again to interrupt)\n'
+      else
+        printf '⢀⡄ Running tools · 6s (esc twice to interrupt)\n'
+      fi
+      composer='❭ Guide Devin while it works'
+      ;;
+    cancelled) printf ' ✗ Canceled due to user interrupt\n ✱ Canceled. What should Devin do?\n' ;;
+    idle) printf ' done\n' ;;
+    picker)
+      printf ' done\nRevert to step:\n────\n/ Type to search\n────\n❭ Step 1\n  Append the line...\n'
+      printf 'type search · ↑↓ select · ↵ revert · esc cancel\n'
+      return 0
+      ;;
+  esac
+  printf '──── (bypass permissions on) ─\n%s\n────\nSWE-2 Medium\n' "$composer"
+}
 case "${1:-}" in
   send-keys)
     shift
@@ -103,6 +136,15 @@ case "${1:-}" in
       esac
     else
       printf '%s\n' "$payload" >> "$D/keys"
+      printf '%s %s\n' "$(perl -MTime::HiRes=time -e 'printf "%.3f", time')" "$payload" >> "$D/key-times"
+      if [ "$payload" = Escape ] && [ -f "$D/devin" ]; then
+        case "$(cat "$D/devin")" in
+          running) printf armed > "$D/devin" ;;
+          armed) printf cancelled > "$D/devin" ;;
+          primed) printf picker > "$D/devin" ;;
+          picker) [ -n "${FM_FAKE_DEVIN_PICKER_STUCK:-}" ] || printf idle > "$D/devin" ;;
+        esac
+      fi
       if [ -n "${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" ] \
          && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
         printf 'zsh' > "$D/command"
@@ -119,14 +161,21 @@ case "${1:-}" in
   display-message)
     for a in "$@"; do
       case "$a" in
-        *cursor_y*) printf '1\n'; exit 0 ;;
+        *cursor_y*)
+          # A modelled Devin screen parks the cursor on its composer row.
+          if [ -f "$D/devin" ]; then
+            devin_screen "$(cat "$D/devin")" | awk '/^❭ /{ print NR - 1; exit }'
+          else
+            printf '1\n'
+          fi
+          exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
       esac
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
-    if [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi
+    if [ -f "$D/devin" ]; then devin_screen "$(cat "$D/devin")"; elif [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi
     exit 0 ;;
   list-windows)
     if [ -f "$D/windows" ]; then cat "$D/windows"; fi
@@ -137,6 +186,7 @@ SH
   chmod +x "$fb/tmux"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
+if [ -f "$FM_FAKE_DIR/devin" ]; then exec /bin/sleep "$@"; fi
 if [ -n "${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" ] \
    && [ -e "$FM_FAKE_DIR/muse-ack-pending" ]; then
   rm -f "$FM_FAKE_DIR/muse-ack-pending"
@@ -198,6 +248,7 @@ run_control() {
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
+    FM_FAKE_DEVIN_PICKER_STUCK="${FM_FAKE_DEVIN_PICKER_STUCK:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -242,6 +293,8 @@ test_interrupt_sends_each_harness_verified_key() {
   for harness in $VERIFIED_HARNESSES; do
     dir=$(new_case "int-$harness")
     add_task "$dir" t1 "$harness"
+    # Devin sends its second press only onto a running turn.
+    [ "$harness" != devin ] || printf running > "$dir/fake/devin"
     if [ "$harness" = cursor ]; then
       alive_as "$dir" cursor-agent
     else
@@ -261,6 +314,97 @@ test_interrupt_sends_each_harness_verified_key() {
   pass "fm-control interrupt: every verified harness gets its own verified key and repeat count"
 }
 
+devin_as() {  # <case-dir> <screen>
+  alive_as "$1" devin
+  printf '%s' "$2" > "$1/fake/devin"
+}
+
+# Seconds between the first two named keys sent.
+first_key_gap() {  # <case-dir>
+  awk 'NR == 1 { a = $1 } NR == 2 { printf "%.3f", $1 - a; exit }' "$1/fake/key-times"
+}
+
+test_devin_interrupt_invalidates_busy() {
+  local dir out gap
+  dir=$(new_case devin-busy)
+  add_task "$dir" t1 devin
+  devin_as "$dir" running
+  "$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1 >/dev/null
+  out=$(run_control "$dir" t1 interrupt) || fail "Devin interrupt failed: $out"
+  assert_contains "$out" 'cancel=unconfirmed' 'Devin cancellation must not claim semantic confirmation'
+  assert_grep 'state=unknown source=fm-interrupt' "$dir/home/state/t1.busy-state" 'cancelled Devin turn stayed busy'
+  [ "$(cat "$dir/fake/devin")" = cancelled ] || fail "the second press should have cancelled the armed turn"
+  gap=$(first_key_gap "$dir")
+  awk -v g="$gap" 'BEGIN{exit !(g >= 0.5)}' \
+    || fail "Devin's second Escape came ${gap}s after the first; under 0.5s a turn ending between them pairs into the revert picker"
+  pass "fm-control Devin interrupt: second press only after the armed hint, then busy invalidated without fabricating idle"
+}
+
+# The revert-picker hazard: on an idle Devin a fast double Escape opens the
+# /revert picker, where Enter reverts file changes. A turn that ended just
+# before the interrupt must get exactly one Escape and keep its busy record.
+test_devin_idle_interrupt_sends_one_press() {
+  local dir out before
+  dir=$(new_case devin-idle)
+  add_task "$dir" t1 devin
+  devin_as "$dir" idle
+  "$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1 >/dev/null
+  before=$(cat "$dir/home/state/t1.busy-state")
+  out=$(run_control "$dir" t1 interrupt) || fail "an idle Devin interrupt should still deliver: $out"
+  [ "$(keys_sent "$dir")" = Escape ] \
+    || fail "an idle Devin must receive exactly one Escape, never the pair that opens its revert picker, got: $(keys_sent "$dir")"
+  assert_contains "$out" 'cancel=not-running' 'an unarmed Devin interrupt must say no running turn was cancelled'
+  [ "$(cat "$dir/home/state/t1.busy-state")" = "$before" ] \
+    || fail "an interrupt that cancelled nothing must not rewrite Devin's busy record"
+  [ "$(cat "$dir/fake/devin")" = idle ] || fail "the idle Devin screen changed: $(cat "$dir/fake/devin")"
+  pass "fm-control Devin interrupt: an idle agent gets one Escape and reports not-running"
+}
+
+test_devin_exit_after_turn_ended_types_quit_once() {
+  local dir out rc
+  dir=$(new_case devin-exit-race)
+  add_task "$dir" t1 devin
+  devin_as "$dir" idle
+  "$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1 >/dev/null
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting a Devin whose turn already ended should succeed"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = Escape ] \
+    || fail "exit on a Devin whose turn already ended must send one Escape, got: $(keys_sent "$dir")"
+  [ "$(literals "$dir")" = /quit ] || fail "exit should type /quit once, got: $(literals "$dir")"
+  pass "fm-control Devin exit: a busy record whose turn already ended never opens the revert picker"
+}
+
+test_devin_interrupt_dismisses_revert_picker() {
+  local dir out
+  dir=$(new_case devin-picker)
+  add_task "$dir" t1 devin
+  devin_as "$dir" primed
+  out=$(run_control "$dir" t1 interrupt) || fail "a Devin interrupt that opened the picker should close it: $out"
+  assert_contains "$out" 'cancel=not-running revert-picker=dismissed' 'the dismissed picker should be reported'
+  [ "$(cat "$dir/fake/devin")" = idle ] || fail "the revert picker was left open: $(cat "$dir/fake/devin")"
+  [ -z "$(literals "$dir")" ] || fail "nothing may be typed into the revert picker, got: $(literals "$dir")"
+  ! grep -qx Enter "$dir/fake/keys" || fail "Enter reverts in the picker and must never be sent"
+  pass "fm-control Devin interrupt: a revert picker a press opened is closed with Escape, never Enter"
+}
+
+test_devin_stuck_picker_refuses_and_exit_types_nothing() {
+  local dir out rc
+  dir=$(new_case devin-stuck)
+  add_task "$dir" t1 devin
+  devin_as "$dir" primed
+  out=$(FM_FAKE_DEVIN_PICKER_STUCK=1 run_control "$dir" t1 interrupt); rc=$?
+  expect_code 1 "$rc" "a revert picker that will not close must fail the interrupt"$'\n'"$out"
+  assert_contains "$out" 'never Enter' 'the refusal should warn against Enter'
+  dir=$(new_case devin-exit-picker)
+  add_task "$dir" t1 devin
+  devin_as "$dir" picker
+  out=$(FM_FAKE_DEVIN_PICKER_STUCK=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "exit must refuse while the revert picker is open"$'\n'"$out"
+  [ -z "$(literals "$dir")" ] || fail "exit typed into the revert picker: $(literals "$dir")"
+  ! grep -qx Enter "$dir/fake/keys" || fail "exit pressed Enter in the revert picker"
+  pass "fm-control Devin: an open revert picker refuses every typed command"
+}
+
 # A recorded harness can carry a raw launch command's basename, so the tables
 # are reached through one prefix rule rather than an exact string match.
 test_harness_family_resolution() {
@@ -268,7 +412,7 @@ test_harness_family_resolution() {
   for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
       opencode:opencode grok:grok grok-2:grok kimi:kimi cursor:cursor \
       cursor-agent:cursor muse:muse muse-bin-0.1.0:muse pi:pi \
-      pi-signed:pi-signed omp:omp; do
+      pi-signed:pi-signed omp:omp devin:devin; do
     recorded=${pair%%:*}
     want=${pair#*:}
     got=$(fm_control_harness_family "$recorded") \
@@ -889,6 +1033,11 @@ test_fm_send_still_marks_the_same_secondmate_task() {
 
 test_exit_types_each_harness_verified_command
 test_interrupt_sends_each_harness_verified_key
+test_devin_interrupt_invalidates_busy
+test_devin_idle_interrupt_sends_one_press
+test_devin_exit_after_turn_ended_types_quit_once
+test_devin_interrupt_dismisses_revert_picker
+test_devin_stuck_picker_refuses_and_exit_types_nothing
 test_opencode_interrupts_twice_and_others_once
 test_unverified_harness_is_refused
 test_harness_family_resolution
