@@ -434,6 +434,17 @@
 #   identity is owned by the parent home that holds its task metadata, while the
 #   pane export happens on the remote host (bin/fm-remote-secondmate-control.sh).
 #   Local spawns never pass it and resolve their own carrier exactly as before.
+#   --claim <target> records a cross-home work claim BEFORE this spawn creates
+#   any endpoint or task record, so a second home dispatching the same target
+#   refuses instead of racing it. Repeatable. A <target> is a PR or issue URL,
+#   an `owner/repo#N` ref, a bare ticket id such as LIN-123, or
+#   `area:<project>:<path>`; a bare `owner/repo#N` is read as a PR (GitHub
+#   numbers issues and PRs in one space). Accepted only on a fresh single ship
+#   or scout spawn - never on --secondmate (a persistent home claims no dispatch
+#   target), --relaunch (the task already holds its claims), or a batch dispatch
+#   (each pair is its own task) - and the canonical keys are recorded on the task
+#   as `claims=`. bin/fm-claim.sh owns the claim contract and docs/configuration.md
+#   "Cross-home work claims" owns the record format, root, and exit codes.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -621,6 +632,8 @@ YOLO_SET=0
 BRANCH_PREFIX_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+CLAIMS=()
+SPAWN_CLAIM_KEYS=()
 POS=()
 want_value=
 for a in "$@"; do
@@ -663,6 +676,9 @@ for a in "$@"; do
     traceparent)
       TRACEPARENT_ARG=$a
       TRACEPARENT_SET=1
+      ;;
+    claim)
+      CLAIMS+=("$a")
       ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
@@ -722,6 +738,10 @@ for a in "$@"; do
     TRACEPARENT_ARG=${a#--traceparent=}
     TRACEPARENT_SET=1
     ;;
+  --claim) want_value=claim ;;
+  --claim=*)
+    CLAIMS+=("${a#--claim=}")
+    ;;
   *) POS+=("$a") ;;
   esac
 done
@@ -769,6 +789,25 @@ if [ "$TRACEPARENT_SET" -eq 1 ]; then
     echo "error: --traceparent is not a valid W3C traceparent" >&2
     exit 1
   }
+fi
+# Cross-home work claims (bin/fm-claim.sh). A claim belongs to a fresh dispatch
+# of one shared target; a persistent secondmate claims no dispatch target, and a
+# relaunch already holds its task's claims, so both refuse the flag.
+if [ "${#CLAIMS[@]}" -gt 0 ]; then
+  [ "$KIND" != secondmate ] || {
+    echo "error: --claim applies only to a fresh ship or scout dispatch, not a persistent secondmate" >&2
+    exit 1
+  }
+  [ "$RELAUNCH" -eq 0 ] || {
+    echo "error: --claim applies only to a fresh dispatch; a relaunch keeps the task's existing claims" >&2
+    exit 1
+  }
+  for spawn_claim_target in "${CLAIMS[@]}"; do
+    [ -n "$spawn_claim_target" ] || {
+      echo "error: --claim requires a non-empty target" >&2
+      exit 1
+    }
+  done
 fi
 case "$EFFORT" in
 '' | low | medium | high | xhigh | max | ultra) ;;
@@ -1328,6 +1367,15 @@ spawn_abort_cleanup() {
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
   fi
+  # A fresh spawn that never published its record must not leave a cross-home
+  # claim naming a task no record describes (bin/fm-claim.sh owns the contract).
+  # A surviving record - including the interrupted-preservation path - keeps its
+  # claims; fm-teardown.sh releases them on cleanup.
+  if [ "${#CLAIMS[@]}" -gt 0 ] && [ "$RELAUNCH" -eq 0 ] &&
+    [ -n "${STATE:-}" ] && [ -n "${ID:-}" ] &&
+    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    "$SCRIPT_DIR/fm-claim.sh" release-task "$ID" --home "$FM_HOME" >/dev/null 2>&1 || true
+  fi
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
@@ -1398,6 +1446,10 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart"
   exit 1
 fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac then
+  if [ "${#CLAIMS[@]}" -gt 0 ]; then
+    echo "error: batch dispatch does not support --claim - each pair is a separate task and cannot share one claimed target; spawn each pair with its own --claim" >&2
+    exit 1
+  fi
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
@@ -1522,6 +1574,27 @@ spawn_require_relocated_queued_work() {
     exit 1
   fi
 }
+# Acquire every --claim target for this task before any endpoint, worktree, or
+# record exists, so a refusal costs nothing to unwind and a second home's live
+# claim stops the dispatch. A leaked claim from an aborted spawn is released by
+# spawn_abort_cleanup and is self-healing through fm-claim.sh's stale reclaim.
+spawn_acquire_claims() {
+  local target key out rc
+  [ "${#CLAIMS[@]}" -gt 0 ] || return 0
+  for target in "${CLAIMS[@]}"; do
+    if ! key=$("$SCRIPT_DIR/fm-claim.sh" key "$target" 2>/dev/null); then
+      echo "error: spawn refused for task $ID - --claim target is not a valid claim target: $target" >&2
+      return 1
+    fi
+    if ! out=$("$SCRIPT_DIR/fm-claim.sh" acquire "$target" --task "$ID" --home "$FM_HOME" 2>&1); then
+      rc=$?
+      echo "error: spawn refused for task $ID - ${out:-claim acquisition failed (fm-claim.sh exit $rc)}" >&2
+      return 1
+    fi
+    SPAWN_CLAIM_KEYS+=("$key")
+    printf '%s\n' "$out"
+  done
+}
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
   control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
@@ -1575,6 +1648,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
   SPAWN_TASK_SET_LOCK_HELD=1
   spawn_refuse_if_away_spend_cap
   spawn_require_relocated_queued_work
+  spawn_acquire_claims || exit 1
 fi
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
@@ -4652,6 +4726,7 @@ preserve_relaunch_meta() {
   [ -z "$WORKER_ACCOUNT_PROVIDER" ] || echo "account_provider=$WORKER_ACCOUNT_PROVIDER"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  [ "${#SPAWN_CLAIM_KEYS[@]}" -eq 0 ] || echo "claims=${SPAWN_CLAIM_KEYS[*]}"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;

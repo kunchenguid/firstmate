@@ -659,6 +659,36 @@ Only the file's presence is read, so its contents are ignored; remove it to retu
 
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
 
+## Cross-home work claims (FM_CLAIM_ROOT)
+
+`bin/fm-claim.sh` records which firstmate home is working a shared external target - a pull request, an issue id, or a declared file area - so a second home refuses to claim the same target instead of racing it.
+The primary home and every local secondmate share one filesystem, so the store is a machine-wide directory rather than any single home's `state/`, exactly as the process-event source claim root is machine-wide.
+A remote secondmate is a separate host by construction ([remote-secondmates.md](remote-secondmates.md)), so this mechanism coordinates local homes only and never claims to span machines.
+
+`FM_CLAIM_ROOT` overrides the store root, defaulting to `${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/claims`.
+The root must be a real directory, not a symlink, with mode `0700`; the CLI refuses a group- or world-accessible root.
+`FM_CLAIM_PENDING_GRACE` (default `300` seconds) bounds the window in which a claim whose task record is not yet visible is treated as live rather than stale.
+
+`bin/fm-claim.sh` owns the command surface (`acquire`, `release`, `release-task`, `reclaim`, `status`, `list`, `key`), and its own header owns the exact usage and exit codes; `bin/fm-claim-lib.sh` owns the atomic mechanism.
+Each claim file holds one `fm-claim.v1` record of `key=value` lines:
+
+- `schema` - always `fm-claim.v1`.
+- `key` - the canonical target key.
+- `kind` - `pr`, `issue`, or `area`.
+- `target` - the raw target as supplied, for human readability.
+- `home` - the absolute `FM_HOME` of the claiming home.
+- `task` - the claiming task id.
+- `created` - claim creation time in epoch seconds.
+- `pid` and `host` - the creating process and host, for diagnostics.
+
+The canonical keys are `pr:<host>/<owner>/<repo>#<n>`, `issue:<host>/<owner>/<repo>#<n>`, `issue:<TICKET-ID>`, and `area:<project>:<normalized-path>`, so two homes naming the same target in different spellings produce one key.
+A bare `owner/repo#N` resolves to `--kind pr`, because GitHub numbers issues and pull requests in one space.
+
+A claim is released explicitly (`release`, or `release-task` on cleanup), or reclaimed only when its holder is provably gone: its recorded home directory is absent, or its task record is absent past `FM_CLAIM_PENDING_GRACE`.
+Any uncertainty keeps the claim, so a live home is never dispossessed.
+
+Firstmate claims a target before dispatching a lane against it: `bin/fm-spawn.sh --claim <target>` records the claim before any endpoint or task record exists and refuses the spawn when another live home holds it, and the canonical keys are recorded on the task as `claims=`.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.

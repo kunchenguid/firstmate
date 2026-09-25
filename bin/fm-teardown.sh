@@ -3774,6 +3774,12 @@ else
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
+# Free this task's cross-home claims now that its work is landed and its record
+# is gone (bin/fm-claim.sh owns the claim contract). Best-effort: the claim
+# store is machine-wide, so a failure here must not turn a confirmed cleanup
+# into a false failure - a leaked claim self-heals through the next acquire's
+# stale reclaim.
+"$SCRIPT_DIR/fm-claim.sh" release-task "$ID" --home "$FM_HOME" >/dev/null 2>&1 || true
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
