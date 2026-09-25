@@ -648,7 +648,8 @@ Reminder times accept an epoch, an exact UTC timestamp, or a positive relative d
 Creating a reminder automatically writes and registers `state/memory-reminders.check.sh` through the authenticated custom-check path.
 The existing watcher polls that check on `FM_CHECK_INTERVAL`, so due delivery is bounded by the supervision cadence rather than guaranteed at the exact second.
 Each poll announces at most five newly due reminders, and any further due reminders wait for a later poll.
-A delivered reminder stays open but is not announced twice; `done` is its acknowledgement, and completing the last open reminder retires the standing check so memories alone do not keep supervision active.
+A reminder is marked notified only after its announcement prints, so an interrupted poll may repeat it but never drops it.
+A delivered reminder stays open and is not announced again; `done` is its acknowledgement, and completing the last open reminder retires the standing check so memories alone do not keep supervision active.
 A live supervision cycle is therefore required while a reminder is open.
 
 This phase has no Jira or calendar integration, no external synchronization, no automatic contextual recall, and no provisioned memory second mate.
