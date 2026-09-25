@@ -907,6 +907,29 @@ test_stale_paused_classifies_pause() {
   pass "paused reasons with captain phrases remain pause-classified"
 }
 
+# A resolved line for another phase key, including the stated default key that
+# `fm-send --resolve-key default` writes for a keyless decision, lands after the
+# pause without ending it. The worker's own keyless resolved line does end it.
+test_stale_pause_survives_a_foreign_resolved_line() {
+  local dir state out
+  dir=$(make_supercase stale-paused-foreign-resolved)
+  state="$dir/state"
+  printf 'needs-decision: which color\npaused: waiting on the vendor release\nresolved [key=default]: answered: blue\n' \
+    > "$state/held-w9r.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9r" "$state" '' 1)
+  case "$out" in pause\|*"paused: waiting on the vendor release") ;; *) fail "a default-key answer cleared the pause: $out" ;; esac
+  printf 'paused: waiting on the vendor release\nresolved [key=legal]: counsel answered\n' > "$state/held-w9r.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9r" "$state" '' 1)
+  case "$out" in pause\|*) ;; *) fail "a differently keyed resolved line cleared the pause: $out" ;; esac
+  printf 'paused: waiting on the vendor release\nresolved: the vendor shipped\n' > "$state/held-w9r.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9r" "$state" '' 1)
+  case "$out" in pause\|*) fail "the worker's own keyless resolved line did not retract the pause: $out" ;; esac
+  printf 'captain-held [key=route]: tracked by task-decision-route\nresolved [key=default]: answered: blue\n' > "$state/held-w9r.status"
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9r" "$state" '' 1)
+  case "$out" in pause\|*) fail "a later resolved line no longer retracted a captain-held declaration: $out" ;; esac
+  pass "a foreign resolved line keeps a pause, while the worker's own resolved line retracts it"
+}
+
 # A verified captain-held transfer is the other declaration that leaves an idle pane
 # EXPECTED, so it earns the same pause action as paused: rather than being aged as a
 # wedge. The wait itself is already durable in the captain-held backlog task.
@@ -2882,6 +2905,7 @@ test_enriched_wedge_under_declared_wait_uses_pause_cadence
 test_stale_terminal_escalates
 test_stale_actionable_wait_escalates_and_keeps_pause_cadence
 test_stale_paused_classifies_pause
+test_stale_pause_survives_a_foreign_resolved_line
 test_stale_captain_held_classifies_pause
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
