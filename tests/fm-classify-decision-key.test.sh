@@ -573,18 +573,23 @@ test_declared_wait_survives_settled_hold_mirror() {
   pass "a settled hold mirror does not hide a standing pause under another key's resolved line"
 }
 
-# While the hold is still standing its mirror is a real event: a worker answer
-# for another key on top of it must not reach the pause underneath.
-test_declared_wait_stops_at_standing_hold_mirror() {
+# While the hold is still standing its mirror is the declared wait: an answer
+# for another key on top of it neither hides it nor reaches the pause under it.
+test_declared_wait_keeps_standing_hold_mirror() {
   local dir f
   dir=$(case_dir standing-hold-mirror)
   f="$dir/held.status"
   printf 'paused: waiting on upstream\n' > "$f"
   printf 'captain-held [key=captain-hold-held-1]: operator review\n' >> "$f"
-  printf 'resolved [key=api]: answered\n' >> "$f"
+  printf 'resolved [key=api-shape]: answered\n' >> "$f"
+  [ "$(status_declared_wait_line "$f")" = 'captain-held [key=captain-hold-held-1]: operator review' ] \
+    || fail "an unrelated answer hid the standing hold mirror: '$(status_declared_wait_line "$f")'"
+  printf 'needs-decision [key=route]: choose a route\n' > "$f"
+  printf 'captain-held [key=route]: tracked by held-route\n' >> "$f"
+  printf 'resolved [key=api-shape]: answered\n' >> "$f"
   [ -z "$(status_declared_wait_line "$f")" ] \
-    || fail "a standing hold mirror was read past to the pause: '$(status_declared_wait_line "$f")'"
-  pass "a standing hold mirror stops the declared-wait scan"
+    || fail "a buried complete transfer still read as the declared wait: '$(status_declared_wait_line "$f")'"
+  pass "a standing hold mirror stays the declared wait under an unrelated answer, a buried transfer does not"
 }
 
 # A settled hold stays read past after the worker or firstmate appends more:
@@ -630,7 +635,7 @@ test_hold_settled_only_without_worker_event_between() {
 test_keyless_wait_survives_stated_default_retraction
 test_declared_wait_survives_answers_past_the_event_window
 test_declared_wait_survives_settled_hold_mirror
-test_declared_wait_stops_at_standing_hold_mirror
+test_declared_wait_keeps_standing_hold_mirror
 test_declared_wait_survives_settled_hold_then_answer
 test_hold_settled_only_without_worker_event_between
 test_bare_prose_cannot_open_or_close_a_decision
