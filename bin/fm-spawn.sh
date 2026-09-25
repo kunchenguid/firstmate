@@ -190,6 +190,12 @@
 #   policy for the one session only (--auto-approve alone owns approval); the
 #   captain's own ~/.omp/agent/config.yml (model roles, providers, theme) is
 #   never written.
+#   When this process's own OMP_PROFILE is set and non-empty, every omp launch
+#   also passes --profile <value> immediately after the resolved binary, so a
+#   crewmate or secondmate authenticates under the same isolated profile
+#   firstmate itself runs under, exactly mirroring the claude launch's
+#   CLAUDE_CONFIG_DIR forwarding below; an unset OMP_PROFILE leaves the omp
+#   launch unchanged.
 #   A model written as <provider>/<id> is validated against `omp models --json`
 #   only when that provider appears in the listing; a provider absent from the
 #   listing (an extension-registered provider such as claude-bridge, which omp
@@ -4811,7 +4817,13 @@ case "$HARNESS" in
 pi | pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
 cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
-omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
+omp)
+  omp_bin_sub="$(shell_quote "$OMP_BIN")"
+  if [ -n "${OMP_PROFILE:-}" ]; then
+    omp_bin_sub="$omp_bin_sub --profile $(shell_quote "$OMP_PROFILE")"
+  fi
+  LAUNCH=${LAUNCH//__OMPBIN__/$omp_bin_sub}
+  ;;
 devin)
   LAUNCH=${LAUNCH//__DEVINBIN__/"$(shell_quote "$DEVIN_BIN")"}
   LAUNCH=${LAUNCH//__DEVINCONFIG__/"$(shell_quote "$STATE_REAL/$ID.devin-config.json")"}
