@@ -1151,6 +1151,147 @@ EOF
   pass "a deferred captain call leaves the live Captain's Call until its date and stays answerable"
 }
 
+test_answer_time_and_keyed_defer() {
+  local home show out before_stamp after_stamp FM_CAPTAIN_HOLD_NOW=2026-09-20T12:00:00Z
+  export FM_CAPTAIN_HOLD_NOW
+  home=$(make_home answer-defer)
+  run_captain "$home" hold sample-direct-defer --title "Captain call: revisit the sample" \
+    --reason "wait for the sample release" --repo sample >/dev/null \
+    || fail "could not hold the direct deferral call"
+  before_stamp=$(grep -A8 -F -- '- [ ] sample-direct-defer ' "$home/data/backlog.md" | grep -m1 'Captain hold set:')
+  [ -n "$before_stamp" ] || fail "the direct deferral call has no hold-set stamp"
+  printf 'Revisit after the sample release.\n' > "$home/direct-answer.txt"
+  run_captain "$home" answer sample-direct-defer --decision-file "$home/direct-answer.txt" \
+    --defer-until 2026-12-01 >/dev/null || fail "the direct deferral failed"
+  show=$(tasks_in "$home" show sample-direct-defer --full)
+  assert_contains "$show" "state: queued" "the deferred question was closed"
+  assert_contains "$show" "hold_kind: captain" "the deferral lost its captain hold"
+  assert_contains "$show" "hold_until: 2026-12-01" "the direct deferral lost its date"
+  assert_contains "$show" "Resolution mode: deferred" "the direct answer did not record its mode"
+  assert_contains "$show" "Deferred until: 2026-12-01" "the resolution omitted its date"
+  assert_contains "$show" "Revisit after the sample release." "the direct answer lost the captain's words"
+
+  run_captain "$home" answer sample-direct-defer --decision-file "$home/direct-answer.txt" \
+    --defer-until 2026-12-01 >/dev/null || fail "an exact direct deferral replay failed"
+  show=$(tasks_in "$home" show sample-direct-defer --full)
+  [ "$(printf '%s\n' "$show" | grep -o 'Resolution mode: deferred' | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "an exact direct replay added another resolution record"
+  run_captain "$home" answer sample-direct-defer --decision-file "$home/direct-answer.txt" \
+    --defer-until 2027-01-01 >/dev/null || fail "a changed deferral date was not recorded"
+  show=$(tasks_in "$home" show sample-direct-defer --full)
+  [ "$(printf '%s\n' "$show" | grep -o 'Resolution mode: deferred' | wc -l | tr -d ' ')" -eq 2 ] \
+    || fail "a changed deferral date did not create a new answer record"
+  assert_contains "$show" "hold_until: 2027-01-01" "the later date did not replace the earlier hold date"
+  after_stamp=$(grep -A8 -F -- '- [ ] sample-direct-defer ' "$home/data/backlog.md" | grep -m1 'Captain hold set:')
+  [ "$after_stamp" = "$before_stamp" ] || fail "deferral restarted the captain hold's age"
+
+  run_captain "$home" hold sample-keyed-defer --title "Captain call: revisit by key" \
+    --reason "wait for the sample release" --repo sample >/dev/null \
+    || fail "could not hold the keyed deferral call"
+  out=$(printf 'sample-keyed-defer\tRevisit after launch\t\tdefer\t2026-12-15\n' \
+    | run_captain "$home" answers --source "captain keyed deferral") \
+    || fail "the keyed deferral intake failed: $out"
+  assert_contains "$out" "deferred: sample-keyed-defer until 2026-12-15" \
+    "the keyed intake did not report the deferral"
+  assert_contains "$out" "answers: closed=0 deferred=1 skipped=0" \
+    "the keyed intake miscounted the deferral"
+  show=$(tasks_in "$home" show sample-keyed-defer --full)
+  assert_contains "$show" "hold_until: 2026-12-15" "the keyed deferral lost its date"
+  run_captain "$home" answers --source "captain keyed deferral" \
+    < <(printf 'sample-keyed-defer\tRevisit after launch\t\tdefer\t2026-12-15\n') >/dev/null \
+    || fail "an exact keyed deferral replay failed"
+  show=$(tasks_in "$home" show sample-keyed-defer --full)
+  [ "$(printf '%s\n' "$show" | grep -o 'Resolution mode: deferred' | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "an exact keyed replay added another resolution record"
+  pass "direct and keyed answers defer without closing the captain-held task"
+}
+
+test_defer_requires_a_real_future_date() {
+  local home show out invalid FM_CAPTAIN_HOLD_NOW=2026-09-20T12:00:00Z
+  export FM_CAPTAIN_HOLD_NOW
+  home=$(make_home defer-date-validation)
+  run_captain "$home" hold sample-invalid-defer --title "Captain call: choose a future date" \
+    --reason "wait for the sample release" --repo sample >/dev/null \
+    || fail "could not hold the date-validation call"
+  printf 'Revisit later.\n' > "$home/answer.txt"
+  for invalid in 2026-09-31 2026-09-20 2026-09-19; do
+    if run_captain "$home" answer sample-invalid-defer --decision-file "$home/answer.txt" \
+      --defer-until "$invalid" > "$home/invalid.out" 2> "$home/invalid.err"; then
+      fail "answer accepted non-future or impossible date $invalid"
+    fi
+  done
+  if run_captain "$home" answer sample-invalid-defer --decision-file "$home/answer.txt" \
+    --release --defer-until 2026-12-01 > "$home/mutually-exclusive.out" 2> "$home/mutually-exclusive.err"; then
+    fail "answer combined --release and --defer-until"
+  fi
+  out=$(printf 'sample-invalid-defer\tRevisit later\t\tdefer\t2026-09-20\n' \
+    | run_captain "$home" answers --source "captain keyed deferral" 2>&1) &&
+    fail "keyed intake accepted a same-day deferral"
+  assert_contains "$out" "must be a valid future UTC date" "the keyed date refusal omitted its cause"
+  show=$(tasks_in "$home" show sample-invalid-defer --full)
+  printf '%s\n' "$show" > "$home/invalid-show.out"
+  assert_no_grep "Resolution mode: deferred" "$home/invalid-show.out" \
+    "an invalid date wrote a deferred resolution"
+  assert_contains "$show" "hold_kind: captain" "an invalid deferral changed the captain hold"
+  pass "deferral rejects impossible, past, same-day, and conflicting requests before recording"
+}
+
+test_deferred_answers_keep_pending_reconcile_requests() {
+  local home list FM_CAPTAIN_HOLD_NOW=2026-09-20T12:00:00Z
+  export FM_CAPTAIN_HOLD_NOW
+  home=$(make_home reconcile-deferred-answer)
+  run_captain "$home" hold sample-direct-defer --title "Captain call to defer" \
+    --reason "waiting for the captain" --repo sample >/dev/null \
+    || fail "could not hold the pending-reconcile fixture"
+  request_reconciles "$home" board-src sample-direct-defer \
+    || fail "could not create a reconcile request before deferral"
+  printf 'Revisit after the sample launch.\n' > "$home/defer.txt"
+  run_captain "$home" answer sample-direct-defer --decision-file "$home/defer.txt" \
+    --defer-until 2026-12-01 >/dev/null || fail "the deferral failed with a pending reconcile request"
+  list=$(run_captain "$home" reconcile list)
+  assert_contains "$list" "sample-direct-defer" "deferral retired the pending reconcile request"
+  run_captain "$home" answer sample-direct-defer --decision-file "$home/defer.txt" \
+    --defer-until 2026-12-01 >/dev/null || fail "the deferral replay failed with a pending reconcile request"
+  list=$(run_captain "$home" reconcile list)
+  assert_contains "$list" "reconcile-requests: 1" "deferral replay retired its pending request"
+  pass "a deferred answer and its replay keep the pending reconcile request"
+}
+
+test_deferred_record_does_not_hide_out_of_band_close() {
+  local home id show FM_CAPTAIN_HOLD_NOW=2026-09-20T12:00:00Z
+  export FM_CAPTAIN_HOLD_NOW
+  home=$(make_home deferred-out-of-band)
+  id=sample-deferred-origin
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the deferred sample call" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the origin task"
+  write_origin_meta "$home" "$id"
+  printf 'done: investigation complete\n' > "$home/state/$id.status"
+  printf '# Deferred captain call\n\nThe call needs one final answer.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold sample-deferred-call --title "Captain call: revisit the sample" \
+    --reason "wait for the sample release" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the captain call"
+  run_captain "$home" complete "$id" sample-deferred-call >/dev/null \
+    || fail "the completion inventory rejected the active captain hold"
+  printf 'Revisit after the sample release.\n' > "$home/deferred.txt"
+  run_captain "$home" answer sample-deferred-call --decision-file "$home/deferred.txt" \
+    --defer-until 2026-12-01 >/dev/null || fail "could not defer the captain call"
+  tasks_in "$home" "done" sample-deferred-call >/dev/null \
+    || fail "could not reproduce the out-of-band close"
+  if run_captain "$home" verify "$id" > "$home/deferred-verify.out" 2> "$home/deferred-verify.err"; then
+    fail "a deferred record hid the out-of-band close from verify"
+  fi
+  printf 'Proceed with the sample after all.\n' > "$home/final-answer.txt"
+  run_captain "$home" answer sample-deferred-call --decision-file "$home/final-answer.txt" >/dev/null \
+    || fail "a final answer could not repair the out-of-band close"
+  show=$(tasks_in "$home" show sample-deferred-call --full)
+  assert_contains "$show" "Resolution mode: repaired" "the final answer did not repair the close"
+  assert_contains "$show" "Resolution mode: deferred" "the prior deferral record was lost"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "the repaired close did not satisfy the completion inventory"
+  pass "a deferred record cannot disguise an out-of-band task close"
+}
+
 # The recorded-answer guard survives an out-of-band close: a bare tasks-axi done
 # fails verify until answer records the captain's word, and an ordinary finished
 # task can never be dressed up as an answered captain call.
@@ -4036,6 +4177,10 @@ test_release_frees_held_work
 test_hold_stamp_precedes_hold_visibility
 test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due
+test_answer_time_and_keyed_defer
+test_defer_requires_a_real_future_date
+test_deferred_answers_keep_pending_reconcile_requests
+test_deferred_record_does_not_hide_out_of_band_close
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell line into its terminal, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--defer-until YYYY-MM-DD] [--fire-and-forget <delivery-id>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -191,6 +191,9 @@
 # the legacy `<task>-decision-<key>` identity for pre-collapse rows. fm-send
 # closes nothing itself; it hands the intake `<task-id>\t<answer>\t<label>`
 # exactly as every other channel does, and the intake owns what that means.
+# `--defer-until YYYY-MM-DD` adds the keyed intake's `defer` mode and required
+# date. It applies only to keys already held for the captain, not status-log
+# keys. Invalid or non-future UTC dates are refused before anything is sent.
 # This is what lets an answer reach a decision that has already been
 # transferred from the live status log to its durable captain-held task, which
 # the status ledger alone can no longer close.
@@ -259,6 +262,9 @@ fi
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-calendar-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-calendar-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -464,6 +470,10 @@ fi
 # must precede --key or the message text; everything after the last flag is the
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
+RESOLVE_DEFER_UNTIL_SET=0
+RESOLVE_DEFER_UNTIL=
+RESOLVE_DEFER_TODAY=
+RESOLVE_DEFER_OBSERVATION=
 FIRE_AND_FORGET_ID=
 fm_send_add_resolve_key() { # <key>
   local k=$1
@@ -495,6 +505,28 @@ while :; do
     fm_send_add_resolve_key "${1#--resolve-key=}" || exit 1
     shift
     ;;
+  --defer-until)
+    [ $# -ge 2 ] || {
+      echo "error: --defer-until requires a YYYY-MM-DD date" >&2
+      exit 1
+    }
+    [ "$RESOLVE_DEFER_UNTIL_SET" = 0 ] || {
+      echo "error: duplicate --defer-until" >&2
+      exit 1
+    }
+    RESOLVE_DEFER_UNTIL_SET=1
+    RESOLVE_DEFER_UNTIL=$2
+    shift 2
+    ;;
+  --defer-until=*)
+    [ "$RESOLVE_DEFER_UNTIL_SET" = 0 ] || {
+      echo "error: duplicate --defer-until" >&2
+      exit 1
+    }
+    RESOLVE_DEFER_UNTIL_SET=1
+    RESOLVE_DEFER_UNTIL=${1#--defer-until=}
+    shift
+    ;;
   --fire-and-forget)
     [ $# -ge 2 ] || {
       echo "error: --fire-and-forget requires a delivery id" >&2
@@ -518,6 +550,22 @@ while :; do
   *) break ;;
   esac
 done
+
+if [ "$RESOLVE_DEFER_UNTIL_SET" = 1 ]; then
+  fm_valid_calendar_day "$RESOLVE_DEFER_UNTIL" || {
+    echo "error: --defer-until requires a real YYYY-MM-DD calendar date: $RESOLVE_DEFER_UNTIL" >&2
+    exit 1
+  }
+  RESOLVE_DEFER_TODAY=$(fm_utc_calendar_day "${FM_CAPTAIN_HOLD_NOW:-}") || {
+    echo "error: could not determine the UTC calendar date for --defer-until; nothing was recorded or sent" >&2
+    exit 1
+  }
+  fm_future_calendar_day "$RESOLVE_DEFER_UNTIL" "$RESOLVE_DEFER_TODAY" || {
+    echo "error: --defer-until date $RESOLVE_DEFER_UNTIL must be later than UTC today $RESOLVE_DEFER_TODAY; nothing was recorded or sent" >&2
+    exit 1
+  }
+  RESOLVE_DEFER_OBSERVATION=${FM_CAPTAIN_HOLD_NOW:-${RESOLVE_DEFER_TODAY}T00:00:00Z}
+fi
 
 if [ "$TARGET_BACKEND" != remote ]; then
   fm_backend_validate "$TARGET_BACKEND" || exit 1
@@ -613,6 +661,11 @@ if [ -n "$FIRE_AND_FORGET_ID" ]; then
     }
 fi
 
+[ "$RESOLVE_DEFER_UNTIL_SET" = 0 ] || [ -n "$RESOLVE_KEYS" ] || {
+  echo "error: --defer-until requires at least one --resolve-key" >&2
+  exit 1
+}
+
 if [ -n "$RESOLVE_KEYS" ]; then
   if [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then
     echo "error: --resolve-key needs a task selector resolved through this home's metadata; an explicit backend target has no decision ledger here" >&2
@@ -646,6 +699,12 @@ if [ -n "$RESOLVE_KEYS" ]; then
     echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
     exit 1
   done
+  if [ "$RESOLVE_DEFER_UNTIL_SET" = 1 ]; then
+    [ -z "$RESOLVE_STATUS_KEYS" ] || {
+      echo "error: --defer-until applies only to captain-held task keys; status-log key(s) '$RESOLVE_STATUS_KEYS' have not been transferred. Nothing was sent." >&2
+      exit 1
+    }
+  fi
   # The decision-answer partition (the header's "Answering a decision"
   # contract): a key that is an open needs-decision, or already a captain-held
   # task, is a decision, and answering one is main-owned while attended. A
@@ -737,11 +796,21 @@ fm_send_feed_resolved_holds() { # <answer-text>
   [ -n "$RESOLVE_HOLD_KEYS" ] || return 0
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_HOLD_KEYS; do
-    lines="${lines}${k}"$'\t'"${note}"$'\t'$'\n'
+    if [ "$RESOLVE_DEFER_UNTIL_SET" = 1 ]; then
+      lines="${lines}${k}"$'\t'"${note}"$'\t\tdefer\t'"${RESOLVE_DEFER_UNTIL}"$'\n'
+    else
+      lines="${lines}${k}"$'\t'"${note}"$'\t'$'\n'
+    fi
   done
-  if ! printf '%s' "$lines" | "$SCRIPT_DIR/fm-captain-hold.sh" answers \
-    --source "a firstmate answer sent to $RESOLVE_TASK_ID" >/dev/null 2>&1; then
-    echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer - do not resend the answer." >&2
+  if ! printf '%s' "$lines" \
+    | FM_CAPTAIN_HOLD_NOW="$RESOLVE_DEFER_OBSERVATION" \
+      "$SCRIPT_DIR/fm-captain-hold.sh" answers \
+        --source "a firstmate answer sent to $RESOLVE_TASK_ID" >/dev/null 2>&1; then
+    if [ "$RESOLVE_DEFER_UNTIL_SET" = 1 ]; then
+      echo "error: the answer was delivered to $T, but this captain-held task could not be deferred: ${RESOLVE_HOLD_KEYS}. Record it with fm-captain-hold.sh answer <task-id> --decision-file <path> --defer-until $RESOLVE_DEFER_UNTIL; do not resend the answer." >&2
+    else
+      echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer - do not resend the answer." >&2
+    fi
     return 1
   fi
 }
