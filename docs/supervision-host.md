@@ -98,21 +98,10 @@ So every guarded script treats it exactly as it treats the Pi branch.
 ## The dialog mirror
 
 The engine's conversation receives nothing between wakes, so attended supervision needs a record of what the captain and main said: the same `[captain]` and `[main]` context the Pi branch receives as mirror messages.
-`bin/fm-host-mirror.sh` owns that record in `state/`: `.host-mirror.jsonl` holds the dialog entries, `.host-mirror-cursor` the newest entry fed to an engine conversation, and `.host-mirror.lock` serializes every append and feed; its header owns the formats, caps, and feed contract.
-Today the writers record and nothing reads the mirror: the host never calls the feed, so the mirror changes no wake.
-Each primary's code-owned turn surfaces write it, never the model:
-
-| Primary | Captain text | Main text |
-|---|---|---|
-| Claude | the `UserPromptSubmit` hook's prompt | the `Stop` hook's last assistant message |
-| Cursor | the `beforeSubmitPrompt` hook's prompt | the `afterAgentResponse` hook's text |
-
-A writer records only on a home with `config/supervision-host`, from a genuine primary checkout, for the session that holds the fleet lock; everywhere else the tracked registrations exit silently and write nothing.
-Operational input (watcher wakes, guard follow-ups, launch briefs) is dropped by the shared operational-input protocol, as is a turn the harness starts itself, such as Claude's Stop-hook rewake, and tool traffic is never mirrored.
-Each entry is keyed to the current main session (`fm_supervision_host_main_key` in `bin/fm-supervision-engine-lib.sh`), so a new engine conversation re-anchors on this session's dialog and an earlier session's dialog never steers today's.
-The mirror is owner-only, and an existing file that cannot be restricted receives no new entry.
-The feed and `check` refuse a mirror whose entries do not parse, whose sequence numbers are not positive integers rising in file order, or whose final record is unterminated, so a caller can hand the wake to main rather than judge without the captain's words.
-A captain prompt whose own hook write fails, because permission on its state file is refused or the disk is full, is not mirrored, and Claude and Cursor have no later source for it.
+`bin/fm-host-mirror.sh` owns the record, writers, files, and feed; its header owns their formats, bounds, and failure contract.
+Today its writers record on opted-in Claude and Cursor primaries, but the host never calls the feed, so the mirror changes no wake.
+The writers use code-owned turn surfaces rather than model-generated messages, and drop operational input, harness-started prompts, and tool traffic.
+A captain prompt whose hook write fails is not mirrored, and Claude and Cursor have no later source for it.
 
 A primary's mirror is verified (`bin/fm-host-mirror.sh verified`) only when its writers were proven against the real harness to record the session's dialog from its first captain prompt, which today means Claude and Cursor.
 Codex has no writer yet: a supervising Codex main stays inside one turn across its foreground checkpoints, so a captain message typed then fires no prompt or Stop hook, and only a reader of its transcript could record it.
@@ -257,7 +246,7 @@ A new one opens in two cases:
 - Every `FM_SUPERVISION_HOST_ROTATE_TURNS` turns, because each wake adds history and the per-wake cost grows with it.
 
 Nothing captain-facing rides on that conversation, because the outcome store carries every result.
-The engine sees no mirror of main's dialog.
+Today the engine sees no mirror of main's dialog; the [dialog mirror](#the-dialog-mirror) is recorded but not yet fed to it.
 The away record's read-back at the tail of every wake is the captain context it acts on.
 
 ### Where engine cost is read
