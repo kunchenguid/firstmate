@@ -116,8 +116,8 @@ esac
 [ "$MAX_COUNT" -ge 1 ] 2>/dev/null || MAX_COUNT=3
 
 # Parse mode: --check is detection-only; otherwise it is a post, with the text
-# source (--text-file <path> | -) deferred until after the link/window/cap
-# check so a missing or exhausted link never consumes stdin or posts.
+# source (--text-file <path> | -) validated before the link/window/cap
+# check; the text itself is read only when the link is eligible to post.
 MODE=post
 case "${1:-}" in
   --help|-h) help; exit 0 ;;
