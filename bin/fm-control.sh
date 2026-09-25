@@ -37,11 +37,12 @@
 #              busy, then submits the harness's exit command. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent). An endpoint that reads
-#              `missing` is already-stopped: there is no endpoint and therefore
-#              no agent to stop. The worktree and durable task record are left
-#              untouched. A pane that is present but idle is also
-#              `already-stopped`; alive, ambiguous, and unreadable states retain
-#              their existing safety refusals.
+#              `missing` is checked through the backend absence proof. Herdr's
+#              proven-gone endpoint reports `endpoint-gone`; a herdr endpoint
+#              that reappears dead reports `already-stopped`. Tmux `missing`
+#              remains unproven and refuses. A pane that is present but idle is
+#              also `already-stopped`; alive, ambiguous, and unreadable states
+#              retain their existing safety refusals.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME worktree - and the same endpoint whenever that endpoint
 #              still exists - on the same or a newly chosen
@@ -558,12 +559,15 @@ do_exit() {
       ;;
     alive) ;;
     missing)
-      # The recovery-grade classifier has authoritatively established that the
-      # recorded endpoint is absent. There is no agent to stop, so exit's
-      # already-stopped postcondition is satisfied without touching the task's
-      # worktree or durable record.
-      printf 'already-stopped'
-      return 0
+      # `missing` can mean destroyed or unreachable, so only herdr's recorded
+      # session recheck may establish the exit postcondition.
+      absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T")
+      case "${absence%%$'\t'*}" in
+        gone) printf 'endpoint-gone'; return 0 ;;
+        dead) printf 'already-stopped'; return 0 ;;
+        alive) ;;
+        *) die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one" ;;
+      esac
       ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac

@@ -1846,19 +1846,15 @@ strand_endpoint() {  # <case-dir> <id>
   : > "$1/fake/windows"
 }
 
-# A recovery-grade `missing` endpoint is already stopped and can be replaced
-# in the task's existing worktree.
-assert_tmux_missing_reclaims() {  # <case-dir> <id> <what-was-staged>
+# Tmux `missing` is not authoritative because the task record lacks the
+# endpoint's socket identity, so recovery must refuse without creating a window.
+assert_tmux_missing_refuses() {  # <case-dir> <id> <what-was-staged>
   local dir=$1 id=$2 what=$3 out rc
 
   out=$(run_spawn "$dir" "$id" --relaunch --harness claude); rc=$?
-  expect_code 0 "$rc" "relaunch must replace a missing tmux endpoint ($what)"$'\n'"$out"
-  assert_present "$dir/fake/created-windows" "relaunch must create a replacement window ($what)"
-
-  # The replacement is now present and exit remains idempotent for it.
-  out=$(run_control "$dir" "$id" exit); rc=$?
-  expect_code 0 "$rc" "exit must accept a stopped replacement ($what)"$'\n'"$out"
-
+  expect_code 1 "$rc" "relaunch must refuse an unproven tmux absence ($what)"$'\n'"$out"
+  assert_contains "$out" "cannot be proven" "the refusal should explain tmux absence ($what)"
+  assert_absent "$dir/fake/created-windows" "a refused relaunch must not create a window ($what)"
 }
 
 test_tmux_refuses_a_window_missing_from_its_session() {
@@ -1866,8 +1862,8 @@ test_tmux_refuses_a_window_missing_from_its_session() {
   dir=$(new_case tmux-gone rl60)
   add_ship_task "$dir" rl60 claude
   strand_endpoint "$dir" rl60
-  assert_tmux_missing_reclaims "$dir" rl60 "window absent from a readable session inventory"
-  pass "tmux: a missing window is replaced and exit remains idempotent"
+  assert_tmux_missing_refuses "$dir" rl60 "window absent from a readable session inventory"
+  pass "tmux: a missing window remains unproven and refuses recovery"
 }
 
 test_tmux_refuses_a_session_that_cannot_be_found() {
@@ -1878,8 +1874,8 @@ test_tmux_refuses_a_session_that_cannot_be_found() {
   # TMUX_TMPDIR/socket: definitive about the SESSION, silent about whether the
   # window and its agent survived elsewhere.
   : > "$dir/fake/session-missing"
-  assert_tmux_missing_reclaims "$dir" rl61 "recorded session not found"
-  pass "tmux: a missing session is replaced and exit remains idempotent"
+  assert_tmux_missing_refuses "$dir" rl61 "recorded session not found"
+  pass "tmux: a missing session remains unproven and refuses recovery"
 }
 
 test_tmux_refuses_when_the_server_is_gone() {
@@ -1889,8 +1885,8 @@ test_tmux_refuses_when_the_server_is_gone() {
   # No server on the socket this process addresses. Another server may still be
   # running the task's window, and the record cannot say which socket is its.
   : > "$dir/fake/server-dead"
-  assert_tmux_missing_reclaims "$dir" rl62 "no tmux server on this socket"
-  pass "tmux: a missing server endpoint is replaced and exit remains idempotent"
+  assert_tmux_missing_refuses "$dir" rl62 "no tmux server on this socket"
+  pass "tmux: a missing server remains unproven and refuses recovery"
 }
 
 test_reclaim_refuses_an_unreadable_endpoint() {
