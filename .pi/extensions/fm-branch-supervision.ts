@@ -74,7 +74,6 @@
 // readonly-variable shell prelude so an accidental override fails loudly
 // inside the branch's own shell. bin/fm-lease-lib.sh documents the grade and
 // its deliberate limits.
-import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -328,18 +327,6 @@ function modelLabel(model: { provider: string; id: string }): string {
   return `${model.provider}/${model.id}`;
 }
 
-async function parentPid(pid: string): Promise<string> {
-  const result = await runCommandAsync("ps", ["-o", "ppid=", "-p", pid]);
-  if (result.status !== 0) return "";
-  return result.stdout.trim();
-}
-
-function parentPidSync(pid: string): string {
-  const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
-  if (result.status !== 0) return "";
-  return result.stdout.trim();
-}
-
 function pidAlive(pid: string): boolean {
   try {
     process.kill(Number(pid), 0);
@@ -351,22 +338,16 @@ function pidAlive(pid: string): boolean {
 
 let ownedLockPid = "";
 
-// Same ownership read as the watcher extension's lockOwnership(): the lock
-// names the harness pid, and this process owns it when that pid appears in
-// its own ancestry.
+// Same ownership read as the watcher and turn-end guard extensions: the lock
+// names the owning harness pid, and this Pi process owns it only when that pid
+// is its own. Shell startup resolves a native Codex transport child to this
+// same Pi pid in bin/fm-session-lock-lib.sh, so no ancestry is walked here and
+// none is accepted: a launcher or an enclosing session holding the lock is
+// another session.
 //
-// The ancestry is walked in full at every boundary that asks, never cached:
-// process ancestry is not immutable (a parent exiting reparents its child,
-// and pid identity is reused), and this answer is an ownership AUTHORITY
-// rather than a hint, so a stale chain would misattribute ownership. Moving
-// delivery off Pi's render thread does not trade that away - it awaits each
-// `ps` instead of shortening the walk.
-//
-// The lock file's own answer and the verdict after the walk are shared by the
-// awaited and synchronous forms below, so the only difference between them
-// stays the wait.
-const LOCK_ANCESTRY_DEPTH = 8;
-
+// The lock is re-read at every boundary that asks, never cached: this answer
+// is an ownership AUTHORITY rather than a hint. The awaited form exists for
+// the call sites that are asynchronous anyway; both forms share one read.
 function readLockPid(): { lockPid: string; verdict: LockOwnership | null } {
   ownedLockPid = "";
   let lockPid = "";
@@ -379,45 +360,22 @@ function readLockPid(): { lockPid: string; verdict: LockOwnership | null } {
   return { lockPid, verdict: null };
 }
 
-function ownershipVerdict(lockPid: string, ancestryMatched: boolean): LockOwnership {
-  if (ancestryMatched) {
+function ownershipVerdict(lockPid: string, owned: boolean): LockOwnership {
+  if (owned) {
     ownedLockPid = lockPid;
     return "owned";
   }
   return pidAlive(lockPid) ? "other" : "missing";
 }
 
-async function lockOwnership(): Promise<LockOwnership> {
-  const { lockPid, verdict } = readLockPid();
-  if (verdict) return verdict;
-  let pid = String(process.pid);
-  for (let i = 0; i < LOCK_ANCESTRY_DEPTH; i += 1) {
-    if (pid === lockPid) {
-      const current = readLockPid();
-      if (current.verdict || current.lockPid !== lockPid) return current.verdict ?? "other";
-      return ownershipVerdict(lockPid, true);
-    }
-    pid = await parentPid(pid);
-    if (!pid || pid === "1") break;
-  }
-  return ownershipVerdict(lockPid, false);
-}
-
-// Pi types its bash spawn hook as a synchronous function
-// (BashSpawnHook: (context) => context), so the guard on the BRANCH's own
-// shell commands cannot await. It keeps the synchronous walk unchanged rather
-// than caching the authority: what blocks there is one branch shell command
-// about to spawn a shell anyway, never an arriving outcome.
 function lockOwnershipSync(): LockOwnership {
   const { lockPid, verdict } = readLockPid();
   if (verdict) return verdict;
-  let pid = String(process.pid);
-  for (let i = 0; i < LOCK_ANCESTRY_DEPTH; i += 1) {
-    if (pid === lockPid) return ownershipVerdict(lockPid, true);
-    pid = parentPidSync(pid);
-    if (!pid || pid === "1") break;
-  }
-  return ownershipVerdict(lockPid, false);
+  return ownershipVerdict(lockPid, lockPid === String(process.pid));
+}
+
+async function lockOwnership(): Promise<LockOwnership> {
+  return lockOwnershipSync();
 }
 
 function textOfContent(content: unknown): string {
@@ -605,10 +563,10 @@ export default function (pi: ExtensionAPI) {
   // dispatch order, one at a time (the branch runs drain -> handle -> ack
   // serially by design).
   let branchChain: Promise<void> = Promise.resolve();
-  // Serializes DELIVERY work. The store scripts and the ownership walk are
-  // awaited rather than synchronous now (lib/fm-async-exec.ts), which means a
-  // second outcome, a turn boundary, or main's acknowledgement can reach this
-  // extension while an earlier one is still between two of its own steps.
+  // Serializes DELIVERY work. The store scripts are awaited rather than
+  // synchronous now (lib/fm-async-exec.ts), which means a second outcome, a
+  // turn boundary, or main's acknowledgement can reach this extension while an
+  // earlier one is still between two of its own steps.
   // Every such unit runs to completion here before the next one starts, so
   // the guarantees the single thread used to provide for free - one delivery
   // at a time, the durable append before anything visible, the read cursor
