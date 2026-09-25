@@ -838,7 +838,7 @@ EOF
   printf '%s\n' "$holder_pid" > "$home/state/.lock"
   printf '%s\n' "$holder_pid" > "$home/state/.session-start-complete"
 
-  out=$(FM_FAKE_LIVE_HOLDER_PID="$holder_pid" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(FM_FAKE_LIVE_HOLDER_PID="$holder_pid" FM_STATE_OVERRIDE="$home/state" run_session_start "$root" "$root" "$fakebin:$BASE_PATH")
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
 

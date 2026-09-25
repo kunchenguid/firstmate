@@ -648,7 +648,7 @@ EOF
   git -C "$root" init -q
   : > "$root/AGENTS.md"
   out=$(PATH="$root/bin:$PATH" FM_FAKE_HARNESS_PID="$next_owner" FM_FAKE_OLD_HARNESS_PID=$$ FM_FAKE_ANCESTRY_JUMP=1 \
-    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$root/bin/fm-lock.sh" 2>&1) \
+    FM_HOME="$root" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$root" "$root/bin/fm-lock.sh" 2>&1) \
     || fail "lock takeover still failed after the sweep released its lease: $out"
   new_owner=$(cat "$home/state/.lock")
   assert_contains "$out" "lock takeover: displaced live holder $$; lock acquired by $new_owner" \

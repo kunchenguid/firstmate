@@ -106,7 +106,8 @@ A lock another live session took meanwhile prevents a re-emit and routes the new
 ### Primary takeover
 
 At a full interactive primary start, `bin/fm-lock.sh` serializes acquisition through `state/.lock.acquire` and re-reads the holder under that claim.
-A different, positively live holder is superseded only when the caller proves the same unmarked primary checkout and home and the holder's full startup completion record matches its lock identity; `bin/fm-lock.sh takeover` uses that same path for an explicit attempt.
+A different, positively live holder is superseded only when the caller proves the same unmarked primary checkout and home and the holder's own startup sweep is not still running, so an idle live pane, including one that itself acquired the lock by takeover or recovery, never wedges a new session; `bin/fm-lock.sh takeover` uses that same path for an explicit attempt.
+A numeric holder that is alive but not a verified harness (a reused pid) is stale and is reclaimed, while a malformed identity or an uncertain Codex writer lock stays a read-only refusal.
 The lock command prints one `lock takeover:` line naming the displaced identity and never signals its process.
 A worker task marker, linked worker checkout, secondmate home, or different home cannot supersede a live primary.
 Non-regular or unreadable locks, failed publication, uncertain ownership, and an unfinished deferred startup sweep retain their read-only refusals.

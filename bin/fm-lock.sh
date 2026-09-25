@@ -73,7 +73,25 @@ takeover_eligible() {
   fm_primary_scope_matches "$FM_ROOT" "$STATE" || return 1
   root=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || return 1
   home=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || return 1
-  [ "$root" = "$home" ] || [ "${FM_TEST_SEAM:-}" = 1 ] || return 1
+  [ "$root" = "$home" ]
+}
+
+# True while the startup sweep launched by holder $1's session start is still
+# genuinely running: a running record naming that holder, a live worker pid,
+# and a start time inside the sweep's own budget so a reused pid cannot pin it.
+startup_sweep_running() {  # <holder-identity>
+  local status="$STATE/.startup-network.status" pid started budget
+  [ -f "$status" ] && [ ! -L "$status" ] || return 1
+  [ "$(sed -n 's/^state=//p' "$status" 2>/dev/null | tail -1)" = running ] || return 1
+  [ "$(sed -n 's/^lock_pid=//p' "$status" 2>/dev/null | tail -1)" = "$1" ] || return 1
+  pid=$(sed -n 's/^pid=//p' "$status" 2>/dev/null | tail -1)
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  started=$(sed -n 's/^started=//p' "$status" 2>/dev/null | tail -1)
+  case "$started" in ''|*[!0-9]*) return 0 ;; esac
+  budget=${FM_STARTUP_NETWORK_TIMEOUT:-120}
+  case "$budget" in ''|*[!0-9]*|0) budget=120 ;; esac
+  [ $(( $(date +%s) - started )) -le $(( budget + 30 )) ]
 }
 
 me=$(fm_session_identity) || { echo "error: cannot locate a verified harness session identity" >&2; exit 1; }
@@ -252,9 +270,8 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     old=$(cat "$LOCK" 2>/dev/null || true)
     if [ "$old" != "$me" ] && fm_session_identity_liveness "$old"; then
       takeover_eligible || refuse_live_owner "$old"
-      completed=$(cat "$STATE/.session-start-complete" 2>/dev/null || true)
-      if [ "$completed" != "$old" ]; then
-        echo "error: the prior session's startup has not completed; operate read-only until its startup sweep finishes" >&2
+      if startup_sweep_running "$old"; then
+        echo "error: the prior session's startup sweep is still running; operate read-only until it finishes" >&2
         exit 1
       fi
       DISPLACED_OWNER=$old

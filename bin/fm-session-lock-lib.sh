@@ -104,8 +104,10 @@ fm_session_identity() {
   printf '%s\n' "$pid"
 }
 
-# Return 0 only for a verified live holder, 1 for a proven dead holder, and 2
-# for malformed or uncertain state. Callers must not treat 2 as takeover proof.
+# Return 0 only for a verified live holder, 1 for a holder that is not a live
+# harness (dead, or a numeric pid since reused by an unrelated process), and 2
+# for malformed identities or an uncertain Codex writer lock. Callers must not
+# treat 2 as takeover proof.
 fm_session_identity_liveness() {  # <identity>
   case "${1:-}" in
     codex:*)
@@ -116,8 +118,6 @@ fm_session_identity_liveness() {  # <identity>
     ''|*[!0-9]*) return 2 ;;
   esac
   fm_harness_pid_alive "$1" && return 0
-  kill -0 "$1" 2>/dev/null && return 2
-  ps -o comm= -p "$1" >/dev/null 2>&1 && return 2
   return 1
 }
 

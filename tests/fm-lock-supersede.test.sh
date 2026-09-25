@@ -161,7 +161,7 @@ run_as "$new" "$ROOT/bin/fm-lock.sh" > "$LAB/new.out" 2>&1 & first=$!
 run_as "$third" "$ROOT/bin/fm-lock.sh" > "$LAB/third.out" 2>&1 & second=$!
 if wait "$first"; then first_rc=0; else first_rc=1; fi
 if wait "$second"; then second_rc=0; else second_rc=1; fi
-[ "$((first_rc + second_rc))" -eq 1 ] || fail "concurrent starters did not resolve to exactly one successful claim"
+[ "$((first_rc + second_rc))" -le 1 ] || fail "concurrent starters both failed to claim the lock: $(cat "$LAB/new.out") / $(cat "$LAB/third.out")"
 winner=$(cat "$STATE/.lock")
 case "$winner" in "$new"|"$third") ;; *) fail "race published a corrupt lock: $winner" ;; esac
 if [ "$winner" = "$new" ]; then loser=$third; else loser=$new; fi
@@ -174,10 +174,26 @@ printf '%s\n' "$old" > "$STATE/.lock"
 printf '%s\n' "$old" > "$STATE/.session-start-complete"
 FM_TASK_ID=worker run_as "$new" "$ROOT/bin/fm-lock.sh" > "$LAB/refusal.out" 2>&1 && fail "worker takeover unexpectedly passed"
 rm "$STATE/.session-start-complete"
+printf 'state=running\nlock_pid=%s\npid=%s\nstarted=%s\n' "$old" "$old" "$(date +%s)" > "$STATE/.startup-network.status"
 run_as "$new" "$ROOT/bin/fm-lock.sh" > "$LAB/unfinished.out" 2>&1 \
-  && fail "unfinished prior startup was superseded"
-assert_contains "$(cat "$LAB/unfinished.out")" 'startup has not completed' \
-  "unfinished startup refusal changed"
+  && fail "a holder whose startup sweep is running was superseded"
+assert_contains "$(cat "$LAB/unfinished.out")" 'startup sweep is still running' \
+  "running-sweep refusal changed"
+[ "$(cat "$STATE/.lock")" = "$old" ] || fail "the running-sweep refusal changed the lock"
+printf 'state=done\nlock_pid=%s\npid=%s\nstarted=%s\n' "$old" "$old" "$(date +%s)" > "$STATE/.startup-network.status"
+run_as "$new" "$ROOT/bin/fm-lock.sh" > "$LAB/finished.out" 2>&1 \
+  || fail "a holder whose startup sweep finished could not be superseded"
+rm -f "$STATE/.startup-network.status"
+printf '%s\n' "$old" > "$STATE/.lock"
+printf '1\n' > "$STATE/.lock"
+out=$(run_as "$new" "$ROOT/bin/fm-lock.sh") || fail "a live non-harness pid (pid reuse) wedged the lock"
+assert_contains "$out" "lock acquired: harness pid $new" "a live non-harness holder was not reclaimed as stale"
+printf '%s\n' "$old" > "$STATE/.lock"
+printf '%s\n' "$old" > "$STATE/.session-start-complete"
+run_as "$new" "$ROOT/bin/fm-lock.sh" takeover > "$LAB/via-takeover.out" 2>&1 || fail "takeover from an idle holder failed"
+run_as "$third" "$ROOT/bin/fm-lock.sh" > "$LAB/after-takeover.out" 2>&1 \
+  || fail "a holder that acquired the lock by takeover could not be superseded by a later start"
+[ "$(cat "$STATE/.lock")" = "$third" ] || fail "the later start did not own the lock after a takeover chain"
 printf 'not-an-identity\n' > "$STATE/.lock"
 run_as "$new" "$ROOT/bin/fm-lock.sh" > "$LAB/unknown.out" 2>&1 \
   && fail "an unverifiable holder was reclaimed"

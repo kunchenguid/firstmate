@@ -718,7 +718,7 @@ expect_phase_owned() {  # <dir> <n> <expected-arms> <expected-lock-pid> <label>
 }
 
 # Not the owner: no arm, the guard's foreign-owner diagnostic naming the live
-# owner, and a lock refusal because this fixture has not completed startup.
+# owner, and a lock refusal because the owner's startup sweep is still running.
 expect_phase_foreign() {  # <dir> <n> <expected-arms> <owner-pid> <label>
   local dir=$1 n=$2 arms=$3 owner=$4 label=$5
   expect_code 0 "$(phase_value "$dir" "$n" hook.rc)" "$label: the Stop auto-arm did not stand down"
@@ -727,8 +727,8 @@ expect_phase_foreign() {  # <dir> <n> <expected-arms> <owner-pid> <label>
   grep -q "OWNED BY ANOTHER LIVE SESSION.*lock owner pid $owner" "$dir/state/phase-$n/guard.out" \
     || fail "$label: the guard did not report the live owner $owner: $(cat "$dir/state/phase-$n/guard.out")"
   expect_code 1 "$(phase_value "$dir" "$n" lock.rc)" "$label: fm-lock.sh accepted a lock this session does not own"
-  grep -q "prior session's startup has not completed" "$dir/state/phase-$n/lock.out" \
-    || fail "$label: the incomplete-startup refusal was missing: $(cat "$dir/state/phase-$n/lock.out")"
+  grep -q "prior session's startup sweep is still running" "$dir/state/phase-$n/lock.out" \
+    || fail "$label: the running-sweep refusal was missing: $(cat "$dir/state/phase-$n/lock.out")"
   [ "$(phase_value "$dir" "$n" lock-after)" = "$owner" ] || fail "$label: a non-owner rewrote the lock"
 }
 
@@ -753,6 +753,7 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   [ "$(tr -d '[:space:]' < "$dir/state/.lock-session")" = S1 ] \
     || fail "the front-end did not record its trusted session id beside the lock"
   cp "$dir/state/.lock-session" "$dir/sidecar-initial"
+  printf 'state=running\nlock_pid=%s\npid=%s\nstarted=%s\n' "$frontend" "$frontend" "$(date +%s)" > "$dir/state/.startup-network.status"
 
   # Phase 1: the healthy contiguous chain, the session's own id.
   fire_phase "$dir" 1 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
