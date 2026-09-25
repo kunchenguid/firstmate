@@ -92,9 +92,12 @@ test_brief_refuses_unusable_branch_selections() {
   expect_code 1 "$status" "a scout crew branch was accepted"
   assert_contains "$out" "applies only to ship briefs" "a scout crew branch was not refused as a ship-only flag"
 
-  out=$(FM_HOME="$home" "$BRIEF" scout-base-collision proj --scout --base-branch fm/scout-base-collision 2>&1); status=$?
-  expect_code 1 "$status" "a scout base equal to its default crew branch was accepted"
-  assert_contains "$out" "cannot be the crew branch" "a scout base collision was not refused"
+  FM_HOME="$home" "$BRIEF" scout-base-collision proj --scout \
+    --base-branch fm/scout-base-collision >/dev/null \
+    || fail "a valid scout base equal to the default crew name was refused"
+  assert_grep 'Base branch contract: base_branch=fm/scout-base-collision' \
+    "$home/data/scout-base-collision/brief.md" \
+    "a valid scout base was not recorded in the brief"
 
   out=$(FM_HOME="$home" "$BRIEF" bad proj --mode local-only --base-branch 'has space' 2>&1); status=$?
   expect_code 1 "$status" "a base branch with a space was accepted"
@@ -515,6 +518,34 @@ test_review_uses_the_recorded_base() {
   pass "fm-review-diff: a recorded base is the compare ref"
 }
 
+test_scout_review_uses_a_local_base_when_origin_lacks_it() {
+  local home proj remote id out
+  home="$TMP_ROOT/review-scout-local/home"
+  proj="$TMP_ROOT/review-scout-local/proj"
+  remote="$TMP_ROOT/review-scout-local/remote.git"
+  id=named-review-scout-local
+  mkdir -p "$home/data" "$home/state" "$proj"
+  git init -q -b main "$proj"
+  git_identity "$proj"
+  commit_file "$proj" base base base
+  git -C "$proj" checkout -qb office
+  commit_file "$proj" office office office
+  git -C "$proj" checkout -qb "fm/$id"
+  commit_file "$proj" change change change
+  git init -q --bare "$remote"
+  git -C "$proj" remote add origin "$remote"
+  git -C "$proj" push -q origin main
+  printf 'kind=scout\nmode=scout\nworktree=%s\nproject=%s\nbranch=fm/%s\nbase_branch=office\n' \
+    "$proj" "$proj" "$id" > "$home/state/$id.meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REVIEW" "$id" --stat) \
+    || fail "scout review refused its valid local-only base: $out"
+  assert_contains "$out" "diff base: office" \
+    "scout review did not use its local named base"
+  assert_not_contains "$out" "diff base: origin/office" \
+    "scout review invented a remote named base"
+  pass "fm-review-diff: a scout uses its local named base when origin lacks it"
+}
+
 test_brief_names_the_crew_and_base_branches
 test_brief_refuses_unusable_branch_selections
 test_bare_originless_project_lock_resolves
@@ -526,3 +557,4 @@ test_local_merge_refuses_a_linked_landing_checkout
 test_local_merge_refuses_a_bare_linked_landing_checkout
 test_local_merge_fast_forwards_a_bare_repository
 test_review_uses_the_recorded_base
+test_scout_review_uses_a_local_base_when_origin_lacks_it

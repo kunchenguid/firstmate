@@ -1537,11 +1537,6 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ]; then
     exit 1
   fi
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = scout ] && [ "$BASE_BRANCH_SET" -eq 1 ] &&
-  [ "$BASE_BRANCH" = "fm/$ID" ]; then
-  echo "error: --base-branch cannot be the scout's default crew branch (fm/$ID); choose a different base branch" >&2
-  exit 1
-fi
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   fm_backlog_directory_present "$STATE" "state directory" || {
     echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2

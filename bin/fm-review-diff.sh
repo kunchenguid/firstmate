@@ -152,6 +152,7 @@ resolve_pr_head() {
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
+KIND=$(grep '^kind=' "$META" | tail -n 1 | cut -d= -f2- || true)
 COMPARE_REF=$BRANCH
 if [ -n "$PR_URL" ]; then
   if PR_HEAD=$(resolve_pr_head "$PR_URL" "$PR_HEAD_RECORDED"); then
@@ -164,6 +165,22 @@ fi
 if [ "$MODE" = local-only ]; then
   BASE_REF="refs/heads/$DEFAULT"
   BASE_LABEL=$DEFAULT
+elif [ "$KIND" = scout ] && git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+  if ! REMOTE_BASES=$(git -C "$PROJ" ls-remote --heads origin "refs/heads/$DEFAULT" 2>/dev/null); then
+    echo "error: could not check remote base origin/$DEFAULT; refusing to review against an unknown base" >&2
+    exit 1
+  fi
+  if [ -n "$REMOTE_BASES" ]; then
+    if ! git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet; then
+      echo "error: could not fetch remote base origin/$DEFAULT; refusing to review against a cached ref" >&2
+      exit 1
+    fi
+    BASE_REF="refs/remotes/origin/$DEFAULT"
+    BASE_LABEL="origin/$DEFAULT"
+  else
+    BASE_REF="refs/heads/$DEFAULT"
+    BASE_LABEL=$DEFAULT
+  fi
 elif git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
