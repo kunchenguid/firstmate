@@ -151,7 +151,13 @@
 #                          FM_SECONDMATE_LIVENESS_WINDOW_SECS)
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
-# no-op through the watcher singleton lock.
+# no-op through the watcher singleton lock. A live holder whose beacon is stale
+# past the grace (FM_WATCHER_STALE_GRACE, default max(300, FM_POLL+60)) is
+# refused with "lock held by live pid ... but heartbeat is stale"; one stale past
+# the hard bound FM_WATCHER_STALL_BOUND (default 3x that grace) is instead
+# evicted with TERM after its recorded identity is re-verified, and this arm
+# starts in its place, printing "watcher: replaced stalled pid <N> (...)". A
+# holder that survives TERM keeps the refusal and the nonzero exit.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -258,6 +264,11 @@ POLL=${FM_POLL:-15}                   # seconds between cycles
 # This recomputes the library default above now that the real configured
 # POLL is known.
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace "$POLL")}}
+# Hard bound on a live holder's beacon age. Under it a re-arm refuses and asks
+# for inspection (the grace above); at or past it the re-arm evicts the holder
+# instead, because a watcher whose beacon has stalled that long is not polling
+# and nothing else would ever replace it (evict_stalled_holder below).
+WATCHER_STALL_BOUND=${FM_WATCHER_STALL_BOUND:-$((WATCHER_STALE_GRACE * 3))}
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
@@ -2324,12 +2335,40 @@ if ! fm_procevent_launch_confirm_seconds >/dev/null; then
   exit 1
 fi
 
-if ! fm_lock_try_acquire "$WATCH_LOCK"; then
-  BEAT="$STATE/.last-watcher-beat"
+# evict_stalled_holder <pid>: retire a live lock holder whose beacon stalled past
+# WATCHER_STALL_BOUND. The pid is signalled only while it still proves the
+# lock's own recorded identity (fm_watcher_lock_matches_pid: this home, this
+# script, and the starttime+cmdline proof the lock carries), so a recycled pid
+# is never touched; TERM only, never KILL, and never a name or pattern match.
+# Succeeds only once the holder has exited within the bounded wait.
+evict_stalled_holder() {
+  local pid=$1 i=0
+  fm_watcher_lock_matches_pid "$STATE" "$WATCH_PATH" "$pid" "$FM_HOME" || return 1
+  kill -TERM "$pid" 2>/dev/null || return 1
+  while [ "$i" -lt 50 ] && fm_pid_alive "$pid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! fm_pid_alive "$pid"
+}
+
+EVICTED_PID=
+EVICTED_BEAT_AGE=
+BEAT="$STATE/.last-watcher-beat"
+while ! fm_lock_try_acquire "$WATCH_LOCK"; do
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
     if [ -e "$BEAT" ]; then
       beat_age=$(fm_path_age "$BEAT")
       if [ "$beat_age" -ge "$WATCHER_STALE_GRACE" ]; then
+        # One eviction per arm: the retry re-reads the lock and beacon, so a
+        # holder that exited leaves a dead-pid lock the normal reclaim takes,
+        # and a rival arm that won first reads as a fresh running watcher.
+        if [ -z "$EVICTED_PID" ] && [ "$beat_age" -ge "$WATCHER_STALL_BOUND" ] \
+          && evict_stalled_holder "$FM_LOCK_HELD_PID"; then
+          EVICTED_PID=$FM_LOCK_HELD_PID
+          EVICTED_BEAT_AGE=$beat_age
+          continue
+        fi
         echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
         exit 1
       fi
@@ -2342,6 +2381,9 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
     echo "watcher: already running"
   fi
   exit 0
+done
+if [ -n "$EVICTED_PID" ]; then
+  echo "watcher: replaced stalled pid $EVICTED_PID (beacon ${EVICTED_BEAT_AGE}s past hard bound ${WATCHER_STALL_BOUND}s)"
 fi
 WATCHER_RECOVERY_PENDING=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then

@@ -574,6 +574,14 @@ deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
 while :; do
   if healthy_watcher; then
     if [ "$HEALTHY_PID" = "$child" ]; then
+      if grep -q '^watcher: replaced stalled pid ' "$child_out" 2>/dev/null; then
+        # The child evicted a live holder whose beacon stalled past the hard
+        # bound (bin/fm-watch.sh evict_stalled_holder). Ledger that as its own
+        # row - lock_before still names the evicted holder - then reopen this
+        # cycle so its ordinary close row follows as usual.
+        cycle_log_append 0 none stalled-holder-replaced "started:$child"
+        cycle_begin "$child" started "$HEALTHY_IDENTITY"
+      fi
       cycle_refresh_lock_before
       if ! handling_generation=$(handling_successor_generation); then
         cleanup_child
