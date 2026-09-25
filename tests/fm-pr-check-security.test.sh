@@ -179,6 +179,14 @@ case " $* " in
   *" api repos/"*"/commits/"*"/statuses?per_page=100 "*)
     printf '%s\n' '[[]]'
     ;;
+  *" api --paginate repos/"*"/rules/branches/"*merge_queue*)
+    ;;
+  *" api --paginate repos/"*"/rules/branches/"*)
+    printf '%s\n' '[]'
+    ;;
+  *" api repos/"*"/branches/"*)
+    printf '%s\n' '{"name":"main","protected":false}'
+    ;;
   *" api repos/"*"/pulls/"*)
     printf '%s\n' "{\"state\":\"open\",\"user\":{\"login\":\"author\"},\"head\":{\"sha\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\"},\"draft\":false,\"mergeable\":true,\"merged_at\":null}"
     ;;
