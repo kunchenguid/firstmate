@@ -406,7 +406,7 @@ classify_signal() {  # <reason-after-colon> <state>
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state> [<span-record> <span-status>]
-  local win=$1 state=$2 record=${3-} rc=${4-} task last event rest
+  local win=$1 state=$2 record=${3-} rc=${4-} task last declared event rest
   task=$(window_to_task "$win" "$state")
   if [ -z "$rc" ]; then
     record=$(status_span_first_actionable_record "$state/$task.status" \
@@ -424,14 +424,15 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
     printf 'escalate|stale + actionable status: %s' "$event"
     return
   fi
-  if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
+  declared=$(status_declared_wait_line "$state/$task.status")
+  if [ -n "$declared" ] && status_is_paused_or_captain_held "$declared"; then
     # A DECLARED external-wait pause or a verified captain-held transfer
     # (fm-classify-lib.sh owns which declarations qualify): an idle pane is
     # EXPECTED, so this is not a wedge. The caller records a pause marker (long
     # re-surface cadence in housekeeping) rather than a wedge stale marker. Cheap:
-    # reuses the status line already read, no fm-crew-state.sh call, mirroring the
+    # a status-file read, no fm-crew-state.sh call, mirroring the
     # daemon's existing status-log classification.
-    printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
+    printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$declared"
     return
   fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
@@ -466,9 +467,38 @@ classify_heartbeat() {
   printf 'self|heartbeat (catch-all scan runs in housekeeping)'
 }
 
-# Anything unrecognized is escalated (fail-safe).
+# Anything unrecognized is escalated (fail-safe). A delivered unknown wake is
+# acknowledged by its exact distilled line in state/.subsuper-unknown-acked, so
+# that same identity does not escalate again in this away session; the away
+# entry and return paths clear that file. An identity still only buffered,
+# or never successfully flushed, is not acknowledged and still escalates.
 classify_unknown() {  # <reason>
   printf 'escalate|unknown wake: %s' "$1"
+}
+
+# Exact distilled line of an unknown-wake escalation, or nothing.
+unknown_wake_line() {  # <item>
+  case "$1" in
+    "unknown wake: "*) printf '%s' "$1"; return 0 ;;
+  esac
+  return 1
+}
+
+unknown_wake_acknowledged() {  # <state> <line>
+  local ack="$1/.subsuper-unknown-acked"
+  [ -f "$ack" ] || return 1
+  grep -Fxq -- "$2" "$ack"
+}
+
+# Record every unknown-wake line from a flush that already reached the supervisor.
+# Ordinary escalation lines are left alone.
+unknown_wake_acknowledge_flushed() {  # <state> <buffer>
+  local state=$1 buf=$2 line
+  while IFS= read -r line || [ -n "$line" ]; do
+    unknown_wake_line "$line" >/dev/null || continue
+    unknown_wake_acknowledged "$state" "$line" && continue
+    printf '%s\n' "$line" >> "$state/.subsuper-unknown-acked" || return 1
+  done < "$buf"
 }
 
 # --- stale marker + escalation buffer (stateful, but via explicit state dir) -
@@ -548,7 +578,7 @@ migrate_watcher_pause_markers() {  # <state>
     task=$(basename "$meta"); task=${task%.meta}
     key=$(_stale_key "$task")
     watcher_key=$(_stale_key "$win")
-    last=$(last_status_line "$state/$task.status")
+    last=$(status_declared_wait_line "$state/$task.status")
     if status_is_paused_or_captain_held "$last" || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
       reconcile_pause_tracking "$win" "$state" "$last"
     fi
@@ -562,7 +592,7 @@ sync_pause_markers_from_signal() {  # <state> <signal files>
   for f in "${files[@]}"; do
     case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || continue
-    last=$(last_status_line "$f")
+    last=$(status_declared_wait_line "$f")
     task=$(basename "$f"); task=${task%.status}
     win=$(window_for_task "$task" "$state" 2>/dev/null || true)
     [ -n "$win" ] || continue
@@ -693,7 +723,10 @@ stale_window_is_busy() {  # <window> <state>
 }
 
 escalate_add() {  # <state> <distilled-item>
-  local state=$1 item=$2 buf
+  local state=$1 item=$2 buf line
+  if line=$(unknown_wake_line "$item"); then
+    unknown_wake_acknowledged "$state" "$line" && return 0
+  fi
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || _now > "${buf}.since"
   printf '%s\n' "$item" >> "$buf"
@@ -712,7 +745,13 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  if inject_msg "$msg" "$state"; then
+    unknown_wake_acknowledge_flushed "$state" "$buf" \
+      || log "unknown-wake acknowledgement write failed; a delivered unknown wake may escalate again"
+    : > "$buf"
+    rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
+    return 0
+  fi
   return 1
 }
 
@@ -1066,7 +1105,7 @@ housekeeping() {  # <state>
       rm -f "$marker"; continue
     fi
     task=$(window_to_task "$win" "$state")
-    last=$(last_status_line "$state/$task.status")
+    last=$(status_declared_wait_line "$state/$task.status")
     if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
@@ -1107,7 +1146,7 @@ housekeeping() {  # <state>
       rm -f "$marker"; continue
     fi
     task=$(window_to_task "$win" "$state")
-    last=$(last_status_line "$state/$task.status")
+    last=$(status_declared_wait_line "$state/$task.status")
     if [ -z "$last" ] || ! status_is_paused_or_captain_held "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
@@ -1142,7 +1181,7 @@ housekeeping() {  # <state>
     case "$?" in
       2) rm -f "$marker" ;;
       *)
-        last=$(last_status_line "$state/$task.status")
+        last=$(status_declared_wait_line "$state/$task.status")
         if [ -n "$last" ] && status_is_captain_held "$last"; then
           if escalate_add "$state" "captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $win"; then
             _now > "$marker"
@@ -1396,7 +1435,7 @@ handle_wake() {  # <reason> <state>
                 pause) : ;;
                 *) case "$stale_detail" in
                      idle\ *s,\ possible\ wedge,\ escalation\ *)
-                       last=$(last_status_line "$state/$task.status")
+                       last=$(status_declared_wait_line "$state/$task.status")
                        status_is_paused_or_captain_held "$last" \
                          || decision="escalate|${reason#stale: }"
                        ;;
@@ -1411,7 +1450,7 @@ handle_wake() {  # <reason> <state>
   [ "$kind" = signal ] && sync_pause_markers_from_signal "$state" "$arg"
   if [ "$kind" = stale ] && [ "$action" = escalate ]; then
     task=$(window_to_task "$arg" "$state")
-    last=$(last_status_line "$state/$task.status")
+    last=$(status_declared_wait_line "$state/$task.status")
     reconcile_pause_tracking "$arg" "$state" "$last"
   fi
   case "$action" in
