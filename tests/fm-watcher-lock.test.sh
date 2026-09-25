@@ -1183,6 +1183,94 @@ test_cycle_successor_link_lands_on_a_predecessor_still_closing() {
   pass "a predecessor still closing links the successor that already claimed it"
 }
 
+# A foreign watcher can win the singleton while this arm's own child stands
+# down. That winner is a verified healthy watcher, so the predecessor that
+# handed over to this arm did get a successor - but the child's close then runs
+# a branch (a delivered wake, or a nonzero exit) that records this arm's own row
+# and returns without ever publishing a claim, leaving the predecessor reading
+# successor=none with nothing on stderr. The fixture forces the nonzero-exit
+# branch by letting the child see the peer's beacon as stale while the arm still
+# sees it as fresh.
+test_cycle_successor_link_survives_a_foreign_singleton_winner() {
+  local dir state fakebin armout succout succerr peer_ready peer identity first_arm watcher_pid status i
+  dir=$(make_case cycle-ledger-link-foreign-winner)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/first-arm.out"
+  succout="$dir/successor-arm.out"
+  succerr="$dir/successor-arm.err"
+  peer_ready="$dir/peer.ready"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  first_arm=$!
+  i=0
+  while [ "$i" -lt 200 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$watcher_pid" "$armout" \
+    || fail "foreign-winner predecessor cycle did not start: $(cat "$armout")"
+  kill -HUP "$first_arm" 2>/dev/null || true
+  wait "$first_arm" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 200 ]; do
+    grep -q "arm_pid=$first_arm" "$state/.watch-cycle-exits.log" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -q "arm_pid=$first_arm.*successor=none" "$state/.watch-cycle-exits.log" \
+    || fail "predecessor did not record an unlinked cycle: $(tail -3 "$state/.watch-cycle-exits.log" 2>/dev/null)"
+  # The foreign winner: a live, TERM-resistant holder of the singleton with a
+  # fresh beacon, so --restart cannot stop it and the arm confirms it healthy.
+  node -e 'const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(process.argv[1], "ready\n"); setTimeout(() => {}, 300000)' "$peer_ready" &
+  peer=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$peer_ready" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -s "$peer_ready" ]; then
+    kill -KILL "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    fail "TERM-resistant foreign winner did not become ready"
+  fi
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") \
+    || fail "could not identify the foreign winner pid"
+  rm -rf "$state/.watch.lock"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+
+  # FM_WATCHER_STALE_GRACE applies to the child only; the arm's own freshness
+  # bound is FM_GUARD_GRACE, left at its default. The child therefore refuses
+  # the live holder and exits nonzero while the arm still sees that same holder
+  # as the healthy watcher that won the singleton. The stall bound stays high so
+  # the child never tries to evict the holder instead.
+  status=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_WATCH_PREDECESSOR_ARM_PID="$first_arm" \
+    FM_WATCHER_STALE_GRACE=0 FM_WATCHER_STALL_BOUND=999999 \
+    FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 \
+    "$WATCH_ARM" --restart > "$succout" 2> "$succerr" || status=$?
+  [ "$status" -ne 0 ] \
+    || fail "successor arm exited zero though its child stood down nonzero: $(cat "$succout")"
+  grep -q 'reason=nonzero-exit' "$state/.watch-cycle-exits.log" \
+    || fail "the successor's child did not take the nonzero-exit close this case exercises: $(tail -3 "$state/.watch-cycle-exits.log" 2>/dev/null)"
+  is_live_non_zombie "$peer" || fail "the arm killed the foreign singleton winner"
+
+  grep -q "arm_pid=$first_arm.*successor=attached:$peer" "$state/.watch-cycle-exits.log" \
+    || fail "a predecessor whose successor lost the singleton to a verified foreign watcher was left unlinked: $(tail -3 "$state/.watch-cycle-exits.log" 2>/dev/null)"
+
+  kill -KILL "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  pass "a foreign singleton winner still links the predecessor that handed over"
+}
+
 # The claim horizon exists to retire claims whose predecessor record never
 # appears, not to cancel a link that is still applicable. A deferred claim
 # routinely outlives the horizon, because the only remaining application point
@@ -1627,6 +1715,7 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_cycle_successor_link_survives_a_busy_ledger
 test_cycle_successor_link_lands_on_a_predecessor_still_closing
+test_cycle_successor_link_survives_a_foreign_singleton_winner
 test_cycle_successor_link_outlives_the_claim_horizon
 test_unreadable_claim_is_retried_not_retired
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified

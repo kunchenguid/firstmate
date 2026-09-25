@@ -806,6 +806,7 @@ while :; do
       exit $?
     fi
     # Another watcher won the singleton; our child stood down.
+    cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
     wait "$child"
     rc=$?
     owned_child_finished "$rc"
