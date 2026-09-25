@@ -102,6 +102,7 @@ Bounds of the Claude Code support, recorded with evidence in [`calm-mode-feasibi
 - On the main-screen layout (not the fullscreen alternate screen), a toggle redraws the live screen by clearing and reprinting it, and the terminal's own scrollback keeps the earlier rendering above it; the fullscreen layout has no such stale copy.
 - The sailboat is painted through Claude Code's Raster element, whose colors are RGB quantized to 256-color escapes rather than the standard 16-color ANSI codes Pi's widget emits.
 - The detailed transcript view (`ctrl+o`) keeps its per-message timestamp and model headers where hidden assistant rows sat, because those headers are not a hookable drawing.
+- Collapsed thinking never appears in Claude Code's default view, and the mod has no thinking drawing to hide in other views.
 
 Regression entry points:
 
