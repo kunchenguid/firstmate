@@ -9,12 +9,14 @@
 # writers record and nothing calls the feed yet: the host's attended posture
 # is the later step that reads it.
 #
-# WRITERS. Each verified primary's code-owned turn surfaces append here, never
-# the model: Claude through its prompt-submit and Stop hooks, and Cursor
-# through its beforeSubmitPrompt and afterAgentResponse hooks. A writer appends
-# captain text (the submitted prompt) and MAIN text (the turn's final
-# assistant message), never tool traffic. A
-# prompt the shared operational-input protocol classifies
+# WRITERS. Code-owned turn surfaces append here, never the model: Claude
+# through its prompt-submit and Stop hooks, and Cursor through its
+# beforeSubmitPrompt and afterAgentResponse hooks. Codex, Grok, OpenCode, and
+# omp have no writer (docs/supervision-host.md "The dialog mirror"). A writer
+# appends captain text (the submitted prompt) and MAIN text (the turn's final
+# assistant message), never tool traffic, as said, with only the whitespace at
+# the very end of the message trimmed. A prompt the shared operational-input
+# protocol classifies
 # (bin/fm-operational-input.sh: watcher wakes, guard follow-ups, launch briefs)
 # is fleet machinery, not dialog, and is dropped, and so is a prompt that opens
 # with the wrapper a harness puts around a turn it started itself: Claude
@@ -62,24 +64,14 @@
 # it left out counted within that bound. Mirrored text is context for
 # judgment and authorizes nothing (bin/fm-branch-prompt.sh "Context channels").
 #
-# VERIFIED WRITERS. `verified <harness>` exits 0 for a primary whose writers
-# were proven against the real harness to record a session's dialog from its
-# first captain prompt (docs/supervision-host.md "The dialog mirror"); the
-# host's attended posture is meant only for those. Codex, Grok, OpenCode, and
-# omp have no writer (docs/supervision-host.md "The dialog mirror").
-#
 # Usage:
 #   fm-host-mirror.sh hook <harness>        a prompt-submit or turn-end hook payload on stdin
 #   fm-host-mirror.sh feed <session> new|resume
 #   fm-host-mirror.sh commit
-#   fm-host-mirror.sh check
-#   fm-host-mirror.sh verified <harness>
 # hook and commit always exit 0 and print nothing; feed exits 1 when
-# the mirror is missing, could not be read, or holds an invalid entry, and
-# prints nothing when there is nothing to feed; check validates only the mirror
-# file, exiting 1 when its contents would fail the feed, and prints nothing,
-# stages nothing, and moves no cursor. Feed also requires an identifiable main
-# session.
+# the mirror is missing, could not be read, or holds an invalid entry, or the
+# main session cannot be identified, and prints nothing when there is nothing
+# to feed.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -88,7 +80,6 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
-FM_HOST_MIRROR_VERIFIED='claude cursor'
 MIRROR_CAP=4000
 MIRROR_KEEP=200
 FEED_CAP=16000
@@ -99,23 +90,18 @@ usage() {
 }
 
 case "${1:-}" in
-  verified)
-    [ "$#" -eq 2 ] || usage
-    case " $FM_HOST_MIRROR_VERIFIED " in *" $2 "*) exit 0 ;; esac
-    exit 1
-    ;;
   hook)
     # The opt-in gate runs before anything is sourced or created, so a home
     # without the file, and a crewmate worktree with no config/, stay inert.
     [ -f "$CONFIG/supervision-host" ] || exit 0
     ;;
-  feed|commit|check) ;;
+  feed|commit) ;;
   -h|--help) sed -n '2,/^set -u/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) usage ;;
 esac
 
 if ! command -v jq >/dev/null 2>&1 || [ ! -d "$STATE" ]; then
-  case "$1" in feed|check) exit 1 ;; esac
+  [ "$1" != feed ] || exit 1
   exit 0
 fi
 
@@ -156,11 +142,9 @@ operational() {  # <text>
 
 # Append one entry. The caller holds nothing; this takes the mirror lock.
 # Returns 1 when the entry could not be recorded; an entry dropped by design
-# (empty, injected, operational, or already recorded) returns 0.
+# (injected, operational, or already recorded) returns 0.
 append_entry() {  # <captain|main> <text> [<id>]
   local tag=$1 text=$2 id=${3:-} key last seq tmp record lines=0
-  text=$(printf '%s' "$text" | sed -e 's/[[:space:]]*$//')
-  [ -n "$(printf '%s' "$text" | tr -d '[:space:]')" ] || return 0
   if [ "$tag" = captain ]; then
     case "${text#"${text%%[![:space:]]*}"}" in
       '<task-notification>'*) return 0 ;;
@@ -242,6 +226,7 @@ case "$1" in
           elif $event == "afterAgentResponse" then
             ["main", ((.generation_id // "") | tostring), ((.text // "") | tostring)]
           else empty end
+        | .[2] |= sub("\\s+\\z"; "")
         | select(.[2] != "")
         | "\(.[0])\n\(.[1])\n\(.[2])"
       end' 2>/dev/null) || exit 0
@@ -259,16 +244,6 @@ case "$1" in
     fm_lock_acquire_wait "$LOCK" || exit 0
     mv -f "$STAGED" "$CURSOR" 2>/dev/null || true
     fm_lock_release "$LOCK"
-    exit 0
-    ;;
-  check)
-    [ "$#" -eq 1 ] || usage
-    [ -f "$MIRROR" ] || exit 1
-    fm_lock_acquire_wait "$LOCK" || exit 1
-    jq -Rs "$ENTRIES" "$MIRROR" >/dev/null 2>&1
-    rc=$?
-    fm_lock_release "$LOCK"
-    [ "$rc" -eq 0 ] || exit 1
     exit 0
     ;;
 esac

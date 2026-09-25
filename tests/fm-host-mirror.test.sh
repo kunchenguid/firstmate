@@ -156,6 +156,27 @@ test_operational_foreign_and_unowned_input_is_dropped() {
   pass "mirror: operational input, a harness-started turn, a foreign host's payload, other events, and a session without the lock are never mirrored"
 }
 
+# Dialog is recorded as said: a line ending in spaces, blank lines, and
+# indentation inside a message survive, and only the whitespace at the very
+# end of the message is trimmed.
+test_internal_whitespace_is_recorded_verbatim() {
+  local home
+  home=$(make_home whitespace)
+  as_session "$home" "$SAY"'
+    say captain "$(printf "first line  \n\n  second line\t\nthird  \n \n")" p1
+    say main "$(printf "reply line \n    indented\n\nlast")"$(printf " \n\t ") p1
+  ' || fail "a writer failed"
+  assert_equals "$(printf 'first line  \n\n  second line\t\nthird')" \
+    "$(jq -r 'select(.tag == "captain") | .text' "$home/state/.host-mirror.jsonl")" \
+    "a captain prompt must keep its internal whitespace and lose only its trailing whitespace"
+  assert_equals "$(printf 'reply line \n    indented\n\nlast')" \
+    "$(jq -r 'select(.tag == "main") | .text' "$home/state/.host-mirror.jsonl")" \
+    "a main reply must keep its internal whitespace and lose only its trailing whitespace"
+  [ "$(jq -j 'select(.tag == "captain") | .text' "$home/state/.host-mirror.jsonl" | tail -c 1)" = d ] \
+    || fail "the trailing whitespace at the end of a message must be trimmed"
+  pass "mirror: a captain prompt and a main reply keep their internal whitespace and newlines verbatim"
+}
+
 test_entries_are_deduplicated_and_capped() {
   local home long text kept
   home=$(make_home capped)
@@ -198,9 +219,7 @@ test_a_failed_append_leaves_the_mirror_valid() {
     big=$(awk "BEGIN { for (i = 0; i < 3000; i++) printf \"z\" }")
     (ulimit -f 1; trap "" XFSZ; say main "$big" p1) > "$FM_HOME/full.out" 2>&1
     printf "%s\n" "$?" > "$FM_HOME/full.rc"
-    "$MIRROR" check || exit 1
     say captain "asked once space returned" p2
-    "$MIRROR" check || exit 1
     "$MIRROR" feed s1 new > "$FM_HOME/feed.after"
   ' || fail "the mirror did not stay valid across a failed append"
   assert_equals "0" "$(cat "$home/full.rc")" "a failed append must still exit 0"
@@ -366,22 +385,21 @@ test_recycled_lock_pid_is_a_new_main_session() {
 
 # A mirror whose sequence numbers are not positive integers rising in file
 # order, or whose final record is unterminated, cannot vouch for the dialog it
-# carries: check and feed both refuse it, and the feed stages nothing.
+# carries: the feed refuses it and stages nothing.
 test_feed_refuses_unfeedable_sequences_and_unterminated_records() {
   local home bad good
   home=$(make_home unfeedable)
-  as_session "$home" "$SAY"'say captain "a sound ask"; "$MIRROR" check' || fail "check refused a sound mirror"
+  as_session "$home" "$SAY"'say captain "a sound ask"; "$MIRROR" feed s1 new >/dev/null' || fail "the feed refused a sound mirror"
   good=$(cat "$home/state/.host-mirror.jsonl")
   for bad in "$(printf '%s' "$good" | jq -c '.seq = 0')"$'\n' \
     "$(printf '%s' "$good" | jq -c '.seq = 1.5')"$'\n' \
     "$good"$'\n'"$good"$'\n' \
     "$good"; do
     printf '%s' "$bad" > "$home/state/.host-mirror.jsonl"
-    as_session "$home" '"$MIRROR" check' && fail "check accepted an unfeedable mirror:"$'\n'"$bad"
     as_session "$home" '"$MIRROR" feed s1 new' >/dev/null && fail "the feed accepted an unfeedable mirror:"$'\n'"$bad"
     [ ! -e "$home/state/.host-mirror-cursor.next" ] || fail "the feed staged a cursor for an unfeedable mirror"
   done
-  pass "mirror: check and feed refuse a mirror with a zero, fractional, or non-rising sequence, or an unterminated final record"
+  pass "mirror: the feed refuses a mirror with a zero, fractional, or non-rising sequence, or an unterminated final record"
 }
 
 test_recreated_mirror_continues_past_both_cursors() {
@@ -405,21 +423,11 @@ test_recreated_mirror_continues_past_both_cursors() {
   pass "mirror: a recreated mirror continues past the committed and staged cursors, so a resumed conversation still gets new dialog"
 }
 
-test_verified_writers() {
-  local harness
-  for harness in claude cursor; do
-    "$MIRROR" verified "$harness" || fail "$harness must have a verified dialog mirror"
-  done
-  for harness in codex grok opencode omp kimi pi unknown; do
-    ! "$MIRROR" verified "$harness" || fail "$harness must not claim a verified dialog mirror"
-  done
-  pass "mirror: exactly the primaries whose writers record a session from its first captain prompt report a verified mirror"
-}
-
 test_every_harness_registration_writes_the_mirror
 test_writers_are_inert_without_the_opt_in
 test_home_without_the_flag_is_untouched
 test_operational_foreign_and_unowned_input_is_dropped
+test_internal_whitespace_is_recorded_verbatim
 test_entries_are_deduplicated_and_capped
 test_a_later_session_may_reuse_an_entry_id
 test_a_failed_append_leaves_the_mirror_valid
@@ -430,4 +438,3 @@ test_feed_bound_includes_its_omitted_note
 test_recycled_lock_pid_is_a_new_main_session
 test_feed_refuses_unfeedable_sequences_and_unterminated_records
 test_recreated_mirror_continues_past_both_cursors
-test_verified_writers

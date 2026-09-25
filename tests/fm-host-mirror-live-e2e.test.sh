@@ -168,7 +168,6 @@ for harness in $HARNESSES; do
     ABSENT="$ABSENT $harness"
     continue
   fi
-  "$ROOT/bin/fm-host-mirror.sh" verified "$harness" || fail "$harness is not in the verified-writer list this guard proves"
   case "$harness" in
     claude) run_claude ;;
     cursor) run_interactive cursor cursor-agent ;;

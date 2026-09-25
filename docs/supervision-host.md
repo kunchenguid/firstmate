@@ -103,7 +103,7 @@ Today its writers record on opted-in Claude and Cursor primaries, but the host n
 The writers use code-owned turn surfaces rather than model-generated messages; `bin/fm-host-mirror.sh` owns the input exclusions.
 A captain prompt whose hook write fails is not mirrored, and Claude and Cursor have no later source for it.
 
-A primary's mirror is verified (`bin/fm-host-mirror.sh verified`) only when its writers were proven against the real harness to record the session's dialog from its first captain prompt, which today means Claude and Cursor.
+Claude and Cursor have writers, proven against the real harness to record the session's dialog from its first captain prompt.
 Codex has no writer yet: a supervising Codex main stays inside one turn across its foreground checkpoints, so a captain message typed then fires no prompt or Stop hook, and only a reader of its transcript could record it.
 Grok and OpenCode have no writer, because their session takes the fleet lock during its first turn, so that turn's captain prompt could never be recorded.
 omp has no verified writer, because no omp was available to prove one against.
