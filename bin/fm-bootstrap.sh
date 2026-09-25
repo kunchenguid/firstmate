@@ -139,6 +139,15 @@
 #          consumes respawned ids. Worker output is captured separately and
 #          replayed in spawn order; failure to create that private capture
 #          directory selects the sequential fallback.
+#          When config/ssh-launch-stagger-host names a remote host, the Nth
+#          launch bound for that host within one concurrent batch waits
+#          0.4s * (N-1) inside its own worker before it starts, so
+#          simultaneous cold SSH connections to that host's sshd arrive 0.4s
+#          apart and do not collide with its connection-rate limit. The wait
+#          happens after the fork, so the parent dispatch loop never blocks:
+#          every other host and every local launch is forked immediately and
+#          runs exactly as before, unserialized. Absent (the default) means
+#          no staggering at all.
 #          A relaunch that the liveness sweep performs during an `only` run is
 #          always reported, because a digest composed before that run already
 #          printed the superseded endpoint record.
@@ -205,6 +214,19 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-timing-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-timing-lib.sh"
 
+# config/ssh-launch-stagger-host is the primary-owned optional setting naming
+# the one remote host (the literal remote_host value registered in
+# data/secondmates.md) whose repeat launches within one bootstrap batch get
+# spaced; see bootstrap_parallel_spawn and the header doc above for why. Read
+# the same way config/lavish-axi-host is read. Absent means no staggering at
+# all, unchanged from today's default for every installation that does not
+# create the file. Reading and validating it is deferred to just before the
+# network sweeps that consume it (see below), so a malformed file only
+# refuses the run that would actually use it, not `lavish-compatible`,
+# `install`, or a detect-only/network-skip session that never forks a
+# network batch.
+BOOTSTRAP_STAGGER_HOST=""
+
 # Network-phase selection (see the header). An unrecognized value resolves to
 # `all` so a malformed override runs every step rather than silently dropping a
 # safety sweep.
@@ -239,16 +261,36 @@ network_sweep_authorized() {
 # or mis-attribute SECONDMATE_LIVENESS / SECONDMATE_SYNC lines. Respawned ids
 # are collected from per-id files because background workers cannot mutate
 # the parent's SECONDMATE_RESPAWNED_IDS.
+# Repeat launches to the configured config/ssh-launch-stagger-host host are
+# spaced by bootstrap_parallel_spawn; see that function and the header doc
+# above for why.
 bootstrap_parallel_begin() {
   BOOTSTRAP_PAR_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-bootstrap-par.XXXXXX") || return 1
   BOOTSTRAP_PAR_N=0
+  BOOTSTRAP_PAR_STAGGER_N=0
   FM_BOOTSTRAP_PARALLEL_DIR=$BOOTSTRAP_PAR_DIR
   export FM_BOOTSTRAP_PARALLEL_DIR
 }
 
-bootstrap_parallel_spawn() {
+# <remote-host> is the item's remote_host, or "" for a local item. Every item
+# is forked immediately; only a worker bound for the configured
+# config/ssh-launch-stagger-host host waits, and only after its own fork,
+# 0.4s times the number of that host's items already dispatched in this
+# batch. That is the smallest spacing evidence showed clearing six
+# same-instant cold SSH connections to that host that otherwise dropped
+# three of eighteen. Because the wait lives in the worker, an item for any
+# other host and any local item starts the instant the loop reaches it. An
+# unset (empty) configured host disables staggering entirely.
+bootstrap_parallel_spawn() {  # <remote-host> <command> [args...]
+  local host=$1 tenths=0
+  shift
+  if [ -n "$BOOTSTRAP_STAGGER_HOST" ] && [ "$host" = "$BOOTSTRAP_STAGGER_HOST" ]; then
+    tenths=$((BOOTSTRAP_PAR_STAGGER_N * 4))
+    BOOTSTRAP_PAR_STAGGER_N=$((BOOTSTRAP_PAR_STAGGER_N + 1))
+  fi
   BOOTSTRAP_PAR_N=$((BOOTSTRAP_PAR_N + 1))
   (
+    [ "$tenths" -eq 0 ] || sleep "$((tenths / 10)).$((tenths % 10))"
     "$@"
   ) >"$BOOTSTRAP_PAR_DIR/$BOOTSTRAP_PAR_N.out" 2>"$BOOTSTRAP_PAR_DIR/$BOOTSTRAP_PAR_N.err" &
   printf '%s\n' "$!" > "$BOOTSTRAP_PAR_DIR/$BOOTSTRAP_PAR_N.pid"
@@ -273,7 +315,7 @@ bootstrap_parallel_finish() {
     SECONDMATE_RESPAWNED_IDS="$SECONDMATE_RESPAWNED_IDS $(tr -d '\n' < "$f")"
   done
   rm -rf "$BOOTSTRAP_PAR_DIR"
-  unset FM_BOOTSTRAP_PARALLEL_DIR BOOTSTRAP_PAR_DIR BOOTSTRAP_PAR_N
+  unset FM_BOOTSTRAP_PARALLEL_DIR BOOTSTRAP_PAR_DIR BOOTSTRAP_PAR_N BOOTSTRAP_PAR_STAGGER_N
 }
 
 secondmate_note_respawned() {  # <id>
@@ -669,7 +711,7 @@ secondmate_sync() {
     remote_host=$(fm_meta_get "$meta" remote_host)
     [ -n "$remote_host" ] || continue
     if [ "$parallel" -eq 1 ]; then
-      bootstrap_parallel_spawn secondmate_sync_remote_one_timed "$id" "$_home" "$remote_host"
+      bootstrap_parallel_spawn "$remote_host" secondmate_sync_remote_one_timed "$id" "$_home" "$remote_host"
     else
       secondmate_sync_remote_one_timed "$id" "$_home" "$remote_host"
     fi
@@ -717,7 +759,7 @@ secondmate_liveness_sweep() {
     label=$id
     [ -z "$remote_host" ] || label="$id@$remote_host"
     if [ "$parallel" -eq 1 ]; then
-      bootstrap_parallel_spawn secondmate_liveness_one_timed "$meta" "$id" "$label"
+      bootstrap_parallel_spawn "$remote_host" secondmate_liveness_one_timed "$meta" "$id" "$label"
     else
       secondmate_liveness_one_timed "$meta" "$id" "$label"
     fi
@@ -1537,6 +1579,28 @@ fi
 local_phase && detect_local_config
 
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+  # config/ssh-launch-stagger-host is read and validated here, before any
+  # network sweep starts (including the fleet_sync clone-refresh fork right
+  # below), so a malformed file exits before anything is left running
+  # unwaited and unlocked.
+  if network_phase; then
+    if ! BOOTSTRAP_STAGGER_HOST_CONFIG_PRESENT=$(fm_config_source_present "$CONFIG/ssh-launch-stagger-host"); then
+      exit 1
+    fi
+    if [ "$BOOTSTRAP_STAGGER_HOST_CONFIG_PRESENT" = 1 ]; then
+      if [ ! -f "$CONFIG/ssh-launch-stagger-host" ] || [ ! -r "$CONFIG/ssh-launch-stagger-host" ]; then
+        echo "error: config/ssh-launch-stagger-host must be a readable regular file" >&2
+        exit 1
+      fi
+      BOOTSTRAP_STAGGER_HOST=$(cat "$CONFIG/ssh-launch-stagger-host") || exit 1
+      case "$BOOTSTRAP_STAGGER_HOST" in
+        ''|*[[:space:][:cntrl:]]*)
+          echo "error: config/ssh-launch-stagger-host must contain one non-empty host value without whitespace" >&2
+          exit 1
+          ;;
+      esac
+    fi
+  fi
   # secondmate_sync consumes SECONDMATE_RESPAWNED_IDS from the liveness sweep, so
   # those two always run together in the same phase. Clone refresh does not
   # depend on them, so it starts in the background and overlaps their wall clock.

@@ -880,6 +880,18 @@ When the file is absent, worker launches do not add a board address and retain t
 Malformed or unreadable values refuse the launch before the worker starts.
 The address selects the existing shared server; it does not authorize starting or stopping the server, and the Lavish startup crash remains a vendor-tool concern.
 
+## SSH launch stagger host (config/ssh-launch-stagger-host)
+
+The optional local, gitignored `config/ssh-launch-stagger-host` names one remote host, read the same way `config/lavish-axi-host` is read.
+Its content is the literal `remote_host` value that host's secondmates are registered under in `data/secondmates.md`.
+When it is present, `bin/fm-bootstrap.sh` spaces repeated launches bound for that host within one concurrent bootstrap batch by a fixed 0.4s per repeat, so simultaneous cold SSH connections to that host's `sshd` do not collide with its connection-rate limit.
+Every other host, and every local launch, still fires immediately and runs exactly as before.
+When the file is absent, no staggering happens at all, which is the unchanged default for every installation that does not create the file.
+There is no environment-variable override; the setting is file-only.
+Malformed or unreadable values refuse the network sweeps of that bootstrap run, before any of them starts.
+The setting only matters in a home that owns live secondmates of its own, since a secondmate home never contains one; it is not part of the inherited-configuration contract.
+`bin/fm-bootstrap.sh`'s header owns the exact spacing mechanism.
+
 ## Home brief include (config/brief-include.md)
 
 The optional local, gitignored `config/brief-include.md` adds standing worker instructions to every ship and scout brief.

@@ -9,6 +9,12 @@
 # that a dirty or unreachable mate still refuses rather than proceeding. This
 # suite drives bin/fm-bootstrap.sh's network-only phase through FM_SSH_BIN, so
 # it exercises the same remote probe path a real session start uses.
+#
+# One scheduling property is a contract of its own and is covered here too:
+# when config/ssh-launch-stagger-host names a remote host, repeated launches to
+# that host are spaced, while every other host and every local launch still
+# starts immediately; when the file is absent, no launch is ever spaced. See
+# run_stagger_scenario and the tests below.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -73,6 +79,9 @@ case "$command_name" in
 esac
 if [ "$slow" -eq 1 ]; then
   printf 'START %s %s %s\n' "$host" "$command_name" "$subcommand" >> "$log"
+  if [ -n "${FM_FAKE_SSH_TIMING_LOG:-}" ]; then
+    printf '%s %s %s %s\n' "$host" "$command_name" "$(python3 -c 'import time; print(time.time())')" "$subcommand" >> "$FM_FAKE_SSH_TIMING_LOG"
+  fi
   # Do not let scheduler latency turn the concurrency assertion into a race
   # between equal sleeps. If the fetch worker was launched concurrently, give
   # it a bounded opportunity to publish its START record.
@@ -326,4 +335,229 @@ EOF
 
 test_remote_probe_scheduling_keeps_per_mate_lines parallel
 test_remote_probe_scheduling_keeps_per_mate_lines fallback
+
+# Launch-stagger regression: bootstrap_parallel_spawn (bin/fm-bootstrap.sh)
+# makes the Nth worker of a concurrent batch bound for the host named in
+# config/ssh-launch-stagger-host wait 0.4s * (N-1) after its own fork before
+# it starts, so simultaneous cold SSH connections to that host's sshd do not
+# collide with its connection-rate limit. It applies to no other host, and
+# because the wait lives in the worker the parent dispatch loop never blocks.
+# When the config file is absent, no launch is ever spaced - that is today's
+# unchanged upstream default.
+#
+# What the spacing controls is the instant each worker's first remote call
+# leaves, so the signal to assert on is the spacing between the probes of one
+# batch, not the wall clock of a whole run. The convergence batch
+# (secondmate_sync) is used: each worker goes straight out over SSH, so the
+# spacing survives to the fake SSH as the arrival spacing of the `sync`
+# probes.
+STAGGER_TEST_IDS="alpha bravo charlie"
+STAGGER_TEST_HOST="test-stagger-host"
+
+run_stagger_scenario() { # <dir> <label> <hosts-are-distinct 0|1> <config-present 0|1> -> sets STAGGER_OUT, STAGGER_TIMING_LOG
+  local dir=$1 label=$2 distinct=$3 configured=$4
+  local id host log timing_log root home fakebin
+  log="$dir/$label/probe.log"
+  timing_log="$dir/$label/timing.log"
+  mkdir -p "$dir/$label/home/state" "$dir/$label/home/data" "$dir/$label/home/config" "$dir/$label/home/projects"
+  : > "$dir/$label/home/data/secondmates.md"
+  if [ "$configured" -eq 1 ]; then
+    printf '%s\n' "$STAGGER_TEST_HOST" > "$dir/$label/home/config/ssh-launch-stagger-host"
+  fi
+  for id in $STAGGER_TEST_IDS; do
+    if [ "$distinct" -eq 1 ]; then host="host-$id"; else host="$STAGGER_TEST_HOST"; fi
+    root="$dir/$label/remote/$id/root"
+    home="$dir/$label/remote/$id/home"
+    mkdir -p "$root" "$home"
+    write_remote_registry_line "$dir/$label/home/data/secondmates.md" "$id" "$host" "$root" "$home"
+    fm_write_secondmate_meta "$dir/$label/home/state/$id.meta" "$home"
+    printf 'remote_host=%s\n' "$host" >> "$dir/$label/home/state/$id.meta"
+  done
+  fm_git_init_commit "$dir/$label/home/projects/alpha"
+  fm_git_add_origin "$dir/$label/home/projects/alpha" "$dir/$label/alpha.origin.git"
+  : > "$log"
+  : > "$timing_log"
+  # A per-scenario fakebin: install_slow_git bakes its log path into the
+  # generated git wrapper at install time, so two scenarios sharing one
+  # fakebin would have the second install silently overwrite the first
+  # wrapper's target log.
+  fakebin=$(fm_fakebin "$dir/$label")
+  fm_fake_exit0 "$fakebin" gh treehouse tmux node
+  install_fake_ssh "$fakebin"
+  install_slow_git "$fakebin" "$REAL_GIT" "$log"
+  STAGGER_OUT=$(
+    PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$dir/$label/home" \
+    FM_ROOT_OVERRIDE="$dir/primary" \
+    FM_BOOTSTRAP_NETWORK=only \
+    FM_SSH_BIN="$fakebin/fake-ssh" \
+    FM_FAKE_SSH_LOG="$log" \
+    FM_FAKE_SSH_TIMING_LOG="$timing_log" \
+    FM_FAKE_SSH_SLEEP=0.02 \
+    FM_FAKE_SSH_UNREACHABLE_HOST=no-such-host \
+    FM_FAKE_SSH_FAIL_HOST=no-such-host \
+    FM_FAKE_SSH_DIRTY_HOST=no-such-host \
+    FM_FAKE_GIT_FETCH_SLEEP=0.02 \
+    FM_BOOTSTRAP_VERBOSE_FACTS=1 \
+    FM_INHERITABLE_CONFIG='' \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1
+  )
+  STAGGER_TIMING_LOG=$timing_log
+}
+
+stagger_seed_primary() { # <dir>
+  local primary="$1/primary"
+  mkdir -p "$primary"
+  git init -q -b main "$primary"
+  cp -R "$ROOT/bin" "$primary/bin"
+  printf 'test primary\n' > "$primary/AGENTS.md"
+  git -C "$primary" add AGENTS.md bin
+  git -C "$primary" commit -qm 'seed primary default branch'
+}
+
+test_remote_probe_launch_stagger_when_configured() {
+  local dir id spacing n
+  dir="$TMP_ROOT/stagger-configured"
+  stagger_seed_primary "$dir"
+
+  run_stagger_scenario "$dir" repeat 0 1
+  local out_rep=$STAGGER_OUT timing_rep=$STAGGER_TIMING_LOG
+  run_stagger_scenario "$dir" distinct 1 1
+  local out_dist=$STAGGER_OUT timing_dist=$STAGGER_TIMING_LOG
+
+  for id in $STAGGER_TEST_IDS; do
+    assert_contains "$out_rep" "BOOTSTRAP_INFO: remote secondmate $id already live" \
+      "repeat batch: secondmate $id (repeated host) must still report success"
+    assert_contains "$out_dist" "BOOTSTRAP_INFO: remote secondmate $id already live" \
+      "distinct batch: secondmate $id (its own host) must still report success"
+  done
+
+  n=$(grep -c "^${STAGGER_TEST_HOST} fm-remote-doctor.sh " "$timing_rep" || true)
+  [ "$n" -eq 3 ] \
+    || fail "repeat batch: expected exactly 3 readiness probes to the configured host (no retry), got $n"$'\n'"$(cat "$timing_rep")"
+
+  spacing=$(python3 - "$timing_rep" "$timing_dist" <<'PYSPACING'
+import sys
+
+# One threshold sits between two well-separated populations: a staggered gap
+# measures about 0.4s plus a small scheduling margin, while an unstaggered
+# batch spans well under that even under load.
+MIN_REPEAT_GAP = 0.30
+MAX_DISTINCT_SPAN = 0.30
+
+
+def convergence_launches(path):
+    stamps = []
+    with open(path) as handle:
+        for line in handle:
+            fields = line.split()
+            if (len(fields) == 4 and fields[1] == "fm-remote-secondmate-control.sh"
+                    and fields[3] == "sync"):
+                stamps.append(float(fields[2]))
+    return sorted(stamps)
+
+
+def gaps(stamps):
+    return [later - earlier for earlier, later in zip(stamps, stamps[1:])]
+
+
+repeat_log, distinct_log = sys.argv[1], sys.argv[2]
+repeat, distinct = convergence_launches(repeat_log), convergence_launches(distinct_log)
+repeat_gaps, distinct_gaps = gaps(repeat), gaps(distinct)
+
+problems = []
+if len(repeat) != 3:
+    problems.append("repeat batch made %d convergence launches, want 3" % len(repeat))
+if len(distinct) != 3:
+    problems.append("distinct batch made %d convergence launches, want 3" % len(distinct))
+if repeat_gaps and min(repeat_gaps) < MIN_REPEAT_GAP:
+    problems.append("repeated-host launches were not staggered: smallest gap %.3fs < %.2fs"
+                    % (min(repeat_gaps), MIN_REPEAT_GAP))
+if distinct and distinct[-1] - distinct[0] > MAX_DISTINCT_SPAN:
+    problems.append("distinct-host launches lost their parallelism: span %.3fs > %.2fs"
+                    % (distinct[-1] - distinct[0], MAX_DISTINCT_SPAN))
+
+print("repeat gaps=%s distinct gaps=%s"
+      % (["%.3f" % gap for gap in repeat_gaps], ["%.3f" % gap for gap in distinct_gaps]))
+for problem in problems:
+    print(problem)
+raise SystemExit(1 if problems else 0)
+PYSPACING
+  ) || fail "launch spacing did not isolate the configured-host stagger"$'\n'"$spacing"
+
+  if [ -n "${FM_TEST_EVIDENCE_FILE:-}" ]; then
+    {
+      printf '=== configured-host repeat batch output ===\n%s\n' "$out_rep"
+      printf '=== configured-host distinct batch output ===\n%s\n' "$out_dist"
+      printf '=== convergence launch spacing ===\n%s\n' "$spacing"
+    } >> "$FM_TEST_EVIDENCE_FILE"
+  fi
+
+  pass "bootstrap network launch stagger (config present): $spacing - repeated launches to the configured host are staggered, other hosts stay parallel, no retry"
+}
+
+test_remote_probe_launch_stagger_when_absent() {
+  local dir id spacing n
+  dir="$TMP_ROOT/stagger-absent"
+  stagger_seed_primary "$dir"
+
+  run_stagger_scenario "$dir" repeat 0 0
+  local out_rep=$STAGGER_OUT timing_rep=$STAGGER_TIMING_LOG
+
+  for id in $STAGGER_TEST_IDS; do
+    assert_contains "$out_rep" "BOOTSTRAP_INFO: remote secondmate $id already live" \
+      "repeat batch with no config file: secondmate $id must still report success"
+  done
+
+  n=$(grep -c "^${STAGGER_TEST_HOST} fm-remote-doctor.sh " "$timing_rep" || true)
+  [ "$n" -eq 3 ] \
+    || fail "repeat batch with no config file: expected exactly 3 readiness probes, got $n"$'\n'"$(cat "$timing_rep")"
+
+  spacing=$(python3 - "$timing_rep" <<'PYABSENT'
+import sys
+
+# Absent = no staggering at all, so even repeated launches to the same host
+# must land within an ordinary unstaggered span.
+MAX_REPEAT_SPAN = 0.30
+
+
+def convergence_launches(path):
+    stamps = []
+    with open(path) as handle:
+        for line in handle:
+            fields = line.split()
+            if (len(fields) == 4 and fields[1] == "fm-remote-secondmate-control.sh"
+                    and fields[3] == "sync"):
+                stamps.append(float(fields[2]))
+    return sorted(stamps)
+
+
+repeat = convergence_launches(sys.argv[1])
+problems = []
+if len(repeat) != 3:
+    problems.append("repeat batch made %d convergence launches, want 3" % len(repeat))
+if repeat and repeat[-1] - repeat[0] > MAX_REPEAT_SPAN:
+    problems.append("repeated-host launches were staggered with no config file present: span %.3fs > %.2fs"
+                    % (repeat[-1] - repeat[0], MAX_REPEAT_SPAN))
+
+print("repeat span=%s" % ("%.3f" % (repeat[-1] - repeat[0]) if len(repeat) > 1 else "n/a"))
+for problem in problems:
+    print(problem)
+raise SystemExit(1 if problems else 0)
+PYABSENT
+  ) || fail "an absent config file unexpectedly staggered launches"$'\n'"$spacing"
+
+  if [ -n "${FM_TEST_EVIDENCE_FILE:-}" ]; then
+    {
+      printf '=== absent-config repeat batch output ===\n%s\n' "$out_rep"
+      printf '=== convergence launch spacing ===\n%s\n' "$spacing"
+    } >> "$FM_TEST_EVIDENCE_FILE"
+  fi
+
+  pass "bootstrap network launch stagger (config absent): $spacing - repeated launches to the same host are never staggered without the config file"
+}
+
+test_remote_probe_launch_stagger_when_configured
+test_remote_probe_launch_stagger_when_absent
 echo "# all fm-bootstrap-network-parallel tests passed"

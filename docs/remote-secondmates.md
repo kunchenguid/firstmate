@@ -16,6 +16,7 @@ Configure an SSH alias in the primary account's normal OpenSSH configuration.
 Use ordinary public-key authentication, strict host-key verification, and a dedicated remote account where practical.
 Do not enable agent forwarding for Firstmate.
 `fm-on.sh` also disables agent forwarding, forwarding setup, and configured `SendEnv` patterns on every call, and arms bounded SSH dead-peer detection so a vanished host (a reboot, a dropped link) fails within a bounded window instead of hanging indefinitely; its [script header](../bin/fm-on.sh) owns the keepalive defaults and environment overrides.
+When [`config/ssh-launch-stagger-host`](configuration.md#ssh-launch-stagger-host-configssh-launch-stagger-host) names a remote host, session start spaces out the launches it sends to that host at the same instant, so that a batch of cold connections does not hit its SSH connection-rate limit together; [`bin/fm-bootstrap.sh`'s header](../bin/fm-bootstrap.sh) owns the exact spacing, and every other alias keeps its unspaced launch.
 
 Clone Firstmate on the remote host at an absolute code-root path.
 Expose that clone's fixed entrypoint on the account's non-interactive SSH `PATH`, for example:
