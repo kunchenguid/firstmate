@@ -173,7 +173,7 @@ Classify each wake this way:
   If a declared external wait is still declared past `FM_PAUSE_RESURFACE_SECS` (default four hours), housekeeping sends one recheck and resets the pause window; a captain-held transfer is never rechecked while the posture record exists.
   The window ages against the crew's own latest status line, so only a status append that stops declaring the wait ends this routing and restores wedge detection.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
-- `stale` with a terminal status or bare legacy captain-relevant line -> escalate.
+- `stale` with a terminal status, a bare legacy captain-relevant line, or an unrecognized status prefix such as `parked:` -> escalate.
   Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.
   If the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible wedge.
   This bounds wedge-detection latency to the threshold plus a tick: a delay, never a loss.

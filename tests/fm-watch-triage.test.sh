@@ -415,6 +415,117 @@ EOF
   pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
 }
 
+# An unknown status prefix, and a known verb whose correlation token did not
+# parse, must reach the supervisor as that line. Recognized verbs stay on their
+# existing classification, and continuation prose must not become a prefix.
+test_unrecognized_status_prefix_is_visible() {
+  local dir state event continuation
+  dir=$(make_case unrecognized-prefix); state="$dir/state"
+  printf 'working: still on it\nparked: waiting for upstream\n' > "$state/parked.status"
+  [ "$(last_status_line "$state/parked.status")" = 'parked: waiting for upstream' ] \
+    || fail "parked: stayed behind the earlier working line"
+  event=$(status_span_first_actionable "$state/parked.status" 0) \
+    || fail "parked: produced no supervisor event"
+  [ "$event" = 'parked: waiting for upstream' ] || fail "parked: was rewritten to '$event'"
+  status_is_paused "$event" && fail "parked: was classified as a pause"
+  status_is_terminal_verb "$event" && fail "parked: was classified as terminal"
+
+  printf 'working: still on it\nholding: for review\n' > "$state/holding.status"
+  [ "$(last_status_line "$state/holding.status")" = 'holding: for review' ] \
+    || fail "holding: stayed behind the earlier working line"
+  event=$(status_span_first_actionable "$state/holding.status" 0) \
+    || fail "holding: produced no supervisor event"
+  [ "$event" = 'holding: for review' ] || fail "holding: was rewritten to '$event'"
+
+  printf 'working: still on it\ndone corr=deadbeef: shipped\n' > "$state/bad-token.status"
+  [ "$(last_status_line "$state/bad-token.status")" = 'done corr=deadbeef: shipped' ] \
+    || fail "a mismatched correlation token stayed behind the earlier working line"
+  event=$(status_span_first_actionable "$state/bad-token.status" 0) \
+    || fail "a mismatched correlation token produced no supervisor event"
+  [ "$event" = 'done corr=deadbeef: shipped' ] || fail "mismatched token was rewritten to '$event'"
+  status_is_terminal_verb "$event" && fail "a mismatched done token became a terminal verb"
+  printf 'working [at=1]: still on it\nparked [at=17:00]: waiting upstream\n' > "$state/stamped-parked.status"
+  [ "$(last_status_line "$state/stamped-parked.status")" = 'parked [at=17:00]: waiting upstream' ] \
+    || fail "a readable stamp hid parked: behind the earlier working line"
+  event=$(status_span_first_actionable "$state/stamped-parked.status" 0) \
+    || fail "a readable-stamped parked: produced no supervisor event"
+  [ "$event" = 'parked [at=17:00]: waiting upstream' ] || fail "stamped parked: was rewritten to '$event'"
+  printf 'working [at=1]: still on it\ndone corr=deadbeef [at=17:00]: shipped\n' > "$state/stamped-bad-token.status"
+  [ "$(last_status_line "$state/stamped-bad-token.status")" = 'done corr=deadbeef [at=17:00]: shipped' ] \
+    || fail "a readable stamp hid a mismatched correlation token behind the earlier working line"
+  event=$(status_span_first_actionable "$state/stamped-bad-token.status" 0) \
+    || fail "a readable-stamped mismatched token produced no supervisor event"
+  status_is_terminal_verb "$event" && fail "a readable-stamped mismatched done token became a terminal verb"
+  printf 'working [at=17:00]: still on it\n' > "$state/stamped-working.status"
+  status_span_has_actionable "$state/stamped-working.status" 0 \
+    && fail "a readable-stamped working: became a supervisor event"
+  printf 'needs-decision [key=kept]: a real decision\ndone corr=deadbeef: shipped\n' > "$state/bad-close.status"
+  printf '%s' "$(status_open_decisions "$state/bad-close.status")" | grep -F $'kept\t' >/dev/null \
+    || fail "a mismatched done token closed a real decision"
+
+  printf 'needs-decision corr=: choose A or B\n' > "$state/missing-token.status"
+  event=$(status_span_first_actionable "$state/missing-token.status" 0) \
+    || fail "a missing correlation token produced no supervisor event"
+  [ "$event" = 'needs-decision corr=: choose A or B' ] || fail "missing token was rewritten to '$event'"
+  [ -z "$(status_open_decisions "$state/missing-token.status")" ] \
+    || fail "a missing correlation token opened a decision"
+
+  printf 'corr=deadbeef needs-decision [key=ahead]: token first\n' > "$state/token-first.status"
+  event=$(status_span_first_actionable "$state/token-first.status" 0) \
+    || fail "a token-first line produced no supervisor event"
+  [ "$event" = 'corr=deadbeef needs-decision [key=ahead]: token first' ] \
+    || fail "token-first line was rewritten to '$event'"
+  [ -z "$(status_open_decisions "$state/token-first.status")" ] \
+    || fail "a token-first line opened a decision"
+
+  printf 'working: still on it\n' > "$state/working.status"
+  status_span_has_actionable "$state/working.status" 0 \
+    && fail "working: became a supervisor event"
+  printf 'paused: waiting on the upstream release\nMore detail: still waiting.\n' > "$state/prose.status"
+  [ "$(last_status_line "$state/prose.status")" = 'paused: waiting on the upstream release' ] \
+    || fail "continuation prose hid the paused declaration"
+  status_is_paused "$(last_status_line "$state/prose.status")" \
+    || fail "continuation prose cleared the pause classification"
+  status_span_has_actionable "$state/prose.status" 0 \
+    && fail "a paused declaration or its continuation became a supervisor event"
+  for continuation in 'https://github.com/o/r/pull/12' 'Reason: upstream is slow' \
+    'Note: see above' 'e.g.: the release notes' '10:30 retry scheduled'; do
+    printf 'paused: waiting on the upstream release\n%s\n' "$continuation" > "$state/paused-cont.status"
+    [ "$(last_status_line "$state/paused-cont.status")" = 'paused: waiting on the upstream release' ] \
+      || fail "continuation '$continuation' hid the paused declaration"
+    status_is_paused "$(last_status_line "$state/paused-cont.status")" \
+      || fail "continuation '$continuation' cleared the pause classification"
+    status_span_has_actionable "$state/paused-cont.status" 0 \
+      && fail "continuation '$continuation' after paused: became a supervisor event"
+    printf 'working: opened PR\n%s\n' "$continuation" > "$state/working-cont.status"
+    [ "$(last_status_line "$state/working-cont.status")" = 'working: opened PR' ] \
+      || fail "continuation '$continuation' hid the working declaration"
+    status_span_has_actionable "$state/working-cont.status" 0 \
+      && fail "continuation '$continuation' after working: became a supervisor event"
+  done
+  printf 'done: shipped\n' > "$state/done.status"
+  event=$(status_span_first_actionable "$state/done.status" 0) \
+    || fail "done: stopped reaching the supervisor"
+  [ "$event" = 'done: shipped' ] || fail "done: was rewritten to '$event'"
+  status_is_terminal_verb "$event" || fail "done: stopped being terminal"
+  printf 'note: for the record\n' > "$state/note.status"
+  status_span_has_actionable "$state/note.status" 0 \
+    && fail "note: became a supervisor event"
+  status_is_captain_relevant 'merged' || fail "legacy merged free-text stopped being captain-relevant"
+
+  (
+    export FM_CLASSIFY_PAUSED_VERB=holding
+    printf 'holding: for the upstream release\n' > "$state/renamed-pause.status"
+    status_is_paused "$(last_status_line "$state/renamed-pause.status")" \
+      || fail "an overridden pause verb was treated as unrecognized"
+    status_span_has_actionable "$state/renamed-pause.status" 0 \
+      && fail "an overridden pause verb became a supervisor event"
+    return 0
+  ) || fail "an overridden pause verb was treated as unrecognized"
+
+  pass "unrecognized status prefixes are visible and recognized prefixes are unchanged"
+}
+
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
 # benign (absorb) ONLY when fm-crew-state.sh reports the crew as working from an
 # actively-running pipeline step (source run-step) or a busy pane (source pane);
@@ -6170,6 +6281,7 @@ test_status_span_closure_from_an_offset
 test_malformed_seen_signature_reads_the_whole_log
 test_stale_is_terminal_classifier
 test_classifier_primitives
+test_unrecognized_status_prefix_is_visible
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
