@@ -57,7 +57,7 @@ Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm
 
 **`resume` is not a verb.**
 It is not deterministic across the verified adapters: codex, grok, gemini, and devin resume only from a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, kimi, and agy have no verified pane-resume contract.
-`relaunch` covers the same need when the backend can prove the old agent stopped and the composer is empty, because the brief on disk - not a harness-private session - is the durable instruction; Devin on Herdr currently fails that composer check and refuses.
+`relaunch` covers the same need when the backend can prove the old agent stopped and the composer is empty, with the durable brief and, for a live secondmate, the [context handoff](#live-secondmate-context-custody) replacing a harness-private session; Devin on Herdr currently fails that composer check and refuses.
 
 ## Transactional relaunch
 
@@ -77,14 +77,14 @@ It is not deterministic across the verified adapters: codex, grok, gemini, and d
 3. **Record the note or handoff.**
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require a note and never rewrites its standing charter.
-   A live secondmate additionally requires the transaction-bound handoff and replacement receipt described above, or explicit `--abandon-live-context`; dead or proven-missing recovery is custody-free.
+   A live secondmate additionally requires the transaction-bound handoff and replacement receipt described below, or explicit `--abandon-live-context`; dead or proven-missing recovery is custody-free.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which reuses the recorded worktree instead of creating one, adopts the recorded endpoint when it still exists, clears the previous harness's per-task wiring, and arms a fresh busy generation.
    With a live secondmate handoff, the replacement receives a one-launch-only instruction to read the saved context, verify the receipt transaction details, record the receipt only after it is ready to resume, and preserve the standing charter.
+   When the recorded endpoint is proven gone rather than merely idle or unreachable - which only Herdr can establish - the launch owner creates one fresh endpoint in that same worktree and the republished record rebinds the task to it - see [Reclaiming a task whose endpoint is gone](#reclaiming-a-task-whose-endpoint-is-gone).
 6. **Confirm and retire custody artifacts.**
    The control plane waits for the replacement's bound receipt before removing its raw and delivered context copies.
    A timeout or launch uncertainty retains the full content for recovery rather than claiming that it transferred successfully.
-   When the recorded endpoint is proven gone rather than merely idle or unreachable - which only Herdr can establish - the launch owner creates one fresh endpoint in that same worktree and the republished record rebinds the task to it - see [Reclaiming a task whose endpoint is gone](#reclaiming-a-task-whose-endpoint-is-gone).
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
