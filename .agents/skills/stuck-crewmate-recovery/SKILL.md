@@ -50,11 +50,13 @@ If the worktree or ownership cannot be reconciled safely, leave all state intact
 
 ## Stall and recurrence diagnostic pivot
 
-Pivot after one bounded attempt returns unchanged, before a third retry, after a repeated fix, or when a phase remains unchanged for 15 minutes without fresh evidence of progress.
+Pivot after one bounded attempt returns unchanged, before a third retry, after a repeated fix, when a phase remains unchanged for 15 minutes without fresh evidence of progress, or when a fix has clearly consumed an outsized share of the turn's tokens or turns without resolving the issue.
 1. Read `bin/fm-crew-state.sh <task-id>` once, then inspect only one targeted pane, status excerpt, or validation result that can change the next action.
 2. Trace the repeated failure to its shared owner and inspect why the prior attempt failed; batch related corrections together.
 3. When the same fix or checkpoint failed, choose a materially different approach instead of replaying it without new evidence.
 4. Verify the durable postcondition through its owning state or control path; command exit alone does not prove recovery.
+5. Invoke `/ultrawork` for its discipline: state the exact outcome and stop condition, make the smallest change that satisfies it, and verify against the real surface rather than intent alone.
+6. Invoke `/doctor` to rule out an environment or tooling cause driving the loop, such as a misconfigured MCP server, stale hook, broken permission rule, orphaned state file blocking teardown, or auto-mode permission denial misread as a code problem.
 
 A bounded `bin/fm-watch-checkpoint.sh` return proves only that checkpoint interval, not persistent supervision.
 For recurring watcher-down conditions, inspect `docs/watcher-continuity.md` and the block emitted by `bin/fm-supervision-instructions.sh` to identify the intended continuity owner and why it failed.
