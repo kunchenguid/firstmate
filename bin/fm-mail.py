@@ -121,6 +121,7 @@ def afk_email_context():
     try:
 
 
+
         configured = subprocess.run(
             [sys.executable, helper, 'configured'],
             stdout=subprocess.PIPE,
@@ -134,6 +135,7 @@ def afk_email_context():
     if configured.returncode != 0 or not recipient:
         return None, True, False
     return recipient, True, False
+
 
 
 
@@ -632,6 +634,7 @@ def cmd_poll_list():
                 if afk_enabled and not ignored and from_is_configured(fr, recipient):
 
 
+
                     try:
                         message_size = fetched_size(msg)
                         if message_size is None:
@@ -653,6 +656,7 @@ def cmd_poll_list():
                         else:
                             subj = clean(
                                 f'[away-mode reply not processed: message body exceeds 256 KiB] {subj}')
+
 
 
                     except AfkBodyFetchError:
@@ -766,6 +770,7 @@ def cmd_poll_list():
                     ]
                 if result.stderr:
                     sys.stderr.write(result.stderr)
+
 
 
 
