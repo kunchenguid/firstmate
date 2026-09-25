@@ -102,23 +102,40 @@ GH_GLOBAL="([[:space:]]+(-r|--repo)[[:space:]]+[^[:space:]]+|[[:space:]]+--repo=
 SEGMENT_START="^[[:space:]({]*([[:alpha:]_][[:alnum:]_]*=[^[:space:]]*[[:space:]]+)*([^[:space:]]*/)?"
 WRITER="${SEGMENT_START}(git${GIT_GLOBAL}[[:space:]]+(commit|merge|tag|notes)|gh(-axi)?${GH_GLOBAL}[[:space:]]+pr[[:space:]]+(create|edit|comment|review|merge))([[:space:]]|\$)"
 GH_API="${SEGMENT_START}gh(-axi)?${GH_GLOBAL}[[:space:]]+api([[:space:]]|\$)"
-GH_API_METHOD="[[:space:]](-x[[:space:]]*|--method[[:space:]=]+)([[:alpha:]]+)"
 GH_API_FIELDS="[[:space:]](-f|--field|--raw-field|--input)([[:space:]=]|\$)"
 
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 # Succeeds when a lowercased command segment writes commit or PR text. A gh api
-# call writes when its method is not GET, or when it sends fields or input
-# without an explicit GET, which is gh's default POST.
+# call writes when any method it names is not GET, or when it sends fields or
+# input without an explicit GET, which is gh's default POST. Methods are read
+# only from the segment before its first quote, so quoted body text cannot turn
+# a write into a read.
 segment_writes() {  # <segment>
-  local seg=$1
+  local seg=$1 tok method= get=1 next_is_method=0
   [[ $seg =~ $WRITER ]] && return 0
   [[ $seg =~ $GH_API ]] || return 1
-  if [[ $seg =~ $GH_API_METHOD ]]; then
-    [ "${BASH_REMATCH[2]}" != get ]
-    return
-  fi
-  [[ $seg =~ $GH_API_FIELDS ]]
+  set -f
+  for tok in ${seg%%[\"\']*}; do
+    if [ "$next_is_method" -eq 1 ]; then
+      method=$tok
+      next_is_method=0
+    else
+      case "$tok" in
+        -x|--method) next_is_method=1; continue ;;
+        -x?*) method=${tok#-x} ;;
+        --method=*) method=${tok#--method=} ;;
+        *) continue ;;
+      esac
+    fi
+    if [ "$method" != get ]; then
+      set +f
+      return 0
+    fi
+    get=0
+  done
+  set +f
+  [ "$get" -eq 1 ] && [[ $seg =~ $GH_API_FIELDS ]]
 }
 
 # Prints each line of <text> that carries attribution; fails when none does.

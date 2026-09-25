@@ -9,6 +9,9 @@
 # and every sibling worktree keep their hooks; that file is only read once
 # extensions.worktreeConfig is on, which is the one shared-config change made,
 # and it is left in place at teardown because other worktrees may rely on it.
+# A shared config that sets core.bare or core.worktree would leak that setting
+# into every worktree once the extension is on, so the install refuses that
+# layout before writing anything unless the extension is already enabled.
 # bin/fm-teardown.sh clears the pointer with the rest of the per-task wiring.
 
 fm_worktree_git_hooks_dir() {  # <fm-root>
@@ -20,6 +23,11 @@ fm_worktree_git_hooks_install() {  # <worktree> <fm-root>
   dir=$(fm_worktree_git_hooks_dir "$2")
   [ -x "$dir/commit-msg" ] || return 1
   if [ "$(git -C "$wt" config --local --bool extensions.worktreeConfig 2>/dev/null)" != true ]; then
+    if [ "$(git -C "$wt" config --local --bool core.bare 2>/dev/null)" = true ] ||
+      [ -n "$(git -C "$wt" config --local core.worktree 2>/dev/null)" ]; then
+      echo "error: the shared git config of worktree $wt sets core.bare or core.worktree (a bare-repository or separate-work-tree layout), so enabling extensions.worktreeConfig would apply that setting to every worktree; enable extensions.worktreeConfig after moving it into config.worktree as git-worktree(1) describes" >&2
+      return 1
+    fi
     git -C "$wt" config --local extensions.worktreeConfig true || return 1
   fi
   git -C "$wt" config --worktree core.hooksPath "$dir" || return 1

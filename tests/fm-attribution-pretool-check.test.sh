@@ -71,6 +71,10 @@ test_allows_human_messages_and_reads() {
   expect_deny 'gh -R o/r pr create --title t --body "Generated with Claude Code"' "a gh pr create after -R"
   expect_deny 'gh api -X PATCH repos/o/r/pulls/1 --input body.json -f body="Generated with Claude Code"' "a PATCH gh api write"
   expect_deny 'gh-axi api repos/o/r/issues/1/comments -f body="Generated with Claude Code"' "a gh api field write with the default POST"
+  expect_deny 'gh api repos/o/r/pulls/1 -f body="to read, pass -X GET. Generated with Claude Code"' \
+    "a default-POST gh api write whose quoted body mentions -X GET"
+  expect_deny 'gh api -X GET --method PATCH repos/o/r/pulls/1 -f body="Generated with Claude Code"' \
+    "a gh api call naming any non-GET method"
   expect_allow 'git log --format=%B | grep -i "Co-Authored-By: Claude"' "searching history for the pattern"
   expect_allow 'grep -rn "Co-Authored-By: Claude" docs' "grepping for the pattern outside git"
   expect_allow 'echo "Co-Authored-By: Claude <noreply@anthropic.com>" > notes.txt' "a command that writes no commit or PR"
@@ -214,6 +218,41 @@ test_worktree_commit_msg_hook_on_any_harness() {
   pass "a task worktree on any harness rejects attributed commits, keeps the project's hooks, and leaves other checkouts alone"
 }
 
+# A project whose primary checkout is itself a linked worktree of a bare repo
+# keeps core.bare=true in the shared config, which extensions.worktreeConfig
+# would spread to every worktree, so the spawn must refuse before writing it.
+test_bare_repo_layout_refuses_before_shared_config_change() {
+  local case_dir=$TMP_ROOT/bare home bare primary wt sib fakebin out rc id=attr-bare-1 before
+  home="$case_dir/home"
+  bare="$case_dir/repo.git"
+  primary="$case_dir/primary"
+  wt="$case_dir/wt"
+  sib="$case_dir/sibling"
+  fm_git_identity fmtest fmtest@example.invalid
+  fm_git_init_commit "$case_dir/seed"
+  fm_git_add_origin "$case_dir/seed" "$case_dir/origin.git"
+  git clone -q --bare "file://$(cd "$case_dir/origin.git" && pwd)" "$bare"
+  git -C "$bare" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+  git -C "$bare" fetch -q origin
+  git -C "$bare" remote set-head origin main >/dev/null
+  git -C "$bare" worktree add --quiet "$primary" main
+  git -C "$bare" worktree add --quiet -b wt-bare "$wt"
+  git -C "$bare" worktree add --quiet -b sib-bare "$sib"
+  before=$(cat "$bare/config")
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" codex)
+  fm_test_spawn_home "$home" codex
+  fm_test_spawn_brief "$home" "$id"
+  out=$(fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$primary" --mode no-mistakes --yolo off)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a spawn into a bare-repo layout must be refused: $out"
+  assert_contains "$out" "core.bare or core.worktree" "the refusal did not name the layout"
+  assert_equals "$before" "$(cat "$bare/config")" "the refused spawn changed the shared repo config"
+  git -C "$primary" status --short >/dev/null 2>&1 || fail "git in the primary worktree broke"
+  git -C "$wt" status --short >/dev/null 2>&1 || fail "git in the task worktree broke"
+  git -C "$sib" status --short >/dev/null 2>&1 || fail "git in the sibling worktree broke"
+  pass "a bare-repo layout refuses the spawn before any shared config change and leaves git working"
+}
+
 test_claude_spawn_registers_the_guard() {
   local case_dir=$TMP_ROOT/spawn home proj wt fakebin out settings cmd rc id=attr-cl-1
   home="$case_dir/home"
@@ -244,4 +283,5 @@ test_scans_message_files_the_command_names
 test_transport_edges
 test_message_file_mode
 test_worktree_commit_msg_hook_on_any_harness
+test_bare_repo_layout_refuses_before_shared_config_change
 test_claude_spawn_registers_the_guard
