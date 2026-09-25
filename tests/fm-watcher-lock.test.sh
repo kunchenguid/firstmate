@@ -460,6 +460,34 @@ test_lock_reclaims_self_held_steal_mutex() {
   pass "a steal mutex abandoned by this process does not block its own reclaim"
 }
 
+test_lock_resumes_own_interrupted_steal_reap() {
+  # A TERM that lands after this process renamed a dead steal owner to its own
+  # tombstone, but before it unlinked the mutex, runs the EXIT path, which
+  # re-acquires the same dead-owner lock. Its own tombstone must not wedge it.
+  local dir state lockdir rc
+  dir=$(make_case lock-own-steal-tomb)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  mkdir "$lockdir"
+  printf '%s\n' "$(dead_pid)" > "$lockdir/pid"
+  leave_dead_link_locks "$state" "$lockdir.steal"
+
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_current_pid me || exit 6
+    owner=$(fm_lock_link_owner "$2.steal") || exit 6
+    mv -- "$owner" "$owner.reaped.$me" || exit 7
+    fm_lock_try_acquire "$2" || exit 8
+    [ "$(cat "$2/pid" 2>/dev/null)" = "$me" ] || exit 9
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -eq 0 ] || fail "own interrupted steal reap blocked reclaiming a dead-owner lock (rc=$rc)"
+  [ ! -e "$lockdir.steal" ] && [ ! -L "$lockdir.steal" ] \
+    || fail "own interrupted steal reap left the steal mutex linked"
+  pass "a steal reap interrupted in this process is resumed from its own tombstone"
+}
+
 test_lock_steal_reap_cannot_remove_successor() {
   # Two reapers verify the same dead steal owner. The competitor runs to
   # completion exactly when the first one is about to remove the link; at most
@@ -1519,6 +1547,7 @@ test_lock_reclaims_dead_steal_owner_without_nested_markers
 test_lock_recovers_dead_nested_steal_chain
 test_lock_steal_reap_cannot_remove_successor
 test_lock_reclaims_self_held_steal_mutex
+test_lock_resumes_own_interrupted_steal_reap
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace

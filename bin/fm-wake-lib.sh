@@ -940,7 +940,8 @@ fm_recovery_marker_reopen_announced() {
 # dead owner directory to this process's tombstone elects exactly one reaper,
 # so a competing reaper that verified the same dead owner cannot remove a
 # successor's link. A reaper that died after winning leaves its tombstone; a
-# later reaper re-elects itself by renaming that dead reaper's tombstone.
+# later reaper re-elects itself by renaming that dead reaper's tombstone, and a
+# reaper whose own election a trap interrupted resumes it from its tombstone.
 fm_lock_reap_dead_link() {
   local lockdir=$1 owner pid token tomb current
   [ -L "$lockdir" ] || return 1
@@ -954,13 +955,17 @@ fm_lock_reap_dead_link() {
     token=
     for tomb in "$owner".reaped.*; do
       [ -d "$tomb" ] || continue
-      fm_pid_alive "${tomb##*.reaped.}" && return 1
+      if [ "${tomb##*.reaped.}" != "$current" ]; then
+        fm_pid_alive "${tomb##*.reaped.}" && return 1
+      fi
       token=$tomb
     done
     [ -n "$token" ] || return 1
   fi
   tomb="$owner.reaped.$current"
-  mv -- "$token" "$tomb" 2>/dev/null || return 1
+  if [ "$token" != "$tomb" ]; then
+    mv -- "$token" "$tomb" 2>/dev/null || return 1
+  fi
   if fm_lock_points_to_owner "$lockdir" "$owner"; then
     rm -f "$lockdir" 2>/dev/null || true
   fi
