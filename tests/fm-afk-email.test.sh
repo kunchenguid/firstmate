@@ -387,6 +387,7 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
 
 
 
+
     || fail "valid reply handoff errored: $out"
   assert_contains "$out" 'received 1 verified and 0 untrusted' 'matching sender and code are accepted'
   note=$(find "$inbox" -maxdepth 1 -name '*.note' -print -quit)
@@ -1176,6 +1177,7 @@ assert recovery_rows["2"][4] == "ok", recovery_rows["2"]
 assert recovery_rows["4"][4] == "ok", recovery_rows["4"]
 assert "reply in mail UID 4 rejected; answer exceeds 8000 characters" in recovery_error.getvalue()
 assert mailbox.body_fetches == ["2", "4"], mailbox.body_fetches
+
 
 
 

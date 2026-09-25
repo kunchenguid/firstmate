@@ -1032,6 +1032,7 @@ def receive_messages(messages, posture, config):
 
 
 
+
     print(f"received {accepted} verified and {untrusted} untrusted away-email message(s)")
     return 0
 
