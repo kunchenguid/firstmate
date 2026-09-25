@@ -672,9 +672,11 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   [ -n "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" ] \
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" ] \
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" ] || return 1
-  expected_label=$(fm_backend_herdr_projection_workspace_label "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
+  expected_label=$(fm_backend_herdr_projection_workspace_label "$id")
+  legacy_expected_label=$(fm_backend_herdr_projection_workspace_label_legacy "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
   expected_task_label="fm-$id"
-  [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$expected_label" ] \
+  { [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$expected_label" ] \
+    || [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$legacy_expected_label" ]; } \
     && [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" = "$expected_task_label" ]
 }
 
@@ -766,10 +768,16 @@ fm_backend_herdr_projection_concise_task_label() {  # <task-id>
 }
 
 # fm_backend_herdr_projection_workspace_label: presentation-only child label.
-# Format is literal U+2514 BOX DRAWINGS LIGHT UP AND RIGHT, one space, the
-# concise task label, then the unchanged · p:<full-22-char-token> suffix.
-# Labels and tokens remain non-authoritative correlators only.
-fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
+# Format is literal U+2514 BOX DRAWINGS LIGHT UP AND RIGHT, one space, and
+# the concise task label.
+# Labels remain non-authoritative presentation aids only.
+fm_backend_herdr_projection_workspace_label() {  # <task-id> [<projection-id>]
+  printf '└ %s' "$(fm_backend_herdr_projection_concise_task_label "$1")"
+}
+
+# fm_backend_herdr_projection_workspace_label_legacy: legacy format with visible
+# token suffix used by projections created before the label cleanup.
+fm_backend_herdr_projection_workspace_label_legacy() {  # <task-id> <projection-id>
   printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
 }
 
@@ -1464,9 +1472,9 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
 # longer make the whole layout ambiguous; when omitted the parent is located by
 # label exactly as before. With a unique label the two select the same
 # workspace, so ordering behavior is unchanged in the ordinary case.
-# New-format └ ... · p:<token> children and, for compatibility only, already
-# adjacent old-format firstmate/... or 2ndmate-<id>/... projections may extend
-# the block read-only; they are never renamed or moved.
+# Clean └ ... children, legacy └ ... · p:<token> children, and, for compatibility
+# only, already adjacent old-format firstmate/... or 2ndmate-<id>/... projections
+# may extend the block read-only; they are never renamed or moved.
 #
 # This is presentation-only and always returns success.
 # Every unavailable, ambiguous, failed, or unverifiable ordering step prints a
@@ -1500,7 +1508,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
       and ((.label == "firstmate") or (.label | test("^2ndmate-[^/]+$")));
     def is_new_child:
       (.label | type) == "string"
-      and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
+      and (.label | test("^└ .+$"));
     def is_legacy_child:
       (.label | type) == "string"
       and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"));
@@ -2671,7 +2679,7 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
     --arg workspace_label "$workspace_label" '
       def is_new_child:
         (.label | type) == "string"
-        and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
+        and (.label | test("^└ .+$"));
       def is_legacy_child_for($owner):
         (.label | type) == "string"
         and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"))
@@ -2680,8 +2688,15 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
       | select(($spaces | type) == "array")
       | select(([$spaces[]? | select(.workspace_id == $workspace)] | length) == 1)
       | select(([$spaces[]? | select(.workspace_id == $workspace and .label == $workspace_label)] | length) == 1)
-      | select(([$spaces[]? | select((.label | type) == "string" and (.label | endswith(" · p:" + $token)))] | length) == 1)
-      | select(([$spaces[]? | select((.label | type) == "string" and (.label | endswith(" · p:" + $token)) and .workspace_id == $workspace)] | length) == 1)
+      | select(
+          if ($workspace_label | endswith(" · p:" + $token))
+          then
+            ([$spaces[]? | select((.label | type) == "string" and (.label | endswith(" · p:" + $token)))] | length) == 1
+            and ([$spaces[]? | select((.label | type) == "string" and (.label | endswith(" · p:" + $token)) and .workspace_id == $workspace)] | length) == 1
+          else
+            ([$spaces[]? | select(.label == $workspace_label)] | length) == 1
+          end
+        )
       | select(([$spaces[]? | select(.workspace_id == $parent_workspace and .label == $parent_label)] | length) == 1)
       | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $parent_workspace)]) as $parents
       | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $workspace)]) as $children
@@ -2895,8 +2910,9 @@ fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <tas
     echo "error: could not parse herdr workspaces while inspecting the quarantined presentation for $id" >&2
     return 1
   fi
-  wsids=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" \
-    '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null)
+  expected_label=$(fm_backend_herdr_projection_workspace_label "$id")
+  wsids=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" --arg label "$expected_label" \
+    '.result.workspaces[]? | select((.label | type) == "string" and ((.label | endswith($suffix)) or (.label == $label))) | .workspace_id' 2>/dev/null)
   count=$(printf '%s\n' "$wsids" | awk 'NF { n += 1 } END { print n + 0 }')
   if [ "$count" -eq 0 ]; then
     echo "warning: no exact herdr presentation token match for $id; leaving any stale space untouched and spawning flat" >&2
@@ -2946,8 +2962,13 @@ fm_backend_herdr_projection_endpoint_matches_journal() {  # <session> <workspace
   token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || return 1
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
   printf '%s' "$list" | jq -e '(.result.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
-  matches=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" \
-    '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null)
+  expected_label=$(fm_backend_herdr_projection_workspace_label "$id")
+  matches=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" --arg label "$expected_label" '
+    [.result.workspaces[]?
+      | select((.label | type) == "string" and ((.label | endswith($suffix)) or (.label == $label)))
+      | .workspace_id] as $wsids
+    | if ($wsids | length) == 1 then $wsids[0] else empty end
+  ' 2>/dev/null)
   [ "$matches" = "$workspace_id" ]
 }
 

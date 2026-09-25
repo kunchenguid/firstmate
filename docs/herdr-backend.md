@@ -105,7 +105,8 @@ Only a fresh task with neither metadata nor an existing presentation journal is 
 Firstmate atomically publishes a three-field version 1 journal containing a random 128-bit base64url token before asking Herdr to create anything.
 After the new workspace converges to one exact task endpoint beneath one exact parent workspace id, the journal advances to a version 2 binding that records the physical home, named session, endpoint, parent, and immutable expected labels.
 Another parent with the same presentation label does not prevent publication or participate in restart reclaim.
-The token is visible in the workspace title because Herdr exposes no verified hidden persistent field, but neither token, title, nor journal authorizes send, capture, task ownership, Treehouse return, or general recovery.
+The journal records the 128-bit base64url token, but the visible workspace title renders only the clean `└ <concise-task>` label, while legacy children carrying `└ <concise-task> · p:<token>` remain supported without migration.
+Neither token, title, nor journal authorizes send, capture, task ownership, Treehouse return, or general recovery.
 
 The owning parent is the launcher's own exact workspace, resolved from the same identity the flat path uses, and falls back to a unique home-label lookup only for a Firstmate outside Herdr.
 Projected children are never collapsed back into that parent; it is the placement and ordering reference the projection is bound under.
@@ -154,8 +155,8 @@ A live or unknown recorded or token-matched endpoint refuses duplicate launch.
 
 Locked session start has one narrower cleanup for a restored projected child that is no longer current task state.
 It runs only when the current home has at least one ordinary presentation journal and considers only that home; a primary never recursively sweeps a secondmate home.
-Discovery starts from the exact current `└ <concise-task> · p:<22-character-token>` grammar, but a title or token alone is never mutation authority.
-The title must contain exactly one token occurrence across the named-session snapshot and must equal the title derived from exactly one valid presentation journal in this home's own `state/`; a version 2 journal additionally must bind this exact physical home, named session, workspace, tab, and pane.
+Discovery recognizes clean `└ <concise-task>` child titles as well as legacy `└ <concise-task> · p:<22-character-token>` titles, but a title alone is never mutation authority.
+The candidate must be unambiguous across the named-session snapshot and must match the title derived from exactly one valid presentation journal in this home's own `state/`; a version 2 journal additionally must bind this exact physical home, named session, workspace, tab, and pane.
 The task's ordinary metadata must be absent, and the candidate must have exactly one tab and exactly one pane.
 Before cleanup, Firstmate acquires the existing task-id spawn lock and then the shared named-session presentation lock.
 Inside both locks it takes one exact snapshot, requires one unambiguous non-target focus and the exact title, token, tab, and pane shape, positively confirms no registered agent, and reads Herdr's process information for the exact named-session pane.
@@ -179,7 +180,7 @@ Operational compromises:
 - Spaces have no cross-home cleanup path, and a secondmate child can clean up only from its exact home.
 - Every stale-looking space outside that narrow startup proof still requires manual cleanup in Herdr's UI after human inspection.
 - Regaining a dedicated space after degradation requires stopping the flat task, manually checking the stale projection, and clearing its journal before a genuinely fresh launch.
-- The visible token is only a restart-stable correlator and never substitutes for the exact binding.
+- The journal token is only an internal correlator and never substitutes for the exact binding.
 
 `tests/fm-backend-herdr-presentation-e2e.test.sh` covers multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path.
 `tests/fm-herdr-session-cleanup.test.sh` covers every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary.

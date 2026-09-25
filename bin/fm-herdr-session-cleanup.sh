@@ -76,9 +76,10 @@ fm_herdr_cleanup_journal_matches() { # <title> <session> <home-real>
       [ "$journal_home" = "$home_real" ] \
         && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] || continue
     fi
-    expected=$(fm_backend_herdr_projection_workspace_label \
+    expected=$(fm_backend_herdr_projection_workspace_label "$id")
+    legacy_expected=$(fm_backend_herdr_projection_workspace_label_legacy \
       "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
-    [ "$expected" = "$title" ] || continue
+    { [ "$expected" = "$title" ] || [ "$legacy_expected" = "$title" ]; } || continue
     printf '%s\t%s\t%s\n' "$journal" "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID"
   done
 }
@@ -129,6 +130,7 @@ fm_herdr_cleanup_snapshot_candidate() { # <snapshot> <workspace> <title> <token>
     | [$s.panes[]? | select(.workspace_id == $workspace)] as $panes
     | ([ $s.workspaces[]?.label? // "" |
          ((split("p:" + $token) | length) - 1) ] | add // 0) as $token_count
+    | ([ $s.workspaces[]? | select(.label == $title) ] | length) as $title_count
     | select($workspaces | length == 1)
     | select($workspaces[0].label == $title)
     | select($workspaces[0].tab_count == 1 and $workspaces[0].pane_count == 1)
@@ -138,7 +140,7 @@ fm_herdr_cleanup_snapshot_candidate() { # <snapshot> <workspace> <title> <token>
     | select($bound_workspace == "" or $workspace == $bound_workspace)
     | select($bound_tab == "" or $tabs[0].tab_id == $bound_tab)
     | select($bound_pane == "" or $panes[0].pane_id == $bound_pane)
-    | select($token_count == 1)
+    | select(if ($title | contains("p:" + $token)) then $token_count == 1 else $title_count == 1 end)
     | select(($s.focused_workspace_id | type) == "string")
     | select(($s.focused_tab_id | type) == "string")
     | select(($s.focused_pane_id | type) == "string")
@@ -168,8 +170,12 @@ fm_herdr_cleanup_revalidate() { # <session> <workspace> <tab> <pane> <title> <to
   workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
   printf '%s' "$workspaces" | jq -e --arg workspace "$workspace" --arg title "$title" --arg token "$token" '
     ([.result.workspaces[]? | select(.workspace_id == $workspace and .label == $title)] | length) == 1
-    and ([.result.workspaces[]?.label? // "" |
-          ((split("p:" + $token) | length) - 1)] | add // 0) == 1
+    and (
+      if ($title | contains("p:" + $token))
+      then ([.result.workspaces[]?.label? // "" | ((split("p:" + $token) | length) - 1)] | add // 0) == 1
+      else ([.result.workspaces[]? | select(.label == $title)] | length) == 1
+      end
+    )
   ' >/dev/null 2>&1 || return 1
   workspace_info=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || return 1
   printf '%s' "$workspace_info" | jq -e --arg workspace "$workspace" --arg title "$title" '
@@ -203,9 +209,16 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   local session=$1 workspace=$2 title=$3 home_real=$4 token journal id task_lock
   local version bound_workspace bound_tab bound_pane presentation_lock snapshot
   local tab pane state close_status=0
-  token=$(fm_herdr_cleanup_title_token "$title") || return 0
+  token=$(fm_herdr_cleanup_title_token "$title" 2>/dev/null || true)
   if ! fm_herdr_cleanup_unique_match "$title" "$session" "$home_real"; then
     return 0
+  fi
+  if [ -z "$token" ]; then
+    case "$title" in
+      '└ '*) ;;
+      *) return 0 ;;
+    esac
+    token=$FM_HERDR_CLEANUP_TOKEN
   fi
   journal=$FM_HERDR_CLEANUP_JOURNAL
   id=$FM_HERDR_CLEANUP_ID
