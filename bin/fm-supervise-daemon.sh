@@ -674,6 +674,9 @@ mark_escalated_seen() {  # <state> <captured-endpoint-file>
 # harness selects exactly one signature, so output from another harness cannot
 # make the primary read busy.
 #
+# A daemon launched in its own terminal (bin/fm-afk-launch.sh) is outside the
+# captain's process tree, so the launcher names the captain's harness in
+# FM_DAEMON_PRIMARY_HARNESS; detection covers a harness-native daemon.
 # Resolved lazily and memoized: harness detection walks process ancestry, which
 # is too heavy to pay on every source of this library (the unit tests and the
 # launcher source it purely for its pure functions).

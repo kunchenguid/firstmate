@@ -20,9 +20,9 @@
 // `$.ui.blit` on the sprite's own tick; `ToolUse`, `ToolResult`, and `ToolGroup` rows
 // draw as zero-height boxes; a `UserMessage` whose text the canonical operational-input
 // classifier recognizes, or a record-backed doorbell whose record holds a current
-// envelope (read once through `$.fs.read` and cached), draws as zero height; an
-// `AssistantMessage` block recorded as a
-// mid-turn working note draws as zero height. Calm off returns every drawing to the
+// envelope (read through `$.fs.read`, cached until Calm next invalidates its drawings),
+// draws as zero height; an `AssistantMessage` block recorded as a mid-turn working note
+// draws as zero height. Calm off returns every drawing to the
 // engine. A toggle invalidates every hooked drawing, so rows already on screen redraw.
 // The boat is painted in Claude Code's own theme colors: the family is read from the
 // `theme` setting at load and re-read when a `config.set` changes it.
@@ -68,7 +68,8 @@ let loading: Promise<void> | undefined;
 let ticker: { cancel(): void } | undefined;
 const workingNotes = new Set<string>();
 const finalReplies = new Set<string>();
-// Each doorbell's record verdict, by record path: records are immutable once published.
+// Each doorbell's record verdict, by record path. Records are immutable once published
+// but pruned after seven days, so every invalidation drops the cache and rechecks.
 const doorbellVerdicts = new Map<string, Promise<boolean>>();
 const sprite = createCalmWorkingShipSprite();
 let palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.light;
@@ -126,7 +127,7 @@ async function load($: EngineInterface): Promise<void> {
       void repaintShip($);
     });
   }
-  $.ui.invalidate("ui.render");
+  invalidateDrawings($);
 }
 
 function ensureLoaded($: EngineInterface): Promise<void> {
@@ -146,6 +147,12 @@ async function resetSession($: EngineInterface): Promise<void> {
   sprite.reset();
   palette = CALM_SHIP_RASTER_PALETTES.light;
   await ensureLoaded($);
+}
+
+/** Redraw every hooked drawing, rechecking each doorbell's record on its next drawing. */
+function invalidateDrawings($: EngineInterface): void {
+  doorbellVerdicts.clear();
+  $.ui.invalidate("ui.render");
 }
 
 /** One scheduler tick: advance the sprite, then repaint every mounted boat in place. */
@@ -211,7 +218,7 @@ export const register: Register = (on) => {
     }
     calm = active;
     if (!calm) sites.clear();
-    $.ui.invalidate("ui.render");
+    invalidateDrawings($);
     $.ui.toast(active ? "Calm on" : "Calm off");
     // No `text`: the toggle leaves no output row in the transcript, as on Pi.
     return {};
@@ -225,7 +232,7 @@ export const register: Register = (on) => {
       const chosen = CALM_SHIP_RASTER_PALETTES[calmShipPaletteFamily(result.value)];
       if (chosen !== palette) {
         palette = chosen;
-        if (calm) $.ui.invalidate("ui.render");
+        if (calm) invalidateDrawings($);
       }
     }
     return result;
@@ -263,7 +270,7 @@ export const register: Register = (on) => {
           if (workingNotes.delete(key)) changed = true;
         }
       }
-      if (changed && calm) $.ui.invalidate("ui.render");
+      if (changed && calm) invalidateDrawings($);
     }
     return result;
   });

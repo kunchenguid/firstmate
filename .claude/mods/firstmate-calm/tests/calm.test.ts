@@ -226,6 +226,16 @@ describe("operational user rows", () => {
     expect(journal.fsReads.filter((path) => path === backed).length).toBe(readsBefore);
   });
 
+  test("shows a hidden doorbell again once a toggle redraws it after its record is pruned", async ($, on) => {
+    const { files } = world(on, { preference: "on\n" });
+    files.set(backed, operational("away-supervisor", "escalate"));
+    expect(isHidden(await $.ui.render(userMessage(doorbell(backed))))).toBe(true);
+    files.delete(backed);
+    await $.command.run(calmCommand());
+    await $.command.run(calmCommand());
+    expect(isStock(await $.ui.render(userMessage(doorbell(backed))))).toBe(true);
+  });
+
   test("leaves a backed doorbell to the engine while off, without reading its record", async ($, on) => {
     const { files, journal } = world(on);
     files.set(backed, operational("away-supervisor", "escalate"));

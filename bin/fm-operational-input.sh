@@ -229,7 +229,7 @@ fm_operational_harness_needs_record() {  # <harness>
 
 fm_operational_record_prune() {  # <record-dir>
   find "$1" -maxdepth 1 -type f \( -name '*.msg' -o -name '.record.*' \) \
-    -mtime +"$FM_OPERATIONAL_RECORD_RETENTION_DAYS" \
+    -mmin +"$((FM_OPERATIONAL_RECORD_RETENTION_DAYS * 24 * 60))" \
     -exec rm -f {} + 2>/dev/null || true
 }
 

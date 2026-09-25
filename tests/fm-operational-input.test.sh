@@ -22,6 +22,12 @@ kind_cli() {
   printf '%s' "$1" | "$OWNER" kind 2>/dev/null
 }
 
+set_age_secs() {  # <file> <age-seconds>
+  local at=$(( $(date +%s) - $2 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$at" '+%Y%m%d%H%M.%S')" "$1"
+  else touch -m -d "@$at" "$1"; fi
+}
+
 test_current_generic_matrix() {
   local kind body encoded parsed stripped prefix_hex
   prefix_hex=$(printf '%s' "$FM_OPERATIONAL_PREFIX" | od -An -tx1 | tr -d ' \n')
@@ -152,7 +158,7 @@ test_invalid_current_encodings_are_rejected() {
 }
 
 test_record_backed_doorbell_carrier() {
-  local tmp state other doorbell record kind body linked prefix_len old_record stray
+  local tmp state other doorbell record kind body linked prefix_len old_record just_expired just_kept stray
   tmp=$(fm_test_tmproot fm-operational-input-record)
   state="$tmp/home/state"
   other="$tmp/other/state"
@@ -213,8 +219,16 @@ test_record_backed_doorbell_carrier() {
   old_record="$state/operational-inbox/1-old.msg"
   printf '%s' "${FM_OPERATIONAL_PREFIX}v1 watcher: old" >"$old_record"
   touch -t 200001010000 "$old_record"
+  just_expired="$state/operational-inbox/1-just-expired.msg"
+  just_kept="$state/operational-inbox/1-just-kept.msg"
+  printf '%s' "${FM_OPERATIONAL_PREFIX}v1 watcher: just expired" >"$just_expired"
+  printf '%s' "${FM_OPERATIONAL_PREFIX}v1 watcher: just kept" >"$just_kept"
+  set_age_secs "$just_expired" $((7 * 86400 + 3600))
+  set_age_secs "$just_kept" $((7 * 86400 - 3600))
   printf 'x' | FM_STATE_OVERRIDE="$state" "$OWNER" record watcher >/dev/null || fail "second record write failed"
   [ ! -e "$old_record" ] || fail "a record older than the retention window was not pruned"
+  [ ! -e "$just_expired" ] || fail "a record an hour past seven days was retained into the eighth day"
+  [ -f "$just_kept" ] || fail "a record an hour short of seven days was pruned"
   [ -f "$record" ] || fail "a fresh record was pruned"
   pass "record-backed carrier: Claude-only selection, an ASCII doorbell naming an exact envelope record, home-bound open, and no recognition without the record"
 }
