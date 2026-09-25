@@ -47,7 +47,7 @@
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
+# already present in the up-to-date landing branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main. A task whose meta records
 # base_branch= (bin/fm-spawn.sh) runs that content check against origin's copy of
@@ -1588,12 +1588,12 @@ pr_is_merged() {
   return 0
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
+# Is the branch's content already present in the up-to-date landing branch? Fetches
+# first, then 3-way merges the landing branch with HEAD: when HEAD introduces nothing
+# the landing branch does not already contain (e.g. its change landed via squash) the
+# merged tree equals the landing branch's tree. This isolates branch-only changes, so
+# unrelated commits the landing branch gained past the merge-base do not count as
+# "added". Returns non-zero when inconclusive (no landing ref, or a merge conflict),
 # so the caller refuses rather than guesses.
 content_in_default() {
   local name ref default_tree merged_tree
@@ -1618,7 +1618,7 @@ content_in_default() {
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
+# landing branch (fallback, which also covers the no-PR and gh-error paths). False
 # only for genuinely unlanded work.
 work_is_landed() {
   local branch=$1
@@ -1627,8 +1627,9 @@ work_is_landed() {
 }
 
 # The completion links this teardown already holds locally. A scout's
-# deliverable is its report, a local-only ship lands on local main, and every
-# other ship carries the PR recorded on its own record.
+# deliverable is its report, a local-only ship lands on its recorded integration
+# branch or local default, and every other ship carries the PR recorded on its own
+# record.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative landing
