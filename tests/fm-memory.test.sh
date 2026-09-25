@@ -168,19 +168,26 @@ test_malformed_inputs_and_records_are_refused() {
   pass "malformed input and stored records are refused without guessing"
 }
 
-test_disarm_refuses_open_reminders() {
-  local home out status id
-  home=$(make_home disarm)
+test_manual_check_controls_are_not_public() {
+  local home out status id cmd
+  home=$(make_home controls)
   out="$home/out"
+  for cmd in arm disarm; do
+    status=$(run_capture "$home" 5000 "$out" "$cmd")
+    expect_code 2 "$status" "$cmd without an open reminder exit"
+    assert_absent "$home/state/memory-reminders.check.sh" "$cmd left a standing check with no open reminder"
+    assert_absent "$home/state/memory-reminders.check-trust" "$cmd left check trust with no open reminder"
+  done
   status=$(run_capture "$home" 5000 "$out" remind --in 1h 'Keep this armed')
   expect_code 0 "$status" "remind before disarm exit"
   id=$(record_id_from "$out")
   status=$(run_capture "$home" 5000 "$out" disarm)
-  expect_code 1 "$status" "disarm with an open reminder exit"
-  assert_present "$home/state/memory-reminders.check.sh" "refused disarm removed the live check"
+  expect_code 2 "$status" "disarm with an open reminder exit"
+  assert_present "$home/state/memory-reminders.check.sh" "disarm removed the live check"
   status=$(run_capture "$home" 5000 "$out" "done" "$id")
-  expect_code 0 "$status" "done after refused disarm exit"
-  pass "the reminder path cannot be disarmed while an open reminder depends on it"
+  expect_code 0 "$status" "done of the only reminder exit"
+  assert_absent "$home/state/memory-reminders.check.sh" "done of the only reminder left the check armed"
+  pass "only remind and done control the standing check"
 }
 
 test_last_open_reminder_keeps_the_check_armed() {
@@ -252,7 +259,7 @@ test_capture_list_and_literal_search
 test_due_delivery_is_once_and_done_is_acknowledgement
 test_due_reminder_reaches_the_real_watcher
 test_malformed_inputs_and_records_are_refused
-test_disarm_refuses_open_reminders
+test_manual_check_controls_are_not_public
 test_last_open_reminder_keeps_the_check_armed
 test_malformed_record_does_not_hide_a_due_reminder
 test_due_announcements_are_bounded_and_resume

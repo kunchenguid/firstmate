@@ -8,7 +8,7 @@
 #   fm-memory.sh list [--all] [--kind memory|reminder]
 #   fm-memory.sh search [--all] <query>
 #   fm-memory.sh done <reminder-id>
-#   fm-memory.sh arm | disarm | check
+#   fm-memory.sh check
 #
 # Records live under data/memory/records in the selected FM_HOME. Each record is
 # an ordinary private file in the fm-memory-v1 line format owned by this script.
@@ -56,15 +56,14 @@ Usage:
   fm-memory.sh list [--all] [--kind memory|reminder]
   fm-memory.sh search [--all] <query>
   fm-memory.sh done <reminder-id>
-  fm-memory.sh arm
-  fm-memory.sh disarm
   fm-memory.sh check
 
 `list` shows memories and open reminders by default. `--all` also shows completed
 reminders. `search` is a case-insensitive literal search over the same records.
-Reminder creation arms an authenticated watcher check automatically. `disarm`
-refuses while an open reminder exists. `check` is for the watcher: it prints one
-line when a reminder is due or a stored record is malformed, and nothing otherwise.
+Reminder creation arms an authenticated watcher check automatically, and
+completing the last open reminder retires it. `check` is for the watcher: it
+prints one line when a reminder is due or a stored record is malformed, and
+nothing otherwise.
 EOF
 }
 
@@ -316,7 +315,6 @@ action_arm() {
     && [ "$(fm_pr_file_mode "$CHECK_SHIM")" = 700 ] \
     && [ "$(cat "$CHECK_SHIM" 2>/dev/null)" = "$want" ] \
     && fm_custom_check_registered "$STATE" "$CHECK_ID"; then
-    printf 'armed: state/%s.check.sh\n' "$CHECK_ID"
     return 0
   fi
   ARM_BACKUP=
@@ -345,7 +343,6 @@ action_arm() {
   trap - HUP INT TERM
   [ -z "$ARM_BACKUP" ] || rm -f -- "$ARM_BACKUP"
   ARM_BACKUP=
-  printf 'armed: state/%s.check.sh\n' "$CHECK_ID"
 }
 
 has_open_reminder() {
@@ -356,24 +353,6 @@ has_open_reminder() {
     [ "$R_KIND" != reminder ] || [ "$R_STATE" != open ] || return 0
   done
   return 1
-}
-
-action_disarm() {
-  local check_open=0
-  lock_acquire || die 'the memory store is busy or unavailable'
-  has_open_reminder || check_open=$?
-  case "$check_open" in
-    0) die 'cannot disarm while an open reminder exists' ;;
-    1) ;;
-    *) die 'cannot disarm because a stored record is malformed' ;;
-  esac
-  if [ -e "$CHECK_SHIM" ] || [ -L "$CHECK_SHIM" ] || [ -e "$CHECK_TRUST" ] || [ -L "$CHECK_TRUST" ]; then
-    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$UNREGISTER_BIN" "$CHECK_ID" >/dev/null \
-      || die 'could not retire the reminder check'
-  fi
-  lock_release
-  trap - EXIT HUP INT TERM
-  printf 'disarmed: state/%s.check.sh\n' "$CHECK_ID"
 }
 
 # Retire the standing check when no open reminder remains.
@@ -402,7 +381,7 @@ action_add() {
   now=$(now_epoch) || die 'the current time is unavailable'
   lock_acquire || die 'the memory store is busy or unavailable'
   if [ "$kind" = reminder ]; then
-    action_arm >/dev/null || die 'could not arm the due-reminder check; no reminder was recorded'
+    action_arm || die 'could not arm the due-reminder check; no reminder was recorded'
     trap 'lock_release' EXIT HUP INT TERM
   fi
   if ! id=$(new_id "$now"); then
@@ -575,14 +554,6 @@ case "$command" in
   list) action_list "$@" ;;
   search) action_search "$@" ;;
   "done") action_done "$@" ;;
-  arm)
-    [ "$#" -eq 0 ] || die_usage 'arm takes no arguments'
-    action_arm || die 'could not arm the due-reminder check'
-    ;;
-  disarm)
-    [ "$#" -eq 0 ] || die_usage 'disarm takes no arguments'
-    action_disarm
-    ;;
   check)
     [ "$#" -eq 0 ] || die_usage 'check takes no arguments'
     action_check
