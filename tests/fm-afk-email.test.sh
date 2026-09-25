@@ -313,9 +313,10 @@ test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit() {
 import importlib.util
 import os
 import sys
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 
 root = Path(sys.argv[1])
 home = Path(sys.argv[2])
@@ -389,8 +390,9 @@ with redirect_stdout(poll_output):
 poll_lines = poll_output.getvalue().splitlines()
 assert poll_lines[0] == "uidvalidity\t44", poll_lines
 poll_rows = {fields[0]: fields for fields in (line.split("\t") for line in poll_lines[1:])}
-assert set(poll_rows) == {"1", "3"}, poll_rows
+assert set(poll_rows) == {"1", "2", "3"}, poll_rows
 assert poll_rows["1"][4] == "ok", poll_rows["1"]
+assert poll_rows["2"][4] == "degraded", poll_rows["2"]
 assert poll_rows["3"][4] == "ok", poll_rows["3"]
 assert mailbox.body_fetches == ["2"], mailbox.body_fetches
 mailbox.fail_body_fetch = False
@@ -405,14 +407,37 @@ assert recovery_rows["2"][4] == "ok", recovery_rows["2"]
 assert mailbox.body_fetches == ["2"], mailbox.body_fetches
 recipient = os.environ.pop("FM_AFK_EMAIL_TO")
 try:
-    try:
-        mail.afk_email_recipient()
-    except RuntimeError as error:
-        assert "mail configuration is missing" in str(error), str(error)
-    else:
-        raise AssertionError("live email posture silently disabled when destination is missing")
+    assert mail.afk_email_recipient() is None
+    mailbox.body_fetches.clear()
+    missing_config_output = StringIO()
+    with redirect_stdout(missing_config_output):
+        assert mail.cmd_poll_list() == 0
+    missing_config_lines = missing_config_output.getvalue().splitlines()
+    missing_config_rows = {fields[0]: fields for fields in (line.split("\t") for line in missing_config_lines[1:])}
+    assert set(missing_config_rows) == {"1", "2", "3"}, missing_config_rows
+    assert mailbox.body_fetches == [], mailbox.body_fetches
 finally:
     os.environ["FM_AFK_EMAIL_TO"] = recipient
+real_run = mail.subprocess.run
+def fail_handoff(command, *args, **kwargs):
+    if isinstance(command, list) and command[-1] == "receive-batch":
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+    return real_run(command, *args, **kwargs)
+mail.subprocess.run = fail_handoff
+mailbox.body_fetches.clear()
+handoff_output = StringIO()
+handoff_error = StringIO()
+try:
+    with redirect_stdout(handoff_output), redirect_stderr(handoff_error):
+        assert mail.cmd_poll_list() == 0
+finally:
+    mail.subprocess.run = real_run
+handoff_lines = handoff_output.getvalue().splitlines()
+handoff_rows = {fields[0]: fields for fields in (line.split("\t") for line in handoff_lines[1:])}
+assert set(handoff_rows) == {"1", "2", "3"}, handoff_rows
+assert handoff_rows["2"][4] == "degraded", handoff_rows["2"]
+assert "away-email reply handoff failed" in handoff_error.getvalue(), handoff_error.getvalue()
+assert mailbox.body_fetches == ["2"], mailbox.body_fetches
 (state / ".afk-contract").write_text("version: 99\nentered_epoch: 1\nreach_channels: email\n")
 mailbox.body_fetches.clear()
 assert mail.cmd_poll_list() == 0

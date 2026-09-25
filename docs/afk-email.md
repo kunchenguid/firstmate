@@ -36,7 +36,7 @@ No credential needs to be shared with Firstmate.
 
 ## Replies and limits
 
-Captain-facing Pi supervision outcomes are grouped into plain-text email updates, with the full pull-request URL retained when present and a short one-time reply code for each item.
+Captain-facing Pi supervision outcomes are grouped into plain-text email updates, with the full pull-request URL retained when present and a short one-time reply code for each item. Outcome selection compares integer-second epochs, so an outcome recorded immediately before `/afk` in the same second may be included; this is a known boundary.
 To answer an item, reply from the configured destination address and make the first non-empty line exactly `FM-AFK-REPLY FM-AFK-<code>`; put your words on the following lines before any quoted message.
 Each code is accepted only for its own sent item, once, and for seven days after sending. Reply bodies are fetched and parsed only when the header's single sender address matches the configured destination; each fetched message is limited to 256 KiB. Replies over 8,000 characters are not accepted.
 

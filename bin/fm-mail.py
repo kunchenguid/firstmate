@@ -81,25 +81,28 @@ def afk_email_recipient():
     contract = os.path.join(os.path.dirname(__file__), 'fm-afk-contract.sh')
     env = os.environ.copy()
     env.setdefault('FM_HOME', os.path.dirname(os.path.dirname(__file__)))
-    validated = subprocess.run(
-        [contract, 'validate'],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env=env,
-    )
-    if validated.returncode != 0 or afk_record_field('reach_channels') != 'email':
+    try:
+        validated = subprocess.run(
+            [contract, 'validate'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+        if validated.returncode != 0 or afk_record_field('reach_channels') != 'email':
+            return None
+        helper = os.path.join(os.path.dirname(__file__), 'fm-afk-email.py')
+        configured = subprocess.run(
+            [sys.executable, helper, 'configured'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
         return None
-    helper = os.path.join(os.path.dirname(__file__), 'fm-afk-email.py')
-    configured = subprocess.run(
-        [sys.executable, helper, 'configured'],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        env=env,
-    )
     recipient = configured.stdout.strip()
     if configured.returncode != 0 or not recipient:
-        raise RuntimeError('mail configuration is missing for active email away posture')
+        return None
     return recipient
 
 
@@ -472,33 +475,34 @@ def cmd_poll_list():
                 idate = clean(dec(mi.get('Date')))
                 subj = clean(dec(mi.get('Subject')))
                 fr = clean(dec(mi.get('From')))
-                if afk_enabled:
-                    body = ''
-                    if from_is_configured(fr, recipient):
-                        try:
-                            message_size = fetched_size(msg)
-                            if message_size is None:
-                                raise AfkBodyFetchError('RFC822.SIZE was unavailable for the configured sender')
-                            if message_size <= MAX_AFK_BODY_BYTES:
-                                body_type, body_data = m.uid(
-                                    'fetch', u.encode(), f'(BODY.PEEK[]<0.{MAX_AFK_BODY_BYTES}>)')
-                                body_bytes = fetched_literal(body_data) if body_type == 'OK' else None
-                                if body_bytes is None or len(body_bytes) != message_size:
-                                    raise AfkBodyFetchError('configured sender body fetch was incomplete')
-                                body_message = email.message_from_bytes(body_bytes)
-                                body = plain_body(body_message)[:MAX_AFK_REPLY_CHARS + 1]
-                        except AfkBodyFetchError:
-                            raise
-                        except Exception as error:
-                            raise AfkBodyFetchError('configured sender body fetch failed') from error
-                    afk_messages.append({
-                        'uidvalidity': uidv,
-                        'uid': uid,
-                        'from': fr,
-                        'subject': subj,
-                        'body': body,
-                    })
+                if afk_enabled and from_is_configured(fr, recipient):
+                    try:
+                        message_size = fetched_size(msg)
+                        if message_size is None:
+                            raise AfkBodyFetchError('RFC822.SIZE was unavailable for the configured sender')
+                        if message_size <= MAX_AFK_BODY_BYTES:
+                            body_type, body_data = m.uid(
+                                'fetch', u.encode(), f'(BODY.PEEK[]<0.{MAX_AFK_BODY_BYTES}>)')
+                            body_bytes = fetched_literal(body_data) if body_type == 'OK' else None
+                            if body_bytes is None or len(body_bytes) != message_size:
+                                raise AfkBodyFetchError('configured sender body fetch was incomplete')
+                            body_message = email.message_from_bytes(body_bytes)
+                            afk_messages.append({
+                                'uidvalidity': uidv,
+                                'uid': uid,
+                                'from': fr,
+                                'subject': subj,
+                                'body': plain_body(body_message)[:MAX_AFK_REPLY_CHARS + 1],
+                            })
+                    except AfkBodyFetchError:
+                        raise
+                    except Exception as error:
+                        raise AfkBodyFetchError('configured sender body fetch failed') from error
             except AfkBodyFetchError:
+                if is_retry:
+                    continue
+                out.append((uid, idate, fr, subj, 'degraded'))
+                new_emitted += 1
                 continue
             except Exception:
                 if is_retry:
@@ -535,16 +539,25 @@ def cmd_poll_list():
         m = None
         if afk_messages:
             helper = os.path.join(os.path.dirname(__file__), 'fm-afk-email.py')
-            result = subprocess.run(
-                [sys.executable, helper, 'receive-batch'],
-                input=json.dumps(afk_messages, ensure_ascii=False),
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=os.environ.copy(),
-            )
-            if result.returncode != 0:
-                raise RuntimeError('away-email reply handoff could not be recorded')
+            try:
+                result = subprocess.run(
+                    [sys.executable, helper, 'receive-batch'],
+                    input=json.dumps(afk_messages, ensure_ascii=False),
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=os.environ.copy(),
+                )
+                handoff_failed = result.returncode != 0
+            except (OSError, subprocess.SubprocessError):
+                handoff_failed = True
+            if handoff_failed:
+                failed_uids = {message['uid'] for message in afk_messages}
+                out = [
+                    (uid, idate, fr, subj, 'degraded' if uid in failed_uids else status)
+                    for uid, idate, fr, subj, status in out
+                ]
+                print('fm-mail: away-email reply handoff failed; affected messages will retry', file=sys.stderr)
         print('uidvalidity\t%s' % uidv)
         for uid, idate, fr, subj, status in out:
             print('%s\t%s\t%s\t%s\t%s' % (uid, idate, fr, subj, status))
