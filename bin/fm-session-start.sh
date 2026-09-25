@@ -622,7 +622,8 @@ if [ "$REEMIT" -eq 1 ]; then
   printf 'context. Lock ownership is re-verified and the durable records below are\n'
   printf 'reprinted, but the sweeps startup already reconciled - project clone refresh,\n'
   printf 'secondmate convergence and liveness, pending remote handoff\n'
-  printf 'retry, X-mode artifact writes, and stale Herdr child cleanup - are NOT repeated.\n'
+  printf 'retry, X-mode artifact writes, stale Herdr child cleanup, and Herdr project-cluster\n'
+  printf 'reconciliation - are NOT repeated.\n'
   printf 'Queued wakes ARE still drained: they arrived after startup and are this turn work.\n'
 else
   section "SESSION START - $FM_HOME"
@@ -641,8 +642,8 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '%s\n' "$BAR"
     printf '●  READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED\n'
     printf '●  %s\n' "$LOCK_OUT"
-    printf '●  Skipping every mutating step: stale Herdr child cleanup,\n'
-    printf '●  secondmate convergence, secondmate liveness, pending remote handoff retry,\n'
+    printf '●  Skipping every mutating step: stale Herdr child cleanup and project-cluster\n'
+    printf '●  reconciliation, secondmate convergence, secondmate liveness, pending remote handoff retry,\n'
     printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
     printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
     printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
