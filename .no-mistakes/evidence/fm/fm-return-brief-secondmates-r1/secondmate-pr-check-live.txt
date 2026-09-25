@@ -1,0 +1,2 @@
+error: axi-mate is a secondmate, not a delivery lane - https://github.com/example/child/pull/7 was reported on its status channel but belongs to a task in the mate's own home, which arms its own merge watch
+exit=1
