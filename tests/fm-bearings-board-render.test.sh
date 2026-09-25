@@ -92,6 +92,20 @@ require_listener_reached_poll() {  # <home>
   fail "the board listener did not reach the Lavish poll (owner: ${owner:-none})"
 }
 
+# Build the board from a complete <payload.json> and return what the renderer
+# produced.
+render_payload() {  # <home> <payload.json>
+  local home=$1 data=$2
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    LAVISH_AXI_STATE_DIR="$home/lavish-state" \
+    "$BOARD" build "$data" >/dev/null || fail "the board did not build"
+  require_listener_reached_poll "$home"
+  node "$HARNESS" "$home/.lavish/bearings-board.html" \
+    || fail "the built board could not be rendered"
+}
+
 # Build the board from <underway-json> plus <charted-json> and return what the
 # renderer produced.
 render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more]
@@ -101,14 +115,7 @@ render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charte
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
     prs_live:false, captains_call:[], underway:$underway, landed:[],
     charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
-  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
-    LAVISH_AXI_STATE_DIR="$home/lavish-state" \
-    "$BOARD" build "$data" >/dev/null || fail "the board did not build"
-  require_listener_reached_poll "$home"
-  node "$HARNESS" "$home/.lavish/bearings-board.html" \
-    || fail "the built board could not be rendered"
+  render_payload "$home" "$data"
 }
 
 # Build the board from <charted-json> alone and return what the renderer produced.
@@ -266,6 +273,65 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
   pass "charted rows with no filed date follow the dated rows in payload order"
 }
 
+test_every_board_list_links_its_ticket_and_pr() {
+  local home out data
+  home=$(make_home links)
+  data="$home/payload.json"
+  jq -n '{
+    schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
+    prs_live:false,
+    captains_call:[
+      {key:"hold-links", type:"decision", repo:"sample", title:"Pick a direction",
+       options:[{value:"go", label:"Go"}],
+       ticket:"ABC-101", ticket_url:"https://tracker.example/issue/ABC-101",
+       pr_url:"https://forge.example/org/sample/pull/41"},
+      {key:"merge.links", type:"merge", repo:"sample", title:"Merge the fix", risk:"low",
+       options:[{value:"merge", label:"Merge"}],
+       ticket:"ABC-102", ticket_url:"https://tracker.example/issue/ABC-102",
+       pr_url:"https://forge.example/org/sample/pull/42"}
+    ],
+    underway:[
+      {id:"uw-linked", repo:"sample", name:"ABC-103: Linked work", state:"working",
+       kind:"ship", doing:"implementing",
+       ticket:"ABC-103", ticket_url:"https://tracker.example/issue/ABC-103",
+       pr_url:"https://forge.example/org/sample/pull/43"},
+      {id:"uw-plain", repo:"sample", name:"Unlinked work", state:"working",
+       kind:"ship", doing:"implementing"}
+    ],
+    landed:[
+      {id:"ld-linked", repo:"sample", what:"Shipped fix", owner:"worker",
+       ticket_url:"https://tracker.example/issue/ABC-104",
+       pr_url:"https://forge.example/org/sample/pull/44"}
+    ],
+    charted:[
+      {id:"ch-linked", repo:"sample", title:"Queued fix", reason:"", dispatchable:true,
+       ticket:"ABC-105", ticket_url:"https://tracker.example/issue/ABC-105",
+       pr_url:"https://forge.example/org/sample/pull/45"}
+    ]}' > "$data"
+  out=$(render_payload "$home" "$data")
+  printf '%s' "$out" | jq -e '.error == ""' >/dev/null \
+    || fail "the linked board rendered its fail-closed error: $out"
+  printf '%s' "$out" | jq -e '
+    def newtab: all(.[]; .target == "_blank" and .rel == "noopener");
+    (.underway[0].links == [
+        {text:"ABC-103", href:"https://tracker.example/issue/ABC-103", target:"_blank", rel:"noopener"},
+        {text:"#43", href:"https://forge.example/org/sample/pull/43", target:"_blank", rel:"noopener"}])
+      and (.underway[1].links == [])
+      and (.landed[0].links | map(.text) == ["ticket", "#44"])
+      and (.landed[0].links | map(.href)
+        == ["https://tracker.example/issue/ABC-104", "https://forge.example/org/sample/pull/44"])
+      and (.landed[0].links | newtab)
+      and (.charted[0].links | map(.text) == ["ABC-105", "#45"])
+      and (.charted[0].links | newtab)
+      and ([.calls[] | .links | map(.href)] == [
+        ["https://tracker.example/issue/ABC-101", "https://forge.example/org/sample/pull/41"],
+        ["https://forge.example/org/sample/pull/42", "https://tracker.example/issue/ABC-102"]])
+      and ([.calls[] | .links | newtab] | all)
+  ' >/dev/null || fail "a board list did not link its ticket and PR: $out"
+  pass "every board list links a supplied ticket and PR in a new tab, and no link without a URL"
+}
+
+test_every_board_list_links_its_ticket_and_pr
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first
