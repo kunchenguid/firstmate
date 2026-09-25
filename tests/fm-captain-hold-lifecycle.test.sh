@@ -1058,10 +1058,10 @@ EOF
 
   # The skill's order - hold the work item the question gates, then run
   # complete with it - leaves command_complete's captain-held transfer as the
-  # lane's last line. Settlement retracts it under its own key, with no worker
-  # alive, and both readers then read past the settled bookkeeping to the
-  # needs-decision the transfer answered; a replayed settlement appends
-  # nothing more.
+  # lane's last line. Settlement retracts it and the hold mirror under it, each
+  # under its own key, with no worker alive, and both readers then read past
+  # the settled bookkeeping to the needs-decision the transfer answered; a
+  # replayed settlement appends nothing more.
   lane=sample-transfer-lane
   tasks_in "$home" add "$lane" "Guard the transfer sample" --kind scout --repo sample >/dev/null \
     || fail "could not create the transfer lane"
@@ -1083,10 +1083,10 @@ EOF
     || fail "answer could not close the transfer lane"
   run_captain "$home" answer "$lane" --decision-file "$home/transfer.txt" >/dev/null \
     || fail "transfer answer retry was not idempotent"
-  [ "$(unstamp_line "$(tail -n 1 "$home/state/$lane.status")")" = "resolved [key=route]: captain call answered by fm-captain-hold" ] \
-    || fail "settlement did not retract the lane's captain-held transfer: $(tail -n 1 "$home/state/$lane.status")"
-  [ "$(grep -c '^resolved \[key=route\]' "$home/state/$lane.status")" = 1 ] \
-    || fail "a replayed settlement retracted the transfer twice"
+  [ "$(grep -cE '^resolved \[key=route\]( \[at=[0-9]+\])?: captain call answered by fm-captain-hold$' "$home/state/$lane.status")" = 1 ] \
+    || fail "settlement did not retract the lane's captain-held transfer exactly once: $(cat "$home/state/$lane.status")"
+  [ "$(grep -cE "^resolved \\[key=captain-hold-$lane-1\\]( \\[at=[0-9]+\\])?: captain call answered by fm-captain-hold$" "$home/state/$lane.status")" = 1 ] \
+    || fail "settlement did not retract the hold mirror under the transfer exactly once: $(cat "$home/state/$lane.status")"
   for reader in last_status_line last_worker_status_line; do
     last=$(bash -c '. "$1"; "$3" "$2"' _ \
       "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status" "$reader")

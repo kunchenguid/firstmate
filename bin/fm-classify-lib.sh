@@ -182,15 +182,14 @@ _fm_hold_unstamped_match() {  # <line> <ere>
 # was appended, so a consumer can name the head it is superseding; asking for it
 # always reads the whole file, since a bounded window cannot bound two events.
 # This is an event read; status_current_line below reconciles open decisions.
-# A settled hold reads through the raw stream: when the latest event is a
-# retraction the hold command wrote, every hold-command line is its
-# bookkeeping, not worker state, and is read past to the event the worker last
-# wrote - a lane that was done, paused, or failed before the hold, or whose
-# transferred needs-decision was just answered, reads that way to the watcher,
-# the away-mode daemon, and the return brief again. A hold or transfer still
+# A settled hold is read past (_fm_hold_settled_drop): its hold-command lines
+# are bookkeeping, not worker state, so a lane that was done, paused, or failed
+# before the hold, or whose transferred needs-decision was just answered, reads
+# that way to the watcher, the away-mode daemon, and the return brief again,
+# whatever the worker appends after the settlement. A hold or transfer still
 # standing is returned raw, because those readers must see it.
 last_status_line() {  # <status-file> [<previous-event-var>]
-  _fm_status_read '' "$@"
+  _fm_last_status_event "$(_fm_hold_line_ere "$1")" '' "$@"
 }
 
 # last_status_line read past bin/fm-captain-hold.sh's hold mirror at all
@@ -200,26 +199,42 @@ last_status_line() {  # <status-file> [<previous-event-var>]
 # past exactly as last_status_line reads it. The watcher and away-mode daemon
 # read last_status_line directly, which keeps a standing hold visible to them.
 last_worker_status_line() {  # <status-file> [<previous-event-var>]
-  _fm_status_read "$(_fm_hold_mirror_line_ere "$1" 'captain-held|resolved')" "$@"
+  _fm_last_status_event "$(_fm_hold_line_ere "$1")" \
+    "$(_fm_hold_mirror_line_ere "$1" 'captain-held|resolved')" "$@"
 }
 
-_fm_status_read() {  # <skip-ere> <status-file> [<previous-event-var>]
-  local latest
-  latest=$(_fm_last_status_event "$1" "$2")
-  if _fm_hold_unstamped_match "$latest" "$FM_HOLD_RETRACTION_ERE"; then
-    _fm_last_status_event "$(_fm_hold_line_ere "$2")" "${@:2}"
-  elif [ "$#" -gt 2 ]; then
-    _fm_last_status_event "$@"
-  else
-    printf '%s\n' "$latest"
+# Print the status lines on stdin without a settled hold's lines. A line
+# matching <hold-line-ere> is settled when a hold-command retraction for its
+# own key appears at or after it, so every retraction goes, and so does the
+# mirror or transfer it retracts however many worker lines follow, while a hold
+# or transfer still standing stays. An empty <hold-line-ere> drops nothing.
+_fm_hold_settled_drop() {  # <hold-line-ere>
+  local hold=$1 key settled=$'\n' i=0
+  local -a lines=()
+  if [ -z "$hold" ]; then
+    cat
+    return
   fi
+  while IFS= read -r 'lines[i]' || [ -n "${lines[i]}" ]; do
+    i=$((i + 1))
+  done
+  unset 'lines[i]'
+  while [ "$i" -gt 0 ]; do
+    i=$((i - 1))
+    _fm_hold_unstamped_match "${lines[i]}" "$hold" || continue
+    key=$(_fm_decision_key "${lines[i]}") || continue
+    ! _fm_hold_unstamped_match "${lines[i]}" "$FM_HOLD_RETRACTION_ERE" \
+      || settled="$settled$key"$'\n'
+    case "$settled" in *$'\n'"$key"$'\n'*) unset 'lines[i]' ;; esac
+  done
+  [ "${#lines[@]}" -eq 0 ] || printf '%s\n' "${lines[@]}"
 }
 
 # 0 when the log's latest raw event is a hold-command retraction - the settled
 # bookkeeping last_status_line reads through - so a caller can tell a lane
 # whose only lifted wait was the hold from a worker that moved on.
 status_hold_settled() {  # <status-file>
-  _fm_hold_unstamped_match "$(_fm_last_status_event '' "$1")" "$FM_HOLD_RETRACTION_ERE"
+  _fm_hold_unstamped_match "$(_fm_last_status_event '' '' "$1")" "$FM_HOLD_RETRACTION_ERE"
 }
 
 # status_observed_signature of the log as its worker left it: the hold
@@ -240,15 +255,16 @@ status_worker_signature() {  # <status-file>
   status_observed_signature "$f" "$size"
 }
 
-_fm_last_status_event() {  # <skip-ere> <status-file> [<previous-event-var>]
-  local skip=$1 f=$2 scan=''
+_fm_last_status_event() {  # <hold-line-ere> <skip-ere> <status-file> [<previous-event-var>]
+  local hold=$1 skip=$2 f=$3 scan=''
   [ -f "$f" ] && [ -r "$f" ] || return 0
-  if [ "$#" -gt 2 ]; then
-    scan=$(_fm_status_event_scan "$skip" < "$f") || :
-  elif ! scan=$(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null | _fm_status_event_scan "$skip"); then
-    scan=$(_fm_status_event_scan "$skip" < "$f") || :
+  if [ "$#" -gt 3 ]; then
+    scan=$(_fm_hold_settled_drop "$hold" < "$f" | _fm_status_event_scan "$skip") || :
+  elif ! scan=$(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null \
+      | _fm_hold_settled_drop "$hold" | _fm_status_event_scan "$skip"); then
+    scan=$(_fm_hold_settled_drop "$hold" < "$f" | _fm_status_event_scan "$skip") || :
   fi
-  [ "$#" -lt 3 ] || printf -v "$3" '%s' "${scan%%$'\n'*}"
+  [ "$#" -lt 4 ] || printf -v "$4" '%s' "${scan%%$'\n'*}"
   printf '%s\n' "${scan##*$'\n'}"
 }
 
@@ -449,10 +465,11 @@ status_is_paused_or_captain_held() {  # <status-line>
 # pause. Only a resolved line for the pause's own phase key (the keyed
 # activity fold's key, where a keyless line is its own phase) retracts it, as
 # does any other later event. A captain-held line counts only while it is the
-# latest event. Bounded like last_status_line: only a tail window made wholly of
-# resolved events widens the read to the whole file.
+# latest event. Bounded like last_status_line, and like it reads past a settled
+# hold: only a tail window made wholly of resolved events widens the read to the
+# whole file.
 status_declared_wait_line() {  # <status-file>
-  local f=$1 last verb resolve legacy_re hold=''
+  local f=$1 last verb resolve legacy_re hold
   last=$(last_status_line "$f")
   if status_is_paused_or_captain_held "$last"; then
     printf '%s\n' "$last"
@@ -462,21 +479,19 @@ status_declared_wait_line() {  # <status-file>
   status_line_verb "$last" verb
   [ "$verb" = "$resolve" ] || return 0
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
-  ! status_hold_settled "$f" || hold=$(_fm_hold_line_ere "$f")
-  tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null \
-    | _fm_status_declared_wait_scan "$resolve" "$legacy_re" "$hold" \
-    || _fm_status_declared_wait_scan "$resolve" "$legacy_re" "$hold" < "$f" || :
+  hold=$(_fm_hold_line_ere "$f")
+  tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null | _fm_hold_settled_drop "$hold" \
+    | _fm_status_declared_wait_scan "$resolve" "$legacy_re" \
+    || _fm_hold_settled_drop "$hold" < "$f" \
+    | _fm_status_declared_wait_scan "$resolve" "$legacy_re" || :
 }
 
 # Walk the status lines on stdin back from the newest event past resolved lines
 # to the first other event, and print it when it is a pause none of those
-# resolved lines share a phase key with. Settled hold-command lines are not
-# events in this walk: they match the same unstamped hold-line matcher
-# last_status_line uses, so a mirror declaration or its retraction cannot hide
-# the pause underneath. Returns 1 when every event is a resolved line, so a
-# caller reading a bounded window knows to widen it.
-_fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re> <hold-line-ere>
-  local resolve=$1 legacy_re=$2 hold=$3 line verb key keys=$'\n' i=0
+# resolved lines share a phase key with. Returns 1 when every event is a
+# resolved line, so a caller reading a bounded window knows to widen it.
+_fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re>
+  local resolve=$1 legacy_re=$2 line verb key keys=$'\n' i=0
   local -a lines=()
   while IFS= read -r line || [ -n "$line" ]; do
     lines[i]=$line
@@ -487,7 +502,6 @@ _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re> <hold-li
     line=${lines[i]}
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
     _fm_status_line_is_event "$line" "$legacy_re" || continue
-    [ -z "$hold" ] || ! _fm_hold_unstamped_match "$line" "$hold" || continue
     status_line_verb "$line" verb
     case "$verb" in
       "$resolve") ;;

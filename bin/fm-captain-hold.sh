@@ -291,10 +291,13 @@ status_declare_hold() {  # <task-id> <occurrence> <reason>
 
 # Retract what still declares the call once it is settled, but only while that
 # declaration is a log's last event line: a worker that already moved on owns
-# its own newer state, and a matching retry must not append again. Two
+# its own newer state, and a matching retry must not append again. Each
+# retraction settles only its own key, so a log is retracted until its last
+# event line is no longer such a declaration: a mirror left under a transfer,
+# or a second transfer under the first, is retracted in turn. Two
 # declarations qualify. The mirror's own keyed declaration on the task's log
-# takes the keyed retraction; the guard matches that key, so a replay cannot
-# retract twice once last_status_line reads past the settled pair. And a
+# takes a retraction under that key, so a replay cannot retract twice once
+# last_status_line reads past the settled pair. And a
 # command_complete transfer (`captain-held [key=<k>]: tracked by <ids>`) takes
 # `resolved [key=<k>]` once neither a task it names nor the lane's own task is
 # still an open captain call, when this task is either of those: the transfer
@@ -303,29 +306,45 @@ status_declare_hold() {  # <task-id> <occurrence> <reason>
 # lane held itself while its transfer was the last line (so status_declare_hold
 # wrote no mirror) keeps that transfer as its only declaration until the lane's
 # own call settles too.
-status_retract_hold() {  # <task-id> <occurrence> <note>
-  local id=$1 occurrence=$2 note=$3 f key lane ids named rc
-  local -a names
+status_retract_hold() {  # <task-id> <note>
+  local id=$1 note=$2 f
   f="$STATE/$id.status"
-  if _fm_hold_unstamped_match "$(last_status_line "$f")" "$(_fm_hold_mirror_line_ere "$f" 'captain-held')"; then
-    status_append_retraction "$id" "$f" "captain-hold-$id-$occurrence" "$note"
-  fi
+  status_retract_settled_top "$id" "$f" "$note"
   for f in "$STATE"/*.status; do
-    [ -f "$f" ] && [ ! -L "$f" ] || continue
-    _fm_hold_unstamped_match "$(last_status_line "$f")" "$FM_HOLD_TRANSFER_ERE" || continue
-    key=${BASH_REMATCH[1]}
-    lane=${f##*/}
-    ids="${BASH_REMATCH[2]},${lane%.status}"
-    case ",$ids," in *",$id,"*) ;; *) continue ;; esac
-    IFS=, read -r -a names <<< "$ids"
-    for named in "${names[@]}"; do
-      rc=0
-      (command_open "$named") >/dev/null 2>&1 || rc=$?
-      [ "$rc" -eq 1 ] || continue 2
-    done
-    status_append_retraction "$id" "$f" "$key" "$note"
+    [ -f "$f" ] && [ ! -L "$f" ] && [ "$f" != "$STATE/$id.status" ] || continue
+    status_retract_settled_top "$id" "$f" "$note"
   done
   return 0
+}
+
+status_retract_settled_top() {  # <task-id> <status-file> <note>
+  local id=$1 f=$2 note=$3 last before key lane ids named rc
+  local -a names
+  lane=${f##*/}
+  lane=${lane%.status}
+  last=$(last_status_line "$f")
+  while :; do
+    if [ "$lane" = "$id" ] \
+      && _fm_hold_unstamped_match "$last" "$(_fm_hold_mirror_line_ere "$f" 'captain-held')"; then
+      key=$(_fm_decision_key "$last") || return 0
+    elif _fm_hold_unstamped_match "$last" "$FM_HOLD_TRANSFER_ERE"; then
+      key=${BASH_REMATCH[1]}
+      ids="${BASH_REMATCH[2]},$lane"
+      case ",$ids," in *",$id,"*) ;; *) return 0 ;; esac
+      IFS=, read -r -a names <<< "$ids"
+      for named in "${names[@]}"; do
+        rc=0
+        (command_open "$named") >/dev/null 2>&1 || rc=$?
+        [ "$rc" -eq 1 ] || return 0
+      done
+    else
+      return 0
+    fi
+    status_append_retraction "$id" "$f" "$key" "$note"
+    before=$last
+    last=$(last_status_line "$f")
+    [ "$last" != "$before" ] || return 0
+  done
 }
 
 status_append_retraction() {  # <task-id> <status-file> <key> <note>
@@ -1505,7 +1524,7 @@ publish_parent_resolution_then_retire() {  # <task-id> <occurrence> <note>
   local id=$1 occurrence=$2 note=$3 request
   request=$(reconcile_request_path "$id")
   publish_parent_hold "$id" "$occurrence" resolved "$note"
-  status_retract_hold "$id" "$occurrence" "$note"
+  status_retract_hold "$id" "$note"
   if [ -e "$request" ] && [ "$PARENT_HOLD_PUBLISHED" != 1 ]; then
     fail "could not publish the answered captain-held task $id to its parent"
   fi
@@ -1638,7 +1657,7 @@ reconcile_close() {
     publish_parent_hold "$id" "$occurrence" resolved reconciled
     [ "$PARENT_HOLD_PUBLISHED" = 1 ] \
       || fail "could not publish the reconciled captain-held task $id to its parent"
-    status_retract_hold "$id" "$occurrence" reconciled
+    status_retract_hold "$id" reconciled
     reconcile_request_retire "$id"
     printf 'reconciled: %s\n' "$id"
     return 0
@@ -1662,7 +1681,7 @@ reconcile_close() {
   publish_parent_hold "$id" "$occurrence" resolved reconciled
   [ "$PARENT_HOLD_PUBLISHED" = 1 ] \
     || fail "could not publish the reconciled captain-held task $id to its parent"
-  status_retract_hold "$id" "$occurrence" reconciled
+  status_retract_hold "$id" reconciled
   reconcile_request_retire "$id"
   printf 'reconciled: %s\n' "$id"
 }
