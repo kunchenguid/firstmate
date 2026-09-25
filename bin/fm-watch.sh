@@ -2164,14 +2164,14 @@ run_merge_attempt_capture() {
   FM_ACTIVE_CHECK_PID=$!
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
+  watcher_stop_signals
+  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
-  trap 'exit 1' HUP INT TERM
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true
     fm_check_output_cleanup
     return 1
   fi
-  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
   FM_MERGE_ATTEMPT_STATUS=0
   wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || FM_MERGE_ATTEMPT_STATUS=$?
   FM_ACTIVE_CHECK_PID=
