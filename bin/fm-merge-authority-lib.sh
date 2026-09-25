@@ -53,20 +53,22 @@ FM_MERGE_AUTHORITY_RECORD_IDENTITY=
 
 fm_merge_authority_resolve() {  # <home> <state> <meta> <task-id>
   local home=${1-} state=${2-} meta=${3-} id=${4-}
+  local yolo=''
   FM_MERGE_AUTHORITY=
   FM_MERGE_AUTHORITY_REASON='invalid'
-  [ -n "$home" ] && [ -n "$state" ] && [ -n "$meta" ] && [ -n "$id" ] || return 1
 
-  if [ -f "$meta" ]; then
-    yolo=$(grep '^yolo=' "$meta" | tail -1 | cut -d= -f2- || true)
-  fi
-  if [ "$yolo" = on ]; then
-    FM_MERGE_AUTHORITY='yolo'
-    FM_MERGE_AUTHORITY_REASON='granted'
-    return 0
-  fi
-
+  # The away-posture record outranks a standing yolo posture: while the captain
+  # is away every green merge runs under away authority, and which merge the
+  # captain's words meant is the supervision session's reading, not a meta flag.
   if ! fm_afk_contract_present "$state"; then
+    if [ -f "$meta" ]; then
+      yolo=$(grep '^yolo=' "$meta" | tail -1 | cut -d= -f2- || true)
+    fi
+    if [ "$yolo" = on ]; then
+      FM_MERGE_AUTHORITY='yolo'
+      FM_MERGE_AUTHORITY_REASON='granted'
+      return 0
+    fi
     FM_MERGE_AUTHORITY='attended'
     FM_MERGE_AUTHORITY_REASON='attended'
     return 0
@@ -111,7 +113,7 @@ fm_merge_authority_persist() {  # <state> <task-id> <meta> <provider> <host> <pa
   local state=$1 id=$2 meta=$3 provider=$4 host=$5 path=$6 number=$7 authority=$8
   local record tmp='' state_device lock status=0
   fm_pr_task_id_valid "$id" || return 1
-  case "$authority" in away|attended) ;; *) return 1 ;; esac
+  case "$authority" in away|attended|yolo) ;; *) return 1 ;; esac
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
   fm_pr_metadata_identity_parse "$meta" || return 1
