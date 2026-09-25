@@ -1801,6 +1801,7 @@ test_tick_starts_reminder_only_for_escalated_records() {
   state="$home/state"
   stub="$TMP_ROOT/remind-stub-$RANDOM"
   mkdir -p "$stub"
+  # shellcheck disable=SC2016  # $1 must reach the generated stub unexpanded.
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$1" >> "%s/started"\n' "$stub" \
     > "$stub/fm-pending-reply-remind.sh"
   chmod +x "$stub/fm-pending-reply-remind.sh"
