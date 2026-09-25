@@ -19,9 +19,12 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | Why a command ran on a different `herdr` client | [Client selection](#client-selection) |
 | Where task tabs appear and how to watch them | [Watching and task containers](#watching-and-task-containers) |
 | The one-task workspaces, their setting, and their cleanup | [Presentation spaces](#presentation-spaces) |
+| Why a seeded default tab is or is not closed | [Default-tab prune safety](#default-tab-prune-safety) |
 | What task metadata records for a Herdr endpoint | [Endpoint metadata](#endpoint-metadata) |
 | How text and keys reach a worker and how delivery is confirmed | [Current transport behavior](#current-transport-behavior) and [Composer and injection safety](#composer-and-injection-safety) |
 | What happens after a Herdr server restart and how liveness is judged | [Restart and liveness behavior](#restart-and-liveness-behavior) |
+| How blocked transitions arrive and what happens without protocol 16 | [Push events and polling fallback](#push-events-and-polling-fallback) |
+| Where the away daemon runs and how it stops | [Away-mode supervisor support](#away-mode-supervisor-support) |
 | Stopping or deleting Herdr sessions during verification | [Destructive lab safety](#destructive-lab-safety) |
 | Known limits and the test suite | [Active limits](#active-limits) and [Regression entry points](#regression-entry-points) |
 
@@ -553,7 +556,7 @@ Ctrl+C is not used for this, because Claude documents it as interrupting a runni
 If the composer cannot be verified empty again, the submit reports `unknown` instead, because text may still be in the composer.
 
 Other harnesses, and panes with no native identity, skip this proof and keep the type-then-Enter path.
-Their paste placeholders and composer shapes are not live-verified.
+They skip it because their paste placeholders and composer shapes are not live-verified.
 
 ### Submit confirmation
 
