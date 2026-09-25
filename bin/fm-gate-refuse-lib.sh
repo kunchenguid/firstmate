@@ -58,11 +58,12 @@
 # environment this guard refuses. So both signals would fire during firstmate's
 # own validation and break unrelated tests. FM_GATE_REFUSE_BYPASS=1 makes the
 # guard a no-op; firstmate's shared test helpers (tests/lib.sh and the backend
-# safety helpers) export it, so every test that drives these scripts against its
-# temp-sandbox fleet is exempt. This does NOT weaken the boundary against the
-# real hazard: the threat is a CONFUSED-not-adversarial gate agent that runs
-# bin/fm-spawn.sh directly after adopting firstmate's identity - it never sources
-# firstmate's test helpers, so it never carries the bypass; and the adversarial
+# safety helpers) export it for temp-sandbox fleet tests. The disposable lab
+# primary recipe in .no-mistakes.yaml uses the marked-home allowance instead.
+# This does NOT weaken the boundary against the real hazard: the threat is a
+# CONFUSED-not-adversarial gate agent that runs bin/fm-spawn.sh directly after
+# adopting firstmate's identity outside a lab - it never sources firstmate's
+# test helpers or sets the bypass; and the adversarial
 # case (an agent that would deliberately set it) is covered by no-mistakes'
 # neutral-execution-context and the HEAD-continuity guard. The dedicated
 # tests/fm-gate-refuse.test.sh strips the bypass so it still verifies real refusal.
