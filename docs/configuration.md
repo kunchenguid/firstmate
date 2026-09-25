@@ -1052,7 +1052,7 @@ This single-provider table is separate from the frozen legacy mapping used by `f
 **Model, effort, and fallback behavior**
 
 - `ultra` is native-only: the model-aware validation contract and launch mapping are owned by `bin/fm-harness.sh validate-native-effort` and `bin/fm-spawn.sh` respectively.
-- Codex `max` is valid when the profile selects `gpt-5.6-luna`, whose installed catalog entry supports that reasoning level.
+- Codex `max` is valid for any model; per-model support is left to launch, where `bin/fm-spawn.sh` passes it only when the installed Codex catalog advertises `max` for the launched model and otherwise omits it with a warning.
 - An omitted model or effort means the selected harness uses its own default for that axis.
 - Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 - If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.

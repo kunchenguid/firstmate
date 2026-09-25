@@ -2495,7 +2495,7 @@ codex_max_effort_flag() {
       [.models[] | select(type == "object" and .slug == $m)][0] as $e
       | if $e == null then "absent"
         else "present\u001f"
-          + ([$e.supported_reasoning_levels[]? | (.effort? // .) | select(type == "string")] | join(","))
+          + ([$e.supported_reasoning_levels[]? | .effort | select(type == "string")] | join(","))
           + "\u001f" + (if ($e.default_reasoning_level | type) == "string" then $e.default_reasoning_level else "" end)
         end
     end' "$catalog" 2>/dev/null); then
