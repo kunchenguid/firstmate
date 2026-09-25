@@ -2,16 +2,25 @@
 
 Audience: maintainer verification.
 
-This record supports the active guarantee that Firstmate can discover and JIT-load a user-owned local skill excluded through the clone's `.git/info/exclude`.
+This record supports the active guarantee that Pi can discover and JIT-load a user-owned local skill excluded through the clone's `.git/info/exclude` when Firstmate supplies the `.agents/skills` root through Pi's public skill interface.
 The internal [`stow` skill](../../.agents/skills/stow/SKILL.md) owns tiering, curation, archival, offload, and completion-receipt behavior.
 [`docs/configuration.md`](../configuration.md) owns the current operator-facing startup-memory setting and estimate.
 
 ## Git-excluded local skill discovery and loading
 
-The internal skill's offload destination relies on the harness discovering and JIT-loading a skill directory whose path is listed in the clone's local `.git/info/exclude`.
-The former experiment exercised only a removed harness and is retired.
-It does not prove current Pi or Codex discovery behavior.
-The retained harness skill-discovery refresh must load a sentinel from the excluded skill body, rather than inferring discovery from Git ignore status or the indexed description.
+The internal skill's offload destination relies on Pi discovering and JIT-loading a skill directory whose path is listed in the clone's local `.git/info/exclude` beneath the explicitly supplied `.agents/skills` root.
+The current Pi guard creates a skill beneath `.agents/skills/`, excludes that directory through the disposable repository's local `.git/info/exclude`, and invokes Pi through its public `--skill` interface.
+The required sentinel exists only in the skill body, so the final response proves body loading rather than only Git ignore status or catalog-description discovery.
+Codex discovery remains unverified.
+
+## 2026-09-25 local-skill verification
+
+The live guard passed with Pi 0.87.1.
+
+```text
+$ FM_STOW_LOCAL_SKILL_LIVE_E2E=1 tests/fm-stow-local-skill-live-e2e.test.sh
+ok - Pi discovers and JIT-loads a repository-local git-excluded skill body
+```
 
 ## 2026-09-24 periodic coordinator verification
 
