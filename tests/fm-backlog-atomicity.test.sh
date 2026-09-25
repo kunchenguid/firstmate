@@ -1757,6 +1757,29 @@ test_completion_fails_loudly_and_records_the_close_it_still_owes() {
   pass "completion refuses to report success while its item is still open, and records what it owes"
 }
 
+test_completion_records_a_codebase_mr_without_fabricating_a_pr_link() {
+  local case_dir id mr out
+  id=atomic-codebase-close-b7
+  mr=https://code.byted.org/chengyuhang/firstmate/merge_requests/61
+  case_dir=$(make_home codebase-close)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship no-mistakes \
+    "spawn_gen=spawn-codebase-close" "pr=$mr"
+
+  out=$(run_teardown "$case_dir" "$id") \
+    || fail "Codebase completion teardown failed: $out"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "Codebase completion did not close the backlog row"
+  assert_grep "Codebase MR $mr" "$(backlog_of "$case_dir")" \
+    "Codebase completion dropped the real delivery URL"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "Codebase completion left a landed pending-close record"
+  assert_absent "$(home_of "$case_dir")/state/$id.meta" \
+    "Codebase completion left the physically retired task record"
+  pass "ordinary teardown records an exact Codebase MR through tasks-axi's supported note channel"
+}
+
 test_interrupted_destructive_cleanup_leaves_a_recoverable_close() {
   local case_dir home id marker out rc=0
   id=atomic-close-destructive-interrupt-b8
@@ -1998,6 +2021,134 @@ test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
     "recovery discarded the recorded link because the item was already Done"
   assert_absent "$marker" "recovery retained an applied completion-link marker"
   pass "recovery backfills recorded links onto already Done items"
+}
+
+test_recovery_retries_a_codebase_close_after_bookkeeping_failure() {
+  local case_dir id mr marker out rc=0
+  id=atomic-codebase-retry-b9
+  mr=https://code.byted.org/chengyuhang/firstmate/merge_requests/62
+  case_dir=$(make_home codebase-retry)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship no-mistakes \
+    "spawn_gen=spawn-codebase-retry" "pr=$mr"
+  marker="$(home_of "$case_dir")/state/$id.backlog-close"
+  break_verb "$case_dir" "done"
+
+  out=$(run_teardown "$case_dir" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "injected Codebase bookkeeping failure reported success"
+  assert_present "$marker" "failed Codebase bookkeeping lost its retry receipt"
+  assert_absent "$(home_of "$case_dir")/state/$id.meta" \
+    "failed Codebase bookkeeping retained a task record after physical cleanup"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "injected Codebase bookkeeping failure changed the backlog row: $out"
+
+  rm -f "$case_dir/fakebin/tasks-axi"
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "restart did not replay the Codebase close: $out"
+  assert_grep "Codebase MR $mr" "$(backlog_of "$case_dir")" \
+    "restart dropped the Codebase delivery URL"
+  assert_absent "$marker" "successful Codebase replay retained its close receipt"
+  run_bootstrap "$case_dir" >/dev/null || fail "idempotent Codebase recovery failed"
+  [ "$(grep -Fc "$mr" "$(backlog_of "$case_dir")")" -eq 1 ] \
+    || fail "idempotent recovery duplicated the Codebase delivery URL"
+  pass "restart retries only Codebase bookkeeping after physical cleanup and converges once"
+}
+
+test_recovery_backfills_a_codebase_mr_on_an_already_done_item() {
+  local case_dir id mr marker out
+  id=atomic-codebase-done-backfill-b9
+  mr=https://code.byted.org/chengyuhang/firstmate/merge_requests/59
+  case_dir=$(make_home codebase-done-backfill)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  tasks-axi "done" "$id" --report "data/$id/report.md" \
+    --file "$(backlog_of "$case_dir")" >/dev/null
+  marker="$(home_of "$case_dir")/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-codebase-done\narg=--pr\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$mr" > "$marker"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "Codebase backfill reopened an already Done row: $out"
+  assert_grep "data/$id/report.md" "$(backlog_of "$case_dir")" \
+    "Codebase backfill lost the existing report artifact"
+  assert_grep "Codebase MR $mr" "$(backlog_of "$case_dir")" \
+    "Codebase backfill did not retain the real merge-request URL"
+  assert_absent "$marker" "Codebase backfill retained an applied receipt"
+  pass "recovery backfills a Codebase MR without reopening Done work or losing its report"
+}
+
+test_recovery_retains_codebase_evidence_when_history_already_archived() {
+  local case_dir id mr marker out
+  id=atomic-codebase-archived-b9
+  mr=https://code.byted.org/chengyuhang/firstmate/merge_requests/60
+  case_dir=$(make_home codebase-history-archived)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  tasks-axi "done" "$id" --file "$(backlog_of "$case_dir")" >/dev/null
+  (cd "$(home_of "$case_dir")" && \
+    tasks-axi prune --keep 0 --file "$(backlog_of "$case_dir")" >/dev/null)
+  marker="$(home_of "$case_dir")/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-codebase-archived\narg=--pr\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$mr" > "$marker"
+
+  out=$(run_bootstrap "$case_dir")
+  assert_present "$marker" "missing archived row erased the Codebase delivery receipt"
+  assert_contains "$out" "preserving its pending-close record" \
+    "archived Codebase recovery did not report its retained evidence"
+  tasks-axi show "$id" --file "$(backlog_of "$case_dir")" >/dev/null 2>&1 \
+    && fail "Codebase recovery reopened an archived task"
+  assert_grep "$id" "$(home_of "$case_dir")/data/done-archive.md" \
+    "Codebase recovery erased the archived task evidence"
+  pass "an archived task stays archived and its unapplied Codebase receipt stays retryable"
+}
+
+test_recovery_preserves_a_captain_hold_while_retaining_a_codebase_mr() {
+  local case_dir id mr marker out shown
+  id=atomic-codebase-captain-hold-b9
+  mr=https://code.byted.org/chengyuhang/firstmate/merge_requests/63
+  case_dir=$(make_home codebase-captain-hold)
+  add_item "$case_dir" "$id"
+  tasks-axi update "$id" --report "data/$id/report.md" \
+    --file "$(backlog_of "$case_dir")" >/dev/null
+  tasks-axi hold "$id" --reason 'captain decision pending' --kind captain \
+    --file "$(backlog_of "$case_dir")" >/dev/null
+  marker="$(home_of "$case_dir")/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-codebase-held\nmode=retain\narg=--pr\narg=%s\n' \
+    "$id" "$(home_of "$case_dir")/data" "$mr" > "$marker"
+
+  out=$(run_bootstrap "$case_dir")
+  shown=$(tasks-axi show "$id" --full --file "$(backlog_of "$case_dir")")
+  assert_contains "$shown" 'state: queued' "Codebase retention changed the held task state"
+  assert_contains "$shown" 'held: yes' "Codebase retention dropped the captain hold"
+  assert_contains "$shown" 'hold_kind: captain' "Codebase retention lost decision ownership"
+  assert_contains "$shown" "report:data/$id/report.md" \
+    "Codebase retention lost the existing report artifact"
+  assert_contains "$shown" "Codebase MR $mr" \
+    "Codebase retention dropped the real merge-request URL"
+  assert_absent "$marker" "successful Codebase retention left its receipt behind: $out"
+  pass "Codebase retention preserves report and captain-decision ownership"
+}
+
+test_recovery_rejects_a_malformed_codebase_mr() {
+  local case_dir id marker out
+  id=atomic-codebase-malformed-b9
+  case_dir=$(make_home codebase-malformed)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  marker="$(home_of "$case_dir")/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-codebase-malformed\narg=--pr\narg=https://code.byted.org/chengyuhang/firstmate/merge_requests/not-a-number\n' \
+    "$id" "$(home_of "$case_dir")/data" > "$marker"
+
+  out=$(run_bootstrap "$case_dir")
+  assert_present "$marker" "malformed Codebase URL was consumed as supported delivery evidence"
+  [ "$(row_state "$case_dir" "$id")" = in_flight ] \
+    || fail "malformed Codebase URL changed the task state: $out"
+  assert_not_contains "$(cat "$(backlog_of "$case_dir")")" 'Codebase MR' \
+    "malformed Codebase URL was rewritten into a completion note"
+  pass "the adapter rejects malformed Codebase merge-request URLs"
 }
 
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read() {
@@ -2993,6 +3144,7 @@ test_trailing_newline_data_path_fails_closed
 test_control_character_data_path_is_refused_before_cleanup
 test_completion_preserves_records_when_meta_removal_fails
 test_completion_fails_loudly_and_records_the_close_it_still_owes
+test_completion_records_a_codebase_mr_without_fabricating_a_pr_link
 test_interrupted_destructive_cleanup_leaves_a_recoverable_close
 test_completion_refuses_a_close_target_symlinked_to_a_directory
 test_completion_fails_when_its_close_marker_cannot_be_removed
@@ -3004,6 +3156,11 @@ test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
+test_recovery_retries_a_codebase_close_after_bookkeeping_failure
+test_recovery_backfills_a_codebase_mr_on_an_already_done_item
+test_recovery_retains_codebase_evidence_when_history_already_archived
+test_recovery_preserves_a_captain_hold_while_retaining_a_codebase_mr
+test_recovery_rejects_a_malformed_codebase_mr
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning
 test_recovery_finishes_a_close_for_the_same_meta_incarnation

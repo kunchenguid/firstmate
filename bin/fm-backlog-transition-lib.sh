@@ -567,10 +567,49 @@ fm_backlog_start() {  # <data-dir> <id>
   fm_backlog_mutate "$1" start "$2"
 }
 
+fm_backlog_codebase_mr_url() {  # <url>
+  local url=$1 path project number
+  case "$url" in
+    https://code.byted.org/*/merge_requests/*) ;;
+    *) return 1 ;;
+  esac
+  path=${url#https://code.byted.org/}
+  project=${path%/merge_requests/*}
+  number=${path##*/}
+  [ "$path" = "$project/merge_requests/$number" ] || return 1
+  case "$project" in
+    ''|.|..|/*|*/|*//*|./*|../*|*/.|*/..|*[!A-Za-z0-9._/-]*) return 1 ;;
+  esac
+  case "$number" in
+    [1-9]* ) case "$number" in *[!0-9]*) return 1 ;; esac ;;
+    *) return 1 ;;
+  esac
+}
+
+# tasks-axi deliberately reserves its structured `pr` link for GitHub-style
+# /pull/<number> URLs. Preserve an exact Codebase merge-request URL through its
+# idempotent completion-note channel instead of fabricating a GitHub URL or
+# discarding the delivery artifact. The durable close marker keeps the original
+# --pr pair, so a future backend that supports Codebase links can still see the
+# source semantics; only the tasks-axi compatibility boundary is adapted.
+fm_backlog_adapt_artifact_args() {
+  FM_BACKLOG_ADAPTED_ARTIFACT_ARGS=("$@")
+  if [ "${#FM_BACKLOG_ADAPTED_ARTIFACT_ARGS[@]}" -eq 2 ] \
+     && [ "${FM_BACKLOG_ADAPTED_ARTIFACT_ARGS[0]}" = --pr ] \
+     && fm_backlog_codebase_mr_url "${FM_BACKLOG_ADAPTED_ARTIFACT_ARGS[1]}"; then
+    FM_BACKLOG_ADAPTED_ARTIFACT_ARGS=(
+      --note "Codebase MR ${FM_BACKLOG_ADAPTED_ARTIFACT_ARGS[1]}"
+    )
+  fi
+}
+
 fm_backlog_done() {  # <data-dir> <id> [flag...]
   local data=$1 id=$2
+  local -a args=()
   shift 2
-  fm_backlog_mutate "$data" "done" "$id" "$@"
+  fm_backlog_adapt_artifact_args "$@"
+  args=("${FM_BACKLOG_ADAPTED_ARTIFACT_ARGS[@]+"${FM_BACKLOG_ADAPTED_ARTIFACT_ARGS[@]}"}")
+  fm_backlog_mutate "$data" "done" "$id" "${args[@]}"
 }
 
 fm_backlog_row_artifact_supported() {
@@ -608,8 +647,12 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
         fi
         ;;
       --pr)
-        deliverable="${deliverable:+$deliverable; }PR $arg"
-        row_args=(--pr "$arg")
+        if fm_backlog_codebase_mr_url "$arg"; then
+          deliverable="${deliverable:+$deliverable; }Codebase MR $arg"
+        else
+          deliverable="${deliverable:+$deliverable; }PR $arg"
+          row_args=(--pr "$arg")
+        fi
         ;;
       --note) deliverable="${deliverable:+$deliverable; }$arg" ;;
     esac
@@ -1233,6 +1276,11 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   else
     if [ "$FM_BACKLOG_ROW_RESULT" != not_found ]; then
       FM_BACKLOG_TRANSITION_ERROR=$FM_BACKLOG_ROW_ERROR
+      return 1
+    fi
+    if [ "${#args[@]}" -eq 2 ] && [ "${args[0]}" = --pr ] \
+       && fm_backlog_codebase_mr_url "${args[1]}"; then
+      FM_BACKLOG_TRANSITION_ERROR="tasks-axi cannot attach the recorded Codebase MR to missing task $id; preserving its pending-close record"
       return 1
     fi
     row_state=

@@ -2963,6 +2963,54 @@ SH
   pass "an answer before cleanup replay preserves the retained report"
 }
 
+test_retained_codebase_artifact_survives_captain_answer() {
+  local home codebase_id github_id codebase_mr github_pr show
+  home=$(make_home retained-codebase-answer)
+  codebase_id=sample-retained-codebase-answer
+  github_id=sample-retained-github-answer
+  codebase_mr=https://code.byted.org/sample/firstmate/merge_requests/64
+  github_pr=https://github.com/sample/firstmate/pull/64
+
+  tasks_in "$home" add "$codebase_id" "Choose the Codebase follow-up" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the retained Codebase fixture"
+  tasks_in "$home" update "$codebase_id" --report "data/$codebase_id/report.md" >/dev/null \
+    || fail "could not attach the retained Codebase report"
+  run_captain "$home" hold "$codebase_id" --reason "captain must choose the follow-up" \
+    >/dev/null || fail "could not hold the retained Codebase fixture"
+  printf 'id=%s\ndata=%s\nspawn_gen=fixture-codebase-answer\nmode=retain\narg=--pr\narg=%s\n' \
+    "$codebase_id" "$home/data" "$codebase_mr" \
+    > "$home/state/$codebase_id.backlog-close"
+  printf 'Proceed with the Codebase result.\n' > "$home/codebase-answer.txt"
+  run_captain "$home" answer "$codebase_id" \
+    --decision-file "$home/codebase-answer.txt" >/dev/null \
+    || fail "the retained Codebase artifact blocked the captain answer"
+  show=$(tasks_in "$home" show "$codebase_id" --full)
+  assert_contains "$show" "state: done" "the Codebase answer did not close its call"
+  assert_contains "$show" "report:data/$codebase_id/report.md" \
+    "the Codebase answer lost the retained report"
+  assert_contains "$show" "Codebase MR $codebase_mr" \
+    "the Codebase answer lost the exact merge-request URL"
+
+  tasks_in "$home" add "$github_id" "Choose the GitHub follow-up" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the retained GitHub fixture"
+  run_captain "$home" hold "$github_id" --reason "captain must choose the follow-up" \
+    >/dev/null || fail "could not hold the retained GitHub fixture"
+  printf 'id=%s\ndata=%s\nspawn_gen=fixture-github-answer\nmode=retain\narg=--pr\narg=%s\n' \
+    "$github_id" "$home/data" "$github_pr" > "$home/state/$github_id.backlog-close"
+  printf 'Proceed with the GitHub result.\n' > "$home/github-answer.txt"
+  run_captain "$home" answer "$github_id" \
+    --decision-file "$home/github-answer.txt" >/dev/null \
+    || fail "the retained GitHub artifact blocked the captain answer"
+  show=$(tasks_in "$home" show "$github_id" --full)
+  assert_contains "$show" "state: done" "the GitHub answer did not close its call"
+  assert_contains "$show" "$github_pr" "the GitHub answer lost its structured PR"
+  assert_not_contains "$show" "Codebase MR $github_pr" \
+    "the GitHub PR was rewritten through the Codebase adapter"
+  pass "retained Codebase and GitHub artifacts survive captain answers"
+}
+
 test_unusable_pending_close_record_names_its_reason() {
   local home id wt rc err marker
   home=$(make_home unusable-pending-close-reason)
@@ -4012,6 +4060,7 @@ test_teardown_never_closes_a_captain_held_task
 test_retained_row_artifacts_survive_captain_answers
 test_interrupted_cleanup_keeps_the_captain_call_recoverable
 test_answer_before_cleanup_replay_preserves_the_retained_report
+test_retained_codebase_artifact_survives_captain_answer
 test_unusable_pending_close_record_names_its_reason
 test_relocated_report_does_not_wedge_an_answer_before_replay
 test_teardown_retains_captain_calls_in_a_relocated_backlog
