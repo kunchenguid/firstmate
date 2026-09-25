@@ -2753,6 +2753,8 @@ test_settled_transfer_keeps_the_stale_suppressor() {
     || fail "the transfer firstmate just recorded re-woke it: $(cat "$state/.wake-queue")"
   [ -e "$state/.paused-$key" ] || fail "the transferred lane did not take the captain-held cadence"
 
+  mirror_append "$state" "$statusf" "resolved [key=captain-hold-scout-1]: captain call answered by fm-captain-hold" \
+    || fail "the mirror retraction was not self-announced"
   mirror_append "$state" "$statusf" "resolved [key=route]: captain call answered by fm-captain-hold" \
     || fail "the transfer retraction was not self-announced"
   parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb "$crew" \

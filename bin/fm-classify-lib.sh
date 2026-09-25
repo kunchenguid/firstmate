@@ -208,11 +208,10 @@ last_worker_status_line() {  # <status-file> [<previous-event-var>]
 # own key appears at or after it, so every retraction goes, and so does the
 # mirror or transfer it retracts however many worker lines follow, while a hold
 # or transfer still standing stays. An empty <hold-line-ere> drops nothing.
-# When <mirror-ere> is set, a settled complete transfer also drops a standing
-# mirror recorded before it: that transfer's answer reads back to the worker
-# event, and the mirror is not still the lane's latest event.
-_fm_hold_settled_drop() {  # <hold-line-ere> [<mirror-ere>]
-  local hold=$1 mirror=${2:-} key settled=$'\n' lifted=0 i=0
+# Settlement is per key: a settled transfer does not drop a mirror of another
+# key, including one recorded later.
+_fm_hold_settled_drop() {  # <hold-line-ere>
+  local hold=$1 key settled=$'\n' i=0
   local -a lines=()
   if [ -z "$hold" ]; then
     cat
@@ -228,17 +227,7 @@ _fm_hold_settled_drop() {  # <hold-line-ere> [<mirror-ere>]
     key=$(_fm_decision_key "${lines[i]}") || continue
     ! _fm_hold_unstamped_match "${lines[i]}" "$FM_HOLD_RETRACTION_ERE" \
       || settled="$settled$key"$'\n'
-    case "$settled" in
-      *$'\n'"$key"$'\n'*)
-        _fm_hold_unstamped_match "${lines[i]}" "$FM_HOLD_TRANSFER_ERE" && lifted=1
-        unset 'lines[i]'
-        continue
-        ;;
-    esac
-    if [ "$lifted" -eq 1 ] && [ -n "$mirror" ] \
-      && _fm_hold_unstamped_match "${lines[i]}" "$mirror"; then
-      unset 'lines[i]'
-    fi
+    case "$settled" in *$'\n'"$key"$'\n'*) unset 'lines[i]' ;; esac
   done
   [ "${#lines[@]}" -eq 0 ] || printf '%s\n' "${lines[@]}"
 }
@@ -287,14 +276,13 @@ status_worker_signature() {  # <status-file>
 }
 
 _fm_last_status_event() {  # <hold-line-ere> <skip-ere> <status-file> [<previous-event-var>]
-  local hold=$1 skip=$2 f=$3 scan='' mirror
+  local hold=$1 skip=$2 f=$3 scan=''
   [ -f "$f" ] && [ -r "$f" ] || return 0
-  mirror=$(_fm_hold_mirror_line_ere "$f" 'captain-held')
   if [ "$#" -gt 3 ]; then
-    scan=$(_fm_hold_settled_drop "$hold" "$mirror" < "$f" | _fm_status_event_scan "$skip") || :
+    scan=$(_fm_hold_settled_drop "$hold" < "$f" | _fm_status_event_scan "$skip") || :
   elif ! scan=$(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null \
-      | _fm_hold_settled_drop "$hold" "$mirror" | _fm_status_event_scan "$skip"); then
-    scan=$(_fm_hold_settled_drop "$hold" "$mirror" < "$f" | _fm_status_event_scan "$skip") || :
+      | _fm_hold_settled_drop "$hold" | _fm_status_event_scan "$skip"); then
+    scan=$(_fm_hold_settled_drop "$hold" < "$f" | _fm_status_event_scan "$skip") || :
   fi
   [ "$#" -lt 4 ] || printf -v "$4" '%s' "${scan%%$'\n'*}"
   printf '%s\n' "${scan##*$'\n'}"
@@ -502,38 +490,13 @@ status_is_paused_or_captain_held() {  # <status-line>
 # other captain-held line, such as a complete transfer, counts only while it is
 # the latest event. Bounded like last_status_line, and like it reads past a settled
 # hold: only a tail window made wholly of resolved events widens the read to the
-# whole file. A settled complete transfer lifts the pause it carried, so a
-# standing mirror beside that transfer is not still the declared wait.
-# 0 when a complete transfer has its own keyed retraction later in the log.
-_fm_settled_transfer_present() {  # <status-file>
-  local f=$1 line key seen=$'\n'
-  [ -f "$f" ] && [ -r "$f" ] || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    if _fm_hold_unstamped_match "$line" "$FM_HOLD_TRANSFER_ERE"; then
-      key=$(_fm_decision_key "$line") || continue
-      seen="$seen$key"$'\n'
-      continue
-    fi
-    _fm_hold_unstamped_match "$line" "$FM_HOLD_RETRACTION_ERE" || continue
-    key=$(_fm_decision_key "$line") || continue
-    case "$seen" in *$'\n'"$key"$'\n'*) return 0 ;; esac
-  done < "$f"
-  return 1
-}
-
+# whole file.
 status_declared_wait_line() {  # <status-file>
   local f=$1 last verb resolve legacy_re hold mirror
   last=$(last_status_line "$f")
   if status_is_paused_or_captain_held "$last"; then
-    mirror=$(_fm_hold_mirror_line_ere "$f" 'captain-held')
-    if status_is_captain_held "$last" \
-      && _fm_hold_unstamped_match "$last" "$mirror" \
-      && _fm_settled_transfer_present "$f"; then
-      :
-    else
-      printf '%s\n' "$last"
-      return 0
-    fi
+    printf '%s\n' "$last"
+    return 0
   fi
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   status_line_verb "$last" verb

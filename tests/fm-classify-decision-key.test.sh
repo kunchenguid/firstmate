@@ -662,6 +662,27 @@ test_worker_event_after_standing_hold_mirror_replaces_it() {
   pass "a worker event after a standing hold mirror replaces it as the declared wait"
 }
 
+# A worker who already finished stays done while a later hold mirror stands,
+# and a transfer settled earlier does not hide a hold opened after it.
+test_done_past_standing_mirror_and_later_hold_after_settled_transfer() {
+  local dir f current
+  dir=$(case_dir done-past-mirror)
+  f="$dir/lane.status"
+  printf 'done: report ready\n' > "$f"
+  printf 'captain-held [key=captain-hold-lane-1]: operator review\n' >> "$f"
+  current=$(status_current_line "$f" scout)
+  [ "$current" = 'done: report ready' ] \
+    || fail "a standing mirror displaced the worker's done line: '$current'"
+  printf 'needs-decision [key=route]: pick\n' > "$f"
+  printf 'captain-held [key=route]: tracked by lane\n' >> "$f"
+  printf 'resolved [key=route]: captain call answered by fm-captain-hold\n' >> "$f"
+  printf 'working: continuing\n' >> "$f"
+  printf 'captain-held [key=captain-hold-lane-2]: operator review\n' >> "$f"
+  [ "$(status_declared_wait_line "$f")" = 'captain-held [key=captain-hold-lane-2]: operator review' ] \
+    || fail "an earlier settled transfer hid the later standing mirror: '$(status_declared_wait_line "$f")'"
+  pass "a worker done stays current under a standing mirror, and a later hold survives an earlier settled transfer"
+}
+
 test_keyless_wait_survives_stated_default_retraction
 test_declared_wait_survives_answers_past_the_event_window
 test_declared_wait_survives_settled_hold_mirror
@@ -669,4 +690,5 @@ test_declared_wait_keeps_standing_hold_mirror
 test_declared_wait_survives_settled_hold_then_answer
 test_hold_settled_only_without_worker_event_between
 test_worker_event_after_standing_hold_mirror_replaces_it
+test_done_past_standing_mirror_and_later_hold_after_settled_transfer
 test_bare_prose_cannot_open_or_close_a_decision
