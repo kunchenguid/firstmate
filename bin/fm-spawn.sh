@@ -78,9 +78,13 @@
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed. Ultra is the explicit
-#   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
-#   supported Pi launches receive --codex-effort ultra, never --thinking ultra.
+#   from that harness's launch rather than guessed. Codex max is threaded only
+#   when the installed Codex model catalog advertises it for the launched model
+#   (--model, else config.toml's model); otherwise it is omitted with a one-line
+#   stderr warning naming that model and the effort Codex runs at instead. Ultra
+#   is the explicit exception: bin/fm-harness.sh validate-native-effort owns its
+#   model scope; supported Pi launches receive --codex-effort ultra, never
+#   --thinking ultra.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -2440,6 +2444,94 @@ muse_credential_present() {
   [ -s "$auth" ] || muse_worker_meta_api_key_present
 }
 
+# codex_config_string <key>: the value of a top-level string key in Codex's own
+# config.toml, or nothing. Reading stops at the first table header, because a
+# key under a table does not apply to a plain launch.
+codex_config_string() {
+  local file="${CODEX_HOME:-${HOME:-}/.codex}/config.toml"
+  [ -r "$file" ] || return 0
+  awk -v key="$1" -v sq="'" '
+    /^[[:space:]]*\[/ { exit }
+    {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      if (substr(line, 1, length(key)) != key) next
+      line = substr(line, length(key) + 1)
+      if (line !~ /^[[:space:]]*=/) next
+      sub(/^[[:space:]]*=[[:space:]]*/, "", line)
+      q = substr(line, 1, 1)
+      if (q != "\"" && q != sq) next
+      line = substr(line, 2)
+      close_at = index(line, q)
+      if (close_at == 0) next
+      print substr(line, 1, close_at - 1)
+      exit
+    }
+  ' "$file" 2>/dev/null || true
+}
+
+# codex_max_effort_flag <model>: print Codex's max reasoning flag when the
+# installed model catalog advertises max for the model the worker will run.
+# Otherwise print nothing, so the launch keeps record-and-omit, and warn once on
+# stderr naming that model and the effort Codex falls back to. The catalog is
+# ${CODEX_HOME:-~/.codex}/models_cache.json, the file Codex refreshes and
+# `codex debug models` prints; the Codex harness reference owns that fact.
+codex_max_effort_flag() {
+  local model=$1 home catalog config label entry status levels default_level reason configured in_force
+  home=${CODEX_HOME:-${HOME:-}/.codex}
+  catalog="$home/models_cache.json"
+  config="$home/config.toml"
+  [ -n "$model" ] && [ "$model" != default ] || model=$(codex_config_string model)
+  label=${model:-"Codex's default model"}
+  if [ -z "$model" ]; then
+    reason="no --model was given and $config names no model"
+  elif [ ! -e "$catalog" ]; then
+    reason="$catalog is missing"
+  elif ! command -v jq >/dev/null 2>&1; then
+    reason="jq is not installed to read $catalog"
+  elif ! entry=$(jq -r --arg m "$model" '
+    if (.models | type) != "array" then "malformed"
+    else
+      [.models[] | select(type == "object" and .slug == $m)][0] as $e
+      | if $e == null then "absent"
+        else "present\u001f"
+          + ([$e.supported_reasoning_levels[]? | (.effort? // .) | select(type == "string")] | join(","))
+          + "\u001f" + (if ($e.default_reasoning_level | type) == "string" then $e.default_reasoning_level else "" end)
+        end
+    end' "$catalog" 2>/dev/null); then
+    reason="$catalog is unreadable or malformed"
+  else
+    IFS=$'\x1f' read -r status levels default_level <<<"$entry"
+    case "$status" in
+    present)
+      case ",$levels," in
+      *,max,*)
+        printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
+        return 0
+        ;;
+      esac
+      if [ -n "$levels" ]; then
+        reason="$catalog advertises only ${levels//,/, } for it"
+      else
+        reason="$catalog lists no reasoning levels for it"
+      fi
+      ;;
+    absent) reason="$catalog does not list it" ;;
+    *) reason="$catalog is unreadable or malformed" ;;
+    esac
+  fi
+  configured=$(codex_config_string model_reasoning_effort)
+  if [ -n "$configured" ]; then
+    in_force="$configured from $config"
+  elif [ -n "${default_level:-}" ]; then
+    in_force="$default_level, the catalog default for $model"
+  else
+    in_force="Codex's own default"
+  fi
+  printf 'warning: codex max reasoning effort not passed for model %s (%s); the worker runs at %s\n' \
+    "$label" "$reason" "$in_force" >&2
+}
+
 model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
@@ -2460,15 +2552,11 @@ effort_flag_for_harness() {
     esac
     ;;
   codex)
-    # The installed codex config schema uses model_reasoning_effort. The
-    # installed model catalog supports max for gpt-5.6-luna; keep that level
-    # scoped to the model whose catalog entry advertises it.
+    # The installed codex config schema uses model_reasoning_effort. max is
+    # model-scoped, so codex_max_effort_flag reads it from the installed catalog.
     case "$effort" in
     low | medium | high | xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
-    max)
-      [ "$model" = gpt-5.6-luna ] || return 0
-      printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
-      ;;
+    max) codex_max_effort_flag "$model" ;;
     esac
     ;;
   grok)
