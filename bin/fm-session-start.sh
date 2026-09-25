@@ -45,8 +45,8 @@
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
-#                       the away posture (state/.afk-contract and the legacy
-#                       state/.afk daemon flag), and a cheap per-task
+#                       the away posture (state/.afk-contract) and the
+#                       state/.afk daemon flag, and a cheap per-task
 #                       endpoint-liveness read:
 #                       read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
@@ -876,8 +876,11 @@ done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
 subsection "AFK"
-# The away posture is the record (bin/fm-afk-contract.sh); the legacy flag
-# still marks a running daemon on the harnesses that launch one.
+# The away posture is the record (bin/fm-afk-contract.sh); the flag marks a
+# running daemon on the harnesses that launch one. A flag standing alone in
+# quiet mode is that mode's whole posture, which never writes a record
+# (bin/fm-afk-launch.sh "QUIET"); standing alone in away mode it is the legacy
+# pre-record flag.
 if [ -f "$STATE/.afk-contract" ]; then
   printf 'present - away posture recorded at %s (hold-for-return only; bin/fm-afk-contract.sh readback for the mandate)' \
     "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)"
@@ -892,7 +895,7 @@ if [ -f "$STATE/.afk-contract" ]; then
   fi
 elif [ -e "$STATE/.afk" ]; then
   if [ "$AFK_MODE" = quiet ]; then
-    printf 'present - quiet-mode supervision is active; the daemon owns the watcher, only an explicit /quiet off exits it (legacy flag with no posture record).\n'
+    printf 'present - quiet-mode supervision is active; the daemon owns the watcher, only an explicit /quiet off exits it.\n'
   else
     printf 'present - away-mode supervision is active; the daemon owns the watcher (legacy flag with no posture record).\n'
   fi

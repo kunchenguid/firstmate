@@ -3,7 +3,8 @@
 # foreground process when one is not already alive.
 #
 # Usage: fm-afk-start.sh
-#   Sets state/.afk (mode preserved on refresh, see fm_afk_flag_write) unless
+#   Sets state/.afk (mode and window start preserved on refresh, see
+#   fm_afk_flag_write) unless
 #   FM_AFK_STATE_PREPARED=1, checks state/.supervise-daemon.lock, and:
 #     - prints "afk: daemon already running pid=<pid>" then exits 0 when that
 #       lock is held by a live daemon (a REFRESH: no stale-artifact clear);
@@ -113,7 +114,7 @@ daemon_lock_held_by_live_daemon() {
 
 fm_afk_flag_write() {  # <state-dir> [mode]
   local state=$1 requested_mode=${2:-} lock="$1/.cursor-park-owner.lock" \
-    pending attempt=0 status=1 mode
+    pending attempt=0 status=1 mode started
   mkdir -p "$state" || return 1
   [ ! -d "$state/.afk" ] || return 1
   # An explicit mode is a caller's deliberate request (a fresh /afk or /quiet
@@ -127,8 +128,19 @@ fm_afk_flag_write() {  # <state-dir> [mode]
     away|quiet) mode=$requested_mode ;;
     *) mode=$(fm_afk_mode "$state") ;;
   esac
+  # The second line is when THIS posture window started, and the return reads it
+  # as the window the catch-up covers (bin/fm-afk-return.sh window_start_epoch).
+  # A refresh of the same mode is the same window, so it keeps that timestamp;
+  # only a new entry, or a mode change, starts a new window and stamps one.
+  started=
+  if [ -f "$state/.afk" ] && [ "$(fm_afk_mode "$state")" = "$mode" ]; then
+    started=$(sed -n '2p' "$state/.afk" 2>/dev/null || true)
+    case "$started" in ''|*[!0-9]*) started= ;; esac
+  fi
+  [ -n "$started" ] || started=$(date '+%s')
   pending=$(mktemp "$state/.afk.pending.XXXXXX") || return 1
-  { printf '%s\n' "$mode"; date '+%s'; } > "$pending" || { rm -f "$pending"; return 1; }
+  { printf '%s\n' "$mode"; printf '%s\n' "$started"; } > "$pending" \
+    || { rm -f "$pending"; return 1; }
   while [ "$attempt" -lt 50 ]; do
     attempt=$((attempt + 1))
     if fm_lock_try_acquire "$lock"; then

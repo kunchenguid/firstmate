@@ -38,18 +38,19 @@ install_runner() {  # <case-dir>
   cp "$ROOT/bin/fm-pr-lib.sh" "$dir/bin/"
   cp "$ROOT/.tasks.toml" "$dir/home/.tasks.toml"
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/home/data/backlog.md"
-  # The fake stop mirrors the real one's ordering: the away flag goes, then the
-  # posture record is archived through its owner.
+  # The fake stop mirrors the real one's ordering: the daemon terminal comes
+  # down, then the away flag goes, then the posture record is archived through
+  # its owner - and a failed teardown leaves the flag standing for the retry.
   cat > "$dir/bin/fm-afk-launch.sh" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" = stop ] || exit 2
 printf 'stop\n' >> "$FM_HOME/stop.log"
-rm -f "$FM_HOME/state/.afk"
 if [ -e "$FM_HOME/state/.fail-terminal-stop-once" ]; then
   rm -f "$FM_HOME/state/.fail-terminal-stop-once"
   exit 1
 fi
 rm -f "$FM_HOME/state/.afk-daemon-terminal"
+rm -f "$FM_HOME/state/.afk"
 "$(dirname "$0")/fm-afk-contract.sh" archive >/dev/null
 SH
   cat > "$dir/bin/fm-wake-drain.sh" <<'SH'
@@ -322,6 +323,7 @@ test_return_is_mode_agnostic_for_quiet_mode() {
 
   out=$(run_return "$dir" begin) || fail "return did not succeed cleanly against a quiet-mode flag: $out"
   assert_contains "$out" 'catch-up clear' "quiet-mode return did not announce ordinary work may proceed"
+  assert_contains "$out" '=== Return brief (quiet ' "the brief told a captain who never left that they were away"
   [ ! -e "$dir/home/state/.afk" ] || fail "quiet-mode return left the mode flag behind"
   [ "$(wc -l < "$dir/home/stop.log" | tr -d ' ')" -eq 1 ] || fail "quiet-mode return did not stop the daemon exactly once"
   pass "/quiet off's return path behaves identically for a quiet-content flag as for a legacy away-content one"
@@ -343,7 +345,7 @@ test_check_retries_recorded_terminal_teardown() {
   [ "$rc" -eq 3 ] || fail "failed terminal teardown should keep return catch-up gated (rc=$rc): $out"
   [ -e "$gate" ] || fail "failed terminal teardown cleared the return gate"
   [ -e "$dir/home/state/.afk-daemon-terminal" ] || fail "failed terminal teardown discarded its durable record"
-  [ ! -e "$dir/home/state/.afk" ] || fail "failed terminal teardown did not preserve stop ordering"
+  [ -e "$dir/home/state/.afk" ] || fail "failed terminal teardown cleared the posture flag the retry reads"
 
   out=$(run_return "$dir" check) || fail "check did not retry recorded terminal teardown: $out"
   [ ! -e "$dir/home/state/.afk-daemon-terminal" ] || fail "successful check left the terminal teardown record behind"
@@ -791,13 +793,38 @@ test_return_brief_without_a_record_reports_the_legacy_flag() {
   printf '%s\n' "$(( $(date +%s) - 7200 ))" > "$dir/home/state/.afk"
   : > "$dir/home/state/.fake-drain"
   out=$(run_return "$dir" begin) || fail "a legacy-flag return with no blockers should clear: $out"
-  assert_contains "$out" '(no away-posture record for this window; legacy away flag only)' "the legacy window was not named"
+  assert_contains "$out" '(no away-posture record for this window: quiet mode, or a legacy away flag)' "the legacy window was not named"
   assert_contains "$out" ', 2h00m) ===' "the away window was not measured from the legacy flag's own timestamp"
   [ ! -e "$dir/home/state/.afk" ] || fail "the legacy flag survived the return"
   pass "a return with only the legacy away flag still renders the brief and measures the window from the flag"
 }
 
 
+
+# The brief renders after the shutdown has already cleared state/.afk, and a
+# gated return re-renders it on every `check`, so the posture has to survive in
+# the gate the way the window epoch does.
+test_return_brief_keeps_the_quiet_posture_across_a_retry() {
+  local dir out rc
+  dir="$TMP_ROOT/brief-quiet-posture"
+  install_runner "$dir"
+  printf 'quiet\n%s\n' "$(( $(date +%s) - 3600 ))" > "$dir/home/state/.afk"
+  printf 'herdr\tsynthetic:pane\tsynthetic-workspace\n' > "$dir/home/state/.afk-daemon-terminal"
+  touch "$dir/home/state/.fail-terminal-stop-once"
+  : > "$dir/home/state/.fake-drain"
+
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "the failed teardown should keep the quiet return gated (rc=$rc): $out"
+  assert_contains "$out" '=== Return brief (quiet ' "the gated quiet brief named the away posture"
+
+  out=$(run_return "$dir" check) || fail "the quiet check did not clear: $out"
+  assert_contains "$out" '=== Return brief (quiet ' "the check re-run lost the quiet posture after the flag was cleared"
+  assert_contains "$out" ', 1h00m) ===' "the quiet window was not measured from the flag's own timestamp"
+  pass "the return brief names the quiet posture and keeps naming it once the flag is gone"
+}
 
 test_unreadable_superseded_archive_keeps_return_gated() {
   local dir out rc epoch archive backup
@@ -890,3 +917,4 @@ test_return_guard_refuses_while_the_record_exists
 test_return_brief_health_leads_with_a_gap
 test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap
 test_return_brief_without_a_record_reports_the_legacy_flag
+test_return_brief_keeps_the_quiet_posture_across_a_retry

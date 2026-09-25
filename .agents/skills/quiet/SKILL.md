@@ -23,38 +23,33 @@ exits it.
 
 ## What it does
 
-1. **Enter the lifecycle through `bin/fm-afk-launch.sh`, exactly as `/afk`
-   does, with `FM_AFK_MODE=quiet` set first.**
-   Follow the `afk` skill's "What it does" steps 1-3 verbatim (terminal-
-   backed vs harness-native entry, daemon-already-running refresh, never
-   arming a separate `fm-watch.sh`) with one addition: export
-   `FM_AFK_MODE=quiet` in the shell that invokes `bin/fm-afk-launch.sh start`
-   (or `start-native`), so `state/.afk`'s first line reads `quiet` instead of
-   `away`.
-   Leaving `FM_AFK_MODE` unset on a bare refresh of an already-running quiet
-   daemon is also correct and does nothing wrong: `fm_afk_flag_write`
-   preserves the on-disk mode when no explicit mode is given, so a plain
-   `/afk`-shaped refresh call never resets quiet back to away underneath the
-   captain.
+Quiet mode is NOT the away posture.
+The away posture is `state/.afk-contract`, and quiet mode never requires, writes, or coexists with it, so never run `bin/fm-afk-launch.sh enter` for `/quiet`: that would put the home into away mode, where the next ordinary captain message counts as a return.
+If an away-posture record stands when `/quiet` arrives, that message is the captain's return: run the return in the `afk` skill's "How to exit: the return" section first, then enter quiet mode.
+
+1. **Start the daemon on the path the `afk` skill's "Entering: `/afk [words]`" step 2 names for this harness, with `FM_AFK_MODE=quiet` set on the launcher call, and skip that skill's step 1.**
+   That step owns the per-harness matrix, including the Pi and pi-signed branch where nothing is launched at all.
+   The launcher writes `quiet` as `state/.afk`'s first line and refuses a quiet start while an away-posture record stands; its header owns the mode rules.
+   A bare refresh of an already-running quiet daemon with `FM_AFK_MODE` unset keeps quiet, because `fm_afk_flag_write` preserves the on-disk mode when no record stands.
+   As with `/afk`, do not separately arm `fm-watch.sh` where the daemon runs.
 
 2. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, quiet mode is
    active; I will batch routine updates and surface only decisions, failures,
    credentials, or review-ready work - ordinary chat will not exit this, say
    `/quiet off` when you want normal per-wake responses back."
+   On Pi and pi-signed nothing durable is written, so say plainly in the same
+   breath that quiet holds for this session only and has to be re-entered after
+   a restart or a compaction; there is no flag for the session-start digest to
+   find, so it will report away/quiet mode inactive.
 
 ## How to exit quiet mode
 
 Unlike `/afk`, ordinary chat is never the exit signal - that is the entire
 point of this mode (AGENTS.md section 8's away-mode stub, quiet branch).
 
-- Only an explicit `/quiet off` (or the captain plainly asking to leave quiet
-  mode / resume normal supervision) exits it: run `bin/fm-afk-return.sh`
-  unchanged, exactly the procedure `/afk`'s "How to exit afk" section
-  documents for its own return path (correct-ordered daemon shutdown,
-  durable wake presentation and acknowledgement, escalation/wedge evidence,
-  and the return-catch-up gate).
-  That script does not read or care about the flag's mode, so it needs no
-  quiet-specific variant.
+- Only an explicit `/quiet off` (or the captain plainly asking to leave quiet mode / resume normal supervision) exits it: run `bin/fm-afk-return.sh` unchanged, the same return the `afk` skill's "How to exit: the return" section documents (correct-ordered daemon shutdown, durable wake presentation and acknowledgement, escalation and wedge evidence, and the return catch-up gate).
+  It needs no quiet-specific variant; with no away-posture record its brief reports that no away instructions were recorded for the window, which is expected.
+  On Pi and pi-signed a quiet entry launches nothing and writes nothing durable, so when neither `state/.afk` nor `state/.afk-contract` stands there is nothing to return from: run no return, acknowledge the exit, and resume ordinary per-wake responses. Check the two files rather than the harness alone - `state/` is shared by every session in this home, so a flag or record entered from another harness still stands here, and then the ordinary return above is what exits it.
 - A marked daemon escalation, or a message beginning `/quiet` while already
   in quiet mode (refresh, not exit) -> stay in quiet mode and process it, the
   same two carve-outs `/afk` documents for away mode.

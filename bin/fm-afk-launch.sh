@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# fm-afk-launch.sh - the single owner of away-mode ENTRY and EXIT: the
-# same-turn entry that writes the away-posture record through
-# bin/fm-afk-contract.sh, and the away-mode daemon TERMINAL lifecycle where a
+# fm-afk-launch.sh - the single owner of away-mode ENTRY and EXIT, and of the
+# quiet-mode entry that runs the same daemon without that posture (QUIET below):
+# the same-turn entry that writes the away-posture record through
+# bin/fm-afk-contract.sh, and the daemon TERMINAL lifecycle where a
 # daemon still runs: launch it in a NON-VISIBLE tracked terminal per backend,
 # record its exact id, tear it down by that exact id, and reconcile a leaked one
 # after a crash.
@@ -21,10 +22,21 @@
 # opted into the supervision host (config/supervision-host), where the host
 # runs the away session; `enter` there adds one line when the host has no
 # engine, because every away wake then reaches main. Every other harness still
-# runs the daemon for now, so `start` and `start-native` require the record
-# `enter` wrote before they launch the daemon.
+# runs the daemon for now, so an away `start` or `start-native` requires the
+# record `enter` wrote before it launches the daemon.
+# QUIET mode (FM_AFK_MODE=quiet, the /quiet skill) is the same daemon for a
+# captain who stays present, so it is NOT the away posture: a quiet `start` or
+# `start-native` needs no record, never writes one, and refuses while one stands
+# (return from away first). With FM_AFK_MODE unset, a standing record means away
+# and an on-disk quiet flag with no record means a quiet refresh
+# (fm_afk_launch_posture_require), so going /afk out of quiet mode rewrites a
+# standing quiet flag to away as `enter` records the posture - a rewrite, never a
+# removal, so a live daemon keeps the presence gate it injects through.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
-# clears state/.afk last, and archives the record under state/afk-contracts/.
+# clears state/.afk once that teardown succeeded (a failed stop leaves the flag
+# standing, so the retry still reads the real posture), and archives the record
+# under state/afk-contracts/ last when one stands; a quiet stop has none to
+# archive.
 #
 # Why the terminal lifecycle exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
@@ -77,7 +89,8 @@
 # override the captured captain pane/backend (an isolated lab pane in tests).
 # FM_AFK_MODE (away|quiet, default away) declares which mode a `start` entry
 # requests; leave it unset for a plain refresh of an already-running daemon
-# so its current mode is preserved (bin/fm-afk-start.sh fm_afk_flag_write).
+# so its current mode is preserved (bin/fm-afk-start.sh fm_afk_flag_write),
+# except that a standing away-posture record always writes away.
 set -u
 
 FM_AFK_LAUNCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -207,21 +220,20 @@ fm_afk_launch_host_primary() {  # <harness>
 # docs/supervision-host.md): the posture record is the whole entry there and
 # the ordinary supervision session runs in both postures. Quiet mode still
 # runs the daemon on that home, so a quiet entry or a refresh of a running
-# quiet daemon is allowed.
+# quiet daemon is allowed - which posture that is comes from
+# fm_afk_launch_posture, so a standing record still reads away while the quiet
+# flag is on disk (going /afk out of quiet mode).
 fm_afk_launch_daemon_allowed() {
   local harness mode
   harness=$(fm_afk_launch_primary_harness)
   case "$harness" in
     pi|pi-signed)
-      fm_afk_launch_log "the away daemon is no longer launched on $harness; the away-posture record is the posture there (run bin/fm-afk-launch.sh enter and stop)"
+      fm_afk_launch_log "the away daemon is no longer launched on $harness; the away-posture record is the posture there (run bin/fm-afk-launch.sh enter and stop), and quiet mode launches nothing at all here, so never run enter for /quiet"
       return 1 ;;
   esac
   fm_afk_launch_host_primary "$harness" || return 0
   [ -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/supervision-host" ] || return 0
-  mode=${FM_AFK_MODE:-}
-  if [ -z "$mode" ] && [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
-    mode=$(head -n 1 "$FM_AFK_LAUNCH_STATE/.afk" 2>/dev/null || true)
-  fi
+  mode=$(fm_afk_launch_posture)
   [ "$mode" != quiet ] || return 0
   fm_afk_launch_log "the away daemon is not launched on this $harness home, which runs the supervision host (config/supervision-host); the away-posture record is the posture here (run bin/fm-afk-launch.sh enter and stop)"
   return 1
@@ -245,9 +257,9 @@ fm_afk_launch_host_engine_note() {
     "$FM_SUPERVISION_ENGINE_PROBLEM"
 }
 
-fm_afk_launch_catchup_pending() {
+fm_afk_launch_catchup_pending() {  # [posture]
   if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
-    fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
+    fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering ${1:-$(fm_afk_launch_posture)} mode"
     return 0
   fi
   return 1
@@ -257,7 +269,7 @@ fm_afk_launch_record_require() {
   local record
   record=$(fm_afk_contract_path "$FM_AFK_LAUNCH_STATE")
   if ! fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
-    fm_afk_launch_log "an away-posture record is required; run enter before starting the daemon"
+    fm_afk_launch_log "an away-posture record is required; run enter before starting the daemon - but a quiet entry never runs enter: set FM_AFK_MODE=quiet, which is not the away posture and needs no record"
     return 1
   fi
   fm_afk_contract_validate "$record" || {
@@ -266,9 +278,79 @@ fm_afk_launch_record_require() {
   }
 }
 
+# The mode a daemon entry requests: an explicit FM_AFK_MODE, else away while the
+# away-posture record stands (the record IS the away posture), else empty so
+# fm_afk_flag_write preserves the on-disk mode on a bare refresh.
+fm_afk_launch_requested_mode() {
+  case "${FM_AFK_MODE:-}" in
+    away|quiet) printf '%s' "$FM_AFK_MODE"; return 0 ;;
+  esac
+  if fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
+    printf away
+  fi
+}
+
+# The posture this invocation is acting on, always away or quiet: the mode it
+# requests, else the one already on disk. The single owner of which posture the
+# entry gate enforces and the operator-facing messages name.
+fm_afk_launch_posture() {
+  local mode
+  mode=$(fm_afk_launch_requested_mode)
+  [ -n "$mode" ] || mode=$(fm_afk_mode "$FM_AFK_LAUNCH_STATE")
+  printf '%s' "$mode"
+}
+
+# Away needs the record `enter` wrote; quiet must never coexist with one, so it
+# neither requires nor creates it. A bare refresh with no record is quiet only
+# when the on-disk flag already says quiet (fm_afk_mode), else it is an away
+# entry and needs the record.
+fm_afk_launch_posture_require() {
+  local mode
+  mode=$(fm_afk_launch_posture)
+  if [ "$mode" = quiet ]; then
+    if fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
+      fm_afk_launch_log "an away-posture record stands; quiet mode cannot start until the captain's return (bin/fm-afk-return.sh) archives it"
+      return 1
+    fi
+    return 0
+  fi
+  fm_afk_launch_record_require
+}
+
+# The record IS the away posture, so `enter` rewrites a standing state/.afk to
+# away rather than leaving a stale `quiet` beside it - on the homes where /afk
+# launches nothing, no later flag write would ever correct it. It rewrites and
+# never removes: that file is the live daemon's presence gate
+# (bin/fm-supervise-daemon.sh afk_active), and an absent flag is not created,
+# because no daemon is running to gate. The two writes stand or fall together:
+# the flag goes first so a failed write leaves no record behind, and a failed
+# record write (fm-afk-contract.sh validates its own arguments, so every usage
+# error lands here) puts the previous flag back byte for byte. Either way a
+# reported failure means the home did not move.
 fm_afk_launch_enter() {
-  fm_afk_launch_catchup_pending && return 1
-  "$FM_AFK_CONTRACT_CMD" enter "$@" || return
+  local backup='' rc
+  fm_afk_launch_catchup_pending away && return 1
+  if [ -e "$FM_AFK_LAUNCH_STATE/.afk" ]; then
+    if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
+      backup=$(mktemp "$FM_AFK_LAUNCH_STATE/.afk-enter-backup.XXXXXX") || return 1
+      cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup" || { rm -f "$backup"; return 1; }
+    fi
+    if ! fm_afk_flag_write "$FM_AFK_LAUNCH_STATE" away; then
+      [ -z "$backup" ] || rm -f "$backup"
+      fm_afk_launch_log "failed to write the away posture to the flag; no away-posture record was written, so the home did not go away"
+      return 1
+    fi
+  fi
+  "$FM_AFK_CONTRACT_CMD" enter "$@"
+  rc=$?
+  if [ -n "$backup" ]; then
+    if [ "$rc" -ne 0 ] && ! cp "$backup" "$FM_AFK_LAUNCH_STATE/.afk"; then
+      fm_afk_launch_log "the away-posture record failed and the prior flag could not be restored; its content is retained at $backup"
+      return 1
+    fi
+    rm -f "$backup"
+  fi
+  [ "$rc" -eq 0 ] || return "$rc"
   fm_afk_launch_host_engine_note
 }
 
@@ -291,7 +373,7 @@ fm_afk_launch_flag_write() {
   # requests (away, the unset default, or quiet - kunchenguid/firstmate#2356);
   # fm_afk_flag_write itself preserves the on-disk mode when it is unset, so
   # a plain /afk refresh of an already-quiet daemon never resets it.
-  fm_afk_flag_write "$FM_AFK_LAUNCH_STATE" "${FM_AFK_MODE:-}"
+  fm_afk_flag_write "$FM_AFK_LAUNCH_STATE" "$(fm_afk_launch_requested_mode)"
 }
 
 # Read the recorded terminal into FM_AFK_REC_BACKEND/FM_AFK_REC_TARGET. The third
@@ -590,7 +672,7 @@ fm_afk_launch_start() {
   local captain_target captain_backend backup artifact had_afk=0 result
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
-  fm_afk_launch_record_require || return 1
+  fm_afk_launch_posture_require || return 1
   # Capture the captain pane FIRST, before creating anything.
   captain_target=$(discover_supervisor_target) || {
     fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"
@@ -604,10 +686,10 @@ fm_afk_launch_start() {
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
     if ! fm_afk_launch_flag_write; then
-      fm_afk_launch_log "failed to refresh away-mode flag"
+      fm_afk_launch_log "failed to refresh the $(fm_afk_launch_posture)-mode flag"
       return 1
     fi
-    fm_afk_launch_log "daemon already running; refreshed away-mode flag (no new terminal)"
+    fm_afk_launch_log "daemon already running; refreshed the $(fm_afk_launch_posture)-mode flag (no new terminal)"
     return 0
   fi
 
@@ -627,13 +709,13 @@ fm_afk_launch_start() {
     if fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
       result=0
     else
-      fm_afk_launch_log "failed to clear stale away-mode artifacts"
+      fm_afk_launch_log "failed to clear stale $(fm_afk_launch_posture)-mode artifacts"
       result=1
     fi
   fi
   if [ "$result" -eq 0 ]; then
     if ! fm_afk_launch_flag_write; then
-      fm_afk_launch_log "failed to write away-mode flag"
+      fm_afk_launch_log "failed to write the $(fm_afk_launch_posture)-mode flag"
       result=1
     fi
   fi
@@ -661,11 +743,11 @@ fm_afk_launch_start_native() {
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
-  fm_afk_launch_record_require || return 1
+  fm_afk_launch_posture_require || return 1
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
     fm_afk_launch_flag_write || return 1
-    fm_afk_launch_log "daemon already running; refreshed away-mode flag"
+    fm_afk_launch_log "daemon already running; refreshed the $(fm_afk_launch_posture)-mode flag"
     return 0
   fi
   backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
@@ -681,7 +763,7 @@ fm_afk_launch_start_native() {
   fm_afk_launch_reconcile || result=1
   if [ "$result" -eq 0 ]; then
     if ! fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
-      fm_afk_launch_log "failed to clear stale away-mode artifacts"
+      fm_afk_launch_log "failed to clear stale $(fm_afk_launch_posture)-mode artifacts"
       result=1
     elif ! fm_afk_launch_flag_write; then
       result=1
@@ -699,11 +781,14 @@ fm_afk_launch_start_native() {
 }
 
 fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result archived closed_daemon_terminal=0
+  local pid pid_identity current_identity result=0 read_result archived closed_daemon_terminal=0 record_note mode
+  # The flag names which posture this stop is ending, so read it before step (3)
+  # clears it.
+  mode=$(fm_afk_launch_posture)
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
-    fm_afk_launch_log "malformed daemon terminal record; refusing to stop away mode"
+    fm_afk_launch_log "malformed daemon terminal record; refusing to stop $mode mode"
     return 1
   fi
   # (1) SIGTERM the daemon so its cleanup trap flushes buffered escalations
@@ -717,7 +802,7 @@ fm_afk_launch_stop() {
   fi
   if [ -n "$pid" ]; then
     if ! kill -TERM "$pid" 2>/dev/null; then
-      fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
+      fm_afk_launch_log "failed to signal the $mode-mode daemon pid=$pid"
       result=1
     fi
     for _ in $(seq 1 40); do
@@ -727,11 +812,11 @@ fm_afk_launch_stop() {
   fi
   if [ -n "$pid" ] && fm_pid_alive "$pid"; then
     current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || {
-      fm_afk_launch_log "could not confirm away-mode daemon exit; preserving lifecycle state"
+      fm_afk_launch_log "could not confirm the $mode-mode daemon exit; preserving lifecycle state"
       return 1
     }
     if [ "$current_identity" = "$pid_identity" ]; then
-      fm_afk_launch_log "away-mode daemon did not exit after SIGTERM; preserving lifecycle state"
+      fm_afk_launch_log "the $mode-mode daemon did not exit after SIGTERM; preserving lifecycle state"
       return 1
     fi
   fi
@@ -745,13 +830,18 @@ fm_afk_launch_stop() {
     fm_afk_launch_close_recorded || result=1
     [ "$result" -eq 0 ] || closed_daemon_terminal=0
   fi
-  # (3) Clear the away-mode flag, then (4) archive the posture record LAST so the
-  # posture ends only once every daemon-side artifact is down.
-  if ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
-    fm_afk_launch_log "failed to clear away-mode flag"
+  # (3) Clear the posture flag, then (4) archive the posture record LAST so the
+  # posture ends only once every daemon-side artifact is down. A teardown that
+  # failed above leaves the flag standing, so the retry still reads the real
+  # posture rather than falling back to away.
+  if [ "$result" -eq 0 ] && ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
+    fm_afk_launch_log "failed to clear the $mode-mode flag"
     result=1
   fi
+  # A quiet entry never wrote a record, so there is none to archive.
+  record_note="no posture record stood"
   if [ "$result" -eq 0 ] && fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
+    record_note="the posture record archived"
     if archived=$("$FM_AFK_CONTRACT_CMD" archive); then
       fm_afk_launch_log "away-posture record archived at $archived"
     else
@@ -761,12 +851,12 @@ fm_afk_launch_stop() {
   fi
   if [ "$result" -eq 0 ]; then
     if [ "$closed_daemon_terminal" -eq 1 ]; then
-      fm_afk_launch_log "away mode stopped; daemon terminal torn down, .afk cleared, and the posture record archived"
+      fm_afk_launch_log "$mode mode stopped; daemon terminal torn down, .afk cleared, and $record_note"
     else
-      fm_afk_launch_log "away mode stopped; no daemon terminal was running, .afk cleared, and the posture record archived"
+      fm_afk_launch_log "$mode mode stopped; no daemon terminal was running, .afk cleared, and $record_note"
     fi
   else
-    fm_afk_launch_log "away mode stopped; terminal teardown or the record archive remains recorded for retry"
+    fm_afk_launch_log "$mode mode is not stopped; the flag still stands and terminal teardown or the record archive remains recorded for retry"
   fi
   return "$result"
 }
