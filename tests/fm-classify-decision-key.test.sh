@@ -676,10 +676,12 @@ test_done_past_standing_mirror_and_later_hold_after_settled_transfer() {
       || fail "a standing mirror displaced the worker's line '$line': '$current'"
   done
   printf 'needs-decision [key=route]: pick\n' > "$f"
-  printf 'captain-held [key=route]: tracked by lane\n' >> "$f"
-  printf 'resolved [key=route]: captain call answered by fm-captain-hold\n' >> "$f"
-  printf 'working: continuing\n' >> "$f"
-  printf 'captain-held [key=captain-hold-lane-2]: operator review\n' >> "$f"
+  {
+    printf 'captain-held [key=route]: tracked by lane\n'
+    printf 'resolved [key=route]: captain call answered by fm-captain-hold\n'
+    printf 'working: continuing\n'
+    printf 'captain-held [key=captain-hold-lane-2]: operator review\n'
+  } >> "$f"
   [ "$(status_declared_wait_line "$f")" = 'captain-held [key=captain-hold-lane-2]: operator review' ] \
     || fail "an earlier settled transfer hid the later standing mirror: '$(status_declared_wait_line "$f")'"
   pass "a worker done stays current under a standing mirror, and a later hold survives an earlier settled transfer"
