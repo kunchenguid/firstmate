@@ -68,6 +68,7 @@ if [ "${1:-}" = terminal ] && [ "${2:-}" = title ] && [ "${3:-}" = clear ]; then
 fi
 n=$next
 echo "$n" > "$COUNT_FILE"
+[ -f "$RESP/$n.err" ] && cat "$RESP/$n.err" >&2
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
@@ -4301,6 +4302,26 @@ test_send_text_submit_detects_swallowed_enter() {
   pass "fm_backend_herdr_send_text_submit: reports 'pending' when agent_status stays idle and the composer still holds unsent text after retried Enters (swallowed)"
 }
 
+test_send_text_submit_replays_literal_send_stderr() {
+  local dir log resp fb out err
+  dir="$TMP_ROOT/submit-send-stderr"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  err="$dir/stderr"
+  # 1: agent get (a non-Claude identity skips the payload proof)
+  # 2: send-text fails the way an oversized argument does, before herdr runs
+  printf '{"result":{"agent":{"agent":"codex","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf 'herdr: Argument list too long\n' > "$resp/2.err"
+  printf '126\n' > "$resp/2.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" 2>"$err" )
+  [ "$out" = send-failed ] || fail "a failed literal send should report send-failed, got '$out'"
+  grep -F 'Argument list too long' "$err" >/dev/null \
+    || fail "the literal send's stderr was not replayed to the caller: $(cat "$err")"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-keys' "$log")" -eq 0 ] \
+    || fail "no Enter may follow a failed literal send"
+  pass "fm_backend_herdr_send_text_submit: a failed literal send reports send-failed and replays the transport's stderr"
+}
+
 # Regression coverage for the 2026-07-03 incident using the NEW mechanism: a
 # slash command's first Enter can close a completion popup and fill an
 # argument-hint placeholder WITHOUT submitting. In the idle-baseline path,
@@ -5754,6 +5775,7 @@ test_wait_for_working_returns_unknown_when_never_readable
 test_wait_for_working_treats_blocked_as_submit_active
 test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
+test_send_text_submit_replays_literal_send_stderr
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_preexisting_working_pending_is_queued_enter
