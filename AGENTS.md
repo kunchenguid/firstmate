@@ -645,7 +645,9 @@ Keep irreversible actions behind human confirmation; a Jev answer is never permi
 
 The invocation this agent can actually perform is `jev '<compact state JSON>'`, on PATH at `~/.local/bin/jev`.
 The state schema, the action table, and the confidence policy live in `~/Documents/muse-jev-playbook/skill/jev-decision-layer.SKILL.md`; read that file rather than trusting a remembered shape.
-The router runs in `shadow` mode, so its output is advice appended to `logs/runs.jsonl` and this agent keeps its own judgment; move it to `active` only after reading that log and seeing the advice repeatedly match the action this agent would have taken anyway.
+The router runs in `shadow` mode, so its output is advice appended to `~/Documents/muse-jev-playbook/logs/runs.jsonl` and this agent keeps its own judgment.
+The router stays in `shadow` mode; promotion to `active` is the captain's decision alone, taken only after the captain reviews that log against the playbook's bar of at least 90% agreement at high confidence, sustained over weeks.
+Never promote the router yourself, and never treat your own observation of matching advice as sufficient evidence.
 The official TypeSafe API skill sits at `.agents/skills/typesafe-ai` and teaches the API, which is a separate component from this routing policy.
 
 ## Maintaining this file
