@@ -564,10 +564,12 @@ test_declared_wait_survives_settled_hold_mirror() {
   local dir f
   dir=$(case_dir settled-hold-mirror)
   f="$dir/answered.status"
-  printf 'paused: waiting on upstream\n' > "$f"
-  printf 'resolved [key=api]: answered\n' >> "$f"
-  printf 'captain-held [key=captain-hold-answered-1]: operator review\n' >> "$f"
-  printf 'resolved [key=captain-hold-answered-1]: captain call released by fm-captain-hold\n' >> "$f"
+  {
+    printf 'paused: waiting on upstream\n'
+    printf 'resolved [key=api]: answered\n'
+    printf 'captain-held [key=captain-hold-answered-1]: operator review\n'
+    printf 'resolved [key=captain-hold-answered-1]: captain call released by fm-captain-hold\n'
+  } > "$f"
   [ "$(status_declared_wait_line "$f")" = 'paused: waiting on upstream' ] \
     || fail "a settled hold mirror hid the standing pause: '$(status_declared_wait_line "$f")'"
   pass "a settled hold mirror does not hide a standing pause under another key's resolved line"
@@ -623,10 +625,12 @@ test_hold_settled_only_without_worker_event_between() {
   printf 'resolved [key=captain-hold-held-1]: captain call released by fm-captain-hold\n' >> "$f"
   status_hold_settled "$f" \
     || fail "a retraction right after its declaration did not read as the hold's own settlement"
-  printf 'paused: waiting on upstream\n' > "$f"
-  printf 'captain-held [key=captain-hold-held-1]: operator review\n' >> "$f"
-  printf 'working: resumed\n' >> "$f"
-  printf 'resolved [key=captain-hold-held-1]: captain call released by fm-captain-hold\n' >> "$f"
+  {
+    printf 'paused: waiting on upstream\n'
+    printf 'captain-held [key=captain-hold-held-1]: operator review\n'
+    printf 'working: resumed\n'
+    printf 'resolved [key=captain-hold-held-1]: captain call released by fm-captain-hold\n'
+  } > "$f"
   ! status_hold_settled "$f" \
     || fail "a retraction over a worker's newer line read as the hold's own settlement"
   pass "a hold settlement is the hold's own only with no worker event between"
@@ -638,7 +642,7 @@ test_worker_event_after_standing_hold_mirror_replaces_it() {
   local dir f verb current
   dir=$(case_dir worker-after-standing-mirror)
   f="$dir/lane.status"
-  for verb in done failed working blocked needs-decision; do
+  for verb in "done" failed working blocked needs-decision; do
     printf 'working: start\n' > "$f"
     printf 'captain-held [key=captain-hold-lane-1]: operator review\n' >> "$f"
     printf '%s: latest worker report\n' "$verb" >> "$f"
