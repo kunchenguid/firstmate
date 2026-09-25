@@ -1204,20 +1204,23 @@ fm_remote_job_clear_stopped_ownership() { # <stopped-pid>
 # started (a worker's own supervisor restarted it first), the started tree
 # lost and is reaped here rather than left behind.
 fm_remote_job_wait_for_started_owner() { # <remote-root> <account-home> <started-pid>
-  local root=$1 account_home=$2 started=$3 deadline pgid
+  local root=$1 account_home=$2 started=$3 deadline pgid owned=0
   deadline=$(($(date +%s) + 20))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     if fm_remote_job_worker_owned_alive "$root" "$account_home" &&
       fm_remote_job_worker_identity_matches "$root" "$account_home"; then
+      owned=1
       pgid=$(fm_remote_job_process_pgid "$FM_REMOTE_JOB_OWNER_PID" 2>/dev/null || true)
+      [ -n "$pgid" ] || { sleep 0.1; continue; }
       [ "$pgid" != "$started" ] || return 0
       fm_remote_job_stop_worker_tree "$started" || return 1
       wait "$started" 2>/dev/null || true
       return 0
     fi
+    owned=0
     sleep 0.1
   done
-  return 1
+  [ "$owned" -eq 1 ]
 }
 
 fm_remote_job_start_linux_worker() { # <remote-root> <account-home> [--replace]

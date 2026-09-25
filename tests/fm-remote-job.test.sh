@@ -445,6 +445,33 @@ fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the job staged after the s
 fm_remote_job_probe "$ACCOUNT_HOME" || fail "the owner stopped heartbeating after the split"
 pass "a serving worker that lost the ownership lock stops itself and its supervisor"
 
+# A pgid lookup that fails (ps cannot fork under load) proves nothing about
+# who owns the lock. ensure must never stop the replacement it just started
+# on that basis and then report success with no worker serving.
+PGID_FAILED="$TMP_ROOT/pgid-failed"
+(
+  # shellcheck disable=SC2329 # Overrides the library lookup ensure calls.
+  fm_remote_job_process_pgid() {
+    if [ "${FUNCNAME[1]}" = fm_remote_job_wait_for_started_owner ] && [ ! -f "$PGID_FAILED" ]; then
+      : > "$PGID_FAILED"
+      return 1
+    fi
+    ps -p "$1" -o pgid= | tr -d '[:space:]'
+  }
+  fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" --replace || fail "$FM_REMOTE_JOB_ERROR"
+) || fail "ensure failed after a failed pgid lookup"
+assert_present "$PGID_FAILED" "the failing pgid lookup was never consulted"
+fm_remote_job_worker_owned_alive "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  || fail "ensure stopped its own replacement after a failed pgid lookup"
+[ "$(worker_tree_count)" -eq 1 ] || fail "the failed pgid lookup left $(worker_tree_count) worker trees running"
+PGID_SIDE_EFFECT="$TMP_ROOT/pgid-side-effect"
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-append-job.sh "$PGID_SIDE_EFFECT" < /dev/null > /dev/null
+JOB_ID=$FM_REMOTE_JOB_ID
+fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+[ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "no worker served the job staged after a failed pgid lookup"
+fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the job staged after a failed pgid lookup could not be reaped"
+pass "a failed pgid lookup never makes ensure stop the replacement it started"
+
 FM_REMOTE_JOB_TIMEOUT=1
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-timeout-job.sh < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID

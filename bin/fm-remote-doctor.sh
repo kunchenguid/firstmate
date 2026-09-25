@@ -55,7 +55,8 @@
 # A worker that heartbeats but cannot complete the required-tool probe is
 # replaced once under --fix; if the probe still fails, or a worker repair
 # itself fails, the remaining remote-job gap is reported as human: with the
-# cause, never as another --fix.
+# cause, never as another --fix. A worker that answers the probe with an
+# invalid result is never replaced; that result is reported as human:.
 set -eu
 
 # Resolve this script's directory with builtins only: a host missing a required
@@ -458,12 +459,14 @@ report_required_tools() {
 # Run the required-tool probe through the worker without printing anything.
 # Sets WORKER_PROBE_FAILURE to why the worker could not serve it (empty on
 # success), and on success leaves the validated facts in WORKER_PROBE_FACTS
-# and the missing tools in MISSING.
+# and the missing tools in MISSING. When the worker answered but the result
+# failed validation, WORKER_PROBE_RESULT holds that result on one line.
 worker_tool_probe() {
-  local job_id probe_stdout probe_stderr probe_exit line fact name value
+  local job_id probe_stdout probe_stderr probe_exit line fact name value result
   local expected=6 count=0 valid=1 seen=' '
   WORKER_PROBE_FAILURE=
   WORKER_PROBE_FACTS=
+  WORKER_PROBE_RESULT=
   if ! job_id=$(fm_remote_job_stage "${HOME:-}" "$FM_ROOT" "${FM_HOME:-}" \
     fm-remote-doctor.sh --worker-tool-probe </dev/null); then
     WORKER_PROBE_FAILURE="could not accept the required-tool probe"
@@ -496,6 +499,9 @@ worker_tool_probe() {
     WORKER_PROBE_FACTS=$(cat "$probe_stdout")
   else
     WORKER_PROBE_FAILURE="returned an invalid required-tool probe result"
+    result="exit $probe_exit; stdout: $(<"$probe_stdout"); stderr: $(<"$probe_stderr")"
+    result=${result//$'\n'/ | }
+    WORKER_PROBE_RESULT=${result:0:600}
   fi
   fm_remote_job_reap "${HOME:-}" "$job_id" 2>/dev/null || true
   [ -z "$WORKER_PROBE_FAILURE" ]
@@ -507,7 +513,11 @@ report_required_tools_from_worker() {
     set_check remote-job-probe "ok: the remote job worker completed the required-tool probe"
     return 0
   fi
-  if [ "$REMOTE_JOB_PROBE_REPLACED" -eq 1 ]; then
+  if [ -n "$WORKER_PROBE_RESULT" ]; then
+    # The worker answered, so replacing it cannot change what it returned.
+    set_check remote-job-probe "human: the remote job worker $WORKER_PROBE_FAILURE: $WORKER_PROBE_RESULT" \
+      "fix whatever on this host's worker PATH produced that result, then rerun this command"
+  elif [ "$REMOTE_JOB_PROBE_REPLACED" -eq 1 ]; then
     # --fix already replaced the worker once for this failure, so another
     # --fix cannot help; name what is still wrong instead of looping on it.
     set_check remote-job-probe "human: the remote job worker still $WORKER_PROBE_FAILURE after --fix replaced it" \
@@ -950,7 +960,8 @@ if [ "$MODE" = fix ]; then
   # A worker can heartbeat and still never serve a job, which no check above
   # can see. Replace it once when it cannot serve the probe; the report below
   # then states whether that worked.
-  if [ "${FM_REMOTE_JOB_ACTIVE:-}" != 1 ] && remote_job_identity_ok && ! worker_tool_probe; then
+  if [ "${FM_REMOTE_JOB_ACTIVE:-}" != 1 ] && remote_job_identity_ok && ! worker_tool_probe &&
+    [ -z "$WORKER_PROBE_RESULT" ]; then
     fix_report remote-job-probe failed "the running remote job worker $WORKER_PROBE_FAILURE; replacing it"
     fix_remote_job_worker --replace && REMOTE_JOB_PROBE_REPLACED=1
     run_checks "$LAUNCH_AGENT_SHELL"

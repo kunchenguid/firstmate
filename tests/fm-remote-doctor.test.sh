@@ -913,6 +913,51 @@ DOCTOR_WORKER_PID=$(cat "$DEAF_STATE/worker.pid")
 DOCTOR_WORKER_PID=
 pass "--fix replaces a worker that heartbeats but cannot serve, instead of advising another --fix"
 
+# A worker that answers the probe is listening. When its answer fails
+# validation, replacing it cannot change the answer, so --fix must leave it
+# serving and report the result itself as a gap only a person can close.
+new_case Linux with-herdr no-gui
+CASE_REMOTE_JOB_ACTIVE=
+CASE_PLATFORM_OVERRIDE=Linux
+rm -f "$CASE_BIN/sleep" "$CASE_BIN/uname"
+mkdir -p "$CASE_HOME/.local/bin"
+for tool in herdr treehouse claude; do
+  ln -s "$CASE_BIN/$tool" "$CASE_HOME/.local/bin/$tool"
+done
+cat > "$CASE_HOME/.local/bin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] && [ "\${1:-}" = mv ]; then
+  printf 'tasks-axi shim warning: config drift\\n' > "/proc/\$PPID/fd/2"
+fi
+exec '$CASE_BIN/tasks-axi' "\$@"
+SH
+chmod +x "$CASE_HOME/.local/bin/tasks-axi"
+ANSWER_STATE="$CASE_HOME/.firstmate/remote-job"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "--fix reported ready while the worker returned an invalid probe result"
+assert_not_contains "$DOCTOR_OUT" 'fix remote-job-probe=failed' "--fix replaced a worker that answered the probe"
+assert_contains "$DOCTOR_OUT" 'check remote-job-probe=human: the remote job worker returned an invalid required-tool probe result: exit ' \
+  "an answered but invalid probe result was not reported as a human gap"
+assert_contains "$DOCTOR_OUT" 'tasks-axi shim warning: config drift' "the invalid probe result text was not reported"
+ANSWER_WORKER_PID=$(cat "$ANSWER_STATE/worker.pid")
+DOCTOR_WORKER_PID=$ANSWER_WORKER_PID
+doctor
+expect_code 1 "$DOCTOR_RC" "the read-only doctor accepted an invalid probe result"
+assert_contains "$DOCTOR_OUT" 'check remote-job-probe=human: the remote job worker returned an invalid required-tool probe result:' \
+  "the read-only doctor did not report the invalid probe result as a human gap"
+assert_not_contains "$DOCTOR_OUT" 'check remote-job-probe=fixable:' "the read-only doctor offered --fix for an invalid probe result"
+doctor --fix
+assert_not_contains "$DOCTOR_OUT" 'fix remote-job-probe=failed' "a repeated --fix replaced a worker that answered the probe"
+[ "$(cat "$ANSWER_STATE/worker.pid")" = "$ANSWER_WORKER_PID" ] || fail "--fix replaced a worker that answered the probe"
+kill -0 "$ANSWER_WORKER_PID" 2>/dev/null || fail "--fix stopped a worker that answered the probe"
+(
+  # shellcheck source=bin/fm-remote-job-lib.sh
+  . "$ROOT/bin/fm-remote-job-lib.sh"
+  fm_remote_job_stop_worker_tree "$ANSWER_WORKER_PID"
+) || true
+DOCTOR_WORKER_PID=
+pass "--fix keeps a worker that answers with an invalid probe result and reports that result as human"
+
 # --- the entrypoint symlink is recreated when it is missing ------------------
 
 new_case Linux with-herdr no-gui
