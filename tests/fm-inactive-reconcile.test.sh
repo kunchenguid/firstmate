@@ -7,6 +7,7 @@ set -u
 
 RECON="$ROOT/bin/fm-inactive-reconcile.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+GRANT="$ROOT/bin/fm-wake-grant.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
 TMP_ROOT=$(fm_test_tmproot fm-inactive-reconcile)
 fm_git_identity fmtest fmtest@example.invalid
@@ -169,6 +170,56 @@ test_main_direct_terminal_presentation_receipt() {
   FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation"
   [ "$(outcome_count "$MAIN" presented)" = 1 ] || fail "acknowledged presentation did not receive its own receipt"
   pass "main direct terminal presentation has a durable receipt"
+}
+
+# Away-posture regression: a branch-actor drain that consumes an
+# inactive-outcome check row must retire its terminal-outcome receipt exactly
+# like a main ack does. The 2026-09-25 away window on the supervision host
+# consumed the queue row but left the .pending receipt, so every later cadence
+# scan republished the same fingerprint - the 1,734-escalation flood.
+test_branch_ack_retires_inactive_outcome_receipt() {
+  local err seq generation
+  make_world branch-ack
+  write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "scan did not queue the terminal presentation"
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "scan did not retain a presentation receipt"
+
+  # The same grant the branch dispatch publishes for this row in the away
+  # posture (check rows become branch-eligible), with this test's own live
+  # process as the recorded grant owner.
+  seq=$(awk -F '\t' '$4 ~ /^inactive-outcome:/ { print $2 }' "$MAIN/state/.wake-queue" | tail -1)
+  case "$seq" in ''|*[!0-9]*) fail "the queued inactive-outcome row had no sequence" ;; esac
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$GRANT" activate "$$" branch-ack \
+    || fail "branch owner activation failed"
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$GRANT" publish branch-ack "$seq" \
+    || fail "branch grant publication failed"
+
+  err="$WORLD/branch-drain.err"
+  FM_SUPERVISION_ACTOR=branch FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" \
+    FM_CONFIG_OVERRIDE="$MAIN/config" "$DRAIN" >/dev/null 2> "$err"
+  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$seq" ] && [ -n "$generation" ] \
+    || { cat "$err"; fail "branch presentation did not require durable acknowledgement"; }
+  FM_SUPERVISION_ACTOR=branch FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" \
+    FM_CONFIG_OVERRIDE="$MAIN/config" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation" \
+    || fail "branch acknowledgement failed"
+
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] || fail "branch acknowledgement left its check row queued"
+  [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "branch acknowledgement left the terminal-outcome receipt pending"
+  [ "$(outcome_count "$MAIN" presented)" = 1 ] || fail "branch acknowledgement never recorded the presentation receipt"
+
+  # The flood's shape: with the receipt retired, later cadence scans must not
+  # republish the same unchanged fingerprint.
+  local cycle
+  for cycle in 1 2 3; do
+    age "$MAIN/state/.inactive-outcome-reconcile"
+    FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN"
+    [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] \
+      || fail "unchanged inactive outcome re-queued on cadence scan $cycle after its branch acknowledgement"
+  done
+  pass "a branch-actor acknowledgement retires the inactive-outcome receipt and later scans stay quiet"
 }
 
 # An unpushed CI-ready ship done: is not a parent-facing ready signal. The
@@ -988,6 +1039,7 @@ SH
 }
 
 test_main_direct_terminal_presentation_receipt
+test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published
 test_delivered_ledger_done_skips_git_gate
 test_local_secondmate_delivers_terminal_ledger_line

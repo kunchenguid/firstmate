@@ -51,6 +51,15 @@
 #     Main-actor drain calls processed-init under the outcome lock when that
 #     ready marker is absent or invalid, on every harness; only a genuine store
 #     fault keeps the lost-wake backstop skipped.
+#   - Situation key: $STATE/.<task>.branch-captain-key records
+#     "<seq>\t<digest>" for the task's newest stored captain row, where the
+#     digest hashes the task's durable records at append time (metadata bytes,
+#     captured status-log endpoint and identity, live crew-state verb, and
+#     worktree head). A later captain verdict whose recomputed key matches is
+#     stored as routine with an "unchanged since seq <N>:" summary instead of
+#     escalating the same situation again; a task with no readable status
+#     ledger is never demoted. bin/fm-teardown.sh removes the sidecar with the
+#     task's other records.
 #   - Every mutation runs under $STATE/.branch-outcomes.lock so the branch
 #     extension and a concurrent session-start replay cannot interleave.
 #   - The store is written BEFORE the outcome is delivered to main
@@ -233,6 +242,86 @@ capture_status_position() { # <task>
   case "$ident" in *$'\t'*|*$'\n'*|'') return 0 ;; esac
   CAPTURED_STATUS_ENDPOINT=$size
   CAPTURED_STATUS_IDENT=$ident
+}
+
+# --- once-per-situation captain reporting ------------------------------------
+#
+# A captain verdict restating a situation the store already escalated must not
+# escalate again: an away branch re-observing an unchanged held PR would
+# otherwise emit one captain row per check it re-answers. Before a captain row
+# is written, append computes a mechanical situation key for the task from its
+# durable records - the metadata bytes, the captured status-log endpoint and
+# identity, the live crew-state verb, and the worktree head - and compares it
+# with the key recorded beside the task's newest captain row in
+# $STATE/.<task>.branch-captain-key ("<seq>\t<key>"). A matching key demotes
+# the new row to routine with "unchanged since seq <N>:" prefixed to its
+# summary, so one situation is escalated once and then only noted as routine
+# until something provably changes. A task with no status ledger - the `fleet`
+# pseudo-task, a teardown report whose records are already gone, or a task
+# that never wrote a status line - has no recorded situation to compare and is
+# never demoted, and a record that exists but cannot be read fails toward
+# reporting rather than toward silence.
+captain_key_path() { # <task> - sidecar is same-shape-guarded as the index path
+  case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  printf '%s/.%s.branch-captain-key' "$STATE" "$1"
+}
+
+outcome_meta_value() { # <meta-file> <key> -> last `key=` value, never errors
+  local meta=$1 key=$2 line value=''
+  [ -f "$meta" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in "$key="*) value=${line#*=} ;; esac
+  done < "$meta" 2>/dev/null || true
+  printf '%s' "$value"
+}
+
+outcome_sha() { # stable digest of stdin
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print substr($1,1,32)}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print substr($1,1,32)}'
+  else
+    cksum | awk '{printf "%x-%x", $1, $2}'
+  fi
+}
+
+# captain_situation_key <task> -> the task's current situation key on stdout.
+#   0: key computed. 2: the task has no readable status ledger to compare, so
+#      the append must never be demoted. 1: a record that could carry a change
+#      could not be read, which also fails toward reporting.
+captain_situation_key() { # <task>
+  local task=$1 meta status meta_sig crew worktree head
+  status="$STATE/$task.status"
+  [ -f "$status" ] && [ -r "$status" ] && [ ! -L "$status" ] || return 2
+  meta="$STATE/$task.meta"
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    if [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ]; then
+      meta_sig=$(outcome_sha < "$meta") || return 1
+    else
+      # A metadata record that exists but cannot be hashed may be hiding
+      # exactly the change a second report exists to carry.
+      return 1
+    fi
+  else
+    meta_sig=no-meta
+  fi
+  # Crew state is a live probe: an unreadable answer is a stable token here,
+  # not a reason to keep escalating - the durable records still carry the key.
+  crew=$(fm_run_timed 8 env \
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
+    "$FM_CREW_STATE_BIN" "$task" 2>/dev/null \
+    | sed -n 's/^state: \([A-Za-z][A-Za-z-]*\).*/\1/p' | head -1)
+  [ -n "$crew" ] || crew=unreadable
+  worktree=$(outcome_meta_value "$meta" worktree)
+  if [ -n "$worktree" ] && [ -d "$worktree" ]; then
+    head=$(fm_run_timed 8 git -C "$worktree" rev-parse HEAD 2>/dev/null) || head=
+    [ -n "$head" ] || head=no-head
+  else
+    head=no-worktree
+  fi
+  printf 'meta=%s\nstatus=%s:%s\ncrew=%s\nhead=%s\n' \
+    "$meta_sig" "$CAPTURED_STATUS_ENDPOINT" "$CAPTURED_STATUS_IDENT" "$crew" "$head" \
+    | outcome_sha
 }
 
 write_outcome_index() { # <task> <seq> [<endpoint> <identity>]
@@ -459,11 +548,46 @@ case "$CMD" in
     fi
     SEQ=$(( LAST_SEQ + 1 ))
     capture_status_position "$TASK"
+    CAPTAIN_SITUATION_KEY=
+    if [ "$VERDICT" = captain ]; then
+      key_status=0
+      CAPTAIN_SITUATION_KEY=$(captain_situation_key "$TASK") || key_status=$?
+      if [ "$key_status" -eq 0 ]; then
+        prior_key_file=$(captain_key_path "$TASK")
+        prior_seq=
+        prior_key=
+        if [ -f "$prior_key_file" ] && [ -r "$prior_key_file" ] && [ ! -L "$prior_key_file" ]; then
+          IFS="$(printf '\t')" read -r prior_seq prior_key _ < "$prior_key_file" || true
+        fi
+        case "$prior_seq" in ''|*[!0-9]*) prior_seq= ;; esac
+        if [ -n "$prior_seq" ] && [ "$prior_seq" -le "$LAST_SEQ" ] \
+            && [ -n "$prior_key" ] && [ "$prior_key" = "$CAPTAIN_SITUATION_KEY" ]; then
+          VERDICT=routine
+          SUMMARY="unchanged since seq $prior_seq: ${SUMMARY:0:350}"
+        fi
+      fi
+    fi
     rm -f -- "$OUTCOME_INDEX_READY" || { fm_lock_release "$LOCK"; exit 1; }
     printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s"}\n' \
       "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
       "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
       "$(json_escape "$CAPTURED_STATUS_IDENT")" >> "$STORE"
+    if [ "$VERDICT" = captain ] && [ -n "$CAPTAIN_SITUATION_KEY" ]; then
+      # Refresh the once-per-situation anchor while the lock still serializes
+      # every writer. The row is already durable, so a failed write only
+      # delays dedupe - it warns rather than failing the append.
+      key_tmp=
+      key_tmp=$(mktemp "$STATE/.branch-captain-key.XXXXXX" 2>/dev/null) || true
+      if [ -n "$key_tmp" ] \
+          && chmod 0600 "$key_tmp" 2>/dev/null \
+          && printf '%s\t%s\n' "$SEQ" "$CAPTAIN_SITUATION_KEY" > "$key_tmp" \
+          && mv -f -- "$key_tmp" "$(captain_key_path "$TASK")"; then
+        :
+      else
+        [ -z "$key_tmp" ] || rm -f -- "$key_tmp"
+        echo "branch outcome: captain situation key could not be recorded; an unchanged repeat escalates once more" >&2
+      fi
+    fi
     # A task with neither a live meta nor a status log is retired: the branch
     # reports the teardown it just performed, and writing the index here would
     # recreate the footprint teardown removed. The outcome itself is still

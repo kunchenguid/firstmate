@@ -312,20 +312,23 @@ If a branch offer loses the claim race to main, it rejects its settlement so the
 
 [`pi-supervision-branch.md`](pi-supervision-branch.md#components-and-their-owners) owns branch eligibility, mixed-queue dispatch, the pre-drain recheck, and heartbeat's all-or-nothing rule.
 
-A check-kind row is main-owned in every mode, including a heartbeat review.
+While attended, a check-kind row is main-owned, including a heartbeat review.
 So it is never part of a branch claim and never defers one.
 Main is woken for it on that check's own triggering close.
+Under the away-posture record the exclusion lifts and a check row is offered to and claimed by the branch like every other actionable row.
 
 `fm-wake-drain.sh` never reclassifies a row itself.
 It filters the queue to the current actor's opaque claim before same-key deduplication, then presents and acknowledges only that actor-local view.
 A missing or empty branch snapshot is refused loudly rather than read as "nothing eligible", because reaching the drain without the non-empty handoff promised by the extension is a wiring bug.
-Because branch claims contain no check-kind rows, a branch acknowledgement skips check-specific receipt scans.
+A branch acknowledgement retires the check-row receipts - inactive-outcome, inactive-reconcile notice, and secondmate stall - of exactly the granted sequences it consumes, so a branch-consumed check is never re-queued by its producer.
+Attended, a grant names no check row and each scan finds nothing.
 
 ### Per-actor regression tests
 
 `tests/fm-wake-queue.test.sh`'s mixed-queue actor, stale-acknowledgement remedy, and presentation-deadline tests drive the real scripts and check that:
 
 - Branch acknowledgement cannot swallow a main row.
+- Branch acknowledgement retires the check-row receipts of exactly its granted sequences.
 - A concurrent main turn cannot present or acknowledge an active branch grant.
 - A no-op stale acknowledgement names the current presented wake's exact command.
 - Live-holder presentation contention stays bounded and retriable.

@@ -135,6 +135,116 @@ PY
   pass "outcome store is append-only and refuses sequence reuse after a torn tail"
 }
 
+# Once-per-situation captain reporting: a captain verdict whose task's durable
+# records are unchanged since the task's newest captain row is stored as
+# routine, so an away branch re-observing the same held outcome cannot mint an
+# escalation per check. A genuinely changed record (status position, crew
+# verb, recorded PR, head) must escalate again, and a task without a status
+# ledger - including the fleet pseudo-task - is never demoted.
+test_captain_verdict_dedupes_only_an_unchanged_situation() {
+  local home fakebin store seq
+  home="$TMP_ROOT/dedupe-home"
+  fakebin="$home/fakebin"
+  store="$home/state/branch-outcomes.jsonl"
+  mkdir -p "$home/state" "$home/projects/held" "$fakebin"
+  git -C "$home/projects/held" init -q
+  git -C "$home/projects/held" commit -q --allow-empty -m init
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: %s · source: fake\n' "${FM_FAKE_CREW_STATE:-done}"
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  fm_write_meta "$home/state/held.meta" \
+    'window=firstmate:fm-held' "worktree=$home/projects/held" "project=$home/projects/held" \
+    'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' 'spawn_gen=g1' \
+    'pr=https://example.test/o/r/pull/153'
+  printf 'done [at=1]: PR https://example.test/o/r/pull/153 checks green\n' > "$home/state/held.status"
+  fm_write_meta "$home/state/meta-only.meta" 'window=firstmate:fm-meta-only' 'kind=ship'
+
+  append() { # <append args...> -> assigned seq
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_FAKE_CREW_STATE="${FM_FAKE_CREW_STATE:-done}" \
+      "$ROOT/bin/fm-branch-outcome.sh" append "$@"
+  }
+
+  seq=$(append --task held --verdict captain \
+    --summary 'PR https://example.test/o/r/pull/153 open, green, mergeable - held for return') \
+    || fail "first captain append failed"
+  [ "$seq" = 1 ] || fail "first captain append took seq $seq, not 1"
+  # The same situation re-reported - even worded differently - is routine.
+  seq=$(append --task held --verdict captain --summary 'the held PR is still held, reworded') \
+    || fail "unchanged repeat append failed"
+  [ "$seq" = 2 ] || fail "unchanged repeat append took seq $seq, not 2"
+  seq=$(append --task held --verdict captain --summary 'held again') \
+    || fail "third unchanged append failed"
+  [ "$seq" = 3 ] || fail "third unchanged append took seq $seq, not 3"
+
+  python3 - "$store" <<'PY' || fail "unchanged captain repeats were not recorded as anchored routine rows"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+assert [row["verdict"] for row in rows] == ["captain", "routine", "routine"], rows
+assert rows[1]["summary"].startswith("unchanged since seq 1:"), rows[1]
+assert rows[2]["summary"].startswith("unchanged since seq 1:"), rows[2]
+assert rows[1]["silent"] is False and rows[2]["silent"] is False, rows
+PY
+
+  # A moved status endpoint is a new situation and escalates again; that new
+  # captain row becomes the next anchor.
+  printf 'working: captain returned, resuming\n' >> "$home/state/held.status"
+  seq=$(append --task held --verdict captain --summary 'captain answered; work resumed') \
+    || fail "changed-situation append failed"
+  [ "$seq" = 4 ] || fail "changed-situation append took seq $seq, not 4"
+  seq=$(append --task held --verdict captain --summary 'same new situation again') \
+    || fail "post-change repeat append failed"
+  [ "$seq" = 5 ] || fail "post-change repeat append took seq $seq, not 5"
+
+  # A changed crew-state verb is a new situation too.
+  FM_FAKE_CREW_STATE=working seq=$(append --task held --verdict captain --summary 'crew state moved') \
+    || fail "crew-change append failed"
+  [ "$seq" = 6 ] || fail "crew-change append took seq $seq, not 6"
+
+  # A changed recorded PR field is a new situation.
+  FM_FAKE_CREW_STATE=working append --task held --verdict captain --summary 'crew moved again' >/dev/null \
+    || fail "seventh append failed"
+  fm_write_meta "$home/state/held.meta" \
+    'window=firstmate:fm-held' "worktree=$home/projects/held" "project=$home/projects/held" \
+    'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' 'spawn_gen=g1' \
+    'pr=https://example.test/o/r/pull/777'
+  seq=$(append --task held --verdict captain --summary 'a different PR is now recorded') \
+    || fail "meta-change append failed"
+  [ "$seq" = 8 ] || fail "meta-change append took seq $seq, not 8"
+
+  python3 - "$store" <<'PY' || fail "changed situations did not re-escalate as captain rows"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+verdicts = [(row["seq"], row["verdict"]) for row in rows]
+assert verdicts == [(1, "captain"), (2, "routine"), (3, "routine"), (4, "captain"),
+                    (5, "routine"), (6, "captain"), (7, "routine"), (8, "captain")], verdicts
+assert rows[4]["summary"].startswith("unchanged since seq 4:"), rows[4]
+assert rows[6]["summary"].startswith("unchanged since seq 6:"), rows[6]
+PY
+
+  # Tasks without a status ledger have no recorded situation to compare: the
+  # fleet pseudo-task and a meta-only task are never demoted.
+  append --task fleet --verdict captain --summary 'fleet review finding one' >/dev/null \
+    || fail "first fleet append failed"
+  append --task fleet --verdict captain --summary 'fleet review finding one' >/dev/null \
+    || fail "second fleet append failed"
+  append --task meta-only --verdict captain --summary 'never wrote a status line' >/dev/null \
+    || fail "first meta-only append failed"
+  append --task meta-only --verdict captain --summary 'never wrote a status line' >/dev/null \
+    || fail "second meta-only append failed"
+  python3 - "$store" <<'PY' || fail "ledgerless tasks were demoted"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+tail = [(row["task"], row["verdict"]) for row in rows[-4:]]
+assert tail == [("fleet", "captain"), ("fleet", "captain"),
+                ("meta-only", "captain"), ("meta-only", "captain")], tail
+PY
+  pass "a captain verdict is stored as routine only while the task's durable situation is provably unchanged"
+}
+
 test_outcome_startup_replay_preserves_silence() {
   local home replay out status store
   home="$TMP_ROOT/store-silent-home"
@@ -1285,6 +1395,7 @@ WRAPPER
 
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
+test_captain_verdict_dedupes_only_an_unchanged_situation
 test_outcome_startup_replay_preserves_silence
 test_outcome_startup_replay_stops_at_captain_barrier
 test_outcome_cursor_corruption_fails_closed
