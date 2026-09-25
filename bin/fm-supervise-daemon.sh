@@ -316,6 +316,8 @@ should_exit_afk() {  # <state> <message-text>
 # messages return the captain. Bias ambiguous cases toward exit (a false exit
 # is self-correcting).
 message_is_injection() {  # <message-text> [state]
+  # The record resolver writes its validated kind through this output variable.
+  # shellcheck disable=SC2034
   local msg=$1 state=${2:-$(_state_root)} record_kind
   [ -n "$msg" ] || return 1
   case "$msg" in
