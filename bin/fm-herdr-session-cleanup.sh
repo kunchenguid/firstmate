@@ -292,6 +292,22 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   return 0
 }
 
+fm_herdr_reconcile_existing_layout() { # <session> <home-real>
+  local session=$1 home_real=$2 presentation_lock home_label
+  presentation_lock=$(fm_backend_herdr_presentation_session_lock_path "$session" 2>/dev/null) || {
+    fm_herdr_cleanup_warn 'existing project clusters skipped because the shared presentation lock is unavailable'
+    return 0
+  }
+  if ! fm_lock_try_acquire "$presentation_lock"; then
+    fm_herdr_cleanup_warn 'existing project clusters skipped because the shared presentation lock is busy'
+    return 0
+  fi
+  home_label=$(fm_backend_herdr_workspace_label)
+  fm_backend_herdr_projection_order_best_effort \
+    "$session" "" "$home_label" "" "$STATE" "$home_real"
+  fm_lock_release "$presentation_lock" || true
+}
+
 fm_herdr_session_cleanup() {
   local session home_real list candidates workspace title journal found=0
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
@@ -313,6 +329,7 @@ fm_herdr_session_cleanup() {
     fm_herdr_cleanup_warn "session '$session' workspace discovery failed; preserving every candidate"
     return 0
   }
+  fm_herdr_reconcile_existing_layout "$session" "$home_real"
   candidates=$(printf '%s' "$list" | jq -er '
     .result.workspaces
     | select(type == "array")

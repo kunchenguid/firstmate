@@ -64,6 +64,7 @@ TITLE="└ task · p:$TOKEN"
 FIXTURE_DIR="$TMP_ROOT/fixture"
 LOCK_LOG="$TMP_ROOT/locks.log"
 CLOSE_LOG="$TMP_ROOT/closes.log"
+ORDER_LOG="$TMP_ROOT/order.log"
 mkdir -p "$FIXTURE_DIR"
 
 fm_backend_name() { printf herdr; }
@@ -193,6 +194,10 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {
   : > "$FIXTURE_DIR/closed"
 }
 
+fm_backend_herdr_projection_order_best_effort() {
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" >> "$ORDER_LOG"
+}
+
 write_v1() { # <id> [token]
   local id=$1 token=${2:-$TOKEN}
   {
@@ -222,7 +227,7 @@ write_cross_home_v2() {
 reset_fixture() {
   rm -rf "$FIXTURE_DIR" "$TMP_ROOT"/*.lock "${FM_STATE_OVERRIDE:?}/"*
   mkdir -p "$FIXTURE_DIR"
-  : > "$LOCK_LOG"; : > "$CLOSE_LOG"
+  : > "$LOCK_LOG"; : > "$CLOSE_LOG"; : > "$ORDER_LOG"
   printf '%s\n' "$TITLE" > "$FIXTURE_DIR/title"
   printf '1\n' > "$FIXTURE_DIR/tabs"
   printf '1\n' > "$FIXTURE_DIR/panes"
@@ -243,11 +248,22 @@ assert_preserved() { # <case>
 }
 
 reset_fixture
+write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
+: > "$FM_STATE_OVERRIDE/$ID.meta"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ "$(cat "$ORDER_LOG")" = $'test\t\tfirstmate\t\t'"$FM_STATE_OVERRIDE"$'\t'"$(cd "$FM_HOME" && pwd -P)" ] \
+  || fail "locked session cleanup did not reconcile existing journal-owned clusters"
+[ -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] && [ ! -s "$CLOSE_LOG" ] \
+  || fail "existing live projection reconciliation entered stale cleanup"
+pass "locked session start reconciles existing live journal-owned clusters"
+
+reset_fixture
 fm_herdr_session_cleanup >/dev/null 2>&1
 [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "positive cleanup kept the journal"
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "positive cleanup did not close exactly once"
-[ "$(sed -n '1p' "$LOCK_LOG")" = "$FM_STATE_OVERRIDE/.spawn-$ID.lock" ] || fail "task lock was not acquired first"
-[ "$(sed -n '2p' "$LOCK_LOG")" = "$TMP_ROOT/presentation.lock" ] || fail "presentation lock was not acquired second"
+[ "$(sed -n '1p' "$LOCK_LOG")" = "$TMP_ROOT/presentation.lock" ] || fail "layout reconciliation did not acquire the presentation lock"
+[ "$(sed -n '2p' "$LOCK_LOG")" = "$FM_STATE_OVERRIDE/.spawn-$ID.lock" ] || fail "stale cleanup did not acquire its task lock first"
+[ "$(sed -n '3p' "$LOCK_LOG")" = "$TMP_ROOT/presentation.lock" ] || fail "stale cleanup did not acquire its presentation lock second"
 pass "exact stale projection closes one exact pane under task then presentation locks"
 fm_herdr_session_cleanup >/dev/null 2>&1
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "repeat cleanup closed again"

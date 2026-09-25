@@ -1503,6 +1503,9 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     echo "warning: herdr presentation ordering found ambiguous journal ownership; leaving worker in Herdr's current order" >&2
     return 0
   }
+  if [ -z "$created" ] && [ "$owned" = '[]' ]; then
+    return 0
+  fi
   plan=$(printf '%s' "$list" | jq -c --argjson owned "$owned" --arg home_label "$home_label" --arg created "$created" '
     (.result.workspaces // null) as $spaces
     | select(($spaces | type) == "array" and ($spaces | length) > 0)
