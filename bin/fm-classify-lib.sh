@@ -452,7 +452,7 @@ status_is_paused_or_captain_held() {  # <status-line>
 # latest event. Bounded like last_status_line: only a tail window made wholly of
 # resolved events widens the read to the whole file.
 status_declared_wait_line() {  # <status-file>
-  local f=$1 last verb resolve legacy_re
+  local f=$1 last verb resolve legacy_re hold
   last=$(last_status_line "$f")
   if status_is_paused_or_captain_held "$last"; then
     printf '%s\n' "$last"
@@ -462,17 +462,21 @@ status_declared_wait_line() {  # <status-file>
   status_line_verb "$last" verb
   [ "$verb" = "$resolve" ] || return 0
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
+  hold=$(_fm_hold_line_ere "$f")
   tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null \
-    | _fm_status_declared_wait_scan "$resolve" "$legacy_re" \
-    || _fm_status_declared_wait_scan "$resolve" "$legacy_re" < "$f" || :
+    | _fm_status_declared_wait_scan "$resolve" "$legacy_re" "$hold" \
+    || _fm_status_declared_wait_scan "$resolve" "$legacy_re" "$hold" < "$f" || :
 }
 
 # Walk the status lines on stdin back from the newest event past resolved lines
 # to the first other event, and print it when it is a pause none of those
-# resolved lines share a phase key with. Returns 1 when every event is a
-# resolved line, so a caller reading a bounded window knows to widen it.
-_fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re>
-  local resolve=$1 legacy_re=$2 line verb key keys=$'\n' i=0
+# resolved lines share a phase key with. Settled hold-command lines are not
+# events in this walk: they match the same unstamped hold-line matcher
+# last_status_line uses, so a mirror declaration or its retraction cannot hide
+# the pause underneath. Returns 1 when every event is a resolved line, so a
+# caller reading a bounded window knows to widen it.
+_fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re> <hold-line-ere>
+  local resolve=$1 legacy_re=$2 hold=$3 line verb key keys=$'\n' i=0
   local -a lines=()
   while IFS= read -r line || [ -n "$line" ]; do
     lines[i]=$line
@@ -483,6 +487,7 @@ _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re>
     line=${lines[i]}
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
     _fm_status_line_is_event "$line" "$legacy_re" || continue
+    _fm_hold_unstamped_match "$line" "$hold" && continue
     status_line_verb "$line" verb
     case "$verb" in
       "$resolve") ;;
