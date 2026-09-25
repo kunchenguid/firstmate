@@ -867,6 +867,36 @@ test_sweep_all_open_issues() {
   pass "a sweep with no issue numbers screens every listed open issue"
 }
 
+test_opt_in_gate() {
+  local cfg="$TMP_ROOT/optin-config" out rc
+  mkdir -p "$cfg"
+  rm -f "$cfg/issue-claim-screen"
+
+  rc=0
+  : > "$FIX/calls.log"
+  out=$(FM_CONFIG_OVERRIDE="$cfg" PATH="$FAKEBIN:$PATH" "$SCRIPT" --if-enabled --repo o/r --git-dir "$CLONE" 4018 2>&1) || rc=$?
+  expect_code 0 "$rc" "an unconfigured home's gated screen"
+  assert_equals "" "$out" "an unconfigured home's gated screen must print nothing"
+  [ ! -s "$FIX/calls.log" ] || fail "an unconfigured home's gated screen must make no forge call: $(cat "$FIX/calls.log")"
+
+  rc=0
+  out=$(FM_CONFIG_OVERRIDE="$cfg" PATH="$FAKEBIN:$PATH" "$SCRIPT" --if-enabled --sweep --repo o/r --git-dir "$CLONE" 2>&1) || rc=$?
+  expect_code 0 "$rc" "an unconfigured home's gated sweep"
+  assert_equals "" "$out" "an unconfigured home's gated sweep must print nothing"
+
+  : > "$cfg/issue-claim-screen"
+  rc=0
+  out=$(FM_CONFIG_OVERRIDE="$cfg" PATH="$FAKEBIN:$PATH" "$SCRIPT" --if-enabled --repo o/r --git-dir "$CLONE" 4018) || rc=$?
+  expect_code 0 "$rc" "an opted-in home's gated screen"
+  assert_contains "$out" "verdict: claimed" "an opted-in home still screens"
+  assert_contains "$out" "claim: PR #52" "an opted-in home still finds the claim"
+
+  rm -f "$cfg/issue-claim-screen"
+  out=$(FM_CONFIG_OVERRIDE="$cfg" run_claim 4018) || true
+  assert_contains "$out" "verdict: claimed" "an explicit operator call without --if-enabled screens regardless of the flag"
+  pass "the gated screen runs only in an opted-in home; explicit calls are unchanged"
+}
+
 test_usage_refusals() {
   local rc
   for args in "" "--repo o/r" "--repo bad 1" "--repo o/r 01" "--repo o/r x1" \
@@ -905,3 +935,4 @@ test_every_forge_call_is_a_read
 test_sweep_dispositions
 test_sweep_all_open_issues
 test_usage_refusals
+test_opt_in_gate

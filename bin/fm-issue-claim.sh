@@ -23,6 +23,14 @@
 #   --sweep              opt-in, report-only: print one disposition line per
 #                        issue instead of the evidence block; with no issue
 #                        numbers it screens every open issue of the repo
+#   --if-enabled         screen only when this home has opted in with the
+#                        config/issue-claim-screen presence flag; otherwise
+#                        exit 0 with no output and no forge or git read. This
+#                        is the form workflows such as Bearings call, so an
+#                        unconfigured home never runs the screen. Without it
+#                        an explicit operator invocation always screens.
+#                        FM_HOME and FM_CONFIG_OVERRIDE resolve the config
+#                        directory exactly as the other bin/ scripts do.
 #
 # Each issue runs five checks, and one open-PR corpus is shared by every issue
 # in the run:
@@ -131,6 +139,7 @@ REPO=
 GIT_DIR_ARG=.
 REF=
 SWEEP=0
+IF_ENABLED=0
 ISSUES=()
 SYMBOLS=()
 
@@ -142,6 +151,7 @@ while [ "$#" -gt 0 ]; do
     --ref) [ "$#" -ge 2 ] || die "--ref needs a ref"; REF=$2; shift 2 ;;
     --symbol) [ "$#" -ge 2 ] || die "--symbol needs <n>:<text>"; SYMBOLS+=("$2"); shift 2 ;;
     --sweep) SWEEP=1; shift ;;
+    --if-enabled) IF_ENABLED=1; shift ;;
     --) shift; while [ "$#" -gt 0 ]; do ISSUES+=("$1"); shift; done ;;
     -*) die "unknown option: $1" ;;
     *) ISSUES+=("$1"); shift ;;
@@ -173,6 +183,13 @@ for s in ${SYMBOLS[@]+"${SYMBOLS[@]}"}; do
   [ "$found" = 1 ] || [ "$SWEEP_ALL" = 1 ] \
     || die "--symbol names issue $sn, which is not being screened"
 done
+if [ "$IF_ENABLED" = 1 ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+  FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+  CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+  [ -e "$CONFIG/issue-claim-screen" ] || exit 0
+fi
 command -v gh >/dev/null 2>&1 || die "gh is required"
 command -v jq >/dev/null 2>&1 || die "jq is required"
 command -v git >/dev/null 2>&1 || die "git is required"
