@@ -312,8 +312,9 @@ should_exit_afk() {  # <state> <message-text>
 # message_is_injection: 0 if the given message text starts with the sentinel
 # marker, or is a record-backed doorbell whose record sits in <state>'s own
 # operational inbox (a daemon escalation), 1 otherwise (a real user message). Firstmate's
-# afk-exit contract uses this: marker present -> stay afk; absent -> captain is
-# back. Bias ambiguous cases toward exit (a false exit is self-correcting).
+# afk-exit contract uses this: a marker or backed doorbell stays afk; other
+# messages return the captain. Bias ambiguous cases toward exit (a false exit
+# is self-correcting).
 message_is_injection() {  # <message-text> [state]
   local msg=$1 state=${2:-$(_state_root)} record_kind
   [ -n "$msg" ] || return 1
