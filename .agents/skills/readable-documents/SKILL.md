@@ -149,6 +149,7 @@ Treat an accepted template's information categories, hierarchy, order, scope, re
 Preserve each section's purpose instead of merely retaining its heading text.
 Do not add tests, rollout, monitoring, deployment, environment scenarios, completion checklists, or generic boilerplate when the accepted template excludes those categories.
 Write product and requirement sections for a reader without prior subsystem context, then place code-level detail in review-sized units grouped by semantic owner or logical flow.
+For a Feishu technical design, write concise Chinese unless the requested review audience requires another language, and use native Feishu whiteboards for retained diagrams rather than inline diagram text.
 Retain required supporting evidence privately when it does not belong in the maintained document.
 
 ### Build evidence before prose
@@ -156,10 +157,12 @@ Retain required supporting evidence privately when it does not belong in the mai
 Record the live document identity and revision together with every relevant repository's canonical identity, default branch, and exact commit.
 Pin generated artifacts, API declarations, dependency versions, SDKs, and runtime packages when they constrain the design.
 Distinguish repository head from the exact revision another component consumes, implemented behavior from proposed behavior, and unavailable or stale evidence from verified evidence.
+Refresh volatile baselines immediately before relying on them, and mark permission-limited or intentionally older evidence explicitly.
 Use a compact baseline table when several sources constrain the design, and treat line numbers as revision-specific evidence while paths, symbols, and owning modules remain durable locators.
 
 Trace each important behavior through its declaration or decoder, constructor, validator, caller, persistence boundary, execution path, recovery path, and user-visible adapter as applicable.
 Inspect sibling paths and shared helpers that can bypass, duplicate, or reinterpret the proposed owner.
+Inspect history or an accepted base when current behavior may be a migration artifact.
 Treat comments, names, and types as hypotheses until call sites, state transitions, or observable behavior confirm them.
 
 Translate requirements into testable invariants before choosing modules or APIs.
@@ -258,7 +261,7 @@ For remote artifacts, verify the actual remote revision and render through the f
 On drift, partial success, or a revision conflict, re-observe before another write.
 
 For comment-driven revision, read each relevant complete thread and track its stable identity, concern, governing evidence, disposition, dependent sections, reply state, and verification state privately.
-Reply on the original thread only after verifying the changed content, and do not resolve an unanswered factual question or genuine decision merely because the prose or diagram improved.
+Reply on the original thread with the verified content location and evidence, and do not resolve an unanswered factual question or genuine decision merely because the prose or diagram improved.
 
 ## Standalone readability check
 
