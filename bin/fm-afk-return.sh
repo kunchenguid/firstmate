@@ -419,6 +419,9 @@ scan_landed_awaiting_cleanup() {  # -> <task>\t<url> rows
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     task=$(basename "$meta"); task=${task%.meta}
+    # A secondmate is a persistent worker, never landed work: its teardown is
+    # retirement, which is never an ordinary cleanup this section may offer.
+    [ "$(grep '^kind=' "$meta" | tail -1 | cut -d= -f2- || true)" = secondmate ] && continue
     fm_pr_metadata_identity_parse "$meta" || continue
     fm_pr_poll_merge_already_notified "$STATE" "$task" \
       "$FM_PR_META_PROVIDER" "$FM_PR_META_HOST" "$FM_PR_META_PATH" "$FM_PR_META_NUMBER" \

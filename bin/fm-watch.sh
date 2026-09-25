@@ -2763,6 +2763,17 @@ EOF
         fi
         reason="check: $c: $out"
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
+          if [ "$(fm_meta_get "$STATE/$id.meta" kind)" = secondmate ]; then
+            # A merge poll armed on a secondmate is residue: the mate is a
+            # persistent worker, never landed work, and the merge it detected
+            # belongs to a task in the mate's own home. Retire the poll with no
+            # outcome and no wake; bin/fm-pr-check.sh refuses to arm another.
+            retire_merged_pr_poll "$id"
+            pr_poll_control_release || exit 1
+            touch "$STATE/.last-check"
+            triage_log "retired a merge poll armed on secondmate $id without reporting an outcome"
+            continue
+          fi
           if ! fm_merge_authority_read "$STATE" "$id" \
               "$provider" "$host" "$path" "$number"; then
             triage_log "no matching persisted merge authority for $id; recording an external merge outcome"

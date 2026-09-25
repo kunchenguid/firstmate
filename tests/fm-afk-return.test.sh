@@ -481,10 +481,17 @@ test_return_brief_lists_landed_work_awaiting_cleanup() {
   printf 'done [at=1]: PR https://github.com/example/landed/pull/7\n' > "$dir/home/state/landed.status"
   printf 'window=synthetic:fm-open\nbackend=tmux\nkind=ship\npr=https://github.com/example/open/pull/8\n' > "$dir/home/state/open.meta"
   printf 'done [at=1]: PR https://github.com/example/open/pull/8\n' > "$dir/home/state/open.status"
+  # The 2026-09-25 supervision-host window: a persistent secondmate's record
+  # carried a relayed child's pr= and the same merged marker, and the brief
+  # offered the mate itself for teardown. Identical merge evidence must still
+  # never list it: a secondmate is never landed work.
+  printf 'window=synthetic:fm-axi-mate\nbackend=tmux\nkind=secondmate\npr=https://github.com/example/child/pull/7\n' > "$dir/home/state/axi-mate.meta"
+  printf 'done [at=1] [key=merged-childx]: merged childx https://github.com/example/child/pull/7\n' > "$dir/home/state/axi-mate.status"
   (
     # shellcheck source=bin/fm-pr-lib.sh
     . "$ROOT/bin/fm-pr-lib.sh"
     fm_pr_poll_merge_mark_notified "$dir/home/state" landed github github.com example/landed 7
+    fm_pr_poll_merge_mark_notified "$dir/home/state" axi-mate github github.com example/child 7
   ) || fail "could not record the landed PR's merge notification through its owner"
   touch "$dir/home/state/.last-watcher-beat"
   : > "$dir/home/state/.fake-drain"
@@ -498,8 +505,11 @@ test_return_brief_lists_landed_work_awaiting_cleanup() {
     || fail "landed work is out of order (failed $failed_line, landed $landed_line, handled $handled_line)"
   assert_contains "$out" '  - landed: https://github.com/example/landed/pull/7 is merged and the worker is still up; close it with bin/fm-teardown.sh landed once catch-up clears' "the landed worker was not listed for cleanup"
   assert_not_contains "$out" '  - open:' "a done worker with no durable merge evidence was listed as landed"
+  assert_not_contains "$out" '  - axi-mate:' "a persistent secondmate was listed as landed work"
+  assert_not_contains "$out" 'bin/fm-teardown.sh axi-mate' "the brief offered a persistent secondmate for teardown"
+  assert_not_contains "$out" 'example/child/pull/7' "a secondmate's recorded PR surfaced in the brief"
   assert_contains "$out" 'catch-up clear' "landed work must not hold the gate"
-  pass "the return brief lists landed work whose worker is still up, from the durable merge marker only, without gating on it"
+  pass "the return brief lists landed work whose worker is still up, from the durable merge marker only, without gating on it and never offering a secondmate for teardown"
 }
 
 test_return_brief_keeps_refresh_history() {
