@@ -573,7 +573,22 @@ test_declared_wait_survives_settled_hold_mirror() {
   pass "a settled hold mirror does not hide a standing pause under another key's resolved line"
 }
 
+# While the hold is still standing its mirror is a real event: a worker answer
+# for another key on top of it must not reach the pause underneath.
+test_declared_wait_stops_at_standing_hold_mirror() {
+  local dir f
+  dir=$(case_dir standing-hold-mirror)
+  f="$dir/held.status"
+  printf 'paused: waiting on upstream\n' > "$f"
+  printf 'captain-held [key=captain-hold-held-1]: operator review\n' >> "$f"
+  printf 'resolved [key=api]: answered\n' >> "$f"
+  [ -z "$(status_declared_wait_line "$f")" ] \
+    || fail "a standing hold mirror was read past to the pause: '$(status_declared_wait_line "$f")'"
+  pass "a standing hold mirror stops the declared-wait scan"
+}
+
 test_keyless_wait_survives_stated_default_retraction
 test_declared_wait_survives_answers_past_the_event_window
 test_declared_wait_survives_settled_hold_mirror
+test_declared_wait_stops_at_standing_hold_mirror
 test_bare_prose_cannot_open_or_close_a_decision
