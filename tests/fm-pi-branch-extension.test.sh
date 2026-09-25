@@ -1077,7 +1077,7 @@ EOF
   body=$(./bin/fm-operational-input.sh body < "$home/state/delivered-processing-request") \
     || fail "the processing request envelope carries no readable body"
   case "$body" in
-    *"delivered automatically by the supervision branch."*"It was not typed by the captain."*"trusted content source"*"[seq 3] task=task-9"*) ;;
+    *"delivered automatically by the supervision branch."*"It was not typed by the captain."*"call fm_branch_outcomes with exactly the listed sequences"*"[seq 3] task=task-9"*) ;;
     *) fail "the processing request body lost its self-description or outcome identity: $body" ;;
   esac
   case "$body" in
@@ -1499,6 +1499,11 @@ if (requests().length !== 5 || requests()[4].options.triggerTurn !== true) throw
 if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === seq).length !== 1) {
   throw new Error("re-presentation duplicated the visible entry");
 }
+// Simulate a compacted/recovered main context that no longer contains the
+// visible anchor. The identity-only request must recover the exact row from the
+// durable store and cannot treat the missing anchor as witnessed evidence.
+const visibleIndex = mainEntries.findIndex((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === seq);
+mainEntries.splice(visibleIndex, 1);
 
 // Only the sequence-bound acknowledgement closes it.
 const nativeTools = new Map();
@@ -1522,6 +1527,17 @@ if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error
 const tooFar = await processed.execute("ack-too-far", { through: seq + 100 }, undefined, undefined, {});
 if (!tooFar.isError) throw new Error("an acknowledgement beyond the read cursor was accepted");
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("a refused acknowledgement moved the marker");
+const unseen = await processed.execute("ack-unseen", { through: seq }, undefined, undefined, {});
+if (!unseen.isError || !unseen.content.some((item) => item.type === "text" && item.text.includes("load exact durable outcome evidence first"))) {
+  throw new Error(`an unseen compacted outcome could be acknowledged: ${JSON.stringify(unseen)}`);
+}
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("an unseen-evidence refusal moved the marker");
+const outcomes = nativeTools.get("fm_branch_outcomes");
+const exact = await outcomes.execute("read-exact", { sequences: String(seq) }, undefined, undefined, {});
+const exactText = exact.content.map((item) => item.text ?? "").join("\n");
+if (exact.isError || !exactText.includes(`"seq":${seq}`) || !exactText.includes(decision)) {
+  throw new Error(`exact durable outcome recovery failed after anchor compaction: ${JSON.stringify(exact)}`);
+}
 const ack = await processed.execute("ack", { through: seq }, undefined, undefined, {});
 if (ack.isError) throw new Error(`acknowledgement failed: ${JSON.stringify(ack)}`);
 if (unprocessedSeqs().length !== 0) throw new Error("the acknowledgement did not close the sequence");
@@ -1570,6 +1586,13 @@ if (requests().length !== beforePair + 2) throw new Error("the widened sequence 
 const latest = requests().at(-1).message.content;
 if (!latest.includes(`[seq ${seqE}] task=branch-driver`) || !latest.includes(`[seq ${seqF}] task=task-f`) || !latest.includes(`through=${seqF}`)) {
   throw new Error(`the widened request did not cover every unprocessed sequence with the highest key: ${latest}`);
+}
+const exactPair = await outcomes.execute("read-exact-pair", { sequences: `${seqE},${seqF}` }, undefined, undefined, {});
+const exactPairText = exactPair.content.map((item) => item.text ?? "").join("\n");
+if (exactPair.isError || !exactPairText.includes(`"seq":${seqE}`) || !exactPairText.includes(`"seq":${seqF}`)
+    || !exactPairText.includes("PR https://example.com/pr/e is ready for review")
+    || !exactPairText.includes("worker blocked on a missing credential")) {
+  throw new Error(`exact multi-outcome recovery failed: ${JSON.stringify(exactPair)}`);
 }
 const beforePairRepeat = requests().length;
 await runOf();

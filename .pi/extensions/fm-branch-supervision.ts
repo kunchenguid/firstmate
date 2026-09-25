@@ -183,7 +183,7 @@ const PROVIDER_REPROBE_MAX_MS = 60 * 60 * 1000;
 const PROCESSING_INSTRUCTION =
   "This is a supervision processing request delivered automatically by the supervision branch. " +
   "It was not typed by the captain. " +
-  "The outcome identities below refer to exact, durable anchor entries already shown to the captain in this transcript; use each matching sequence anchor as the trusted content source. Each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
+  "The outcome identities below refer to exact, durable anchor entries already shown to the captain in this transcript. Before acting, call fm_branch_outcomes with exactly the listed sequences to load their trusted content; this is required even when an anchor appears visible, because recovery or compaction may have omitted it from model context. Each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
   "Process each identified outcome now as firstmate: give the captain a visible response where one is due, answer or escalate a decision, act on a blocker or failure, or record that no further action is needed. " +
   "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
   "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
@@ -734,6 +734,11 @@ export default function (pi: ExtensionAPI) {
   // session generation.
   type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean };
   let processing: ProcessingState | null = null;
+  // Exact outcome contents are loaded once per main-session generation through
+  // fm_branch_outcomes. Identity-only processing retries can then stay small,
+  // while a reload/compaction boundary clears this witness set and requires a
+  // fresh durable read before acknowledgement.
+  const loadedOutcomeSequences = new Set<number>();
   let processedInitializedGeneration = -1;
   // One revision for BOTH selections: a model or effort change invalidates an
   // in-flight branch build exactly the same way.
@@ -1882,6 +1887,7 @@ ${context.command}
     branchBroken = "";
     consecutiveProviderErrors = 0;
     providerRecovery = null;
+    loadedOutcomeSequences.clear();
     generation += 1;
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
@@ -2025,6 +2031,7 @@ ${context.command}
     resetInProgress = false;
     generation += 1;
     processing = null;
+    loadedOutcomeSequences.clear();
     pendingMirror.length = 0;
     currentMainSession = null;
     mirrorCollection.collectAnchor = null;
@@ -2384,10 +2391,11 @@ ${context.command}
     name: "fm_branch_outcomes",
     label: "Read supervision branch outcomes",
     description:
-      "Read the durable outcome store of the supervision branch: what fleet events it handled, each verdict, and each summary. Use when the captain asks what happened in the fleet.",
+      "Read the durable outcome store of the supervision branch: what fleet events it handled, each verdict, and each summary. During a processing request, pass its exact sequences before acknowledging them; otherwise use recent when the captain asks what happened in the fleet.",
     promptSnippet: "Read what the supervision branch handled (durable outcome store).",
     parameters: Type.Object({
       recent: Type.Optional(Type.Number({ description: "How many most-recent outcomes to read (default 20)" })),
+      sequences: Type.Optional(Type.String({ description: "Comma-separated exact active outcome sequences whose durable summaries must be loaded before acknowledgement" })),
     }),
     renderShell: "self",
     renderCall: (_args, theme, context) => {
@@ -2420,7 +2428,58 @@ ${context.command}
       return new Container();
     },
     execute: async (_toolCallId, params) => {
-      const recentRaw = (params as { recent?: unknown }).recent;
+      const { recent: recentRaw, sequences: sequencesRaw } = params as { recent?: unknown; sequences?: unknown };
+      if (sequencesRaw !== undefined) {
+        if (recentRaw !== undefined || typeof sequencesRaw !== "string" || !/^[1-9][0-9]*(,[1-9][0-9]*)*$/.test(sequencesRaw)) {
+          return {
+            content: [{ type: "text", text: "exact outcome read refused: pass only comma-separated active positive sequence numbers" }],
+            details: undefined,
+            isError: true,
+          };
+        }
+        const sequences = sequencesRaw.split(",").map(Number);
+        const unique = [...new Set(sequences)];
+        const active = processing?.sequences.split(",").map(Number) ?? [];
+        if (unique.length > 100 || unique.length !== sequences.length || unique.some((seq) => !Number.isSafeInteger(seq) || !active.includes(seq))) {
+          return {
+            content: [{ type: "text", text: "exact outcome read refused: every sequence must be unique and listed in the active processing request" }],
+            details: undefined,
+            isError: true,
+          };
+        }
+        const readGeneration = generation;
+        return enqueueDelivery(async () => {
+          if (!(await actingAsOwner(readGeneration))) {
+            return {
+              content: [{ type: "text", text: "exact outcome read refused: this session does not own the fleet lock" }],
+              details: undefined,
+              isError: true,
+            };
+          }
+          const rows = await readUnprocessedOutcomes(readGeneration);
+          if (rows === null) {
+            return {
+              content: [{ type: "text", text: "could not read exact outcomes from the durable store" }],
+              details: undefined,
+              isError: true,
+            };
+          }
+          const bySequence = new Map(rows.map((row) => [row.seq, row]));
+          if (unique.some((seq) => !bySequence.has(seq))) {
+            return {
+              content: [{ type: "text", text: "exact outcome read refused: a requested active sequence is absent from durable unprocessed records" }],
+              details: undefined,
+              isError: true,
+            };
+          }
+          const selected = unique.map((seq) => bySequence.get(seq) as OutcomeRow);
+          for (const seq of unique) loadedOutcomeSequences.add(seq);
+          return {
+            content: [{ type: "text", text: selected.map((row) => JSON.stringify(row)).join("\n") }],
+            details: undefined,
+          };
+        });
+      }
       const recent = typeof recentRaw === "number" && recentRaw >= 1 ? String(Math.floor(recentRaw)) : "20";
       const listed = await enqueueDelivery(() => runOutcomeScript(["list", "--recent", recent]));
       if (!listed.ok) {
@@ -2500,6 +2559,16 @@ ${context.command}
             isError: true,
           };
         }
+        const missingEvidence = processing.sequences.split(",")
+          .map(Number)
+          .filter((seq) => seq <= through && !loadedOutcomeSequences.has(seq));
+        if (missingEvidence.length > 0) {
+          return {
+            content: [{ type: "text", text: `acknowledgement refused: load exact durable outcome evidence first with fm_branch_outcomes sequences=${missingEvidence.join(",")}` }],
+            details: undefined,
+            isError: true,
+          };
+        }
         const marked = await runOutcomeScript(["mark-processed", "--through", String(through)]);
         if (!marked.ok) {
           return {
@@ -2507,6 +2576,9 @@ ${context.command}
             details: undefined,
             isError: true,
           };
+        }
+        for (const seq of loadedOutcomeSequences) {
+          if (seq <= through) loadedOutcomeSequences.delete(seq);
         }
         const remaining = await readUnprocessedOutcomes(acknowledgedGeneration);
         if (remaining !== null && remaining.length === 0) processing = null;
