@@ -891,6 +891,19 @@ The text is static and never executed or expanded; secondmate charters never tak
 
 `bin/fm-brief.sh`'s header owns the placement rule and its safety argument.
 
+## Ship branch ticket case (config/ship-branch-ticket-case)
+
+`config/ship-branch-ticket-case` is an optional local, gitignored presence flag that canonicalizes a Jira-style ticket token in a ship branch name to uppercase `KEY-NNN`.
+Without it a ship branch is `<prefix><task-id>` verbatim, which is the default and unchanged behavior.
+
+With it, a task id such as `ve1262-backoff-retry` or `ve-1262-backoff-retry` yields the branch `fm/VE-1262-backoff-retry`, so a no-mistakes `commit.branch_pattern` such as `^fm/([A-Z]+-[0-9]+)` can feed a stable ticket into `commit.fix_message` or `pr.title_format` through `{{.Branch}}`.
+Opt in for a home whose projects track work in Jira-style tickets; a home without tickets gains nothing.
+
+The flag is per home and is not inherited by secondmate homes.
+Only the file's presence is read, so its contents are ignored, and it affects only branches derived after it appears, never an existing task's recorded branch.
+
+`bin/fm-branch-name-lib.sh` owns the ticket-token rule and its no-op cases.
+
 ## Worker launch environment (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.

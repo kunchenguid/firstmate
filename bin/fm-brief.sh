@@ -48,9 +48,9 @@
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
 # --branch-prefix <prefix> optionally overrides the ship branch's "fm/" prefix, so
-# the resolved branch is "<prefix><task-id>" with any ticket token normalized to
-# uppercase KEY-NNN by bin/fm-branch-name-lib.sh, instead of the default
-# "fm/<task-id>".
+# the resolved branch is "<prefix><task-id>" instead of the default "fm/<task-id>";
+# bin/fm-branch-name-lib.sh owns the derivation, including the opt-in ticket-case
+# normalization.
 # Pass an empty prefix ("--branch-prefix ''") for a bare "<task-id>" branch, or a
 # conventional prefix such as "fix/" - useful for a third-party project that does
 # not use this tooling and should not see an "fm/"-branded branch or PR. Defaults
@@ -275,7 +275,7 @@ elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
   exit 1
 fi
 ID=${POS[0]}
-BRANCH=$(fm_ship_branch_name "$BRANCH_PREFIX" "$ID")
+BRANCH=$(fm_ship_branch_name "$BRANCH_PREFIX" "$ID" "$CONFIG")
 if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
   echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
   exit 1
