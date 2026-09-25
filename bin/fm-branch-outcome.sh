@@ -120,6 +120,7 @@
 #   fm-branch-outcome.sh lookup --seqs <n,...>
 #     Print the requested records in sequence order only when every sequence
 #     exists; validate the full store while holding its lock.
+
 #   fm-branch-outcome.sh startup-replay
 #     Session-start recovery: print the leading routine unread records under a
 #     labeled header into the locked startup digest, skip rows whose `silent`
@@ -164,6 +165,7 @@ RECORDED_AGO_JQ='def recorded_ago: ([$now - .epoch, 0] | max) as $s
 
 usage() {
   echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>|--all] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
+
   exit 2
 }
 
@@ -754,6 +756,7 @@ case "$CMD" in
       fm_lock_release "$LOCK"
       echo "error: refusing lookup because one or more requested outcome sequences are missing" >&2
       exit 1
+
     fi
     fm_lock_release "$LOCK"
     ;;

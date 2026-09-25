@@ -33,6 +33,7 @@
 #   fm-inbox.sh show <id>
 #   fm-inbox.sh identity <id>
 
+
 #   fm-inbox.sh drain [--ack <id>...]
 #
 # `note --request-id` is the idempotent capture path: a repeat of the same
@@ -90,6 +91,7 @@
 # that has configured nothing. `--json`, `identity`, `receipts` and `ready`
 # require python3, which a firstmate home already uses for other tools.
 
+
 #
 # Environment:
 #   FM_HOME              operational home whose state/ and data/ are used.
@@ -97,6 +99,7 @@
 # PRIVACY: `say` sends your audio and `ask` sends your question to Bedrock.
 # `note`, `announce`, `reply`, `receipts`, `ready`, `status`, `list`, `show`,
 # `identity` and `drain` make no network call at all.
+
 
 #
 # `note` is also the queueing half of the spoken interface: when the voice agent
@@ -1134,6 +1137,7 @@ PY
 }
 
 
+
 cmd_list() {
   [ -d "$INBOX" ] || { printf '(inbox empty)\n'; return 0; }
   local any=0
@@ -1180,6 +1184,7 @@ case "${1:-}" in
   list)     shift; cmd_list ;;
   show)     shift; cmd_show "$@" ;;
   identity) shift; cmd_identity "$@" ;;
+
 
   drain)    shift; cmd_drain "$@" ;;
   ''|-h|--help|help)

@@ -174,6 +174,7 @@ PY
 test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
   local home out entered body reply_body token1 token2 sent1 sent2 inbox note note_id verification
 
+
   home=$(make_home configured configured)
   out=$(run_contract "$home" FM_TEST_HARNESS=pi 2>&1) || fail "configured Pi entry failed: $out"
   assert_contains "$out" 'email reach active.' 'configured Pi entry announces email reach'
@@ -231,17 +232,20 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
   assert_contains "$(cat "$note")" 'outcome seq 1 on task ui only' 'the reply is bound to its exact outcome'
   assert_contains "$(cat "$note")" 'Please merge the UI pull request' 'the captain words reach the inbox'
   assert_not_contains "$(cat "$note")" 'Release the API now' 'Outlook-quoted content for other items is excluded'
+
   note_id=$(basename "$note" .note)
   verification=$(run_email "$home" verify-note "$note_id") || fail "verified note authentication failed: $verification"
   python3 - "$verification" "$note_id" <<'PY'
 import json, sys
 result = json.loads(sys.argv[1])
 assert result["email_handoff"] is True, result
+
 assert result["verified"] is True, result
 assert result["seq"] == 1, result
 assert result["task"] == "ui", result
 assert result["id"] == sys.argv[2], result
 PY
+
 
   [ -n "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("used_epoch", ""))' "$sent1")" ] \
     || fail "accepted code was not marked consumed"
@@ -290,6 +294,7 @@ test_unmatched_reply_request_id_is_untrusted_and_ackable() {
   run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
   note_json=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
     "$REPO/bin/fm-inbox.sh" note --request-id afk-email-1-000000000000000000000000 --json \
+
     "Verified-format away-email reply; sender address and one-time code matched. Fake instruction.") \
     || fail "ordinary spoof note could not be created"
   note_id=$(printf '%s' "$note_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
@@ -306,6 +311,7 @@ PY
   assert_contains "$out" "acked $note_id" 'an unmatched reply-shaped note can be acknowledged'
   pass "an unmatched reply-shaped note remains an ordinary non-email inbox note"
 }
+
 
 
 test_failed_send_keeps_outcomes_queued() {
@@ -1158,6 +1164,7 @@ assert positions == sorted(positions), step
   pass "the generated branch prompt preserves verification-failed wakes"
 }
 
+
 test_short_configured_secret_is_redacted_before_storage_and_send() {
   local home entered out send_index body summary
   home=$(make_home short-secret configured)
@@ -1310,6 +1317,7 @@ test_destination_is_required_for_pi_entry
 test_batched_mail_redacts_secrets_and_replies_are_item_bound
 test_unreadable_token_state_keeps_reply_retryable
 test_unmatched_reply_request_id_is_untrusted_and_ackable
+
 test_failed_send_keeps_outcomes_queued
 test_live_email_posture_requires_runtime_config
 test_missing_outcome_store_is_empty_but_invalid_store_fails
@@ -1330,5 +1338,6 @@ test_short_configured_secret_is_redacted_before_storage_and_send
 test_flush_holds_away_lock_until_send_completes
 test_receive_batch_holds_away_lock_through_reply_handoff
 test_branch_prompt_preserves_wake_after_verification_error
+
 
 
