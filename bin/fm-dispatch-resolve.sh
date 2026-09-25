@@ -233,6 +233,8 @@ QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
 TASK_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA"; die "mktemp failed"; }
 BRIEF_SNAPSHOT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA" "$TASK_TEXT"; die "mktemp failed"; }
 trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT" "$BRIEF_SNAPSHOT"' EXIT
+# Every read below uses this one copy, so a brief edited mid-resolve cannot
+# mix the section check, the scout tag, and the text actually sent.
 cp "$BRIEF" "$BRIEF_SNAPSHOT" || die "could not snapshot brief file: $BRIEF"
 chmod 400 "$BRIEF_SNAPSHOT" || die "could not protect brief snapshot"
 
