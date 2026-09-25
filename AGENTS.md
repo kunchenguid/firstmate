@@ -634,6 +634,19 @@ Ambiguous scope or conflict still requires one concise clarification before acti
 Destructive, irreversible, security-sensitive, discard, and merge actions still require the captain to state that concrete action explicitly; once the captain does so and higher-priority instructions permit it, a conflicting Firstmate-written rule must not rigidly block the action.
 Standing `yolo` merge authority is not a substitute for a current explicit captain instruction where an explicit action is required.
 
+## Jev decision layer
+
+Before substantial browser research, repeating a failed approach, loading several tools or skills, spawning agents, choosing between materially different execution routes, or proposing a consequential action, consider whether a small bounded Jev decision would change the next step.
+If yes, build a compact state without secrets, call the installed router, interpret its action, and continue the original task.
+Skip Jev for simple answers, deterministic calculations, routine file edits, and situations where the call adds no useful decision.
+Respect `bypass_jev` - the router's own kill switch is `enabled: false` or the literal markers `bypass jev` and `no jev` in the state text.
+Keep irreversible actions behind human confirmation; a Jev answer is never permission to skip one.
+
+The invocation this agent can actually perform is `jev '<compact state JSON>'`, on PATH at `~/.local/bin/jev`.
+The state schema, the action table, and the confidence policy live in `~/Documents/muse-jev-playbook/skill/jev-decision-layer.SKILL.md`; read that file rather than trusting a remembered shape.
+The router runs in `shadow` mode, so its output is advice appended to `logs/runs.jsonl` and this agent keeps its own judgment; move it to `active` only after reading that log and seeing the advice repeatedly match the action this agent would have taken anyway.
+The official TypeSafe API skill sits at `.agents/skills/typesafe-ai` and teaches the API, which is a separate component from this routing policy.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
