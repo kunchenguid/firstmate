@@ -42,8 +42,9 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #   return-first the captain returns first, then handle, then block until the
 #               host is stopped (an owner killing its host at the turn's end)
 #   noack       the same as handle, but skip the acknowledgement
-#   chain       handle, then append a status line, so the next close is already
-#               waiting when the turn ends
+#   held        handle, but first block until $FM_HOME/stub-release exists
+#               (bounded by FM_TEST_STUB_MAX_BLOCK_SECONDS), so the test chooses
+#               when the turn ends
 #   emptyresult the same as handle, but print {} as its result
 #   noreport    drain and exit cleanly without a report
 #   fail        exit nonzero at once, with no result and no report (an engine
@@ -73,7 +74,14 @@ task=$(sed -n 's/^tasks=//p' "$STATE/.supervision-host-turn" | awk '{ print $1 }
 [ -n "$task" ] || task=fleet
 case "$mode" in
   fail) exit 3 ;;
-  handle|captain|hold-lease|return|return-fail|return-first|noack|chain|emptyresult)
+  handle|captain|held|hold-lease|return|return-fail|return-first|noack|chain|emptyresult)
+    if [ "$mode" = held ]; then
+      i=0
+      while [ ! -e "$FM_HOME/stub-release" ] && [ "$i" -lt $((FM_TEST_STUB_MAX_BLOCK_SECONDS * 10)) ]; do
+        sleep 0.1
+        i=$((i + 1))
+      done
+    fi
     [ "$mode" != return-first ] || "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1
     "$FM_REPO/bin/fm-lease.sh" claim "$task" >> "$FM_HOME/engine-lease.log" 2>&1
     if [ "$mode" = captain ]; then
@@ -89,7 +97,6 @@ case "$mode" in
     [ "$mode" = hold-lease ] || "$FM_REPO/bin/fm-lease.sh" release "$task" >> "$FM_HOME/engine-lease.log" 2>&1
     case "$mode" in
       return|return-fail) "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1 ;;
-      chain) printf 'working [at=%s]: chained %s\n' "$(date +%s)" "$n" >> "$STATE/demo.status" ;;
     esac
     [ "$mode" != return-fail ] || exit 3
     [ "$mode" != return-first ] || sleep "$FM_TEST_STUB_MAX_BLOCK_SECONDS"
@@ -589,19 +596,45 @@ test_park_boundary_ends_the_park_before_the_hook_timeout() {
   pass "host: the park ends itself with a boundary wake and a stopped watcher"
 }
 
+# A close that lands while a turn is running can only wait: the host ends its
+# park at the bound regardless of how many closes are queued behind it. The
+# held turn is released once the refusal window opens (park bound minus the
+# turn bound and grace, read off the host's own start record), so the second
+# close can never take a turn of its own on any machine speed.
 test_park_boundary_holds_under_back_to_back_closes() {
-  local home
+  local home deadline
   home=$(make_home boundary-busy away)
-  echo chain > "$home/stub-mode"
-  FM_SUPERVISION_HOST_PARK_SECONDS=20 FM_SUPERVISION_HOST_TURN_TIMEOUT=3 FM_SUPERVISION_ENGINE_GRACE=1 start_host "$home"
-  wait_until 150 watcher_live "$home" || fail "boundary-busy: the host never started a watcher cycle"
+  echo held > "$home/stub-mode"
+  FM_SUPERVISION_HOST_PARK_SECONDS=75 FM_SUPERVISION_HOST_TURN_TIMEOUT=50 FM_SUPERVISION_ENGINE_GRACE=1 start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "boundary-busy: the host never started a watcher cycle: $(cat "$home/host.out")"
   append_status "$home" 'the first of many'
-  wait_until 450 host_exited "$home" \
+  # The turn starts only while it can still finish inside the park; a host too
+  # loaded to start it hands the first close to the same boundary exit.
+  wait_until 800 sh -c '[ -e "$1/engine-call.1" ] || [ -s "$1/host.rc" ]' _ "$home" \
+    || fail "boundary-busy: the host neither started a turn nor exited: $(cat "$home/host.out" "$home/state/.supervision-host.log" 2>/dev/null)"
+  if [ -e "$home/engine-call.1" ]; then
+    append_status "$home" 'queued while the first close is still handled'
+    # A turn may start only while it can still finish inside the park, so
+    # holding it until host-start + park - turn-bound - grace lands its end in
+    # the refusal window: the queued close can never take a turn of its own,
+    # however loaded the machine is. The start epoch is the host's own record.
+    deadline=$(awk -F '\t' '$2 == "start" { g = $3; sub(/^gen=host-[0-9]+-/, "", g); print g + 75 - 51; exit }' \
+      "$home/state/.supervision-host.log")
+    case "$deadline" in ''|*[!0-9]*) fail "boundary-busy: the ledger has no start record" ;; esac
+    wait_until 600 sh -c '[ "$(date +%s)" -ge "$1" ]' _ "$deadline" \
+      || fail "boundary-busy: the refusal window never opened"
+    : > "$home/stub-release"
+  fi
+  wait_until 900 host_exited "$home" \
     || fail "the host kept handling back-to-back closes past its park boundary: $(cat "$home/state/.supervision-host.log")"
-  handled_at_least "$home" 2 || fail "fixture: closes did not arrive back to back: $(cat "$home/state/.supervision-host.log")"
+  if [ -e "$home/engine-call.1" ]; then
+    handled_at_least "$home" 1 || fail "the held turn did not complete once released: $(cat "$home/state/.supervision-host.log")"
+  fi
+  [ ! -e "$home/engine-call.2" ] || fail "a close waiting at the boundary still got an engine turn"
   assert_re '^supervision-host: cycle boundary - ' "$home/host.out" "the park boundary must reach main as a host line"
   [ "$(tail -n 1 "$home/host.out")" = "$(grep '^supervision-host: cycle boundary - ' "$home/host.out")" ] \
     || fail "a close read at the boundary must be printed ahead of the boundary line: $(cat "$home/host.out")"
+  assert_grep 'demo.status' "$home/state/.wake-queue" "a close waiting at the boundary must stay queued for main"
   watcher_live "$home" && fail "the park boundary left the watcher running"
   pass "host: waiting closes cannot carry the park past its boundary"
 }
