@@ -323,7 +323,7 @@ bin/fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<projec
 | Argument | Meaning |
 | --- | --- |
 | `<remote-root>` | The remote Firstmate code clone that supplies tracked scripts. |
-| `<remote-home>` | A separate absolute path for the persistent secondmate home. It must not overlap the code root. |
+| `<remote-home>` | A separate absolute path for the persistent secondmate home that must not overlap the code root. |
 
 ### Project origins
 
