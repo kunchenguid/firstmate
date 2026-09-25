@@ -417,7 +417,8 @@ For spawn-capable adapters, the runtime session-provider backend controls where 
 | `cmux` | Experimental; no dedicated real-backend CI lane | [`docs/cmux-backend.md`](cmux-backend.md) |
 
 Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only; Orca provides both the task worktree and terminal endpoint.
-For Treehouse-backed spawns, a pane reporting an isolated pool slot is not sufficient to launch: Firstmate waits until Treehouse records a live owner and no lease before checking cleanliness, allowing up to 600 seconds of checkout settling in addition to the ordinary 60-second pane wait.
+For Treehouse-backed spawns, a pane reporting an isolated pool slot is not sufficient to launch: Firstmate waits until Treehouse records a live owner and no lease before checking cleanliness, allowing up to 600 seconds from the first observed writing checkout, with a separate 60-second allowance for unexpected pane paths.
+A get stuck in the spawning project is interrupted after 300 seconds; without verified ownership of an identified slot, spawn refuses rather than returning a possibly foreign slot or retrying.
 If handoff never completes, spawn refuses without claiming the slot or publishing task metadata; a genuinely dirty pooled slot is still left untouched.
 Inspecting Treehouse pool ownership requires `jq` even with the tmux backend; if it is missing, spawn refuses promptly rather than assuming the slot is ready.
 

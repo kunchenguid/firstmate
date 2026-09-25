@@ -232,10 +232,11 @@
 #   recorded with an unleased live owner) is waited out the same way, on a
 #   separate longer allowance, so a slow first checkout is neither refused as
 #   uncommitted work nor abandoned
-#   half-written. A project-location hang is interrupted at 300 seconds and
-#   retried once only if a clean, unclaimed pool slot was repeatedly observed
-#   in this pane and Treehouse safely returns it. The retry uses the same
-#   settling guard. A pane that never reaches a ready isolated worktree refuses
+#   half-written. A project-location hang is interrupted at 300 seconds.
+#   Retry requires a repeatedly observed clean slot with this task's verified
+#   owner claim and a successful non-forced Treehouse return; fresh gets with
+#   no authoritative slot ownership refuse instead of releasing another caller's
+#   slot. The retry uses the same settling guard. A pane that never reaches a ready isolated worktree refuses
 #   at its applicable deadline, naming the last path seen and why it was rejected.
 #   That placement is proven only at launch. Every ship or scout pane therefore
 #   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
