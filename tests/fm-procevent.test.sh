@@ -4617,6 +4617,12 @@ done
 # meets it still held, then release it partway through the confirm window.
 setsid sleep 60 &
 drain_holder=$!
+# Read the identity only once the holder has exec'd sleep: mid-exec its cmdline
+# can read empty, and a pre-exec identity would never match the live holder.
+for _ in $(seq 1 100); do
+  case "$(ps -p "$drain_holder" -o comm= 2>/dev/null)" in *sleep) break ;; esac
+  sleep 0.05
+done
 drain_holder_identity=$(bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$ROOT" "$drain_holder") \
   || fail "could not read the draining holder's identity"
 awk -v pid="$drain_holder" -v ident="$drain_holder_identity" \
