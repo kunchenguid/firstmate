@@ -3696,6 +3696,18 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
+# A task-bound resource budget has its own process-event source and finalized
+# event journal. Retire both through their owner before generic task state goes
+# away; an unsafe or corrupt record stops cleanup rather than orphaning the
+# monitor or silently losing the terminal event.
+if [ -e "$STATE/$ID.resource-budget.json" ] || [ -L "$STATE/$ID.resource-budget.json" ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-resource-guard.sh" retire "$ID" >/dev/null || {
+      echo "error: $ID's resource budget could not be retired safely; preserving its task records" >&2
+      exit 1
+    }
+  rm -f -- "$STATE/$ID.resource-budget.json" "$STATE/$ID.resource-pause.json"
+fi
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.

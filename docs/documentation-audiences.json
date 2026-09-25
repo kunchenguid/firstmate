@@ -245,6 +245,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/resource-guard/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/secondmate-provisioning/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -395,6 +399,10 @@
     {
       "path": "docs/remote-secondmates.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/resource-guard.md",
+      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/secondmate-parent-channel.md",

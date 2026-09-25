@@ -78,11 +78,14 @@ Each effective `FM_HOME` contains private operational directories.
 - Project and secondmate registries.
 - Captain preferences and optional shared captain preferences.
 - Learnings, backlog, briefs, and scout reports.
+- 90-day minimized resource events under `data/resource-events/`.
+- Immutable resource-pause evidence under `data/burn-evaluations/`.
 - Explicitly installed content-addressed extension packages under `data/extensions/packages/`.
 
 `state/` holds runtime records:
 
 - Task metadata, append-only status events, and endpoint signals.
+- Task resource budgets and pause authority in `state/<id>.resource-budget.json` and `state/<id>.resource-pause.json`.
 - Watcher and wake-queue coordination, away-mode state, and generated Relay artifacts.
 - Inactive terminal-outcome receipts under `state/terminal-outcomes/`.
 - Enabled extension working namespaces under `state/extensions/`.

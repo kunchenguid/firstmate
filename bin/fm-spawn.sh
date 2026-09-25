@@ -22,9 +22,17 @@
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, an incomplete pair of Task subsections, or a
 #   `## Captain's intent` line opening with a Captain label or address.
-#   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
-#   it also carries the current `--intent` contract and the extracted captain
-#   intent. A legacy mixed Task is accepted there only under bin/fm-dod-lib.sh's
+#   Every ship or scout spawn renders `launch-brief.md`; when this home already
+#   carries state/<id>.resource-budget.json, the same harness-independent overlay
+#   also carries bin/fm-resource-guard.sh's cooperative safe-boundary contract.
+#   The budget is created before dispatch, and an unsafe or corrupt record, or
+#   one that is not active, stops the spawn instead of launching an unguarded
+#   or paused heavy lane. A guarded launch records the budget's one durable
+#   `dispatched` transition before delivery and rolls it back if the spawn
+#   aborts before the worker command is delivered. For a no-mistakes
+#   ship the launch brief also carries the current `--intent` contract and the
+#   extracted captain intent. A legacy mixed Task is accepted there only under
+#   bin/fm-dod-lib.sh's
 #   provenance-marking rules; unmarked legacy Tasks stop for migration rather
 #   than becoming intent. That library owns the parsing and intent rules. When
 #   the explicit mode carries less rigor than the project's standing posture, a
@@ -1169,6 +1177,7 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+RESOURCE_DISPATCH_TOKEN=
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -1199,6 +1208,12 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$status" -ne 0 ] && [ -n "$RESOURCE_DISPATCH_TOKEN" ]; then
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-resource-guard.sh" dispatch "$ID" --rollback "$RESOURCE_DISPATCH_TOKEN" >/dev/null ||
+      echo "warning: could not return task $ID's resource budget to pre-dispatch after the aborted spawn" >&2
+    RESOURCE_DISPATCH_TOKEN=
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -2854,6 +2869,32 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   fi
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.
+  # A resource overlay is rendered before the no-mistakes intent overlay: that
+  # intent section consumes through end-of-file, so nothing authored by
+  # firstmate may follow it and accidentally become captain intent.
+  RESOURCE_OVERLAY=
+  if [ -e "$STATE/$ID.resource-budget.json" ] || [ -L "$STATE/$ID.resource-budget.json" ]; then
+    RESOURCE_RC=0
+    RESOURCE_OVERLAY=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-resource-guard.sh" worker-overlay "$ID") || RESOURCE_RC=$?
+    if [ "$RESOURCE_RC" -eq 3 ]; then
+      echo "error: task $ID's resource budget is paused or pending a pause; refusing to launch it until the guard authorizes resume" >&2
+      exit 1
+    elif [ "$RESOURCE_RC" -ne 0 ]; then
+      echo "error: task $ID has an unsafe or corrupt resource budget; refusing to launch it unguarded" >&2
+      exit 1
+    fi
+    RESOURCE_RC=0
+    RESOURCE_DISPATCH=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-resource-guard.sh" dispatch "$ID") || RESOURCE_RC=$?
+    if [ "$RESOURCE_RC" -ne 0 ]; then
+      echo "error: task $ID's resource budget could not record its dispatch; refusing to launch it" >&2
+      exit 1
+    fi
+    case "$RESOURCE_DISPATCH" in
+      "dispatched: $ID at="*) RESOURCE_DISPATCH_TOKEN=${RESOURCE_DISPATCH##*at=} ;;
+    esac
+  fi
   SOURCE_BRIEF=$BRIEF
   BRIEF="$DATA/$ID/launch-brief.md"
   BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
@@ -2861,6 +2902,9 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     fm_brief_worker_role "$STATE" "$ID" &&
       printf '\n' &&
       cat "$SOURCE_BRIEF" &&
+      if [ -n "$RESOURCE_OVERLAY" ]; then
+        printf '%s\n' "$RESOURCE_OVERLAY"
+      fi &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
       fi
@@ -5043,6 +5087,7 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+RESOURCE_DISPATCH_TOKEN=
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"

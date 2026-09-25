@@ -31,6 +31,7 @@
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
+#   fm-captain-hold.sh resolution <task-id> --lifecycle <open-identity>
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
@@ -181,6 +182,12 @@
 # crew task reaches a due stale alarm - its open backlog hold need not appear in
 # the task's last status line - and on a 0 bounds repeated alarms from new pane
 # hashes for the decision.
+#
+# `resolution` is the read-only authority proof for a caller that first bound
+# one exact open lifecycle through `open --identity`. It prints only the newest
+# resolution mode and decision digest, never the captain's words. It accepts
+# that lifecycle only when exactly one resolution was added after the binding,
+# so a re-hold or later answer cannot be spent as authority for the old call.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
@@ -1851,6 +1858,52 @@ EOF
   done
 }
 
+command_resolution() {  # <task-id> --lifecycle <open-identity>
+  local id=${1:-} expected='' show state hold_kind body mode digest before_count current_count stamp
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --lifecycle) shift; expected=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  validate_slug task-id "$id"
+  case "$expected" in
+    *'#'*) stamp=${expected%#*}; before_count=${expected##*#} ;;
+    *) fail "--lifecycle must be the exact value from open --identity" ;;
+  esac
+  [ -n "$stamp" ] || fail "--lifecycle has no hold-set timestamp"
+  case "$before_count" in ''|*[!0-9]*) fail "--lifecycle has an invalid resolution count" ;; esac
+  require_tasks_axi
+  task_show "$id" || fail "captain authority task $id is absent from this home's configured backlog (data directory $DATA)"
+  show=$TASK_SHOW_OUTPUT
+  state=$(show_field "$show" state)
+  hold_kind=$(show_field_value "$show" hold_kind)
+  body=$(show_field "$show" body)
+  body_has_resolution_record "$body" || fail "captain authority task $id has no durable resolution"
+  current_count=$(resolution_record_count "$body")
+  [ "$current_count" -eq $((before_count + 1)) ] \
+    || fail "captain authority task $id no longer matches the bound lifecycle"
+  mode=$(recorded_resolution_mode "$body" || true)
+  digest=$(recorded_decision_digest "$body" || true)
+  [ -n "$mode" ] && [ -n "$digest" ] || fail "captain authority task $id has an incomplete durable resolution"
+  case "$mode" in
+    answered|repaired|routed)
+      [ "$state" = "done" ] || fail "captain authority task $id records an answer but is not closed"
+      mode=answered
+      ;;
+    released)
+      [ "$state" != "done" ] && [ "$hold_kind" != captain ] \
+        || fail "captain authority task $id records a release but remains closed or held"
+      ;;
+    *) fail "captain authority task $id resolved through non-authority mode $mode" ;;
+  esac
+  printf 'task_id=%s\nmode=%s\ndecision_digest=%s\nresolution_count=%s\n' \
+    "$id" "$mode" "$digest" "$current_count"
+}
+
 # Still an open captain call? Exit 0 yes, 1 no, 2 cannot tell (see the header).
 # A row this home does not carry is 3 when the caller requests the distinction,
 # and so is a home with no backlog file at all, because a backlog that does not
@@ -1934,6 +1987,7 @@ case "${1:-}" in
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
+  resolution) shift; command_resolution "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   reconcile) shift; command_reconcile "$@" ;;
   -h|--help) usage ;;

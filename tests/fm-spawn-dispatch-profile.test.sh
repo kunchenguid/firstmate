@@ -1388,6 +1388,135 @@ SH
   pass "fm-spawn: actual ship/scout launch commands deliver the worker role contract"
 }
 
+test_worker_launch_carries_resource_boundary() {
+  local rec id out launch envelope encoded prompt resource_line intent_line
+  id=resource-overlay-worker
+  rec=$(make_spawn_case "$id" codex)
+  read_case_record "$rec"
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  jq -n --arg task "$id" '{
+    schema:"fm.task-resource-budget.v1",task_id:$task,provider:"codex",
+    guard_state:"active",dispatch_state:"pre_dispatch",monitor_enabled:false,
+    decision_reason:null,windows:[],review:{},revision:1
+  }' >"$HOME_DIR/state/$id.resource-budget.json"
+  cat > "$FAKEBIN_DIR/codex" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$FM_ROLE_PROMPT"
+SH
+  chmod +x "$FAKEBIN_DIR/codex"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+  expect_code 0 "$?" "resource-guarded worker spawn failed: $out"
+  [ "$(jq -r .dispatch_state "$HOME_DIR/state/$id.resource-budget.json")" = dispatched ] \
+    || fail "successful guarded launch did not record its dispatch"
+  launch=$(cat "$LAUNCH_LOG")
+  envelope="$CASE_DIR/resource-prompt-envelope"
+  encoded="$CASE_DIR/resource-encoded-prompt"
+  prompt="$CASE_DIR/resource-prompt"
+  FM_ROLE_PROMPT="$envelope" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" \
+    || fail "could not consume resource-guarded launch command"
+  sed -n '/FIRSTMATE_OP: v1 launch-brief:/,$p' "$envelope" > "$encoded"
+  "$ROOT/bin/fm-operational-input.sh" body < "$encoded" > "$prompt" \
+    || fail "could not decode resource-guarded launch brief"
+  assert_grep '# Resource budget boundary' "$prompt" "resource budget did not reach the worker launch"
+  assert_grep 'preserve every file and branch and stop at the next safe ownership boundary' "$prompt" \
+    "resource launch weakened the preservation boundary"
+  resource_line=$(grep -n '^# Resource budget boundary$' "$prompt" | cut -d: -f1)
+  intent_line=$(grep -n '^# Current no-mistakes intent contract$' "$prompt" | cut -d: -f1)
+  [ "$resource_line" -lt "$intent_line" ] \
+    || fail "resource overlay leaked into the captain-authorized no-mistakes intent section"
+
+  id=resource-overlay-corrupt
+  rec=$(make_spawn_case "$id" codex)
+  read_case_record "$rec"
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  printf 'not-json\n' >"$HOME_DIR/state/$id.resource-budget.json"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+  expect_code 1 "$?" "corrupt resource budget unexpectedly launched a worker: $out"
+  assert_contains "$out" "unsafe or corrupt resource budget" \
+    "corrupt resource budget refusal did not name the guard"
+
+  for state in pause_pending paused; do
+    id=resource-overlay-$state
+    id=${id//_/-}
+    rec=$(make_spawn_case "$id" codex)
+    read_case_record "$rec"
+    fm_test_spawn_brief "$HOME_DIR" "$id"
+    jq -n --arg task "$id" --arg state "$state" '{
+      schema:"fm.task-resource-budget.v1",task_id:$task,provider:"codex",
+      guard_state:$state,decision_reason:"reserve_floor",windows:[],review:{},revision:1
+    }' >"$HOME_DIR/state/$id.resource-budget.json"
+    : >"$LAUNCH_LOG"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+    expect_code 1 "$?" "$state resource budget unexpectedly launched a worker: $out"
+    assert_contains "$out" "paused or pending a pause" \
+      "$state resource budget refusal did not name the pause"
+    [ ! -s "$LAUNCH_LOG" ] || fail "$state resource budget still reached the launch command"
+  done
+
+  id=resource-overlay-failed-launch
+  rec=$(make_spawn_case "$id" codex)
+  read_case_record "$rec"
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  jq -n --arg task "$id" '{
+    schema:"fm.task-resource-budget.v1",task_id:$task,provider:"codex",
+    guard_state:"active",dispatch_state:"pre_dispatch",monitor_enabled:false,
+    decision_reason:null,windows:[],review:{},revision:1
+  }' >"$HOME_DIR/state/$id.resource-budget.json"
+  mv "$FAKEBIN_DIR/tmux" "$FAKEBIN_DIR/tmux.real"
+  cat >"$FAKEBIN_DIR/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = new-window ] && [ -e "$CASE_DIR/fail-new-window" ]; then exit 1; fi
+exec "$FAKEBIN_DIR/tmux.real" "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/tmux"
+  : >"$CASE_DIR/fail-new-window"
+  if out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off); then
+    fail "failing endpoint creation unexpectedly launched a worker: $out"
+  fi
+  [ "$(jq -r .dispatch_state "$HOME_DIR/state/$id.resource-budget.json")" = pre_dispatch ] \
+    || fail "a spawn that failed before launch delivery left the budget dispatched"
+  rm -f "$CASE_DIR/fail-new-window"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+  expect_code 0 "$?" "guarded spawn retry after a failed launch did not succeed: $out"
+  [ "$(jq -r .dispatch_state "$HOME_DIR/state/$id.resource-budget.json")" = dispatched ] \
+    || fail "guarded spawn retry did not record its dispatch"
+
+  for delivery_failure in literal key; do
+    id=resource-overlay-failed-$delivery_failure
+    rec=$(make_spawn_case "$id" codex)
+    read_case_record "$rec"
+    fm_test_spawn_brief "$HOME_DIR" "$id"
+    jq -n --arg task "$id" '{
+      schema:"fm.task-resource-budget.v1",task_id:$task,provider:"codex",
+      guard_state:"active",dispatch_state:"pre_dispatch",monitor_enabled:false,
+      decision_reason:null,windows:[],review:{},revision:1
+    }' >"$HOME_DIR/state/$id.resource-budget.json"
+    mv "$FAKEBIN_DIR/tmux" "$FAKEBIN_DIR/tmux.real"
+    cat >"$FAKEBIN_DIR/tmux" <<SH
+#!/usr/bin/env bash
+literal=
+for arg in "\$@"; do [ "\$arg" = -l ] && literal=1; done
+if [ "\${1:-}" = send-keys ] && [ -n "\$literal" ]; then
+  if [ "\${FM_FAIL_DELIVERY:-}" = literal ]; then exit 1; fi
+  : >"$CASE_DIR/literal-delivered"
+fi
+if [ "\${1:-}" = send-keys ] && [ "\${FM_FAIL_DELIVERY:-}" = key ] &&
+  [ -e "$CASE_DIR/literal-delivered" ] && [ "\$#" -eq 4 ] && [ "\${4:-}" = Enter ]; then
+  exit 1
+fi
+exec "$FAKEBIN_DIR/tmux.real" "\$@"
+SH
+    chmod +x "$FAKEBIN_DIR/tmux"
+    if out=$(FM_FAIL_DELIVERY=$delivery_failure \
+      run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off); then
+      fail "$delivery_failure delivery failure unexpectedly completed the spawn: $out"
+    fi
+    [ "$(jq -r .dispatch_state "$HOME_DIR/state/$id.resource-budget.json")" = pre_dispatch ] \
+      || fail "$delivery_failure delivery failure left the resource budget dispatched"
+  done
+  pass "fm-spawn: guarded tasks carry the shared boundary, record dispatch once, and non-active budgets refuse launch"
+}
+
 # config/claude-permission-mode (bin/fm-spawn.sh header): absent and `bypass`
 # must both produce today's launch byte-for-byte, `auto` swaps only the
 # permission flag, and any other token refuses before endpoint or metadata.
@@ -1482,6 +1611,7 @@ test_non_claude_harness_ignores_claude_permission_mode() {
 }
 
 test_worker_launch_delivers_role_scope
+test_worker_launch_carries_resource_boundary
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
