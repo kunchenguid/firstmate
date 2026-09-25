@@ -1505,8 +1505,9 @@ SH
 # must both produce today's launch byte-for-byte, `auto` swaps only the
 # permission flag, and any other token refuses before endpoint or metadata.
 claude_launch_brief_arg() {  # <launch>
+  local command=${1#*; }
   (
-    eval "set -- ${1#*; }"
+    eval "set -- ${command#*; }"
     eval "printf '%s' \"\${$#}\""
   )
 }
