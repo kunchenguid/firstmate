@@ -178,7 +178,10 @@ Classify each wake this way:
   Healthy crewmates are autonomous and do not wait on firstmate mid-task.
 - `heartbeat` -> self-handle.
   The daemon runs its own cheap bash fleet scan every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for captain-relevant events still unread by the per-wake classifier.
-- An unknown wake reason escalates fail-safe, while status-read uncertainty follows the shared one-report-without-position-advance contract referenced under Dedupe below.
+- An unknown wake reason escalates fail-safe.
+  After that escalation is delivered, its exact distilled line is acknowledged and the same identity does not escalate again.
+  An identity that was not delivered still escalates.
+  Status-read uncertainty follows the shared one-report-without-position-advance contract referenced under Dedupe below.
 
 Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 =
 immediate) and flushed as one single-line digest prefixed with the current

@@ -466,9 +466,46 @@ classify_heartbeat() {
   printf 'self|heartbeat (catch-all scan runs in housekeeping)'
 }
 
-# Anything unrecognized is escalated (fail-safe).
+# Anything unrecognized is escalated (fail-safe). A delivered unknown wake is
+# acknowledged by its exact distilled line in state/.subsuper-unknown-acked, so
+# that same identity does not escalate again. An identity still only buffered,
+# or never successfully flushed, is not acknowledged and still escalates.
 classify_unknown() {  # <reason>
   printf 'escalate|unknown wake: %s' "$1"
+}
+
+# Exact distilled line of an unknown-wake escalation, or nothing.
+unknown_wake_line() {  # <item>
+  case "$1" in
+    "unknown wake: "*) printf '%s' "$1"; return 0 ;;
+  esac
+  return 1
+}
+
+unknown_wake_acknowledged() {  # <state> <line>
+  local ack="$1/.subsuper-unknown-acked"
+  [ -f "$ack" ] || return 1
+  grep -Fxq -- "$2" "$ack"
+}
+
+unknown_wake_buffered() {  # <state> <line>
+  local buf="$1/.subsuper-escalations"
+  [ -f "$buf" ] || return 1
+  grep -Fxq -- "$2" "$buf"
+}
+
+# Record every unknown-wake line from a flush that already reached the supervisor.
+# Ordinary escalation lines are left alone. Failure leaves the caller holding
+# the buffer so an undelivered identity can still escalate.
+unknown_wake_acknowledge_flushed() {  # <state> <buffer>
+  local state=$1 buf=$2 line ack="$1/.subsuper-unknown-acked"
+  while IFS= read -r line || [ -n "$line" ]; do
+    unknown_wake_line "$line" >/dev/null || continue
+    if [ -f "$ack" ] && grep -Fxq -- "$line" "$ack"; then
+      continue
+    fi
+    printf '%s\n' "$line" >> "$ack" || return 1
+  done < "$buf"
 }
 
 # --- stale marker + escalation buffer (stateful, but via explicit state dir) -
@@ -693,7 +730,12 @@ stale_window_is_busy() {  # <window> <state>
 }
 
 escalate_add() {  # <state> <distilled-item>
-  local state=$1 item=$2 buf
+  local state=$1 item=$2 buf line
+  if line=$(unknown_wake_line "$item"); then
+    if unknown_wake_acknowledged "$state" "$line" || unknown_wake_buffered "$state" "$line"; then
+      return 0
+    fi
+  fi
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || _now > "${buf}.since"
   printf '%s\n' "$item" >> "$buf"
@@ -712,7 +754,12 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  if inject_msg "$msg" "$state"; then
+    unknown_wake_acknowledge_flushed "$state" "$buf" || return 1
+    : > "$buf"
+    rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
+    return 0
+  fi
   return 1
 }
 

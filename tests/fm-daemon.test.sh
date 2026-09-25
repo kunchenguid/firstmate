@@ -605,6 +605,62 @@ test_classify_check_and_unknown_escalate() {
   pass "check + unknown escalate; heartbeat self-handles"
 }
 
+# An unrecognized wake escalates once per identity. Delivery acknowledges that
+# exact line; a later copy does not escalate again. A different identity still
+# escalates, and an identity that never flushed still escalates. Ordinary
+# escalation lines are not part of that acknowledgement.
+test_unknown_wake_ack_suppresses_handled_identity() {
+  local dir state fakebin sent capture out
+  dir=$(make_supercase unknown-wake-ack)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "the first unknown wake was not handled"
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "a repeated unknown wake before delivery was not handled"
+  [ "$(grep -c 'unknown wake: frobnicate: already-handled' "$state/.subsuper-escalations")" = 1 ] \
+    || fail "an undelivered unknown wake was buffered more than once: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-unknown-acked" ] \
+    || fail "an undelivered unknown wake was acknowledged"
+
+  : > "$state/.subsuper-escalations"
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "an undelivered unknown wake did not escalate again after its buffer was lost"
+  [ "$(grep -c 'unknown wake: frobnicate: already-handled' "$state/.subsuper-escalations")" = 1 ] \
+    || fail "a lost undelivered unknown wake did not escalate again"
+
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "unknown-wake flush failed"
+  grep -F 'unknown wake: frobnicate: already-handled' "$state/.subsuper-unknown-acked" >/dev/null \
+    || fail "a delivered unknown wake was not acknowledged"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "delivered unknown wake stayed buffered"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "an acknowledged unknown wake was not handled"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "an acknowledged unknown wake escalated again: $(cat "$state/.subsuper-escalations")"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: brand-new" "$state" \
+    || fail "a new unknown wake was not handled"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in
+    "unknown wake: frobnicate: brand-new") ;;
+    *) fail "a new unknown wake did not escalate on its own: $out" ;;
+  esac
+  escalate_add "$state" "done: PR https://example.test/pull/9"
+  [ "$(grep -c 'done: PR https://example.test/pull/9' "$state/.subsuper-escalations")" = 1 ] \
+    || fail "an ordinary escalation was swallowed by unknown-wake acknowledgement"
+  escalate_add "$state" "done: PR https://example.test/pull/9"
+  [ "$(grep -c 'done: PR https://example.test/pull/9' "$state/.subsuper-escalations")" = 2 ] \
+    || fail "an ordinary escalation was deduped by unknown-wake acknowledgement"
+  pass "a delivered unknown wake is acknowledged once; a new one and ordinary escalations still fire"
+}
+
 test_stale_transient_self_records_marker() {
   local dir state out key
   dir=$(make_supercase stale-transient)
@@ -2788,6 +2844,7 @@ test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
+test_unknown_wake_ack_suppresses_handled_identity
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_enriched_wedge_under_declared_wait_uses_pause_cadence
