@@ -4,8 +4,8 @@
 # task herdr-sm-spaces-k4). Drives the REAL bin/fm-spawn.sh and
 # bin/fm-teardown.sh (not just adapter primitives), because the requirement
 # under test - a --secondmate spawn's tab landing in the secondmate's OWN
-# herdr workspace, and a crewmate spawned FROM a secondmate home landing there
-# too - only exists at fm-spawn.sh's own home-shadowing logic (the herdr case
+# herdr workspace, and a crewmate spawned FROM a secondmate home using its
+# separate worker container - only exists at fm-spawn.sh's own home-shadowing logic (the herdr case
 # arm) and at fm_backend_herdr_workspace_label's FM_HOME read; neither is
 # exercised by the adapter-primitive smoke test.
 #
@@ -19,18 +19,24 @@
 #
 # Covers, at minimum (per the task brief):
 #   - a primary-shaped home (no .fm-secondmate-home marker) spawning a
-#     crewmate into the "firstmate" workspace
+#     crewmate into the "workers · main · <hash>" workspace
 #   - a secondmate-shaped home (with .fm-secondmate-home) getting its own
 #     labeled workspace when the PRIMARY spawns it (fm-spawn.sh's FM_HOME
 #     shadow for --secondmate)
 #   - a crewmate spawned FROM that secondmate-shaped home (the secondmate
-#     running its OWN fm-spawn.sh) landing in the secondmate's own workspace -
+#     running its OWN fm-spawn.sh) landing in the separate "workers · <id> · <hash>" workspace -
 #     this exact path has never run before this test
 #   - teardown closing the right tab (and no other)
 #   - list-live recovery seeing only its own home's tabs, for both homes
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+expected_worker_label() {  # <main|secondmate-id>
+  local tag
+  tag=$(FM_HOME=/nonexistent FM_ROOT="$ROOT" bash -c '. "$0/bin/fm-backend-hometag-lib.sh"; fm_backend_hometag' "$ROOT")
+  printf 'workers · %s · %s' "$1" "${tag##*-}"
+}
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -66,17 +72,25 @@ herdr_forget_inherited_pane
 # canonicalized project and backend cwd comparisons in the worktree-discovery
 # poll.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-e2e.XXXXXX")
-SESSION="fm-lab-herdr-e2e-$$"
+HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+SESSION=${HERDR_LAB_SESSION:-$("$HERDR_LAB_HELPER" name fm-herdr-per-home)}
+HERDR_LAB_ORIGINAL_PATH=$PATH
+LAB_READY=0
 export HERDR_SESSION="$SESSION"
 WT1=; WT2=
 cleanup_all() {
   [ -n "$WT1" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT1" >/dev/null 2>&1
   [ -n "$WT2" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT2" >/dev/null 2>&1
-  herdr_safe_stop_and_delete "$SESSION"
+  if [ "$LAB_READY" = 1 ]; then
+    PATH="$HERDR_LAB_ORIGINAL_PATH" "$HERDR_LAB_HELPER" teardown "$SESSION" || return 1
+    LAB_READY=0
+  fi
   rm -rf "$TMP_ROOT"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+LAB_READY=1
+"$HERDR_LAB_HELPER" provision "$SESSION" || fail "could not provision isolated Herdr lab session"
+herdr_guard_adapter_calls "$TMP_ROOT/guard-bin" "$SESSION" "$HERDR_LAB_HELPER"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
@@ -151,8 +165,8 @@ assert_contains_local "$CM1_CAPTURE" "primary-crew-ok" "cm1's raw launch command
 CM1_WSID=$(herdr pane get "$CM1_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
 [ -n "$CM1_WSID" ] || fail "could not read cm1's pane workspace_id"
 CM1_WS_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$CM1_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
-[ "$CM1_WS_LABEL" = "firstmate" ] || fail "a primary-shaped home's crewmate should land in the 'firstmate' workspace, got '$CM1_WS_LABEL'"
-pass "real herdr E2E: the primary-shaped home's crewmate landed in the 'firstmate' workspace"
+[ "$CM1_WS_LABEL" = "$(expected_worker_label main)" ] || fail "a primary-shaped home's crewmate should land in its separate worker workspace, got '$CM1_WS_LABEL'"
+pass "real herdr E2E: the primary-shaped home's crewmate landed in its separate worker workspace"
 
 # --- 2. the PRIMARY spawns a secondmate: its tab lands in the SECONDMATE's own space ---
 # (fm-spawn.sh's herdr case arm shadows FM_HOME to the secondmate's home for
@@ -204,9 +218,11 @@ CM2_CAPTURE=$(fm_backend_herdr_capture "$SESSION:$CM2_PANE" 30) || fail "capture
 assert_contains_local "$CM2_CAPTURE" "sm-crew-ok" "cm2's raw launch command did not run in its herdr pane"
 
 CM2_WSID=$(herdr pane get "$CM2_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
-[ "$CM2_WSID" = "$SM_WSID" ] || fail "a crewmate spawned FROM the secondmate home should land in the SAME workspace as the secondmate's own task ($SM_WSID), got '$CM2_WSID'"
+[ "$CM2_WSID" != "$SM_WSID" ] || fail "a worker must not join its secondmate supervisor workspace"
+[ "$(herdr workspace get "$CM2_WSID" --session "$SESSION" | jq -r .result.workspace.label)" = "$(expected_worker_label e2esm1)" ] \
+  || fail "a secondmate worker must use its own home's separate worker container"
 [ "$CM2_WSID" != "$CM1_WSID" ] || fail "a crewmate spawned FROM the secondmate home must NOT land in the primary's workspace"
-pass "real herdr E2E: a crewmate spawned FROM the secondmate-shaped home lands in the secondmate's OWN workspace - falls out of per-home resolution, no glue needed"
+pass "real herdr E2E: a crewmate spawned FROM the secondmate-shaped home lands in its home's separate worker container"
 
 # --- 4. list-live recovery: each home sees only its own tabs ---------------
 
@@ -257,9 +273,13 @@ if ! herdr pane get "$SM_PANE" --session "$SESSION" >/dev/null 2>&1; then
   fail "tearing down cm2 must not have closed the secondmate's OWN pane (wrong tab closed)"
 fi
 WT2=
-pass "real herdr E2E: tearing down cm2 closes only its own tab - the secondmate's own tab (same workspace) survives untouched"
+pass "real herdr E2E: tearing down cm2 closes only its own tab - the secondmate's own tab (separate workspace) survives untouched"
 
 fm_backend_herdr_kill "$SESSION:$SM_PANE"
 
-cleanup_all
+if ! cleanup_all; then
+  trap - EXIT
+  printf 'not ok - isolated Herdr lab teardown failed or the default fleet session changed\n' >&2
+  exit 1
+fi
 trap - EXIT

@@ -3,13 +3,11 @@
 # end-to-end real-Herdr test for worker PLACEMENT with presentation spaces
 # disabled.
 #
-# The guarantee under test: a crewmate or scout is created in the exact Herdr
-# workspace of the firstmate or secondmate process that launched it, identified
-# from that process's own Herdr pane rather than from a workspace label. Herdr
-# enforces no workspace-label uniqueness, so two workspaces can both be labeled
-# "firstmate", and the previous label-first-match resolution put the worker in
-# whichever one sorted first - visibly the wrong space whenever the launcher was
-# not in it.
+# The guarantee under test: worker creation validates the launcher's exact
+# Herdr identity even with projection disabled, but uses the separate worker
+# container. With projection enabled, duplicate supervisor labels do not
+# displace the child's exact parent binding. Neither mode adopts or mutates a
+# same-labeled sibling supervisor workspace.
 #
 # This drives the REAL bin/fm-spawn.sh and bin/fm-teardown.sh, because the
 # guarantee spans the whole spawn handoff (fm-spawn.sh's herdr arm ->
@@ -25,6 +23,12 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+expected_worker_label() {  # <main|secondmate-id>
+  local tag
+  tag=$(FM_HOME=/nonexistent FM_ROOT="$ROOT" bash -c '. "$0/bin/fm-backend-hometag-lib.sh"; fm_backend_hometag' "$ROOT")
+  printf 'workers · %s · %s' "$1" "${tag##*-}"
+}
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -47,8 +51,9 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 herdr_forget_inherited_pane
 
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-launcher-e2e.XXXXXX")
-HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
-HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-herdr-launcher-ws) || {
+HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+HERDR_LAB_ORIGINAL_PATH=$PATH
+HERDR_LAB_SESSION=${HERDR_LAB_SESSION:-$("$HERDR_LAB_HELPER" name fm-herdr-launcher-ws)} || {
   rm -rf "$TMP_ROOT"
   printf 'not ok - could not generate an isolated Herdr lab session name\n' >&2
   exit 1
@@ -68,14 +73,15 @@ cleanup_all() {
     [ -n "$wt" ] && treehouse return --force "$wt" >/dev/null 2>&1
   done
   WORKTREES=()
-  "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || status=$?
+  PATH="$HERDR_LAB_ORIGINAL_PATH" "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || status=$?
   rm -rf "$TMP_ROOT"
   return "$status"
 }
 trap cleanup_all EXIT
 "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" || fail "could not provision isolated Herdr lab session"
 
-lab() { "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"; }
+herdr_guard_adapter_calls "$TMP_ROOT/guard-bin" "$HERDR_LAB_SESSION" "$HERDR_LAB_HELPER"
+lab() { PATH="$HERDR_LAB_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"; }
 
 # --- helpers ----------------------------------------------------------------
 
@@ -226,17 +232,16 @@ UNIQA_META="$PRIMARY_HOME/state/uniqA.meta"
 record_worktree "$UNIQA_META"
 UNIQA_PANE=$(grep '^herdr_pane_id=' "$UNIQA_META" | cut -d= -f2-)
 [ -n "$UNIQA_PANE" ] || fail "uniqA meta is missing herdr_pane_id"
-WS_PRIMARY=$(workspace_of_pane "$UNIQA_PANE")
-[ -n "$WS_PRIMARY" ] || fail "could not read uniqA's workspace"
-[ "$(label_of_workspace "$WS_PRIMARY")" = firstmate ] || fail "uniqA did not land in a 'firstmate' workspace"
+WS_WORKERS=$(workspace_of_pane "$UNIQA_PANE")
+[ -n "$WS_WORKERS" ] || fail "could not read uniqA's workspace"
+[ "$(label_of_workspace "$WS_WORKERS")" = "$(expected_worker_label main)" ] || fail "uniqA did not land in its separate worker container"
 [ "$(focused_workspace)" = "$WS_OTHER" ] || fail "the spawn stole focus from the captain's workspace"
-pass "real herdr E2E: with one 'firstmate' workspace and no herdr parent, a crewmate still lands in this home's own workspace without stealing focus"
+pass "real herdr E2E: with no Herdr parent, a crewmate uses its home's separate worker container without stealing focus"
 
-# --- 2. unique label, WITH a launcher pane: same workspace, now by identity --
+# --- 2. unique label, WITH a launcher pane: separate worker container --
 
-read -r _ _ LAUNCH_PRIMARY_PANE <<EOF
-$(lab tab create --workspace "$WS_PRIMARY" --cwd "$TMP_ROOT" --label captain-shell --no-focus 2>/dev/null \
-  | jq -r '["x","x", .result.root_pane.pane_id] | @tsv' | tr '\t' ' ')
+read -r WS_PRIMARY _ LAUNCH_PRIMARY_PANE <<EOF
+$(make_workspace firstmate)
 EOF
 [ -n "$LAUNCH_PRIMARY_PANE" ] || fail "could not create a launcher pane inside the 'firstmate' workspace"
 
@@ -245,9 +250,9 @@ spawn_from_launcher "$LAUNCH_PRIMARY_PANE" "$PRIMARY_HOME" uniqB "$PROJ" --mode 
 UNIQB_META="$PRIMARY_HOME/state/uniqB.meta"
 record_worktree "$UNIQB_META"
 UNIQB_PANE=$(grep '^herdr_pane_id=' "$UNIQB_META" | cut -d= -f2-)
-[ "$(workspace_of_pane "$UNIQB_PANE")" = "$WS_PRIMARY" ] \
-  || fail "a crewmate launched from the 'firstmate' workspace must stay in it"
-pass "real herdr E2E: the normal unique-label path is unchanged when the launcher's own pane identifies the workspace"
+[ "$(workspace_of_pane "$UNIQB_PANE")" = "$WS_WORKERS" ] \
+  || fail "a crewmate must use the same separate worker container regardless of launcher ancestry"
+pass "real herdr E2E: the launcher's own pane is validated while the worker stays in its separate container"
 
 # --- 2b. presentation spaces ON: the projected child is created and bound
 #         UNDER the launcher's exact workspace, not collapsed into it ---------
@@ -291,6 +296,7 @@ WS_PRIMARY_TABS_BEFORE=$(tab_labels_of_workspace "$WS_PRIMARY")
 cat > "$TMP_ROOT/spawn-in-pane.sh" <<SPAWN
 #!/usr/bin/env bash
 set -u
+PATH="$PATH" HERDR_LAB_ORIGINAL_PATH="$HERDR_LAB_ORIGINAL_PATH" HERDR_LAB_GUARD_HELPER="$HERDR_LAB_GUARD_HELPER" HERDR_LAB_GUARD_SESSION="$HERDR_LAB_GUARD_SESSION" \\
 FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \\
   "$ROOT/bin/fm-spawn.sh" dupC "$PROJ" "sh -c 'echo launcher-ws-ok'" --mode no-mistakes --yolo off --backend herdr \\
   > "$TMP_ROOT/dupC.out" 2> "$TMP_ROOT/dupC.err"
@@ -309,13 +315,13 @@ DUPC_META="$PRIMARY_HOME/state/dupC.meta"
 record_worktree "$DUPC_META"
 DUPC_PANE=$(grep '^herdr_pane_id=' "$DUPC_META" | cut -d= -f2-)
 DUPC_WS=$(workspace_of_pane "$DUPC_PANE")
-[ "$DUPC_WS" = "$WS_PRIMARY_DUP" ] \
-  || fail "a worker launched from the second 'firstmate' workspace ($WS_PRIMARY_DUP) landed in '$DUPC_WS' instead"
+[ "$DUPC_WS" = "$WS_WORKERS" ] \
+  || fail "a worker launched from the second 'firstmate' workspace did not use its separate worker container: $DUPC_WS"
 [ "$DUPC_WS" != "$WS_PRIMARY" ] || fail "the worker was placed in the first label match, the defect under test"
 [ "$DUPC_WS" != "$WS_OTHER" ] || fail "the worker was placed in the globally focused workspace"
-[ "$(grep '^herdr_workspace_id=' "$DUPC_META" | cut -d= -f2-)" = "$WS_PRIMARY_DUP" ] \
-  || fail "the recorded endpoint workspace does not match the launcher's workspace"
-pass "real herdr E2E: with two 'firstmate' workspaces, a worker spawned from inside the second one lands in that exact workspace"
+[ "$(grep '^herdr_workspace_id=' "$DUPC_META" | cut -d= -f2-)" = "$WS_WORKERS" ] \
+  || fail "the recorded endpoint workspace does not match the worker container"
+pass "real herdr E2E: with two 'firstmate' workspaces, an in-pane spawn validates its exact launcher and uses the separate worker container"
 
 [ "$(tab_labels_of_workspace "$WS_PRIMARY")" = "$WS_PRIMARY_TABS_BEFORE" ] \
   || fail "the other same-labeled workspace's tabs changed; it must never be adopted or mutated"
@@ -404,11 +410,11 @@ SME_META="$SM_HOME/state/smE.meta"
 record_worktree "$SME_META"
 SME_PANE=$(grep '^herdr_pane_id=' "$SME_META" | cut -d= -f2-)
 SME_WS=$(workspace_of_pane "$SME_PANE")
-[ "$SME_WS" = "$WS_SM_LAUNCH" ] \
-  || fail "a secondmate's own worker must land in the secondmate's exact workspace ($WS_SM_LAUNCH), got '$SME_WS'"
+[ "$SME_WS" != "$WS_SM_LAUNCH" ] && [ "$(label_of_workspace "$SME_WS")" = "$(expected_worker_label "$SM_ID")" ] \
+  || fail "a secondmate's worker must use its separate worker container, got '$SME_WS'"
 [ "$(tab_labels_of_workspace "$WS_SM_DECOY")" = "$WS_SM_DECOY_TABS_BEFORE" ] \
   || fail "the duplicate secondmate-labeled workspace was mutated"
-pass "real herdr E2E: a secondmate launching its own worker gets the same exact-workspace guarantee, and its same-labeled sibling is untouched"
+pass "real herdr E2E: a secondmate launching its own worker uses a separate worker container, and its same-labeled sibling is untouched"
 
 # --- 7. a --secondmate launch is NOT collapsed into the launcher's workspace -
 

@@ -43,3 +43,24 @@ herdr_refuse_if_default() { # <session>
 herdr_safe_stop_and_delete() { # <session>
   fm_herdr_lab_teardown "$1"
 }
+
+# Route production adapter calls as well as test probes through the lab helper.
+# Provision first, then install this shim; lifecycle calls must restore the
+# saved PATH so that the helper retains exclusive ownership of those calls.
+herdr_guard_adapter_calls() { # <shim-dir> <session> <helper>
+  local shim_dir=$1
+  export HERDR_LAB_ORIGINAL_PATH=$PATH HERDR_LAB_GUARD_SESSION=$2 HERDR_LAB_GUARD_HELPER=$3
+  mkdir -p "$shim_dir"
+  cat > "$shim_dir/herdr" <<'SH'
+#!/usr/bin/env bash
+set -eu
+args=("$@")
+last=$((${#args[@]} - 1)); flag=$((last - 1))
+if [ "${#args[@]}" -ge 2 ] && [ "${args[$flag]}" = --session ] && [ "${args[$last]}" = "$HERDR_LAB_GUARD_SESSION" ]; then
+  unset 'args[last]' 'args[flag]'
+fi
+exec env PATH="$HERDR_LAB_ORIGINAL_PATH" "$HERDR_LAB_GUARD_HELPER" run "$HERDR_LAB_GUARD_SESSION" "${args[@]}"
+SH
+  chmod +x "$shim_dir/herdr"
+  export PATH="$shim_dir:$PATH"
+}

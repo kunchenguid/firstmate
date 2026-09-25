@@ -11,21 +11,19 @@
 # normal operation; the unit tests source it directly, so the FM_HOME fallback
 # below keeps that path sane without fm-backend.sh's preamble.
 #
-# Default container shape (D4, decided empirically - see
-# herdr-verification-p2.md "Task container shape", refined by
-# docs/herdr-backend.md "Default task container shape"): ONE herdr workspace PER
-# FIRSTMATE HOME (the primary, and each secondmate, gets its own), ONE herdr TAB
-# per task inside its home's workspace. The default-on presentation projection
-# creates a disposable workspace for a clean fresh task instead unless the home
-# opts out. That
-# workspace is a non-authoritative visual projection containing only the normal
-# task pane. Its random token and mutable label never authorize lookup,
-# adoption, reuse, closure, deletion, task ownership, or endpoint selection.
-# A version 2 journal can participate in replacing only its exact same-identity
-# endpoint after metadata, home, session, workspace, tab, pane, parent, shape,
-# focus, and agent-absence checks all agree under the session lock.
-# Every ambiguous recovered launch uses the default flat home workspace when
-# duplicate-agent risk is independently absent.
+# Container placement is owned by docs/herdr-backend.md "Presentation spaces".
+# A worker normally gets a disposable workspace containing its task pane;
+# disabled or degraded projection uses a separate role-neutral flat container
+# ("workers · main · <hash>" or "workers · <secondmate-id> · <hash>").
+# Supervisor home workspaces keep their existing names; a proven agent-free
+# worker husk left in one is closed only after its replacement exists.
+# A projection's random token and mutable label never authorize task ownership
+# or endpoint selection. A version 2 journal can participate in replacing only
+# its exact same-identity endpoint after metadata, home, session, workspace,
+# tab, pane, parent, shape, focus, and agent-absence checks all agree under the
+# session lock. A proven missing token permits fresh projection only after
+# independent recorded-endpoint and duplicate-tab checks; surviving ambiguous
+# projections remain untouched while safe fallback uses the worker container.
 # Target resolution stays parallel to the tmux adapter in both layouts.
 # Projected create, move, and cleanup operations capture the named session's
 # exact active workspace and tab. On Herdr 0.7.5, an explicit close that
@@ -71,6 +69,9 @@
 FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+
+# shellcheck source=bin/fm-backend-hometag-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-backend-hometag-lib.sh"
 
 # Shared composer-content classifier (empty|pending|unknown, and the fleet-wide
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
@@ -323,7 +324,7 @@ fm_backend_herdr_presentation_default_supported() {  # <state-dir> [<session>]
   return 1
 }
 
-# fm_backend_herdr_presentation_enabled <config-dir> [<state-dir>]: the one gate
+# fm_backend_herdr_presentation_enabled <config-dir> [<state-dir>] [<session>]: the one gate
 # bin/fm-spawn.sh consults before projecting this home's children into
 # disposable one-task workspaces (docs/herdr-backend.md "Presentation spaces"
 # owns the full contract). An explicit "off" or "on" is obeyed as written; a
@@ -331,8 +332,8 @@ fm_backend_herdr_presentation_default_supported() {  # <state-dir> [<session>]
 # and otherwise falls back to the flat layout with one warning. Sets
 # FM_BACKEND_HERDR_PRESENTATION_PREFERENCE for the new-projection boundary to
 # distinguish an unconfigured default from an explicit opt-in.
-fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
-  local config_dir=${1:-} state_dir=${2:-} preference
+fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>] [<session>]
+  local config_dir=${1:-} state_dir=${2:-} session=${3:-} preference
   preference=$(fm_backend_herdr_presentation_preference "$config_dir")
   # bin/fm-spawn.sh reads this out-parameter after sourcing this adapter.
   # shellcheck disable=SC2034
@@ -341,16 +342,16 @@ fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
     off) return 1 ;;
     on) return 0 ;;
   esac
-  fm_backend_herdr_presentation_default_supported "$state_dir"
+  fm_backend_herdr_presentation_default_supported "$state_dir" "$session"
 }
 
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
 # label (docs/herdr-backend.md "Default task container shape"). The PRIMARY home (no
 # secondmate marker) resolves to the constant "firstmate", byte-identical to
 # every pre-existing task's recorded label - no forced migration. A SECONDMATE
-# home resolves to "2ndmate-<secondmate-id>", so its tasks land in their own
-# workspace, obviously distinguishable from the primary's (and from every
-# other secondmate's) in herdr's spaces sidebar. Read fresh from FM_HOME on
+# home resolves to "2ndmate-<secondmate-id>", so its supervisor gets its own
+# workspace. Workers project beneath that parent or use a separate container
+# named by fm_backend_herdr_worker_workspace_label. Read fresh from FM_HOME on
 # every call rather than cached at source time: FM_HOME is the home's own
 # durable identity, not env plumbing threaded through a call chain, so the
 # label is automatically stable across every respawn/recovery for the life of
@@ -367,6 +368,115 @@ fm_backend_herdr_workspace_label() {
     fi
   fi
   printf 'firstmate'
+}
+
+# A degraded worker uses a separate per-home container. This is placement,
+# never endpoint authority; existing tasks keep their recorded pane IDs.
+# The label is role-neutral and installation-scoped: "workers · main · <hash>"
+# for the primary home and "workers · <secondmate-id> · <hash>" for a
+# secondmate home, where <hash> is fm_backend_hometag's per-installation hash.
+fm_backend_herdr_worker_workspace_label() {
+  local home tag
+  home=$(fm_backend_herdr_workspace_label)
+  case "$home" in
+    2ndmate-*) home=${home#2ndmate-} ;;
+    *) home=main ;;
+  esac
+  tag=$(fm_backend_hometag)
+  printf 'workers · %s · %s' "$home" "${tag##*-}"
+}
+
+# Before creating a projected or fallback worker, refuse a surviving attempt
+# in either the legacy parent container or the separate worker container.
+# Labels select duplicate-refusal candidates only: this never adopts or closes
+# them. Recorded endpoints and projection journals retain their own guards.
+# Proven agent-free husks are recorded in FM_BACKEND_HERDR_WORKER_HUSKS as
+# "<workspace>\t<tab>\t<pane>" lines for fm_backend_herdr_worker_husks_close
+# once the replacement endpoint exists.
+fm_backend_herdr_worker_container_preflight() { # <session> <task-label>
+  local session=$1 task_label=$2 parent_label worker_label parent='' status list workspaces workspace tabs tab panes pane
+  FM_BACKEND_HERDR_WORKER_HUSKS=
+  fm_backend_herdr_server_ensure "$session" || return 1
+  fm_backend_herdr_launcher_identity "$session" && status=0 || status=$?
+  case "$status" in
+    0) parent=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID ;;
+    2) ;;
+    *) return 1 ;;
+  esac
+  parent_label=$(fm_backend_herdr_workspace_label)
+  worker_label=$(fm_backend_herdr_worker_workspace_label)
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  workspaces=$(printf '%s' "$list" | jq -er --arg parent "$parent" --arg home "$parent_label" --arg workers "$worker_label" '
+    if (.result.workspaces | type) != "array" then error("missing workspaces") else .result.workspaces end
+    | . as $all
+    | (if $parent != "" then map(select(.workspace_id == $parent)) else map(select(.label == $home)) end) as $parents
+    | ($all | map(select(.label == $workers))) as $fallback
+    | if ($parents | length) > 1 then error("ambiguous worker placement")
+      else [$parents[], $fallback[]]
+        | if all(.[]; (.workspace_id | type) == "string" and (.workspace_id | length) > 0)
+          then unique_by(.workspace_id) | map(.workspace_id) | join("\n")
+          else error("missing workspace identity") end end
+  ' 2>/dev/null) || {
+    echo "error: ambiguous herdr parent labeled '$parent_label' or unreadable worker containers labeled '$worker_label' in session '$session'; refusing worker placement" >&2
+    return 1
+  }
+  while IFS= read -r workspace; do
+    [ -n "$workspace" ] || continue
+    tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
+    tabs=$(printf '%s' "$tabs" | jq -er --arg want "$task_label" '
+      if (.result.tabs | type) != "array" then error("missing tabs")
+      else [.result.tabs[] | select(.label == $want) | .tab_id]
+        | if all(.[]; type == "string" and length > 0) then join("\n")
+          else error("missing tab identity") end end
+    ' 2>/dev/null) || return 1
+    while IFS= read -r tab; do
+      [ -n "$tab" ] || continue
+      panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || return 1
+      pane=$(printf '%s' "$panes" | jq -er --arg tab "$tab" '
+        if (.result.panes | type) != "array" then error("missing panes")
+        else [.result.panes[] | select(.tab_id == $tab)]
+          | select(length == 1) | .[0].pane_id | select(type == "string" and length > 0) end
+      ' 2>/dev/null) || pane=
+      if [ -z "$pane" ] || ! fm_backend_herdr_tab_is_husk "$session" "$pane"; then
+        echo "error: herdr worker tab '$task_label' already exists in workspace $workspace; refusing duplicate launch" >&2
+        return 1
+      fi
+      FM_BACKEND_HERDR_WORKER_HUSKS="${FM_BACKEND_HERDR_WORKER_HUSKS}${workspace}"$'\t'"${tab}"$'\t'"${pane}"$'\n'
+    done <<EOF
+$tabs
+EOF
+  done <<EOF
+$workspaces
+EOF
+}
+
+# Close the husks the preflight proved, only after the replacement endpoint
+# exists. Each tab must still carry <task-label>, still hold its recorded pane,
+# still classify as a husk, and share its workspace with another tab, so a
+# close never deletes a workspace or touches an agent-bearing or ambiguous tab.
+# Best-effort: a husk that cannot be proven again is left in place.
+fm_backend_herdr_worker_husks_close() { # <session> <task-label>
+  local session=$1 task_label=$2 workspace tab pane tabs panes
+  while IFS=$'\t' read -r workspace tab pane; do
+    [ -n "$pane" ] || continue
+    tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || continue
+    printf '%s' "$tabs" | jq -e --arg tab "$tab" --arg want "$task_label" '
+      (.result.tabs | type) == "array"
+      and ([.result.tabs[] | select(.tab_id == $tab and .label == $want)] | length) == 1
+      and (.result.tabs | length) > 1
+    ' >/dev/null 2>&1 || continue
+    panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || continue
+    printf '%s' "$panes" | jq -e --arg tab "$tab" --arg pane "$pane" '
+      (.result.panes | type) == "array"
+      and ([.result.panes[] | select(.tab_id == $tab)] | length == 1 and .[0].pane_id == $pane)
+    ' >/dev/null 2>&1 || continue
+    fm_backend_herdr_tab_is_husk "$session" "$pane" || continue
+    fm_backend_herdr_cli "$session" tab close "$tab" >/dev/null 2>&1 || \
+      echo "warning: could not close agent-free herdr husk tab $tab for '$task_label' in workspace $workspace" >&2
+  done <<EOF
+${FM_BACKEND_HERDR_WORKER_HUSKS:-}
+EOF
+  FM_BACKEND_HERDR_WORKER_HUSKS=
 }
 
 # fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>, setting
@@ -874,6 +984,30 @@ fm_backend_herdr_presentation_session_lock_path() {  # <session>
   fi
   fm_backend_herdr_presentation_lock_namespace_valid "$dir" || return 1
   printf '%s/order-%s.lock' "$dir" "$key"
+}
+
+# fm_backend_herdr_presentation_session_lock_acquire: bounded (5s) acquisition
+# of <session>'s presentation lock for an adapter-owned critical section. Must
+# be called as a plain statement so this process owns the lock; on success the
+# held path is FM_BACKEND_HERDR_SESSION_LOCK, which the caller releases with
+# fm_lock_release. Never call it while this process already holds that lock.
+fm_backend_herdr_presentation_session_lock_acquire() {  # <session>
+  local lock_path attempt=0
+  FM_BACKEND_HERDR_SESSION_LOCK=
+  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh"
+  fi
+  lock_path=$(fm_backend_herdr_presentation_session_lock_path "$1") || return 1
+  while [ "$attempt" -lt 50 ]; do
+    if fm_lock_try_acquire "$lock_path"; then
+      FM_BACKEND_HERDR_SESSION_LOCK=$lock_path
+      return 0
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  return 1
 }
 
 # fm_backend_herdr_projection_focus_snapshot: print the exact active
@@ -1684,9 +1818,9 @@ fm_backend_herdr_server_ensure() {  # <session>
 # duplicate means for them - fm_backend_herdr_workspace_ensure refuses to guess
 # which one is the caller's, while the read-only recovery path below keeps its
 # historical first-match behavior.
-fm_backend_herdr_workspace_find_all() {  # <session>
-  local session=$1 label list
-  label=$(fm_backend_herdr_workspace_label)
+fm_backend_herdr_workspace_find_all() {  # <session> [<exact-label>]
+  local session=$1 label=${2:-} list
+  [ -n "$label" ] || label=$(fm_backend_herdr_workspace_label)
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 0
   # NOTE: the jq variable is $want, NOT $label - `label` is a jq reserved
   # keyword (label/break), so declaring a jq variable named "label" is a
@@ -1895,6 +2029,33 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
   fi
 }
 
+# fm_backend_herdr_workspace_unique: the single workspace id labeled exactly
+# <label> in <session>, or empty when none is. Returns 3 after reporting a
+# duplicate label, which no exact identity can disambiguate.
+fm_backend_herdr_workspace_unique() {  # <session> <label>
+  local session=$1 label=$2 matches count
+  matches=$(fm_backend_herdr_workspace_find_all "$session" "$label")
+  count=$(printf '%s' "$matches" | grep -c '[^[:space:]]' || true)
+  if [ "$count" -gt 1 ]; then
+    echo "error: ${count} herdr workspaces in session '$session' are labeled '$label' (${matches//$'\n'/ }) and no exact workspace identity selects one for this container; rename or close the extras" >&2
+    return 3
+  fi
+  printf '%s' "${matches%%$'\n'*}"
+}
+
+# fm_backend_herdr_worker_container_select: this home's worker container with
+# the lowest workspace id among every exact match of <label>, or empty when
+# there is none. Concurrent lock-free creates can leave more than one such
+# container; each is harmless, discovery scans them all, and new placement
+# always picks the same one regardless of Herdr's list order.
+fm_backend_herdr_worker_container_select() {  # <session> <label>
+  fm_backend_herdr_workspace_find_all "$1" "$2" | jq -Rrs '
+    split("\n") | map(select(length > 0))
+    | sort_by(if test("^w[0-9]+$") then [0, (.[1:] | tonumber), .] else [1, 0, .] end)
+    | .[0] // empty
+  ' 2>/dev/null
+}
+
 # fm_backend_herdr_workspace_ensure: the workspace this spawn's task tab
 # belongs in inside <session> - the launching agent's own exact workspace when
 # it has one, otherwise this HOME's persistent workspace, created in <cwd> if
@@ -1938,49 +2099,44 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
 # attach to). --no-focus is passed unconditionally anyway, for defense in
 # depth and because it is a no-op in the already-safe case.
 #
-# <launcher-relationship> (3rd arg, default "launcher-home") says whether the
-# container being ensured belongs to the SAME firstmate home as the process
-# calling this:
-#   launcher-home - a crewmate or scout for the caller's own home. When the
-#                   caller is itself running in a herdr pane, the worker MUST
-#                   land in that exact workspace
-#                   (fm_backend_herdr_launcher_identity), never in whichever
-#                   same-labeled workspace happens to sort first.
-#   other-home    - a --secondmate launch, which stands up a DIFFERENT home's
-#                   own per-home workspace by design. The launcher's workspace
-#                   is deliberately not inherited here.
-# With no herdr ancestry at all there is no launcher workspace to inherit, so
-# the per-home label lookup below stays the resolver - but it must then resolve
-# to exactly ONE workspace. Two same-labeled home workspaces with no launcher
-# identity to disambiguate them is an unresolvable placement, and adopting
-# either one is the very defect this refuses.
+# <launcher-relationship> (3rd arg, default "launcher-home"):
+#   launcher-home - supervisor/legacy callers inherit their exact launcher
+#                   workspace, or use the unique home label without ancestry.
+#   worker-home   - validates the same launcher identity but selects a separate
+#                   role-neutral worker container, never the parent's workspace;
+#                   among several exact matches it takes the lowest id.
+#   other-home    - a --secondmate launch stands up that different home's own
+#                   supervisor workspace and deliberately ignores the launcher.
+# A supervisor label lookup must resolve exactly one workspace or create a
+# fresh one; labels never disambiguate supervisors or authorize cleanup.
 #
 # Returns 0 on success, 3 for a refusal whose exact reason is already on
 # stderr, and 1 for a failed or unparseable herdr call.
 fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship>]
-  local session=$1 cwd=$2 relationship=${3:-launcher-home} wsid out label matches count status
+  local session=$1 cwd=$2 relationship=${3:-launcher-home} wsid out label status
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
-  if [ "$relationship" = launcher-home ]; then
+  if [ "$relationship" = launcher-home ] || [ "$relationship" = worker-home ]; then
     fm_backend_herdr_launcher_identity "$session" && status=0 || status=$?
     case "$status" in
       0)
-        FM_BACKEND_HERDR_WS_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
-        printf '%s' "$FM_BACKEND_HERDR_WS_ID"
-        return 0
+        if [ "$relationship" = launcher-home ]; then
+          FM_BACKEND_HERDR_WS_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
+          printf '%s' "$FM_BACKEND_HERDR_WS_ID"
+          return 0
+        fi
         ;;
       2) ;;
       *) return 3 ;;
     esac
   fi
-  label=$(fm_backend_herdr_workspace_label)
-  matches=$(fm_backend_herdr_workspace_find_all "$session")
-  count=$(printf '%s' "$matches" | grep -c '[^[:space:]]' || true)
-  if [ "$count" -gt 1 ]; then
-    echo "error: ${count} herdr workspaces in session '$session' are labeled '$label' (${matches//$'\n'/ }) and this spawn has no herdr parent pane to identify which one is its own; rename or close the extras, or run firstmate inside the workspace its workers belong in" >&2
-    return 3
+  if [ "$relationship" = worker-home ]; then
+    label=$(fm_backend_herdr_worker_workspace_label)
+    wsid=$(fm_backend_herdr_worker_container_select "$session" "$label")
+  else
+    label=$(fm_backend_herdr_workspace_label)
+    wsid=$(fm_backend_herdr_workspace_unique "$session" "$label") || return 3
   fi
-  wsid=${matches%%$'\n'*}
   if [ -n "$wsid" ]; then
     FM_BACKEND_HERDR_WS_ID=$wsid
     printf '%s' "$wsid"
@@ -2513,8 +2669,8 @@ EOF
 # CLEANUP_SAFE becomes 1 only after both creates returned complete exact IDs.
 # A missing, failed, or malformed create response stays ambiguous and grants no
 # cleanup authority.
-fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-label>
-  local cwd=$1 workspace_label=$2 task_label=$3 session out tabs panes tab_count pane_count focus_before active_tab
+fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-label> [<session>]
+  local cwd=$1 workspace_label=$2 task_label=$3 session=${4:-} out tabs panes tab_count pane_count focus_before active_tab
   FM_BACKEND_HERDR_PROJECTION_SESSION=""
   FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID=""
   FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID=""
@@ -2524,7 +2680,7 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
   FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=0
 
   fm_backend_herdr_version_check || return 1
-  session=$(fm_backend_herdr_session)
+  [ -n "$session" ] || session=$(fm_backend_herdr_session)
   fm_backend_herdr_server_ensure "$session" || return 1
   focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
     echo "error: herdr presentation workspace create could not capture exact active workspace and tab; refusing a focus-unsafe projection" >&2
@@ -2878,11 +3034,15 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
 # One or more matches allow flat fallback only when every pane is positively
 # dead or agent-free; a live or unknown pane refuses a duplicate launch.
 fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <task-id>
-  local session=$1 journal=$2 id=$3 token list wsids count wsid panes pane_ids pane state
-  token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || {
+  local session=$1 journal=$2 id=$3 token list wsids count wsid panes pane_ids pane state home
+  # Published only after a complete successful inspection. Callers may retire
+  # an orphaned journal and create a fresh projection when this is exactly 0.
+  FM_BACKEND_HERDR_PROJECTION_RECOVERY_MATCHES=
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || {
     echo "error: malformed herdr presentation journal for $id; refusing duplicate launch" >&2
     return 1
   }
+  token=$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID
   fm_backend_herdr_server_ensure "$session" || {
     echo "error: could not inspect the quarantined herdr presentation for $id; refusing duplicate launch" >&2
     return 1
@@ -2899,7 +3059,21 @@ fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <tas
     '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null)
   count=$(printf '%s\n' "$wsids" | awk 'NF { n += 1 } END { print n + 0 }')
   if [ "$count" -eq 0 ]; then
-    echo "warning: no exact herdr presentation token match for $id; leaving any stale space untouched and spawning flat" >&2
+    printf '%s' "$list" | jq -e 'all(.result.workspaces[];
+      (.workspace_id | type) == "string" and (.workspace_id | length) > 0
+      and (.label | type) == "string")' >/dev/null 2>&1 || {
+      echo "error: incomplete herdr workspace identity while proving a missing presentation for $id" >&2
+      return 1
+    }
+    if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
+      home=$(fm_backend_herdr_projection_home_identity "$FM_HOME") || return 1
+      if [ "$FM_BACKEND_HERDR_JOURNAL_HOME" != "$home" ] || [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" != "$session" ]; then
+        echo "warning: missing herdr presentation token for $id belongs to another home or session; retaining its journal and spawning flat" >&2
+        return 0
+      fi
+    fi
+    FM_BACKEND_HERDR_PROJECTION_RECOVERY_MATCHES=0
+    echo "warning: no exact herdr presentation token match for $id; a fresh projection may be created without touching any stale space" >&2
     return 0
   fi
   if [ "$count" -gt 1 ]; then
@@ -2933,6 +3107,8 @@ EOF
 $wsids
 EOF
   echo "warning: quarantined herdr presentation for $id is dead or agent-free; exact bound reclaim may proceed, otherwise spawning flat" >&2
+  # shellcheck disable=SC2034 # fm-spawn consumes this successful inspection result.
+  FM_BACKEND_HERDR_PROJECTION_RECOVERY_MATCHES=$count
   return 0
 }
 
@@ -3483,24 +3659,9 @@ fm_backend_herdr_kill_serialized() {  # <session> <pane>
 fm_backend_herdr_kill() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 0
   local session=$FM_BACKEND_HERDR_SESSION pane=$FM_BACKEND_HERDR_PANE
-  local lock_path attempt=0 lock_held=0
-  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
-    # shellcheck source=bin/fm-wake-lib.sh
-    . "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh"
-  fi
-  if lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session"); then
-    while [ "$attempt" -lt 50 ]; do
-      if fm_lock_try_acquire "$lock_path"; then
-        lock_held=1
-        break
-      fi
-      sleep 0.1
-      attempt=$((attempt + 1))
-    done
-  fi
-  if [ "$lock_held" = 1 ]; then
+  if fm_backend_herdr_presentation_session_lock_acquire "$session"; then
     fm_backend_herdr_kill_serialized "$session" "$pane"
-    fm_lock_release "$lock_path" || true
+    fm_lock_release "$FM_BACKEND_HERDR_SESSION_LOCK" || true
   else
     echo "warning: herdr task kill could not acquire its session presentation lock; refusing an unlocked pane close" >&2
   fi
@@ -3689,26 +3850,36 @@ EOF
 
 # fm_backend_herdr_list_live: recovery/orphan discovery. Lists every tab whose
 # label looks like a firstmate task window (fm-<id>) in <session>'s, THIS
-# HOME'S OWN workspace (fm_backend_herdr_workspace_label - never another
+# HOME'S legacy and separate worker workspaces (never another
 # home's), by LABEL - never by trusting a stored pane id, since ids are not
 # guaranteed stable across every server lifecycle (see herdr-verification-p2.md
 # "ID stability"). A caller running as a given home (e.g. a secondmate
 # recovering its own in-flight work) naturally scopes to that home's own
-# workspace because FM_HOME already names it - no glue needed, unlike the
+# workspaces because FM_HOME already names it - no glue needed, unlike the
 # primary-spawns-a-secondmate path in fm-spawn.sh. Read-only: a session/
 # workspace that does not exist yet simply lists nothing. One
 # "<session>:<pane_id>\t<label>" line per live task tab.
 fm_backend_herdr_list_live() {  # <session>
-  local session=$1 wsid tabs tab_id label pane_id
-  wsid=$(fm_backend_herdr_workspace_find "$session") || return 0
-  [ -n "$wsid" ] || return 0
-  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
-  while IFS=$'\t' read -r tab_id label; do
-    [ -n "$tab_id" ] || continue
-    pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
-    [ -n "$pane_id" ] || continue
-    printf '%s:%s\t%s\n' "$session" "$pane_id" "$label"
-  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null)
+  local session=$1 wsid wsids list tabs tab_id label pane_id
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 0
+  wsids=$(printf '%s' "$list" | jq -r --arg home "$(fm_backend_herdr_workspace_label)" \
+    --arg workers "$(fm_backend_herdr_worker_workspace_label)" '
+    [.result.workspaces[]?] as $all
+    | ([$all[] | select(.label == $home)][0].workspace_id // empty),
+      ($all[] | select(.label == $workers) | .workspace_id // empty)
+  ' 2>/dev/null)
+  while IFS= read -r wsid; do
+    [ -n "$wsid" ] || continue
+    tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || continue
+    while IFS=$'\t' read -r tab_id label; do
+      [ -n "$tab_id" ] || continue
+      pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
+      [ -n "$pane_id" ] || continue
+      printf '%s:%s\t%s\n' "$session" "$pane_id" "$label"
+    done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null)
+  done <<EOF
+$wsids
+EOF
 }
 
 # --- native event push: pane.agent_status_changed subscriber -----------------

@@ -1210,21 +1210,11 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
   tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
 ```
 
-Observed guarantees on 2026-07-30 against Herdr 0.7.5 protocol 17:
-
-```text
-ok - real herdr E2E: with one 'firstmate' workspace and no herdr parent, a crewmate still lands in this home's own workspace without stealing focus
-ok - real herdr E2E: the normal unique-label path is unchanged when the launcher's own pane identifies the workspace
-ok - real herdr E2E: presentation spaces still create the isolated child workspace and bind it under the launcher's exact parent, without stealing focus
-ok - real herdr E2E: with two 'firstmate' workspaces, a worker spawned from inside the second one lands in that exact workspace
-ok - real herdr E2E: the duplicate-labeled sibling workspace is left entirely untouched and focus is preserved
-ok - real herdr E2E: with a duplicated home label, a projected worker still hangs off the launcher's exact workspace and the sibling stays untouched
-ok - real herdr E2E: an ambiguous home label with no launcher identity refuses before any worker endpoint exists
-ok - real herdr E2E: a launcher pane that no longer exists refuses before any worker endpoint exists
-ok - real herdr E2E: a secondmate launching its own worker gets the same exact-workspace guarantee, and its same-labeled sibling is untouched
-ok - real herdr E2E: a --secondmate launch still stands up that secondmate's own workspace instead of inheriting the launcher's
-ok - real herdr E2E: teardown closes only the worker's own pane and leaves the launcher, its workspace, and the same-labeled sibling intact
-```
+Refreshed on 2026-09-22 against Herdr 0.8.2 protocol 20 on macOS arm64.
+With projection disabled, workers use a separate worker container even when the launcher has a valid pane identity.
+With projection enabled, the child still binds to the exact launcher parent when supervisor labels are duplicated.
+The real in-pane spawn, stale-launcher refusal, unambiguous outside-Herdr lookup, secondmate placement, sibling preservation, and exact focus checks passed.
+The lab teardown confirmed the default session was unchanged.
 
 That suite's headline case runs `bin/fm-spawn.sh` inside a real Herdr pane, so the parent identity comes from Herdr's own injection rather than a composed environment.
 Cross-session and contradictory bindings are covered deterministically in `tests/fm-backend-herdr.test.sh`, which can script a second server's socket without provisioning one.
@@ -1238,7 +1228,36 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
   tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 ```
 
-Observed guarantee: the primary and secondmate used distinct home workspaces, a child launched by the secondmate stayed in that secondmate workspace, list-live remained home-scoped, and exact cleanup did not affect sibling homes.
+Refreshed on 2026-09-22 against Herdr 0.8.2 protocol 20: the primary worker used the role-neutral `workers · main · <hash>` container, the secondmate supervisor retained `2ndmate-<secondmate-id>`, and its child used `workers · <secondmate-id> · <hash>`.
+List-live found both supervisor and worker containers within the owning home, and exact cleanup preserved sibling tasks.
+All adapter calls and test probes passed through the named-session lab helper, whose teardown verified that the default session was unchanged.
+
+On 2026-09-22, the complete presentation suite passed on Herdr 0.8.2 protocol 20, including all six lost-workspace scenarios: ordinary respawn, relaunch with the old journal, and relaunch without the journal, each from primary and secondmate homes.
+Every replacement received a new task-named projected workspace; relaunch kept the recorded worktree, and the exact parent focus was preserved.
+The five-suite validation used unchanged source files throughout:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  bin/fm-test-run.sh tests/fm-backend-herdr.test.sh \
+  tests/fm-control-relaunch.test.sh \
+  tests/fm-backend-herdr-workspace-per-home-e2e.test.sh \
+  tests/fm-backend-herdr-launcher-workspace-e2e.test.sh \
+  tests/fm-backend-herdr-presentation-e2e.test.sh
+```
+
+```text
+ok - real Herdr lab: concurrent cross-home recoveries replace exact husks under one session lock with no focus drift
+ok - real Herdr lab: legacy projection labels and flat secondmate tabs are left unmigrated
+ok - real Herdr lab validation completed on Herdr 0.8.2 with the default-session tripwire intact
+FM_TEST_SUMMARY total=5 failed=0 skipped_gate=0 duration_ms=974356
+```
+
+After the fallback-label rename, the three real-Herdr suites were rerun individually through the same lab helper; each exited 0 with the default-session tripwire intact.
+
+The portable regressions in `tests/fm-backend-herdr.test.sh` cover separate fallback placement, legacy/new-container discovery, live or unreadable duplicate refusal, split-tab refusal, incomplete missing-token snapshots, and preservation of journals bound to another home or session.
+`tests/fm-control-relaunch.test.sh` verifies recorded-session pinning, intact-endpoint reuse, work preservation, and refusal of live or ambiguous endpoints.
+The general/tmux, Zellij, cmux, and Orca portable adapter suites also passed; this placement path does not change those runtime adapters or any task tab label.
+Real lifecycle checks for those other backends and live harness prompts were not run for this Herdr-only change.
 
 The complete projection suite ran on 2026-07-21 against Herdr 0.7.4 protocol 16:
 
