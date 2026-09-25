@@ -174,20 +174,43 @@ ensure_store() {
 
 LOCK_HELD=0
 lock_release() {
-  [ "$LOCK_HELD" -eq 0 ] || rm -rf -- "$LOCK"
+  [ "$LOCK_HELD" -eq 0 ] || rm -f -- "$LOCK"
   LOCK_HELD=0
 }
 
+lock_holder_alive() {
+  local pid
+  IFS= read -r pid < "$1" 2>/dev/null || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null
+}
+
+lock_break_stale() {
+  local aside
+  lock_holder_alive "$LOCK" && return 0
+  aside="$LOCK.stale.$$"
+  mv -f -- "$LOCK" "$aside" 2>/dev/null || return 0
+  if lock_holder_alive "$aside"; then
+    ln -- "$aside" "$LOCK" 2>/dev/null || true
+  fi
+  rm -f -- "$aside"
+}
+
 lock_acquire() {
-  local tries=0
+  local tries=0 tmp
   ensure_store || return 1
-  while ! (umask 077; mkdir "$LOCK") 2>/dev/null; do
+  tmp=$(umask 077; mktemp "$STORE/.lock.XXXXXX") || return 1
+  printf '%s\n' "$$" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  trap 'lock_release' EXIT
+  trap 'exit 1' HUP INT TERM
+  while ! ln -- "$tmp" "$LOCK" 2>/dev/null; do
     tries=$((tries + 1))
-    [ "$tries" -lt 50 ] || return 1
+    [ "$tries" -lt 50 ] || { rm -f -- "$tmp"; return 1; }
+    lock_break_stale
     sleep 0.1
   done
   LOCK_HELD=1
-  trap 'lock_release' EXIT HUP INT TERM
+  rm -f -- "$tmp"
 }
 
 record_id_valid() {
@@ -330,17 +353,17 @@ action_arm() {
     || ! fm_pr_private_file_valid "$SHIM_WRITE_TMP" 700 "$device" \
     || ! fm_pr_regular_destination_on_device_or_absent "$CHECK_SHIM" "$device" \
     || ! mv -f -- "$SHIM_WRITE_TMP" "$CHECK_SHIM"; then
-    trap - HUP INT TERM
+    trap 'exit 1' HUP INT TERM
     arm_rollback
     return 1
   fi
   SHIM_WRITE_TMP=
   if ! FM_HOME="$home" FM_STATE_OVERRIDE="$STATE" "$REGISTER_BIN" "$CHECK_ID" >/dev/null; then
-    trap - HUP INT TERM
+    trap 'exit 1' HUP INT TERM
     arm_rollback
     return 1
   fi
-  trap - HUP INT TERM
+  trap 'exit 1' HUP INT TERM
   [ -z "$ARM_BACKUP" ] || rm -f -- "$ARM_BACKUP"
   ARM_BACKUP=
 }
@@ -382,7 +405,6 @@ action_add() {
   lock_acquire || die 'the memory store is busy or unavailable'
   if [ "$kind" = reminder ]; then
     action_arm || die 'could not arm the due-reminder check; no reminder was recorded'
-    trap 'lock_release' EXIT HUP INT TERM
   fi
   if ! id=$(new_id "$now"); then
     [ "$kind" != reminder ] || retire_check_if_idle || true
@@ -499,7 +521,7 @@ truncate_wake_text() {
 }
 
 action_check() {
-  local now path count=0 report="" text malformed=""
+  local now path count=0 report="" text malformed="" due_paths=()
   now=$(now_epoch) || { printf 'memory reminders: current time unavailable\n'; return 0; }
   lock_acquire || { printf 'memory reminders: store busy or unavailable\n'; return 0; }
   for path in "$RECORDS"/*; do
@@ -511,10 +533,7 @@ action_check() {
     [ "$count" -lt "$MAX_DUE_PER_CHECK" ] || continue
     [ "$R_KIND" = reminder ] && [ "$R_STATE" = open ] && [ "$R_NOTIFIED" = 0 ] \
       && [ "$R_DUE" -le "$now" ] 2>/dev/null || continue
-    if ! record_write "$path" "$R_ID" "$R_KIND" "$R_CREATED" "$R_DUE" "$R_STATE" "$now" "$R_TEXT"; then
-      report="${report:+$report; }could not mark $R_ID notified"
-      break
-    fi
+    due_paths+=("$path")
     text=$(truncate_wake_text "$R_TEXT")
     if [ -z "$report" ]; then
       report="memory reminder due: $R_ID $text"
@@ -523,8 +542,6 @@ action_check() {
     fi
     count=$((count + 1))
   done
-  lock_release
-  trap - EXIT HUP INT TERM
   if [ -n "$malformed" ]; then
     if [ -z "$report" ]; then
       report="memory reminders: malformed record $malformed"
@@ -532,7 +549,14 @@ action_check() {
       report="$report; malformed record $malformed"
     fi
   fi
-  [ -z "$report" ] || printf '%s\n' "$report"
+  if [ -n "$report" ] && printf '%s\n' "$report"; then
+    for path in ${due_paths[@]+"${due_paths[@]}"}; do
+      record_read "$path" || continue
+      record_write "$path" "$R_ID" "$R_KIND" "$R_CREATED" "$R_DUE" "$R_STATE" "$now" "$R_TEXT" || break
+    done
+  fi
+  lock_release
+  trap - EXIT HUP INT TERM
 }
 
 command=${1:-}

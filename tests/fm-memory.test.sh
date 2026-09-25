@@ -255,6 +255,38 @@ test_due_announcements_are_bounded_and_resume() {
   pass "due announcements stay bounded and resume without repetition"
 }
 
+test_dead_lock_holder_does_not_wedge_the_store() {
+  local home out status dead
+  home=$(make_home stale-lock)
+  out="$home/out"
+  status=$(run_capture "$home" 1000 "$out" remind --at 2000 'Survive a killed holder')
+  expect_code 0 "$status" "remind before stale lock exit"
+  sh -c 'exit 0' &
+  dead=$!
+  wait "$dead"
+  printf '%s\n' "$dead" > "$home/data/memory/.lock"
+  status=$(run_capture "$home" 2001 "$out" check)
+  expect_code 0 "$status" "check with a dead lock holder exit"
+  assert_contains "$(cat "$out")" "memory reminder due:" "a dead lock holder wedged the due check"
+  assert_absent "$home/data/memory/.lock" "check left its lock behind"
+  pass "a lock left by a killed holder is broken instead of wedging the store"
+}
+
+test_unwritten_wake_line_does_not_mark_notified() {
+  local home out status id
+  [ -w /dev/full ] || { pass "skipped: /dev/full is unavailable"; return 0; }
+  home=$(make_home unwritten)
+  out="$home/out"
+  status=$(run_capture "$home" 1000 "$out" remind --at 2000 'Do not lose me')
+  expect_code 0 "$status" "remind before failed delivery exit"
+  id=$(record_id_from "$out")
+  FM_HOME="$home" FM_MEMORY_NOW=2001 "$MEMORY" check >/dev/full 2>/dev/null || true
+  status=$(run_capture "$home" 2002 "$out" check)
+  expect_code 0 "$status" "check after failed delivery exit"
+  assert_contains "$(cat "$out")" "memory reminder due: $id" "a wake line that was never written marked the reminder notified"
+  pass "a reminder is marked notified only after its wake line is written"
+}
+
 test_capture_list_and_literal_search
 test_due_delivery_is_once_and_done_is_acknowledgement
 test_due_reminder_reaches_the_real_watcher
@@ -263,3 +295,5 @@ test_manual_check_controls_are_not_public
 test_last_open_reminder_keeps_the_check_armed
 test_malformed_record_does_not_hide_a_due_reminder
 test_due_announcements_are_bounded_and_resume
+test_dead_lock_holder_does_not_wedge_the_store
+test_unwritten_wake_line_does_not_mark_notified
