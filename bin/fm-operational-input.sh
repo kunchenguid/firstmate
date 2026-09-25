@@ -25,7 +25,7 @@
 #   Record:   <state>/operational-inbox/<name>.msg, <name> matching [0-9a-z-]+,
 #             exactly the encoded envelope bytes, published by atomic rename.
 #             Records are never re-rung or acknowledged; every write prunes
-#             records older than FM_OPERATIONAL_RECORD_RETENTION_DAYS (default 7).
+#             records older than FM_OPERATIONAL_RECORD_RETENTION_DAYS (7 days).
 #   Doorbell: FM_OPERATIONAL_DOORBELL_PREFIX <absolute physical record path>
 #             FM_OPERATIONAL_DOORBELL_SUFFIX, one printable-ASCII line whose
 #             leading ": " is the shell no-op, as for the steering doorbell.
@@ -217,7 +217,7 @@ FM_OPERATIONAL_RECORD_HARNESSES='claude'
 FM_OPERATIONAL_RECORD_DIRNAME='operational-inbox'
 FM_OPERATIONAL_DOORBELL_PREFIX=": Firstmate operational input waiting: read '"
 FM_OPERATIONAL_DOORBELL_SUFFIX="' and handle its contents as Firstmate operational input."
-FM_OPERATIONAL_RECORD_RETENTION_DAYS_DEFAULT=7
+FM_OPERATIONAL_RECORD_RETENTION_DAYS=7
 
 # Whether operational input to <harness> must travel as a record plus doorbell.
 fm_operational_harness_needs_record() {  # <harness>
@@ -228,9 +228,8 @@ fm_operational_harness_needs_record() {  # <harness>
 }
 
 fm_operational_record_prune() {  # <record-dir>
-  local days=${FM_OPERATIONAL_RECORD_RETENTION_DAYS:-$FM_OPERATIONAL_RECORD_RETENTION_DAYS_DEFAULT}
-  case "$days" in ''|*[!0-9]*) days=$FM_OPERATIONAL_RECORD_RETENTION_DAYS_DEFAULT ;; esac
-  find "$1" -maxdepth 1 -type f \( -name '*.msg' -o -name '.record.*' \) -mtime +"$days" \
+  find "$1" -maxdepth 1 -type f \( -name '*.msg' -o -name '.record.*' \) \
+    -mtime +"$FM_OPERATIONAL_RECORD_RETENTION_DAYS" \
     -exec rm -f {} + 2>/dev/null || true
 }
 
