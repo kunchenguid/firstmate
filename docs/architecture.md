@@ -187,6 +187,7 @@ The guard covers the main primary and genuinely marked secondmate homes, exempts
 
 Away mode is a posture of the one supervision session, recorded in `state/.afk-contract` by `bin/fm-afk-contract.sh` in the same turn as `/afk` with no wait for a further go and read back in plain sentences only after entry; Pi refuses entry unless `FM_AFK_EMAIL_TO` is exactly `johnpoyser@gmail.com`, announces email reach when the mail plane is also configured, and otherwise records hold-for-return ([`afk-email.md`](afk-email.md)).
 
+
 The captain's away words are the whole mandate: the record owner's header is the single owner of the record schema, the words are recorded verbatim, and by the captain's mandate no parser, tokenizer, classifier, or grammar reads them anywhere.
 The supervision session reads the words at the tail of every wake and acts on them by its own judgment at the moment an event makes them relevant, only through the guarded scripts under standing authority, never by analogy, holding for the return on doubt; `bin/fm-branch-prompt.sh` "Postures" owns those execution rules.
 What stays mechanical is exactly what a script can check without reading words: a merge green at its live head under the record lock, synchronous merges only, the spend cap, and the never-set; destructive, irreversible, and security-sensitive actions are never pre-authorizable whatever the words say.

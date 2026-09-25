@@ -60,6 +60,7 @@ def mail_configuration():
         not recipient
         or recipient != OWNER_EMAIL
 
+
         or not EMAIL_RE.fullmatch(recipient)
         or len(addresses) != 1
         or addresses[0][1].casefold() != recipient.casefold()
@@ -899,6 +900,7 @@ def main():
     if command == "verify-note" and len(sys.argv) == 3:
         return verify_note(sys.argv[2])
     print("usage: fm-afk-email.py destination|configured|queue-unprocessed|flush|receive-batch|verify-note <id>", file=sys.stderr)
+
 
 
     return 2
