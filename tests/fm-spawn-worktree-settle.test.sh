@@ -94,6 +94,12 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
+  status)
+    if [ "${FM_FAKE_POOL_CHANGES:-0}" = 1 ] && grep -q C-c "$FM_FAKE_PANE_COUNTFILE.keys" 2>/dev/null; then
+      printf 'new unobserved slot\n'
+    else
+      printf 'unchanged pool\n'
+    fi ;;
   return) printf '%s\n' "$2" >> "$FM_FAKE_PANE_COUNTFILE.return"; [ "${FM_FAKE_RETURN_SKIPS:-0}" != 1 ] ;;
 esac
 exit 0
@@ -328,7 +334,7 @@ test_hung_slot_with_work_is_not_destroyed() {
   pass "dirty observed slot prevents retry"
 }
 
-test_unidentified_slot_refuses_retry() {
+test_unidentified_slot_retries_when_pool_unchanged() {
   local rec id out status
   id=settle-hung-unknown-z9
   rec=$(make_settle_case settle-hung-unknown "$id" 0)
@@ -337,10 +343,26 @@ test_unidentified_slot_refuses_retry() {
   HUNG_SLOT_DIR=""
   out=$(FM_FAKE_PANE_HUNG_GETS=1 run_settle_spawn "$id")
   status=$?
-  [ "$status" -ne 0 ] || fail "spawn retried without slot evidence"
-  assert_contains "$out" 'no repeatedly observed pool slot' 'missing unproved-slot reason'
-  [ "$(key_count 'treehouse get')" -eq 1 ] || fail "retried unknown slot"
-  pass "unidentified slot is left untouched without retry"
+  expect_code 0 "$status" "unchanged pool should allow no-slot retry"$'\n'"$out"
+  [ "$(key_count 'treehouse get')" -eq 2 ] || fail "missing no-slot retry"
+  [ ! -e "$COUNTFILE.return" ] || fail "returned an unidentified slot"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "retry did not reach worktree"
+  pass "unchanged pool permits one no-slot retry"
+}
+
+test_unidentified_slot_refuses_changed_pool() {
+  local rec id out status
+  id=settle-hung-changed-z12
+  rec=$(make_settle_case settle-hung-changed "$id" 0)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  HUNG_SLOT_DIR=""
+  out=$(FM_FAKE_PANE_HUNG_GETS=1 FM_FAKE_POOL_CHANGES=1 run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn retried with changed pool"
+  assert_contains "$out" 'cannot prove interrupted get created no slot' 'missing changed-pool refusal'
+  [ "$(key_count 'treehouse get')" -eq 1 ] || fail "retried with changed pool"
+  pass "changed pool prevents no-slot retry"
 }
 
 test_claimed_slot_refuses_retry() {
@@ -562,7 +584,8 @@ test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_hung_get_in_project_is_interrupted_and_retried
 test_hung_slot_with_work_is_not_destroyed
-test_unidentified_slot_refuses_retry
+test_unidentified_slot_retries_when_pool_unchanged
+test_unidentified_slot_refuses_changed_pool
 test_claimed_slot_refuses_retry
 test_get_surviving_interrupt_refuses_retry
 test_hung_get_that_hangs_again_refuses_after_one_retry

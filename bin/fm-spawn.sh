@@ -4103,15 +4103,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # (spawn_worktree_settling): adopting it would misread the files not yet
   # written as uncommitted work, and giving up on it would abort the spawn while
   # git is still writing, leaving a partial slot folder behind. Polls that see a
-  # checkout in progress therefore extends the attempt's absolute deadline
-  # to 600s instead of stacking a 600s allowance on top of the ordinary 60s.
+  # checkout in progress gets a separate 600s allowance from its first observation.
   # A slow first checkout is waited out, but a pane that never settles ends.
-  # One loop per attempt. Its deadline is measured from the start of that
-  # attempt, not extended each time the pane reports an unfinished checkout.
   # Keep the 60s ordinary allowance for unexpected paths, 300s for a get
   # still in the spawning project, and 600s for an observed writing checkout.
   spawn_await_treehouse_worktree() {
-    local elapsed=0 ordinary=0 limit=60 p p_real candidate="" observed="" observed_count=0 writing=0
+    local elapsed=0 ordinary=0 limit=60 writing_start=-1 p p_real candidate="" observed="" observed_count=0 writing=0
     last_seen=""
     last_reason="the pane reported no path"
     spawn_hung_slot=""
@@ -4123,6 +4120,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       [ -z "$p" ] || p_real=$(real_path_or_raw "$p")
       if [ -n "$p" ] && spawn_worktree_isolated "$p" && spawn_worktree_settling "$p"; then
         writing=1
+        [ "$writing_start" -ge 0 ] || writing_start=$elapsed
         candidate=""
         last_reason=$SPAWN_WT_REASON
       elif [ -n "$p" ] && spawn_worktree_isolated "$p"; then
@@ -4156,10 +4154,8 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       if [ "$p_real" = "$PROJ_ABS_REAL" ]; then
         limit=300
       fi
-      [ "$writing" = 0 ] || limit=600
-      # Ordinary polls remain bounded after a transient writing slot;
-      # the 600s absolute ceiling remains in force for that attempt.
-      if [ "$limit" = 600 ] && [ "$writing" = 0 ]; then
+      [ "$writing" = 0 ] || limit=$((writing_start + 600))
+      if [ "$writing_start" -ge 0 ] && [ "$writing" = 0 ]; then
         ordinary=$((ordinary + 1))
         if [ "$ordinary" -ge 60 ] && [ "$p_real" != "$PROJ_ABS_REAL" ]; then
           return 1
