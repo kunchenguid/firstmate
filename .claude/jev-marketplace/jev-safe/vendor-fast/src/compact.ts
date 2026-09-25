@@ -11,7 +11,6 @@ import type {
   Message,
   ResolvedCompactOptions,
   ToolCall,
-  ToolUse,
 } from './types.ts';
 
 export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
@@ -20,7 +19,6 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   preserveRecentMessages: 6,
   maxStateTokens: 25_000,
   maxRequestTokens: 30_000,
-  truncateHeadChars: 300,
 };
 
 /** Tokens the request envelope (`model`, key names) adds around state and questions. */
@@ -44,10 +42,6 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
     maxRequestTokens: Math.max(
       1,
       finite(options.maxRequestTokens, DEFAULT_OPTIONS.maxRequestTokens),
-    ),
-    truncateHeadChars: Math.max(
-      0,
-      Math.floor(finite(options.truncateHeadChars, DEFAULT_OPTIONS.truncateHeadChars)),
     ),
   };
 }
@@ -132,17 +126,9 @@ async function askBatch(
   );
 }
 
-function truncatedResultText(text: string, isError: boolean, headChars: number): string {
-  if (text.length <= headChars + 120) return text;
-  const head = headChars > 0 ? `${text.slice(0, headChars)}\n` : '';
-  return `${head}[fast-jev-compaction truncated ${text.length - headChars} chars of this tool result${
-    isError ? ' (error)' : ''
-  }; re-run the tool if needed]`;
-}
-
 /**
  * Rebuilds the conversation from the decisions. A dropped call disappears
- * together with its result; a dropped result keeps a bounded head and note.
+ * together with its result; a dropped result is replaced with an omission marker.
  * Messages that lose all their content are removed; untouched messages are
  * returned as the same objects they came in as.
  */
@@ -150,7 +136,6 @@ export function applyDecisions(
   messages: readonly Message[],
   decisions: readonly CallDecision[],
   calls: readonly ToolCall[],
-  headChars: number,
 ): Message[] {
   const byId = new Map(calls.map((call) => [call.id, call]));
   const actions = new Map<string, CallDecision['action']>();
@@ -171,33 +156,13 @@ export function applyDecisions(
       .filter((tool) => actions.get(tool.tool_use_id) !== 'drop_call')
       .map((tool) => {
         if (actions.get(tool.tool_use_id) !== 'drop_result') return tool;
-        const text = truncatedResultText(
-          tool.text ?? '',
-          tool.isError ?? false,
-          headChars,
-        );
-        if ((tool.text ?? '') === text) return tool;
-        const copy: ToolUse = {
-          tool_use_id: tool.tool_use_id,
-          tool: tool.tool,
-          input: tool.input,
-          text,
-        };
-        if (tool.isError) copy.isError = true;
-        return copy;
+        return { ...tool, text: '[omitted: result_dropped]' };
       });
     const toolResults = (message.toolResults ?? [])
       .filter((result) => actions.get(result.tool_use_id) !== 'drop_call')
       .map((result) => {
         if (actions.get(result.tool_use_id) !== 'drop_result') return result;
-        const text = truncatedResultText(result.text, result.isError ?? false, headChars);
-        return text === result.text
-          ? result
-          : {
-              tool_use_id: result.tool_use_id,
-              text,
-              isError: result.isError,
-            };
+        return { ...result, text: '[omitted: result_dropped]' };
       });
     if (
       !message.toolUses.some(
@@ -281,12 +246,7 @@ export async function compact(
   const decisions = calls.map((call) =>
     decideCall(call, answers.get(call.id) ?? { keepCall: 1, keepResult: 1 }, resolved),
   );
-  const kept = applyDecisions(
-    messages,
-    decisions,
-    calls,
-    resolved.truncateHeadChars,
-  );
+  const kept = applyDecisions(messages, decisions, calls);
   return {
     messages: kept,
     decisions,

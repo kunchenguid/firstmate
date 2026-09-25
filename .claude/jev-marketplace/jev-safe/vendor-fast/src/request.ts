@@ -72,7 +72,9 @@ export function noulAnswer(
     !answer ||
     !('noul' in answer) ||
     typeof answer.noul !== 'number' ||
-    !Number.isFinite(answer.noul)
+    !Number.isFinite(answer.noul) ||
+    answer.noul < 0 ||
+    answer.noul > 1
   ) {
     throw new Error(`Invalid Jev answer for ${name}`);
   }

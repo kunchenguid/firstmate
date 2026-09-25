@@ -7,7 +7,10 @@ import type {
   ToolUseSummary,
   TurnCompleteInput,
 } from 'claude-code';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
+import { safetyAllows } from '../../../../jev-safety/client.mjs';
 import { compact, reductionRatio, resolveOptions } from '../src/compact.ts';
 import { buildJevRequest, DEFAULT_MODEL, parseJevResponse } from '../src/request.ts';
 import type {
@@ -65,7 +68,6 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     'preserveRecentMessages',
     'maxStateTokens',
     'maxRequestTokens',
-    'truncateHeadChars',
   ] as const) {
     const value = options[key];
     if (typeof value === 'number' && Number.isFinite(value)) numbers[key] = value;
@@ -100,19 +102,6 @@ export function jevAsker(fetchFn: HookFetch, apiKey: string, model: string): Jev
       return parseJevResponse(response.status, response.ok, response.text);
     },
   };
-}
-
-async function safetyAllows(fetchFn: HookFetch, body: string): Promise<boolean> {
-  try {
-    const result = await fetchFn('http://127.0.0.1:48752/check', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body,
-    });
-    return result.ok && JSON.parse(result.text).allowed === true;
-  } catch {
-    return false;
-  }
 }
 
 function toolUseSummary(tool: ToolUse): ToolUseSummary {
@@ -193,7 +182,7 @@ export function summarize(result: CompactResult): string {
   const { stats } = result;
   const parts = [
     stats.kept > 0 ? `${stats.kept} kept` : '',
-    stats.resultsDropped > 0 ? `${stats.resultsDropped} results truncated` : '',
+    stats.resultsDropped > 0 ? `${stats.resultsDropped} results omitted` : '',
     stats.callsDropped > 0 ? `${stats.callsDropped} call_dropped` : '',
     stats.pinned > 0 ? `${stats.pinned} pinned` : '',
   ].filter(Boolean);
@@ -241,6 +230,7 @@ async function getApiKey(
   $: {
     env: { get: (name: string) => Promise<string | undefined> };
     settings: { read: () => Promise<Readonly<Record<string, unknown>>> };
+    session: { cwd: () => Promise<string> };
   },
   config: HookConfig,
 ): Promise<string | undefined> {
@@ -253,7 +243,21 @@ async function getApiKey(
     const value = (env as Record<string, unknown>)['TYPESAFE_API_KEY'];
     if (typeof value === 'string' && value) return value;
   }
-  return undefined;
+  const root = (await $.env.get('FM_HOME')) ||
+    (await $.env.get('CLAUDE_PROJECT_DIR')) ||
+    (await $.session.cwd());
+  let contents: string;
+  try {
+    contents = await readFile(join(root, '.env'), 'utf8');
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined;
+    throw error;
+  }
+  const matches = [...contents.matchAll(/^[ \t]*(?:export[ \t]+)?TYPESAFE_API_KEY=(.*)$/gm)];
+  const raw = matches.at(-1)?.[1]?.trim();
+  if (!raw) return undefined;
+  const quote = raw[0];
+  return (quote === '"' || quote === "'") && raw.endsWith(quote) ? raw.slice(1, -1) : raw;
 }
 
 function notify(
@@ -277,10 +281,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     try {
       const config = { ...configured, apiKey: await getApiKey($, configured) };
       const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
-        if (!(await safetyAllows(async (gateUrl, gateInit) => {
-          const gateResponse = await $.http.fetch(gateUrl, gateInit);
-          return { status: gateResponse.status, ok: gateResponse.ok, text: gateResponse.text };
-        }, init?.body ?? ''))) {
+        if (!safetyAllows(init?.body ?? '', await $.session.cwd())) {
           throw new Error('Jev safety gate blocked or unavailable; using built-in summary');
         }
         const response = await $.http.fetch(url, init);

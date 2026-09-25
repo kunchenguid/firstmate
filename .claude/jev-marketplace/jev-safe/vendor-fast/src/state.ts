@@ -170,7 +170,6 @@ function historyEntries(
   return entries;
 }
 
-/** The last three user prompts, as the default `goal`. */
 export function goalFromMessages(messages: readonly Message[]): string {
   return messages
     .filter(

@@ -377,6 +377,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/jev-tools-adoption.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/extension-bindings.md",
       "audience": "maintainer-architecture"
     },
@@ -418,10 +422,6 @@
     },
     {
       "path": "docs/gitlab-merge-watch.md",
-      "audience": "maintainer-verification"
-    },
-    {
-      "path": "docs/jev-tools-adoption.md",
       "audience": "maintainer-verification"
     },
     {

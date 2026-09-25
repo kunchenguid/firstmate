@@ -2,7 +2,7 @@
   "env": {
     "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"
   },
-  "enabledMcpjsonServers": [
+  "disabledMcpjsonServers": [
     "jev"
   ],
   "hooks": {
@@ -75,7 +75,7 @@
     ]
   },
   "enabledPlugins": {
-    "jev-safe@firstmate-jev": true
+    "jev-safe@firstmate-jev": false
   },
   "extraKnownMarketplaces": {
     "firstmate-jev": {

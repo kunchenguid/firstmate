@@ -6,17 +6,15 @@
  * reports. The module wraps every Read, Bash and Grep call in-process: the result
  * goes to the resident sidecar (`winnow serve`) together with the task read from
  * the live session, and the sidecar's rewrite comes back as the tool's result.
- * At prompt time it asks the sidecar which context files the prompt needs and
- * appends them to the prompt's context.
  */
-import type { EngineInterface, Register, SessionMessage } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
+import { safetyAllows } from '../../../jev-safety/client.mjs'
 
 /** The sidecar's port. Keep it equal to WINNOW_PORT. */
 export const PORT = 47311
 export const TOOLS = ['Read', 'Bash', 'Grep'] as const
 /** Results shorter than this are never rewritten (the sidecar's WINNOW_MIN_CHARS default); skip the round trip. */
 const MIN_CHARS = 1500
-const TASK_CHARS = 1500
 
 export type Task = { user_request: string; assistant_intent: string }
 
@@ -30,40 +28,6 @@ type HookOutput = {
 
 type ToolCallEvent = { tool: string; tool_use_id?: string; agentId?: string } & Record<string, unknown>
 
-/**
- * The task a tool call serves: the last thing the human asked for and the last
- * thing the assistant said since. Mirrors the sidecar's `read_task`, which reads
- * the same two things from the transcript file; here they come from the live
- * session, so no transcript path is needed and a subagent sees its own task.
- */
-export function taskFrom(messages: readonly SessionMessage[]): Task {
-  let user = ''
-  let assistant = ''
-  for (const m of messages) {
-    const text = m.text.trim()
-    if (m.role === 'user') {
-      if (m.toolResults !== undefined && m.toolResults.length > 0) continue // a tool-result turn, not the human
-      if (text !== '') {
-        user = text
-        assistant = ''
-      }
-    } else if (text !== '') {
-      assistant = text
-    }
-  }
-  return { user_request: head(user, TASK_CHARS), assistant_intent: tail(assistant, TASK_CHARS) }
-}
-
-/** A long request says what to do in its first lines. */
-export function head(text: string, limit: number): string {
-  return text.length <= limit ? text : text.slice(0, limit - 1).trimEnd() + '…'
-}
-
-/** A long assistant message says what it will do next at its end. */
-export function tail(text: string, limit: number): string {
-  return text.length <= limit ? text : '…' + text.slice(-(limit - 1)).trimStart()
-}
-
 export function describeMeta(tool: string, meta: Meta): string {
   const k = (n: number | undefined) =>
     n === undefined ? '?' : n >= 10_000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
@@ -75,15 +39,11 @@ async function post(
   $: EngineInterface,
   url: string,
   payload: unknown,
+  root: string,
 ): Promise<{ output: HookOutput | undefined; meta: Meta | undefined } | undefined> {
   let res
   try {
-    const gate = await $.http.fetch('http://127.0.0.1:48752/check', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload),
-    })
-    if (!gate.ok || JSON.parse(gate.text).allowed !== true) {
+    if (!safetyAllows(JSON.stringify(payload), root)) {
       $.ui.log('winnow: safety gate blocked or unavailable; preserving original output', { to: 'debug' })
       return undefined
     }
@@ -123,6 +83,19 @@ async function whereami($: EngineInterface): Promise<{ session_id: string; cwd: 
   return { session_id, cwd }
 }
 
+async function liveTask($: EngineInterface): Promise<Task | undefined> {
+  const messages = await $.session.messages().catch(() => [])
+  const lastText = (role: string) =>
+    [...messages].reverse().find((message) =>
+      message.role === role &&
+      message.text.trim() &&
+      (role !== 'user' || (message.toolResults ?? []).length === 0),
+    )?.text.trim() ?? ''
+  const user_request = lastText('user')
+  const assistant_intent = lastText('assistant')
+  return user_request && assistant_intent ? { user_request, assistant_intent } : undefined
+}
+
 export const register: Register = (on) => {
   const base = `http://127.0.0.1:${PORT}`
 
@@ -133,7 +106,9 @@ export const register: Register = (on) => {
       if (JSON.stringify(answer.result).length < MIN_CHARS) return answer
 
       const { tool: toolName, tool_use_id, agentId, ...input } = e as ToolCallEvent
-      const [messages, where] = await Promise.all([$.session.messages().catch(() => [] as SessionMessage[]), whereami($)])
+      const where = await whereami($)
+      const task = await liveTask($)
+      if (!task) return answer
       const res = await post($, `${base}/hook/post-tool-use`, {
         hook_event_name: 'PostToolUse',
         source: 'function-hook',
@@ -143,8 +118,8 @@ export const register: Register = (on) => {
         tool_input: input,
         tool_response: answer.result,
         tool_use_id,
-        task: taskFrom(messages),
-      })
+        task,
+      }, where.cwd)
       if (typeof res?.output?.systemMessage === 'string') $.ui.toast(res.output.systemMessage)
       const updated = res?.output?.hookSpecificOutput?.updatedToolOutput
       if (updated === undefined) return answer
@@ -152,19 +127,4 @@ export const register: Register = (on) => {
       return { ...answer, result: updated }
     })
   }
-
-  on('prompt.submit', async ($, e, next) => {
-    if (e.text.trim().length < 12) return next(e)
-    const where = await whereami($)
-    const res = await post($, `${base}/hook/user-prompt-submit`, {
-      hook_event_name: 'UserPromptSubmit',
-      source: 'function-hook',
-      ...where,
-      prompt: e.text,
-    })
-    if (typeof res?.output?.systemMessage === 'string') $.ui.toast(res.output.systemMessage)
-    const extra = res?.output?.hookSpecificOutput?.additionalContext
-    if (typeof extra !== 'string' || extra === '') return next(e)
-    return next({ ...e, context: [...(e.context ?? []), extra] })
-  })
 }
