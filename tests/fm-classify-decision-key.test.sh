@@ -558,6 +558,22 @@ test_declared_wait_survives_answers_past_the_event_window() {
   pass "a declared wait outlives answers for other keys beyond the event window, and its own resolved line retracts it"
 }
 
+# A settled hold mirror sits on top of a pause whose own last worker event is a
+# resolved line for a different key. The mirror must not hide that pause.
+test_declared_wait_survives_settled_hold_mirror() {
+  local dir f
+  dir=$(case_dir settled-hold-mirror)
+  f="$dir/answered.status"
+  printf 'paused: waiting on upstream\n' > "$f"
+  printf 'resolved [key=api]: answered\n' >> "$f"
+  printf 'captain-held [key=captain-hold-answered-1]: operator review\n' >> "$f"
+  printf 'resolved [key=captain-hold-answered-1]: captain call released by fm-captain-hold\n' >> "$f"
+  [ "$(status_declared_wait_line "$f")" = 'paused: waiting on upstream' ] \
+    || fail "a settled hold mirror hid the standing pause: '$(status_declared_wait_line "$f")'"
+  pass "a settled hold mirror does not hide a standing pause under another key's resolved line"
+}
+
 test_keyless_wait_survives_stated_default_retraction
 test_declared_wait_survives_answers_past_the_event_window
+test_declared_wait_survives_settled_hold_mirror
 test_bare_prose_cannot_open_or_close_a_decision
