@@ -4153,12 +4153,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         limit=300
       fi
       [ "$writing" = 0 ] || limit=$((writing_start + 600))
-      if [ "$writing_start" -ge 0 ] && [ "$writing" = 0 ]; then
-        if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
-          limit=$((writing_start + 600))
-        fi
+      if [ "$writing_start" -ge 0 ] && [ "$writing" = 0 ] && [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+        limit=$((writing_start + 600))
         ordinary=$((ordinary + 1))
-        if [ "$ordinary" -ge 60 ] && [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+        if [ "$ordinary" -ge 60 ]; then
           return 1
         fi
       fi
@@ -4220,6 +4218,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       fi
       if ! (cd "$PROJ_ABS" && TREEHOUSE_NO_UPDATE_CHECK=1 fm_run_timed 15 treehouse return "$spawn_first_slot" </dev/null); then
         echo "error: Treehouse did not return the observed slot; refusing retry in window $T" >&2
+        exit 1
+      fi
+      fm_treehouse_slot_owner_release "$spawn_first_slot" "$ID"
+      fm_treehouse_slot_owner_state "$spawn_first_slot" "$ID"
+      if [ "$FM_TREEHOUSE_SLOT_OWNER" != absent ]; then
+        echo "error: could not retire returned slot's task claim; refusing retry in window $T" >&2
         exit 1
       fi
       spawn_treehouse_get_attempts=2

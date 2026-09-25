@@ -428,7 +428,9 @@ test_hung_get_that_hangs_again_refuses_after_one_retry() {
   assert_contains "$out" 'attempts: 2' 'missing retry count'
   [ "$(key_count 'treehouse get')" -eq 2 ] || fail 'retried more than once'
   [ "$(key_count C-c)" -eq 2 ] || fail 'second hang was not interrupted'
-  pass "second hang refuses after exactly one retry"
+  assert_grep "$HUNG_SLOT_DIR" "$COUNTFILE.return" 'owned slot was not returned'
+  [ ! -e "$(dirname "$HUNG_SLOT_DIR")/.fm-slot-owner" ] || fail 'returned slot retained its task claim after retry failed'
+  pass "second hang refuses after exactly one retry and retires returned-slot claim"
 }
 
 test_hung_get_behind_a_held_pool_lock_refuses_without_retry() {
