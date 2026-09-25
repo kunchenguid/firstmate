@@ -1411,8 +1411,11 @@ fm_pending_reply_session_token() {  # <state-dir>
     printf '%s' "$FM_PENDING_REPLY_SESSION"
     return 0
   fi
-  # shellcheck source=bin/fm-session-lock-lib.sh
-  . "$_FM_PENDING_REPLY_LIB_DIR/fm-session-lock-lib.sh"
+  if ! command -v fm_session_lock_inspect >/dev/null 2>&1; then
+    bash -c '. "$1"; fm_session_lock_inspect "$2"; [ "${FM_LOCK_INSPECT_STATE:-}" = held ] || exit 0; printf "%s" "$FM_LOCK_INSPECT_PID"; if recorded=$(fm_session_lock_recorded_session_id "$2"); then printf ":%s" "$recorded"; fi' _ \
+      "$_FM_PENDING_REPLY_LIB_DIR/fm-session-lock-lib.sh" "$state"
+    return 0
+  fi
   fm_session_lock_inspect "$state"
   [ "${FM_LOCK_INSPECT_STATE:-}" = held ] || return 0
   printf '%s' "$FM_LOCK_INSPECT_PID"
@@ -1448,7 +1451,9 @@ fm_pending_reply_escalated_decisions_json() {  # <state-dir>
 # Remind unresolved escalations once per later live session. One check wake,
 # no second recovery and no second status line. Empty token and an unchanged
 # token are no-ops, including on every later poll of the same session.
-fm_pending_reply_remind_escalated() {  # <state-dir>
+# Pass the session token when the caller already computed it. Omitting it
+# reads the token here, which needs the lock helpers already loaded.
+fm_pending_reply_remind_escalated() {  # <state-dir> [session-token]
   local state=$1 token dir rec corr task summary payload key queued rc=0
   local -a open=() recs=()
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
@@ -1462,13 +1467,13 @@ fm_pending_reply_remind_escalated() {  # <state-dir>
     open+=("$rec")
   done
   [ "${#open[@]}" -gt 0 ] || return 0
-  token=$(fm_pending_reply_session_token "$state")
+  if [ "$#" -ge 2 ]; then
+    token=$2
+  else
+    token=$(fm_pending_reply_session_token "$state")
+  fi
   [ -n "$token" ] || return 0
   STATE=$state
-  if ! declare -F fm_wake_append >/dev/null 2>&1; then
-    # shellcheck source=bin/fm-wake-lib.sh
-    . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
-  fi
   for rec in "${open[@]}"; do
     [ "$(fm_pending_reply_get "$rec" surfaced_session)" != "$token" ] || continue
     if fm_pending_reply_escalation_dismissed "$rec"; then
