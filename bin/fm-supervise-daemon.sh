@@ -25,10 +25,14 @@
 # current daemon injection as the typed away-supervisor kind after the stable
 # FM_OPERATIONAL_PREFIX. A human cannot type its leading U+2063 from a normal
 # keyboard at the start of a message, and Herdr transports it as text.
-# Firstmate's contract: a message that starts with the current prefix, or a
-# legacy bare-marker daemon escalation, is internal (stay afk); an unmarked
-# message means the captain is back (exit afk, flush catch-up, resume per-wake
-# responsiveness). The prefix and busy-guard solve the same problem - the
+# A primary harness that strips invisible characters from submitted prompts
+# (fm_operational_harness_needs_record, Claude Code) instead receives the
+# owner's record-backed doorbell: the envelope is written to this home's
+# state/operational-inbox and only a plain doorbell line naming it is typed.
+# Firstmate's contract: a message that starts with the current prefix, a
+# legacy bare-marker daemon escalation, or a doorbell whose record this home
+# holds is internal (stay afk); any other message means the captain is back
+# (exit afk, flush catch-up, resume per-wake responsiveness). The prefix and busy-guard solve the same problem - the
 # daemon and the human share one input channel - so they live together under
 # /afk.
 #
@@ -281,7 +285,8 @@ afk_exit() {  # <state>
 # should_exit_afk: encodes firstmate's afk-exit contract as a testable function.
 #   away posture inactive   -> 1 (nothing to exit; the posture is the record
 #                              bin/fm-afk-contract.sh owns, or the legacy flag)
-#   message has marker      -> 1 (internal escalation; stay afk)
+#   message has marker, or is a doorbell for a record in this home
+#                           -> 1 (internal escalation; stay afk)
 #   message is /afk command -> 1 (re-entering/extending afk; stay afk)
 #   anything else           -> 0 (captain is back; exit afk)
 # Bias toward exit: only the marker and an explicit /afk invocation keep afk
@@ -289,7 +294,7 @@ afk_exit() {  # <state>
 should_exit_afk() {  # <state> <message-text>
   local state=$1 msg=$2
   afk_active "$state" || fm_afk_contract_present "$state" || return 1
-  message_is_injection "$msg" && return 1
+  message_is_injection "$msg" "$state" && return 1
   case "$msg" in
     /afk*) return 1 ;;
   esac
@@ -297,16 +302,17 @@ should_exit_afk() {  # <state> <message-text>
 }
 
 # message_is_injection: 0 if the given message text starts with the sentinel
-# marker (a daemon escalation), 1 otherwise (a real user message). Firstmate's
+# marker, or is a record-backed doorbell whose record sits in <state>'s own
+# operational inbox (a daemon escalation), 1 otherwise (a real user message). Firstmate's
 # afk-exit contract uses this: marker present -> stay afk; absent -> captain is
 # back. Bias ambiguous cases toward exit (a false exit is self-correcting).
-message_is_injection() {  # <message-text>
-  local msg=$1
+message_is_injection() {  # <message-text> [state]
+  local msg=$1 state=${2:-$(_state_root)} record_kind
   [ -n "$msg" ] || return 1
   case "$msg" in
     "$FM_INJECT_MARK"*) return 0 ;;
   esac
-  return 1
+  fm_operational_doorbell_kind "$msg" "$state" record_kind
 }
 
 # strip_injection_marker: remove a current typed away envelope, the landed
@@ -1282,7 +1288,7 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded
+  local msg=$1 state target backend retries sleep_s verdict composer encoded body
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -1294,6 +1300,7 @@ inject_msg() {  # <message> [state]
   # the exact away-supervisor kind without interpreting this payload's prose.
   msg=$(_collapse_newlines "$msg")
   fm_operational_input_encode away-supervisor "$msg" encoded || return 1
+  body=$msg
   msg=$encoded
   target="${FM_SUPERVISOR_TARGET:-$FM_SUPERVISOR_TARGET_DEFAULT}"
   # BACKEND-AWARE (previously a raw `tmux display-message` pane-exists probe):
@@ -1321,6 +1328,16 @@ inject_msg() {  # <message> [state]
   if [ "$composer" != empty ]; then
     log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
     return 1
+  fi
+  #   c) A primary that strips invisible characters from submitted prompts gets
+  #      the owner's record-backed doorbell instead of the typed envelope, so
+  #      the away-mode return check can still tell this escalation from the
+  #      captain. The record is written only once every guard has passed.
+  if fm_operational_harness_needs_record "$(fm_daemon_primary_harness)"; then
+    if ! fm_operational_record_write "$state" away-supervisor "$body" msg; then
+      log "inject failed: could not publish the away-supervisor record under $state"
+      return 1
+    fi
   fi
   # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
   # retype) via the shared submit primitive. Success = the backend confirms
