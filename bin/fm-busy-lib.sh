@@ -1008,6 +1008,30 @@ fm_busy_launch_prompt_parked() {  # <harness>
   esac
 }
 
+# --- confirmation-prompt signatures (fm_busy_confirmation_prompt_pending) ---
+#
+# NOT part of fm_busy_classify's busy/idle/unknown precedence chain: a
+# command-safety confirmation prompt can render in the middle of an otherwise
+# ordinary turn, while the busy-state record still legitimately reads busy.
+# bin/fm-watch.sh calls this detector directly against every captured pane.
+
+fm_busy_claude_confirmation_prompt_tail() {
+  local buf
+  buf=$(cat)
+  printf '%s' "$buf" | grep -qiE 'requires confirmation for this command' \
+    && printf '%s' "$buf" | grep -qiE 'Blocked by classifier' \
+    && printf '%s' "$buf" | grep -qE '❯[[:space:]]*[0-9]+\.' \
+    && printf '%s' "$buf" | grep -qiE '[0-9]+\.[[:space:]]*Yes([^A-Za-z]|$)' \
+    && printf '%s' "$buf" | grep -qiE '[0-9]+\.[[:space:]]*No([^A-Za-z]|$)'
+}
+
+fm_busy_confirmation_prompt_pending() {  # <harness>
+  case "${1:-}" in
+    claude*) fm_busy_claude_confirmation_prompt_tail ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown plus the producing source (see header). Never probes

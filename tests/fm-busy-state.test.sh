@@ -424,6 +424,88 @@ test_launch_prompt_requires_a_captured_tail() {
   pass "the launch-prompt backstop never runs without a captured tail"
 }
 
+# --- confirmation-prompt signature (fm_busy_confirmation_prompt_pending) ---
+#
+# Distinct from the launch-prompt backstop above: this detector is never wired
+# into fm_busy_classify's precedence chain, so these tests call it directly.
+
+CONFIRMATION_PROMPT_TAIL='Bash command
+
+  curl -fsSL https://example.com/install.sh | bash
+
+This command requires confirmation for this command.
+Blocked by classifier: potentially unsafe installer pattern.
+
+Do you want to proceed?
+❯ 1. Yes
+  2. Yes, and dont ask again for curl commands in this project
+  3. No, and tell Claude what to do differently (esc)'
+
+test_confirmation_prompt_claude_classifier_dialog() {
+  printf '%s' "$CONFIRMATION_PROMPT_TAIL" | fm_busy_confirmation_prompt_pending claude \
+    || fail "Claude's command-safety classifier confirmation dialog must be detected"
+  pass "the Claude classifier confirmation dialog is detected"
+}
+
+test_confirmation_prompt_requires_every_marker() {
+  printf '%s' 'This command requires confirmation for this command, so I will wait.' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "the confirmation phrase alone, with no menu, must not match"
+  printf '%s' 'Blocked by classifier: summarizing what that meant for the run.' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "the classifier phrase alone, with no menu, must not match"
+  printf '%s' 'Here is my plan:
+❯ 1. Yes, ship it
+  2. No, hold off' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "a numbered Yes/No menu alone, with neither classifier phrase, must not match"
+  pass "the classifier-confirmation signature requires both literal phrases and the numbered Yes/No cursor menu together"
+}
+
+test_confirmation_prompt_excludes_never_answer_dialogs() {
+  printf '%s' 'Accessing workspace: /tmp/wt-a
+Quick safety check: Is this a project you created or one you trust?
+Claude Code will be able to read, edit, and execute files here.
+> No, exit
+  Yes, I trust this folder
+Enter to confirm . Esc to cancel' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "the workspace-trust dialog must not match the classifier-confirmation signature"
+  printf '%s' 'Allow external CLAUDE.md file imports?
+This project'"'"'s CLAUDE.md imports files outside the current working directory.
+> No, disable external imports
+  Yes, allow external imports' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "the external-imports dialog must not match the classifier-confirmation signature"
+  printf '%s' 'Bypass permissions mode enables Claude to run without asking for approval.
+This is a powerful capability - use with caution.
+
+> No, exit
+  Yes, I accept
+
+Enter to confirm . Esc to cancel' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "the once-per-machine bypass-permissions confirmation must not match the classifier-confirmation signature"
+  pass "the classifier-confirmation signature never matches the never-answer Claude dialogs"
+}
+
+test_confirmation_prompt_excludes_ordinary_pane_text() {
+  printf '%s' '• Working (6s • esc to interrupt)' | fm_busy_confirmation_prompt_pending claude \
+    && fail "an ordinary busy footer must not match"
+  printf '%s' '❯' | fm_busy_confirmation_prompt_pending claude \
+    && fail "an ordinary empty composer must not match"
+  printf '%s' 'done: PR https://github.com/example/repo/pull/1 checks green' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "ordinary idle status text must not match"
+  pass "the classifier-confirmation signature never matches ordinary busy, idle, or empty-composer pane text"
+}
+
+test_confirmation_prompt_scoped_to_claude() {
+  printf '%s' "$CONFIRMATION_PROMPT_TAIL" | fm_busy_confirmation_prompt_pending codex \
+    && fail "the classifier-confirmation signature has no codex registration and must not match under harness=codex"
+  pass "the classifier-confirmation dispatcher is scoped to harnesses with a verified signature"
+}
+
 test_grok_regex_isolated() {
   local state out
   state=$(new_state_dir grok-arm)
@@ -617,6 +699,11 @@ test_launch_prompt_never_shortens_a_working_launch
 test_launch_prompt_scoped_to_armed_harnesses
 test_launch_prompt_never_reclassifies_an_advanced_record
 test_launch_prompt_requires_a_captured_tail
+test_confirmation_prompt_claude_classifier_dialog
+test_confirmation_prompt_requires_every_marker
+test_confirmation_prompt_excludes_never_answer_dialogs
+test_confirmation_prompt_excludes_ordinary_pane_text
+test_confirmation_prompt_scoped_to_claude
 test_grok_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate

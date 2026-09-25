@@ -594,6 +594,20 @@ The real pane renders this inside a bordered box, omitted here for readability; 
 That capture demonstrated why each signature function matches the FULL captured tail rather than the Grok/Rovo/AGY busy-footer convention of the last 12 non-blank lines: a bordered dialog box renders many short lines of pure border and padding (`│  ...  │`) that are NOT whitespace-only, so the 12-line reduction pushed this exact heading text out of the window and silently defeated the match on the first attempt.
 None of these three runs ever answered its dialog (Escape only, never Enter), so no credential store was written to and no model tokens were spent.
 
+## Interactive confirmation-prompt signature
+
+`bin/fm-busy-lib.sh`'s `fm_busy_confirmation_prompt_pending` detects Claude Code's command-safety classifier confirmation dialog in a captured pane, independent of busy-state classification.
+`bin/fm-watch.sh`'s `interactive_prompt_check` calls it directly on every recorded window every poll.
+
+This signature has not been live-verified against a real Claude Code session because Claude's classifier decides per command whether to render its confirmation dialog, and no reliable CLI flag or environment shape is known to force it.
+The signature is built from the literal phrases reported from the originating incident plus the numbered Yes/No menu with a cursor line, and it is pinned by the portable regression suite below.
+
+```sh
+bash tests/fm-busy-state.test.sh
+```
+
+Refresh this record if a real captured classifier-confirmation dialog becomes available, or if a reliable way to force the dialog on demand is found.
+
 ## Worker account pin sign-in check
 
 `bin/fm-worker-account-lib.sh` decides whether a pinned account is signed in from vendor output: the exit status of `claude auth status`, the JSON of `pi auth check`, and the provider column of `pi --list-models`.

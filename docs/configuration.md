@@ -93,6 +93,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 - Independent HOME/AWAY Hermes/Telegram routing mode under `state/captain-presence` (`bin/fm-hermes-notify.sh`).
 - Optional durable Hermes/Telegram captain-hold notification registrations under `state/hermes-notify/` (`bin/fm-hermes-notify.sh`).
+- Last interactive confirmation/permission prompt hashes under `state/.prompt-*` (`bin/fm-watch.sh`).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
 
