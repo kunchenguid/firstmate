@@ -168,6 +168,7 @@ def afk_email_context():
 
 
 
+
     contract = os.path.join(os.path.dirname(__file__), 'fm-afk-contract.sh')
     env = os.environ.copy()
     env.setdefault('FM_HOME', os.path.dirname(os.path.dirname(__file__)))
@@ -208,6 +209,7 @@ def afk_email_context():
     if configured.returncode != 0 or not recipient:
         return None, True, False
     return recipient, True, False
+
 
 
 
@@ -644,6 +646,7 @@ def cmd_poll_list():
 
 
 
+
         afk_enabled = recipient is not None
 
 
@@ -707,6 +710,7 @@ def cmd_poll_list():
                 else:
                     new_emitted += 1
                 continue
+
 
 
 

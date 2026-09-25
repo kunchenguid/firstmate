@@ -783,6 +783,7 @@ def verify_note(note_id):
 
 
 
+
         return 0
     identity = inbox_identity(note_id)
     if identity is None:
@@ -796,6 +797,7 @@ def verify_note(note_id):
     if posture is None:
         print("fm-afk-email: away posture could not be validated for an email handoff", file=sys.stderr)
         return 1
+
 
 
 
@@ -817,6 +819,7 @@ def verify_note(note_id):
 
 
 
+
         return 0
     body = inbox_note_body(note_id)
     if body is None:
@@ -828,6 +831,7 @@ def verify_note(note_id):
         return 0
     print(json.dumps({
         "email_handoff": True,
+
 
 
 
