@@ -48,6 +48,8 @@ pass 'attempt replay is idempotent and payload mutation is rejected'
 
 "$CLI" lifecycle a | jq '.disposition="archived"' > "$TMP_ROOT/input.json"
 if "$CLI" reconcile a --expected-revision 4 --record "$TMP_ROOT/input.json" >/dev/null 2>&1; then fail 'archive accepted without stop authority'; fi
+"$CLI" lifecycle a | jq '.disposition="archived" | .assessment.authority_ref="data/a/brief.md"' > "$TMP_ROOT/input.json"
+if "$CLI" reconcile a --expected-revision 4 --record "$TMP_ROOT/input.json" >/dev/null 2>&1; then fail 'archive accepted an alias of the existing authority'; fi
 printf 'Explicitly stop this task\n' > "$FM_HOME/data/a/stop.txt"
 "$CLI" lifecycle a | jq --arg ref "$FM_HOME/data/a/stop.txt" '.disposition="archived" | .assessment.authority_ref=$ref' > "$TMP_ROOT/input.json"
 "$CLI" reconcile a --expected-revision 4 --record "$TMP_ROOT/input.json" >/dev/null
