@@ -435,6 +435,31 @@ test_lock_recovers_dead_nested_steal_chain() {
   pass "dead nested steal chain from an interrupted reclaim is recovered"
 }
 
+test_lock_reclaims_self_held_steal_mutex() {
+  # A TERM that lands while this process holds the steal mutex runs the EXIT
+  # path, which re-acquires the same dead-owner lock. The abandoned steal hold
+  # is this process's own and must not wedge that exit path.
+  local dir state lockdir rc
+  dir=$(make_case lock-self-held-steal)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  mkdir "$lockdir"
+  printf '%s\n' "$(dead_pid)" > "$lockdir/pid"
+
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_create "$2.steal" || exit 7
+    fm_lock_try_acquire "$2" || exit 8
+    [ "$(cat "$2/pid" 2>/dev/null)" = "${BASHPID:-$$}" ] || exit 9
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -eq 0 ] || fail "self-held steal mutex blocked reclaiming a dead-owner lock (rc=$rc)"
+  [ ! -e "$lockdir.steal" ] && [ ! -L "$lockdir.steal" ] \
+    || fail "self-held steal mutex remained linked after reclaim"
+  pass "a steal mutex abandoned by this process does not block its own reclaim"
+}
+
 test_lock_steal_reap_cannot_remove_successor() {
   # Two reapers verify the same dead steal owner. The competitor runs to
   # completion exactly when the first one is about to remove the link; at most
@@ -1493,6 +1518,7 @@ test_lock_stale_steal_single_winner_under_concurrency
 test_lock_reclaims_dead_steal_owner_without_nested_markers
 test_lock_recovers_dead_nested_steal_chain
 test_lock_steal_reap_cannot_remove_successor
+test_lock_reclaims_self_held_steal_mutex
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace

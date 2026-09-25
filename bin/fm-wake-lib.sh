@@ -969,13 +969,18 @@ fm_lock_reap_dead_link() {
 
 # Acquire the short-lived steal mutex without recursively creating another
 # steal mutex. A dead holder is reaped once; a dead nested steal marker left by
-# the former recursive reclaim is reaped too so it cannot block the claim.
+# the former recursive reclaim is reaped too so it cannot block the claim. A
+# hold abandoned by this very process (a trap interrupted its critical section)
+# is reclaimed like fm_lock_try_acquire's self-held branch.
 fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
-  local lockdir=$1
+  local lockdir=$1 current
   FM_LOCK_OWNER_DIR=
   fm_lock_try_create "$lockdir" && return 0
+  fm_current_pid current || return 1
   fm_lock_reap_dead_link "$lockdir.steal" || true
-  if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
+  if [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$current" ]; then
+    fm_lock_remove_path "$lockdir" || true
+  elif [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_reap_dead_link "$lockdir" || return 1
   fi
   fm_lock_try_create "$lockdir"
@@ -1817,7 +1822,7 @@ fm_autoarm_release_abandoned() {  # <state-dir> [grace]
   steal="$lock.steal"
   epoch="$state/.claude-autoarm-epoch"
   fm_autoarm_claim_abandoned "$state" "$grace" || return 1
-  fm_lock_try_acquire "$steal" || return 1
+  fm_lock_try_acquire_steal_mutex "$steal" || return 1
   if ! fm_autoarm_claim_abandoned "$state" "$grace"; then
     fm_lock_release "$steal"
     return 1
