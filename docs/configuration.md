@@ -969,6 +969,7 @@ Its `commit-msg` rejects a message carrying AI self-attribution and names the li
 [`fm-worktree-hooks-lib.sh`](../bin/fm-worktree-hooks-lib.sh) owns that scoping, and teardown removes the worktree's `core.hooksPath` with the rest of the per-task wiring.
 A claude task worker's worktree hooks also run [`fm-attribution-pretool-check.sh`](../bin/fm-attribution-pretool-check.sh), the same matcher, as a Bash PreToolUse guard that additionally covers PR titles and bodies written through `gh` or `gh-axi`, and every ship and scout brief's rules forbid attribution.
 The hook does not cover commits made by no-mistakes' own pipeline agents: they run in no-mistakes' own worktrees (`~/.no-mistakes/worktrees`), outside the task worktree's git context.
+It also does not cover a commit made with `git commit --no-verify` (`-n`), which skips git's `commit-msg` hook; only the brief's rule forbids that bypass.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

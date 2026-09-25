@@ -20,11 +20,13 @@
 #
 # In command mode the guard fires only when a command segment (split at |, &&,
 # ||, ;, & and newlines) is itself a git commit, merge, tag, or notes invocation
-# (only git's global options may sit between `git` and the verb) or a gh /
-# gh-axi pr or api call, and the command carries an attribution pattern, either
+# (only git's global options may sit between `git` and the verb), a gh /
+# gh-axi pr create, edit, comment, review, or merge, or a gh / gh-axi api call
+# that writes, and the command carries an attribution pattern, either
 # inline or in a message file it passes (git commit -F/--file, gh --body-file/-F,
 # gh api -F/--field body=@file). Reading or searching for those patterns
-# (`git log | grep Co-Authored-By`) is never denied, and files named any other
+# (`git log | grep Co-Authored-By`, `gh pr view`, a GET `gh api`) is never
+# denied, and files named any other
 # way, such as by git add or a pathspec, are never read. It never executes,
 # sources, or expands the command.
 #
@@ -81,17 +83,43 @@ done
 NL=$'\n'
 # Matching is on lowercased text, one line at a time, so every pattern below is
 # lowercase.
-# An AI or agent name as a whole word. Claude is also a human first name, so it
-# counts only as a model or product name, or right before an email, a closing
-# quote, or the end of a line.
+# An AI or agent product named in a "Generated with" line, as a whole word.
+# Claude counts only as a model or product name, or right before an email, a
+# closing quote, or the end of a line.
 AI_NAME="(^|[^[:alnum:]])((anthropic|openai|chatgpt|codex|copilot|gemini|devin|cursor ?agent|grok|kimi|opencode|an? ai)([^[:alnum:]]|\$)|claude([[:space:]]*[<(\"']|[[:space:]]+(code|opus|sonnet|haiku|fable)|[[:space:]]*\$))"
-ATTRIBUTION="co-authored-by:.*${AI_NAME}|generated (with|by)[^[:alnum:]]*${AI_NAME}|claude-session:|claude\\.ai/code"
+# A Co-Authored-By line credits an AI only with AI context, because most agent
+# names are also human names (Claude Dupont, Devin Smith, Kimi Raikkonen): a
+# vendor-only name, the Claude form above, a product or model qualifier, a
+# vendor address, or an agent's bot account.
+CO_AUTHOR_AI="(^|[^[:alnum:]])((anthropic|openai|chatgpt|an? ai)([^[:alnum:]]|\$)|claude([[:space:]]*[<(\"']|[[:space:]]+(code|opus|sonnet|haiku|fable)|[[:space:]]*\$)|codex[[:space:]]+(cli|agent)|gemini[[:space:]]+(cli|code|[0-9])|github[[:space:]]+copilot|copilot[[:space:]]+(agent|chat)|grok[[:space:]]+(cli|code|[0-9])|kimi[[:space:]]+(cli|code|k[0-9])|devin[[:space:]]+ai|opencode[[:space:]]+agent|cursor[[:space:]]?agent)|@(anthropic\\.com|openai\\.com|cursor\\.com|x\\.ai|moonshot\\.(ai|cn)|cognition\\.ai|opencode\\.ai)([^[:alnum:].-]|\$)|(claude|codex|copilot|gemini|devin|cursor|grok|kimi|opencode)[^[:space:]<>@]*\\[bot\\]|\\+copilot@users\\.noreply\\.github\\.com"
+ATTRIBUTION="co-authored-by:.*(${CO_AUTHOR_AI})|generated (with|by)[^[:alnum:]]*${AI_NAME}|claude-session:|claude\\.ai/code"
 # A command segment that writes commit or PR text: git with only its global
-# options before a writing verb, or gh / gh-axi pr or api.
+# options before a writing verb, gh / gh-axi (optionally with -R/--repo) pr
+# create, edit, comment, review, or merge, or a gh / gh-axi api call, which
+# segment_writes admits only when it writes.
 GIT_GLOBAL="([[:space:]]+(-[cC]|--git-dir|--work-tree|--namespace|--exec-path|--config-env)[[:space:]]+[^[:space:]]+|[[:space:]]+-[^[:space:]]+)*"
-WRITER="^[[:space:]({]*([[:alpha:]_][[:alnum:]_]*=[^[:space:]]*[[:space:]]+)*([^[:space:]]*/)?(git${GIT_GLOBAL}[[:space:]]+(commit|merge|tag|notes)|gh(-axi)?[[:space:]]+(pr|api))([[:space:]]|\$)"
+GH_GLOBAL="([[:space:]]+(-r|--repo)[[:space:]]+[^[:space:]]+|[[:space:]]+--repo=[^[:space:]]+)*"
+SEGMENT_START="^[[:space:]({]*([[:alpha:]_][[:alnum:]_]*=[^[:space:]]*[[:space:]]+)*([^[:space:]]*/)?"
+WRITER="${SEGMENT_START}(git${GIT_GLOBAL}[[:space:]]+(commit|merge|tag|notes)|gh(-axi)?${GH_GLOBAL}[[:space:]]+pr[[:space:]]+(create|edit|comment|review|merge))([[:space:]]|\$)"
+GH_API="${SEGMENT_START}gh(-axi)?${GH_GLOBAL}[[:space:]]+api([[:space:]]|\$)"
+GH_API_METHOD="[[:space:]](-x[[:space:]]*|--method[[:space:]=]+)([[:alpha:]]+)"
+GH_API_FIELDS="[[:space:]](-f|--field|--raw-field|--input)([[:space:]=]|\$)"
 
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# Succeeds when a lowercased command segment writes commit or PR text. A gh api
+# call writes when its method is not GET, or when it sends fields or input
+# without an explicit GET, which is gh's default POST.
+segment_writes() {  # <segment>
+  local seg=$1
+  [[ $seg =~ $WRITER ]] && return 0
+  [[ $seg =~ $GH_API ]] || return 1
+  if [[ $seg =~ $GH_API_METHOD ]]; then
+    [ "${BASH_REMATCH[2]}" != get ]
+    return
+  fi
+  [[ $seg =~ $GH_API_FIELDS ]]
+}
 
 # Prints each line of <text> that carries attribution; fails when none does.
 attribution_lines() {  # <text>
@@ -147,7 +175,7 @@ SEGMENTS=${SEGMENTS//[|;&]/$NL}
 writes=1
 [ "$MODE" != raw ] || writes=0
 while [ "$writes" -eq 1 ] && IFS= read -r seg; do
-  if [[ $seg =~ $WRITER ]]; then
+  if segment_writes "$seg"; then
     writes=0
     break
   fi
