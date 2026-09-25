@@ -25,8 +25,6 @@
 # Post (after composing the reply to a file or stdin):
 #   fm-x-followup.sh <task-id> [--image <path>] [--final] --text-file <path>
 #   fm-x-followup.sh <task-id> [--image <path>] [--final] -
-#   Parsing is strict: an unknown dash-leading argument, a dash-leading task id,
-#   or more than one text source is a usage error before the link is even read.
 #     Linked, within window, and under the cap: posts ONE follow-up via
 #       fm-x-reply.sh --followup.
 #       On success: increments the counter and KEEPS the link, unless --final
@@ -46,6 +44,9 @@
 #     Window or cap already exhausted: clears the link, posts nothing, exit 0
 #       (silent skip).
 #     Not linked: nothing to do, exit 0.
+#
+# An unknown dash-leading argument, a dash-leading task id, or more than one
+# text source is a usage error before the link is read or changed.
 #
 # --final marks this as the outcome reply: it always clears the link after a
 # successful post, even if follow-ups remain under the cap. Use it for the
@@ -86,6 +87,8 @@ usage: fm-x-followup.sh --check <task-id>
 
 Post a completion follow-up (up to 3 per link, within a 7-day window) for an
 X-mode-linked task and manage the link's follow-up counter.
+Unknown options and extra text arguments are refused before checking the link.
+Text beginning with '-' must be supplied through --text-file or stdin.
 
 Options:
   --check          Print the request_id when a follow-up is due.

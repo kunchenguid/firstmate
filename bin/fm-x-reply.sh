@@ -136,6 +136,10 @@ usage: fm-x-reply.sh <request_id> [--followup] [--image <path>] [--receipt-file 
        fm-x-reply.sh <request_id> [--followup] [--image <path>] [--receipt-file <path>] -
 
 Post a public-safe X-mode answer to the relay, or a completion follow-up with --followup.
+Unknown options and extra text arguments are refused before posting.
+Text beginning with '-' must be supplied through --text-file or stdin.
+Use fm-x-followup.sh <task-id> --final for a final linked-task outcome;
+--final is not an fm-x-reply.sh option.
 
 Options:
   --followup       POST to /connector/followup instead of /connector/answer.
