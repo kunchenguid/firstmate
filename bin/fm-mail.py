@@ -140,6 +140,7 @@ def away_posture_operation():
 
 
 
+
 class AfkBodyFetchError(Exception):
     pass
 
@@ -760,6 +761,7 @@ def cmd_poll_list():
 
 
 
+
                     except AfkBodyFetchError:
                         raise
                     except Exception as error:
@@ -877,6 +879,7 @@ def cmd_poll_list():
                     ]
                 if result.stderr:
                     sys.stderr.write(result.stderr)
+
 
 
 

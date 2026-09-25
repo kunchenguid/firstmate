@@ -80,6 +80,7 @@ Each code is accepted only for its own sent item, once, and for seven days after
 
 
 
+
 A matching reply enters Firstmate's existing captain inbox as words for that outcome.
 An authenticated owner message with a missing, invalid, expired, or already-used code follows the ordinary mail wake path and is never treated as verified instructions.
 The email footer states the same safety boundary: replies never authorize destructive, irreversible, or security-sensitive actions, which still require your return or trusted-channel confirmation.
