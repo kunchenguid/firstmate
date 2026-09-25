@@ -13,6 +13,10 @@ WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LIB="$ROOT/bin/fm-wake-lib.sh"
 
+# Ambient omp markers would outrank the CLAUDECODE marker the guard cases below
+# assert, so drop them here the same way the harness suites do.
+unset OMPCODE FM_OMP_HARNESS
+
 # An arm only reports its typed failure after wait_for_healthy_successor has
 # spent the whole confirmation budget, so cases that wait for that failure must
 # outlast the production default (30s - see ARM_CONFIRM_DEFAULT in
