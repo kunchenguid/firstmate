@@ -568,6 +568,7 @@ test_backlog_tasks_axi_forms_and_overrides() {
 
 ## Queued
 - [ ] queued-comma - Queued Comma Task (repo: beta, since 2026-07-08) (kind: ship)
+- [ ] queued-local-title - Refresh local office (repo: beta, since 2026-07-08) (kind: ship)
 - [ ] parenthetical-title - Refresh sidebar (mobile) (repo: beta) (kind: ship)
 - [ ] blocked-reason - Blocked Reason (repo: beta) (kind: ship) blocked-by: queued-comma - waits on queued-comma
 - [ ] sample-decision-route - Choose sample route (repo: sample) (kind: captain) (since 2026-07-14) (hold: captain route choice pending) (hold-kind: captain)
@@ -616,6 +617,10 @@ EOF
     .backlog.records[] | select(.id == "queued-comma")
     | .repo == "beta" and .since == "2026-07-08"
   ' >/dev/null || fail "queued comma metadata did not split"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "queued-local-title")
+    | .title == "Refresh local office" and .local_note == null
+  ' >/dev/null || fail "an active title was mistaken for a local landing note"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "parenthetical-title")
     | .title == "Refresh sidebar (mobile)" and .repo == "beta"
