@@ -325,6 +325,35 @@ test_trust_refusals() {
   pass "traex trust refuses mismatched evidence and requires native working"
 }
 
+test_late_trust_preserves_launch() {
+  local rec out status gen slot_claim
+  rec=$(make_spawn_case late-trust)
+  read_spawn_case "$rec"
+  mkdir -p "$CASE_DIR/slots/1"
+  git -C "$PROJECT_DIR" worktree move "$WT_DIR" "$CASE_DIR/slots/1/project"
+  WT_DIR="$CASE_DIR/slots/1/project"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$WT_DIR" >"$CASE_DIR/slots/treehouse-state.json"
+  slot_claim="$CASE_DIR/slots/1/.fm-slot-owner"
+  out=$(FM_FAKE_AGENT_STATUS=unknown FM_FAKE_TRUST_PROMPT=other \
+    FM_BACKEND_HERDR_TRAEX_START_POLLS=3 FM_BACKEND_HERDR_TRAEX_START_INTERVAL=0 \
+    run_traex_spawn)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unapproved trust unexpectedly succeeded"
+  assert_absent "$CASE_DIR/trust-count" "unapproved hook trust received Enter"
+  assert_present "$HOME_DIR/state/$TASK_ID.meta" "live unconfirmed launch lost its task record"
+  assert_present "$HOME_DIR/state/$TASK_ID.busy-gen" "live unconfirmed launch lost its generation"
+  gen=$(cat "$HOME_DIR/state/$TASK_ID.busy-gen")
+  assert_grep "busy_gen=$gen" "$HOME_DIR/state/$TASK_ID.meta" "preserved generation changed"
+  assert_grep 'spawn_gen=s' "$HOME_DIR/state/$TASK_ID.meta" "original spawn generation was lost"
+  assert_grep 'launch_state=unconfirmed' "$HOME_DIR/state/$TASK_ID.meta" "unconfirmed launch is not actionable"
+  assert_grep "task=$TASK_ID" "$slot_claim" "unconfirmed live launch lost its pool slot claim"
+  out=$(run_traex_spawn)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unconfirmed launch allowed a duplicate spawn"
+  [ "$(grep -c . "$CASE_DIR/launch.log")" = 1 ] || fail "preserved task launched twice"
+  pass "late trust preserves the original task and generation without accepting trust or duplicating a worker"
+}
+
 test_scope_refuses_before_endpoint() {
   local rec out status sm
   rec=$(make_spawn_case scope)
@@ -420,6 +449,7 @@ test_generic_steer_interrupt_and_keys() {
   pass "traex steering, interrupt clearing, keys, and current state use generic Herdr owners"
 }
 
+test_late_trust_preserves_launch
 test_marker_detection_is_scoped
 test_spawn_trust_and_generic_lifecycle
 test_new_unknown_trust_rendering

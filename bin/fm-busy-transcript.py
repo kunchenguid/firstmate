@@ -5,9 +5,19 @@ Usage: init STATE ID HARNESS CWD SESSIONS BACKEND TARGET
        activate STATE ID
        read STATE ID HARNESS BACKEND TARGET
        fence-target STATE BACKEND TARGET
+       check-target STATE BACKEND TARGET
+       recover-check STATE ID ORIGINAL_TERMINAL ORIGINAL_PID
+       recover-apply STATE ID RECEIPT (internal fm-busy-event recovery writer)
 
 Owns <id>.busy-session (v1 JSON). The existing busy-gen and busy-state.lock
 serialize init/read/submission fencing with arm/retire. No vendor file is written.
+The optional process_binding records the original terminal, native PID/start,
+shell PID/start and kernel boot identity after in-place recovery. Every later
+read/text/key guard verifies that seal against Herdr and Linux /proc. Recovery
+restores the original gen only, under fm-busy-event's writer authority; its
+shell owner also holds lease/control/meta locks and reconciles the backlog.
+The check command writes no records. Apply must receive its exact receipt and
+never replaces an existing conflicting gen, process binding or spawn_gen.
 The launch prompt carries FIRSTMATE_BUSY_GENERATION=<gen>. Only a root CLI
 session whose FIRST typed UserMessage contains that whole line may bind. Cwd,
 session id, verified schema version, metadata generation and endpoint must match.
@@ -27,6 +37,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
+import signal
 import sys
 import time
 
@@ -43,9 +55,9 @@ class BrokenBinding(Unknown):
     pass
 
 
-def require(ok):
+def require(ok, reason=""):
     if not ok:
-        raise Unknown()
+        raise Unknown(reason)
 
 
 def metadata(state, task):
@@ -77,26 +89,144 @@ class Lock:
         for _ in range(40):
             try:
                 self.path.mkdir()
+                (self.path / "pid").write_text(str(os.getpid()))
                 return self
             except FileExistsError:
                 time.sleep(0.05)
         raise Unknown()
 
     def __exit__(self, *_):
+        (self.path / "pid").unlink(missing_ok=True)
         self.path.rmdir()
 
 
-def load(state, task):
+def load(state, task, recovery=False):
     data = json.loads((state / (task + ".busy-session")).read_text())
     meta = metadata(state, task)
     require(data["version"] == 1)
-    require(data["gen"] == (state / (task + ".busy-gen")).read_text().strip())
+    gen_path = state / (task + ".busy-gen")
+    require(not gen_path.is_symlink())
+    if not recovery or gen_path.exists():
+        require(data["gen"] == gen_path.read_text().strip())
     require(data["gen"] == meta.get("busy_gen"))
     require(data["harness"] == meta.get("harness"))
     require(data["cwd"] == str(Path(meta["worktree"]).resolve()))
     require(data["backend"] == meta.get("backend", "tmux"))
     require(data["target"] == meta.get("window"))
+    if not recovery:
+        require(meta.get("launch_state") not in ("prepared", "unconfirmed"))
+        if "process_binding" in data:
+            require(process_binding(state, task, data) == data["process_binding"])
     return data
+
+
+def herdr_snapshot(target):
+    # Route through the backend owner, including its session/transport checks.
+    # Tests can wrap the CLI through the guarded lab helper like fm-spawn.
+    owner = Path(__file__).with_name("fm-backend.sh")
+    script = '''set -eu
+source "$1"
+fm_backend_source herdr
+fm_backend_herdr_parse_target "$2"
+fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE"
+fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE"
+'''
+    result = subprocess.run(["bash", "-c", script, "busy-provenance", str(owner), target],
+                            capture_output=True, text=True, timeout=15, check=True)
+    rows = result.stdout.splitlines()
+    require(len(rows) == 2)
+    return json.loads(rows[0])["result"]["pane"], json.loads(rows[1])["result"]["process_info"]
+
+
+def process_start(pid):
+    require(isinstance(pid, int) and pid > 1)
+    proc = Path("/proc") / str(pid)
+    require(proc.stat().st_uid == os.getuid())
+    fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
+    require(fields[0] not in ("Z", "X"))
+    return fields[19]
+
+
+def launch_generation_in_argv(argv, gen):
+    prompts = [arg for arg in argv if isinstance(arg, str) and arg.startswith("\u2063FIRSTMATE_OP: v1 launch-brief:")]
+    return len(prompts) == 1 and "FIRSTMATE_BUSY_GENERATION=" + gen in prompts[0].splitlines()
+
+
+def process_binding(state, task, data):
+    # Narrow recovery capability: Linux-local Herdr Codex/TraeX only. A saved
+    # transcript by itself never proves which live process owns an endpoint.
+    require(sys.platform == "linux" and data["backend"] == "herdr")
+    require(data["harness"] in VERSIONS)
+    meta = metadata(state, task)
+    require(meta.get("kind") in ("ship", "scout") and not meta.get("remote_host"))
+    require(meta.get("endpoint_task_id", task) == task, "recorded endpoint task identity differs from the task")
+    session, workspace, pane_number = data["target"].split(":")
+    pane_id = workspace + ":" + pane_number
+    require(meta.get("herdr_session") == session)
+    require(meta.get("herdr_workspace_id") == workspace)
+    require(meta.get("herdr_pane_id") == pane_id)
+    pane, info = herdr_snapshot(data["target"])
+    require(pane["pane_id"] == info["pane_id"] == pane_id)
+    require(pane["tab_id"] == meta.get("herdr_tab_id"))
+    require(pane["workspace_id"] == workspace)
+    require(pane["agent"] == data["harness"], "Herdr agent does not match the recorded harness")
+    require(str(Path(pane["foreground_cwd"]).resolve()) == data["cwd"], "Herdr foreground cwd differs from the original task copy")
+    terminal = pane["terminal_id"]
+    require(isinstance(terminal, str) and terminal.startswith("term_"))
+    candidates = [p for p in info["foreground_processes"]
+                  if p.get("name") == data["harness"] and launch_generation_in_argv(p.get("argv", []), data["gen"])]
+    require(len(candidates) == 1, "no unique native harness process in the foreground")
+    process = candidates[0]
+    pid = process["pid"]
+    start = process_start(pid)
+    proc = Path("/proc") / str(pid)
+    fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
+    require(int(fields[2]) == info["foreground_process_group_id"], "native process is no longer in the recorded foreground group")
+    parent = int(fields[1])
+    for _ in range(128):
+        if parent == info["shell_pid"]:
+            break
+        require(parent > 1)
+        parent = int((Path("/proc") / str(parent) / "stat").read_text().rsplit(")", 1)[1].split()[1])
+    else:
+        raise Unknown()
+    argv = (proc / "cmdline").read_bytes().decode().strip("\0").split("\0")
+    require(argv == process["argv"], "kernel and Herdr process arguments disagree")
+    require(Path((proc / "exe").readlink()).name == data["harness"], "native executable name does not match the harness")
+    require(str((proc / "cwd").resolve()) == data["cwd"], "native process cwd differs from the original task copy")
+    require(launch_generation_in_argv(argv, data["gen"]), "original generation is absent from the live launch prompt")
+    env = dict(item.split(b"=", 1) for item in (proc / "environ").read_bytes().split(b"\0") if b"=" in item)
+    require(env.get(b"FM_TASK_ID") == task.encode(), "native process task environment does not match")
+    require(env.get(b"GOTMPDIR") == ("/tmp/fm-" + task + "/gotmp").encode(), "native process temporary directory binding does not match")
+    require(process_start(pid) == start)
+    return {"terminal": terminal, "pid": pid, "start": start,
+            "shell_pid": info["shell_pid"], "shell_start": process_start(info["shell_pid"]),
+            "boot": Path("/proc/sys/kernel/random/boot_id").read_text().strip()}
+
+
+def recovery_evidence(state, task, terminal, original_pid):
+    for suffix in ("meta", "busy-session", "busy-gen", "busy-state"):
+        path = state / (task + "." + suffix)
+        require(not path.is_symlink())
+        require(not path.exists() or (path.is_file() and path.stat().st_uid == os.getuid()))
+    data = load(state, task, recovery=True)
+    require(bool(data["gen"]) and all(c.isascii() and (c.isalnum() or c in "._-") for c in data["gen"]))
+    require(not data.get("unaccounted_input"))
+    record = state / (task + ".busy-state")
+    if record.exists():
+        require("gen=" + data["gen"] in record.read_text().split())
+    current = observe(data)
+    process = process_binding(state, task, data)
+    require(process["terminal"] == terminal)
+    require(process["pid"] == int(original_pid))
+    if "process_binding" in data:
+        require(data["process_binding"] == process)
+    meta = metadata(state, task)
+    proof = {"version": 1, "state": str(state.resolve()), "task": task,
+             "gen": data["gen"], "spawn_gen": meta.get("spawn_gen", ""),
+             "harness": data["harness"], "cwd": data["cwd"], "target": data["target"],
+             "session_id": current["sid"], "process": process}
+    return data, proof
 
 
 def identity(payload, data):
@@ -233,7 +363,23 @@ def read(state, task, harness, backend, target):
         print(verdict + " " + harness + "-transcript")
 
 
-def fence(state, backend, target):
+def fence(state, backend, target, check_only=False):
+    tasks = set()
+    # Metadata makes a missing or damaged sidecar a refusal, not a silent
+    # opt-out from identity checking. Unmanaged legacy endpoints stay outside
+    # this transcript contract.
+    for path in state.glob("*.meta"):
+        try:
+            meta = metadata(state, path.stem)
+        except Unknown:
+            require("window=" + target not in path.read_text().splitlines(), "contradictory metadata for the target endpoint")
+            continue
+        except OSError:
+            continue
+        if (meta.get("backend", "tmux"), meta.get("window")) == (backend, target):
+            binding = state / (path.stem + ".busy-session")
+            if meta.get("harness") in VERSIONS and (meta.get("busy_gen") or binding.exists() or binding.is_symlink()):
+                tasks.add(path.stem)
     for path in state.glob("*.busy-session"):
         # A damaged unrelated binding must not affect another adapter's input.
         # Its own reader already fails closed, so allowing input cannot produce
@@ -244,10 +390,13 @@ def fence(state, backend, target):
             continue
         if (header.get("backend"), header.get("target")) != (backend, target):
             continue
-        task = path.name.removesuffix(".busy-session")
+        tasks.add(path.name.removesuffix(".busy-session"))
+    require(len(tasks) <= 1)
+    for task in tasks:
+        path = state / (task + ".busy-session")
         with Lock(state, task):
             data = load(state, task)
-            if not data.get("input_enabled"):
+            if check_only or not data.get("input_enabled"):
                 continue
             try:
                 current = observe(data)
@@ -263,7 +412,38 @@ def fence(state, backend, target):
 def main():
     command, state_arg, *args = sys.argv[1:]
     state = Path(state_arg)
-    if command == "init":
+    if command in ("recover-check", "recover-apply"):
+        if command == "recover-check":
+            task, value, original_pid = args
+            # No state writes, including no discovered transcript watermark.
+            _, proof = recovery_evidence(state, task, value, original_pid)
+            print(json.dumps(proof, sort_keys=True))
+        else:
+            task, value = args
+            expected = json.loads(Path(value).read_text())
+            def interrupted(signum, _frame):
+                raise SystemExit(128 + signum)
+            signal.signal(signal.SIGTERM, interrupted)
+            signal.signal(signal.SIGHUP, interrupted)
+            with Lock(state, task):
+                data, proof = recovery_evidence(state, task, expected["process"]["terminal"], expected["process"]["pid"])
+                require(proof == expected)
+                data["process_binding"] = proof["process"]
+                data["input_enabled"] = True
+                # Publish the restriction first. Interruption leaves either the
+                # old refusal or a fully proven original-generation binding.
+                save(state / (task + ".busy-session"), data)
+                gen_path = state / (task + ".busy-gen")
+                if not gen_path.exists():
+                    tmp = gen_path.with_name(gen_path.name + ".recover." + str(os.getpid()))
+                    try:
+                        with tmp.open("x") as stream:
+                            stream.write(data["gen"] + "\n")
+                        os.replace(tmp, gen_path)
+                    finally:
+                        tmp.unlink(missing_ok=True)
+                print(json.dumps(proof, sort_keys=True))
+    elif command == "init":
         task, harness, cwd, sessions, backend, target = args
         require(harness in VERSIONS)
         with Lock(state, task):
@@ -278,13 +458,16 @@ def main():
     elif command == "activate":
         task, = args
         with Lock(state, task):
-            data = load(state, task)
+            data = load(state, task, recovery=True)
+            require(data["gen"] == (state / (task + ".busy-gen")).read_text().strip())
             data["input_enabled"] = True
             save(state / (task + ".busy-session"), data)
     elif command == "read":
         read(state, *args)
     elif command == "fence-target":
         fence(state, *args)
+    elif command == "check-target":
+        fence(state, *args, check_only=True)
     else:
         raise Unknown()
 
@@ -292,9 +475,13 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (Unknown, OSError, ValueError, KeyError, TypeError, AttributeError):
+    except (Unknown, OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as error:
         if len(sys.argv) > 4 and sys.argv[1] == "read":
             print("unknown " + sys.argv[4] + "-transcript")
         else:
-            print("error: transcript binding unavailable; input not sent", file=sys.stderr)
+            if sys.argv[1].startswith("recover-"):
+                detail = str(error) if isinstance(error, Unknown) and str(error) else "missing, unreadable or contradictory identity evidence"
+                print("error: recovery refused: " + detail, file=sys.stderr)
+            else:
+                print("error: transcript binding unavailable; input not sent", file=sys.stderr)
             sys.exit(1)

@@ -214,6 +214,38 @@ ok - real TraeX lab teardown preserved the default Herdr session
 ok - thin TraeX/Herdr smoke completed
 ```
 
+#### Preserved launch and steering recovery
+
+Verified on 2026-09-25 with Herdr 0.8.0, TraeX 0.207.1 internal edition, and Codex 0.156.1 on Linux.
+`tests/fm-busy-transcript-live-e2e.test.sh` runs the installed default TUIs in private user, PID, and network namespaces with a local simulated Responses provider and a generated non-default Herdr session.
+Its spawn regression creates a private harmless `true` hook and observes the real `Hooks need review` screen after directory trust.
+The failed spawn preserves its original records; only the test approves that known private hook, then the recovery entrypoint and ordinary inbox doorbell execute and acknowledge the original instruction.
+The same guard restores a missing original generation for both retained transcript adapters and checks later input, interrupt, completion, API failure, and endpoint death.
+The procedure and refusal boundaries belong to `bin/fm-busy-event.sh recover`, with mutation mechanics in `bin/fm-busy-recover.sh` and provenance checks in `bin/fm-busy-transcript.py`.
+
+```sh
+HERDR_LAB_HELPER=/home/chengyuhang/firstmate/bin/fm-herdr-lab.sh \
+  FM_BUSY_TRANSCRIPT_LAB_TASK=fix-traex-launch-steering-recovery-20260925 \
+  FM_BUSY_TRANSCRIPT_LIVE_E2E=1 \
+  bin/fm-test-run.sh tests/fm-busy-transcript-live-e2e.test.sh
+```
+
+```text
+ok - codex real original-generation recovery
+ok - traex real original-generation recovery
+ok - real hook trust is not accepted; failed spawn preserves original records and durable instruction
+ok - late trust, same-process recovery and ordinary re-ring executed the original durable instruction
+ok - real legacy missing-generation recovery preserves absent spawn_gen and ordinary fm-send reaches another vendor turn
+ok - recovery preserves the worker commit and unfinished work
+ok - real normal fm-spawn launch confirmed without requiring recovery
+```
+
+TraeX can expose both its root TUI and a same-name app-server process in the foreground process list.
+Recovery selects the unique native process carrying the exact generation-bearing launch argument, then verifies its kernel arguments and process identity; a name alone is insufficient.
+`tests/fm-busy-state.test.sh` supplies real-process regressions for that distinction, ambiguous roots, replacement processes, missing or contradictory records, repeated recovery, and interrupted recovery.
+`tests/fm-backlog-atomicity.test.sh` checks that pre-launch failure still rolls back while post-submission failure preserves ownership; `tests/fm-busy-adapter-wiring.test.sh` covers retained Pi extension guarantees.
+The provider is simulated, so this guard proves vendor lifecycle and local delivery behavior, not an external model service or production credentials.
+
 The broader ordinary TraeX worker/scout lifecycle was verified on 2026-08-11 with traecli 0.200.19 internal edition and Herdr 0.8.0.
 That guarded smoke used the same generic Herdr input, current-state, key, and cleanup owners as the other harnesses, while the only TraeX-specific backend fact was exact fresh-directory trust recognition.
 

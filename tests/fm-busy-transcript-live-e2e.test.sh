@@ -10,7 +10,7 @@ fm_live_gate opt-in FM_BUSY_TRANSCRIPT_LIVE_E2E herdr codex traex bwrap python3 
 HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 LAB_ROOT=$(fm_test_tmproot fm-busy-live)
 export FM_HERDR_LAB_STATE_DIR="$LAB_ROOT/herdr-state"
-SESSION=$("$HELPER" name busy-transcript)
+SESSION=$("$HELPER" name "${FM_BUSY_TRANSCRIPT_LAB_TASK:-busy-transcript}")
 cleanup() {
   local result=$?
   "$HELPER" teardown "$SESSION" || result=1
@@ -20,3 +20,5 @@ cleanup() {
 trap cleanup EXIT
 "$HELPER" provision "$SESSION"
 python3 "$ROOT/tests/busy-transcript-live.py" drive "$ROOT" "$LAB_ROOT" "$HELPER" "$SESSION"
+python3 "$ROOT/tests/traex-launch-recovery-live.py" "$ROOT" "$LAB_ROOT" "$HELPER" "$SESSION"
+python3 "$ROOT/tests/traex-launch-recovery-live.py" "$ROOT" "$LAB_ROOT" "$HELPER" "$SESSION" normal
