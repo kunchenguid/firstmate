@@ -25,6 +25,10 @@
 # data/backlog.md; those cases print the manual follow-up. A configured
 # non-markdown adapter remains active without a markdown file; any active
 # automatic backend without compatible tasks-axi refuses before cleanup.
+# When returning a Treehouse slot, teardown resolves the recorded physical path
+# against `treehouse status --json` and passes the registry's own spelling to
+# `treehouse return`; if that read cannot prove a match, it preserves the
+# original path and lets Treehouse fail closed.
 # None of this loosens the landed-work gates below: the transition runs only on
 # the paths that already proceed to remove the record.
 # The close - and only the close - is replaced by `tasks-axi reopen` with the
@@ -1717,15 +1721,43 @@ cleanup_stale_lock_for_safety_check() {
   return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
 }
 
+# Resolve a recorded path to the spelling Treehouse has in its registry.
+treehouse_registered_path_for_return() {
+  local dir=$1 cd_dir=$2 target_abs status listed listed_abs
+  command -v jq >/dev/null 2>&1 || return 1
+  target_abs=$(cd "$cd_dir" && canonical_existing_dir "$dir") || return 1
+  status=$(cd "$cd_dir" && treehouse status --json 2>/dev/null) || return 1
+  while IFS= read -r listed; do
+    [ -n "$listed" ] || continue
+    listed_abs=$(cd "$cd_dir" && canonical_existing_dir "$listed") || continue
+    if [ "$listed_abs" = "$target_abs" ]; then
+      printf '%s\n' "$listed"
+      return 0
+    fi
+  done < <(
+    printf '%s\n' "$status" | jq -r '.[]?.path // empty' 2>/dev/null
+  )
+  return 1
+}
+
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc
+  local out lock attempt=0 max_retries lock_desc return_path registered_path
+
+  # Treehouse's registry preserves the configured root's spelling, while
+  # Firstmate records the physical path from the worker pane. Resolve both
+  # spellings to identify the entry, then pass Treehouse its own spelling so
+  # its textual membership check can find the slot.
+  return_path=$dir
+  if registered_path=$(treehouse_registered_path_for_return "$dir" "$cd_dir"); then
+    return_path=$registered_path
+  fi
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+  if out=$( ( cd "$cd_dir" && treehouse return --force "$return_path" ) 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
@@ -1750,7 +1782,7 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+    if out=$( ( cd "$cd_dir" && treehouse return --force "$return_path" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
@@ -1777,7 +1809,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+      if out=$( ( cd "$cd_dir" && treehouse return --force "$return_path" ) 2>&1 ); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
