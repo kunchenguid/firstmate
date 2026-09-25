@@ -151,6 +151,24 @@ a { color: inherit; text-decoration: none; }
 .bb-stat--call .bb-stat__num { color: var(--rust-600); }
 .bb-stat__label { font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
 
+/* ---- telemetry strips (bt-*): a purpose-built second look for the
+   cost/cache/error and fleet-count metric rows, distinct from bb-stat's
+   Captain's-Call-flavored card so the two widget families read apart at a
+   glance - ocean accent instead of rust, mono numerals, a thin fill bar for
+   the two cap-bound metrics. Same tokens as the rest of the board. ---- */
+.bt-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.bt-stat {
+  display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; min-width: 0;
+  background: var(--ocean-050); border: 1px solid var(--ocean-200); border-radius: var(--radius-md);
+}
+.bt-stat--nodata { background: var(--surface-card-warm); border: 1px dashed var(--border-soft); }
+.bt-stat__val { font-family: var(--font-mono); font-size: var(--fs-h4); font-weight: 700; line-height: 1.15; color: var(--text-strong); }
+.bt-stat--nodata .bt-stat__val { color: var(--text-faint); font-weight: 600; font-size: var(--fs-sm); }
+.bt-stat__label { font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
+.bt-stat__bar { height: 5px; border-radius: var(--radius-pill); background: var(--ocean-200); overflow: hidden; }
+.bt-stat__bar > span { display: block; height: 100%; background: var(--ocean-600); }
+.bt-stat__bar--over > span { background: var(--rust-600); }
+
 .bb-section { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .bb-section__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .bb-cols { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 22px; }
@@ -235,6 +253,10 @@ a { color: inherit; text-decoration: none; }
 
 /* ---- compact rows (Underway / Landed / Charted) ---- */
 .bb-rows { display: flex; flex-direction: column; }
+.bb-task-table { width: 100%; border-collapse: collapse; font-size: var(--fs-xs); }
+.bb-task-table th, .bb-task-table td { padding: 9px 12px; border-bottom: 1px solid var(--border-soft); text-align: left; }
+.bb-task-table th { color: var(--text-muted); font-weight: 700; }
+.bb-task-table td:first-child { font-family: var(--font-mono); }
 .bb-row {
   display: flex; align-items: center; gap: 12px; padding: 11px 18px;
   border-top: 1px solid var(--border-soft); min-width: 0;
@@ -246,6 +268,10 @@ a { color: inherit; text-decoration: none; }
 .bb-row__sub { font-size: var(--fs-xs); color: var(--text-muted); line-height: 1.3; margin-top: 1px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bb-row__id { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); white-space: nowrap; }
+.bb-row__q { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); white-space: nowrap; }
+.bb-row__action { flex: none; font-size: var(--fs-2xs); font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--gold-600); background: var(--gold-100); border: 1px solid var(--gold-300); border-radius: var(--radius-xs);
+  padding: 3px 8px 2px; white-space: nowrap; }
 .bb-row__pr { font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 600; color: var(--ocean-600); white-space: nowrap; }
 .bb-row__pr:hover { text-decoration: underline; }
 .bb-row__check { width: 26px; height: 26px; border-radius: var(--radius-sm); display: grid; place-items: center; flex: none;
@@ -294,6 +320,9 @@ a { color: inherit; text-decoration: none; }
 
 <main class="bb-main">
 
+  <div class="bt-stats" id="bt-stats-cost"></div>
+  <div class="bt-stats" id="bt-stats-fleet"></div>
+
   <div class="bb-stats" id="bb-stats"></div>
 
   <div class="bb-cols">
@@ -323,14 +352,11 @@ a { color: inherit; text-decoration: none; }
 
   <section class="bb-section">
     <div class="bb-section__head">
-      <span class="fm-sign fm-sign--eyebrow">
-        <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
-        Charted Next
-      </span>
-      <span class="fm-sign fm-sign--muted" id="bb-charted-sub"></span>
+      <span class="fm-sign fm-sign--eyebrow">태스크 (M3)</span>
+      <span class="fm-sign fm-sign--muted" id="bb-task-omitted"></span>
     </div>
     <div class="fm-card fm-card--warm">
-      <div class="bb-rows" id="bb-charted"></div>
+      <table class="bb-task-table"><thead><tr><th>ID</th><th>상태</th><th>제목</th><th>blocker</th></tr></thead><tbody id="bb-tasks"></tbody></table>
       <div class="bb-dispatch" id="bb-dispatch" hidden>
         <span class="bb-dispatch__count" id="bb-dispatch-count">nothing picked</span>
         <span class="bb-queued" id="bb-dispatch-queued">
@@ -347,16 +373,6 @@ a { color: inherit; text-decoration: none; }
     <section class="bb-section">
       <div class="bb-section__head">
         <span class="fm-sign fm-sign--eyebrow">
-          <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10.189V14"/><path d="M12 2v3"/><path d="M19 13V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v6"/><path d="M19.38 20A11.6 11.6 0 0 0 21 14l-8.188-3.639a2 2 0 0 0-1.624 0L3 14a11.6 11.6 0 0 0 2.81 7.76"/><path d="M2 21c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1s1.2 1 2.5 1c2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"/></svg>
-          Underway
-        </span>
-      </div>
-      <div class="fm-card"><div class="bb-rows" id="bb-underway"></div></div>
-    </section>
-
-    <section class="bb-section">
-      <div class="bb-section__head">
-        <span class="fm-sign fm-sign--eyebrow">
           <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.801 10A10 10 0 1 1 17 3.335"/><path d="m9 11 3 3L22 4"/></svg>
           Recently Landed
         </span>
@@ -364,6 +380,16 @@ a { color: inherit; text-decoration: none; }
       <div class="fm-card"><div class="bb-rows" id="bb-landed"></div></div>
     </section>
   </div>
+
+  <section class="bb-section">
+    <div class="bb-section__head">
+      <span class="fm-sign fm-sign--eyebrow">
+        <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
+        Unanswered Questions
+      </span>
+    </div>
+    <div class="fm-card fm-card--warm"><table class="bb-task-table"><thead><tr><th>ID</th><th>긴급도</th><th>질문</th><th>기본 행동</th></tr></thead><tbody id="bb-questions"></tbody></table></div>
+  </section>
 
   <footer class="bb-foot">
     <span class="bb-meta-mono" id="bb-provenance">-</span>
@@ -456,6 +482,72 @@ __FM_BEARINGS_BOARD_DATA__
   var CHECK_SVG = '<svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 
   document.getElementById("bb-provenance").textContent = data.schema + " · " + data.generated;
+
+  /* telemetry strips - honestly labeled "no data" when this fleet has no live
+     source for a metric, never a fabricated or always-zero number. */
+  var metrics = (data.metrics && typeof data.metrics === "object") ? data.metrics : {};
+  function money(n) { return "$" + Number(n).toFixed(2); }
+  function pct(n) { return Math.round(n * 10) / 10 + "%"; }
+  function btCard(container, label, valueText, noData, barFrac) {
+    var t = el("div", "bt-stat" + (noData ? " bt-stat--nodata" : ""));
+    t.appendChild(el("span", "bt-stat__val", valueText));
+    t.appendChild(el("span", "bt-stat__label", label));
+    if (!noData && typeof barFrac === "number") {
+      var bar = el("div", "bt-stat__bar" + (barFrac > 1 ? " bt-stat__bar--over" : ""));
+      var fill = document.createElement("span");
+      fill.style.width = Math.max(0, Math.min(1, barFrac)) * 100 + "%";
+      bar.appendChild(fill);
+      t.appendChild(bar);
+    }
+    container.appendChild(t);
+  }
+  var statsCost = document.getElementById("bt-stats-cost");
+  if (metrics.cost_cumulative) {
+    btCard(statsCost, "cumulative cost", money(metrics.cost_cumulative.spent) + " / " + money(metrics.cost_cumulative.cap),
+      false, metrics.cost_cumulative.spent / metrics.cost_cumulative.cap);
+  } else {
+    btCard(statsCost, "cumulative cost", "no data", true);
+  }
+  if (metrics.cost_session) {
+    btCard(statsCost, "session cost", money(metrics.cost_session.spent) + " / " + money(metrics.cost_session.cap),
+      false, metrics.cost_session.spent / metrics.cost_session.cap);
+  } else {
+    btCard(statsCost, "session cost", "no data", true);
+  }
+  if (typeof metrics.cache_hit_rate === "number") {
+    btCard(statsCost, "cache hit rate", pct(metrics.cache_hit_rate), false);
+  } else {
+    btCard(statsCost, "cache hit rate", "no data", true);
+  }
+  if (metrics.tool_error_rate) {
+    var terTotal = metrics.tool_error_rate.total;
+    var terPct = terTotal > 0 ? pct((metrics.tool_error_rate.errors / terTotal) * 100) : "-";
+    btCard(statsCost, "tool error rate", metrics.tool_error_rate.errors + " / " + terTotal + " (" + terPct + ")", false);
+  } else {
+    btCard(statsCost, "tool error rate", "no data", true);
+  }
+
+  var statsFleet = document.getElementById("bt-stats-fleet");
+  if (typeof metrics.context_read_miss === "number") {
+    btCard(statsFleet, "context read misses", String(metrics.context_read_miss), false);
+  } else {
+    btCard(statsFleet, "context read misses", "no data", true);
+  }
+  if (metrics.auto_continue) {
+    btCard(statsFleet, "auto-continues", metrics.auto_continue.rejected + " reject / " + metrics.auto_continue.api_error + " api-error", false);
+  } else {
+    btCard(statsFleet, "auto-continues", "no data", true);
+  }
+  if (metrics.milestone_tasks) {
+    btCard(statsFleet, "tasks (" + metrics.milestone_tasks.label + ")",
+      metrics.milestone_tasks.done + " / " + metrics.milestone_tasks.total, false,
+      metrics.milestone_tasks.total > 0 ? metrics.milestone_tasks.done / metrics.milestone_tasks.total : 0);
+  } else {
+    btCard(statsFleet, "tasks (milestone)", "no data", true);
+  }
+  /* Always real: every Captain's Call item is an unanswered question by
+     definition, so this reads straight off captains_call - no metrics entry. */
+  btCard(statsFleet, "unanswered questions", String(data.captains_call.length), false);
 
   /* stat strip */
   var callTotal = data.captains_call.length;
@@ -621,22 +713,16 @@ __FM_BEARINGS_BOARD_DATA__
     stackNav.hidden = true;
   }
 
-  /* Underway */
-  var uw = document.getElementById("bb-underway");
-  if (!data.underway.length) uw.appendChild(el("div", "bb-empty", "Nothing is underway."));
+  var taskBody = document.getElementById("bb-tasks");
   data.underway.forEach(function (t) {
-    var row = el("div", "bb-row");
-    row.appendChild(badge(t.state === "working" ? "online" : "info", t.state));
-    var main = el("div", "bb-row__main");
-    /* the snapshot's durable name-or-id label leads the row so a scan says
-       WHICH task this is; the run status keeps its place on the second line */
-    main.appendChild(el("div", "bb-row__title", t.name));
-    /* captain-facing rows name the repo; the internal task id shows only when
-       no repo is known */
-    main.appendChild(el("div", "bb-row__sub",
-      t.doing + " · " + t.kind + " · " + (t.repo || t.id)));
-    row.appendChild(main);
-    uw.appendChild(row);
+    var blockedWithoutReason = t.state === "blocked" && !t.blocker;
+    var row = el("tr", "bb-task-row");
+    row.setAttribute("data-kind", "underway");
+    row.appendChild(el("td", "bb-row__id", t.id));
+    row.appendChild(el("td", "", blockedWithoutReason ? "차단됨" : (t.blocker ? "대기" : "진행중")));
+    row.appendChild(el("td", "", t.name));
+    row.appendChild(el("td", "", blockedWithoutReason ? "사유 미상" : (t.blocker || "-")));
+    taskBody.appendChild(row);
   });
 
   /* Landed */
@@ -659,15 +745,14 @@ __FM_BEARINGS_BOARD_DATA__
     ld.appendChild(row);
   });
 
-  /* Charted Next + dispatch picker */
-  var ch = document.getElementById("bb-charted");
+  /* Dispatch picker for charted rows in the task table. */
   var bar = document.getElementById("bb-dispatch");
   var barCount = document.getElementById("bb-dispatch-count");
   var barBtn = document.getElementById("bb-dispatch-btn");
   var anyPickable = false;
 
   function pickedIds() {
-    return Array.prototype.map.call(ch.querySelectorAll(".bb-pick:checked"), function (c) { return c.value; });
+    return Array.prototype.map.call(document.getElementById("bb-tasks").querySelectorAll(".bb-pick:checked"), function (c) { return c.value; });
   }
   function refreshBar(limitMessage) {
     var n = pickedIds().length;
@@ -675,14 +760,11 @@ __FM_BEARINGS_BOARD_DATA__
     barBtn.disabled = !n;
   }
 
-  if (!chartedQueued(data.charted).length && !chartedMoreQueued) {
-    ch.appendChild(el("div", "bb-empty", "Nothing is queued."));
-  }
   chartedOrder(data.charted).forEach(function (t) {
-    var row = el("div", "bb-row");
+    var pick = null;
     if (t.dispatchable && !isWarning(t)) {
       anyPickable = true;
-      var pick = document.createElement("input");
+      pick = document.createElement("input");
       pick.type = "checkbox"; pick.className = "bb-pick"; pick.value = t.id;
       pick.setAttribute("aria-label", "Pick " + t.id + " for dispatch");
       pick.addEventListener("change", function () {
@@ -693,29 +775,34 @@ __FM_BEARINGS_BOARD_DATA__
         }
         refreshBar();
       });
-      row.appendChild(pick);
-    } else {
-      row.appendChild(el("span", "bb-pick-spacer"));
     }
-    var main = el("div", "bb-row__main");
-    main.appendChild(el("div", "bb-row__title", t.title));
-    /* second line keeps the title uncrowded in the half-width column */
-    var chSub = t.repo || t.id;
-    main.appendChild(el("div", "bb-row__sub", t.reason ? t.reason + " · " + chSub : chSub));
-    row.appendChild(main);
-    if (isWarning(t)) row.appendChild(badge("danger", "needs repair"));
-    else if (t.reason) row.appendChild(badge("warn", "waiting"));
-    ch.appendChild(row);
+    var warning = isWarning(t);
+    var row = el("tr", "bb-task-row" + (warning ? " bb-task-row--warning" : ""));
+    row.setAttribute("data-kind", "charted");
+    var idCell = el("td", "bb-row__id");
+    idCell.appendChild(el("span", "bb-task-id", t.id));
+    if (pick) idCell.appendChild(pick);
+    row.appendChild(idCell);
+    var stateCell = el("td", "");
+    if (warning) stateCell.appendChild(badge("danger", "needs repair"));
+    stateCell.appendChild(el("span", "", warning || t.reason ? "대기" : "예정"));
+    row.appendChild(stateCell);
+    row.appendChild(el("td", "", t.title));
+    row.appendChild(el("td", "", t.reason || "-"));
+    taskBody.appendChild(row);
   });
-  var chartedShown = chartedQueued(data.charted).length;
-  var chartedTotal = chartedShown + chartedMoreQueued;
-  document.getElementById("bb-charted-sub").textContent =
-    chartedMoreQueued ? "showing " + chartedShown + " of " + chartedTotal : "";
-  if (chartedMoreQueued) {
-    ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreQueued + " more queued - ask firstmate for the full chart"));
-  }
-  if (chartedMoreWarnings) {
-    ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreWarnings + " more repair warning" + (chartedMoreWarnings === 1 ? "" : "s") + " - ask firstmate for the full chart"));
+  var omitted = [];
+  var underwayMore = data.underway_more || 0;
+  if (underwayMore > 0) omitted.push("Underway +" + underwayMore + " more");
+  if (chartedMoreQueued > 0) omitted.push("Charted Next +" + chartedMoreQueued + " more");
+  if (chartedMoreWarnings > 0) omitted.push("repair warnings +" + chartedMoreWarnings + " more");
+  var omittedIndicator = document.getElementById("bb-task-omitted");
+  omittedIndicator.textContent = omitted.join(" · ");
+  omittedIndicator.hidden = omitted.length === 0;
+  if (!taskBody.children.length) {
+    var emptyTask = el("tr", "bb-empty");
+    emptyTask.appendChild(el("td", "", "No tasks are underway or charted."));
+    taskBody.appendChild(emptyTask);
   }
 
   if (anyPickable) {
@@ -740,6 +827,28 @@ __FM_BEARINGS_BOARD_DATA__
       bar.classList.add("is-queued");
     });
   }
+
+  /* Unanswered Questions: every Captain's Call item is, by definition, a
+     question the captain has not answered yet. The default action is this fleet's real behavior
+     for an item left unanswered - not a per-item stored field, because none
+     exists - so it is a short fixed label per card type, not per-item prose. */
+  var DEFAULT_ACTION = { decision: "ages to Charted Next", merge: "PR stays unmerged", credential: "work stays blocked" };
+  var qs = document.getElementById("bb-questions");
+  if (!data.captains_call.length) {
+    var emptyQuestion = el("tr", "bb-empty");
+    emptyQuestion.appendChild(el("td", "", "Nothing needs your action right now."));
+    qs.appendChild(emptyQuestion);
+  }
+  data.captains_call.forEach(function (item) {
+    var row = el("tr", "bb-question-row");
+    row.appendChild(el("td", "bb-row__q", item.key));
+    var age = item.filed ? Math.floor((Date.now() - Date.parse(item.filed)) / 86400000) : null;
+    /* Urgency is high at age >= 3 days or when blocking is true; absent filed means unknown. */
+    row.appendChild(el("td", "bb-row__urgency", age === null || !isFinite(age) || (age < 3 && typeof item.blocking !== "boolean") ? "-" : ((age >= 3 || item.blocking) ? "높음" : "보통")));
+    row.appendChild(el("td", "", item.title));
+    row.appendChild(el("td", "bb-row__action", DEFAULT_ACTION[item.type] || "stays open"));
+    qs.appendChild(row);
+  });
   } catch (e) {
     renderBoardError("The board data could not be rendered");
   }

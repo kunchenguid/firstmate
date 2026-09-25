@@ -233,6 +233,13 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "a dispatchable warning row was accepted"
 
+  for invalid_more in -1 1.5 '"2"'; do
+    write_valid_payload "$data"
+    jq --argjson more "$invalid_more" '.underway_more = $more' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+    set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+    [ "$rc" -ne 0 ] || fail "an invalid underway omitted count was accepted: $invalid_more"
+  done
+
   write_valid_payload "$data"
   jq '.charted_warning_more = -1' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
@@ -501,14 +508,14 @@ test_charted_kind_is_optional_and_accepts_both_values() {
         {"id":"a","repo":"sample","title":"Queued","reason":"","dispatchable":true},
         {"id":"b","repo":"sample","title":"Queued too","reason":"gated","dispatchable":true,"kind":"queued"},
         {"id":"c","repo":"sample","title":"Integrity notice","reason":"main inventory","dispatchable":false,"kind":"warning"}
-      ] | .charted_warning_more = 2' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+      ] | .charted_warning_more = 2 | .underway_more = 4' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   run_board "$home" build "$data" >/dev/null \
     || fail "an omitted, queued, and warning charted kind was refused"
   extract_payload "$home/.lavish/bearings-board.html" | jq -e '
     ([.charted[] | .kind // "queued"]) == ["queued", "queued", "warning"]
-      and .charted_warning_more == 2
-  ' >/dev/null || fail "the built board did not carry the charted kinds and omitted-warning count it was given"
-  pass "charted kind is optional and accepts queued and warning"
+      and .charted_warning_more == 2 and .underway_more == 4
+  ' >/dev/null || fail "the built board did not carry charted kinds and omitted counts it was given"
+  pass "charted kind and underway omitted count are retained"
 }
 
 
@@ -769,6 +776,53 @@ test_build_refuses_a_nondecision_reconcile_value() {
   pass "build reserves reconcile across non-decision cards"
 }
 
+test_optional_metrics_and_underway_blocker_are_validated() {
+  local home data board out rc
+  home=$(make_home metrics)
+  board="$home/.lavish/bearings-board.html"
+  data="$home/payload.json"
+
+  write_valid_payload "$data"
+  jq '.captains_call[0].filed = "2026-09-20" | .captains_call[0].blocking = true
+      | .underway = [{"id":"sample-task","repo":"sample","name":"Sample task","state":"working",
+        "kind":"ship","doing":"implementing","blocker":"waiting on sample-decision"}]
+      | .metrics = {
+          cost_cumulative: {spent: 90.71, cap: 300.0},
+          cache_hit_rate: 72.5,
+          tool_error_rate: {errors: 3, total: 120},
+          context_read_miss: 4,
+          auto_continue: {rejected: 2, api_error: 1},
+          milestone_tasks: {label: "current", done: 3, total: 8}
+        }' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  out=$(run_board "$home" build "$data") || fail "a valid metrics/blocker payload did not build: $out"
+  assert_present "$board" "a valid metrics/blocker payload produced no board"
+  pass "a fully populated metrics object and an underway blocker both validate"
+
+  for mutation in \
+    '.metrics.cost_cumulative = {spent: -1, cap: 300}' \
+    '.metrics.cost_cumulative = {spent: 1, cap: 0}' \
+    '.metrics.cache_hit_rate = 101' \
+    '.metrics.tool_error_rate = {errors: 5, total: 3}' \
+    '.metrics.context_read_miss = -1' \
+    '.metrics.auto_continue = {rejected: "two", api_error: 1}' \
+    '.metrics.milestone_tasks = {label: "", done: 1, total: 2}' \
+    '.metrics.milestone_tasks = {label: "x", done: 5, total: 2}' \
+    '.metrics = "not an object"' \
+    '.underway[0].blocker = 5' \
+    '.captains_call[0].filed = "yesterday"' \
+    '.captains_call[0].blocking = "yes"'
+  do
+    write_valid_payload "$data"
+    jq '.underway = [{"id":"sample-task","repo":"sample","name":"Sample task","state":"working",
+          "kind":"ship","doing":"implementing"}]
+        | .metrics = {cost_cumulative: {spent: 1, cap: 2}}
+        | '"$mutation" "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+    set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+    [ "$rc" -ne 0 ] || fail "an invalid metrics/blocker payload was accepted: $mutation"
+  done
+  pass "malformed metrics fields and a non-string underway blocker are refused"
+}
+
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
@@ -787,3 +841,4 @@ test_build_fails_when_reconcile_cannot_establish_a_listener
 test_every_decision_card_carries_the_reconcile_choice
 test_build_refuses_a_payload_that_occupies_the_reconcile_value
 test_build_refuses_a_nondecision_reconcile_value
+test_optional_metrics_and_underway_blocker_are_validated

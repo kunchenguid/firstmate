@@ -522,29 +522,42 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                   | (if (($name | type) == "string" and ($name | test("[^[:space:]]")))
                      then $name else ($m.id + "/" + .id) end) | trunc(70)),
             doing:((.doing // .state) | trunc(90))} ]) as $in_flight_all
-  | ([ .backlog.records[]
+  | (.backlog.records) as $backlog_records
+  | ([ $backlog_records[]
          | . as $record
          | select(.structured and .hold_bucket != null)
          | select(($all_decisions == 1) or live_captain_call)
          | {id,key:.id,verb:"captain-hold",
-            summary:hold_summary(.title; .hold_reason),owner:"(main)"} ]
+            summary:hold_summary(.title; .hold_reason),owner:"(main)",
+            filed:(.since // null),
+            blocking:any($backlog_records[]; .id != $record.id and (.state == "queued" or .state == "in_flight") and ((.unresolved_blocker_ids // []) | index($record.id) != null))} ]
      + [ (.secondmate_current.records // [])[] as $m
          | ([ $m.decisions_open[]?
+              | . as $decision
               | select(.source == "backlog" and .verb == "captain-hold")
               | select(($all_decisions == 1) or live_captain_call)
               | {id:($m.id + "/" + .id),key,verb,
                  summary:hold_summary((.summary // .id);
-                                      (.reason // "captain decision pending")),owner:$m.id} ]
+                                      (.reason // "captain decision pending")),owner:$m.id,
+                 filed:(([$m.filed_references[]? | select(.id == $decision.id) | .since][0]
+                         // [$m.queued[]? | select(.id == $decision.id) | .since][0]) // null)}
+                + (if ($m.blocking_references | type) == "array"
+                   then {blocking:any($m.blocking_references[]; .dependent_id != $decision.id and .blocked_id == $decision.id)}
+                   else {} end) ]
             + [ $m.queued[]?
+                | . as $queued_record
                 | select($all_decisions == 1 and .hold_kind == "captain")
-                | select(.id as $id
-                         | [$m.decisions_open[]?
-                            | select(.source == "backlog" and .verb == "captain-hold")
-                            | .id]
-                         | index($id) | not)
-                | {id:($m.id + "/" + .id),key:.id,verb:"captain-hold",
-                   summary:hold_summary((.title // .id);
-                                        (.hold_reason // "captain decision pending")),owner:$m.id} ])[] ]) as $decisions_all
+                | select([$m.decisions_open[]?
+                         | select(.source == "backlog" and .verb == "captain-hold")
+                         | .id] | index($queued_record.id) | not)
+                | {id:($m.id + "/" + $queued_record.id),key:$queued_record.id,verb:"captain-hold",
+                   summary:hold_summary(($queued_record.title // $queued_record.id);
+                                        ($queued_record.hold_reason // "captain decision pending")),owner:$m.id,
+                   filed:(([$m.filed_references[]? | select(.id == $queued_record.id) | .since][0]
+                           // $queued_record.since) // null)}
+                  + (if ($m.blocking_references | type) == "array"
+                     then {blocking:any($m.blocking_references[]; .dependent_id != $queued_record.id and .blocked_id == $queued_record.id)}
+                     else {} end) ])[] ]) as $decisions_all
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and projected_deferred_hold) ]

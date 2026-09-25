@@ -3,9 +3,8 @@
 // asserted through the real template rather than by reading its source.
 //
 // Usage: node board-render-harness.mjs <built-board.html>
-// Prints one JSON document:
-//   { stats:[{n,label}], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], empty, more, error }
+// Prints one JSON document containing stat cards, merged task rows,
+// unanswered-question rows, and renderer errors.
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -27,7 +26,15 @@ class Node {
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
       contains: (c) => this.className.split(/\s+/).includes(c),
+      toggle: (c, force) => {
+        const has = this.className.split(/\s+/).includes(c);
+        const want = force === undefined ? !has : Boolean(force);
+        if (want && !has) this.className = (this.className + " " + c).trim();
+        else if (!want && has) this.className = this.className.split(/\s+/).filter((x) => x !== c).join(" ");
+        return want;
+      },
     };
+    this.style = {};
   }
   get textContent() {
     return this.children.length
@@ -84,43 +91,62 @@ globalThis.TextEncoder = TextEncoder;
 const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
 new Function(script)();
 
-const badgesOf = (row) =>
-  row.children
-    .filter((c) => c.className.includes("fm-badge"))
-    .map((c) => ({ tone: c.className.replace(/.*fm-badge--/, "").trim(), text: c.textContent }));
-
-const strip = byId.get("bb-stats") || new Node("div");
-const stats = strip.children.map((t) => ({
+const stats = (byId.get("bb-stats") || new Node("div")).children.map((t) => ({
   n: Number(t.children.find((c) => c.className.includes("bb-stat__num"))?.textContent),
   label: t.children.find((c) => c.className.includes("bb-stat__label"))?.textContent,
 }));
 
-const rowsOf = (container) =>
-  container.children
-    .filter((r) => r.className.split(/\s+/).includes("bb-row"))
-    .map((row) => {
-      const main = row.children.find((c) => c.className.includes("bb-row__main"));
-      return {
-        title: main?.children.find((c) => c.className.includes("bb-row__title"))?.textContent ?? "",
-        sub: main?.children.find((c) => c.className.includes("bb-row__sub"))?.textContent ?? "",
-        badges: badgesOf(row),
-        pickable: row.children.some((c) => c.className.includes("bb-pick") && !c.className.includes("spacer")),
-      };
-    });
+// A telemetry stat strip (bt-stats-*): one {label, value, noData} per card.
+const btStatsOf = (container) =>
+  container.children.map((t) => ({
+    label: t.children.find((c) => c.className.includes("bt-stat__label"))?.textContent ?? "",
+    value: t.children.find((c) => c.className.includes("bt-stat__val"))?.textContent ?? "",
+    noData: t.className.includes("bt-stat--nodata"),
+  }));
 
-const uw = byId.get("bb-underway") || new Node("div");
-const underway = rowsOf(uw);
-
-const ch = byId.get("bb-charted") || new Node("div");
-const charted = rowsOf(ch);
+const taskContainer = byId.get("bb-tasks") || new Node("tbody");
+const tasks = taskContainer.children
+  .filter((row) => row.className.split(/\s+/).includes("bb-task-row"))
+  .map((row) => {
+    const stateCell = row.children[1];
+    const repairBadge = stateCell?.children.find((c) => c.className.includes("fm-badge--danger"));
+    const stateText = stateCell?.children.find((c) => c !== repairBadge)?.textContent ?? stateCell?.textContent ?? "";
+    return {
+      id: row.children[0]?.textContent.trim() ?? "",
+      state: stateText,
+      title: row.children[2]?.textContent ?? "",
+      blocker: row.children[3]?.textContent ?? "",
+      kind: row.attributes["data-kind"] ?? "underway",
+      alarm: Boolean(repairBadge),
+      alarmText: repairBadge?.textContent ?? "",
+      pickable: row.children[0]?.querySelectorAll(".bb-pick").length > 0,
+    };
+  });
+const legacyCopies = ["bb-charted", "bb-underway"].filter((id) => byId.has(id));
+const empty = taskContainer.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
+const omittedIndicator = byId.get("bb-task-omitted");
+const omitted = omittedIndicator?.textContent ?? "";
 // A fail-closed render replaces the page body instead of the board sections, so
 // surface it rather than reporting an empty board as a successful render.
 const errorText = [...byId.entries()]
   .filter(([k]) => k.startsWith("sel:"))
   .flatMap(([, n]) => n.children.map((c) => c.textContent))
   .join(" ");
-const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
-const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
+const statsCost = btStatsOf(byId.get("bt-stats-cost") || new Node("div"));
+const statsFleet = btStatsOf(byId.get("bt-stats-fleet") || new Node("div"));
+const qContainer = byId.get("bb-questions") || new Node("div");
+const questionRows = qContainer.children
+  .filter((r) => r.className.split(/\s+/).includes("bb-question-row"))
+  .map((row) => ({
+    id: row.children[0]?.textContent ?? "",
+    urgency: row.children[1]?.textContent ?? "",
+    question: row.children[2]?.textContent ?? "",
+    action: row.children[3]?.textContent ?? "",
+  }));
+const questionsEmpty = qContainer.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({
+    stats, tasks, legacyCopies, empty, omitted, omittedHidden: omittedIndicator?.hidden ?? true, error: errorText,
+    statsCost, statsFleet, questions: questionRows, questionsEmpty,
+  }) + "\n");

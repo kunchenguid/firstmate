@@ -73,7 +73,25 @@
 # existing board is touched.
 #
 # Every Underway row likewise carries a non-empty `name`: the durable task name
-# when known, otherwise its durable identifier.
+# when known, otherwise its durable identifier. It MAY carry `blocker`, the
+# task's actual blocker text (cross-referenced from that same task id's
+# decisions_open/gates entry) when one is known; omit it when the task is not
+# blocked rather than sending an empty placeholder.
+# A Charted Next row's existing `reason` field IS its blocker text; the board
+# renders it as a labeled blocker column rather than folding it only into the
+# row subtitle.
+#
+# The top-level payload MAY carry an optional `metrics` object with any subset
+# of: `cost_cumulative`/`cost_session` ({spent,cap}, both positive numbers),
+# `cache_hit_rate` (0-100), `tool_error_rate` ({errors,total} counts, errors
+# <= total), `context_read_miss` (a non-negative count), `auto_continue`
+# ({rejected,api_error} counts), and `milestone_tasks` ({label,done,total}, a
+# non-empty label and done <= total). Every one of these keys is independently
+# optional: the composer fills in only what this fleet actually has a live
+# source for, and the board renders an explicit "no data" card for any key
+# left out rather than a fabricated or always-zero number. The Captain's Call
+# "unanswered questions" count and table need no `metrics` entry - the board
+# reads them directly off `captains_call`, which is always authoritative.
 # A Charted Next row MAY carry `filed`, the durable filed date (YYYY-MM-DD, or
 # that date with a UTC timestamp) the template orders the section by, newest
 # first; a row with no comparable date keeps its payload order after every dated
@@ -168,10 +186,13 @@ validate_payload() {  # <data.json>
           and (.recommend_value as $recommend
             | ([.options[].value] | index($recommend) != null))))
       and ([.options[].value] | index("reconcile") == null)
+      and optional_filed
+      and ((has("blocking") | not) or (.blocking | type == "boolean"))
       and (if .type == "merge" then (.risk | nonempty_string) else true end);
     def underway_item:
       type == "object" and repo_marker and name_marker and (.id | nonempty_string)
-      and (.state | nonempty_string) and (.doing | nonempty_string) and (.kind | nonempty_string);
+      and (.state | nonempty_string) and (.doing | nonempty_string) and (.kind | nonempty_string)
+      and (optional_string("blocker"));
     def landed_item:
       type == "object" and repo_marker and (.id | nonempty_string)
       and (.what | nonempty_string) and (.owner | nonempty_string)
@@ -184,6 +205,32 @@ validate_payload() {  # <data.json>
       and ((has("kind") | not) or (.kind == "queued" or .kind == "warning"))
       and optional_filed
       and (if .kind == "warning" then .dispatchable == false else true end);
+    def nonneg_int: type == "number" and . >= 0 and (. | floor == .);
+    def pos_num: type == "number" and . > 0;
+    def nonneg_num: type == "number" and . >= 0;
+    def cost_pair:
+      type == "object" and (keys | sort) == ["cap","spent"]
+      and (.spent | nonneg_num) and (.cap | pos_num);
+    def error_pair:
+      type == "object" and (keys | sort) == ["errors","total"]
+      and (.errors | nonneg_int) and (.total | nonneg_int) and (.errors <= .total);
+    def autocontinue_pair:
+      type == "object" and (keys | sort) == ["api_error","rejected"]
+      and (.rejected | nonneg_int) and (.api_error | nonneg_int);
+    def milestone_pair:
+      type == "object" and (keys | sort) == ["done","label","total"]
+      and (.label | nonempty_string) and (.done | nonneg_int) and (.total | nonneg_int)
+      and (.done <= .total);
+    def optional_metrics:
+      (has("metrics") | not) or (
+        .metrics | type == "object"
+        and ((has("cost_cumulative") | not) or (.cost_cumulative | cost_pair))
+        and ((has("cost_session") | not) or (.cost_session | cost_pair))
+        and ((has("cache_hit_rate") | not) or (.cache_hit_rate | type == "number" and . >= 0 and . <= 100))
+        and ((has("tool_error_rate") | not) or (.tool_error_rate | error_pair))
+        and ((has("context_read_miss") | not) or (.context_read_miss | nonneg_int))
+        and ((has("auto_continue") | not) or (.auto_continue | autocontinue_pair))
+        and ((has("milestone_tasks") | not) or (.milestone_tasks | milestone_pair)));
     type == "object"
     and (.schema == $schema)
     and (.home | nonempty_string)
@@ -193,6 +240,9 @@ validate_payload() {  # <data.json>
     and (.underway | type == "array")
     and (.landed | type == "array")
     and (.charted | type == "array")
+    and optional_metrics
+    and ((has("underway_more") | not)
+      or ((.underway_more | type == "number") and (.underway_more >= 0) and (.underway_more | floor == .)))
     and ((has("charted_more") | not)
       or ((.charted_more | type == "number") and (.charted_more >= 0) and (.charted_more | floor == .)))
     and ((has("charted_warning_more") | not)
