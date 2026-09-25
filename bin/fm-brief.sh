@@ -14,8 +14,8 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab|--herdr-retire-session <name>]
+#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab|--herdr-retire-session <name>]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -32,12 +32,18 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
-#   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
-#   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
-#   The flag must be explicit because {TASK} and {FIRSTMATE_SPEC} are filled
-#   after scaffolding and the caller-supplied repo string cannot reliably
-#   identify this repo. Briefs made without it carry a loud declaration so an
-#   omitted contract cannot be silent.
+#   --herdr-lab is mandatory for Herdr lifecycle tasks except the single
+#   retirement-only case below. It adds the hard isolation contract backed by
+#   bin/fm-herdr-lab.sh.
+#   --herdr-retire-session <name> is mandatory instead when the task's only Herdr
+#   lifecycle action is guardedly stopping one explicitly named, pre-existing
+#   session Firstmate did not provision. It adds the hard retirement contract
+#   backed by bin/fm-herdr-session-retire.sh and is mutually exclusive with
+#   --herdr-lab, since the two helpers own disjoint session-lifecycle scopes.
+#   One of these flags must be explicit because {TASK} and {FIRSTMATE_SPEC} are
+#   filled after scaffolding and the caller-supplied repo string cannot reliably
+#   identify this repo. Briefs made without either flag carry a loud declaration
+#   so an omitted contract cannot be silent.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
@@ -171,6 +177,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 case "$CONFIG" in /*) ;; *) CONFIG="$PWD/$CONFIG" ;; esac
 KIND=ship
 HERDR_LAB=0
+HERDR_RETIRE_SESSION=
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
@@ -189,6 +196,10 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      herdr-retire-session)
+        [ -n "$a" ] || { echo "error: --herdr-retire-session requires a non-empty session name" >&2; exit 1; }
+        HERDR_RETIRE_SESSION=$a
+        ;;
       branch-prefix) BRANCH_PREFIX=$a; BRANCH_PREFIX_SET=1 ;;
       forge) FORGE=$a; FORGE_SET=1 ;;
       shape) SHAPE=$a; SHAPE_SET=1 ;;
@@ -201,6 +212,11 @@ for a in "$@"; do
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
+    --herdr-retire-session) want_value=herdr-retire-session ;;
+    --herdr-retire-session=*)
+      HERDR_RETIRE_SESSION=${a#--herdr-retire-session=}
+      [ -n "$HERDR_RETIRE_SESSION" ] || { echo "error: --herdr-retire-session requires a non-empty session name" >&2; exit 1; }
+      ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
@@ -280,6 +296,17 @@ printf -v BRANCH_Q '%q' "$BRANCH"
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
   exit 1
+fi
+
+if [ -n "$HERDR_RETIRE_SESSION" ]; then
+  if [ "$KIND" = secondmate ]; then
+    echo "error: --herdr-retire-session applies only to crewmate ship or scout briefs" >&2
+    exit 1
+  fi
+  if [ "$HERDR_LAB" -eq 1 ]; then
+    echo "error: --herdr-lab and --herdr-retire-session are mutually exclusive: the lab helper only ever operates on a session it generated itself, while the retirement helper only ever operates on a pre-existing session it did not create" >&2
+    exit 1
+  fi
 fi
 
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
@@ -470,11 +497,28 @@ HERDR_SECTION=$(printf '%s\n' \
 '' \
 'Never bypass the helper, even for a read-only lifecycle probe or cleanup after failure.' \
 'The captain fleet uses the running `default` session.')
+elif [ -n "$HERDR_RETIRE_SESSION" ]; then
+HERDR_RETIRE_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-session-retire.sh")
+HERDR_RETIRE_TARGET=$(shell_quote "$HERDR_RETIRE_SESSION")
+# shellcheck disable=SC2016  # single quotes are deliberate: literal brief text with a backtick-wrapped helper invocation that must reach the reading agent verbatim, not expand at scaffold time.
+HERDR_SECTION=$(printf '%s\n' \
+'# Herdr retirement - HARD SAFETY CONTRACT' \
+'This brief was explicitly scaffolded with `--herdr-retire-session '"$HERDR_RETIRE_SESSION"'` because the task'\''s only Herdr lifecycle action is guardedly stopping one explicitly named, pre-existing session Firstmate did not provision.' \
+'' \
+'1. Run only `'"$HERDR_RETIRE_HELPER"' '"$HERDR_RETIRE_TARGET"'` to stop it.' \
+'   It refuses the target unless it is empty, refuses `default`, `fm-remote`, and every `fm-lab-*` name, snapshots and re-verifies every other session before and after the call, and never deletes, restarts, or force-stops anything.' \
+'2. If it refuses, stop and report the exact refusal; do not fall back to a direct `herdr session stop` or any other bypass.' \
+'3. Forbidden commands: direct `herdr server stop` or any other server-global operation, direct `herdr session stop`, direct `herdr session delete`, and any Herdr call scoped only by ambient or inline `HERDR_SESSION`.' \
+'4. This is a different helper from `bin/fm-herdr-lab.sh`: it only ever operates on the one pre-existing session named above, never on a generated verification session.' \
+'' \
+'Never bypass the helper, even for a read-only lifecycle probe or cleanup after failure.' \
+'The captain fleet uses the running `default` session.')
 else
 IFS= read -r -d '' HERDR_SECTION <<'EOF' || true
 # Herdr lifecycle declaration - NOT ENABLED
 **HARD SAFETY GATE:** this scaffold cannot inspect the task text filled in above.
 If the task will start, stop, delete, restart, profile, or otherwise drive Herdr lifecycle behavior, stop and regenerate the brief with `--herdr-lab` before dispatch.
+If the task's only Herdr lifecycle action is stopping one explicitly named, pre-existing session Firstmate did not provision, stop and regenerate the brief with `--herdr-retire-session <name>` before dispatch instead.
 Do not add Herdr lifecycle commands to this unguarded brief by hand.
 EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}

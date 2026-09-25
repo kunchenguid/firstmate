@@ -565,6 +565,8 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
       "$kind brief silently omitted the Herdr declaration"
     assert_grep "regenerate the brief with \`--herdr-lab\` before dispatch" "$brief" \
       "$kind brief missing the fail-visible regeneration instruction"
+    assert_grep "regenerate the brief with \`--herdr-retire-session <name>\` before dispatch" "$brief" \
+      "$kind brief missing the fail-visible existing-session retirement routing"
   done
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
@@ -818,6 +820,90 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
   assert_absent "$home/data/herdr-secondmate/brief.md" \
     "rejected secondmate --herdr-lab still wrote a brief"
   pass "fm-brief.sh: Herdr lab contract covers scouts and rejects secondmate misuse"
+}
+
+test_herdr_retire_session_contract_is_explicit_and_complete() {
+  local home id brief
+  home="$TMP_ROOT/herdr-retire-home"
+  mkdir -p "$home/data"
+  id="brief-herdr-retire-d1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode direct-PR --herdr-retire-session mbk >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "Herdr retire-session brief was not scaffolded"
+  assert_grep "# Herdr retirement - HARD SAFETY CONTRACT" "$brief" \
+    "Herdr retire-session brief missing its hard safety contract"
+  assert_grep "explicitly scaffolded with \`--herdr-retire-session mbk\`" "$brief" \
+    "Herdr retire-session brief did not name the scaffolded target"
+  assert_grep "Run only \`'$ROOT/bin/fm-herdr-session-retire.sh' 'mbk'\` to stop it" "$brief" \
+    "Herdr retire-session brief missing the single required invocation"
+  assert_grep "refuses \`default\`, \`fm-remote\`, and every \`fm-lab-*\` name" "$brief" \
+    "Herdr retire-session brief missing the reserved-name refusal summary"
+  assert_grep "never deletes, restarts, or force-stops anything" "$brief" \
+    "Herdr retire-session brief missing the stop-only boundary"
+  assert_grep "direct \`herdr server stop\`" "$brief" \
+    "Herdr retire-session brief missing the forbidden server-global command list"
+  assert_grep "a different helper from \`bin/fm-herdr-lab.sh\`" "$brief" \
+    "Herdr retire-session brief did not distinguish itself from the lab helper"
+  assert_no_grep "Herdr lifecycle declaration - NOT ENABLED" "$brief" \
+    "Herdr retire-session brief retained the unguarded declaration"
+  assert_no_grep "# Herdr isolation - HARD SAFETY CONTRACT" "$brief" \
+    "Herdr retire-session brief also rendered the unrelated lab contract"
+  pass "fm-brief.sh: --herdr-retire-session emits the complete hard retirement contract"
+}
+
+test_herdr_retire_session_contract_quotes_foreign_firstmate_path() {
+  local home id brief foreign_root helper
+  home="$TMP_ROOT/herdr-retire-foreign-home"
+  foreign_root="$TMP_ROOT/firstmate helper's root"
+  mkdir -p "$home/data"
+  id="brief-herdr-retire-foreign-d2"
+  helper=$(printf '%s' "$foreign_root/bin/fm-herdr-session-retire.sh" | sed "s/'/'\\\\''/g")
+  helper="'$helper'"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$foreign_root" \
+    "$ROOT/bin/fm-brief.sh" "$id" foreign --scout --herdr-retire-session mbk >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Run only \`$helper 'mbk'\` to stop it" "$brief" \
+    "Herdr retire-session brief must shell-quote an absolute Firstmate helper path"
+  assert_no_grep "bin/fm-herdr-session-retire.sh mbk" "$brief" \
+    "Herdr retire-session brief must not invoke a worktree-relative helper"
+  pass "fm-brief.sh: --herdr-retire-session uses its quoted Firstmate-owned helper path"
+}
+
+test_herdr_retire_session_applies_to_scouts_but_not_secondmates() {
+  local home brief status=0
+  home="$TMP_ROOT/herdr-retire-kind-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-retire-scout firstmate --scout --herdr-retire-session mbk >/dev/null 2>&1
+  brief="$home/data/herdr-retire-scout/brief.md"
+  assert_grep "# Herdr retirement - HARD SAFETY CONTRACT" "$brief" \
+    "scout --herdr-retire-session brief missing the contract"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER=ops \
+    "$ROOT/bin/fm-brief.sh" herdr-retire-secondmate --secondmate firstmate --herdr-retire-session mbk \
+    >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "secondmate --herdr-retire-session must be rejected"
+  assert_absent "$home/data/herdr-retire-secondmate/brief.md" \
+    "rejected secondmate --herdr-retire-session still wrote a brief"
+  pass "fm-brief.sh: Herdr retirement contract covers scouts and rejects secondmate misuse"
+}
+
+test_herdr_lab_and_herdr_retire_session_are_mutually_exclusive() {
+  local home status=0
+  home="$TMP_ROOT/herdr-mutex-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-mutex firstmate --mode direct-PR \
+    --herdr-lab --herdr-retire-session mbk >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "combining --herdr-lab and --herdr-retire-session must be rejected"
+  assert_absent "$home/data/herdr-mutex/brief.md" \
+    "rejected combined --herdr-lab/--herdr-retire-session still wrote a brief"
+
+  status=0
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-empty-name firstmate --mode direct-PR \
+    --herdr-retire-session= >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "an empty --herdr-retire-session name must be rejected"
+  assert_absent "$home/data/herdr-empty-name/brief.md" \
+    "rejected empty --herdr-retire-session still wrote a brief"
+  pass "fm-brief.sh: --herdr-lab and --herdr-retire-session are mutually exclusive and require a real name"
 }
 
 test_pause_verb_override_renders_all_brief_scaffolds() {
@@ -1325,6 +1411,10 @@ test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_documented_global_replace_leaves_the_herdr_gate_intact
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
+test_herdr_retire_session_contract_is_explicit_and_complete
+test_herdr_retire_session_contract_quotes_foreign_firstmate_path
+test_herdr_retire_session_applies_to_scouts_but_not_secondmates
+test_herdr_lab_and_herdr_retire_session_are_mutually_exclusive
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
