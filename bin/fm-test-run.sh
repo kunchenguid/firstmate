@@ -1501,6 +1501,7 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-pi-branch-extension.test.sh
       printf '%s\n' __script__:fm-pi-watch-extension.test.sh
       printf '%s\n' __script__:fm-calm-pi-extension.test.sh
+      printf '%s\n' __script__:fm-calm-omp-extension.test.sh
       printf '%s\n' __script__:fm-watch-recovery-loop.test.sh
       printf '%s\n' __script__:fm-turnend-guard.test.sh
       printf '%s\n' __script__:fm-sessionstart-nudge.test.sh
@@ -1514,7 +1515,31 @@ families_for_changed_path() {
       # sprite, the Pi typecheck, and the Claude-dependent guards.
       printf '%s\n' __script__:fm-calm-claude-mod.test.sh
       printf '%s\n' __script__:fm-calm-pi-extension.test.sh
+      printf '%s\n' __script__:fm-calm-omp-extension.test.sh
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
+      printf '%s\n' live-harness-optin
+      ;;
+    .pi/extensions/lib/fm-calm-visibility.ts|.pi/extensions/lib/fm-calm-visibility-core.ts)
+      # The Calm visibility policy the Pi and omp extensions share: the Pi Calm
+      # suites and typecheck, the Pi suites that load it, and the omp Calm guard.
+      printf '%s\n' __script__:fm-pi-branch-extension.test.sh
+      printf '%s\n' __script__:fm-pi-watch-extension.test.sh
+      printf '%s\n' __script__:fm-calm-pi-extension.test.sh
+      printf '%s\n' __script__:fm-calm-omp-extension.test.sh
+      printf '%s\n' __script__:fm-watch-recovery-loop.test.sh
+      printf '%s\n' __script__:fm-wake-queue.test.sh
+      printf '%s\n' __script__:fm-pi-primary-types.test.sh
+      printf '%s\n' live-harness-optin
+      ;;
+    .omp/extensions/fm-calm.ts|.omp/extensions/lib/fm-calm-assistant-layout.ts|\
+    .omp/extensions/lib/fm-calm-operational-user-layout.ts|\
+    .omp/extensions/lib/fm-calm-visibility.ts|.omp/extensions/lib/fm-calm-working-loader.ts|\
+    .omp/extensions/fm-primary-omp-watch.ts)
+      # The omp Calm extension, its adapters, and the omp watcher bridge that
+      # carries the fm_watch_arm_omp Calm shell: the token-free omp live guard
+      # plus the omp harness and live-e2e guards that load the extension tree.
+      printf '%s\n' __script__:fm-calm-omp-extension.test.sh
+      printf '%s\n' __script__:fm-omp-harness.test.sh
       printf '%s\n' live-harness-optin
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\

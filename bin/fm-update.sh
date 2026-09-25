@@ -5,8 +5,13 @@
 # firstmate repo's default branch from origin, then fast-forwards every
 # registered secondmate home. Local homes are treehouse worktrees or standalone
 # clones; remote routes update their configured code root on that host and then
-# fast-forward the persistent home to that root. FAST-FORWARD ONLY, exactly like
-# fm-fleet-sync.sh: never force, never create a merge commit, never stash.
+# fast-forward the persistent home to that root. Secondmate and remote syncs are
+# FAST-FORWARD ONLY, exactly like fm-fleet-sync.sh: never force, never create a
+# merge commit, never stash. The one exception is the primary under the fork
+# model (a distinct 'upstream' template remote alongside origin): there the
+# primary first merges upstream's default branch into the fork's and pushes it to
+# origin, which does create a single merge commit, still guarded - clean checkout
+# on a real branch only, conflicts aborted rather than forced, never force-pushed.
 # A secondmate divergence whose complete local tree result is already present at
 # the target is reconciled with reset --keep; every other unsafe target is
 # skipped and reported, with divergence recorded durably by fm-ff-lib.sh.
@@ -86,21 +91,67 @@ fi
 [ $# -eq 0 ] || { usage; exit 1; }
 
 # --- main firstmate repo ---------------------------------------------------
+#
+# Fork model: when origin is a fork carrying a distinct 'upstream' template
+# remote, the primary cannot simply fast-forward from origin - new upstream
+# commits must first be merged into the fork's default branch and pushed back to
+# origin, after which the origin fast-forward below is a no-op. The merge is
+# guarded exactly like every other sync here: it runs only on a clean checkout
+# that is on a real branch, aborts a conflicted merge instead of forcing or
+# leaving a half-merged tree, and never force-pushes. With no distinct upstream
+# remote it is a silent no-op and the origin fast-forward is the whole update,
+# exactly as before.
+fork_merge_upstream() {  # <dir> <label>; may set reread_firstmate / fork_merged
+  local dir=$1 label=$2 origin_url upstream_url branch before after instr
+  git -C "$dir" remote get-url upstream >/dev/null 2>&1 || return 0
+  origin_url=$(git -C "$dir" remote get-url origin 2>/dev/null || true)
+  upstream_url=$(git -C "$dir" remote get-url upstream 2>/dev/null || true)
+  [ -n "$upstream_url" ] && [ "$origin_url" != "$upstream_url" ] || return 0
+  branch=$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  if [ -z "$branch" ]; then echo "$label upstream: skipped: detached HEAD"; return 0; fi
+  if [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]; then
+    echo "$label upstream: skipped: dirty working tree"; return 0
+  fi
+  if ! git -C "$dir" fetch --quiet upstream 2>/dev/null; then
+    echo "$label upstream: skipped: fetch failed"; return 0
+  fi
+  if ! git -C "$dir" rev-parse --quiet --verify "upstream/$branch" >/dev/null 2>&1; then
+    echo "$label upstream: skipped: no upstream/$branch"; return 0
+  fi
+  if git -C "$dir" merge-base --is-ancestor "upstream/$branch" HEAD 2>/dev/null; then
+    echo "$label upstream: already current"; return 0
+  fi
+  before=$(git -C "$dir" rev-parse HEAD)
+  if ! git -C "$dir" merge --no-edit "upstream/$branch" >/dev/null 2>&1; then
+    git -C "$dir" merge --abort >/dev/null 2>&1 || true
+    echo "$label upstream: skipped: merge conflict, left unchanged"; return 0
+  fi
+  after=$(git -C "$dir" rev-parse HEAD)
+  fork_merged="yes"
+  instr=$(git -C "$dir" diff --name-only "$before" "$after" -- AGENTS.md bin/ .agents/skills/ 2>/dev/null || true)
+  [ -z "$instr" ] || reread_firstmate="yes"
+  if git -C "$dir" push --quiet origin "$branch" 2>/dev/null; then
+    echo "$label upstream: merged ${before:0:7}..${after:0:7} and pushed to origin"
+  else
+    echo "$label upstream: merged ${before:0:7}..${after:0:7} locally; push to origin FAILED - push manually"
+  fi
+}
 
 reread_firstmate="no"
+fork_merged="no"
+fork_merge_upstream "$FM_ROOT" "firstmate"
 ff_target "$FM_ROOT" "firstmate" origin no no
-if [ "$FF_STATUS" = "updated" ]; then
-  if [ -n "$FF_INSTR" ]; then
-    reread_firstmate="yes"
-  fi
-  # A fast-forward changes bin/'s bytes out from under any locally armed
-  # fm-procevent-when watch's trust binding, with no tampering involved; left
-  # alone, the very next fire is refused and the watch dies silently. Refresh
-  # every such watch now, right after the update that broke it. FM_ROOT_OVERRIDE
-  # is passed explicitly rather than relying on the script's own location: this
-  # process's own FM_ROOT is the repo that was just updated, which is not
-  # always where this very script file happens to live (FM_ROOT_OVERRIDE, as
-  # this test suite uses to point fm-update.sh at a fixture checkout).
+if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
+  reread_firstmate="yes"
+fi
+# A fast-forward or an upstream merge changes bin/'s bytes out from under any
+# locally armed fm-procevent-when watch's trust binding, with no tampering
+# involved; left alone, the very next fire is refused and the watch dies
+# silently. Refresh every such watch now, right after the update that broke it.
+# FM_ROOT_OVERRIDE is passed explicitly rather than relying on the script's own
+# location: this process's own FM_ROOT is the repo that was just updated, which
+# is not always where this very script file happens to live.
+if [ "$FF_STATUS" = "updated" ] || [ "$fork_merged" = "yes" ]; then
   FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" "$SCRIPT_DIR/fm-procevent-when.sh" rebind-all || true
 fi
 

@@ -271,6 +271,7 @@ grok 0.2.106 (bde89716f679)
 | Codex CLI 0.144.6 | Not feasible through the inspected supported project surface. | The tracked hooks expose session, pre-tool, and stop handling, while the plugin and feature inventories expose no TUI tool-row renderer or transcript redraw control. |
 | OpenCode 1.17.18 | Not feasible without violating the preservation boundary. | Plugins expose events and tool execution hooks, not a built-in transcript-row renderer; same-name tool replacement changes execution rather than presentation alone. |
 | Pi (verified 0.81.1 through 0.82.0) | Partially feasible with two API-probed exported-class adapters. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, and expansion redraws; exported assistant and interactive-mode classes provide the collapsed-thinking and operational-user layout boundaries, gated on the exact method's presence rather than a version number, while generic user, tool, and status filtering remains unavailable. |
+| omp 18.2.6 (a Pi fork) | Feasible through the same API-probed exported-class adapters as Pi, shipped as the `.omp/extensions/fm-calm.ts` extension. | omp auto-discovers the extension from `<cwd>/.omp/extensions` with no trust gate, gates `ToolExecutionComponent.render` and `ReadToolGroupComponent.render` for every routed tool row rather than a fixed list of built-in renderer functions, gates `InteractiveMode.addMessageToChat` for operational rows, and drives `chatContainer.setToolActivityVisible` with `ui.resetDisplay` to repaint already-painted history; it lacks `setWorkingVisible`/`setHiddenThinkingLabel`, so Calm gates the stock loader through `InteractiveMode.ensureLoadingAnimation`; the [2026-09-20 record](#2026-09-20-omp-1826-seam-drift-and-the-repair) owns the current live-guard evidence and the [2026-09-17 record](#2026-09-17-omp-1820-calm-feasibility-and-the-shipped-extension) owns the original 18.2.0 feasibility. |
 | Grok CLI 0.2.106 | Not feasible through the inspected supported project surface. | Project hooks expose lifecycle and tool interception, while the plugin CLI exposes no row-renderer contract; `--minimal` changes the whole screen mode rather than selected transcript rows. |
 
 These conclusions are deliberately limited to the named versions and supported surfaces.
@@ -293,6 +294,7 @@ Quoted current markers, ASCII-only labels, ordinary text before a marker, unrela
 `tests/fm-calm-claude-mod.test.sh` needs no Claude Code binary: it proves the mod is one hooks module with no command, skill, agent, or classic hook path around its opt-in, that Pi's working ship renders byte-for-byte the shared sprite core painted in ANSI at every width and step, that the Raster packing lays that frame out exactly, that the mod resolves its home like Pi, that its live and restored working-note classifiers enforce the visibility boundaries [`calm.md`](calm.md#claude-code) owns, and that its operational-input classifier agrees with `bin/fm-operational-input.sh` on a corpus the shell owner itself encodes plus legacy shapes and near misses.
 `tests/fm-calm-claude-mod-plugin.test.sh` runs wherever `claude` is installed without spending a model turn: strict `claude plugin validate` on the folder and on the `.claude/skills` auto-load path, then the mod's own `claude plugin test` suites, which drive the hooks module in the engine's host against a mocked clock, environment, file system, and drawing surface.
 `tests/fm-calm-claude-mod-live-e2e.test.sh` is the opt-in credentialed guard in a real Claude Code TUI under tmux: flag off is a complete no-op with the preference already on, flag on shows the moving boat, hides tool and operational rows, toggles and persists through `/calm`, and `claude --continue` restores the hidden rows.
+`tests/fm-calm-omp-extension.test.sh` is the token-free omp live guard: default-on wherever omp is installed, it loads the real extension into `omp --mode rpc` and asserts that all six built-in tool rows and the grouped-read rows render empty while Calm is on and restore stock rendering while off or exporting, exiting from `session_start` before any credentialed call.
 
 The relevant commands are:
 
@@ -304,6 +306,7 @@ tests/fm-pi-primary-types.test.sh
 tests/fm-calm-claude-mod.test.sh
 tests/fm-calm-claude-mod-plugin.test.sh
 FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-mod-live-e2e.test.sh
+tests/fm-calm-omp-extension.test.sh
 ```
 
 ## 2026-07-23 verification record
@@ -746,4 +749,67 @@ The flag-off session's settled screen, with the preference `on` on disk, drew Cl
 ⏺ The three words are alpha, beta, and gamma.
 
 ✻ Sautéed for 8s · done 11:07 AM
+```
+
+## 2026-09-17 omp 18.2.0 Calm feasibility and the shipped extension
+
+omp is a Pi fork whose extension surface imports `@oh-my-pi/pi-coding-agent` and `@oh-my-pi/pi-tui`, auto-discovered from `<cwd>/.omp/extensions` with no trust gate.
+Calm ships as `.omp/extensions/fm-calm.ts` with its omp-specific adapters under `.omp/extensions/lib/`, and reuses the Pi tree for everything shared: the package-free visibility policy in `.pi/extensions/lib/fm-calm-visibility-core.ts` (which the Pi and omp `fm-calm-visibility.ts` wrappers both re-export), the operational-input classifier in `.pi/extensions/lib/fm-operational-input.ts`, and the standard-ANSI working-ship painter and sprite geometry in `.pi/extensions/lib/fm-calm-working-ship.ts`.
+omp exposes no `setWorkingVisible` or `setHiddenThinkingLabel`, so Calm gates the stock loader through `InteractiveMode.ensureLoadingAnimation` and hides thinking by policy in the assistant-layout adapter; it adapts the shared built-in tool renderer functions and `ReadToolGroupComponent.render` in place rather than replacing tool definitions, and the `fm_watch_arm_omp` tool shell follows the `firstmate:calm-presentation` event from `.omp/extensions/fm-primary-omp-watch.ts`.
+
+The runtime symbol probe confirmed every seam Calm patches is present in the installed omp (binary release v18.1.15, reporting `omp/18.2.0`): the six built-in tool renderer functions, `ReadToolGroupComponent`, `AssistantMessageComponent`, `InteractiveMode` with `ensureLoadingAnimation` and `addMessageToChat`, `UserMessageComponent`, `getMarkdownTheme`, `registerMessageRenderer`, and `Container`/`visibleWidth` from pi-tui, while `setWorkingVisible` and `registerEntryRenderer` are absent as expected.
+
+The token-free live guard loaded the real extension into `omp --mode rpc` and exited from `session_start` before any credentialed call:
+
+```text
+$ tests/fm-calm-omp-extension.test.sh
+omp runtime: omp/18.2.0
+PASS read: native ownership, hide, export, restore
+PASS bash: native ownership, hide, export, restore
+PASS edit: native ownership, hide, export, restore
+PASS write: native ownership, hide, export, restore
+PASS grep: native ownership, hide, export, restore
+PASS glob: native ownership, hide, export, restore
+PASS grouped read: hide and restore
+ok - omp Calm hides native tool rows and restores stock rendering on the installed omp
+```
+
+The load also emitted the `setWidget` request for `firstmate-calm-working-ship` and the `setStatus` reset at `session_start`, confirming the working-ship widget and status path install on omp.
+
+## 2026-09-20 omp 18.2.6 seam drift and the repair
+
+omp self-updated in place from the binary reporting `omp/18.2.0` to `omp/18.2.6`, and that release removed three seams the shipped extension patched.
+Calm degraded silently rather than failing loudly, because each adapter is installed through the probe-and-skip wrapper: every skipped adapter logged its diagnostic and Calm kept running with the rows it could no longer hide left visible.
+
+The removed seams, confirmed by runtime probe against the installed `omp/18.2.6`:
+
+| Seam the extension patched | 18.2.6 |
+| --- | --- |
+| `readToolRenderer`, `editToolRenderer`, `writeToolRenderer`, `grepToolRenderer` | absent from the binary |
+| `bashToolRenderer`, `globToolRenderer` | present in the binary, not exported |
+| `InteractiveMode.prototype.getUserMessageText` | `undefined` |
+| `InteractiveMode.prototype.getMarkdownThemeWithSettings`, `outputPad` | `undefined` |
+| `UserMessageComponent` constructor | `(text, { synthetic, imageLinks })`, no longer `(text, theme, pad)` |
+
+`getUserMessageText` was called unguarded inside the patched `addMessageToChat`, so it threw at submit time rather than at install time; the probe-and-skip wrapper only covers the install path, and the unhandled rejection killed the turn.
+
+The repair replaces the per-name renderer list with the two components omp routes every tool row through, `ToolExecutionComponent.render` and `ReadToolGroupComponent.render`, so coverage follows omp's own routing instead of a fixed list of built-in names and no longer drifts when a built-in is renamed.
+The operational-user adapter stops constructing its own component: it lets omp build the row, then gates that row's `render`, which removes the dependency on the changed constructor, the absent theme accessor, and the absent pad.
+Render gating alone does not repaint rows already painted or retired to terminal scrollback, so Calm also drives `chatContainer.setToolActivityVisible` and `ui.resetDisplay` on every state change, the same pair omp's own tool-visibility toggle uses to replay native history.
+
+`toolRenderers` is exported inside the bundle but not re-exported from `@oh-my-pi/pi-coding-agent` or `@oh-my-pi/pi-tui`, so it is not a reachable seam from an extension; `display.hideToolActivity` is reachable through the exported `settings` singleton but is read once into `InteractiveMode` state at construction, so it cannot express a mid-session toggle and was rejected for that reason.
+
+`tests/fm-calm-omp-extension.test.sh` is the regression boundary: it fails on the pre-repair tree against `omp/18.2.6` and passes after the repair.
+
+```text
+$ tests/fm-calm-omp-extension.test.sh
+omp runtime: omp/18.2.6
+PASS read: native ownership, hide, export, restore
+PASS bash: native ownership, hide, export, restore
+PASS edit: native ownership, hide, export, restore
+PASS write: native ownership, hide, export, restore
+PASS grep: native ownership, hide, export, restore
+PASS glob: native ownership, hide, export, restore
+PASS grouped read: hide and restore
+ok - omp Calm hides native tool rows and restores stock rendering on the installed omp
 ```

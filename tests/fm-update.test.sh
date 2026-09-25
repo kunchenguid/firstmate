@@ -176,6 +176,51 @@ test_updates_main_and_secondmate() {
   pass "T1 main + secondmate fast-forward (single-parent), reread + restart signalled"
 }
 
+# --- T1b: fork model - upstream is merged into the fork and pushed to origin --
+# When origin is a fork carrying a distinct 'upstream' template remote, the
+# primary cannot fast-forward from origin: new upstream commits are merged into
+# the fork's default branch and pushed back to origin. The fork's own commits are
+# preserved, the merge is a single merge commit, an upstream instruction change
+# triggers a reread, and a second pass is idempotent.
+test_fork_model_merges_upstream_into_origin() {
+  local w out
+  w=$(new_world fork1)
+  # A distinct upstream template bare, seeded from the same root commit.
+  git init -q --bare "$w/upstream.git"
+  git -C "$w/upstream.git" symbolic-ref HEAD refs/heads/main
+  git -C "$w/seed" push -q "$w/upstream.git" main
+  # A fork-only commit on origin (through the primary checkout).
+  printf 'fork\n' > "$w/main/FORK.md"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm fork-only
+  git -C "$w/main" push -q origin main
+  # Register the upstream remote on the fork checkout.
+  git -C "$w/main" remote add upstream "$w/upstream.git"
+  # Upstream advances the instruction surface.
+  git clone -q "$w/upstream.git" "$w/up"
+  printf 'v2\n' > "$w/up/AGENTS.md"
+  git -C "$w/up" add -A
+  git -C "$w/up" commit -qm upstream-instr
+  git -C "$w/up" push -q origin main
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate upstream: merged " "fork model merges upstream into the fork"
+  assert_contains "$out" "and pushed to origin" "the merge is pushed back to the fork"
+  assert_contains "$out" "reread-firstmate: yes" "an upstream instruction change triggers a reread"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$(git -C "$w/main" rev-parse origin/main)" ] \
+    || fail "fork main was not pushed to origin"
+  [ -f "$w/main/FORK.md" ] || fail "fork-only commit was lost in the merge"
+  [ "$(cat "$w/main/AGENTS.md")" = "v2" ] || fail "upstream AGENTS.md was not merged in"
+  [ "$(git -C "$w/main" rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" -eq 3 ] \
+    || fail "fork tip is not a single merge commit"
+
+  # Idempotent: a second pass has nothing to merge.
+  out=$(run_update "$w")
+  assert_contains "$out" "firstmate upstream: already current" "a second fork pass is idempotent"
+  pass "T1b fork model: upstream merged into fork main, pushed to origin, reread signalled, idempotent"
+}
+
 # --- T3: README-only change does not trigger a reread ----------------------
 test_reread_gate_is_instruction_only() {
   local w out
@@ -557,6 +602,7 @@ test_primary_update_rebinds_local_watch() {
 }
 
 test_updates_main_and_secondmate
+test_fork_model_merges_upstream_into_origin
 test_reread_gate_is_instruction_only
 test_bin_only_advance_restarts
 test_unprovable_runtime_gets_fallback_nudge

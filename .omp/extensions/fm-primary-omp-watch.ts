@@ -19,8 +19,8 @@
 //     successor generation commits its own arm, so omp keeps the plain
 //     teardown-and-rearm replacement shape.
 //   - The Pi supervision branch is out of scope for omp: every actionable wake
-//     is delivered to main, so no branch offer is made and no calm presentation
-//     hooks exist.
+//     is delivered to main, so no branch offer is made. Calm presentation for
+//     fm_watch_arm_omp follows FIRSTMATE_CALM_PRESENTATION_EVENT from fm-calm.ts.
 //   - The arming tool is fm_watch_arm_omp and its human fallback
 //     /fm-watch-arm-omp; the loaded-build marker is state/.omp-watch-extension-loaded.
 //   - Supervision host: a home opted in with config/supervision-host
@@ -68,6 +68,12 @@ import { Type } from "typebox";
 // resolves bin/fm-operational-input.sh relative to its own location, which is
 // the same repository root this file lives in.
 import { encodeFirstmateOperationalInput } from "../../.pi/extensions/lib/fm-operational-input.ts";
+import {
+  type CalmPresentationState,
+  calmTranscriptClassIsVisible,
+  FIRSTMATE_CALM_PRESENTATION_EVENT,
+} from "./lib/fm-calm-visibility.ts";
+import { Container } from "@oh-my-pi/pi-tui";
 
 // The omp extension API surface this file uses. omp is a Pi fork and ships no
 // separately installable type package, so the contract is declared locally
@@ -77,6 +83,9 @@ type ExtensionAPI = {
   sendUserMessage: (content: string, options?: { deliverAs?: string }) => unknown;
   registerCommand?: (name: string, command: { description: string; handler: (args: string, ctx: any) => Promise<void> | void }) => void;
   registerTool?: (tool: Record<string, unknown>) => void;
+  events?: {
+    on?: (event: string, handler: (data: unknown) => void) => void;
+  };
 };
 
 type ArmResult = {
@@ -538,6 +547,21 @@ process.once("exit", cleanupOnProcessExit);
 export default function (pi: ExtensionAPI) {
   let generation = createGeneration();
   activateGeneration(generation);
+  let calmPresentation: CalmPresentationState = {
+    active: false,
+    stockExportRendering: false,
+  };
+  pi.events?.on?.(FIRSTMATE_CALM_PRESENTATION_EVENT, (data) => {
+    const next = (data ?? {}) as Partial<CalmPresentationState>;
+    calmPresentation = {
+      active: next.active === true,
+      stockExportRendering: next.stockExportRendering === true,
+    };
+  });
+  const calmHides = (itemClass: Parameters<typeof calmTranscriptClassIsVisible>[0]): boolean =>
+    calmPresentation.active &&
+    !calmPresentation.stockExportRendering &&
+    !calmTranscriptClassIsVisible(itemClass);
 
   async function sendWake(
     owner: SessionGeneration,
@@ -1124,6 +1148,14 @@ export default function (pi: ExtensionAPI) {
         content: [{ type: "text", text: result.message }],
         details: result,
       };
+    },
+    renderCall: () => {
+      if (calmHides("assistant-tool-call")) return new Container();
+      return undefined;
+    },
+    renderResult: () => {
+      if (calmHides("tool-result")) return new Container();
+      return undefined;
     },
   });
 
