@@ -78,6 +78,18 @@ Claude Code's early-access function-hooks surface is off by default and can load
 Firstmate never sets that flag in any project or user settings; enabling it is each captain's own explicit opt-in, and without that exact value the mod is a complete no-op even if Claude Code's rollout flag loads the module: there is no `/calm` command, no preference or transcript read, no timer, and every drawing stays exactly as Claude Code draws it, whatever `config/calm` says.
 The trusted project auto-loads the mod through the `.claude/skills/firstmate-calm` entry (a symlink into `.claude/mods`), so no `--plugin-dir` or marketplace install is needed.
 
+### Turning Calm on in Claude Code
+
+Launch Claude Code from the Firstmate folder with the flag:
+
+```sh
+cd path/to/firstmate
+CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude
+```
+
+`/calm` toggles the saved preference, so it turns Calm off if it was already on.
+When you exit, choose Exit rather than keeping the session in the background, or the next launch reattaches to that session without the flag.
+
 With the flag on, the mod registers `/calm`, which toggles the same per-home preference Pi's `/calm` uses, so one choice applies on both harnesses.
 The toggle answers with a transient "Calm on" or "Calm off" notice under the prompt rather than a transcript row, and a preference that cannot be written leaves the current choice unchanged and says so in that notice.
 While Calm is on, the stock working row (`Sauteing... (12s · 300 tokens)`) becomes the same two-row sailboat Pi draws, from the same shared sprite geometry: it fills the row inside the transcript margin, repaints on the boat's 220ms cadence with the hull moving every 880ms, reflows on resize, and appears and disappears exactly where the stock row would.
