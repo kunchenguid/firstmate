@@ -677,31 +677,42 @@ The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the split the
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
-The live half of that guarantee was verified on 2026-08-10 from an already-trusted checkout at the branch's final validated head, against every installed harness then covered by the empty-composer matrix on tmux 3.6a, macOS arm64, on an isolated private socket, with no prompt submitted to any harness.
-An earlier untrusted-worktree run left Claude, Grok, and Muse unverified because the guard treats first-launch trust dialogs as an unreadable-composer state and never confirms them; this trusted-checkout rerun supersedes those missing results.
+The live half of that guarantee was re-verified on 2026-09-24 from an already-trusted checkout on tmux 3.7c, macOS arm64, on an isolated private socket, with no prompt submitted to any harness.
+The first live run in that checkout failed on Pi and is the reason this section keeps a dated per-harness result rather than a version-scoped claim.
 
 ```sh
 FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
 ```
 
-Observed output:
+Observed output on 2026-09-24, before the Pi prompt-row fix (the Pi arm of that run; the failing harness names itself and its version):
 
 ```text
-ok - claude (2.1.227 (Claude Code)): real idle composer classifies empty
-ok - codex (codex-cli 0.146.0): real idle composer classifies empty
-ok - opencode (1.14.46): real idle composer classifies empty
-ok - pi (0.84.0): real idle composer classifies empty
-ok - grok (grok 1.0.0 (3cd0d0cbcebe)): real idle composer classifies empty
-# harness absent, not verified here: kimi
-ok - muse (Muse Code 0.1.0 (0.1.0-R708.1)): real idle composer classifies empty
-ok - strict posture live: a blank shell row classifies unknown and injection defers
-ok - zellij (zellij 0.44.0): unrelated pane change never confirms delivery (verdict: unknown)
-ok - live composer-matrix guard verified 8 live surface(s)
+not ok - pi (0.87.1): idle composer never classified empty (last verdict: pending)
 ```
 
-All six installed harnesses' real idle composers reached a proven `empty` (Claude auto-updated to 2.1.227 between the audit and this rerun, so the shipped classifier is proven against the newer release as well), including Pi through the tmux foreground-process identity probe, Grok through the titled-bottom-border tolerance, and OpenCode through the left-bar shape; Codex and OpenCode first parked on vendor update-available modals that the strict classifier correctly refused until the guard's single non-submitting Escape dismissed them.
-The strict blank-row posture held live (a blank shell row deferred injection), and a zellij pane changing for reasons unrelated to submission never confirmed a delivery, replacing the retired content-diff heuristic's false positive.
-Kimi was not installed on the verification machine; its bordered shape is pinned by the portable byte-capture regressions in `tests/fm-composer-lib.test.sh`, which also carry the other five adapters' capability profiles for every harness under both a UTF-8 locale and `LC_ALL=C`.
+Pi 0.87.1 draws its editor as the separator pair whose single input row leads with the harness's shell prompt glyph at full brightness (truecolor fg 200,200,200, above the ghost threshold), so ghost stripping kept it and the genuinely idle, empty composer read `pending` - the one verdict that skips a steer's doorbell, reports a submit unconfirmed, and refuses fm-control's exit command.
+`_fm_composer_classify_pi_rows` now treats the pair's FIRST row alone as the editor's own input line, exempting it only when nothing but that prompt glyph is on it; real input renders after the glyph on the same row and every later row still keeps its verdict, which is what holds the PR #5040 R1 multiline-draft boundary.
+The same run after the fix:
+
+```text
+ok - claude (2.1.280 (Claude Code)): real idle composer classifies empty
+ok - claude (2.1.280 (Claude Code)): the same idle pane read cursorless is not pending (verdict: empty)
+ok - codex (codex-cli 0.156.1): real idle composer classifies empty
+ok - codex (codex-cli 0.156.1): the same idle pane read cursorless is not pending (verdict: empty)
+# harness absent, not verified here: opencode
+ok - pi (0.87.1): real idle composer classifies empty
+ok - pi (0.87.1): the same idle pane read cursorless is not pending (verdict: unknown)
+# harness absent, not verified here: grok
+# harness absent, not verified here: kimi
+# harness absent, not verified here: muse
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+# harness absent, not verified here: zellij (false-positive regression not exercised)
+ok - live composer-matrix guard verified 7 live surface(s)
+```
+
+Every installed harness's real idle composer reached a proven `empty` (Claude and Pi auto-updated between runs, so the shipped classifier is proven against those newer releases as well), including Pi through the tmux foreground-process identity probe, and Codex first parked on a vendor update-available modal that the strict classifier correctly refused until the guard's single non-submitting Escape dismissed it.
+The strict blank-row posture held live (a blank shell row deferred injection).
+An earlier 2026-08-10 run on tmux 3.6a verified the then-installed claude 2.1.227, codex 0.146.0, opencode 1.14.46, pi 0.84.0, grok 1.0.0, and muse 0.1.0 the same way, with kimi absent.
 This guard is the refresh command after an upgrade to any matrix-covered harness; rerun it and update the versions above rather than trusting this table across releases.
 The 2026-08-23 steering-inbox doorbell run observed grok 1.0.5's idle composer classifying `unknown` (and sometimes pending-family), never `empty`.
 Issue #3436's recorded idle capture reproduced the cause on 2026-09-14: Grok 1.0.5 renders the titled bottom border three columns wider than its aligned top and content rows, so the cursorless Herdr profile rejected the otherwise complete box as ambiguous.

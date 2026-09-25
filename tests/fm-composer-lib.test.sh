@@ -585,6 +585,13 @@ test_matrix_pi_separated_needs_identity() {
   # exactly what the strict rule refuses; only structure PLUS a live
   # idle/done pi identity proves the composer (herdr's rule, now
   # fleet-wide; tmux supplies identity from its foreground-process probe).
+  # The blank input row here is the other idle shape the identity rule owns: a
+  # pair whose region carries nothing at all. That is the fixture this case
+  # needs, and pi 0.87.1 is the reason the other fixture exists - it fills the
+  # same row with its prompt glyph, pinned by
+  # test_matrix_pi_prompt_row_is_editor_furniture below. Both stay green because
+  # they answer different questions: this case owns "the region's content alone
+  # is never proof", that one owns "the prompt row is furniture".
   local screen typed pi_idle pi_working pi_blocked none
   screen=$'transcript\n────────────────────────\n\n────────────────────────\n footer'
   pi_idle=$(printf 'pi\tidle'); pi_working=$(printf 'pi\tworking'); none=$(printf 'zsh\t')
@@ -617,6 +624,91 @@ test_matrix_pi_separated_needs_identity() {
   assert_screen "lone glyph on plain backend" empty "$CAPS_PLAIN" "$typed"
   assert_screen "lone glyph with non-pi identity" empty "$CAPS_STYLED" "$typed" '' "$none"
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
+}
+
+test_matrix_pi_prompt_row_is_editor_furniture() {
+  # pi 0.87.1's real editor box: a solid rule, ONE input row leading with the
+  # harness's own prompt glyph at full brightness (truecolor fg 200,200,200 -
+  # above the ghost threshold, so ghost stripping kept it), then a second solid
+  # rule, and the footer's `↳` echo of the last submitted message BELOW it.
+  # Read live through fm_tmux_composer_state against an idle, empty pi pane on
+  # 2026-09-24, that glyph row was the pair's only row and the verdict was a
+  # false `pending` - which skipped every steer's doorbell, reported every
+  # submit unconfirmed, and refused fm-control's exit command (task
+  # fm-pi-queued-composer-classification). The glyph is FURNITURE.
+  local screen styled queued typed pi_idle pi_working none selected
+  pi_idle=$(printf 'pi\tidle'); pi_working=$(printf 'pi\tworking'); none=$(printf 'zsh\t')
+  screen=$'transcript\n────────────────────────\n>\n────────────────────────\n footer'
+  assert_screen "pi idle prompt row with identity" empty "$CAPS_STYLED" "$screen" '' "$pi_idle"
+  assert_screen "pi idle prompt row on tmux" empty "$CAPS_TMUX" "$screen" 2 "$pi_idle"
+  # A busy pi cannot authorize injection at all, prompt row or not: only a
+  # live idle/done identity proves an empty composer, so a working pane still
+  # defers.
+  assert_screen "pi busy prompt row still defers" unknown "$CAPS_STYLED" "$screen" '' "$pi_working"
+  # The same frame with its real styling: the bright prompt glyph, the
+  # reverse-video hardware cursor on the empty input line, and the dim 244
+  # rules that bound the pair.
+  styled=$'\033[38;5;244m────────────────────────\033[39m\n\033[38;2;200;200;200m>\033[39m \033[7m \033[0m\n\033[38;5;244m────────────────────────\033[39m'
+  assert_screen "pi idle prompt row at real 0.87.1 brightness" empty "$CAPS_STYLED" "$styled" '' "$pi_idle"
+  # The incident frame, captured live from a BUSY pi 0.87.1 pane with a queued
+  # message: the `Steering:` row and its `↳` dequeue hint (both dim 102), the
+  # `⠏ Working` spinner row, the bright status row, then the editor box and the
+  # footer's `↳` echo of the last submitted message. The two rules are trimmed
+  # from the captured 98 columns; the width is not load-bearing. What is: every
+  # queued-message row pi draws renders OUTSIDE the pair (the dock order is
+  # pending messages, status, editor, footer), so the pair still has exactly one
+  # row and it is the prompt glyph. The tail note is therefore never the
+  # editor's text, and no queued row is exempted here - there is none to exempt.
+  # The only shape that widens the pair is the editor's own SCROLL border
+  # (`↑ n ───` instead of a solid rule), which pi draws only once a draft
+  # outgrows the visible input lines; a genuinely long draft is then in the
+  # region and `pending` is the right refusal, so that shape needs no rule.
+  queued=$'\033[38;2;102;102;102mSteering: launch-brief/queued\033[39m\n\033[38;2;102;102;102m↳ Alt+Up to edit all queued messages\033[39m\n\n\033[38;2;138;190;183m⠏\033[39m \033[38;2;128;128;128mWorking\033[39m\n\n\033[38;2;215;135;175mDeepSeek V4.1 Flash (Cline Pass)\033[39m \033[38;5;244m·\033[39m \033[38;2;178;129;214mthink:high\033[39m \033[38;5;244m·\033[39m fm-pi-repro\n\033[38;5;244m────────────────────────\033[39m\n\033[38;2;200;200;200m>\033[39m \033[7m \033[0m\n\033[38;5;244m────────────────────────\033[39m\nFeishu: 已连接 / Connected  ·  🐙 0 · 0 · $0\n\033[38;5;244m↳ launch-brief/queued\033[39m'
+  assert_screen "pi queued tail note stays outside the pair, whose one row is the prompt" empty "$CAPS_STYLED" "$queued" '' "$pi_idle"
+  # Non-vacuousness: the SAME frame with one line typed into the editor must
+  # still refuse, so the case above passes because of what the pair holds and
+  # not because the tail note made the frame unreadable.
+  typed=${queued//$'\033[38;2;200;200;200m>\033[39m \033[7m \033[0m'/$'\033[38;2;200;200;200m> fix the flaky test\033[39m'}
+  assert_screen "pi queued tail note plus a real draft stays pending" pending "$CAPS_STYLED" "$typed" '' "$pi_idle"
+  # The same boundary read where it can actually break: the extraction consumer
+  # that answers "what does this composer hold?" must scope itself to the pair
+  # and never to the queued rows, and it must strip the editor's own prompt
+  # glyph the classification side treats as furniture. If a queued row were ever
+  # selected as the composer, this is the assertion that would fail; if the
+  # prompt glyph survived, the exact-match doorbell consumer
+  # (fm_task_inbox_composer_holds) could never match our own doorbell line.
+  selected=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$queued")
+  [ -z "$selected" ] \
+    || fail "an idle pi composer holding only its prompt glyph should extract to empty content, got '$selected'"
+  case "$selected" in
+    *Steering:*|*launch-brief/queued*|*"to edit all queued messages"*)
+      fail "a queued-message row was selected as composer content: '$selected'" ;;
+  esac
+  # The complement that makes the doorbell consumer reachable: a real line on
+  # the editor's prompt row extracts to exactly that line.
+  selected=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$typed")
+  [ "$selected" = 'fix the flaky test' ] \
+    || fail "a pi composer holding a real line should extract it exactly, got '$selected'"
+  # PROTECTION, unchanged and never relaxed: real input renders AFTER the glyph
+  # on the SAME row (measured live), so it is not the prompt row any more.
+  typed=$'transcript\n────────────────────────\n> fix the flaky test\n────────────────────────\n footer'
+  assert_screen "pi typed draft on the prompt row stays pending" pending "$CAPS_STYLED" "$typed" '' "$pi_idle"
+  assert_screen "pi typed draft on the prompt row on tmux" pending "$CAPS_TMUX" "$typed" 2 "$pi_idle"
+  # A typed `>` is `> >` on the input row (measured live), so it is prose.
+  typed=$'────────────────────────\n> >\n────────────────────────'
+  assert_screen "pi typed prompt glyph stays a draft" pending "$CAPS_STYLED" "$typed" '' "$pi_idle"
+  # The PR #5040 R1 shape: the prompt row is clean/blank and a LATER row is the
+  # bare glyph the operator typed as a continuation. Only the pair's FIRST row
+  # is the editor's input line, so this keeps refusing.
+  typed=$'transcript\n────────────────────────\n\n>\n────────────────────────\n footer'
+  assert_screen "pi later bare glyph row is typed continuation, not furniture" pending "$CAPS_STYLED" "$typed" '' "$pi_idle"
+  # A continuation TEXT row below a clean prompt row keeps refusing too.
+  typed=$'transcript\n────────────────────────\n>\n fix the flaky test\n────────────────────────\n footer'
+  assert_screen "pi continuation row below the prompt stays pending" pending "$CAPS_STYLED" "$typed" '' "$pi_idle"
+  # Unchanged strict posture: no identity capability still proves nothing.
+  assert_screen "pi prompt row without identity capability" unknown "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "pi prompt row with non-pi identity" unknown "$CAPS_STYLED" "$screen" '' "$none"
+  pass "matrix: pi's own prompt row is editor furniture; queued tail notes and every real draft keep their verdicts"
 }
 
 test_matrix_opencode_leftbar_signals() {
@@ -928,6 +1020,7 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
+test_matrix_pi_prompt_row_is_editor_furniture
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box

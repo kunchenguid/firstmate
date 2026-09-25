@@ -75,7 +75,7 @@ The tmux reader is a thin adapter over the fleet-wide classifier in `bin/fm-comp
 Real text in an identified shape is pending, while only positively proven emptiness reads empty.
 A blank or otherwise unidentified cursor row is `unknown` and every consumer defers, except that a foreground process proven to be Cursor is re-read cursorlessly because Cursor parks its terminal cursor below its footer.
 That identity-gated exception preserves the strict container-proof rule for every other pane, so a modal dialog, a dead shell between stale rules, or a mid-redraw pane is never an injection target.
-The shared classifier accepts a shell glyph as an empty agent composer only inside a bordered container.
+The shared classifier accepts a shell glyph as an empty agent composer only inside a positively identified composer container.
 A bare shell prompt is `unknown`, so away-mode escalation is never injected into a dead shell.
 
 Busy state is not read from rendered text on this backend.
@@ -95,7 +95,7 @@ OpenCode 1.18.4 has one busy-queue exception.
 While OpenCode is mid-turn, Enter queues the message but leaves its text visible until the turn completes.
 After the normal retry budget, only structurally proven pending text in a provably busy pane is accepted as queued, while an idle pane remains `pending` as a genuine swallowed Enter.
 Ambiguous pending text never receives the busy-queue conversion.
-A second, baseline-gated conversion covers harnesses whose mid-turn screen the classifier cannot identify (Pi replaces its separated composer while working): when and only when the pane was idle before the text was typed, an idle-to-busy transition across the submit's own Enter confirms delivery, the same turn-started signal Herdr reads natively.
+A second, baseline-gated conversion covers harnesses whose mid-turn screen the classifier cannot identify (Pi keeps its separated composer while working, but a working identity cannot prove it empty, so the verdict stays `unknown`): when and only when the pane was idle before the text was typed, an idle-to-busy transition across the submit's own Enter confirms delivery, the same turn-started signal Herdr reads natively.
 Without that baseline, an `unknown` verdict is preserved untouched, so a busy-looking pane can never convert an unread composer into a confirmation.
 `tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
 
