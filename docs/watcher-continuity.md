@@ -433,6 +433,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - Decision-only OPEN DECISIONS recovery.
 - Interrupted handling replay.
 - Generation-bound acknowledgement.
+- The bounded reopen of a stuck unacknowledged episode, with and without queued rows, and a genuine acknowledgement with a queued row that still resurfaces.
 - A persistent live successor after recovery.
 - A watcher close inside the handling window that must leave the printed acknowledgement valid.
 - A re-arm whose recovery cycle is slowed after confirmation and must still surface rather than read as a watcher that stayed live.
