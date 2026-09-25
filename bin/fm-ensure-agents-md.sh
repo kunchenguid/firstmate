@@ -24,7 +24,10 @@
 # uppercase-literal-target dangling-symlink hazard that a CLAUDE.md -> AGENTS.md
 # link would have carried for that same mismatch.
 # This is a worktree utility for crewmates, not a supervision script, so it does
-# not call fm-guard.sh.
+# not call fm-guard.sh. Crewmates reach for it only alongside a correction of
+# factually wrong content in an existing memory file: AGENTS.md section 6 owns
+# the policy that worker edits correct and never add, so this script is not how
+# a task grows a project's memory.
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
 set -eu
 
@@ -109,7 +112,7 @@ write_skeleton() {
 
 This file is the project's committed home for project-intrinsic agent knowledge: build, test, release, architecture, and sharp-edge notes that should travel with the code.
 
-- Add durable project-specific notes here as they are discovered through real work.
+- Correct entries that work proves wrong; add new ones only by deliberate maintainer choice, never as routine task output.
 EOF
   ensure_maintenance_section
 }
