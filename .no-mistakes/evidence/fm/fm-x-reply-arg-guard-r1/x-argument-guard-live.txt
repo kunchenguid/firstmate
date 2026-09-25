@@ -1,0 +1,29 @@
+A: mistyped reply flag after --followup must not publish
+reply-final: exit=2; stderr=fm-x-reply: unknown option '--final' (reply text starting with '-' needs --text-file or stdin)
+reply-surplus: exit=2; stderr=fm-x-reply: unexpected extra arguments
+reply-id: exit=2; stderr=fm-x-reply: unknown option '--bogus'
+reply-post-id-help: exit=2; stderr=fm-x-reply: unknown option '--help' (reply text starting with '-' needs --text-file or stdin)
+B: --text-file must not swallow dash-leading option (including when file exists)
+missing-dash-file: exit=2; stderr=fm-x-reply: missing --text-file path
+existing-dash-file: exit=2; stderr=fm-x-reply: missing --text-file path
+image-value: exit=2; stderr=fm-x-reply: missing --image path
+receipt-value: exit=2; stderr=fm-x-reply: missing --receipt-file path
+C: follow-up refuses malformed args before changing even expired link
+followup-unlinked: exit=2; stderr=fm-x-followup: unexpected extra arguments (exactly one text source: --text-file <path> or -)
+followup-unknown: exit=2; stderr=fm-x-followup: unknown option '--bogus' (follow-up text comes only from --text-file or stdin)
+followup-extra: exit=2; stderr=fm-x-followup: unexpected extra arguments (exactly one text source: --text-file <path> or -)
+followup-image-value: exit=2; stderr=fm-x-followup: missing --image path
+followup-text-file-value: exit=2; stderr=fm-x-followup: missing --text-file path
+followup-post-id-help: exit=2; stderr=fm-x-followup: unknown option '--help' (follow-up text comes only from --text-file or stdin)
+followup-clear-value: exit=2; stderr=usage: fm-x-followup.sh --check <task-id> | --clear <task-id> [--expect-request <request-id>] | <task-id> [--image <path>] [--final] --text-file <path> | <task-id> [--image <path>] [--final] -
+followup-check-id: exit=2; stderr=usage: fm-x-followup.sh --check <task-id> | --clear <task-id> [--expect-request <request-id>] | <task-id> [--image <path>] [--final] --text-file <path> | <task-id> [--image <path>] [--final] -
+linked state after rejects: x_request=req-linked; x_followups=0
+followup-expired-surplus: exit=2; stderr=fm-x-followup: unexpected extra arguments (exactly one text source: --text-file <path> or -)
+expired link after reject: x_request=req-expired
+D: dismiss rejects dash-leading ID and extra arguments
+dismiss-id: exit=2; stderr=fm-x-dismiss: unknown option '--bogus'
+dismiss-surplus: exit=2; stderr=usage: fm-x-dismiss.sh <request_id>
+E: legitimate dash-leading text through file and stdin is recorded as intended
+{"request_id":"req-file","text":"--final is intentional text"}
+{"request_id":"req-stdin","text":"--leading stdin text"}
+Live dry-run CLI scenarios completed; temporary home removed on exit.

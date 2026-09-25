@@ -1,0 +1,3 @@
+follow-up result: req-final
+dry-run post body: {"request_id":"req-final","endpoint":"followup","text":"--final is text here"}
+link after --final: (none)
