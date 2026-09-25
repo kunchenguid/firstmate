@@ -157,7 +157,7 @@ The effort picker may only inspect the model named by the current pointer, as th
 Nothing captain-facing rides on that conversation.
 The durable outcome store and its processed marker are what carry unacknowledged outcomes across the boundary.
 They re-present on the new main session exactly as they do after a crash.
-An explicit Pi watcher repair also requests an immediate serialized reconciliation of that store, including when the watcher arm itself was already running.
+An explicit Pi watcher repair also follows the immediate reconciliation contract under [Outcome store](#outcome-store).
 
 #### Guarded side effects and delivery ownership
 
@@ -221,6 +221,9 @@ Its header owns the append-only format, read cursor, and bounded per-task status
 Outcomes are written to the store before delivery to Pi.
 A captain row advances the cursor only after its matching visible session entry exists.
 The shared event contract in `.pi/extensions/lib/fm-branch-dispatch.ts` couples an explicit watcher repair to this reconciliation without making the watcher read the outcome store itself.
+After either starting a new arm or finding its owned arm already running, the repair emits a request that the lock-owning branch accepts synchronously and serializes with its delivery queue.
+The repair reports success only after that reconciliation settles successfully; an absent or declining listener, lost ownership, or failed reconciliation makes the repair fail closed.
+Sequence-keyed visible entries and the processing request's pending state keep a repeated repair from presenting a missed captain outcome more than once.
 Locked session-start replay stops before the first captain row, so it cannot acknowledge that outcome through prose alone.
 
 A routine note has no such sequence-keyed record.
@@ -630,7 +633,7 @@ At that moment the branch reports any refusal instead of concluding there is "no
 - Re-presentation after an empty reply and after an unrelated prior answer, the triggered-then-next-turn pacing, and session-start re-presentation.
 - Routine outcomes staying turn-free, and the processed-marker migration.
 - Idle and busy main state, and incident-shaped compaction and unrelated-assistant context.
-- Cold-start post-lock recovery, crash-before-cursor reload recovery, and repeated-reload idempotency.
+- Cold-start post-lock recovery, crash-before-cursor reload recovery, repeated-reload idempotency, and exactly-once missed-outcome reconciliation after repeated explicit watcher repair.
 - Mirroring.
 - Post-construction provider-error and no-report fallback, the consecutive-error latch, cooldown probe, exponential backoff, report-plus-settlement recovery, and report-before-error re-latch.
 - Cache key, and model and effort selection.

@@ -43,7 +43,7 @@ Each adapter:
 - Applies bounded exponential retry after an unexpected or failed close.
 
 A failed follow-up never cancels continuity restoration.
-On Pi, an explicit `fm_watch_arm_pi` repair also waits for the supervision branch to reconcile its durable outcome store, whether the call starts a new arm or finds the owned arm already running.
+On Pi, an explicit `fm_watch_arm_pi` repair also follows the supervision branch's [durable outcome reconciliation contract](pi-supervision-branch.md#outcome-store).
 
 ### Pi session replacement
 
@@ -395,7 +395,7 @@ The watcher uses bash's native fatal handling for HUP and TERM, including during
 
 ### Pi and OpenCode watch extension
 
-`tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops.
+`tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata, ownership-based redundant-call no-ops, reconciliation after both a new arm and an owned no-op, settlement-before-success, and fail-closed behavior when no branch accepts the request.
 It then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, and:
 
 - Blocks prompt delivery to prove the successor launches first.
