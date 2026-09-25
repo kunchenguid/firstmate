@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
+# clean up auxiliary sessions (scope and failure reporting below),
 # clear volatile state, and transition this home's backlog item for ship and
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
@@ -12,6 +13,29 @@
 # the one site where --force overrides it, and bin/fm-backend.sh's
 # fm_backend_kill owns what each backend can prove about its own close - an
 # already-exited endpoint is not a failure and stays silent.
+# Auxiliary session cleanup is best effort and does not veto task-record removal.
+# A live chrome-devtools-axi bridge must carry FM_TASK_ID equal to the task id
+# and have its cwd under the task's recorded worktree before session cleanup
+# may stop it; a matching session name alone is insufficient because task ids
+# repeat across homes. If CHROME_DEVTOOLS_AXI_SESSION equals that id, cleanup
+# invokes the CLI's stop for that session. For any other name, including an
+# unset/default session, it terminates the attributed bridge and its descendants
+# directly, without issuing a global default-session stop. The separate cwd
+# reaper's boundary is described at task_bridge_session below.
+# Lavish cleanup retires registrations in the owning home's state/procevent
+# whose adapter is lavish and whose argv invokes fm-procevent-lavish.sh poll
+# with an artifact resolving beneath that home's data/<task-id>/ (or the
+# configured data root). It retires the poller, not the Lavish review session.
+# Ship/scout cleanup runs after run conclusion and before cwd reaping and
+# worktree return; a reassigned slot skips browser attribution but still permits
+# poller retirement. Secondmate cleanup also applies this helper to each child
+# before removing its worktree or records, and to the secondmate itself before
+# home removal. No launch-time browser session naming is imposed here.
+# Each failed browser-stop or poller-retirement attempt appends one final stdout
+# line: teardown: LEFTOVER <browser|poller> <task-id> <detail>.
+# Poller-retirement failure leaves its registration for reconciliation while
+# the owning home remains; it does not prevent otherwise successful teardown.
+# tests/fm-teardown.test.sh --sessions-only covers these cleanup boundaries.
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
@@ -390,6 +414,7 @@ DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
 DESCENDANT_TASK_HOMES=()
 DESCENDANT_TREEHOUSE_LOCK_PATHS=()
+TEARDOWN_SESSION_LEFTOVERS=
 teardown_release_locks() {
   local status=$? i
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
@@ -428,6 +453,7 @@ teardown_release_locks() {
     TREEHOUSE_PROJECT_LOCK_HELD=0
   fi
   fm_lease_guard_release || true
+  [ -z "$TEARDOWN_SESSION_LEFTOVERS" ] || printf '%s' "$TEARDOWN_SESSION_LEFTOVERS"
   return "$status"
 }
 trap teardown_release_locks EXIT
@@ -3121,6 +3147,129 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
   return 1
 }
 
+teardown_session_leftover() {
+  TEARDOWN_SESSION_LEFTOVERS+="teardown: LEFTOVER $1 $2 $3"$'\n'
+}
+
+# The worktree reaper owns processes inside a returned worktree by cwd;
+# attribution governs only what is stopped by session name outside it.
+task_bridge_session() {
+  local pid=$1 task_id=$2 command environment
+  command=$(ps -ww -p "$pid" -o command= 2>/dev/null) || return 1
+  case "$command" in *chrome-devtools-axi-bridge*) ;; *) return 1 ;; esac
+  if [ "$(uname -s)" = Darwin ]; then
+    environment=$(ps -Eww -p "$pid" -o command= 2>/dev/null) || return 1
+  else
+    environment=$(ps eww -p "$pid" -o command= 2>/dev/null) || return 1
+  fi
+  printf '%s\n' "$environment" | perl -e '
+    local $/; my $row = <STDIN>;
+    my ($task) = $row =~ /(?:^|\s)FM_TASK_ID=([^\s]*)/;
+    exit 1 unless defined($task) && $task eq $ARGV[0];
+    my ($session) = $row =~ /(?:^|\s)CHROME_DEVTOOLS_AXI_SESSION=([^\s]*)/;
+    print defined($session) ? $session : "default";
+  ' "$task_id"
+}
+
+stop_task_bridge_tree() {
+  local bridge=$1 bridge_identity=$2 table descendants pid identity i attempt alive
+  local -a pids identities
+  task_process_identity_matches "$bridge" "$bridge_identity" || return 0
+  table=$(ps -axo pid=,ppid=) || return 1
+  descendants=$(printf '%s\n' "$table" | awk -v root="$bridge" '
+    { parent[$1] = $2 }
+    END {
+      owned[root] = 1
+      do {
+        changed = 0
+        for (pid in parent) if (!owned[pid] && owned[parent[pid]]) {
+          owned[pid] = 1; changed = 1
+        }
+      } while (changed)
+      for (pid in owned) if (owned[pid]) print pid
+    }') || return 1
+  pids=(); identities=()
+  while IFS= read -r pid; do
+    [ -n "$pid" ] && [ "$pid" != "$$" ] || continue
+    identity=$(task_process_identity "$pid") || continue
+    pids+=("$pid"); identities+=("$identity")
+  done <<< "$descendants"
+  task_process_identity_matches "$bridge" "$bridge_identity" || return 0
+  for ((i=0; i<${#pids[@]}; i++)); do
+    if task_process_identity_matches "${pids[$i]}" "${identities[$i]}"; then
+      kill -TERM "${pids[$i]}" 2>/dev/null || true
+    fi
+  done
+  for ((attempt=0; attempt<20; attempt++)); do
+    alive=0
+    for ((i=0; i<${#pids[@]}; i++)); do
+      if task_process_identity_matches "${pids[$i]}" "${identities[$i]}" \
+        && ! ps -p "${pids[$i]}" -o stat= 2>/dev/null | grep -q '^[[:space:]]*Z'; then
+        alive=1
+        [ "$attempt" -ne 10 ] || kill -KILL "${pids[$i]}" 2>/dev/null || true
+      fi
+    done
+    [ "$alive" -ne 0 ] || return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+cleanup_task_sessions() {
+  local task_id=$1 task_wt=$2 task_home=$3 task_state=$4 task_data=$5
+  local record adapter argc line artifact data_root candidates pid session identity current
+  local -a poll_argv
+  if candidates=$(pids_with_cwd_under "$task_wt"); then
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      identity=$(task_process_identity "$pid") || continue
+      session=$(task_bridge_session "$pid" "$task_id") || continue
+      current=$(pids_with_cwd_under "$task_wt") || continue
+      task_pid_list_contains "$current" "$pid" || continue
+      task_process_identity_matches "$pid" "$identity" || continue
+      if [ "$session" = "$task_id" ]; then
+        CHROME_DEVTOOLS_AXI_SESSION="$task_id" chrome-devtools-axi stop >&2 \
+          || teardown_session_leftover browser "$task_id" "session=$session bridge=$pid"
+      else
+        stop_task_bridge_tree "$pid" "$identity" \
+          || teardown_session_leftover browser "$task_id" "session=$session bridge=$pid"
+      fi
+    done <<< "$candidates"
+  else
+    echo "warning: cannot attribute browser processes for $task_id" >&2
+  fi
+  [ -d "$task_data" ] || return 0
+  data_root=$(cd "$task_data" && pwd -P) || {
+    echo "warning: cannot resolve task artifact root for $task_id" >&2
+    return 0
+  }
+  for record in "$task_state/procevent/"*.source; do
+    [ -f "$record" ] && [ ! -L "$record" ] || continue
+    adapter=$(sed -n 's/^adapter=//p' "$record" | head -1)
+    [ "$adapter" = lavish ] || continue
+    argc=$(sed -n 's/^argc=//p' "$record" | head -1)
+    [ "$argc" = 3 ] || continue
+    poll_argv=()
+    while IFS= read -r line; do
+      [ "${#poll_argv[@]}" -ge 3 ] || poll_argv+=("$line")
+    done < <(sed -n '/^argv:$/,$p' "$record" | tail -n +2)
+    [ "${#poll_argv[@]}" -eq 3 ] || continue
+    case "${poll_argv[0]}" in */fm-procevent-lavish.sh) ;; *) continue ;; esac
+    [ "${poll_argv[1]}" = poll ] || continue
+    artifact=$(perl -MCwd=realpath -e '
+      $p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n";
+    ' "${poll_argv[2]}" 2>/dev/null) || {
+      echo "warning: cannot resolve Lavish artifact in $record" >&2
+      continue
+    }
+    case "$artifact" in "$data_root/$task_id/"*) ;; *) continue ;; esac
+    FM_HOME="$task_home" FM_STATE_OVERRIDE="$task_state" FM_DATA_OVERRIDE="$task_data" \
+      "$SCRIPT_DIR/fm-procevent-lavish.sh" retire "$artifact" >&2 \
+      || teardown_session_leftover poller "$task_id" "$artifact"
+  done
+  return 0
+}
+
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc
   sub_state="$home/state"
@@ -3166,6 +3315,7 @@ cleanup_firstmate_home_children() {
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       fi
     fi
+    cleanup_task_sessions "$child_id" "$child_wt" "$home" "$sub_state" "$home/data"
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -3477,8 +3627,10 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
+  cleanup_task_sessions "$ID" "$WT" "$FM_HOME" "$STATE" "$DATA"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 elif [ "$KIND" != secondmate ]; then
+  cleanup_task_sessions "$ID" "" "$FM_HOME" "$STATE" "$DATA"
   reap_task_worktree_processes tasktmp "$TASK_TMP"
 fi
 
@@ -3614,6 +3766,10 @@ if [ "$BACKEND" = herdr ]; then
     exit 1
   fi
 fi
+if [ "$KIND" = secondmate ]; then
+  cleanup_task_sessions "$ID" "$WT" "$FM_HOME" "$STATE" "$DATA"
+fi
+
 if [ "$KIND" != secondmate ]; then
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       "$SCRIPT_DIR/fm-inactive-reconcile.sh" report "$ID"; then
