@@ -216,7 +216,9 @@
 #   config reread generations because the new agent reads the converged files.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
-#   provisioned firstmate home; the default is kind=ship.
+#   provisioned firstmate home, or on herdr in that home's workspace root with
+#   FM_HOME naming the home (docs/configuration.md "Second-mate working
+#   directory"); the default is kind=ship.
 #   Before a secondmate launch, the home is fast-forwarded to the primary's
 #   default-branch commit when safe: directly for a local home, or through the
 #   configured host for a remote home. Skipped syncs warn and launch unchanged.
@@ -394,7 +396,8 @@
 # claude is the one harness whose pre-launch setup can REFUSE the spawn: before
 # any per-task state exists, and before its worktree .claude/settings.local.json
 # hooks are written, every claude launch pre-registers the directory the pane
-# starts in - the task worktree, or the secondmate home for a --secondmate spawn -
+# starts in - the task worktree, or the secondmate home (or its herdr workspace
+# root, when it starts there) for a --secondmate spawn -
 # in the launching user's own Claude trust store through bin/fm-claude-trust.sh,
 # because Claude's interactive workspace-trust dialog gates a folder it has never
 # seen and firstmate cannot answer it. That helper's header owns the structural

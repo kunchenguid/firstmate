@@ -813,6 +813,38 @@ test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded() {
   pass "fm-spawn.sh: a claude secondmate spawn refuses when home trust cannot be recorded"
 }
 
+# A second mate that starts in its Herdr workspace root gets trust on that root,
+# granted on the seed evidence of its home; the root itself needs no firstmate
+# shape, but the shared refusals and the home's seed test still hold.
+test_secondmate_root_trust_is_granted_on_the_home_seed() {
+  local case_dir config home root out
+  case_dir="$TMP_ROOT/sm-root"
+  config="$case_dir/claude-config"
+  home="$case_dir/home"
+  root="$case_dir/workspace-root"
+  mkdir -p "$config" "$root"
+  seed_secondmate_home "$home" root-n1 clone
+
+  out=$(CLAUDE_CONFIG_DIR="$config" HOME="$config" "$TRUST" --secondmate-root "$root" "$home" root-n1 2>&1)
+  expect_code 0 $? "a registered second mate's workspace root should be trusted: $out"
+  assert_trusted "$config/.claude.json" "$(cd "$root" && pwd -P)" "the workspace root was not trusted"
+  assert_not_trusted "$config/.claude.json" "$(cd "$home" && pwd -P)" "root mode must not also trust the home"
+
+  out=$(CLAUDE_CONFIG_DIR="$config" HOME="$config" "$TRUST" --secondmate-root "$root" "$home" other-n1 2>&1)
+  expect_code 1 $? "a root for a home marked for another second mate must be refused: $out"
+  assert_contains "$out" "root-n1" "the refusal did not name the id the home is marked for"
+
+  rm -f "$home/.fm-secondmate-home"
+  out=$(CLAUDE_CONFIG_DIR="$config" HOME="$config" "$TRUST" --secondmate-root "$root" "$home" root-n1 2>&1)
+  expect_code 1 $? "a root for an unseeded home must be refused: $out"
+  printf 'root-n1\n' >"$home/.fm-secondmate-home"
+
+  out=$(CLAUDE_CONFIG_DIR="$config" HOME="$case_dir" "$TRUST" --secondmate-root "$case_dir" "$home" root-n1 2>&1)
+  expect_code 1 $? "the user's home directory must never be trusted as a workspace root: $out"
+  assert_contains "$out" "home directory" "the refusal did not name the home directory"
+  pass "fm-claude-trust.sh: a second mate's workspace root is trusted only on its home's seed evidence"
+}
+
 test_fresh_worktree_is_trusted
 test_fresh_worktree_also_trusts_the_project_root_without_import_consent
 test_registration_carries_forward_existing_import_consent
@@ -842,5 +874,6 @@ test_refused_spawn_leaves_no_task_state
 test_secondmate_standalone_clone_home_is_trusted
 test_secondmate_leased_worktree_home_is_trusted
 test_secondmate_home_trust_refuses_everything_unseeded
+test_secondmate_root_trust_is_granted_on_the_home_seed
 test_worktree_mode_still_refuses_a_secondmate_home
 test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded
