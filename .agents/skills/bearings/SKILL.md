@@ -47,6 +47,8 @@ For a contribution wake or linked-issue filing, go directly to Contribution foll
    For registered secondmates, use the snapshot's structured-home classification and provenance.
    A parent event or bounded terminal contradiction is fallback evidence, never authority over readable structured home state.
    A decision is simply a task held for the captain (`captain-hold-lifecycle`), whatever its kind.
+   The one exception is a `decisions_open` row with verb `blocked` and key `pending-reply-<corr>`: a secondmate request whose missed reply was escalated and is still unresolved (`bin/fm-pending-reply-lib.sh` owns that lifecycle).
+   It is not a captain hold and takes no hold bucket; list it in Captain's Call, and the captain dismisses it with `bin/fm-send.sh --resolve-key <key>`.
    The canonical snapshot assigns every captain hold exactly one bucket from structured fields only: `blocked` when any blocker is unresolved, else `dated` while `hold_until` is in the future, else `aged` when an undated hold has reached the configured age threshold, else `live`.
    Never use hold-reason or body prose to classify or place a decision.
    A `live` hold appears in Captain's Call; `blocked`, `dated`, and `aged` holds appear as disclosed Charted Next gates stating their structured reason.
@@ -99,6 +101,7 @@ For a contribution wake or linked-issue filing, go directly to Contribution foll
 Compose the payload from the same snapshot with the same ranking judgment as the chat digest, plus these board rules:
 
 - A Captain's Call decision key is the captain-held TASK ID from `decisions_open` (legacy `<origin>-decision-<key>` rows are already task ids); a merge card's key is `merge.<task-id>`; the Charted Next dispatch picker's key is `dispatch.charted`.
+  An escalated pending-reply row is not a captain-held task, so it gets no decision card; name it in the chat digest instead.
 - Before carding a hold, check that its SUBJECT has not already landed, and omit it when it has. `build` drops a card whose task or PR appears in the payload's own landed rows, and one whose task is no longer an open captain call. When a hold waits on one specific PR, put that PR in the card's `pr_url`. When it concerns a published version, put the artifact and numeric three-part version in the card's structured `subject`; landed rows for releases carry the same identity, and a matching or newer version drops the card. Identity matching is structured only, so verify any subject without one of these identities against current reality before carding it.
 - Never author a `reconcile` option on any card. `build` gives every decision card the standard reconcile choice itself, and the payload validator reserves that value across all card types; recommendations must name an authored option.
 - Compose exactly one decision card per captain-held task id. When one task carries multiple questions, consolidate all of them and their options into that card; never emit duplicate cards with the same task-id key.
