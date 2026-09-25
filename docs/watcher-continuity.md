@@ -32,6 +32,11 @@ Codex and Grok keep their own protocols; see [Manual recovery and other harnesse
 
 On a non-Pi primary, a home that runs the supervision host also changes what the owner runs; see [Supervision host](#supervision-host).
 
+Continuous input demand is default-off and explicitly registered by the session owner through `bin/fm-inbox.sh subscribe`; that script owns registration and the body-free `input-receipts` interface.
+Registered notes use the existing wake queue, handling acknowledgement, and harness owner; the adapter must not run a second waiter.
+The subscription does not authenticate an external human or change away/quiet ownership.
+See [input verification](verification/captain-input.md) for measured limits.
+
 ### Pi, omp, and OpenCode adapters
 
 Pi's `.pi/extensions/fm-primary-pi-watch.ts`, omp's `.omp/extensions/fm-primary-omp-watch.ts`, and OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` own continuous re-arm after an actionable child close.

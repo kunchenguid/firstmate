@@ -1819,6 +1819,10 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session
     fm_lock_release "$lock"
     return 2
   fi
+  if [ "$outcome" = rewake ] && ! fm_input_handoff "$state" "$gen" "$session" "$recovery"; then
+    fm_lock_release "$lock"
+    return 1
+  fi
   identity=$FM_AUTOARM_IDENTITY
   tmp="$epoch.tmp.$pid"
   if ! {
@@ -1832,6 +1836,13 @@ fm_autoarm_write_owned() {  # <state-dir> <gen> <outcome> [marker-file] [session
     rm -f "$tmp" 2>/dev/null || true
     fm_lock_release "$lock"
     return 1
+  fi
+  if [ "$outcome" = rewake ] && [ -f "$state/.captain-input" ]; then
+    if ! mkdir -p "$state/.input-commit" \
+      || ! printf '%s\t%s\n' "$session" "$recovery" > "$state/.input-commit/$gen"; then
+      fm_lock_release "$lock"
+      return 2
+    fi
   fi
   if [ -n "$marker" ] && ! : > "$marker" 2>/dev/null; then
     fm_lock_release "$lock"
@@ -2017,6 +2028,11 @@ fm_wake_append_locked() {
   esac
 
   clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
+  # Registered input uses the ordinary queue and recovery episode, with no
+  # user text in any internal banner or durable notification.
+  if [ -f "$STATE/.captain-input" ] && [ "$kind" = check ]; then
+    case "$key" in inbox:*) payload="check: captain inbox note ${key#inbox:}" ;; esac
+  fi
   clean_payload=$(printf '%s' "$payload" | fm_wake_clean_field)
   epoch=$(date +%s)
   seq_file="$STATE/.wake-queue.seq"
@@ -2041,7 +2057,67 @@ fm_wake_append_locked() {
     FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
     FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
   fi
+  if [ "$status" -eq 0 ] && [ -f "$STATE/.captain-input" ] && [ "$kind" = check ]; then
+    case "$clean_key" in
+      inbox:*)
+        # This is only a doorbell: the already committed queue is the authority.
+        # A failed hint write leaves ordinary recovery/polling intact.
+        printf '%s\t%s\n' "$seq" "${clean_key#inbox:}" > "$STATE/.captain-input-notify.tmp" \
+          && mv -f "$STATE/.captain-input-notify.tmp" "$STATE/.captain-input-notify" || true
+        ;;
+    esac
+  fi
   return "$status"
+}
+
+# Input receipts share the queue lock and its exact sequence identities. A
+# handoff records the winning Claude generation's request, not vendor delivery.
+# An ack is published only after the note is handled, before queue retirement;
+# retries overwrite the same identity, never create a second receipt.
+fm_input_handoff() { # <state> <generation> <session-pid> <recovery-generation>
+  local state=$1 gen=$2 session=$3 recovery=$4 epoch seq kind key payload id tmp rc=0
+  [ -f "$state/.captain-input" ] || return 0
+  [ -f "$state/.wake-queue" ] || return 0
+  fm_lock_try_acquire "$state/.wake-queue.lock" || return 1
+  mkdir -p "$state/.input-handoff" || rc=1
+  while IFS=$'\t' read -r epoch seq kind key payload; do
+    [ "$kind" = check ] || continue
+    case "$key" in inbox:*) id=${key#inbox:} ;; *) continue ;; esac
+    case "$id" in ''|*..*|*[!A-Za-z0-9._-]*) continue ;; esac
+    tmp="$state/.input-handoff/$id.tmp"
+    printf '%s\t%s\t%s\t%s\n' "$seq" "$gen" "$session" "$recovery" > "$tmp" \
+      && mv -f "$tmp" "$state/.input-handoff/$id" || rc=1
+  done < "$state/.wake-queue"
+  fm_lock_release "$state/.wake-queue.lock"
+  return "$rc"
+}
+
+fm_input_ack_locked() { # <cutoff> <owned-sequence-file> <recovery-generation>
+  local cutoff=$1 rows=$2 recovery=$3 epoch seq kind key payload id tmp
+  [ -f "$STATE/.captain-input" ] || return 0
+  while IFS=$'\t' read -r epoch seq kind key payload; do
+    [ "$kind" = check ] || continue
+    case "$key" in inbox:*) id=${key#inbox:} ;; *) continue ;; esac
+    case "$id" in ''|*..*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    [ "$seq" -le "$cutoff" ] || continue
+    grep -qx "$seq" "$rows" || continue
+    # Scope ownership to input acknowledgement: branch/daemon drains of other
+    # event kinds keep their existing authority and presentation contract.
+    # shellcheck source=bin/fm-session-lock-lib.sh
+    . "${BASH_SOURCE[0]%/*}/fm-session-lock-lib.sh"
+    fm_session_lock_owned_by_self "$STATE" || {
+      printf 'wake drain: only the owning session may acknowledge subscribed input\n' >&2
+      return 1
+    }
+    if [ ! -f "$STATE/inbox/handled/$id.note" ]; then
+      printf 'wake drain: handle inbox note %s before acknowledging its wake\n' "$id" >&2
+      return 1
+    fi
+    mkdir -p "$STATE/.input-ack" || return 1
+    tmp="$STATE/.input-ack/$id.tmp"
+    printf '%s\t%s\n' "$seq" "$recovery" > "$tmp" \
+      && mv -f "$tmp" "$STATE/.input-ack/$id" || return 1
+  done < "$FM_WAKE_QUEUE"
 }
 
 # fm_wake_queued_keys <kind>

@@ -544,3 +544,120 @@ run_inbox "$home" drain --ack "$did" >/dev/null || fail "drain --ack failed"
 assert_absent "$home/state/inbox/$did.note" "acked note leaves pending"
 assert_present "$home/state/inbox/handled/$did.note" "acked note is in handled"
 pass "drain --ack still moves the note to handled"
+
+# --- registered continuous input shares the existing wake owner -------------
+home=$(make_home subscribed)
+mkdir -p "$TMP_ROOT/owner-bin"
+ln -s /bin/bash "$TMP_ROOT/owner-bin/claude"
+owned() {
+  # shellcheck disable=SC2016 # The fixture harness expands its own environment.
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    "$TMP_ROOT/owner-bin/claude" -c 'printf "%s\n" "$$" > "$FM_HOME/state/.lock"; "$@"' owner "$@"
+}
+needed() {
+  bash -c '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2/state"' check "$ROOT" "$home"
+}
+if needed; then fail "an idle default-off home must not demand supervision"; fi
+if run_inbox "$home" subscribe >/dev/null 2>&1; then fail "unowned registration must refuse"; fi
+owned "$INBOX_BIN" subscribe || fail "owner registration failed"
+needed || fail "subscription must demand supervision with no tasks or input"
+# Existing non-session drain actors retain ordinary-event presentation and ack.
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_wake_append check ordinary "check: ordinary"' check "$ROOT"
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-drain.sh" > "$home/ordinary.out" 2> "$home/ordinary.err"
+ordinary_seq=$(awk -F '\t' 'NF == 5 {print $2}' "$home/ordinary.out" | tail -1)
+ordinary_gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation //p' "$home/ordinary.err")
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$ordinary_seq" --recovery-generation "$ordinary_gen" \
+  || fail "subscription must preserve existing ordinary-event drain actors"
+first=$(run_inbox "$home" note --request-id input-1 --json 'PRIVATE_BODY_NEVER_IN_BANNER')
+id=$(printf '%s' "$first" | json_get id)
+assert_not_contains "$(cat "$home/state/.wake-queue")" PRIVATE_BODY_NEVER_IN_BANNER "registered queue is body free"
+assert_contains "$(cat "$home/state/.captain-input-notify")" "$id" "doorbell carries note identity"
+# Receipt reads cannot take locks or make input handled.
+before=$(find "$home/state" -type f | sort)
+run_inbox "$home" input-receipts >/dev/null
+assert_equals "$before" "$(find "$home/state" -type f | sort)" "read-only projection creates nothing"
+if run_inbox "$home" drain --ack "$id" >/dev/null 2>&1; then fail "read-only session must not handle input"; fi
+owned "$ROOT/bin/fm-wake-drain.sh" > "$home/drain.out" 2> "$home/drain.err"
+seq=$(awk -F '\t' 'NF == 5 {print $2}' "$home/drain.out" | tail -1)
+gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation //p' "$home/drain.err")
+if owned "$ROOT/bin/fm-wake-drain.sh" --ack-through "$seq" --recovery-generation "$gen" >/dev/null 2>&1; then
+  fail "wake acknowledgement must not consume an unhandled note"
+fi
+# shellcheck disable=SC2016 # Both children inherit the same fixture harness owner.
+owned bash -c '"$1" drain --ack "$2" & a=$!; "$1" drain --ack "$2" & b=$!; wait "$a"; wait "$b"' \
+  ack "$INBOX_BIN" "$id" > "$home/note-ack"
+owned "$INBOX_BIN" drain --ack "$id" >> "$home/note-ack"
+assert_equals 1 "$(grep -c '^acked ' "$home/note-ack")" "one note-handling receipt on repeated acknowledgement"
+if FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$seq" --recovery-generation "$gen" >/dev/null 2>&1; then
+  fail "read-only session must not acknowledge a subscribed input wake"
+fi
+owned "$ROOT/bin/fm-wake-drain.sh" --ack-through "$seq" --recovery-generation "$gen"
+assert_equals 1 "$(run_inbox "$home" input-receipts | json_get records | python3 -c 'import ast,sys; print(len(ast.literal_eval(sys.stdin.read())))')" "one shared receipt"
+assert_equals 0 "$(count_wakes "$home")" "post-handling ack retires the original wake"
+run_inbox "$home" note --request-id input-1 --json retry >/dev/null
+assert_equals 0 "$(count_wakes "$home")" "retry after handling has no redundant wake"
+owned "$INBOX_BIN" unsubscribe
+if needed; then fail "unsubscription should remove idle demand"; fi
+pass "idle demand, owner refusal, body-free notification, and one shared acknowledgement"
+
+# Real watcher, no fake fleet tasks: a thirty-second poll is interrupted by
+# input; simultaneous ordinary events stay durable for the same drain.
+home=$(make_home input-watch)
+owned "$INBOX_BIN" subscribe
+printf 'tmux\n' > "$home/config/backend"
+touch "$home/state/.last-check"
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+  FM_POLL=30 FM_HEARTBEAT=999999 FM_CHECK_INTERVAL=999999 \
+  "$ROOT/bin/fm-watch.sh" > "$home/watch.out" 2> "$home/watch.err" &
+watch_pid=$!
+fm_test_track_watcher_state "$home/state"
+for ((i=0; i<100; i++)); do
+  [ ! -f "$home/state/.last-watcher-beat" ] || break
+  sleep 0.1
+done
+[ -f "$home/state/.last-watcher-beat" ] || fail "watcher did not start"
+# Give the empty first scan time to enter the long sleep.
+sleep 1
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_wake_append check ordinary "check: ordinary"' check "$ROOT"
+run_inbox "$home" note --request-id wake-1 'synthetic input' >/dev/null
+for ((i=0; i<100; i++)); do
+  grep -q '^check:' "$home/watch.out" && break
+  sleep 0.1
+done
+grep -q '^check:' "$home/watch.out" || { kill "$watch_pid"; fail "input did not interrupt thirty-second wait"; }
+wait "$watch_pid"
+assert_contains "$(cat "$home/state/.wake-queue")" ordinary "simultaneous ordinary event remains"
+assert_equals 1 "$(count_wakes "$home")" "watcher must not append a second input row"
+pass "subscribed idle watcher wakes before the unchanged fleet poll and retains simultaneous sources"
+
+home=$(make_home input-busy)
+owned "$INBOX_BIN" subscribe
+printf 'tmux\n' > "$home/config/backend"
+for check in a b c d; do
+  cat > "$home/state/$check.check.sh" <<'CHECK'
+#!/bin/sh
+printf 'started\n' > "$FM_HOME/check-started"
+sleep 2
+CHECK
+  chmod 700 "$home/state/$check.check.sh"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-check-register.sh" "$check" >/dev/null
+done
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+  FM_POLL=30 FM_HEARTBEAT=999999 FM_CHECK_INTERVAL=999999 \
+  "$ROOT/bin/fm-watch.sh" > "$home/watch.out" 2> "$home/watch.err" &
+watch_pid=$!
+fm_test_track_watcher_state "$home/state"
+for ((i=0; i<100; i++)); do
+  [ ! -f "$home/check-started" ] || break
+  sleep 0.1
+done
+[ -f "$home/check-started" ] || fail "bounded check never started"
+run_inbox "$home" note --request-id busy-1 'input during a bounded check' >/dev/null
+for ((i=0; i<60; i++)); do
+  grep -q '^check: captain-input' "$home/watch.out" && break
+  sleep 0.1
+done
+grep -q '^check: captain-input' "$home/watch.out" || { kill "$watch_pid"; fail "input waited for the whole check batch"; }
+wait "$watch_pid"
+assert_equals 1 "$(count_wakes "$home")" "busy scan retains exactly one note row"
+pass "input is delivered between bounded checks without reducing the fleet poll"

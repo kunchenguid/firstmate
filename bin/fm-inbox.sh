@@ -26,11 +26,19 @@
 #   fm-inbox.sh reply [--json] <id> <text>... | reply [--json] <id> -
 #   fm-inbox.sh receipts [--after <cursor>] [--all-pending] [--all-handled] [--all-replies]
 #   fm-inbox.sh ready
+#   fm-inbox.sh subscribe | unsubscribe | input-receipts
 #   fm-inbox.sh say  [<file.wav>]       (default: audio on stdin)
 #   fm-inbox.sh status
 #   fm-inbox.sh ask  <question>...
 #   fm-inbox.sh list
 #   fm-inbox.sh drain [--ack <id>...]
+#
+# subscribe explicitly enables continuous, default-off input demand for this
+# home, using state/.captain-input. Only the session-lock owner may change it.
+# No listener is launched here: the existing supervision owner arms normally.
+# input-receipts is a body-free, read-only projection of the queue sequence,
+# Claude handoff generation (a committed request, not proof of delivery), and
+# post-handling acknowledgement. fm-wake-lib.sh owns those records.
 #
 # `note --request-id` is the idempotent capture path: a repeat of the same
 # request id returns the original note instead of creating a second one, and
@@ -1117,25 +1125,94 @@ cmd_drain() {
   if [ "${1:-}" = "--ack" ]; then
     shift
     [ "$#" -gt 0 ] || die "usage: fm-inbox.sh drain --ack <id>..."
+    local input_locked=0 id
+    for id in "$@"; do valid_note_id "$id" || die "invalid note id"; done
+    if [ -f "$STATE/.captain-input" ]; then
+      # shellcheck source=bin/fm-session-lock-lib.sh
+      . "$SELF_DIR/fm-session-lock-lib.sh"
+      fm_session_lock_owned_by_self "$STATE" || die "only the owning session may handle subscribed input"
+      load_wake_lib || return 1
+      fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+      input_locked=1
+    fi
     mkdir -p "$INBOX/handled"
-    local id
     for id in "$@"; do
       if [ -f "$INBOX/$id.note" ]; then
-        mv "$INBOX/$id.note" "$INBOX/handled/$id.note"
+        if ! mv "$INBOX/$id.note" "$INBOX/handled/$id.note"; then
+          [ "$input_locked" -eq 0 ] || fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+          return 1
+        fi
         printf 'acked %s\n' "$id"
       else
         printf 'already-acked %s\n' "$id"
       fi
     done
+    [ "$input_locked" -eq 0 ] || fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 0
   fi
   cmd_list
   printf '\nAck with: fm-inbox.sh drain --ack <id>...\n'
 }
 
+# Continuous demand is an explicit owner operation, never implicit in note.
+cmd_subscription() {
+  # shellcheck source=bin/fm-session-lock-lib.sh
+  . "$SELF_DIR/fm-session-lock-lib.sh"
+  fm_session_lock_owned_by_self "$STATE" || die "only the owning session may change the input subscription"
+  load_wake_lib || return 1
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  if [ "$1" = subscribe ]; then
+    printf 'v1\n' > "$STATE/.captain-input"
+  else
+    rm -f "$STATE/.captain-input"
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+}
+
+cmd_input_receipts() {
+  need_python
+  python3 - "$STATE" <<'PYRECEIPTS'
+import json, sys
+from pathlib import Path
+state = Path(sys.argv[1])
+records = {}
+try:
+    queued = {line.split("\t")[3][6:] for line in (state / ".wake-queue").read_text().splitlines()
+              if len(line.split("\t")) >= 5 and line.split("\t")[3].startswith("inbox:")}
+except OSError:
+    queued = None
+for kind, fields in [("handoff", ["sequence", "generation", "session_pid", "recovery_generation"]),
+                     ("ack", ["sequence", "recovery_generation"])]:
+    for path in sorted((state / (".input-" + kind)).glob("*")):
+        try:
+            values = path.read_text().strip().split("\t")
+        except OSError:
+            continue
+        if len(values) != len(fields):
+            continue
+        if path.name.endswith(".tmp"):
+            continue
+        rec = records.setdefault(path.name, {"note_id": path.name})
+        rec[kind] = dict(zip(fields, values))
+        if kind == "handoff":
+            try:
+                commit = (state / ".input-commit" / values[1]).read_text().strip()
+            except OSError:
+                commit = ""
+            rec[kind]["committed"] = commit == "\t".join(values[2:])
+for rec in records.values():
+    rec["queue_acknowledged"] = None if queued is None else "ack" in rec and rec["note_id"] not in queued
+    rec["note_handled"] = (state / "inbox/handled" / (rec["note_id"] + ".note")).is_file()
+print(json.dumps({"schema": "fm-input-receipts.v1", "registered": (state / ".captain-input").is_file(),
+                  "records": list(records.values())}))
+PYRECEIPTS
+}
+
 # ---------------------------------------------------------------- dispatch
 
 case "${1:-}" in
+  subscribe|unsubscribe) cmd_subscription "$1" ;;
+  input-receipts) cmd_input_receipts ;;
   note)     shift; cmd_note "$@" ;;
   announce) shift; cmd_announce "$@" ;;
   reply)    shift; cmd_reply "$@" ;;
