@@ -320,7 +320,8 @@ fm_herdr_cleanup_one() ( # <session> <workspace> <title> <home-real>
   # fm_lock_release verifies this process owns each path, so unconditional cleanup
   # closes the signal window before the held flags could be set.
   trap '[ -z "$presentation_lock" ] || fm_lock_release "$presentation_lock" || true
-    [ -z "$task_lock" ] || fm_lock_release "$task_lock" || true' EXIT
+    [ -z "$task_lock" ] || fm_lock_release "$task_lock" || true
+    [ -z "$FM_HERDR_CLEANUP_LOCK_RECORD" ] || : > "$FM_HERDR_CLEANUP_LOCK_RECORD"' EXIT
   trap 'exit 143' TERM
   trap 'exit 130' INT
   trap 'exit 129' HUP
@@ -414,18 +415,19 @@ fm_herdr_cleanup_one() ( # <session> <workspace> <title> <home-real>
   return 0
 )
 
-fm_herdr_session_cleanup() {
-  local session home_real list candidates workspace title journal found=0
-  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
-  for journal in "$STATE"/*"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"; do
-    if [ -f "$journal" ] && [ ! -L "$journal" ]; then
-      found=1
-      break
-    fi
-  done
-  [ "$found" -eq 1 ] || return 0
+fm_herdr_cleanup_has_work() {
+  local journal
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
   command -v herdr >/dev/null 2>&1 \
-    && command -v jq >/dev/null 2>&1 || return 0
+    && command -v jq >/dev/null 2>&1 || return 1
+  for journal in "$STATE"/*"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"; do
+    [ -f "$journal" ] && [ ! -L "$journal" ] && return 0
+  done
+  return 1
+}
+
+fm_herdr_session_cleanup() {
+  local session home_real list candidates workspace title
   home_real=$(fm_herdr_cleanup_home_identity) || {
     fm_herdr_cleanup_warn 'home identity is unreadable; preserving every candidate'
     return 0
@@ -459,12 +461,10 @@ fm_herdr_session_cleanup() {
 }
 
 if [ "${FM_HERDR_SESSION_CLEANUP_SOURCE_ONLY:-0}" != 1 ]; then
-  if [ "${1:-}" = --_recover-interrupted ]; then
-    fm_herdr_cleanup_recover_interrupted_candidate "${2:-}"
-  elif [ "${1:-}" = --_worker ]; then
+  if [ "${1:-}" = --_worker ]; then
     fm_herdr_session_cleanup
   else
-    [ -d "$STATE" ] && [ ! -L "$STATE" ] || exit 0
+    fm_herdr_cleanup_has_work || exit 0
     budget=${FM_HERDR_SESSION_CLEANUP_TIMEOUT:-30}
     case "$budget" in ''|*[!0-9]*|0) budget=30 ;; esac
     cleanup_lock_record=$(umask 077; mktemp "$STATE/.herdr-cleanup-locks.XXXXXX") || {

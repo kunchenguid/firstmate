@@ -256,6 +256,14 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "repeat cleanup closed again"
 pass "successful cleanup is idempotent on repeat"
 
+reset_fixture
+LOCK_RECORD=$(umask 077; mktemp "$TMP_ROOT/lock-record.XXXXXX") || fail "could not create a lock record"
+FM_HERDR_CLEANUP_LOCK_RECORD=$LOCK_RECORD fm_herdr_session_cleanup >/dev/null 2>&1
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "recorded cleanup did not close exactly once"
+[ ! -s "$LOCK_RECORD" ] || fail "a finished candidate stayed eligible for deadline recovery: $(cat "$LOCK_RECORD")"
+rm -f "$LOCK_RECORD"
+pass "a finished candidate clears its deadline lock record"
+
 reset_fixture; printf '%s\n' '└ malformed p:AbCdEfGhIjKlMnOpQrStUv' > "$FIXTURE_DIR/title"; assert_preserved "malformed title"
 reset_fixture; printf '%s\n' '└ missing-token' > "$FIXTURE_DIR/title"; assert_preserved "missing token"
 reset_fixture; printf 'version=1\ntask_id=%s\nprojection_id=short\n' "$ID" > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; assert_preserved "malformed journal"
@@ -490,8 +498,7 @@ PY
     || fail "could not create the interrupted-cleanup record"
   printf '%s\t%s\t%s\t%s\t%s\n' \
     "$ID" "$task_lock" "$presentation_lock" "$zombie_owner" "$zombie_identity" > "$record"
-  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$FM_STATE_OVERRIDE" \
-    "$ROOT/bin/fm-herdr-session-cleanup.sh" --_recover-interrupted "$record" \
+  fm_herdr_cleanup_recover_interrupted_candidate "$record" \
     || fail "the cleanup worker could not recover its recorded zombie locks"
   [ ! -e "$task_lock" ] && [ ! -L "$task_lock" ] \
     || fail "the zombie-backed task lock was not reclaimed"
