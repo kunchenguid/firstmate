@@ -1,0 +1,4 @@
+[AFTER-fix] fm-lint.test.sh exit=0
+[AFTER-fix] changed-mode test line: ok - fm-lint.sh changed mode excludes cross-file codes that explicit paths still report
+[AFTER-fix] distinct untracked files seen in tests/ during run:
+  (none)

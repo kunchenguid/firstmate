@@ -1,0 +1,4 @@
+[BEFORE-fix] fm-lint.test.sh exit=0
+[BEFORE-fix] changed-mode test line: ok - fm-lint.sh changed mode excludes cross-file codes that explicit paths still report
+[BEFORE-fix] distinct untracked files seen in tests/ during run:
+  tests/fm-lint-local-exclude-fixture.test.sh

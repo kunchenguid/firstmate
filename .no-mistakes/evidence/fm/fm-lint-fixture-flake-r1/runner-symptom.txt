@@ -1,0 +1,7 @@
+## Clean tree
+portable-parallel-1: 11 scripts
+portable-parallel-2: 13 scripts
+overlap: ''
+## With the old transient fixture present in tests/ (what base fm-lint.test.sh left mid-run)
+overlap: ''
+union==proven? yes
