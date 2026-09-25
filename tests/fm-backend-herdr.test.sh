@@ -127,6 +127,12 @@ herdr_submit_claude_prefix() {  # <resp-dir> <typed-text>
 
 # make_herdr_server_env_fakebin: a stateful server stub that records only the
 # long-lived server launch environment, then reports the server as running.
+# The recorded list is the regression surface for the environment leak this
+# server can spread: the server hands its startup environment to every pane it ever opens,
+# so every name here (the home/harness identity the adapter always scrubbed,
+# the bounded per-invocation overrides it used to miss, and the two
+# client-selection variables its own child legitimately needs) is asserted
+# unset or kept by the test below.
 make_herdr_server_env_fakebin() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -143,7 +149,7 @@ case "${1:-}" in
     ;;
   server)
     {
-      for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL FM_HERDR_SENTINEL HERDR_SESSION; do
+      for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL FM_CREW_STATE_META_OVERRIDE FM_CREW_STATE_STATUS_OVERRIDE FM_SESSION_START_STAGE_FILE FM_SESSIONSTART_SUPERVISOR_PID FM_FUTURE_OVERRIDE_SENTINEL FM_BACKEND_HERDR_BIN FM_BACKEND_HERDR_CLIENT_SESSION UNRELATED_SENTINEL HERDR_SESSION; do
         eval 'value=${'"$name"'-<unset>}'
         printf '%s=%s\n' "$name" "$value"
       done
@@ -1130,25 +1136,47 @@ test_container_ensure_starts_server_and_workspace() {
   pass "fm_backend_herdr_container_ensure: version-gates, starts the server, ensures the firstmate workspace, echoes session:workspace_id + the seeded default tab id"
 }
 
-test_server_ensure_scrubs_home_and_harness_identity() {
+# The long-lived server's startup environment becomes the ambient environment of
+# every pane it ever opens, so a per-invocation override that legitimately
+# belongs to one bounded child must never survive into it. The observed
+# regression: a crew-state backend probe started the server while carrying a
+# fleet snapshot's FM_CREW_STATE_* overrides (naming a captured snapshot
+# directory) plus the session-start digest's FM_SESSION_START_STAGE_FILE and the
+# Pi session-start supervisor's FM_SESSIONSTART_SUPERVISOR_PID, and every later
+# firstmate session and crewmate then inherited them - blinding state reads for
+# every task once that snapshot directory was cleaned. The client-selection pair
+# the same call's own child needs is the deliberate exception.
+test_server_ensure_scrubs_leaked_override_environment() {
   local dir log marker fb output name
   dir="$TMP_ROOT/server-env"; mkdir -p "$dir"; log="$dir/env"; marker="$dir/running"
   fb=$(make_herdr_server_env_fakebin "$dir")
-  PATH="$fb:$PATH" FM_HERDR_SERVER_ENV_LOG="$log" FM_HERDR_SERVER_MARKER="$marker" FM_HERDR_SENTINEL=kept \
+  PATH="$fb:$PATH" FM_HERDR_SERVER_ENV_LOG="$log" FM_HERDR_SERVER_MARKER="$marker" UNRELATED_SENTINEL=kept \
     FM_HOME=/tmp/wrong-home FM_ROOT_OVERRIDE=/tmp/wrong-root FM_STATE_OVERRIDE=/tmp/wrong-state \
     FM_DATA_OVERRIDE=/tmp/wrong-data FM_PROJECTS_OVERRIDE=/tmp/wrong-projects FM_CONFIG_OVERRIDE=/tmp/wrong-config \
     CURSOR_AGENT=1 CURSOR_INVOKED_AS=cursor-agent CLAUDECODE=1 PI_CODING_AGENT=true FM_PI_HARNESS=pi-signed GROK_AGENT=1 FM_SUPERVISION_MODEL=autoarm \
+    FM_CREW_STATE_META_OVERRIDE=/tmp/fm-fleet-tasks.stale/task-a.meta \
+    FM_CREW_STATE_STATUS_OVERRIDE=/tmp/fm-fleet-tasks.stale/task-a.status \
+    FM_SESSION_START_STAGE_FILE=/tmp/fm-session-start-stage.stale \
+    FM_SESSIONSTART_SUPERVISOR_PID=1586 \
+    FM_FUTURE_OVERRIDE_SENTINEL=/tmp/not-a-real-namespace \
+    FM_BACKEND_HERDR_BIN=herdr FM_BACKEND_HERDR_CLIENT_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
   expect_code 0 $? "server_ensure should start under a polluted launcher environment"
   output=$(cat "$log")
   for name in FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
-    CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL; do
+    CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL \
+    FM_CREW_STATE_META_OVERRIDE FM_CREW_STATE_STATUS_OVERRIDE FM_SESSION_START_STAGE_FILE FM_SESSIONSTART_SUPERVISOR_PID \
+    FM_FUTURE_OVERRIDE_SENTINEL; do
     assert_contains "$output" "$name=<unset>" "server_ensure leaked $name into the long-lived Herdr server"
   done
-  assert_contains "$output" "FM_HERDR_SENTINEL=kept" "server_ensure removed an unrelated environment variable"
+  assert_contains "$output" "UNRELATED_SENTINEL=kept" "server_ensure removed an unrelated environment variable"
+  assert_contains "$output" "FM_BACKEND_HERDR_BIN=herdr" \
+    "server_ensure removed the client-selection binary its own child needs"
+  assert_contains "$output" "FM_BACKEND_HERDR_CLIENT_SESSION=fmtest" \
+    "server_ensure removed the client-selection session its own child needs"
   assert_contains "$output" "HERDR_SESSION=fmtest" "server_ensure lost explicit Herdr session routing"
   assert_contains "$output" "args=server --session fmtest" "server_ensure lost the trailing Herdr session flag"
-  pass "fm_backend_herdr_server_ensure: scrubs home and harness identity without disturbing unrelated environment or session routing"
+  pass "fm_backend_herdr_server_ensure: scrubs leaked overrides and harness identity without disturbing unrelated environment or session routing"
 }
 
 test_container_ensure_reuses_existing_workspace() {
@@ -5627,7 +5655,7 @@ test_workspace_ensure_refuses_an_ambiguous_label_with_no_launcher
 test_workspace_ensure_other_home_ignores_the_launcher_identity
 test_container_ensure_refuses_an_ambiguous_home_label
 test_container_ensure_starts_server_and_workspace
-test_server_ensure_scrubs_home_and_harness_identity
+test_server_ensure_scrubs_leaked_override_environment
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label

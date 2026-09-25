@@ -1931,6 +1931,67 @@ SH
   chmod +x "$fakebin/timeout"
 }
 
+# The parent starts the digest as a bounded child with FM_SESSION_START_STAGE_FILE
+# exported, and that same variable is the flag that tells the child it is the
+# child. The marker's only reader is the child's own stage() breadcrumb, so the
+# child must take it into a shell variable and drop the export: anything the
+# digest starts - a bootstrap sweep, the fleet snapshot, and any long-lived
+# server one of them launches as a side effect - must not inherit a marker that
+# would later tell a DIFFERENT session start it is somebody else's bounded child.
+# This is one half of the environment leak this marker has caused in production;
+# the other half, the fleet snapshot's crew-state overrides, is pinned in
+# tests/fm-crew-state.test.sh and tests/fm-backend-herdr.test.sh.
+test_digest_child_drops_the_stage_marker_before_its_own_children() {
+  local rec root home fakebin w probe stage out lines real_git
+  rec=$(new_world stage-marker)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  w=${root%/root}
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  probe="$w/digest-child.marker"
+  stage="$w/digest-child.stage"
+  : > "$probe"
+  # A tool the digest's children invoke records what it saw, then delegates to
+  # the real one, so a marker that survived the hand-off shows up as its path
+  # instead of <unset>. git is the probe because bootstrap's worktree-tangle read
+  # is the earliest thing every digest does, and delegating keeps the digest's own
+  # behavior unchanged.
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+[ -z "\${FM_TEST_STAGE_PROBE:-}" ] || printf '%s\\n' "\${FM_SESSION_START_STAGE_FILE:-<unset>}" >> "\$FM_TEST_STAGE_PROBE"
+exec "$real_git" "\$@"
+SH
+  chmod +x "$fakebin/git"
+
+  # The marker is handed over explicitly, exactly as the parent hands it over
+  # with its own bounded child, so this case exercises the child shape.
+  out=$(FM_TEST_STAGE_PROBE="$probe" FM_SESSION_START_STAGE_FILE="$stage" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    "$SESSION_START")
+
+  # The probe really ran: a fixture that never invoked a tool would pass by
+  # silence rather than by the guarantee under test.
+  [ -s "$probe" ] || fail "no digest child invoked a tool, so the marker hand-off was never observed"
+  lines=$(grep -c -v -x '<unset>' "$probe" || true)
+  [ "$lines" -eq 0 ] \
+    || fail "the digest exported the stage marker to its own children: $(sort -u "$probe" | tr '\n' ' ')"
+  # Dropping the export must not cost the breadcrumb the parent's truncation
+  # banner depends on: the child is still writing real stage names there, up to
+  # whatever stage this environment reached.
+  [ -s "$stage" ] || fail "the digest child stopped writing its stage breadcrumb"
+  case "$(cat "$stage")" in
+    lock|bootstrap|wake-queue|supervision-instructions|read-once|fleet-state|network-checks|context|next-step) ;;
+    *) fail "the digest child wrote an unrecognized stage breadcrumb: $(cat "$stage")" ;;
+  esac
+  assert_contains "$out" "SESSION START" "the digest child did not produce the digest"
+
+  pass "the digest child takes the stage marker into a shell variable and exports it to nobody"
+}
+
 test_runtime_bound_truncates_loudly_and_exits_zero() {
   local rec root home fakebin out status=0 stray mechanism
   rec=$(new_world runtime-bound)
@@ -2745,6 +2806,7 @@ test_omp_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker
 test_pi_diagnostic_rejects_previous_session_loaded_marker
 test_runtime_bound_truncates_loudly_and_exits_zero
+test_digest_child_drops_the_stage_marker_before_its_own_children
 test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom

@@ -26,6 +26,14 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
+# Exit status: 0 for every honest verdict, including unknown and a missing
+# task's own record; 2 for a usage error; 3 when an explicit
+# FM_CREW_STATE_META_OVERRIDE or FM_CREW_STATE_STATUS_OVERRIDE names a target
+# that no longer exists. The overrides belong to a bounded caller (the fleet
+# snapshot's captured task generation) and a stale one is refused with a stderr
+# diagnostic rather than answered as a missing task, because reporting "no
+# metadata for <id>" there is indistinguishable from a genuinely absent task.
+#
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
 #      recording remote_host= is a remote secondmate: its worktree and endpoint
@@ -152,7 +160,8 @@
 #      capture as gone. The fallback's own comment owns the per-verdict rules.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
-# of state; exit 2 only on a usage error (no id).
+# of state; exit 2 only on a usage error (no id), and exit 3 when an explicit
+# override names a target that no longer exists, refused with a stderr diagnostic.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -182,8 +191,39 @@ ID=${1:-}
 
 # Fleet snapshot composition supplies its captured metadata path here so every
 # state read resolves the same task generation selected by that snapshot.
-META=${FM_CREW_STATE_META_OVERRIDE:-"$STATE/$ID.meta"}
-LOG=${FM_CREW_STATE_STATUS_OVERRIDE:-"$STATE/$ID.status"}
+META_OVERRIDE=${FM_CREW_STATE_META_OVERRIDE:-}
+STATUS_OVERRIDE=${FM_CREW_STATE_STATUS_OVERRIDE:-}
+META=${META_OVERRIDE:-"$STATE/$ID.meta"}
+LOG=${STATUS_OVERRIDE:-"$STATE/$ID.status"}
+
+# An explicit override is a bounded caller's assertion about where THIS read
+# must resolve its records, and it names either the live records or a captured
+# snapshot of them. When its target is gone the override is stale - a cleaned
+# snapshot directory, or an export that leaked out of the one child it was meant
+# for into a later, unrelated shell - and a stale override is never evidence
+# about the TASK. Answering "no metadata for <id>" there is what let one leaked
+# override blind every state read for every task while their real records sat in
+# place, so a missing override target is refused
+# loudly and non-zero instead of becoming a missing-task verdict.
+# The metadata override must name an existing file: the fleet snapshot copies
+# the metadata of every task it publishes. The status override is validated by
+# its DIRECTORY instead, because a task that has appended no status event yet
+# legitimately has no captured status file in an existing snapshot directory.
+if [ -n "$META_OVERRIDE" ] && [ ! -f "$META" ]; then
+  printf 'fm-crew-state: refusing to read %s: FM_CREW_STATE_META_OVERRIDE names a path that does not exist: %s\n' "$ID" "$META" >&2
+  exit 3
+fi
+if [ -n "$STATUS_OVERRIDE" ] && [ ! -d "$(dirname -- "$LOG")" ]; then
+  printf 'fm-crew-state: refusing to read %s: FM_CREW_STATE_STATUS_OVERRIDE names a path whose directory does not exist: %s\n' "$ID" "$LOG" >&2
+  exit 3
+fi
+# The overrides above are inputs to THIS read alone. Dropping them here keeps
+# the read's own children - backend probes, no-mistakes ledger reads, forge
+# calls - out of the picture: a long-lived process started from one of those
+# children (the herdr server every later pane inherits its environment from)
+# must never carry them on.
+unset FM_CREW_STATE_META_OVERRIDE FM_CREW_STATE_STATUS_OVERRIDE
+
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # How many of the most recent `no-mistakes runs` rows each ledger read

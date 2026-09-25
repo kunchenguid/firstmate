@@ -181,7 +181,9 @@
 # a loud STARTUP TRUNCATED banner naming the stage that did not finish and the
 # sections that were therefore never emitted, and still exits 0. The child
 # records its progress in FM_SESSION_START_STAGE_FILE, which is also the flag
-# that tells a child it is the child - the parent never recurses.
+# that tells a child it is the child - the parent never recurses - and takes that
+# export into a shell variable before its first stage, so nothing the digest
+# starts can inherit a marker that belongs to this one bounded run.
 # Hosts without timeout, gtimeout, or perl use the shared pure-Bash watchdog, so
 # the digest never runs without the same hard bound and process-group cleanup.
 #
@@ -265,8 +267,8 @@ done
 SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
 
 stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
-  [ -n "${FM_SESSION_START_STAGE_FILE:-}" ] || return 0
-  printf '%s\n' "$1" > "$FM_SESSION_START_STAGE_FILE" 2>/dev/null || true
+  [ -n "${SESSION_START_STAGE_FILE:-}" ] || return 0
+  printf '%s\n' "$1" > "$SESSION_START_STAGE_FILE" 2>/dev/null || true
 }
 
 # shellcheck source=bin/fm-timeout-lib.sh
@@ -329,6 +331,17 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
   rm -f "$SESSION_START_STAGE_FILE" 2>/dev/null || true
   exit 0
 fi
+
+# This process IS the bounded digest child the parent started, carrying
+# FM_SESSION_START_STAGE_FILE as the flag that says so. Take that marker into a
+# shell variable for stage()'s own breadcrumb writes and drop the export: the
+# marker's only reader is stage(), so no process this digest starts - a bootstrap
+# sweep, the fleet snapshot, or any long-lived server one of them launches as a
+# side effect - may inherit it. Left exported it outlives the session and then
+# tells a LATER session start that it is somebody else's bounded child, which is
+# one half of the environment leak this marker has caused in production.
+SESSION_START_STAGE_FILE=${FM_SESSION_START_STAGE_FILE:-}
+unset FM_SESSION_START_STAGE_FILE
 
 PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 

@@ -221,10 +221,10 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
 Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
-When the selected named server is not running, the adapter launches it without inherited Firstmate home and directory overrides, harness identity markers, or the supervision-model override.
-Herdr passes its server startup environment to every later pane, so retaining those values could misroute panes for another Firstmate home or harness.
+When the selected named server is not running, the adapter launches it through `fm_backend_herdr_server_env_scrub`, which drops every Firstmate-owned variable except this adapter's own `FM_HERDR_*` and `FM_BACKEND_HERDR_*` namespaces, plus the harness identity markers.
+Herdr passes its server startup environment to every later pane, so retaining those values could misroute panes for another Firstmate home or harness, and the default-deny namespace rule matters more than any individual name: a bounded child's per-invocation override (`FM_CREW_STATE_META_OVERRIDE`, `FM_CREW_STATE_STATUS_OVERRIDE`, `FM_SESSION_START_STAGE_FILE`, `FM_SESSIONSTART_SUPERVISOR_PID`) that starts a server by side effect would otherwise become the ambient environment of every later session and crewmate on the machine, and a name nobody listed is exactly how that happens.
 An already-running server is reused without restart or environment changes.
-Explicit named-session routing and unrelated launch environment remain intact.
+Explicit named-session routing, the adapter's own variables, and unrelated launch environment remain intact.
 
 Literal text and Enter are separate operations on `fm-send.sh`'s typed plane; ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
 Spawn-time fixed commands may use Herdr's atomic run primitive.

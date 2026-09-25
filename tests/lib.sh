@@ -63,6 +63,24 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# Clear an ambient crew-state snapshot override the same way. Those overrides
+# belong to one bounded child of a fleet snapshot, so a shell that inherited a
+# stale pair - a leaked export whose captured snapshot directory is long gone -
+# makes every case that does not set its own override refuse instead of reading
+# (bin/fm-crew-state.sh exit 3). A case that
+# verifies the overrides sets them explicitly on the invocation.
+unset FM_CREW_STATE_META_OVERRIDE FM_CREW_STATE_STATUS_OVERRIDE
+
+# The session-start markers leak the same way and are worse: an inherited
+# FM_SESSION_START_STAGE_FILE makes bin/fm-session-start.sh believe this process
+# is a bounded child, so it skips the parent's runtime bound entirely (the
+# truncation cases then hang instead of truncating) and its stage breadcrumbs
+# land in some other run's temporary file. FM_SESSIONSTART_SUPERVISOR_PID is the
+# Pi session-start supervisor's own marker for the same one child. Both are
+# dropped here so a suite measures the code, not the terminal it was launched
+# from; a case that exercises either sets it explicitly.
+unset FM_SESSION_START_STAGE_FILE FM_SESSIONSTART_SUPERVISOR_PID
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
