@@ -2,7 +2,13 @@
 # Register and provision a whole secondmate home on an SSH-reachable host.
 #
 # Usage:
-#   fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<project>[=<origin-url>]...|--no-projects}
+#   fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> \
+#     {<project>[=<origin-url>]...|--no-projects} [--readiness-read-only]
+#
+# --readiness-read-only makes the readiness gate read-only: the seed runs the
+# doctor's read-only check and stops on any gap or unknown transport result,
+# never running doctor --fix or any service-repair fallback. It changes only the
+# readiness check; a host that passes is still registered and provisioned.
 #
 # The SSH alias must already reach a host whose non-interactive PATH exposes the
 # fixed fm-remote-entrypoint.sh from <remote-root>. The command records the
@@ -46,7 +52,7 @@ MAX_MANIFEST_BYTES=1048576
 . "$SCRIPT_DIR/fm-project-origin-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 encode() { base64 | tr -d '\n'; }
 safe_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac; }
 
@@ -81,23 +87,26 @@ case "$REMOTE_HOME/" in "$REMOTE_ROOT/"*) die "remote home must not be inside th
 case "$REMOTE_ROOT/" in "$REMOTE_HOME/"*) die "remote code root must not be inside the remote home" ;; esac
 
 NO_PROJECTS=0
+READINESS_MODE=fix
 PROJECT_NAMES=()
 PROJECT_ORIGINS=()
 for arg in "$@"; do
-  if [ "$arg" = --no-projects ]; then
-    NO_PROJECTS=1
-  else
-    name=${arg%%=*}
-    origin=
-    case "$arg" in *=*) origin=${arg#*=} ;; esac
-    safe_id "$name" || die "invalid project name: $name"
-    case "$arg" in
-      *=*) fm_project_origin_safe "$origin" \
-        || die "project $name origin is not an accepted clone URL: $origin" ;;
-    esac
-    PROJECT_NAMES+=("$name")
-    PROJECT_ORIGINS+=("$origin")
-  fi
+  case "$arg" in
+    --no-projects) NO_PROJECTS=1 ;;
+    --readiness-read-only) READINESS_MODE=read-only ;;
+    *)
+      name=${arg%%=*}
+      origin=
+      case "$arg" in *=*) origin=${arg#*=} ;; esac
+      safe_id "$name" || die "invalid project name: $name"
+      case "$arg" in
+        *=*) fm_project_origin_safe "$origin" \
+          || die "project $name origin is not an accepted clone URL: $origin" ;;
+      esac
+      PROJECT_NAMES+=("$name")
+      PROJECT_ORIGINS+=("$origin")
+      ;;
+  esac
 done
 if [ "$NO_PROJECTS" -eq 1 ]; then
   [ "${#PROJECT_NAMES[@]}" -eq 0 ] || die "--no-projects cannot be combined with project names"
@@ -236,11 +245,13 @@ restore_registry_and_brief() {
   [ "$BRIEF_CREATED" -eq 0 ] || rm -f -- "$BRIEF"
 }
 
-# Preflight and, where it can, repair the remote runtime before anything is
-# created on that host. The doctor runs through the same fixed entrypoint as
-# every later call, so it sees the exact PATH the remote home will run under.
+# Preflight the remote runtime before anything is created on that host. The
+# doctor runs through the same fixed entrypoint as every later call, so it sees
+# the exact PATH the remote home will run under. The default gate repairs a gap
+# with doctor --fix and re-checks; --readiness-read-only skips that repair and
+# stops on the first gap or unknown transport result.
 set +e
-fm_remote_readiness_ensure "$SCRIPT_DIR" "$ID"
+fm_remote_readiness_ensure "$SCRIPT_DIR" "$ID" "$READINESS_MODE"
 PREFLIGHT_RC=$?
 set -e
 if [ "$PREFLIGHT_RC" -ne 0 ]; then
@@ -248,6 +259,9 @@ if [ "$PREFLIGHT_RC" -ne 0 ]; then
     restore_registry_and_brief
   fi
   [ -z "$FM_REMOTE_READINESS_OUT" ] || printf '%s\n' "$FM_REMOTE_READINESS_OUT" >&2
+  if [ "$READINESS_MODE" = read-only ]; then
+    printf 'note: --readiness-read-only was requested, so no automatic repair was attempted.\n' >&2
+  fi
   if [ "$PREFLIGHT_RC" -eq 255 ]; then
     die "remote readiness completion is unknown; route and brief preserved for same-host reconciliation"
   fi

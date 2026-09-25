@@ -451,6 +451,72 @@ doctor-fixable --fix
 doctor-fixable -' ] || fail "the repaired seed did not re-check after its repair"$'\n'"$(cat "$DOCTOR_LOG")"
 pass "remote seeding proceeds once the repair closes every gap"
 
+# The read-only readiness option must keep the gate read-only: a healthy host is
+# still registered and provisioned without ever running doctor --fix, while a
+# gap or an unknown transport result stops the seed before provisioning and
+# never repairs a service. The route-identity guard stays in force.
+: > "$DOCTOR_LOG"
+out=$(FM_SECONDMATE_CHARTER='Read-only healthy charter.' FM_SECONDMATE_SCOPE='read-only healthy' \
+  seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-ro-ok remote-mac "$REMOTE_ROOT" \
+  "$TMP_ROOT/seed-ro-ok-home" --readiness-read-only --no-projects 2>&1) \
+  || fail "read-only readiness refused a healthy host"$'\n'"$out"
+assert_present "$TMP_ROOT/seed-ro-ok-home/.fm-secondmate-home" \
+  "the healthy read-only seed was never provisioned"
+assert_grep '- seed-ro-ok ' "$TMP_ROOT/seed-parent/data/secondmates.md" \
+  "the healthy read-only seed was not registered"
+[ "$(cat "$DOCTOR_LOG")" = 'normal -' ] \
+  || fail "read-only readiness ran a repair step on a healthy host"$'\n'"$(cat "$DOCTOR_LOG")"
+pass "read-only readiness proceeds on a healthy host without doctor --fix"
+
+: > "$DOCTOR_LOG"
+if FM_SECONDMATE_CHARTER='Read-only gap charter.' FM_SECONDMATE_SCOPE='read-only gap' \
+  FM_FAKE_SSH_MODE=doctor-human seed_env "$ROOT/bin/fm-remote-home-seed.sh" \
+  seed-ro-gap remote-mac "$REMOTE_ROOT" "$TMP_ROOT/seed-ro-gap-home" \
+  --readiness-read-only --no-projects > "$TMP_ROOT/seed-ro-gap.out" 2>&1; then
+  fail "read-only readiness proceeded against a host with a readiness gap"
+fi
+assert_grep 'check gui-session=human:' "$TMP_ROOT/seed-ro-gap.out" \
+  "the read-only seed hid the remaining readiness gap"
+assert_grep '--readiness-read-only was requested' "$TMP_ROOT/seed-ro-gap.out" \
+  "the read-only seed did not say it skipped the repair"
+assert_absent "$TMP_ROOT/seed-ro-gap-home" \
+  "the read-only seed provisioned although the host reported a gap"
+assert_no_grep '- seed-ro-gap ' "$TMP_ROOT/seed-parent/data/secondmates.md" \
+  "the read-only gap route survived its refusal"
+[ "$(cat "$DOCTOR_LOG")" = 'doctor-human -' ] \
+  || fail "read-only readiness ran doctor --fix on a gap"$'\n'"$(cat "$DOCTOR_LOG")"
+pass "read-only readiness stops on a gap without doctor --fix or provisioning"
+
+: > "$DOCTOR_LOG"
+if FM_SECONDMATE_CHARTER='Read-only unknown charter.' FM_SECONDMATE_SCOPE='read-only unknown' \
+  FM_FAKE_SSH_MODE=unreachable seed_env "$ROOT/bin/fm-remote-home-seed.sh" \
+  seed-ro-unknown remote-mac "$REMOTE_ROOT" "$TMP_ROOT/seed-ro-unknown-home" \
+  --readiness-read-only --no-projects > "$TMP_ROOT/seed-ro-unknown.out" 2>&1; then
+  fail "read-only readiness claimed success on an unknown transport result"
+fi
+assert_grep 'readiness completion is unknown' "$TMP_ROOT/seed-ro-unknown.out" \
+  "the read-only seed misreported an unknown transport result"
+assert_grep '- seed-ro-unknown ' "$TMP_ROOT/seed-parent/data/secondmates.md" \
+  "the unknown read-only route was not preserved for reconciliation"
+assert_present "$TMP_ROOT/seed-parent/data/seed-ro-unknown/brief.md" \
+  "the unknown read-only brief was not preserved for reconciliation"
+assert_absent "$TMP_ROOT/seed-ro-unknown-home" \
+  "the read-only seed provisioned a home on an unknown transport result"
+[ "$(cat "$DOCTOR_LOG")" = 'unreachable -' ] \
+  || fail "read-only readiness ran a repair on an unknown transport result"$'\n'"$(cat "$DOCTOR_LOG")"
+pass "read-only readiness preserves the route on an unknown transport result"
+
+if FM_SECONDMATE_CHARTER='Read-only reassignment charter.' FM_SECONDMATE_SCOPE='read-only reassignment' \
+  seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-ro-ok remote-mac "$REMOTE_ROOT" \
+  "$TMP_ROOT/seed-ro-ok-other" --readiness-read-only --no-projects \
+  > "$TMP_ROOT/seed-ro-ok-other.out" 2>&1; then
+  fail "read-only seeding moved an existing route to another home"
+fi
+assert_grep 'already registered to a different local or remote home' \
+  "$TMP_ROOT/seed-ro-ok-other.out" "the read-only seed did not keep the route-identity guard"
+assert_absent "$TMP_ROOT/seed-ro-ok-other" "the refused read-only reassignment created a home"
+pass "read-only readiness keeps the route-identity guard"
+
 # Seeding must not need a copy of the project in this home: firstmate names the
 # origin it already resolved, the seed validates and transports it, and the
 # primary project tree is left exactly as it was found.
