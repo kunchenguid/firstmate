@@ -54,7 +54,7 @@ A remote second-mate agent is the one case with no choice: it always runs on Her
 
 Herdr is also auto-detected when the primary runs natively under `HERDR_ENV=1` and is not inside tmux.
 A tmux pane nested inside Herdr resolves to tmux because the innermost multiplexer wins.
-That holds only while `$TMUX_PANE` resolves on the tmux server `$TMUX` names: a Herdr server started from a tmux shell leaves stale tmux variables in every Herdr pane, and those fall through to Herdr.
+That holds only while `$TMUX` and `$TMUX_PANE` describe the tmux pane this process runs in: a Herdr server started from a tmux shell leaves that shell's tmux variables in every Herdr pane, and those fall through to Herdr even while that tmux pane is still open.
 An auto-detected Herdr spawn stays silent, matching the verified tmux default path.
 
 ### Spawn preflight and CI

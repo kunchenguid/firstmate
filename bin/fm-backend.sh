@@ -94,11 +94,12 @@ fm_backend_is_known() {  # <name>
 # and returns 0, or returns 1 when nothing is detected. Nesting resolves
 # INNERMOST-first: tmux sets $TMUX in every process running inside it, even a
 # tmux started inside a herdr pane, so $TMUX is checked first and wins over
-# HERDR_ENV=1 in that nested case - but only when $TMUX_PANE resolves to a live
-# pane on the server $TMUX names (fm_backend_tmux_env_masked_by_herdr). A herdr
-# server started from a tmux shell hands that shell's now-meaningless $TMUX and
-# $TMUX_PANE to every herdr pane, so an unresolvable pane there falls through
-# to herdr instead of steering spawns into an unrelated tmux session. herdr
+# HERDR_ENV=1 in that nested case - but only when $TMUX and $TMUX_PANE describe
+# the tmux pane this process runs in (fm_backend_tmux_env_masked_by_herdr). A
+# herdr server started from a tmux shell hands that shell's $TMUX and
+# $TMUX_PANE to every herdr pane, so there they fall through to herdr - whether
+# that pane is gone or still live - instead of steering spawns into an
+# unrelated tmux session. herdr
 # injects HERDR_ENV=1 (plus HERDR_SOCKET_PATH/HERDR_PANE_ID) into every process
 # it manages a pane for;
 # HERDR_ENV=1 alone (no $TMUX) selects herdr. cmux injects CMUX_WORKSPACE_ID
@@ -143,22 +144,40 @@ fm_backend_is_known() {  # <name>
 # FM_BACKEND_DETECTED after a direct (non-command-substitution) call.
 FM_BACKEND_CMUX_BUNDLE_ID="com.cmuxterm.app"
 
-# fm_backend_tmux_env_live: whether the inherited $TMUX_PANE is a pane that
-# exists on the tmux server whose socket $TMUX names (its first comma field).
-# One silent `tmux display-message` probe; false when either variable is empty,
-# tmux is absent, the server is gone, or the pane is not on it.
+# fm_backend_tmux_env_live: whether the inherited $TMUX/$TMUX_PANE describe
+# the tmux pane THIS process runs in: $TMUX_PANE exists on the server whose
+# socket $TMUX names (its first comma field), that server's pid is $TMUX's
+# second comma field, and the pane's pid is this process or one of its
+# ancestors (the same parent-chain walk as fm_backend_detect_cmux_app_is_ancestor).
+# One silent `tmux display-message` probe plus that walk; false when either
+# variable is empty, tmux is absent, the server is gone or restarted, the pane
+# is not on it, or the pane is live but foreign to this process.
 fm_backend_tmux_env_live() {
-  local socket=${TMUX:-} pane=${TMUX_PANE:-} out
+  local socket=${TMUX:-} server_pid pane=${TMUX_PANE:-} out pane_pid pid ppid hops=0
+  server_pid=${socket#*,}
+  server_pid=${server_pid%%,*}
   socket=${socket%%,*}
   [ -n "$socket" ] && [ -n "$pane" ] || return 1
   command -v tmux >/dev/null 2>&1 || return 1
-  out=$(tmux -S "$socket" display-message -p -t "$pane" '#{pane_id}' 2>/dev/null) || return 1
-  [ "$out" = "$pane" ]
+  out=$(tmux -S "$socket" display-message -p -t "$pane" '#{pid} #{pane_id} #{pane_pid}' 2>/dev/null) || return 1
+  pane_pid=${out##* }
+  [ "$out" = "$server_pid $pane $pane_pid" ] || return 1
+  case "$pane_pid" in ''|*[!0-9]*) return 1 ;; esac
+  pid=$$
+  while [ "$hops" -lt 32 ]; do
+    [ "$pid" = "$pane_pid" ] && return 0
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$ppid" -gt 1 ] || return 1
+    pid=$ppid
+    hops=$((hops + 1))
+  done
+  return 1
 }
 
 # fm_backend_tmux_env_masked_by_herdr: the one owner of when inherited tmux
 # markers must NOT outrank herdr - HERDR_ENV=1 is present and the tmux markers
-# do not prove a live pane (fm_backend_tmux_env_live). Only a herdr marker
+# do not describe the pane this process runs in (fm_backend_tmux_env_live). Only a herdr marker
 # triggers the probe, so plain tmux without herdr never pays for it and keeps
 # resolving to tmux exactly as before. Shared by fm_backend_detect and
 # bin/fm-supervisor-target-lib.sh's supervisor-pane discovery.

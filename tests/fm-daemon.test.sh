@@ -2881,13 +2881,14 @@ test_discover_supervisor_target_herdr() {
 }
 
 # Supervisor-pane discovery with tmux AND herdr markers follows
-# fm_backend_detect's rule: $TMUX_PANE outranks herdr only when it resolves on
-# the tmux server $TMUX names. A herdr server started from a tmux shell leaves
-# every herdr pane holding that shell's stale $TMUX/$TMUX_PANE; escalations
-# must then go to the herdr pane, not a tmux pane that does not exist. Uses a
-# REAL tmux server on a private socket so the liveness probe runs for real.
+# fm_backend_detect's rule: $TMUX_PANE outranks herdr only when $TMUX and
+# $TMUX_PANE describe the tmux pane this process runs in. A herdr server
+# started from a tmux shell leaves every herdr pane holding that shell's
+# $TMUX/$TMUX_PANE; escalations must then go to the herdr pane, not a tmux pane
+# that is gone or foreign. Uses a REAL tmux server on a private socket, and
+# runs the genuine nested case inside one of its panes.
 test_discover_supervisor_tmux_liveness_under_herdr() {
-  local dir sock live live_tmux live_pane out
+  local dir sock live live_tmux live_pane out script
   if ! command -v tmux >/dev/null 2>&1; then
     echo "skip: tmux not found (supervisor tmux liveness under herdr)"
     return 0
@@ -2898,17 +2899,28 @@ test_discover_supervisor_tmux_liveness_under_herdr() {
   live_tmux=${live% *}
   live_pane=${live#* }
 
-  # Proven path: a live tmux pane nested in herdr stays the tmux supervisor.
-  out=$(FM_SUPERVISOR_BACKEND='' TMUX="$live_tmux" TMUX_PANE="$live_pane" HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)
-  [ "$out" = tmux ] || fail "a live TMUX_PANE nested in herdr should resolve to tmux: $out"
-  out=$(FM_SUPERVISOR_TARGET='' TMUX="$live_tmux" TMUX_PANE="$live_pane" HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_target)
-  [ "$out" = "$live_pane" ] || fail "a live TMUX_PANE nested in herdr should be the target: $out"
+  # Proven path: a genuine tmux pane nested in herdr stays the tmux supervisor.
+  script="$dir/nested.sh"
+  cat > "$script" <<SH
+. $(printf '%q' "$ROOT/bin/fm-backend.sh")
+. $(printf '%q' "$ROOT/bin/fm-supervisor-target-lib.sh")
+printf 'backend=%s\n' "\$(FM_SUPERVISOR_BACKEND='' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_backend)"
+t=\$(FM_SUPERVISOR_TARGET='' HERDR_ENV=1 HERDR_PANE_ID=w1:p1 discover_supervisor_target)
+[ -n "\$TMUX_PANE" ] && [ "\$t" = "\$TMUX_PANE" ] && echo target=own-pane || echo "target=\$t"
+SH
+  out=$(fm_test_tmux_run_in_pane "$sock" "$script") || { tmux -S "$sock" kill-server >/dev/null 2>&1; rm -rf "$dir"; fail "could not run the nested case inside a tmux pane"; }
+  assert_contains "$out" "backend=tmux" "a genuine TMUX_PANE nested in herdr should resolve to tmux"$'\n'"$out"
+  assert_contains "$out" "target=own-pane" "a genuine TMUX_PANE nested in herdr should be the target"$'\n'"$out"
 
-  # Regression: stale inherited tmux markers under herdr fall through to herdr.
+  # Regression: a live tmux pane this process does not run in falls through.
+  out=$(FM_SUPERVISOR_BACKEND='' TMUX="$live_tmux" TMUX_PANE="$live_pane" HERDR_ENV=1 HERDR_PANE_ID=w2:p1 discover_supervisor_backend)
+  [ "$out" = herdr ] || fail "a foreign TMUX_PANE under herdr should resolve to herdr: $out"
+  out=$(FM_SUPERVISOR_TARGET='' TMUX="$live_tmux" TMUX_PANE="$live_pane" HERDR_ENV=1 HERDR_PANE_ID=w2:p1 HERDR_SESSION='' discover_supervisor_target)
+  [ "$out" = "default:w2:p1" ] || fail "a foreign TMUX_PANE under herdr should target the herdr pane: $out"
+
+  # Stale or dead inherited tmux markers under herdr fall through to herdr.
   out=$(FM_SUPERVISOR_BACKEND='' TMUX="$live_tmux" TMUX_PANE='%999999' HERDR_ENV=1 HERDR_PANE_ID=w2:p1 discover_supervisor_backend)
   [ "$out" = herdr ] || fail "a stale TMUX_PANE under herdr should resolve to herdr: $out"
-  out=$(FM_SUPERVISOR_TARGET='' TMUX="$live_tmux" TMUX_PANE='%999999' HERDR_ENV=1 HERDR_PANE_ID=w2:p1 HERDR_SESSION='' discover_supervisor_target)
-  [ "$out" = "default:w2:p1" ] || fail "a stale TMUX_PANE under herdr should target the herdr pane: $out"
   out=$(FM_SUPERVISOR_TARGET='' TMUX="$dir/gone,1,0" TMUX_PANE='%1' HERDR_ENV=1 HERDR_PANE_ID=w2:p1 HERDR_SESSION='' discover_supervisor_target)
   [ "$out" = "default:w2:p1" ] || fail "TMUX naming a dead server under herdr should target the herdr pane: $out"
 
@@ -2918,7 +2930,7 @@ test_discover_supervisor_tmux_liveness_under_herdr() {
 
   tmux -S "$sock" kill-server >/dev/null 2>&1 || true
   rm -rf "$dir"
-  pass "discover_supervisor_*: TMUX_PANE outranks herdr only when live; stale tmux markers under herdr resolve to the herdr pane"
+  pass "discover_supervisor_*: TMUX_PANE outranks herdr only for the pane this process runs in; stale or foreign tmux markers under herdr resolve to the herdr pane"
 }
 
 test_pane_is_busy_herdr_native_busy_state() {

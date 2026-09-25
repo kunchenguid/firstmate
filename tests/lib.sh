@@ -402,6 +402,24 @@ fm_test_tmux_live_pane() {
   printf '%s,%s,0 %s\n' "$sock" "$pid" "$pane"
 }
 
+# fm_test_tmux_run_in_pane <socket> <script>: run the bash <script> file in a
+# new window on the tmux server at <socket>, so it descends from that pane's
+# process and inherits the real $TMUX/$TMUX_PANE tmux exports there. Waits up
+# to ten seconds, then prints the script's combined output. Returns 1 when the
+# window cannot be created or the script does not finish in time.
+fm_test_tmux_run_in_pane() {
+  local sock=$1 script=$2 out tries=0
+  out=$(mktemp "${TMPDIR:-/tmp}/fmtxo.XXXXXX") || return 1
+  tmux -S "$sock" new-window -d "bash $(printf '%q' "$script") >$(printf '%q' "$out") 2>&1; touch $(printf '%q' "$out.done")" || { rm -f "$out"; return 1; }
+  while [ ! -e "$out.done" ]; do
+    [ "$tries" -lt 100 ] || { rm -f "$out"; return 1; }
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  cat "$out"
+  rm -f "$out" "$out.done"
+}
+
 # --- fakebin / PATH shims ---------------------------------------------------
 #
 # fm_fakebin <dir> creates <dir>/fakebin and echoes it; prepend it to PATH to
