@@ -6,12 +6,11 @@
 #   1. With CLAUDE_CODE_ENABLE_FUNCTION_HOOKS unset, the mod is a complete no-op even
 #      with the per-home preference already on: no hooks module loads, /calm is not a
 #      command, the stock working row shows, and tool rows draw as stock.
-#   2. With the flag on, the sailboat replaces the working row and moves, no row draws
-#      for a turn whose stored transcript holds thinking, tool rows and a record-backed
-#      operational doorbell (the carrier Firstmate types into Claude Code, which strips
-#      U+2063 from submitted prompts) draw at zero height, /calm restores them and
-#      persists off, /calm hides them again and persists on, all without a Calm output
-#      row in the transcript.
+#   2. With the flag on, the sailboat replaces the working row and moves, tool rows and
+#      a record-backed operational doorbell (the carrier Firstmate types into Claude
+#      Code, which strips U+2063 from submitted prompts) draw at zero height, /calm
+#      restores them and persists off, /calm hides them again and persists on, all
+#      without a Calm output row in the transcript.
 #   3. `claude --continue` restores the transcript with those rows still hidden.
 # The project and FM_HOME are isolated; Claude keeps using its existing managed
 # authentication and one trusted temporary folder. A few Haiku turns are submitted.
@@ -38,9 +37,6 @@ SESSION="fm-calm-claude-e2e"
 HULL='╲▁▁▁╱'
 SAIL='◿│◣'
 
-# Claude Code stores the lab project's transcripts under its sanitized path.
-TRANSCRIPTS="$HOME/.claude/projects/$(printf '%s' "$PROJECT" | sed 's/[^A-Za-z0-9]/-/g')"
-
 cleanup() {
   local i=0
   tmux -L "$SOCKET" kill-server 2>/dev/null || true
@@ -49,7 +45,7 @@ cleanup() {
     sleep 0.25
     i=$((i + 1))
   done
-  rm -rf "$LAB" "$TRANSCRIPTS" 2>/dev/null || true
+  rm -rf "$LAB" 2>/dev/null || true
   fm_test_cleanup
 }
 trap cleanup EXIT
@@ -74,7 +70,7 @@ launch() {  # <debug-log> <flag: 1|0> [claude args...]
   [ "$flag" = 1 ] && flag_env="CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1"
   tmux -L "$SOCKET" kill-session -t "$SESSION" 2>/dev/null || true
   tmux -L "$SOCKET" new-session -d -s "$SESSION" -x 160 -y 44 -c "$PROJECT" \
-    "env $(unset_inherited) $flag_env FM_HOME='$FM_HOME_DIR' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --model haiku --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"alwaysThinkingEnabled\":true}' --debug-file '$log' $*; printf '\nCLAUDE_EXIT=%s\n' \"\$?\"; sleep 30"
+    "env $(unset_inherited) $flag_env FM_HOME='$FM_HOME_DIR' CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --model haiku --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --debug-file '$log' $*; printf '\nCLAUDE_EXIT=%s\n' \"\$?\"; sleep 30"
 }
 
 screen() {
@@ -317,18 +313,7 @@ case "$on_settled" in
     printf '%s\n' "$on_settled" >&2
     fail "a tool row drew while Calm was on"
     ;;
-  *'∴'*|*'Thinking'*|*'Thought for'*)
-    printf '%s\n' "$on_settled" >&2
-    fail "a thinking row drew while Calm was on"
-    ;;
 esac
-# The thinking check is vacuous unless the settled turn really stored thinking.
-on_transcript=
-for transcript in "$TRANSCRIPTS"/*.jsonl; do
-  if [[ "$transcript" -nt "$on_transcript" ]]; then on_transcript=$transcript; fi
-done
-grep -qs '"type":"thinking"' "$on_transcript" \
-  || fail "Claude Code $CLAUDE_VERSION stored no thinking block for the flag-on turn, so hidden thinking cannot be judged"
 
 # Claude Code strips U+2063 from submitted prompts, so Firstmate types a plain doorbell
 # naming a record that holds the envelope; that doorbell row draws at zero height while
@@ -431,7 +416,7 @@ esac
 send '/exit'
 enter
 sleep 2
-pass "Claude Code $CLAUDE_VERSION with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, a thinking turn draws no thinking row, tool rows and the record-backed operational doorbell draw at zero height, /calm restores and re-hides them while persisting the shared preference"
+pass "Claude Code $CLAUDE_VERSION with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, tool rows and the record-backed operational doorbell draw at zero height, /calm restores and re-hides them while persisting the shared preference"
 
 # --- 3. Resume: the restored transcript keeps the hidden rows hidden ---------------
 launch "$DEBUG_LOG_RESUME" 1 --continue

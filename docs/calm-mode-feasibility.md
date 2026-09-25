@@ -811,7 +811,6 @@ The mod hides a doorbell row only when the record it names holds a current envel
 
 Observed on 2.1.280 with the flag on, beyond the live guard below:
 
-- Turns on Opus 5.5 at high effort and on Haiku 4.5 with `alwaysThinkingEnabled` stored thinking blocks in the session transcript and drew no thinking row with Calm on or off; the only thinking indicator is the working row (`Channeling… (2s · thinking with high effort)`), which the sailboat replaces.
 - A Stop hook that exits 2 draws `Ran 1 stop hook` with its feedback beneath; a scratch module hiding every other exposed component (`InfoNotice`, `ToolProgress`, `CommandOutput`, `TurnDuration`, `SessionMode`, `AskUserQuestion`) alongside the mod's own hooks left that row drawn, so it is not a hookable drawing on this build.
 
 ```text
@@ -826,8 +825,11 @@ $ bash tests/fm-calm-claude-mod-plugin.test.sh
 ok - Claude Code 2.1.280 (Claude Code) validates the Calm mod strictly at its folder and its auto-load path, hooking exactly the working row, tool, user, and assistant drawings and /calm
 ok - Claude Code 2.1.280 (Claude Code) runs the Calm mod's plugin test suites clean: persisted toggle, hidden rows, working notes, and the clock-driven working ship
 
+$ claude --version
+2.1.282 (Claude Code)
+
 $ FM_CLAUDE_CALM_LIVE_E2E=1 bash tests/fm-calm-claude-mod-live-e2e.test.sh
-ok - Claude Code 2.1.280 (Claude Code) with the flag unset: no hooks module, no /calm, stock working row, stock tool rows, preference on ignored
-ok - Claude Code 2.1.280 (Claude Code) with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, a thinking turn draws no thinking row, tool rows and the record-backed operational doorbell draw at zero height, /calm restores and re-hides them while persisting the shared preference
-ok - Claude Code 2.1.280 (Claude Code) resumes the transcript with Calm's hidden rows still hidden and the preference intact
+ok - Claude Code 2.1.282 (Claude Code) with the flag unset: no hooks module, no /calm, stock working row, stock tool rows, preference on ignored
+ok - Claude Code 2.1.282 (Claude Code) with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, tool rows and the record-backed operational doorbell draw at zero height, /calm restores and re-hides them while persisting the shared preference
+ok - Claude Code 2.1.282 (Claude Code) resumes the transcript with Calm's hidden rows still hidden and the preference intact
 ```
