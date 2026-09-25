@@ -127,15 +127,36 @@ remove_superseded_record() {  # <path> <file>
   mv "$pending" "$file"
 }
 
-# The epoch the away window started at, from the gate's retained contract row,
-# else from the live record (before it is archived), else from the legacy away
-# flag's own timestamp, else unknown (empty).
+# The epoch the posture window started at, from the gate's retained contract
+# row, else from the live record (before it is archived), else from the flag's
+# own window-start timestamp (bin/fm-afk-start.sh fm_afk_flag_write: quiet
+# mode's only source, since it writes no record, and a legacy away flag's), else
+# unknown (empty).
 gate_contract_epoch() {
   awk -F '\t' '$1 == "contract" { print $2; exit }' "$GATE" 2>/dev/null || true
 }
 
 gate_window_epoch() {
   awk -F '\t' '$1 == "window" || $1 == "contract" { print $2; exit }' "$GATE" 2>/dev/null || true
+}
+
+# The posture this return is ending, always away or quiet. The brief renders
+# after the shutdown has cleared state/.afk and archived the record, so the gate
+# retains it the same way it retains the window epoch; a `check` re-run reads it
+# back from there. A standing record is away (the record IS the away posture),
+# else the flag's own mode, else away.
+RETURN_POSTURE=away
+return_posture() {
+  local posture
+  posture=$(awk -F '\t' '$1 == "posture" { print $2; exit }' "$GATE" 2>/dev/null || true)
+  case "$posture" in
+    away|quiet) printf '%s' "$posture"; return 0 ;;
+  esac
+  if [ -e "$STATE/.afk" ] && ! fm_afk_contract_present "$STATE"; then
+    printf '%s' "$(fm_afk_mode "$STATE")"
+    return 0
+  fi
+  printf away
 }
 
 window_start_epoch() {
@@ -211,6 +232,7 @@ write_pending_seed() {  # <window-epoch> <contract-epoch>  Fail-closed marker be
     printf 'schema\tfm-afk-return.v1\n'
     printf 'started\t%s\n' "$started"
     printf 'phase\tstopping-and-draining\n'
+    printf 'posture\t%s\n' "$RETURN_POSTURE"
     [ -z "$window_epoch" ] || printf 'window\t%s\n' "$window_epoch"
     [ -z "$contract_epoch" ] || printf 'contract\t%s\n' "$contract_epoch"
     preserve_evidence /dev/stdout | grep -Ev "^(window|contract)$(printf '\t')" || true
@@ -229,6 +251,7 @@ write_gate() {  # <evidence-file> <blockers-file>
     printf 'schema\tfm-afk-return.v1\n'
     printf 'started\t%s\n' "$started"
     printf 'phase\tblocked\n'
+    printf 'posture\t%s\n' "$RETURN_POSTURE"
     [ -z "$window_epoch" ] || printf 'window\t%s\n' "$window_epoch"
     [ -z "$contract_epoch" ] || printf 'contract\t%s\n' "$contract_epoch"
     grep -Ev "^(window|contract)$(printf '\t')" "$evidence" 2>/dev/null || true
@@ -433,7 +456,7 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
   now=$(date +%s)
   printf '=== Return brief'
   if [ -n "$since" ]; then
-    printf ' (away %s -> %s, %s)' "$(epoch_to_iso "$since")" "$(epoch_to_iso "$now")" "$(format_duration $((now - since)))"
+    printf ' (%s %s -> %s, %s)' "$RETURN_POSTURE" "$(epoch_to_iso "$since")" "$(epoch_to_iso "$now")" "$(format_duration $((now - since)))"
   fi
   printf ' ===\n'
 
@@ -460,7 +483,7 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
     [ "$MANDATE_COUNT" -gt 0 ] || printf '  (no away instructions recorded)\n'
     render_words_account
   else
-    printf '  (no away-posture record for this window; legacy away flag only)\n'
+    printf '  (no away-posture record for this window: quiet mode, or a legacy away flag)\n'
   fi
 
   # 3. waiting on the captain.
@@ -771,6 +794,7 @@ main() {
   mkdir -p "$STATE" || return 1
   fm_lock_acquire_wait "$LOCK"
   trap 'fm_lock_release "$LOCK"' EXIT
+  RETURN_POSTURE=$(return_posture)
   window_epoch=$(window_start_epoch)
   contract_epoch=$(gate_contract_epoch)
   if [ -z "$contract_epoch" ] && fm_afk_contract_present "$STATE"; then

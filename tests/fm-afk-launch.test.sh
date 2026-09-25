@@ -124,8 +124,9 @@ unit_pi_never_launches_the_daemon() {
       bash -c '. "$1"; fm_afk_launch_primary_harness() { printf "%s" "$FM_TEST_HARNESS"; }; fm_afk_launch_main start' _ "$LAUNCH" 2>&1)
     rc=$?
     if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F "the away daemon is no longer launched on $harness" >/dev/null \
+      && printf '%s' "$out" | grep -F 'never run enter for /quiet' >/dev/null \
       && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] && [ ! -e "$st/state/.afk-contract" ]; then
-      pass "$harness: start refuses to launch the daemon and writes no state"
+      pass "$harness: start refuses to launch the daemon, writes no state, and keeps a quiet entry off enter"
     else
       fail "$harness: start did not refuse cleanly (rc=$rc): $out"
     fi
@@ -169,8 +170,9 @@ unit_daemon_entry_requires_the_record() {
   out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
   rc=$?
   if [ "$rc" -ne 0 ] && [ ! -e "$st/state/.afk-contract" ] && [ ! -e "$st/state/.afk" ] \
-    && printf '%s' "$out" | grep -F 'an away-posture record is required; run enter' >/dev/null; then
-    pass "daemon entry: no daemon lifecycle starts without the away-posture record"
+    && printf '%s' "$out" | grep -F 'an away-posture record is required; run enter' >/dev/null \
+    && printf '%s' "$out" | grep -F 'FM_AFK_MODE=quiet' >/dev/null; then
+    pass "daemon entry: no daemon lifecycle starts without the away-posture record, and the refusal points a quiet entry away from enter"
   else
     fail "daemon entry: started without a record or the refusal was unclear (rc=$rc): $out"
   fi
@@ -182,6 +184,230 @@ unit_daemon_entry_requires_the_record() {
     fail "daemon entry: the record enter wrote did not permit lifecycle preparation"
   fi
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  rm -rf "$st"
+}
+
+# /quiet is the same daemon for a captain who stays present, so it is not the
+# away posture: quiet entry must succeed with no record, never create one, and
+# never coexist with one, while an away entry still requires its record.
+unit_quiet_entry_needs_no_record() {
+  local st out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-quiet-entry.XXXXXX")
+  mkdir -p "$st/state"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ "$(read_mode "$st/state")" = quiet ] \
+    && [ ! -e "$st/state/.afk-contract" ] && [ ! -e "$st/state/afk-contracts" ]; then
+    pass "quiet entry: starts with no away-posture record and leaves none behind"
+  else
+    fail "quiet entry: refused or wrote an away-posture record (rc=$rc): $out"
+  fi
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ "$(read_mode "$st/state")" = quiet ] && [ ! -e "$st/state/.afk-contract" ]; then
+    pass "quiet entry: a bare refresh of quiet mode needs no record and keeps quiet"
+  else
+    fail "quiet entry: a bare quiet refresh was refused or changed mode (rc=$rc): $out"
+  fi
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
+    FM_SUPERVISOR_BACKEND=unsupported FM_AFK_MODE=quiet "$LAUNCH" start 2>&1)
+  if printf '%s' "$out" | grep -F 'no non-visible daemon-launch primitive' >/dev/null \
+    && ! printf '%s' "$out" | grep -F 'away-posture record' >/dev/null; then
+    pass "quiet entry: the terminal-backed start passes the posture check without a record too"
+  else
+    fail "quiet entry: the terminal-backed start was refused over the record: $out"
+  fi
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop 2>&1)
+  if [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-contract" ] && [ ! -e "$st/state/afk-contracts" ] \
+    && printf '%s' "$out" | grep -F 'no posture record stood' >/dev/null \
+    && printf '%s' "$out" | grep -F 'quiet mode stopped' >/dev/null \
+    && ! printf '%s' "$out" | grep -F 'away mode stopped' >/dev/null; then
+    pass "quiet exit: stop clears quiet mode, names the quiet posture, and claims no record archive"
+  else
+    fail "quiet exit: stop left state behind or misreported the posture or record: $out"
+  fi
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=away "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -e "$st/state/.afk" ] \
+    && printf '%s' "$out" | grep -F 'an away-posture record is required; run enter' >/dev/null; then
+    pass "away entry: an explicit away start still requires its record"
+  else
+    fail "away entry: started without a record (rc=$rc): $out"
+  fi
+  enter_posture "$st" || fail "quiet entry: could not enter fixture posture"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -e "$st/state/.afk" ] && [ -f "$st/state/.afk-contract" ] \
+    && printf '%s' "$out" | grep -F 'quiet mode cannot start' >/dev/null; then
+    pass "quiet entry: refuses while an away-posture record stands and leaves it alone"
+  else
+    fail "quiet entry: started beside a standing away record (rc=$rc): $out"
+  fi
+  rm -rf "$st"
+}
+
+# Going /afk from quiet mode: the record enter writes is the away posture, so
+# `enter` itself must rewrite a standing quiet flag to away - a bare daemon
+# refresh cannot be relied on, because the homes that launch no daemon never
+# reach one. It rewrites rather than removes: state/.afk is the live daemon's
+# injection gate (bin/fm-supervise-daemon.sh afk_active), and on Pi `enter` is
+# the whole entry, so clearing it there would mute a running daemon.
+unit_away_entry_from_quiet_writes_away() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-quiet-to-away.XXXXXX")
+  mkdir -p "$st/state"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet "$LAUNCH" start-native >/dev/null 2>&1 \
+    || fail "quiet to away: quiet entry failed"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'ship it' >/dev/null 2>&1 \
+    && [ -f "$st/state/.afk-contract" ] && [ -e "$st/state/.afk" ] \
+    && [ "$(read_mode "$st/state")" = away ]; then
+    pass "quiet to away: enter rewrites the quiet flag to away without clearing the daemon's presence gate"
+  else
+    fail "quiet to away: enter left '$(read_mode "$st/state")' standing, removed state/.afk, or failed to write the record"
+  fi
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
+    && [ "$(read_mode "$st/state")" = away ]; then
+    pass "quiet to away: a later refresh beside the record keeps the away posture"
+  else
+    fail "quiet to away: the flag stayed '$(read_mode "$st/state")' beside a standing away record"
+  fi
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  rm -rf "$st"
+}
+
+# The launcher's own messages name the posture they act on, so a captain who
+# never went away is not told the daemon refreshed an "away-mode" flag.
+unit_launcher_messages_name_the_posture() {
+  local st sleep_pid lock out
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-posture-wording.XXXXXX")
+  mkdir -p "$st/state"
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$st/state/.afk"
+  sleep 600 &
+  sleep_pid=$!
+  lock="$st/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$sleep_pid" > "$lock/pid"
+  bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$sleep_pid" \
+    > "$lock/pid-identity" 2>/dev/null || true
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  if printf '%s' "$out" | grep -F 'refreshed the quiet-mode flag' >/dev/null \
+    && ! printf '%s' "$out" | grep -F 'away-mode flag' >/dev/null; then
+    pass "posture wording: a quiet refresh of a running daemon reports the quiet flag, not away"
+  else
+    fail "posture wording: the quiet refresh named the wrong posture: $out"
+  fi
+  : > "$st/state/.afk-return-catchup"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  if printf '%s' "$out" | grep -F 're-entering quiet mode' >/dev/null; then
+    pass "posture wording: the catch-up gate names the quiet posture it is holding"
+  else
+    fail "posture wording: the catch-up gate named the wrong posture: $out"
+  fi
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'go fix prod' 2>&1)
+  if printf '%s' "$out" | grep -F 're-entering away mode' >/dev/null \
+    && ! printf '%s' "$out" | grep -F 're-entering quiet mode' >/dev/null; then
+    pass "posture wording: the catch-up gate calls an enter an away entry beside a stale quiet flag"
+  else
+    fail "posture wording: the catch-up gate misnamed the posture for an /afk entry: $out"
+  fi
+  rm -f "$st/state/.afk-return-catchup"
+  enter_posture "$st" || fail "posture wording: could not enter fixture posture"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  if printf '%s' "$out" | grep -F 'refreshed the away-mode flag' >/dev/null; then
+    pass "posture wording: an away refresh beside the record still reports the away flag"
+  else
+    fail "posture wording: the away refresh named the wrong posture: $out"
+  fi
+  kill "$sleep_pid" 2>/dev/null || true
+  wait "$sleep_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+# The record IS the away posture, so a reported entry failure must be true: the
+# flag write goes first, and when it fails no record is written and the home
+# stays where it was.
+unit_enter_flag_failure_writes_no_record() {
+  local st out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-enter-flag-fail.XXXXXX")
+  mkdir -p "$st/state"
+  # A directory standing where the flag file belongs is exactly what
+  # fm_afk_flag_write refuses to overwrite.
+  mkdir -p "$st/state/.afk"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'ship it' 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -f "$st/state/.afk-contract" ] \
+    && printf '%s' "$out" | grep -F 'no away-posture record was written' >/dev/null; then
+    pass "enter: a failed flag write reports a failure that is true - no away-posture record stands"
+  else
+    fail "enter: reported failure (rc=$rc) with an away-posture record standing: $out"
+  fi
+  rm -rf "$st"
+}
+
+# The mirror of the above: fm-afk-contract.sh validates its own arguments, so a
+# usage error lands after the flag was already rewritten. The record is the
+# posture, so a failed entry must leave the captain's standing posture exactly
+# as it was - mode AND window start.
+unit_enter_record_failure_restores_the_flag() {
+  local st before out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-enter-record-fail.XXXXXX")
+  mkdir -p "$st/state"
+  before=$(( $(date '+%s') - 3600 ))
+  printf 'quiet\n%s\n' "$before" > "$st/state/.afk"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words-file "$st/nonexistent" 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -f "$st/state/.afk-contract" ] \
+    && [ "$(read_mode "$st/state")" = quiet ] \
+    && [ "$(read_window_start "$st/state")" = "$before" ]; then
+    pass "enter: a failed away-posture record puts the captain's quiet flag back untouched"
+  else
+    fail "enter: a failed record left the flag as '$(read_mode "$st/state")' at '$(read_window_start "$st/state")' (rc=$rc): $out"
+  fi
+  if ! ls "$st/state"/.afk-enter-backup.* >/dev/null 2>&1; then
+    pass "enter: the restored flag leaves no backup behind"
+  else
+    fail "enter: a flag backup leaked into the state directory"
+  fi
+  rm -rf "$st"
+}
+
+# A stop that could not finish has not ended the posture, so it must leave
+# state/.afk standing: it is the only thing a retried stop can read the real
+# posture from, and clearing it would make the retry announce away mode to a
+# captain who was only ever quiet.
+unit_failed_stop_keeps_the_flag_for_the_retry() {
+  local st out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-retry.XXXXXX")
+  mkdir -p "$st/state"
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$st/state/.afk"
+  printf 'tmux\texact-session\towned\n' > "$st/state/.afk-daemon-terminal"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_close_terminal() { return 1; }
+    fm_afk_launch_terminal_absent() { return 1; }
+    fm_afk_launch_stop
+  ' _ "$LAUNCH" 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ -e "$st/state/.afk" ] && [ "$(read_mode "$st/state")" = quiet ] \
+    && printf '%s' "$out" | grep -F 'quiet mode is not stopped' >/dev/null; then
+    pass "stop retry: a failed teardown keeps the quiet flag and says the posture still stands"
+  else
+    fail "stop retry: the failed teardown cleared the flag or misreported it (rc=$rc): $out"
+  fi
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_close_terminal() { return 0; }
+    fm_afk_launch_terminal_absent() { return 0; }
+    fm_afk_launch_stop
+  ' _ "$LAUNCH" 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ ! -e "$st/state/.afk" ] \
+    && printf '%s' "$out" | grep -F 'quiet mode stopped' >/dev/null \
+    && ! printf '%s' "$out" | grep -F 'away mode stopped' >/dev/null; then
+    pass "stop retry: the retry still names the quiet posture and clears the flag on success"
+  else
+    fail "stop retry: the retry misnamed the posture or left the flag behind (rc=$rc): $out"
+  fi
   rm -rf "$st"
 }
 
@@ -201,18 +427,19 @@ unit_failed_daemon_launch_preserves_the_record() {
 }
 
 unit_stop_archives_the_record_last() {
-  local st epoch
+  local st epoch out
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-archive.XXXXXX")
   mkdir -p "$st/state"
   enter_posture "$st" || fail "stop archive: could not enter fixture posture"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 || fail "stop archive: native entry failed"
   epoch=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" field entered_epoch)
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 \
-    && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-contract" ] \
-    && [ -f "$st/state/afk-contracts/$epoch.afk-contract" ]; then
-    pass "stop: clears the away flag and archives the posture record under its entry time"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop 2>&1)
+  if [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-contract" ] \
+    && [ -f "$st/state/afk-contracts/$epoch.afk-contract" ] \
+    && printf '%s' "$out" | grep -F 'away mode stopped' >/dev/null; then
+    pass "stop: clears the away flag, names the away posture, and archives the record under its entry time"
   else
-    fail "stop: the posture record was not archived (state: $(ls -a "$st/state"))"
+    fail "stop: the posture record was not archived or the posture was misnamed (state: $(ls -a "$st/state")): $out"
   fi
   rm -rf "$st"
 }
@@ -339,6 +566,51 @@ unit_fresh_vs_refresh() {
 # ---------------------------------------------------------------------------
 read_mode() {  # <state-dir>
   bash -c '. "$1"; fm_afk_mode "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$1"
+}
+
+read_window_start() {  # <state-dir>
+  sed -n '2p' "$1/.afk" 2>/dev/null || true
+}
+
+# The flag's second line is when this posture window started, and the return's
+# catch-up covers everything from it (bin/fm-afk-return.sh window_start_epoch).
+# A quiet window has no posture record to take that epoch from, so a refresh
+# that restamped it would silently shorten the catch-up and drop every outcome
+# the daemon self-handled before the refresh.
+unit_mode_refresh_keeps_the_window_start() {
+  local st before after
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-window-start.XXXXXX")
+  mkdir -p "$st/state"
+  before=$(( $(date '+%s') - 3600 ))
+  printf 'quiet\n%s\n' "$before" > "$st/state/.afk"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet \
+    bash -c '. "$1"; fm_afk_launch_flag_write' _ "$LAUNCH"
+  after=$(read_window_start "$st/state")
+  if [ "$after" = "$before" ] && [ "$(read_mode "$st/state")" = quiet ]; then
+    pass "window start: a quiet refresh keeps the window's original start timestamp"
+  else
+    fail "window start: a quiet refresh restamped the window ($before -> $after)"
+  fi
+
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    bash -c '. "$1"; fm_afk_launch_flag_write' _ "$LAUNCH"
+  after=$(read_window_start "$st/state")
+  if [ "$after" = "$before" ]; then
+    pass "window start: a bare refresh with no requested mode keeps it too"
+  else
+    fail "window start: a bare refresh restamped the window ($before -> $after)"
+  fi
+
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=away \
+    bash -c '. "$1"; fm_afk_launch_flag_write' _ "$LAUNCH"
+  after=$(read_window_start "$st/state")
+  case "$after" in ''|*[!0-9]*) after=0 ;; esac
+  if [ "$(read_mode "$st/state")" = away ] && [ "$after" -gt "$before" ]; then
+    pass "window start: entering the other mode starts a new window"
+  else
+    fail "window start: the quiet -> away entry kept the old window start ($after)"
+  fi
+  rm -rf "$st"
 }
 
 unit_mode_explicit_write() {
@@ -825,6 +1097,10 @@ unit_supervision_host_claude_home_runs_no_away_daemon() {
   else
     fail "supervision host: away start-native did not refuse cleanly (rc=$rc): $out"
   fi
+  # Quiet is not the away posture and never starts beside a standing record
+  # (fm_afk_launch_posture_require), so return from away before the quiet phase.
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 \
+    || fail "supervision host: could not archive the away record before the quiet phase"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet "$LAUNCH" start-native >/dev/null 2>&1 \
     && [ "$(head -n 1 "$st/state/.afk")" = quiet ] \
     && FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
@@ -832,6 +1108,24 @@ unit_supervision_host_claude_home_runs_no_away_daemon() {
     pass "supervision host: quiet start-native and a plain refresh of the quiet daemon still prepare the daemon"
   else
     fail "supervision host: quiet mode was refused or lost its mode on a claude host home"
+  fi
+  # Going /afk out of quiet mode on the home where /afk launches nothing: the
+  # entry itself has to leave the posture reading away, because no later flag
+  # write ever runs here to correct a stale quiet flag.
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'go fix prod' >/dev/null 2>&1 \
+    || fail "supervision host: could not record the away posture from quiet"
+  if [ -f "$st/state/.afk-contract" ] && [ -e "$st/state/.afk" ] \
+    && [ "$(read_mode "$st/state")" = away ]; then
+    pass "supervision host: /quiet then /afk leaves the posture reading away with the presence gate intact"
+  else
+    fail "supervision host: the posture read '$(read_mode "$st/state")' after /quiet then /afk"
+  fi
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F 'runs the supervision host (config/supervision-host)' >/dev/null; then
+    pass "supervision host: an away record beside the rewritten flag still refuses the daemon"
+  else
+    fail "supervision host: away entry from quiet was not refused (rc=$rc): $out"
   fi
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 || true
   rm -rf "$st"
@@ -960,7 +1254,7 @@ unit_malformed_record_fails_closed() {
 }
 
 unit_stop_malformed_record_fails_closed() {
-  local st
+  local st out
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-malformed.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.afk"
@@ -972,6 +1266,19 @@ unit_stop_malformed_record_fails_closed() {
     pass "stop: malformed terminal record preserves away state and fails closed"
   else
     fail "stop: malformed terminal record cleared protected lifecycle state"
+  fi
+  # The same refusal reached by /quiet off must name the posture it declined to
+  # end, not call a present captain's home away.
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$st/state/.afk"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_stop
+  ' _ "$LAUNCH" 2>&1)
+  if printf '%s' "$out" | grep -F 'refusing to stop quiet mode' >/dev/null \
+    && [ -e "$st/state/.afk" ] && [ -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "stop: the malformed-record refusal names the quiet posture it declined to end"
+  else
+    fail "stop: the malformed-record refusal misnamed the posture: $out"
   fi
   rm -rf "$st"
 }
@@ -1317,6 +1624,12 @@ unit_retired_two_step_entry_is_refused
 unit_pi_never_launches_the_daemon
 unit_pi_enter_stop_does_not_claim_a_daemon_terminal
 unit_daemon_entry_requires_the_record
+unit_quiet_entry_needs_no_record
+unit_away_entry_from_quiet_writes_away
+unit_launcher_messages_name_the_posture
+unit_enter_flag_failure_writes_no_record
+unit_enter_record_failure_restores_the_flag
+unit_failed_stop_keeps_the_flag_for_the_retry
 unit_failed_daemon_launch_preserves_the_record
 unit_stop_archives_the_record_last
 unit_relative_paths_are_absolute_before_daemon_launch
@@ -1324,6 +1637,7 @@ unit_fresh_vs_refresh
 unit_mode_explicit_write
 unit_mode_fresh_defaults_away
 unit_mode_refresh_preserves_quiet
+unit_mode_refresh_keeps_the_window_start
 unit_mode_garbage_and_legacy_content_reads_away
 unit_stop_ordering
 unit_stop_rejects_reused_pid
