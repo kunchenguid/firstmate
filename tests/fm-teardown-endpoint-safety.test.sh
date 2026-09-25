@@ -478,14 +478,16 @@ test_reused_pool_slot_refuses_before_touching_the_other_task() {
 
   dir=$(make_case slot-reuse)
   mark_case_as_treehouse_pool "$dir"
-  # The reuse collision: the pool slot recorded for a finished task has already
-  # been handed to another task, whose worker is live in it right now.
+  # Two records conflict while the slot still claims the task being cleaned.
+  # That same-owner claim cannot identify the other record as stale, so cleanup
+  # must refuse while the other task's worker is live in the slot.
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
   fm_write_meta "$dir/home/state/$other.meta" \
     "window=firstmate:fm-$other" "endpoint_task_id=$other" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id"
   # Staged in this shell, not a command substitution: a background child of a
   # $(...) subshell does not outlive it, and the point of this worker is to be
   # alive in the slot while teardown runs.
@@ -875,11 +877,10 @@ test_remote_layout_homes_serialize_on_one_project_lock() {
   pass "Treehouse project locking still serializes two homes across the remote-seeded boundary"
 }
 
-# The slot-reuse sequence with only ONE discoverable record: the finished task's
-# worker exited, its slot was granted to another task, and that task leaves no
-# record this home can enumerate. Nothing in the record scan contradicts the
-# stale worktree= line, so the slot's own owner claim is the only evidence that
-# it was reassigned. The slot is no longer this task's, so teardown finishes the
+# Slot-reuse sequences with an authoritative owner claim: another task's record
+# may still name the shared slot, or may be unavailable to this home. In either
+# case the claim identifies the stale record instead of leaving record collision
+# ambiguous. The slot is no longer this task's, so teardown finishes the
 # task's own cleanup and leaves the slot - its worker, its copy, its claim -
 # exactly as it found it.
 assert_reassigned_slot_left_alone() {  # <case> <id> <other> <description>
@@ -908,6 +909,9 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
   claim_pool_slot "$dir" "$other" "$dir/other-home"
   # Staged in this shell, not a command substitution: a background child of a
   # $(...) subshell does not outlive it, and the point of this worker is to be
@@ -923,9 +927,12 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   [ "$rc" -eq 0 ] || fail "teardown of a task whose slot was reassigned failed: $(cat "$dir/stderr")"
   kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the reassigned pool slot"
   assert_present "$dir/worktree/sentinel" "teardown reset a pool slot another task had claimed"
+  assert_present "$dir/home/state/$other.meta" "teardown removed the live claimant's task record"
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "dirty reassigned slot with --force"
   assert_contains "$(cat "$dir/stderr")" "$dir/other-home" \
     "the warning should name the claimant's home"
+  ! grep -Fq "kill-window> <-t> <=firstmate:=fm-$other" "$dir/runtime.log" \
+    || fail "teardown closed the live claimant's endpoint: $(cat "$dir/runtime.log")"
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
 
