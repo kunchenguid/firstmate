@@ -70,6 +70,19 @@
 #                          an unhandled record's ladder cannot advance; quiet
 #                          successful attempts never wake firstmate
 #                          (bin/fm-task-inbox-lib.sh owns the ladder policy)
+#   stale: <window> (interactive confirmation prompt pending: ...)
+#                          interactive_prompt_check found a live interactive
+#                          confirmation/permission prompt rendered in the
+#                          window's own captured pane (bin/fm-busy-lib.sh's
+#                          fm_busy_confirmation_prompt_pending owns the
+#                          per-harness signature) - checked on EVERY window
+#                          every poll, including an idle secondmate the rest
+#                          of this stale path exempts as healthy, because a
+#                          rendered dialog freezes the pane with no busy
+#                          footer and no new status-log entry, so none of the
+#                          other stale/busy signals can see it. Reported once
+#                          per distinct captured prompt text and again on any
+#                          later change, never automatically answered.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -249,6 +262,12 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+# Longest excerpt of a detected interactive confirmation/permission prompt's
+# captured pane text carried in its wake reason (interactive_prompt_check),
+# matching the existing bounded-annotation convention other wake reasons and
+# captured-content excerpts already use elsewhere in this fleet (for example
+# bin/fm-parent-channel-lib.sh's own cut -c1-1200 clean-and-bound helper).
+PROMPT_REASON_MAX_CHARS=${FM_PROMPT_REASON_MAX_CHARS:-500}
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
@@ -343,6 +362,44 @@ window_is_busy() {  # <window> <tail40>
       "${task:-unknown}" "$STATE" "$tail40")
   fi
   [ "${verdict%% *}" = busy ]
+}
+
+# interactive_prompt_check: detect a live interactive confirmation/permission
+# prompt in <tail> (bin/fm-busy-lib.sh's fm_busy_confirmation_prompt_pending
+# owns the per-harness signature) and, on a match not already alerted for
+# this exact pane content, queue and surface a distinguishing stale wake
+# carrying the captured prompt text. Runs for every recorded window on every
+# poll - called from the main loop below BEFORE the secondmate idle
+# exemption and the busy/staleness bookkeeping - because a rendered dialog
+# freezes the pane with no busy footer and no new status-log entry, so
+# neither of those existing signals can see it, and a genuinely busy
+# claude-hook record (a real turn open, no Stop event yet because the
+# harness is waiting on a human) would otherwise hide it from the ordinary
+# stale path entirely and from the busy-turn bound for up to
+# BUSY_TURN_MAX_SECS (task fleet-stuck-prompt-detection-20260925).
+# Detection-and-report only: never answers a prompt with a key. AGENTS.md
+# section 8 and the stuck-crewmate-recovery skill own what firstmate does
+# with the report.
+# The marker clears on every non-match so a later recurrence of the exact
+# same rendered text still surfaces, rather than reading as already-reported
+# forever.
+interactive_prompt_check() {  # <window> <key> <tail> <harness>
+  local w=$1 key=$2 tail=$3 harness=$4 pf reason prompt_hash prompt_excerpt
+  pf="$STATE/.prompt-$key"
+  if [ -z "$tail" ] || ! printf '%s' "$tail" | fm_busy_confirmation_prompt_pending "$harness"; then
+    rm -f "$pf"
+    return 0
+  fi
+  prompt_hash=$(printf '%s' "$tail" | hash_pane)
+  if [ -e "$pf" ] && [ "$(cat "$pf" 2>/dev/null || true)" = "$prompt_hash" ]; then
+    triage_log "absorbed interactive confirmation prompt (already surfaced for this pane state): $w"
+    return 0
+  fi
+  prompt_excerpt=$(printf '%s' "$tail" | tr '\t\r\n' '   ' | cut -c1-"$PROMPT_REASON_MAX_CHARS")
+  reason="stale: $w (interactive confirmation prompt pending: $prompt_excerpt)"
+  fm_wake_append stale "$w" "$reason" || exit 1
+  printf '%s' "$prompt_hash" > "$pf"
+  wake "$reason"
 }
 
 window_kind() {
@@ -2254,17 +2311,29 @@ EOF
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
     fi
+    # Captured once here, before the idle-secondmate exemption below, so
+    # interactive_prompt_check can inspect every window - including a mate
+    # that exemption would otherwise skip entirely - for a live confirmation
+    # prompt. Reused as tail40 below rather than captured a second time.
+    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null)
+    capture_rc=$?
+    if [ "$capture_rc" -eq 0 ]; then
+      interactive_prompt_check "$w" "$key" "$tail40" "$(window_harness "$w")"
+    fi
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
-    # the pane-stale path ONLY to serve a status-declared wait's bounded
-    # re-surface. This gate reads the shared predicate rather than the pause verb
-    # alone so it includes a declared `captain-held` status. A hold recorded only
-    # in the backlog while the mate still says `working:` or `done:` is outside
-    # this guard: reaching it would require backlog reads for windows this gate
-    # deliberately skips, putting that read on the ordinary poll hot path.
+    # the REST of the pane-stale path below ONLY to serve a status-declared
+    # wait's bounded re-surface; the confirmation-prompt detector above still
+    # inspected its pane regardless, which is the whole point of capturing
+    # before this gate. This gate reads the shared predicate rather than the
+    # pause verb alone so it includes a declared `captain-held` status. A hold
+    # recorded only in the backlog while the mate still says `working:` or
+    # `done:` is outside this guard: reaching it would require backlog reads
+    # for windows this gate deliberately skips, putting that read on the
+    # ordinary poll hot path.
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    [ "$capture_rc" -eq 0 ] || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"

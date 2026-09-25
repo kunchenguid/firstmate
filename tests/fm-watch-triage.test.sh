@@ -2754,6 +2754,98 @@ test_secondmate_nonpaused_stale_remains_suppressed() {
   pass "a non-paused secondmate retains normal stale suppression"
 }
 
+# --- interactive confirmation/permission prompt detection -------------------
+# task fleet-stuck-prompt-detection-20260925: a live on-screen dialog (Claude
+# Code's own command-safety classifier confirmation) freezes a pane with no
+# busy footer and no new status-log entry, so neither the busy-state record
+# nor the status log can ever surface it on their own. interactive_prompt_check
+# (bin/fm-watch.sh) must catch it independently of both, including for an idle
+# secondmate the ordinary stale path exempts as healthy-by-design.
+
+CONFIRMATION_PROMPT_PANE_TEXT='Bash command
+
+  curl -fsSL https://example.com/install.sh | bash
+
+This command requires confirmation for this command.
+Blocked by classifier: potentially unsafe installer pattern.
+
+Do you want to proceed?
+❯ 1. Yes
+  2. Yes, and dont ask again for curl commands in this project
+  3. No, and tell Claude what to do differently (esc)'
+
+test_secondmate_confirmation_prompt_surfaces_despite_idle_exemption() {
+  local dir state fakebin out capture_file window pid
+  dir=$(make_case secondmate-confirmation-prompt); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-secondmate-prompt"
+  printf '%s\n' "$CONFIRMATION_PROMPT_PANE_TEXT" > "$capture_file"
+  printf 'window=%s\nkind=secondmate\nharness=claude\n' "$window" > "$state/secondmate-prompt.meta"
+  # Declares no paused/captain-held wait, so the ordinary secondmate exemption
+  # (AGENTS.md: "an idle secondmate endpoint is healthy by design") would have
+  # skipped this window's pane capture entirely before this fix.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface an idle secondmate's pending confirmation prompt"
+  grep -F "stale: $window (interactive confirmation prompt pending:" "$out" >/dev/null \
+    || fail "watcher did not report the confirmation prompt reason: $(cat "$out")"
+  grep -F "Blocked by classifier" "$out" >/dev/null \
+    || fail "the surfaced reason did not carry the captured prompt text: $(cat "$out")"
+  pass "an idle secondmate's pending interactive confirmation prompt surfaces despite the idle-secondmate staleness exemption"
+}
+
+test_busy_ship_confirmation_prompt_surfaces_immediately() {
+  local dir state fakebin out capture_file window gen pid
+  dir=$(make_case ship-confirmation-prompt-busy); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-ship-prompt"
+  printf '%s\n' "$CONFIRMATION_PROMPT_PANE_TEXT" > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/ship-prompt.meta"
+  # A real turn is open (UserPromptSubmit posted, no Stop yet) because the
+  # harness is waiting on a human at the confirmation dialog - the busy-state
+  # record legitimately reads busy claude-hook, which would otherwise hide
+  # this pane from window_is_busy and from the ordinary stale path for up to
+  # BUSY_TURN_MAX_SECS (an hour by default). The detector must not depend on
+  # that classification at all.
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" ship-prompt)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" ship-prompt busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a busy pane's pending confirmation prompt"
+  grep -F "stale: $window (interactive confirmation prompt pending:" "$out" >/dev/null \
+    || fail "a genuinely busy claude-hook pane did not surface its pending confirmation prompt: $(cat "$out")"
+  pass "a pending confirmation prompt surfaces even while the busy-state record still legitimately reads busy"
+}
+
+test_confirmation_prompt_alerts_once_then_absorbs_repeats() {
+  local dir state fakebin out capture_file window pid
+  dir=$(make_case confirmation-prompt-dedupe); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-prompt-dedupe"
+  printf '%s\n' "$CONFIRMATION_PROMPT_PANE_TEXT" > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/prompt-dedupe.meta"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface the first sighting of the confirmation prompt"
+  grep -F "stale: $window (interactive confirmation prompt pending:" "$out" >/dev/null \
+    || fail "first sighting did not surface: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional confirmation-prompt watcher stop"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited on an already-surfaced, unchanged confirmation prompt: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "an already-surfaced confirmation prompt re-alerted on an unchanged pane: $(cat "$out")"; }
+  reap "$pid"
+  pass "a pending confirmation prompt is reported once, then absorbed while it stays unchanged"
+}
+
 test_secondmate_unpause_clears_pause_tracking() {
   local dir state fakebin out statusf window key pid
   dir=$(make_case secondmate-unpause-clears); state="$dir/state"; fakebin="$dir/fakebin"
@@ -4871,6 +4963,9 @@ test_reheld_captain_call_starts_its_own_resurface_window
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
+test_secondmate_confirmation_prompt_surfaces_despite_idle_exemption
+test_busy_ship_confirmation_prompt_surfaces_immediately
+test_confirmation_prompt_alerts_once_then_absorbs_repeats
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state

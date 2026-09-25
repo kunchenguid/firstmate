@@ -59,6 +59,16 @@ Never restart, stop, or update the shared daemon on a crewmate's claim.
 It is one instance serving every lane and home, so a restart kills other lanes' in-flight runs.
 Only positive socket refusal or absence is a daemon-down finding; escalate that finding, or a failed run record that names a daemon error, to the captain.
 
+## Interactive confirmation/permission prompt
+
+A `stale: ... (interactive confirmation prompt pending: ...)` wake (`AGENTS.md` section 8, `bin/fm-watch.sh`'s `interactive_prompt_check`) already carries the pane's captured prompt text in the wake reason itself - read it there rather than peeking the pane.
+This applies to any FirstMate, SecondMate, or Crewmate window: the same wake fires whether the owning FirstMate is supervising its own crew or a SecondMate.
+
+Three Claude dialogs - workspace-trust, external-imports, and the once-per-machine bypass-permissions confirmation, all documented in `.agents/skills/harness-adapters/references/harness/claude.md`'s "Workspace trust" section - default to their DECLINING option, so inspect and report them but never answer with a key; that section owns the full detail.
+A different shape, such as Claude's command-safety classifier confirmation ("Do you want to proceed? 1. Yes / ...") defaults to an APPROVING option instead, so answering it is a judgment call rather than a flat refusal: only answer directly when it is a narrow instance already verified safe from context FirstMate already has (the same judgment FirstMate would make case by case, never a standing rule to always accept or always decline a given command shape).
+Otherwise escalate to the captain using `AGENTS.md` section 9's outcome-framed escalation - state the pending command and what it would do, not the wake's internal wording.
+FirstMate's key plane carries only Enter, Escape, and C-c with no arrow navigation, so confirm which option a key would actually select before sending one.
+
 ## Live-endpoint escalation
 
 Escalate in order:

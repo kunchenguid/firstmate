@@ -446,6 +446,20 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+## Interactive confirmation-prompt signature
+
+`bin/fm-busy-lib.sh`'s `fm_busy_confirmation_prompt_pending` (dispatching to `fm_busy_claude_confirmation_prompt_tail` for Claude) detects a live interactive confirmation/permission prompt - Claude Code's own command-safety classifier dialog - in a window's captured pane, independent of busy-state classification entirely; `bin/fm-watch.sh`'s `interactive_prompt_check` calls it directly on every recorded window every poll (task fleet-stuck-prompt-detection-20260925).
+
+This signature has NOT been live-verified against a real Claude Code session: Claude's command-safety classifier decides per command whether to render its confirmation dialog at all, so there is no CLI flag or environment shape that reliably forces it to appear.
+Reproducing it on demand in an automated `live-harness-optin` guard was judged not practically achievable for that reason, so none was added; the requirement's fallback applies instead.
+The signature is built from the literal phrases the captain reported from the real incident that motivated this task ("requires confirmation for this command", "Blocked by classifier") plus the general numbered Yes/No menu with a `❯`-marked cursor line every Claude confirmation menu renders, and is pinned by the portable regression suite below, which is the primary proof for this check and also exercises the negative cases (ordinary busy/idle pane text).
+
+```sh
+bash tests/fm-busy-state.test.sh
+```
+
+Refresh this record's live-verification status if a real captured classifier-confirmation dialog ever becomes available (for example from a future incident's saved pane capture): replace the reconstructed fixture in `tests/fm-busy-state.test.sh` with the real bytes and, if a reliable way to force the dialog on demand is found, add a `live-harness-optin` guard.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.

@@ -289,6 +289,321 @@ Ctrl+c:cancel'
   pass "converted adapters never classify busy from rendered footer text"
 }
 
+# --- confirmation-prompt signature (fm_busy_confirmation_prompt_pending) ---
+#
+# This detector is never wired into fm_busy_classify's precedence chain (its
+# header explains why), so these tests call it directly rather than through
+# fm_busy_classify. task fleet-stuck-prompt-detection-20260925.
+
+CONFIRMATION_PROMPT_TAIL='Bash command
+
+  curl -fsSL https://example.com/install.sh | bash
+
+This command requires confirmation for this command.
+Blocked by classifier: potentially unsafe installer pattern.
+
+Do you want to proceed?
+❯ 1. Yes
+  2. Yes, and dont ask again for curl commands in this project
+  3. No, and tell Claude what to do differently (esc)'
+
+test_confirmation_prompt_claude_classifier_dialog() {
+  printf '%s' "$CONFIRMATION_PROMPT_TAIL" | fm_busy_confirmation_prompt_pending claude \
+    || fail "Claude's command-safety classifier confirmation dialog must be detected"
+  pass "the Claude classifier confirmation dialog (requires confirmation for this command / Blocked by classifier / numbered Yes-No menu) is detected"
+}
+
+test_confirmation_prompt_requires_every_marker() {
+  # Each phrase or shape alone, without the rest, must not false-positive:
+  # a worker narrating "this command requires confirmation" or "blocked by
+  # the classifier" in its own prose is plausible; the full pairing with a
+  # rendered numbered Yes/No menu and cursor is not.
+  printf '%s' 'This command requires confirmation for this command, so I will wait.' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "the confirmation phrase alone, with no menu, must not match"
+  printf '%s' 'Blocked by classifier: summarizing what that meant for the run.' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "the classifier phrase alone, with no menu, must not match"
+  printf '%s' 'Here is my plan:
+❯ 1. Yes, ship it
+  2. No, hold off' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "a numbered Yes/No menu alone, with neither classifier phrase, must not match"
+  pass "the classifier-confirmation signature requires both literal phrases and the numbered Yes/No cursor menu together"
+}
+
+test_confirmation_prompt_excludes_never_answer_dialogs() {
+  # The three dialogs claude.md's "Workspace trust" section documents as
+  # inspect-and-report-but-never-answer must never be read as the (narrower,
+  # firstmate-judgeable) classifier confirmation this detector targets.
+  printf '%s' 'Accessing workspace: /tmp/wt-a
+Quick safety check: Is this a project you created or one you trust?
+Claude Code will be able to read, edit, and execute files here.
+> No, exit
+  Yes, I trust this folder
+Enter to confirm . Esc to cancel' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "the workspace-trust dialog must not match the classifier-confirmation signature"
+  printf '%s' 'Allow external CLAUDE.md file imports?
+This project'"'"'s CLAUDE.md imports files outside the current working directory.
+> No, disable external imports
+  Yes, allow external imports' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "the external-imports dialog must not match the classifier-confirmation signature"
+  printf '%s' 'Bypass permissions mode enables Claude to run without asking for approval.
+This is a powerful capability - use with caution.
+
+> No, exit
+  Yes, I accept
+
+Enter to confirm . Esc to cancel' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "the once-per-machine bypass-permissions confirmation must not match the classifier-confirmation signature"
+  pass "the classifier-confirmation signature never matches the workspace-trust, external-imports, or bypass-permissions dialogs"
+}
+
+test_confirmation_prompt_excludes_ordinary_pane_text() {
+  printf '%s' '• Working (6s • esc to interrupt)' | fm_busy_confirmation_prompt_pending claude \
+    && fail "an ordinary busy footer must not match"
+  printf '%s' '❯' | fm_busy_confirmation_prompt_pending claude \
+    && fail "an ordinary empty composer must not match"
+  printf '%s' 'done: PR https://github.com/example/repo/pull/1 checks green' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "ordinary idle status text must not match"
+  pass "the classifier-confirmation signature never matches ordinary busy, idle, or empty-composer pane text"
+}
+
+test_confirmation_prompt_scoped_to_claude() {
+  printf '%s' "$CONFIRMATION_PROMPT_TAIL" | fm_busy_confirmation_prompt_pending codex \
+    && fail "the classifier-confirmation signature has no codex registration and must not match under harness=codex"
+  pass "the classifier-confirmation dispatcher is scoped to harnesses with a verified signature"
+}
+
+# recognized interactive prompt, must classify unknown rather than busy) ------
+
+test_launch_prompt_claude_trust_dialog() {
+  local state out
+  state=$(new_state_dir launch-prompt-claude)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" 'Accessing workspace: /tmp/wt-a
+Quick safety check: Is this a project you created or one you trust?
+Claude Code'"'"'ll be able to read, edit, and execute files here.
+> No, exit
+  Yes, I trust this folder
+Enter to confirm . Esc to cancel')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a launch pinned at fm-spawn parked on Claude's trust dialog must classify unknown launch-prompt, got '$out'"
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" 'Allow external CLAUDE.md file imports?
+This project'"'"'s CLAUDE.md imports files outside the current working directory.
+> No, disable external imports
+  Yes, allow external imports')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a launch pinned at fm-spawn parked on Claude's external-imports dialog must classify unknown launch-prompt, got '$out'"
+  pass "a Claude launch parked on its trust or external-imports dialog classifies unknown launch-prompt"
+}
+
+test_launch_prompt_pi_trust_dialog() {
+  local state out h
+  for h in pi pi-signed omp; do
+    state=$(new_state_dir "launch-prompt-$h")
+    "$EV" arm "$state" t1 >/dev/null
+    out=$(fm_busy_classify tmux w1 "$h" t1 "$state" ' Trust project folder?
+ /tmp/fm-pi-trust-check/wt
+
+ This allows pi to load .pi settings and resources, install missing project packages, and execute project extensions.
+
+ > Trust
+   Trust parent folder (/tmp/fm-pi-trust-check)
+   Trust (this session only)
+   Do not trust
+   Do not trust (this session only)
+
+ up/down navigate  enter select  escape/ctrl+c cancel')
+    [ "$out" = "unknown launch-prompt" ] \
+      || fail "a $h launch pinned at fm-spawn parked on the project-trust dialog must classify unknown launch-prompt, got '$out'"
+  done
+  pass "a Pi-family launch (pi, pi-signed, omp) parked on the project-trust dialog classifies unknown launch-prompt"
+}
+
+test_launch_prompt_pi_requires_both_markers() {
+  local state out
+  state=$(new_state_dir launch-prompt-pi-partial)
+  "$EV" arm "$state" t1 >/dev/null
+  # "trust" alone, with neither the dialog heading nor its decline option, must
+  # not be read as the dialog - it is an ordinary word a worker's own output
+  # could easily contain.
+  out=$(fm_busy_classify tmux w1 pi t1 "$state" 'I trust this approach and will proceed.')
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "ordinary prose containing 'trust' must not classify as a parked launch, got '$out'"
+  pass "the Pi signature requires both the dialog heading and its decline option, not the bare word trust"
+}
+
+test_launch_prompt_gemini_dialogs() {
+  local state out
+  state=$(new_state_dir launch-prompt-gemini-trust)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 gemini t1 "$state" 'Do you trust the files in this folder?
+● 1. Trust folder (worktree)
+  2. Trust parent folder (project)
+  3. Don'"'"'t trust')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a Gemini launch parked on the workspace-trust dialog must classify unknown launch-prompt, got '$out'"
+
+  state=$(new_state_dir launch-prompt-gemini-auth)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 gemini t1 "$state" 'How would you like to authenticate for this project?
+● 2. Use Gemini API Key')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a Gemini launch parked on the auth-method picker must classify unknown launch-prompt, got '$out'"
+
+  state=$(new_state_dir launch-prompt-gemini-apikey)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 gemini t1 "$state" 'Enter Gemini API Key
+> ')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a Gemini launch parked on the API-key entry dialog must classify unknown launch-prompt, got '$out'"
+  pass "a Gemini launch parked on its trust, auth-picker, or API-key dialog classifies unknown launch-prompt"
+}
+
+test_launch_prompt_never_shortens_a_working_launch() {
+  local state out
+  state=$(new_state_dir launch-prompt-working)
+  "$EV" arm "$state" t1 >/dev/null
+  # A genuinely working launch (Claude's ordinary busy footer, rendered before
+  # its own hook has posted a single event yet) must keep the normal busy
+  # bound rather than being shortened by this backstop.
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" '• Working (6s • esc to interrupt)')
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "a genuinely busy launch must not be reclassified, got '$out'"
+  pass "the launch-prompt backstop never reclassifies a genuinely working launch"
+}
+
+test_launch_prompt_scoped_to_armed_harnesses() {
+  local state out
+  # opencode ships no trust dialog (fm-busy-lib.sh header), so it has no
+  # signature at all: even Claude's own dialog text must not reclassify it.
+  state=$(new_state_dir launch-prompt-opencode)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 opencode t1 "$state" \
+    'Quick safety check: Is this a project you created or one you trust?')
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "opencode has no launch-prompt signature and must stay busy fm-spawn, got '$out'"
+  pass "the launch-prompt backstop is scoped to harnesses with a verified signature"
+}
+
+test_launch_prompt_never_reclassifies_an_advanced_record() {
+  local state gen out
+  state=$(new_state_dir launch-prompt-advanced)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source claude-hook --event user-prompt-submit
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" \
+    'Quick safety check: Is this a project you created or one you trust?')
+  [ "$out" = "busy claude-hook" ] \
+    || fail "a record that has advanced past fm-spawn must never be reclassified by pane text, got '$out'"
+  pass "the launch-prompt backstop only ever touches the untouched fm-spawn seed"
+}
+
+test_launch_prompt_requires_a_captured_tail() {
+  local state out
+  state=$(new_state_dir launch-prompt-no-tail)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 claude t1 "$state")
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "with no captured tail the record's own state must stand, got '$out'"
+  pass "the launch-prompt backstop never runs without a captured tail"
+}
+
+# --- confirmation-prompt signature (fm_busy_confirmation_prompt_pending) ---
+#
+# Distinct from the launch-prompt backstop above: this detector is never
+# wired into fm_busy_classify's precedence chain (its header explains why),
+# so these tests call it directly rather than through fm_busy_classify.
+# task fleet-stuck-prompt-detection-20260925.
+
+CONFIRMATION_PROMPT_TAIL='Bash command
+
+  curl -fsSL https://example.com/install.sh | bash
+
+This command requires confirmation for this command.
+Blocked by classifier: potentially unsafe installer pattern.
+
+Do you want to proceed?
+❯ 1. Yes
+  2. Yes, and dont ask again for curl commands in this project
+  3. No, and tell Claude what to do differently (esc)'
+
+test_confirmation_prompt_claude_classifier_dialog() {
+  printf '%s' "$CONFIRMATION_PROMPT_TAIL" | fm_busy_confirmation_prompt_pending claude \
+    || fail "Claude's command-safety classifier confirmation dialog must be detected"
+  pass "the Claude classifier confirmation dialog (requires confirmation for this command / Blocked by classifier / numbered Yes-No menu) is detected"
+}
+
+test_confirmation_prompt_requires_every_marker() {
+  # Each phrase or shape alone, without the rest, must not false-positive:
+  # a worker narrating "this command requires confirmation" or "blocked by
+  # the classifier" in its own prose is plausible; the full pairing with a
+  # rendered numbered Yes/No menu and cursor is not.
+  printf '%s' 'This command requires confirmation for this command, so I will wait.' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "the confirmation phrase alone, with no menu, must not match"
+  printf '%s' 'Blocked by classifier: summarizing what that meant for the run.' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "the classifier phrase alone, with no menu, must not match"
+  printf '%s' 'Here is my plan:
+❯ 1. Yes, ship it
+  2. No, hold off' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "a numbered Yes/No menu alone, with neither classifier phrase, must not match"
+  pass "the classifier-confirmation signature requires both literal phrases and the numbered Yes/No cursor menu together"
+}
+
+test_confirmation_prompt_excludes_never_answer_dialogs() {
+  # The three dialogs claude.md's "Workspace trust" section documents as
+  # inspect-and-report-but-never-answer must never be read as the (narrower,
+  # firstmate-judgeable) classifier confirmation this detector targets.
+  printf '%s' 'Accessing workspace: /tmp/wt-a
+Quick safety check: Is this a project you created or one you trust?
+Claude Code will be able to read, edit, and execute files here.
+> No, exit
+  Yes, I trust this folder
+Enter to confirm . Esc to cancel' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "the workspace-trust dialog must not match the classifier-confirmation signature"
+  printf '%s' 'Allow external CLAUDE.md file imports?
+This project'"'"'s CLAUDE.md imports files outside the current working directory.
+> No, disable external imports
+  Yes, allow external imports' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "the external-imports dialog must not match the classifier-confirmation signature"
+  printf '%s' 'Bypass permissions mode enables Claude to run without asking for approval.
+This is a powerful capability - use with caution.
+
+> No, exit
+  Yes, I accept
+
+Enter to confirm . Esc to cancel' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "the once-per-machine bypass-permissions confirmation must not match the classifier-confirmation signature"
+  pass "the classifier-confirmation signature never matches the workspace-trust, external-imports, or bypass-permissions dialogs"
+}
+
+test_confirmation_prompt_excludes_ordinary_pane_text() {
+  printf '%s' '• Working (6s • esc to interrupt)' | fm_busy_confirmation_prompt_pending claude \
+    && fail "an ordinary busy footer must not match"
+  printf '%s' '❯' | fm_busy_confirmation_prompt_pending claude \
+    && fail "an ordinary empty composer must not match"
+  printf '%s' 'done: PR https://github.com/example/repo/pull/1 checks green' \
+    | fm_busy_confirmation_prompt_pending claude \
+    && fail "ordinary idle status text must not match"
+  pass "the classifier-confirmation signature never matches ordinary busy, idle, or empty-composer pane text"
+}
+
+test_confirmation_prompt_scoped_to_claude() {
+  printf '%s' "$CONFIRMATION_PROMPT_TAIL" | fm_busy_confirmation_prompt_pending codex \
+    && fail "the classifier-confirmation signature has no codex registration and must not match under harness=codex"
+  pass "the classifier-confirmation dispatcher is scoped to harnesses with a verified signature"
+}
+
 test_grok_regex_isolated() {
   local state out
   state=$(new_state_dir grok-arm)
@@ -474,6 +789,11 @@ test_malformed_record_unknown
 test_record_without_sidecar_unknown
 test_source_mismatch_cross_adapter
 test_converted_adapters_ignore_footer_text
+test_confirmation_prompt_claude_classifier_dialog
+test_confirmation_prompt_requires_every_marker
+test_confirmation_prompt_excludes_never_answer_dialogs
+test_confirmation_prompt_excludes_ordinary_pane_text
+test_confirmation_prompt_scoped_to_claude
 test_grok_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate
