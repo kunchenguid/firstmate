@@ -677,6 +677,7 @@ def verify_note(note_id):
     if not isinstance(note_id, str) or not NOTE_ID_RE.fullmatch(note_id):
         print(json.dumps({"email_handoff": False, "verified": False}, separators=(",", ":")))
 
+
         return 0
     identity = inbox_identity(note_id)
     if identity is None:
@@ -691,6 +692,7 @@ def verify_note(note_id):
         print("fm-afk-email: away posture could not be validated for an email handoff", file=sys.stderr)
         return 1
 
+
     try:
         item = handoff_record(request_id, posture)
     except (OSError, ValueError):
@@ -698,6 +700,7 @@ def verify_note(note_id):
         return 1
     if item is None:
         print(json.dumps({"email_handoff": False, "verified": False}, separators=(",", ":")))
+
 
 
         return 0
@@ -711,6 +714,7 @@ def verify_note(note_id):
         return 0
     print(json.dumps({
         "email_handoff": True,
+
 
         "verified": True,
         "id": note_id,

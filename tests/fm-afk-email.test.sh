@@ -250,6 +250,7 @@ import json, sys
 result = json.loads(sys.argv[1])
 assert result["email_handoff"] is True, result
 
+
 assert result["verified"] is True, result
 assert result["seq"] == 1, result
 assert result["task"] == "ui", result
@@ -325,6 +326,7 @@ PY
     "$REPO/bin/fm-inbox.sh" drain --ack "$note_id") || fail "untrusted note could not be acknowledged: $out"
   assert_contains "$out" "acked $note_id" 'an unmatched reply-shaped note can be acknowledged'
   pass "an unmatched reply-shaped note remains an ordinary non-email inbox note"
+
 
 }
 
@@ -445,6 +447,7 @@ EOF
 test_invalid_or_unreadable_posture_suppresses_mail() {
   local home
   home=$(make_home invalid-posture-poll configured)
+
   run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
   python3 - "$REPO" "$home" <<'PY' || fail "invalid or unreadable posture did not fail closed"
 
@@ -1250,6 +1253,7 @@ clauses = [
     "do not run the `--ack-through` command",
     "Otherwise, after handling any captain inbox note, including one with `email_handoff:false`",
 
+
     "run `bin/fm-inbox.sh drain --ack <id>`",
     "run the exact `--ack-through` command",
 ]
@@ -1427,6 +1431,7 @@ test_processed_marker_cannot_suppress_outcomes
 test_invalid_away_record_does_not_enable_email
 test_invalid_or_unreadable_posture_suppresses_mail
 test_read_gates_unauthenticated_bodies_during_away
+
 test_voice_inbox_note_remains_ordinary_during_away_mode
 test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit
 test_over_limit_reply_is_explicitly_rejected
