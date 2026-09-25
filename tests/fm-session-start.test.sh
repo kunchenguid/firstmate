@@ -719,6 +719,60 @@ write_omp_loaded_markers() {
 
 # --- context digest: absent vs empty vs present -----------------------------
 
+test_summary_refresh_never_blocks_the_digest() {
+  local rec root home fakebin world out started release finished waited=0 f
+  local SESSION_START
+  rec=$(new_world summary-refresh-deferred)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  world=${root%/root}
+  started="$world/summary.started"
+  release="$world/summary.release"
+  finished="$world/summary.finished"
+  mkdir -p "$root/bin"
+  ln -s "$ROOT/docs" "$root/docs"
+  for f in "$ROOT"/bin/*.sh; do ln -s "$f" "$root/bin/${f##*/}"; done
+  rm "$root/bin/fm-home-summary-refresh.sh"
+  cat > "$root/bin/fm-home-summary-refresh.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_HOME_SUMMARY_IF_IDLE:-0}" > "${FM_TEST_SUMMARY_STARTED:?}"
+ticks=0
+while [ ! -e "${FM_TEST_SUMMARY_RELEASE:?}" ] && [ "$ticks" -lt 600 ]; do
+  sleep 0.1
+  ticks=$((ticks + 1))
+done
+: > "${FM_TEST_SUMMARY_FINISHED:?}"
+SH
+  chmod +x "$root/bin/fm-home-summary-refresh.sh"
+  SESSION_START="$root/bin/fm-session-start.sh"
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  out=$(FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
+    FM_TEST_SUMMARY_STARTED="$started" FM_TEST_SUMMARY_RELEASE="$release" \
+    FM_TEST_SUMMARY_FINISHED="$finished" \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'NEXT STEP' "digest did not reach its final section"
+  assert_not_contains "$out" '●  STARTUP TRUNCATED' "summary truncated the digest"
+  assert_absent "$finished" "digest waited for the unreleased summary producer"
+  while [ ! -s "$started" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if ! grep -q '^1$' "$started" 2>/dev/null; then
+    fail "summary did not run in deferred single-flight mode: marker=$(cat "$started" 2>/dev/null), stage=$(network_stage_report "$home" "$root" 2>/dev/null), digest=$out"
+  fi
+  : > "$release"
+  waited=0
+  while [ ! -e "$finished" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -e "$finished" ] || fail "summary obligation disappeared after the digest"
+  wait_for_network_stage "$home" "$root" || fail "deferred startup stage never settled"
+  pass "session start: summary publication is deferred without losing its obligation"
+}
+
 test_context_digest_absent_empty_present() {
   local rec root home fakebin out
   rec=$(new_world context-digest)
@@ -732,8 +786,11 @@ EOF
   : > "$home/data/captain.md"
   # secondmates.md, captain-shared.md, and learnings.md deliberately absent
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
+  wait_for_network_stage "$home" "$root" \
+    || fail "the deferred startup work did not finish"
   jq -e --arg home "$home" '
     .schema == "fm-secondmate-home-summary.v1"
     and .home == $home
@@ -1470,10 +1527,18 @@ EOF
 # unreachable host without touching one: if any part of the blocking path still
 # waits on the network, the digest cannot finish before this does.
 install_slow_gh() {
-  local fakebin=$1 seconds=$2 finished_marker=${3:-}
+  local fakebin=$1 seconds=$2 finished_marker=${3:-} release_gate=${4:-}
   cat > "$fakebin/gh" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = auth ]; then
+  if [ -n '$release_gate' ]; then
+    ticks=0
+    while [ ! -e '$release_gate' ] && [ "\$ticks" -lt 1200 ]; do
+      sleep 0.1
+      ticks=\$((ticks + 1))
+    done
+    [ -e '$release_gate' ] || exit 98
+  fi
   sleep $seconds
   [ -z '$finished_marker' ] || : > '$finished_marker'
   exit 1
@@ -1576,25 +1641,25 @@ SH
 }
 
 # The headline guarantee: an unreachable host delays a reported CHECK, never the
-# startup. The fake host hangs for 12s; the digest must be done long before that,
+# startup. The fake host waits for release; the digest must be done before that,
 # must say so rather than implying the checks passed, and the sweeps must still
 # run and land afterwards.
 test_unreachable_network_never_blocks_the_digest() {
-  local rec root home fakebin mate log spawned network_finished out started elapsed
+  local rec root home fakebin mate log spawned network_finished out release_gate
   rec=$(prepare_session_start_secondmate secondmate-slow-network)
   IFS='|' read -r root home fakebin mate log spawned <<EOF
 $rec
 EOF
   network_finished="${root%/root}/network-finished"
-  install_slow_gh "$fakebin" 12 "$network_finished"
+  release_gate="${root%/root}/network-release"
+  install_slow_gh "$fakebin" 0 "$network_finished" "$release_gate"
 
-  started=$(date +%s)
   out=$(run_session_start_secondmate "$root" "$home" "$fakebin" "$mate" "$log" "$spawned" missing)
-  elapsed=$(( $(date +%s) - started ))
 
   [ ! -e "$network_finished" ] \
-    || fail "the digest waited for the 12s unreachable-host probe instead of returning from local state (${elapsed}s)"
+    || fail "the digest waited for the gated unreachable-host probe instead of returning from local state"
   assert_contains "$out" "SESSION START" "the digest did not complete"
+  assert_not_contains "$out" '●  STARTUP TRUNCATED' "the gated probe prevented the digest from completing"
   assert_contains "$out" "IN PROGRESS - the deferred network checks have not finished yet." \
     "the digest did not disclose that its network checks were still running"
   assert_contains "$out" "NOT yet confirmed: GitHub authentication, dead-secondmate relaunch" \
@@ -1603,6 +1668,7 @@ EOF
     "the digest reported a GitHub-auth verdict it could not yet have"
 
   # ... and the work itself still happens, off the blocking path.
+  : > "$release_gate"
   wait_for_network_stage "$home" "$root" 60 \
     || fail "the deferred stage never finished: $(network_stage_report "$home" "$root")"
   assert_contains "$(network_stage_report "$home" "$root")" "NEEDS_GH_AUTH" \
@@ -2699,6 +2765,7 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
+test_summary_refresh_never_blocks_the_digest
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path

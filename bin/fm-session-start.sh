@@ -72,7 +72,7 @@
 # convergence, pending remote handoff delivery, and the fleet-sync fetch - are
 # started as one detached bounded worker right after the lock (step 1) and
 # harvested at step 7 without ever blocking on it. The bounded inactive-outcome
-# startup scan joins that worker because its local current-state reads can also
+# startup scan and home-summary publication join that worker because their local current-state reads can also
 # be slow. bin/fm-startup-network.sh owns that stage and its safety argument;
 # bin/fm-bootstrap.sh and bin/fm-inactive-reconcile.sh remain the owners of the
 # work itself and still run it.
@@ -656,13 +656,7 @@ if [ "$READ_ONLY" -eq 0 ]; then
     rm -f "$COMPLETION_FILE" 2>/dev/null || true
   fi
   fm_trace_context_session_start "$CONFIG" "$STATE/.trace-context-effective"
-  # A full locked start publishes this home's current structured summary.
-  # Publication is side-band and best-effort, so it can never change the
-  # session-start result. A context re-emit is not another session start.
-  if [ "$REEMIT" -eq 0 ]; then
-    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
-  fi
-  # Every network call and the potentially slow inactive-outcome startup scan
+  # Every network call, summary refresh, and potentially slow inactive-outcome startup scan
   # are launched HERE, detached and bounded, so they run concurrently with the
   # whole digest below instead of in front of it. Step 7 harvests whatever has
   # finished, without ever waiting.

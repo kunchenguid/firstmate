@@ -169,6 +169,9 @@ fm_backend_herdr_cli() {
       esac
       ;;
     "api snapshot")
+      if [ -e "$FIXTURE_DIR/journal-race" ]; then
+        write_v1 "$ID" ZbCdEfGhIjKlMnOpQrStUv
+      fi
       : > "$FIXTURE_DIR/snapshotted"
       printf '{"result":{"snapshot":{"focused_workspace_id":"w1","focused_tab_id":"%s","focused_pane_id":"w1:p1","workspaces":' "$(cat "$FIXTURE_DIR/active-tab")"
       fixture_workspaces
@@ -253,6 +256,14 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "repeat cleanup closed again"
 pass "successful cleanup is idempotent on repeat"
 
+reset_fixture
+LOCK_RECORD=$(umask 077; mktemp "$TMP_ROOT/lock-record.XXXXXX") || fail "could not create a lock record"
+FM_HERDR_CLEANUP_LOCK_RECORD=$LOCK_RECORD fm_herdr_session_cleanup >/dev/null 2>&1
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "recorded cleanup did not close exactly once"
+[ ! -s "$LOCK_RECORD" ] || fail "a finished candidate stayed eligible for deadline recovery: $(cat "$LOCK_RECORD")"
+rm -f "$LOCK_RECORD"
+pass "a finished candidate clears its deadline lock record"
+
 reset_fixture; printf '%s\n' '└ malformed p:AbCdEfGhIjKlMnOpQrStUv' > "$FIXTURE_DIR/title"; assert_preserved "malformed title"
 reset_fixture; printf '%s\n' '└ missing-token' > "$FIXTURE_DIR/title"; assert_preserved "missing token"
 reset_fixture; printf 'version=1\ntask_id=%s\nprojection_id=short\n' "$ID" > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; assert_preserved "malformed journal"
@@ -325,5 +336,181 @@ FM_HOME="$INTEGRATION_ROOT/home" FM_ROOT_OVERRIDE="$INTEGRATION_ROOT" \
   || fail "read-only session start failed"
 [ ! -s "$TRACE" ] || fail "read-only session start ran stale projection cleanup"
 pass "session start runs cleanup only after acquiring its home lock"
+
+# Cached discovery cannot authorize retirement after the journal changes.
+reset_fixture
+: > "$FIXTURE_DIR/journal-race"
+assert_preserved "journal identity changed after indexed discovery"
+[ "$(fm_backend_herdr_projection_journal_field "$FM_STATE_OVERRIDE/$ID.herdr-presentation" projection_id)" = ZbCdEfGhIjKlMnOpQrStUv ] \
+  || fail "journal race did not change the identity under review"
+pass "fresh locked revalidation rejects journal identity changes after indexed discovery"
+
+# Observe journal I/O through the executable cleanup interface. Increasing
+# foreign projection titles must not reread this home's journals per workspace.
+(
+  reset_fixture
+  for n in 1 2 3 4 5 6 7 8 9 10; do write_v1 "owned-$n"; done
+  export FM_TEST_REAL_GREP
+  FM_TEST_REAL_GREP=$(command -v grep)
+  export FM_TEST_JOURNAL_READ_LOG="$TMP_ROOT/journal-reads"
+  cat > "$FAKEBIN/grep" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in *.herdr-presentation) printf '%s\n' "$arg" >> "$FM_TEST_JOURNAL_READ_LOG" ;; esac
+done
+exec "$FM_TEST_REAL_GREP" "$@"
+SH
+  chmod +x "$FAKEBIN/grep"
+  # shellcheck disable=SC2329 # invoked indirectly by the fake herdr workspace list.
+  fixture_workspaces() {
+    local n=1
+    printf '['
+    while [ "$n" -le "$FM_TEST_PROJECTION_COUNT" ]; do
+      [ "$n" -eq 1 ] || printf ','
+      printf '{"workspace_id":"foreign-%s","label":"└ foreign-%s · p:%s"}' "$n" "$n" "$TOKEN"
+      n=$((n + 1))
+    done
+    printf ']'
+  }
+  : > "$FM_TEST_JOURNAL_READ_LOG"
+  FM_TEST_PROJECTION_COUNT=1 fm_herdr_session_cleanup
+  single_reads=$(wc -l < "$FM_TEST_JOURNAL_READ_LOG" | tr -d '[:space:]')
+  : > "$FM_TEST_JOURNAL_READ_LOG"
+  FM_TEST_PROJECTION_COUNT=20 fm_herdr_session_cleanup
+  fleet_reads=$(wc -l < "$FM_TEST_JOURNAL_READ_LOG" | tr -d '[:space:]')
+  [ "$single_reads" -gt 0 ] || fail "journal I/O probe checked nothing"
+  [ "$fleet_reads" -eq "$single_reads" ] \
+    || fail "foreign projections multiplied journal reads: $single_reads -> $fleet_reads"
+  [ ! -s "$CLOSE_LOG" ] || fail "foreign projection discovery closed a pane"
+  rm -f "$FAKEBIN/grep"
+) || exit 1
+pass "fleet discovery reads home journals once regardless of foreign projection count"
+
+# Exercise the actual executable deadline, not the sourced worker alone.
+(
+  reset_fixture
+  cp "$FM_STATE_OVERRIDE/$ID.herdr-presentation" "$TMP_ROOT/deadline-journal"
+  export FM_TEST_HERDR_PID="$TMP_ROOT/deadline-herdr.pid"
+  export FM_TEST_HERDR_OWNER_PID="$TMP_ROOT/deadline-owner.pid"
+  export FM_TEST_HERDR_LOCK="$FM_STATE_OVERRIDE/.spawn-$ID.lock"
+  export FM_TEST_HERDR_SOCKET="$TMP_ROOT/deadline-session.sock"
+  export FM_TEST_HERDR_TITLE="$TITLE"
+  cat > "$FAKEBIN/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "session list")
+    printf '{"sessions":[{"name":"test","running":true,"socket_path":"%s"}]}\n' "$FM_TEST_HERDR_SOCKET"
+    ;;
+  "workspace list")
+    printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"%s","tab_count":1,"pane_count":1}]}}\n' "$FM_TEST_HERDR_TITLE"
+    ;;
+  "api snapshot")
+    printf '%s\n' "$$" > "$FM_TEST_HERDR_PID"
+    if [ "${FM_TEST_HERDR_STOP_LOCK_OWNER:-0}" = 1 ]; then
+      owner=$(cat "$FM_TEST_HERDR_LOCK/pid")
+      printf '%s\n' "$owner" > "$FM_TEST_HERDR_OWNER_PID"
+      kill -STOP "$owner" || exit 1
+      case "$(ps -p "$owner" -o stat= 2>/dev/null)" in
+        T*|t*) : ;;
+        *) printf 'lock owner %s was not stopped\n' "$owner" >&2; exit 1 ;;
+      esac
+    fi
+    trap 'exit 143' TERM
+    sleep 30
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$FAKEBIN/herdr"
+  presentation_lock=$(PATH="$FAKEBIN:$PATH" HERDR_SESSION=test FM_HOME="$FM_HOME" \
+    FM_ROOT_OVERRIDE="$ROOT" bash -c \
+    '. "$1/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_presentation_session_lock_path test' \
+    _ "$ROOT") || fail "could not resolve the isolated fixture presentation lock"
+  started=$SECONDS
+  HERDR_SESSION=test FM_HERDR_SESSION_CLEANUP_TIMEOUT=2 FM_TEST_HERDR_STOP_LOCK_OWNER=1 \
+    "$ROOT/bin/fm-herdr-session-cleanup.sh" > "$TMP_ROOT/deadline.out" 2>&1 \
+    || fail "cleanup deadline blocked startup"
+  [ "$((SECONDS - started))" -lt 25 ] || fail "cleanup deadline did not bound execution"
+  grep -q 'unfinished candidates preserved; cleanup coverage is unconfirmed' "$TMP_ROOT/deadline.out" \
+    || fail "cleanup deadline did not report unconfirmed coverage"
+  cmp -s "$TMP_ROOT/deadline-journal" "$FM_STATE_OVERRIDE/$ID.herdr-presentation" \
+    || fail "cleanup deadline changed an unfinished journal"
+  [ -s "$FM_TEST_HERDR_PID" ] || fail "deadline never reached the backend read after acquiring locks"
+  [ -s "$FM_TEST_HERDR_OWNER_PID" ] || fail "deadline never stopped the lock owner"
+  task_lock="$FM_STATE_OVERRIDE/.spawn-$ID.lock"
+  [ ! -e "$task_lock" ] && [ ! -L "$task_lock" ] \
+    || fail "cleanup deadline left the candidate task lock held: $(ls -ld "$task_lock" 2>/dev/null) owner=$(cat "$task_lock/pid" 2>/dev/null)"
+  [ ! -e "$presentation_lock" ] && [ ! -L "$presentation_lock" ] \
+    || fail "cleanup deadline left the shared presentation lock held: $(ls -ld "$presentation_lock" 2>/dev/null) owner=$(cat "$presentation_lock/pid" 2>/dev/null)"
+  backend_pid=$(cat "$FM_TEST_HERDR_PID")
+  if kill -0 "$backend_pid" 2>/dev/null; then
+    backend_state=$(ps -p "$backend_pid" -o stat= 2>/dev/null || true)
+    case "$backend_state" in Z*) ;; *) fail "deadline left the backend process running" ;; esac
+  fi
+
+  zombie_parent=''
+  zombie_reap="$TMP_ROOT/reap-zombie-owner"
+  reap_zombie_owner() {
+    if [ -n "$zombie_parent" ]; then
+      [ -z "${zombie_owner:-}" ] || kill -KILL "$zombie_owner" 2>/dev/null || true
+      : > "$zombie_reap"
+      wait "$zombie_parent" 2>/dev/null || true
+    fi
+  }
+  trap reap_zombie_owner EXIT
+  python3 - "$TMP_ROOT/zombie-owner.pid" "$zombie_reap" <<'PY' >/dev/null 2>&1 &
+import os
+import sys
+import time
+
+pid = os.fork()
+if pid == 0:
+    while True:
+        time.sleep(1)
+open(sys.argv[1], "w").write(str(pid))
+while not os.path.exists(sys.argv[2]):
+    time.sleep(0.05)
+os.waitpid(pid, 0)
+PY
+  zombie_parent=$!
+  waited=0
+  while [ ! -s "$TMP_ROOT/zombie-owner.pid" ] && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -s "$TMP_ROOT/zombie-owner.pid" ] || fail "could not start the zombie lock-owner fixture"
+  zombie_owner=$(<"$TMP_ROOT/zombie-owner.pid")
+  zombie_identity=$(fm_herdr_cleanup_process_identity "$zombie_owner") \
+    || fail "could not record the lock owner's process identity"
+  kill -KILL "$zombie_owner" 2>/dev/null \
+    || fail "could not terminate the lock-owner fixture"
+  zombie_state=$(ps -p "$zombie_owner" -o stat= 2>/dev/null || true)
+  case "$zombie_state" in Z*) ;; *) fail "the lock-owner fixture did not remain a zombie: $zombie_state" ;; esac
+
+  task_owner="$TMP_ROOT/zombie-task-owner"
+  presentation_owner="$TMP_ROOT/zombie-presentation-owner"
+  mkdir "$task_owner" "$presentation_owner"
+  printf '%s\n' "$zombie_owner" > "$task_owner/pid"
+  printf '%s\n' "$zombie_owner" > "$presentation_owner/pid"
+  ln -s "$task_owner" "$task_lock"
+  ln -s "$presentation_owner" "$presentation_lock"
+  record=$(umask 077; mktemp "$FM_STATE_OVERRIDE/.herdr-cleanup-locks.XXXXXX") \
+    || fail "could not create the interrupted-cleanup record"
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$ID" "$task_lock" "$presentation_lock" "$zombie_owner" "$zombie_identity" > "$record"
+  fm_herdr_cleanup_recover_interrupted_candidate "$record" \
+    || fail "the cleanup worker could not recover its recorded zombie locks"
+  [ ! -e "$task_lock" ] && [ ! -L "$task_lock" ] \
+    || fail "the zombie-backed task lock was not reclaimed"
+  [ ! -e "$presentation_lock" ] && [ ! -L "$presentation_lock" ] \
+    || fail "the zombie-backed presentation lock was not reclaimed"
+  pass "interrupted recovery reclaims only its recorded zombie-backed locks"
+  rm -f "$record"
+  : > "$zombie_reap"
+  wait "$zombie_parent" || fail "the zombie lock-owner fixture did not exit cleanly"
+  zombie_parent=''
+  trap - EXIT
+) || exit 1
+pass "executable deadline preserves journals and releases both locks after interruption"
 
 printf 'all fm-herdr-session-cleanup tests passed\n'
