@@ -194,6 +194,24 @@ test_entries_are_deduplicated_and_capped() {
   pass "mirror: a repeated entry is recorded once, and a long entry keeps its head and tail within the cap"
 }
 
+# A turn that continues after a blocked Stop fires Stop again under the same
+# prompt id with its real final reply: only an identical repeat is dropped.
+test_a_different_reply_under_the_same_id_is_recorded() {
+  local home
+  home=$(make_home same-id-reply)
+  as_session "$home" "$SAY"'
+    say captain "ship it" p1
+    say main "interim reply before the guard blocked" p1
+    say main "the real final answer" p1
+    say main "the real final answer" p1
+  ' || fail "a writer failed"
+  assert_equals "captain|ship it
+main|interim reply before the guard blocked
+main|the real final answer" "$(entries "$home")" \
+    "a different reply under the same id must be recorded, and an identical repeat only once"
+  pass "mirror: a later different reply under the same id is recorded, while an identical repeat is recorded once"
+}
+
 # A hook id names an entry only within one main session: a later session
 # reusing it is new dialog.
 test_a_later_session_may_reuse_an_entry_id() {
@@ -231,26 +249,6 @@ test_a_failed_append_leaves_the_mirror_valid() {
   pass "mirror: a failed append leaves the mirror valid, prints nothing, and later dialog still lands"
 }
 
-# A chmod on PATH that records, for the mirror, its entry count and mode just
-# after the real chmod, and refuses while $FM_HOME/chmod-refuses exists.
-CHMOD_SHIM="$TMP_ROOT/chmod-shim"
-mkdir -p "$CHMOD_SHIM"
-{
-  printf '#!/usr/bin/env bash\nREAL_CHMOD=%q\n' "$(command -v chmod)"
-  cat <<'SH'
-file=${!#}
-case "$file" in
-  */.host-mirror.jsonl)
-    [ ! -e "$FM_HOME/chmod-refuses" ] || exit 1
-    "$REAL_CHMOD" "$@" || exit
-    printf '%s %s\n' "$(wc -l < "$file" | tr -d ' ')" "$(stat -c %a "$file" 2>/dev/null || stat -f %Lp "$file")" >> "$FM_HOME/chmod.log"
-    ;;
-  *) exec "$REAL_CHMOD" "$@" ;;
-esac
-SH
-} > "$CHMOD_SHIM/chmod"
-chmod +x "$CHMOD_SHIM/chmod"
-
 test_mirror_is_owner_only_under_an_open_umask() {
   local home mirror
   home=$(make_home private)
@@ -258,15 +256,9 @@ test_mirror_is_owner_only_under_an_open_umask() {
   (umask 022; as_session "$home" "$SAY"'say captain "keep this between us" p1') || fail "a writer failed"
   [ "$(mode_of "$mirror")" = 600 ] || fail "a new mirror must be owner-only, got $(mode_of "$mirror")"
   chmod 644 "$mirror"
-  (umask 022; PATH="$CHMOD_SHIM:$PATH" as_session "$home" "$SAY"'say main "understood" p1') || fail "a writer failed"
-  [ "$(cat "$home/chmod.log" 2>/dev/null)" = "1 600" ] \
-    || fail "an existing readable mirror must be owner-only before new dialog lands, got: $(cat "$home/chmod.log" 2>/dev/null)"
-  [ "$(mode_of "$mirror")" = 600 ] || fail "an existing readable mirror must stay owner-only, got $(mode_of "$mirror")"
+  (umask 022; as_session "$home" "$SAY"'say main "understood" p1') || fail "a writer failed"
+  [ "$(mode_of "$mirror")" = 600 ] || fail "an existing readable mirror must be owner-only after an append, got $(mode_of "$mirror")"
   [ "$(entries "$home" | wc -l | tr -d ' ')" -eq 2 ] || fail "both entries must be recorded: $(entries "$home")"
-  chmod 644 "$mirror"
-  : > "$home/chmod-refuses"
-  (umask 022; PATH="$CHMOD_SHIM:$PATH" as_session "$home" "$SAY"'say captain "not for other eyes" p2') || fail "a writer failed"
-  [ "$(entries "$home" | wc -l | tr -d ' ')" -eq 2 ] || fail "dialog must not land in a mirror that could not be made owner-only: $(entries "$home")"
   pass "mirror: the captain's dialog lands only in an owner-only mirror, even when the file already existed readable by others"
 }
 
@@ -429,6 +421,7 @@ test_home_without_the_flag_is_untouched
 test_operational_foreign_and_unowned_input_is_dropped
 test_internal_whitespace_is_recorded_verbatim
 test_entries_are_deduplicated_and_capped
+test_a_different_reply_under_the_same_id_is_recorded
 test_a_later_session_may_reuse_an_entry_id
 test_a_failed_append_leaves_the_mirror_valid
 test_mirror_is_owner_only_under_an_open_umask

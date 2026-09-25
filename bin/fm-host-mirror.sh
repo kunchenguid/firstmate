@@ -34,18 +34,17 @@
 #    "tag":"captain"|"main","text":"..."}
 # key is the current main-session key (fm_supervision_host_main_key,
 # bin/fm-supervision-engine-lib.sh). id is the writer's own identity for the
-# entry when it has one (a prompt id or a generation id); an entry whose id is
-# already recorded for the same main session and tag is not appended again, so
-# a surface that fires twice mirrors each entry once. Each text is capped at
+# entry when it has one (a prompt id or a generation id); an entry whose id and
+# text are already recorded for the same main session and tag is not appended
+# again, so a surface that fires twice mirrors each entry once, while a
+# different text under the same id is recorded. Each text is capped at
 # 4000 characters, its truncation note included (head and tail kept, as the Pi
 # mirror caps); when the file exceeds 300 entries it is trimmed to its newest
 # 200. New entries continue above both the committed and staged
-# cursor after file recreation so a later commit cannot skip them. Existing
-# mirror files are restricted to owner-only before an append; if that fails,
-# the entry is not written. An append writes the whole new file beside the
-# mirror and renames it into place, so a write that fails or is interrupted
-# leaves the mirror as it was. Every append and feed runs under
-# $STATE/.host-mirror.lock.
+# cursor after file recreation so a later commit cannot skip them. An append
+# writes the whole new file, owner-only, beside the mirror and renames it into
+# place, so a write that fails or is interrupted leaves the mirror as it was.
+# Every append and feed runs under $STATE/.host-mirror.lock.
 #
 # FEED. $STATE/.host-mirror-cursor holds "<seq>\t<engine session>": the newest
 # entry already fed to that engine conversation. `feed <session> new|resume`
@@ -144,7 +143,7 @@ operational() {  # <text>
 # Returns 1 when the entry could not be recorded; an entry dropped by design
 # (injected, operational, or already recorded) returns 0.
 append_entry() {  # <captain|main> <text> [<id>]
-  local tag=$1 text=$2 id=${3:-} key last seq tmp record lines=0
+  local tag=$1 text=$2 id=${3:-} key last seq tmp record lines=0 recorded=/dev/null
   if [ "$tag" = captain ]; then
     case "${text#"${text%%[![:space:]]*}"}" in
       '<task-notification>'*) return 0 ;;
@@ -153,16 +152,7 @@ append_entry() {  # <captain|main> <text> [<id>]
   fi
   key=$(fm_supervision_host_main_key "$STATE") || return 1
   fm_lock_acquire_wait "$LOCK" || return 1
-  if [ -e "$MIRROR" ] && ! chmod 600 "$MIRROR" 2>/dev/null; then
-    fm_lock_release "$LOCK"
-    return 1
-  fi
-  if [ -n "$id" ] && [ -f "$MIRROR" ] \
-    && jq -Rne --arg id "$id" --arg tag "$tag" --arg key "$key" \
-      'any(inputs | fromjson? | select(type == "object"); .id == $id and .tag == $tag and .key == $key)' "$MIRROR" >/dev/null 2>&1; then
-    fm_lock_release "$LOCK"
-    return 0
-  fi
+  [ ! -f "$MIRROR" ] || recorded=$MIRROR
   last=$(jq -Rn '[inputs | fromjson? | select(type == "object") | .seq | numbers] | max // 0' "$MIRROR" 2>/dev/null)
   case "$last" in ''|*[!0-9]*) last=0 ;; esac
   # The file may have been removed while either cursor survived. Keep new
@@ -176,7 +166,7 @@ append_entry() {  # <captain|main> <text> [<id>]
   done
   seq=$((last + 1))
   record=$(printf '%s' "$text" | jq -cRs --argjson seq "$seq" --argjson epoch "$(date +%s)" --arg key "$key" \
-    --arg id "$id" --arg tag "$tag" --argjson cap "$MIRROR_CAP" '
+    --arg id "$id" --arg tag "$tag" --argjson cap "$MIRROR_CAP" --rawfile recorded "$recorded" '
       . as $text
       | def note($n): "\n[mirror truncated: \($n) characters omitted]\n";
       def capped: if length <= $cap then .
@@ -184,8 +174,15 @@ append_entry() {  # <captain|main> <text> [<id>]
           | ($cap - (note($len - $cap + (note($len - $cap) | length)) | length)) as $keep
           | .[0:($keep / 2 | ceil)] + note($len - $keep) + .[$len - ($keep / 2 | floor):]
         end;
-      {seq: $seq, epoch: $epoch, key: $key, id: $id, tag: $tag, text: ($text | capped)}' 2>/dev/null) \
+      {seq: $seq, epoch: $epoch, key: $key, id: $id, tag: $tag, text: ($text | capped)} as $entry
+      | if $id != "" and any($recorded | split("\n")[] | fromjson? | select(type == "object");
+          .id == $id and .tag == $tag and .key == $key and .text == $entry.text)
+        then empty else $entry end' 2>/dev/null) \
     || { fm_lock_release "$LOCK"; return 1; }
+  if [ -z "$record" ]; then
+    fm_lock_release "$LOCK"
+    return 0
+  fi
   tmp=$(mktemp "$MIRROR.tmp.XXXXXX" 2>/dev/null) || { fm_lock_release "$LOCK"; return 1; }
   if [ -f "$MIRROR" ]; then
     lines=$(wc -l < "$MIRROR" 2>/dev/null | tr -d ' ')
