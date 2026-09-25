@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regression test for the fm-spawn.sh treehouse-get worktree-detection settle
-# loop (bin/fm-spawn.sh, the wait loop after `treehouse get`).
+# loop (bin/fm-spawn.sh, spawn_await_treehouse_worktree after `treehouse get`).
 #
 # On some tmux/WSL setups a brand-new window's pane_current_path transiently
 # reports a stale, unrelated-but-real path on the very first poll, before the
@@ -19,15 +19,6 @@
 # comparing only against the project adopted it and the isolation guard then
 # refused the launch. The cases below cover both the transient and the pane
 # that never leaves the primary at all.
-#
-# The third transient is a checkout still being written. While `git worktree
-# add` populates a new slot, its `.git` link already exists and its `git reset
-# --hard` child runs inside the slot, so a pane reporting its foreground cwd
-# reads the slot as an isolated worktree from the first poll, and `git status`
-# lists every file not yet written. Adopting it then refused the launch as "not
-# clean", and on a checkout slower than the wait the abort interrupted git and
-# left a partial slot folder behind. The last cases cover a checkout that
-# finishes, one that outlasts the ordinary wait, and one that never finishes.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -47,8 +38,25 @@ make_settle_fakebin() {
 #!/usr/bin/env bash
 set -u
 case "$*" in
+  *"#{pane_current_command}"*)
+    printf "%s\n" "${FM_FAKE_FOREGROUND:-bash}"; exit 0 ;;
   *"#{pane_current_path}"*)
     countfile="${FM_FAKE_PANE_COUNTFILE:?FM_FAKE_PANE_COUNTFILE unset}"
+    # A pane whose `treehouse get` hangs in the project until it is interrupted
+    # (and, when asked, stays hung on the retry too).
+    if [ -n "${FM_FAKE_PANE_HUNG_GETS:-}" ]; then
+      gets=$(grep -c 'treehouse get' "$countfile.keys" 2>/dev/null || true)
+      interrupts=$(grep -c 'C-c' "$countfile.keys" 2>/dev/null || true)
+      if [ "${interrupts:-0}" -lt "$FM_FAKE_PANE_HUNG_GETS" ] || [ "${gets:-0}" -le "${interrupts:-0}" ]; then
+        if [ -n "${FM_FAKE_OWN_SLOT:-}" ] && [ ! -e "$countfile.own-seen" ]; then
+          [ -e "$countfile.own-first" ] && touch "$countfile.own-seen" || touch "$countfile.own-first"
+          printf '%s\n' "$FM_FAKE_OWN_SLOT"
+          exit 0
+        fi
+        printf '%s\n' "$FM_FAKE_PANE_PROJECT"
+        exit 0
+      fi
+    fi
     n=0
     [ -f "$countfile" ] && n=$(cat "$countfile")
     n=$((n + 1))
@@ -65,15 +73,32 @@ case "$*" in
     ;;
 esac
 case "${1:-}" in
+  capture-pane)
+    interrupts=$(grep -c C-c "$FM_FAKE_PANE_COUNTFILE.keys" 2>/dev/null || true)
+    if [ "${FM_FAKE_GET_SURVIVES_INTERRUPT:-0}" != 1 ] && [ "$interrupts" -gt 0 ]; then
+      probe=$(grep 'printf.*fm-idle-' "$FM_FAKE_PANE_COUNTFILE.keys" 2>/dev/null | tail -1)
+      [ -z "$probe" ] || printf '%s\n' "$probe" | grep -o '[0-9]*-[0-9]*-[0-9]*' | head -1 | sed 's/^/fm-idle-/'
+    fi
+    exit 0 ;;
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys) exit 0 ;;
+  send-keys)
+    [ -z "${FM_FAKE_PANE_COUNTFILE:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_PANE_COUNTFILE.keys"
+    exit 0
+    ;;
 esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  return) printf '%s\n' "$2" >> "$FM_FAKE_PANE_COUNTFILE.return"; [ "${FM_FAKE_RETURN_SKIPS:-0}" != 1 ] ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -122,8 +147,33 @@ run_settle_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_PANE_PROJECT="$PROJ_DIR" FM_FAKE_OWN_SLOT="${HUNG_SLOT_DIR:-}" \
     PATH="$FAKEBIN_DIR:${SETTLE_TEST_PATH:-$PATH}" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+}
+
+# make_hung_treehouse <fakebin> replaces the fake treehouse with one whose
+# `status` never answers, standing in for a pool whose state lock another
+# process holds. It uses the real sleep because the case also fakes sleep.
+make_hung_treehouse() {
+  local real_sleep
+  real_sleep=$(command -v sleep)
+  cat > "$1/treehouse" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  status)
+    if grep -q 'C-c' "\$FM_FAKE_PANE_COUNTFILE.keys" 2>/dev/null; then
+      exec "$real_sleep" 60
+    fi
+    printf '[]\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$1/treehouse"
+}
+
+key_count() {  # <pattern>
+  grep -c -- "$1" "$COUNTFILE.keys" 2>/dev/null || true
 }
 
 # A single stale first read (the exact incident) must not be accepted: the
@@ -233,6 +283,129 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
 
+# Pool evidence: this slot belongs to the same repository, has no task claim,
+# and was seen twice by the hung pane before it returned to the project.
+make_hung_slot() {
+  local slot
+  slot="$(dirname "$STALE_DIR")/pool/1/repo"
+  mkdir -p "$(dirname "$slot")"
+  git -C "$PROJ_DIR" worktree add -q -b "hung-${1}" "$slot"
+  printf '{"worktrees":[]}\n' > "$(dirname "$(dirname "$slot")")/treehouse-state.json"
+  HUNG_SLOT_DIR=$slot
+}
+
+test_hung_get_in_project_is_interrupted_and_retried() {
+  local rec id out status
+  id=settle-hung-retry-z5
+  rec=$(make_settle_case settle-hung-retry "$id" 0)
+  read_settle_record "$rec"
+  make_hung_slot "$id"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  out=$(FM_FAKE_PANE_HUNG_GETS=1 run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "observed clean slot should be returned and get retried"$'\n'"$out"
+  assert_grep "$HUNG_SLOT_DIR" "$COUNTFILE.return" "observed slot was not returned"
+  [ "$(key_count C-c)" -eq 1 ] || fail "expected one interrupt"
+  [ "$(key_count 'treehouse get')" -eq 2 ] || fail "expected exactly two gets"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "retry did not enter new slot"
+  pass "observed clean pool slot is returned before one retry"
+}
+
+test_hung_slot_with_work_is_not_destroyed() {
+  local rec id out status
+  id=settle-hung-work-z8
+  rec=$(make_settle_case settle-hung-work "$id" 0)
+  read_settle_record "$rec"
+  make_hung_slot "$id"
+  printf 'work\n' > "$HUNG_SLOT_DIR/uncommitted"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  out=$(FM_FAKE_PANE_HUNG_GETS=1 run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn retried despite dirty observed slot"
+  assert_contains "$out" "dirty or no longer" "missing dirty-slot refusal"
+  [ ! -e "$COUNTFILE.return" ] || fail "returned dirty slot"
+  [ "$(key_count 'treehouse get')" -eq 1 ] || fail "retried despite dirty slot"
+  pass "dirty observed slot prevents retry"
+}
+
+test_unidentified_slot_refuses_retry() {
+  local rec id out status
+  id=settle-hung-unknown-z9
+  rec=$(make_settle_case settle-hung-unknown "$id" 0)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  HUNG_SLOT_DIR=""
+  out=$(FM_FAKE_PANE_HUNG_GETS=1 run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn retried without slot evidence"
+  assert_contains "$out" 'no repeatedly observed pool slot' 'missing unproved-slot reason'
+  [ "$(key_count 'treehouse get')" -eq 1 ] || fail "retried unknown slot"
+  pass "unidentified slot is left untouched without retry"
+}
+
+test_claimed_slot_refuses_retry() {
+  local rec id out status
+  id=settle-hung-claimed-z11
+  rec=$(make_settle_case settle-hung-claimed "$id" 0)
+  read_settle_record "$rec"
+  make_hung_slot "$id"
+  printf 'task=another-task\nhome=elsewhere\n' > "$(dirname "$HUNG_SLOT_DIR")/.fm-slot-owner"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  out=$(FM_FAKE_PANE_HUNG_GETS=1 run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail 'retried claimed slot'
+  assert_contains "$out" 'existing task claim' 'missing claim refusal'
+  [ ! -e "$COUNTFILE.return" ] || fail 'returned claimed slot'
+  pass "another task's claim prevents return and retry"
+}
+
+test_get_surviving_interrupt_refuses_retry() {
+  local rec id out status
+  id=settle-hung-survives-z10
+  rec=$(make_settle_case settle-hung-survives "$id" 0)
+  read_settle_record "$rec"
+  make_hung_slot "$id"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  out=$(FM_FAKE_PANE_HUNG_GETS=1 FM_FAKE_GET_SURVIVES_INTERRUPT=1 run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail 'retried busy pane'
+  assert_contains "$out" 'could not confirm an idle shell' 'missing busy-pane refusal'
+  [ "$(key_count 'treehouse get')" -eq 1 ] || fail 'retried busy pane'
+  pass "get surviving C-c prevents retry"
+}
+
+test_hung_get_that_hangs_again_refuses_after_one_retry() {
+  local rec id out status
+  id=settle-hung-twice-z6
+  rec=$(make_settle_case settle-hung-twice "$id" 0)
+  read_settle_record "$rec"
+  make_hung_slot "$id"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  out=$(FM_FAKE_PANE_HUNG_GETS=2 run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail 'accepted second hung get'
+  assert_contains "$out" 'attempts: 2' 'missing retry count'
+  [ "$(key_count 'treehouse get')" -eq 2 ] || fail 'retried more than once'
+  [ "$(key_count C-c)" -eq 2 ] || fail 'second hang was not interrupted'
+  pass "second hang refuses after exactly one retry"
+}
+
+test_hung_get_behind_a_held_pool_lock_refuses_without_retry() {
+  local rec id out status
+  id=settle-hung-locked-z7
+  rec=$(make_settle_case settle-hung-locked "$id" 0)
+  read_settle_record "$rec"
+  make_hung_slot "$id"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  make_hung_treehouse "$FAKEBIN_DIR"
+  out=$(FM_FAKE_PANE_HUNG_GETS=1 run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail 'retried behind held pool lock'
+  assert_contains "$out" 'treehouse status failed' 'missing status refusal'
+  [ "$(key_count 'treehouse get')" -eq 1 ] || fail 'retried behind held lock'
+  pass "unresponsive pool status prevents retry"
+}
+
 # make_checkout_case <name> <id> builds a Treehouse pool slot whose checkout
 # is still being written, plus the script the fake pane runs to finish it.
 # The state does not list a new slot until checkout finishes. The slot is
@@ -296,6 +469,25 @@ test_pool_slot_checkout_in_progress_is_waited_out() {
 
 # A checkout that never finishes still ends in a refusal that names the cause,
 # and the refusal neither claims the slot nor touches its files.
+# A live checkout still in progress after the hang threshold must not be
+# interrupted, returned, or retried just because its first 300 polls elapsed.
+test_checkout_beyond_hang_threshold_keeps_writing() {
+  local rec id out status
+  id=settle-checkout-long-z12
+  rec=$(make_checkout_case settle-checkout-long "$id")
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  out=$(run_checkout_spawn "$id" 310)
+  status=$?
+  expect_code 0 "$status" "slow checkout should finish without interruption"$'\n'"$out"
+  [ "$(cat "$COUNTFILE")" -ge 310 ] || fail "adopted writing slot before checkout finished"
+  [ "$(key_count C-c)" -eq 0 ] || fail "interrupted a writing checkout"
+  [ "$(key_count 'treehouse get')" -eq 1 ] || fail "retried a writing checkout"
+  [ ! -e "$COUNTFILE.return" ] || fail "returned a writing checkout"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "failed to acquire finished checkout"
+  pass "checkout writing beyond 300 polls remains untouched and completes"
+}
+
 test_checkout_that_never_finishes_refuses_without_claiming() {
   local rec id out status
   id=settle-checkout-stuck-z7
@@ -368,7 +560,15 @@ test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_hung_get_in_project_is_interrupted_and_retried
+test_hung_slot_with_work_is_not_destroyed
+test_unidentified_slot_refuses_retry
+test_claimed_slot_refuses_retry
+test_get_surviving_interrupt_refuses_retry
+test_hung_get_that_hangs_again_refuses_after_one_retry
+test_hung_get_behind_a_held_pool_lock_refuses_without_retry
 test_pool_slot_checkout_in_progress_is_waited_out
+test_checkout_beyond_hang_threshold_keeps_writing
 test_leased_pool_slot_waits_for_handoff
 test_checkout_that_never_finishes_refuses_without_claiming
 test_pool_slot_without_jq_refuses_immediately

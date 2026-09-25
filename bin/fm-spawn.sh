@@ -232,8 +232,11 @@
 #   recorded with an unleased live owner) is waited out the same way, on a
 #   separate longer allowance, so a slow first checkout is neither refused as
 #   uncommitted work nor abandoned
-#   half-written. A pane that never reaches an isolated worktree refuses at the
-#   end of that wait, naming the last path seen and why it was rejected.
+#   half-written. A project-location hang is interrupted at 300 seconds and
+#   retried once only if a clean, unclaimed pool slot was repeatedly observed
+#   in this pane and Treehouse safely returns it. The retry uses the same
+#   settling guard. A pane that never reaches a ready isolated worktree refuses
+#   at its applicable deadline, naming the last path seen and why it was rejected.
 #   That placement is proven only at launch. Every ship or scout pane therefore
 #   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
 #   the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -4098,43 +4101,142 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # (spawn_worktree_settling): adopting it would misread the files not yet
   # written as uncommitted work, and giving up on it would abort the spawn while
   # git is still writing, leaving a partial slot folder behind. Polls that see a
-  # checkout in progress therefore do not spend the ordinary 60s window; they
-  # draw on a separate 600s allowance instead, so a slow first checkout of a
-  # large repository is waited out while a pane that never settles still ends.
-  candidate=""
-  last_seen=""
-  last_reason="the pane reported no path"
-  wt_waited=0
-  wt_settle_waited=0
-  while [ "$wt_waited" -lt 60 ]; do
-    wt_settling=0
-    p=$(spawn_current_path "$WT_TARGET" || true)
-    [ -z "$p" ] || last_seen="$p"
-    if [ -n "$p" ] && spawn_worktree_isolated "$p" && spawn_worktree_settling "$p"; then
-      wt_settling=1
-      candidate=""
-      last_reason=$SPAWN_WT_REASON
-    elif [ -n "$p" ] && spawn_worktree_isolated "$p"; then
-      p_real=$(real_path_or_raw "$p")
-      last_reason="it is an isolated worktree, but no second read agreed with it"
-      if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-        WT="$p"
-        break
+  # checkout in progress therefore extends the attempt's absolute deadline
+  # to 600s instead of stacking a 600s allowance on top of the ordinary 60s.
+  # A slow first checkout is waited out, but a pane that never settles ends.
+  # One loop per attempt. Its deadline is measured from the start of that
+  # attempt, not extended each time the pane reports an unfinished checkout.
+  # Keep the 60s ordinary allowance for unexpected paths, 300s for a get
+  # still in the spawning project, and 600s for an observed writing checkout.
+  spawn_await_treehouse_worktree() {
+    local elapsed=0 ordinary=0 limit=60 writing_seen=0 p p_real candidate="" observed="" observed_count=0
+    last_seen=""
+    last_reason="the pane reported no path"
+    spawn_hung_slot=""
+    while [ "$elapsed" -lt "$limit" ]; do
+      p=$(spawn_current_path "$WT_TARGET" || true)
+      [ -z "$p" ] || last_seen="$p"
+      p_real=""
+      [ -z "$p" ] || p_real=$(real_path_or_raw "$p")
+      if [ -n "$p" ] && spawn_worktree_isolated "$p" && spawn_worktree_settling "$p"; then
+        writing_seen=1
+        candidate=""
+        last_reason=$SPAWN_WT_REASON
+      elif [ -n "$p" ] && spawn_worktree_isolated "$p"; then
+        last_reason="it is an isolated worktree, but no second read agreed with it"
+        if [ "$candidate" = "$p_real" ]; then
+          WT="$p"
+          return 0
+        fi
+        candidate=$p_real
+      else
+        candidate=""
+        [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
       fi
-      candidate="$p_real"
-    else
-      candidate=""
-      [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
+      # An observation in this pane must be stable across reads; a single
+      # stale cwd can name another task's otherwise clean pool slot.
+      if [ -n "$p_real" ] && fm_treehouse_pool_slot "$PROJ_ABS" "$p"; then
+        if [ "$observed" = "$p_real" ]; then
+          observed_count=$((observed_count + 1))
+        else
+          observed=$p_real
+          observed_count=1
+        fi
+        if [ "$observed_count" -ge 2 ]; then
+          spawn_hung_slot=$observed
+        fi
+      elif [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+        observed=""
+        observed_count=0
+      fi
+      limit=60
+      if [ "$p_real" = "$PROJ_ABS_REAL" ]; then
+        limit=300
+      fi
+      [ "$writing_seen" = 0 ] || limit=600
+      # Ordinary polls remain bounded after a transient writing slot;
+      # the 600s absolute ceiling remains in force for that attempt.
+      if [ "$limit" = 600 ] && [ "$last_reason" != "its checkout is still being written (treehouse get has not finished handing it out)" ]; then
+        ordinary=$((ordinary + 1))
+        if [ "$ordinary" -ge 60 ] && [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+          return 1
+        fi
+      fi
+      sleep 1
+      elapsed=$((elapsed + 1))
+    done
+    spawn_wait_elapsed=$elapsed
+    return 1
+  }
+  spawn_treehouse_get_attempts=1
+  if ! spawn_await_treehouse_worktree; then
+    spawn_first_slot=$spawn_hung_slot
+    if [ -n "$last_seen" ] && [ "$(real_path_or_raw "$last_seen")" = "$PROJ_ABS_REAL" ]; then
+      echo "warning: treehouse get remained in the spawning project for ${spawn_wait_elapsed}s; interrupting it" >&2
+      if ! spawn_send_key "$WT_TARGET" C-c; then
+        echo "error: could not interrupt treehouse get in window $T; refusing retry" >&2
+        exit 1
+      fi
+      if [ -z "$spawn_first_slot" ]; then
+        echo "error: treehouse get did not enter an isolated worktree (last seen '${last_seen:-none}': $last_reason); no repeatedly observed pool slot belongs to the interrupted get; cannot safely return it or retry in window $T" >&2
+        exit 1
+      fi
+      spawn_probe="fm-idle-${BASHPID}-${RANDOM}-${RANDOM}"
+      if ! spawn_send_text_line "$WT_TARGET" "printf 'fm-idle-%s\\n' '${spawn_probe#fm-idle-}'"; then
+        echo "error: could not probe idle shell in window $T; refusing retry" >&2
+        exit 1
+      fi
+      spawn_idle=0
+      for _ in $(seq 1 10); do
+        spawn_capture=$(fm_backend_capture "$BACKEND" "$T" 30 "$W" 2>/dev/null) || spawn_capture=""
+        if printf '%s\n' "$spawn_capture" | grep -Fxq "$spawn_probe"; then
+          spawn_idle=1
+          break
+        fi
+        sleep 1
+      done
+      if [ "$spawn_idle" -ne 1 ]; then
+        echo "error: could not confirm an idle shell after interrupting treehouse get in window $T; refusing retry" >&2
+        exit 1
+      fi
+      if ! (cd "$PROJ_ABS" && TREEHOUSE_NO_UPDATE_CHECK=1 fm_run_timed 15 treehouse status </dev/null >/dev/null 2>&1); then
+        echo "error: treehouse status failed after interrupting get; refusing retry in window $T" >&2
+        exit 1
+      fi
+      # A missing or unreadable Git status is not evidence of a clean slot.
+      spawn_slot_status=$(git -C "$spawn_first_slot" status --porcelain 2>/dev/null) || {
+        echo "error: cannot prove observed slot clean; refusing retry in window $T" >&2
+        exit 1
+      }
+      if [ -n "$spawn_slot_status" ] || ! fm_treehouse_pool_slot "$PROJ_ABS" "$spawn_first_slot"; then
+        echo "error: observed slot is dirty or no longer in this Treehouse pool; refusing retry in window $T" >&2
+        exit 1
+      fi
+      fm_treehouse_slot_owner_state "$spawn_first_slot" "$ID"
+      if [ "$FM_TREEHOUSE_SLOT_OWNER" != absent ]; then
+        echo "error: observed slot has an existing task claim; refusing retry in window $T" >&2
+        exit 1
+      fi
+      if ! (cd "$PROJ_ABS" && TREEHOUSE_NO_UPDATE_CHECK=1 fm_run_timed 15 treehouse return "$spawn_first_slot" </dev/null); then
+        echo "error: Treehouse did not return the observed slot; refusing retry in window $T" >&2
+        exit 1
+      fi
+      spawn_treehouse_get_attempts=2
+      spawn_send_text_line "$WT_TARGET" 'treehouse get' || exit 1
+      if ! spawn_await_treehouse_worktree; then
+        # A checkout still writing at its deadline must not be interrupted.
+        if [ -n "$last_seen" ] && [ "$(real_path_or_raw "$last_seen")" = "$PROJ_ABS_REAL" ]; then
+          spawn_send_key "$WT_TARGET" C-c || true
+        fi
+      fi
+      if [ -n "$WT" ] && [ "$(real_path_or_raw "$WT")" = "$spawn_first_slot" ]; then
+        echo "error: retried treehouse get reused the hung slot '$WT'; refusing launch" >&2
+        exit 1
+      fi
     fi
-    sleep 1
-    if [ "$wt_settling" = 1 ] && [ "$wt_settle_waited" -lt 600 ]; then
-      wt_settle_waited=$((wt_settle_waited + 1))
-    else
-      wt_waited=$((wt_waited + 1))
-    fi
-  done
+  fi
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within $((wt_waited + wt_settle_waited))s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+    echo "error: treehouse get did not enter an isolated worktree ready for launch (attempts: $spawn_treehouse_get_attempts; last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); hung slot unproved or incomplete; inspect window $T" >&2
     exit 1
   fi
 
