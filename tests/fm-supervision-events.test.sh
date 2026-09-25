@@ -153,4 +153,36 @@ WTN=$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')
 [ "$WTN" = 2 ] || fail "after EVENT_CAP_FAIL_MAX connect failures the event path must be disabled for the process (expected 2 wait_transition calls, got $WTN)"
 pass "event_wait_or_sleep: consecutive event-path failures disable the fast-path and revert to pure polling (fail-closed)"
 
+# --- watch_delivery_publish: a refused delivery lock is reported, not dropped --
+
+reset_state
+# shellcheck disable=SC2034 # Read by the isolated production owner watch_delivery_publish.
+FM_WATCH_DELIVERY_PID=$$
+# shellcheck disable=SC2034 # Read by the isolated production owner watch_delivery_publish.
+FM_WATCH_DELIVERY_IDENTITY=fm-supervision-events-test
+DELIVERY_ERR="$TMP/delivery.err"
+DELIVERY_RC=0
+chmod 0555 "$STATE_DIR"
+watch_delivery_publish 'stale: herdr agent blocked' 2> "$DELIVERY_ERR" || DELIVERY_RC=$?
+chmod 0755 "$STATE_DIR"
+[ "$DELIVERY_RC" -ne 0 ] \
+  || fail "a delivery record whose lock the filesystem refused reported success"
+grep -q 'delivery record was NOT written' "$DELIVERY_ERR" \
+  || fail "a refused delivery lock never told the operator the record was lost: $(cat "$DELIVERY_ERR")"
+grep -q 'the filesystem refused the operation' "$DELIVERY_ERR" \
+  || fail "a refused delivery lock never named the filesystem as the cause: $(cat "$DELIVERY_ERR")"
+[ ! -e "$STATE_DIR/.watch-deliveries.log" ] \
+  || fail "a refused delivery lock wrote the record anyway"
+pass "watch_delivery_publish: a delivery lock the filesystem refuses is reported, never silently dropped"
+
+reset_state
+: > "$DELIVERY_ERR"
+DELIVERY_RC=0
+watch_delivery_publish 'stale: herdr agent blocked' 2> "$DELIVERY_ERR" || DELIVERY_RC=$?
+[ "$DELIVERY_RC" -eq 0 ] || fail "an ordinary delivery record failed to publish (rc=$DELIVERY_RC)"
+[ ! -s "$DELIVERY_ERR" ] || fail "an ordinary delivery record warned about the filesystem: $(cat "$DELIVERY_ERR")"
+grep -q 'fm-supervision-events-test' "$STATE_DIR/.watch-deliveries.log" \
+  || fail "an ordinary delivery record was not written"
+pass "watch_delivery_publish: an ordinary delivery record still publishes silently"
+
 echo "# fm-supervision-events.test.sh: all assertions passed"

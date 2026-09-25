@@ -40,6 +40,19 @@ fm_herdr_cleanup_warn() {
   printf 'warning: herdr session-start projection cleanup: %s\n' "$*" >&2
 }
 
+# Why a lock could not be taken. "Busy" is only true when another process holds
+# it, and that peer will release it, so the next session start cleans up. A
+# filesystem that refused to create the lock at all is a different problem that
+# no later run recovers from on its own, and an operator told the wrong one goes
+# looking for a peer that does not exist.
+fm_herdr_cleanup_lock_cause() { # <what>
+  if [ "${FM_LOCK_FAIL_REASON:-}" = unavailable ]; then
+    printf '%s could not be created - the filesystem refused the operation (out of space, read-only, or not writable)' "$1"
+    return 0
+  fi
+  printf '%s is busy' "$1"
+}
+
 fm_herdr_cleanup_title_token() { # <workspace-title>
   local title=$1 prefix token rest
   case "$title" in
@@ -216,7 +229,7 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   [ "$FM_HERDR_CLEANUP_TOKEN" = "$token" ] || return 0
   task_lock="$STATE/.spawn-$id.lock"
   if ! fm_lock_try_acquire "$task_lock"; then
-    fm_herdr_cleanup_warn "$id skipped because its task lock is busy"
+    fm_herdr_cleanup_warn "$id skipped because $(fm_herdr_cleanup_lock_cause 'its task lock')"
     return 0
   fi
   presentation_lock=$(fm_backend_herdr_presentation_session_lock_path "$session" 2>/dev/null) || {
@@ -226,7 +239,7 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   }
   if ! fm_lock_try_acquire "$presentation_lock"; then
     fm_lock_release "$task_lock" || true
-    fm_herdr_cleanup_warn "$id skipped because the shared presentation lock is busy"
+    fm_herdr_cleanup_warn "$id skipped because $(fm_herdr_cleanup_lock_cause 'the shared presentation lock')"
     return 0
   fi
 

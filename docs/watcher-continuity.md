@@ -446,6 +446,8 @@ It also checks that a newly appended keyed decision is classified without reread
 - Bounded and successor-linked lifecycle rows.
 - A SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 
+It also pins the acquisition primitive underneath: a stale-owner reclaim serializes through at most one `.steal` level whatever chain it finds on disk, a leftover chain from the pre-fix recursive reclaim is swept level by level and stops at the first level a live holder still occupies, concurrent reclaimers of a stale steal mutex still leave exactly one publisher of the primary lock, a lock the filesystem itself refuses to create is refused once with an explanatory line and an `unavailable` reason distinct from an ordinary held lock instead of being retried into a longer path, a leftover steal mutex beside an absent primary lock is reclaimed rather than read as a held lock that could never self-heal, a creation race whose winner released before the loser looked is retried once as the contention it was instead of being reported as a refusing filesystem, and the blocking wait never returns without the lock.
+
 ### Claude auto-arm and turn-end guard
 
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
@@ -487,6 +489,11 @@ It also covers generation-claim single-flight, stuck-claim supersession, superse
 
 The goal is continuity without a Pi, omp, or OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed, because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
+When the filesystem itself cannot create the session lock, because it is full, mounted read-only, or has an unwritable parent, acquisition refuses instead of treating the missing lock as a stale one to reclaim.
+A caller that waits for the lock keeps waiting rather than returning without it, and reports the reason on stderr on a throttled cadence, so work stops safely instead of proceeding unlocked.
+Bounding that wait is tracked as separate work and is not in place today.
+A caller that does not wait tells that refusal apart from an ordinary held lock and reports it rather than reporting success it did not achieve.
+A watcher start that took no lock exits nonzero saying no watcher is running and none was started, instead of reporting one already running; the Stop auto-arm says supervision is not running for this home; and a refused Claude block-budget reset ([`turnend-guard.md`](turnend-guard.md#harness-integrations) owns that budget) or a refused diagnostic cycle or delivery row names the record that was not written rather than passing silently.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
 
 The other harnesses rely on these mechanisms:

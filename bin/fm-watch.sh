@@ -2366,6 +2366,13 @@ EVICTED_PID=
 EVICTED_BEAT_AGE=
 BEAT="$STATE/.last-watcher-beat"
 while ! fm_lock_try_acquire "$WATCH_LOCK"; do
+  # A refused primitive is a third outcome, not a held lock: no lock exists, no
+  # pid is recorded, and no watcher is running. Reporting the usual "already
+  # running" and exiting 0 there claims a supervisor that does not exist.
+  if [ "${FM_LOCK_FAIL_REASON:-}" = unavailable ]; then
+    echo "watcher: cannot create $WATCH_LOCK - the filesystem refused the operation (out of space, read-only, or not writable); no watcher is running and none was started." >&2
+    exit 1
+  fi
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
     if [ -e "$BEAT" ]; then
       beat_age=$(fm_path_age "$BEAT")
