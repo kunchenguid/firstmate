@@ -1467,13 +1467,14 @@ ok - forced teardown retains a nested secondmate home and its grandchild's Herdr
 Real captures verified these active distinctions:
 
 - Claude and Codex use bare `❯` and `›` agent composers.
-- Pi uses content between complete separator rows and requires exact native Pi identity.
+- Pi's live-verified layout uses content between complete separator rows and requires exact native Pi identity.
 - Dim or faint suggestion text is ghost content, while normally styled text is pending input.
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.
 - A bare shell prompt has no safe agent-composer container and is unknown.
 - Codex 0.154's idle braille starfield rows are composer furniture, with the dated Herdr evidence and refresh command in [Composer classification matrix](#composer-classification-matrix).
 
 `tests/fm-composer-ghost.test.sh`, `tests/fm-composer-lib.test.sh`, and the Herdr composer cases pin the exact captured ANSI bytes.
+The compact Herdr Pi layout - a rounded header, reverse-video blank input cell, and one lower rule - currently has portable fixture coverage in `tests/fm-backend-herdr.test.sh` and safe-exit coverage in `tests/fm-control.test.sh`; it has not been validated against a live running Pi.
 The U+2063 operational and routed-request separators were exercised through a real Pi-on-Herdr path; the byte-exact active regression is:
 
 ```sh

@@ -266,10 +266,12 @@ A human-blocked permission dialog has no busy banner and still surfaces.
 ## Composer and injection safety
 
 Herdr has no direct cursor-row primitive.
-The adapter is a thin capture: it hands a bounded ANSI tail plus Herdr's capability facts to the fleet-wide classifier in `bin/fm-composer-lib.sh`, which owns every shape - bordered boxes, bare agent-glyph rows (including muse's `⟩`, which the adapter's retired local pattern silently omitted), opencode's left bar, and the Pi separator region this adapter pioneered, admitted only when native `agent get` identity is exactly Pi and state is idle or done.
+The adapter is a thin capture: it hands a bounded ANSI tail plus Herdr's capability facts to the fleet-wide classifier in `bin/fm-composer-lib.sh`, which owns every shape - bordered boxes, bare agent-glyph rows (including muse's `⟩`, which the adapter's retired local pattern silently omitted), opencode's left bar, and Pi's separated or compact region.
+A Pi region proves an empty composer only when native `agent get` identity is exactly Pi and state is idle or done.
+The compact Pi shape is a rounded status header, one unboxed input row, and one lower solid separator followed by no visible content in the capture; its empty row must be exactly one reverse-video blank cursor cell.
 A blocked Pi is parked on an interactive prompt, so its blank composer region is a menu's and not a free composer's; that state defers instead of proving emptiness.
-A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending.
-Identity stays a lazy second read, consulted only when a separator pair could change the verdict.
+A working Pi, pending input, an unstyled compact row, missing or contradictory identity, truncated capture, incomplete separator pair, over-tall candidate, or trailing shell remains unknown or pending.
+Identity stays a lazy second read, consulted only after the classifier selects a recognized Pi structure.
 
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.

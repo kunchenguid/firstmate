@@ -196,6 +196,47 @@ fi
 exit 0
 SH
   chmod +x "$fb/sleep"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=$FM_FAKE_DIR
+case "${1:-} ${2:-}" in
+  "status --json")
+    printf '%s\n' '{"client":{"version":"0.9.0","protocol":22},"server":{"running":true}}'
+    ;;
+  "pane get")
+    printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","workspace_id":"ws1","tab_id":"tab1"}}}'
+    ;;
+  "pane process-info")
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_processes":[{"pid":%s,"name":"node","argv":["pi"]}]}}}\n' "$$" "$$"
+    ;;
+  "agent get")
+    if [ -e "$D/herdr-stopped" ]; then
+      printf '%s\n' '{"error":{"code":"agent_not_found"}}'
+    else
+      count=$(( $(cat "$D/herdr-agent-count" 2>/dev/null || echo 0) + 1 ))
+      printf '%s' "$count" > "$D/herdr-agent-count"
+      mode=$(cat "$D/herdr-mode" 2>/dev/null || echo idle)
+      if [ "$mode" = missing-identity ] && [ "$count" -ge 3 ]; then
+        printf '%s\n' '{"error":{"code":"agent_not_found"}}'
+      elif [ "$mode" = contradictory-identity ] && [ "$count" -ge 3 ]; then
+        printf '%s\n' '{"result":{"agent":{"agent":"shell","agent_status":"idle"}}}'
+      else
+        case "$mode" in working|blocked) status=$mode ;; *) status=idle ;; esac
+        printf '{"result":{"agent":{"agent":"pi","agent_status":"%s"}}}\n' "$status"
+      fi
+    fi
+    ;;
+  "pane read") cat "$D/herdr-screen" ;;
+  "pane send-text")
+    printf '%s\n' "${4:-}" >> "$D/literal"
+    [ "${4:-}" != /quit ] || : > "$D/herdr-stopped"
+    ;;
+  "pane send-keys") printf '%s\n' "${4:-}" >> "$D/keys" ;;
+  *) printf '%s\n' '{}' ;;
+esac
+SH
+  chmod +x "$fb/herdr"
   printf '%s\n' "$fb"
 }
 
@@ -286,6 +327,54 @@ test_exit_types_each_harness_verified_command() {
     assert_contains "$out" "stopped t1 harness=$harness" "exit should report the stop for $harness"
   done
   pass "fm-control exit: every verified harness gets its own verified exit command"
+}
+
+test_pi_exit_uses_herdr_compact_proof_boundary() {
+  local dir out rc case_id screen mode history i
+  for case_id in idle idle-short-history idle-long-history draft whitespace boxed unstyled-row continuation working blocked missing-identity contradictory-identity truncated shell; do
+    dir=$(new_case "pi-herdr-exit-$case_id")
+    add_task "$dir" t1 pi ship herdr "lab:w1:p2"
+    {
+      echo 'herdr_session=lab'
+      echo 'herdr_workspace_id=ws1'
+      echo 'herdr_tab_id=tab1'
+      echo 'herdr_pane_id=w1:p2'
+    } >> "$dir/home/state/t1.meta"
+    screen=$'\033[38;2;129;162;190m╭ gpt-5.6-terra · firstmate ────────────────╮\033[0m\n\033[7m \033[0m\n\033[38;2;129;162;190m─────────────────────────────────────────────\033[0m\n'
+    mode=idle
+    history=
+    case "$case_id" in
+      idle-short-history) history=$'\033[38;2;129;162;190m─────────────────────────────────────────────\033[0m\nold transcript one\nold transcript two\n' ;;
+      idle-long-history)
+        history=$'\033[38;2;129;162;190m─────────────────────────────────────────────\033[0m\n'
+        for i in $(seq 1 9); do history+="old transcript $i"$'\n'; done
+        ;;
+      draft) screen=$'\033[38;2;129;162;190m╭ gpt-5.6-terra · firstmate ────────────────╮\033[0m\nprivacy-safe draft\033[7m \033[0m\n\033[38;2;129;162;190m─────────────────────────────────────────────\033[0m\n' ;;
+      whitespace) screen=$'\033[38;2;129;162;190m╭ gpt-5.6-terra · firstmate ────────────────╮\033[0m\n  \033[7m \033[0m\n\033[38;2;129;162;190m─────────────────────────────────────────────\033[0m\n' ;;
+      boxed) screen=$'\033[38;2;129;162;190m╭ gpt-5.6-terra · firstmate ────────────────╮\033[0m\n│\033[7m \033[0m│\n\033[38;2;129;162;190m─────────────────────────────────────────────\033[0m\n' ;;
+      unstyled-row) screen=$'\033[38;2;129;162;190m╭ gpt-5.6-terra · firstmate ────────────────╮\033[0m\n \n\033[38;2;129;162;190m─────────────────────────────────────────────\033[0m\n' ;;
+      continuation) screen=$'\033[38;2;129;162;190m╭ gpt-5.6-terra · firstmate ────────────────╮\033[0m\n> continued input\033[7m \033[0m\n\033[38;2;129;162;190m─────────────────────────────────────────────\033[0m\n' ;;
+      working|blocked|missing-identity|contradictory-identity) mode=$case_id ;;
+      truncated) screen=$'\033[38;2;129;162;190m╭ gpt-5.6-terra · firstmate ────────────────╮\033[0m\n\033[7m \033[0m\n' ;;
+      shell) screen+=$'\n$ prompt after stale Pi registration\n' ;;
+    esac
+    printf '%s' "$history$screen" > "$dir/fake/herdr-screen"
+    printf '%s' "$mode" > "$dir/fake/herdr-mode"
+    out=$(run_control "$dir" t1 exit); rc=$?
+    case "$case_id" in
+      idle|idle-short-history|idle-long-history)
+      expect_code 0 "$rc" "idle native compact Pi exit with $case_id should succeed"$'\n'"$out"
+      [ "$(literals "$dir")" = /quit ] \
+        || fail "idle native compact Pi exit with $case_id should type exactly /quit, got: $(literals "$dir")"
+      ;;
+      *)
+        expect_code 1 "$rc" "Pi exit must refuse the unproven Herdr '$case_id' compact shape"$'\n'"$out"
+        [ ! -s "$dir/fake/literal" ] \
+          || fail "Pi exit typed /quit for unsafe Herdr '$case_id' evidence: $(literals "$dir")"
+        ;;
+    esac
+  done
+  pass "fm-control Pi exit: Herdr compact proof alone permits /quit"
 }
 
 test_interrupt_sends_each_harness_verified_key() {
@@ -1032,6 +1121,7 @@ test_fm_send_still_marks_the_same_secondmate_task() {
 }
 
 test_exit_types_each_harness_verified_command
+test_pi_exit_uses_herdr_compact_proof_boundary
 test_interrupt_sends_each_harness_verified_key
 test_devin_interrupt_invalidates_busy
 test_devin_idle_interrupt_sends_one_press
