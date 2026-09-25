@@ -27,7 +27,7 @@
 #   Record:   <state>/operational-inbox/<name>.msg, <name> matching [0-9a-z-]+,
 #             exactly the encoded envelope bytes, published by atomic rename.
 #             Records are never re-rung or acknowledged; every write prunes
-#             records older than FM_OPERATIONAL_RECORD_RETENTION_DAYS (7 days).
+#             records at about FM_OPERATIONAL_RECORD_RETENTION_DAYS (7) elapsed days.
 #   Doorbell: FM_OPERATIONAL_DOORBELL_PREFIX <absolute physical record path>
 #             FM_OPERATIONAL_DOORBELL_SUFFIX, one printable-ASCII line whose
 #             leading ": " is the shell no-op, as for the steering doorbell.
