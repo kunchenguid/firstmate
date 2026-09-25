@@ -25,6 +25,8 @@ REPLACEMENT_OWNER_PID=
 STALL_WORKER_PID=
 STALL_REPLACEMENT_PID=
 STALL_JOB_GROUP=
+STEP_STATE="$TMP_ROOT/clock-step-jobs"
+STEP_SLEEP_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -36,16 +38,19 @@ cleanup_remote_job_fixture() {
   [ -z "$RESTART_SUPERVISOR_PID" ] || kill -KILL "$RESTART_SUPERVISOR_PID" 2>/dev/null || true
   [ -z "$LOST_TERM_PID" ] || kill -KILL "$LOST_TERM_PID" 2>/dev/null || true
   [ -z "$REPLACEMENT_OWNER_PID" ] || kill -KILL "$REPLACEMENT_OWNER_PID" 2>/dev/null || true
-  local stall_pid
+  local stall_pid state_root
   for stall_pid in "$STALL_WORKER_PID" "$STALL_REPLACEMENT_PID"; do
     [ -n "$stall_pid" ] || continue
     kill -KILL "$stall_pid" 2>/dev/null || true
     wait "$stall_pid" 2>/dev/null || true
   done
   [ -z "$STALL_JOB_GROUP" ] || kill -KILL -- "-$STALL_JOB_GROUP" 2>/dev/null || true
-  if [ -f "$STATE_ROOT/worker.pid" ]; then
-    fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
-  fi
+  for state_root in "$STATE_ROOT" "$STEP_STATE"; do
+    if [ -f "$state_root/worker.pid" ]; then
+      fm_remote_job_stop_worker_tree "$(cat "$state_root/worker.pid")" || true
+    fi
+  done
+  [ -z "$STEP_SLEEP_PID" ] || kill "$STEP_SLEEP_PID" 2>/dev/null || true
   rm -rf -- "$TMP_ROOT"
 }
 trap cleanup_remote_job_fixture EXIT
@@ -1099,5 +1104,188 @@ RESTART_SUPERVISOR_PID=
 assert_grep "remote job worker exited 3 times; stopping the supervisor" "$TMP_ROOT/restart-supervisor.err" \
   "the restart guard did not explain why it stopped"
 pass "barely healthy worker failures remain bounded by the restart guard"
+
+# A Linux host's wall clock can step (WSL2 under Hyper-V does so by seconds to
+# minutes while reporting itself synchronised), and procps renders ps lstart as
+# the current wall clock minus the process's age, so a step moves the lstart of
+# a worker that never restarted. The stub below is that ps: it passes every
+# query through except lstart, which it renders shifted by the step recorded in
+# STEP_CLOCK. The start identity must not move with it.
+STEP_CLOCK="$TMP_ROOT/clock-step-seconds"
+STEP_PS="$TMP_ROOT/clock-step-ps"
+printf '0\n' > "$STEP_CLOCK"
+cat > "$STEP_PS" <<'SH'
+#!/bin/bash
+if [ -x /bin/ps ]; then real_ps=/bin/ps; else real_ps=/usr/bin/ps; fi
+if [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
+  real=$(LC_ALL=C "$real_ps" "$@") || exit
+  real=$(printf '%s' "$real" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  step=$(cat "$FM_TEST_CLOCK_STEP")
+  [ "$step" -ne 0 ] || { printf '%s\n' "$real"; exit 0; }
+  LC_ALL=C date -d "$real $step seconds" '+%a %b %e %H:%M:%S %Y' 2>/dev/null \
+    || LC_ALL=C date -j -v"+${step}S" -f '%a %b %e %H:%M:%S %Y' "$real" '+%a %b %e %H:%M:%S %Y'
+  exit
+fi
+exec "$real_ps" "$@"
+SH
+chmod +x "$STEP_PS"
+export FM_TEST_CLOCK_STEP="$STEP_CLOCK"
+
+# A fake /proc lets every host check the /proc parsing and matching rules
+# against a real live pid. The comm field carries spaces and ')' so the parser
+# must count fields from the final ')'.
+FAKE_PROC="$TMP_ROOT/fake-proc"
+sleep 60 &
+STEP_SLEEP_PID=$!
+mkdir -p "$FAKE_PROC/$STEP_SLEEP_PID" "$FAKE_PROC/sys/kernel/random"
+fake_proc_stat() { # <pid> <starttime>
+  printf '%s (odd) name (x) S 1 1 1 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 %s 1000 0\n' "$1" "$2" \
+    > "$FAKE_PROC/$1/stat"
+}
+fake_proc_stat "$STEP_SLEEP_PID" 424242
+printf '6f1c0f9e-8a5b-4c3d-9e2f-0a1b2c3d4e5f\n' > "$FAKE_PROC/sys/kernel/random/boot_id"
+STEP_IDENTITY=$(FM_PROC_ROOT_OVERRIDE="$FAKE_PROC" fm_remote_job_process_start "$STEP_SLEEP_PID") \
+  || fail "the /proc start identity could not be read"
+assert_equals "proc:6f1c0f9e-8a5b-4c3d-9e2f-0a1b2c3d4e5f:424242" "$STEP_IDENTITY" \
+  "the start identity is not the boot-qualified /proc start time"
+printf '5\n' > "$STEP_CLOCK"
+STEP_RC=0
+FM_PROC_ROOT_OVERRIDE="$FAKE_PROC" FM_REMOTE_JOB_PS_BIN="$STEP_PS" \
+  fm_remote_job_process_start_matches "$STEP_SLEEP_PID" "$STEP_IDENTITY" || STEP_RC=$?
+[ "$STEP_RC" -eq 0 ] || fail "a wall-clock step changed a live process's /proc start identity ($STEP_RC)"
+fake_proc_stat "$STEP_SLEEP_PID" 424243
+STEP_RC=0
+FM_PROC_ROOT_OVERRIDE="$FAKE_PROC" FM_REMOTE_JOB_PS_BIN="$STEP_PS" \
+  fm_remote_job_process_start_matches "$STEP_SLEEP_PID" "$STEP_IDENTITY" || STEP_RC=$?
+[ "$STEP_RC" -eq 1 ] || fail "a reused pid with a different /proc start time still matched ($STEP_RC)"
+fake_proc_stat "$STEP_SLEEP_PID" 424242
+printf '0\n' > "$STEP_CLOCK"
+NO_PROC_IDENTITY=$(FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proc" FM_REMOTE_JOB_PS_BIN="$STEP_PS" \
+  fm_remote_job_process_start "$STEP_SLEEP_PID") || fail "the ps fallback identity could not be read"
+assert_equals "$(FM_REMOTE_JOB_PS_BIN="$STEP_PS" fm_remote_job_process_lstart "$STEP_SLEEP_PID")" \
+  "$NO_PROC_IDENTITY" "a host without /proc did not fall back to ps lstart"
+pass "the start identity reads /proc past an odd comm and ignores wall-clock steps"
+
+# Records written before this identity existed hold ps lstart. They still match
+# while lstart is unchanged; after a step they report the ambiguous legacy
+# status rather than a plain mismatch, and a /proc record never falls back.
+LEGACY_START=$(FM_REMOTE_JOB_PS_BIN="$STEP_PS" fm_remote_job_process_lstart "$STEP_SLEEP_PID")
+STEP_RC=0
+FM_PROC_ROOT_OVERRIDE="$FAKE_PROC" FM_REMOTE_JOB_PS_BIN="$STEP_PS" \
+  fm_remote_job_process_start_matches "$STEP_SLEEP_PID" "$LEGACY_START" || STEP_RC=$?
+[ "$STEP_RC" -eq 0 ] || fail "an unchanged legacy lstart record no longer matched ($STEP_RC)"
+printf '300\n' > "$STEP_CLOCK"
+STEP_RC=0
+FM_PROC_ROOT_OVERRIDE="$FAKE_PROC" FM_REMOTE_JOB_PS_BIN="$STEP_PS" \
+  fm_remote_job_process_start_matches "$STEP_SLEEP_PID" "$LEGACY_START" || STEP_RC=$?
+[ "$STEP_RC" -eq 3 ] || fail "a stepped legacy lstart record did not report the legacy status ($STEP_RC)"
+STEP_RC=0
+FM_PROC_ROOT_OVERRIDE="$FAKE_PROC" FM_REMOTE_JOB_PS_BIN="$STEP_PS" \
+  fm_remote_job_process_start_matches "$STEP_SLEEP_PID" "proc::1" || STEP_RC=$?
+[ "$STEP_RC" -eq 1 ] || fail "a mismatched /proc record fell back to lstart ($STEP_RC)"
+
+# The worker lock pairs that legacy status with the recorded command line, so a
+# pre-upgrade worker that a step has already moved is still recognised as the
+# owner and can be replaced rather than raced.
+LEGACY_LOCK_HOME="$TMP_ROOT/legacy-lock-account"
+LEGACY_LOCK_STATE="$TMP_ROOT/legacy-lock-jobs"
+mkdir -p "$LEGACY_LOCK_HOME" "$LEGACY_LOCK_STATE/worker.lock"
+chmod 700 "$LEGACY_LOCK_HOME" "$LEGACY_LOCK_STATE" "$LEGACY_LOCK_STATE/worker.lock"
+printf '%s\n' "$STEP_SLEEP_PID" > "$LEGACY_LOCK_STATE/worker.lock/pid"
+printf '%s\n' "$LEGACY_START" > "$LEGACY_LOCK_STATE/worker.lock/start"
+fm_remote_job_process_command "$STEP_SLEEP_PID" > "$LEGACY_LOCK_STATE/worker.lock/command"
+chmod 600 "$LEGACY_LOCK_STATE/worker.lock"/*
+(
+  # shellcheck disable=SC2030 # This fixture's state root and seams are confined to its subshell.
+  export FM_REMOTE_JOB_STATE_ROOT="$LEGACY_LOCK_STATE" FM_PROC_ROOT_OVERRIDE="$FAKE_PROC" \
+    FM_REMOTE_JOB_PS_BIN="$STEP_PS"
+  fm_remote_job_lock_owner_matches_process "$LEGACY_LOCK_HOME" \
+    || fail "a stepped legacy lock owner with its recorded command was not recognised"
+  printf 'sleep 61\n' > "$LEGACY_LOCK_STATE/worker.lock/command"
+  ! fm_remote_job_lock_owner_matches_process "$LEGACY_LOCK_HOME" \
+    || fail "a stepped legacy lock owner matched without its recorded command"
+  # A legacy record naming the reader's own pid is a pre-reboot record that pid
+  # reuse happens to satisfy, never a rival owner.
+  LEGACY_SELF=${BASHPID:-$$}
+  mkdir -p "$FAKE_PROC/$LEGACY_SELF"
+  fake_proc_stat "$LEGACY_SELF" 525252
+  printf '%s\n' "$LEGACY_SELF" > "$LEGACY_LOCK_STATE/worker.lock/pid"
+  printf 'Sat Jan  1 00:00:00 2000\n' > "$LEGACY_LOCK_STATE/worker.lock/start"
+  fm_remote_job_process_command "$LEGACY_SELF" > "$LEGACY_LOCK_STATE/worker.lock/command"
+  ! fm_remote_job_lock_owner_matches_process "$LEGACY_LOCK_HOME" \
+    || fail "a legacy lock record naming the reader's own pid was taken as a rival owner"
+)
+printf '0\n' > "$STEP_CLOCK"
+kill "$STEP_SLEEP_PID" 2>/dev/null || true
+wait "$STEP_SLEEP_PID" 2>/dev/null || true
+STEP_SLEEP_PID=
+pass "pre-upgrade lstart records stay recognisable across a wall-clock step"
+
+# End to end on a real Linux /proc: a wall-clock step while a worker serves a
+# job must neither make ensure start a second worker nor fail the running job
+# as stopped. Hosts without /proc keep ps lstart, which macOS records as an
+# absolute start time that a clock step does not move.
+if [ -r "/proc/$$/stat" ]; then
+  STEP_ROOT="$TMP_ROOT/clock-step-root"
+  STEP_HOME="$TMP_ROOT/clock-step-account"
+  cp -R "$REMOTE_ROOT" "$STEP_ROOT"
+  mkdir -p "$STEP_HOME"
+  chmod 700 "$STEP_HOME"
+  # Supervisors and serving children only; the path travels in the environment
+  # so the counting process's own command line never matches itself.
+  step_worker_count() {
+    ps -u "$(id -u)" -o command= 2>/dev/null \
+      | STEP_WORKER="$STEP_ROOT/bin/fm-remote-job-worker.sh" awk '
+          { w = ENVIRON["STEP_WORKER"]; n = length($0) - length(w) }
+          substr($0, n + 1) == w || substr($0, n - 7) == w " --serve" { c++ }
+          END { print c + 0 }'
+  }
+  (
+    # shellcheck disable=SC2031 # The legacy-lock fixture's exports were confined to its subshell.
+    export FM_REMOTE_JOB_STATE_ROOT="$STEP_STATE" FM_REMOTE_JOB_PS_BIN="$STEP_PS"
+    FM_REMOTE_JOB_TIMEOUT=10
+    fm_remote_job_ensure_worker "$STEP_ROOT" "$STEP_HOME" || fail "$FM_REMOTE_JOB_ERROR"
+    STEP_WORKER_PID=$(cat "$STEP_STATE/worker.pid")
+    [ "$(step_worker_count)" -eq 2 ] || fail "the clock-step fixture did not start one supervised worker"
+    STEP_SIDE_EFFECT="$TMP_ROOT/clock-step-side-effect"
+    fm_remote_job_stage "$STEP_HOME" "$STEP_ROOT" "$REMOTE_HOME" \
+      fm-delay-job.sh 3 "$STEP_SIDE_EFFECT" < /dev/null > /dev/null
+    STEP_JOB_ID=$FM_REMOTE_JOB_ID
+    for _ in $(seq 1 100); do
+      [ "$(fm_remote_job_read_state "$STEP_STATE/jobs/$STEP_JOB_ID" 2>/dev/null || true)" = running ] && break
+      sleep 0.05
+    done
+    STEP_LSTART=$(fm_remote_job_process_lstart "$STEP_WORKER_PID")
+    printf '2791\n' > "$STEP_CLOCK"
+    [ "$(fm_remote_job_process_lstart "$STEP_WORKER_PID")" != "$STEP_LSTART" ] \
+      || fail "the stubbed wall-clock step did not move the worker's lstart"
+    fm_remote_job_ensure_worker "$STEP_ROOT" "$STEP_HOME" || fail "$FM_REMOTE_JOB_ERROR"
+    [ "$FM_REMOTE_JOB_REPAIRED" -eq 0 ] || fail "ensure repaired a healthy worker after a wall-clock step"
+    [ "$(cat "$STEP_STATE/worker.pid")" = "$STEP_WORKER_PID" ] \
+      || fail "a wall-clock step made ensure replace the serving worker"
+    sleep 1
+    [ "$(step_worker_count)" -eq 2 ] || fail "a wall-clock step made ensure start a second worker"
+    fm_remote_job_wait "$STEP_HOME" "$STEP_JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+    [ "$FM_REMOTE_JOB_EXIT" -eq 0 ] \
+      || fail "the job running across a wall-clock step did not complete: $(cat "$FM_REMOTE_JOB_STDERR")"
+    assert_present "$STEP_SIDE_EFFECT" "the job running across a wall-clock step was interrupted"
+    fm_remote_job_reap "$STEP_HOME" "$STEP_JOB_ID" || fail "the clock-step job could not be reaped"
+
+    # A worker left by a pre-upgrade build holds an lstart lock record that the
+    # step has already moved. Changed code must still replace it exactly once.
+    STEP_OLD_PGID=$(fm_remote_job_process_pgid "$STEP_WORKER_PID")
+    printf '%s\n' "$STEP_LSTART" > "$STEP_STATE/worker.lock/start"
+    printf '\n' >> "$STEP_ROOT/bin/fm-remote-job-worker.sh"
+    fm_remote_job_ensure_worker "$STEP_ROOT" "$STEP_HOME" || fail "$FM_REMOTE_JOB_ERROR"
+    [ "$(cat "$STEP_STATE/worker.pid")" != "$STEP_WORKER_PID" ] \
+      || fail "ensure kept a stepped pre-upgrade worker running stale code"
+    ! kill -0 -- "-$STEP_OLD_PGID" 2>/dev/null || fail "ensure left the stepped pre-upgrade worker alive"
+    sleep 1
+    [ "$(step_worker_count)" -eq 2 ] || fail "replacing a stepped pre-upgrade worker left rival workers"
+  ) || exit 1
+  pass "a wall-clock step never makes a live Linux worker read as gone"
+else
+  pass "Linux end-to-end clock-step check skipped where /proc is absent"
+fi
 
 echo "ALL TESTS PASSED"
