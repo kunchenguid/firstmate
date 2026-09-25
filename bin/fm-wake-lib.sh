@@ -109,6 +109,56 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+# fm_host_sleep_window
+# Print "<sleep-epoch> <wake-epoch>" for the host's most recent completed system
+# sleep, or nothing when the host does not expose one. macOS reports it through
+# kern.sleeptime and kern.waketime, where a DarkWake counts as a wake; other
+# hosts print nothing. FM_HOST_SLEEP_WINDOW, when set, replaces the probe with
+# its own "<sleep-epoch> <wake-epoch>" value, or with none when empty.
+fm_host_sleep_window() {
+  local out sleep_at wake_at
+  if [ -n "${FM_HOST_SLEEP_WINDOW+set}" ]; then
+    out=$FM_HOST_SLEEP_WINDOW
+  elif [ "$_FM_UNAME" = Darwin ]; then
+    out=$(/usr/sbin/sysctl -n kern.sleeptime kern.waketime 2>/dev/null \
+      | sed -n 's/^{ sec = \([0-9][0-9]*\),.*/\1/p' | tr '\n' ' ')
+  else
+    return 0
+  fi
+  read -r sleep_at wake_at _ <<EOF
+$out
+EOF
+  case "$sleep_at" in ''|*[!0-9]*) return 0 ;; esac
+  case "$wake_at" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$sleep_at" -gt 0 ] && [ "$wake_at" -gt "$sleep_at" ] || return 0
+  printf '%s %s\n' "$sleep_at" "$wake_at"
+}
+
+# fm_beacon_age <path>
+# Awake age of a liveness beacon: fm_path_age minus the part of the host's most
+# recent system sleep (fm_host_sleep_window) that falls after the last touch.
+# No process runs while the host sleeps, so a healthy watcher cannot touch its
+# beacon then, and a wall-clock age would read the whole sleep as a stall the
+# moment the host wakes. Only the most recent sleep is known, so an earlier
+# sleep inside the same interval still counts as awake time, erring toward stale.
+fm_beacon_age() {
+  local path=$1 m now age window sleep_at wake_at from
+  m=$(fm_path_mtime "$path") || { echo 999999; return; }
+  now=$(date +%s)
+  age=$((now - m))
+  window=$(fm_host_sleep_window)
+  if [ -n "$window" ]; then
+    sleep_at=${window% *}
+    wake_at=${window#* }
+    if [ "$wake_at" -gt "$m" ] && [ "$wake_at" -le "$now" ]; then
+      from=$sleep_at
+      [ "$from" -ge "$m" ] || from=$m
+      age=$((age - (wake_at - from)))
+    fi
+  fi
+  echo "$age"
+}
+
 # fm_poll_derived_grace [poll-seconds]
 # Default guard-grace derivation: max(300, poll + 60). A watcher touches its
 # liveness beacon once per poll cycle, so a fixed 300s grace stops correctly
@@ -169,7 +219,7 @@ fm_watcher_healthy() {
   fm_pid_alive "$pid" || return 1
   fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
   identity=$FM_WATCHER_MATCHED_IDENTITY
-  age=$(fm_path_age "$beat")
+  age=$(fm_beacon_age "$beat")
   [ "$age" -lt "$grace" ] || return 1
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
   FM_WATCHER_HEALTHY_PID=$pid
@@ -410,7 +460,7 @@ fm_watcher_supervision_verdict() {
   FM_WATCHER_VERDICT_OK=false
   FM_WATCHER_VERDICT_REASON=stale-beacon
   beat="$state/.last-watcher-beat"
-  age=$(fm_path_age "$beat")
+  age=$(fm_beacon_age "$beat")
   case "$age" in
     ''|*[!0-9]*) ;;
     *) [ "$age" -lt "$grace" ] && fresh=true ;;
