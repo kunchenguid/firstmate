@@ -730,13 +730,15 @@ test_secondmate_and_child_bounds_are_disclosed() {
       and ([.omitted[].surface] | any(test("secondmates showing 1 of 2")))
       and ([.omitted[].surface] | any(test("registered secondmates omitted by snapshot bound: 1")))
   ' >/dev/null || fail "bearings secondmate or child bound was not disclosed: $json"
-  expanded=$(FM_SNAPSHOT_SECONDMATE_CHILDREN=2 FM_BEARINGS_SECONDMATES=1 \
-    run "$home" "$fakebin" --json --all-secondmates)
+  expanded=$(FM_SNAPSHOT_SECONDMATE_CHILDREN=0 FM_BEARINGS_SECONDMATES=1 \
+    run "$home" "$fakebin" --json --all-secondmates --fields paths)
   printf '%s' "$expanded" | jq -e '
     (.secondmates | length) == 3
+      and ([.in_flight[].id] | sort) == ["a/child-1", "a/child-2", "a/child-3"]
+      and ([.paths[] | select(.id | startswith("a/")) | .worktree] | length) == 3
       and ([.omitted[].surface] | any(test("secondmates showing|registered secondmates omitted")) | not)
-  ' >/dev/null || fail "--all-secondmates did not expand the canonical and bearings bounds: $expanded"
-  pass "secondmate and per-home child counts are bounded, disclosed, and explicitly expandable"
+  ' >/dev/null || fail "unbounded secondmate selection omitted active child worktrees: $expanded"
+  pass "secondmate and child bounds can be lifted for complete worktree selection"
 }
 
 test_parent_decision_is_untrusted_contradiction_only() {
@@ -981,6 +983,14 @@ test_registry_unavailability_and_bounds_are_explicit() {
       and .records_in_window == 3 and (.records | length) == 2
       and (.reasons | index("record_limit") != null)
   ' >/dev/null || fail "registry record bound was not enforced or disclosed: $canonical"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    FM_SNAPSHOT_REGISTRY_LINES=0 FM_SNAPSHOT_REGISTRY_BYTES=0 FM_SNAPSHOT_REGISTRY_RECORDS=0 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.registry.complete == true
+      and (.secondmate_current.registry.records | length) == 3
+      and .secondmate_current.truncated == 0
+  ' >/dev/null || fail "zero registry bounds did not include all registered secondmates: $canonical"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     FM_SNAPSHOT_REGISTRY_LINES=2 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s' "$canonical" | jq -e '

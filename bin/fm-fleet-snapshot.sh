@@ -180,6 +180,14 @@ validate_positive_bound() {  # <name> <value>
       ;;
   esac
 }
+validate_nonnegative_bound() {
+  case "$2" in
+    ''|*[!0-9]*)
+      printf 'fm-fleet-snapshot: %s must be a non-negative integer\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+}
 case "$FM_SNAPSHOT_SECONDMATES" in
   ''|*[!0-9]*)
     echo "fm-fleet-snapshot: FM_SNAPSHOT_SECONDMATES must be a non-negative integer" >&2
@@ -190,7 +198,7 @@ validate_positive_bound FM_SNAPSHOT_CREW_STATE_TIMEOUT "$FM_SNAPSHOT_CREW_STATE_
 validate_positive_bound FM_SNAPSHOT_LOCAL_READ_CONCURRENCY "$FM_SNAPSHOT_LOCAL_READ_CONCURRENCY"
 validate_positive_bound FM_SNAPSHOT_BUDGET "$FM_SNAPSHOT_BUDGET"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_MAX_BYTES "$FM_SNAPSHOT_SECONDMATE_MAX_BYTES"
-validate_positive_bound FM_SNAPSHOT_SECONDMATE_CHILDREN "$FM_SNAPSHOT_SECONDMATE_CHILDREN"
+validate_nonnegative_bound FM_SNAPSHOT_SECONDMATE_CHILDREN "$FM_SNAPSHOT_SECONDMATE_CHILDREN"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_QUEUED "$FM_SNAPSHOT_SECONDMATE_QUEUED"
 validate_positive_bound FM_SNAPSHOT_SECONDMATE_DECISIONS "$FM_SNAPSHOT_SECONDMATE_DECISIONS"
 validate_positive_bound FM_SNAPSHOT_TERMINAL_LINES "$FM_SNAPSHOT_TERMINAL_LINES"
@@ -200,9 +208,9 @@ validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITY_LINES "$FM_SNAPSHOT_PARENT_A
 validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITY_BYTES "$FM_SNAPSHOT_PARENT_ACTIVITY_BYTES"
 validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITIES "$FM_SNAPSHOT_PARENT_ACTIVITIES"
 validate_positive_bound FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT "$FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT"
-validate_positive_bound FM_SNAPSHOT_REGISTRY_LINES "$FM_SNAPSHOT_REGISTRY_LINES"
-validate_positive_bound FM_SNAPSHOT_REGISTRY_BYTES "$FM_SNAPSHOT_REGISTRY_BYTES"
-validate_positive_bound FM_SNAPSHOT_REGISTRY_RECORDS "$FM_SNAPSHOT_REGISTRY_RECORDS"
+validate_nonnegative_bound FM_SNAPSHOT_REGISTRY_LINES "$FM_SNAPSHOT_REGISTRY_LINES"
+validate_nonnegative_bound FM_SNAPSHOT_REGISTRY_BYTES "$FM_SNAPSHOT_REGISTRY_BYTES"
+validate_nonnegative_bound FM_SNAPSHOT_REGISTRY_RECORDS "$FM_SNAPSHOT_REGISTRY_RECORDS"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIMEOUT"
 FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS=${FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS:-14}
 case "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" in
@@ -1058,6 +1066,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
          | select(.id == $work.id and .current_state.state == "working")
          | {id,kind,state:.current_state.state,
             repo:(($work.repo // .project // null) | if . == null then null else trunc(120) end),
+            worktree:(.paths.worktree.path // "-"),
             name:(($work.title // null) | if . == null then null else trunc(70) end),
             source:.current_state.source,
             doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
@@ -1111,7 +1120,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         reason:$reason,
         invalidity:$invalidity,
         state:$state,
-        active_children:$active_all[:$child_n],
+        active_children:(if $child_n == 0 then $active_all else $active_all[:$child_n] end),
         decisions_open:$decisions_all[:$decisions_n],
         holds:$holds_all[:$queued_n],
         queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | trunc(120)),
@@ -1133,7 +1142,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           | .[:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
         endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,
-          endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),
+          endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}]
+          | if $child_n == 0 then . else .[:$child_n] end),
         counts:{
           active_children:($active_all | length),
           decisions_open:($decisions_all | length),
@@ -1143,10 +1153,10 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           endpoints:($tasks | length)
         },
         omitted:[
-          (if ($active_all | length) > $child_n then {surface:"active_children",count:(($active_all | length) - $child_n)} else empty end),
+          (if $child_n > 0 and ($active_all | length) > $child_n then {surface:"active_children",count:(($active_all | length) - $child_n)} else empty end),
           (if ($decisions_all | length) > $decisions_n then {surface:"decisions_open",count:(($decisions_all | length) - $decisions_n)} else empty end),
           (if ($queued_all | length) > $queued_n then {surface:"queued",count:(($queued_all | length) - $queued_n)} else empty end),
-          (if ($tasks | length) > $child_n then {surface:"endpoints",count:(($tasks | length) - $child_n)} else empty end),
+          (if $child_n > 0 and ($tasks | length) > $child_n then {surface:"endpoints",count:(($tasks | length) - $child_n)} else empty end),
           (if $landed_n > 0 and ($landed_all | length) > $landed_n then {surface:"landed",count:(($landed_all | length) - $landed_n)} else empty end)
         ]
       }'
@@ -1194,11 +1204,15 @@ registry_secondmates_json() {
     observed=$6
     parse_filter=$7
     output_filter=$8
-    content=$(LC_ALL=C head -c "$((max_bytes + 1))" "$f" || exit 3; printf "\036") || exit 3
+    if [ "$max_bytes" -eq 0 ]; then
+      content=$(cat "$f" || exit 3; printf "\036") || exit 3
+    else
+      content=$(LC_ALL=C head -c "$((max_bytes + 1))" "$f" || exit 3; printf "\036") || exit 3
+    fi
     content=${content%$'\036'}
     bytes=$(printf "%s" "$content" | LC_ALL=C wc -c | tr -d " ")
     byte_truncated=false
-    if [ "$bytes" -gt "$max_bytes" ]; then
+    if [ "$max_bytes" -gt 0 ] && [ "$bytes" -gt "$max_bytes" ]; then
       byte_truncated=true
       content=$(printf "%s" "$content" | LC_ALL=C head -c "$max_bytes")
       complete=${content%$'\n'*}
@@ -1214,8 +1228,12 @@ registry_secondmates_json() {
       lines=0
     fi
     line_truncated=false
-    if [ "$lines" -gt "$max_lines" ]; then line_truncated=true; fi
-    window=$(printf "%s\n" "$content" | LC_ALL=C head -n "$max_lines") || exit 3
+    if [ "$max_lines" -gt 0 ] && [ "$lines" -gt "$max_lines" ]; then line_truncated=true; fi
+    if [ "$max_lines" -eq 0 ]; then
+      window=$content
+    else
+      window=$(printf "%s\n" "$content" | LC_ALL=C head -n "$max_lines") || exit 3
+    fi
     if [ -n "$window" ]; then
       lines_in_window=$(printf "%s\n" "$window" | awk "END {print NR}")
     else
@@ -1224,7 +1242,7 @@ registry_secondmates_json() {
     records=$(printf "%s\n" "$window" | jq -Rn "$parse_filter") || exit 3
     records_in_window=$(printf "%s" "$records" | jq "length") || exit 3
     records_truncated=false
-    if [ "$records_in_window" -gt "$max_records" ]; then records_truncated=true; fi
+    if [ "$max_records" -gt 0 ] && [ "$records_in_window" -gt "$max_records" ]; then records_truncated=true; fi
     printf "%s" "$records" | jq \
       --arg path "$path" --arg observed "$observed" \
       --argjson byte_truncated "$byte_truncated" \
@@ -1254,7 +1272,7 @@ JQ
   output_filter=$(cat <<'JQ'
       {present:true,available:true,reason:null,provenance:"registered-table",path:$path,
        freshness:{status:"fresh",observed_at:$observed},
-       records:(if length > $max_records then .[:$max_records] else . end),
+       records:(if $max_records == 0 or length <= $max_records then . else .[:$max_records] end),
        input_truncated:($byte_truncated or $line_truncated),records_truncated:$records_truncated,
        complete:(($byte_truncated or $line_truncated or $records_truncated) | not),
        reasons:[
