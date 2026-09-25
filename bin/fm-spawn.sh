@@ -4064,6 +4064,21 @@ if [ "$RELAUNCH" -eq 1 ]; then
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_pool_before=$(cd "$PROJ_ABS" && TREEHOUSE_NO_UPDATE_CHECK=1 fm_run_timed 15 treehouse status </dev/null 2>/dev/null) || spawn_pool_before=""
   spawn_worktrees_before=$(git -C "$PROJ_ABS" worktree list --porcelain 2>/dev/null) || spawn_worktrees_before=""
+  spawn_pool_root=${TREEHOUSE_ROOT:-}
+  if [ -z "$spawn_pool_root" ]; then
+    spawn_pool_path=$(printf '%s\n' "$spawn_pool_before" | jq -er '.[0].path // empty' 2>/dev/null) || spawn_pool_path=""
+    [ -z "$spawn_pool_path" ] || spawn_pool_root=$(dirname "$(dirname "$spawn_pool_path")")
+  fi
+  case "$spawn_pool_root" in
+    /*) ;;
+    "") ;;
+    *) spawn_pool_root="$PROJ_ABS/$spawn_pool_root" ;;
+  esac
+  spawn_slot_dirs() {
+    [ -n "$spawn_pool_root" ] && [ -d "$spawn_pool_root" ] && [ ! -L "$spawn_pool_root" ] || return 1
+    find "$spawn_pool_root" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | LC_ALL=C sort
+  }
+  spawn_slots_before=$(spawn_slot_dirs) && spawn_slots_before_valid=1 || spawn_slots_before_valid=0
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -4156,6 +4171,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       fi
       [ "$writing" = 0 ] || limit=$((writing_start + 600))
       if [ "$writing_start" -ge 0 ] && [ "$writing" = 0 ]; then
+        if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+          limit=$((writing_start + 600))
+        fi
         ordinary=$((ordinary + 1))
         if [ "$ordinary" -ge 60 ] && [ "$p_real" != "$PROJ_ABS_REAL" ]; then
           return 1
@@ -4200,7 +4218,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       }
       if [ -z "$spawn_first_slot" ]; then
         spawn_worktrees_after=$(git -C "$PROJ_ABS" worktree list --porcelain 2>/dev/null) || spawn_worktrees_after=""
+        spawn_slots_after=$(spawn_slot_dirs) && spawn_slots_after_valid=1 || spawn_slots_after_valid=0
         if [ -z "$spawn_pool_before" ] || [ -z "$spawn_worktrees_before" ] ||
+           [ "$spawn_slots_before_valid" -ne 1 ] || [ "$spawn_slots_after_valid" -ne 1 ] ||
+           [ "$spawn_slots_before" != "$spawn_slots_after" ] ||
            [ "$spawn_pool_before" != "$spawn_pool_after" ] || [ "$spawn_worktrees_before" != "$spawn_worktrees_after" ]; then
           echo "error: cannot prove interrupted get created no slot; refusing retry in window $T" >&2
           exit 1

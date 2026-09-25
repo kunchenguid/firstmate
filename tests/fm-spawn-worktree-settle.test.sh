@@ -84,6 +84,9 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
+    if [ "${FM_FAKE_SLOT_DIR_APPEARS:-0}" = 1 ] && [[ " $* " == *' C-c '* ]]; then
+      mkdir -p "$TREEHOUSE_ROOT/unregistered-slot"
+    fi
     [ -z "${FM_FAKE_PANE_COUNTFILE:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_PANE_COUNTFILE.keys"
     exit 0
     ;;
@@ -122,7 +125,7 @@ make_settle_case() {
   stale="$case_dir/stale-other-checkout"
   countfile="$case_dir/pane-call-count"
   fakebin=$(make_settle_fakebin "$case_dir/fake")
-  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
+  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config" "$case_dir/pool"
   printf 'codex\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_git_init_commit "$stale"
@@ -154,6 +157,7 @@ run_settle_spawn() {
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     FM_FAKE_PANE_PROJECT="$PROJ_DIR" FM_FAKE_OWN_SLOT="${HUNG_SLOT_DIR:-}" \
+    TREEHOUSE_ROOT="$(dirname "$PROJ_DIR")/pool" \
     PATH="$FAKEBIN_DIR:${SETTLE_TEST_PATH:-$PATH}" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -363,6 +367,21 @@ test_unidentified_slot_refuses_changed_pool() {
   assert_contains "$out" 'cannot prove interrupted get created no slot' 'missing changed-pool refusal'
   [ "$(key_count 'treehouse get')" -eq 1 ] || fail "retried with changed pool"
   pass "changed pool prevents no-slot retry"
+}
+
+test_unregistered_slot_directory_refuses_retry() {
+  local rec id out status
+  id=settle-hung-unregistered-z13
+  rec=$(make_settle_case settle-hung-unregistered "$id" 0)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  HUNG_SLOT_DIR=""
+  out=$(FM_FAKE_PANE_HUNG_GETS=1 FM_FAKE_SLOT_DIR_APPEARS=1 run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn retried after unregistered slot directory appeared"
+  assert_contains "$out" 'cannot prove interrupted get created no slot' 'missing unregistered-slot refusal'
+  [ "$(key_count 'treehouse get')" -eq 1 ] || fail "retried after unregistered slot appeared"
+  pass "unregistered pool slot directory prevents retry"
 }
 
 test_claimed_slot_refuses_retry() {
@@ -586,6 +605,7 @@ test_hung_get_in_project_is_interrupted_and_retried
 test_hung_slot_with_work_is_not_destroyed
 test_unidentified_slot_retries_when_pool_unchanged
 test_unidentified_slot_refuses_changed_pool
+test_unregistered_slot_directory_refuses_retry
 test_claimed_slot_refuses_retry
 test_get_surviving_interrupt_refuses_retry
 test_hung_get_that_hangs_again_refuses_after_one_retry
