@@ -24,9 +24,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || SCRIPT
 # Otherwise a held session lock's pid, joined with the recorded session id.
 fm_pending_reply_session_token() {  # <state-dir>
   local state=$1 recorded
-  if [ -n "${FM_PENDING_REPLY_TOKEN_HOOK:-}" ]; then
-    eval "$FM_PENDING_REPLY_TOKEN_HOOK"
-  fi
   if [ -n "${FM_PENDING_REPLY_SESSION+x}" ]; then
     printf '%s' "$FM_PENDING_REPLY_SESSION"
     return 0

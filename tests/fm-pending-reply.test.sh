@@ -1769,25 +1769,52 @@ test_other_closes_do_not_dismiss_escalation() {
   pass "only the operator's keyed close dismisses an escalation"
 }
 
-# With nothing escalated, or only dismissed escalations, the reminder does no
-# session lookup and enqueues nothing.
-test_reminder_skips_session_lookup_without_escalations() {
-  local home state corr
+# With nothing escalated, or only dismissed escalations, a live session gets
+# no reminder row and the record is left as it was.
+test_reminder_leaves_state_alone_without_escalations() {
+  local home state corr rec before
   home=$(setup_parent no-escalation)
   state="$home/state"
   export FM_PENDING_REPLY_NOW=1000
-  unset FM_PENDING_REPLY_SESSION
   corr=$(fm_pending_reply_create "$home" "$state" mate "still waiting")
+  rec=$(fm_pending_reply_path "$state" "$corr")
   (
-    export FM_PENDING_REPLY_TOKEN_HOOK=": > \"$state/token-looked-up\""
-    "$ROOT/bin/fm-pending-reply-remind.sh" "$state"
-    fm_pending_reply_set "$(fm_pending_reply_path "$state" "$corr")" phase escalated
-    fm_pending_reply_set "$(fm_pending_reply_path "$state" "$corr")" escalation_dismissed_epoch 900
-    "$ROOT/bin/fm-pending-reply-remind.sh" "$state"
+    export FM_PENDING_REPLY_SESSION=s1
+    before=$(cat "$rec")
+    "$ROOT/bin/fm-pending-reply-remind.sh" "$state" || exit 1
+    [ "$(cat "$rec")" = "$before" ] || { echo "an unescalated record was rewritten" >&2; exit 1; }
+    fm_pending_reply_set "$rec" phase escalated
+    fm_pending_reply_set "$rec" escalation_dismissed_epoch 900
+    before=$(cat "$rec")
+    "$ROOT/bin/fm-pending-reply-remind.sh" "$state" || exit 1
+    [ "$(cat "$rec")" = "$before" ] || { echo "a dismissed record was rewritten" >&2; exit 1; }
   ) || fail "remind without live escalations failed"
-  [ ! -e "$state/token-looked-up" ] || fail "the session token was looked up with nothing to remind"
   [ ! -s "$state/.wake-queue" ] || fail "a reminder was enqueued with nothing to remind"
-  pass "the reminder skips the session lookup when nothing needs reminding"
+  pass "the reminder leaves records and queue alone when nothing needs reminding"
+}
+
+# A watcher tick over only resolved records starts no reminder process; once a
+# record is escalated, the tick starts it.
+test_tick_starts_reminder_only_for_escalated_records() {
+  local home state corr stub
+  home=$(setup_parent tick-remind)
+  state="$home/state"
+  stub="$TMP_ROOT/remind-stub-$RANDOM"
+  mkdir -p "$stub"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$1" >> "%s/started"\n' "$stub" \
+    > "$stub/fm-pending-reply-remind.sh"
+  chmod +x "$stub/fm-pending-reply-remind.sh"
+  export FM_PENDING_REPLY_NOW=1000
+  corr=$(fm_pending_reply_create "$home" "$state" mate "done already")
+  fm_pending_reply_set "$(fm_pending_reply_path "$state" "$corr")" phase resolved
+  ( _FM_PENDING_REPLY_LIB_DIR=$stub; fm_pending_reply_tick "$state" ) || fail "resolved-only tick failed"
+  [ ! -e "$stub/started" ] || fail "a tick over only resolved records started the reminder"
+  corr=$(fm_pending_reply_create "$home" "$state" mate "never answered")
+  fm_pending_reply_set "$(fm_pending_reply_path "$state" "$corr")" phase escalated
+  ( _FM_PENDING_REPLY_LIB_DIR=$stub; fm_pending_reply_tick "$state" ) || fail "escalated tick failed"
+  [ "$(cat "$stub/started" 2>/dev/null)" = "$state" ] \
+    || fail "a tick with an escalated record did not start the reminder once"
+  pass "the tick starts the reminder only when a record is escalated"
 }
 
 # A new session in the same harness process keeps the lock pid and only
@@ -1829,7 +1856,8 @@ test_second_missed_turn_escalates_once_and_stays_durable
 test_escalated_record_is_reminded_once_per_later_session
 test_operator_closed_escalation_is_not_reminded
 test_other_closes_do_not_dismiss_escalation
-test_reminder_skips_session_lookup_without_escalations
+test_reminder_leaves_state_alone_without_escalations
+test_tick_starts_reminder_only_for_escalated_records
 test_new_session_in_same_harness_process_is_reminded
 test_escalation_wakes_and_its_close_stays_quiet
 test_escalation_publication_failure_retries

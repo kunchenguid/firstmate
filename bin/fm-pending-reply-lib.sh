@@ -1504,7 +1504,7 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 fm_pending_reply_tick() {  # <state-dir>
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
   local observation observation_task found i
-  local -a observation_tasks=() observation_values=()
+  local -a observation_tasks=() observation_values=() live=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
@@ -1522,6 +1522,7 @@ fm_pending_reply_tick() {  # <state-dir>
       fm_pending_reply_close_escalation "$state" "$corr" || true
       continue
     fi
+    live+=("$rec")
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true
     phase=$(fm_pending_reply_get "$rec" phase)
     delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
@@ -1611,7 +1612,11 @@ fm_pending_reply_tick() {  # <state-dir>
     fi
     fm_pending_reply_tick_one "$state" "$corr" "$busy" "$sm_home" || true
   done
-  "$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-remind.sh" "$state" || true
+  for rec in ${live[@]+"${live[@]}"}; do
+    [ "$(fm_pending_reply_get "$rec" phase)" = escalated ] || continue
+    "$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-remind.sh" "$state" || true
+    break
+  done
   return 0
 }
 
