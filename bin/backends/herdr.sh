@@ -3367,16 +3367,15 @@ fm_backend_herdr_payload_arriving() {  # <text> <after>
 }
 
 # fm_backend_herdr_payload_proof: the bounded post-type proof. Reads the
-# composer up to FM_BACKEND_HERDR_PROOF_READS times, <settle> apart, and
-# returns 0 as soon as either reading shows <text>. Only a read that could
+# composer up to 3 times, <settle> apart, and returns 0 as soon as either
+# reading shows <text>. Only a read that could
 # still be the payload arriving - unreadable, no composer selected, or
 # an empty or strict-prefix reading - earns another read; a finished wrong
 # shape refuses at once. A refusal prints one diagnostic line on stderr naming
 # the target and what the last read showed, escaped, so the caller's
 # send-failed is never blind.
 fm_backend_herdr_payload_proof() {  # <target> <text> <lines> <settle>
-  local target=$1 text=$2 lines=$3 settle=$4 reads=0 max=$FM_BACKEND_HERDR_PROOF_READS
-  case "$max" in ''|*[!0-9]*|0) max=3 ;; esac
+  local target=$1 text=$2 lines=$3 settle=$4 reads=0 max=3
   while :; do
     fm_backend_herdr_proof_read "$target" "$lines"
     reads=$((reads + 1))
@@ -3724,10 +3723,6 @@ fm_backend_herdr_busy_state() {  # <target>
 # call-count assertions).
 FM_BACKEND_HERDR_SUBMIT_POLLS=${FM_BACKEND_HERDR_SUBMIT_POLLS:-6}
 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=${FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP:-0.6}
-# FM_BACKEND_HERDR_PROOF_READS (default 3): the most composer reads
-# fm_backend_herdr_payload_proof takes, one caller <settle> apart, before a
-# Claude payload that is still arriving is refused and cleared.
-FM_BACKEND_HERDR_PROOF_READS=${FM_BACKEND_HERDR_PROOF_READS:-3}
 
 fm_backend_herdr_submit_confirm_budget() {  # <caller-budget-seconds>
   awk -v b="${1:-0}" -v m="$FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP" 'BEGIN {

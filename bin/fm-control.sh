@@ -132,9 +132,6 @@
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
-#   FM_CONTROL_EXIT_SETTLE       wait after typing the exit command before it
-#                                is read back and submitted, and before the one
-#                                resend of a refused exit command (1.2)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -189,7 +186,7 @@ ARM_WAIT=${FM_CONTROL_ARM_WAIT:-1.5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
-EXIT_SETTLE=${FM_CONTROL_EXIT_SETTLE:-1.2}
+EXIT_SETTLE=1.2
 
 die() {  # <message>
   echo "error: $1" >&2

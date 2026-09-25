@@ -543,7 +543,7 @@ When native `agent get` identity is Claude, the adapter types only into an empty
 A Claude composer that already holds text, or cannot be read, before the send is refused with nothing typed.
 Before that Enter, the adapter continues only when the selected composer shows the typed payload, or only Claude paste placeholders with no literal remainder.
 The composer is read two ways from one capture: ghost-stripped, and with only escape sequences removed, because ghost stripping assumes a dark theme and Claude's light theme draws a typed slash command dark enough to be stripped; either reading can prove the payload.
-A read that could still be the payload being drawn - unreadable, with no composer selected, empty, or a strict prefix of the payload - is repeated after the caller's settle, up to `FM_BACKEND_HERDR_PROOF_READS` reads in all, before the refusal below; any other shape is refused on its first read.
+A read that could still be the payload being drawn - unreadable, with no composer selected, empty, or a strict prefix of the payload - is repeated after the caller's settle, up to 3 reads in all, before the refusal below; any other shape is refused on its first read.
 
 That comparison ignores whitespace and U+2063, the invisible mark that starts operational inputs and ends the from-firstmate label.
 It ignores U+2063 because Claude's Herdr read-back never shows it.
