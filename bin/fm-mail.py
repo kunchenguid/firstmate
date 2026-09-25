@@ -76,6 +76,7 @@ class AfkBodyFetchError(Exception):
 
 
 
+
 class AfkBodyFetchError(Exception):
     pass
 
@@ -153,6 +154,7 @@ def afk_email_context():
 
 
 
+
 def fetched_literal(data):
     for item in data or []:
         if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], bytes):
@@ -195,6 +197,7 @@ def gmail_authentication_pass(message):
     if receiver_result is None:
         return False
     clauses = str(receiver_result).split(';')
+
     authserv = clauses[0].strip().split()
     if not authserv or authserv[0].casefold() != 'mx.google.com':
         return False
@@ -209,6 +212,7 @@ def gmail_authentication_pass(message):
             if gmail_aligned(authentication_property(clause, 'header.from')):
                 return True
     return False
+
 
 
 
@@ -256,6 +260,7 @@ def plain_body(msg):
         payload = part.get_payload(decode=True)
         if payload is None:
             return
+
 
 
 
@@ -640,6 +645,7 @@ def cmd_poll_list():
 
 
 
+
                     try:
                         message_size = fetched_size(msg)
                         if message_size is None:
@@ -701,6 +707,7 @@ def cmd_poll_list():
                 continue
             status = 'ignored' if ignored else ('retry' if is_retry else 'ok')
             if not ignored and afk_email_active and not afk_enabled:
+
 
 
 
