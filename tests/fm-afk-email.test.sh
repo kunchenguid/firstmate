@@ -435,6 +435,7 @@ PY
   verification=$(run_email "$home" verify-note "$note_id") \
     || fail "completed reply handoff could not be verified after return: $verification"
   assert_contains "$verification" '"verified":true' 'persisted matching handoff remains verifiable after return'
+
   printf '{invalid json\n' > "$sent1"
   if verification=$(run_email "$home" verify-note "$note_id" 2>&1); then
     fail "unreadable reply state was treated as an untrusted note: $verification"

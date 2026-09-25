@@ -666,6 +666,7 @@ def validate_handoff_state_item(path, store):
 
 
 
+
             raise ValueError("away-email state is malformed")
     else:
         if (
@@ -732,6 +733,7 @@ def validate_handoff_state_item(path, store):
 
 
 def handoff_record(request_id):
+
     requested_id = request_id if isinstance(request_id, str) and request_id else None
     matches = []
     with afk_state_lock():
@@ -749,6 +751,7 @@ def handoff_record(request_id):
                 if (
                     requested_id is not None
                     and item.get("handoff_request_id") == requested_id
+
                 ):
                     matches.append(item)
     if not matches:
@@ -760,6 +763,7 @@ def handoff_record(request_id):
         )):
             raise ValueError("away-email handoff state is ambiguous")
     return reference
+
 
 
 
@@ -795,6 +799,7 @@ def verify_note(note_id):
 
     try:
         item = handoff_record(request_id)
+
     except (OSError, ValueError):
         print("fm-afk-email: verified reply state could not be read", file=sys.stderr)
         return 1
