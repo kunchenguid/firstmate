@@ -320,6 +320,7 @@ test_hung_get_in_project_is_interrupted_and_retried() {
   rec=$(make_settle_case settle-hung-retry "$id" 0)
   read_settle_record "$rec"
   make_hung_slot "$id"
+  printf 'task=%s\nhome=%s\n' "$id" "$HOME_DIR" > "$(dirname "$HUNG_SLOT_DIR")/.fm-slot-owner"
   fm_test_fake_sleep_noop "$FAKEBIN_DIR"
   out=$(FM_FAKE_PANE_HUNG_GETS=1 run_settle_spawn "$id")
   status=$?
@@ -337,6 +338,7 @@ test_hung_slot_with_work_is_not_destroyed() {
   rec=$(make_settle_case settle-hung-work "$id" 0)
   read_settle_record "$rec"
   make_hung_slot "$id"
+  printf 'task=%s\nhome=%s\n' "$id" "$HOME_DIR" > "$(dirname "$HUNG_SLOT_DIR")/.fm-slot-owner"
   printf 'work\n' > "$HUNG_SLOT_DIR/uncommitted"
   fm_test_fake_sleep_noop "$FAKEBIN_DIR"
   out=$(FM_FAKE_PANE_HUNG_GETS=1 run_settle_spawn "$id")
@@ -348,7 +350,7 @@ test_hung_slot_with_work_is_not_destroyed() {
   pass "dirty observed slot prevents retry"
 }
 
-test_unidentified_slot_retries_when_pool_unchanged() {
+test_unidentified_slot_refuses_retry() {
   local rec id out status
   id=settle-hung-unknown-z9
   rec=$(make_settle_case settle-hung-unknown "$id" 0)
@@ -357,57 +359,28 @@ test_unidentified_slot_retries_when_pool_unchanged() {
   HUNG_SLOT_DIR=""
   out=$(FM_FAKE_PANE_HUNG_GETS=1 run_settle_spawn "$id")
   status=$?
-  expect_code 0 "$status" "unchanged pool should allow no-slot retry"$'\n'"$out"
-  [ "$(key_count 'treehouse get')" -eq 2 ] || fail "missing no-slot retry"
-  [ ! -e "$COUNTFILE.return" ] || fail "returned an unidentified slot"
-  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "retry did not reach worktree"
-  pass "unchanged pool permits one no-slot retry"
+  [ "$status" -ne 0 ] || fail "retried without an identified slot"
+  assert_contains "$out" 'no identified slot' 'missing no-slot refusal'
+  [ "$(key_count 'treehouse get')" -eq 1 ] || fail "retried without slot"
+  [ ! -e "$COUNTFILE.return" ] || fail "returned unidentified slot"
+  pass "unidentified slot prevents retry"
 }
 
-test_unidentified_slot_refuses_changed_pool() {
+test_stale_foreign_slot_refuses_return() {
   local rec id out status
-  id=settle-hung-changed-z12
-  rec=$(make_settle_case settle-hung-changed "$id" 0)
+  id=settle-hung-foreign-z13
+  rec=$(make_settle_case settle-hung-foreign "$id" 0)
   read_settle_record "$rec"
+  make_hung_slot "$id"
   fm_test_fake_sleep_noop "$FAKEBIN_DIR"
-  HUNG_SLOT_DIR=""
-  out=$(FM_FAKE_PANE_HUNG_GETS=1 FM_FAKE_POOL_CHANGES=1 run_settle_spawn "$id")
+  out=$(FM_FAKE_PANE_HUNG_GETS=1 run_settle_spawn "$id")
   status=$?
-  [ "$status" -ne 0 ] || fail "spawn retried with changed pool"
-  assert_contains "$out" 'cannot prove interrupted get created no slot' 'missing changed-pool refusal'
-  [ "$(key_count 'treehouse get')" -eq 1 ] || fail "retried with changed pool"
-  pass "changed pool prevents no-slot retry"
-}
-
-test_unregistered_slot_directory_refuses_retry() {
-  local rec id out status
-  id=settle-hung-unregistered-z13
-  rec=$(make_settle_case settle-hung-unregistered "$id" 0)
-  read_settle_record "$rec"
-  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
-  HUNG_SLOT_DIR=""
-  out=$(FM_FAKE_PANE_HUNG_GETS=1 FM_FAKE_SLOT_DIR_APPEARS=1 run_settle_spawn "$id")
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn retried after unregistered slot directory appeared"
-  assert_contains "$out" 'cannot prove interrupted get created no slot' 'missing unregistered-slot refusal'
-  [ -d "$(dirname "$PROJ_DIR")/treehouse/project/unregistered-slot" ] || fail "fake did not create unregistered slot"
-  [ "$(key_count 'treehouse get')" -eq 1 ] || fail "retried after unregistered slot appeared"
-  pass "unregistered pool slot directory prevents retry"
-}
-
-test_failed_slot_listing_refuses_retry() {
-  local rec id out status
-  id=settle-hung-list-fail-z14
-  rec=$(make_settle_case settle-hung-list-fail "$id" 0)
-  read_settle_record "$rec"
-  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
-  HUNG_SLOT_DIR=""
-  out=$(FM_FAKE_PANE_HUNG_GETS=1 FM_FAKE_SLOT_LIST_FAIL=1 run_settle_spawn "$id")
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn retried after slot listing failed"
-  assert_contains "$out" 'cannot prove interrupted get created no slot' 'missing listing-failure refusal'
-  [ "$(key_count 'treehouse get')" -eq 1 ] || fail "retried after listing failed"
-  pass "failed slot listing prevents no-slot retry"
+  [ "$status" -ne 0 ] || fail "accepted stale foreign slot"
+  assert_contains "$out" 'no verified claim' 'missing ownership refusal'
+  [ ! -e "$COUNTFILE.return" ] || fail "returned foreign slot"
+  [ "$(key_count 'treehouse get')" -eq 1 ] || fail "retried foreign slot"
+  [ -d "$HUNG_SLOT_DIR" ] || fail "removed foreign slot"
+  pass "stale foreign slot cannot be returned"
 }
 
 test_claimed_slot_refuses_retry() {
@@ -421,7 +394,7 @@ test_claimed_slot_refuses_retry() {
   out=$(FM_FAKE_PANE_HUNG_GETS=1 run_settle_spawn "$id")
   status=$?
   [ "$status" -ne 0 ] || fail 'retried claimed slot'
-  assert_contains "$out" 'existing task claim' 'missing claim refusal'
+  assert_contains "$out" 'no verified claim' 'missing claim refusal'
   [ ! -e "$COUNTFILE.return" ] || fail 'returned claimed slot'
   pass "another task's claim prevents return and retry"
 }
@@ -447,6 +420,7 @@ test_hung_get_that_hangs_again_refuses_after_one_retry() {
   rec=$(make_settle_case settle-hung-twice "$id" 0)
   read_settle_record "$rec"
   make_hung_slot "$id"
+  printf 'task=%s\nhome=%s\n' "$id" "$HOME_DIR" > "$(dirname "$HUNG_SLOT_DIR")/.fm-slot-owner"
   fm_test_fake_sleep_noop "$FAKEBIN_DIR"
   out=$(FM_FAKE_PANE_HUNG_GETS=2 run_settle_spawn "$id")
   status=$?
@@ -629,10 +603,8 @@ test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_hung_get_in_project_is_interrupted_and_retried
 test_hung_slot_with_work_is_not_destroyed
-test_unidentified_slot_retries_when_pool_unchanged
-test_unidentified_slot_refuses_changed_pool
-test_unregistered_slot_directory_refuses_retry
-test_failed_slot_listing_refuses_retry
+test_unidentified_slot_refuses_retry
+test_stale_foreign_slot_refuses_return
 test_claimed_slot_refuses_retry
 test_get_surviving_interrupt_refuses_retry
 test_hung_get_that_hangs_again_refuses_after_one_retry

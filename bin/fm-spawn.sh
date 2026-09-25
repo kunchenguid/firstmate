@@ -4062,29 +4062,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_pool_before=$(cd "$PROJ_ABS" && TREEHOUSE_NO_UPDATE_CHECK=1 fm_run_timed 15 treehouse status </dev/null 2>/dev/null) || spawn_pool_before=""
-  spawn_worktrees_before=$(git -C "$PROJ_ABS" worktree list --porcelain 2>/dev/null) || spawn_worktrees_before=""
-  spawn_pool_root=${TREEHOUSE_ROOT:-}
-  case "$spawn_pool_root" in
-    /*) ;;
-    "") ;;
-    *) spawn_pool_root="$PROJ_ABS/$spawn_pool_root" ;;
-  esac
-  spawn_pool_path=$(printf '%s\n' "$spawn_pool_before" | jq -er '.[0].path // empty' 2>/dev/null) || spawn_pool_path=""
-  spawn_project_pool=""
-  if [ -n "$spawn_pool_path" ]; then
-    spawn_project_pool=$(dirname "$(dirname "$spawn_pool_path")")
-  elif [ -n "$spawn_pool_root" ]; then
-    spawn_project_pool="$spawn_pool_root/$(basename "$PROJ_ABS")"
-  fi
-  spawn_slot_dirs() {
-    [ -n "$spawn_project_pool" ] && [ -d "$spawn_project_pool" ] && [ ! -L "$spawn_project_pool" ] &&
-      [ -f "$spawn_project_pool/treehouse-state.json" ] || return 1
-    local listing
-    listing=$(find "$spawn_project_pool" -mindepth 1 -maxdepth 1 -type d -printf '%f\n') || return 1
-    printf '%s\n' "$listing" | LC_ALL=C sort
-  }
-  spawn_slots_before=$(spawn_slot_dirs) && spawn_slots_before_valid=1 || spawn_slots_before_valid=0
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -4223,23 +4200,14 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         exit 1
       }
       if [ -z "$spawn_first_slot" ]; then
-        spawn_worktrees_after=$(git -C "$PROJ_ABS" worktree list --porcelain 2>/dev/null) || spawn_worktrees_after=""
-        spawn_slots_after=$(spawn_slot_dirs) && spawn_slots_after_valid=1 || spawn_slots_after_valid=0
-        if [ -z "$spawn_pool_before" ] || [ -z "$spawn_worktrees_before" ] ||
-           [ "$spawn_slots_before_valid" -ne 1 ] || [ "$spawn_slots_after_valid" -ne 1 ] ||
-           [ "$spawn_slots_before" != "$spawn_slots_after" ] ||
-           [ "$spawn_pool_before" != "$spawn_pool_after" ] || [ "$spawn_worktrees_before" != "$spawn_worktrees_after" ]; then
-          echo "error: cannot prove interrupted get created no slot; refusing retry in window $T" >&2
-          exit 1
-        fi
-        spawn_treehouse_get_attempts=2
-        spawn_send_text_line "$WT_TARGET" 'treehouse get' || exit 1
-        if ! spawn_await_treehouse_worktree; then
-          if [ -n "$last_seen" ] && [ "$(real_path_or_raw "$last_seen")" = "$PROJ_ABS_REAL" ]; then
-            spawn_send_key "$WT_TARGET" C-c || true
-          fi
-        fi
-      else
+        echo "error: no identified slot for interrupted treehouse get in project '$PROJ_ABS'; cannot prove ownership or safely retry in window $T" >&2
+        exit 1
+      fi
+      fm_treehouse_slot_owner_state "$spawn_first_slot" "$ID"
+      if [ "$FM_TREEHOUSE_SLOT_OWNER" != mine ]; then
+        echo "error: observed slot '$spawn_first_slot' has no verified claim for task $ID; refusing return and retry in window $T" >&2
+        exit 1
+      fi
       # A missing or unreadable Git status is not evidence of a clean slot.
       spawn_slot_status=$(git -C "$spawn_first_slot" status --porcelain 2>/dev/null) || {
         echo "error: cannot prove observed slot clean; refusing retry in window $T" >&2
@@ -4247,11 +4215,6 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       }
       if [ -n "$spawn_slot_status" ] || ! fm_treehouse_pool_slot "$PROJ_ABS" "$spawn_first_slot"; then
         echo "error: observed slot is dirty or no longer in this Treehouse pool; refusing retry in window $T" >&2
-        exit 1
-      fi
-      fm_treehouse_slot_owner_state "$spawn_first_slot" "$ID"
-      if [ "$FM_TREEHOUSE_SLOT_OWNER" != absent ]; then
-        echo "error: observed slot has an existing task claim; refusing retry in window $T" >&2
         exit 1
       fi
       if ! (cd "$PROJ_ABS" && TREEHOUSE_NO_UPDATE_CHECK=1 fm_run_timed 15 treehouse return "$spawn_first_slot" </dev/null); then
@@ -4266,8 +4229,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
           spawn_send_key "$WT_TARGET" C-c || true
         fi
       fi
-      fi
-      if [ -n "$spawn_first_slot" ] && [ -n "$WT" ] && [ "$(real_path_or_raw "$WT")" = "$spawn_first_slot" ]; then
+      if [ -n "$WT" ] && [ "$(real_path_or_raw "$WT")" = "$spawn_first_slot" ]; then
         echo "error: retried treehouse get reused the hung slot '$WT'; refusing launch" >&2
         exit 1
       fi
