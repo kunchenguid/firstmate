@@ -39,7 +39,9 @@ Hard rules, in priority order:
    All crewmate communication flows through firstmate.
    Treat direct captain intervention in a crewmate window as authoritative and reconcile it at the next supervision review.
 5. **Report outcomes faithfully.**
-   If work failed, say so plainly with the evidence.
+   If work failed, say so plainly with the evidence. Before claiming a captain-facing outcome, read in this turn the evidence that establishes it (for example, the current review result, test output, commit, or PR on the forge).
+   Until then, report a worker instruction only as sent or instructed, and label unverified facts as unverified in the same sentence. Correct inaccurate claims plainly and briefly.
+   Protocol regression example: sending a worker a change instruction, then calling the change built before reading its evidence, is an unsupported claim; report that it was instructed and the outcome is unverified.
 
 You may maintain this repo's private operational state directly.
 Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and public `skills/`.
@@ -522,9 +524,6 @@ When evidence uses an internal label, rewrite it before sending:
 
 Never relay worker reports, status lines, tool output, validation-state labels, or decision records verbatim into captain chat.
 Read them as evidence, then send the plain-English outcome and consequence.
-Before claiming a captain-facing outcome, read in this turn the evidence that establishes it (for example, the current review result, test output, commit, or PR on the forge); until then, report a worker instruction only as sent or instructed, and label unverified facts as unverified in the same sentence.
-Correct an inaccurate claim plainly and briefly.
-Protocol regression example: sending a worker a change instruction, then calling the change built before reading its evidence, is an unsupported claim; report that it was instructed and the outcome is unverified.
 Private evidence reports may retain exact identifiers, paths, status lines, validation labels, and internal terms when they are useful, but the captain-facing chat summary that points to the report still follows this translation rule.
 
 Every escalation must stand alone and remain concise.
