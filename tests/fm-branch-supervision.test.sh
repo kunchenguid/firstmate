@@ -135,12 +135,14 @@ PY
   pass "outcome store is append-only and refuses sequence reuse after a torn tail"
 }
 
-# Once-per-situation captain reporting: a captain verdict whose task's durable
-# records are unchanged since the task's newest captain row is stored as
-# routine, so an away branch re-observing the same held outcome cannot mint an
-# escalation per check. A genuinely changed record (status position, crew
-# verb, recorded PR, head) must escalate again, and a task without a status
-# ledger - including the fleet pseudo-task - is never demoted.
+# Once-per-situation captain reporting: a captain verdict answering the same
+# wake row as the task's newest captain row, while the task's durable records
+# are unchanged, is stored as routine, so an away branch re-handling a
+# re-queued identical row cannot mint an escalation per check. A new wake on
+# the same task and HEAD (a red check, a decision) or a genuinely changed
+# record (status position, crew verb, recorded PR) must escalate again, and a
+# task without a status ledger - including the fleet pseudo-task - or a report
+# no live grant covers is never demoted.
 test_captain_verdict_dedupes_only_an_unchanged_situation() {
   local home fakebin store seq
   home="$TMP_ROOT/dedupe-home"
@@ -161,6 +163,26 @@ SH
   printf 'done [at=1]: PR https://example.test/o/r/pull/153 checks green\n' > "$home/state/held.status"
   fm_write_meta "$home/state/meta-only.meta" 'window=firstmate:fm-meta-only' 'kind=ship'
 
+  # One branch turn's wake: the previous turn's rows are acknowledged, the new
+  # row is queued, and the branch grant names exactly it, as both report
+  # surfaces publish before the branch reports.
+  wake() { # <kind> <key> <payload>
+    local row
+    : > "$home/state/.wake-queue"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      bash -c '. "$1"; fm_wake_append "$2" "$3" "$4"' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2" "$3" \
+      || fail "wake append failed"
+    row=$(awk -F '\t' 'END { print $2 }' "$home/state/.wake-queue")
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-grant.sh" activate "$$" dedupe \
+      || fail "branch owner activation failed"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-grant.sh" publish dedupe "$row" \
+      || fail "branch grant publication failed"
+  }
+  held_wake() {
+    wake check inactive-outcome:held-fp \
+      'done [key=pr-153]: inactive terminal child=held fingerprint=held-fp pr=https://example.test/o/r/pull/153'
+  }
+
   append() { # <append args...> -> assigned seq
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
       FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
@@ -168,14 +190,17 @@ SH
       "$ROOT/bin/fm-branch-outcome.sh" append "$@"
   }
 
+  held_wake
   seq=$(append --task held --verdict captain \
     --summary 'PR https://example.test/o/r/pull/153 open, green, mergeable - held for return') \
     || fail "first captain append failed"
   [ "$seq" = 1 ] || fail "first captain append took seq $seq, not 1"
-  # The same situation re-reported - even worded differently - is routine.
+  # The same row re-queued and re-reported - even worded differently - is routine.
+  held_wake
   seq=$(append --task held --verdict captain --summary 'the held PR is still held, reworded') \
     || fail "unchanged repeat append failed"
   [ "$seq" = 2 ] || fail "unchanged repeat append took seq $seq, not 2"
+  held_wake
   seq=$(append --task held --verdict captain --summary 'held again') \
     || fail "third unchanged append failed"
   [ "$seq" = 3 ] || fail "third unchanged append took seq $seq, not 3"
@@ -189,40 +214,69 @@ assert rows[2]["summary"].startswith("unchanged since seq 1:"), rows[2]
 assert rows[1]["silent"] is False and rows[2]["silent"] is False, rows
 PY
 
+  # Same task, same HEAD, same durable records: a newly red check and then an
+  # away-posture decision are new events and each reaches the captain; a
+  # repeat on the decision row stays routine, and the held row after them is a
+  # different event from the decision and escalates again.
+  wake check pr-check:held 'PR https://example.test/o/r/pull/153 check ci/test turned red'
+  seq=$(append --task held --verdict captain --summary 'PR 153 check ci/test is red') \
+    || fail "red-check append failed"
+  [ "$seq" = 4 ] || fail "red-check append took seq $seq, not 4"
+  wake signal held.status 'needs-decision: merge PR 153 now or hold for return?'
+  seq=$(append --task held --verdict captain --summary 'decision held for the return') \
+    || fail "decision append failed"
+  [ "$seq" = 5 ] || fail "decision append took seq $seq, not 5"
+  wake signal held.status 'needs-decision: merge PR 153 now or hold for return?'
+  seq=$(append --task held --verdict captain --summary 'decision still held') \
+    || fail "decision repeat append failed"
+  [ "$seq" = 6 ] || fail "decision repeat append took seq $seq, not 6"
+  held_wake
+  seq=$(append --task held --verdict captain --summary 'held PR again after the decision') \
+    || fail "held-after-decision append failed"
+  [ "$seq" = 7 ] || fail "held-after-decision append took seq $seq, not 7"
+
+  python3 - "$store" <<'PY' || fail "distinct wakes on an unchanged task were not each escalated once"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+verdicts = [(row["seq"], row["verdict"]) for row in rows]
+assert verdicts[3:] == [(4, "captain"), (5, "captain"), (6, "routine"), (7, "captain")], verdicts
+assert rows[5]["summary"].startswith("unchanged since seq 5:"), rows[5]
+PY
+
   # A moved status endpoint is a new situation and escalates again; that new
   # captain row becomes the next anchor.
   printf 'working: captain returned, resuming\n' >> "$home/state/held.status"
   seq=$(append --task held --verdict captain --summary 'captain answered; work resumed') \
     || fail "changed-situation append failed"
-  [ "$seq" = 4 ] || fail "changed-situation append took seq $seq, not 4"
+  [ "$seq" = 8 ] || fail "changed-situation append took seq $seq, not 8"
   seq=$(append --task held --verdict captain --summary 'same new situation again') \
     || fail "post-change repeat append failed"
-  [ "$seq" = 5 ] || fail "post-change repeat append took seq $seq, not 5"
+  [ "$seq" = 9 ] || fail "post-change repeat append took seq $seq, not 9"
 
   # A changed crew-state verb is a new situation too.
   FM_FAKE_CREW_STATE=working seq=$(append --task held --verdict captain --summary 'crew state moved') \
     || fail "crew-change append failed"
-  [ "$seq" = 6 ] || fail "crew-change append took seq $seq, not 6"
+  [ "$seq" = 10 ] || fail "crew-change append took seq $seq, not 10"
 
   # A changed recorded PR field is a new situation.
   FM_FAKE_CREW_STATE=working append --task held --verdict captain --summary 'crew moved again' >/dev/null \
-    || fail "seventh append failed"
+    || fail "eleventh append failed"
   fm_write_meta "$home/state/held.meta" \
     'window=firstmate:fm-held' "worktree=$home/projects/held" "project=$home/projects/held" \
     'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' 'spawn_gen=g1' \
     'pr=https://example.test/o/r/pull/777'
   seq=$(append --task held --verdict captain --summary 'a different PR is now recorded') \
     || fail "meta-change append failed"
-  [ "$seq" = 8 ] || fail "meta-change append took seq $seq, not 8"
+  [ "$seq" = 12 ] || fail "meta-change append took seq $seq, not 12"
 
   python3 - "$store" <<'PY' || fail "changed situations did not re-escalate as captain rows"
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1])]
 verdicts = [(row["seq"], row["verdict"]) for row in rows]
-assert verdicts == [(1, "captain"), (2, "routine"), (3, "routine"), (4, "captain"),
-                    (5, "routine"), (6, "captain"), (7, "routine"), (8, "captain")], verdicts
-assert rows[4]["summary"].startswith("unchanged since seq 4:"), rows[4]
-assert rows[6]["summary"].startswith("unchanged since seq 6:"), rows[6]
+assert verdicts[7:] == [(8, "captain"), (9, "routine"), (10, "captain"), (11, "routine"),
+                        (12, "captain")], verdicts
+assert rows[8]["summary"].startswith("unchanged since seq 8:"), rows[8]
+assert rows[10]["summary"].startswith("unchanged since seq 10:"), rows[10]
 PY
 
   # Tasks without a status ledger have no recorded situation to compare: the
@@ -235,14 +289,22 @@ PY
     || fail "first meta-only append failed"
   append --task meta-only --verdict captain --summary 'never wrote a status line' >/dev/null \
     || fail "second meta-only append failed"
-  python3 - "$store" <<'PY' || fail "ledgerless tasks were demoted"
+  # A report no live grant covers cannot name the event it answers.
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-grant.sh" release dedupe \
+    || fail "branch grant release failed"
+  append --task held --verdict captain --summary 'reported outside any grant' >/dev/null \
+    || fail "first ungranted append failed"
+  append --task held --verdict captain --summary 'reported outside any grant' >/dev/null \
+    || fail "second ungranted append failed"
+  python3 - "$store" <<'PY' || fail "ledgerless tasks or ungranted reports were demoted"
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1])]
-tail = [(row["task"], row["verdict"]) for row in rows[-4:]]
+tail = [(row["task"], row["verdict"]) for row in rows[-6:]]
 assert tail == [("fleet", "captain"), ("fleet", "captain"),
-                ("meta-only", "captain"), ("meta-only", "captain")], tail
+                ("meta-only", "captain"), ("meta-only", "captain"),
+                ("held", "captain"), ("held", "captain")], tail
 PY
-  pass "a captain verdict is stored as routine only while the task's durable situation is provably unchanged"
+  pass "a captain verdict is stored as routine only while the same wake meets an unchanged task situation"
 }
 
 test_outcome_startup_replay_preserves_silence() {

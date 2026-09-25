@@ -55,11 +55,13 @@
 #     "<seq>\t<digest>" for the task's newest stored captain row, where the
 #     digest hashes the task's durable records at append time (metadata bytes,
 #     captured status-log endpoint and identity, live crew-state verb, and
-#     worktree head). A later captain verdict whose recomputed key matches is
-#     stored as routine with an "unchanged since seq <N>:" summary instead of
-#     escalating the same situation again; a task with no readable status
-#     ledger is never demoted. bin/fm-teardown.sh removes the sidecar with the
-#     task's other records.
+#     worktree head) together with the kind/key/payload of every queued wake
+#     row the live branch grant covers. A later captain verdict whose
+#     recomputed key matches is stored as routine with an "unchanged since
+#     seq <N>:" summary instead of escalating the same situation again; a task
+#     with no readable status ledger, or a report no live grant covers, is
+#     never demoted. bin/fm-teardown.sh removes the sidecar with the task's
+#     other records.
 #   - Every mutation runs under $STATE/.branch-outcomes.lock so the branch
 #     extension and a concurrent session-start replay cannot interleave.
 #   - The store is written BEFORE the outcome is delivered to main
@@ -251,16 +253,21 @@ capture_status_position() { # <task>
 # otherwise emit one captain row per check it re-answers. Before a captain row
 # is written, append computes a mechanical situation key for the task from its
 # durable records - the metadata bytes, the captured status-log endpoint and
-# identity, the live crew-state verb, and the worktree head - and compares it
-# with the key recorded beside the task's newest captain row in
-# $STATE/.<task>.branch-captain-key ("<seq>\t<key>"). A matching key demotes
+# identity, the live crew-state verb, and the worktree head - plus the identity
+# of the event being reported: the kind/key/payload of every queued wake row
+# the live branch grant ($STATE/.branch-eligible-rows) names, which both report
+# surfaces publish before the branch reports and acknowledge only after. It
+# compares that key with the one recorded beside the task's newest captain row
+# in $STATE/.<task>.branch-captain-key ("<seq>\t<key>"). A matching key demotes
 # the new row to routine with "unchanged since seq <N>:" prefixed to its
 # summary, so one situation is escalated once and then only noted as routine
-# until something provably changes. A task with no status ledger - the `fleet`
-# pseudo-task, a teardown report whose records are already gone, or a task
-# that never wrote a status line - has no recorded situation to compare and is
-# never demoted, and a record that exists but cannot be read fails toward
-# reporting rather than toward silence.
+# until something provably changes: a re-queued identical row matches, while a
+# new wake - a red check, a decision - carries a different row and escalates.
+# A task with no status ledger - the `fleet` pseudo-task, a teardown report
+# whose records are already gone, or a task that never wrote a status line -
+# has no recorded situation to compare and is never demoted, nor is a report
+# no live grant covers, and a record that exists but cannot be read fails
+# toward reporting rather than toward silence.
 captain_key_path() { # <task> - sidecar is same-shape-guarded as the index path
   case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   printf '%s/.%s.branch-captain-key' "$STATE" "$1"
@@ -285,14 +292,29 @@ outcome_sha() { # stable digest of stdin
   fi
 }
 
+covered_wake_rows() { # -> sorted kind/key/payload of the live grant's queued rows
+  local rows="$STATE/.branch-eligible-rows" covered
+  fm_wake_branch_grant_live "$rows" "$STATE/.branch-eligible-owner" || return 1
+  [ -f "$FM_WAKE_QUEUE" ] && [ -r "$FM_WAKE_QUEUE" ] || return 1
+  covered=$(awk -F '\t' -v seqs="$rows" '
+    BEGIN { while ((getline line < seqs) > 0) keep[line] = 1 }
+    NF >= 5 && $2 ~ /^[0-9]+$/ && ($2 in keep) { print $3 "\t" $4 "\t" $5 }
+  ' "$FM_WAKE_QUEUE" | LC_ALL=C sort) || return 1
+  [ -n "$covered" ] || return 1
+  printf '%s\n' "$covered"
+}
+
 # captain_situation_key <task> -> the task's current situation key on stdout.
-#   0: key computed. 2: the task has no readable status ledger to compare, so
-#      the append must never be demoted. 1: a record that could carry a change
-#      could not be read, which also fails toward reporting.
+#   0: key computed. 2: the task has no readable status ledger to compare, or
+#      no live grant covers a queued row this report answers, so the append
+#      must never be demoted. 1: a record that could carry a change could not
+#      be read, which also fails toward reporting.
 captain_situation_key() { # <task>
-  local task=$1 meta status meta_sig crew worktree head
+  local task=$1 meta status meta_sig crew worktree head wake_sig
   status="$STATE/$task.status"
   [ -f "$status" ] && [ -r "$status" ] && [ ! -L "$status" ] || return 2
+  wake_sig=$(covered_wake_rows) || return 2
+  wake_sig=$(printf '%s\n' "$wake_sig" | outcome_sha) || return 1
   meta="$STATE/$task.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     if [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ]; then
@@ -319,8 +341,8 @@ captain_situation_key() { # <task>
   else
     head=no-worktree
   fi
-  printf 'meta=%s\nstatus=%s:%s\ncrew=%s\nhead=%s\n' \
-    "$meta_sig" "$CAPTURED_STATUS_ENDPOINT" "$CAPTURED_STATUS_IDENT" "$crew" "$head" \
+  printf 'meta=%s\nstatus=%s:%s\ncrew=%s\nhead=%s\nwake=%s\n' \
+    "$meta_sig" "$CAPTURED_STATUS_ENDPOINT" "$CAPTURED_STATUS_IDENT" "$crew" "$head" "$wake_sig" \
     | outcome_sha
 }
 
