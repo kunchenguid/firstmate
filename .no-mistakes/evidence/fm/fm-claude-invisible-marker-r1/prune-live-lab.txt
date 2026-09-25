@@ -1,0 +1,2 @@
+Expired record after write: ABSENT
+Fresh record after write: PRESENT
