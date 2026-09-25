@@ -1017,6 +1017,202 @@ test_own_and_absent_slot_claims_still_tear_down() {
   pass "fm-teardown: a task's own slot claim, and an unclaimed slot, both still tear down"
 }
 
+# The collision shape where both records are still discoverable: a cancelled
+# task's record still names a pool slot the pool has since handed to a later
+# task, whose own record names it too. The slot's claim names the later task,
+# so the cancelled task's record is the obsolete one.
+stage_stale_duplicate_slot() {  # <case> <stale-id> <owner-id>
+  local dir=$1 stale=$2 owner=$3
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$stale.meta" \
+    "window=firstmate:fm-$stale" "endpoint_task_id=$stale" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+  fm_write_meta "$dir/home/state/$owner.meta" \
+    "window=firstmate:fm-$owner" "endpoint_task_id=$owner" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+}
+
+run_ordinary_case() {  # <case> <id>
+  local dir=$1 id=$2
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id"
+}
+
+assert_stale_duplicate_refused() {  # <case> <stale-id> <owner-id> <description>
+  local dir=$1 stale=$2 owner=$3 description=$4 rc
+  set +e
+  run_ordinary_case "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "$description: teardown of the duplicate record unexpectedly succeeded"
+  assert_present "$dir/home/state/$stale.meta" "$description: the duplicate record was removed"
+  assert_present "$dir/home/state/$owner.meta" "$description: the other record was removed"
+  assert_present "$dir/worktree/sentinel" "$description: the shared slot was reset"
+  ! grep -Eq "kill-window|treehouse" "$dir/runtime.log" \
+    || fail "$description: teardown closed an endpoint or returned the slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "REFUSED" "$description: the refusal should be named"
+}
+
+test_proven_stale_duplicate_record_retires_before_the_claimed_owner() {
+  local dir stale=stale-task owner=live-owner worker rc
+
+  dir=$(make_case slot-stale-duplicate)
+  stage_stale_duplicate_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  # The owner's worker is live in the slot and its copy carries uncommitted
+  # work (the untracked sentinel). Staged in this shell so it outlives teardown.
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  # While the obsolete record still names its slot, the owner's own cleanup
+  # refuses exactly as before and changes nothing.
+  set +e
+  run_ordinary_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the claimed owner returned a slot a second record still names"
+  assert_present "$dir/home/state/$owner.meta" "the refused owner teardown removed its record"
+  assert_present "$dir/home/state/$stale.meta" "the refused owner teardown removed the obsolete record"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "the refused owner teardown reached the runtime: $(cat "$dir/runtime.log")"
+
+  # The obsolete record retires first: its own endpoint and records go, while
+  # the owner's worker, uncommitted copy, claim, and record stay untouched.
+  set +e
+  run_ordinary_case "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the proven obsolete record did not retire: $(cat "$dir/stderr")"
+  kill -0 "$worker" 2>/dev/null || fail "retiring the obsolete record killed the owner's worker"
+  assert_present "$dir/worktree/sentinel" "retiring the obsolete record reset the owner's copy"
+  assert_present "$dir/home/state/$owner.meta" "retiring the obsolete record removed the owner's record"
+  assert_reassigned_slot_left_alone "$dir" "$stale" "$owner" "proven obsolete duplicate record"
+  assert_contains "$(cat "$dir/stderr")" "claim" \
+    "the warning should name the slot claim as the proof"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  # With the obsolete record gone, the owner's ordinary cleanup of its own
+  # landed copy returns the slot and drops its spent claim.
+  rm -f "$dir/worktree/sentinel"
+  : > "$dir/runtime.log"
+  run_ordinary_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "the claimed owner's cleanup failed after the obsolete record retired: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$owner.meta" "the owner's cleanup left its record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "the owner's cleanup left its spent slot claim"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "the owner's cleanup did not return its pool slot: $(cat "$dir/runtime.log")"
+
+  pass "fm-teardown: a record the slot claim proves obsolete retires without touching the slot, then the claimed owner's own cleanup succeeds"
+}
+
+# Nothing short of that proof lets the duplicate record's cleanup proceed.
+test_unproven_duplicate_slot_record_still_refuses() {
+  local dir stale=stale-task owner=live-owner second_home second_project rc
+
+  # The claim names the record being torn down, so the OTHER record may be the
+  # obsolete one - or both workers may be live. Either way this is not proof.
+  dir=$(make_case slot-duplicate-claim-mine)
+  stage_stale_duplicate_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$stale"
+  assert_stale_duplicate_refused "$dir" "$stale" "$owner" "claim naming the record itself"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "task=$stale" \
+    "claim naming the record itself: the claim was changed"
+
+  # The claim names a third task neither record belongs to.
+  dir=$(make_case slot-duplicate-claim-third)
+  stage_stale_duplicate_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" third-task
+  assert_stale_duplicate_refused "$dir" "$stale" "$owner" "claim naming a third task"
+
+  # No claim, and a claim that cannot be read, prove nothing either way.
+  dir=$(make_case slot-duplicate-claim-absent)
+  stage_stale_duplicate_slot "$dir" "$stale" "$owner"
+  assert_stale_duplicate_refused "$dir" "$stale" "$owner" "absent claim"
+
+  dir=$(make_case slot-duplicate-claim-unreadable)
+  stage_stale_duplicate_slot "$dir" "$stale" "$owner"
+  printf 'not-a-claim\n' > "$dir/pool/1/.fm-slot-owner"
+  assert_stale_duplicate_refused "$dir" "$stale" "$owner" "unreadable claim"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "not-a-claim" \
+    "unreadable claim: the claim was changed"
+
+  # The claim names the other record's task id but a different home, so it
+  # cannot be proved to be that record's claim.
+  dir=$(make_case slot-duplicate-claim-other-home)
+  stage_stale_duplicate_slot "$dir" "$stale" "$owner"
+  mkdir -p "$dir/elsewhere"
+  claim_pool_slot "$dir" "$owner" "$dir/elsewhere"
+  assert_stale_duplicate_refused "$dir" "$stale" "$owner" "claim naming another home"
+
+  # A third record also names the slot, so the claim cannot settle every
+  # collision this record is part of.
+  dir=$(make_case slot-duplicate-three-records)
+  stage_stale_duplicate_slot "$dir" "$stale" "$owner"
+  fm_write_meta "$dir/home/state/third-task.meta" \
+    "window=firstmate:fm-third-task" "endpoint_task_id=third-task" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$owner"
+  assert_stale_duplicate_refused "$dir" "$stale" "$owner" "a third record naming the slot"
+  assert_present "$dir/home/state/third-task.meta" "a third record naming the slot: the third record was removed"
+
+  # The claim proves the record obsolete, but its own endpoint still reads as
+  # a live agent, which may be working inside the owner's copy right now.
+  dir=$(make_case slot-duplicate-live-endpoint)
+  stage_stale_duplicate_slot "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf 'tmux' >> "\${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
+printf '\n' >> "\${FM_RUNTIME_LOG:?}"
+case " \$* " in
+  *" list-windows "*) printf 'fm-$stale\n' ;;
+  *"#{pane_current_command}"*) printf 'claude\n' ;;
+esac
+exit 0
+SH
+  assert_stale_duplicate_refused "$dir" "$stale" "$owner" "live endpoint on the obsolete record"
+  assert_contains "$(cat "$dir/stderr")" "alive" \
+    "live endpoint on the obsolete record: the refusal should name the endpoint state"
+
+  # A claim naming the other record in ANOTHER home refuses for the same
+  # reason when the homes do not match, and is proof when they do.
+  dir=$(make_case slot-duplicate-cross-home)
+  mark_case_as_treehouse_pool "$dir"
+  second_home="$dir/secondmate-home"
+  second_project="$second_home/projects/project"
+  mkdir -p "$second_home/projects" "$second_home/state" "$second_home/data"
+  git clone -q "$dir/project" "$second_project"
+  printf '%s\n' "- mate - fixture (home: $second_home; scope: test; projects: project; added 2026-01-01)" \
+    > "$dir/home/data/secondmates.md"
+  fm_write_meta "$dir/home/state/$stale.meta" \
+    "window=firstmate:fm-$stale" "endpoint_task_id=$stale" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+  fm_write_meta "$second_home/state/$owner.meta" \
+    "window=firstmate:fm-$owner" "endpoint_task_id=$owner" \
+    "worktree=$dir/worktree" "project=$second_project" "kind=ship"
+  claim_pool_slot "$dir" "$owner" "$dir/home"
+  set +e
+  run_ordinary_case "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a cross-home claim naming the wrong home retired the duplicate record"
+  assert_contains "$(cat "$dir/stderr")" "REFUSED" "cross-home claim in the wrong home: the refusal should be named"
+  assert_present "$dir/home/state/$stale.meta" "cross-home claim in the wrong home removed the duplicate record"
+  assert_present "$dir/worktree/sentinel" "cross-home claim in the wrong home reset the shared slot"
+  claim_pool_slot "$dir" "$owner" "$second_home"
+  : > "$dir/runtime.log"
+  run_ordinary_case "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "a cross-home claim naming the other record's own home did not retire the obsolete record: $(cat "$dir/stderr")"
+  assert_present "$second_home/state/$owner.meta" "cross-home retirement removed the owner's record"
+  assert_present "$dir/worktree/sentinel" "cross-home retirement reset the owner's copy"
+  assert_reassigned_slot_left_alone "$dir" "$stale" "$owner" "cross-home proven obsolete record"
+
+  pass "fm-teardown: a duplicate slot record still refuses without claim proof, a matching home, a single other record, and a confidently gone endpoint"
+}
+
 # The tmux shim used by the endpoint-close tests below: every subcommand
 # reaches the real isolated server, so presence is always read from real tmux.
 # When FM_TEST_BLOCK_KILL is set, `kill-window` alone fails without forwarding,
@@ -1404,6 +1600,8 @@ test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_own_and_absent_slot_claims_still_tear_down
+test_proven_stale_duplicate_record_retires_before_the_claimed_owner
+test_unproven_duplicate_slot_record_still_refuses
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot

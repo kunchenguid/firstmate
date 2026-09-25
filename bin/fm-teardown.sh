@@ -86,7 +86,8 @@
 # cleanup step, teardown verifies record exclusivity: no OTHER task record in
 # this home or any locally registered Firstmate home may name the same live path
 # in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale.
+# collision itself, whichever record is stale, unless the slot's owner claim
+# below proves which one.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -111,6 +112,17 @@
 # absent claim - a slot taken before claims existed, or already returned - keeps
 # exactly the record-scan protection it had before, because refusing it would
 # strand every task in flight across that change on no evidence at all.
+# The claim also settles the one collision that would otherwise deadlock: an
+# obsolete record whose slot went to a task that still has its own record, so
+# each teardown refuses on the other. When the claim names exactly that other
+# record - its task id and the home whose state holds it - and this task's own
+# recorded endpoint is confidently gone (bin/fm-backend.sh's recovery-grade
+# dead or missing), this record is proven obsolete and its cleanup runs as the
+# reassignment above, leaving the slot to the claimant; the claimant's own
+# teardown then passes the scan once this record is gone. Only the task's own
+# record qualifies. A claim naming this task, a third task, or another home, an
+# absent or unreadable claim, a third record on the same path, an endpoint not
+# confidently gone, and every forced secondmate descendant still refuse.
 # Why Treehouse's own state cannot answer this for crewmate slots, and why the
 # claim file sits on top of it, is owned by bin/fm-wake-lib.sh's slot-owner
 # claim comment.
@@ -2336,8 +2348,42 @@ collect_local_firstmate_states() {
   done
 }
 
-require_exclusive_worktree_slot_record() {
-  local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
+# The one record collision the slot's claim settles (see the script header):
+# the claim names exactly the other record - its task id and the home whose
+# state holds it - and this task's own recorded endpoint is confidently gone.
+# Then this record is the obsolete one and require_owned_task_worktree_slot
+# reads the same claim as a reassignment. Every other shape returns nonzero so
+# the caller refuses.
+teardown_claim_proves_record_obsolete() {  # <slot> <other-id> <other-state-dir>
+  local slot=$1 other_id=$2 other_state=$3 other_home claim_home endpoint
+  fm_treehouse_slot_owner_state "$slot" "$ID"
+  [ "$FM_TREEHOUSE_SLOT_OWNER" = other ] || return 1
+  [ "$FM_TREEHOUSE_SLOT_OWNER_ID" = "$other_id" ] || return 1
+  if [ "$other_state" = "$STATE" ]; then
+    other_home=$FM_HOME
+  else
+    other_home=${other_state%/state}
+  fi
+  other_home=$(canonical_existing_dir "$other_home") || return 1
+  claim_home=$(canonical_existing_dir "$FM_TREEHOUSE_SLOT_OWNER_HOME") || return 1
+  [ "$claim_home" = "$other_home" ] || return 1
+  if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
+    endpoint=missing
+  else
+    endpoint=$(fm_backend_agent_state "$BACKEND" "$T")
+  fi
+  case "$endpoint" in
+    dead|missing)
+      echo "warning: task $ID's recorded worktree $slot is also task $other_id's, and that slot's owner claim names $other_id while $ID's own endpoint reads '$endpoint', so $ID's record is the obsolete one." >&2
+      return 0
+      ;;
+  esac
+  echo "task $ID's slot owner claim names task $other_id, but $ID's own recorded endpoint reads '$endpoint', not confidently dead or missing, so its worker may still be running in that slot." >&2
+  return 1
+}
+
+require_exclusive_worktree_slot_record() {  # <meta> <task-id> <state> <worktree> [prove-obsolete]
+  local record_meta=$1 record_id=$2 record_state=$3 worktree=$4 prove_obsolete=${5:-0}
   local slot state_dir other other_id field other_path other_slot
   slot=$(canonical_existing_dir "$worktree") || return 0
   collect_local_firstmate_states "$record_state" || return 1
@@ -2355,6 +2401,10 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
+        if [ "$prove_obsolete" = 1 ] \
+           && teardown_claim_proves_record_obsolete "$slot" "$other_id" "$state_dir"; then
+          continue 2
+        fi
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
         echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
         echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
@@ -2367,14 +2417,15 @@ require_exclusive_worktree_slot_record() {
 require_exclusive_task_worktree_slot() {
   local slot
   slot=$(teardown_live_slot_path) || return 0
-  require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot"
+  require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot" 1
 }
 
 # Positive slot ownership, read from the claim the task that took the slot wrote
 # into the slot itself (bin/fm-wake-lib.sh owns the claim and its states).
 #
-# The record scan above proves that no OTHER task record names this slot. It
-# cannot prove that THIS record is not the stale one, because the task that took
+# The record scan above proves that no OTHER task record names this slot, apart
+# from one this claim itself proves is the owner. It cannot prove that THIS
+# record is not the stale one, because the task that took
 # the slot next may leave no record this scan can reach: its own worker may have
 # exited and its record been cleaned up, or it may belong to a home this machine
 # does not register. The claim closes that gap from the other side - it names the
