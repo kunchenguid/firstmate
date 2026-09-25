@@ -732,6 +732,7 @@ def verify_note(note_id):
 
 
 
+
         return 0
     identity = inbox_identity(note_id)
     if identity is None:
@@ -748,6 +749,7 @@ def verify_note(note_id):
 
 
 
+
     try:
         item = handoff_record(request_id, posture)
     except (OSError, ValueError):
@@ -755,6 +757,7 @@ def verify_note(note_id):
         return 1
     if item is None:
         print(json.dumps({"email_handoff": False, "verified": False}, separators=(",", ":")))
+
 
 
 
@@ -771,6 +774,7 @@ def verify_note(note_id):
         return 0
     print(json.dumps({
         "email_handoff": True,
+
 
 
 
