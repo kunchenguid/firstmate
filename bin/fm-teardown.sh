@@ -3283,7 +3283,7 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
-      "$sub_state/$child_id.devin-config.json" "$sub_state/.$child_id.devin-config.json" \
+      "$sub_state/$child_id.devin-config.json" \
       "$sub_state/.$child_id.branch-outcome-index" "$sub_state/.$child_id.branch-captain-key"
     chmod u+w "$sub_state/$child_id.git-hooks" 2>/dev/null || true
     rm -rf "$sub_state/$child_id.git-hooks"

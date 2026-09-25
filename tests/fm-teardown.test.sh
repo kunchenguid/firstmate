@@ -2589,6 +2589,55 @@ test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
   pass "forced secondmate teardown retains Herdr child identity until exact pane disappearance"
 }
 
+# A forced secondmate teardown sweeps each child's per-task state files from
+# the child home's own state dir before the home itself is removed, so a whole
+# -home assertion cannot prove that list named the right paths. A close refusal
+# on a later child stops the sweep mid-loop with the home intact: the already
+# -cleaned child's <id>.devin-config.json and .<id>.branch-captain-key must be
+# gone while everything of the unconsumed child's is retained.
+test_forced_secondmate_teardown_removes_a_cleaned_childs_state_files() {
+  local case_dir home rc
+  case_dir=$(make_case child-state-files)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  printf '{}\n' > "$home/state/child-a.devin-config.json"
+  printf '7\t0123456789abcdef\n' > "$home/state/.child-a.branch-captain-key"
+  printf '{}\n' > "$home/state/child-b.devin-config.json"
+  printf '9\tfedcba9876543210\n' > "$home/state/.child-b.branch-captain-key"
+  # child-b's close refuses: its kill fails and the re-read still lists the
+  # window, so the sweep stops after child-a with the home retained.
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *kill-window*fm-child-b*) exit 1 ;;
+  *list-windows*) printf 'fm-child-b\n'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "child-state-files: teardown continued past a refused child close"
+  assert_grep "could not be closed" "$case_dir/stderr" \
+    "child-state-files: refusal did not name the child endpoint it could not close"
+  [ -d "$home" ] || fail "child-state-files: refusal removed the secondmate home"
+  [ ! -e "$home/state/child-a.meta" ] \
+    || fail "child-state-files: the cleaned child's task record was left behind"
+  [ ! -e "$home/state/child-a.devin-config.json" ] \
+    || fail "child-state-files: the cleaned child's devin config was left behind"
+  [ ! -e "$home/state/.child-a.branch-captain-key" ] \
+    || fail "child-state-files: the cleaned child's captain anchor was left behind"
+  [ -e "$home/state/child-b.meta" ] \
+    || fail "child-state-files: refusal erased the unconsumed child's record"
+  [ -e "$home/state/child-b.devin-config.json" ] \
+    || fail "child-state-files: refusal removed the unconsumed child's devin config"
+  [ -e "$home/state/.child-b.branch-captain-key" ] \
+    || fail "child-state-files: refusal removed the unconsumed child's captain anchor"
+  pass "forced secondmate teardown removes a cleaned child's devin config and captain anchor"
+}
+
 configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
   local case_dir=$1 home="$1/secondmate-home" nested_home="$1/secondmate-home/nested-home"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
@@ -4082,6 +4131,7 @@ test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
+test_forced_secondmate_teardown_removes_a_cleaned_childs_state_files
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
