@@ -436,35 +436,33 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def strip_trailing_metadata:
       reduce range(0; 20) as $_ (.;
         sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority|hold|hold-kind|hold-until):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
-    def strip_title_artifacts($include_local):
+    def strip_title_artifacts:
       sub("[[:space:]]+-[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
       | sub("[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
-      | if $include_local then
-          sub("[[:space:]]+-[[:space:]]+local[[:space:]][^[:space:]]+$"; "")
-          | sub("[[:space:]]+local[[:space:]][^[:space:]]+$"; "")
-        else . end
+      | sub("[[:space:]]+-[[:space:]]+local main$"; "")
+      | sub("[[:space:]]+local main$"; "")
       | sub("[[:space:]]+-[[:space:]]*$"; "");
-    def clean_title($include_local):
+    def clean_title:
       strip_trailing_metadata
-      | strip_title_artifacts($include_local)
+      | strip_title_artifacts
       | gsub("[[:space:]]+"; " ")
       | trim;
-    def title_of($rest; $include_local):
+    def title_of($rest):
       $rest
       | gsub(wrapped_url_pattern; "")
       | sub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:])]+[[:space:]]+-[[:space:]]+.*$"; "")
       | gsub("[[:space:]]*blocked-by:[[:space:]]+[^[:space:]]+"; "")
-      | clean_title($include_local);
+      | clean_title;
     def blocked_by_ids($rest):
       [ $rest | scan("blocked-by:[[:space:]]+(?<id>[^[:space:])]+)") | .[0] ]
       | reduce .[] as $id ([]; if index($id) == null then . + [$id] else . end);
     def blocked_reason($rest):
       cap($rest; ".*blocked-by:[[:space:]]*[^[:space:])]+[[:space:]]+-[[:space:]]*(?<v>.*)$") as $reason
       | if $reason == null then null
-        else ($reason | clean_title(false) | if . == "" then null else . end)
+        else ($reason | clean_title | if . == "" then null else . end)
         end;
     def local_note($rest):
-      cap(($rest | strip_trailing_metadata); ".*(?:^|[[:space:]]+-[[:space:]]+|[[:space:]])(?<v>local[[:space:]][^[:space:]]+)$");
+      cap(($rest | strip_trailing_metadata); ".*(?:^|[[:space:]]+-[[:space:]]+|[[:space:]])(?<v>local main)$");
     def completion($rest):
       (metadata_word($rest; "merged")) as $merged
       | (metadata_word($rest; "reported")) as $reported
@@ -491,7 +489,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              structured:true,
              id:($m.id | trim),
              checked:($m.check | test("[xX]")),
-             title:title_of($rest; ($section == "done")),
+             title:title_of($rest),
              repo:metadata($rest; "repo"),
              kind:kind_of($rest),
              priority:metadata($rest; "priority"),
@@ -539,7 +537,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
               // (if .state == "done" and any(.body_lines[];
                     test("^Resolution recorded by fm-(captain|decision)-hold\\.$"))
                   then null
-                  elif .state == "done" then cap(.body_lines[-1]; "^(?<v>local[[:space:]][^[:space:]]+)$")
+                  elif .state == "done" then cap(.body_lines[-1]; "^(?<v>local main)$")
                   else null
                   end))
           | .body_excerpt = ((.body_lines | join(" "))[:240])
