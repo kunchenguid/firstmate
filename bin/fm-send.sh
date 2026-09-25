@@ -11,7 +11,12 @@
 # before anything is marked, recorded, or typed, because an empty marked
 # secondmate request delivers only marker and correlation bytes and leaves the
 # parent waiting on a reply to nothing.
+# A token starting with "--" before the text that is not --resolve-key,
+# --fire-and-forget, or --key is refused as an unknown flag before anything is
+# recorded or typed, so message text cannot begin with "--" (a single leading
+# "-" is still plain text).
 # Special keys instead of text: fm-send.sh <target> --key Enter
+# --key takes exactly one key; any argument after it is refused unsent.
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
@@ -462,7 +467,8 @@ fi
 
 # Collect --resolve-key flags (answerer-closes; see the header contract). They
 # must precede --key or the message text; everything after the last flag is the
-# message exactly as before, so ordinary sends are byte-identical.
+# message exactly as before, so ordinary sends are byte-identical. An unknown
+# "--" token is refused here (see the header) rather than becoming the message.
 RESOLVE_KEYS=
 FIRE_AND_FORGET_ID=
 fm_send_add_resolve_key() { # <key>
