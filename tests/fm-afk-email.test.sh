@@ -563,6 +563,7 @@ test_invalid_or_unreadable_posture_suppresses_mail() {
   local home
   home=$(make_home invalid-posture-poll configured)
 
+
   run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
   python3 - "$REPO" "$home" <<'PY' || fail "invalid or unreadable posture did not fail closed"
 
@@ -806,6 +807,7 @@ test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit() {
   [ -n "$token" ] && [ -n "$token2" ] || fail "sent update omitted a reply token"
   python3 - "$ROOT" "$home" "$token" "$token2" <<'PY'
 
+
 import importlib.util
 import os
 import sys
@@ -818,6 +820,7 @@ root = Path(sys.argv[1])
 home = Path(sys.argv[2])
 reply_token = sys.argv[3]
 recovery_token = sys.argv[4]
+
 
 
 
@@ -860,6 +863,7 @@ headers = {
 
 
 
+
 }
 bodies = {
     "1": b"From: outsider@example.com\r\nSubject: outside\r\nContent-Type: text/plain\r\n\r\nprivate body",
@@ -895,11 +899,13 @@ bodies = {
 
 
 
+
 }
 class FakeMailbox:
     untagged_responses = {"UIDVALIDITY": [b"44"]}
     body_fetches = []
     search_ids = b"1 2 3 4 6 7 8 9"
+
 
 
     fail_body_fetch = False
@@ -915,6 +921,7 @@ class FakeMailbox:
     def uid(self, command, uid, fetch_spec):
         if command == "search":
             return "OK", [self.search_ids]
+
 
 
 
@@ -953,6 +960,7 @@ assert initial_rows["3"][4] == "ok", initial_rows["3"]
 assert "body exceeds 256 KiB" in initial_rows["3"][3], initial_rows["3"]
 assert initial_rows["4"][4] == "ok", initial_rows["4"]
 assert "answer exceeds 8,000 characters" in initial_rows["4"][3], initial_rows["4"]
+
 
 
 
@@ -1014,6 +1022,7 @@ try:
     mailbox.search_ids = b"1 2 3 4 5 6 7 8 9"
 
 
+
     mailbox.body_fetches.clear()
     outage_output = StringIO()
     with redirect_stdout(outage_output):
@@ -1027,6 +1036,7 @@ try:
     assert mailbox.body_fetches == [], mailbox.body_fetches
 
     (state / ".mail-seen").write_text("uidvalidity=44\n1\n2\n3\n4\n5\n6\n7\n8\n9\n", encoding="utf-8")
+
 
 
     (state / ".mail-retry").write_text("5\n", encoding="utf-8")
@@ -1059,6 +1069,7 @@ assert "FORWARDED_ATTACHMENT_SECRET" not in recovered_note
 (state / ".mail-seen").unlink()
 (state / ".mail-retry").unlink()
 mailbox.search_ids = b"1 2 3 4 6 7 8 9"
+
 
 
 
