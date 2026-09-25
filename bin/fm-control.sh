@@ -917,8 +917,6 @@ prepare_secondmate_context_custody() {
       fi
       ;;
     dead|missing)
-      [ "$HANDOFF_FILE_SET" = 0 ] && [ "$ABANDON_LIVE_CONTEXT" = 0 ] \
-        || die "secondmate $ID is $state, so there is no live conversation to hand off or abandon; retry without context-custody options"
       CONTEXT_CUSTODY="not-required-$state"
       CUSTODY_LINES=("context_custody=$CONTEXT_CUSTODY")
       ;;

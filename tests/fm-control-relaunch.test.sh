@@ -1566,12 +1566,41 @@ test_dead_secondmate_relaunch_needs_no_context_custody() {
   pass "fm-control relaunch: dead secondmate recovery remains custody-free"
 }
 
+test_dead_secondmate_relaunch_accepts_prepared_live_custody() {
+  local dir handoff digest out rc
+  dir=$(new_case sm-custody-died smdied)
+  add_secondmate_task "$dir" smdied
+  handoff="$dir/handoff.md"
+  printf 'Confirmed persist reply before the agent died.\n' > "$handoff"
+  digest=$(shasum -a 256 "$handoff" | awk '{print $1}')
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_control "$dir" smdied relaunch --handoff-file "$handoff" \
+    --handoff-sha256 "$digest"); rc=$?
+  expect_code 0 "$rc" "a persisted mate that died before relaunch should recover"$'\n'"$out"
+  [ "$(journal_field "$dir" smdied context_custody)" = not-required-dead ] \
+    || fail "a dead mate should not wait for handoff receipt"
+  assert_present "$handoff" "the caller must still own its prepared handoff"
+
+  dir=$(new_case sm-custody-abandon-died smabandondied)
+  add_secondmate_task "$dir" smabandondied
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_control "$dir" smabandondied relaunch --abandon-live-context); rc=$?
+  expect_code 0 "$rc" "a mate that died after abandonment was chosen should recover"$'\n'"$out"
+  [ "$(journal_field "$dir" smabandondied context_custody)" = not-required-dead ] \
+    || fail "dead recovery should not record live-context abandonment"
+  pass "fm-control relaunch: death after a live custody choice remains custody-free"
+}
+
 test_missing_secondmate_relaunch_reaches_backend_absence_proof_without_custody_gate() {
-  local dir out rc
+  local dir handoff digest out rc
   dir=$(new_case sm-custody-missing smmissing)
   add_secondmate_task "$dir" smmissing
+  handoff="$dir/handoff.md"
+  printf 'Prepared context for a mate whose endpoint became missing.\n' > "$handoff"
+  digest=$(shasum -a 256 "$handoff" | awk '{print $1}')
   : > "$dir/fake/session-missing"
-  out=$(run_control "$dir" smmissing relaunch); rc=$?
+  out=$(run_control "$dir" smmissing relaunch --handoff-file "$handoff" \
+    --handoff-sha256 "$digest"); rc=$?
   expect_code 1 "$rc" "an unprovable missing tmux endpoint should still refuse safely"
   assert_contains "$out" "tmux absence cannot be proven" \
     "missing recovery should reach the backend's existing absence proof"
@@ -2524,6 +2553,7 @@ test_live_secondmate_handoff_waits_for_receipt_before_retiring_copies
 test_unconfirmed_live_secondmate_handoff_retains_full_context
 test_live_secondmate_relaunch_requires_explicit_abandonment_choice
 test_dead_secondmate_relaunch_needs_no_context_custody
+test_dead_secondmate_relaunch_accepts_prepared_live_custody
 test_missing_secondmate_relaunch_reaches_backend_absence_proof_without_custody_gate
 test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter
 test_secondmate_relaunch_refuses_an_unmarked_home
