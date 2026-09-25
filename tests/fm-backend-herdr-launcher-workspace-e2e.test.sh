@@ -117,6 +117,13 @@ journal_field() {  # <presentation-journal> <key>
   grep "^$2=" "$1" 2>/dev/null | head -1 | cut -d= -f2-
 }
 
+move_workspace_to() {  # <workspace-id> <index>
+  local out
+  out=$("$ROOT/bin/backends/herdr-workspace-move.py" "$LAB_SOCKET" "$1" "$2" 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -e --arg id "$1" --argjson index "$2" \
+    '.result.workspaces[$index].workspace_id == $id' >/dev/null 2>&1
+}
+
 # spawn_from_launcher <launcher-pane|""> <home> <task-id> <project> [extra fm-spawn args...]
 # Composes exactly the Herdr identity Herdr itself injects into a pane's
 # processes. An empty launcher pane means "this firstmate is not running inside
@@ -203,7 +210,7 @@ for id in uniqA uniqB dupC dupD staleF smE presU presD; do
   write_ship_brief "$SM_HOME/data/$id/brief.md" "$id"
   write_ship_brief "$PRES_HOME/data/$id/brief.md" "$id"
 done
-for id in development-to-staging public-profile-header; do
+for id in development-to-staging public-profile-header aiddrop-task; do
   mkdir -p "$PROJECT_HOME/data/$id"
   write_ship_brief "$PROJECT_HOME/data/$id/brief.md" "$id"
 done
@@ -289,8 +296,7 @@ PRESU_ORDER=$(lab workspace list 2>/dev/null | jq -r --arg parent "$WS_PRIMARY" 
 [ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a projected spawn stole focus from the captain's workspace"
 pass "real herdr E2E: a task with no project space gets an isolated child directly under Firstmate without stealing focus"
 
-# --- 2c. a project-named parent plus detached historical child: two new
-#         Firstmate projections stay contiguous under the exact project -------
+# --- 2c. existing project clusters are reconciled from exact journal ownership
 
 read -r PROJECT_FIRSTMATE _ _ <<EOF
 $(make_workspace 'Firstmate')
@@ -298,54 +304,60 @@ EOF
 read -r PROJECT_PARENT _ PROJECT_LAUNCHER <<EOF
 $(make_workspace 'Find My Matcha')
 EOF
-read -r PROJECT_DIVIDER _ _ <<EOF
+read -r PROJECT_DIVIDER _ AIDDROP_LAUNCHER <<EOF
 $(make_workspace 'AidDrop')
 EOF
-read -r PROJECT_DETACHED _ _ <<EOF
-$(make_workspace '└ historical-task · p:AbCdEfGhIjKlMnOpQrStUw')
-EOF
 [ -n "$PROJECT_FIRSTMATE" ] && [ -n "$PROJECT_PARENT" ] && [ -n "$PROJECT_LAUNCHER" ] \
-  && [ -n "$PROJECT_DIVIDER" ] && [ -n "$PROJECT_DETACHED" ] \
+  && [ -n "$PROJECT_DIVIDER" ] && [ -n "$AIDDROP_LAUNCHER" ] \
   || fail "could not create the project-relative ordering fixture"
 
-for id in development-to-staging public-profile-header; do
-  spawn_from_launcher "$PROJECT_LAUNCHER" "$PROJECT_HOME" "$id" "$PROJ" --mode no-mistakes --yolo off
-  [ "$SPAWN_RC" -eq 0 ] \
-    || fail "project-relative projected spawn $id failed"$'\n'"$(cat "$SPAWN_ERR")"
-  if grep -E 'ambiguous workspace layout|could not publish an exact restart binding' "$SPAWN_ERR" >/dev/null 2>&1; then
-    fail "project-relative projected spawn $id left an ordering or restart-binding warning"$'\n'"$(cat "$SPAWN_ERR")"
-  fi
-  PROJECT_META="$PROJECT_HOME/state/$id.meta"
-  record_worktree "$PROJECT_META"
-  PROJECT_JOURNAL="$PROJECT_HOME/state/$id.herdr-presentation"
-  [ "$(journal_field "$PROJECT_JOURNAL" version)" = 2 ] \
-    || fail "project-relative projected spawn $id did not publish an exact binding"
-  [ "$(journal_field "$PROJECT_JOURNAL" parent_workspace_id)" = "$PROJECT_PARENT" ] \
-    || fail "project-relative projected spawn $id bound the wrong parent"
-done
+spawn_from_launcher "$AIDDROP_LAUNCHER" "$PROJECT_HOME" aiddrop-task "$PROJ" --mode no-mistakes --yolo off
+[ "$SPAWN_RC" -eq 0 ] || fail "AidDrop projected spawn failed"$'\n'"$(cat "$SPAWN_ERR")"
+AIDDROP_META="$PROJECT_HOME/state/aiddrop-task.meta"
+record_worktree "$AIDDROP_META"
+AIDDROP_WS=$(grep '^herdr_workspace_id=' "$AIDDROP_META" | cut -d= -f2-)
+[ "$(journal_field "$PROJECT_HOME/state/aiddrop-task.herdr-presentation" parent_workspace_id)" = "$PROJECT_DIVIDER" ] \
+  || fail "AidDrop task did not bind its exact project parent"
 
-DEVELOPMENT_WS=$(grep '^herdr_workspace_id=' "$PROJECT_HOME/state/development-to-staging.meta" | cut -d= -f2-)
-PROFILE_WS=$(grep '^herdr_workspace_id=' "$PROJECT_HOME/state/public-profile-header.meta" | cut -d= -f2-)
+spawn_from_launcher "$PROJECT_LAUNCHER" "$PROJECT_HOME" development-to-staging "$PROJ" --mode no-mistakes --yolo off
+[ "$SPAWN_RC" -eq 0 ] || fail "existing Find My Matcha projected spawn failed"$'\n'"$(cat "$SPAWN_ERR")"
+DEVELOPMENT_META="$PROJECT_HOME/state/development-to-staging.meta"
+record_worktree "$DEVELOPMENT_META"
+DEVELOPMENT_WS=$(grep '^herdr_workspace_id=' "$DEVELOPMENT_META" | cut -d= -f2-)
+
+move_workspace_to "$PROJECT_DIVIDER" 0 \
+  && move_workspace_to "$PROJECT_FIRSTMATE" 1 \
+  && move_workspace_to "$PROJECT_PARENT" 2 \
+  && move_workspace_to "$AIDDROP_WS" 3 \
+  && move_workspace_to "$DEVELOPMENT_WS" 4 \
+  || fail "could not scramble the existing project clusters"
+
+spawn_from_launcher "$PROJECT_LAUNCHER" "$PROJECT_HOME" public-profile-header "$PROJ" --mode no-mistakes --yolo off
+[ "$SPAWN_RC" -eq 0 ] \
+  || fail "project reconciliation spawn failed"$'\n'"$(cat "$SPAWN_ERR")"
+if grep -E 'ambiguous workspace layout|ambiguous journal ownership|could not publish an exact restart binding' "$SPAWN_ERR" >/dev/null 2>&1; then
+  fail "project reconciliation left an ordering or restart-binding warning"$'\n'"$(cat "$SPAWN_ERR")"
+fi
+PROFILE_META="$PROJECT_HOME/state/public-profile-header.meta"
+record_worktree "$PROFILE_META"
+PROFILE_WS=$(grep '^herdr_workspace_id=' "$PROFILE_META" | cut -d= -f2-)
+PROFILE_JOURNAL="$PROJECT_HOME/state/public-profile-header.herdr-presentation"
+[ "$(journal_field "$PROFILE_JOURNAL" version)" = 2 ] \
+  && [ "$(journal_field "$PROFILE_JOURNAL" parent_workspace_id)" = "$PROJECT_PARENT" ] \
+  || fail "new Find My Matcha task did not bind its exact project parent"
+
 PROJECT_ORDER=$(lab workspace list 2>/dev/null | jq -c \
   --arg firstmate "$PROJECT_FIRSTMATE" --arg parent "$PROJECT_PARENT" \
   --arg development "$DEVELOPMENT_WS" --arg profile "$PROFILE_WS" \
-  --arg divider "$PROJECT_DIVIDER" --arg detached "$PROJECT_DETACHED" '
+  --arg divider "$PROJECT_DIVIDER" --arg aiddrop "$AIDDROP_WS" '
     [.result.workspaces[].workspace_id] as $ids
     | [($ids | index($firstmate)), ($ids | index($parent)), ($ids | index($development)),
-       ($ids | index($profile)), ($ids | index($divider)), ($ids | index($detached))]
+       ($ids | index($profile)), ($ids | index($divider)), ($ids | index($aiddrop))]
   ')
-PROJECT_ORDER_OK=$(printf '%s' "$PROJECT_ORDER" | jq -r '
-  all(.[]; . != null)
-  and .[1] == .[0] + 1
-  and .[2] == .[0] + 2
-  and .[3] == .[0] + 3
-  and .[4] == .[0] + 4
-  and .[5] == .[0] + 5
-')
-[ "$PROJECT_ORDER_OK" = true ] \
-  || fail "project task spaces were not contiguous under Find My Matcha: $PROJECT_ORDER"
-[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "project-relative projected spawns stole focus"
-pass "real herdr E2E: repeated Firstmate task spaces stay directly under a project-named parent despite a detached historical child"
+[ "$PROJECT_ORDER" = '[0,1,2,3,4,5]' ] \
+  || fail "existing project/task clusters were not reconciled by exact journal ownership: $PROJECT_ORDER"
+[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "project reconciliation stole focus"
+pass "real herdr E2E: existing project clusters migrate with foreign adjacent tasks assigned only by exact journal ownership"
 
 # --- 3. duplicate label, launcher in the NON-first match, driven from a real
 #        Herdr pane so the identity comes from Herdr's own injection ----------
@@ -496,8 +508,8 @@ pass "real herdr E2E: a --secondmate launch still stands up that secondmate's ow
 
 # --- 8. teardown closes only the worker's own pane --------------------------
 
-FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
-  FM_CONFIG_OVERRIDE="$PRIMARY_HOME/config" \
+FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" \
+  FM_DATA_OVERRIDE="$PRIMARY_HOME/data" FM_CONFIG_OVERRIDE="$PRIMARY_HOME/config" \
   "$ROOT/bin/fm-teardown.sh" dupC >"$TMP_ROOT/teardown.out" 2>&1
 status=$?
 [ "$status" -eq 0 ] || fail "fm-teardown.sh failed for dupC"$'\n'"$(cat "$TMP_ROOT/teardown.out")"
