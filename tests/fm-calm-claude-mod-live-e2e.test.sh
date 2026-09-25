@@ -323,7 +323,10 @@ case "$on_settled" in
     ;;
 esac
 # The thinking check is vacuous unless the settled turn really stored thinking.
-on_transcript=$(ls -t "$TRANSCRIPTS"/*.jsonl 2>/dev/null | head -1)
+on_transcript=
+for transcript in "$TRANSCRIPTS"/*.jsonl; do
+  if [[ "$transcript" -nt "$on_transcript" ]]; then on_transcript=$transcript; fi
+done
 grep -qs '"type":"thinking"' "$on_transcript" \
   || fail "Claude Code $CLAUDE_VERSION stored no thinking block for the flag-on turn, so hidden thinking cannot be judged"
 
