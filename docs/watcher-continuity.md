@@ -68,6 +68,8 @@ The acknowledgement retires the marker only when no rows remain after sequence-b
 A concurrently appended wake has a higher sequence, remains queued, and keeps the episode pending for presentation.
 Consequently, an empty-queue downtime publication during handling can be retired by the outstanding acknowledgement without a dedicated recovery turn.
 An acknowledged episode does not freeze the generation, because the next downtime after it opens an episode of its own.
+A stale-lock recovery that finds a fully acknowledged episode and an empty durable queue does not reopen the episode and starts no recovery presentation, because everything that episode owed was already presented and acknowledged.
+This keeps a daemon-managed chain of one-shot watcher children settled instead of delivering `check: rearm-resurface` on every cycle, while a pending episode or any queued row at recovery still resurfaces through the ordinary durable handling path.
 
 ## Per-actor acknowledgement
 
@@ -130,6 +132,7 @@ The guard and session-start suites prove that active generation evidence tolerat
 `tests/fm-watch-triage.test.sh` proves TERM stops a watcher blocked inside a poll's pane capture and still releases its lock and records an acknowledgeable stop.
 It also checks that a newly appended keyed decision is classified without rereading earlier status bytes, so signal handling can return to the watcher's beacon refresh even when the status history is long.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, recovery publication before stale-lock removal, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+The same suite pins the acked-and-empty retirement rule: a stale-lock recovery over a fully acknowledged episode with an empty durable queue settles without a recovery presentation, while a pending marker or a queued row at recovery still resurfaces with the pending episode's generation preserved.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, exit-2 translation, the handling successor an ended attached cycle starts with the closed arm as its predecessor and that outlives the rewake, an unconfirmed successor reported in the banner without withholding the wake, and host-timeout HUP/TERM/INT translation into the same durable failure handoff.
 It also covers generation-claim single-flight, stuck-claim supersession, superseded-owner silence, notice-marker refusal and retry, ownership-atomic episode reset, and the legacy upgrade shim; [`turnend-guard.md`](turnend-guard.md) owns those behavior contracts.
