@@ -233,6 +233,20 @@ test_record_backed_doorbell_carrier() {
   pass "record-backed carrier: Claude-only selection, an ASCII doorbell naming an exact envelope record, home-bound open, and no recognition without the record"
 }
 
+test_record_prune_outgrows_one_argument_list() {
+  local tmp state pad left
+  tmp=$(fm_test_tmproot fm-operational-input-flood)
+  state="$tmp/state"
+  mkdir -p "$state/operational-inbox"
+  pad=$(printf '%0200d' 0)
+  (cd "$state/operational-inbox" && seq 1 12000 | sed "s/\$/-$pad.msg/" | xargs touch -t 200001010000) \
+    || fail "could not seed the expired record flood"
+  printf 'x' | FM_STATE_OVERRIDE="$state" "$OWNER" record watcher >/dev/null || fail "record write over a flood failed"
+  left=$(find "$state/operational-inbox" -maxdepth 1 -type f -name '*.msg' | wc -l | tr -d ' ')
+  [ "$left" = 1 ] || fail "a write left $left records when only its own fresh record was within retention"
+  pass "record pruning: expired records past one argument list are all pruned on a write"
+}
+
 test_current_generic_matrix
 test_current_from_firstmate_carrier
 test_landed_untyped_prefix_is_explicitly_legacy
@@ -241,3 +255,4 @@ test_genuine_near_misses_remain_unclassified
 test_cross_language_adapter_uses_the_owner
 test_invalid_current_encodings_are_rejected
 test_record_backed_doorbell_carrier
+test_record_prune_outgrows_one_argument_list

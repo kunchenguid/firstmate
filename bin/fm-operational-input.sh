@@ -228,20 +228,18 @@ fm_operational_harness_needs_record() {  # <harness>
 }
 
 fm_operational_record_prune() {  # <record-dir>
-  local path mtime cutoff files=()
-  for path in "$1"/*.msg "$1"/.record.*; do
-    [ -f "$path" ] && files+=("$path")
-  done
-  [ "${#files[@]}" -gt 0 ] || return 0
-  cutoff=$(( $(date +%s) - FM_OPERATIONAL_RECORD_RETENTION_DAYS * 86400 ))
+  local stat_cmd path mtime cutoff
   if [ "$(uname)" = Darwin ]; then
-    /usr/bin/stat -f '%m %N' "${files[@]}" 2>/dev/null
+    stat_cmd=(/usr/bin/stat -f '%m %N')
   else
-    stat -c '%Y %n' "${files[@]}" 2>/dev/null
-  fi | while read -r mtime path; do
+    stat_cmd=(stat -c '%Y %n')
+  fi
+  cutoff=$(( $(date +%s) - FM_OPERATIONAL_RECORD_RETENTION_DAYS * 86400 ))
+  find "$1" -maxdepth 1 -type f \( -name '*.msg' -o -name '.record.*' \) \
+    -exec "${stat_cmd[@]}" {} + 2>/dev/null | while read -r mtime path; do
     case "$mtime" in ''|*[!0-9]*) continue ;; esac
-    if [ "$mtime" -lt "$cutoff" ]; then rm -f "$path"; fi
-  done
+    if [ "$mtime" -lt "$cutoff" ]; then printf '%s\0' "$path"; fi
+  done | xargs -0 rm -f
   return 0
 }
 
