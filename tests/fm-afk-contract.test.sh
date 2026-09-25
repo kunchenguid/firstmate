@@ -25,7 +25,7 @@ contract() {  # <home> <args...>
   local home=$1
   shift
   env -u FM_MAIL_USER -u FM_MAIL_PASS -u FM_IMAP_HOST -u FM_SMTP_HOST -u FM_AFK_EMAIL_TO \
-    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$CONTRACT" "$@"
+    FM_AFK_EMAIL_TO=johnpoyser@gmail.com FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$CONTRACT" "$@"
 }
 
 # A confirmed record in the retired version 1 shape, exactly as the clause

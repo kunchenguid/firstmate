@@ -111,18 +111,20 @@ IMAP_HOST="${FM_IMAP_HOST:-}"
 IMAP_PORT="${FM_IMAP_PORT:-993}"
 SMTP_HOST="${FM_SMTP_HOST:-}"
 SMTP_PORT="${FM_SMTP_PORT:-465}"
-case "$IMAP_PORT" in
-  ''|*[!0-9]*|0)
-    echo "fm-mail: FM_IMAP_PORT must be a positive integer, got: ${FM_IMAP_PORT:-}" >&2
-    exit 1
-    ;;
-esac
-case "$SMTP_PORT" in
-  ''|*[!0-9]*|0)
-    echo "fm-mail: FM_SMTP_PORT must be a positive integer, got: ${FM_SMTP_PORT:-}" >&2
-    exit 1
-    ;;
-esac
+if [ "${1:-}" != afk-email ] || [ "${2:-}" != destination ]; then
+  case "$IMAP_PORT" in
+    ''|*[!0-9]*|0)
+      echo "fm-mail: FM_IMAP_PORT must be a positive integer, got: ${FM_IMAP_PORT:-}" >&2
+      exit 1
+      ;;
+  esac
+  case "$SMTP_PORT" in
+    ''|*[!0-9]*|0)
+      echo "fm-mail: FM_SMTP_PORT must be a positive integer, got: ${FM_SMTP_PORT:-}" >&2
+      exit 1
+      ;;
+  esac
+fi
 MAIL_MAX_WAKES="${FM_MAIL_POLL_MAX_WAKES:-20}"
 case "$MAIL_MAX_WAKES" in
   ''|*[!0-9]*|0) MAIL_MAX_WAKES=20 ;;
@@ -195,7 +197,7 @@ fm-mail.sh read
 fm-mail.sh send <to> <subject> <body | ->
 fm-mail.sh poll
 fm-mail.sh status
-fm-mail.sh afk-email configured|queue-unprocessed|flush|verify-note <id>
+fm-mail.sh afk-email destination|configured|queue-unprocessed|flush|verify-note <id>
 EOF
 }
 

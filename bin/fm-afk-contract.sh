@@ -8,9 +8,10 @@
 # the home is afk; the captain's first unmarked message archives it (the return
 # path in bin/fm-afk-return.sh calls `archive` through bin/fm-afk-launch.sh stop).
 # Being away changes how the captain is informed and what happens at a
-# captain-owned decision point, never the authority set. Reach is email only
-# when the mail plane and FM_AFK_EMAIL_TO are configured at entry; otherwise
-# hold-for-return remains the exact fallback.
+# captain-owned decision point, never the authority set. A Pi entry requires
+# FM_AFK_EMAIL_TO to be exactly johnpoyser@gmail.com; email reach is recorded
+# only when the full mail plane is configured, otherwise the exact
+# hold-for-return fallback remains in force.
 #
 # AWAY OR QUIET. The same record also backs daemon-backed quiet mode, which a
 # quiet entry marks with `mode: quiet`: the captain is present there, so a quiet
@@ -518,10 +519,28 @@ fm_afk_contract_archive_target() {  # <record> [superseded-stamp]
 # follows the header's AWAY OR QUIET rules.
 fm_afk_contract_cmd_enter() {
   local record legacy now now_epoch session_entered session_entered_epoch staged archived archived_tmp standing=''
+  local harness destination require_owner_destination
   record=$(fm_afk_contract_path)
   legacy=$(fm_afk_contract_legacy_proposal_path)
   FM_AFK_CONTRACT_ENTRY_MODE=away
   [ "${FM_AFK_MODE:-}" != quiet ] || FM_AFK_CONTRACT_ENTRY_MODE=quiet
+  harness=$("$FM_AFK_CONTRACT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
+  require_owner_destination=0
+  case "$harness" in
+    pi|pi-signed) require_owner_destination=1 ;;
+  esac
+  if [ -f "$record" ] && [ "$(fm_afk_contract_read_field "$record" reach_channels)" = email ]; then
+    require_owner_destination=1
+  fi
+  if [ "$require_owner_destination" -eq 1 ]; then
+    destination=$(
+      "$FM_AFK_CONTRACT_DIR/fm-mail.sh" afk-email destination 2>/dev/null || true
+    )
+    if [ "$destination" != 'johnpoyser@gmail.com' ]; then
+      fm_afk_contract_log 'FM_AFK_EMAIL_TO must be exactly johnpoyser@gmail.com for Pi away mode; refusing entry'
+      return 1
+    fi
+  fi
   if [ -f "$record" ]; then
     fm_afk_contract_validate "$record" || return 1
     standing=$(fm_afk_contract_record_mode "$record")
@@ -554,8 +573,6 @@ fm_afk_contract_cmd_enter() {
   mkdir -p "$(dirname "$record")" || return 1
   FM_AFK_CONTRACT_REACH_CHANNELS=none
   FM_AFK_CONTRACT_REACH_ANNOUNCED='No phone channel is configured; anything that needs you waits for your return.'
-  local harness
-  harness=$("$FM_AFK_CONTRACT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
     pi|pi-signed)
       if [ -x "$FM_AFK_CONTRACT_DIR/fm-mail.sh" ] && "$FM_AFK_CONTRACT_DIR/fm-mail.sh" afk-email configured >/dev/null 2>&1; then

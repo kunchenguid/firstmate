@@ -11,6 +11,7 @@ mkdir -p "$REPO"
 cp -R "$ROOT/bin" "$REPO/bin"
 mv "$REPO/bin/fm-mail.sh" "$REPO/bin/fm-mail-real.sh"
 CAPTURE="$TMP_ROOT/sent"
+AFK_OWNER_EMAIL=johnpoyser@gmail.com
 mkdir -p "$CAPTURE"
 export CAPTURE
 cat > "$REPO/bin/fm-mail.sh" <<'SH'
@@ -46,7 +47,7 @@ FM_MAIL_USER=owner@example.com
 FM_MAIL_PASS=mail-secret-not-to-leak
 FM_IMAP_HOST=imap.example.test
 FM_SMTP_HOST=smtp.example.test
-FM_AFK_EMAIL_TO=${3:-owner@example.com}
+FM_AFK_EMAIL_TO=${3:-$AFK_OWNER_EMAIL}
 ENV
   fi
   printf '%s\n' "$home"
@@ -91,27 +92,57 @@ count_sends() {
   find "$CAPTURE" -maxdepth 1 -name '*.txt' -type f | wc -l | tr -d ' '
 }
 
-# Missing mail values and non-Pi primaries keep hold-for-return with no private email state.
-test_unconfigured_and_non_pi_retain_existing_behavior() {
+# Pi entry requires the fixed owner destination; other harnesses keep hold-for-return.
+test_destination_is_required_for_pi_entry() {
   local home out
-  home=$(make_home unconfigured)
-  out=$(run_contract "$home" FM_TEST_HARNESS=pi 2>&1) || fail "unconfigured Pi entry failed: $out"
-  assert_contains "$out" 'hold-for-return only. No phone channel is configured; anything that needs you waits for your return.' 'unconfigured announcement is unchanged'
-  [ "$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field reach_channels)" = none ] \
-    || fail "unconfigured posture selected email reach"
-  [ ! -e "$home/state/afk-email" ] || fail "unconfigured entry created email state"
-  out=$(run_email "$home" queue-unprocessed 2>&1) || fail "unconfigured queue check failed: $out"
-  [ -z "$out" ] || fail "unconfigured email queue was not silent: $out"
-  out=$(run_email "$home" flush 2>&1) || fail "unconfigured flush check failed: $out"
-  [ -z "$out" ] || fail "unconfigured email flush was not silent: $out"
-  out=$(printf '[]' | run_email "$home" receive-batch 2>&1) || fail "unconfigured receive check failed: $out"
-  [ -z "$out" ] || fail "unconfigured email receive was not silent: $out"
+  home=$(make_home missing-destination)
+  if out=$(run_contract "$home" FM_TEST_HARNESS=pi 2>&1); then
+    fail "Pi entry without the fixed destination succeeded: $out"
+  fi
+  assert_contains "$out" 'FM_AFK_EMAIL_TO must be exactly johnpoyser@gmail.com' 'missing destination refusal is explicit'
+  assert_not_contains "$out" 'email reach active' 'entry is refused before any active-email announcement'
+  [ ! -e "$home/state/.afk-contract" ] || fail "missing destination wrote an away record"
 
-  home=$(make_home non-pi configured)
+  home=$(make_home wrong-destination configured other@example.com)
+  if out=$(run_contract "$home" FM_TEST_HARNESS=pi 2>&1); then
+    fail "Pi entry with a different destination succeeded: $out"
+  fi
+  assert_contains "$out" 'FM_AFK_EMAIL_TO must be exactly johnpoyser@gmail.com' 'wrong destination refusal is explicit'
+  assert_not_contains "$out" 'email reach active' 'wrong destination is rejected before announcement'
+  [ ! -e "$home/state/.afk-contract" ] || fail "wrong destination wrote an away record"
+  if out=$(run_email "$home" configured 2>&1); then
+    fail "helper accepted a non-owner destination: $out"
+  fi
+
+  home=$(make_home stale-destination configured)
+  run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "valid destination entry failed"
+  cp "$home/state/.afk-contract" "$home/record.before"
+  python3 - "$home/.env" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+text = text.replace("FM_AFK_EMAIL_TO=johnpoyser@gmail.com", "FM_AFK_EMAIL_TO=other@example.com")
+open(path, "w", encoding="utf-8").write(text)
+PY
+  if out=$(run_contract "$home" FM_TEST_HARNESS=pi 2>&1); then
+    fail "refresh announced an active channel after the destination changed: $out"
+  fi
+  assert_contains "$out" 'FM_AFK_EMAIL_TO must be exactly johnpoyser@gmail.com' 'refresh rejects stale email reach'
+  assert_not_contains "$out" 'email reach active' 'refresh does not announce stale email reach'
+  cmp -s "$home/record.before" "$home/state/.afk-contract" || fail "refused refresh changed the standing record"
+
+  home=$(make_home destination-only)
+  printf 'FM_AFK_EMAIL_TO=%s\n' "$AFK_OWNER_EMAIL" > "$home/.env"
+  out=$(run_contract "$home" FM_TEST_HARNESS=pi 2>&1) || fail "Pi entry with only the fixed destination failed: $out"
+  assert_contains "$out" 'No phone channel is configured' 'missing mail transport keeps hold-for-return'
+  [ "$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field reach_channels)" = none ] \
+    || fail "destination without mail transport selected email reach"
+
+  home=$(make_home non-pi configured other@example.com)
   out=$(run_contract "$home" FM_TEST_HARNESS=claude 2>&1) || fail "non-Pi entry failed: $out"
   [ "$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field reach_channels)" = none ] \
     || fail "non-Pi posture claimed Pi email delivery"
-  pass "unconfigured and non-Pi away entries preserve hold-for-return without creating email state"
+  pass "Pi entry requires the fixed destination while other harnesses retain hold-for-return"
 }
 
 test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
@@ -120,7 +151,7 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
   out=$(run_contract "$home" FM_TEST_HARNESS=pi 2>&1) || fail "configured Pi entry failed: $out"
   assert_contains "$out" 'email reach active.' 'configured Pi entry announces email reach'
   assert_contains "$out" 'Captain-facing outcomes are emailed to the configured address' 'record announces email delivery'
-  [ "$(run_email "$home" configured)" = owner@example.com ] || fail "mail config did not return the helper's canonical recipient"
+  [ "$(run_email "$home" configured)" = "$AFK_OWNER_EMAIL" ] || fail "mail config did not return the fixed away-email destination"
   [ "$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field reach_channels)" = email ] \
     || fail "configured Pi posture did not record email reach"
   entered=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field entered_epoch)
@@ -161,8 +192,8 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
   [ -z "$(find "$inbox" -maxdepth 1 -name '*.note' -print -quit 2>/dev/null)" ] \
     || fail "untrusted mail created a duplicate inbox notification"
 
-  reply_body=$(printf 'FM-AFK-REPLY %s\nPlease merge the UI pull request\n\nFrom: owner@example.com\nSent: Tuesday, June 30, 2026 9:00 AM\nTo: owner@example.com\nSubject: Firstmate away update\n\nFM-AFK-REPLY %s\nRelease the API now' "$token1" "$token2")
-  out=$(message "$home" 101 'owner@example.com' 'Re: Firstmate away update' "$reply_body" 2>&1) \
+  reply_body=$(printf 'FM-AFK-REPLY %s\nPlease merge the UI pull request\n\nFrom: %s\nSent: Tuesday, June 30, 2026 9:00 AM\nTo: %s\nSubject: Firstmate away update\n\nFM-AFK-REPLY %s\nRelease the API now' "$token1" "$AFK_OWNER_EMAIL" "$AFK_OWNER_EMAIL" "$token2")
+  out=$(message "$home" 101 "$AFK_OWNER_EMAIL" 'Re: Firstmate away update' "$reply_body" 2>&1) \
     || fail "valid reply handoff errored: $out"
   assert_contains "$out" 'received 1 verified and 0 untrusted' 'matching sender and code are accepted'
   note=$(find "$inbox" -maxdepth 1 -name '*.note' -print -quit)
@@ -184,7 +215,7 @@ PY
     || fail "accepted code was not marked consumed"
 
   reply_body=$(printf 'FM-AFK-REPLY %s\nrepeat answer' "$token1")
-  out=$(message "$home" 102 'owner@example.com' 'Re: Firstmate away update' "$reply_body" 2>&1) \
+  out=$(message "$home" 102 "$AFK_OWNER_EMAIL" 'Re: Firstmate away update' "$reply_body" 2>&1) \
     || fail "replayed code handoff errored: $out"
   assert_contains "$out" 'received 0 verified and 1 untrusted' 'a one-time code cannot be replayed'
 
@@ -212,7 +243,7 @@ test_unreadable_token_state_keeps_reply_retryable() {
   [ -n "$token" ] || fail "sent update omitted its reply token"
   printf '{invalid json\n' > "$home/state/afk-email/sent/1.json"
   reply_body=$(printf 'FM-AFK-REPLY %s\nanswer' "$token")
-  if out=$(message "$home" 301 'owner@example.com' 'Re: Firstmate away update' "$reply_body" 2>&1); then
+  if out=$(message "$home" 301 "$AFK_OWNER_EMAIL" 'Re: Firstmate away update' "$reply_body" 2>&1); then
     fail "unreadable token state was treated as an untrusted message: $out"
   fi
   assert_contains "$out" 'token state could not be checked; mail poll will retry' 'token-state failure keeps mail retryable'
@@ -602,7 +633,7 @@ test_over_limit_reply_is_explicitly_rejected() {
   [ -n "$token" ] || fail "sent update omitted its reply token"
   long_answer=$(python3 -c 'print("a" * 8001, end="")')
   reply_body=$(printf 'FM-AFK-REPLY %s\n%s' "$token" "$long_answer")
-  out=$(message "$home" 401 'owner@example.com' 'Re: Firstmate away update' "$reply_body" 2>&1) \
+  out=$(message "$home" 401 "$AFK_OWNER_EMAIL" 'Re: Firstmate away update' "$reply_body" 2>&1) \
     || fail "over-limit reply could not be reported as rejected: $out"
   assert_contains "$out" 'reply in mail UID 401 rejected; answer exceeds 8000 characters' \
     'an over-limit answer is explicitly rejected'
@@ -625,7 +656,7 @@ test_reply_survives_crash_after_smtp_acceptance() {
   accepted_body="$home/state/accepted-body.txt"
   if FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
     FM_MAIL_USER=owner@example.com FM_MAIL_PASS=test-secret FM_IMAP_HOST=imap.example.test \
-    FM_SMTP_HOST=smtp.example.test FM_AFK_EMAIL_TO=owner@example.com \
+    FM_SMTP_HOST=smtp.example.test FM_AFK_EMAIL_TO=johnpoyser@gmail.com \
     FM_TEST_ACCEPTED_BODY="$accepted_body" python3 - "$REPO/bin/fm-afk-email.py" <<'PY'
 import importlib.util
 import os
@@ -677,7 +708,7 @@ PY
     || fail "the pending record did not retain the accepted reply token"
 
   reply_body=$(printf 'FM-AFK-REPLY %s\nPlease merge the UI pull request' "$token")
-  out=$(message "$home" 301 'owner@example.com' 'Re: Firstmate away update' "$reply_body" 2>&1) \
+  out=$(message "$home" 301 "$AFK_OWNER_EMAIL" 'Re: Firstmate away update' "$reply_body" 2>&1) \
     || fail "reply to ambiguously sent update errored: $out"
   assert_contains "$out" 'received 1 verified and 0 untrusted' 'a reply is accepted while its item is still pending'
   note=$(find "$home/state/inbox" -maxdepth 1 -name '*.note' -print -quit)
@@ -701,7 +732,7 @@ item['send_expires_epoch'] = 2
 json.dump(item, open(path, 'w'))
 PY
   reply_body=$(printf 'FM-AFK-REPLY %s\nexpired pending answer' "$expired_token")
-  out=$(message "$home" 303 'owner@example.com' 'Re: Firstmate away update' "$reply_body" 2>&1) \
+  out=$(message "$home" 303 "$AFK_OWNER_EMAIL" 'Re: Firstmate away update' "$reply_body" 2>&1) \
     || fail "expired pending-token reply errored: $out"
   assert_contains "$out" 'received 0 verified and 1 untrusted' 'pending tokens use the same expiry check as sent tokens'
   used_before=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["used_epoch"])' "$pending")
@@ -712,7 +743,7 @@ PY
   used_after=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["used_epoch"])' "$pending")
   [ "$used_before" = "$used_after" ] || fail "sent transition lost the pending item's consumed state"
   reply_body=$(printf 'FM-AFK-REPLY %s\nreplay after sent transition' "$token")
-  out=$(message "$home" 302 'owner@example.com' 'Re: Firstmate away update' "$reply_body" 2>&1) \
+  out=$(message "$home" 302 "$AFK_OWNER_EMAIL" 'Re: Firstmate away update' "$reply_body" 2>&1) \
     || fail "replayed reply errored: $out"
   assert_contains "$out" 'received 0 verified and 1 untrusted' 'a pending-token reply remains single-use after the sent transition'
   pass "reply tokens survive the SMTP-accepted, sent-record-crash window"
@@ -738,10 +769,10 @@ item['expires_epoch'] = 2
 json.dump(item, open(path, 'w'))
 PY
   reply_body=$(printf 'FM-AFK-REPLY %s\nlate answer' "$token")
-  out=$(message "$home" 201 'owner@example.com' 'reply' "$reply_body" 2>&1) \
+  out=$(message "$home" 201 "$AFK_OWNER_EMAIL" 'reply' "$reply_body" 2>&1) \
     || fail "expired code handoff errored: $out"
   assert_contains "$out" 'received 0 verified and 1 untrusted' 'expired code is rejected'
-  out=$(message "$home" 202 'owner@example.com' 'reply' $'FM-AFK-REPLY FM-AFK-AAAAAAAAAAAAAAAA\nunknown answer' 2>&1) \
+  out=$(message "$home" 202 "$AFK_OWNER_EMAIL" 'reply' $'FM-AFK-REPLY FM-AFK-AAAAAAAAAAAAAAAA\nunknown answer' 2>&1) \
     || fail "unknown code handoff errored: $out"
   assert_contains "$out" 'received 0 verified and 1 untrusted' 'unknown code is rejected'
   pass "expired and unknown correlation codes remain untrusted"
@@ -806,7 +837,7 @@ PY
   pass "short configured secrets are redacted before persistence and delivery"
 }
 
-test_unconfigured_and_non_pi_retain_existing_behavior
+test_destination_is_required_for_pi_entry
 # The active feature is tested with synthetic mail and a local fake SMTP command; no network or mailbox is used.
 test_batched_mail_redacts_secrets_and_replies_are_item_bound
 test_unreadable_token_state_keeps_reply_retryable

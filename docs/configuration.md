@@ -1398,7 +1398,8 @@ The mail plane (`bin/fm-mail.sh`) reads unseen IMAP messages and sends one SMTP 
 
 
 **Polling and delivery guarantees**
-Its `poll` command surfaces each new message as a durable `check: mail <uid>` wake, which is also what the standing received-mail check runs each watcher cycle.
+Its `poll` command surfaces each eligible message as a durable `check: mail <uid>` wake, which is also what the standing received-mail check runs each watcher cycle.
+During an active Pi away-email posture, only mail from `johnpoyser@gmail.com` with Google's Gmail-aligned DKIM or DMARC pass is eligible; other or unauthenticated messages are silently cursor-recorded without body reads or wakes.
 Poll emission is exactly-once-recovering: a published wake always carries a durable journal record, and a poll interrupted before recording its uid is healed from that journal, so inbound mail is never silently missed.
 
 A duplicate wake is possible if the process is killed between the queue append and the journal write and the drain acknowledges that row before the next poll heals it, or under a triple write fault that leaves a queued row with no durable record; neither case drops mail.
@@ -1411,18 +1412,23 @@ STARTTLS and port 587 are not supported.
 It is off unless the home's gitignored `.env` provides the connection values.
 This section is the single owner of the mail-plane configuration schema; for direct invocations, environment values override `.env`, matching the Relay contract.
 
-Required, in the home's gitignored `.env`:
+Required mail transport values, in the home's gitignored `.env`:
 
 ```sh
 FM_MAIL_USER=   # IMAP/SMTP login
 FM_MAIL_PASS=   # IMAP/SMTP password
 FM_IMAP_HOST=   # IMAP server hostname
 FM_SMTP_HOST=   # SMTP server hostname
-FM_AFK_EMAIL_TO=   # optional captain destination; enables Pi away email only when all four mail settings above are present
+```
+
+The Pi `/afk` destination is separate from general mail transport and, when using that setup, must be present exactly as shown; a missing or different value refuses Pi `/afk` entry:
+
+```sh
+FM_AFK_EMAIL_TO=johnpoyser@gmail.com
 ```
 
 `FM_IMAP_PORT` (default 993), `FM_SMTP_PORT` (default 465), `FM_MAIL_TIMEOUT` (default 20 seconds), and `FM_MAIL_POLL_MAX_WAKES` (default 20, valid 1..200) are optional.
-Away-email setup, reply-code handling, and its authority limit are documented in [Away email on Pi](afk-email.md).
+Pi away-email setup, its fixed destination, authenticated reply checks, and authority limit are documented in [Away email on Pi](afk-email.md).
 The per-poll wake cap bounds the wakes of one `poll` run; header fetches scan a larger bounded window of new unseen uids plus already-surfaced retry-set uids, so a flood or large backlog still makes bounded progress every poll, keeping the durable wake queue bounded without ever dropping mail.
 
 **Unfetchable headers**

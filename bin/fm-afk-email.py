@@ -29,6 +29,7 @@ SEND_INTERVAL = 60
 MAX_BATCH_ITEMS = 25
 MAX_BATCH_BYTES = 24000
 MAX_REPLY_CHARS = 8000
+OWNER_EMAIL = "johnpoyser@gmail.com"
 TOKEN_RE = re.compile(r"^FM-AFK-[A-Za-z0-9_-]{16}$")
 NOTE_ID_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9._-]+$")
 REPLY_LINE_RE = re.compile(r"^FM-AFK-REPLY (FM-AFK-[A-Za-z0-9_-]{16})$")
@@ -48,6 +49,7 @@ def mail_configuration():
     addresses = getaddresses([recipient])
     if (
         not recipient
+        or recipient != OWNER_EMAIL
         or not EMAIL_RE.fullmatch(recipient)
         or len(addresses) != 1
         or addresses[0][1].casefold() != recipient.casefold()
@@ -747,6 +749,9 @@ def receive_messages(messages, posture, config):
 
 def main():
     command = sys.argv[1] if len(sys.argv) > 1 else ""
+    if command == "destination":
+        print(os.environ.get("FM_AFK_EMAIL_TO", "").strip())
+        return 0
     if command == "configured":
         config = mail_configuration()
         if not config:
@@ -761,7 +766,7 @@ def main():
         return receive_batch()
     if command == "verify-note" and len(sys.argv) == 3:
         return verify_note(sys.argv[2])
-    print("usage: fm-afk-email.py configured|queue-unprocessed|flush|receive-batch|verify-note <id>", file=sys.stderr)
+    print("usage: fm-afk-email.py destination|configured|queue-unprocessed|flush|receive-batch|verify-note <id>", file=sys.stderr)
     return 2
 
 
