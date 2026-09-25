@@ -1231,14 +1231,30 @@ if [ -r "/proc/$$/stat" ]; then
   cp -R "$REMOTE_ROOT" "$STEP_ROOT"
   mkdir -p "$STEP_HOME"
   chmod 700 "$STEP_HOME"
-  # Supervisors and serving children only; the path travels in the environment
-  # so the counting process's own command line never matches itself.
+  # Independent worker trees: top-level supervisors, meaning worker processes
+  # whose parent is not itself a worker. A worker's forked subshells carry its
+  # command line for a moment, so counting every matching process is racy; a
+  # rival started beside the live worker is always a new top-level supervisor.
+  # The path travels in the environment so awk never matches its own argv.
   step_worker_count() {
-    ps -u "$(id -u)" -o command= 2>/dev/null \
+    ps -u "$(id -u)" -o pid=,ppid=,command= 2>/dev/null \
       | STEP_WORKER="$STEP_ROOT/bin/fm-remote-job-worker.sh" awk '
-          { w = ENVIRON["STEP_WORKER"]; n = length($0) - length(w) }
-          substr($0, n + 1) == w || substr($0, n - 7) == w " --serve" { c++ }
-          END { print c + 0 }'
+          {
+            pid = $1; ppid = $2; cmd = $0
+            sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+/, "", cmd)
+            w = ENVIRON["STEP_WORKER"]
+            if (index(cmd, w) == 0) next
+            worker[pid] = 1
+            parent[pid] = ppid
+            # A supervisor runs the worker with no arguments, optionally
+            # behind the one interpreter token ps shows for a script.
+            head = substr(cmd, 1, length(cmd) - length(w))
+            if (substr(cmd, length(head) + 1) == w && head !~ / ./) supervisor[pid] = 1
+          }
+          END {
+            for (pid in supervisor) if (!(parent[pid] in worker)) c++
+            print c + 0
+          }'
   }
   (
     # shellcheck disable=SC2031 # The legacy-lock fixture's exports were confined to its subshell.
@@ -1246,7 +1262,7 @@ if [ -r "/proc/$$/stat" ]; then
     FM_REMOTE_JOB_TIMEOUT=10
     fm_remote_job_ensure_worker "$STEP_ROOT" "$STEP_HOME" || fail "$FM_REMOTE_JOB_ERROR"
     STEP_WORKER_PID=$(cat "$STEP_STATE/worker.pid")
-    [ "$(step_worker_count)" -eq 2 ] || fail "the clock-step fixture did not start one supervised worker"
+    [ "$(step_worker_count)" -eq 1 ] || fail "the clock-step fixture did not start one supervised worker"
     STEP_SIDE_EFFECT="$TMP_ROOT/clock-step-side-effect"
     fm_remote_job_stage "$STEP_HOME" "$STEP_ROOT" "$REMOTE_HOME" \
       fm-delay-job.sh 3 "$STEP_SIDE_EFFECT" < /dev/null > /dev/null
@@ -1264,7 +1280,7 @@ if [ -r "/proc/$$/stat" ]; then
     [ "$(cat "$STEP_STATE/worker.pid")" = "$STEP_WORKER_PID" ] \
       || fail "a wall-clock step made ensure replace the serving worker"
     sleep 1
-    [ "$(step_worker_count)" -eq 2 ] || fail "a wall-clock step made ensure start a second worker"
+    [ "$(step_worker_count)" -eq 1 ] || fail "a wall-clock step made ensure start a second worker"
     fm_remote_job_wait "$STEP_HOME" "$STEP_JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
     [ "$FM_REMOTE_JOB_EXIT" -eq 0 ] \
       || fail "the job running across a wall-clock step did not complete: $(cat "$FM_REMOTE_JOB_STDERR")"
@@ -1281,7 +1297,7 @@ if [ -r "/proc/$$/stat" ]; then
       || fail "ensure kept a stepped pre-upgrade worker running stale code"
     ! kill -0 -- "-$STEP_OLD_PGID" 2>/dev/null || fail "ensure left the stepped pre-upgrade worker alive"
     sleep 1
-    [ "$(step_worker_count)" -eq 2 ] || fail "replacing a stepped pre-upgrade worker left rival workers"
+    [ "$(step_worker_count)" -eq 1 ] || fail "replacing a stepped pre-upgrade worker left rival workers"
   ) || exit 1
   pass "a wall-clock step never makes a live Linux worker read as gone"
 else
