@@ -390,6 +390,9 @@ fm_pr_metadata_identity_parse() {
         ;;
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
         ;;
+      merge_waived_check=*)
+        [ -n "${line#merge_waived_check=}" ] || post_pr_invalid=1
+        ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
         ;;

@@ -20,13 +20,18 @@
 # --match-head-commit, so a push that lands between that read and the merge
 # fails the merge instead of landing commits nothing verified. Reading that
 # state needs gh and jq, and either one absent stops the merge before any
-# state is recorded. An attended --allow-red <check-name> may be passed once,
-# with the name as a separate argument; it waives only checks with that exact
-# name, still requires every other check green, and still binds the head. It is
-# refused while the away-posture record exists, and it never
+# state is recorded. An attended --allow-red <check-name> may be repeated,
+# with each name as a separate argument; it waives only checks whose exact name
+# was passed, still requires every other check green, and still binds the
+# head. It is refused while the away-posture record exists, and it never
 # applies on GitLab, where a merge already requires the head pipeline to have
-# succeeded. After gh returns success, GitHub's live state is read back and
-# accepted only when the pull request is merged or in the merge queue. gh's
+# succeeded. Every check a waiver actually covered is named in this script's
+# verification line and, once the forge accepts the merge, persisted as one
+# merge_waived_check=<name> line in the task's meta beside the merge-authority
+# record, so an authorized red merge is never recorded as a fully green one; a
+# waiver that covered no red check is reported and recorded nowhere, because
+# nothing was waived. After gh returns success, GitHub's live state is read back
+# and accepted only when the pull request is merged or in the merge queue. gh's
 # GraphQL API supplies that queue-aware read; when that read fails, gh-axi's
 # own view still proves a landed merge, and every outcome it cannot prove
 # refuses, reporting the failed gh read and naming both failed reads when the
@@ -102,7 +107,7 @@
 # explicit captain instruction and never skips the live green check, the
 # away-record read, or a captain hold.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [-- <extra forge merge args>]
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>]... [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
@@ -174,7 +179,6 @@ while [ "$#" -gt 0 ]; do
       ;;
     --allow-red)
       [ -n "${2:-}" ] || { echo "error: --allow-red requires a check name" >&2; exit 2; }
-      [ "${#ALLOW_RED[@]}" -eq 0 ] || { echo "error: --allow-red may be specified only once" >&2; exit 2; }
       ALLOW_RED+=("$2")
       shift 2
       ;;
@@ -403,6 +407,10 @@ fi
 # the merge request. Sets FM_PR_MERGE_HEAD to the verified head on success and
 # returns non-zero after reporting every condition that failed.
 FM_PR_MERGE_HEAD=
+# The checks a live read reported red and the caller waived by exact name, in
+# the order the read reported them. Empty on every merge that was actually
+# green, so it names what a merge landed on rather than what was asked for.
+FM_PR_WAIVED_CHECKS=()
 FM_PR_GITLAB_ASYNC_CONFIGURED=false
 gitlab_verify_mergeable() {
   local json fields line
@@ -585,7 +593,7 @@ github_checks_not_green() {
 # Pre-merge conditions for a GitHub pull request, read from one live view.
 # Sets FM_PR_MERGE_HEAD to the verified head on success.
 github_verify_mergeable() {
-  local json fields line red name covered
+  local json fields line red name check covered recorded waived=''
   local total=0 named=0 refusals=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
 
@@ -654,6 +662,7 @@ FIELDS
 "
 
   uncovered=''
+  FM_PR_WAIVED_CHECKS=()
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     covered=0
@@ -662,11 +671,19 @@ FIELDS
         [ "$check" = "$name" ] && covered=1
       done
     fi
-    [ "$covered" -eq 1 ] || {
+    if [ "$covered" -eq 1 ]; then
+      recorded=0
+      if [ "${#FM_PR_WAIVED_CHECKS[@]}" -gt 0 ]; then
+        for check in "${FM_PR_WAIVED_CHECKS[@]}"; do
+          [ "$check" = "$name" ] && recorded=1
+        done
+      fi
+      [ "$recorded" -eq 1 ] || FM_PR_WAIVED_CHECKS+=("$name")
+    else
       refusals="$refusals  - check '$name' is not green
 "
       uncovered="${uncovered:+$uncovered, }$name"
-    }
+    fi
   done <<EOF
 $red
 EOF
@@ -677,8 +694,16 @@ EOF
     [ -z "$uncovered" ] || printf 'error: these checks are not green: %s\n' "$uncovered" >&2
     return 1
   fi
-  printf 'verified: %s is open and mergeable, with every required check green at head %s\n' \
-    "$URL" "$live_head" >&2
+  if [ "${#FM_PR_WAIVED_CHECKS[@]}" -gt 0 ]; then
+    for name in "${FM_PR_WAIVED_CHECKS[@]}"; do
+      waived="${waived:+$waived, }'$name'"
+    done
+    printf 'verified: %s is open and mergeable at head %s, with every other required check green and these red checks explicitly waived: %s\n' \
+      "$URL" "$live_head" "$waived" >&2
+  else
+    printf 'verified: %s is open and mergeable, with every required check green at head %s\n' \
+      "$URL" "$live_head" >&2
+  fi
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITHUB_BASE=$base
 }
@@ -952,20 +977,70 @@ require_current_away_authority() {
   fi
 }
 
+# One merge_waived_check=<name> line per red check this run waived, replacing
+# any the task carries from an earlier accepted merge of the same canonical PR
+# and clearing them when this merge waived nothing, so the recorded set always
+# describes the merge the forge just accepted rather than an earlier one.
+# The task's meta is rewritten atomically under the merge metadata lock its
+# caller already holds, and the identity the authority record is persisted
+# against is revalidated on the published file, so a waived merge can never be
+# recorded as an unqualified green one. A name reaches here only by matching a
+# check the live read reported red, so it is non-empty and single-line.
+record_waived_red_checks() {
+  local tmp='' line name status=0 state_device
+  if [ "${#FM_PR_WAIVED_CHECKS[@]}" -eq 0 ] \
+    && ! grep -q '^merge_waived_check=' "$META"; then
+    return 0
+  fi
+  state_device=$(fm_pr_file_device "$STATE") || return 1
+  fm_pr_private_file_valid "$META" 600 "$state_device" || return 1
+  tmp=$(mktemp "$STATE/.fm-merge-waived.XXXXXX") || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      merge_waived_check=*) ;;
+      *) printf '%s\n' "$line" >> "$tmp" || status=1 ;;
+    esac
+  done < "$META"
+  if [ "$status" -eq 0 ] && [ "${#FM_PR_WAIVED_CHECKS[@]}" -gt 0 ]; then
+    for name in "${FM_PR_WAIVED_CHECKS[@]}"; do
+      printf 'merge_waived_check=%s\n' "$name" >> "$tmp" || status=1
+    done
+  fi
+  if [ "$status" -eq 0 ]; then
+    chmod 0600 "$tmp" \
+      && fm_pr_private_file_valid "$tmp" 600 "$state_device" \
+      && fm_pr_metadata_identity_parse "$tmp" \
+      && [ "$FM_PR_META_URL" = "$URL" ] \
+      && fm_pr_regular_destination_on_device_or_absent "$META" "$state_device" \
+      && mv -f -- "$tmp" "$META" \
+      || status=1
+  fi
+  if [ "$status" -eq 0 ]; then
+    tmp=''
+    fm_pr_private_file_valid "$META" 600 "$state_device" || status=1
+  fi
+  [ -z "$tmp" ] || rm -f -- "$tmp"
+  return "$status"
+}
+
 persist_accepted_merge_authority() {
-  local status=0
+  local status=0 failure='its merge authority could not be persisted'
   MERGE_META_LOCK=$(fm_meta_lock_path "$META") || return 1
   fm_lock_acquire_wait "$MERGE_META_LOCK" || return 1
-  fm_merge_authority_persist "$STATE" "$ID" "$META" \
-    "$PROVIDER" "$PR_HOST" "$PR_PATH" "$PR_NUMBER" "$FM_PR_MERGE_AUTHORITY" \
-    || status=1
+  if ! record_waived_red_checks; then
+    status=1
+    failure='the red checks it waived could not be recorded'
+  elif ! fm_merge_authority_persist "$STATE" "$ID" "$META" \
+    "$PROVIDER" "$PR_HOST" "$PR_PATH" "$PR_NUMBER" "$FM_PR_MERGE_AUTHORITY"; then
+    status=1
+  fi
   fm_lock_release "$MERGE_META_LOCK" || status=1
   MERGE_META_LOCK=
   if [ "$status" -eq 0 ]; then
     return 0
   fi
-  printf 'actionable: the forge accepted the merge request for %s but its merge authority could not be persisted; the merge poll remains armed\n' \
-    "$URL" >&2
+  printf 'actionable: the forge accepted the merge request for %s but %s; the merge poll remains armed\n' \
+    "$URL" "$failure" >&2
   return 1
 }
 

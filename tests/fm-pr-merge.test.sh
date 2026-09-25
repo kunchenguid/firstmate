@@ -2722,7 +2722,7 @@ test_allow_red_is_refused_while_away() {
   pass "fm-pr-merge rechecks away presence before an attended red merge"
 }
 
-test_allow_red_requires_one_separate_name() {
+test_allow_red_requires_a_separate_name() {
   local case_dir rc head
   head=afafafafafafafafafafafafafafafafafafafaf
 
@@ -2738,20 +2738,94 @@ test_allow_red_requires_one_separate_name() {
   expect_code 2 "$rc" "github-allow-red-equals: equals form must be refused"
   assert_no_grep 'pr merge' "$case_dir/gh.log" \
     "github-allow-red-equals: gh pr merge ran for the equals alias"
+  pass "fm-pr-merge requires each red-check waiver as a separate named argument"
+}
 
-  case_dir=$(make_case github-allow-red-duplicate)
+test_allow_red_accepts_multiple_separately_named_checks() {
+  local case_dir head url
+  head=b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0
+  url=https://github.com/example/repo/pull/88
+  case_dir=$(make_case github-allow-red-multiple)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" "$head"
-  write_github_red_json "$case_dir" "$head" lint
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run lint COMPLETED FAILURE 2026-01-01T00:00:01Z)" \
+    "$(check_run unit COMPLETED FAILURE 2026-01-01T00:00:01Z)" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:01Z)"
+
+  run_pr_merge "$case_dir" task-x1 "$url" \
+    --allow-red lint --allow-red unit \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-allow-red-multiple: named waivers should merge"$'\n'"$(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 88 example/repo --squash
+  grep -qxF "pr=$url" "$case_dir/state/task-x1.meta" \
+    || fail "github-allow-red-multiple: the guarded path did not record the PR"
+  [ -f "$case_dir/state/task-x1.merge-authority" ] \
+    || fail "github-allow-red-multiple: the guarded path did not record merge authority"
+  assert_grep "these red checks explicitly waived: 'lint', 'unit'" "$case_dir/stderr" \
+    "github-allow-red-multiple: the verification line did not name the waived checks"
+  assert_no_grep 'with every required check green at head' "$case_dir/stderr" \
+    "github-allow-red-multiple: a waived merge still claimed every required check green"
+  grep -qxF 'merge_waived_check=lint' "$case_dir/state/task-x1.meta" \
+    || fail "github-allow-red-multiple: the waived check lint was not recorded"$'\n'"$(cat "$case_dir/state/task-x1.meta")"
+  grep -qxF 'merge_waived_check=unit' "$case_dir/state/task-x1.meta" \
+    || fail "github-allow-red-multiple: the waived check unit was not recorded"$'\n'"$(cat "$case_dir/state/task-x1.meta")"
+  pass "fm-pr-merge accepts multiple separately named red-check waivers and records the merge"
+}
+
+# The record is evidence of what the merge landed on, not of what was asked
+# for: a waiver that covered no red check leaves the green claim intact and
+# writes nothing, and the durable waiver set replaces itself rather than
+# accumulating names across runs.
+test_a_waived_merge_records_only_the_checks_it_waived() {
+  local case_dir head url
+  head=b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2
+  url=https://github.com/example/repo/pull/90
+  case_dir=$(make_case github-allow-red-unused)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run ci COMPLETED SUCCESS 2026-01-01T00:00:01Z)"
+  printf '%s\n' 'merge_waived_check=stale' >> "$case_dir/state/task-x1.meta"
+
+  run_pr_merge "$case_dir" task-x1 "$url" --allow-red lint \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-allow-red-unused: a green pull request should merge"$'\n'"$(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 90 example/repo --squash
+  assert_grep 'with every required check green at head' "$case_dir/stderr" \
+    "github-allow-red-unused: a green merge did not report every required check green"
+  assert_no_grep 'explicitly waived' "$case_dir/stderr" \
+    "github-allow-red-unused: an unused waiver was reported as waived"
+  ! grep -q '^merge_waived_check=' "$case_dir/state/task-x1.meta" \
+    || fail "github-allow-red-unused: an unused waiver was recorded"$'\n'"$(cat "$case_dir/state/task-x1.meta")"
+  [ -f "$case_dir/state/task-x1.merge-authority" ] \
+    || fail "github-allow-red-unused: the guarded path did not record merge authority"
+  pass "fm-pr-merge records a red-check waiver only for a check it actually waived"
+}
+
+test_allow_red_refuses_an_unlisted_red_check() {
+  local case_dir rc head
+  head=b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1
+  case_dir=$(make_case github-allow-red-unlisted)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run lint COMPLETED FAILURE 2026-01-01T00:00:01Z)" \
+    "$(check_run unit COMPLETED FAILURE 2026-01-01T00:00:01Z)" \
+    "$(check_run security COMPLETED FAILURE 2026-01-01T00:00:01Z)"
+
   set +e
-  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/88 \
-    --allow-red lint --allow-red unit > "$case_dir/stdout" 2> "$case_dir/stderr"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/89 \
+    --allow-red lint --allow-red unit \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 2 "$rc" "github-allow-red-duplicate: duplicate waiver must be refused"
+  expect_code 1 "$rc" "github-allow-red-unlisted: an unlisted red check must refuse"
+  assert_grep "check 'security' is not green" "$case_dir/stderr" \
+    "github-allow-red-unlisted: the unlisted red check was not named"
   assert_no_grep 'pr merge' "$case_dir/gh.log" \
-    "github-allow-red-duplicate: gh pr merge ran for duplicate waivers"
-  pass "fm-pr-merge accepts exactly one separately named red-check waiver"
+    "github-allow-red-unlisted: gh pr merge ran with an unlisted red check"
+  pass "fm-pr-merge still refuses an unlisted red check beside multiple named waivers"
 }
 
 test_away_record_permits_any_green_merge_under_away_authority() {
@@ -3244,7 +3318,10 @@ test_supersession_never_crosses_check_names
 test_undated_runs_never_supersede
 test_allow_red_still_waives_only_the_current_failure
 test_allow_red_is_refused_while_away
-test_allow_red_requires_one_separate_name
+test_allow_red_requires_a_separate_name
+test_allow_red_accepts_multiple_separately_named_checks
+test_allow_red_refuses_an_unlisted_red_check
+test_a_waived_merge_records_only_the_checks_it_waived
 test_away_record_permits_any_green_merge_under_away_authority
 test_away_branch_actor_merges_green_under_the_record
 test_away_branch_refuses_when_record_archived_during_preflight
