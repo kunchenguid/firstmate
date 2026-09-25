@@ -267,7 +267,7 @@ make_remote_ledger_fleet() {  # <parent-home> <count>
 }
 
 make_remote_ledger_ssh() {  # <dir>
-  local dir=$1 fb="$1/fakebin"
+  local fb="$1/fakebin"
   mkdir -p "$fb"
   cat > "$fb/fake-ssh" <<'SH'
 #!/usr/bin/env bash
@@ -1211,7 +1211,7 @@ test_reconcile_requested_hold_leaves_captains_call() {
 
 ## Done
 EOF
-  printf 'schema=fm-reconcile-request.v1\ntask=checking-call\nrequested=2026-07-14T09:30:00Z\nsource=herdr-firstmate-flow Captain Deck\n' \
+  printf 'schema=fm-reconcile-request.v1\ntask=checking-call\nrequested=2026-07-14T09:30:00Z\nsource=herdr-firstmate-flow captain'\''s deck\n' \
     > "$home/state/reconcile-requests/checking-call.request"
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json)

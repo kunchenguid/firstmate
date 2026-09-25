@@ -66,7 +66,7 @@
 # DURABLE DECISION CARDS. `build` also writes every surviving decision card to
 # state/decision-cards/<task>.json (schema fm-decision-card.v1), because the
 # board page is rebuilt from scratch and a card absent from the newest payload
-# would otherwise be lost to later readers such as the Captain Deck. The stored
+# would otherwise be lost to later readers such as the captain's deck. The stored
 # record is the EFFECTIVE card, reconcile choice included. A record whose task
 # is definitely no longer an open captain call is pruned; an absent or
 # unestablished task keeps its record, because a card wrongly hidden is worse
