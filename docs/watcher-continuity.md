@@ -446,6 +446,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - Decision-only OPEN DECISIONS recovery.
 - Interrupted handling replay.
 - Generation-bound acknowledgement.
+- The bounded reopen of a stuck unacknowledged episode, with and without queued rows, and a genuine acknowledgement with a queued row that still resurfaces.
 - A persistent live successor after recovery.
 - An idle live Lavish source that stays quiet until its real result wakes promptly.
 - An append that reopens an announced empty recovery.
