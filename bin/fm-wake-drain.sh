@@ -722,7 +722,7 @@ if [ -n "$ACK_THROUGH" ]; then
         ;;
     esac
   else
-    fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
+    fm_recovery_marker_snapshot "$RECOVERY_MARKER" "$ACK_GENERATION" || exit 1
     RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
     if [ "${RECOVERY_MARKER_TOKEN##*:}" != "$ACK_GENERATION" ]; then
       RECOVERY_ACK_MOVED=true

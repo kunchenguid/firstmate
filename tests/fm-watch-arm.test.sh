@@ -1176,6 +1176,40 @@ test_genuinely_acked_recovery_with_queued_row_still_resurfaces() {
   pass "watch-arm: a genuinely acknowledged episode with a queued row still resurfaces on re-arm"
 }
 
+# A genuine session ack that lands after the reopen bound already settled the
+# same generation, while a newer row is still queued, retires the bound-settle
+# distinction, so the next arm re-announces that newer row (#2065 path).
+test_late_genuine_ack_after_bound_settle_still_resurfaces_queued_row() {
+  local dir home state fakebin now
+  dir=$(make_case late-ack-after-settle)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  printf 'acked:downtime:settledgen1\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+  printf 'settledgen1\n' > "$state/.watcher-down.reopen-settled"
+  now=$(date +%s)
+  {
+    printf '%s\t1\tcheck\tlate-ack-one\tcheck: late ack row one\n' "$now"
+    printf '%s\t2\tcheck\tlate-ack-two\tcheck: late ack row two\n' "$now"
+  } > "$state/.wake-queue"
+  printf '2\n' > "$state/.wake-queue.seq"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through 1 --recovery-generation settledgen1 \
+    > "$dir/ack.out" 2>&1 \
+    || fail "late genuine ack after a bound settle failed: $(cat "$dir/ack.out")"
+  grep "$(printf '\tcheck\tlate-ack-two\t')" "$state/.wake-queue" >/dev/null \
+    || fail "late genuine ack dropped the newer queued row"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/arm.out"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" \
+    || fail "a late genuine ack after a bound settle left the newer queued row unresurfaced: $(cat "$dir/arm.out")"
+  grep -F 'check: rearm-resurface' "$dir/arm.out" >/dev/null \
+    || fail "a late genuine ack after a bound settle did not re-announce the newer queued row: $(cat "$dir/arm.out")"
+  pass "watch-arm: a genuine ack after a bound settle still resurfaces a newer queued row on re-arm"
+}
+
 test_stuck_unacked_recovery_settles_after_bounded_reopen() {
   check_stuck_unacked_recovery_settles bounded-reopen 0
   pass "watch-arm: a stuck unacknowledged recovery episode settles after a bounded number of reopens instead of looping forever"
@@ -1196,6 +1230,7 @@ test_reaper_stops_a_tracked_watcher
 test_stuck_unacked_recovery_settles_after_bounded_reopen
 test_stuck_unacked_recovery_with_queued_rows_stays_up_after_settling
 test_genuinely_acked_recovery_with_queued_row_still_resurfaces
+test_late_genuine_ack_after_bound_settle_still_resurfaces_queued_row
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_rearm_resurfaces_durable_queue_and_remote_open_decision
 test_slow_rearm_recovery_is_still_surfaced

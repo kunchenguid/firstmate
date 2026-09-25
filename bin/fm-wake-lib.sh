@@ -742,12 +742,19 @@ _fm_recovery_marker_begin_handling() {
   fm_lock_release "$lock"
 }
 
+# With an acknowledged generation, a snapshot that still names it also retires
+# the reopen bound's settle distinction: a genuine ack that leaves newer rows
+# queued must keep the acked-plus-queue re-announce on the next arm.
 fm_recovery_marker_snapshot() {
-  local marker=$1 lock
+  local marker=$1 acked_generation=${2:-} lock
   FM_RECOVERY_MARKER_TOKEN=
   lock="${marker}.lock"
   fm_lock_acquire_wait "$lock" || return 1
   fm_recovery_marker_read "$marker" || true
+  if [ -n "$acked_generation" ] && [ -n "$FM_RECOVERY_MARKER_TOKEN" ] \
+    && [ "${FM_RECOVERY_MARKER_TOKEN##*:}" = "$acked_generation" ]; then
+    rm -f -- "${marker}.reopen-count" "${marker}.reopen-settled" 2>/dev/null || true
+  fi
   fm_lock_release "$lock"
 }
 
