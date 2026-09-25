@@ -203,6 +203,7 @@ Do not use source grep, source snapshots, or abstract syntax tree shape as a sub
 
 When environment scenarios, deployment, rollback, or monitoring are in accepted scope, derive them from the same invariants and compatibility boundaries.
 State scenario preconditions, input, action, observable evidence, forbidden side effects, pass criteria, cleanup owner, and recovery path.
+Use disposable external resources when a scenario mutates another system, and exclude credentials and high-cardinality business payloads from monitoring.
 Separate automated claims from claims requiring environment or production observation.
 
 Use code blocks only when exact syntax, types, optionality, cardinality, ordering, or error behavior matters.
