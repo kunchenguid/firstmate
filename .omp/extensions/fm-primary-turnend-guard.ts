@@ -504,6 +504,10 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
   return runChecker("fm-cd-pretool-check.sh", command);
 }
 
+function runJevGuard(command: string): Promise<{ code: number; stderr: string }> {
+  return runChecker("fm-jev-guard.sh", command);
+}
+
 export default function (pi: ExtensionAPI) {
   let sessionstartGeneration: SessionstartGeneration | null = null;
   let sessionstartExitListenerRegistered = false;
@@ -587,6 +591,10 @@ export default function (pi: ExtensionAPI) {
     const cdResult = await runCdCheck(command);
     if (cdResult.code === 2) {
       return { block: true, reason: cdResult.stderr.trim() || "denied by the cd-guard PreToolUse seatbelt" };
+    }
+    const jevResult = await runJevGuard(command);
+    if (jevResult.code === 2) {
+      return { block: true, reason: jevResult.stderr.trim() || "denied by the Jev dynamic delegation guardrail" };
     }
     const result = await runPretoolCheck(command);
     if (result.code !== 2) return {};
