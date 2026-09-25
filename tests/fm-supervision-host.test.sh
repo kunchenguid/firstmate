@@ -596,18 +596,20 @@ test_park_boundary_ends_the_park_before_the_hook_timeout() {
 # turn bound and grace, read off the host's own start record), so the second
 # close can never take a turn of its own on any machine speed.
 test_park_boundary_holds_under_back_to_back_closes() {
-  # Not pass margins: the held design needs the first turn to start within
-  # park - turn - grace (60s) of the host's start, which a loaded host takes
-  # most of, and a turn bound beyond that hold plus the stub's work after
-  # release, so the product never kills the held turn.
-  local home deadline park=151 turn=90 grace=1
+  # Derived, not pass margins: the first turn must start within the refusal
+  # window's opening, park - turn - grace, which keeps the 16s this case always
+  # gave the first turn to start. The held turn can last up to those 16s plus
+  # the stub's report work after release, which the 3s turn bound always
+  # covered, so turn = 16 + 3 and the product never kills the held turn; then
+  # park = 16 + turn + grace.
+  local home deadline park=36 turn=19 grace=1
   home=$(make_home boundary-busy away)
   echo held > "$home/stub-mode"
   mkfifo "$home/stub-release"
   FM_SUPERVISION_HOST_PARK_SECONDS=$park FM_SUPERVISION_HOST_TURN_TIMEOUT=$turn FM_SUPERVISION_ENGINE_GRACE=$grace start_host "$home"
   wait_until 150 watcher_live "$home" || fail "boundary-busy: the host never started a watcher cycle: $(cat "$home/host.out")"
   append_status "$home" 'the first of many'
-  wait_until 800 sh -c '[ -e "$1/engine-call.1" ] || [ -s "$1/host.rc" ]' _ "$home" \
+  wait_until 450 sh -c '[ -e "$1/engine-call.1" ] || [ -s "$1/host.rc" ]' _ "$home" \
     || fail "boundary-busy: the host never started the first turn: $(cat "$home/host.out" "$home/state/.supervision-host.log" 2>/dev/null)"
   [ -e "$home/engine-call.1" ] \
     || fail "boundary-busy: the host exited without starting the first turn: $(cat "$home/host.out" "$home/state/.supervision-host.log" 2>/dev/null)"
@@ -620,11 +622,11 @@ test_park_boundary_holds_under_back_to_back_closes() {
     '$2 == "start" { g = $3; sub(/^gen=host-[0-9]+-/, "", g); printf "%d\n", g + window; exit }' \
     "$home/state/.supervision-host.log")
   case "$deadline" in ''|*[!0-9]*) fail "boundary-busy: the ledger has no start record" ;; esac
-  wait_until 600 sh -c '[ "$(date +%s)" -ge "$1" ]' _ "$deadline" \
+  wait_until 450 sh -c '[ "$(date +%s)" -ge "$1" ]' _ "$deadline" \
     || fail "boundary-busy: the refusal window never opened"
   exec 3<> "$home/stub-release"
   printf 'release\n' >&3
-  wait_until 900 host_exited "$home" \
+  wait_until 450 host_exited "$home" \
     || fail "the host kept handling back-to-back closes past its park boundary: $(cat "$home/state/.supervision-host.log")"
   exec 3>&-
   ! grep -q '	failed	' "$home/state/.supervision-host.log" \
@@ -640,14 +642,14 @@ test_park_boundary_holds_under_back_to_back_closes() {
 }
 
 test_park_boundary_rechecked_just_before_the_engine_turn() {
-  # Not pass margins: the close must be read within park - turn - grace
-  # (296s) of the host's start; the close, successor start, and prompt render
-  # are all real script chains whose sleeps stretch under load. Rendering the
-  # wake prompt runs after the successor cycle has started; the shim holds
-  # the render on a FIFO the test releases once the refusal window opens, so
-  # the pre-turn recheck must refuse on any machine speed. The snapshot
-  # proves the successor arm it started can be checked afterwards.
-  local home real_node pid deadline park=300 turn=3 grace=1
+  # Derived, not pass margins: the close must pass the arrival check within
+  # the refusal window's opening, park - turn - grace, which keeps the 10s
+  # this case always gave it; no turn runs, so the turn bound stays 3s.
+  # Rendering the wake prompt runs after the successor cycle has started; the
+  # shim holds the render on a FIFO the test releases once the refusal window
+  # opens, so the pre-turn recheck must refuse on any machine speed. The
+  # snapshot proves the successor arm it started can be checked afterwards.
+  local home real_node pid deadline park=14 turn=3 grace=1
   home=$(make_home boundary-late away)
   real_node=$(command -v node)
   mkfifo "$home/render-release"
@@ -660,11 +662,10 @@ fi
 exec "$real_node" "\$@"
 SH
   chmod +x "$home/fakebin/node"
-  FM_SUPERVISION_HOST_PARK_SECONDS=$park FM_SUPERVISION_HOST_TURN_TIMEOUT=$turn FM_SUPERVISION_ENGINE_GRACE=$grace \
-  FM_SUPERVISION_HOST_READY_TIMEOUT=240 start_host "$home"
-  wait_until 1200 watcher_live "$home" || fail "boundary-late: the host never started a watcher cycle"
+  FM_SUPERVISION_HOST_PARK_SECONDS=$park FM_SUPERVISION_HOST_TURN_TIMEOUT=$turn FM_SUPERVISION_ENGINE_GRACE=$grace start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "boundary-late: the host never started a watcher cycle"
   append_status "$home" 'arrives with just enough margin'
-  wait_until 3600 sh -c '[ -s "$1/host-record-at-render" ] || [ -s "$1/host.rc" ]' _ "$home" \
+  wait_until 300 sh -c '[ -s "$1/host-record-at-render" ] || [ -s "$1/host.rc" ]' _ "$home" \
     || fail "boundary-late: the host neither reached the wake render nor exited: $(cat "$home/host.out" "$home/state/.supervision-host.log" 2>/dev/null)"
   [ -s "$home/host-record-at-render" ] \
     || fail "the close was stopped before the successor started: $(cat "$home/host.out")"
@@ -676,11 +677,11 @@ SH
     '$2 == "start" { g = $3; sub(/^gen=host-[0-9]+-/, "", g); printf "%d\n", g + window; exit }' \
     "$home/state/.supervision-host.log")
   case "$deadline" in ''|*[!0-9]*) fail "boundary-late: the ledger has no start record" ;; esac
-  wait_until 3000 sh -c '[ "$(date +%s)" -ge "$1" ]' _ "$deadline" \
+  wait_until 300 sh -c '[ "$(date +%s)" -ge "$1" ]' _ "$deadline" \
     || fail "boundary-late: the refusal window never opened"
   exec 3<> "$home/render-release"
   printf 'release\n' >&3
-  wait_until 1200 host_exited "$home" || fail "boundary-late: the host did not end its park"
+  wait_until 300 host_exited "$home" || fail "boundary-late: the host did not end its park"
   exec 3>&-
   assert_re '^signal: .*demo.status' "$home/host.out" "the close read at the boundary must reach main"
   [ "$(tail -n 1 "$home/host.out")" = "$(grep '^supervision-host: cycle boundary - ' "$home/host.out")" ] \
