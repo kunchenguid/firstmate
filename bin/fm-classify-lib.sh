@@ -1044,7 +1044,7 @@ status_open_decisions() {  # <status-file> [<kind>]
 # the worker's own latest event (last_worker_status_line), stands when nothing is open.
 # Actual run/pane evidence is still reconciled by fm-crew-state.sh.
 status_current_line() {  # <status-file> <kind>
-  local open key verb note current='' worker wverb mirror
+  local open key verb note current='' worker mirror
   open=$(status_open_decisions "$1" "$2")
   while IFS=$'\t' read -r key verb note; do
     case "$verb" in ?*) current="$verb [key=$key]: $note" ;; esac
@@ -1057,8 +1057,7 @@ EOF
     if status_is_captain_held "$current" \
       && _fm_hold_unstamped_match "$current" "$mirror"; then
       worker=$(last_worker_status_line "$1")
-      status_line_verb "$worker" wverb
-      case "$wverb" in done|failed) current=$worker ;; esac
+      [ -z "$worker" ] || current=$worker
     fi
   fi
   [ -n "$current" ] || current=$(last_worker_status_line "$1")

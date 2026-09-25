@@ -662,17 +662,19 @@ test_worker_event_after_standing_hold_mirror_replaces_it() {
   pass "a worker event after a standing hold mirror replaces it as the declared wait"
 }
 
-# A worker who already finished stays done while a later hold mirror stands,
+# A worker's own last line stays current while a later hold mirror stands,
 # and a transfer settled earlier does not hide a hold opened after it.
 test_done_past_standing_mirror_and_later_hold_after_settled_transfer() {
-  local dir f current
+  local dir f current line
   dir=$(case_dir done-past-mirror)
   f="$dir/lane.status"
-  printf 'done: report ready\n' > "$f"
-  printf 'captain-held [key=captain-hold-lane-1]: operator review\n' >> "$f"
-  current=$(status_current_line "$f" scout)
-  [ "$current" = 'done: report ready' ] \
-    || fail "a standing mirror displaced the worker's done line: '$current'"
+  for line in 'done: report ready' 'working: mid implementation' 'paused: waiting on upstream'; do
+    printf '%s\n' "$line" > "$f"
+    printf 'captain-held [key=captain-hold-lane-1]: operator review\n' >> "$f"
+    current=$(status_current_line "$f" scout)
+    [ "$current" = "$line" ] \
+      || fail "a standing mirror displaced the worker's line '$line': '$current'"
+  done
   printf 'needs-decision [key=route]: pick\n' > "$f"
   printf 'captain-held [key=route]: tracked by lane\n' >> "$f"
   printf 'resolved [key=route]: captain call answered by fm-captain-hold\n' >> "$f"
