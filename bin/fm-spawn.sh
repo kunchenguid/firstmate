@@ -1965,8 +1965,15 @@ launch_template() {
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # Pi's project-trust prompt is keyed by absolute path, and every treehouse
+  # worktree is a fresh path, so an unattended Pi worker otherwise opens ON that
+  # prompt and never reaches its brief. Worse, the prompt counts as pending
+  # composer text, so bin/fm-control.sh refuses to stop or relaunch the worker
+  # and only the captain can clear it by hand. --approve trusts project-local
+  # files for the one run, mirroring what codex, opencode, and omp already do at
+  # their own launch boundaries.
   pi | pi-signed)
-    printf '%s' '__PIBIN____PITUIMODE__'
+    printf '%s' '__PIBIN____PITUIMODE__ --approve'
     if [ "$kind" = secondmate ]; then
       printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
