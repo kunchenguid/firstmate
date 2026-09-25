@@ -605,6 +605,92 @@ test_classify_check_and_unknown_escalate() {
   pass "check + unknown escalate; heartbeat self-handles"
 }
 
+# An unrecognized wake escalates once per identity. Delivery acknowledges that
+# exact line; a later copy does not escalate again. A different identity still
+# escalates, and an identity that never flushed still escalates. Ordinary
+# escalation lines are not part of that acknowledgement. A new away session
+# clears the acknowledgements, so the same identity can fire again.
+test_unknown_wake_ack_suppresses_handled_identity() {
+  local dir state fakebin sent capture out
+  dir=$(make_supercase unknown-wake-ack)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "the first unknown wake was not handled"
+  [ ! -e "$state/.subsuper-unknown-acked" ] \
+    || fail "an undelivered unknown wake was acknowledged"
+
+  : > "$state/.subsuper-escalations"
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "an undelivered unknown wake did not escalate again after its buffer was lost"
+  [ "$(grep -c 'unknown wake: frobnicate: already-handled' "$state/.subsuper-escalations")" = 1 ] \
+    || fail "a lost undelivered unknown wake did not escalate again"
+
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "unknown-wake flush failed"
+  grep -F 'unknown wake: frobnicate: already-handled' "$state/.subsuper-unknown-acked" >/dev/null \
+    || fail "a delivered unknown wake was not acknowledged"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "delivered unknown wake stayed buffered"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "an acknowledged unknown wake was not handled"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "an acknowledged unknown wake escalated again: $(cat "$state/.subsuper-escalations")"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: brand-new" "$state" \
+    || fail "a new unknown wake was not handled"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in
+    "unknown wake: frobnicate: brand-new") ;;
+    *) fail "a new unknown wake did not escalate on its own: $out" ;;
+  esac
+  escalate_add "$state" "done: PR https://example.test/pull/9"
+  [ "$(grep -c 'done: PR https://example.test/pull/9' "$state/.subsuper-escalations")" = 1 ] \
+    || fail "an ordinary escalation was swallowed by unknown-wake acknowledgement"
+  escalate_add "$state" "done: PR https://example.test/pull/9"
+  [ "$(grep -c 'done: PR https://example.test/pull/9' "$state/.subsuper-escalations")" = 2 ] \
+    || fail "an ordinary escalation was deduped by unknown-wake acknowledgement"
+
+  bash -c '. "$1"; fm_afk_clear_stale_artifacts "$2"' _ "$AFK_START" "$state" \
+    || fail "clearing the away-session artifacts failed"
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
+    || fail "an unknown wake from a prior session was not handled"
+  [ "$(grep -c 'unknown wake: frobnicate: already-handled' "$state/.subsuper-escalations")" = 1 ] \
+    || fail "an unknown wake acknowledged in a prior away session did not fire again"
+  pass "a delivered unknown wake is acknowledged once per away session; a new one and ordinary escalations still fire"
+}
+
+# A digest that inject_msg already delivered must not be injected again just
+# because the acknowledgement write failed afterwards.
+test_unknown_wake_ack_failure_still_clears_delivered_digest() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase unknown-wake-ack-failure)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
+  mkdir -p "$state/.subsuper-unknown-acked"
+
+  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: ack-write-fails" "$state" \
+    || fail "the unknown wake was not handled"
+  escalate_add "$state" "done: PR https://example.test/pull/10"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" 2>/dev/null \
+    || fail "a delivered digest was reported undelivered after its acknowledgement write failed"
+  grep -F 'unknown wake: frobnicate: ack-write-fails' "$sent" >/dev/null \
+    || fail "the digest was not delivered: $(cat "$sent")"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a delivered digest stayed buffered for re-injection: $(cat "$state/.subsuper-escalations")"
+  [ ! -e "$state/.subsuper-escalations.since" ] || fail "a delivered digest kept its batch timer"
+  pass "a failed unknown-wake acknowledgement write does not re-inject a delivered digest"
+}
+
 test_stale_transient_self_records_marker() {
   local dir state out key
   dir=$(make_supercase stale-transient)
@@ -2788,6 +2874,8 @@ test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
+test_unknown_wake_ack_suppresses_handled_identity
+test_unknown_wake_ack_failure_still_clears_delivered_digest
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_enriched_wedge_under_declared_wait_uses_pause_cadence
