@@ -247,15 +247,25 @@ cycle_link_claim() {
   case "$predecessor" in
     ''|*[!0-9]*) return 0 ;;
   esac
-  [ -n "$PREDECESSOR_IDENTITY" ] || return 0
+  if [ -z "$PREDECESSOR_IDENTITY" ]; then
+    echo "watcher-ledger: successor claim dropped - predecessor $predecessor has no resolvable pid-identity" >&2
+    return 1
+  fi
   [ -d "$CYCLE_LINK" ] || rm -f "$CYCLE_LINK" 2>/dev/null || true
-  mkdir -p "$CYCLE_LINK" 2>/dev/null || return 0
+  if ! mkdir -p "$CYCLE_LINK" 2>/dev/null; then
+    echo "watcher-ledger: successor claim dropped - $CYCLE_LINK could not be created" >&2
+    return 1
+  fi
   tmp="$CYCLE_LINK/.pending.$ARM_PID"
-  printf 'predecessor=%s\tpredecessor_identity=%s\tsuccessor=%s\tclaimed_at=%s\n' \
+  if printf 'predecessor=%s\tpredecessor_identity=%s\tsuccessor=%s\tclaimed_at=%s\n' \
     "$predecessor" "$PREDECESSOR_IDENTITY" "$(cycle_clean_field "$successor")" "$(date +%s)" \
     > "$tmp" 2>/dev/null \
-    && mv -f "$tmp" "$CYCLE_LINK/$ARM_PID.claim" 2>/dev/null
+    && mv -f "$tmp" "$CYCLE_LINK/$ARM_PID.claim" 2>/dev/null; then
+    return 0
+  fi
   rm -f "$tmp" 2>/dev/null || true
+  echo "watcher-ledger: successor claim dropped - $CYCLE_LINK/$ARM_PID.claim could not be written" >&2
+  return 1
 }
 
 # Apply every outstanding claim to the ledger, and retire the ones that are
