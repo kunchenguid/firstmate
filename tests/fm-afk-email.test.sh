@@ -56,11 +56,13 @@ make_home() {  # <name> [configured] [recipient]
   if [ "${2:-}" = configured ]; then
     cat > "$home/.env" <<ENV
 
+
 FM_MAIL_USER=owner@example.com
 FM_MAIL_PASS=mail-secret-not-to-leak
 FM_IMAP_HOST=imap.example.test
 FM_SMTP_HOST=smtp.example.test
 FM_AFK_EMAIL_TO=${3:-$AFK_OWNER_EMAIL}
+
 
 ENV
   fi
@@ -683,6 +685,7 @@ os.environ.update({
     "FM_AFK_POSTURE": "1",
     "FM_AFK_EMAIL_TO": "johnpoyser@gmail.com",
 
+
     "FM_MAIL_USER": "owner@example.com",
     "FM_MAIL_PASS": "test-secret",
     "FM_IMAP_HOST": "imap.example.test",
@@ -708,6 +711,7 @@ headers = {
     "7": b"From: other@example.com\r\nAuthentication-Results: mx.google.com; dmarc=pass header.from=gmail.com\r\nSubject: other sender\r\n\r\n",
     "8": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=fail header.d=gmail.com; dmarc=fail header.from=gmail.com\r\nSubject: forged From\r\n\r\n",
     "9": b"From: johnpoyser@gmail.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=attacker.com; dmarc=fail header.from=gmail.com\r\nSubject: unaligned signer\r\n\r\n",
+
 
 
 }
@@ -742,11 +746,13 @@ bodies = {
 
 
 
+
 }
 class FakeMailbox:
     untagged_responses = {"UIDVALIDITY": [b"44"]}
     body_fetches = []
     search_ids = b"1 2 3 4 6 7 8 9"
+
 
     fail_body_fetch = False
 
@@ -815,6 +821,7 @@ assert set(poll_rows) == {"1", "2", "3", "4", "6", "7", "8", "9"}, poll_rows
 assert all(poll_rows[uid][4] == "ignored" for uid in ("1", "6", "7", "8", "9")), poll_rows
 
 
+
 assert poll_rows["2"][4] == "degraded", poll_rows["2"]
 assert poll_rows["3"][4] == "ok", poll_rows["3"]
 assert poll_rows["4"][4] == "degraded", poll_rows["4"]
@@ -830,6 +837,7 @@ recovery_rows = {fields[0]: fields for fields in (line.split("\t") for line in r
 assert set(recovery_rows) == {"1", "2", "3", "4", "6", "7", "8", "9"}, recovery_rows
 assert all(recovery_rows[uid][4] == "ignored" for uid in ("1", "6", "7", "8", "9")), recovery_rows
 
+
 assert recovery_rows["2"][4] == "ok", recovery_rows["2"]
 assert recovery_rows["4"][4] == "ok", recovery_rows["4"]
 assert "reply in mail UID 4 rejected; answer exceeds 8000 characters" in recovery_error.getvalue()
@@ -841,6 +849,7 @@ try:
     assert mail.afk_email_context() == (None, True, False)
     (state / ".mail-seen").write_text("uidvalidity=44\n1\n2\n3\n4\n6\n7\n8\n9\n", encoding="utf-8")
     mailbox.search_ids = b"1 2 3 4 5 6 7 8 9"
+
 
     mailbox.body_fetches.clear()
     outage_output = StringIO()
@@ -854,6 +863,7 @@ try:
     assert mailbox.body_fetches == [], mailbox.body_fetches
 
     (state / ".mail-seen").write_text("uidvalidity=44\n1\n2\n3\n4\n5\n6\n7\n8\n9\n", encoding="utf-8")
+
 
     (state / ".mail-retry").write_text("5\n", encoding="utf-8")
     retry_output = StringIO()
@@ -887,6 +897,7 @@ assert "FORWARDED_ATTACHMENT_SECRET" not in recovered_note
 mailbox.search_ids = b"1 2 3 4 6 7 8 9"
 
 
+
 real_run = mail.subprocess.run
 def fail_handoff(command, *args, **kwargs):
     if isinstance(command, list) and command[-1] == "receive-batch":
@@ -904,6 +915,7 @@ finally:
 handoff_lines = handoff_output.getvalue().splitlines()
 handoff_rows = {fields[0]: fields for fields in (line.split("\t") for line in handoff_lines[1:])}
 assert set(handoff_rows) == {"1", "2", "3", "4", "6", "7", "8", "9"}, handoff_rows
+
 
 assert handoff_rows["2"][4] == "degraded", handoff_rows["2"]
 assert handoff_rows["4"][4] == "degraded", handoff_rows["4"]
@@ -1048,6 +1060,7 @@ PY
     || fail "replayed reply errored: $out"
   assert_contains "$out" 'received 0 verified and 1 untrusted' 'a pending-token reply remains single-use after the sent transition'
   pass "reply tokens survive the SMTP-accepted, sent-record-crash window"
+
 
 
 }

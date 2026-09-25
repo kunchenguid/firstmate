@@ -65,6 +65,7 @@ class AfkBodyFetchError(Exception):
 
 
 
+
 class AfkBodyFetchError(Exception):
     pass
 
@@ -123,6 +124,7 @@ def afk_email_context():
     if configured.returncode != 0 or not recipient:
         return None, True, False
     return recipient, True, False
+
 
 
 
@@ -189,6 +191,7 @@ def gmail_authentication_pass(message):
 
 
 
+
 def dec(s):
     """Decode an RFC-2047 header to display text, tolerating malformed input."""
     if not s:
@@ -231,6 +234,7 @@ def plain_body(msg):
         payload = part.get_payload(decode=True)
         if payload is None:
             return
+
 
         charset = part.get_content_charset() or 'utf-8'
         try:
@@ -600,6 +604,7 @@ def cmd_poll_list():
                 )
                 if afk_enabled and not ignored and from_is_configured(fr, recipient):
 
+
                     try:
                         message_size = fetched_size(msg)
                         if message_size is None:
@@ -655,6 +660,7 @@ def cmd_poll_list():
                 continue
             status = 'ignored' if ignored else ('retry' if is_retry else 'ok')
             if not ignored and afk_email_active and not afk_enabled:
+
 
                 status = 'degraded'
             out.append((uid, idate, fr, subj, status))
