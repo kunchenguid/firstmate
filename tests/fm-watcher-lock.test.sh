@@ -1269,6 +1269,107 @@ SH
   pass "a claim past its horizon still links a predecessor record that is present and unlinked"
 }
 
+# Only the claim writer produces these files, so a claim that reads back as
+# nothing is a read failure, not invalid content. Retiring it would delete a
+# perfectly good hand-over record, which is the loss this whole mechanism exists
+# to prevent, so an unreadable claim must survive to the next reconcile.
+test_unreadable_claim_is_retried_not_retired() {
+  local dir state fakebin armout armerr claim check_file first_arm successor_arm successor_pid third_arm holder ready release i
+  dir=$(make_case cycle-ledger-link-unreadable)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/first-arm.out"
+  check_file="$state/task.check.sh"
+  ready="$dir/ledger-lock-ready"
+  release="$dir/ledger-lock-release"
+  cat > "$check_file" <<'SH'
+#!/usr/bin/env bash
+printf 'done: synthetic unreadable-claim cycle\n'
+SH
+  chmod 0700 "$check_file"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
+    || fail "could not register unreadable-claim cycle-ledger check"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  first_arm=$!
+  wait "$first_arm" || fail "first unreadable-claim ledger cycle did not surface its actionable wake"
+  drain_and_ack "$state" || fail "first unreadable-claim ledger wake handling acknowledgement failed"
+  rm -f "$check_file" "$state/task.check-trust"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 1
+    printf ready > "$3"
+    i=0
+    while [ ! -f "$4" ] && [ "$i" -lt 600 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watch-cycle-exits.lock" "$ready" "$release" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ -f "$ready" ] && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -f "$ready" ] || fail "test could not hold the lifecycle ledger lock"
+
+  armout="$dir/successor-arm.out"
+  armerr="$dir/successor-arm.err"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_PREDECESSOR_ARM_PID="$first_arm" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" 2> "$armerr" &
+  successor_arm=$!
+  i=0
+  while [ "$i" -lt 200 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  successor_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$successor_pid" "$armout" \
+    || fail "unreadable-claim successor cycle did not start: $(cat "$armout")"
+  i=0
+  while [ "$i" -lt 200 ]; do
+    grep -qF 'successor link deferred' "$armerr" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher-ledger: successor link deferred' "$armerr" \
+    || fail "the claim was never deferred, so no pending claim exists to read: $(cat "$armerr")"
+
+  claim="$state/.watch-cycle-links/$successor_arm.claim"
+  [ -f "$claim" ] || fail "the successor published no durable claim to make unreadable"
+  chmod 0000 "$claim" || fail "could not make the pending claim unreadable"
+  printf release > "$release"
+  wait "$holder" || fail "test lifecycle ledger lock holder failed"
+
+  # This close reconciles while the claim cannot be read. Retiring it here is
+  # the defect: the record is valid and its predecessor row is still unlinked.
+  kill -HUP "$successor_arm" 2>/dev/null || true
+  wait "$successor_arm" 2>/dev/null || true
+  [ -f "$claim" ] || fail "a claim that could not be read was deleted instead of retried"
+  chmod 0600 "$claim" || fail "could not restore the pending claim"
+  drain_and_ack "$state" || fail "recovery drain after unreadable-claim successor interruption failed"
+
+  armout="$dir/third-arm.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  third_arm=$!
+  i=0
+  while [ "$i" -lt 200 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF 'watcher: started pid=' "$armout" || fail "the reconciling cycle did not start: $(cat "$armout")"
+  kill -HUP "$third_arm" 2>/dev/null || true
+  wait "$third_arm" 2>/dev/null || true
+  grep -q "arm_pid=$first_arm.*successor=started:$successor_pid" "$state/.watch-cycle-exits.log" \
+    || fail "the retried claim never linked its predecessor: $(tail -3 "$state/.watch-cycle-exits.log")"
+  drain_and_ack "$state" || fail "recovery drain after the reconciling cycle failed"
+  pass "a claim that could not be read is retried by the next reconcile instead of retired"
+}
+
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   local dir state fakebin armout armpid watcher_pid i status
   dir=$(make_case stopped-watcher)
@@ -1527,4 +1628,5 @@ test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_cycle_successor_link_survives_a_busy_ledger
 test_cycle_successor_link_lands_on_a_predecessor_still_closing
 test_cycle_successor_link_outlives_the_claim_horizon
+test_unreadable_claim_is_retried_not_retired
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified

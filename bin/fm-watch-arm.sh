@@ -271,7 +271,7 @@ cycle_link_claim() {
 # applied or expired. The caller must already hold the ledger lock, so this
 # never waits on anything and never runs on a critical path.
 cycle_link_reconcile() {
-  local log_tmp claims_tmp retire_tmp now claim_file
+  local log_tmp claims_tmp retire_tmp now claim_file claim_line
   [ -d "$CYCLE_LINK" ] || return 0
   [ -f "$CYCLE_LOG" ] || return 0
   log_tmp="$CYCLE_LOG.reconcile.$ARM_PID"
@@ -280,7 +280,11 @@ cycle_link_reconcile() {
   : > "$claims_tmp" 2>/dev/null || return 0
   for claim_file in "$CYCLE_LINK"/*.claim; do
     [ -f "$claim_file" ] || continue
-    printf '%s\t%s\n' "$claim_file" "$(head -n 1 "$claim_file" 2>/dev/null)" >> "$claims_tmp" 2>/dev/null || true
+    # A claim that could not be read is not a claim that is invalid: enumerating
+    # it empty would retire it as malformed, so leave it for the next reconcile.
+    claim_line=$(head -n 1 "$claim_file" 2>/dev/null) || continue
+    [ -n "$claim_line" ] || continue
+    printf '%s\t%s\n' "$claim_file" "$claim_line" >> "$claims_tmp" 2>/dev/null || true
   done
   if [ ! -s "$claims_tmp" ]; then
     rm -f "$claims_tmp" 2>/dev/null || true

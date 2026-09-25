@@ -387,6 +387,8 @@ A claim is enumerated by directory listing rather than read out of a shared file
 The arm applies outstanding claims immediately after appending its own record, so a predecessor still running its close links the row it just wrote.
 A claim names its predecessor by arm PID **and** the pid-identity that arm recorded, resolved once at successor startup from the live predecessor or from its already-written ledger row, so a recycled PID can never collect another cycle's link.
 A claim whose target row never appears (the predecessor was killed outright, or its row rotated away) is retired after `FM_WATCH_CYCLE_LINK_HORIZON_S` seconds rather than kept forever.
+A claim that could not be read is left in place for the next reconcile rather than retired, because an unreadable claim is not an invalid one.
+Known limitation: two claims for the same predecessor are resolved by `claimed_at`, which has second resolution, so a sub-second retry leaves the tie to the claim filename and the ledger can name an earlier successor's watcher; the row is still linked, never `successor=none`.
 So a busy ledger can delay a link but never drop it, which keeps `successor=none` meaning "no successor" instead of "a successor whose link lost a race".
 `state/.watch-triage.log` remains only the watcher's bounded absorbed-wake debug log and carries no lifecycle semantics.
 
