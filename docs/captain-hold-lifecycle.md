@@ -479,10 +479,13 @@ It then finishes any still-recorded dependency-edge cleanup without rewriting th
 
 The focused end-to-end regression suite is `tests/fm-captain-hold-lifecycle.test.sh`, using only synthetic `sample` identities and decision text.
 It proves the behaviors below.
+The suite does not test the accepted merge-to-cleanup re-hold window or asynchronous queued-forge landing because those events occur after the locally serialized merge command has returned.
 
-**Cleanup of a captain-held row**
+### Cleanup of a captain-held row
+
 - Cleanup of a finished task whose own row is the captain call leaves that call open, queued, held, carrying its deliverable, and visible in Bearings' Captain's Call.
-  That cleanup leaves no pending record behind, survives a `--force` cleanup, and closes only when `answer` records the captain's words.
+  That cleanup leaves no pending record behind.
+  The call survives a `--force` cleanup and closes only when `answer` records the captain's words.
   An ordinary finished task in the same home still closes with its report link.
 - An interrupted cleanup leaves the row In flight and untouched with its pending record.
   When the row remains unanswered, the next session start retains it as queued and held with the deliverable recorded.
@@ -490,26 +493,30 @@ It proves the behaviors below.
 - A pending-close record that cannot be validated refuses the answer while naming the record and the reason.
 - A relocated data directory keeps the retention in its one configured backlog.
 
-**Merges, releases, and unreadable holds**
+### Merges, releases, and unreadable holds
+
 - Direct PR and local-only merge entrypoint calls refuse a still-held task before reaching the forge or moving local main.
 - A released pull request passes the guarded PR entrypoint, cleanup records its artifact, and Recently Landed publishes it.
 - An ordinary release still survives zero-retention cleanup and archives when configured.
 - A ship row whose captain hold cannot be read refuses cleanup before any destructive step and surfaces the read failure.
+- A released call whose decision text is `local main`, closed with no artifact, is not published as a local-only landing.
 
-**Record divergence**
+### Divergence coverage
+
 - The reconstructed silent-divergence case is signalled.
   A status resolution over a still-open captain-held task reaches both `diverged` and the drain's `RECORD DIVERGENCE` section, under the collapsed and the legacy identity alike.
   The backlog task, its hold, and the status log all survive the report unchanged, and the printed hint names both reconciliation directions.
 - The false-signal boundary holds.
   A captain call with no routed work item, a verified `captain-held` transfer, a still-open status decision, an already answered call, and an ordinary task whose keyed question was answered all stay silent.
-- A released call whose decision text is `local main`, closed with no artifact, is not published as a local-only landing.
 
-**Completion and verification**
+### Completion and verification
+
 - A report-only unresolved captain call refuses `--none` completion before teardown can erase the source.
 - Non-forced scout teardown always requires the durable inventory verification.
 - The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call.
 
-**Answers, stamps, and deferral**
+### Answers, stamps, and deferral
+
 - Answer-time resolution works through a bound channel with task-id keys.
   This includes the `release` mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys.
 - The chat channel reaches the same intake.
@@ -517,10 +524,9 @@ It proves the behaviors below.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
 
-**Legacy paths**
-- Every legacy path works: composed identities through the shim, pre-collapse `decision_keys=` metadata, routed-resolution replay, and a concrete-origin binding.
+### Legacy paths
 
-The suite does not test the accepted merge-to-cleanup re-hold window or asynchronous queued-forge landing because those events occur after the locally serialized merge command has returned.
+- Every legacy path works: composed identities through the shim, pre-collapse `decision_keys=` metadata, routed-resolution replay, and a concrete-origin binding.
 
 ### Task-body read-back cases
 
