@@ -530,7 +530,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 
 ### Task-body read-back cases
 
-Two of its cases pin how a task body is read back rather than any decision behavior, because both paths that read one are otherwise silent when they get it wrong.
+Two of the suite's cases pin how a task body is read back rather than any decision behavior, because both paths that read one are otherwise silent when they get it wrong.
 
 The first case covers holding a task that carries a body, and cleanup's retention of a captain-held row.
 Both work where the installed JSON::PP defaults `allow_nonref` off and therefore rejects the JSON-encoded bare string a shown scalar field arrives as.
