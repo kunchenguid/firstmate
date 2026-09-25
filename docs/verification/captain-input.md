@@ -1,6 +1,7 @@
 # Continuous Input Lab Notes
 
 This private branch implements an opt-in shared wake owner, with no deployment or upstream contribution.
+The subsequent latency target remains unmet; the retained runtime is the implementation validated at `18391786`.
 `bin/fm-inbox.sh --help` owns registration and read-only receipt commands.
 No process-event runner was added because input already has a durable inbox and wake queue; a second result queue would duplicate that ownership.
 
@@ -53,3 +54,40 @@ Registration does not authenticate an external human, return an away desk, clear
 The native proof covers attended Claude; other supported harnesses and backend event waits were inspected at their shared integration surfaces but were not revalidated live.
 As in the existing Stop owner, a vendor hook timeout retains queued input and requires a subsequent Stop/session event to re-arm; this does not add an independent timeout-repair service.
 The prior bridge probe on the same installed Claude version observed no native StopFailure receipt after an injected provider error; this change neither depends on that event nor claims to fix it.
+
+## Latency target audit
+
+The follow-up target was idle input-to-reader median at most 2,400 ms and p95 below 5,000 ms, retaining one handling receipt per input and zero redundant wakes.
+A same-day profile of the unchanged implementation used the same Haiku model, prompt, reader, six idle inputs, and one busy input.
+Lab-only file timestamps marked input checkpoints, successor confirmation, and generation commit; reader timestamps separated drain from bridge acceptance.
+No profiling hooks are part of the tracked runtime.
+
+| Profiled interval | Median |
+| --- | ---: |
+| Input to watcher checkpoint | 190 ms |
+| Checkpoint to successor start | 463 ms |
+| Successor confirmation | 648 ms |
+| Confirmation end to handoff commit | 194 ms |
+| Handoff commit to first model output | 1,010 ms |
+| First model output to reader process start | 1,799 ms |
+| Reader drain | 497 ms |
+| Drain completion to bridge acceptance | 650 ms |
+
+Interval medians are independent and should not be summed as a measured whole-turn percentile.
+The unchanged profile measured 5,606.436 ms idle median, 9,331.920 ms p95, and 10,677.987 ms busy input-to-reader latency.
+All seven inputs had one matching reader receipt, committed handoff and queue acknowledgement, with seven watcher deliveries, zero redundant deliveries, zero extra idle model results, an empty final queue, and a stopped disposable watcher.
+The median from committed handoff to reader acceptance alone was 4,082.321 ms; eliminating watcher and handoff time alone would still miss the target in this sample.
+The scan checkpoint and successor grace are not the dominant remaining delay.
+
+A shorter input-specific banner measured 5,133.241 ms / 8,504.174 ms and busy 10,537.537 ms, with all seven receipts, but missed the target and did not justify retaining speculative prompt changes.
+A candidate with faster bounded startup confirmation and an interruptible attached-owner wait measured 5,354.630 ms / 7,958.498 ms for idle inputs while focused tests also ran.
+Its busy input had a committed handoff and one watcher delivery but no reader receipt within the subsequent 60-second wait; it remained durable in the queue.
+That failed native acceptance gate disqualified the candidate; this probe does not establish whether its timing changes or an existing busy-turn vendor race caused the miss.
+Both candidates were discarded; this follow-up changes only this verification record.
+Exactly-once handling was not relaxed, and no faster production guarantee is claimed.
+Reaching the target needs a broader investigation of model/tool-call generation, reader integration, and busy-turn native handoff behavior before changing those boundaries.
+
+The follow-up inbox, Stop auto-arm, and watcher-arm suites passed on the candidate, including a twenty-second attached wait interrupted by input; the retained runtime's five-suite results above remain its validation evidence.
+Raw profiles, candidate source snapshots and streams remain under ignored `.no-mistakes/desk-input-lab/native-profile`, `native-concise`, and `native-tuned`.
+The profile command is `FM_LAB_NAME=<new-disposable-name> FM_LAB_PROFILE=1 .no-mistakes/desk-input-lab/venv/bin/python .no-mistakes/desk-input-lab/native.py`.
+Every probe's disposable watcher and Claude session was stopped, and no live desk or external transport was activated.
