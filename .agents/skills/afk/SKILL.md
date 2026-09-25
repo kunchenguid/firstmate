@@ -191,11 +191,8 @@ Classify each wake this way:
   An identity that was not delivered still escalates.
   Status-read uncertainty follows the shared one-report-without-position-advance contract referenced under Dedupe below.
 
-Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 =
-immediate) and flushed as one single-line digest prefixed with the current
-operational prefix, carrying pre-read status summaries and a recommended action.
-The single-line format makes the submission unambiguous across harnesses, and
-the operational prefix lets firstmate distinguish it from a real captain message.
+Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 = immediate) and flushed as one single-line digest carrying pre-read status summaries and a recommended action.
+The single-line format makes submission unambiguous across harnesses; the carrier described above distinguishes it from an ordinary captain message.
 
 ### Injection hardening
 
