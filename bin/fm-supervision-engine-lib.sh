@@ -3,7 +3,8 @@
 # host's branch session, and how one engine turn runs (one owner of both).
 #
 # Sourced, never executed. docs/supervision-host.md owns the host design and
-# bin/fm-supervision-host.sh the loop; this file owns two contracts.
+# bin/fm-supervision-host.sh the loop; this file owns two contracts, plus the
+# main-session key (fm_supervision_host_main_key) the host's parts share.
 #
 # THE HOME OPT-IN (config/supervision-host). docs/configuration.md
 # "Supervision host" owns the file's schema and its no-engine outcome; this
@@ -108,8 +109,11 @@ EOF
 # a checksum of its process identity (bin/fm-wake-lib.sh fm_pid_identity), and
 # a checksum of its session sidecar, so a later session given a recycled lock
 # pid never shares it. The host keys its engine conversation and broken-session
-# latch to it. When the holder's identity cannot be read, it prints nothing and
-# fails, and no conversation or latch kept under an earlier key is reused.
+# latch to it; the dialog mirror (bin/fm-host-mirror.sh) keys each entry and
+# feed to it. When the holder's identity cannot be read, it prints nothing and
+# fails, so a mirror writer records nothing and no conversation, latch, or
+# dialog kept under an earlier key is reused. Needs bin/fm-wake-lib.sh sourced
+# first.
 fm_supervision_host_main_key() {
   local pid identity
   pid=$(sed -n '1p' "$1/.lock" 2>/dev/null)

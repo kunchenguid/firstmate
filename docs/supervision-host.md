@@ -40,6 +40,7 @@ Today it runs beside a Claude, Cursor, OpenCode, omp, Grok, or Codex primary and
 
 Attended supervision on the host, `/quiet` on the host, and the daemon's retirement are later steps of the same design.
 Until they land, their current behavior stays as described in their own owners.
+The [dialog mirror](#the-dialog-mirror) that attended supervision will read already records on opted-in Claude and Cursor primaries, but nothing reads it yet.
 
 ## Components and their owners
 
@@ -53,6 +54,7 @@ Until they land, their current behavior stays as described in their own owners.
 | The prompt | `bin/fm-branch-prompt.sh` | Emits the same byte-stable prompt the Pi branch runs; each wake names its host's report surface. |
 | The report surface | `bin/fm-branch-report.sh` | The command twin of the Pi branch's `fm_branch_report` tool, with the same task scoping; see [The report surface](#the-report-surface). |
 | Leases and authority | `bin/fm-lease-lib.sh` | Owns the per-task leases, the main-owned role partition, and the away relocation; see [Leases and authority](#leases-and-authority). |
+| The dialog mirror | `bin/fm-host-mirror.sh` | Owns the mirror files, writers, and feed; see [The dialog mirror](#the-dialog-mirror). |
 | The main side | [supervision-protocols/supervision-host.md](supervision-protocols/supervision-host.md) | What main reads at session start on an opted-in home, rendered for its harness. |
 
 ### Arm owners
@@ -92,6 +94,30 @@ The host's engine runs with these settings:
 - The primary's harness pin.
 
 So every guarded script treats it exactly as it treats the Pi branch.
+
+## The dialog mirror
+
+The engine's conversation receives nothing between wakes, so attended supervision needs a record of what the captain and main said: the same `[captain]` and `[main]` context the Pi branch receives as mirror messages.
+`bin/fm-host-mirror.sh` owns that record in `state/`: `.host-mirror.jsonl` holds the dialog entries, `.host-mirror-cursor` the newest entry fed to an engine conversation, and `.host-mirror.lock` serializes every append and feed; its header owns the formats, caps, and feed contract.
+Today the writers record and nothing reads the mirror: the host never calls the feed, so the mirror changes no wake.
+Each primary's code-owned turn surfaces write it, never the model:
+
+| Primary | Captain text | Main text |
+|---|---|---|
+| Claude | the `UserPromptSubmit` hook's prompt | the `Stop` hook's last assistant message |
+| Cursor | the `beforeSubmitPrompt` hook's prompt | the `afterAgentResponse` hook's text |
+
+A writer records only on a home with `config/supervision-host`, from a genuine primary checkout, for the session that holds the fleet lock; everywhere else the tracked registrations exit silently and write nothing.
+Operational input (watcher wakes, guard follow-ups, launch briefs) is dropped by the shared operational-input protocol, as is a turn the harness starts itself, such as Claude's Stop-hook rewake, and tool traffic is never mirrored.
+Each entry is keyed to the current main session (`fm_supervision_host_main_key` in `bin/fm-supervision-engine-lib.sh`), so a new engine conversation re-anchors on this session's dialog and an earlier session's dialog never steers today's.
+The mirror is owner-only, and an existing file that cannot be restricted receives no new entry.
+The feed and `check` refuse a mirror whose entries do not parse, whose sequence numbers are not positive integers rising in file order, or whose final record is unterminated, so a caller can hand the wake to main rather than judge without the captain's words.
+A captain prompt whose own hook write fails, because permission on its state file is refused or the disk is full, is not mirrored, and Claude and Cursor have no later source for it.
+
+A primary's mirror is verified (`bin/fm-host-mirror.sh verified`) only when its writers were proven against the real harness to record the session's dialog from its first captain prompt, which today means Claude and Cursor.
+Codex has no writer yet: a supervising Codex main stays inside one turn across its foreground checkpoints, so a captain message typed then fires no prompt or Stop hook, and only a reader of its transcript could record it.
+Grok and OpenCode have no writer, because their session takes the fleet lock during its first turn, so that turn's captain prompt could never be recorded.
+omp has no verified writer, because no omp was available to prove one against.
 
 ## One away wake
 
@@ -315,6 +341,8 @@ Each arm owner's own suite covers its host mode against a stub host.
 | `tests/fm-omp-harness.test.sh` | The omp arm owner's host mode against a stub host. |
 | `tests/fm-watch-checkpoint.test.sh` | The Codex checkpoint's host mode against a stub host. |
 | `tests/fm-supervision-instructions.test.sh` | The rendered protocol, including Grok's arm command. |
+| `tests/fm-host-mirror.test.sh` | The dialog mirror's writers through the tracked Claude and Cursor registrations, the opt-in gate, and the feed. |
 | `tests/fm-supervision-host-live-e2e.test.sh` | Runs a real engine turn; opt-in because it spends tokens. |
+| `tests/fm-host-mirror-live-e2e.test.sh` | Proves the Claude and Cursor mirror writers against the real harnesses; opt-in because it spends tokens. |
 
 [verification/supervision.md](verification/supervision.md#supervision-host) records the dated live results.

@@ -1,0 +1,341 @@
+#!/usr/bin/env bash
+# Behavior tests for the supervision host's dialog mirror (bin/fm-host-mirror.sh,
+# docs/supervision-host.md "The dialog mirror"): its writers, driven through the
+# tracked hook registrations each primary harness runs, and its feed.
+#
+# Every writer runs as a child of a fake harness (a bash symlink named
+# "claude") whose pid is the home's session lock, from a git checkout that
+# passes the primary-scope check, exactly as a primary's own hook runs. Hook
+# payloads are the shapes measured from the real harnesses
+# (docs/supervision-host.md "The dialog mirror").
+# shellcheck disable=SC2016 # single-quoted scripts expand inside their own shells
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+MIRROR="$ROOT/bin/fm-host-mirror.sh"
+command -v jq >/dev/null 2>&1 || { printf 'skip: jq absent\n'; exit 0; }
+
+TMP_ROOT=$(fm_test_tmproot fm-host-mirror)
+FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
+ln -s /bin/bash "$FAKEBIN/claude"
+FAKE_CLAUDE="$FAKEBIN/claude"
+trap fm_test_cleanup EXIT
+unset FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE CLAUDE_PROJECT_DIR CURSOR_PROJECT_DIR
+
+# A primary checkout: git, AGENTS.md, and this repo's bin.
+PRIMARY_ROOT="$TMP_ROOT/primary"
+mkdir -p "$PRIMARY_ROOT"
+git init -q "$PRIMARY_ROOT"
+: > "$PRIMARY_ROOT/AGENTS.md"
+ln -s "$ROOT/bin" "$PRIMARY_ROOT/bin"
+
+make_home() {  # <name> [opted-in: 1|0]
+  local home="$TMP_ROOT/$1"
+  mkdir -p "$home/state" "$home/config"
+  [ "${2:-1}" != 1 ] || : > "$home/config/supervision-host"
+  printf '%s\n' "$home"
+}
+
+# Run a shell script as the lock-owning primary session of <home>: the script
+# runs under the fake harness whose pid it records as the session lock.
+as_session() {  # <home> <script>
+  FM_HOME="$1" PRIMARY_ROOT="$PRIMARY_ROOT" MIRROR="$MIRROR" "$FAKE_CLAUDE" -c \
+    'printf "%s\n" "$$" > "$FM_HOME/state/.lock"; '"$2"
+}
+
+# The command string one tracked registration runs.
+claude_cmd() { jq -r --arg e "$1" '.hooks[$e][].hooks[] | select(.command | contains("fm-host-mirror.sh")) | .command' "$ROOT/.claude/settings.json"; }
+cursor_cmd() { jq -r --arg e "$1" '.hooks[$e][] | select(.command | contains("fm-host-mirror.sh")) | .command' "$ROOT/.cursor/hooks.json"; }
+
+# Inside an as_session script: one Claude prompt-submit (captain) or Stop
+# (main) hook payload carrying <text>, through the mirror's hook writer.
+SAY='say() {  # <captain|main> <text> [<id>]
+  if [ "$1" = captain ]; then
+    jq -cn --arg t "$2" --arg id "${3:-}" "{hook_event_name: \"UserPromptSubmit\", prompt_id: \$id, prompt: \$t}"
+  else
+    jq -cn --arg t "$2" --arg id "${3:-}" "{hook_event_name: \"Stop\", prompt_id: \$id, last_assistant_message: \$t}"
+  fi | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude
+}
+'
+
+mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+
+entries() {  # <home> -> "<tag>|<text>" per entry
+  jq -r '"\(.tag)|\(.text)"' "$1/state/.host-mirror.jsonl" 2>/dev/null
+}
+
+test_every_harness_registration_writes_the_mirror() {
+  local home out
+  home=$(make_home harnesses)
+  CLAUDE_PROMPT=$(claude_cmd UserPromptSubmit) CLAUDE_STOP=$(claude_cmd Stop) \
+  CURSOR_PROMPT=$(cursor_cmd beforeSubmitPrompt) CURSOR_RESPONSE=$(cursor_cmd afterAgentResponse) \
+  as_session "$home" '
+    run() { printf "%s" "$2" | env CLAUDE_PROJECT_DIR="$PRIMARY_ROOT" CURSOR_PROJECT_DIR="$PRIMARY_ROOT" \
+      bash -c "cd \"$PRIMARY_ROOT\" && $1"; }
+    run "$CLAUDE_PROMPT" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt_id\":\"c1\",\"prompt\":\"claude captain\"}"
+    run "$CLAUDE_STOP" "{\"hook_event_name\":\"Stop\",\"prompt_id\":\"c1\",\"last_assistant_message\":\"claude main\"}"
+    run "$CURSOR_PROMPT" "{\"hook_event_name\":\"beforeSubmitPrompt\",\"generation_id\":\"u1\",\"prompt\":\"cursor captain\",\"cursor_version\":\"x\"}"
+    run "$CURSOR_RESPONSE" "{\"hook_event_name\":\"afterAgentResponse\",\"generation_id\":\"u1\",\"text\":\"cursor main\",\"cursor_version\":\"x\"}"
+  ' || fail "a tracked mirror hook failed"
+  out=$(entries "$home")
+  assert_equals "captain|claude captain
+main|claude main
+captain|cursor captain
+main|cursor main" "$out" "every tracked registration must write its captain prompt and main reply, in order"
+  pass "mirror: the Claude and Cursor registrations each write the captain's prompt and main's reply"
+}
+
+# Non-host invariance: on a home without config/supervision-host, every tracked
+# mirror registration prints nothing and leaves the home's state byte-for-byte
+# as it was, even for the lock-owning primary session in a primary checkout.
+test_home_without_the_flag_is_untouched() {
+  local home before after
+  home=$(make_home without-flag 0)
+  printf 'working: demo\n' > "$home/state/demo.status"
+  # The fixture's own session lock is written by as_session, not by a writer.
+  snapshot() { (cd "$1/state" && find . -type f ! -name .lock | LC_ALL=C sort | while IFS= read -r f; do printf '%s %s\n' "$f" "$(cksum < "$f")"; done); }
+  before=$(snapshot "$home")
+  CLAUDE_PROMPT=$(claude_cmd UserPromptSubmit) CLAUDE_STOP=$(claude_cmd Stop) \
+  CURSOR_PROMPT=$(cursor_cmd beforeSubmitPrompt) CURSOR_RESPONSE=$(cursor_cmd afterAgentResponse) \
+  as_session "$home" '
+    run() { printf "%s" "$2" | env CLAUDE_PROJECT_DIR="$PRIMARY_ROOT" CURSOR_PROJECT_DIR="$PRIMARY_ROOT" \
+      bash -c "cd \"$PRIMARY_ROOT\" && $1"; }
+    run "$CLAUDE_PROMPT" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"hello\"}"
+    run "$CURSOR_PROMPT" "{\"hook_event_name\":\"beforeSubmitPrompt\",\"prompt\":\"hello\",\"cursor_version\":\"x\"}"
+    run "$CLAUDE_STOP" "{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"hi\"}"
+    run "$CURSOR_RESPONSE" "{\"hook_event_name\":\"afterAgentResponse\",\"text\":\"hi\",\"cursor_version\":\"x\"}"
+  ' > "$home/writers.out" 2>&1 || fail "a mirror registration failed on a home without the flag: $(cat "$home/writers.out")"
+  [ ! -s "$home/writers.out" ] || fail "a mirror registration printed on a home without the flag: $(cat "$home/writers.out")"
+  after=$(snapshot "$home")
+  assert_equals "$before" "$after" "a mirror writer changed the state of a home without the flag"
+  pass "mirror: a home without the flag is untouched by every tracked mirror registration"
+}
+
+test_writers_are_inert_without_the_opt_in() {
+  local home crew out
+  home=$(make_home no-opt-in 0)
+  as_session "$home" '
+    printf "%s" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"hello\"}" | "$MIRROR" hook claude
+  ' || fail "an inert writer failed"
+  assert_absent "$home/state/.host-mirror.jsonl" "a home without config/supervision-host must mirror nothing"
+  crew="$TMP_ROOT/crew-worktree"
+  mkdir -p "$crew"
+  out=$(printf '%s' '{"hook_event_name":"UserPromptSubmit","prompt":"hello"}' | FM_HOME="$crew" "$MIRROR" hook claude 2>&1)
+  [ -z "$out" ] || fail "an inert writer printed: $out"
+  assert_absent "$crew/state" "an inert writer must create nothing in a home without config/"
+  pass "mirror: writers stay silent and write nothing on a home that did not opt in"
+}
+
+test_operational_foreign_and_unowned_input_is_dropped() {
+  local home other
+  home=$(make_home dropped)
+  as_session "$home" '
+    printf "%s" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"\342\201\243FIRSTMATE_OP: v1 watcher: signal: demo.status\"}" \
+      | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude
+    printf "%s" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"from cursor\",\"cursor_version\":\"x\"}" \
+      | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude
+    printf "%s" "{\"hook_event_name\":\"PreToolUse\",\"prompt\":\"not dialog\"}" \
+      | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude
+    printf "%s" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"\\n\\n<task-notification>\\n<summary>Stop hook feedback</summary>\\n</task-notification>\"}" \
+      | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude
+    printf "%s" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"kept\"}" \
+      | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude
+  ' || fail "a writer failed"
+  assert_equals "captain|kept" "$(entries "$home")" \
+    "operational input, a harness-started turn, a Cursor payload on the Claude registration, and a non-dialog event must not be mirrored"
+
+  other=$(make_home unowned)
+  sleep 30 &
+  printf '%s\n' "$!" > "$other/state/.lock"
+  printf '%s' '{"hook_event_name":"UserPromptSubmit","prompt":"not the owner"}' \
+    | FM_HOME="$other" FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$FAKE_CLAUDE" -c '"$0" hook claude' "$MIRROR"
+  kill "$(cat "$other/state/.lock")" 2>/dev/null || true
+  assert_absent "$other/state/.host-mirror.jsonl" "a session that does not hold the fleet lock must mirror nothing"
+  pass "mirror: operational input, a harness-started turn, a foreign host's payload, other events, and a session without the lock are never mirrored"
+}
+
+test_entries_are_deduplicated_and_capped() {
+  local home long text
+  home=$(make_home capped)
+  long=$(awk 'BEGIN { for (i = 0; i < 5000; i++) printf "x" }')
+  LONG=$long as_session "$home" "$SAY"'
+    for n in 1 2; do printf "%s" "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt_id\":\"p1\",\"prompt\":\"once\"}" \
+      | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude; done
+    say main "$LONG" long
+  ' || fail "a writer failed"
+  [ "$(grep -c '"text":"once"' "$home/state/.host-mirror.jsonl")" -eq 1 ] || fail "an entry whose id is already recorded must not be appended again"
+  text=$(jq -r 'select(.id == "long") | .text' "$home/state/.host-mirror.jsonl")
+  assert_contains "$text" "[mirror truncated: 1000 characters omitted]" "a long entry must be capped with a truncation note"
+  [ "${#text}" -lt 4100 ] || fail "a capped entry kept ${#text} characters"
+  pass "mirror: a repeated entry is recorded once, and a long entry keeps its head and tail"
+}
+
+# A chmod on PATH that records, for the mirror, its entry count and mode just
+# after the real chmod, and refuses while $FM_HOME/chmod-refuses exists.
+CHMOD_SHIM="$TMP_ROOT/chmod-shim"
+mkdir -p "$CHMOD_SHIM"
+{
+  printf '#!/usr/bin/env bash\nREAL_CHMOD=%q\n' "$(command -v chmod)"
+  cat <<'SH'
+file=${!#}
+case "$file" in
+  */.host-mirror.jsonl)
+    [ ! -e "$FM_HOME/chmod-refuses" ] || exit 1
+    "$REAL_CHMOD" "$@" || exit
+    printf '%s %s\n' "$(wc -l < "$file" | tr -d ' ')" "$(stat -c %a "$file" 2>/dev/null || stat -f %Lp "$file")" >> "$FM_HOME/chmod.log"
+    ;;
+  *) exec "$REAL_CHMOD" "$@" ;;
+esac
+SH
+} > "$CHMOD_SHIM/chmod"
+chmod +x "$CHMOD_SHIM/chmod"
+
+test_mirror_is_owner_only_under_an_open_umask() {
+  local home mirror
+  home=$(make_home private)
+  mirror="$home/state/.host-mirror.jsonl"
+  (umask 022; as_session "$home" "$SAY"'say captain "keep this between us" p1') || fail "a writer failed"
+  [ "$(mode_of "$mirror")" = 600 ] || fail "a new mirror must be owner-only, got $(mode_of "$mirror")"
+  chmod 644 "$mirror"
+  (umask 022; PATH="$CHMOD_SHIM:$PATH" as_session "$home" "$SAY"'say main "understood" p1') || fail "a writer failed"
+  [ "$(cat "$home/chmod.log" 2>/dev/null)" = "1 600" ] \
+    || fail "an existing readable mirror must be owner-only before new dialog lands, got: $(cat "$home/chmod.log" 2>/dev/null)"
+  [ "$(mode_of "$mirror")" = 600 ] || fail "an existing readable mirror must stay owner-only, got $(mode_of "$mirror")"
+  [ "$(entries "$home" | wc -l | tr -d ' ')" -eq 2 ] || fail "both entries must be recorded: $(entries "$home")"
+  chmod 644 "$mirror"
+  : > "$home/chmod-refuses"
+  (umask 022; PATH="$CHMOD_SHIM:$PATH" as_session "$home" "$SAY"'say captain "not for other eyes" p2') || fail "a writer failed"
+  [ "$(entries "$home" | wc -l | tr -d ' ')" -eq 2 ] || fail "dialog must not land in a mirror that could not be made owner-only: $(entries "$home")"
+  pass "mirror: the captain's dialog lands only in an owner-only mirror, even when the file already existed readable by others"
+}
+
+test_feed_resumes_reanchors_and_is_bounded() {
+  local home out
+  home=$(make_home feed)
+  as_session "$home" "$SAY"'
+    say captain "first ask"; say main "first answer"
+    "$MIRROR" feed s1 new > "$FM_HOME/feed.1" && "$MIRROR" commit
+    say captain "second ask"
+    "$MIRROR" feed s1 resume > "$FM_HOME/feed.uncommitted"
+    "$MIRROR" feed s1 resume > "$FM_HOME/feed.2" && "$MIRROR" commit
+    "$MIRROR" feed s1 resume > "$FM_HOME/feed.3" && "$MIRROR" commit
+    "$MIRROR" feed s2 resume > "$FM_HOME/feed.4"
+  ' || fail "the first session failed"
+  assert_equals "[captain] first ask
+[main] first answer" "$(cat "$home/feed.1")" "a new conversation must be fed this session's dialog"
+  assert_equals "[captain] second ask" "$(cat "$home/feed.uncommitted")" "a resumed conversation must be fed only what is new"
+  assert_equals "[captain] second ask" "$(cat "$home/feed.2")" "a feed never committed to the engine must leave its entries for the next feed"
+  assert_equals "" "$(cat "$home/feed.3")" "a resumed conversation with nothing new must be fed nothing"
+  assert_equals "[captain] first ask
+[main] first answer
+[captain] second ask" "$(cat "$home/feed.4")" "a conversation the cursor does not belong to must re-anchor"
+
+  as_session "$home" "$SAY"'
+    say captain "a later session"
+    "$MIRROR" feed s3 new > "$FM_HOME/feed.5"
+    big=$(awk "BEGIN { for (i = 0; i < 3000; i++) printf \"y\" }")
+    for n in 1 2 3 4 5 6 7; do say main "$n $big"; done
+    "$MIRROR" feed s4 new > "$FM_HOME/feed.6"
+  ' || fail "the second session failed"
+  assert_equals "[captain] a later session" "$(cat "$home/feed.5")" "a new main session must never be fed an earlier session's dialog"
+  out=$(cat "$home/feed.6")
+  assert_contains "$(head -n 1 "$home/feed.6")" "earlier mirrored entries are not shown)" "a bounded feed must say what it left out"
+  assert_contains "$out" "[main] 7 yyy" "a bounded feed must keep the newest entries"
+  assert_not_contains "$out" "[captain] a later session" "a bounded feed must drop the oldest entries"
+  [ "${#out}" -le 16100 ] || fail "the feed was not bounded: ${#out} characters"
+  pass "mirror: the feed resumes from its committed cursor, re-anchors on a new conversation or session, and is bounded"
+}
+
+test_recycled_lock_pid_is_a_new_main_session() {
+  local home
+  home=$(make_home recycled)
+  as_session "$home" "$SAY"'
+    fake_proc() {  # <root> <starttime>: this pid with that process start
+      mkdir -p "$1/$$"
+      printf "%s (claude) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 %s 0 0\n" "$$" "$2" > "$1/$$/stat"
+      printf "claude\0" > "$1/$$/cmdline"
+    }
+    fake_proc "$FM_HOME/proc.first" 1000
+    fake_proc "$FM_HOME/proc.recycled" 2000
+    export FM_PROC_ROOT_OVERRIDE="$FM_HOME/proc.first"
+    say captain "asked in the first session"
+    "$MIRROR" feed s1 new > "$FM_HOME/feed.first" && "$MIRROR" commit
+    export FM_PROC_ROOT_OVERRIDE="$FM_HOME/proc.recycled"
+    "$MIRROR" feed s2 new > "$FM_HOME/feed.recycled"
+    say captain "asked in the recycled session"
+    "$MIRROR" feed s3 new > "$FM_HOME/feed.second"
+  ' || fail "the session failed"
+  assert_equals "[captain] asked in the first session" "$(cat "$home/feed.first")" \
+    "one lock holder must keep one key across its writes and feeds"
+  assert_equals "" "$(cat "$home/feed.recycled")" \
+    "a later lock holder given the same pid must not be fed the earlier holder's dialog"
+  assert_equals "[captain] asked in the recycled session" "$(cat "$home/feed.second")" \
+    "a later lock holder given the same pid must be fed only its own dialog"
+  pass "mirror: a later lock holder with a recycled pid is a new main session"
+}
+
+# A mirror whose sequence numbers are not positive integers rising in file
+# order, or whose final record is unterminated, cannot vouch for the dialog it
+# carries: check and feed both refuse it, and the feed stages nothing.
+test_feed_refuses_unfeedable_sequences_and_unterminated_records() {
+  local home bad good
+  home=$(make_home unfeedable)
+  as_session "$home" "$SAY"'say captain "a sound ask"; "$MIRROR" check' || fail "check refused a sound mirror"
+  good=$(cat "$home/state/.host-mirror.jsonl")
+  for bad in "$(printf '%s' "$good" | jq -c '.seq = 0')"$'\n' \
+    "$(printf '%s' "$good" | jq -c '.seq = 1.5')"$'\n' \
+    "$good"$'\n'"$good"$'\n' \
+    "$good"; do
+    printf '%s' "$bad" > "$home/state/.host-mirror.jsonl"
+    as_session "$home" '"$MIRROR" check' && fail "check accepted an unfeedable mirror:"$'\n'"$bad"
+    as_session "$home" '"$MIRROR" feed s1 new' >/dev/null && fail "the feed accepted an unfeedable mirror:"$'\n'"$bad"
+    [ ! -e "$home/state/.host-mirror-cursor.next" ] || fail "the feed staged a cursor for an unfeedable mirror"
+  done
+  pass "mirror: check and feed refuse a mirror with a zero, fractional, or non-rising sequence, or an unterminated final record"
+}
+
+test_recreated_mirror_continues_past_both_cursors() {
+  local home
+  home=$(make_home recreate)
+  as_session "$home" "$SAY"'
+    for n in 1 2 3 4 5; do say captain "earlier ask $n"; done
+    "$MIRROR" feed s1 new > /dev/null && "$MIRROR" commit
+    rm "$FM_HOME/state/.host-mirror.jsonl"
+    say captain "asked after the mirror was lost"
+    "$MIRROR" feed s1 resume > "$FM_HOME/feed.recreated"
+    rm "$FM_HOME/state/.host-mirror.jsonl"
+    say captain "asked while that turn ran"
+    "$MIRROR" commit
+    "$MIRROR" feed s1 resume > "$FM_HOME/feed.after-commit"
+  ' || fail "the session failed"
+  assert_equals "[captain] asked after the mirror was lost" "$(cat "$home/feed.recreated")" \
+    "a recreated mirror must not number new dialog at or below the committed cursor"
+  assert_equals "[captain] asked while that turn ran" "$(cat "$home/feed.after-commit")" \
+    "a mirror recreated during a turn must not let that turn's commit skip new dialog"
+  pass "mirror: a recreated mirror continues past the committed and staged cursors, so a resumed conversation still gets new dialog"
+}
+
+test_verified_writers() {
+  local harness
+  for harness in claude cursor; do
+    "$MIRROR" verified "$harness" || fail "$harness must have a verified dialog mirror"
+  done
+  for harness in codex grok opencode omp kimi pi unknown; do
+    ! "$MIRROR" verified "$harness" || fail "$harness must not claim a verified dialog mirror"
+  done
+  pass "mirror: exactly the primaries whose writers record a session from its first captain prompt report a verified mirror"
+}
+
+test_every_harness_registration_writes_the_mirror
+test_writers_are_inert_without_the_opt_in
+test_home_without_the_flag_is_untouched
+test_operational_foreign_and_unowned_input_is_dropped
+test_entries_are_deduplicated_and_capped
+test_mirror_is_owner_only_under_an_open_umask
+test_feed_resumes_reanchors_and_is_bounded
+test_recycled_lock_pid_is_a_new_main_session
+test_feed_refuses_unfeedable_sequences_and_unterminated_records
+test_recreated_mirror_continues_past_both_cursors
+test_verified_writers
