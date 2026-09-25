@@ -57,6 +57,10 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *"# PR identity: copy or abstain"*"copied verbatim from the task's \`done [at=<epoch>]: PR <url>\` status line or its \`pr=\` metadata field"*"Never assemble an owner, repository, host, or number"*"report the identifier you do have"*) ;;
     *) fail "branch prompt lost the copy-or-abstain PR identity rule" ;;
   esac
+  case "$out_a" in
+    *"first run \`bin/fm-inbox.sh identity <id>\`"*"without invoking the email verifier"*"additional captain authorization"*"email_handoff:false"*"has no matching durable handoff"*"ordinary away-mode rules"*"email_handoff:true"*"verified:true"*) ;;
+    *) fail "branch prompt does not preserve ordinary inbox handling outside proven email handoffs" ;;
+  esac
   # The 2026-09-22 away window: every landed exemption worker was left sitting
   # because the prompt granted landed-task cleanup without ever naming the
   # moment or the command, so the stale wake ended in the recovery playbook's

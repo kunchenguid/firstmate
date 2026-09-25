@@ -206,6 +206,7 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
   python3 - "$verification" "$note_id" <<'PY'
 import json, sys
 result = json.loads(sys.argv[1])
+assert result["email_handoff"] is True, result
 assert result["verified"] is True, result
 assert result["seq"] == 1, result
 assert result["task"] == "ui", result
@@ -267,12 +268,12 @@ test_unmatched_reply_request_id_is_untrusted_and_ackable() {
   python3 - "$verification" <<'PY'
 import json, sys
 result = json.loads(sys.argv[1])
-assert result == {"verified": False}, result
+assert result == {"email_handoff": False, "verified": False}, result
 PY
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
     "$REPO/bin/fm-inbox.sh" drain --ack "$note_id") || fail "untrusted note could not be acknowledged: $out"
   assert_contains "$out" "acked $note_id" 'an unmatched reply-shaped note can be acknowledged'
-  pass "an unmatched reply-shaped note is untrusted and acknowledgeable"
+  pass "an unmatched reply-shaped note remains an ordinary non-email inbox note"
 }
 
 test_failed_send_keeps_outcomes_queued() {
@@ -380,6 +381,127 @@ EOF
     | run_email "$home" receive-batch 2>&1) || fail "invalid-record receive check failed: $out"
   [ ! -e "$home/state/inbox" ] || fail "an invalid away record accepted or surfaced a reply"
   pass "away email remains disabled when the contract owner rejects the record"
+}
+
+test_invalid_or_unreadable_posture_suppresses_mail() {
+  local home
+  home=$(make_home invalid-posture-poll configured)
+  run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
+  python3 - "$REPO" "$home" <<'PY' || fail "invalid or unreadable posture did not fail closed"
+import importlib.util
+import os
+import sys
+from contextlib import redirect_stdout
+from io import StringIO
+from pathlib import Path
+from types import SimpleNamespace
+
+root = Path(sys.argv[1])
+home = Path(sys.argv[2])
+state = home / "state"
+os.environ.update({
+    "FM_HOME": str(home),
+    "FM_STATE_OVERRIDE": str(state),
+    "FM_ROOT_OVERRIDE": str(root),
+    "FM_AFK_POSTURE": "1",
+    "FM_AFK_EMAIL_TO": "johnpoyser@gmail.com",
+    "FM_MAIL_USER": "owner@example.com",
+    "FM_MAIL_PASS": "test-secret",
+    "FM_IMAP_HOST": "imap.example.test",
+    "FM_IMAP_PORT": "993",
+    "FM_SMTP_HOST": "smtp.example.test",
+    "FM_SMTP_PORT": "465",
+    "FM_MAIL_CURSOR": str(state / ".mail-seen"),
+    "FM_MAIL_RETRY": str(state / ".mail-retry"),
+    "FM_MAIL_RETRY_POS": str(state / ".mail-retry-pos"),
+    "FM_MAIL_TURN": str(state / ".mail-turn"),
+    "FM_MAIL_POLL_MAX_WAKES": "20",
+})
+spec = importlib.util.spec_from_file_location("fm_mail_under_test", root / "bin" / "fm-mail.py")
+mail = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mail)
+
+class FakeMailbox:
+    untagged_responses = {"UIDVALIDITY": [b"44"]}
+    fetches = []
+
+    def login(self, *_): pass
+    def select(self, *_): pass
+    def logout(self): pass
+
+    def uid(self, command, uid, fetch_spec):
+        if command == "search":
+            return "OK", [b"1 2"]
+        self.fetches.append((uid.decode(), fetch_spec))
+        raise AssertionError(f"invalid posture fetched mail: {fetch_spec}")
+
+mailbox = FakeMailbox()
+mail.connect_mailbox = lambda: mailbox
+posture = state / ".afk-contract"
+valid_record = posture.read_bytes()
+
+def poll_and_assert(label):
+    mailbox.fetches.clear()
+    output = StringIO()
+    with redirect_stdout(output):
+        assert mail.cmd_poll_list() == 0
+    lines = output.getvalue().splitlines()
+    rows = {fields[0]: fields for fields in (line.split("\t") for line in lines[1:])}
+    assert set(rows) == {"1", "2"}, (label, rows)
+    assert all(row[4] == "deferred" for row in rows.values()), (label, rows)
+    assert not mailbox.fetches, (label, mailbox.fetches)
+    assert mail.afk_email_context() == (None, True, True), label
+
+posture.write_text("version: 99\nentered_epoch: 100\nreach_channels: email\n", encoding="utf-8")
+poll_and_assert("malformed posture")
+posture.write_bytes(valid_record)
+real_run = mail.subprocess.run
+def deny_posture_read(command, *args, **kwargs):
+    if isinstance(command, list) and command[0].endswith("fm-afk-contract.sh") and command[1:] == ["validate"]:
+        return SimpleNamespace(returncode=1, stdout="", stderr="permission denied")
+    return real_run(command, *args, **kwargs)
+mail.subprocess.run = deny_posture_read
+poll_and_assert("unreadable posture")
+PY
+  pass "invalid and unreadable away records suppress normal mail and retain retry eligibility"
+}
+
+test_voice_inbox_note_remains_ordinary_during_away_mode() {
+  local home receipt note_id identity out
+  home=$(make_home voice-note configured)
+  run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
+  receipt=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
+    "$REPO/bin/fm-inbox.sh" note --json "voice relay request: review the deployment window") \
+    || fail "voice relay note could not be queued"
+  note_id=$(printf '%s' "$receipt" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+  [ -n "$note_id" ] || fail "voice note receipt omitted its id"
+  identity=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
+    "$REPO/bin/fm-inbox.sh" identity "$note_id") || fail "voice note identity could not be read"
+  python3 - "$identity" <<'PY' || fail "ordinary voice note entered the AFK-email candidate path"
+import json, sys
+assert json.loads(sys.argv[1])["request_id"] is None
+PY
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
+    "$REPO/bin/fm-inbox.sh" drain) || fail "voice note could not be drained"
+  assert_contains "$out" 'voice relay request: review the deployment window' 'ordinary inbox drain still presents the voice request'
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
+    "$REPO/bin/fm-inbox.sh" show "$note_id") || fail "voice note could not be read"
+  assert_contains "$out" 'voice relay request: review the deployment window' 'ordinary inbox read still exposes the voice request'
+  [ -f "$home/state/inbox/$note_id.note" ] || fail "ordinary voice request was acknowledged by email verification"
+  cat > "$home/state/.afk-contract" <<'EOF'
+version: 99
+entered_epoch: 100
+reach_channels: email
+EOF
+  identity=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
+    "$REPO/bin/fm-inbox.sh" identity "$note_id") \
+    || fail "voice note identity could not be read with an invalid away record"
+  python3 - "$identity" <<'PY' || fail "invalid away record changed the ordinary voice note identity"
+import json, sys
+assert json.loads(sys.argv[1])["request_id"] is None
+PY
+  [ -f "$home/state/inbox/$note_id.note" ] || fail "invalid away record acknowledged an ordinary voice request"
+  pass "away-email verification leaves ordinary voice inbox requests on the normal path"
 }
 
 test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit() {
@@ -547,7 +669,7 @@ assert "reply in mail UID 4 rejected; answer exceeds 8000 characters" in recover
 assert mailbox.body_fetches == ["2", "4"], mailbox.body_fetches
 recipient = os.environ.pop("FM_AFK_EMAIL_TO")
 try:
-    assert mail.afk_email_context() == (None, True)
+    assert mail.afk_email_context() == (None, True, False)
     (state / ".mail-seen").write_text("uidvalidity=44\n1\n2\n3\n4\n6\n7\n8\n9\n", encoding="utf-8")
     mailbox.search_ids = b"1 2 3 4 5 6 7 8 9"
     mailbox.body_fetches.clear()
@@ -790,7 +912,7 @@ clauses = [
     "If step 4\x27s verifier exited nonzero",
     "leave both the note and its wake unacknowledged",
     "do not run the `--ack-through` command",
-    "Otherwise, if step 4 handled a verified or untrusted captain inbox note",
+    "Otherwise, after handling any captain inbox note, including one with `email_handoff:false`",
     "run `bin/fm-inbox.sh drain --ack <id>`",
     "run the exact `--ack-through` command",
 ]
@@ -847,6 +969,8 @@ test_live_email_posture_requires_runtime_config
 test_missing_outcome_store_is_empty_but_invalid_store_fails
 test_processed_marker_cannot_suppress_outcomes
 test_invalid_away_record_does_not_enable_email
+test_invalid_or_unreadable_posture_suppresses_mail
+test_voice_inbox_note_remains_ordinary_during_away_mode
 test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit
 test_over_limit_reply_is_explicitly_rejected
 test_expired_and_unknown_codes_are_untrusted

@@ -77,7 +77,7 @@ def afk_record_field(name):
 
 def afk_email_context():
     if os.environ.get('FM_AFK_POSTURE') != '1':
-        return None, False
+        return None, False, False
     contract = os.path.join(os.path.dirname(__file__), 'fm-afk-contract.sh')
     env = os.environ.copy()
     env.setdefault('FM_HOME', os.path.dirname(os.path.dirname(__file__)))
@@ -88,10 +88,15 @@ def afk_email_context():
             stderr=subprocess.DEVNULL,
             env=env,
         )
-        if validated.returncode != 0 or afk_record_field('reach_channels') != 'email':
-            return None, False
+        if validated.returncode != 0:
+            return None, True, True
+        reach = afk_record_field('reach_channels')
+        if reach == 'none':
+            return None, False, False
+        if reach != 'email':
+            return None, True, True
     except (OSError, subprocess.SubprocessError):
-        return None, False
+        return None, True, True
     helper = os.path.join(os.path.dirname(__file__), 'fm-afk-email.py')
     try:
         configured = subprocess.run(
@@ -102,11 +107,11 @@ def afk_email_context():
             env=env,
         )
     except (OSError, subprocess.SubprocessError):
-        return None, True
+        return None, True, False
     recipient = configured.stdout.strip()
     if configured.returncode != 0 or not recipient:
-        return None, True
-    return recipient, True
+        return None, True, False
+    return recipient, True, False
 
 
 def fetched_literal(data):
@@ -461,7 +466,7 @@ def cmd_poll_list():
         # retry set.
         retry_window = retry_scan_window(retry_order, retry_pos, window)
         retry_candidates = [u for u in retry_window if u in seen]
-        recipient, afk_email_active = afk_email_context()
+        recipient, afk_email_active, invalid_posture = afk_email_context()
         afk_enabled = recipient is not None
         afk_messages = []
         turn_path = os.environ.get('FM_MAIL_TURN', '')
@@ -506,6 +511,15 @@ def cmd_poll_list():
                     continue
                 retry_examined += 1
             elif new_emitted >= new_budget:
+                continue
+            if invalid_posture:
+                out.append((clean(u), '', '', '', 'deferred'))
+                if is_retry:
+                    retry_emitted += 1
+                    if first_retry_emitted_index == -1:
+                        first_retry_emitted_index = retry_idx
+                else:
+                    new_emitted += 1
                 continue
             # A raised or empty header FETCH is treated as a failure for THIS uid only,
             # so one bad message can never abort the bounded scan: a new uid is

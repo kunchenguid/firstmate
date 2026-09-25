@@ -584,24 +584,27 @@ def handoff_record(request_id, posture):
 
 def verify_note(note_id):
     if not isinstance(note_id, str) or not NOTE_ID_RE.fullmatch(note_id):
-        print(json.dumps({"verified": False}, separators=(",", ":")))
-        return 0
-    posture = live_record()
-    if posture is None:
-        print(json.dumps({"verified": False}, separators=(",", ":")))
+        print(json.dumps({"email_handoff": False, "verified": False}, separators=(",", ":")))
         return 0
     identity = inbox_identity(note_id)
     if identity is None:
         print("fm-afk-email: inbox identity could not be read", file=sys.stderr)
         return 1
     request_id = identity.get("request_id")
+    if not isinstance(request_id, str) or not re.fullmatch(r"afk-email-[1-9][0-9]*-[0-9a-f]{24}", request_id):
+        print(json.dumps({"email_handoff": False, "verified": False}, separators=(",", ":")))
+        return 0
+    posture = live_record()
+    if posture is None:
+        print("fm-afk-email: away posture could not be validated for an email handoff", file=sys.stderr)
+        return 1
     try:
         item = handoff_record(request_id, posture)
     except (OSError, ValueError):
         print("fm-afk-email: verified reply state could not be read", file=sys.stderr)
         return 1
     if item is None:
-        print(json.dumps({"verified": False}, separators=(",", ":")))
+        print(json.dumps({"email_handoff": False, "verified": False}, separators=(",", ":")))
         return 0
     body = inbox_note_body(note_id)
     if body is None:
@@ -609,9 +612,10 @@ def verify_note(note_id):
         return 1
     body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
     if body_hash != item["handoff_body_hash"]:
-        print(json.dumps({"verified": False}, separators=(",", ":")))
+        print(json.dumps({"email_handoff": True, "verified": False}, separators=(",", ":")))
         return 0
     print(json.dumps({
+        "email_handoff": True,
         "verified": True,
         "id": note_id,
         "request_id": request_id,
