@@ -461,6 +461,7 @@ It also checks that a newly appended keyed decision is classified without reread
 - Recovery publication before stale-lock removal.
 - The typed self-eviction failure.
 - Bounded and successor-linked lifecycle rows.
+- Deferred identity-keyed successor claims, including the link made when a foreign watcher wins the singleton.
 - A SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 
 ### Claude auto-arm and turn-end guard
