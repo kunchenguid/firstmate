@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
-# secondmate in its isolated firstmate home.
+# Spawn a direct report: a crewmate in a treehouse or Orca worktree (or, in a
+# secondmate home, a copy of that home's own clone), or a secondmate in its
+# isolated firstmate home.
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
@@ -568,6 +569,8 @@ fi
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -1162,6 +1165,9 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_CLONE_COPY=0
+SPAWN_CLONE_COPY_PATH=
+SPAWN_CLONE_COPY_ABORT_CLEANUP=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1310,6 +1316,14 @@ spawn_abort_cleanup() {
     else
       echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
     fi
+  fi
+  # A copy made from this home's clone for a spawn that never published its
+  # record holds no work, and nothing else can reach it, so it is removed.
+  if [ "$SPAWN_CLONE_COPY_ABORT_CLEANUP" = 1 ] && [ -n "$SPAWN_CLONE_COPY_PATH" ] &&
+    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    SPAWN_CLONE_COPY_ABORT_CLEANUP=0
+    fm_clone_worktree_remove "$PROJ_ABS" "$SPAWN_CLONE_COPY_PATH" "$ID" ||
+      echo "warning: could not remove aborted task $ID's copy $SPAWN_CLONE_COPY_PATH" >&2
   fi
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
     SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
@@ -2812,7 +2826,19 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+# A secondmate home spawning on a clone in its own projects/ makes the copy
+# from that clone instead of a pool that may belong to another home's clone of
+# the same remote. A project-less home has no clone of its own, so nothing can
+# collide and it keeps its pool. bin/fm-wake-lib.sh's "Clone copies" section
+# owns that decision and its scope.
+SPAWN_CLONE_COPY=0
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] &&
+  fm_root_is_secondmate_home "$FM_HOME" &&
+  fm_home_owns_project_clone "$PROJECTS" "$PROJ_ABS"; then
+  SPAWN_CLONE_COPY=1
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] &&
+  [ "$SPAWN_CLONE_COPY" = 0 ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
     exit 1
@@ -4010,7 +4036,21 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  if [ "$SPAWN_CLONE_COPY" = 1 ]; then
+    # Make the copy before the pane moves, so the poll below adopts only the
+    # exact path this spawn made and removes on abort.
+    SPAWN_CLONE_COPY_PATH=$(fm_clone_worktree_create "$PROJ_ABS" "$ID") || {
+      echo "error: could not make task $ID's copy from this home's clone $PROJ_ABS; inspect window $T" >&2
+      exit 1
+    }
+    SPAWN_CLONE_COPY_ABORT_CLEANUP=1
+    spawn_worktree_source="a copy of this home's clone"
+    spawn_clone_cd_path=${SPAWN_CLONE_COPY_PATH//\'/\'\\\'\'}
+    spawn_send_text_line "$WT_TARGET" "cd -- '$spawn_clone_cd_path'"
+  else
+    spawn_worktree_source="treehouse get"
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -4050,7 +4090,14 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     [ -z "$p" ] || last_seen="$p"
-    if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
+    if [ -n "$p" ] && [ "$SPAWN_CLONE_COPY" = 1 ] &&
+      [ "$(real_path_or_raw "$p")" != "$(real_path_or_raw "$SPAWN_CLONE_COPY_PATH")" ]; then
+      # Only the copy this spawn made is a destination; anything else is the
+      # pane still on its way there.
+      candidate=""
+      last_seen="$p"
+      last_reason="it is not the copy this spawn made at '$SPAWN_CLONE_COPY_PATH'"
+    elif [ -n "$p" ] && spawn_worktree_isolated "$p"; then
       p_real=$(real_path_or_raw "$p")
       last_reason="it is an isolated worktree, but no second read agreed with it"
       if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
@@ -4065,11 +4112,11 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+    echo "error: $spawn_worktree_source did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  validate_spawn_worktree "$spawn_worktree_source" "$T"
 
   # Claim the pool slot for this task. The interactive `treehouse get` sent to
   # the pane above records only a process lease (Treehouse's durable
@@ -4775,6 +4822,7 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
 fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+SPAWN_CLONE_COPY_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

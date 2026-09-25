@@ -3198,7 +3198,12 @@ cleanup_firstmate_home_children() {
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
-        if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
+        if fm_clone_worktree_owned "$child_proj" "$child_wt" "$child_id"; then
+          # A child home's own-clone copy lives outside that home, so removing
+          # the home alone would strand it registered with the clone.
+          fm_clone_worktree_remove "$child_proj" "$child_wt" "$child_id" ||
+            safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+        elif [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
           if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
             fm_treehouse_slot_owner_release "$child_wt" "$child_id"
           else
@@ -3520,23 +3525,33 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
-  # Kills remaining processes in the worktree (including the agent), resets, returns
-  # to pool. treehouse resolves the pool from the working directory, so run it from
-  # the project. teardown_treehouse_return tolerates transient and stale git locks
-  # left by a killed crew process; see the script header for retry and stale-lock proof.
-  post_lock_cleanup_check=
-  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
-    post_lock_cleanup_check=validate_worktree_teardown_safety
+  if fm_clone_worktree_owned "$PROJ" "$WT" "$ID"; then
+    # A secondmate home's own-clone copy (bin/fm-wake-lib.sh "Clone copies") is
+    # no pool slot: the landed-work checks above already passed, and the
+    # worktree processes were reaped, so it is removed from its clone.
+    fm_clone_worktree_remove "$PROJ" "$WT" "$ID" || {
+      echo "error: could not remove worktree $WT from its clone; teardown aborted" >&2
+      exit 1
+    }
+  else
+    # Kills remaining processes in the worktree (including the agent), resets, returns
+    # to pool. treehouse resolves the pool from the working directory, so run it from
+    # the project. teardown_treehouse_return tolerates transient and stale git locks
+    # left by a killed crew process; see the script header for retry and stale-lock proof.
+    post_lock_cleanup_check=
+    if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
+      post_lock_cleanup_check=validate_worktree_teardown_safety
+    fi
+    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+      exit 1
+    }
+    # The slot is back in the pool, so this task's claim on it is spent. Dropping
+    # it here - and only after a return that succeeded - keeps a returned slot
+    # unclaimed until its next holder claims it, and leaves the claim in place
+    # whenever the return did not actually happen.
+    fm_treehouse_slot_owner_release "$WT" "$ID"
   fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
-  # The slot is back in the pool, so this task's claim on it is spent. Dropping
-  # it here - and only after a return that succeeded - keeps a returned slot
-  # unclaimed until its next holder claims it, and leaves the claim in place
-  # whenever the return did not actually happen.
-  fm_treehouse_slot_owner_release "$WT" "$ID"
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"

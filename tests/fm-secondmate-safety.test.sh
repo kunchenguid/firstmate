@@ -1970,6 +1970,52 @@ EOF
   pass "secondmate force teardown discards child work"
 }
 
+# A child's copy made from its home's own clone lives outside that home, so
+# retiring the home must remove it from the clone too, not strand it registered.
+test_secondmate_force_teardown_removes_child_clone_copy() {
+  local home subhome childproj childwt fakebin log copy_home
+  home="$TMP_ROOT/force-clone-home"
+  subhome="$TMP_ROOT/force-clone-subhome"
+  childproj="$subhome/projects/alpha"
+  copy_home="$TMP_ROOT/force-clone-user-home"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$copy_home"
+  fm_git_init_commit "$childproj"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  childwt=$(HOME="$copy_home" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_clone_worktree_create "$2" child' _ "$ROOT" "$childproj") \
+    || fail "could not make the child's clone copy"
+  printf 'discarded\n' > "$childwt/wip.txt"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  cat > "$subhome/state/child.meta" <<EOF
+window=firstmate:fm-child
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  fakebin=$(make_fake_tmux "$TMP_ROOT/force-clone-fake")
+  log="$TMP_ROOT/force-clone-fake/tmux.log"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-clone-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>/dev/null \
+    || fail "force teardown failed to discard a child's clone copy"
+  [ ! -d "$subhome" ] || fail "force teardown did not remove the retired secondmate home"
+  [ ! -e "$childwt" ] || fail "force teardown left the child's clone copy on disk"
+  [ ! -e "$(dirname "$childwt")" ] || fail "force teardown left the child's copy record on disk"
+  pass "secondmate force teardown removes a child's copy made from its own clone"
+}
+
 test_secondmate_force_teardown_refuses_duplicated_child_slot() {
   local home subhome childproj childwt fakebin log err rc
   home="$TMP_ROOT/force-duplicate-slot-home"
@@ -3045,6 +3091,7 @@ test_secondmate_force_teardown_preserves_nested_restore_status
 test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
+test_secondmate_force_teardown_removes_child_clone_copy
 test_secondmate_force_teardown_refuses_duplicated_child_slot
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
 test_secondmate_force_teardown_allows_non_state_operational_dir_symlinks_inside_home

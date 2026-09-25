@@ -1272,6 +1272,141 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
   [ "$project_common" = "$slot_common" ]
 }
 
+# Clone copies: the task worktree a secondmate home makes from its OWN clone.
+#
+# Decision: every secondmate home stops pooling, and makes each crewmate or
+# scout copy with `git worktree add` from the clone in its own projects/.
+# A Treehouse pool is keyed by the project's remote, but each slot in it is a
+# linked worktree of whichever clone created the pool first. Once two homes on
+# one machine hold clones of one remote, the later home is handed slots that
+# belong to the other home's clone, and the ownership checks above and in
+# bin/fm-claude-trust.sh correctly refuse them. A fallback that makes a copy
+# only after a refused slot would leave that collision live and merely recover
+# from it; not pooling makes it impossible, at the cost of the few seconds a
+# worktree from a clone already on disk takes. The main home keeps its pool.
+#
+# Scope: the defect is not pooling itself, it is a home with its OWN clone
+# leasing from a pool that belongs to a DIFFERENT clone. So a secondmate home
+# stops pooling exactly when the project it spawns on is a clone inside its own
+# projects/ directory (fm_home_owns_project_clone below). A project-less home,
+# whose crews work on the firstmate repo itself, holds no clone of its own:
+# there is no second clone for a slot to belong to, so nothing can collide, and
+# its pool slots are worktrees of the one clone it works on, exactly as its
+# seed contract documents. Keep that home pooling; widening this condition
+# would rewrite that contract to fix a defect that cannot occur there.
+#
+# Layout: <root>/<repo>-<clone-hash>/<task-id>/<repo>, where <root> is
+# $HOME/.fm-worktrees and <clone-hash> names the clone's git common dir, so two
+# clones of one remote never share a directory and a task id names one copy.
+# <root>/<repo>-<clone-hash>/<task-id>/.fm-clone-worktree - a sibling of the
+# checkout, so it never dirties the copy - records the task and the clone. Only
+# a copy whose record, task id, and git common dir all match is ever treated as
+# a clone copy, so no path, pool slot, or primary checkout can pass for one.
+
+# True when <project-dir> is a clone inside <projects-dir>, the home's own
+# projects/ directory. See "Scope" above for why only this case stops pooling.
+fm_home_owns_project_clone() {  # <projects-dir> <project-dir>
+  local projects project
+  projects=$(CDPATH='' cd -- "$1" 2>/dev/null && pwd -P) || return 1
+  project=$(CDPATH='' cd -- "$2" 2>/dev/null && pwd -P) || return 1
+  case "$project" in
+    "$projects"/*) ;;
+    *) return 1 ;;
+  esac
+  git -C "$project" rev-parse --git-dir >/dev/null 2>&1
+}
+
+# Print the canonical git common dir of <dir>.
+fm_clone_worktree_common() {  # <dir>
+  local common
+  common=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  CDPATH='' cd -- "$common" 2>/dev/null && pwd -P
+}
+
+# Print the copy path this home would make for <task-id> from <project-dir>.
+fm_clone_worktree_path() {  # <project-dir> <task-id>
+  local project=$1 id=$2 common top name hash
+  [ -n "$id" ] && [ -n "${HOME:-}" ] || return 1
+  case "$id" in */*|.|..) return 1 ;; esac
+  common=$(fm_clone_worktree_common "$project") || return 1
+  top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || return 1
+  name=$(basename "$top")
+  hash=$(printf '%s' "$common" | git hash-object --stdin 2>/dev/null) || return 1
+  printf '%s/.fm-worktrees/%s-%s/%s/%s\n' "$HOME" "$name" "${hash:0:12}" "$id" "$name"
+}
+
+# True when <worktree> is the clone copy made for <task-id> from <project-dir>.
+fm_clone_worktree_owned() {  # <project-dir> <worktree> <task-id>
+  local project=$1 worktree=$2 id=$3 wt marker project_common wt_common wt_git_dir
+  [ -n "$id" ] && [ -d "$project" ] && [ -d "$worktree" ] || return 1
+  wt=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  [ "$(basename "$(dirname "$wt")")" = "$id" ] || return 1
+  marker="$(dirname "$wt")/.fm-clone-worktree"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  project_common=$(fm_clone_worktree_common "$project") || return 1
+  wt_common=$(fm_clone_worktree_common "$wt") || return 1
+  [ "$project_common" = "$wt_common" ] || return 1
+  grep -qxF "task=$id" "$marker" 2>/dev/null || return 1
+  grep -qxF "clone=$project_common" "$marker" 2>/dev/null || return 1
+  # A linked worktree has its own git dir; the primary checkout's is the
+  # common dir itself.
+  wt_git_dir=$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  wt_git_dir=$(CDPATH='' cd -- "$wt_git_dir" 2>/dev/null && pwd -P) || return 1
+  [ "$wt_git_dir" != "$project_common" ]
+}
+
+# Make the clone copy for <task-id> from <project-dir>, detached at the clone's
+# HEAD, and print its path. A task-id directory that already exists is refused,
+# never adopted, so one copy is never handed to two spawns.
+fm_clone_worktree_create() {  # <project-dir> <task-id>
+  local project=$1 id=$2 wt task_dir common out
+  wt=$(fm_clone_worktree_path "$project" "$id") || {
+    echo "error: could not resolve a copy path for task $id from clone $project" >&2
+    return 1
+  }
+  task_dir=$(dirname "$wt")
+  common=$(fm_clone_worktree_common "$project") || return 1
+  mkdir -p "$(dirname "$task_dir")" 2>/dev/null || {
+    echo "error: could not create the copy root $(dirname "$task_dir")" >&2
+    return 1
+  }
+  if ! mkdir "$task_dir" 2>/dev/null; then
+    echo "error: a copy for task $id already exists at $task_dir; refusing to hand it to another spawn" >&2
+    return 1
+  fi
+  printf 'task=%s\nclone=%s\n' "$id" "$common" > "$task_dir/.fm-clone-worktree" || {
+    rm -rf -- "$task_dir"
+    return 1
+  }
+  if ! out=$(git -C "$project" worktree add --quiet --detach "$wt" HEAD 2>&1); then
+    printf '%s\n' "$out" >&2
+    echo "error: could not make a copy of clone $project at $wt" >&2
+    rm -rf -- "$task_dir"
+    git -C "$project" worktree prune 2>/dev/null || true
+    return 1
+  fi
+  printf '%s\n' "$wt"
+}
+
+# Remove the clone copy made for <task-id>, refusing anything that is not
+# provably that copy. Callers own every landed-work check before this runs.
+fm_clone_worktree_remove() {  # <project-dir> <worktree> <task-id>
+  local project=$1 worktree=$2 id=$3 wt task_dir
+  fm_clone_worktree_owned "$project" "$worktree" "$id" || {
+    echo "error: $worktree is not task $id's copy of clone $project; refusing to remove it" >&2
+    return 1
+  }
+  wt=$(CDPATH='' cd -- "$worktree" && pwd -P) || return 1
+  task_dir=$(dirname "$wt")
+  git -C "$project" worktree remove --force "$wt" || {
+    echo "error: could not remove task $id's copy $wt from clone $project" >&2
+    return 1
+  }
+  rm -f -- "$task_dir/.fm-clone-worktree"
+  rmdir -- "$task_dir" 2>/dev/null || true
+  rmdir -- "$(dirname "$task_dir")" 2>/dev/null || true
+}
+
 # Slot-owner claim: which task a Treehouse pool slot currently belongs to.
 #
 # Treehouse can record ownership durably: `treehouse get --lease --lease-holder`
