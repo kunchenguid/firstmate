@@ -228,9 +228,21 @@ fm_operational_harness_needs_record() {  # <harness>
 }
 
 fm_operational_record_prune() {  # <record-dir>
-  find "$1" -maxdepth 1 -type f \( -name '*.msg' -o -name '.record.*' \) \
-    -mmin +"$((FM_OPERATIONAL_RECORD_RETENTION_DAYS * 24 * 60))" \
-    -exec rm -f {} + 2>/dev/null || true
+  local path mtime cutoff files=()
+  for path in "$1"/*.msg "$1"/.record.*; do
+    [ -f "$path" ] && files+=("$path")
+  done
+  [ "${#files[@]}" -gt 0 ] || return 0
+  cutoff=$(( $(date +%s) - FM_OPERATIONAL_RECORD_RETENTION_DAYS * 86400 ))
+  if [ "$(uname)" = Darwin ]; then
+    /usr/bin/stat -f '%m %N' "${files[@]}" 2>/dev/null
+  else
+    stat -c '%Y %n' "${files[@]}" 2>/dev/null
+  fi | while read -r mtime path; do
+    case "$mtime" in ''|*[!0-9]*) continue ;; esac
+    if [ "$mtime" -lt "$cutoff" ]; then rm -f "$path"; fi
+  done
+  return 0
 }
 
 # Write one generic-kind record under <state-dir> and return its doorbell line.

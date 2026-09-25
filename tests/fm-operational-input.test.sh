@@ -223,12 +223,12 @@ test_record_backed_doorbell_carrier() {
   just_kept="$state/operational-inbox/1-just-kept.msg"
   printf '%s' "${FM_OPERATIONAL_PREFIX}v1 watcher: just expired" >"$just_expired"
   printf '%s' "${FM_OPERATIONAL_PREFIX}v1 watcher: just kept" >"$just_kept"
-  set_age_secs "$just_expired" $((7 * 86400 + 3600))
-  set_age_secs "$just_kept" $((7 * 86400 - 3600))
+  set_age_secs "$just_expired" $((7 * 86400 + 5))
+  set_age_secs "$just_kept" $((7 * 86400 - 60))
   printf 'x' | FM_STATE_OVERRIDE="$state" "$OWNER" record watcher >/dev/null || fail "second record write failed"
   [ ! -e "$old_record" ] || fail "a record older than the retention window was not pruned"
-  [ ! -e "$just_expired" ] || fail "a record an hour past seven days was retained into the eighth day"
-  [ -f "$just_kept" ] || fail "a record an hour short of seven days was pruned"
+  [ ! -e "$just_expired" ] || fail "a record seconds past seven days survived a write"
+  [ -f "$just_kept" ] || fail "a record a minute short of seven days was pruned"
   [ -f "$record" ] || fail "a fresh record was pruned"
   pass "record-backed carrier: Claude-only selection, an ASCII doorbell naming an exact envelope record, home-bound open, and no recognition without the record"
 }
