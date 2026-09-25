@@ -146,8 +146,11 @@ fm_control_backend_state_verified() {  # <backend>
   return 1
 }
 
-# Only Pi creates per-task wiring in maintained adapters.
+# Managed worker wiring retired before a relaunch changes generation.
 fm_control_harness_wiring_paths() { # <harness> <worktree> <state-dir> <id>
   [ -n "${2-}" ] && [ -n "${3-}" ] && [ -n "${4-}" ] || return 1
-  case "${1-}" in pi) printf '%s/%s.pi-ext.ts\n' "$3" "$4" ;; esac
+  case "${1-}" in
+    pi) printf '%s/%s.pi-ext.ts\n' "$3" "$4" ;;
+    codex|traex) printf '%s/%s.busy-session\n' "$3" "$4" ;;
+  esac
 }

@@ -709,11 +709,25 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
   esac
 }
 
+# Fence the two rollout readers before input reaches a worker. A failed send
+# leaves unknown until fresh lifecycle evidence; it never restores old idle.
+fm_backend_fence_transcript_input() {  # <backend> <target>
+  local binding state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+  for binding in "$state/"*.busy-session; do
+    [ -f "$binding" ] || continue
+    python3 "$FM_BACKEND_LIB_DIR/fm-busy-transcript.py" fence-target "$state" "$1" "$2"
+    return $?
+  done
+}
+
 # fm_backend_send_key: one backend-supported named special key.
 fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   local backend=$1
   shift
   fm_backend_source "$backend" || return 1
+  case "${2-}" in
+    Enter|enter|C-m|c-m|ctrl+m|Ctrl+M) fm_backend_fence_transcript_input "$backend" "$1" || return 1 ;;
+  esac
   case "$backend" in
     tmux) fm_backend_tmux_send_key "$@" ;;
     herdr) fm_backend_herdr_send_key "$@" ;;
@@ -731,6 +745,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   local backend=$1
   shift
   fm_backend_source "$backend" || return 1
+  fm_backend_fence_transcript_input "$backend" "$1" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_send_text_submit "$@" ;;
     herdr) fm_backend_herdr_send_text_submit "$@" ;;

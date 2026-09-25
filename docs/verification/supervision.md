@@ -142,25 +142,56 @@ The detailed reconciliation and task chronology stay in the private audit report
 
 ## Semantic busy state
 
-The per-adapter semantic sources behind [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) were live-verified on 2026-07-28 against firstmate-launched workers wired exactly as `fm-spawn` writes them.
-Each pass polled `state/<id>.busy-state` while a real turn ran.
+The per-adapter semantic sources behind [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) were verified on the dates below.
+Push-source passes polled `state/<id>.busy-state`; pull-source passes used the public classifier.
 
 | Harness | Version verified | Semantic source | Observed result |
 | --- | --- | --- | --- |
 | Pi | 0.82.0 | Extension `agent_start` / `agent_settled` with `ctx.isIdle()` | The spawn seed `busy source=fm-spawn`, then `busy source=pi-ext event=agent-start`, then `idle source=pi-ext event=agent-settled`; the turn-end marker was still touched. |
-| Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
+| Codex | codex-cli 0.156.1 | Bound structured transcript | 2026-09-25 default interactive TUI: busy during a turn and foreground tool, idle after completion, API failure and interrupt, dead after process or endpoint exit. Local simulated provider; see the guard below. |
+| TraeX | 0.207.1 internal | Bound structured transcript | Same guard and lifecycle coverage; native Herdr unknown did not mask the transcript. |
 
-Codex was probed two ways, both refused:
+The earlier Codex 0.145.0 probe on 2026-07-28 tried two push paths, both refused:
 
 ```sh
 codex app-server daemon start
 codex exec --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust 'Reply with exactly PROBE2.'
 ```
 
-The daemon refused with `managed standalone Codex install not found`, and an interactive TUI worker neither starts nor attaches to the app-server control socket, so no client can observe its turns.
+That installation refused daemon startup with `managed standalone Codex install not found`; its interactive TUI did not expose its turns through the app-server control socket.
 In this 2026-07-28 Codex 0.145.0 semantic-busy probe, Firstmate-written lifecycle project hooks under `<worktree>/.codex/hooks.json` fired for neither an interactive pane whose directory trust was granted nor `codex exec`, in both cases with `--dangerously-bypass-hook-trust`, while an untracked global probe fired in the same runs; Firstmate does not ship, install, recommend, or depend on that global path.
-Codex also exposes no `StopFailure` hook, so an API-error turn end would need separate coverage even after hook discovery works.
+Neither old hook discovery failures nor old daemon reachability establish a current transcript limitation.
+The 0.156.1 hook probe still omitted a closing hook on API failure, which is why current eligible workers use the transcript.
 The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
+
+Current default-TUI refresh (Linux, named Herdr lab, private mount/PID/network namespaces, no real provider or credentials):
+
+```sh
+FM_BUSY_TRANSCRIPT_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-busy-transcript-live-e2e.test.sh
+```
+
+The 2026-09-25 run on Herdr 0.8.0 passed all ten per-tool lifecycle assertions with Codex 0.156.1 and TraeX 0.207.1.
+The exact stable success lines were:
+
+```text
+ok - codex default TUI startup and completion
+ok - codex active turn and user interrupt
+ok - codex real tool failure and simulated API failure
+ok - codex process exit overrides a completed transcript
+ok - codex endpoint death
+ok - traex default TUI startup and completion
+ok - traex active turn and user interrupt
+ok - traex real tool failure and simulated API failure
+ok - traex process exit overrides a completed transcript
+ok - traex endpoint death
+```
+
+The guard preserves the managed TUI flags and positional operational brief; it does not use `exec`, `--no-daemon`, a remote app-server, or shared daemon configuration.
+Provider responses and HTTP 401 are simulated; tool execution, interrupt keys, vendor transcript emission, process exit and classification run for real.
+This does not verify an authenticated provider's availability or the allocator that provisions a worktree.
+The exact binding, supported versions, record-size limit, missing-log behavior and conservative submission-fence rules belong to [`fm-busy-transcript.py`](../../bin/fm-busy-transcript.py).
+Manual input that bypasses Firstmate's send path has only the vendor log's observation timing; it has no Firstmate submission fence.
+The portable regressions also cover stale generations, child/mismatched/ambiguous sessions, queued submissions and missing, corrupt, truncated or replaced logs.
 
 Deterministic entry points:
 

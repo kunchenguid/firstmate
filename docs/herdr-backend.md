@@ -39,7 +39,8 @@ TraeX is verified on Herdr 0.8.0 for ordinary isolated workers and scouts only.
 `fm-spawn.sh` refuses secondmate and non-Herdr TraeX launches before endpoint creation.
 The [`harness-adapters` TraeX reference](../.agents/skills/harness-adapters/references/harness/traex.md) owns its exact launch, profile, marker, trust, interrupt, exit, and resume facts.
 
-After launch, TraeX uses the generic Herdr agent, pane, process, input, busy-state, kill, supervision, and stale-recovery paths used by ordinary harnesses.
+After launch, TraeX uses the generic Herdr agent, pane, process, input, kill, supervision, and stale-recovery paths used by ordinary harnesses.
+Its managed-worker busy verdict comes from the shared task-bound transcript source, with Herdr supplying structural process liveness; the [TraeX harness reference](../.agents/skills/harness-adapters/references/harness/traex.md) owns the current boundary.
 It has no TraeX-specific readiness state machine, transition journal, completion transaction, watcher scan, or exactly-once guarantee.
 The opt-in smoke test is `FM_TRAEX_HERDR_LIVE=1 bin/fm-test-run.sh tests/fm-traex-harness-live-e2e.test.sh`.
 ## Client selection

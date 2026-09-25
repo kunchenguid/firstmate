@@ -11,7 +11,7 @@ The router owns TraeX's role and backend boundary.
 | Backend lifecycle | Generic Herdr `agent get`, pane and process inspection, text or key input, busy observation, and pane cleanup, identical to other ordinary Herdr harnesses. TraeX owns no readiness state machine, transition journal, or completion protocol. |
 | Models | `--model <model>`; discover current-account support with `traex models --json`. |
 | Effort | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'`; `max` is refused before endpoint creation. |
-| Busy state | Generic Herdr native status. It provides current-state evidence with the same limits as other Herdr harnesses and does not promise exactly-once completion or crash-perfect edge recovery. |
+| Busy state | Managed workers use the task-bound transcript reader owned by `bin/fm-busy-transcript.py`, with structural process liveness from Herdr. Native unknown does not mask a valid bound transcript; missing or unsupported evidence stays unknown. Current verification: [semantic busy state](../../../../../docs/verification/supervision.md#semantic-busy-state). |
 | Exit | Use the generic backend pane-cleanup owner. |
 | Interrupt | Single Escape, followed by generic Herdr `Ctrl+U` because TraeX restores interrupted input into the composer. |
 | Skill invocation | No separately verified command form; use natural language. |

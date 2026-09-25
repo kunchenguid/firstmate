@@ -175,19 +175,21 @@ Text for a worker to read and commands that drive a worker's process are separat
 
 ## Busy state is semantic, per adapter
 
-`bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means, and `bin/fm-busy-event.sh` is the only writer of the per-task records it reads.
+`bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means.
+`bin/fm-busy-event.sh` owns the shared generation sidecar and pushed lifecycle records, while `bin/fm-busy-transcript.py` owns the task-bound pull source used by managed non-secondmate Codex and TraeX workers.
 Every classification returns a verdict of busy, idle, unknown, or dead together with the source that produced it, so a consumer or a diagnostic can never confuse semantic state with a fallback.
 
 Pi reports its turn lifecycle through the Firstmate-owned extension's `agent_start` and `agent_settled`, confirmed by `ctx.isIdle()`.
 Model providers used through Pi inherit that lifecycle.
-Codex remains unknown behind its explicit semantic-source verification gate; TraeX uses Herdr's native busy state.
+Managed non-secondmate Codex and TraeX workers on tmux or Herdr use their bound structured transcript after structural process liveness is established; missing, unsupported, or unbound evidence remains unknown.
+Legacy TraeX tasks without transcript wiring retain Herdr's native busy-only fallback, while legacy Codex tasks remain `codex-unverified`.
 
 Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.
 Ordinary task-state consumers act only on an exact busy verdict, so an unreadable worker surfaces for a closer look instead of being absorbed as still-working or written off as finished.
 Endpoint death is the only process-level override and yields dead; child processes, CPU, process sleep state, and marker modification times are not state signals.
 `state/<id>.turn-ended` files remain wake notifications, not current state.
 
-Each record is bound to an incarnation token minted when the task's wiring is armed, so an event from a superseded incarnation is rejected rather than applied, and a record left behind by one classifies unknown.
+Each pushed record or transcript binding is bound to an incarnation token minted when the task's wiring is armed, so evidence from a superseded incarnation is rejected rather than applied, and stale retained evidence classifies unknown.
 Three rendered-text checks deliberately remain outside this contract because they answer delivery questions: submit acknowledgement and the away-mode supervisor-pane busy guard consume the shared delivery-footer matcher owned by `bin/fm-composer-lib.sh`, while `bin/fm-pending-reply-lib.sh` owns the secondmate delivery-confirmation observation.
 All are harness-scoped rather than a global pattern union, and none is a recorded worker state source.
 
@@ -235,8 +237,9 @@ Runtime auto-detection is innermost-first: `$TMUX` wins over `HERDR_ENV=1`, whic
 Unknown backend names fail loudly.
 For compatibility, default tmux tasks do not write `backend=tmux`; every reader treats a missing `backend=` field as `tmux`.
 `fm-watch.sh` decides each window's busy state through the semantic contract above rather than by polling the backend for rendered text.
-Herdr's native `agent.get` verdict still participates, but only as evidence of activity: a native `busy` is accepted when the task has no record of its own, while a native `idle` is not, because `agent.get` reports generation state and reads idle while a worker blocks on its own long-running foreground tool call.
-tmux, zellij, orca, and cmux expose no native busy primitive at all, so a task on those backends is classified purely from its adapter's own lifecycle record.
+Herdr's native `agent.get` verdict still participates, but only as evidence of activity: a native `busy` is accepted when the task has no semantic source of its own, while a native `idle` is not, because `agent.get` reports generation state and reads idle while a worker blocks on its own long-running foreground tool call.
+For a transcript-bound worker, Herdr instead supplies structural process liveness before the transcript is read; native unknown does not mask valid task-bound evidence, and native state never closes its turn.
+tmux, zellij, orca, and cmux expose no native busy primitive at all, so a task on those backends is classified purely from its adapter's own semantic source.
 That poll loop is still the default event source for backends with no native push events, so this stays an extraction of the abstraction rather than a watcher rewrite.
 For capable Herdr sessions, the same watcher replaces its terminal sleep with a bounded native event wait that immediately surfaces `blocked`; [Push events and polling fallback](herdr-backend.md#push-events-and-polling-fallback) owns the current mechanism and capability gates, while [runtime backend verification](verification/runtime-backends.md#native-blocked-event) owns the active evidence.
 The deeper session-start agent-process liveness probe is separate from that busy-state poll: tmux and Herdr have verified classifiers for secondmate recovery, Zellij remains unverified, and Orca and cmux do not support secondmate spawns.

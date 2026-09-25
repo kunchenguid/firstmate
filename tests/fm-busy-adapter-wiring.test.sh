@@ -36,7 +36,7 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
   # fixed valid one.
   local home=$1 wt=$2 fakebin=$3
   shift 3
-  GROK_HOME="$home/grok-home" \
+  CODEX_HOME="$home/codex-home" TRAE_HOME="$home/traex-home" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$@" --mode no-mistakes --yolo off
 }
 
@@ -155,33 +155,47 @@ test_pi_extension_stale_incarnation_rejected() {
   pass "pi extension events from a superseded incarnation are rejected as stale"
 }
 
-# drive_oc_plugin <plugin-path> <events-json-lines...>: load the generated
-# OpenCode plugin in a plain Node host and feed it one event per argument, in
-# order, through the same hooks.event entry OpenCode calls.
-test_codex_unverified_until_a_semantic_source_exists() {
+test_codex_task_bound_transcript_wiring() {
   local rec id=busy-cx-1 out state
   rec=$(make_spawn_case codex-unverified codex "$id")
   read_case_record "$rec"
+  export FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "codex spawn should succeed: $out"
   state="$HOME_DIR/state"
-  assert_absent "$state/$id.busy-gen" "codex must not arm a busy contract with no verified semantic source"
+  assert_present "$state/$id.busy-gen" "codex must mint a launch generation"
+  assert_present "$state/$id.busy-session" "codex must bind its transcript source"
+  local launch
+  launch=$(grep 'FIRSTMATE_BUSY_GENERATION=' "$FM_FAKE_LAUNCH_LOG")
+  unset FM_FAKE_LAUNCH_LOG
+  cat > "$FAKEBIN_DIR/codex" <<'PY'
+#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ['FM_ARGV_LOG'], 'w') as stream:
+    json.dump({'args': sys.argv[1:], 'home': os.environ.get('CODEX_HOME')}, stream)
+PY
+  chmod +x "$FAKEBIN_DIR/codex"
+  FM_ARGV_LOG="$CASE_DIR/argv.json" PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch" || fail "managed Codex launch is not executable"
+  python3 - "$CASE_DIR/argv.json" "$state/$id.busy-gen" "$HOME_DIR/codex-home" <<'PY' || fail "launch binding marker or vendor home differs from the reader"
+import json, pathlib, sys
+record = json.loads(pathlib.Path(sys.argv[1]).read_text())
+gen = pathlib.Path(sys.argv[2]).read_text().strip()
+assert record['args'][-1].splitlines()[-1] == 'FIRSTMATE_BUSY_GENERATION=' + gen
+assert 'FIRSTMATE_OP: v1 launch-brief:' in record['args'][-1]
+assert record['home'] == sys.argv[3]
+PY
   assert_absent "$WT_DIR/.codex/hooks.json" "codex must not install unverified busy hooks"
   assert_contains "$out" 'spawned '"$id"' harness=codex' "codex spawn did not complete normally"
   out=$(classify codex "$id" "$state")
-  [ "$out" = "unknown codex-unverified" ] || fail "codex must classify 'unknown codex-unverified', got '$out'"
+  [ "$out" = "unknown codex-transcript" ] || fail "codex must classify 'unknown codex-transcript', got '$out'"
   out=$(fm_busy_classify tmux fake:w codex "$id" "$state" '• Working (6s • esc to interrupt)')
-  [ "$out" = "unknown codex-unverified" ] || fail "codex must not fall back to footer text, got '$out'"
-  pass "codex classifies unknown until a semantic source is verified, never idle or footer-matched"
+  [ "$out" = "unknown codex-transcript" ] || fail "codex must not fall back to footer text, got '$out'"
+  pass "codex binds its transcript but remains unknown without task lifecycle evidence"
 }
 
-# Gemini's hooks are PROJECT hooks in the worktree's own .gemini/settings.json,
-# and gemini's hook contract requires each command to print a JSON object on
-# stdout and nothing else, so these drive the real command and check both the
-# classification and that stdout stays parseable JSON.
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
-test_codex_unverified_until_a_semantic_source_exists
+test_codex_task_bound_transcript_wiring
 
 echo "all fm-busy-adapter-wiring tests passed"

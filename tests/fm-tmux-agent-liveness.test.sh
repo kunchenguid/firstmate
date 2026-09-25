@@ -132,6 +132,8 @@ assert_sources_disagree() {  # <target> <label>
     "$2: the two name sources were expected to disagree, but title=$t comms=$c (title='$(fm_backend_tmux_current_command "$1")' comms='$(fm_backend_tmux_foreground_comms "$1" | tr '\n' ' ')')"
 }
 
+for name in traex traecli extraex; do ln -s "$SLEEP_BIN" "$LAB/bin/$name"; done
+
 # --- a harness-named foreground process -------------------------------------
 # Invoking the symlink by its harness name proves the ordinary positive path
 # with a real process. macOS exposes different names for the symlink through
@@ -142,6 +144,16 @@ new_window agent "$LAB/bin/codex-test" 900
 wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
 pass "tmux liveness: a harness-named foreground process classifies alive"
+
+# The TraeX process probe must survive a native unknown status, but must not
+# claim unrelated executables containing its name.
+for name in traex traecli; do
+  new_window "$name" "$LAB/bin/$name" 900
+  wait_for_state "$SESSION:$name" alive || fail "$name must classify alive"
+done
+new_window extraex "$LAB/bin/extraex" 900
+wait_for_state "$SESSION:extraex" ambiguous || fail "extraex must remain ambiguous"
+pass "tmux liveness: exact TraeX executable names are recognized without substring matches"
 
 # --- a version name blinds one source ---------------------------------------
 # Giving a genuine harness-named executable the version-string argv[0] that
