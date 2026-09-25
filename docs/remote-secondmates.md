@@ -261,7 +261,7 @@ Every claude pane under such a server falls back to a stale plaintext credential
 
 ### How the guard converges on one server
 
-Herdr's own SSH remote attach starts such a server when it finds none.
+Herdr's own SSH remote attach starts a server born in another session when it finds none.
 At boot, that server wins the `fm-remote` socket, because sshd accepts connections before the login session exists.
 The guard is what makes the launch agent converge.
 It acts on whichever server owns the `fm-remote` socket:
@@ -370,7 +370,7 @@ Launch records are created only when the secondmate is launched.
 
 ### The seed's readiness gate
 
-Readiness starts with a read-only check:
+The seed gates readiness in these steps:
 
 1. The seed runs a read-only check.
 2. When that check reports a gap, it runs `--fix`.
@@ -543,8 +543,7 @@ If the confined remote reader cannot deliver an offered document, the channel fa
 - The cursor still advances.
 - The adapter appends one unkeyed note carrying the reader's own reason.
 
-That note never enters the open-decision fold.
-The reader cannot tell a report that is still being written from one that will never exist.
+That note never enters the open-decision fold, because the reader cannot tell a report that is still being written from one that will never exist.
 A decision raised on that ambiguity could stand open describing a transfer that later succeeded.
 
 A refused document is not re-attempted automatically.
