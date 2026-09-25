@@ -11,12 +11,12 @@
 #
 # no-mistakes owns the authority-removal half (it neutralizes the project
 # instructions and stamps NO_MISTAKES_GATE into the gate agent's environment).
-# THIS is the firstmate capability-removal half: an enforceable script refusal,
-# not a prose rule the neutralized agent would never read. It is sourced at the
-# top of the three fleet-lifecycle entrypoints and called before any fleet
-# mutation, so a gate agent that still reaches for the fleet is stopped cold.
+# THIS is the firstmate capability boundary: an enforceable script check,
+# not a prose rule the neutralized agent would never read. It is sourced by the
+# four fleet-lifecycle entrypoints and called before their fleet mutation, so
+# a gate agent that reaches for the real fleet is stopped cold.
 #
-# Two independent signals, either of which refuses (fail closed):
+# Two independent gate-context signals, either of which triggers the check:
 #
 #   1. NO_MISTAKES_GATE set - the durable env marker no-mistakes stamps into every
 #      gate agent. This is the primary signal and covers a relocated NM_HOME.
@@ -24,7 +24,7 @@
 #      repo (.../.no-mistakes/repos/*.git) - the UNSPOOFABLE backstop. It derives
 #      from the checkout's real filesystem location, which the agent cannot
 #      relocate without breaking the gate's own git operations, so it still
-#      refuses even if the agent tampered NO_MISTAKES_GATE away. Its limit: the
+#      detects a gate even if the agent tampered NO_MISTAKES_GATE away. Its limit: the
 #      literal-path match only fires for the default NM_HOME (~/.no-mistakes); a
 #      relocated NM_HOME is covered by signal 1.
 #
@@ -46,13 +46,13 @@
 # fm_is_gate_agent still reports the gate context, so the sessionstart
 # stand-downs that read it directly are unaffected by the marker.
 #
-# This mirrors the unspoofable-marker precedent in bin/fm-marker-lib.sh: a signal
-# the agent cannot forge, keyed on at a chokepoint, keeping the pattern familiar
-# to firstmate maintainers. It layers ABOVE no-mistakes' separately-shipping
-# HEAD-continuity guard, which remains the adversarial/residual backstop.
+# The gate-context backstop mirrors the unspoofable-marker precedent in
+# bin/fm-marker-lib.sh; the lab-home marker is deliberately not unspoofable.
+# This boundary layers above no-mistakes' separately-shipping HEAD-continuity
+# guard, which remains the adversarial/residual backstop.
 #
 # TEST-HARNESS ESCAPE HATCH (FM_GATE_REFUSE_BYPASS=1): firstmate's own test suite
-# must exercise the REAL fm-spawn/fm-send/fm-teardown, but the no-mistakes gate
+# must exercise the real fleet entrypoints, but the no-mistakes gate
 # runs that suite FROM a gate worktree (cwd git-common-dir under
 # .no-mistakes/repos/*.git, and possibly NO_MISTAKES_GATE set) - the exact
 # environment this guard refuses. So both signals would fire during firstmate's
@@ -67,18 +67,17 @@
 # neutral-execution-context and the HEAD-continuity guard. The dedicated
 # tests/fm-gate-refuse.test.sh strips the bypass so it still verifies real refusal.
 #
-# Sourced by bin/fm-spawn.sh, bin/fm-send.sh, bin/fm-teardown.sh,
-# bin/fm-sessionstart-nudge.sh, and the tests.
+# Sourced by the fleet lifecycle entrypoints, session-start hooks,
+# bin/fm-lab-home.sh, and the tests.
 # No side effects on source. set -u / set -e safe. The refusal is a hard exit,
-# not a return, because there is no safe way to continue a fleet mutation from a
-# gate context.
+# not a return, because an unpermitted gate call cannot safely mutate the fleet.
 
 # The exit code every refusal uses, distinct enough to recognize in a caller or
 # test as "the gate refusal fired" rather than an ordinary usage error.
 FM_GATE_REFUSE_EXIT=3
 
 # The disposable-lab-home marker file and the token line it must carry. The
-# format is owned here; bin/fm-lab-home.sh is the only writer.
+# format is owned here; bin/fm-lab-home.sh is the supported writer.
 FM_GATE_LAB_MARKER='.fm-lab-home'
 FM_GATE_LAB_TOKEN='fm-lab-home v1'
 

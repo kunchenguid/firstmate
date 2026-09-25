@@ -3,9 +3,9 @@
 #
 # A lab home is a throwaway FM_HOME that a no-mistakes GATE agent may drive
 # through the fleet lifecycle entrypoints: bin/fm-gate-refuse-lib.sh refuses
-# every fleet mutation inside a gate agent EXCEPT when FM_HOME carries the
-# marker file this helper writes (the lib owns the marker format and the
-# authorization decision; this script owns the only writer).
+# those calls inside a gate agent unless FM_HOME carries the marker file this
+# helper writes (the lib owns the marker format and authorization decision;
+# this script is the supported writer).
 #
 # Usage:
 #   fm-lab-home.sh create <dir>   make <dir> a marked lab home and print it;

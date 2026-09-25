@@ -291,10 +291,9 @@ Placement is proven only at launch, so `bin/fm-spawn.sh` also exports the task i
 
 Firstmate's own no-mistakes gate runs agents inside a checkout that also contains the fleet-captain identity in `AGENTS.md`, so gate execution needs an authority boundary separate from ordinary crewmate worktree isolation.
 The tracked `.no-mistakes.yaml` sets `disable_project_settings: true`; no-mistakes honors that setting only from the trusted default-branch copy, so a pushed branch cannot enable its own project instructions during validation.
-Independently, `fm-spawn.sh`, `fm-send.sh`, `fm-control.sh`, and `fm-teardown.sh` source `bin/fm-gate-refuse-lib.sh` and exit with status 3 before fleet mutation when the gate environment marker is present or the current checkout matches the default no-mistakes gate-repository topology, unless the call targets a permitted lab home.
-A disposable `FM_HOME` marked by `bin/fm-lab-home.sh` while empty and driven through its stock layout is permitted inside a gate so validation can exercise the real lifecycle.
-A normal primary checkout or crewmate worktree has neither signal and remains unaffected.
-The helper's header owns the exact signal detection, relocated-home limitation, lab-home marker contract, test-harness bypass, and relationship to no-mistakes' HEAD-continuity guard.
+Independently, the fleet lifecycle entrypoints use `bin/fm-gate-refuse-lib.sh` to refuse gate calls against the real fleet, while permitting validation against a disposable lab home minted by `bin/fm-lab-home.sh`.
+A normal primary checkout or crewmate worktree remains unaffected.
+The refusal library's header owns the gate detection, lab-home exception, test-harness bypass, and relationship to no-mistakes' HEAD-continuity guard; the lab helper's header owns its usage.
 
 ## Two task shapes
 
