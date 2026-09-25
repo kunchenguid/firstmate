@@ -342,14 +342,63 @@ test_distinct_real_files_are_refused() {
   cp "$repo/CLAUDE.md" "$repo/.claude-before"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1)
   rc=$?
-  [ "$rc" -ne 0 ] || fail "expected a non-zero exit for distinct real AGENTS.md and CLAUDE.md"
-  assert_contains "$out" "conflict:" "distinct real files did not report a conflict"
+  expect_code 3 "$rc" "distinct real AGENTS.md and CLAUDE.md must exit 3, distinct from a usage error"
+  assert_contains "$out" "conflict: both AGENTS.md and CLAUDE.md are distinct real files" "distinct real files did not report a conflict"
+  assert_contains "$out" "AGENTS.md: 16 bytes; CLAUDE.md: 16 bytes; CLAUDE.md imports @AGENTS.md: no" "conflict report lost its file evidence"
+  assert_contains "$out" "do not merge, replace, symlink, or edit either file from a crewmate task" "conflict report must forbid a task-level edit"
+  assert_contains "$out" "report it to firstmate for the captain" "conflict report must route the decision to the captain"
+  assert_contains "$out" "<!-- firstmate:separate-claude-md -->" "conflict report must name the deliberate-separation mark"
+  assert_not_contains "$out" "reconcile them manually" "conflict report must not instruct a manual reconciliation"
   cmp -s "$repo/.agents-before" "$repo/AGENTS.md" \
     || fail "distinct-real-files refusal modified AGENTS.md"
   cmp -s "$repo/.claude-before" "$repo/CLAUDE.md" \
     || fail "distinct-real-files refusal modified CLAUDE.md"
   [ ! -L "$repo/CLAUDE.md" ] || fail "distinct-real-files refusal turned CLAUDE.md into a symlink"
-  pass "fm-ensure-agents-md.sh: refuses distinct real AGENTS.md and CLAUDE.md"
+  pass "fm-ensure-agents-md.sh: refuses distinct real AGENTS.md and CLAUDE.md with a bounded, actionable report"
+}
+
+test_distinct_real_files_report_import_evidence() {
+  local repo out rc
+  repo="$TMP_ROOT/distinct-real-files-import-project"
+  mkdir -p "$repo"
+  printf '# Agents memory\n' > "$repo/AGENTS.md"
+  printf '# Claude memory\n\n@AGENTS.md\n\nExtra Claude-only guidance.\n' > "$repo/CLAUDE.md"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1)
+  rc=$?
+  expect_code 3 "$rc" "a real CLAUDE.md that imports AGENTS.md but carries more is still a project decision"
+  assert_contains "$out" "CLAUDE.md imports @AGENTS.md: yes" "conflict report must say when CLAUDE.md already imports AGENTS.md"
+  pass "fm-ensure-agents-md.sh: the conflict report says whether CLAUDE.md already imports AGENTS.md"
+}
+
+test_marked_separate_claude_md_is_settled() {
+  local repo out
+  repo="$TMP_ROOT/marked-separate-project"
+  mkdir -p "$repo"
+  printf '# Agents memory\n\n## Maintaining this file\n\nKeep this file for knowledge useful to almost every future agent session in this project.\nDo not repeat what the codebase already shows; point to the authoritative file or command instead.\nPrefer rewriting or pruning existing entries over appending new ones.\nWhen updating this file, preserve this bar for all agents and keep entries concise.\n' > "$repo/AGENTS.md"
+  printf '<!-- firstmate:separate-claude-md -->\n# Claude memory\n\nDeliberately separate.\n' > "$repo/CLAUDE.md"
+  cp "$repo/AGENTS.md" "$repo/.agents-before"
+  cp "$repo/CLAUDE.md" "$repo/.claude-before"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "a marked separate CLAUDE.md must not be a conflict: $out"
+  assert_contains "$out" "unchanged: AGENTS.md with a deliberately separate, marked CLAUDE.md" "marked separation was not reported as settled"
+  cmp -s "$repo/.agents-before" "$repo/AGENTS.md" || fail "marked separation modified AGENTS.md"
+  cmp -s "$repo/.claude-before" "$repo/CLAUDE.md" || fail "marked separation modified CLAUDE.md"
+  pass "fm-ensure-agents-md.sh: a marked separate CLAUDE.md is a settled layout"
+}
+
+test_marked_separate_claude_md_still_maintains_agents_section() {
+  local repo out
+  repo="$TMP_ROOT/marked-separate-section-project"
+  mkdir -p "$repo"
+  printf '# Agents memory\n' > "$repo/AGENTS.md"
+  printf '<!-- firstmate:separate-claude-md -->\r\n# Claude memory\r\n' > "$repo/CLAUDE.md"
+  cp "$repo/CLAUDE.md" "$repo/.claude-before"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "a CRLF-marked separate CLAUDE.md must not be a conflict: $out"
+  assert_contains "$out" "updated: added ## Maintaining this file to AGENTS.md beside the marked separate CLAUDE.md" "marked separation did not maintain the AGENTS.md section"
+  assert_grep "## Maintaining this file" "$repo/AGENTS.md" "AGENTS.md did not gain its self-governance section"
+  cmp -s "$repo/.claude-before" "$repo/CLAUDE.md" || fail "marked separation modified CLAUDE.md"
+  pass "fm-ensure-agents-md.sh: a marked separate CLAUDE.md (CRLF) leaves CLAUDE.md alone and maintains AGENTS.md only"
 }
 
 test_agents_md_symlink_is_refused() {
@@ -429,6 +478,9 @@ test_reworded_guidance_requires_first_line_marker
 test_marked_project_guidance_stays_unchanged
 test_canonical_pointer_is_accepted_when_both_are_real_files
 test_distinct_real_files_are_refused
+test_distinct_real_files_report_import_evidence
+test_marked_separate_claude_md_is_settled
+test_marked_separate_claude_md_still_maintains_agents_section
 test_agents_md_symlink_is_refused
 test_wrong_target_symlink_is_refused
 test_non_regular_claude_md_is_refused

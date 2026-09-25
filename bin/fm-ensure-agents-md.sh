@@ -23,9 +23,20 @@
 # filesystem (issue #389). The real-file pointer also eliminates the old
 # uppercase-literal-target dangling-symlink hazard that a CLAUDE.md -> AGENTS.md
 # link would have carried for that same mismatch.
+# Two distinct real files (a real AGENTS.md beside a real non-pointer CLAUDE.md)
+# is a project decision the helper never guesses at: it reports both files'
+# sizes, whether CLAUDE.md already imports @AGENTS.md, the two resolutions, and
+# an instruction not to edit either file from a task, then exits 3 (distinct
+# from exit 1 usage or refusal errors). A project that keeps both deliberately
+# records that with this exact first line of CLAUDE.md (LF or CRLF):
+# <!-- firstmate:separate-claude-md -->
+# after which the helper treats the pair as settled and only maintains AGENTS.md's
+# self-governance section.
 # This is a worktree utility for crewmates, not a supervision script, so it does
 # not call fm-guard.sh.
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
+# Exit: 0 settled or updated; 1 usage error or refused layout; 3 distinct real
+#       AGENTS.md and CLAUDE.md needing a project decision.
 set -eu
 
 usage() {
@@ -144,6 +155,36 @@ install_claude_pointer() {
   claude_pointer_content > "$CLAUDE"
 }
 
+# A project may keep a real CLAUDE.md deliberately separate from AGENTS.md by
+# making this exact first line of CLAUDE.md (LF or CRLF):
+# <!-- firstmate:separate-claude-md -->
+# The mark records a project decision the helper then respects; it is never
+# inferred from content.
+is_marked_separate_claude() {
+  [ -f "$CLAUDE" ] && [ ! -L "$CLAUDE" ] || return 1
+  head -n 1 "$CLAUDE" | grep -Fqx -e '<!-- firstmate:separate-claude-md -->' \
+    -e $'<!-- firstmate:separate-claude-md -->\r'
+}
+
+# Two distinct real files is a project decision, not something a task should
+# resolve by guessing which file wins. Report the exact evidence and the two
+# resolutions, tell the caller not to edit either file, and exit 3 so a caller
+# can tell "needs a project decision" from a usage error (exit 1).
+report_distinct_files_conflict() {
+  local agents_bytes claude_bytes imports
+  agents_bytes=$(wc -c < "$AGENTS" | tr -d ' ')
+  claude_bytes=$(wc -c < "$CLAUDE" | tr -d ' ')
+  imports=no
+  grep -Eq '^@AGENTS\.md[[:space:]]*$' "$CLAUDE" && imports=yes
+  {
+    echo "conflict: both AGENTS.md and CLAUDE.md are distinct real files in $DIR"
+    echo "  AGENTS.md: $agents_bytes bytes; CLAUDE.md: $claude_bytes bytes; CLAUDE.md imports @AGENTS.md: $imports"
+    echo "  This is a project decision, not a task edit: do not merge, replace, symlink, or edit either file from a crewmate task; report it to firstmate for the captain and continue."
+    echo "  Resolutions the project owner can choose: fold CLAUDE.md's unique content into AGENTS.md and replace CLAUDE.md with the canonical two-line @AGENTS.md pointer, or keep both deliberately by making this exact first line of CLAUDE.md: <!-- firstmate:separate-claude-md -->"
+  } >&2
+  exit 3
+}
+
 is_correct_claude_symlink() {
   [ -L "$CLAUDE" ] || return 1
   target=$(readlink "$CLAUDE")
@@ -227,8 +268,16 @@ if [ -e "$AGENTS" ]; then
       fi
       exit 0
     fi
-    echo "conflict: both AGENTS.md and CLAUDE.md are real files in $DIR; reconcile them manually" >&2
-    exit 1
+    if is_marked_separate_claude; then
+      ensure_maintenance_section
+      if [ "$MAINT_INJECTED" -eq 1 ]; then
+        echo "updated: added ## Maintaining this file to AGENTS.md beside the marked separate CLAUDE.md in $DIR"
+      else
+        echo "unchanged: AGENTS.md with a deliberately separate, marked CLAUDE.md in $DIR"
+      fi
+      exit 0
+    fi
+    report_distinct_files_conflict
   fi
   echo "conflict: CLAUDE.md exists in $DIR but is not a regular file or symlink" >&2
   exit 1
