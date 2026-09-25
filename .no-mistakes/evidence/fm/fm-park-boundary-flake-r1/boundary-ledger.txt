@@ -1,0 +1,3 @@
+1790365356	start	gen=host-83320-1790365355	primary=claude
+1790365416	handled	turn=host-83320-1790365355.1	rc=0	reports=1	error=0 cost=0.25 conversation_cost=0.25 input=5 cache_read=100 cache_write=10 output=20 turns=3	signal: /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3CXDSCFA2FWEVCKCE7NZKE7/.test-tmp/fm-supervision-host.z46xlL/boundary-busy/state/demo.status
+1790365416	boundary	after 61s

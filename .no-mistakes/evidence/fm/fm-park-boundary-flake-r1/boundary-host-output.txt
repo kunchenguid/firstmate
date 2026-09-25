@@ -1,0 +1,4 @@
+watcher: started pid=83646 (beacon fresh)
+watcher: started pid=87909 (beacon fresh) recovery-generation=85895.1790365358.KYoJ01
+signal: /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3CXDSCFA2FWEVCKCE7NZKE7/.test-tmp/fm-supervision-host.z46xlL/boundary-busy/state/demo.status
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
