@@ -54,7 +54,6 @@ socket.setdefaulttimeout(MAIL_TIMEOUT)
 MAX_PREVIEW = 200
 READ_LIMIT = 20
 MAX_AFK_BODY_BYTES = 256 * 1024
-MAX_AFK_REPLY_CHARS = 8000
 
 
 class AfkBodyFetchError(Exception):
@@ -492,8 +491,11 @@ def cmd_poll_list():
                                 'uid': uid,
                                 'from': fr,
                                 'subject': subj,
-                                'body': plain_body(body_message)[:MAX_AFK_REPLY_CHARS + 1],
+                                'body': plain_body(body_message),
                             })
+                        else:
+                            subj = clean(
+                                f'[away-mode reply not processed: message body exceeds 256 KiB] {subj}')
                     except AfkBodyFetchError:
                         raise
                     except Exception as error:
@@ -558,6 +560,8 @@ def cmd_poll_list():
                     for uid, idate, fr, subj, status in out
                 ]
                 print('fm-mail: away-email reply handoff failed; affected messages will retry', file=sys.stderr)
+            elif result.stderr:
+                sys.stderr.write(result.stderr)
         print('uidvalidity\t%s' % uidv)
         for uid, idate, fr, subj, status in out:
             print('%s\t%s\t%s\t%s\t%s' % (uid, idate, fr, subj, status))

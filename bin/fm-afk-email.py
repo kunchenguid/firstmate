@@ -162,6 +162,29 @@ def outcomes_by_seq():
     return rows
 
 
+def outcome_marker(path):
+    try:
+        value = path.read_text(encoding="ascii")
+    except FileNotFoundError:
+        return 0
+    except (OSError, UnicodeError) as error:
+        raise ValueError("outcome marker could not be read") from error
+    value = value.rstrip("\n")
+    if (
+        not value
+        or any(char < "0" or char > "9" for char in value)
+        or len(value) > 1 and value.startswith("0")
+    ):
+        raise ValueError("outcome marker is malformed")
+    try:
+        marker = int(value)
+    except ValueError as error:
+        raise ValueError("outcome marker is out of range") from error
+    if marker > 9007199254740991:
+        raise ValueError("outcome marker is out of range")
+    return marker
+
+
 def live_mail_context():
     posture = live_record()
     if posture is None:
@@ -182,10 +205,15 @@ def queue_unprocessed():
     if rows is None:
         print("fm-afk-email: outcome store is unreadable; pending email was not queued", file=sys.stderr)
         return 1
+    store_last = max(rows, default=0)
     try:
-        processed = int((STATE / ".branch-outcomes-processed").read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        processed = 0
+        cursor = outcome_marker(STATE / ".branch-outcomes-cursor")
+        processed = outcome_marker(STATE / ".branch-outcomes-processed")
+        if cursor > store_last or processed > cursor:
+            raise ValueError("outcome markers are ahead of the validated store")
+    except ValueError:
+        print("fm-afk-email: outcome markers are invalid; pending email was not queued", file=sys.stderr)
+        return 1
     PENDING.mkdir(mode=0o700, parents=True, exist_ok=True)
     SENT.mkdir(mode=0o700, parents=True, exist_ok=True)
     queued = 0
@@ -446,7 +474,15 @@ def validate_handoff_state_item(path, store):
             or item["send_expires_epoch"] <= item["send_started_epoch"]
         ):
             raise ValueError("away-email state is malformed")
-        if "sent_epoch" in item or "expires_epoch" in item:
+        present_sent_fields = {"sent_epoch", "expires_epoch"}.intersection(item)
+        if present_sent_fields and (
+            present_sent_fields != {"sent_epoch", "expires_epoch"}
+            or not present_send_fields
+            or type(item["sent_epoch"]) is not int
+            or type(item["expires_epoch"]) is not int
+            or item["sent_epoch"] != item["send_started_epoch"]
+            or item["expires_epoch"] != item["send_expires_epoch"]
+        ):
             raise ValueError("away-email state is malformed")
     else:
         if (
@@ -585,13 +621,21 @@ def verify_note(note_id):
 
 def token_record(token):
     digest = token_digest(token)
-    for directory in (SENT, PENDING):
+    for store, directory in (("sent", SENT), ("pending", PENDING)):
+        try:
+            paths = sorted(directory.iterdir())
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise ValueError("away-email token state directory could not be read") from error
         matches = []
-        for path in directory.glob("*.json"):
-            item = read_json(path)
-            if not isinstance(item, dict) or item.get("token_hash") != digest:
+        for path in paths:
+            if path.suffix != ".json":
                 continue
-            if directory == PENDING:
+            item = validate_handoff_state_item(path, store)
+            if item.get("token_hash") != digest:
+                continue
+            if store == "pending":
                 started = item.get("send_started_epoch")
                 expires = item.get("send_expires_epoch")
                 if not isinstance(started, int) or not isinstance(expires, int):
@@ -600,8 +644,10 @@ def token_record(token):
                 item["sent_epoch"] = started
                 item["expires_epoch"] = expires
             matches.append((path, item))
+        if len(matches) > 1:
+            raise ValueError("away-email token state is ambiguous")
         if matches:
-            return matches[0] if len(matches) == 1 else (None, None)
+            return matches[0]
     return None, None
 
 
@@ -638,7 +684,18 @@ def receive_messages(messages, posture, config):
         sender = senders[0][1].strip().casefold() if len(senders) == 1 else ""
         configured_sender = config["recipient"].casefold()
         token, answer = extract_reply(str(message.get("body", ""))) if sender == configured_sender else (None, "")
-        record_path, item = token_record(token) if token else (None, None)
+        if token and len(answer) > MAX_REPLY_CHARS:
+            print(
+                f"fm-afk-email: reply in mail UID {uid} rejected; answer exceeds {MAX_REPLY_CHARS} characters",
+                file=sys.stderr,
+            )
+            untrusted += 1
+            continue
+        try:
+            record_path, item = token_record(token) if token else (None, None)
+        except (OSError, ValueError):
+            print("fm-afk-email: away-email token state could not be checked; mail poll will retry", file=sys.stderr)
+            return 1
         now = int(time.time())
         if item and item.get("used_mail_key") == mail_key:
             continue
@@ -651,7 +708,6 @@ def receive_messages(messages, posture, config):
             and item["sent_epoch"] <= now < item["expires_epoch"]
             and not item.get("used_epoch")
             and bool(answer.strip())
-            and len(answer) <= MAX_REPLY_CHARS
             and item.get("handoff_mail_key", mail_key) == mail_key
         )
         if valid:
@@ -665,6 +721,9 @@ def receive_messages(messages, posture, config):
             if item.get("handoff_request_id") not in (None, request_id) or item.get("handoff_body_hash") not in (None, body_hash):
                 print("fm-afk-email: verified reply handoff state conflicts; mail poll will retry", file=sys.stderr)
                 return 1
+            if "send_started_epoch" in item:
+                item.pop("sent_epoch", None)
+                item.pop("expires_epoch", None)
             item["handoff_request_id"] = request_id
             item["handoff_mail_key"] = mail_key
             item["handoff_body_hash"] = body_hash
