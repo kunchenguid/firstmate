@@ -489,22 +489,14 @@ unknown_wake_acknowledged() {  # <state> <line>
   grep -Fxq -- "$2" "$ack"
 }
 
-unknown_wake_buffered() {  # <state> <line>
-  local buf="$1/.subsuper-escalations"
-  [ -f "$buf" ] || return 1
-  grep -Fxq -- "$2" "$buf"
-}
-
 # Record every unknown-wake line from a flush that already reached the supervisor.
 # Ordinary escalation lines are left alone.
 unknown_wake_acknowledge_flushed() {  # <state> <buffer>
-  local state=$1 buf=$2 line ack="$1/.subsuper-unknown-acked"
+  local state=$1 buf=$2 line
   while IFS= read -r line || [ -n "$line" ]; do
     unknown_wake_line "$line" >/dev/null || continue
-    if [ -f "$ack" ] && grep -Fxq -- "$line" "$ack"; then
-      continue
-    fi
-    printf '%s\n' "$line" >> "$ack" || return 1
+    unknown_wake_acknowledged "$state" "$line" && continue
+    printf '%s\n' "$line" >> "$state/.subsuper-unknown-acked" || return 1
   done < "$buf"
 }
 
@@ -732,9 +724,7 @@ stale_window_is_busy() {  # <window> <state>
 escalate_add() {  # <state> <distilled-item>
   local state=$1 item=$2 buf line
   if line=$(unknown_wake_line "$item"); then
-    if unknown_wake_acknowledged "$state" "$line" || unknown_wake_buffered "$state" "$line"; then
-      return 0
-    fi
+    unknown_wake_acknowledged "$state" "$line" && return 0
   fi
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || _now > "${buf}.since"

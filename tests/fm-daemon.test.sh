@@ -620,10 +620,6 @@ test_unknown_wake_ack_suppresses_handled_identity() {
 
   FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
     || fail "the first unknown wake was not handled"
-  FM_ESCALATE_BATCH_SECS=999 handle_wake "frobnicate: already-handled" "$state" \
-    || fail "a repeated unknown wake before delivery was not handled"
-  [ "$(grep -c 'unknown wake: frobnicate: already-handled' "$state/.subsuper-escalations")" = 1 ] \
-    || fail "an undelivered unknown wake was buffered more than once: $(cat "$state/.subsuper-escalations")"
   [ ! -e "$state/.subsuper-unknown-acked" ] \
     || fail "an undelivered unknown wake was acknowledged"
 
