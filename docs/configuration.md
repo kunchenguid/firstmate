@@ -1151,8 +1151,6 @@ The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and sche
 - An expanded provider with no matching account row leaves the candidate eligible but unranked.
 - Known applicable rows from a provider with partial quota semantics remain rankable; rows whose own status is not known remain unrankable.
 
-An expanded provider with no matching account row leaves the candidate eligible but unranked.
-Known applicable rows from a provider with partial quota semantics remain rankable; rows whose own status is not known remain unrankable.
 Any applicable `exhausted_now` row or known zero bound makes that candidate ineligible, and a known profile-floor shortfall does the same before unrelated quota uncertainty is considered.
 Missing or nonnumeric `spendPriority` evidence is never ranked, and every candidate is printed beside its evidence or the reason it was not rankable, including on ambiguous and approval-gated outcomes that emit no profile.
 When exactly one eligible candidate remains and it is unranked because quota is unknown, it needs no comparative ranking: the resolver clears it with an explicit uncertainty note, provided its account-specific profile floor is absent or verified. Multiple unranked candidates, malformed ranking evidence, known exhaustion, unverifiable floors, low confidence and approval gates retain their existing outcomes. This exception does not establish authentication or provider availability.
