@@ -192,7 +192,8 @@ _fm_status_corr_attempt() {  # <word>
 # prefix, including a sentence that merely starts with a known verb, a label
 # such as Reason: or e.g.:, a URL, or a clock time such as 10:30.
 status_prefix_unrecognized() {  # <status-line>
-  local line=$1 verb first rest word
+  local line verb first rest word
+  _fm_status_unstamped "$1" line
   case "$line" in *:*) ;; *) return 1 ;; esac
   case "${line#*:}" in ''|[[:space:]]*) ;; *) return 1 ;; esac
   status_line_verb "$line" verb
@@ -247,12 +248,7 @@ _fm_status_event_scan() {
 _fm_status_line_is_event() {  # <line> <legacy-captain-re>
   local verb unstamped
   case "$1" in *:*) status_line_verb "$1" verb ;; *) verb='' ;; esac
-  case "$verb" in
-    working|needs-decision|blocked|done|failed|note|\
-    "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|\
-    "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|\
-    "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") return 0 ;;
-  esac
+  _fm_status_verb_recognized "$verb" && return 0
   # Unrecognized verb-shaped prefixes (parked:, holding:, bad corr tokens) stay
   # events so a bad declaration cannot vanish behind an earlier recognized line.
   status_prefix_unrecognized "$1" && return 0
