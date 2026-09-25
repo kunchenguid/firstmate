@@ -13,6 +13,7 @@
 # only when the full mail plane is configured, otherwise the exact
 # hold-for-return fallback remains in force.
 
+
 #
 # AWAY OR QUIET. The same record also backs daemon-backed quiet mode, which a
 # quiet entry marks with `mode: quiet`: the captain is present there, so a quiet
@@ -530,10 +531,12 @@ fm_afk_contract_archive_target() {  # <record> [superseded-stamp]
 fm_afk_contract_cmd_enter() {
   local record legacy now now_epoch session_entered session_entered_epoch staged archived archived_tmp standing=''
   local harness destination owner_email require_owner_destination
+
   record=$(fm_afk_contract_path)
   legacy=$(fm_afk_contract_legacy_proposal_path)
   FM_AFK_CONTRACT_ENTRY_MODE=away
   [ "${FM_AFK_MODE:-}" != quiet ] || FM_AFK_CONTRACT_ENTRY_MODE=quiet
+
 
 
   harness=$("$FM_AFK_CONTRACT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
@@ -559,6 +562,7 @@ fm_afk_contract_cmd_enter() {
     )
     if [ "$destination" != "$owner_email" ]; then
       fm_afk_contract_log "FM_AFK_EMAIL_TO must be exactly $owner_email for Pi away mode; refusing entry"
+
       return 1
     fi
   fi

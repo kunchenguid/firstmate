@@ -6,12 +6,14 @@ Away email lets a Pi supervision branch send captain-facing outcomes to John Poy
 
 
 
+
 It is an optional extension of the existing mail plane and does not change what actions the away session is authorized to take.
 Other primary harnesses retain their existing away behavior and do not claim this delivery path.
 
 ## Setup
 
 Use a dedicated sending mailbox if practical, and create an app password for it rather than using your normal account password.
+
 
 
 
@@ -34,6 +36,7 @@ Use the Gmail receiving mailbox for IMAP; other IMAP hosts keep Pi away mode on 
 `FM_AFK_EMAIL_TO` must be exactly `johnpoyser@gmail.com`; this fixed destination is also the only permitted reply identity.
 Away email requires the receiving IMAP mailbox to be Gmail at `imap.gmail.com`, so the topmost `Authentication-Results` field can be trusted as Gmail's receiver-generated result.
 
+
 The mail plane requires implicit TLS on IMAP port 993 and SMTP port 465 by default; STARTTLS and port 587 are not supported.
 Set `FM_IMAP_PORT` or `FM_SMTP_PORT` only when your provider uses different implicit-TLS ports.
 
@@ -46,6 +49,7 @@ bin/fm-mail-check.sh arm
 Then enter `/afk` on Pi and confirm its read-back says email reach is active.
 Pi refuses `/afk` before writing or announcing an active posture if `FM_AFK_EMAIL_TO` is absent or differs from `johnpoyser@gmail.com`.
 With the exact destination but incomplete or invalid mail transport settings, away mode retains the hold-for-return behavior instead.
+
 
 
 
@@ -63,6 +67,7 @@ Other senders and messages without that authenticated result are silently ignore
 
 If an away record is present but invalid or unreadable, AFK-email polling defers all incoming mail, including authenticated replies, until the record is valid. The separate `fm-mail.sh read` path continues to apply its own authenticated-body restriction during away mode.
 Each code is accepted only for its own sent item, once, and for seven days after sending. Correctly authenticated owner messages larger than 256 KiB total, including attachments, are not processed as away-mode replies, but receive an ordinary mail wake marked that the body exceeds the limit. Replies over 8,000 characters are rejected with a notice in the durable mail wake.
+
 
 
 

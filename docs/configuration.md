@@ -1415,6 +1415,7 @@ The `read` command fetches and prints bodies only for that authenticated owner w
 
 
 
+
 Poll emission is exactly-once-recovering: a published wake always carries a durable journal record, and a poll interrupted before recording its uid is healed from that journal, so inbound mail is never silently missed.
 
 A duplicate wake is possible if the process is killed between the queue append and the journal write and the drain acknowledges that row before the next poll heals it, or under a triple write fault that leaves a queued row with no durable record; neither case drops mail.
@@ -1434,7 +1435,12 @@ FM_MAIL_USER=   # IMAP/SMTP login
 FM_MAIL_PASS=   # IMAP/SMTP password
 FM_IMAP_HOST=   # IMAP server hostname
 FM_SMTP_HOST=   # SMTP server hostname
-FM_AFK_EMAIL_TO=   # optional captain destination; enables Pi away email only when all four mail settings above are present
+```
+
+The Pi `/afk` destination is separate from general mail transport and, when using that setup, must be present exactly as shown; a missing or different value refuses Pi `/afk` entry:
+
+```sh
+FM_AFK_EMAIL_TO=johnpoyser@gmail.com
 ```
 
 Pi's optional `/afk` email destination is separate from general mail transport; see [Away email on Pi](afk-email.md) for its required setting, Gmail receiving-mailbox requirement, and setup gate.
@@ -1451,6 +1457,7 @@ FM_AFK_EMAIL_TO=johnpoyser@gmail.com
 
 
 Pi away-email setup, its fixed destination, authenticated reply checks, and authority limit are documented in [Away email on Pi](afk-email.md).
+
 
 
 

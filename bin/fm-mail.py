@@ -232,6 +232,7 @@ def afk_email_context():
 
 
 
+
 def fetched_literal(data):
     for item in data or []:
         if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], bytes):
