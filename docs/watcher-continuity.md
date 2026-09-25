@@ -217,7 +217,7 @@ A non-successor watcher start checks the durable queue and recovery marker under
 If an announced-but-unacknowledged episode has an empty queue, the arm leaves that generation announced, making repeated empty-queue arms idempotent while a long-poll source is merely alive.
 If a durable row arrived after the announcement, the arm opens a fresh pending downtime generation so buried work still resurfaces once.
 
-### Bounded reopen
+### Reopen bound
 
 Nothing else ever retires that generation when no live session runs the printed acknowledgement.
 So a plain restart with no re-arm loop and no session would otherwise reopen the same stuck episode into a fresh generation forever, one resurface-then-exit cycle per restart.
