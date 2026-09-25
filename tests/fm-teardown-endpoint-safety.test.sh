@@ -990,6 +990,53 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
 }
 
+test_forced_secondmate_reassigned_child_finishes_without_touching_claimant() {
+  local dir mate parent=mate-task child=stale-child current=current-task worker rc
+
+  dir=$(make_case secondmate-child-reassigned)
+  mark_case_as_treehouse_pool "$dir"
+  mate="$dir/mate"
+  mkdir -p "$mate/state" "$mate/data" "$mate/config"
+  printf '%s\n' "$parent" > "$mate/.fm-secondmate-home"
+  write_local_parent_record "$mate" "$dir/home"
+  fm_write_meta "$dir/home/state/$parent.meta" \
+    "window=firstmate:fm-$parent" "endpoint_task_id=$parent" \
+    "worktree=$mate" "project=$mate" "home=$mate" \
+    "kind=secondmate" "mode=secondmate" "harness=echo" "yolo=off" "projects=project"
+  fm_write_meta "$mate/state/$child.meta" \
+    "window=firstmate:fm-$child" "endpoint_task_id=$child" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$current.meta" \
+    "window=firstmate:fm-$current" "endpoint_task_id=$current" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$current" "$dir/home"
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_case "$dir" "$parent" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] || fail "forced secondmate cleanup refused a child slot claimed by another task: $(cat "$dir/stderr")"
+  kill -0 "$worker" 2>/dev/null || fail "forced secondmate cleanup killed the current slot claimant's process"
+  assert_present "$dir/worktree/sentinel" "forced secondmate cleanup reset the reassigned child slot"
+  assert_present "$dir/home/state/$current.meta" "forced secondmate cleanup removed the current claimant's record"
+  assert_absent "$dir/home/state/$parent.meta" "forced secondmate cleanup left the retired parent record"
+  assert_absent "$mate" "forced secondmate cleanup left the retired secondmate home"
+  assert_present "$dir/pool/1/.fm-slot-owner" "forced secondmate cleanup removed the current claimant's slot claim"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "task=$current" \
+    "forced secondmate cleanup rewrote the current claimant's slot claim"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "forced secondmate cleanup returned the reassigned child slot: $(cat "$dir/runtime.log")"
+  ! grep -Fq "kill-window> <-t> <=firstmate:=fm-$current" "$dir/runtime.log" \
+    || fail "forced secondmate cleanup closed the current claimant's endpoint: $(cat "$dir/runtime.log")"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  pass "fm-teardown: forced secondmate cleanup skips a child's reassigned slot while retiring the child and parent"
+}
+
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
@@ -1410,6 +1457,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
+test_forced_secondmate_reassigned_child_finishes_without_touching_claimant
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
