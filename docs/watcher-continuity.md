@@ -12,7 +12,7 @@ In this document, an arm is one run of `bin/fm-watch-arm.sh`, which starts a wat
 | Which component re-arms the watcher on each harness | [Ownership](#ownership) |
 | What happens between an actionable close and the wake reaching the model | [Actionable wake ordering](#actionable-wake-ordering) |
 | How a watcher-downtime episode is announced and retired | [Recovery episode acknowledgement](#recovery-episode-acknowledgement) |
-| How main and the Pi supervision branch share the wake queue | [Per-actor acknowledgement](#per-actor-acknowledgement) |
+| How each actor consumes the wake queue | [Per-actor acknowledgement](#per-actor-acknowledgement) |
 | What `bin/fm-watch-arm.sh` guarantees about each cycle | [Arm-layer cycle contract](#arm-layer-cycle-contract) |
 | Which test suites pin these contracts | [Regression coverage](#regression-coverage) |
 | What is not guaranteed, and where live evidence lives | [Active limits and verification](#active-limits-and-verification) |
@@ -30,7 +30,7 @@ Codex and Grok keep their own protocols; see [Manual recovery and other harnesse
 | Cursor | `.cursor/hooks.json` `stop` hook (`bin/fm-turnend-guard-cursor.sh`) |
 | Claude | `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) |
 
-A home opted into the supervision host also changes what the owner runs; see [Supervision host](#supervision-host).
+On a non-Pi primary, a home opted into the supervision host also changes what the owner runs; see [Supervision host](#supervision-host).
 
 ### Pi, omp, and OpenCode adapters
 
@@ -118,7 +118,7 @@ The Claude turn-end guard owns that notice commit contract, the monotonic failur
 
 ### Supervision host
 
-A home opted into the supervision host runs `bin/fm-supervision-host.sh` in place of the arm its re-arm owner would start.
+On a non-Pi primary, a home opted into the supervision host runs `bin/fm-supervision-host.sh` in place of the arm its re-arm owner would start.
 The host owns successive watcher cycles through the same arm.
 It starts and confirms each successor before its engine handles an away wake, and it stops its cycle before handing a wake back.
 So the recovery and acknowledgement contracts below apply unchanged ([supervision-host.md](supervision-host.md)).
@@ -243,7 +243,7 @@ An acknowledged episode does not freeze the generation, because the next downtim
 
 `bin/fm-wake-drain.sh` consumes the queue per actor, not per whole-queue cutoff.
 It uses the `fm_lease_actor` identity owned by `bin/fm-lease-lib.sh`.
-The two actors here are main and the Pi supervision branch, and the Pi branch extension injects its branch actor into its own bash tool calls.
+The Pi branch extension injects its branch actor into its own bash tool calls.
 
 ### Claiming rows
 
