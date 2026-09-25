@@ -184,6 +184,36 @@ test_claude_launch_brief_publishes_record_doorbell() {
   pass "a claude launch publishes the brief as an operational-inbox record and passes only the doorbell"
 }
 
+# A secondmate's launch brief belongs to the secondmate home that pane runs in,
+# so its record must publish there rather than into the primary's state.
+test_claude_secondmate_launch_brief_publishes_into_its_own_home() {
+  local rec id sm out status launch subst doorbell record
+  id="brief-doorbell-secondmate-z2"
+  rec=$(make_spawn_case brief-doorbell-secondmate claude "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "secondmate claude spawn for the doorbell check should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  # shellcheck disable=SC2016 # the pane shell, not this test, expands the substitution
+  subst=$(printf '%s' "$launch" | sed -n 's/.*"$(\(.*\))"$/\1/p')
+  [ -n "$subst" ] || fail "the secondmate launch carries no brief substitution: $launch"
+  doorbell=$(eval "$subst") || fail "the secondmate brief substitution could not run: $subst"
+  [ "$(printf '%s' "$doorbell" | "$ROOT/bin/fm-operational-input.sh" doorbell-kind)" = launch-brief ] \
+    || fail "the secondmate record does not hold a launch-brief envelope: $doorbell"
+  record=$(printf '%s' "$doorbell" | sed -n "s/.*: Firstmate operational input waiting: read '\([^']*\)'.*/\1/p")
+  [ -n "$record" ] || fail "the secondmate doorbell names no record: $doorbell"
+  [ "$(cd "$(dirname "$record")" && pwd -P)" = "$(cd "$sm/state/operational-inbox" && pwd -P)" ] \
+    || fail "the secondmate launch record did not publish into its own home: $record"
+  [ -z "$(find "$HOME_DIR/state/operational-inbox" -name '*.msg' -print -quit 2>/dev/null)" ] \
+    || fail "the secondmate launch record leaked into the primary's operational inbox"
+  pass "a secondmate claude launch publishes its brief record into the secondmate's own home"
+}
+
 test_non_cursor_launch_clears_inherited_cursor_markers() {
   local rec id out status launch
   id=profile-claude-cursor-markers-z1b
@@ -1553,6 +1583,7 @@ test_non_claude_harness_ignores_claude_permission_mode() {
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_claude_launch_brief_publishes_record_doorbell
+test_claude_secondmate_launch_brief_publishes_into_its_own_home
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
