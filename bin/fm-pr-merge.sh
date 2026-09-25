@@ -18,14 +18,17 @@
 # every unwaived check the forge requires for the base branch has reported at
 # that head. A required check that never reported is absent from the checks
 # list rather than red, so github_read_required_contexts below reads the
-# required set from classic branch protection and active rulesets. Requirements
-# retain their producer app binding: a same-named check run from another app cannot
+# required set from classic branch protection and active rulesets. Check-run
+# requirements retain their producer app binding: a same-named check run from another app cannot
 # satisfy them, and a duplicate name-only entry cannot weaken that binding.
 # Unbound requirements match by name. A bound requirement reported as a check
 # run also needs a matching producer in the check-runs read at the verified
 # head, while one reported as a commit status matches by name, because the
-# status carries no app id to compare; an unreadable producer
-# read refuses. Successfully read requirements remain checked even if another
+# status carries no app id to compare. Status-creator app binding is not verified
+# here, so an attended --attended-override -- --admin merge can bypass that
+# protection without a missing-check waiver when a same-named status reported.
+# An unreadable producer read still refuses.
+# Successfully read requirements remain checked even if another
 # source fails, so known missing checks and all read errors are reported together.
 # github_branch_rules_unavailable_on_plan owns the narrow plan-unavailable
 # exception; every other unreadable required source refuses.
