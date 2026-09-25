@@ -27,7 +27,8 @@
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
 #                          external-wait pause or verified captain-held transfer is
-#                          absorbed instead with its own long re-surface cadence,
+#                          normally absorbed with its own long re-surface cadence
+#                          (recognized idle pane stops below take precedence),
 #                          never as a wedge, and that recheck reason names which
 #                          human the wait is on. Only when neither absorb class
 #                          applies does the log's latest recognized status event decide:
@@ -76,6 +77,24 @@
 #                          agent, for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
+#   stale: <window> (quota-exhausted: <provider>, observed <UTC>, resets no later than <UTC> (<delay>))
+#   stale: <window> (blocked-at-prompt: <harness> trust)
+#                          recognized idle stops from fm-pane-stop-lib.sh bypass
+#                          ordinary stale/wedge triage, including declared pauses,
+#                          after two unchanged-hash polls. Secondmates and
+#                          away-silenced captain holds are excluded; positive
+#                          working evidence or a dead/missing agent rejects a stop.
+#                          A rendered delay is observed at detection time; that
+#                          time plus the delay is only an upper bound on reset,
+#                          printed with the observation time and raw delay.
+#                          Otherwise the reset is 'unknown', not inferred.
+#                          .pane-stop-<key> stores hash<TAB>busy-generation, so an
+#                          unchanged stop skips repeat probes and wakes. Pane
+#                          churn or busy activity clears it; a new generation
+#                          permits reclassification. No prompt is answered and
+#                          no worker is relaunched. Recovery procedure:
+#                          .agents/skills/stuck-crewmate-recovery/SKILL.md.
+#                          Regression: tests/fm-watch-triage.test.sh.
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement
@@ -439,6 +458,42 @@ window_backend() {
   echo tmux
 }
 
+# shellcheck source=bin/fm-pane-stop-lib.sh
+. "$SCRIPT_DIR/fm-pane-stop-lib.sh"
+
+pane_stop_stale_check() {
+  local w=$1 task=$2 h=$3 pane=$4 key record parsed provider delay display now observed reset kind reason gen agent_state
+  key=$(window_key "$w")
+  record="$STATE/.pane-stop-$key"
+  parsed=$(fm_pane_stop "$(window_harness "$w")" "$pane") || { rm -f "$record"; return 1; }
+  gen=$(fm_busy_current_gen "$STATE" "$task") || gen=-
+  if [ -f "$record" ] && [ "$(cut -f1 "$record")" = "$h" ] && [ "$(cut -f2 "$record")" = "$gen" ]; then return 0; fi
+  if crew_is_provably_working "$task"; then rm -f "$record"; return 1; fi
+  agent_state=$(fm_backend_agent_state "$(window_backend "$w")" "$w" 2>/dev/null) || agent_state=unreadable
+  case "$agent_state" in dead|missing) rm -f "$record"; return 1 ;; esac
+  IFS=$'\t' read -r kind provider delay display <<< "$parsed"
+  if [ "$delay" != - ]; then
+    now=$(date +%s)
+    reset=$(date -u -r "$((now + delay))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+      || date -u -d "@$((now + delay))" +%Y-%m-%dT%H:%M:%SZ) || return 1
+    observed=$(date -u -r "$now" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+      || date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ) || return 1
+    display="observed $observed, resets no later than $reset ($display)"
+  fi
+  if [ "$kind" = quota-exhausted ]; then
+    if [ "$delay" = - ]; then display="resets unknown"; fi
+    reason="stale: $w ($kind: $provider, $display)"
+  else
+    reason="stale: $w ($kind: $provider $display)"
+  fi
+  fm_wake_append stale "$w" "$reason" || exit 1
+  printf '%s\t%s\n' "$h" "$gen" > "$record"
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  wake "$reason"
+  return 0
+}
+
 window_harness() {
   local w=$1 meta
   meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
@@ -749,7 +804,7 @@ signal_turnend_panes_churned() {  # <file> ...
     return 1
   done
   for key in "${churned_keys[@]}"; do
-    if ! rm -f "$STATE/.stale-$key" "$STATE/.wedge-escalations-$key"; then
+    if ! rm -f "$STATE/.stale-$key" "$STATE/.wedge-escalations-$key" "$STATE/.pane-stop-$key"; then
       for created in "${created_keys[@]+"${created_keys[@]}"}"; do
         rm -f "$STATE/.churn-since-$created"
       done
@@ -1658,7 +1713,7 @@ clear_pause_state() {  # <window-key>
 clear_stale_hash_tracking() {  # <window-key>
   local key=$1
   clear_write_tracking "$key"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.pane-stop-$key" \
     "$STATE/.waiting-resurfaced-$key"
 }
 
@@ -1759,7 +1814,14 @@ task_captain_call_open() {  # <task>
   CAPTAIN_CALL_IDENTITY=
   [ -n "$task" ] || return 1
   CAPTAIN_CALL_IDENTITY=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" \
-    open "$task" --identity 2>/dev/null) || return 1
+    open "$task" --identity --include-parked 2>/dev/null) || return 1
+  case "$CAPTAIN_CALL_IDENTITY" in
+    parked:*)
+      case "$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null)" in
+        'state: parked '*'source: run-step'*) CAPTAIN_CALL_IDENTITY=; return 1 ;;
+      esac
+      ;;
+  esac
   return 0
 }
 
@@ -1813,15 +1875,22 @@ stale_wait_record() {  # <window-key>
 # Bound a due stale alarm for an ordinary crew task held for the captain.
 # Backlog-only secondmate holds are outside this guard because the earlier gate
 # preserves their no-backlog-read hot path.
-# While the away-posture record exists the bound is absolute: an open captain
-# call is never rechecked, whatever the throttle says, because nobody is there
-# to answer it and the return brief lists it.
+# A `parked` backlog hold (a desk disposition owed by the supervisor, not the
+# captain) takes the same first-sight-then-cadence bound, so an idle parked pane
+# stops re-alarming on every display tick.
+# While the away-posture record exists the bound is absolute for a captain call
+# only: it is never rechecked, whatever the throttle says, because nobody is
+# there to answer it and the return brief lists it. A parked hold keeps its
+# cadence, because it is not a captain call.
 captain_call_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2
   STALE_WAIT_DECLARATION=
   task_captain_call_open "$task" || return 1
   STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
-  afk_record_present && return 0
+  case "$CAPTAIN_CALL_IDENTITY" in
+    parked:*) ;;
+    *) afk_record_present && return 0 ;;
+  esac
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
@@ -2324,6 +2393,68 @@ if ! fm_procevent_launch_confirm_seconds >/dev/null; then
   exit 1
 fi
 
+# This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
+# ${BASHPID:-$$} from this same main shell). Read directly, never via a command
+# substitution, so it matches the stored holder pid for the self-eviction check.
+# Assigned before the traps below so the ownership check never sees it unset.
+WATCHER_PID=${BASHPID:-$$}
+
+PR_POLL_CONTROL_LOCK=
+PR_POLL_PUBLISH_LOCK=
+# Set by the post-acquire exits that deliberately keep the held lock as stale
+# evidence: cleanup then leaves the lock and the recovery marker exactly as they
+# are instead of releasing the lock and re-attempting the marker write that
+# just failed.
+WATCHER_RETAIN_LOCK_EVIDENCE=0
+
+pr_poll_control_release() {
+  [ -z "$PR_POLL_CONTROL_LOCK" ] || fm_lock_release "$PR_POLL_CONTROL_LOCK" || return 1
+  PR_POLL_CONTROL_LOCK=
+}
+
+pr_poll_publish_release() {
+  [ -z "$PR_POLL_PUBLISH_LOCK" ] || fm_lock_release "$PR_POLL_PUBLISH_LOCK" || return 1
+  PR_POLL_PUBLISH_LOCK=
+}
+
+watcher_cleanup() {
+  local cleanup_status=0 owns_lock=0 transition=release-lock
+  pr_poll_publish_release || cleanup_status=1
+  pr_poll_control_release || cleanup_status=1
+  if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
+    owns_lock=1
+    if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
+      && [ "${FM_WATCH_DELIVERED_REASON:-}" = "check: rearm-resurface" ]; then
+      transition=release-lock-existing
+    fi
+  fi
+  fm_active_check_stop || cleanup_status=1
+  fm_check_output_cleanup
+  fm_custom_check_snapshot_cleanup
+  if [ "$owns_lock" -eq 1 ] && [ "$WATCHER_RETAIN_LOCK_EVIDENCE" -eq 0 ] \
+    && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime; then
+    echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
+    cleanup_status=1
+  fi
+  return "$cleanup_status"
+}
+# The traps own the whole lifecycle from here: a signal at any point, including
+# mid-acquire or pre-publication, runs the same ownership-checked cleanup, so no
+# HUP/TERM window can strand the watch lock with a dead pid (HHE-1805).
+trap watcher_cleanup EXIT
+watcher_stop_signals
+# Stage the full owner generation BEFORE acquiring: fm_lock_prepare_owner
+# writes these into the owner directory ahead of the lock-symlink publication,
+# so a concurrent turn-end guard never observes a published lock with missing
+# fm-home, watcher-path, or pid-identity files (HHE-1805). Nothing rewrites
+# them afterwards: the published generation is complete and never truncated.
+# shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
+FM_WATCH_DELIVERY_PID=$WATCHER_PID
+FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
+FM_LOCK_OWNER_FOR=$WATCH_LOCK
+FM_LOCK_OWNER_FM_HOME=$FM_HOME
+FM_LOCK_OWNER_WATCHER_PATH=$WATCH_PATH
+FM_LOCK_OWNER_PID_IDENTITY=$FM_WATCH_DELIVERY_IDENTITY
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
@@ -2343,6 +2474,10 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   fi
   exit 0
 fi
+# The watch lock is held: drop the staging values so later acquisitions of
+# unrelated locks (cycle ledger, delivery ledger, PR poll locks) publish bare
+# owner directories exactly as before.
+unset FM_LOCK_OWNER_FOR FM_LOCK_OWNER_FM_HOME FM_LOCK_OWNER_WATCHER_PATH FM_LOCK_OWNER_PID_IDENTITY
 WATCHER_RECOVERY_PENDING=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
@@ -2350,11 +2485,13 @@ fi
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ]; then
   if ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER"; then
     echo "watcher: recovery state could not be reopened safely; retaining stale lock evidence" >&2
+    WATCHER_RETAIN_LOCK_EVIDENCE=1
     exit 1
   fi
 fi
 if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
   echo "watcher: recovery state could not be consumed safely; retaining stale lock evidence" >&2
+  WATCHER_RETAIN_LOCK_EVIDENCE=1
   exit 1
 fi
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
@@ -2418,53 +2555,6 @@ reconcile_requests_detached() {
     "$SCRIPT_DIR/fm-secondmate-reconcile.sh" process-requests </dev/null >/dev/null 2>&1 &
   RECONCILE_REQUEST_PID=$!
 }
-
-PR_POLL_CONTROL_LOCK=
-PR_POLL_PUBLISH_LOCK=
-
-pr_poll_control_release() {
-  [ -z "$PR_POLL_CONTROL_LOCK" ] || fm_lock_release "$PR_POLL_CONTROL_LOCK" || return 1
-  PR_POLL_CONTROL_LOCK=
-}
-
-pr_poll_publish_release() {
-  [ -z "$PR_POLL_PUBLISH_LOCK" ] || fm_lock_release "$PR_POLL_PUBLISH_LOCK" || return 1
-  PR_POLL_PUBLISH_LOCK=
-}
-
-watcher_cleanup() {
-  local cleanup_status=0 owns_lock=0 transition=release-lock
-  pr_poll_publish_release || cleanup_status=1
-  pr_poll_control_release || cleanup_status=1
-  if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
-    owns_lock=1
-    if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
-      && [ "${FM_WATCH_DELIVERED_REASON:-}" = "check: rearm-resurface" ]; then
-      transition=release-lock-existing
-    fi
-  fi
-  fm_active_check_stop || cleanup_status=1
-  fm_check_output_cleanup
-  fm_custom_check_snapshot_cleanup
-  if [ "$owns_lock" -eq 1 ] \
-    && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime; then
-    echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
-    cleanup_status=1
-  fi
-  return "$cleanup_status"
-}
-trap watcher_cleanup EXIT
-watcher_stop_signals
-# This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
-# ${BASHPID:-$$} from this same main shell). Read directly, never via a command
-# substitution, so it matches the stored holder pid for the self-eviction check.
-WATCHER_PID=${BASHPID:-$$}
-printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
-printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
-# shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
-FM_WATCH_DELIVERY_PID=$WATCHER_PID
-FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
-printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
@@ -2902,6 +2992,9 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if [ "$busy_now" -eq 0 ] || [ "$h" != "$prev" ]; then
+      rm -f "$STATE/.pane-stop-$key"
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
@@ -2913,6 +3006,8 @@ EOF
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
           esac
+        elif ! captain_held_silenced "$last" && pane_stop_stale_check "$w" "$task" "$h" "$tail40"; then
+          : # Explicit stops bypass the wedge ladder; never answer or relaunch here.
         elif afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before,
           # except that a captain-held pane is never handed over while the
@@ -2921,9 +3016,15 @@ EOF
             printf '%s' "$h" > "$sf"
             triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $w"
           elif [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            fm_wake_append stale "$w" "stale: $w" || exit 1
-            printf '%s' "$h" > "$sf"
-            wake "stale: $w"
+            STALE_WAIT_DECLARATION=
+            if captain_call_stale_bound "$key" "$task" && [[ "$CAPTAIN_CALL_IDENTITY" = parked:* ]]; then
+              printf '%s' "$h" > "$sf"
+            else
+              fm_wake_append stale "$w" "stale: $w" || exit 1
+              stale_wait_record "$key"
+              printf '%s' "$h" > "$sf"
+              wake "stale: $w"
+            fi
           fi
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's latest status event is captain-relevant - but that alone is not

@@ -104,8 +104,9 @@ first_settle() {  # <expected> <label> <harness|--explicit> <message> [selector-
     fm_write_meta "$home/state/$meta_id.meta" "window=sess:win" "harness=$harness"
   fi
   : > "$log"
+  # No absent-watcher-lock retry pauses: the first recorded sleep must be the settle.
   env FM_SEND_SETTLE=0 PATH="$fb:$PATH" \
-    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SLEEP_LOG="$log" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SLEEP_LOG="$log" FM_WATCHER_PIN_ABSENT_ATTEMPTS=0 \
     "$SEND" "$target" "$msg" 2>/dev/null; rc=$?
   expect_code 0 "$rc" "$label: send should succeed"
   first=$(head -1 "$log")
@@ -127,7 +128,7 @@ rides_inbox() {  # <label> <harness> <message>
   fm_write_meta "$home/state/popupcase.meta" "window=sess:win" "harness=$harness"
   : > "$log"
   env FM_SEND_SETTLE=0 PATH="$fb:$PATH" \
-    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SLEEP_LOG="$log" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SLEEP_LOG="$log" FM_WATCHER_PIN_ABSENT_ATTEMPTS=0 \
     "$SEND" fm-popupcase "$msg" 2>/dev/null; rc=$?
   expect_code 0 "$rc" "$label: send should succeed"
   grep -qF -- "$msg" "$home/state/popupcase.inbox/001.msg" \

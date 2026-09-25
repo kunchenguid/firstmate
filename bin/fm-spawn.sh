@@ -227,9 +227,17 @@
 #   the same isolation test screens every read: a pane still showing the project
 #   or the repository primary while `treehouse get` prepares the slot is waited
 #   out as a transient rather than adopted and then refused, so a home that is
-#   itself a linked worktree of the project repository still launches. A pane
-#   that never reaches an isolated worktree refuses at the end of that wait,
-#   naming the last path seen and why it was rejected.
+#   itself a linked worktree of the project repository still launches. A slot
+#   whose checkout is still being written (a Treehouse pool slot not yet
+#   recorded with an unleased live owner) is waited out the same way, on a
+#   separate longer allowance, so a slow first checkout is neither refused as
+#   uncommitted work nor abandoned
+#   half-written. A project-location hang is interrupted at 300 seconds.
+#   Retry requires a repeatedly observed clean slot with this task's verified
+#   owner claim and a successful non-forced Treehouse return; fresh gets with
+#   no authoritative slot ownership refuse instead of releasing another caller's
+#   slot. The retry uses the same settling guard. A pane that never reaches a ready isolated worktree refuses
+#   at its applicable deadline, naming the last path seen and why it was rejected.
 #   That placement is proven only at launch. Every ship or scout pane therefore
 #   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
 #   the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -324,6 +332,18 @@
 #   account_provider=) in the task record and on the spawned line. A local
 #   secondmate reads this launching home's file; pins are never inherited.
 #   bin/fm-worker-account-lib.sh owns parsing, the check, and the shed list.
+
+# Worker memory cap (config/worker-memory-max):
+#   Opt-in, Linux with systemd only. With no file, every launch is unchanged.
+#   With a file, a ship or scout launch (fresh and relaunch) whose harness and
+#   project match a rule runs inside a transient `systemd-run --user --scope`
+#   unit carrying MemoryMax and MemorySwapMax at the rule's cap, and a cgroup
+#   OOM kill of that scope is appended to the task's status log as `failed:`.
+#   The wrapped launch runs under /bin/sh, so raw commands must be POSIX sh
+#   compatible under this opt-in. A malformed file, or a matched cap on a host
+#   that cannot start the scope, refuses before any endpoint, worktree, or
+#   record exists. Secondmates are never capped, and the file is not inherited.
+#   bin/fm-worker-memory-cap.sh owns the rule format, probe, and outcome record.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
@@ -2812,6 +2832,22 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
+# Worker memory cap (header above): resolved and probed before any endpoint,
+# worktree, or record exists, so a malformed rule or a host that cannot start
+# the capped scope refuses instead of launching the lane without its cap.
+MEMORY_MAX_MIB=
+if [ "$KIND" != secondmate ]; then
+  if ! MEMORY_MAX_PRESENT=$(fm_config_source_present "$CONFIG/worker-memory-max"); then
+    exit 1
+  fi
+  if [ "$MEMORY_MAX_PRESENT" = 1 ]; then
+    MEMORY_MAX_MIB=$("$SCRIPT_DIR/fm-worker-memory-cap.sh" resolve \
+      "$CONFIG/worker-memory-max" "$HARNESS" "${PROJ_ABS##*/}") || exit 1
+    if [ -n "$MEMORY_MAX_MIB" ]; then
+      "$SCRIPT_DIR/fm-worker-memory-cap.sh" probe || exit 1
+    fi
+  fi
+fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
@@ -3071,6 +3107,23 @@ spawn_worktree_isolated() { # <path>
     return 1
   fi
   return 0
+}
+
+# A worktree whose checkout is still being written already passes the isolation
+# test: `git worktree add` creates its .git link first and runs its checkout
+# inside it, so a pane reporting its foreground cwd reads the new slot from the
+# first poll while `git status` still lists every file not yet written. A
+# Treehouse pool slot is not handed out until the pool state records an
+# unleased live owner. Sets SPAWN_WT_REASON when the pool slot is still settling.
+spawn_worktree_settling() { # <path>
+  local path=$1
+  if fm_treehouse_pool_slot "$PROJ_ABS" "$path"; then
+    fm_treehouse_slot_acquired "$path" || {
+      SPAWN_WT_REASON="its checkout is still being written (treehouse get has not finished handing it out)"
+      return 0
+    }
+  fi
+  return 1
 }
 
 validate_spawn_worktree() { # <source> <inspect-target>
@@ -4044,28 +4097,152 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # misconfiguration would need machinery this path does not want - so the
   # refusal has to be self-explaining instead: carry the last path seen and the
   # reason it was rejected, and report both at the deadline.
-  candidate=""
-  last_seen=""
-  last_reason="the pane reported no path"
-  for _ in $(seq 1 60); do
-    p=$(spawn_current_path "$WT_TARGET" || true)
-    [ -z "$p" ] || last_seen="$p"
-    if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
-      p_real=$(real_path_or_raw "$p")
-      last_reason="it is an isolated worktree, but no second read agreed with it"
-      if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
-        WT="$p"
-        break
+  #
+  # A candidate whose checkout is still being written is screened the same way
+  # (spawn_worktree_settling): adopting it would misread the files not yet
+  # written as uncommitted work, and giving up on it would abort the spawn while
+  # git is still writing, leaving a partial slot folder behind. Polls that see a
+  # checkout in progress gets a separate 600s allowance from its first observation.
+  # A slow first checkout is waited out, but a pane that never settles ends.
+  # Keep the 60s ordinary allowance for unexpected paths, 300s for a get
+  # still in the spawning project, and 600s for an observed writing checkout.
+  spawn_await_treehouse_worktree() {
+    local elapsed=0 ordinary=0 limit=60 writing_start=-1 p p_real candidate="" observed="" observed_count=0 writing=0
+    last_seen=""
+    last_reason="the pane reported no path"
+    spawn_hung_slot=""
+    while [ "$elapsed" -lt "$limit" ]; do
+      p=$(spawn_current_path "$WT_TARGET" || true)
+      [ -z "$p" ] || last_seen="$p"
+      p_real=""
+      writing=0
+      [ -z "$p" ] || p_real=$(real_path_or_raw "$p")
+      if [ -n "$p" ] && spawn_worktree_isolated "$p" && spawn_worktree_settling "$p"; then
+        writing=1
+        [ "$writing_start" -ge 0 ] || writing_start=$elapsed
+        candidate=""
+        last_reason=$SPAWN_WT_REASON
+      elif [ -n "$p" ] && spawn_worktree_isolated "$p"; then
+        last_reason="it is an isolated worktree, but no second read agreed with it"
+        if [ "$candidate" = "$p_real" ]; then
+          WT="$p"
+          return 0
+        fi
+        candidate=$p_real
+      else
+        candidate=""
+        [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
       fi
-      candidate="$p_real"
-    else
-      candidate=""
-      [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
+      # An observation in this pane must be stable across reads; a single
+      # stale cwd can name another task's otherwise clean pool slot.
+      if [ -n "$p_real" ] && fm_treehouse_pool_slot "$PROJ_ABS" "$p"; then
+        if [ "$observed" = "$p_real" ]; then
+          observed_count=$((observed_count + 1))
+        else
+          observed=$p_real
+          observed_count=1
+        fi
+        if [ "$observed_count" -ge 2 ]; then
+          spawn_hung_slot=$observed
+        fi
+      elif [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+        observed=""
+        observed_count=0
+      fi
+      limit=60
+      if [ "$p_real" = "$PROJ_ABS_REAL" ]; then
+        limit=300
+      fi
+      [ "$writing" = 0 ] || limit=$((writing_start + 600))
+      if [ "$writing_start" -ge 0 ] && [ "$writing" = 0 ] && [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+        limit=$((writing_start + 600))
+        ordinary=$((ordinary + 1))
+        if [ "$ordinary" -ge 60 ]; then
+          return 1
+        fi
+      fi
+      sleep 1
+      elapsed=$((elapsed + 1))
+    done
+    spawn_wait_elapsed=$elapsed
+    return 1
+  }
+  spawn_treehouse_get_attempts=1
+  if ! spawn_await_treehouse_worktree; then
+    spawn_first_slot=$spawn_hung_slot
+    if [ -n "$last_seen" ] && [ "$(real_path_or_raw "$last_seen")" = "$PROJ_ABS_REAL" ]; then
+      echo "warning: treehouse get remained in the spawning project for ${spawn_wait_elapsed}s; interrupting it" >&2
+      if ! spawn_send_key "$WT_TARGET" C-c; then
+        echo "error: could not interrupt treehouse get in window $T; refusing retry" >&2
+        exit 1
+      fi
+      spawn_probe="fm-idle-${BASHPID}-${RANDOM}-${RANDOM}"
+      if ! spawn_send_text_line "$WT_TARGET" "printf 'fm-idle-%s\\n' '${spawn_probe#fm-idle-}'"; then
+        echo "error: could not probe idle shell in window $T; refusing retry" >&2
+        exit 1
+      fi
+      spawn_idle=0
+      for _ in $(seq 1 10); do
+        spawn_capture=$(fm_backend_capture "$BACKEND" "$T" 30 "$W" 2>/dev/null) || spawn_capture=""
+        if printf '%s\n' "$spawn_capture" | grep -Fxq "$spawn_probe"; then
+          spawn_idle=1
+          break
+        fi
+        sleep 1
+      done
+      if [ "$spawn_idle" -ne 1 ]; then
+        echo "error: could not confirm an idle shell after interrupting treehouse get in window $T; refusing retry" >&2
+        exit 1
+      fi
+      spawn_pool_after=$(cd "$PROJ_ABS" && TREEHOUSE_NO_UPDATE_CHECK=1 fm_run_timed 15 treehouse status </dev/null 2>/dev/null) || {
+        echo "error: treehouse status failed after interrupting get; refusing retry in window $T" >&2
+        exit 1
+      }
+      if [ -z "$spawn_first_slot" ]; then
+        echo "error: no identified slot for interrupted treehouse get in project '$PROJ_ABS'; cannot prove ownership or safely retry in window $T" >&2
+        exit 1
+      fi
+      fm_treehouse_slot_owner_state "$spawn_first_slot" "$ID"
+      if [ "$FM_TREEHOUSE_SLOT_OWNER" != mine ]; then
+        # Fresh hung gets lack authoritative Treehouse-side slot ownership, so interrupt and refuse rather than release; safe retry awaits treehouse-reselect-returned-slot.
+        echo "error: observed slot '$spawn_first_slot' has no verified claim for task $ID; refusing return and retry in window $T" >&2
+        exit 1
+      fi
+      # A missing or unreadable Git status is not evidence of a clean slot.
+      spawn_slot_status=$(git -C "$spawn_first_slot" status --porcelain 2>/dev/null) || {
+        echo "error: cannot prove observed slot clean; refusing retry in window $T" >&2
+        exit 1
+      }
+      if [ -n "$spawn_slot_status" ] || ! fm_treehouse_pool_slot "$PROJ_ABS" "$spawn_first_slot"; then
+        echo "error: observed slot is dirty or no longer in this Treehouse pool; refusing retry in window $T" >&2
+        exit 1
+      fi
+      if ! (cd "$PROJ_ABS" && TREEHOUSE_NO_UPDATE_CHECK=1 fm_run_timed 15 treehouse return "$spawn_first_slot" </dev/null); then
+        echo "error: Treehouse did not return the observed slot; refusing retry in window $T" >&2
+        exit 1
+      fi
+      fm_treehouse_slot_owner_release "$spawn_first_slot" "$ID"
+      fm_treehouse_slot_owner_state "$spawn_first_slot" "$ID"
+      if [ "$FM_TREEHOUSE_SLOT_OWNER" != absent ]; then
+        echo "error: could not retire returned slot's task claim; refusing retry in window $T" >&2
+        exit 1
+      fi
+      spawn_treehouse_get_attempts=2
+      spawn_send_text_line "$WT_TARGET" 'treehouse get' || exit 1
+      if ! spawn_await_treehouse_worktree; then
+        # A checkout still writing at its deadline must not be interrupted.
+        if [ -n "$last_seen" ] && [ "$(real_path_or_raw "$last_seen")" = "$PROJ_ABS_REAL" ]; then
+          spawn_send_key "$WT_TARGET" C-c || true
+        fi
+      fi
+      if [ -n "$WT" ] && [ "$(real_path_or_raw "$WT")" = "$spawn_first_slot" ]; then
+        echo "error: retried treehouse get reused the hung slot '$WT'; refusing launch" >&2
+        exit 1
+      fi
     fi
-    sleep 1
-  done
+  fi
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+    echo "error: treehouse get did not enter an isolated worktree ready for launch (attempts: $spawn_treehouse_get_attempts; last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); hung slot unproved or incomplete; inspect window $T" >&2
     exit 1
   fi
 
@@ -4988,6 +5165,23 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
+# Worker memory cap (header above): the whole launch runs inside one transient
+# systemd user scope. systemd-run --scope execs its command with the pane's own
+# environment, so the agent keeps every variable it would otherwise see and its
+# process still sits in the pane's foreground process group. The outcome step
+# runs back in the pane shell once the scope ends and records a cgroup OOM kill
+# as this lane's failure.
+if [ -n "$MEMORY_MAX_MIB" ]; then
+  MEMORY_SCOPE_UNIT="fm-$ID-$SPAWN_GEN.scope"
+  if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
+    MEMORY_SCOPE_CMD=$LAUNCH
+  else
+    MEMORY_SCOPE_CMD="/bin/sh -c $(shell_quote "$LAUNCH")"
+  fi
+  MEMORY_SCOPE_MARKER="$STATE/$ID-$SPAWN_GEN.scope-started"
+  MEMORY_SCOPE_CMD="/bin/sh -c $(shell_quote ": > $(shell_quote "$MEMORY_SCOPE_MARKER"); exec $MEMORY_SCOPE_CMD")"
+  LAUNCH="rm -f $(shell_quote "$MEMORY_SCOPE_MARKER"); systemd-run --user --scope --quiet --unit=$MEMORY_SCOPE_UNIT -p MemoryMax=${MEMORY_MAX_MIB}M -p MemorySwapMax=${MEMORY_MAX_MIB}M -p OOMPolicy=stop -- $MEMORY_SCOPE_CMD; scope_rc=\$?; $(shell_quote "$SCRIPT_DIR/fm-worker-memory-cap.sh") outcome $MEMORY_SCOPE_UNIT $MEMORY_MAX_MIB $(shell_quote "$STATE/$ID.status") $(shell_quote "$CONFIG") \$scope_rc $(shell_quote "$MEMORY_SCOPE_MARKER")"
+fi
 # Implement the launch-delivery contract in this script's header. The full
 # home-identity hash isolates equal task ids across homes, and the spawn token in
 # the final filename keeps a buffered source line bound to this incarnation.
@@ -5186,4 +5380,6 @@ SPAWN_ACCOUNT=
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT account_provider=$WORKER_ACCOUNT_PROVIDER"
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || [ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" || true
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"
+SPAWN_MEMORY=
+[ -z "$MEMORY_MAX_MIB" ] || SPAWN_MEMORY=" memory_max=${MEMORY_MAX_MIB}MiB"
+echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT$SPAWN_MEMORY"

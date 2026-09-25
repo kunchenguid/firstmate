@@ -67,11 +67,30 @@ Never restart, stop, or update the shared daemon on a crewmate's claim.
 It is one instance serving every lane and home, so a restart kills other lanes' in-flight runs.
 Only positive socket refusal or absence is a daemon-down finding; escalate that finding, or a failed run record that names a daemon error, to the captain.
 
+## Quota-exhausted worker
+
+A `quota-exhausted` stale wake identifies a conservative rendered usage-limit stop, not a generic wedge.
+Confirm the targeted current state and pane still show that stop and that no active validation run owns the work before replacing the worker.
+Load `harness-adapters` and use the current dispatch resolver when available, then apply the ordinary dispatch eligibility and quota-array selection procedure to choose the next eligible candidate rather than retrying the exhausted model.
+Relaunch the same task in place through `bin/fm-control.sh <task-id> relaunch`, passing the selected harness, model, effort, and a progress note using its current help.
+Preserve existing work and report the recovery choice; silent automatic model switching is forbidden, and the watcher only reports evidence, never relaunches.
+If no eligible candidate can proceed, report the blocker and, when present, the raw delay, UTC observation time, and reset upper bound ("no later than"), not an exact reset time; do not repeatedly relaunch.
+`bin/fm-pane-stop-lib.sh` owns the supported rendered stops; `bin/fm-watch.sh`'s header owns wake timing, reset upper bounds, and deduplication.
+An unknown reset must not be invented.
+
+A `blocked-at-prompt` stale wake instead calls for trust handling, including workers that have not yet written a status event.
+Load `harness-adapters` and follow that harness's documented trust procedure; do not blindly send Enter or manufacture consent, because some dialogs require an operator decision and some default to exit.
+The watcher never accepts a prompt or changes trust settings.
+
 ## Live-endpoint escalation
 
 Escalate in order:
 
 1. Peek the pane, and check the task's steering inbox (`state/<id>.inbox/`) for unhandled `*.msg` records - a stale wake naming an unread firstmate instruction means the worker never acknowledged a durable steer, and the record itself shows exactly what was intended.
+   If the endpoint is now proven alive and idle with an empty composer, retry the existing inbox doorbell once through `fm_task_inbox_ring` from `bin/fm-task-inbox-lib.sh`, using the recorded backend, endpoint, original oldest record, and expected label.
+   Preserve the original instruction and escalation marker: another enqueue duplicates the requested action, and resetting the watcher ladder gives an already escalated message a fresh retry budget.
+   Ringing is not acknowledgement or validation proof; inspect the existing record's move to `handled/` and the authoritative matching validation run before declaring progress or dispatching validation again.
+   If liveness, identity, or the composer is ambiguous, reconcile it before attempting this recovery; never ring a dead shell.
 2. If the crewmate is waiting on a question its brief already answers, answer in one line via `FM_HOME=<this-firstmate-home> bin/fm-send.sh` from an active firstmate session unless `FM_HOME` is already set to the active firstmate home.
 3. If the crewmate is confused or looping, interrupt with `FM_HOME=<this-firstmate-home> bin/fm-control.sh <task-id> interrupt`, then redirect with one corrective line through `fm-send`.
 4. If the crewmate is genuinely wedged after redirection, relaunch it with `FM_HOME=<this-firstmate-home> bin/fm-control.sh <task-id> relaunch --note '<progress so far>'`, which stops the agent, carries the brief plus that note into a replacement in the same local copy, and restores the prior record if the replacement cannot start.

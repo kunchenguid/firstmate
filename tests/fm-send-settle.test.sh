@@ -59,14 +59,16 @@ SH
 # run_send <fakebin> <sleep-log> [env-assignments...] -- <fm-send args...>
 # Runs fm-send.sh with the stubs on PATH. FM_ROOT_OVERRIDE points at a non-repo
 # temp dir so fm-guard's tangle check stays silent, and FM_HOME at an empty home so
-# no in-flight task is seen; guard noise goes to stderr (discarded). Echoes nothing;
-# returns fm-send's exit code.
+# no in-flight task is seen; guard noise goes to stderr (discarded).
+# FM_WATCHER_PIN_ABSENT_ATTEMPTS=0 keeps the guard's absent-watcher-lock retry
+# pauses out of the recorded sleeps, which pin only the send's own settle.
+# Echoes nothing; returns fm-send's exit code.
 run_send() {
   local fb=$1 log=$2 home; shift 2
   home="$TMP_ROOT/home-$RANDOM"; mkdir -p "$home/state"
   : > "$log"
   env "$@" PATH="$fb:$PATH" \
-    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SLEEP_LOG="$log" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SLEEP_LOG="$log" FM_WATCHER_PIN_ABSENT_ATTEMPTS=0 \
     "$SEND" "sess:win" "hello captain" 2>/dev/null
 }
 
@@ -112,7 +114,7 @@ test_key_path_never_pauses() {
   fb=$(make_stubs "$dir"); log="$dir/sleep.log"
   home="$dir/home"; mkdir -p "$home/state"
   : > "$log"
-  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SLEEP_LOG="$log" \
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SLEEP_LOG="$log" FM_WATCHER_PIN_ABSENT_ATTEMPTS=0 \
     "$SEND" "sess:win" --key Escape 2>/dev/null; rc=$?
   expect_code 0 "$rc" "--key send should succeed"
   [ ! -s "$log" ] || fail "--key path paused but must not"$'\n'"--- sleeps ---"$'\n'"$(cat "$log")"
@@ -131,7 +133,7 @@ test_claude_escape_records_interrupt_idle() {
   printf 'busy_gen=%s\n' "$gen" >> "$home/state/task.meta"
   : > "$log"
 
-  env PATH="$fb:$PATH" FM_HOME="$home" FM_SLEEP_LOG="$log" \
+  env PATH="$fb:$PATH" FM_HOME="$home" FM_SLEEP_LOG="$log" FM_WATCHER_PIN_ABSENT_ATTEMPTS=0 \
     "$SEND" task --key Escape 2>/dev/null; rc=$?
   expect_code 0 "$rc" "Claude Escape send should succeed"
   out=$(fm_busy_classify tmux sess:win claude task "$home/state")

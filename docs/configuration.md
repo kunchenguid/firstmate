@@ -332,6 +332,8 @@ While the file exists, main's lease-checked commands also take the per-task leas
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
+[AGENTS.md section 8](../AGENTS.md#8-supervision-protocol) owns the supervisor's per-wake admission policy and summary; the backend transition guarantees below do not implement a separate scheduler.
+
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
 A home may instead select another tasks-axi adapter such as Beads through its own `.tasks.toml` or `TASKS_AXI_BACKEND`; firstmate still uses only tasks-axi verbs for routine backlog reads and mutations, and the adapter maps `start` and evidence-bearing `done` transitions to its native statuses and evidence fields.
 
@@ -415,6 +417,11 @@ For spawn-capable adapters, the runtime session-provider backend controls where 
 | `cmux` | Experimental; no dedicated real-backend CI lane | [`docs/cmux-backend.md`](cmux-backend.md) |
 
 Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only; Orca provides both the task worktree and terminal endpoint.
+For Treehouse-backed spawns, a pane reporting an isolated pool slot is not sufficient to launch: Firstmate waits until Treehouse records a live owner and no lease before checking cleanliness, allowing up to 600 seconds from the first observed writing checkout, with a separate 60-second allowance for unexpected pane paths.
+A get stuck in the spawning project is interrupted after 300 seconds; without verified ownership of an identified slot, spawn refuses rather than returning a possibly foreign slot or retrying.
+If handoff never completes, spawn refuses without claiming the slot or publishing task metadata; a genuinely dirty pooled slot is still left untouched.
+Inspecting Treehouse pool ownership requires `jq` even with the tmux backend; if it is missing, spawn refuses promptly rather than assuming the slot is ready.
+
 
 ### Backend selection order
 
@@ -426,6 +433,7 @@ New spawns choose the backend in this order:
 3. The first non-empty line of local, gitignored `config/backend`.
 4. Runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, or cmux runtime signals.
 5. Default `tmux`.
+
 
 If more than one runtime marker is present, detection resolves innermost-first: `$TMUX` is checked before `HERDR_ENV=1`, which is checked before cmux's primary `CMUX_WORKSPACE_ID` marker and its documented fallback signals - tmux or herdr started from inside a cmux terminal is the innermost, currently-executing layer, while cmux itself (a terminal application, not a nestable multiplexer) is always checked last.
 See [`docs/cmux-backend.md`](cmux-backend.md#runtime-detection) for why cmux can be selected when `CMUX_WORKSPACE_ID` is absent.
@@ -965,6 +973,29 @@ This applies only to agents Firstmate launches; the captain's own primary Firstm
 
 Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
 
+## Worker memory cap (config/worker-memory-max)
+
+The optional local, gitignored `config/worker-memory-max` caps the memory of each ship and scout lane so one runaway tool inside a lane cannot push the whole host into out-of-memory.
+With no file, every launch is unchanged.
+It requires Linux with a reachable systemd user manager, because each capped lane runs inside a transient `systemd-run --user --scope` unit with `MemoryMax` and `MemorySwapMax` set to the cap.
+The scope holds the agent and every process it starts, so the kernel's cgroup OOM killer acts inside that lane only; systemd then stops the whole scope and Firstmate appends a `failed [at=<epoch>]:` status line naming the cap, so supervision sees a lane failure rather than a host event.
+
+Write one rule per line as `<harness|*> <project> <MiB>`, where the harness is the resolved worker harness, the project is the basename of the project clone (not `*`), and the cap is a positive whole number of mebibytes; `#` comments and blank lines are allowed.
+The first matching rule wins, so put specific rules above general ones, and a lane no rule matches runs uncapped.
+Size each cap from the lane's measured working set plus headroom for the agent itself, for example:
+
+```text
+# <harness|*> <project> <MiB>
+* example-large-project 5120
+* example-small-project 2560
+```
+
+A malformed file, or a matched cap on a host that fails the scope probe, refuses the spawn or relaunch before any endpoint, worktree, or task record exists, rather than launching the lane uncapped.
+If the scope fails to start after the probe, Firstmate records a lane failure in the task status log.
+The capped launch runs under noninteractive POSIX `sh`, so raw launch commands must use compatible syntax.
+Secondmates are never capped, and the file is not inherited into secondmate homes.
+[`bin/fm-worker-memory-cap.sh`](../bin/fm-worker-memory-cap.sh) owns the rule format, the host probe, and the outcome record, with regression coverage in [`tests/fm-worker-memory-cap.test.sh`](../tests/fm-worker-memory-cap.test.sh).
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
@@ -1120,6 +1151,15 @@ The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and sche
 - An expanded provider with no matching account row leaves the candidate eligible but unranked.
 - Known applicable rows from a provider with partial quota semantics remain rankable; rows whose own status is not known remain unrankable.
 
+Any applicable `exhausted_now` row or known zero bound makes that candidate ineligible, and a known profile-floor shortfall does the same before unrelated quota uncertainty is considered.
+Missing or nonnumeric `spendPriority` evidence is never ranked, and every candidate is printed beside its evidence or the reason it was not rankable, including on ambiguous and approval-gated outcomes that emit no profile.
+When exactly one eligible candidate remains and it is unranked because quota is unknown, it needs no comparative ranking: the resolver clears it with an explicit uncertainty note, provided its account-specific profile floor is absent or verified. Multiple unranked candidates, malformed ranking evidence, known exhaustion, unverifiable floors, low confidence and approval gates retain their existing outcomes. This exception does not establish authentication or provider availability.
+On the opted-in path, duplicate concrete profiles with the same harness, model, and effort inside one rule or the default array are configuration errors rather than ties.
+The result is one of `clear` (a `profile:` line ready for `fm-spawn.sh`), `ambiguous` (confidence below the floor), `escalate` (an approval-gated rule, unverifiable rule floor, no selectable candidate, or a genuine tie), or `error` (API, network, malformed response metadata, rendering, or quota-axi failure), and every one of them exits 0.
+Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
+Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
+Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
+
 **Confidence and fallback rules**
 
 - A rule that declares `min_confidence` is checked against that rule's own probability, whether it is the picked option or a runner-up, so a runner-up never needs weaker support than it would as the pick.
@@ -1155,6 +1195,7 @@ Every result above exits 0.
 
 **Firstmate retains the dispatch decision**
 
+
 The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
 By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
 
@@ -1167,6 +1208,20 @@ Firstmate passes its profile line unless it states a reason to override, such as
 - The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, default confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
 
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
+
+## Event shadow pilot
+
+The optional stale-worker-event JEV pilot annotates the existing wake-drain presentation without consuming or suppressing any notification.
+Enable it only for a home whose status text may be sent to TypeSafe, using `FM_EVENT_SHADOW=1` and a runtime-injected `TYPESAFE_API_KEY`; unlike dispatch resolution, this pilot never reads a key file.
+Keep normal supervision unchanged: shadow classifications describe historical declarations, not verified health, completion, approval, or authority to act.
+No low-risk behavior is approved for activation by a shadow result.
+See [`bin/fm-event-shadow.sh`](../bin/fm-event-shadow.sh)'s header for bounded input, journal, metrics, and no-cache mechanics, and its request criteria for the closed attention set.
+[`bin/fm-event-shadow-replay.sh`](../bin/fm-event-shadow-replay.sh) provides sanitized offline confusion examples and an explicit live replay; missing returned cost fields remain unknown rather than estimates.
+The shared [dispatch confidence floor](#typed-dispatch-resolution-env-typesafe_api_key) maps lower-confidence choices to `unknown`, preserving raw choices and probabilities; abstentions are reported separately from errors.
+The [recorded live evidence](../tests/fixtures/event-shadow/live-evidence.json) owns the measured costs, confusion results, and local-rescore provenance; see the replay script's header for offline reproduction.
+Lock contention emits `attention=unknown skipped=locked` rather than silently omitting the annotation; an abandoned lock is not automatically reclaimed, so shadow collection resumes only after an operator verifies no adapter is running and removes the lock directory.
+Neither case suppresses a wake.
+[`tests/fm-event-shadow.test.sh`](../tests/fm-event-shadow.test.sh) verifies default-off behavior, error fallback, deterministic-reason bypass, and unchanged queue acknowledgement.
 
 ## Toolchain
 
@@ -2295,13 +2350,15 @@ FM_WATCH_REARM_RETRY_LIMIT=5   # Pi/OpenCode adapter launch-failure retries befo
 FM_WATCH_CYCLE_LOG_MAX_BYTES=262144   # size cap for the arm-owned watcher lifecycle ledger
 FM_WATCH_CYCLE_LOG_KEEP_LINES=1000   # newest complete lifecycle rows considered when the ledger is capped
 FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE if set, else the poll-derived grace (docs/turnend-guard.md "Guard grace and the poll cadence"); seconds a live watcher lock may have a stale beacon before re-arm errors
+FM_WATCHER_PIN_ATTEMPTS=10   # bounded retries of a guard's generation-pinned .watch.lock read while the owner is changing mid-read; 0 or non-numeric resets to 10 (docs/turnend-guard.md "Guard predicates")
+FM_WATCHER_PIN_ABSENT_ATTEMPTS=3   # brief retries a guard grants an absent .watch.lock to ride out a watcher's release-plus-republish gap before reporting lock-absent; deliberately small so a fresh lock is never confirmed against its predecessor's beacon
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_TURNEND_CHURN_ABSORB_SECS=900   # longest one endpoint's bare turn-ends may be deferred on pane-churn evidence alone; only consulted when config/turnend-churn-absorb is present
 FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # captain-relevant status regex; nonterminal progress verbs remain excluded even when their prose matches
 FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; excluded from FM_CAPTAIN_RE and distinct from blocked
 FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates, unless that pane's own worker declared a wait that has not elapsed, or, where config/wedge-defer-parked-gate arms it, that pane's crew is parked at a validation gate awaiting the supervisor's decision on it that the crew raised under that run's key and nobody has answered yet, either of which takes the FM_PAUSE_RESURFACE_SECS recheck below instead; stale panes whose crew is not provably working surface immediately unless admitted directly to the declared-wait cadence, while a live idle declared wait still surfaces once before that cadence bounds repeats; at that same escalation moment a recovery-grade agent-state probe (docs/architecture.md owns that dead-record contract) reports a pane whose endpoint is proven `dead` or `missing` once and stops re-escalating it while it stays that way
 FM_BUSY_TURN_MAX_SECS=3600         # maximum age without a completed turn or explicit native-harness progress (bin/fm-watch.sh owns marker selection), before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart; a declared external wait, an attended verified captain-held transfer, or - where config/wedge-defer-parked-gate arms it - a validation gate of the crew's own awaiting the supervisor's still-unanswered decision takes the FM_PAUSE_RESURFACE_SECS recheck below instead
-FM_PAUSE_RESURFACE_SECS=14400      # four hours between bounded rechecks of a declared external wait or verified captain-held transfer, and between repeated new-hash stale alarms for an ordinary crew task with an open backlog captain call; a structured until time can make an external-wait recheck occur sooner but cannot extend this bound; this includes a live idle pane after its first inconclusive stale wake, a provably-working pane whose own unelapsed declared wait or, where config/wedge-defer-parked-gate arms it, unanswered supervisor-owed validation gate defers its FM_STALE_ESCALATE_SECS escalation, and a live busy pane past FM_BUSY_TURN_MAX_SECS, while the away-mode daemon uses the same setting and ages its window against the crew's own latest status line rather than pane busy state; a captain-held transfer is never rechecked while the away-posture record exists, while an armed validation gate awaiting the supervisor's decision keeps this recheck in either posture
+FM_PAUSE_RESURFACE_SECS=14400      # four hours between bounded rechecks of a declared external wait or verified captain-held transfer, and between repeated new-hash stale alarms for an ordinary crew task with an open backlog captain call or desk-parked backlog hold; the first sight of each hold declaration alarms, while unheld lanes still alarm on each new hash and a live parked validation-gate worker stays on its own wedge path; a structured until time can make an external-wait recheck occur sooner but cannot extend this bound; this includes a live idle pane after its first inconclusive stale wake, a provably-working pane whose own unelapsed declared wait or, where config/wedge-defer-parked-gate arms it, unanswered supervisor-owed validation gate defers its FM_STALE_ESCALATE_SECS escalation, and a live busy pane past FM_BUSY_TURN_MAX_SECS, while the away-mode daemon uses the same setting and ages its window against the crew's own latest status line rather than pane busy state; a captain-held transfer is never rechecked while the away-posture record exists, but a desk-parked backlog hold keeps its cadence there, as does an armed validation gate awaiting the supervisor's decision
 FM_SECONDMATE_WAKE_STALL_SECS=180  # minimum interval with no change of the oldest actionable foreign wake-queue row (it advances as the mate drains, and a queue reprovisioned under the same task id starts a fresh interval at whatever sequence it restarts) before an endpoint-recorded local secondmate produces one durable parent wake-loop-stall notification for that no-progress episode; a mate that is provably inside an active turn (an exact busy verdict) does not escalate until that same no-progress interval reaches FM_BUSY_TURN_MAX_SECS above; a mate whose busy class is exactly idle, whose agent is alive, and whose composer is not pending is rung once so its own home can drain, and the parent notification is withheld until that same row stays frozen for another stall interval; unknown or ring-unsafe panes keep the parent alarm; declared external-wait pause rows are excluded, and zero or invalid values use 180
 FM_SECONDMATE_LIVENESS_SECS=60   # seconds between watcher probes of each registered secondmate's recorded endpoint through bin/fm-secondmate-liveness-lib.sh, which relaunches only a positively `dead` or `missing` endpoint through the ordinary guarded fm-spawn.sh --secondmate path and emits exactly one check wake per relaunch; zero or invalid values use 60
 FM_SECONDMATE_LIVENESS_TIMEOUT=120   # seconds bounding one watcher-driven relaunch, so a wedged spawn cannot stall the poll; zero or invalid values use 120
@@ -2385,3 +2442,22 @@ A live lock, a missing `lsof`, any failed check, or any other fetch failure keep
 Every wait, retry, and removal is printed to stderr, and a successful recovery also prints one `recovered:` summary line to stdout so a session-start refresh - which discards fleet-sync stderr and relays only stdout - still surfaces it.
 
 The shared staleness proof lives in `bin/fm-lock-lib.sh`, which both `fm-teardown.sh` and `fm-fleet-sync.sh` use.
+
+## Pi transport recovery
+
+The primary Pi watch extension reads optional, home-local `config/transport-recovery.json`; absent or malformed configuration leaves recovery disabled.
+`{"mode":"diagnostics"}` records at most 32 privacy-safe `fm-transport-recovery` session entries per session activation, outside model context.
+Entries contain only fixed route names, result codes, attempt counts, a safe-run flag, and request byte counts.
+
+`{"mode":"muse-to-gemini","exactGeminiIdentityVerified":true}` additionally permits one session-only transition from `cliproxyapi/muse-spark-1.3` to subscription-backed `antigravity/gemini-3.8-flash` at `high` effort after at least two confirmed terminal pre-stream transport failures in one run and after Pi's own automatic retries and queued continuations fully settle.
+Enable this only after proving the installed Gemini provider preserves the requested identity without silently mapping to another model and that subscription auth is available.
+The target must be registered and within the session's model scope, the home lock must be owned, and Pi must expose the guarded `setModelIfCurrent` API that checks session, source model, cancellation, and intervening mutations again after authentication.
+Older Pi versions fail closed; ordinary `setModel` is not a safe substitute because authentication can yield before it changes the session model.
+The single transition attempt has a 10-second deadline; expiry aborts its guard so authentication finishing later cannot change the model.
+
+The provider must mark the final failure with `terminal:true`, `eventsEmitted:false`, and `phase:before_message_stream_start` in a `provider_transport_failure` diagnostic.
+An earlier WebSocket failure followed by successful SSE or an unclassified SSE/auth failure is insufficient.
+Any streamed content, tool execution, cancellation, unknown phase, user input, model selection, or session replacement disqualifies the affected run.
+The switch does not resend prompts, execute tools, acknowledge durable instructions, or change the supervision branch model; the next ordinary stock wake uses Gemini.
+Metered GLM is a manual third-line decision and is never selected automatically by this policy.
+Refresh offline lifecycle proof with `bash tests/fm-transport-recovery.test.sh` and the guarded Pi API's faux-provider tests before considering live activation.

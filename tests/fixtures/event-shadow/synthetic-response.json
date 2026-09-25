@@ -1,0 +1,76 @@
+{
+  "answers": {
+    "event_0": {
+      "choice": "declared_wait",
+      "confidence": 0.95,
+      "probabilities": {
+        "declared_wait": 0.95,
+        "inspect": 0.025,
+        "unknown": 0.025
+      }
+    },
+    "event_1": {
+      "choice": "declared_wait",
+      "confidence": 0.95,
+      "probabilities": {
+        "declared_wait": 0.95,
+        "inspect": 0.025,
+        "unknown": 0.025
+      }
+    },
+    "event_2": {
+      "choice": "unknown",
+      "confidence": 0.95,
+      "probabilities": {
+        "declared_wait": 0.025,
+        "inspect": 0.025,
+        "unknown": 0.95
+      }
+    },
+    "event_3": {
+      "choice": "inspect",
+      "confidence": 0.95,
+      "probabilities": {
+        "declared_wait": 0.025,
+        "inspect": 0.95,
+        "unknown": 0.025
+      }
+    },
+    "event_4": {
+      "choice": "declared_wait",
+      "confidence": 0.99,
+      "probabilities": {
+        "declared_wait": 0.99,
+        "inspect": 0.005,
+        "unknown": 0.005
+      }
+    },
+    "event_5": {
+      "choice": "unknown",
+      "confidence": 0.95,
+      "probabilities": {
+        "declared_wait": 0.025,
+        "inspect": 0.025,
+        "unknown": 0.95
+      }
+    },
+    "event_6": {
+      "choice": "inspect",
+      "confidence": 0.95,
+      "probabilities": {
+        "declared_wait": 0.025,
+        "inspect": 0.95,
+        "unknown": 0.025
+      }
+    },
+    "event_7": {
+      "choice": "unknown",
+      "confidence": 0.95,
+      "probabilities": {
+        "declared_wait": 0.025,
+        "inspect": 0.025,
+        "unknown": 0.95
+      }
+    }
+  }
+}
