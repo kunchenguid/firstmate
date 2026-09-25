@@ -484,6 +484,38 @@ test_ask_user_escalation_format() {
   pass "fm-brief.sh: no-mistakes ask-user findings use one event plus a verbatim snapshot"
 }
 
+test_rule6_forbids_interactive_harness_prompts() {
+  local home mode id brief clause
+  home="$TMP_ROOT/rule6-no-interactive-home"
+  mkdir -p "$home/data"
+  clause="never invoke an interactive question or confirmation tool of your own harness (such as Claude Code's AskUserQuestion)"
+
+  for mode in no-mistakes direct-PR local-only; do
+    id="brief-rule6-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep "append \`needs-decision: {summary of options}\` and stop; $clause" "$brief" \
+      "$mode ship brief rule 6 must forbid an interactive harness prompt right after the needs-decision sentence"
+    assert_grep "you are unattended, nobody can answer such a prompt, and the call will wedge the task" "$brief" \
+      "$mode ship brief rule 6 must explain why an interactive harness prompt wedges an unattended crewmate"
+  done
+
+  id="brief-rule6-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "append \`needs-decision: {summary of options}\` and stop; $clause" "$brief" \
+    "scout brief rule 6 must forbid an interactive harness prompt right after the needs-decision sentence"
+
+  id="brief-rule6-secondmate"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backtick-wrapped needs-decision token must stay literal
+  assert_grep "Never invoke an interactive question or confirmation tool of your own harness (such as Claude Code's AskUserQuestion) to surface a decision instead - you are unattended, nobody can answer such a prompt, and the call will wedge the task; use \`needs-decision:\` above instead." "$brief" \
+    "secondmate charter escalation sentence must forbid an interactive harness prompt"
+
+  pass "fm-brief.sh: rule 6 and the secondmate escalation sentence forbid an interactive harness prompt in every shape"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -1319,6 +1351,7 @@ test_no_mistakes_dod_wording
 test_no_mistakes_dod_green_detection
 test_pr_based_dod_requires_non_draft
 test_ask_user_escalation_format
+test_rule6_forbids_interactive_harness_prompts
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
