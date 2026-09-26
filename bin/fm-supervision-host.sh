@@ -63,8 +63,8 @@
 # (bin/fm-branch-report.sh), and left none of its granted rows in the wake
 # queue. A handled wake with only routine outcomes never wakes
 # main, and neither does any handled wake while away: captain outcomes wait in
-# the outcome store for the return brief. A handled attended wake that
-# recorded a captain outcome exits with one "supervision-host: branch-outcome:"
+# the outcome store for the return drain's BRANCH OUTCOMES section. A handled
+# attended wake that recorded a captain outcome exits with one "supervision-host: branch-outcome:"
 # line naming its store rows, without the close it handled; main drains, where
 # the BRANCH OUTCOMES section (bin/fm-wake-drain.sh) presents every
 # unprocessed captain outcome until main acknowledges it. Otherwise the host

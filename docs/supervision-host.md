@@ -122,7 +122,7 @@ The engine turn runs beside a captain who is present, so its guarded actions tak
 
 ### Away
 
-Every close goes to the engine, and captain outcomes wait for the return brief.
+Every close goes to the engine; captain outcomes remain in the store until the return drain presents them (see [Captain outcomes](#captain-outcomes)).
 A close accepted away whose turn starts attended, because the captain returned in between, meets the attended rule then, and one the session may not take reaches main unchanged.
 A captain who leaves while an attended turn runs turns its captain outcomes into away outcomes: they wait for the return too.
 
@@ -195,7 +195,7 @@ The drain's header owns the section's bounds; these rules keep it bounded and in
 
 The section runs only for main on an opted-in home whose primary is not Pi, and never while the away record exists.
 The drain is the only presenter of these outcomes and the only owner of their read cursor, the away window's included: the return brief counts the window's outcomes and points at the section instead of listing them.
-So a long away window costs one short drain, with each task's captain outcomes collapsed to one line and routine ones past the section's limit collapsed into a count, and once main acknowledges the captain outcomes no later drain shows anything from the window again.
+A long away window no longer requires a drain per outcome: each task's captain outcomes collapse to one line, subject to the captain byte cap, and routine ones past the section's limit collapse into a count; after main acknowledges all captain outcomes no later drain shows anything from the window again.
 A drain that cannot read or project the store (jq missing included), print the section, or advance its read cursor says so and marks nothing it has not shown as read, and it exits nonzero, so the return keeps its catch-up gated until a check drains again and records the presentation, rather than clearing over outcomes a later drain would present again.
 The section's budgets count bytes in any locale, so a multibyte summary is cut on a whole UTF-8 character boundary to fit them.
 An unprocessed captain outcome is never adopted as processed, so a home that opts in mid-session cannot lose its first one.
@@ -389,7 +389,7 @@ Each arm owner's own suite covers its host mode against a stub host.
 | `tests/fm-watch-checkpoint.test.sh` | The Codex checkpoint's host mode against a stub host. |
 | `tests/fm-supervision-instructions.test.sh` | The rendered protocol, including Grok's arm command. |
 | `tests/fm-host-mirror.test.sh` | The dialog mirror's writers through the tracked Claude and Cursor registrations, the opt-in gate, the feed, and the verified-writer list. |
-| `tests/fm-afk-return.test.sh` | The return's read-cursor advance through the away window on a host home, and none on Pi. |
+| `tests/fm-afk-return.test.sh` | The return's drain-owned read-cursor advance through the away window on a host home, and none on Pi. |
 | `tests/fm-supervision-host-live-e2e.test.sh` | Runs a real engine turn; opt-in because it spends tokens. |
 | `tests/fm-host-mirror-live-e2e.test.sh` | Proves the Claude and Cursor mirror writers against the real harnesses; opt-in because it spends tokens. |
 
