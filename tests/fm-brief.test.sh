@@ -1317,8 +1317,60 @@ test_crewmate_scaffolds_forbid_pool_administration() {
   pass "fm-brief.sh: every crewmate scaffold forbids administering the shared worktree pool"
 }
 
+test_crewmate_scaffolds_guard_persistent_shell_paths() {
+  local home id brief mode
+  home="$TMP_ROOT/persistent-shell-home"
+  mkdir -p "$home/data"
+  for profile in .profile .bash_profile .bash_login; do
+    printf 'sentinel:%s\n' "$profile" > "$home/$profile"
+  done
+  printf 'sentinel:.bashrc-target\n' > "$home/bashrc-target"
+  ln -s bashrc-target "$home/.bashrc"
+
+  for mode in no-mistakes direct-PR local-only; do
+    id="brief-shell-$mode"
+    HOME="$home" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode "$mode" >/dev/null 2>&1 \
+      || fail "fm-brief.sh --mode $mode exited non-zero"
+    brief="$home/data/$id/brief.md"
+    for profile in .profile .bash_profile .bash_login .bashrc; do
+      assert_grep "$profile" "$brief" "$mode brief omitted a supported shell startup file"
+    done
+    assert_grep "task temporary directory" "$brief" "$mode brief omitted temporary path rejection"
+    assert_grep "disposable worktree" "$brief" "$mode brief omitted worktree path rejection"
+    assert_grep "Quoting, variable expansion, and symlinks" "$brief" \
+      "$mode brief did not cover indirect or quoted references"
+    assert_grep "before opening or truncating" "$brief" "$mode brief did not forbid partial writes"
+    # shellcheck disable=SC2016 # Assert the literal generated shell expansion.
+    assert_grep '"$HOME/.local/bin"' "$brief" "$mode brief omitted allowed stable home-relative paths"
+    assert_grep "Do not scan or rewrite existing shell files automatically" "$brief" \
+      "$mode brief permitted edits to existing captain configuration"
+  done
+
+  id='brief-shell-scout'
+  HOME="$home" FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh --scout exited non-zero"
+  brief="$home/data/$id/brief.md"
+  for profile in .profile .bash_profile .bash_login .bashrc; do
+    assert_grep "$profile" "$brief" "scout brief omitted a supported shell startup file"
+  done
+  assert_grep "task temporary directory" "$brief" "scout brief omitted temporary path rejection"
+  assert_grep "disposable worktree" "$brief" "scout brief omitted worktree path rejection"
+  assert_grep "before opening or truncating" "$brief" "scout brief did not forbid partial writes"
+  # shellcheck disable=SC2016 # Assert the literal generated shell expansion.
+  assert_grep '"$HOME/.local/bin"' "$brief" "scout brief omitted allowed stable home-relative paths"
+  for profile in .profile .bash_profile .bash_login; do
+    [ "$(<"$home/$profile")" = "sentinel:$profile" ] \
+      || fail "brief generation changed existing $profile contents"
+  done
+  [ -L "$home/.bashrc" ] || fail "brief generation replaced the .bashrc symlink"
+  [ "$(<"$home/bashrc-target")" = 'sentinel:.bashrc-target' ] \
+    || fail "brief generation changed the symlink target without a complete write"
+  pass "fm-brief.sh: ship and scout instructions protect persistent shell configuration"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
+test_crewmate_scaffolds_guard_persistent_shell_paths
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
