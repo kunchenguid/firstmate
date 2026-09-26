@@ -359,7 +359,7 @@ test_scenario_b() {
 # No human input, no swallowed Enter: a captain-relevant status must produce
 # exactly ONE sentinel-prefixed, single-line digest, submitted once. This owns
 # the marker + single-line + no-duplicate operator contract that the deleted
-# fake-tmux units used to assert via internal send-keys counts.
+# earlier transport-unit tests used to assert through internal send counts.
 
 test_scenario_c() {
   reset_state

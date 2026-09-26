@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tests/fm-trace-context-spawn.test.sh - spawn-path integration regressions for
-# native W3C trace context using fake tmux panes and real isolated git worktrees.
+# native W3C trace context using fake Herdr panes and real isolated git worktrees.
 # See docs/verification/trace-context.md for the maintained coverage inventory.
 set -u
 
@@ -23,8 +23,8 @@ Verify the spawned process receives the expected trace context.
 EOF
 }
 
-# Fake tmux: answers the pane-path query and logs every literal `send-keys -l`
-# argument (the GOTMPDIR export, the TRACEPARENT export, and the launch command)
+# Fake Herdr: answers the pane-path query and logs every `pane run` payload
+# (the GOTMPDIR export, the TRACEPARENT export, and the launch command)
 # one per line, in send order, so ordering is observable.
 make_spawn_fakebin() {
   local dir=$1 fakebin

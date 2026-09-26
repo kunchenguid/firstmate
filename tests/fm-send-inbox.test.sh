@@ -4,7 +4,7 @@
 # An ordinary text steer to a task recorded in this home no longer types its
 # payload: fm-send appends a durable sequenced record to state/<id>.inbox/ and
 # rings one constant self-describing doorbell line, best-effort. These tests
-# drive the real fm-send executable over a stubbed tmux and pin:
+# drive the real fm-send executable over a stubbed Herdr CLI and pin:
 #   1. The payload is durably recorded and never typed; only the doorbell
 #      crosses the terminal, and the send exits 0 at enqueue.
 #   2. Multi-line steers are legal and round-trip byte-exact.
@@ -40,9 +40,9 @@ SEND="$ROOT/bin/fm-send.sh"
 TMP_ROOT=$(fm_test_tmproot fm-send-inbox)
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 
-# Stub tmux: logs literal typed text to FM_SEND_LOG and lets the submit and
+# Stub Herdr CLI: logs literal typed text to FM_SEND_LOG and lets the submit and
 # composer paths reach clean verdicts. FM_FAKE_HERDR_COMPOSER=pending renders a
-# composer visibly holding text; FM_FAKE_HERDR_SEND_FAIL=1 fails send-keys.
+# composer visibly holding text; FM_FAKE_HERDR_SEND_FAIL=1 fails pane sends.
 make_stubs() { # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"

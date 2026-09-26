@@ -178,7 +178,7 @@ The 2026-08-27 review inspected `bin/fm-harness.sh`, `bin/fm-supervision-instruc
 | --- | --- |
 | Pi and Codex primaries | Applicable only at the existing watcher continuation after one shared `check` wake; no package byte, command, state path, or verdict enters a harness-specific integration. |
 | Pi, Codex, and TraeX task workers | Not applicable after inspecting harness detection and launch ownership, because source registration has no task metadata or worker endpoint and the package is never launched through `fm-spawn`. |
-| tmux, Herdr, Zellij, Orca, and cmux session providers | Not applicable after inspecting the known and spawn-capable backend dispatch sets, because process-event execution calls no backend selector, capture, send, liveness, or cleanup primitive. |
+| Herdr session provider | Not applicable after inspecting the retained backend dispatch set, because process-event execution calls no backend selector, capture, send, liveness, or cleanup primitive. |
 | Local and remote secondmate homes | Applicable at the home boundary only; each home owns its own binding, content-addressed package, extension state, registration, result, and watcher, and `config/extensions.d` remains outside the inherited-material allowlist. |
 
 ## Runner lifetime and cleanup

@@ -13,7 +13,7 @@
 #      normal-intensity, brightly-coloured text.
 #   2. fixture_input_pending reads a ghost-only composer (either style) as NOT
 #      pending, while still treating real (normal/bright) text as pending.
-#   3. The tmux reader structurally scans every row of a multi-row composer.
+#   3. The shared classifier structurally scans every row of a multi-row composer.
 #   4. The human/LLM-facing capture path (fm-peek.sh) stays PLAIN - no escape codes
 #      ever reach firstmate's context.
 set -u
@@ -32,12 +32,9 @@ TMP_ROOT=$(fm_test_tmproot fm-ghost-tests)
 # ESC byte for building styled fixtures and asserting escape-free output.
 ESC=$(printf '\033')
 
-# A fake tmux that serves a styled composer line for the dim-aware reader and an
-# escape-free line for the plain (peek) path. capture-pane returns the styled
-# fixture verbatim WITH -e (mirrors `tmux capture-pane -e`), and the same content
-# with SGR sequences stripped WITHOUT -e (mirrors a plain capture). cursor_y comes
-# from FM_FAKE_CY. The fake deliberately returns the complete fixture for every
-# capture, which exercises the structural scan while preserving the historical
+# A fake Herdr CLI serves an escape-free composer line for the plain peek path.
+# The pure classifier receives the styled fixture and synthetic cursor row
+# directly, exercising the structural scan while preserving the historical
 # single-row fallback fixtures.
 # The geometry cases call the shared public classifier with captured screens.
 # Herdr's plain peek is separately exercised through a fake CLI.
@@ -338,7 +335,7 @@ test_non_bordered_busy_footer_is_unknown_strict() {
   # longer reads `empty` the way the old allow-busy compatibility fallback
   # did. Its one load-bearing consumer - submit confirmation on a harness
   # whose mid-turn screen hides the composer (pi) - moved to the submit
-  # core's baseline-idle turn-started conversion (fm_tmux_submit_core), which
+  # core's baseline-idle turn-started conversion, which
   # requires an idle-to-busy transition across our own Enter instead of
   # trusting any busy-looking row.
   local dir fb capture out

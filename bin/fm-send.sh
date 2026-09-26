@@ -12,8 +12,8 @@
 # secondmate request delivers only marker and correlation bytes and leaves the
 # parent waiting on a reply to nothing.
 # Special keys instead of text: fm-send.sh <target> --key Enter
-# Key support is backend-specific: Herdr supports Escape, Enter, and C-c;
-# Orca currently supports Enter and C-c only, and rejects Escape.
+# The retained Herdr backend supports Escape, Enter, and C-c.
+# Retired backend identities refuse key delivery.
 #
 # Two data planes:
 #

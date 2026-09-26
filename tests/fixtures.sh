@@ -7,7 +7,7 @@
 #
 # Generic reporters, temp roots, git fixtures, and fail/pass/fm_test_cleanup
 # come from tests/lib.sh, pulled in below. This file owns the shared fake
-# no-mistakes, gh, gh-axi, tmux, ssh, and spawn-world helpers. Wake-queue mocks
+# no-mistakes, gh, gh-axi, Herdr, ssh, and spawn-world helpers. Wake-queue mocks
 # stay in wake-helpers.sh; secondmate-lifecycle mocks stay in
 # secondmate-helpers.sh.
 #
@@ -195,7 +195,7 @@ SH
   chmod +x "$fb/herdr"
 }
 
-# --- fake tmux / ssh / sleep ------------------------------------------------
+# --- fake Herdr / ssh / sleep -----------------------------------------------
 
 # Herdr send fixture; captures actual typed bytes and preserves failure knobs.
 fm_test_fake_herdr_send() {
@@ -289,7 +289,7 @@ EOF
 }
 
 # fm_test_make_spawn_fakebin <dir> [extra-exit0-tool...]
-# Creates <dir>/fakebin with the spawn tmux stub, a no-op treehouse, and any
+# Creates <dir>/fakebin with the spawn Herdr stub, a no-op treehouse, and any
 # extra exit-0 tools. Echoes the fakebin path.
 fm_test_make_spawn_fakebin() {
   local dir=$1 fakebin

@@ -3470,7 +3470,7 @@ test_afk_busy_declared_pause_hands_off_plain_stale() {
 # incident pane's harness footer ticks on every capture, so a one-shot keyed on the
 # pane hash re-fires on every poll, and the daemon, which relaunches the watcher
 # after each handled wake, is woken in a loop for the whole declared wait. This
-# fixture's fake tmux renders a fresh footer on EVERY capture-pane and asserts that
+# fixture's fake Herdr CLI renders a fresh footer on EVERY pane read and asserts that
 # divergence outright on every re-arm (.hash-<key> moves, .count-<key> never
 # climbs), so the one-wake assertion across five silent re-arms cannot pass
 # vacuously on a pane that happened to sit still. Round 1 also starts from an

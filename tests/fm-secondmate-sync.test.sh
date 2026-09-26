@@ -749,7 +749,7 @@ test_spawn_fast_forwards_before_launch() {
   c2=$(head_of "$w/main")
   [ "$(head_of "$w/sm")" = "$c1" ] || fail "precondition: home should start behind the primary"
 
-  # tmux stub: accept every subcommand, print nothing (so no window pre-exists).
+  # Herdr stub: accept the spawn operations with no prior task endpoint.
   fakebin="$w/fakebin"
   mkdir -p "$fakebin"
   fm_test_fake_herdr_spawn "$fakebin"

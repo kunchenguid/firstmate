@@ -27,7 +27,7 @@
 # Portable serial CI installs the public Pi package but no credentials, so this
 # guard checks that available token-free surface there and runs against every installed
 # harness on more capable hosts. The portable counterpart in
-# tests/fm-tmux-agent-liveness.test.sh pins the classifier logic in CI. Run this
+# tests/fm-agent-process.test.sh pins the classifier logic in CI. Run this
 # guard after any harness upgrade and before trusting refreshed evidence.
 set -u
 

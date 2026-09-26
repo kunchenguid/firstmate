@@ -2,8 +2,8 @@
 # Behavior tests for fm-spawn.sh concrete dispatch profile flags.
 #
 # These tests drive fm-spawn through meta writing and launch construction with a
-# fake tmux pane and a real isolated git worktree. The fake tmux captures the
-# literal launch command sent with `tmux send-keys -l`, so assertions pin the
+# fake Herdr pane and a real isolated git worktree. The fake Herdr CLI captures the
+# literal launch command sent with `pane run`, so assertions pin the
 # command firstmate would run without starting any real harness.
 set -u
 

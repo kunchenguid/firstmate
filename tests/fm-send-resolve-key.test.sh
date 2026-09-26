@@ -42,9 +42,9 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-send-resolve-key)
 
-# Stub tmux: logs literal typed text to FM_SEND_LOG and lets the submit path
-# reach a clean "empty" verdict (numeric cursor_y, empty bordered composer).
-# FM_FAKE_HERDR_SEND_FAIL=1 makes send-keys fail so the delivery-failure leg can
+# Stub Herdr CLI: logs literal typed text to FM_SEND_LOG and lets the submit path
+# reach a clean "empty" verdict from an empty bordered composer.
+# FM_FAKE_HERDR_SEND_FAIL=1 makes pane sends fail so the delivery-failure leg can
 # assert that a failed send closes nothing.
 make_stubs() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"

@@ -181,7 +181,7 @@ test_spawn_refuses_and_admits() {
 
 # --- fm-send ----------------------------------------------------------------
 
-# A fake tmux that logs send-keys to FM_TMUX_LOG and reports live endpoints
+# A fake Herdr CLI that logs sends to FM_SEND_LOG and reports live endpoints
 # (mirrors tests/fm-send-strict), so a successful send is observable and a
 # refused one leaves an empty log (proving no message was typed).
 make_send_fakebin() {

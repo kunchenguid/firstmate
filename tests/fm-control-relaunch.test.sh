@@ -47,7 +47,7 @@ relaunch_cleanup() {
 }
 trap relaunch_cleanup EXIT
 
-# The same lifecycle-modelling tmux stub as tests/fm-control.test.sh: the
+# The same lifecycle-modelling Herdr stub as tests/fm-control.test.sh: the
 # harness's exit command stops the agent, and a launch-brief literal starts the
 # harness named in `becomes`.
 make_herdr_stub() {  # <dir>

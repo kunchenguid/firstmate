@@ -9,7 +9,7 @@
 # validate_spawn_worktree's "is a real, distinct worktree" check (it IS a real
 # git checkout, just the wrong one), so a naive single-read loop silently
 # records the wrong worktree= in state/<id>.meta. This test simulates that
-# transient-then-settled pane_current_path sequence with a fake tmux and
+# transient-then-settled pane-path sequence with a fake Herdr CLI and
 # asserts the recorded worktree resolves to the real, settled worktree, never
 # the stale first read.
 #
@@ -27,8 +27,8 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-settle)
 
-# make_settle_fakebin <dir> builds a fake tmux whose `#{pane_current_path}`
-# query returns FM_FAKE_PANE_STALE for the first FM_FAKE_PANE_STALE_READS
+# make_settle_fakebin <dir> builds a fake Herdr CLI whose pane query returns
+# FM_FAKE_PANE_STALE for the first FM_FAKE_PANE_STALE_READS
 # calls, then FM_FAKE_PANE_PATH forever after - reproducing a pane that
 # transiently reports a stale cwd before settling into the real worktree.
 make_settle_fakebin() {

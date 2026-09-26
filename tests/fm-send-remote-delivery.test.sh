@@ -48,7 +48,7 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 TMP_ROOT=$(fm_test_tmproot fm-send-remote-delivery)
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 
-# Stub tmux for the local typed-plane legs: logs literal typed text to
+# Stub Herdr CLI for the local typed-plane legs: logs literal typed text to
 # FM_SEND_LOG. The default composer reads empty (clean submit);
 # FM_FAKE_HERDR_COMPOSER=pending keeps a proven pending composer with no busy footer,
 # so the real submit core exhausts its Enter budget and reports the pending

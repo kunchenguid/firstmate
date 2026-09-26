@@ -7,7 +7,7 @@
 # reads the AUTHORITATIVE source (a matching no-mistakes run-step, else the
 # semantic busy-state contract) and reconciles the possibly-stale log against it. These
 # cases pin every branch of that logic, hermetically, over real throwaway git
-# repos with a fake `no-mistakes` (run-step source) and a fake `tmux` (pane
+# repos with a fake `no-mistakes` (run-step source) and a fake Herdr CLI (pane
 # source):
 #   (a) active run-step is authoritative                          -> run-step
 #   (b) needs-decision/blocked log + resumed run = SUPERSEDED     -> run-step
@@ -65,7 +65,7 @@ make_repo_on_branch() {  # <dir> <branch>
 }
 
 # A fakebin with a fake `no-mistakes` (serves the env-driven run output) and a
-# fake `tmux` (serves a busy or idle pane). The fake no-mistakes mirrors the real
+# fake Herdr CLI (serves a busy or idle pane). The fake no-mistakes mirrors the real
 # command surface the helper uses: `axi status`, `axi status --run <id>` (the
 # `axi` surface - no runs-listing subcommand exists under it, verified against
 # the real CLI), and the actual top-level run-listing command, `no-mistakes
@@ -1739,16 +1739,13 @@ test_dead_window_ignores_stale_status_log() {
   pass "dead window ignores stale status log"
 }
 
-# Regression (2026-09 G7 stale-claim incident, tmux half): the default backend
-# reached the same false-death path as herdr. A tmux that cannot answer at all
+# Regression (2026-09 G7 stale-claim incident): an unreadable terminal provider
+# reached the false-death path. A Herdr CLI that cannot answer at all
 # - a trimmed PATH, or any non-definitive error - made every live crew report
 # "backend target gone", the text the stale sweep matches as positive death.
-# Absence must be proved by tmux's own answer: a window inventory that omits
-# the recorded window, or one of its definitive no-session/no-server/no-socket
-# responses. Anything else is a tmux that failed to answer: unknown, never
-# death. (A socket-connection error is deliberately NOT in this test's scope -
-# fm_backend_tmux_agent_state classifies it as `missing` so fm-bootstrap and
-# fm-session-start can respawn after a genuine server death.)
+# Absence must be proved by Herdr's own answer: a missing pane or a stopped
+# server. Anything else is a provider that failed to answer: unknown, never
+# death.
 test_no_run_tmux_unreadable_reads_unreachable_not_gone() {
   reset_fakes
   local d; d=$(new_case tmux-unreadable)

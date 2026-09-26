@@ -44,7 +44,7 @@ SEND="$ROOT/bin/fm-send.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-send-popup-settle)
 
-# Same stub shape as fm-send-settle.test.sh: a fake tmux that drives the submit
+# Same stub shape as fm-send-settle.test.sh: a fake Herdr CLI that drives the submit
 # path to a clean "empty" verdict on the first Enter, and a fake sleep that records
 # every requested duration (one per line) into FM_SLEEP_LOG instead of sleeping.
 make_stubs() {  # <dir> -> echoes fakebin dir

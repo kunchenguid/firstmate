@@ -43,8 +43,7 @@ FM_PI_BRANCH_RESPONSIVENESS_E2E=1 tests/fm-pi-branch-responsiveness-live-e2e.tes
 
 The full credentialed Pi primary guard passed on the candidate in a bounded baseline/candidate comparison.
 The unchanged baseline both passed once and failed an Ahoy ASCII near-miss case once; earlier candidate near-miss failures therefore have no demonstrated causal link to this pruning.
-The separate compact-refresh guard failed on both versions: after a completed long answer and real compaction, the updated instruction arrived before the question, but the completed answer still used the old marker.
-The refresh guard reads completed native assistant messages, so a prompt echo cannot prematurely permit compaction.
+[`supervision.md`](supervision.md#post-start-instruction-refresh) owns the compact-refresh guard and its current baseline/candidate limitation.
 The TraeX guard independently verified initial execution and durable steering through file receipts on both versions, but both failed to prove an empty composer after Escape and Ctrl+U (`state=unknown`).
 Native unknown remains unknown; the full interrupt sequence has no current passing claim.
 Baseline failures document retained limitations; they do not by themselves waive acceptance or establish a complete root cause.
@@ -97,7 +96,7 @@ The current live guard launches installed Codex in a named Herdr lab and checks 
 tests/fm-composer-codex-idle-live-e2e.test.sh
 ```
 
-The verification machine runs its fleet on Herdr and has no tmux installed, so on 2026-09-15 that guard reported `skip: live: tmux absent` there, and the Herdr capture above is this entry's live evidence.
+The 2026-09-15 run predated the current Herdr lab guard: its then-current tmux guard skipped on this Herdr-only machine, so the read-only Herdr capture above supplied that dated evidence.
 The current guard reports the actual rendered surface rather than assuming every Codex session draws the historical starfield.
 
 ## Steering-inbox doorbell
@@ -774,7 +773,7 @@ The registration is still present after the wait, and Herdr's own `pane report-a
 
 Two vendor facts the fix rests on, both read from the outputs above and from `fm_backend_herdr_pane_process_state`'s `pane process-info` parse:
 
-- Pi's process presents with kernel name `node` and argv0 `pi` (its foreground group also carries Pi's child `node` helpers with argv0 such as `npm view ... version`), so a running Pi is attributed by argv[0] exactly as the tmux probe attributes it; a symlink named `claude` to `sleep` presents as name `sleep`, argv0 `claude`.
+- Pi's process presents with kernel name `node` and argv0 `pi` (its foreground group also carries Pi's child `node` helpers with argv0 such as `npm view ... version`), so a running Pi is attributed by argv[0] through the structural process probe; a symlink named `claude` to `sleep` presents as name `sleep`, argv0 `claude`.
 - Herdr creates the record with its own placeholder `agent_status` of `unknown` the moment it notices Pi, before Pi's extension reports `idle`; that transient reads `unknown` in the pane classifier as it always did, and only a lifecycle status is subject to the process-level proof.
 
 Subcommand presence below the 0.9.0 measurement, checked 2026-09-10 on macOS aarch64 against the pinned upstream release clients fetched from `https://github.com/ogulcancelik/herdr/releases/download/v<version>/herdr-macos-aarch64`:

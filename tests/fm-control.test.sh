@@ -51,14 +51,14 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
 
 # --- fake session provider --------------------------------------------------
 #
-# A tmux stub whose whole model is four files under $FM_FAKE_DIR:
+# A Herdr stub whose whole model is files under $FM_FAKE_DIR:
 #   command  the pane's foreground process name, which IS the agent-state
-#            classifier's input (bin/backends/tmux.sh).
+#            classifier's input (bin/backends/herdr.sh).
 #   cwd      the pane's current path.
-#   literal  every `send-keys -l` payload, one per line - exactly what was
+#   literal  every `pane send-text` or `pane run` payload, one per line - exactly what was
 #            typed into the composer.
 #   keys     every named key send, one per line.
-#   pane     optional capture-pane override, for an adapter whose busy verdict
+#   pane     optional pane-read override, for an adapter whose busy verdict
 #            is read from the rendered tail.
 # Two transitions make it a lifecycle model rather than a recorder: a literal
 # that is the harness's exit command flips `command` to a shell (the agent

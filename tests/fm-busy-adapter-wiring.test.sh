@@ -2,7 +2,7 @@
 # Behavior tests for the per-adapter semantic busy-state wiring that
 # bin/fm-spawn.sh installs under the contract owned by bin/fm-busy-lib.sh.
 #
-# These tests run the REAL fm-spawn against a fake tmux pane and an isolated
+# These tests run the REAL fm-spawn against a fake Herdr pane and an isolated
 # git worktree, then drive the generated adapter artifact (the Pi extension,
 # generated Pi lifecycle handlers) in a plain Node host, so the artifact, the real
 # bin/fm-busy-event.sh writer, and the real classifier are exercised together

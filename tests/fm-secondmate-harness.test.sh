@@ -332,7 +332,7 @@ test_propagate_lib() {
 # propagates the crew harness into the home's config.
 # ===========================================================================
 
-# A tmux stub that accepts every subcommand and prints nothing, so no window
+# A Herdr stub that accepts the spawn operations, so no prior task endpoint
 # pre-exists and the spawn proceeds to write its meta. Echoes the fakebin dir.
 make_noop_herdr() {
   local fakebin
@@ -497,11 +497,11 @@ test_spawn_unverified_secondmate_harness_refused() {
 
 meta_field() { grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
 
-# A tmux stub that behaves like make_noop_herdr but also captures the literal
+# A Herdr stub that behaves like make_noop_herdr but also captures the literal
 # `pane send-text <cmd>` launch command into FM_FAKE_LAUNCH_LOG, mirroring the
 # capture technique in fm-spawn-dispatch-profile.test.sh so the constructed
 # launch command (not just meta) can be asserted on. Also answers the
-# `#{pane_current_path}` probe from FM_FAKE_PANE_PATH so this same stub works
+# pane-path response from FM_FAKE_PANE_PATH so this same stub works
 # for a crew/scout (non-secondmate) spawn's treehouse-worktree wait loop.
 make_launch_capturing_herdr() {
   local fakebin

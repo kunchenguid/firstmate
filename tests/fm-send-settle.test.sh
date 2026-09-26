@@ -26,11 +26,11 @@ SEND="$ROOT/bin/fm-send.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-send-settle)
 
-# A fake tmux that lets fm-send's submit path reach a clean "empty" verdict, plus a
+# A fake Herdr CLI that lets fm-send's submit path reach a clean "empty" verdict, plus a
 # fake sleep that records every requested duration (one per line) instead of
-# sleeping. send-keys always succeeds; display-message yields a numeric cursor_y;
-# capture-pane returns an empty bordered composer so fm_tmux_composer_state reads
-# "empty" (submit landed) on the first Enter. The sleep log path comes from
+# sleeping. Pane sends succeed, and pane read returns an empty bordered composer
+# so the shared classifier reads "empty" (submit landed) on the first Enter.
+# The sleep log path comes from
 # FM_SLEEP_LOG.
 make_stubs() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
