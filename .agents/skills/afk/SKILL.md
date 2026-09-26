@@ -16,7 +16,7 @@ It never changes the authority set.
 The posture is a file, `state/.afk-contract`, written only by `bin/fm-afk-contract.sh` in the same turn as `/afk`; nothing infers the posture from chat.
 A record carrying quiet mode (`bin/fm-afk-contract.sh mode`) is not this posture: the captain is present, so none of this skill's holds for a return apply to it (the `quiet` skill owns it).
 Typing `/afk` is itself the go: the captain may not look at the screen again, so entry never waits for a further human response, and no read-back gates it or asks for a go.
-Hold-for-return remains the fallback when Pi has the exact owner destination but lacks mail transport settings. Pi refuses `/afk` before recording or announcing anything when `FM_AFK_EMAIL_TO` is absent or differs from `johnpoyser@gmail.com`; the [away-email setup guide](../../../docs/afk-email.md) owns setup and limits. Other primary harnesses keep their existing away path and do not claim email delivery.
+Hold-for-return remains the fallback when Pi has the exact owner destination but lacks valid mail transport settings. Pi refuses `/afk` before recording or announcing anything when `FM_AFK_EMAIL_TO` is absent or differs from `johnpoyser@gmail.com`; the [away-email setup guide](../../../docs/afk-email.md) owns setup and limits. Other primary harnesses keep their existing away path and do not claim email delivery.
 
 
 

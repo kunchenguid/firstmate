@@ -37,9 +37,7 @@ bin/fm-mail-check.sh arm
 
 Then enter `/afk` on Pi and confirm its read-back says email reach is active.
 Pi refuses `/afk` before writing or announcing an active posture if `FM_AFK_EMAIL_TO` is absent or differs from `johnpoyser@gmail.com`.
-With the exact destination but incomplete mail transport settings, away mode retains the hold-for-return behavior instead.
-
-
+With the exact destination but incomplete or invalid mail transport settings, away mode retains the hold-for-return behavior instead.
 No credential needs to be shared with Firstmate.
 
 ## Replies and limits
