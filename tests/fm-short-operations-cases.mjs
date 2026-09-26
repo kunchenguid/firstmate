@@ -218,6 +218,64 @@ if(process.env.FM_SHORT_CLEANUP_TARGET) {
   if(result.state!=='completed') console.log(fs.readFileSync(path.join(service.dir(cleanup.id),'operation-0.output.json'),'utf8'));
   assert.equal(result.state,'completed',JSON.stringify(result));assert.ok(!fs.existsSync(path.join(home,'state/cleanup-one.meta')));
   console.log(JSON.stringify({cleanupEvidence:service.dir(cleanup.id),result}));
+
+  // A second positive case starts with a real leased, clean, landed copy.
+  // Treehouse's root is inside this lab, never the user's shared pool.
+  const cleanupProject=path.join(tmp,'cleanup-project'),cleanupRemote=path.join(tmp,'cleanup-remote.git');
+  const poolRoot=path.join(cleanupProject,'pool');
+  git('init','--bare','--initial-branch=main',cleanupRemote);git('clone',cleanupRemote,cleanupProject);
+  fs.writeFileSync(path.join(cleanupProject,'treehouse.toml'),`max_trees = 2\nroot = ${JSON.stringify(poolRoot)}\n`);
+  fs.writeFileSync(path.join(cleanupProject,'.gitignore'),'/pool/.treehouse\n');
+  fs.writeFileSync(path.join(cleanupProject,'base.txt'),'landed base\n');
+  git('-C',cleanupProject,'add','.');git('-C',cleanupProject,'commit','-m','cleanup fixture base');git('-C',cleanupProject,'push','origin','main');git('-C',cleanupProject,'remote','set-head','origin','main');
+  const treehouse=(...args)=>execFileSync('treehouse',args,{cwd:cleanupProject,encoding:'utf8',timeout:30000,stdio:['ignore','pipe','pipe']});
+  const lease=JSON.parse(treehouse('get','--lease','--lease-holder','cleanup-landed','--json'));
+  const unrelated=JSON.parse(treehouse('get','--lease','--lease-holder','unrelated-lab','--json'));
+  for(const allocated of [lease,unrelated]) assert.ok(fs.realpathSync(allocated.path).startsWith(poolRoot+path.sep),'Treehouse allocation stayed inside the lab');
+  assert.notEqual(lease.path,unrelated.path);
+  git('-C',lease.path,'checkout','-b','landed-cleanup-fixture');
+  fs.writeFileSync(path.join(lease.path,'done.txt'),'completed task content\n');
+  git('-C',lease.path,'add','.');git('-C',lease.path,'commit','-m','completed disposable task');
+  git('-C',cleanupProject,'merge','--ff-only','landed-cleanup-fixture');git('-C',cleanupProject,'push','origin','main');
+  const landedHead=git('-C',lease.path,'rev-parse','HEAD');
+  assert.equal(landedHead,git('-C',cleanupProject,'rev-parse','origin/main'));
+  assert.equal(git('-C',lease.path,'status','--porcelain'),'');
+  const unrelatedHead=git('-C',unrelated.path,'rev-parse','HEAD');
+  fs.writeFileSync(path.join(unrelated.path,'keep.txt'),'unrelated content must survive');
+  execFileSync('bash',['-c','. "$1/bin/fm-wake-lib.sh"; fm_treehouse_slot_owner_claim "$2" cleanup-landed "$3"','fixture',root,lease.path,home]);
+  const herdr=(...args)=>JSON.parse(execFileSync(process.env.HERDR_LAB_HELPER,['run',target.session,...args],{encoding:'utf8',env:{...process.env,PATH:process.env.FM_SHORT_TEST_BASE_PATH}}));
+  const pane=herdr('tab','create','--workspace',target.workspace,'--cwd',path.join(tmp,'idle'),'--label','fm-cleanup-landed','--no-focus').result;
+  const beforePanes=herdr('pane','list','--workspace',target.workspace).result.panes.map(p=>p.pane_id);
+  const beforePool=JSON.parse(treehouse('status','--json'));
+  const beforeCopy={path:lease.path,exists:fs.existsSync(lease.path),head:git('-C',lease.path,'rev-parse','HEAD'),status:git('-C',lease.path,'status','--porcelain')};
+  const landedMeta=cleanMeta.replaceAll('cleanup-one','cleanup-landed').replace(`${tmp}/absent-cleaned-worktree`,lease.path).replace(`project=${project}`,`project=${cleanupProject}`).replaceAll(target.pane,pane.root_pane.pane_id).replaceAll(target.tab,pane.tab.tab_id);
+  fs.writeFileSync(path.join(home,'state/cleanup-landed.meta'),landedMeta);
+  const unrelatedMeta=`kind=ship\nspawn_gen=g-other\nworktree=${unrelated.path}\nproject=${cleanupProject}\n`;
+  fs.writeFileSync(path.join(home,'state/unrelated-lab.meta'),unrelatedMeta);
+  const landedRequest=req('cleanup-landed',[{action:'cleanup',task:'cleanup-landed'}]);landedRequest.budget.timeMs=120000;landedRequest.operations.expiresAt=Date.now()+120000;
+  const landed=service.submit(landedRequest),landedResult=await terminal(landed.id);
+  if(landedResult.state!=='completed')console.log(fs.readFileSync(path.join(service.dir(landed.id),'operation-0.output.json'),'utf8'));
+  assert.equal(landedResult.state,'completed',JSON.stringify(landedResult));
+  const afterPool=JSON.parse(treehouse('status','--json'));
+  const returned=afterPool.find(s=>s.path===lease.path),preserved=afterPool.find(s=>s.path===unrelated.path);
+  assert.ok(returned,'returned pool slot remains discoverable');
+  assert.equal(returned.status,'available',JSON.stringify(returned));assert.ok(!returned.lease_id);
+  assert.equal(git('-C',lease.path,'status','--porcelain'),'');
+  assert.equal(git('-C',lease.path,'rev-parse','HEAD'),landedHead);
+  assert.equal(preserved.lease_id,unrelated.lease_id);assert.equal(preserved.status,'leased');
+  assert.equal(git('-C',unrelated.path,'rev-parse','HEAD'),unrelatedHead);
+  assert.equal(fs.readFileSync(path.join(unrelated.path,'keep.txt'),'utf8'),'unrelated content must survive');
+  assert.equal(fs.readFileSync(path.join(home,'state/unrelated-lab.meta'),'utf8'),unrelatedMeta);
+  assert.equal(git('-C',cleanupProject,'rev-parse','HEAD'),landedHead);assert.equal(git('-C',cleanupProject,'status','--porcelain'),'');
+  assert.ok(!fs.existsSync(path.join(home,'state/cleanup-landed.meta')));
+  const afterPanes=herdr('pane','list','--workspace',target.workspace).result.panes.map(p=>p.pane_id);
+  assert.deepEqual(afterPanes.sort(),beforePanes.filter(id=>id!==pane.root_pane.pane_id).sort());
+  const ownerReceipt=JSON.parse(fs.readFileSync(path.join(service.dir(landed.id),'operation-0.receipt.json')));
+  assert.notEqual(ownerReceipt.executor.pid,process.pid);
+  const afterCopy={path:lease.path,exists:fs.existsSync(lease.path),head:git('-C',lease.path,'rev-parse','HEAD'),status:git('-C',lease.path,'status','--porcelain')};
+  const copyEvidence={landedHead,beforeCopy,afterCopy,beforePool,afterPool,beforePanes,afterPanes,ownerReceipt,result:landedResult,mainExecutionCalls:0,unrelatedPreserved:true};
+  fs.writeFileSync(path.join(tmp,'landed-cleanup-evidence.json'),JSON.stringify(copyEvidence,null,2));
+  console.log(JSON.stringify({landedCleanupEvidence:path.join(tmp,'landed-cleanup-evidence.json'),returned,unrelatedPreserved:true,result:landedResult}));
 }
 if(process.env.FM_SHORT_INSTALL_LIVE==='1') {
   const destination=path.join(tmp,'installed');fs.mkdirSync(destination);

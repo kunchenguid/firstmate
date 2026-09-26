@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Opt-in real endpoint cleanup and refusal guard. Every Herdr invocation goes
+# Opt-in real landed-copy and endpoint cleanup/refusal guard. Every Herdr invocation goes
 # through the named-lab helper, including backend probes. No live fleet tasks.
 set -eu
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-fm_live_gate opt-in FM_SHORT_HERDR_E2E herdr node jq
+fm_live_gate opt-in FM_SHORT_HERDR_E2E herdr node jq treehouse
 [ "$(uname -s)" = Linux ] || { echo "skip: operation identity requires Linux /proc"; exit 0; }
 HERDR_LAB_HELPER=${FM_SHORT_HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name short-operations)
@@ -51,4 +51,4 @@ cat "$LAB/result.log"
 "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane list --workspace "$WS" > "$LAB/after.json"
 jq -e --arg pane "$PANE" 'all(.result.panes[]; .pane_id != $pane)' "$LAB/after.json"
 printf 'cleanup-evidence=%s\n' "$LAB"
-pass 'short cleanup owner proves endpoint removal and refuses dirty, unlanded and shared copies'
+pass 'short cleanup returns a landed Treehouse copy, removes its endpoint, preserves unrelated resources and refuses unsafe copies'

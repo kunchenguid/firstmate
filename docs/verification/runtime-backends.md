@@ -1138,7 +1138,10 @@ These are single-run observations, not statistical p95 or a claim of general sav
 It also proves that a lost merge response is reconciled by owner readback and that an owner killed after a possible effect is not replayed after restart.
 `FM_SHORT_INSTALL_LIVE=1` adds an actual verified ShellCheck 0.11.0 install into a temporary directory, without a global install.
 `FM_SHORT_HERDR_E2E=1 bash tests/fm-short-operations-herdr.test.sh` adds real endpoint cleanup through a generated named lab and the guarded helper; the installed Herdr 0.8.0 run confirmed endpoint removal, refused dirty/unlanded/shared copies, and preserved the default-session tripwire.
-The cleanup positive case starts with an already absent worktree and exercises real endpoint and bookkeeping effects; it does not claim a Treehouse return was exercised.
+The cleanup guard covers both an already absent copy and a real existing clean landed Treehouse 2.1.1 worktree.
+The existing-copy case starts with a durable lease and a commit reachable from the disposable remote default branch, then observes the real owner return the slot from `leased` to `available`, clear its lease, and remove the exact endpoint and task record.
+It verifies the returned copy remains clean at the landed head, another slot retains its lease identity, head, untracked sentinel and task metadata, and every unrelated pane remains present.
+The saved `landed-cleanup-evidence.json` combines pre/post Treehouse and Herdr readbacks with the bound child-owner receipt; MAIN executes zero cleanup commands.
 The fixture chains use one model fixture invocation and one operation tool per chain; fixture responses are not real-provider token evidence.
 The optional install also repeats the tool call to prove receipt reuse without reinstalling.
 The portable read-only companion is `tests/fm-short-agent.test.sh`; [the operator guide](../short-agents.md) owns current use and limits.
