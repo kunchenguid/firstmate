@@ -1427,6 +1427,24 @@ if (
 const done = await processed.execute("ack-final", { through: seqF }, undefined, undefined, {});
 if (done.isError || unprocessedSeqs().length !== 0) throw new Error("the final acknowledgement did not close the newer sequence");
 
+// A fresh captain prompt must not consume the only delivery opportunity for
+// an already queued processing request. Simulate Pi first consuming the
+// hidden request's queue slot, then let the captain prompt start the next run.
+const overlapReport = await report2.execute("captain-overlap", { task: "task-overlap", verdict: "captain", summary: "worker completed while captain was typing" }, undefined, undefined, {});
+if (overlapReport.isError) throw new Error(`overlap captain report failed: ${JSON.stringify(overlapReport)}`);
+const overlapRequest = requests().at(-1);
+if (!overlapRequest || overlapRequest.options.triggerTurn !== true) throw new Error("overlap fixture did not open a processing request");
+await fire("before_agent_start", { prompt: overlapRequest.message.content }, defaultSessionCtx);
+await fire("agent_start", {}, defaultSessionCtx);
+const beforeCaptainOverlapReplay = requests().length;
+await fire("before_agent_start", { prompt: "captain typed a new request before processing" }, defaultSessionCtx);
+await fire("agent_start", {}, defaultSessionCtx);
+if (requests().length !== beforeCaptainOverlapReplay + 1 || requests().at(-1).options.deliverAs !== "nextTurn") {
+  throw new Error("a captain prompt stranded the pending processing obligation instead of queuing its successor");
+}
+const overlapAck = await processed.execute("ack-overlap", { through: Number(overlapRequest.message.content.match(/through=(\d+)/)?.[1]) }, undefined, undefined, {});
+if (overlapAck.isError || unprocessedSeqs().length !== 0) throw new Error("the replayed processing request did not preserve duplicate-safe acknowledgement");
+
 // A session that does not own the fleet lock cannot acknowledge anything.
 writeFileSync(`${home}/state/.lock`, "1\n");
 const foreign = await processed.execute("ack-foreign", { through: seqF }, undefined, undefined, {});

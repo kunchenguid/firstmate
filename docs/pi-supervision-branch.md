@@ -420,6 +420,8 @@ The extension presents the current unprocessed sequence set again at the next ma
 ### Re-presentation pacing
 
 A presentation already pending its run boundary is not resent or widened.
+If a fresh captain prompt takes that boundary before the hidden processing request is consumed, the extension queues the same sequence-keyed request after the captain turn starts.
+This is deliberately at-least-once delivery: only `fm_branch_processed` can advance the durable marker, and duplicate requests cannot acknowledge a sequence that is not listed in the active request.
 Once that run settles, the extension presents the then-current sequence set.
 
 The first two presentations of a given sequence set open a turn of their own.
