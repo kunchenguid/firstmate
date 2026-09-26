@@ -77,17 +77,21 @@
 # false before the dialog was ever shown, so that pair means "never asked" and
 # is treated like an absent flag - trust registered, no import consent.
 #
-# THE SCOPE TEST IS THE SAFETY PROPERTY, and it is STRUCTURAL rather than a
-# path policy. Each mode has its own, because the two directories have entirely
-# different shapes on disk.
+# THE SCOPE TEST IS THE SAFETY PROPERTY. Both modes refuse any registration
+# path that resolves to '/', equals the user's home or Claude config directory,
+# or contains either directory. This covers the task worktree, its canonical
+# primary checkout, and a seeded secondmate home, before any trust-store write.
+# Claude Code's trust check walks ancestors, so trusting one of these protected
+# paths would trust every folder beneath it. fm-spawn.sh refuses the launch
+# when registration fails. tests/fm-claude-trust.test.sh pins this boundary.
+# Each mode also requires structural evidence for its directory shape below.
 #
 # WORKTREE MODE. <worktree> must be a LINKED git worktree - its own git dir,
 # sharing <project>'s common dir - whose top level is exactly the resolved
 # argument. Git is the ground truth, so the argument is never trusted on its
 # own word: a primary checkout (git dir == common dir), a worktree of an
 # unrelated repo, a subdirectory of a worktree, a plain directory, and a home
-# directory are each refused, and so is a primary checkout that is, or
-# contains, the home or Claude config directory or is '/'. Refusal is a non-zero exit, never a warning and
+# directory are each refused. Refusal is a non-zero exit, never a warning and
 # never a silent skip. When <project> is itself a linked worktree (a
 # secondmate home spawned from, rather than as, the primary checkout),
 # refusing outright would wedge a relaunch that is otherwise perfectly valid:
@@ -248,13 +252,8 @@ if [ -z "$CONFIG_DIR_REAL" ]; then
 fi
 [ -n "$CONFIG_DIR_REAL" ] || refuse "Claude config directory '$CONFIG_DIR' does not exist and could not be created"
 
-# The filesystem root, a home directory, and the config directory are never
-# something this registers, in either mode, and neither is any directory that
-# contains the home or config directory: Claude Code's trust check walks
-# ancestors, so one entry there would trust every folder beneath it. Every path
-# handed to the store write passes through refuse_protected - the task target
-# here, and the primary checkout in worktree mode once it is derived below - so
-# the refusal names the real reason instead of the scope verdict behind it.
+# Apply the header's protected-path boundary to every path handed to the store
+# write: the task target here, then the canonical primary checkout below.
 HOME_REAL=
 if [ -n "${HOME:-}" ]; then
   HOME_REAL=$(real_dir "$HOME") || true
