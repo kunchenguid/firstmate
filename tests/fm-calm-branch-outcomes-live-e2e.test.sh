@@ -16,17 +16,11 @@
 # (docs/verification/runtime-backends.md).
 set -u
 
-if [ "${FM_CALM_BRANCH_OUTCOMES_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_CALM_BRANCH_OUTCOMES_LIVE_E2E=1 to run the real-Pi Calm branch-outcome guard"
-  exit 0
-fi
-
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+fm_live_gate opt-in FM_CALM_BRANCH_OUTCOMES_LIVE_E2E pi tmux
 export NODE_NO_WARNINGS=1
 
-command -v pi >/dev/null 2>&1 || fail "pi absent: the live Calm branch-outcome guard needs the real pi binary and refuses to pass having checked nothing"
-command -v tmux >/dev/null 2>&1 || fail "tmux absent: the live Calm branch-outcome guard needs a real terminal and refuses to pass having checked nothing"
 PI_VERSION=$(pi --version 2>/dev/null || true)
 [ -n "$PI_VERSION" ] || fail "pi did not report a version: the live Calm branch-outcome guard refuses to record evidence it cannot attribute"
 
