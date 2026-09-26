@@ -40,7 +40,7 @@ The unauthenticated failure mode was not observed, so treat any auth prompt or r
 
 Detected by ancestry alone: `../../../../../bin/fm-harness.sh` matches the anchored process name `agy`, never `*agy*`.
 No environment marker is promoted: `AGENT=1` observed on a live TUI is an inherited launcher value, not an agy identity, and agy does not clear an inherited `CLAUDECODE` - but a structural agy ancestor now outranks that retained marker, which `../../../../../bin/fm-harness.sh` decides without depending on the spawn's own launch-boundary marker clearing.
-agy is deliberately absent from the session-lock name vocabulary in `../../../../../bin/fm-session-lock-lib.sh`, where muse, gemini, and rovo are also absent: a crewmate-only adapter must never own a home session lock.
+`agy` is recognized in `../../../../../bin/fm-session-lock-lib.sh` by anchored regex `^agy$` and executable name `agy`, allowing an AGY primary session to hold this home's session lock (`state/.lock`).
 
 ## Worker busy state and turn end
 
@@ -50,6 +50,10 @@ Teardown removes nothing agy-specific because the spawn leaves nothing behind.
 
 ## Primary integration
 
-Unsupported and unverified.
-`../../../../../docs/supervision-protocols/` carries no agy protocol, no turn-end guard adapter exists for it, and this adapter verified only the crewmate-side launch, busy state, interrupt, and exit.
-`references/common/primary-hooks.md`'s unsupported-boundary rule applies: never invent a wake protocol from a similar TUI.
+Verified on 2026-09-25 with agy 1.2.11 through Herdr and tmux.
+AGY operates as a primary using the foreground checkpoint supervision protocol documented in `../../../../../docs/supervision-protocols/agy.md`.
+Turn lifecycle hooks are registered in `.agents/hooks.json` and executed natively by AGY:
+- `SessionStart`: `bin/fm-sessionstart-agy.sh` executes `bin/fm-sessionstart-run.sh --source startup` and injects the initial session-start digest into model context via `{"injectSteps": [{"ephemeralMessage": "..."}]}`.
+- `PreToolUse`: `bin/fm-pretool-check-agy.sh` matches all tools (`*`), enforcing subagent delegation boundaries (`bin/fm-subagent-pretool-check.sh`), watcher-arm execution policies (`bin/fm-arm-pretool-check.sh`), and persistent cd prevention (`bin/fm-cd-pretool-check.sh`). Denials return `{"decision": "deny", "reason": "..."}`.
+- `Stop`: `bin/fm-turnend-guard-agy.sh` validates watcher health via `bin/fm-turnend-guard.sh`. When supervision is required but absent, it returns `{"decision": "continue", "reason": "..."}` to compel a repair turn, bounded by `executionNum` (default budget 1) to prevent infinite loops.
+Secondmate support remains refused: `../../../../../bin/fm-spawn.sh` refuses secondmate launches on `agy`.

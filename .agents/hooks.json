@@ -1,0 +1,30 @@
+{
+  "firstmate-agy": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "../bin/fm-sessionstart-agy.sh --source startup",
+        "timeout": 180
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "../bin/fm-pretool-check-agy.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "../bin/fm-turnend-guard-agy.sh",
+        "timeout": 30
+      }
+    ]
+  }
+}
