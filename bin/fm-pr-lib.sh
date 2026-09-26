@@ -4,13 +4,15 @@
 # URLs before constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub and an
-# arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
-# project can sit at any depth, so no owner/repository pair can address one and
-# the sidecar carries the whole path instead. GitLab also runs on self-hosted
-# instances, so the host is part of that identity rather than a constant. Every
-# consumer re-derives the identity from the stored URL and refuses any record
-# whose parts do not reconstruct that exact URL.
+# "path" is the full project path, which is owner/repository on GitHub, an
+# arbitrarily nested group/subgroup/project namespace on GitLab, and an
+# arbitrarily nested project name on Gerrit, where "number" is the change
+# number. A GitLab or Gerrit project can sit at any depth, so no
+# owner/repository pair can address one and the sidecar carries the whole path
+# instead. Both also run on self-hosted instances, and Gerrit runs nowhere else,
+# so the host is part of that identity rather than a constant. Every consumer re-derives the identity
+# from the stored URL and refuses any record whose parts do not reconstruct that
+# exact URL.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -113,14 +115,14 @@ fm_task_id_creation_valid() {
   [ "${#id}" -le 64 ]
 }
 
-# GitLab serves self-hosted instances, so the host is part of the identity
-# rather than a constant. It is accepted only as a lowercase DNS name with no
-# userinfo, port, or trailing dot, which keeps one canonical spelling per MR.
-# github.com is refused here even though its shape is otherwise valid: it is
-# GitHub's own host and never a GitLab instance, so a URL like
+# GitLab and Gerrit both serve self-hosted instances, so the host is part of the
+# identity rather than a constant. It is accepted only as a lowercase DNS name
+# with no userinfo, port, or trailing dot, which keeps one canonical spelling per
+# change. github.com is refused here even though its shape is otherwise valid:
+# it is GitHub's own host and never another forge's instance, so a URL like
 # https://github.com/o/r/-/merge_requests/1 (a typo'd or spoofed GitHub URL)
-# would otherwise be armed as a GitLab watch that can never succeed.
-fm_pr_gitlab_host_valid() {
+# would otherwise be armed as a watch that can never succeed.
+fm_pr_forge_host_valid() {
   local host=${1-} label
   local LC_ALL=C
   local -a labels
@@ -160,15 +162,42 @@ fm_pr_gitlab_path_valid() {
   done
 }
 
-# Parse a canonical PR or MR URL into the provider-tagged identity. Validation
-# is strict and per provider: the GitHub username and repository rules are
-# unchanged, and GitLab gets its own host and namespace rules rather than a
-# loosened GitHub rule.
+# A Gerrit project name is itself a path at no fixed depth, and it needs no
+# enclosing group, so a single segment is canonical here where GitLab needs at
+# least two. Gerrit reserves no route segment inside the name, so nothing
+# corresponds to GitLab's "-": the change URL's literal "/+/" is what ends the
+# project instead. A ".git" suffix is refused because Gerrit strips it and the
+# stripped name is the canonical one, and a leading hyphen is refused because a
+# project path is what names the project to any CLI that takes one, where a
+# leading hyphen reads as an option instead.
+fm_pr_gerrit_path_valid() {
+  local path=${1-} segment
+  local LC_ALL=C
+  local -a segments
+  [ "${#path}" -ge 1 ] && [ "${#path}" -le 1024 ] || return 1
+  case "$path" in
+    /*|*/|*//*) return 1 ;;
+  esac
+  IFS=/ read -ra segments <<< "$path"
+  [ "${#segments[@]}" -ge 1 ] && [ "${#segments[@]}" -le 20 ] || return 1
+  for segment in "${segments[@]}"; do
+    [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || return 1
+    case "$segment" in
+      .|..|-*|*.git|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+  done
+}
+
+# Parse a canonical pull request, merge request, or Gerrit change URL into the
+# provider-tagged identity. Validation is strict and per provider: the GitHub
+# username and repository rules are unchanged, and GitLab and Gerrit each get
+# their own namespace rules rather than a loosened GitHub rule.
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
-# them empty, and that path addresses the project by FM_PR_HOST and FM_PR_PATH
-# instead, so a merge request on any instance resolves without a hardcoded host.
+# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab or gerrit
+# URL leaves them empty, and those paths address the project by FM_PR_HOST and
+# FM_PR_PATH instead, so a change on any instance resolves without a hardcoded
+# host.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path
   local LC_ALL=C
@@ -199,12 +228,31 @@ fm_pr_url_parse() {
   # "/-/merge_requests/". Any earlier separator therefore lands inside the
   # captured path, where the reserved "-" segment is refused.
   pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/-/merge_requests/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    path=${BASH_REMATCH[2]}
+    fm_pr_forge_host_valid "$host" || return 1
+    fm_pr_gitlab_path_valid "$path" || return 1
+    FM_PR_PROVIDER=gitlab
+    FM_PR_URL=$raw
+    FM_PR_HOST=$host
+    FM_PR_PATH=$path
+    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  # A Gerrit change URL is https://<host>/c/<project>/+/<number>. "+" is outside
+  # the path class, so the project can never contain the "/+/" separator and this
+  # match needs no greediness argument: a second "/+/" makes the URL match
+  # nothing rather than splitting somewhere else. The project keeps its whole
+  # nested path for the same reason GitLab's does, so it is never flattened into
+  # an owner/repository pair that cannot address it.
+  pattern='^https://([a-z0-9.-]{1,253})/c/([A-Za-z0-9._/-]+)/\+/([1-9][0-9]*)$'
   [[ "$raw" =~ $pattern ]] || return 1
   host=${BASH_REMATCH[1]}
   path=${BASH_REMATCH[2]}
-  fm_pr_gitlab_host_valid "$host" || return 1
-  fm_pr_gitlab_path_valid "$path" || return 1
-  FM_PR_PROVIDER=gitlab
+  fm_pr_forge_host_valid "$host" || return 1
+  fm_pr_gerrit_path_valid "$path" || return 1
+  FM_PR_PROVIDER=gerrit
   FM_PR_URL=$raw
   FM_PR_HOST=$host
   FM_PR_PATH=$path
@@ -215,6 +263,17 @@ fm_pr_head_valid() {
   local head=${1-}
   local LC_ALL=C
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+}
+
+# The one reading of a GitHub pull request's draft state. Prints "true" or
+# "false" for a boolean isDraft and nothing for anything else, so a caller can
+# tell a positive draft from an unreadable payload. bin/fm-pr-merge.sh refuses
+# a merge unless this prints "false"; bin/fm-pr-check.sh refuses to arm a merge
+# poll only when it prints "true".
+fm_pr_json_draft_state() {  # <pull-request-json>
+  printf '%s' "${1-}" | jq -r '
+    if type == "object" and (.isDraft | type) == "boolean" then (.isDraft | tostring) else "" end
+  ' 2>/dev/null || true
 }
 
 fm_pr_file_mode() {
@@ -986,6 +1045,81 @@ FIELDS
   # Consumed by bin/fm-crew-state.sh passed_pr_detail.
   # shellcheck disable=SC2034
   FM_PR_RECORD_MERGED=$merged
+}
+
+# gerrit-axi resolves its server from the current directory's origin remote
+# first, so the host is passed explicitly from the parsed identity and a read
+# outside a clone still reaches the right server. A change number is
+# server-global and --host pins the server, so the number alone names the
+# change and the project path is not part of the read. Prints the one record
+# whose change number is exactly <number> as compact JSON, and fails on any
+# other reading. The record's own url field is not compared against the stored
+# URL, because Gerrit composes it from gerrit.canonicalWebUrl and omits it when
+# that setting is unset, which would turn every read on such a server into a
+# permanent unknown.
+fm_pr_gerrit_read_change() {  # <host> <number>
+  local host=$1 number=$2 json
+  command -v gerrit-axi >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  case "$number" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if ! json=$(gerrit-axi show "$number" --host "$host" --json 2>/dev/null) \
+    || [ -z "$json" ]; then
+    return 1
+  fi
+  printf '%s' "$json" | jq -c --argjson change "$number" '
+    if type == "object" and .ok == true and (.changes | type) == "array" then
+      [.changes[] | select((.change | type) == "number" and .change == $change)] as $match
+      | if ($match | length) == 1 and ($match[0] | type) == "object"
+        then $match[0]
+        else error("no exact change record")
+        end
+    else
+      error("invalid gerrit record")
+    end' 2>/dev/null
+}
+
+# The status of one Gerrit change. The status is the only field read: a merged
+# change and an approved-but-unsubmitted one report the same submit,
+# submittable, and blocked_on values, so only the status separates them.
+fm_pr_gerrit_read_record() {  # <host> <number>
+  local record state merged=false
+  FM_PR_RECORD_STATE=
+  FM_PR_RECORD_MERGED=
+  record=$(fm_pr_gerrit_read_change "$1" "$2") || return 1
+  state=$(printf '%s' "$record" | jq -r '
+    if (.status | type) == "string" and .status != "" and (.status | test("\n") | not)
+    then .status
+    else error("no status")
+    end' 2>/dev/null) || return 1
+  [ -n "$state" ] || return 1
+  [ "$state" != MERGED ] || merged=true
+
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_STATE=$state
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_MERGED=$merged
+}
+
+# The current patch set revision of one Gerrit change, read from the same exact
+# record as its status above. Consumed by bin/fm-dod-lib.sh's named-head gate,
+# which accepts a published change only when this revision carries the worker
+# copy's HEAD tree. It is a live read and never a recorded pr_head: the next
+# amend replaces it.
+fm_pr_gerrit_read_revision() {  # <host> <number>
+  local record revision
+  FM_PR_RECORD_REVISION=
+  record=$(fm_pr_gerrit_read_change "$1" "$2") || return 1
+  revision=$(printf '%s' "$record" | jq -r '
+    if (.revision | type) == "string" then .revision else error("no revision") end' 2>/dev/null) \
+    || return 1
+  fm_pr_head_valid "$revision" || return 1
+  # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_change_carries_head.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_REVISION=$revision
 }
 
 fm_pr_poll_retirement_data_valid() {

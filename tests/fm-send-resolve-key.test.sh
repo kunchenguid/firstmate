@@ -135,8 +135,15 @@ test_answer_send_closes_open_decision() {
   grep -qF "go with REST" "$home/state/t1.inbox/001.msg" \
     || fail "the answer text should reach the worker's durable inbox record"
   assert_contains "$(cat "$log")" "Firstmate instruction waiting" "the doorbell should be rung for the answer"
-  grep -F 'resolved [key=api-shape]: answered: go with REST' "$home/state/t1.status" >/dev/null \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t1.status" | grep -qF 'resolved [key=api-shape]: answered: go with REST' \
     || fail "fm-send did not append the closing resolved line:"$'\n'"$(cat "$home/state/t1.status")"
+  # The drain folded the worker's `working:` line but never listed it, so the
+  # close must leave the file for the watcher instead of marking it seen.
+  if FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t1.status"; then
+    fail "the answerer's close hid a worker line the drain never listed"
+  fi
 
   out=$(drain_out "$home")
   if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
@@ -164,7 +171,7 @@ test_answer_close_is_self_announced() {
 
   run_send "$fb" "$home" "$log" t9 --resolve-key port-choice "use 9090"; rc=$?
   expect_code 0 "$rc" "the answer send should succeed"
-  grep -F 'resolved [key=port-choice]: answered: use 9090' "$home/state/t9.status" >/dev/null \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t9.status" | grep -qF 'resolved [key=port-choice]: answered: use 9090' \
     || fail "the closing resolved line is missing"
   FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"; fm_wake_signal_seen_current "$2" "$3"
@@ -178,6 +185,63 @@ test_answer_close_is_self_announced() {
     fail "a later worker line after the self-announced close was swallowed"
   fi
   pass "fm-send --resolve-key: the close never re-wakes its own home, later lines still do"
+}
+
+# Two distinct --resolve-key answers must each stay quiet even when the seen
+# marker does NOT cover them. An in-flight watcher classification that lands
+# after the first answer regresses the classified offset behind that answer's
+# bytes, so the marker no longer vouches for them; only the home-appends ledger
+# does. Without the ledger the second scan re-wakes this home over its own
+# close. A later worker line on the same task still wakes.
+test_separate_resolve_key_answers_do_not_rewake() {
+  local dir fb log home rc status pre_answer ident
+  dir="$TMP_ROOT/separate-answers"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home separate-answers)
+  status="$home/state/t7.status"
+  fm_write_meta "$home/state/t7.meta" "window=sess:fm-t7" "kind=ship"
+  {
+    printf 'needs-decision [key=budget]: approve spend?\n'
+    printf 'needs-decision [key=vendor]: pick a vendor\n'
+  } > "$status"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_status_mark_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$status" \
+    || fail "could not prime the announced baseline"
+  pre_answer=$(wc -c < "$status" | tr -d '[:space:]')
+
+  run_send "$fb" "$home" "$log" t7 --resolve-key budget "approved"; rc=$?
+  expect_code 0 "$rc" "the first answer should succeed"
+
+  # A watcher classification captured before the answer commits afterwards and
+  # rewinds the classified offset behind the answer's bytes.
+  ident=$(FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; _fm_open_decisions_file_ident "$2"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$status") \
+    || fail "could not read the status identity"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_status_seen_commit "$2" "$3" "$4" "$5"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$status" "$pre_answer" "$ident" \
+    || fail "could not replay the stale watcher classification"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$status" \
+    || fail "the first --resolve-key answer was left to re-wake this home"
+
+  run_send "$fb" "$home" "$log" t7 --resolve-key vendor "acme"; rc=$?
+  expect_code 0 "$rc" "the second answer should succeed"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$status" \
+    || fail "the second --resolve-key answer was left to re-wake this home"
+
+  printf 'blocked: need staging credentials\n' >> "$status"
+  if FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$status"; then
+    fail "a later worker line after two answers was swallowed"
+  fi
+  pass "fm-send --resolve-key: separate answers do not each re-wake; later lines still do"
 }
 
 # The reported failure behind issue #2109: a worker that put the colon first
@@ -199,7 +263,7 @@ test_colon_first_key_position_is_answerable() {
 
   run_send "$fb" "$home" "$log" t8 --resolve-key seam-max-bound "cap it at 4"; rc=$?
   expect_code 0 "$rc" "answering a colon-first stated key should succeed, not refuse as unknown"
-  grep -F 'resolved [key=seam-max-bound]: answered: cap it at 4' "$home/state/t8.status" >/dev/null \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t8.status" | grep -qF 'resolved [key=seam-max-bound]: answered: cap it at 4' \
     || fail "the closing resolved line is missing:"$'\n'"$(cat "$home/state/t8.status")"
 
   out=$(drain_out "$home")
@@ -301,7 +365,7 @@ test_failed_ring_still_closes_at_enqueue() {
   expect_code 0 "$rc" "a failed doorbell must not fail the durably enqueued answer"
   grep -qF 'token is in the vault now' "$home/state/t5.inbox/001.msg" \
     || fail "the answer must be durably recorded despite the failed ring"
-  grep -F 'resolved [key=creds]' "$home/state/t5.status" >/dev/null \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t5.status" | grep -qF 'resolved [key=creds]: answered: token is in the vault now' \
     || fail "the enqueued answer must close the decision at answer time: $(cat "$home/state/t5.status")"
   out=$(drain_out "$home")
   if printf '%s' "$out" | grep -F '[key=creds]' >/dev/null; then
@@ -358,6 +422,37 @@ test_multiple_keys_close_together() {
     fail "an answered key is still open after a multi-key answer: $out"
   fi
   pass "fm-send --resolve-key: one answer closes each named key and only those"
+}
+
+# Issue 4767: the session-start drain listed both decisions (folding them
+# without a watcher seen marker), and one answer closes both. The closes are
+# this home's own bookkeeping, so the watcher must not wake it to reread them.
+test_multiple_keys_close_after_fold_is_self_announced() {
+  local dir fb log home rc out
+  dir="$TMP_ROOT/multi-fold"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home multi-fold)
+  fm_write_meta "$home/state/t7.meta" "window=sess:fm-t7" "kind=ship"
+  {
+    printf 'needs-decision [key=budget]: approve spend?\n'
+    printf 'needs-decision [key=vendor]: pick a vendor\n'
+  } > "$home/state/t7.status"
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=vendor]' >/dev/null \
+    || fail "precondition: the drain should list both decisions: $out"
+
+  run_send "$fb" "$home" "$log" t7 --resolve-key budget --resolve-key vendor \
+    "approve spend, pick acme"; rc=$?
+  expect_code 0 "$rc" "an answer resolving two folded keys should succeed"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t7.status" \
+    || fail "one answer's two closes after an OPEN DECISIONS drain were left to re-wake this home"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "an answered folded key is still open: $out"
+  fi
+  pass "fm-send --resolve-key: one answer's closes after a drain fold never wake this home"
 }
 
 test_local_secondmate_answer_marked_and_closed() {
@@ -432,7 +527,7 @@ test_remote_secondmate_answer_closes_locally() {
   expect_code 0 "$rc" "a remote secondmate answer send should succeed"
   assert_grep 'fm-remote-entrypoint.sh' "$ssh_log" \
     "the answer message should cross the remote transport"
-  grep -F 'resolved [key=upgrade-window]: answered: the weekend, freeze Friday' "$home/state/rsm.status" >/dev/null \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/rsm.status" | grep -qF 'resolved [key=upgrade-window]: answered: the weekend, freeze Friday' \
     || fail "the remote answer did not close the local ledger: $(cat "$home/state/rsm.status")"
   out=$(drain_out "$home")
   if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
@@ -467,7 +562,7 @@ test_remote_reply_corr_tag_does_not_block_resolve_key() {
     FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" FM_FAKE_SSH_RC=0 \
     "$SEND" rsm --resolve-key loan-installment-cadence-amount "monthly" >/dev/null 2>&1; rc=$?
   expect_code 0 "$rc" "answering a corr-tagged remote decision should succeed, not refuse as unknown"
-  grep -F 'resolved [key=loan-installment-cadence-amount]: answered: monthly' "$home/state/rsm.status" >/dev/null \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/rsm.status" | grep -qF 'resolved [key=loan-installment-cadence-amount]: answered: monthly' \
     || fail "the closing resolved line is missing:"$'\n'"$(cat "$home/state/rsm.status")"
 
   out=$(drain_out "$home")
@@ -568,7 +663,7 @@ test_reserved_pending_reply_key_closes_through_resolve_key() {
   grep -F "pending-reply-resolved: task=mate pending-reply-id=$corr via=operator-resolve-key" \
     "$home/state/mate.status" >/dev/null \
     || fail "the operator close did not write the owning library's close note:"$'\n'"$(cat "$home/state/mate.status")"
-  if grep -E "resolved \[key=$key\]: answered:" "$home/state/mate.status" >/dev/null; then
+  if grep -E "resolved \[key=$key\]( \[at=[0-9]+\])?: answered:" "$home/state/mate.status" >/dev/null; then
     fail "the operator close still wrote a bare answered: note that the fold ignores:"$'\n'"$(cat "$home/state/mate.status")"
   fi
 
@@ -667,6 +762,32 @@ test_long_decision_key_refuses_before_send() {
   pass "fm-send --resolve-key: an overlong decision key refuses before sending"
 }
 
+# The cap bounds the line that is actually APPENDED. The self-announced append
+# stamps each close with its emission time, so a cap measured before the stamp
+# lets the stored line overrun it and every 220-capped rendering downstream
+# silently loses that much real note text.
+test_stamped_close_line_stays_within_the_status_line_cap() {
+  local dir fb log home rc answer line
+  dir="$TMP_ROOT/cap-with-stamp"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home cap-with-stamp)
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'needs-decision [key=api-shape]: REST or gRPC\n' > "$home/state/t1.status"
+  answer=$(printf 'x%.0s' {1..400})
+
+  run_send "$fb" "$home" "$log" t1 --resolve-key api-shape "$answer"; rc=$?
+  expect_code 0 "$rc" "answering with an over-long note should succeed, not refuse"
+  line=$(grep -F 'resolved [key=api-shape]' "$home/state/t1.status") \
+    || fail "the closing resolved line is missing:"$'\n'"$(cat "$home/state/t1.status")"
+  case "$line" in
+    *' [at='*']: '*) : ;;
+    *) fail "the appended close carries no emission stamp: $line" ;;
+  esac
+  [ "${#line}" -le 220 ] \
+    || fail "the appended close is ${#line} characters, past the 220-character cap: $line"
+  pass "fm-send --resolve-key: a stamped close line stays inside the status-line cap"
+}
+
 test_failed_close_recovery_command_is_shell_safe() {
   local dir fb log home err marker answer rc diagnostic manual out
   dir="$TMP_ROOT/manual-close"; mkdir -p "$dir"
@@ -754,19 +875,18 @@ test_decision_answer_partition_relocates_under_the_record() {
   # ordinary lease guard alone.
   FM_SUPERVISION_ACTOR=branch run_send "$fb" "$home" "$log" t1 --resolve-key token "refreshed the token; resume"; rc=$?
   expect_code 0 "$rc" "an attended branch resolving a blocker is ordinary steering"
-  grep -qF 'resolved [key=token]: answered: refreshed the token; resume' "$home/state/t1.status" \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t1.status" | grep -qF 'resolved [key=token]: answered: refreshed the token; resume' \
     || fail "the branch's blocker answer did not close the key:"$'\n'"$(cat "$home/state/t1.status")"
   grep -qF "refreshed the token; resume" "$home/state/t1.inbox/001.msg" \
     || fail "the branch's blocker answer did not reach the worker's inbox"
 
   # Under the record: the same decision answer is sent and closes the key.
-  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" propose >/dev/null || fail "away propose failed"
-  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null || fail "away confirm failed"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter >/dev/null || fail "away entry failed"
   out=$(env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     FM_SUPERVISION_ACTOR=branch "$SEND" t1 --resolve-key api-shape "go with REST" 2>&1); rc=$?
   expect_code 0 "$rc" "under the away-posture record the branch's decision answer must be sent: $out"
   assert_contains "$out" "main is parked" "the relocation did not announce itself"
-  grep -qF 'resolved [key=api-shape]: answered: go with REST' "$home/state/t1.status" \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t1.status" | grep -qF 'resolved [key=api-shape]: answered: go with REST' \
     || fail "the relocated answer did not close the decision:"$'\n'"$(cat "$home/state/t1.status")"
   grep -qF "go with REST" "$home/state/t1.inbox/002.msg" \
     || fail "the relocated answer did not reach the worker's inbox"
@@ -780,13 +900,14 @@ test_decision_answer_partition_relocates_under_the_record() {
   printf 'needs-decision [key=db]: postgres or sqlite\n' >> "$home/state/t1.status"
   run_send "$fb" "$home" "$log" t1 --resolve-key db "postgres"; rc=$?
   expect_code 0 "$rc" "main answering a decision attended is unaffected by the partition"
-  grep -qF 'resolved [key=db]: answered: postgres' "$home/state/t1.status" \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t1.status" | grep -qF 'resolved [key=db]: answered: postgres' \
     || fail "main's attended decision answer did not close the key"
   pass "fm-send --resolve-key: a decision answer refuses the attended branch before sending, a blocked: key stays steering, and the away-posture record relocates the answer"
 }
 
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
+test_separate_resolve_key_answers_do_not_rewake
 test_colon_first_key_position_is_answerable
 test_answer_starts_work_never_orphans
 test_routine_steer_never_closes
@@ -794,6 +915,7 @@ test_not_open_key_refuses_before_send
 test_failed_ring_still_closes_at_enqueue
 test_failed_enqueue_does_not_close
 test_multiple_keys_close_together
+test_multiple_keys_close_after_fold_is_self_announced
 test_local_secondmate_answer_marked_and_closed
 test_remote_secondmate_answer_closes_locally
 test_remote_reply_corr_tag_does_not_block_resolve_key
@@ -803,6 +925,7 @@ test_reserved_pending_reply_key_closes_through_resolve_key
 test_unrelated_writer_cannot_close_or_hijack_reserved_key
 test_unclosable_reserved_key_refuses_before_send
 test_long_decision_key_refuses_before_send
+test_stamped_close_line_stays_within_the_status_line_cap
 test_failed_close_recovery_command_is_shell_safe
 test_remote_reserved_pending_reply_key_closes_locally
 test_decision_answer_partition_relocates_under_the_record

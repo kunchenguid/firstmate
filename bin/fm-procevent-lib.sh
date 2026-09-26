@@ -390,6 +390,41 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
   return 1
 }
 
+# Publish one task-owned registration. The single source record persists across
+# rounds; the handled marker, not a second ownership record, holds the round open.
+fm_procevent_task_registration_publish_locked() {  # <state> <adapter> <source-id> <task-id> <argv...>
+  local state=$1 adapter=$2 id=$3 task=$4 reg dest tmp arg identity
+  shift 4
+  fm_procevent_adapter_valid "$adapter" || return 1
+  fm_procevent_source_id_valid "$id" || return 1
+  fm_pr_task_id_valid "$task" || return 1
+  [ "$#" -ge 1 ] || return 1
+  for arg in "$@"; do
+    case "$arg" in *$'\n'*) return 1 ;; esac
+  done
+  reg=$(fm_procevent_registry_dir "$state")
+  (umask 077; mkdir -p "$reg") || return 1
+  [ -d "$reg" ] && [ ! -L "$reg" ] || return 1
+  dest="$reg/$id.source"
+  tmp=$(umask 077; mktemp "$reg/.source.XXXXXX") || return 1
+  if {
+    printf 'adapter=%s\n' "$adapter"
+    printf 'kind=task-owned\n'
+    printf 'owner_task=%s\n' "$task"
+    printf 'argc=%s\n' "$#"
+    printf 'argv:\n'
+    printf '%s\n' "$@"
+  } > "$tmp" && chmod 0600 "$tmp" \
+    && identity=$(fm_pr_file_identity "$tmp") \
+    && fm_procevent_launch_floor_reset_locked "$state" "$id" "$identity" \
+    && mv -f -- "$tmp" "$dest"; then
+    fm_procevent_launch_floor_prune_locked "$state" "$id" "$identity" 2>/dev/null || :
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+
 # Publish one extension-owned registration. Its identity fields and random
 # registration token are immutable owner evidence; the executable argv is never
 # stored because the tracked host constructs that command at run time.
@@ -1009,7 +1044,7 @@ fm_procevent_capture_reservation_remove_claim() {  # <state> <claim-token>
   done
 }
 
-# fm_procevent_capture <state> <source-id> <adapter> <output-file>
+# fm_procevent_capture <state> <source-id> <adapter> <output-file> [<task-id>]
 #   [<extension-id> <extension-version> <capability-version> <package-digest> <binding-digest>]
 # Atomically store the completed output at 0600 and print its durable path. The
 # rename is the commit point; nothing referencing this result may be published
@@ -1018,11 +1053,14 @@ fm_procevent_capture_reservation_remove_claim() {  # <state> <claim-token>
 # silently move to a replacement binding.
 fm_procevent_capture() {
   local state=$1 id=$2 adapter=$3 src=$4 extension_id=${5-} extension_version=${6-}
-  local capability_version=${7-} package_digest=${8-} binding_digest=${9-}
-  local inbox seq dest tmp adapter_dest adapter_tmp extension_dest='' extension_tmp=''
-  [ "$#" -eq 4 ] || [ "$#" -eq 9 ] || return 1
+  local capability_version=${7-} package_digest=${8-} binding_digest=${9-} task_owner=${5-}
+  local inbox seq dest tmp adapter_dest adapter_tmp owner_dest='' owner_tmp='' extension_dest='' extension_tmp=''
+  [ "$#" -eq 4 ] || [ "$#" -eq 5 ] || [ "$#" -eq 9 ] || return 1
   fm_procevent_source_id_valid "$id" || return 1
   fm_procevent_adapter_valid "$adapter" || return 1
+  if [ "$#" -eq 5 ]; then
+    fm_pr_task_id_valid "$task_owner" || return 1
+  fi
   if [ "$#" -eq 9 ]; then
     fm_procevent_extension_id_valid "$extension_id" || return 1
     fm_procevent_extension_version_valid "$extension_version" || return 1
@@ -1051,23 +1089,33 @@ fm_procevent_capture() {
   while [ -e "$inbox/$id.$seq.result" ]; do seq=$((seq + 1)); done
   dest="$inbox/$id.$seq.result"
   adapter_dest="$inbox/$id.$seq.adapter"
+  if [ "$#" -eq 5 ]; then
+    owner_dest="$inbox/$id.$seq.owner-task"
+  fi
   if [ "$#" -eq 9 ]; then
     [ ! -e "$dest" ] && [ ! -L "$dest" ] \
       && [ ! -e "$adapter_dest" ] && [ ! -L "$adapter_dest" ] || return 1
   fi
   tmp=$(umask 077; mktemp "$inbox/.capture.XXXXXX") || return 1
   adapter_tmp=$(umask 077; mktemp "$inbox/.adapter.XXXXXX") || { rm -f -- "$tmp"; return 1; }
+  if [ "$#" -eq 5 ]; then
+    owner_tmp=$(umask 077; mktemp "$inbox/.owner-task.XXXXXX") || { rm -f -- "$tmp" "$adapter_tmp"; return 1; }
+  fi
   if [ "$#" -eq 9 ]; then
     extension_dest="$inbox/$id.$seq.extension"
     [ ! -e "$extension_dest" ] && [ ! -L "$extension_dest" ] || {
-      rm -f -- "$tmp" "$adapter_tmp"
+      rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp"
       return 1
     }
     extension_tmp=$(umask 077; mktemp "$inbox/.extension.XXXXXX") \
-      || { rm -f -- "$tmp" "$adapter_tmp"; return 1; }
+      || { rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp"; return 1; }
   fi
-  if ! cat "$src" > "$tmp"; then rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"; return 1; fi
-  if ! printf '%s\n' "$adapter" > "$adapter_tmp"; then rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"; return 1; fi
+  if ! cat "$src" > "$tmp"; then rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp" "$extension_tmp"; return 1; fi
+  if ! printf '%s\n' "$adapter" > "$adapter_tmp"; then rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp" "$extension_tmp"; return 1; fi
+  if [ "$#" -eq 5 ] && ! printf '%s\n' "$task_owner" > "$owner_tmp"; then
+    rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp" "$extension_tmp"
+    return 1
+  fi
   if [ "$#" -eq 9 ] && ! {
     printf 'schema=fm-procevent-extension-owner.v1\n'
     printf 'extension_id=%s\n' "$extension_id"
@@ -1076,24 +1124,32 @@ fm_procevent_capture() {
     printf 'package_digest=%s\n' "$package_digest"
     printf 'binding_digest=%s\n' "$binding_digest"
   } > "$extension_tmp"; then
-    rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"
+    rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp" "$extension_tmp"
     return 1
   fi
   if ! chmod 0600 "$tmp" "$adapter_tmp"; then
-    rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"
+    rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp" "$extension_tmp"
+    return 1
+  fi
+  if [ "$#" -eq 5 ] && ! chmod 0600 "$owner_tmp"; then
+    rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp" "$extension_tmp"
     return 1
   fi
   if [ "$#" -eq 9 ] && ! chmod 0600 "$extension_tmp"; then
-    rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"
+    rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp" "$extension_tmp"
     return 1
   fi
-  if ! mv -f -- "$adapter_tmp" "$adapter_dest"; then rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"; return 1; fi
+  if ! mv -f -- "$adapter_tmp" "$adapter_dest"; then rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp" "$extension_tmp"; return 1; fi
+  if [ "$#" -eq 5 ] && ! mv -f -- "$owner_tmp" "$owner_dest"; then
+    rm -f -- "$tmp" "$adapter_dest" "$owner_tmp" "$extension_tmp"
+    return 1
+  fi
   if [ "$#" -eq 9 ] && ! mv -f -- "$extension_tmp" "$extension_dest"; then
-    rm -f -- "$tmp" "$adapter_dest" "$extension_tmp"
+    rm -f -- "$tmp" "$adapter_dest" "$owner_dest" "$extension_tmp"
     return 1
   fi
   if ! mv -f -- "$tmp" "$dest"; then
-    rm -f -- "$tmp" "$adapter_dest"
+    rm -f -- "$tmp" "$adapter_dest" "$owner_dest"
     [ -z "$extension_dest" ] || rm -f -- "$extension_dest"
     return 1
   fi
@@ -1102,6 +1158,17 @@ fm_procevent_capture() {
   else
     printf '%s\n' "$dest"
   fi
+}
+
+fm_procevent_result_owner_task() {  # <result-path>
+  local file="${1%.result}.owner-task" task extra
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  {
+    IFS= read -r task && ! IFS= read -r extra
+  } < "$file" || return 1
+  [ -z "$extra" ] || return 1
+  fm_pr_task_id_valid "$task" || return 1
+  printf '%s\n' "$task"
 }
 
 # fm_procevent_pending <state>

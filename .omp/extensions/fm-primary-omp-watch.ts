@@ -1,7 +1,7 @@
 // Firstmate primary watcher bridge for omp (Oh My Pi).
 //
 // A port of .pi/extensions/fm-primary-pi-watch.ts for the omp fork. The arm,
-// successor, retry, and replacement-handoff logic is the Pi contract verbatim;
+// successor, retry, and replacement-handoff logic follows the Pi contract;
 // the omp-specific differences are stated once here:
 //   - omp auto-discovers this file from <cwd>/.omp/extensions with no trust
 //     gate, so an omp primary or secondmate started inside its home loads it
@@ -14,11 +14,27 @@
 //     session_start, in this process or a later one, replays it. Replaying a
 //     wake main has already drained is harmless (the queue is durable and the
 //     drain is idempotent); losing one across /new is not.
+//   - Replacement shutdown retires the established predecessor arm before the
+//     successor arms; unlike Pi, it is not retained until a distinct active
+//     successor generation commits its own arm, so omp keeps the plain
+//     teardown-and-rearm replacement shape.
 //   - The Pi supervision branch is out of scope for omp: every actionable wake
 //     is delivered to main, so no branch offer is made and no calm presentation
 //     hooks exist.
 //   - The arming tool is fm_watch_arm_omp and its human fallback
 //     /fm-watch-arm-omp; the loaded-build marker is state/.omp-watch-extension-loaded.
+//   - Supervision host: a home opted in with config/supervision-host
+//     (docs/configuration.md "Supervision host" owns the opt-in) spawns
+//     bin/fm-supervision-host.sh park --restart in the arm's place, which
+//     takes away-posture wakes itself and closes only when main is needed; its
+//     header owns the output read here. A "supervision-host:" line is
+//     actionable like a wake line, and the message delivered at the host's
+//     close carries every such line in order while wake lines keep an
+//     eight-line cap. The host
+//     prints the first cycle's status line as soon as it is verified, so
+//     readiness and the handling handoff work as they do for the arm, with a
+//     longer readiness budget for the host's own startup. Without the file
+//     nothing below changes.
 //
 // Session-generation ownership (stated once here):
 // omp emits session_shutdown for ordinary same-process replacements (/new,
@@ -42,7 +58,7 @@
 // replacement handoff.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // typebox resolves inside omp's extension loader (verified, omp 18.1.11); the
@@ -124,6 +140,7 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+const hostScript = `${fmRoot}/bin/fm-supervision-host.sh`;
 const marker = `${state}/.omp-watch-extension-loaded`;
 const handoffDir = `${state}/extensions/omp-primary-watch`;
 const actionableHandoff = `${handoffDir}/session-replacement-actionable.json`;
@@ -138,6 +155,7 @@ const armReadyTimeoutMs = positiveInteger(
   "FM_OMP_ARM_READY_TIMEOUT_MS",
   process.platform === "win32" ? 35000 : 12000,
 );
+const hostReadyTimeoutMs = Math.max(armReadyTimeoutMs, 30000);
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const repairOnlyHint = "call fm_watch_arm_omp again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - omp session is shutting down";
@@ -182,6 +200,7 @@ const armClose = new WeakMap<ChildProcess, Promise<void>>();
 const armRetired = new WeakSet<ChildProcess>();
 const armRecovery = new WeakMap<ChildProcess, { generation: string; watcherPid: string }>();
 const armPendingActionable = new WeakMap<ChildProcess, PendingActionableClose>();
+const armHostMode = new WeakMap<ChildProcess, boolean>();
 
 function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -237,6 +256,25 @@ function completedActionableLine(output: string): string {
   return newline < 0 ? "" : actionableLine(output.slice(0, newline + 1));
 }
 
+// The host-mode wake message: every "supervision-host:" line in order, wake
+// lines capped at eight, and the away note while the posture record exists.
+function hostWakeMessage(output: string): string {
+  let shown = 0;
+  const lines = output.split(/\r?\n/).filter((line) => {
+    if (/^supervision-host:/.test(line)) return true;
+    if (/^(signal:|stale:|check:|heartbeat($|:))/.test(line) && shown < 8) {
+      shown += 1;
+      return true;
+    }
+    return false;
+  });
+  if (lines.length === 0) return "";
+  if (existsSync(`${state}/.afk-contract`)) {
+    lines.push("This wake comes from automatic supervision under the away-posture record, not from the captain: it is not a return, so handle it under the away posture.");
+  }
+  return lines.join("\n");
+}
+
 // The text omp carries in a user message_start: sendUserMessage wraps a string
 // as one text part, so the joined text parts equal the sent content.
 function userMessageText(content: unknown): string {
@@ -277,7 +315,8 @@ function validatePendingActionable(value: unknown): PendingActionableClose {
     typeof (value as { token?: unknown }).token !== "string" ||
     !/^[0-9]+-[0-9]+-[0-9]+$/.test((value as { token: string }).token) ||
     typeof (value as { message?: unknown }).message !== "string" ||
-    !actionableLine((value as { message: string }).message) ||
+    (!actionableLine((value as { message: string }).message) &&
+      !/^supervision-host:/m.test((value as { message: string }).message)) ||
     typeof (value as { predecessorArmPid?: unknown }).predecessorArmPid !== "string" ||
     !/^[0-9]*$/.test((value as { predecessorArmPid: string }).predecessorArmPid) ||
     ((value as { delivered?: unknown }).delivered !== undefined &&
@@ -368,8 +407,20 @@ function clearReplacementHandoff(pending: PendingActionableClose): void {
   }
 }
 
-function classifyClose(stdout: string, stderr: string, code: number | null, signal: NodeJS.Signals | null): CloseClassification {
+function classifyClose(
+  hostMode: boolean,
+  stdout: string,
+  stderr: string,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+): CloseClassification {
   const combined = `${stdout}\n${stderr}`.trim();
+  if (hostMode) {
+    const message = hostWakeMessage(combined);
+    if (message) return { kind: "actionable", message };
+    const stoodDown = combined.split(/\r?\n/).find((line) => /^supervision-host stood down:/.test(line));
+    if (stoodDown) return { kind: "failure", message: `watcher: FAILED - ${stoodDown}` };
+  }
   const reason = actionableLine(combined);
   if (reason) return { kind: "actionable", message: reason };
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
@@ -388,9 +439,10 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
     };
   }
   if (code && code !== 0) {
+    const script = hostMode ? "fm-supervision-host.sh" : "fm-watch-arm.sh";
     return {
       kind: "failure",
-      message: `watcher: FAILED - fm-watch-arm.sh exited ${code}${combined ? `\n${combined}` : ""}`,
+      message: `watcher: FAILED - ${script} exited ${code}${combined ? `\n${combined}` : ""}`,
     };
   }
   return {
@@ -779,8 +831,9 @@ export default function (pi: ExtensionAPI) {
   function waitForReadiness(armChild: ChildProcess): Promise<boolean> {
     const readiness = armReadiness.get(armChild);
     if (!readiness) return Promise.resolve(false);
+    const timeout = armHostMode.get(armChild) ? hostReadyTimeoutMs : armReadyTimeoutMs;
     return new Promise((resolveReady) => {
-      const timer = setTimeout(() => resolveReady(false), armReadyTimeoutMs);
+      const timer = setTimeout(() => resolveReady(false), timeout);
       timer.unref();
       void readiness.then((ready) => {
         clearTimeout(timer);
@@ -884,19 +937,23 @@ export default function (pi: ExtensionAPI) {
       };
     }
     const id = ++owner.seq;
-    const env = {
+    const hostMode = existsSync(`${config}/supervision-host`);
+    const env: NodeJS.ProcessEnv = {
       ...process.env,
       FM_HOME: fmHome,
       FM_ROOT_OVERRIDE: fmRoot,
       FM_CONFIG_OVERRIDE: config,
-      FM_WATCH_ARM_SCRIPT: armScript,
+      FM_WATCH_ARM_SCRIPT: hostMode ? hostScript : armScript,
       FM_WATCH_PREDECESSOR_ARM_PID: predecessorArmPid,
     };
-    const armChild = spawn("bash", ["-lc", "config_dir=\"${FM_CONFIG_OVERRIDE:-$FM_HOME/config}\"; [ -f \"$config_dir/x-mode.env\" ] && . \"$config_dir/x-mode.env\"; exec \"$FM_WATCH_ARM_SCRIPT\" --restart"], {
+    if (hostMode) env.FM_SUPERVISION_HOST_PRIMARY = "omp";
+    const command = hostMode ? "exec \"$FM_WATCH_ARM_SCRIPT\" park --restart" : "exec \"$FM_WATCH_ARM_SCRIPT\" --restart";
+    const armChild = spawn("bash", ["-lc", `config_dir="\${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; [ -f "$config_dir/x-mode.env" ] && . "$config_dir/x-mode.env"; ${command}`], {
       cwd: fmRoot,
       env,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    armHostMode.set(armChild, hostMode);
     owner.child = armChild;
     let stdout = "";
     let stderr = "";
@@ -926,6 +983,7 @@ export default function (pi: ExtensionAPI) {
       if (/^watcher: (?:started|attached)\b/m.test(combined)) {
         settleReadiness(true);
       }
+      if (hostMode) return;
       const reason = completedActionableLine(stdout) || completedActionableLine(stderr);
       if (reason && !armPendingActionable.has(armChild)) {
         const pending = createPendingActionable(reason, String(armChild.pid ?? ""));
@@ -950,7 +1008,7 @@ export default function (pi: ExtensionAPI) {
       resolveClosed();
       settleReadiness(false);
       releaseChild();
-      const classification = classifyClose(stdout, stderr, code, signal);
+      const classification = classifyClose(hostMode, stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
         const pending = armPendingActionable.get(armChild) ?? createPendingActionable(classification.message, predecessor);

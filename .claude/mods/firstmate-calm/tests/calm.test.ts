@@ -4,6 +4,7 @@ import { describe, expect, test, type Engine } from "claude-code/testing";
 import {
   assistantMessage,
   calmCommand,
+  doorbell,
   fromFirstmate,
   HOME,
   isHidden,
@@ -201,6 +202,45 @@ describe("operational user rows", () => {
     for (const text of [...hiddenTexts, ...visibleTexts]) {
       expect(isStock(await $.ui.render(userMessage(text))), JSON.stringify(text)).toBe(true);
     }
+  });
+
+  // A harness that strips U+2063 from submitted prompts receives a plain doorbell naming
+  // a record that holds the envelope; only the record makes the row Firstmate's.
+  const inbox = `${HOME}/state/operational-inbox`;
+  const backed = `${inbox}/1790000000-0123456789abcdef.msg`;
+  const unbacked = `${inbox}/1790000000-fedcba9876543210.msg`;
+  const asciiRecord = `${inbox}/1790000000-aaaaaaaaaaaaaaaa.msg`;
+
+  test("hides a doorbell only when the record it names holds a current envelope", async ($, on) => {
+    const { files, journal } = world(on, { preference: "on\n" });
+    files.set(backed, operational("away-supervisor", "Supervisor escalate: done: PR 1"));
+    files.set(asciiRecord, "FIRSTMATE_OP: v1 away-supervisor: ascii only");
+    expect(isHidden(await $.ui.render(userMessage(doorbell(backed))))).toBe(true);
+    expect(isStock(await $.ui.render(userMessage(doorbell(unbacked))))).toBe(true);
+    expect(isStock(await $.ui.render(userMessage(doorbell(asciiRecord))))).toBe(true);
+    expect(isStock(await $.ui.render(userMessage(`${doorbell(backed)} and more`)))).toBe(true);
+    expect(isStock(await $.ui.render(userMessage(doorbell("relative/operational-inbox/1-a.msg"))))).toBe(true);
+    // Records are immutable once published, so one read serves every redraw of the row.
+    const readsBefore = journal.fsReads.filter((path) => path === backed).length;
+    expect(isHidden(await $.ui.render(userMessage(doorbell(backed))))).toBe(true);
+    expect(journal.fsReads.filter((path) => path === backed).length).toBe(readsBefore);
+  });
+
+  test("shows a hidden doorbell again once a toggle redraws it after its record is pruned", async ($, on) => {
+    const { files } = world(on, { preference: "on\n" });
+    files.set(backed, operational("away-supervisor", "escalate"));
+    expect(isHidden(await $.ui.render(userMessage(doorbell(backed))))).toBe(true);
+    files.delete(backed);
+    await $.command.run(calmCommand());
+    await $.command.run(calmCommand());
+    expect(isStock(await $.ui.render(userMessage(doorbell(backed))))).toBe(true);
+  });
+
+  test("leaves a backed doorbell to the engine while off, without reading its record", async ($, on) => {
+    const { files, journal } = world(on);
+    files.set(backed, operational("away-supervisor", "escalate"));
+    expect(isStock(await $.ui.render(userMessage(doorbell(backed))))).toBe(true);
+    expect(journal.fsReads).not.toContain(backed);
   });
 });
 
