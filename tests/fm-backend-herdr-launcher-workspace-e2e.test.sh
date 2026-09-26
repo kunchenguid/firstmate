@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-backend-herdr-launcher-workspace-e2e.test.sh - mandatory ISOLATED
-# end-to-end real-Herdr test for worker PLACEMENT with presentation spaces
-# disabled.
+# end-to-end real-Herdr test for worker PLACEMENT in flat and projected
+# presentation layouts.
 #
 # The guarantee under test: a crewmate or scout is created in the exact Herdr
 # workspace of the firstmate or secondmate process that launched it, identified
@@ -119,6 +119,13 @@ journal_field() {  # <presentation-journal> <key>
   grep "^$2=" "$1" 2>/dev/null | head -1 | cut -d= -f2-
 }
 
+move_workspace_to() {  # <workspace-id> <index>
+  local out
+  out=$("$ROOT/bin/backends/herdr-workspace-move.py" "$LAB_SOCKET" "$1" "$2" 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -e --arg id "$1" --argjson index "$2" \
+    '.result.workspaces[$index].workspace_id == $id' >/dev/null 2>&1
+}
+
 # spawn_from_launcher <launcher-pane|""> <home> <task-id> <project> [extra fm-spawn args...]
 # Composes exactly the Herdr identity Herdr itself injects into a pane's
 # processes. An empty launcher pane means "this firstmate is not running inside
@@ -204,6 +211,10 @@ for id in uniqA uniqB dupC dupD staleF smE presU presD; do
   write_ship_brief "$SM_HOME/data/$id/brief.md" "$id"
   write_ship_brief "$PRES_HOME/data/$id/brief.md" "$id"
 done
+for id in development-to-staging public-profile-header aiddrop-task; do
+  mkdir -p "$PRES_HOME/data/$id"
+  write_ship_brief "$PRES_HOME/data/$id/brief.md" "$id"
+done
 mkdir -p "$PRIMARY_HOME/data/$SM2_ID"
 printf 'trivial secondmate charter brief: nothing to do.\n' > "$PRIMARY_HOME/data/$SM2_ID/brief.md"
 
@@ -277,8 +288,159 @@ PRESU_JOURNAL="$PRES_HOME/state/presU.herdr-presentation"
   || fail "the projection bound a parent other than the launcher's own workspace ($WS_PRIMARY)"
 [ "$(journal_field "$PRESU_JOURNAL" workspace_id)" = "$PRESU_WS" ] \
   || fail "the projection journal does not name its own workspace"
+PRESU_ORDER=$(lab workspace list 2>/dev/null | jq -r --arg parent "$WS_PRIMARY" --arg child "$PRESU_WS" '
+  [.result.workspaces[].workspace_id] as $ids
+  | ($ids | index($child)) - ($ids | index($parent))
+')
+[ "$PRESU_ORDER" = 1 ] \
+  || fail "a task with no project space should sit directly under Firstmate, offset was '$PRESU_ORDER'"
 [ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a projected spawn stole focus from the captain's workspace"
-pass "real herdr E2E: presentation spaces still create the isolated child workspace and bind it under the launcher's exact parent, without stealing focus"
+pass "real herdr E2E: a task with no project space gets an isolated child directly under Firstmate without stealing focus"
+
+ORPHAN_HOME_ID=$(cd "$PRES_HOME" && pwd -P)
+ORPHAN_TOKEN=$(FM_HOME="$PRES_HOME" bash -c '
+  . "$0/bin/backends/herdr.sh"
+  fm_backend_herdr_projection_journal_create "$1" fresh-orphan
+' "$ROOT" "$PRES_HOME/state") || fail "could not create the fresh-orphan journal"
+ORPHAN_LABEL="└ fresh-orphan · p:$ORPHAN_TOKEN"
+read -r ORPHAN_PARENT _ ORPHAN_PARENT_PANE <<EOF
+$(make_workspace 'vanishing-project')
+EOF
+read -r ORPHAN_WS _ ORPHAN_SEEDED_PANE <<EOF
+$(make_workspace "$ORPHAN_LABEL")
+EOF
+ORPHAN_TAB_OUT=$(lab tab create --workspace "$ORPHAN_WS" --cwd "$PROJ" --label fm-fresh-orphan --no-focus 2>/dev/null) \
+  || fail "could not create the fresh-orphan task tab"
+ORPHAN_TAB=$(printf '%s' "$ORPHAN_TAB_OUT" | jq -r '.result.tab.tab_id // empty')
+ORPHAN_PANE=$(printf '%s' "$ORPHAN_TAB_OUT" | jq -r '.result.root_pane.pane_id // empty')
+lab pane close "$ORPHAN_SEEDED_PANE" >/dev/null 2>&1 || fail "could not prune the fresh-orphan seeded pane"
+lab pane close "$ORPHAN_PARENT_PANE" >/dev/null 2>&1 || fail "could not remove the fresh-orphan project"
+ORPHAN_RESOLVED=$(FM_HOME="$PRES_HOME" ROOT="$ROOT" SESSION="$HERDR_LAB_SESSION" \
+  CHILD="$ORPHAN_WS" OLD_PARENT="$ORPHAN_PARENT" STATE="$PRES_HOME/state" HOME_ID="$ORPHAN_HOME_ID" \
+  TOKEN="$ORPHAN_TOKEN" TAB="$ORPHAN_TAB" PANE="$ORPHAN_PANE" LABEL="$ORPHAN_LABEL" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_order_best_effort "$SESSION" "$CHILD" firstmate "$OLD_PARENT" "$STATE" "$HOME_ID"
+    parent=$FM_BACKEND_HERDR_PROJECTION_ORDER_PARENT_WORKSPACE_ID
+    fm_backend_herdr_projection_live_binding_matches \
+      "$SESSION" "$TOKEN" "$CHILD" "$TAB" "$PANE" "$parent" firstmate "$LABEL" fm-fresh-orphan "$STATE" "$HOME_ID" \
+      && fm_backend_herdr_projection_journal_bind \
+        "$STATE/fresh-orphan.herdr-presentation" fresh-orphan "$HOME_ID" "$SESSION" \
+        "$CHILD" "$TAB" "$PANE" "$parent" firstmate "$LABEL" fm-fresh-orphan \
+      || exit 1
+    printf "%s" "$parent"
+  ' 2>"$TMP_ROOT/fresh-orphan.err") || fail "fresh orphan reconciliation failed"$'\n'"$(cat "$TMP_ROOT/fresh-orphan.err")"
+[ "$ORPHAN_RESOLVED" = "$WS_PRIMARY" ] \
+  && [ "$(journal_field "$PRES_HOME/state/fresh-orphan.herdr-presentation" parent_workspace_id)" = "$WS_PRIMARY" ] \
+  || fail "fresh orphan did not bind durably under the exact Firstmate workspace"
+lab pane close "$ORPHAN_PANE" >/dev/null 2>&1 || fail "could not remove the fresh-orphan fixture"
+rm -f "$PRES_HOME/state/fresh-orphan.herdr-presentation"
+pass "real herdr E2E: a fresh task whose project disappears is moved and durably rebound under Firstmate"
+
+# --- 2c. existing project clusters are reconciled from exact journal ownership
+
+PROJECT_FIRSTMATE=$WS_PRIMARY
+read -r PROJECT_PARENT _ PROJECT_LAUNCHER <<EOF
+$(make_workspace 'Find My Matcha')
+EOF
+read -r PROJECT_DIVIDER _ AIDDROP_LAUNCHER <<EOF
+$(make_workspace 'AidDrop')
+EOF
+[ -n "$PROJECT_FIRSTMATE" ] && [ -n "$PROJECT_PARENT" ] && [ -n "$PROJECT_LAUNCHER" ] \
+  && [ -n "$PROJECT_DIVIDER" ] && [ -n "$AIDDROP_LAUNCHER" ] \
+  || fail "could not create the project-relative ordering fixture"
+
+spawn_from_launcher "$AIDDROP_LAUNCHER" "$PRES_HOME" aiddrop-task "$PROJ" --mode no-mistakes --yolo off
+[ "$SPAWN_RC" -eq 0 ] || fail "AidDrop projected spawn failed"$'\n'"$(cat "$SPAWN_ERR")"
+AIDDROP_META="$PRES_HOME/state/aiddrop-task.meta"
+record_worktree "$AIDDROP_META"
+AIDDROP_WS=$(grep '^herdr_workspace_id=' "$AIDDROP_META" | cut -d= -f2-)
+[ "$(journal_field "$PRES_HOME/state/aiddrop-task.herdr-presentation" parent_workspace_id)" = "$PROJECT_DIVIDER" ] \
+  || fail "AidDrop task did not bind its exact project parent"
+
+spawn_from_launcher "$PROJECT_LAUNCHER" "$PRES_HOME" development-to-staging "$PROJ" --mode no-mistakes --yolo off
+[ "$SPAWN_RC" -eq 0 ] || fail "existing Find My Matcha projected spawn failed"$'\n'"$(cat "$SPAWN_ERR")"
+DEVELOPMENT_META="$PRES_HOME/state/development-to-staging.meta"
+record_worktree "$DEVELOPMENT_META"
+DEVELOPMENT_WS=$(grep '^herdr_workspace_id=' "$DEVELOPMENT_META" | cut -d= -f2-)
+
+if ! move_workspace_to "$PROJECT_DIVIDER" 0 \
+  || ! move_workspace_to "$PROJECT_FIRSTMATE" 1 \
+  || ! move_workspace_to "$PROJECT_PARENT" 2 \
+  || ! move_workspace_to "$AIDDROP_WS" 3 \
+  || ! move_workspace_to "$DEVELOPMENT_WS" 4; then
+  fail "could not scramble the existing project clusters"
+fi
+FM_HOME="$PRES_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRES_HOME/state" \
+  "$ROOT/bin/fm-herdr-session-cleanup.sh" >"$TMP_ROOT/startup-reconcile.out" 2>&1 \
+  || fail "locked session-start reconciliation failed"
+MIGRATED_ORDER=$(lab workspace list 2>/dev/null | jq -c \
+  --arg firstmate "$PROJECT_FIRSTMATE" --arg orphan "$PRESU_WS" --arg parent "$PROJECT_PARENT" \
+  --arg development "$DEVELOPMENT_WS" --arg divider "$PROJECT_DIVIDER" --arg aiddrop "$AIDDROP_WS" '
+    [.result.workspaces[].workspace_id] as $ids
+    | [($ids | index($firstmate)), ($ids | index($orphan)), ($ids | index($parent)),
+       ($ids | index($development)), ($ids | index($divider)), ($ids | index($aiddrop))]
+  ')
+[ "$MIGRATED_ORDER" = '[0,1,2,3,4,5]' ] \
+  || fail "locked session start did not migrate existing project clusters: $MIGRATED_ORDER"
+pass "real herdr E2E: locked session start migrates existing journal-owned clusters without a fresh spawn"
+
+if ! move_workspace_to "$PROJECT_DIVIDER" 0 \
+  || ! move_workspace_to "$PROJECT_FIRSTMATE" 1 \
+  || ! move_workspace_to "$PROJECT_PARENT" 2 \
+  || ! move_workspace_to "$AIDDROP_WS" 3 \
+  || ! move_workspace_to "$DEVELOPMENT_WS" 4; then
+  fail "could not rescramble project clusters before the fresh spawn"
+fi
+spawn_from_launcher "$PROJECT_LAUNCHER" "$PRES_HOME" public-profile-header "$PROJ" --mode no-mistakes --yolo off
+[ "$SPAWN_RC" -eq 0 ] \
+  || fail "project reconciliation spawn failed"$'\n'"$(cat "$SPAWN_ERR")"
+if grep -E 'ambiguous workspace layout|ambiguous journal ownership|could not publish an exact restart binding' "$SPAWN_ERR" >/dev/null 2>&1; then
+  fail "project reconciliation left an ordering or restart-binding warning"$'\n'"$(cat "$SPAWN_ERR")"
+fi
+PROFILE_META="$PRES_HOME/state/public-profile-header.meta"
+record_worktree "$PROFILE_META"
+PROFILE_WS=$(grep '^herdr_workspace_id=' "$PROFILE_META" | cut -d= -f2-)
+PROFILE_JOURNAL="$PRES_HOME/state/public-profile-header.herdr-presentation"
+[ "$(journal_field "$PROFILE_JOURNAL" version)" = 2 ] \
+  && [ "$(journal_field "$PROFILE_JOURNAL" parent_workspace_id)" = "$PROJECT_PARENT" ] \
+  || fail "new Find My Matcha task did not bind its exact project parent"
+
+PROJECT_ORDER=$(lab workspace list 2>/dev/null | jq -c \
+  --arg firstmate "$PROJECT_FIRSTMATE" --arg orphan "$PRESU_WS" --arg parent "$PROJECT_PARENT" \
+  --arg development "$DEVELOPMENT_WS" --arg profile "$PROFILE_WS" \
+  --arg divider "$PROJECT_DIVIDER" --arg aiddrop "$AIDDROP_WS" '
+    [.result.workspaces[].workspace_id] as $ids
+    | [($ids | index($firstmate)), ($ids | index($orphan)), ($ids | index($parent)),
+       ($ids | index($development)), ($ids | index($profile)), ($ids | index($divider)),
+       ($ids | index($aiddrop))]
+  ')
+[ "$PROJECT_ORDER" = '[0,1,2,3,4,5,6]' ] \
+  || fail "existing project/task clusters were not reconciled by exact journal ownership: $PROJECT_ORDER"
+[ "$(focused_workspace)" = "$WS_OTHER" ] || fail "project reconciliation stole focus"
+pass "real herdr E2E: existing project clusters migrate with foreign adjacent tasks assigned only by exact journal ownership"
+
+read -r AMBIGUOUS_FIRSTMATE _ AMBIGUOUS_FIRSTMATE_PANE <<EOF
+$(make_workspace 'Firstmate')
+EOF
+lab pane close "$AIDDROP_LAUNCHER" >/dev/null 2>&1 || fail "could not remove the AidDrop parent fixture"
+FM_HOME="$PRES_HOME" ROOT="$ROOT" SESSION="$HERDR_LAB_SESSION" CHILD="$PROFILE_WS" \
+  PARENT="$PROJECT_PARENT" STATE="$PRES_HOME/state" HOME_ID="$ORPHAN_HOME_ID" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_order_best_effort "$SESSION" "$CHILD" firstmate "$PARENT" "$STATE" "$HOME_ID"
+  ' 2>"$TMP_ROOT/ambiguous-firstmate.err" || fail "ambiguous Firstmate reconciliation failed"
+grep -F 'ambiguous Firstmate workspaces' "$TMP_ROOT/ambiguous-firstmate.err" >/dev/null 2>&1 \
+  || fail "mixed-case Firstmate collision did not warn and skip orphan rebinding"
+[ "$(journal_field "$PRES_HOME/state/aiddrop-task.herdr-presentation" parent_workspace_id)" = "$PROJECT_DIVIDER" ] \
+  || fail "mixed-case Firstmate collision rebound an orphan to a label-selected workspace"
+lab pane close "$AMBIGUOUS_FIRSTMATE_PANE" >/dev/null 2>&1 || fail "could not remove the ambiguous Firstmate fixture"
+FM_HOME="$PRES_HOME" ROOT="$ROOT" SESSION="$HERDR_LAB_SESSION" CHILD="$PROFILE_WS" \
+  PARENT="$PROJECT_PARENT" STATE="$PRES_HOME/state" HOME_ID="$ORPHAN_HOME_ID" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_order_best_effort "$SESSION" "$CHILD" firstmate "$PARENT" "$STATE" "$HOME_ID"
+  ' 2>"$TMP_ROOT/rebind-orphan.err" || fail "unique Firstmate orphan reconciliation failed"
+[ "$(journal_field "$PRES_HOME/state/aiddrop-task.herdr-presentation" parent_workspace_id)" = "$WS_PRIMARY" ] \
+  || fail "existing orphan was not rebound under the unique exact Firstmate workspace"
+pass "real herdr E2E: ambiguous Firstmate aliases never gain orphan ownership"
 
 # --- 3. duplicate label, launcher in the NON-first match, driven from a real
 #        Herdr pane so the identity comes from Herdr's own injection ----------
@@ -429,8 +591,8 @@ pass "real herdr E2E: a --secondmate launch still stands up that secondmate's ow
 
 # --- 8. teardown closes only the worker's own pane --------------------------
 
-FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
-  FM_CONFIG_OVERRIDE="$PRIMARY_HOME/config" \
+FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" \
+  FM_DATA_OVERRIDE="$PRIMARY_HOME/data" FM_CONFIG_OVERRIDE="$PRIMARY_HOME/config" \
   "$ROOT/bin/fm-teardown.sh" dupC >"$TMP_ROOT/teardown.out" 2>&1
 status=$?
 [ "$status" -eq 0 ] || fail "fm-teardown.sh failed for dupC"$'\n'"$(cat "$TMP_ROOT/teardown.out")"

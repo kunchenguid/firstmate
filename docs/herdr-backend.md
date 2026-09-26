@@ -18,7 +18,7 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | Install Herdr and select it | [Setup](#setup) |
 | Why a command ran on a different `herdr` client | [Client selection](#client-selection) |
 | Where task tabs appear and how to watch them | [Watching and task containers](#watching-and-task-containers) |
-| The one-task workspaces, their setting, and their cleanup | [Presentation spaces](#presentation-spaces) |
+| The one-task workspaces, their setting, ordering, and cleanup | [Presentation spaces](#presentation-spaces) |
 | Why a seeded default tab is or is not closed | [Default-tab prune safety](#default-tab-prune-safety) |
 | What task metadata records for a Herdr endpoint | [Endpoint metadata](#endpoint-metadata) |
 | How text and keys reach a worker and how delivery is confirmed | [Current transport behavior](#current-transport-behavior) and [Composer and injection safety](#composer-and-injection-safety) |
@@ -252,8 +252,9 @@ Creation proceeds in this order:
 
 1. Firstmate atomically publishes a three-field version 1 journal containing a random 128-bit base64url token, before asking Herdr to create anything.
 2. After the new workspace converges to one exact task endpoint beneath one exact parent workspace id, the journal advances to a version 2 binding.
-   That binding records the physical home, named session, endpoint, parent, and immutable expected labels.
+   That binding records the physical home, named session, endpoint, parent, and immutable expected task labels.
 
+The parent's visible label may be a mutable project name; exact workspace identity, not that label, binds the child.
 Another parent with the same presentation label does not prevent publication or participate in restart reclaim.
 
 The token is visible in the workspace title, because Herdr exposes no verified hidden persistent field.
@@ -276,7 +277,9 @@ An ambiguous response grants no mutation or cleanup authority.
 Protocol 16 exposes `workspace.move` over the named session socket but no CLI subcommand.
 `bin/backends/herdr-workspace-move.py` sends only that whitelisted method and verifies the complete returned workspace order.
 
-Projected children are placed in one contiguous block immediately after their owning home when all of these are verifiable:
+After each fresh projected create, the exact response-derived child and current-home children with valid version 2 journals are reconciled into project clusters: Firstmate first, then each exact parent immediately followed by its children in their existing relative order.
+At locked session start, stale projection retirement runs first and only surviving valid version 2 journals participate in reconciliation.
+Reconciliation runs when all of these are verifiable:
 
 - The session layout.
 - The protocol.
@@ -284,8 +287,12 @@ Projected children are placed in one contiguous block immediately after their ow
 - `python3`.
 - The machine-private per-session lock.
 
-Existing legacy child labels may extend an already adjacent block read-only but are never renamed or migrated.
-A foreign, ambiguous, detached, or manually interleaved child makes ordering skip with a warning rather than rewriting the layout.
+A project workspace used as the launcher owns that project's task block; without a project-specific launcher, the Firstmate workspace owns the task block.
+A child whose recorded parent disappeared is moved and rebound under the unique Firstmate workspace.
+When no Firstmate candidate exists, the normal durable workspace lifecycle creates one before orphan reconciliation.
+`Firstmate` and `firstmate` are one candidate set; multiple matches skip Firstmate rotation and orphan rebinding rather than choosing by spelling.
+Exact version 2 journal bindings, plus the response-derived child during its fresh create, are the only cluster ownership sources; adjacent legacy, foreign, or merely child-shaped workspaces are never adopted into a project block.
+Other homes' workspaces keep their relative order.
 
 Ordering failure never fails the task spawn.
 Firstmate does not retry, adopt, reuse, close, delete, or rename anything in response to an unavailable method, lock contention, ambiguous socket, lost response, failed move, or verification mismatch.
@@ -385,7 +392,7 @@ These cases fall back flat without mutating the old projection when duplicate-ag
 - Version 1 journals.
 - Dead or missing panes.
 - Duplicate or absent tokens.
-- Renamed or detached spaces.
+- Renamed or detached projected spaces.
 - Cross-home mismatches.
 - Inconsistent endpoint bindings.
 - Active target tabs.
@@ -458,7 +465,7 @@ Any of these preserves the candidate and lets session startup continue with at m
   Every earlier degradation on the fresh projected-create path (no session server, contended presentation lock, absent or ambiguous parent) still warns and continues flat.
 - Recovery of an existing presentation journal deliberately refuses the spawn when the shared presentation lock is contended, rather than falling back flat.
   Default-on makes that refusal reachable in any Herdr home.
-- Existing layouts are not force-renamed or rearranged.
+- Existing layouts may be rearranged by the project-cluster reconciliation described above; workspace labels are never changed.
 - Missing or ambiguous restart bindings fall back to the ordinary home workspace while the old projection remains untouched.
 - Crashes, lost responses, failed exact-pane cleanup, or human renames can leave quarantined spaces.
   Session start removes only the exact home-local, uniquely journal-correlated, childless idle-shell shape above.
@@ -472,7 +479,8 @@ Any of these preserves the candidate and lets session startup continue with at m
 | Test | What it covers |
 | --- | --- |
 | `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path. |
-| `tests/fm-herdr-session-cleanup.test.sh` | Every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary. |
+| `tests/fm-backend-herdr-launcher-workspace-e2e.test.sh` | Existing project-cluster migration and orphan fallback under exact launcher and journal ownership in a guarded lab. |
+| `tests/fm-herdr-session-cleanup.test.sh` | Every discovery, ownership, topology, process, locking, revalidation, focus, retirement-before-reconciliation, and continue-on-error boundary. |
 | `tests/fm-herdr-session-cleanup-e2e.test.sh` | The restored-shell cleanup in a guarded non-default named lab. |
 | `tests/fm-backend-herdr-focus-flash-e2e.test.sh` | Reproduces the raw explicit-close focus steal on the installed release, and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval. |
 | `tests/fm-backend-herdr-stale-active-tab-e2e.test.sh` | Proves a persisted-focused tab still closes when no foreground client is attached. |
