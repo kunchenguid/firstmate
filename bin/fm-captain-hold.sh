@@ -177,10 +177,11 @@
 # recorded instead (bin/fm-backlog-transition-lib.sh owns that transition), so
 # holding the very work item a question gates is safe; only `answer` with the
 # captain's words or evidence-backed `reconcile close` closes the call.
-# bin/fm-watch.sh asks it when an ordinary
-# crew task reaches a due stale alarm - its open backlog hold need not appear in
-# the task's last status line - and on a 0 bounds repeated alarms from new pane
-# hashes for the decision.
+# bin/fm-watch.sh asks it (without `--identity`) when an ordinary
+# crew task reaches a due stale or wedge alarm - its open backlog hold need not
+# appear in the task's last status line - and on a 0 suppresses every such
+# alarm for as long as the call stays open, with no periodic re-surface;
+# releasing the call falls through to ordinary supervision on the next check.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
