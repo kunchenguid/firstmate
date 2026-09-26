@@ -250,6 +250,29 @@ fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
   return 1
 }
 
+# Fork-free record pre-read for the per-poll hot path: 0 iff a resolved
+# record still owes its escalation-close work. One bash pass over the record
+# with no forks, no library source, and no lock; the locked caller re-verifies
+# everything it acts on. A resolved record that never escalated, or whose
+# escalation close already converged, owes nothing, so the tick can skip the
+# per-record source-and-lock entirely. Last key occurrence wins, matching
+# fm_pending_reply_get's tail -1.
+fm_pending_reply_close_needed() {  # <record-path>
+  local rec=$1 line phase_val='' esc_val='' closed_val=''
+  [ -f "$rec" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      phase=*) phase_val=${line#phase=} ;;
+      escalated_epoch=*) esc_val=${line#escalated_epoch=} ;;
+      escalation_closed_epoch=*) closed_val=${line#escalation_closed_epoch=} ;;
+    esac
+  done < "$rec"
+  [ "$phase_val" = resolved ] || return 1
+  [ -n "$esc_val" ] || return 1
+  [ -z "$closed_val" ] || return 1
+  return 0
+}
+
 # Rewrite one key in a pending-reply record atomically. Other keys preserved.
 fm_pending_reply_set() {  # <record-path> <key> <value>
   local rec=$1 key=$2 value=$3 dir base tmp line
@@ -1131,6 +1154,10 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 lock rc=0
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
+  # Cheap pre-read before the library source and the lock: a resolved record
+  # that owes no close work is a per-poll no-op, so the tick never pays the
+  # source-and-lock for it. The locked body re-verifies under the lock.
+  fm_pending_reply_close_needed "$(fm_pending_reply_path "$state" "$corr")" || return 0
   lock="$state/.pending-reply-$corr.lock"
   # shellcheck source=bin/fm-wake-lib.sh
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
@@ -1436,23 +1463,41 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # state, and optional secondmate-home wrong-home path checks.
 fm_pending_reply_tick() {  # <state-dir>
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
+  local fm_pending_reply_line
   local observation observation_task found i
   local -a observation_tasks=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
     [ -f "$rec" ] || continue
-    case "$(basename "$rec")" in
+    case "${rec##*/}" in
       .*) continue ;;
     esac
-    corr=$(fm_pending_reply_get "$rec" corr_id)
-    [ -n "$corr" ] || corr=$(basename "$rec")
-    task_id=$(fm_pending_reply_get "$rec" task_id)
-    phase=$(fm_pending_reply_get "$rec" phase)
+    # Fork-free routing prologue: one bash pass per record for the three keys
+    # the loop routes on. Under load a single fork can cost about a second, so
+    # the per-poll scan of a large resolved pile must not fork per record or it
+    # can starve the watcher beacon. Non-resolved records keep the full
+    # machinery below; last key occurrence wins, matching
+    # fm_pending_reply_get's tail -1.
+    corr=''
+    task_id=''
+    phase=''
+    while IFS= read -r fm_pending_reply_line || [ -n "$fm_pending_reply_line" ]; do
+      case "$fm_pending_reply_line" in
+        corr_id=*) corr=${fm_pending_reply_line#corr_id=} ;;
+        task_id=*) task_id=${fm_pending_reply_line#task_id=} ;;
+        phase=*) phase=${fm_pending_reply_line#phase=} ;;
+      esac
+    done < "$rec"
+    [ -n "$corr" ] || corr=${rec##*/}
     if [ "$phase" = resolved ]; then
       # Cheap no-op unless an escalation for this record is still open; this is
       # the retry that makes the close converge after a transient write failure.
-      fm_pending_reply_close_escalation "$state" "$corr" || true
+      # The fork-free pre-read keeps a pile of already-closed resolved records
+      # from paying a per-record library source and lock on every poll.
+      if fm_pending_reply_close_needed "$rec"; then
+        fm_pending_reply_close_escalation "$state" "$corr" || true
+      fi
       continue
     fi
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true

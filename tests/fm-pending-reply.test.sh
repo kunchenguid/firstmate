@@ -1600,6 +1600,76 @@ test_escalated_undelivered_correlation_stays_retryable() {
   pass "an escalated correlation stays retryable only while undelivered"
 }
 
+test_tick_never_locks_or_sources_for_inert_resolved_pile() {
+  (
+    local home state corr rec dir_before i pile_id
+    home=$(setup_parent resolved-pile)
+    state="$home/state"
+    # This fixture clock is intentionally scoped to the isolated subshell.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=10500
+    # A pile of resolved records in both inert shapes: never escalated, and
+    # escalated but already closed. The per-poll scan must class each one with
+    # the fork-free pre-read alone - no per-record library source, no lock.
+    for i in 1 2 3; do
+      pile_id="pile$i"
+      corr=$(fm_pending_reply_create "$home" "$state" "$pile_id" "resolved pile $i")
+      rec=$(fm_pending_reply_path "$state" "$corr")
+      fm_pending_reply_set "$rec" phase resolved
+      if [ "$i" = 3 ]; then
+        fm_pending_reply_set "$rec" escalated_epoch 10400
+        fm_pending_reply_set "$rec" escalation_closed_epoch 10450
+      fi
+    done
+    dir_before=$(cat "$state"/pending-replies/*)
+    # close_escalation re-sources fm-wake-lib.sh before locking, which replaces
+    # this spy with the real lock. The spy is still installed after the tick
+    # only if every inert resolved record short-circuited before that path.
+    fm_lock_acquire_wait() { : > "$home/lock-spy-hit"; return 1; }
+    fm_pending_reply_tick "$state" || fail "tick over an inert resolved pile failed"
+    [ ! -e "$home/lock-spy-hit" ] || fail "tick locked an inert resolved record"
+    fm_lock_acquire_wait "$state/.probe.lock" 0 || true
+    [ -e "$home/lock-spy-hit" ] \
+      || fail "tick re-sourced the lock library for an inert resolved record"
+    [ "$(cat "$state"/pending-replies/*)" = "$dir_before" ] \
+      || fail "tick over an inert resolved pile rewrote a record"
+  ) || fail "inert resolved pile lock regression failed"
+  pass "tick scans an inert resolved pile without locking or re-sourcing"
+}
+
+test_tick_converges_escalation_close_through_resolved_pile() {
+  (
+    local home state corr open_rec target i pile_id rec
+    home=$(setup_parent resolved-pile-converge)
+    state="$home/state"
+    # This fixture clock is intentionally scoped to the isolated subshell.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=10600
+    # The inert majority: resolved and never escalated.
+    for i in 1 2 3 4 5; do
+      pile_id="pile$i"
+      corr=$(fm_pending_reply_create "$home" "$state" "$pile_id" "resolved pile $i")
+      rec=$(fm_pending_reply_path "$state" "$corr")
+      fm_pending_reply_set "$rec" phase resolved
+    done
+    # One resolved record whose escalation close did not converge (a transient
+    # write failure left it open). The tick must still close it through the pile.
+    corr=$(fm_pending_reply_create "$home" "$state" hibit "converge close")
+    open_rec=$(fm_pending_reply_path "$state" "$corr")
+    fm_pending_reply_set "$open_rec" phase resolved
+    fm_pending_reply_set "$open_rec" escalated_epoch 10500
+    target="$state/hibit.status"
+    printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=hibit pending-reply-id=%s request=converge close\n' "$corr" "$corr" > "$target"
+    fm_pending_reply_set "$open_rec" parent_status "$target"
+    fm_pending_reply_tick "$state" || fail "tick over the mixed pile failed"
+    [ -n "$(fm_pending_reply_get "$open_rec" escalation_closed_epoch)" ] \
+      || fail "tick did not converge the open escalation close through the pile"
+    grep -Fq "resolved [key=pending-reply-$corr]" "$target" \
+      || fail "converged close did not append its resolution line"
+  ) || fail "resolved pile close-convergence regression failed"
+  pass "tick converges one open escalation close through a resolved pile"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -1641,5 +1711,8 @@ test_mechanical_helper_writes_parent_channel
 test_remote_parent_replies_is_not_wrong_home
 test_local_parent_replies_is_wrong_home_evidence
 test_escalated_undelivered_correlation_stays_retryable
+test_tick_never_locks_or_sources_for_inert_resolved_pile
+test_tick_converges_escalation_close_through_resolved_pile
+
 
 printf 'ok - all pending-reply tests passed\n'
