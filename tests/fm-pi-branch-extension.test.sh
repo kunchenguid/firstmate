@@ -746,23 +746,33 @@ async function fire(event, payload, ctx) {
   if (eventCtx?.sessionManager) activeMainSession = eventCtx.sessionManager;
   for (const handler of piHandlers.get(event) ?? []) await handler(payload, eventCtx);
 }
-function makeOffer(message, projects = [approvedProject], heartbeat = false, eligible = projects.length > 0 || heartbeat) {
+let nextOfferToken = 0;
+function makeOffer(message, projects = [approvedProject], heartbeat = false, eligible = projects.length > 0 || heartbeat, seq = 1) {
   const offer = {
+    token: `test-${process.pid}-${++nextOfferToken}`,
     message,
     projects,
     heartbeat,
     eligible,
+    eligibleSeqs: eligible ? [String(seq)] : [],
+    eligibleTasks: eligible && !heartbeat ? ["branch-driver"] : [],
+    taskBySeq: eligible && !heartbeat ? { [String(seq)]: "branch-driver" } : {},
+    declineReason: "no-listener",
     accepted: false,
     settlement: Promise.resolve(),
     accept(settlement = Promise.resolve()) {
       offer.accepted = true;
+      offer.declineReason = "";
       offer.settlement = settlement;
+    },
+    decline(reason) {
+      if (!offer.accepted) offer.declineReason = reason;
     },
   };
   return offer;
 }
 function dispatch(message, projects, heartbeat, eligible, seq = 1, append = false) {
-  const offer = makeOffer(message, projects, heartbeat, eligible);
+  const offer = makeOffer(message, projects, heartbeat, eligible, seq);
   if (offer.eligible) {
     const row = offer.heartbeat
       ? `1\t${seq}\theartbeat\theartbeat\theartbeat\n`
@@ -2301,6 +2311,7 @@ if (!(firstFailure instanceof Error) ||
     !firstFailure.message.includes("429: Monthly usage limit reached")) {
   throw new Error(`provider-error settlement lost the settled error turn: ${String(firstFailure)}`);
 }
+
 if (mainUserMessages.length !== 0) throw new Error("branch bypassed watcher-owned fallback delivery");
 if (existsSync(`${home}/state/.branch-eligible-rows`)) {
   throw new Error("provider-error fallback left the claimed row grant active");
@@ -2404,6 +2415,99 @@ EOF
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "provider errors must latch, cool down, re-probe once, back off, and recover through a durable report: $out"
   pass "provider-error latches cool down, re-probe once with backoff, and recover through a durable report"
+}
+
+test_transient_reconcile_failure_recovers_without_reset_and_persistent_failures_back_off() {
+  local repo home fakebin out status real_bash
+  repo="$TMP_ROOT/reconcile-recovery-root"
+  home="$TMP_ROOT/reconcile-recovery-home"
+  fakebin="$home/fakebin"
+  real_bash=$(command -v bash)
+  mkdir -p "$home/state" "$home/config" "$fakebin"
+  install_pi_branch_extension_fixture "$repo"
+  cat > "$fakebin/bash" <<'SH'
+#!/bin/sh
+if [ "$1" = "$FM_TEST_OUTCOME_SCRIPT" ] && [ "$2" = unread ]; then
+  remaining=$(cat "$FM_TEST_FAIL_COUNT" 2>/dev/null || printf '0')
+  if [ "$remaining" -gt 0 ]; then
+    printf '%s\n' "$((remaining - 1))" > "$FM_TEST_FAIL_COUNT"
+    echo "injected unread failure" >&2
+    exit 9
+  fi
+fi
+exec "$FM_TEST_REAL_BASH" "$@"
+SH
+  chmod +x "$fakebin/bash"
+  PATH="$fakebin:$PATH" PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TEST_REAL_BASH="$real_bash" FM_TEST_OUTCOME_SCRIPT="$ROOT/bin/fm-branch-outcome.sh" \
+    FM_TEST_FAIL_COUNT="$home/state/unread-fail-count" FM_BRANCH_RECONCILE_RETRY_BASE_MS=250 \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, defaultSessionCtx }; })()`);
+const { dispatch, fire, home, defaultSessionCtx } = globalThis.__t;
+import { readFileSync, writeFileSync } from "node:fs";
+
+let now = 1_000_000;
+Date.now = () => now;
+await fire("session_start", {}, defaultSessionCtx);
+let reports = 0;
+globalThis.__fmOnBranchPrompt = async ({ session }) => {
+  const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+  const result = await report.execute(
+    `reconcile-recovery-${++reports}`,
+    { task: "branch-driver", verdict: "routine", summary: `reconcile recovery ${reports}` },
+    undefined,
+    undefined,
+    {},
+  );
+  if (result.isError) throw new Error(`recovery report failed: ${JSON.stringify(result)}`);
+  session.messages.push({ role: "assistant", content: [], stopReason: "stop" });
+};
+
+writeFileSync(process.env.FM_TEST_FAIL_COUNT, "1\n");
+await fire("turn_end", {}, defaultSessionCtx);
+const recovered = dispatch("signal: recovered after one unread failure");
+if (!recovered.accepted) throw new Error(`one-shot reconcile failure did not admit a recovery offer: ${recovered.declineReason}`);
+await recovered.settlement;
+if (reports !== 1 || (globalThis.__fmPrompts ?? []).length !== 1) {
+  throw new Error(`one-shot recovery did not process exactly once: reports=${reports} prompts=${globalThis.__fmPrompts?.length}`);
+}
+
+writeFileSync(process.env.FM_TEST_FAIL_COUNT, "2\n");
+await fire("turn_end", {}, defaultSessionCtx);
+const failedProbe = dispatch("signal: repeated reconcile failure");
+if (!failedProbe.accepted) throw new Error("the first retry boundary was not admitted");
+const failure = await failedProbe.settlement.then(() => null, (error) => error);
+if (!(failure instanceof Error) || !failure.message.includes("reconcile unread supervision outcomes")) {
+  throw new Error(`persistent reconcile failure was not surfaced: ${String(failure)}`);
+}
+const duringBackoff = dispatch("signal: inside reconcile backoff");
+if (duringBackoff.accepted || duringBackoff.declineReason !== "reconcile-unhealthy") {
+  throw new Error(`persistent reconcile failure did not back off: ${JSON.stringify(duringBackoff)}`);
+}
+now += 250;
+writeFileSync(process.env.FM_TEST_FAIL_COUNT, "0\n");
+const afterBackoff = dispatch("signal: recovered after reconcile backoff");
+if (!afterBackoff.accepted) throw new Error(`reconcile recovery probe was not admitted: ${afterBackoff.declineReason}`);
+await afterBackoff.settlement;
+if (reports !== 2 || (globalThis.__fmPrompts ?? []).length !== 2) {
+  throw new Error(`reconcile recovery replayed or lost work: reports=${reports} prompts=${globalThis.__fmPrompts?.length}`);
+}
+
+const trace = readFileSync(`${home}/state/.supervision-routing.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+if (!trace.some((row) => row.stage === "reconcile" && row.reason === "failed") ||
+  !trace.some((row) => row.stage === "settlement" && row.reason === "reported-and-released")) {
+  throw new Error(`routing trace did not explain failure and recovery: ${JSON.stringify(trace)}`);
+}
+if (JSON.stringify(trace).includes("reconcile recovery") || JSON.stringify(trace).includes("injected unread failure")) {
+  throw new Error(`routing trace leaked report or subprocess text: ${JSON.stringify(trace)}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "transient reconcile health must recover while persistent failures back off: $out"
+  pass "one-shot reconcile failure recovers on an ordinary offer, persistent failures back off, and trace data stays bounded and redacted"
 }
 
 test_selection_change_does_not_corrupt_inflight_provider_state() {
@@ -2523,6 +2627,84 @@ EOF
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "a main-owned grant result must reject to watcher delivery: $out"
   pass "a stale main claim returns the durable wake to watcher delivery"
+}
+
+test_branch_admission_rechecks_retirement_and_endpoint_reuse() {
+  local repo home out status
+  repo="$TMP_ROOT/admission-identity-root"
+  home="$TMP_ROOT/admission-identity-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { bus, fire, home, realRoot }; })()`);
+const { bus, fire, home } = globalThis.__t;
+import { unlinkSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const lib = await import(pathToFileURL(`${dirname(process.env.PLUGIN)}/lib/fm-branch-dispatch.ts`).href);
+const state = `${home}/state`;
+await fire("session_start", {});
+
+function classifiedOffer(message) {
+  const scope = lib.scopeForUnreadWake(state, false);
+  const disposition = lib.dispositionForWakeTrigger(message, scope);
+  return lib.createBranchDispatchOffer(
+    message,
+    scope.projects,
+    false,
+    disposition.eligible,
+    [],
+    `identity-${message.includes("reuse") ? "reuse" : "retire"}`,
+    scope.eligibleSeqs,
+    scope.eligibleTasks,
+    scope.taskBySeq,
+  );
+}
+
+// The admitted row remains durable but its metadata retires before the
+// serialized pre-grant recheck. That is a fallback, not an already-drained
+// no-op, and the branch must never prompt or grant it.
+writeFileSync(`${state}/.wake-queue`, "1\t41\tstale\tfm-branch-driver\tstale: retire after admission\n");
+const retired = classifiedOffer("stale: fm-branch-driver");
+bus.emit("fm-branch-supervision:dispatch", retired);
+if (!retired.accepted) throw new Error(`retirement probe was not admitted: ${retired.declineReason}`);
+unlinkSync(`${state}/branch-driver.meta`);
+const retiredFailure = await retired.settlement.then(() => null, (error) => error);
+if (!(retiredFailure instanceof Error) || !retiredFailure.message.includes("admitted row retired")) {
+  throw new Error(`retirement after admission did not fall back: ${String(retiredFailure)}`);
+}
+if ((globalThis.__fmPrompts ?? []).length !== 0) throw new Error("retired admitted row reached a branch prompt");
+
+// Recreate the original mapping, classify, then transfer the same endpoint to
+// a different task before the pre-grant read. Matching seq alone is not enough:
+// the admitted task identity must still match exactly.
+writeFileSync(`${state}/branch-driver.meta`, `project=${home}/projects/approved\nwindow=fm-branch-driver\n`);
+writeFileSync(`${state}/.wake-queue`, "1\t42\tstale\tfm-branch-driver\tstale: endpoint reuse\n");
+const reused = classifiedOffer("stale: fm-branch-driver reuse");
+if (!reused.eligible || reused.taskBySeq["42"] !== "branch-driver") {
+  throw new Error(`endpoint reuse fixture did not capture original identity: ${JSON.stringify(reused)}`);
+}
+bus.emit("fm-branch-supervision:dispatch", reused);
+if (!reused.accepted) throw new Error(`endpoint-reuse probe was not admitted: ${reused.declineReason}`);
+writeFileSync(`${state}/branch-driver.meta`, `project=${home}/projects/approved\nwindow=fm-retired-window\n`);
+writeFileSync(`${state}/replacement-task.meta`, `project=${home}/projects/approved\nwindow=fm-branch-driver\n`);
+const reuseFailure = await reused.settlement.then(() => null, (error) => error);
+if (!(reuseFailure instanceof Error) || !reuseFailure.message.includes("task generation changed")) {
+  throw new Error(`endpoint reuse did not fail the identity fence: ${String(reuseFailure)}`);
+}
+if ((globalThis.__fmPrompts ?? []).length !== 0) throw new Error("reused endpoint reached a branch prompt");
+if (await import("node:fs").then(({ existsSync }) => existsSync(`${state}/.branch-eligible-rows`))) {
+  throw new Error("failed identity recheck left a branch grant behind");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "retirement and endpoint reuse after admission must fail the exact identity fence: $out"
+  pass "branch admission rejects task retirement and endpoint reuse before granting work"
 }
 
 test_branch_predrain_recheck_noops_already_drained_wake() {
@@ -4745,9 +4927,8 @@ if (heartbeatMixed.eligibleSeqs.slice().sort().join(",") !== "2,3") {
   throw new Error(`a heartbeat claim must cover every branch-ownable row and no check row: ${JSON.stringify(heartbeatMixed)}`);
 }
 
-// All-or-nothing is unchanged in what it actually guarantees: a heartbeat
-// review takes every branch-ownable row or none of them, so a row this scan
-// cannot resolve still defers the whole review to main.
+  // A retired task's structurally valid row is main-only evidence. It stays
+  // durable while the heartbeat takes the complete safe subset.
 writeFileSync(
   `${state}/.wake-queue`,
   [
@@ -4756,9 +4937,31 @@ writeFileSync(
   ].join("\n"),
 );
 const heartbeatUnresolvable = scopeForUnreadWake(state, true);
-if (heartbeatUnresolvable.eligible || !heartbeatUnresolvable.corrupted) {
-  throw new Error(`an unresolvable row must still defer a heartbeat review: ${JSON.stringify(heartbeatUnresolvable)}`);
+  if (!heartbeatUnresolvable.eligible || heartbeatUnresolvable.corrupted ||
+    heartbeatUnresolvable.eligibleSeqs.join(",") !== "1" ||
+    heartbeatUnresolvable.unresolvedRows.map((row) => row.seq).join(",") !== "2") {
+    throw new Error(`an unresolved row polluted the heartbeat safe subset: ${JSON.stringify(heartbeatUnresolvable)}`);
 }
+
+  // The retained two-row counterexample: the old task stays main-only while
+  // the unrelated live task remains branch-eligible.
+  writeFileSync(
+    `${state}/.wake-queue`,
+    [
+      "1\t21903\tsignal\tretired-task.turn-ended\tsignal: retired-task.turn-ended",
+      "1\t21914\tstale\tfm-window\tstale: fm-window",
+    ].join("\n"),
+  );
+  const retiredAndLive = scopeForUnreadWake(state, false);
+  if (retiredAndLive.corrupted || retiredAndLive.eligibleSeqs.join(",") !== "21914" ||
+    retiredAndLive.unresolvedRows.map((row) => row.seq).join(",") !== "21903") {
+    throw new Error(`the retained old-task/live-task counterexample did not isolate the old row: ${JSON.stringify(retiredAndLive)}`);
+  }
+  writeFileSync(`${state}/.wake-queue`, "1\t21903\tsignal\tretired-task.turn-ended\tsignal: retired-task.turn-ended");
+  const retiredOnly = scopeForUnreadWake(state, false);
+  if (retiredOnly.eligible || retiredOnly.corrupted || retiredOnly.unresolvedRows.length !== 1) {
+    throw new Error(`an old task alone was not preserved as main-only evidence: ${JSON.stringify(retiredOnly)}`);
+  }
 writeFileSync(
   `${state}/.wake-queue`,
   [
@@ -5749,9 +5952,11 @@ test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligi
 test_branch_predrain_needs_decision_keeps_routine_row_branch_eligible
 test_settled_branch_prompt_releases_unacknowledged_grant
 test_busy_branch_declines_an_unowned_ida_result
+test_transient_reconcile_failure_recovers_without_reset_and_persistent_failures_back_off
 test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldown
 test_selection_change_does_not_corrupt_inflight_provider_state
 test_main_owned_grant_result_falls_back_to_main
+test_branch_admission_rechecks_retirement_and_endpoint_reuse
 test_branch_predrain_recheck_noops_already_drained_wake
 test_branch_mirror_filters_order_and_cursor
 test_branch_mirror_reanchors_for_the_new_session_branch_conversation

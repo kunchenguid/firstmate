@@ -101,7 +101,9 @@ import {
 } from "./lib/fm-calm-visibility.ts";
 import {
   activateEligibleRowsOwner,
+  appendBranchRoutingTrace,
   deactivateEligibleRowsOwner,
+  dispositionForWakeTrigger,
   FM_BRANCH_DISPATCH_EVENT,
   readLiveEligibleRows,
   releaseEligibleRowsSnapshot,
@@ -180,6 +182,8 @@ const PROCESSING_TRIGGERED_ATTEMPTS = 2;
 const PROVIDER_ERROR_LATCH_THRESHOLD = 2;
 const PROVIDER_REPROBE_BASE_MS = 5 * 60 * 1000;
 const PROVIDER_REPROBE_MAX_MS = 60 * 60 * 1000;
+const RECONCILE_RETRY_BASE_MS = Math.max(1, Number(process.env.FM_BRANCH_RECONCILE_RETRY_BASE_MS) || 250);
+const RECONCILE_RETRY_MAX_MS = Math.max(RECONCILE_RETRY_BASE_MS, Number(process.env.FM_BRANCH_RECONCILE_RETRY_MAX_MS) || 4000);
 const PROCESSING_INSTRUCTION =
   "This is a supervision processing request delivered automatically by the supervision branch. " +
   "It was not typed by the captain. " +
@@ -205,6 +209,7 @@ type ProviderRecovery = {
   retryNotBefore: number;
   probeInFlight: boolean;
 };
+type ReconcileRecovery = ProviderRecovery & { failures: number; generation: number; selectionRevision: number };
 
 const scriptEnv = {
   ...process.env,
@@ -658,8 +663,10 @@ export default function (pi: ExtensionAPI) {
   };
   let branch: BranchSession | null = null;
   let branchBroken = "";
+  let branchBrokenKind: "none" | "construction" | "reconcile" | "provider" = "none";
   let consecutiveProviderErrors = 0;
   let providerRecovery: ProviderRecovery | null = null;
+  let reconcileRecovery: ReconcileRecovery | null = null;
   // A revision advances only after fm_branch_report has appended successfully,
   // so a prompt can prove that it created a durable outcome after claiming its
   // wake rows without relying on provider text or incidental session shape.
@@ -671,7 +678,7 @@ export default function (pi: ExtensionAPI) {
   // `fleet` included, so a report typed from memory about a task the wake
   // never named is never stored or delivered. Null outside a wake prompt and
   // during a heartbeat review, which is not scoped by task.
-  let wakeTaskScope: { rows: string[]; tasks: Set<string> } | null = null;
+  let wakeTaskScope: { rows: string[]; tasks: Set<string>; token: string } | null = null;
   let mainStreaming = false;
   let shuttingDown = false;
   let resetInProgress = false;
@@ -795,6 +802,8 @@ export default function (pi: ExtensionAPI) {
       ? PROVIDER_REPROBE_BASE_MS
       : Math.min(PROVIDER_REPROBE_MAX_MS, previousCooldownMs * 2);
     branchBroken = detail;
+    branchBrokenKind = "provider";
+    reconcileRecovery = null;
     providerRecovery = {
       cooldownMs,
       retryNotBefore: Date.now() + cooldownMs,
@@ -810,8 +819,53 @@ export default function (pi: ExtensionAPI) {
     consecutiveProviderErrors = 0;
     if (!providerRecovery) return;
     branchBroken = "";
+    branchBrokenKind = "none";
     providerRecovery = null;
     deliverBranchHealthNote("Supervision branch recovered after a successful cooldown probe.");
+  }
+
+  function recordReconcileFailure(expectedGeneration: number, expectedSelectionRevision: number): void {
+    if (expectedGeneration !== generation || expectedSelectionRevision !== branchSelectionRevision || shuttingDown) return;
+    if (branchBrokenKind === "provider" || branchBrokenKind === "construction") return;
+    const failures = reconcileRecovery?.generation === expectedGeneration &&
+      reconcileRecovery.selectionRevision === expectedSelectionRevision
+      ? reconcileRecovery.failures + 1
+      : 1;
+    // The next ordinary lifecycle boundary is the first recovery attempt. Only
+    // repeated failures back off, so a one-shot read error does not require a
+    // timer or a primary reset before normal admission resumes.
+    const cooldownMs = failures === 1
+      ? 0
+      : Math.min(RECONCILE_RETRY_MAX_MS, RECONCILE_RETRY_BASE_MS * (2 ** Math.min(failures - 2, 8)));
+    branchBroken = "could not reconcile unread supervision outcomes into main";
+    branchBrokenKind = "reconcile";
+    reconcileRecovery = {
+      failures,
+      cooldownMs,
+      retryNotBefore: Date.now() + cooldownMs,
+      probeInFlight: false,
+      generation: expectedGeneration,
+      selectionRevision: expectedSelectionRevision,
+    };
+  }
+
+  function recordReconcileSuccess(expectedGeneration: number, expectedSelectionRevision: number): void {
+    if (expectedGeneration !== generation || expectedSelectionRevision !== branchSelectionRevision) return;
+    if (branchBrokenKind !== "reconcile") return;
+    branchBroken = "";
+    branchBrokenKind = "none";
+    reconcileRecovery = null;
+  }
+
+  async function reconcileWithHealth(
+    expectedGeneration: number,
+    present = true,
+    expectedSelectionRevision = branchSelectionRevision,
+  ): Promise<boolean> {
+    const ok = await reconcileUnreadOutcomes(expectedGeneration, present);
+    if (ok) recordReconcileSuccess(expectedGeneration, expectedSelectionRevision);
+    else recordReconcileFailure(expectedGeneration, expectedSelectionRevision);
+    return ok;
   }
 
   function finishProviderProbe(probeGeneration: number, probeSelectionRevision: number): void {
@@ -1306,12 +1360,23 @@ export default function (pi: ExtensionAPI) {
           }
           durableReportRevision += 1;
           const seq = Number(appended.stdout);
-          if (!Number.isSafeInteger(seq) || seq < 1 || !(await reconcileUnreadOutcomes(toolGeneration))) {
+          if (!Number.isSafeInteger(seq) || seq < 1 || !(await reconcileWithHealth(toolGeneration))) {
             return {
               content: [{ type: "text", text: `recorded seq ${appended.stdout}, but visible delivery or cursor advancement failed` }],
               details: undefined,
               isError: true,
             };
+          }
+          if (wakeTaskScope) {
+            appendBranchRoutingTrace(state, {
+              token: wakeTaskScope.token,
+              actor: "branch",
+              stage: "report",
+              reason: verdict,
+              seqs: [String(seq)],
+              generation: toolGeneration,
+              selectionRevision: branchSelectionRevision,
+            });
           }
           return {
             content: [{ type: "text", text: `recorded seq ${appended.stdout} and delivered [${verdict}] into main` }],
@@ -1558,6 +1623,8 @@ ${context.command}
         if (buildRevision !== branchSelectionRevision) continue;
         if (expectedGeneration === generation && !shuttingDown) {
           branchBroken = error instanceof Error ? error.message : String(error);
+          branchBrokenKind = "construction";
+          reconcileRecovery = null;
         }
         throw error;
       }
@@ -1583,11 +1650,27 @@ ${context.command}
     }
   }
 
-  function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false): Promise<void> {
+  function enqueueWake(offer: BranchDispatchOffer, acceptedGeneration: number, recoveryProbe = false): Promise<void> {
+    const message = offer.message;
     const acceptedSelectionRevision = branchSelectionRevision;
+    const admissionSeqs = Array.isArray(offer.eligibleSeqs) ? [...offer.eligibleSeqs] : [];
+    const admissionTaskBySeq = offer.taskBySeq && typeof offer.taskBySeq === "object" ? offer.taskBySeq : {};
+    const trace = (stage: string, reason: string, seqs: readonly string[] = admissionSeqs): void => {
+      appendBranchRoutingTrace(state, {
+        token: offer.token,
+        actor: "branch",
+        stage,
+        reason,
+        trigger: message.split(":", 1)[0],
+        seqs,
+        generation: acceptedGeneration,
+        selectionRevision: acceptedSelectionRevision,
+      });
+    };
     const delivery = branchChain
       .then(async () => {
-        if (shuttingDown || acceptedGeneration !== generation) {
+        if (shuttingDown || acceptedGeneration !== generation || acceptedSelectionRevision !== branchSelectionRevision) {
+          trace("recheck", "generation-or-selection-changed");
           throw new Error("supervision session was replaced before handling the accepted wake");
         }
         // The ownership and reconcile checks the dispatch handler could not
@@ -1597,18 +1680,18 @@ ${context.command}
         if (!(await enqueueDelivery(() => actingAsOwner(acceptedGeneration)))) {
           throw new Error("supervision session no longer owns the fleet lock");
         }
-        if (!(await enqueueDelivery(() => reconcileUnreadOutcomes(acceptedGeneration)))) {
-          if (acceptedGeneration === generation) {
-            branchBroken = "could not reconcile unread supervision outcomes into main";
-          }
+        if (!(await enqueueDelivery(() => reconcileWithHealth(acceptedGeneration, true, acceptedSelectionRevision)))) {
+          trace("reconcile", "failed");
           throw new Error("could not reconcile unread supervision outcomes into main");
         }
+        trace("reconcile", "ok");
         const branchForWake = await ensureBranch(acceptedGeneration, recoveryProbe);
         const { session, sessionManager } = branchForWake;
         await flushMirror(session, acceptedGeneration);
         if (!(await actingAsOwner(acceptedGeneration))) throw new Error("supervision session no longer owns the fleet lock");
         const heartbeat = /^heartbeat($|:)/.test(message);
         const scope = scopeForUnreadWake(state, heartbeat);
+        const disposition = dispositionForWakeTrigger(message, scope);
         // A newly-arrived main-owned (check-kind) row never bounces this
         // whole recheck back to main - scopeForUnreadWake excludes it from
         // eligibleSeqs rather than vetoing the scan, in a heartbeat review as
@@ -1620,23 +1703,45 @@ ${context.command}
         // scopeForUnreadWake itself marks corrupted (the queue or its
         // metadata could not be read safely, or an unresolvable task-local
         // row) still falls back to main.
-        if (scope.status === "empty" || (!scope.corrupted && scope.eligibleSeqs.length === 0)) return;
+        if (scope.status === "empty") return;
         if (scope.corrupted) {
+          trace("recheck", "corrupt-queue");
           throw new Error("the unread wake queue could not be read safely");
+        }
+        const admittedSeqs = admissionSeqs.length > 0 ? admissionSeqs : [...scope.eligibleSeqs];
+        // An offer carrying a real admission snapshot cannot turn into the
+        // legacy already-drained quiet no-op merely because its row retired or
+        // became unresolved while this asynchronous turn waited. Return that
+        // still-durable row to the watcher; only a genuinely empty queue means
+        // another actor already consumed it.
+        if (admissionSeqs.length > 0 && admittedSeqs.some((seq) => !scope.eligibleSeqs.includes(seq))) {
+          trace("recheck", "admitted-row-retired", admittedSeqs);
+          throw new Error("wake scope changed before branch grant: admitted row retired");
+        }
+        if (scope.eligibleSeqs.length === 0) return;
+        if (!disposition.eligible) {
+          trace("recheck", disposition.reason);
+          throw new Error(`wake scope changed before branch grant: ${disposition.reason}`);
+        }
+        if (admissionSeqs.length > 0 && admittedSeqs.some((seq) => admissionTaskBySeq[seq] !== scope.taskBySeq[seq])) {
+          trace("recheck", "task-generation-changed", admittedSeqs);
+          throw new Error("wake scope changed before branch grant: task generation changed");
         }
         const grant = await writeEligibleRowsSnapshot(
           state,
-          scope.eligibleSeqs,
+          admittedSeqs,
           wakeGrantScript,
           String(acceptedGeneration),
         );
         if (grant === "main-owned") throw new Error("the wake rows are already claimed by main");
         if (grant !== "published") throw new Error("could not record the branch's eligible row snapshot");
+        trace("grant", "published", admittedSeqs);
         // A row can still arrive between this re-check and the model starting
         // the drain; that residual is accepted by the confused-agent-grade boundary.
         const reportRevisionBeforePrompt = durableReportRevision;
         const entryOffset = sessionManager.getEntries().length;
-        wakeTaskScope = heartbeat ? null : { rows: [...scope.eligibleSeqs], tasks: new Set(scope.eligibleTasks) };
+        const admittedTasks = new Set(admittedSeqs.map((seq) => scope.taskBySeq[seq]).filter(Boolean));
+        wakeTaskScope = heartbeat ? null : { rows: admittedSeqs, tasks: admittedTasks, token: offer.token };
         try {
           await session.prompt(
             `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
@@ -1656,12 +1761,14 @@ ${context.command}
           throw new Error(detail);
         }
         if (durableReportRevision <= reportRevisionBeforePrompt) {
+          trace("prompt", "no-durable-report", admittedSeqs);
           throw new Error("supervision branch prompt settled but produced no durable outcome for its claimed wake rows");
         }
         recordDurableBranchReport(branchForWake.generation, branchForWake.selectionRevision);
         if (!(await releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration)))) {
           throw new Error("could not release the branch's settled wake-row grant");
         }
+        trace("settlement", "reported-and-released", admittedSeqs);
       })
       .catch(async (error: unknown) => {
         await releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration));
@@ -1682,8 +1789,10 @@ ${context.command}
   // Clearing the broken latch is what lets a corrected pin recover in place.
   function releaseBranchForSelectionChange(): void {
     branchBroken = "";
+    branchBrokenKind = "none";
     consecutiveProviderErrors = 0;
     providerRecovery = null;
+    reconcileRecovery = null;
     const stale = branch;
     branch = null;
     if (!stale) return;
@@ -1737,32 +1846,53 @@ ${context.command}
     // Check eligibility before the ownership read so an out-of-scope wake
     // gets neither branch routing nor branch-owned state/lease cleanup side
     // effects.
-    if (!offerEligible(offer)) return;
-    if (resetInProgress) return;
-    if (!generationOwnsLockSync(generation)) return; // cold start pre-lock, secondary session, or shutdown
-    if (afkActive()) return; // the away daemon owns supervision while afk
+    if (!offerEligible(offer)) return offer.decline?.("ineligible-trigger");
+    if (resetInProgress) return offer.decline?.("reset-in-progress");
+    if (!generationOwnsLockSync(generation)) return offer.decline?.("not-lock-owner");
+    if (afkActive()) return offer.decline?.("away-mode");
     const recoveryProbe = Boolean(
       branchBroken &&
       providerRecovery &&
       !providerRecovery.probeInFlight &&
       Date.now() >= providerRecovery.retryNotBefore
     );
-    if (branchBroken && !recoveryProbe) return; // main owns every wake inside the cooldown window
-    if (!collectCurrentMainDialog()) return;
+    const reconcileProbe = Boolean(
+      branchBrokenKind === "reconcile" &&
+      reconcileRecovery &&
+      reconcileRecovery.generation === generation &&
+      reconcileRecovery.selectionRevision === branchSelectionRevision &&
+      !reconcileRecovery.probeInFlight &&
+      Date.now() >= reconcileRecovery.retryNotBefore
+    );
+    if (branchBroken && !recoveryProbe && !reconcileProbe) return offer.decline?.(`${branchBrokenKind}-unhealthy`);
+    if (!collectCurrentMainDialog()) return offer.decline?.("mirror-collection-failed");
     const idaResultRows = Array.isArray(offer.idaResultRows)
       ? offer.idaResultRows.filter((row) => /^[0-9]+$/.test(row))
       : [];
     if (idaResultRows.length > 0 && unsettledWakeOffers > 0) {
       const ownedRows = readLiveEligibleRows(state);
-      if (!ownedRows || idaResultRows.some((row) => !ownedRows.includes(row))) return;
+      if (!ownedRows || idaResultRows.some((row) => !ownedRows.includes(row))) return offer.decline?.("ida-row-not-owned");
     }
     if (recoveryProbe && providerRecovery) providerRecovery.probeInFlight = true;
-    const settlement = enqueueWake(offer.message, generation, recoveryProbe);
+    if (reconcileProbe && reconcileRecovery) reconcileRecovery.probeInFlight = true;
+    const settlement = enqueueWake(offer, generation, recoveryProbe);
+    appendBranchRoutingTrace(state, {
+      token: offer.token,
+      actor: "branch",
+      stage: "admission",
+      reason: recoveryProbe ? "provider-probe" : reconcileProbe ? "reconcile-probe" : "accepted",
+      trigger: offer.message.split(":", 1)[0],
+      seqs: Array.isArray(offer.eligibleSeqs) ? offer.eligibleSeqs : [],
+      generation,
+      selectionRevision: branchSelectionRevision,
+    });
     unsettledWakeOffers += 1;
     void settlement.then(() => {
       unsettledWakeOffers = Math.max(0, unsettledWakeOffers - 1);
+      if (reconcileProbe && reconcileRecovery) reconcileRecovery.probeInFlight = false;
     }, () => {
       unsettledWakeOffers = Math.max(0, unsettledWakeOffers - 1);
+      if (reconcileProbe && reconcileRecovery) reconcileRecovery.probeInFlight = false;
     });
     offer.accept(settlement);
   });
@@ -1846,18 +1976,20 @@ ${context.command}
     rememberMainModel(ctx);
     currentMainSession = ctx.sessionManager;
     const turnGeneration = generation;
+    const turnSelectionRevision = branchSelectionRevision;
+    if (
+      branchBrokenKind === "reconcile" && reconcileRecovery &&
+      Date.now() < reconcileRecovery.retryNotBefore
+    ) return;
     const reconciled = await enqueueDelivery(async () => {
       if (!(await actingAsOwner(turnGeneration))) return "not-owner";
-      return (await reconcileUnreadOutcomes(turnGeneration, false)) ? "reconciled" : "failed";
+      return (await reconcileWithHealth(turnGeneration, false, turnSelectionRevision)) ? "reconciled" : "failed";
     });
     // A verdict about a generation that has since been replaced says nothing
     // about the new one, so it neither breaks the branch nor flushes a mirror.
     if (turnGeneration !== generation) return;
     if (reconciled === "not-owner") return;
-    if (reconciled === "failed") {
-      branchBroken = "could not reconcile unread supervision outcomes into main";
-      return;
-    }
+    if (reconciled === "failed") return;
     if (!collectCurrentMainDialog()) return;
     enqueueMirrorFlush();
   });
@@ -1885,8 +2017,10 @@ ${context.command}
     shuttingDown = false;
     resetInProgress = false;
     branchBroken = "";
+    branchBrokenKind = "none";
     consecutiveProviderErrors = 0;
     providerRecovery = null;
+    reconcileRecovery = null;
     loadedOutcomeSequences.clear();
     generation += 1;
     mirrorCollection.collectAnchor = null;
@@ -1895,13 +2029,11 @@ ${context.command}
     mirrorCollection.stagedFeishu.clear();
     mirrorCollection.reanchor = true;
     const startedGeneration = generation;
-    const failed = await enqueueDelivery(
+    await enqueueDelivery(
       async () =>
-        (await actingAsOwner(startedGeneration)) && !(await reconcileUnreadOutcomes(startedGeneration)),
+        (await actingAsOwner(startedGeneration)) &&
+        !(await reconcileWithHealth(startedGeneration, true, branchSelectionRevision)),
     );
-    if (failed && startedGeneration === generation) {
-      branchBroken = "could not reconcile unread supervision outcomes into main";
-    }
   });
 
   // A headless short task only announces durable rows; this existing owner
@@ -1909,7 +2041,7 @@ ${context.command}
   pi.events.on("firstmate:outcomes-ready", () => {
     const expected = generation;
     void enqueueDelivery(async () => {
-      if (await actingAsOwner(expected)) await reconcileUnreadOutcomes(expected);
+      if (await actingAsOwner(expected)) await reconcileWithHealth(expected);
     });
   });
 
@@ -2019,8 +2151,10 @@ ${context.command}
         activatedGeneration = -1;
         branchChain = Promise.resolve();
         branchBroken = "";
+        branchBrokenKind = "none";
         consecutiveProviderErrors = 0;
         providerRecovery = null;
+        reconcileRecovery = null;
         branchSessionGeneration = -1;
         branchSessionFile = "";
         ctx.ui.notify("Supervision branch reset; a fresh conversation will start on the next supervision wake.", "info");

@@ -1,4 +1,4 @@
-import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { runCommandAsync } from "./fm-async-exec.ts";
 
 // Shared wake-dispatch handshake between the Pi watcher extension (the
@@ -42,6 +42,8 @@ export interface UnreadWakeScope {
    * heartbeat, which is not scoped by task.
    */
   eligibleTasks: string[];
+  /** Exact resolved task identity for each eligible queue row. */
+  taskBySeq: Record<string, string>;
   /**
    * True only when this scan itself is untrustworthy: the queue or its
    * metadata could not be read, a line fails the structural tab-field check,
@@ -63,6 +65,8 @@ export interface UnreadWakeScope {
    * to main.
    */
   needsDecisionKeys: string[];
+  /** Structurally valid rows whose current task identity cannot be resolved. */
+  unresolvedRows: Array<{ seq: string; kind: "signal" | "stale"; key: string }>;
   /**
    * Exact check payloads whose captured iDA result identity was proved to
    * belong to this home's recorded remote-agent task. The watcher uses this
@@ -79,8 +83,10 @@ const EMPTY_SCOPE: UnreadWakeScope = {
   projects: [],
   eligibleSeqs: [],
   eligibleTasks: [],
+  taskBySeq: {},
   corrupted: false,
   needsDecisionKeys: [],
+  unresolvedRows: [],
   eligibleIdaResults: [],
   taskByWakeKey: {},
 };
@@ -90,8 +96,10 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
   projects: [],
   eligibleSeqs: [],
   eligibleTasks: [],
+  taskBySeq: {},
   corrupted: true,
   needsDecisionKeys: [],
+  unresolvedRows: [],
   eligibleIdaResults: [],
   taskByWakeKey: {},
 };
@@ -123,14 +131,12 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
 // no longer rides the heartbeat into main (docs/pi-supervision-branch.md
 // "Heartbeat routing").
 //
-// The heartbeat's all-or-nothing contract is unchanged in what it actually
-// guarantees: a heartbeat review takes EVERY branch-ownable unread row or none
-// of them. An unresolvable signal/stale row (unmapped project) still vetoes the
-// whole scan in both modes, because that is a data/metadata problem this
-// function cannot safely reason past, not an ordinary main-only event. A row
-// this repo's fm_wake_append could never have produced (an unknown kind, or a
-// line that fails the structural tab-field check) also still vetoes the whole
-// scan - that is queue corruption, not an everyday mixed queue.
+// A structurally valid signal/stale row whose task metadata has already been
+// retired is main-only evidence, not corruption of every unrelated row in the
+// scan. It remains durable and its own trigger stays on main. A row this repo's
+// fm_wake_append could never have produced (an unknown kind, or a line that
+// fails the structural tab-field check) still vetoes the whole scan - that is
+// queue corruption, not an everyday mixed queue.
 function statusLineVerb(line: string): string {
   const beforeColon = line.split(":", 1)[0].split("[", 1)[0].trim();
   const words = beforeColon.split(/\s+/);
@@ -382,7 +388,9 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
 
   const eligibleSeqs: string[] = [];
   const eligibleTasks = new Set<string>();
+  const taskBySeq = new Map<string, string>();
   const needsDecisionKeys: string[] = [];
+  const unresolvedRows: Array<{ seq: string; kind: "signal" | "stale"; key: string }> = [];
   const eligibleIdaResults: Array<{ trigger: string; row: string; task: string }> = [];
   const staleDecisionOwnership = new Map<string, boolean>();
   const resolveVerb = process.env.FM_CLASSIFY_RESOLVE_VERB || "resolved";
@@ -409,6 +417,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
       if (idaResult) {
         eligibleSeqs.push(seq);
         eligibleTasks.add(idaResult.task);
+        taskBySeq.set(seq, idaResult.task);
         eligibleIdaResults.push({ trigger: idaResult.trigger, row: seq, task: idaResult.task });
       }
       continue;
@@ -474,9 +483,13 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
       // ordinary main-only row.
       return UNSAFE_SCOPE;
     }
-    if (!project || !task) return UNSAFE_SCOPE;
+    if (!project || !task) {
+      unresolvedRows.push({ seq, kind, key });
+      continue;
+    }
     projects.add(project);
     eligibleTasks.add(task);
+    taskBySeq.set(seq, task);
     eligibleSeqs.push(seq);
   }
   const eligible = eligibleSeqs.length > 0;
@@ -493,11 +506,105 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     projects: [...projects],
     eligibleSeqs,
     eligibleTasks: [...eligibleTasks],
+    taskBySeq: Object.fromEntries(taskBySeq),
     corrupted: false,
     needsDecisionKeys,
+    unresolvedRows,
     eligibleIdaResults,
     taskByWakeKey: Object.fromEntries(taskByKey),
   };
+}
+
+export type WakeTriggerDisposition = {
+  eligible: boolean;
+  reason: "eligible" | "no-eligible-rows" | "check-main-only" | "decision-owned" | "unresolved-task" | "corrupt-queue";
+};
+
+function triggerKeys(message: string): string[] {
+  if (/^signal:/.test(message)) {
+    return message.slice("signal:".length).split(/\s+/).filter(Boolean).map((path) => path.split("/").pop() ?? path);
+  }
+  if (/^stale:/.test(message)) return [message.slice("stale:".length).trim().split(/\s+/, 1)[0]].filter(Boolean);
+  return [];
+}
+
+function taskIdentity(scope: UnreadWakeScope, key: string): string {
+  return scope.taskByWakeKey[key] ?? scope.taskByWakeKey[key.replace(/^fm-/, "")] ?? key;
+}
+
+/** Shared watcher/admission verdict for the exact actionable close. */
+export function dispositionForWakeTrigger(message: string, scope: UnreadWakeScope): WakeTriggerDisposition {
+  if (scope.corrupted) return { eligible: false, reason: "corrupt-queue" };
+  const keys = triggerKeys(message);
+  const unresolved = new Set(scope.unresolvedRows.map((row) => row.key));
+  if (keys.some((key) => unresolved.has(key) || unresolved.has(key.replace(/^fm-/, "")))) {
+    return { eligible: false, reason: "unresolved-task" };
+  }
+  const decisionTasks = new Set(scope.needsDecisionKeys.map((key) => taskIdentity(scope, key)));
+  if (keys.some((key) => decisionTasks.has(taskIdentity(scope, key)))) {
+    return { eligible: false, reason: "decision-owned" };
+  }
+  if (/^check:/.test(message)) {
+    const matched = scope.eligibleIdaResults.some((result) => result.trigger === message);
+    if (!matched) return { eligible: false, reason: "check-main-only" };
+  }
+  return scope.eligible
+    ? { eligible: true, reason: "eligible" }
+    : { eligible: false, reason: "no-eligible-rows" };
+}
+
+export const BRANCH_ROUTING_TRACE_FILE = ".supervision-routing.jsonl";
+let traceWriteId = 0;
+
+export type BranchRoutingTrace = {
+  token: string;
+  actor: "watcher" | "branch";
+  stage: string;
+  reason: string;
+  trigger?: string;
+  seqs?: readonly string[];
+  excluded?: ReadonlyArray<{ seq: string; reason: "decision-owned" | "unresolved-task" }>;
+  generation?: number | string;
+  selectionRevision?: number;
+  elapsedMs?: number;
+};
+
+/** Best-effort, bounded, privacy-safe diagnostics; never an ownership input. */
+export function appendBranchRoutingTrace(state: string, event: BranchRoutingTrace): void {
+  try {
+    mkdirSync(state, { recursive: true });
+    const path = `${state}/${BRANCH_ROUTING_TRACE_FILE}`;
+    let lines: string[] = [];
+    try {
+      lines = readFileSync(path, "utf8").split(/\r?\n/).filter(Boolean);
+    } catch {}
+    const safe = {
+      time: new Date().toISOString(),
+      token: /^[A-Za-z0-9._:-]{1,96}$/.test(event.token) ? event.token : "invalid",
+      actor: event.actor,
+      stage: event.stage.slice(0, 48),
+      reason: event.reason.slice(0, 80),
+      ...(event.trigger ? { trigger: event.trigger.slice(0, 24) } : {}),
+      ...(event.seqs ? { seqs: event.seqs.filter((seq) => /^[0-9]+$/.test(seq)).slice(0, 64) } : {}),
+      ...(event.excluded ? { excluded: event.excluded.filter((row) => /^[0-9]+$/.test(row.seq)).slice(0, 64) } : {}),
+      ...(event.generation !== undefined ? { generation: event.generation } : {}),
+      ...(event.selectionRevision !== undefined ? { selectionRevision: event.selectionRevision } : {}),
+      ...(event.elapsedMs !== undefined ? { elapsedMs: Math.max(0, Math.floor(event.elapsedMs)) } : {}),
+    };
+    lines.push(JSON.stringify(safe));
+    lines = lines.slice(-200);
+    while (Buffer.byteLength(lines.join("\n"), "utf8") > 256 * 1024 && lines.length > 1) lines.shift();
+    const temporary = `${path}.tmp-${process.pid}-${++traceWriteId}`;
+    try {
+      writeFileSync(temporary, `${lines.join("\n")}\n`, { mode: 0o600 });
+      renameSync(temporary, path);
+    } catch (error) {
+      try { unlinkSync(temporary); } catch {}
+      throw error;
+    }
+  } catch {
+    // Diagnostics are intentionally outside the routing authority path.
+  }
 }
 
 // The exact state-relative filename bin/fm-wake-drain.sh reads for a
@@ -594,6 +701,8 @@ export async function deactivateEligibleRowsOwner(
 }
 
 export interface BranchDispatchOffer {
+  /** Correlation id shared by watcher classification, branch handling and fallback. */
+  token: string;
   /** The watcher's actionable close message (the wake reason line(s)). */
   message: string;
   /**
@@ -607,10 +716,17 @@ export interface BranchDispatchOffer {
   eligible: boolean;
   /** Exact iDA-result queue rows that caused this check trigger, if any. */
   idaResultRows: readonly string[];
+  /** Admission-time identities rechecked after asynchronous queueing. */
+  eligibleSeqs: readonly string[];
+  eligibleTasks: readonly string[];
+  taskBySeq: Readonly<Record<string, string>>;
+  /** Fixed decline category supplied synchronously by the branch listener. */
+  declineReason: string;
   /** Set by accept(); read by the watcher after emit returns. */
   accepted: boolean;
   settlement: Promise<void>;
   accept(settlement?: Promise<void>): void;
+  decline(reason: string): void;
 }
 
 export function createBranchDispatchOffer(
@@ -619,18 +735,31 @@ export function createBranchDispatchOffer(
   heartbeat = false,
   eligible = false,
   idaResultRows: readonly string[] = [],
+  token = `offer-${process.pid}-${Date.now()}`,
+  eligibleSeqs: readonly string[] = [],
+  eligibleTasks: readonly string[] = [],
+  taskBySeq: Readonly<Record<string, string>> = {},
 ): BranchDispatchOffer {
   const offer: BranchDispatchOffer = {
+    token,
     message,
     projects: [...projects],
     heartbeat,
     eligible,
     idaResultRows: [...idaResultRows],
+    eligibleSeqs: [...eligibleSeqs],
+    eligibleTasks: [...eligibleTasks],
+    taskBySeq: { ...taskBySeq },
+    declineReason: "no-listener",
     accepted: false,
     settlement: Promise.resolve(),
     accept(settlement = Promise.resolve()) {
       offer.accepted = true;
+      offer.declineReason = "";
       offer.settlement = settlement;
+    },
+    decline(reason) {
+      if (!offer.accepted) offer.declineReason = reason;
     },
   };
   return offer;
