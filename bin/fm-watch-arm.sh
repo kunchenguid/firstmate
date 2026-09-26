@@ -87,6 +87,8 @@ if [ "${FM_GATE_REFUSE_BYPASS:-}" != 1 ]; then
 fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-telemetry-lib.sh
+. "$SCRIPT_DIR/fm-telemetry-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
@@ -205,6 +207,7 @@ cycle_log_append() {
       ;;
   esac
   fm_lock_release "$CYCLE_LOG_LOCK"
+  fm_telemetry_emit "$reason" || true
   cycle_active=0
 }
 
