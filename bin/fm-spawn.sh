@@ -358,15 +358,20 @@
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
-# Kimi 2.0.0 also gates a fresh worktree on an interactive folder-trust dialog.
-# Its launch-readiness loop reads the visible viewport - so the spawn refuses at
-# preflight on a backend with no viewport-bounded capture - recognizes the
-# complete dialog, re-selects the already highlighted affirmative option on
-# every poll the complete dialog is still there, refuses any ready verdict while
-# dialog text is on that pane, and requires two consecutive captures that are
-# each ready and dialog-free before the ordinary readiness gates can pass. A
-# blank viewport read proves nothing either way: it costs the poll and restarts
-# that count. A viewport read that fails outright fails readiness at once.
+# Kimi 2.0.0 also gates a fresh worktree on an interactive folder-trust dialog,
+# so the spawn pre-registers the launch directory in Kimi's own workspace-trust
+# store through bin/fm-kimi-trust.sh (the agy shape, non-fatal: a failed
+# registration warns and leaves the dialog to the live gate), whose header owns
+# the store contract. That removes the dialog outright, and the launch-readiness
+# loop is the backstop for one that renders anyway: it reads the visible
+# viewport - so the spawn refuses at preflight on a backend with no
+# viewport-bounded capture - recognizes the complete dialog, re-selects the
+# already highlighted affirmative option on every poll the complete dialog is
+# still there, refuses any ready verdict while dialog text is on that pane, and
+# requires two consecutive captures that are each ready and dialog-free before
+# the ordinary readiness gates can pass. A blank viewport read proves nothing
+# either way: it costs the poll and restarts that count. A viewport read that
+# fails outright fails readiness at once.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
@@ -4201,6 +4206,18 @@ fi
 # path that was not pre-registered, refuses to count a busy turn as ready until
 # it has done so. agy is crewmate/scout only (refused above for secondmate), so
 # only the worktree shape applies.
+# kimi gates a folder it has never seen behind its own full-screen "Trust this
+# folder?" dialog and honours a workspace-trust record written ahead of launch
+# (bin/fm-kimi-trust.sh, whose header owns the store contract and the evidence),
+# so the same pre-registration removes the dialog outright and the readiness
+# gate's fragile vendor-frame read is never needed. Like agy's and unlike
+# claude's, kimi's dialog preselects the affirmative answer and
+# kimi_wait_for_ready answers it live, so a failed registration warns rather
+# than refusing: it costs that gate a frame it may not be able to read, not the
+# spawn. Trust is exact-directory with no ancestor walk, so only the directory
+# this launch starts in is registered and never the primary checkout. kimi IS a
+# verified secondmate harness, so both shapes apply: that directory is the
+# worktree for a crewmate or scout and the home itself for a secondmate.
 AGY_TRUST_PREREGISTERED=0
 case "$HARNESS" in
 claude*)
@@ -4221,6 +4238,18 @@ agy)
     else
       echo "warning: could not pre-register agy workspace trust for $WT; the launch will answer the folder-trust dialog in window $T instead" >&2
     fi
+  fi
+  ;;
+kimi)
+  if [ "$KIND" = secondmate ]; then
+    kimi_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
+    kimi_trust_dir=$PROJ_ABS
+  else
+    kimi_trust_args=("$WT" "$PROJ_ABS")
+    kimi_trust_dir=$WT
+  fi
+  if ! "$FM_ROOT/bin/fm-kimi-trust.sh" "${kimi_trust_args[@]}" >/dev/null; then
+    echo "warning: could not pre-register Kimi workspace trust for $kimi_trust_dir; the launch will answer the folder-trust dialog in window $T instead" >&2
   fi
   ;;
 esac

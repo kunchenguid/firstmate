@@ -714,6 +714,7 @@ claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and omp are empirica
 ### Harness restrictions and credentials
 
 `fm-spawn.sh` refuses kimi on cmux and Orca at preflight, because answering Kimi's folder-trust dialog needs a verified viewport-only capture those backends lack; [its adapter reference](../.agents/skills/harness-adapters/references/harness/kimi.md#readiness-gated-start) owns the trust-dialog handling.
+Every kimi launch pre-registers folder trust for the directory its pane starts in - the task worktree, or the home itself for a secondmate - as one record in the captain's own `~/.kimi-code` home through `bin/fm-kimi-trust.sh` before launch, so a folder Kimi has never seen does not park the worker on that dialog; a failed registration warns instead of refusing the spawn and leaves the dialog to the launch-readiness gate, and [that adapter reference](../.agents/skills/harness-adapters/references/harness/kimi.md#workspace-trust-pre-registration) owns the store contract.
 A cursor secondmate or primary runs the tracked project-scope `.cursor/hooks.json` in its own home and must be launched with `--trust`, or no project hook loads; [`docs/supervision-protocols/cursor.md`](supervision-protocols/cursor.md) owns its supervision protocol.
 
 Cursor typed-submit confirmation is verified on tmux and Herdr only.
