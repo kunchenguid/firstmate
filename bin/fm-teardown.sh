@@ -98,13 +98,12 @@
 # name a slot a DIFFERENT live task now holds. Cleanup kills every process under
 # that path and hard-resets it before returning it, so releasing a slot that is
 # not genuinely this task's destroys another worker's live work. Before the first
-# cleanup step, teardown verifies record exclusivity: no OTHER task record in
-# this home or any locally registered Firstmate home may name the same live path
-# in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale. The one exception is a slot whose
-# owner claim (below) names another task: this teardown is then records-only and
-# touches nothing under the slot, so the scan is skipped rather than stranding
-# the stale record and, with it, the claimant's own teardown.
+# cleanup step, teardown reads the slot's owner claim before comparing task
+# records. A readable claim naming another task identifies the stale predecessor:
+# its duplicate record is ignored for exclusivity, and only its own cleanup runs.
+# Otherwise, teardown verifies record exclusivity: no OTHER task record in this
+# home or any locally registered Firstmate home may name the same live path in
+# its worktree= or home=.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -2385,14 +2384,14 @@ collect_local_firstmate_states() {
 
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
-  local slot state_dir other other_id field other_path other_slot
+  local slot state_dir other other_id field other_path other_slot claimed_owner
   slot=$(canonical_existing_dir "$worktree") || return 0
-  # A slot whose owner claim names another task was reassigned, so this record's
-  # teardown is records-only and touches nothing under it; another record naming
-  # the slot is then no hazard, and refusing would strand this stale record and
-  # block the claimant's own teardown behind it.
+  claimed_owner=
   fm_treehouse_slot_owner_state "$slot" "$record_id"
-  [ "$FM_TREEHOUSE_SLOT_OWNER" != other ] || return 0
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    mine) claimed_owner=$FM_TREEHOUSE_SLOT_OWNER_ID ;;
+    other) claimed_owner=$FM_TREEHOUSE_SLOT_OWNER_ID ;;
+  esac
   collect_local_firstmate_states "$record_state" || return 1
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
@@ -2403,6 +2402,7 @@ require_exclusive_worktree_slot_record() {
       # match too.
       [ "${other##*/}" = "${record_meta##*/}" ] && [ "$other" -ef "$record_meta" ] && continue
       other_id=$(basename "$other" .meta)
+      [ -n "$claimed_owner" ] && [ "$other_id" = "$claimed_owner" ] && continue
       for field in worktree home; do
         other_path=$(fm_meta_get "$other" "$field")
         [ -n "$other_path" ] || continue
