@@ -110,6 +110,9 @@ out=$(PATH="$BOUNDARY_BIN:$OTHER_BOUNDARY_BIN:$UPSTREAM:/usr/bin:/bin" perl -e '
 out=$(PATH="$OTHER_BOUNDARY_BIN:$BOUNDARY_BIN:$UPSTREAM:/usr/bin:/bin" perl -e 'alarm 10; exec @ARGV' "$BOUNDARY_BIN/no-mistakes" axi status)
 [ "$out" = 'upstream: <axi> <status>' ] \
   || fail "a boundary invoked behind another on PATH did not reach upstream: $out"
+out=$(PATH="$BOUNDARY_BIN:$OTHER_BOUNDARY_BIN:$BOUNDARY_BIN:$UPSTREAM:/usr/bin:/bin" perl -e 'alarm 10; exec @ARGV' no-mistakes axi status)
+[ "$out" = 'upstream: <axi> <status>' ] \
+  || fail "a boundary listed twice around another on PATH did not reach upstream: $out"
 pass "several Firstmate boundaries on PATH forward to upstream without looping"
 
 out=$(run_dispatch axi status)

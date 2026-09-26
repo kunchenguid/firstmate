@@ -8,12 +8,14 @@
 # and current worktree match that task's durable metadata. Only a hash of the
 # capability is recorded, so a caller that merely knows the task id and
 # worktree is not accepted. Every other invocation is
-# forwarded unchanged to the first executable on PATH after this directory, so
-# several Firstmate checkouts on PATH chain forward instead of looping; absence
-# of an upstream executable is an error.
+# forwarded unchanged to the first no-mistakes executable on PATH that is not a
+# Firstmate boundary copy, so several Firstmate checkouts on PATH, in any order
+# or repeated, never exec each other; absence of an upstream executable is an
+# error.
 set -u
 
-SELF_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 127
+# Marker other boundary copies look for; keep it within the first 4KB
+FM_NO_MISTAKES_DISPATCH_BOUNDARY=1
 
 meta_value() {
   local key=$1 line value=
@@ -63,27 +65,23 @@ if [ "${1:-}" = axi ]; then
   esac
 fi
 
+is_boundary_copy() {
+  head -c 4096 "$1" 2>/dev/null | grep -aqx "FM_NO_MISTAKES_DISPATCH_BOUNDARY=$FM_NO_MISTAKES_DISPATCH_BOUNDARY"
+}
+
 TARGET=
-SEEN_SELF=0
 IFS=: read -r -a PATH_DIRS <<< "${PATH:-}"
 for dir in "${PATH_DIRS[@]}"; do
   [ -n "$dir" ] || dir=.
-  dir_real=$(CDPATH='' cd -- "$dir" 2>/dev/null && pwd -P) || continue
-  if [ "$dir_real" = "$SELF_DIR" ]; then
-    SEEN_SELF=1
-    TARGET=
-    continue
-  fi
-  [ -z "$TARGET" ] || continue
   candidate=$dir/no-mistakes
   [ -f "$candidate" ] && [ -x "$candidate" ] || continue
-  [ "$candidate" -ef "${BASH_SOURCE[0]}" ] && continue
+  is_boundary_copy "$candidate" && continue
   TARGET=$candidate
-  [ "$SEEN_SELF" = 1 ] && break
+  break
 done
 
 if [ -z "$TARGET" ]; then
-  echo "error: no upstream no-mistakes executable found after $SELF_DIR on PATH" >&2
+  echo "error: no upstream no-mistakes executable found on PATH" >&2
   exit 127
 fi
 exec "$TARGET" "$@"
