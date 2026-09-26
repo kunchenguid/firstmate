@@ -85,6 +85,7 @@ No actor string alone grants execution.
 Terminal records contain a bounded summary and evidence directory; operation status also lists each recorded step's completion or refusal.
 The directory contains the independent starting context, model/tool journal, and per-step intent, owner output, and postcondition receipts.
 Full logs stay there rather than entering MAIN's context.
+Short-task state directories are retained for inspection; there is no automatic cleanup.
 
 Results enter the existing durable supervision outcome store.
 MAIN receives, verifies, and acknowledges through `fm_branch_outcomes` / `fm_branch_processed`; it does not poll normal operation progress or execute the chain's commands.
@@ -116,7 +117,9 @@ Automatic provider retries, compaction, and cache warming are disabled.
 [`bin/fm-short-agent.mjs`](../bin/fm-short-agent.mjs) and its `--help` own exact request limits.
 
 Reloading MAIN leaves children running and reconciles results when the extension starts again.
-Expired heartbeats or wall deadlines produce an honest interrupted/timeout result rather than replaying work.
+An expired wall deadline produces `timeout`.
+A stale heartbeat produces `completed` only when every operation has a verified completed receipt; otherwise it produces `interrupted`.
+Neither path replays work.
 For operations, intent is persisted before calling the owner and a receipt requires authoritative postcondition readback.
 Completed early steps remain visible if a later step fails.
 A verified merge whose command response was lost can still complete through the merge owner's readback.

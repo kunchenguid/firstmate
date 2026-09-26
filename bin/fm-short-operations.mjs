@@ -317,7 +317,7 @@ export async function executeOperations(service,request,check) {
   return results;
 }
 
-if(process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
+if(process.argv[1] && fs.realpathSync(process.argv[1])===fs.realpathSync(fileURLToPath(import.meta.url))) {
   try {
     const [command,action,...args]=process.argv.slice(2);
     if(command==='verify') verifyOwner(action,args);
