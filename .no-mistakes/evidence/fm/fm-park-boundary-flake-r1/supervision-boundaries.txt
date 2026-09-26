@@ -1,0 +1,86 @@
+Focused real host/arm/watcher with fixture engine; clock boundary and production gate behavior:
+Machine logical CPUs: 14; load: 7 CPU burners scoped to this shell, terminated by trap.
+=== loaded iteration 1 ===
+ok - host: waiting closes cannot carry the park past its boundary
+ok - host: a close whose margin runs out while the successor starts reaches main at the boundary without a turn
+ok - host: the park's test clock is inert without the test marker
+
+--- boundary-busy ---
+host output:
+signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.7RezdE/boundary-busy/state/demo.status
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+host turn/boundary events:
+1790385204	handled	turn=host-5702-1790385174.1	rc=0	reports=1	error=0 cost=0.25 conversation_cost=0.25 input=5 cache_read=100 cache_write=10 output=20 turns=3	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.7RezdE/boundary-busy/state/demo.status
+1790385205	boundary	after 16s
+queued wakes:
+1790385196	3	signal	demo.status	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.7RezdE/boundary-busy/state/demo.status
+1790385196	4	signal	demo.status	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.7RezdE/boundary-busy/state/demo.status
+engine calls: 1
+
+--- boundary-late ---
+host output:
+signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.7RezdE/boundary-late/state/demo.status
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+host turn/boundary events:
+1790385232	boundary	after 10s
+queued wakes:
+1790385219	1	signal	demo.status	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.7RezdE/boundary-late/state/demo.status
+1790385219	2	signal	demo.status	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.7RezdE/boundary-late/state/demo.status
+engine calls: 0
+
+--- clock-armed ---
+host output:
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+host turn/boundary events:
+1790385234	boundary	after 99999s
+queued wakes:
+engine calls: 0
+
+--- clock-unmarked ---
+host output:
+host turn/boundary events:
+1790385252	handled	turn=host-80687-1790385235.1	rc=0	reports=1	error=0 cost=0.25 conversation_cost=0.25 input=5 cache_read=100 cache_write=10 output=20 turns=3	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.7RezdE/clock-unmarked/state/demo.status
+queued wakes:
+engine calls: 1
+=== loaded iteration 2 ===
+ok - host: waiting closes cannot carry the park past its boundary
+ok - host: a close whose margin runs out while the successor starts reaches main at the boundary without a turn
+ok - host: the park's test clock is inert without the test marker
+
+--- boundary-busy ---
+host output:
+signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.NNMQ2n/boundary-busy/state/demo.status
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+host turn/boundary events:
+1790385268	handled	turn=host-95179-1790385255.1	rc=0	reports=1	error=0 cost=0.25 conversation_cost=0.25 input=5 cache_read=100 cache_write=10 output=20 turns=3	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.NNMQ2n/boundary-busy/state/demo.status
+1790385268	boundary	after 16s
+queued wakes:
+1790385265	3	signal	demo.status	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.NNMQ2n/boundary-busy/state/demo.status
+1790385265	4	signal	demo.status	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.NNMQ2n/boundary-busy/state/demo.status
+engine calls: 1
+
+--- boundary-late ---
+host output:
+signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.NNMQ2n/boundary-late/state/demo.status
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+host turn/boundary events:
+1790385280	boundary	after 10s
+queued wakes:
+1790385274	1	signal	demo.status	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.NNMQ2n/boundary-late/state/demo.status
+1790385274	2	signal	demo.status	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.NNMQ2n/boundary-late/state/demo.status
+engine calls: 0
+
+--- clock-armed ---
+host output:
+supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own
+host turn/boundary events:
+1790385282	boundary	after 99999s
+queued wakes:
+engine calls: 0
+
+--- clock-unmarked ---
+host output:
+host turn/boundary events:
+1790385295	handled	turn=host-16493-1790385283.1	rc=0	reports=1	error=0 cost=0.25 conversation_cost=0.25 input=5 cache_read=100 cache_write=10 output=20 turns=3	signal: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-supervision-host.NNMQ2n/clock-unmarked/state/demo.status
+queued wakes:
+engine calls: 1
