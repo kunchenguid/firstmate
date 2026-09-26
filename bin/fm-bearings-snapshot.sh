@@ -411,6 +411,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
     elif .hold_bucket == "dated" then ("until " + (.hold_until // "-"))
     elif .hold_bucket == "aged" and .hold_age_days != null then
       ("held " + (.hold_age_days | tostring) + "d")
+    elif .hold_bucket == "reconciling" then
+      ("reconcile requested "
+       + ((.reconcile_requested // "") | if . == "" then "-" else . end))
     else null end;
   def hold_gate_reason:
     (.hold_reason // .blocked_reason // "-") as $base
@@ -527,14 +530,18 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(.structured and .hold_bucket != null)
          | select(($all_decisions == 1) or live_captain_call)
          | {id,key:.id,verb:"captain-hold",
-            summary:hold_summary(.title; .hold_reason),owner:"(main)"} ]
+            summary:hold_summary(.title; .hold_reason),owner:"(main)",
+            title:(.title | trunc(120)),
+            reason:((.hold_reason // .blocked_reason // "") | trunc(200))} ]
      + [ (.secondmate_current.records // [])[] as $m
          | ([ $m.decisions_open[]?
               | select(.source == "backlog" and .verb == "captain-hold")
               | select(($all_decisions == 1) or live_captain_call)
               | {id:($m.id + "/" + .id),key,verb,
                  summary:hold_summary((.summary // .id);
-                                      (.reason // "captain decision pending")),owner:$m.id} ]
+                                      (.reason // "captain decision pending")),owner:$m.id,
+                 title:((.summary // .id) | trunc(120)),
+                 reason:((.reason // "") | trunc(200))} ]
             + [ $m.queued[]?
                 | select($all_decisions == 1 and .hold_kind == "captain")
                 | select(.id as $id
@@ -544,7 +551,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                          | index($id) | not)
                 | {id:($m.id + "/" + .id),key:.id,verb:"captain-hold",
                    summary:hold_summary((.title // .id);
-                                        (.hold_reason // "captain decision pending")),owner:$m.id} ])[] ]) as $decisions_all
+                                        (.hold_reason // "captain decision pending")),owner:$m.id,
+                   title:((.title // .id) | trunc(120)),
+                   reason:((.hold_reason // "") | trunc(200))} ])[] ]) as $decisions_all
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and projected_deferred_hold) ]

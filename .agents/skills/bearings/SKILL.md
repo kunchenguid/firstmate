@@ -47,9 +47,9 @@ For a contribution wake or linked-issue filing, go directly to Contribution foll
    For registered secondmates, use the snapshot's structured-home classification and provenance.
    A parent event or bounded terminal contradiction is fallback evidence, never authority over readable structured home state.
    A decision is simply a task held for the captain (`captain-hold-lifecycle`), whatever its kind.
-   The canonical snapshot assigns every captain hold exactly one bucket from structured fields only: `blocked` when any blocker is unresolved, else `dated` while `hold_until` is in the future, else `aged` when an undated hold has reached the configured age threshold, else `live`.
+   The canonical snapshot assigns every captain hold exactly one bucket from structured fields only: `reconciling` while a board-created reconcile request is pending (the captain already sent the call back, so it is not waiting on him), else `blocked` when any blocker is unresolved, else `dated` while `hold_until` is in the future, else `aged` when an undated hold has reached the configured age threshold, else `live`.
    Never use hold-reason or body prose to classify or place a decision.
-   A `live` hold appears in Captain's Call; `blocked`, `dated`, and `aged` holds appear as disclosed Charted Next gates stating their structured reason.
+   A `live` hold appears in Captain's Call; `reconciling`, `blocked`, `dated`, and `aged` holds appear as disclosed Charted Next gates stating their structured reason.
    Use `--all-decisions` to reveal every captain hold available within the bounded snapshot and remove each revealed gate from Charted Next so the buckets remain exclusive.
    Aging is only a presentation safety net, and re-holding with `--until` remains the durable deferral.
    Do not scrape reports, visual-review artifacts, raw status-event tails, or visible conversation history to supplement current state.
@@ -103,6 +103,7 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 - Never author a `reconcile` option on any card. `build` gives every decision card the standard reconcile choice itself, and the payload validator reserves that value across all card types; recommendations must name an authored option.
 - Compose exactly one decision card per captain-held task id. When one task carries multiple questions, consolidate all of them and their options into that card; never emit duplicate cards with the same task-id key.
 - Decision cards carry agent-authored copy: a short noun-phrase title, one-line `about` and `decide` context rows, and option labels with hints, with the recommended option marked.
+  The deck resolves a ticket's dialog from the durable card `bin/fm-captain-hold.sh hold` already stored with the call (or its reason-carrying baseline); this build refreshes every surviving card from the payload, so both surfaces stay consistent.
 - Card `type` (decision, merge, credential) is your composing judgment from the row's content; no backlog field types a card for you.
 - When the card's task is a captain-gated WORK item (the answer should free it to proceed rather than complete it), set the card's `close: "release"` so the answer lifts the hold instead of closing the task; question-shaped items omit it.
 - A Charted Next row's optional `kind` separates work from alarms: omit it (or set `"queued"`) for real queued work, and set `"warning"` on every action-free fleet-integrity notice - the `(main-inventory)` gate, the `(return-catchup)` gate, an unavailable secondmate home, and an inventory-mismatch repair notice. The board badges a warning row `needs repair` instead of `waiting` and leaves it out of the Charted Next count, so those rows never read as dispatchable queued work.

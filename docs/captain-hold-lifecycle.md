@@ -15,6 +15,7 @@ This document records the deterministic mechanism, structured surfaces, compatib
 | How does a keyed answer from chat or a board reach the call? | [Answer-time resolution](#answer-time-resolution) |
 | How is a call closed when it stopped being a question? | [Reconcile](#reconcile-re-check-reality-never-a-blind-close) |
 | Why did a decision card disappear from the board? | [Card hygiene](#card-hygiene-a-landed-subject-is-not-a-live-call) |
+| Where does the captain's deck get its dialog content? | [The decision card](#the-decision-card-stored-with-a-hold) |
 | Where does a hold appear in snapshots and Bearings? | [Structured read surfaces](#structured-read-surfaces) |
 | What does a `RECORD DIVERGENCE` section mean? | [Record divergence](#record-divergence) |
 | How do rows from older installs still work? | [Compatibility with pre-collapse installs](#compatibility-with-pre-collapse-installs) |
@@ -33,7 +34,7 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 
 | Subcommand | What it does | Details |
 | --- | --- | --- |
-| `hold` | Creates or reuses a task and holds it for the captain. | [Creating a hold](#creating-a-hold-hold) |
+| `hold` | Creates or reuses a task and holds it for the captain, recording its decision card with `--card-file` or a reason-carrying baseline. | [Creating a hold](#creating-a-hold-hold) |
 | `answer` | Records the captain's exact words and resolves the call. | [Answering a call](#answering-a-call-answer) |
 | `complete` | Records the reviewed captain-held task ids in the originating task's metadata. | [Recording a reviewed inventory](#recording-a-reviewed-inventory-complete) |
 | `verify` | Read-only check that scout teardown runs before removing source state. | [Checking before scout teardown](#checking-before-scout-teardown-verify) |
@@ -62,6 +63,26 @@ Repeat and edge cases:
 - Re-holding released work starts a new timestamped lifecycle.
 - A closed task is refused rather than reopened.
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
+
+### The decision card stored with a hold
+
+The captain's deck renders each Captain's Call ticket from a durable card under `state/decision-cards/<task-id>.json`, so `hold` records one in the same act as the hold.
+`bin/fm-decision-card-lib.sh` owns that store and `bin/fm-decision-card.jq` owns the card contract, which the `fm-bearings-board.v1` payload validator also includes.
+
+| Input | Stored record |
+| --- | --- |
+| `--card-file <path>` | The composed card, normalized (key set to the task id, missing `type` defaulted to `decision`, missing `repo` filled from the hold) and validated before the hold is written. |
+| No card, no existing record | A mechanical baseline: the task title, the reason as its untruncated `about` line, `allow_freeform: true`, and the standard reconcile choice. |
+| No card, existing record | The existing record is kept, so a re-hold or deferral never loses the options the captain was shown. |
+
+Every stored record is the effective card: the standard `reconcile` choice is added to a decision card that lacks one, exactly as `build` does at payload level.
+The validation refusal precedes the backlog mutation, so an invalid card cannot leave a held call with no stored card.
+
+`answer` and an evidence-backed `reconcile close` remove the record when they resolve the call, together with the pending reconcile request.
+A later re-hold therefore starts from a fresh card rather than a previous lifecycle's options.
+`bin/fm-bearings-board.sh build` refreshes every surviving card from the effective payload and prunes records whose task is definitely no longer an open captain call.
+
+The `captain-hold-lifecycle` skill owns the composition policy: authored titles, about/decide context, option labels and hints, the recommended value, `close: "release"` for captain-gated work, and the rule that no composer ever authors the reserved `reconcile` option.
 
 ### Answering a call (`answer`)
 
@@ -279,6 +300,8 @@ The supported creator is the runner carrying the captain's board selection.
 The binding-checked `reconcile-requests` command is that internal intake rather than an operator reconciliation outcome.
 
 ### Verifying and retiring a request
+
+A pending request is also a classification fact, not merely bookkeeping: the canonical snapshot buckets a hold with a pending request `reconciling`, so it leaves the live Captain's Call (it is no longer waiting on the captain) and is disclosed under Charted Next as `reconcile requested <timestamp>: <hold reason>`. Retiring the request restores the live call when the hold is still due and unblocked.
 
 Verification retires a request through one of two outcomes.
 Each outcome requires both the pending board-created request and the operator input that supports its claim:

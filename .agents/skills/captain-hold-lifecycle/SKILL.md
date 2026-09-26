@@ -18,7 +18,7 @@ The agent performs the semantic inventory because scripts must not infer captain
 
 Every unresolved question that belongs to the captain and is discovered while producing, reading, presenting, or ending an investigation or visual review must be carried by a captain-held task in the authoritative backlog of the home that owns the originating work before that work or review may be treated as complete.
 Prefer holding the work item the question gates over minting a new row; create a new task only when no work item exists to hold.
-Put the question and its options in the hold reason, and keep one held task per genuine gate: a multi-question review is one held task pointing at its report, not a row per question. Represent that task with exactly one board card that consolidates its questions and options; never fan one task id into duplicate same-key cards.
+Put the question and its options in the hold reason, and compose the structured decision card for the same task under "Compose the decision card with the hold"; keep one held task per genuine gate: a multi-question review is one held task pointing at its report, not a row per question. Represent that task with exactly one card that consolidates its questions and options; never fan one task id into duplicate same-key cards.
 Register or re-hold through `bin/fm-captain-hold.sh hold`, which is idempotent per task id.
 After inventorying the whole report and review surface, run `bin/fm-captain-hold.sh complete` with every captain-held task id, or with `--none` only when the reviewed surface leaves nothing waiting on the captain.
 A completed investigation and an ended visual review use this same owner and completion command; a visual tool, including Lavish, never owns a parallel completion policy.
@@ -48,6 +48,25 @@ A captain-held task closed outside this owner leaves no durable answer, so the c
 Resolved findings, recommendations that need no captain choice, and prose that merely sounds decision-like do not create held tasks.
 Bearings reads the resulting structured state and must never compensate by scraping historical reports, visual-review artifacts, terminal output, chat, or other prose.
 
+## Compose the decision card with the hold
+
+The captain decides from the captain's deck, which resolves each Captain's Call ticket from the durable card stored under `state/decision-cards/<task-id>.json`.
+That card is the one surface the deck can render as options, so the hold and its card are recorded in the same act:
+
+- Compose one card for the held task and pass it to `bin/fm-captain-hold.sh hold ... --card-file <path>`.
+  It carries a short noun-phrase `title`, one-line `about` and `decide` context rows, `options` whose entries carry a slug `value`, a `label`, and an optional `hint`, the recommended option's `value` in `recommend_value`, and `repo`.
+  Set `"close": "release"` when the answer frees a captain-gated WORK item to proceed, and omit it for a question-shaped call that the answer completes.
+  Never author a `reconcile` option: the store adds the standard one itself, and refusing that reserved value is what keeps it from ever closing a call.
+  Set `allow_freeform` true when typed words are a legitimate answer, and use `pr_url` or the structured `subject` when the call waits on one exact artifact so card hygiene can drop it after that subject lands.
+  `bin/fm-decision-card.jq` owns the contract and the shared `bin/fm-bearings-board.sh` payload validator enforces the same one.
+- Keep the hold reason as well: it is the durable prose record, and a first hold without a card stores a baseline that carries the reason untruncated.
+  The baseline is a floor, not the target: it has no authored options, so the captain sees only Reconcile and the freeform box.
+- One card per held task id, consolidating every question that task carries, exactly like its one backlog row.
+- A re-hold keeps the stored card unless `--card-file` replaces it, so a deferral never loses the options the captain was shown.
+  When the question itself changes, pass a new card with the new hold.
+- Resolving the call through `answer` or an evidence-backed `reconcile close` retires the card; never delete or edit a stored card by hand.
+- A later `/bearings lavish` build refreshes every surviving card from its composed payload, so the board and the deck never diverge silently.
+
 A captain call can be written down twice - as the keyed status decision the fold reads, and as the backlog task held for the captain - and those two records can disagree without either surface saying so.
 `bin/fm-captain-hold.sh diverged` reports that contradiction and the wake drain prints it as `RECORD DIVERGENCE`; it closes nothing, because a captain call closed wrongly leaves review entirely, which is worse than the noise.
 Read such a line as "these two records disagree", never as "the captain ruled and someone forgot to file it": a call can dissolve because its premise was false, or turn out to have been a question of fact rather than the captain's to answer.
@@ -58,7 +77,7 @@ The absence of a routed work item is not a divergence and the guard never requir
 
 1. Read the complete investigation result and complete the visual review before declaring either complete.
 2. Inventory only genuine unresolved choices that require the captain, and find the task each one gates.
-3. Hold that task - or create one captain-held task for the review's open questions - with a concise reason carrying the question and options.
+3. Hold that task - or create one captain-held task for the review's open questions - with a concise reason carrying the question and options, and pass the composed decision card through `--card-file` so the deck shows the full choice at once.
 4. Run `complete` with the full captain-held inventory for that review pass.
 5. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
 6. Close each call only through `answer` (or a channel that feeds `answers`), close a board-requested moot call through evidence-backed `reconcile close`, record a still-active reconciliation through `reconcile note`, use `--until` when the captain defers it, or confirm a channel already closed it.

@@ -21,7 +21,8 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD] \
+#     [--card-file <card.json>]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
@@ -52,6 +53,20 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
+#
+# `hold` also records the call's decision card under
+# state/decision-cards/<task-id>.json through bin/fm-decision-card-lib.sh, the
+# store the captain's deck resolves a ticket's dialog from. `--card-file`
+# supplies the composed card (a short noun-phrase title, one-line about/decide
+# context, authored options with hints, the recommended value, and the close
+# mode); without it the first hold stores a mechanical baseline that carries
+# the reason untruncated, so a later reader never falls back to the snapshot's
+# 200-character stub. The card is validated before the hold is written, so an
+# invalid card refuses without leaving a held call no stored card backs. A
+# re-hold keeps the existing card unless --card-file replaces it, so a deferral
+# never loses the options the captain was shown. `answer` and `reconcile close`
+# remove the record in the same act that resolves the call, and a later re-hold
+# starts from a fresh card instead of a previous lifecycle's stale options.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -226,6 +241,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-decision-card-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-decision-card-lib.sh"
 
 PARENT_HOLD_PUBLISHED=0
 publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
@@ -810,8 +828,61 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how>"
   verify_hold_durable "${resolved%% *}"
 }
 
+# --- the decision card stored beside a hold ----------------------------------
+#
+# The deck renders a Captain's Call dialog from state/decision-cards/ before it
+# falls back to the snapshot's title and truncated hold reason, so `hold`
+# records one card in the same act as the hold. bin/fm-decision-card-lib.sh
+# owns the store and bin/fm-decision-card.jq owns the contract; this section
+# only composes, validates, stages, and retires the record.
+
+DECISION_CARD=''
+
+retire_decision_card() {  # <task-id>
+  fm_decision_card_remove "$FM_HOME" "$1" \
+    || printf 'actionable: captain call %s is resolved but its stored decision card could not be removed; a later re-hold could show its stale options\n' "$1" >&2
+}
+
+# Stage the effective card for one hold in DECISION_CARD, or leave it empty when
+# an existing card is deliberately kept. The authored --card-file wins; an
+# existing task keeps the card the captain was already shown; anything else
+# gets the mechanical baseline. Validation runs before the hold is written.
+prepare_decision_card() {  # <id> <title> <repo> <reason> <card-file> <keep-existing-0-or-1>
+  local id=$1 title=$2 repo=$3 reason=$4 card_file=$5 keep_existing=$6 file_key raw
+  DECISION_CARD=''
+  [ -n "$title" ] || title=$id
+  if [ -n "$card_file" ]; then
+    [ -f "$card_file" ] && [ ! -L "$card_file" ] \
+      || fail "decision card file is not a regular file: $card_file"
+    jq -e 'type == "object"' "$card_file" >/dev/null 2>&1 \
+      || fail "--card-file must be one JSON card object: $card_file"
+    file_key=$(jq -re '.key? // empty' "$card_file" 2>/dev/null) || file_key=''
+    [ -z "$file_key" ] || [ "$file_key" = "$id" ] \
+      || fail "decision card key $file_key does not match task $id"
+    raw=$(jq -c --arg id "$id" --arg title "$title" --arg repo "$repo" '
+      .key = $id
+      | (if has("type") then . else .type = "decision" end)
+      | (if (has("repo") | not) or .repo == null
+         then (if $repo == "" then .repo = null else .repo = $repo end)
+         else . end)
+    ' "$card_file") || fail "cannot read the decision card: $card_file"
+  elif [ "$keep_existing" = 1 ] && fm_decision_card_exists "$FM_HOME" "$id"; then
+    return 0
+  else
+    raw=$(jq -cn --arg id "$id" --arg title "$title" --arg reason "$reason" --arg repo "$repo" '
+      {key:$id,type:"decision",title:$title,about:$reason,
+       repo:(if $repo == "" then null else $repo end),
+       options:[],allow_freeform:true}') \
+      || fail "cannot compose the baseline decision card for $id"
+  fi
+  fm_decision_card_validate "$raw" \
+    || fail "decision card for $id does not satisfy the fm-decision-card contract${card_file:+ (file: $card_file)}"
+  DECISION_CARD=$(fm_decision_card_effective "$raw") \
+    || fail "cannot build the effective decision card for $id"
+}
+
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
+  local id=${1:-} title='' reason='' repo='' origin='' until='' card_file='' show state existing_title body='' hold_kind hold_set occurrence
   local existing_hold_kind='' existing_held='' preserve_hold_set=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
@@ -822,6 +893,7 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
+      --card-file) shift; card_file=${1:-} ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -855,10 +927,14 @@ command_hold() {
     if [ "$existing_hold_kind" = captain ] && [ "$existing_held" = yes ]; then
       preserve_hold_set=1
     fi
+    existing_title=$(show_field_value "$show" title)
     if [ -n "$title" ]; then
-      existing_title=$(show_field_value "$show" title)
       [ "$existing_title" = "$title" ] || fail "existing task $id has a different title"
     fi
+    # Stage the card before the hold is written: an invalid card refuses here
+    # without leaving a held call that no stored card backs.
+    prepare_decision_card "$id" "${title:-$existing_title}" \
+      "$(show_field_value "$show" repo)" "$reason" "$card_file" 1
   else
     [ -n "$title" ] || fail "--title is required to create task $id"
     validate_one_line title "$title"
@@ -869,6 +945,7 @@ command_hold() {
     fi
     [ -n "$repo" ] || repo=firstmate
     validate_one_line repo "$repo"
+    prepare_decision_card "$id" "$title" "$repo" "$reason" "$card_file" 0
     [ -z "$origin" ] || body=$(printf 'Origin: %s' "$origin")
     # tasks-axi add never passes --due. Beads due.required would refuse this
     # create, and captain holds have no due semantics, so waive it for this
@@ -904,6 +981,10 @@ command_hold() {
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  if [ -n "$DECISION_CARD" ]; then
+    fm_decision_card_persist "$FM_HOME" "$DECISION_CARD" \
+      || printf 'actionable: captain call %s is recorded but its decision card could not be stored; later readers fall back to the hold reason\n' "$id" >&2
+  fi
   printf '%s\n' "$id"
 }
 
@@ -1407,6 +1488,9 @@ publish_parent_resolution_then_retire() {  # <task-id> <occurrence> <note>
     fail "could not publish the answered captain-held task $id to its parent"
   fi
   reconcile_request_retire "$id"
+  # The dialog's card exists only while the call is live; resolving the call
+  # retires it so a later re-hold cannot show the previous lifecycle's options.
+  retire_decision_card "$id"
 }
 
 command_reconcile_requests() {
@@ -1536,6 +1620,7 @@ reconcile_close() {
     [ "$PARENT_HOLD_PUBLISHED" = 1 ] \
       || fail "could not publish the reconciled captain-held task $id to its parent"
     reconcile_request_retire "$id"
+    retire_decision_card "$id"
     printf 'reconciled: %s\n' "$id"
     return 0
   fi
@@ -1559,6 +1644,7 @@ reconcile_close() {
   [ "$PARENT_HOLD_PUBLISHED" = 1 ] \
     || fail "could not publish the reconciled captain-held task $id to its parent"
   reconcile_request_retire "$id"
+  retire_decision_card "$id"
   printf 'reconciled: %s\n' "$id"
 }
 
