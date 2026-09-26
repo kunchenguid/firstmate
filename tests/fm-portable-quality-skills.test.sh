@@ -2,6 +2,7 @@
 # Test family: pure-contract-unit
 # Public packaging-check interface: valid fixtures and deliberately broken packages.
 set -eu
+# shellcheck source=tests/lib.sh
 source "$(dirname "$0")/lib.sh"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 fixture="$(mktemp -d)"

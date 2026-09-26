@@ -7,6 +7,7 @@
 # Output: .no-mistakes/portable-skills/live/<runtime>-<skill>.log and command receipts.
 # No runtime configuration is written; fixture links point at canonical skills.
 set -eu
+# shellcheck source=tests/lib.sh
 source "$(dirname "$0")/lib.sh"
 fm_live_gate opt-in FM_PORTABLE_QUALITY_SKILLS_LIVE claude pi codex || exit 0
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
