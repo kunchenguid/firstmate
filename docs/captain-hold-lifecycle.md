@@ -71,26 +71,34 @@ The `answer` subcommand records the captain's exact words and resolves the call 
 | --- | --- |
 | `answer` | Closes a question-shaped call. |
 | `answer --release` | Frees a captain-gated work item to proceed without completing it. |
+| `answer --defer-until YYYY-MM-DD` | Records the answer and keeps the task held until that future date. |
 
 It requires a non-empty captain decision file of at most 8192 bytes.
+A deferral date must be a valid calendar day later than the current UTC date, and cannot be combined with `--release`.
 It then works in this order:
 
 1. It durably writes a resolution block carrying the decision digest and a `Resolution mode:`.
-2. It retains the leading hold-set stamp until the selected `tasks-axi done` or `tasks-axi unhold` transition succeeds.
-3. It then restores the successful record's resolution-first body ordering.
+   A deferred record also carries the requested date.
+2. For a close or release, it retains the leading hold-set stamp until the selected `tasks-axi done` or `tasks-axi unhold` transition succeeds.
+   For a deferral, it updates the hold date and verifies that the task remains captain-held with the same stamp.
+3. After a terminal close, it restores the successful record's resolution-first body ordering.
    The previous body remains preserved below the block and archived through tasks-axi `--archive-body`.
 
-If the close is interrupted, the still-held task therefore keeps its original age basis.
-A matching retry also completes any resolution-first normalization left unfinished after the close itself succeeded.
+If an answer or deferral is interrupted, the still-held task keeps its original age basis.
+A matching retry completes the selected transition without adding another resolution record.
+
+In a secondmate home, a deferral publishes a dated `note` on the call's open parent key instead of resolving it.
+Deferred records do not count toward the parent key's occurrence, so the later terminal answer resolves that same key.
 
 ### Answer retries and tasks closed elsewhere
 
-- An exact retry is idempotent only when the requested close mode matches the newest record.
+- An exact retry is idempotent only when the answer and requested mode match the newest record.
+- A deferral date is part of the answer identity, so changing it records a new deferral.
 - A drifted answer or a mode mismatch is rejected.
 - A re-held task accepts a new answer as a new record on top.
 
 On a task closed outside the script, `answer` records the missing block only when the captain-hold annotations tasks-axi preserves through a close prove the captain owned it.
-It also verifies the task stays closed.
+A deferred record does not make that close valid; a later answer repairs the out-of-band close and verifies the task stays closed.
 
 A hold whose `--until` date has passed keeps those annotations while tasks-axi reports it no longer held.
 An expired deferral therefore remains answerable.
@@ -180,15 +188,16 @@ Only `answer` with the captain's words or evidence-backed `reconcile close` reso
 
 "A keyed answer resolves its matching captain-held task" is one capability with one owner.
 `answers` is its channel-agnostic entry point.
-It reads `<task-id>\t<answer>\t<label>[\t<mode>]` lines and resolves each named task through the same `answer` path.
+It reads `<task-id>\t<answer>\t<label>[\t<mode>[\t<until>]]` lines and resolves each named task through the same `answer` path.
 Every guard therefore applies identically no matter which channel the answer arrived on.
 
-The optional mode column carries a card-declared close:
+The optional mode column carries the selected action:
 
 | Mode | Effect |
 | --- | --- |
 | `done` (default) | Completes the task. |
 | `release` | Lifts the hold so held work resumes. |
+| `defer` with a future `until` date | Records the answer and keeps the task held until that date. |
 | Any other value | Skipped. |
 
 Each key is reported as follows:
@@ -197,6 +206,7 @@ Each key is reported as follows:
 | --- | --- |
 | Names no task, names a task that is not captain-held, or names a task already closed | Reported as `skipped:` and feeds nothing. |
 | A replay whose answer and requested close mode match the newest record | An idempotent `closed:`. |
+| A deferral replay with the same answer and date | An idempotent `deferred:` with no added resolution record. |
 | A replay with a mode mismatch | Skipped. |
 
 The command exits nonzero when any key was skipped.
@@ -217,6 +227,8 @@ Two channels feed that one intake today, and both are ordinary callers rather th
 - For a key the status log still owns, that script's header owns the status-log close.
 - A key the status log no longer owns is resolved to a still-open captain-held task and fed as one keyed line.
   The script tries the key as a task id first, then the legacy derived identity.
+- `--defer-until YYYY-MM-DD` defers only a captain-held task key.
+  It refuses status-log keys and invalid or non-future dates before sending the answer.
 
 `bin/fm-procevent.sh` is the captured-result channel:
 
@@ -293,7 +305,8 @@ Each outcome requires both the pending board-created request and the operator in
   A later request with the same finding still receives its own dated note.
 
 `reconcile list` is the read-only enumeration of pending requests filed by board answers.
-A successful normal answer also retires any pending request, because an answered call has no remaining re-check obligation.
+A successful terminal answer also retires any pending request, because a closed or released call has no remaining re-check obligation.
+A deferral leaves the request open because the captain's call still needs a later re-check.
 
 Every retirement is checked.
 If request removal fails after an answer, close, or note is already durable, the durable outcome stands, but the command fails and leaves the pending request visible for retry.
@@ -523,6 +536,8 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
+- Direct and keyed `--defer-until` answers preserve the hold-set age, record the exact date, and leave the task open until it is due.
+- A secondmate deferral keeps its parent key open past the due date, and only the final answer resolves that same key.
 
 ### Legacy paths
 
@@ -563,7 +578,7 @@ It uses a stubbed tasks-axi that fails any markdown file override, and proves th
 
 The reconcile path is pinned in the same suite:
 
-- A reconcile answer arriving through the keyed-answer intake is refused, in the default close mode and in the `release` mode a captain-gated work card declares.
+- A reconcile answer arriving through the keyed-answer intake is refused in the default close mode, `release`, and `defer` modes.
   It leaves both tasks held with no resolution record or request.
 - Only the separately bound captured-source intake records one durable request per task, idempotently across a replay.
 
@@ -579,7 +594,7 @@ Around those outcomes, it proves:
 - A later distinct request with the same note still appends its own dated record.
 - Every failed retirement is surfaced with its pending request retained.
 - Incompatible resolution modes cannot replay as captain answers.
-- Normal close, release, and replay paths retire pending requests.
+- Normal close, release, and replay paths retire pending requests, while a deferral leaves its request open.
 
 The captured-source coverage proves:
 
