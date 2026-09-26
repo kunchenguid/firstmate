@@ -204,7 +204,20 @@ esac
 
 refuse() { echo "error: refusing to pre-register Claude trust: $1" >&2; exit 1; }
 
-real_dir() { (cd -P -- "$1" 2>/dev/null && pwd -P); }
+# pwd -P resolves symlinks but on case-insensitive macOS retains the spelling
+# used for cd. Git may have recorded a different spelling of that same path;
+# native realpath recovers the on-disk name for structural comparisons and the
+# Claude config keys. Without node, keep the shell-only scope refusals: no
+# registration can succeed without node (the store writer checks it below).
+real_dir() {
+  local path
+  path=$(cd -P -- "$1" 2>/dev/null && pwd -P) || return 1
+  if command -v node >/dev/null 2>&1; then
+    node -e 'process.stdout.write(require("node:fs").realpathSync.native(process.argv[1]))' "$path" 2>/dev/null
+  else
+    printf '%s\n' "$path"
+  fi
+}
 
 # The fully resolved path of an existing file, or empty. Resolution runs in node
 # because it must follow a symlink chain to its final target, and node is

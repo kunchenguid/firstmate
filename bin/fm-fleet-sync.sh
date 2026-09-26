@@ -319,10 +319,11 @@ sync_project() {
     echo "$label: skipped: not a git repo"
     return 0
   fi
-  # Both sides are physical paths (git resolves --show-toplevel through symlinks),
-  # so a symlinked clone dir still compares equal to its own root.
-  proj_abs=$(cd "$PROJ" && pwd -P) || proj_abs=""
-  if [ "$proj_top" != "$proj_abs" ]; then
+  # Compare the actual directories rather than path spellings: pwd -P keeps a
+  # caller's letter case on case-insensitive macOS even when git reports the
+  # clone's on-disk spelling. -ef also preserves the symlinked-clone allowance;
+  # an enclosing repository has a different directory identity and is refused.
+  if [ ! "$proj_top" -ef "$PROJ" ]; then
     echo "$label: skipped: not a clone root (git would act on $proj_top)"
     return 0
   fi

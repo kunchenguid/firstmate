@@ -678,6 +678,33 @@ test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo() {
   pass "the single-project form also refuses a directory that is not its own clone root"
 }
 
+# On a case-insensitive filesystem a case-only spelling is the same clone root,
+# not an enclosing repo discovered by git. This is the post-merge single-clone
+# refresh path teardown calls with the recorded project path.
+test_case_variant_clone_root_still_syncs() {
+  local home clone variant out before
+  home=$(new_home)
+  clone=$(build_pair "$home" CaseSpelling)
+  variant="${clone/CaseSpelling/casespelling}"
+  if [ ! "$variant" -ef "$clone" ]; then
+    pass "a mixed-case clone-root path (case-sensitive filesystem; skipped)"
+    return 0
+  fi
+  [ "$variant" != "$clone" ] || fail "the variant must have a different spelling"
+  [ ! -L "$variant" ] || fail "the variant must not rely on a symlink"
+  before=$(head_sha "$clone")
+  advance_origin "$home" CaseSpelling C1
+
+  out=$(run_sync "$home" "$variant")
+
+  assert_contains "$out" "casespelling: synced" \
+    "a case-only spelling of a real clone root must still fast-forward: $out"
+  [ "$(head_sha "$clone")" != "$before" ] || fail "the clone did not advance"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "the clone was not fast-forwarded to origin/main"
+  pass "a case-only clone-root spelling still fast-forwards"
+}
+
 test_symlinked_clone_still_syncs() {
   local home clone out
   home=$(new_home)
@@ -740,4 +767,5 @@ test_transient_packed_refs_lock_self_clears
 test_non_signature_fetch_failure_is_not_retried
 test_non_clone_dir_never_syncs_the_enclosing_repo
 test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo
+test_case_variant_clone_root_still_syncs
 test_symlinked_clone_still_syncs

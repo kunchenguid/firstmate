@@ -300,6 +300,30 @@ test_registration_is_idempotent() {
   pass "fm-claude-trust.sh: repeat registration is idempotent"
 }
 
+# A case-insensitive filesystem can resolve both spellings of a directory
+# without a symlink, while pwd -P keeps the caller's spelling and git keeps
+# the path recorded when the worktree was created. The scope check must use
+# the filesystem's identity, not string equality or unconditional lowercasing.
+test_project_spelling_case_does_not_refuse_a_linked_worktree() {
+  local rec out variant
+  rec=$(make_case CaseSpelling)
+  read_case "$rec"
+  variant="${PROJ/CaseSpelling/casespelling}"
+  if [ ! "$variant" -ef "$PROJ" ]; then
+    pass "fm-claude-trust.sh: mixed-case project spelling (case-sensitive filesystem; skipped)"
+    return 0
+  fi
+  [ "$variant" != "$PROJ" ] || fail "the variant must have a different spelling"
+  [ ! -L "$variant" ] || fail "the variant must not rely on a symlink"
+  out=$(run_trust "$CONFIG" "$WT" "$variant")
+  expect_code 0 $? "a linked worktree must accept the filesystem's alternate project spelling: $out"
+  assert_trusted "$CONFIG/.claude.json" "$PROJ" \
+    "the canonical project-root entry was not trusted"
+  assert_trusted "$CONFIG/.claude.json" "$WT" \
+    "the linked worktree was not trusted"
+  pass "fm-claude-trust.sh: a case-only project spelling resolves to the linked worktree's repo"
+}
+
 test_primary_checkout_is_refused() {
   local rec out
   rec=$(make_case primary)
@@ -839,6 +863,7 @@ test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded() {
 
 test_fresh_worktree_is_trusted
 test_fresh_worktree_also_trusts_the_project_root_without_import_consent
+test_project_spelling_case_does_not_refuse_a_linked_worktree
 test_registration_carries_forward_existing_import_consent
 test_project_root_entry_preserves_other_keys
 test_project_root_entry_declined_external_imports_is_not_overridden
