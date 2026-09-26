@@ -303,6 +303,7 @@ family_for_basename() {
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
     fm-session-lock-ancestry.test.sh|fm-cursor-primary.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
+    fm-queued-recheck.test.sh|\
     fm-wake-drain-unread-status.test.sh|\
     fm-tool-update-check.test.sh|\
     fm-mail.test.sh|fm-mail-check.test.sh|\
@@ -847,6 +848,7 @@ tests/fm-update.test.sh 11572
 tests/fm-vendor-auth-probe.test.sh 45255
 tests/fm-voice-relay.test.sh 32486
 tests/fm-wake-daemon-lifecycle-e2e.test.sh 7477
+tests/fm-queued-recheck.test.sh 15000
 tests/fm-wake-drain-open-decisions-cursor.test.sh 38506
 tests/fm-wake-drain-open-decisions.test.sh 6890
 tests/fm-wake-drain-outcome-backstop.test.sh 44076
@@ -1420,7 +1422,8 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       ;;
     bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
-    bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
+    bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh|\
+    bin/fm-queued-recheck.sh)
       printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-afk*)

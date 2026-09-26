@@ -356,6 +356,56 @@ EOF
 # The FAILED/actionable half of the same contract, paired with the success
 # test above: an actionable report (here, a MISSING: line bootstrap-diagnostics
 # would load a skill for) still reaches the wake queue even when unclaimed.
+# The queued-record re-check runs after bootstrap under its own bound. Its
+# STILL-TRUE lines are informational: a clean bootstrap with only re-check
+# output must not wake, and a slow forge read must not turn the finished
+# bootstrap into a stage timeout.
+fake_queued_recheck() {  # <root> [sleep-seconds]
+  rm -f "$1/bin/fm-queued-recheck.sh"
+  cat > "$1/bin/fm-queued-recheck.sh" <<SH
+#!/usr/bin/env bash
+[ -z "${2:-}" ] || sleep "${2:-}"
+printf '%s\n' 'STILL-TRUE RE-CHECK (fixture heading):' 'fixture-id named PR https://github.com/o/r/pull/1 has merged'
+SH
+  chmod +x "$1/bin/fm-queued-recheck.sh"
+}
+
+test_queued_recheck_lines_never_wake_on_their_own() {
+  local rec home root log report
+  rec=$(new_world queued-recheck-informational)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  fake_queued_recheck "$root"
+  FM_FAKE_BOOTSTRAP_LOG="$log" run_stage "$home" "$root" run --locked 0
+  [ ! -s "$home/state/.wake-queue" ] \
+    || fail "queued re-check lines alone queued a startup-network wake: $(cat "$home/state/.wake-queue")"
+  report=$(run_stage "$home" "$root" report)
+  assert_contains "$report" "QUEUED_RECHECK_INFO: fixture-id named PR https://github.com/o/r/pull/1 has merged" \
+    "the queued re-check finding was not retained in the durable report"
+  pass "fm-startup-network: queued re-check lines are informational and never wake on their own"
+}
+
+test_a_slow_queued_recheck_cannot_time_out_a_finished_bootstrap() {
+  local rec home root log report
+  rec=$(new_world queued-recheck-slow)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  fake_queued_recheck "$root" 30
+  FM_STARTUP_NETWORK_TIMEOUT=2 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    FM_FAKE_BOOTSTRAP_OUT='MISSING: some-tool (install: brew install some-tool)' \
+    run_stage "$home" "$root" run --locked 0
+  report=$(run_stage "$home" "$root" report)
+  assert_contains "$report" "MISSING: some-tool" \
+    "the finished bootstrap result was lost behind a slow queued re-check"
+  assert_not_contains "$report" "did not finish cleanly" \
+    "a slow queued re-check turned a finished bootstrap into a failed stage: $report"
+  assert_not_contains "$report" "QUEUED_RECHECK_INFO" \
+    "a queued re-check cut off by its bound still published partial output"
+  pass "fm-startup-network: a slow queued re-check cannot time out a finished bootstrap"
+}
+
 test_an_actionable_successful_result_still_queues_a_wake() {
   local rec home root log claimant
   rec=$(new_world actionable-result-wakes)
@@ -866,6 +916,8 @@ test_a_claimant_crash_after_publish_still_queues_the_wake
 test_a_report_publication_failure_is_failed_and_still_wakes
 test_a_successful_result_never_queues_a_wake
 test_an_actionable_successful_result_still_queues_a_wake
+test_queued_recheck_lines_never_wake_on_their_own
+test_a_slow_queued_recheck_cannot_time_out_a_finished_bootstrap
 test_deferred_invalid_secondmate_markers_queue_durable_findings
 test_mutating_sweeps_are_refused_when_the_lock_changed_hands
 test_the_stage_bound_is_reported_not_swallowed

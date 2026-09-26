@@ -92,6 +92,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
 | `fm-watch.sh`            | Singleton-safe watcher: absorb benign wakes, detect stalled local-secondmate wake queues, and exit on actionable ones |
 | `fm-inactive-reconcile.sh` | Reconcile long-inactive direct crewmate terminal outcomes without forge access |
+| `fm-queued-recheck.sh`   | Report queued records whose declared report exists or whose `pr:`-linked PR merged, closing nothing |
 | `fm-afk-contract.sh`     | Own the away-posture record: schema, the captain's away words verbatim, read-back, entry announcement, archive, and cross-subsystem authority lock |
 | `fm-afk-start.sh`        | Run the common sourceable away-mode daemon entry in the foreground                      |
 | `fm-afk-launch.sh`       | Own away-mode entry (same-turn record write, then read-back), exit, rollback, and any backend terminal lifecycle |

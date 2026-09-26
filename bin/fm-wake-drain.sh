@@ -3,7 +3,8 @@
 # optionally acknowledge handled records,
 # annotate every unread line for validated signal status keys, surface unread
 # informational status lines, latest captain-facing statuses not covered by a
-# newer branch outcome, OPEN DECISIONS, and captain-call record divergence,
+# newer branch outcome, OPEN DECISIONS, captain-call record divergence, and
+# queued records whose named report or PR already landed,
 # then assert liveness.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
@@ -551,6 +552,20 @@ EOF
   printf 'RECORD DIVERGENCE: reconcile each one - record the captain'"'"'s own words with bin/fm-captain-hold.sh answer <task> --decision-file <path>, or re-open the status decision when that resolution was not the captain'"'"'s word.\n' || return 1
 }
 
+# Print the STILL-TRUE RE-CHECK section: queued, unheld records whose declared
+# report already exists on disk, or whose named PR was earlier confirmed merged.
+# bin/fm-queued-recheck.sh owns what counts; this prints what it reports.
+# The local scan never calls the forge, so it is safe on the session-start
+# blocking path. Nothing here closes or removes a record.
+print_still_true_recheck_section() {
+  local bound section
+  bound=${FM_QUEUED_RECHECK_TIMEOUT:-20}
+  case "$bound" in ''|*[!0-9]*|0) bound=20 ;; esac
+  section=$(fm_run_timed "$bound" "$SCRIPT_DIR/fm-queued-recheck.sh" --section --local 2>/dev/null) || return 0
+  [ -n "$section" ] || return 0
+  printf '%s\n' "$section" || return 1
+}
+
 print_status_sections() {
   local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
@@ -609,6 +624,10 @@ print_status_presentation() {  # [<deduped-raw-rows>]
   fi
   if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
   fm_lock_release "$lock"
+  # Backlog-vs-disk, independent of status logs: a home with no .status files
+  # can still have a queued record whose report already exists. It reads no
+  # presentation state, so it runs outside the presentation lock.
+  print_still_true_recheck_section || rc=1
   return "$rc"
 }
 

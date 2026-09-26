@@ -204,6 +204,8 @@ When that section reports its checks still in progress it names exactly what is 
    A main drain may also print a bounded, one-shot `STATUS OUTCOME BACKSTOP` when a task's newest captain-facing status event has no covering supervision-branch outcome; handle it as a recovered wake even when no queue row remains.
    The same drain prints every still-unread `note:` line and pending-reply resolution since the last presentation in an unbounded `UNREAD STATUS` section, so an answer buried under a later routine line is not dropped; those lines are not re-printed after that presentation.
    It also prints a bounded `RECORD DIVERGENCE` section naming every captain call the status log reads as resolved while its backlog task is still held; nothing is closed for you, and `captain-hold-lifecycle` owns the reconciliation.
+   The same drain prints a bounded `STILL-TRUE RE-CHECK` section when a queued, unheld record's declared report already exists on disk, or a PR its structured `pr:` link names has merged; confirm the record is still true, or close it through the ordinary landed-work path.
+   Nothing in that section closes or removes a record (`bin/fm-queued-recheck.sh`).
    When the lock could not be acquired and verified, the queue is left untouched because no session mutation is authorized, and the guard's tangle/watcher-liveness alarms still print in read-only advisory mode without drain, supervision repair, or checkout repair commands.
 4. **Supervision operating instructions** - after the wake queue and before both digests, the digest emits exactly one operating block for the detected primary harness, followed by the read-once contract that governs them.
    The script itself never starts supervision; the emitted harness protocol owns the exact wait or wake mechanism.
@@ -446,6 +448,8 @@ Session start is the only exception because its one-shot digest already presente
 Treat any `OPEN DECISIONS` section from the drain as actionable reconciliation input even when no wake record was queued.
 Treat any `UNREAD STATUS` section as newly surfaced status that must be read this turn; those lines are not re-printed after this presentation.
 Treat any `RECORD DIVERGENCE` section as a contradiction between two records of one captain call, never as proof the captain ruled; load `captain-hold-lifecycle` and reconcile it in whichever direction the evidence supports.
+Treat any `STILL-TRUE RE-CHECK` section as a warning that a queued record may already be done; confirm it is still true in two lines, or close it through the ordinary landed-work path.
+Nothing in that section removes a record.
 After handling all emitted wakes and reconciling the OPEN DECISIONS and UNREAD STATUS sections, run the exact generation-bound `--ack-through` command printed as `WAKE_ACK_REQUIRED`; interruption before that acknowledgement deliberately leaves the work durable for idempotent re-handling.
 A status line is a wake event, not current state; use `bin/fm-crew-state.sh` when current state matters, especially before re-escalating an old decision, blocker, or pause.
 A declared `paused:` event means a bounded external wait expected to clear on its own, while `blocked:` means firstmate action is needed.
