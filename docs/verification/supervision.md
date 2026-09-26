@@ -724,7 +724,7 @@ The routine backlog and most of the away window's rows were appended to the stor
 | Twelve waiting routine rows, then a fresh captain outcome | main's one drain printed `[seq 16]` first, then the four newest routine rows and `(8 earlier routine outcome(s) not shown; bin/fm-branch-outcome.sh list keeps them)` |
 | Return after an away window of 130 outcomes (123 routine, 7 captain over two tasks) | the first drain printed one line per task (`[seq 146, newest of 4 for this task]`, `[seq 147, newest of 3 for this task]`) and no routine rows; main processed through 147 in its return turn |
 
-Counted on a copy of that window's store, draining as main until the section is empty and running each printed acknowledgement, the drain before this change took 21 drains and 46,439 bytes of section text, and this one takes 1 drain (742 bytes once the return has advanced the read cursor).
+Counted on a copy of that window's store, draining as main until the section is empty and running each printed acknowledgement, the drain before this change took 21 drains and 46,439 bytes of section text, and this one takes 1 drain (742 bytes after the return's drain advanced the read cursor).
 A Pi primary without `config/supervision-host` ran the same gated-worker session with the changed branch prompt: routine row 1, captain row 2 for the finished work, landing, and `fm_branch_processed` through 2, with no `BRANCH OUTCOMES` line in either conversation.
 
 ```text
