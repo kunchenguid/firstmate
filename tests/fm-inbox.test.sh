@@ -76,6 +76,7 @@ pass "plain note, list, and wake stay on the historical human path"
 isolated="$TMP_ROOT/isolated"
 mkdir -p "$isolated/bin"
 cp "$INBOX_BIN" "$isolated/bin/fm-inbox.sh"
+cp "$ROOT/bin/fm-inbox-receipts.py" "$isolated/bin/fm-inbox-receipts.py"
 chmod +x "$isolated/bin/fm-inbox.sh"
 home=$(make_home human-wake-fail)
 set +e
@@ -291,7 +292,7 @@ run_inbox "$home" note "establish the inbox" >/dev/null || fail "seed note faile
 legacy="1700000000-legacy"
 printf 'id=%s\nat=2026-01-01T00:00:00Z\nsource=text\n--\nfrom before the marker\n' \
   "$legacy" > "$home/state/inbox/$legacy.note"
-legacy_announced=$(run_inbox "$home" receipts --all-pending | python3 -c 'import json,sys
+legacy_announced=$(run_inbox "$home" receipts --rebuild --all-pending | python3 -c 'import json,sys
 rows={r["id"]: r["announced"] for r in json.load(sys.stdin)["pending"]}
 print(json.dumps(rows[sys.argv[1]]))' "$legacy")
 assert_equals "null" "$legacy_announced" \
@@ -383,7 +384,7 @@ home=$(make_home non-utf8)
 run_inbox "$home" note "readable note" >/dev/null || fail "seed note failed"
 printf 'id=1700000000-binary\nat=2026-01-01T00:00:00Z\nsource=text\n--\n\377\376 bytes\n' \
   > "$home/state/inbox/1700000000-binary.note"
-binary=$(run_inbox "$home" receipts) || fail "receipts must survive a non-UTF-8 note"
+binary=$(run_inbox "$home" receipts --rebuild) || fail "receipts must survive a non-UTF-8 note"
 assert_equals "2" "$(printf '%s' "$binary" | json_len pending)" \
   "the undecodable note and the readable note are both listed"
 pass "a non-UTF-8 note does not break the receipts view"
