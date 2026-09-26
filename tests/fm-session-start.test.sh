@@ -2038,6 +2038,50 @@ EOF
   pass "a session start inside its budget prints no truncation banner"
 }
 
+# Exercise the tracked hook, source-routing wrapper, and runtime-bound wrapper
+# beneath a real harness-named process. Only external tools are stubbed; ps and
+# the startup/detection executables remain real.
+test_codex_hook_preserves_harness_attribution() {
+  local rec root home fakebin hook out startup_env
+  rec=$(new_world codex-hook-ancestry)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  # Select the external-timeout path on macOS too; its status shell is the
+  # extra production wrapper that put native Codex beyond the old scan.
+  make_term_escalating_timeout "$fakebin"
+  cp -R "$ROOT/bin" "$root/bin"
+  mkdir -p "$root/.codex" "$root/docs"
+  cp -R "$ROOT/docs/supervision-protocols" "$root/docs/supervision-protocols"
+  cp "$ROOT/.codex/hooks.json" "$root/.codex/hooks.json"
+  printf '# Startup test home\n' > "$root/AGENTS.md"
+  cp "$(command -v bash)" "$fakebin/codex"
+  hook=$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$root/.codex/hooks.json")
+  # The tracked login shell loads the host profile. Restore only the isolated
+  # tool path afterwards; never replace the ancestry signal or harness marker.
+  startup_env="$home/startup-env.sh"
+  printf 'export PATH=%q\n' "$fakebin:$BASE_PATH" > "$startup_env"
+  # shellcheck disable=SC2016 # The hook and status expand in the child shell.
+  out=$(cd "$root" && env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS \
+    -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
+    -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u FM_OMP_HARNESS \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" BASH_ENV="$startup_env" \
+    "$fakebin/codex" -c 'bash -c "$1" <<EOF
+{"source":"startup"}
+EOF
+exit $?' _ "$hook")
+  assert_contains "$out" 'lock acquired: harness pid' \
+    'the tracked Codex startup hook could not acquire its isolated lock'
+  assert_contains "$out" 'primary harness: codex' \
+    'startup wrappers hid the Codex ancestor from harness detection'
+  assert_contains "$out" 'Mode: Codex foreground checkpoint.' \
+    'the tracked startup hook did not select the Codex supervision protocol'
+  wait_for_network_stage "$home" "$root" \
+    || fail 'the isolated hook startup did not finish its deferred stage'
+  pass 'tracked Codex startup wrappers preserve native harness attribution'
+}
+
 test_runtime_bound_leaves_harness_ancestry_headroom() {
   local rec root home fakebin nest out
   rec=$(new_world runtime-bound-ancestry)
@@ -2703,6 +2747,7 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
+test_codex_hook_preserves_harness_attribution
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
