@@ -660,6 +660,15 @@ Only the file's presence is read, so its contents are ignored; remove it to retu
 
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
 
+## Issue claim screen (config/issue-claim-screen)
+
+`config/issue-claim-screen` is an optional local, gitignored presence flag that opts this home in to screening an upstream GitHub issue for an existing claim or fix before Bearings' contribution follow-up spends work on it.
+Without it that follow-up files work exactly as it did before, and `bin/fm-issue-claim.sh --if-enabled` exits without output or any forge read, so an unconfigured home never runs the screen.
+With it, the same call screens the issue read-only and reports its verdict; it never closes, labels, or comments.
+An explicit operator invocation without `--if-enabled` always screens, and its report-only `--sweep` mode stays a separate explicit opt-in.
+Only the file's presence is read, so its contents are ignored, and the flag is per home and not inherited by secondmate homes.
+The script's header owns its checks, verdicts, and limits.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.

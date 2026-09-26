@@ -200,6 +200,7 @@ Carry any unresolved scope or authority choice through `captain-hold-lifecycle` 
 The classifier does not infer a captain decision from comment prose, and a recorded captain-actor verdict without a live hold asks the fleet to reconcile that missing arbitration.
 A merge-ready classification grants no merge authority and the ordinary exact-PR checks still govern any later approval.
 
+Only in a home opted in with the `config/issue-claim-screen` presence flag ([configuration](../../../docs/configuration.md#issue-claim-screen-configissue-claim-screen)), screen an upstream GitHub issue before spending work on it with `bin/fm-issue-claim.sh --if-enabled`, whose header owns its checks, verdicts, and limits; without the flag, filing proceeds exactly as below.
 When filing work corresponding to an upstream ticket, put its canonical issue URL on the structured backlog row and run the observer's `arm` operation.
 That explicit task link, rather than repository membership or a text similarity guess, makes a ready-for-pr transition owned planning input.
 After a signal's disposition is durable as filed work, a captain hold, or a recorded no-action decision in the task, acknowledge that exact event token through `ack`.
