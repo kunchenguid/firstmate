@@ -54,7 +54,8 @@
 #                older claude). The bottom border may carry a TITLE (grok
 #                writes its model name there); a titled bottom border that
 #                still starts and ends with the family's rule glyph is
-#                tolerated, including Grok 1.0.5's three-column title overhang.
+#                tolerated, including Grok 1.0.5's three-column title overhang
+#                and Grok 1.0.41's same-width ` · always-approve` mode suffix.
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
 #                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
@@ -1032,7 +1033,7 @@ EOF
 # inner (corners already stripped) still starts and ends with the family's own
 # rule glyph, so the title is embedded IN the rule rather than replacing it.
 _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
-  local family=$1 inner=$2 expected=$3 dash spaces title effort model
+  local family=$1 inner=$2 expected=$3 dash spaces title effort model middot
   fm_composer_normalize_trim_var inner
   case "$family" in
     rounded|light) dash='─' ;;
@@ -1045,7 +1046,13 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
     "$dash"*"$dash") ;;
     *) return 1 ;;
   esac
+  # U+00B7 MIDDLE DOT is the separator grok 1.0.41 draws in
+  # `Grok <model> (<effort>) · always-approve` (Firstmate's --always-approve
+  # spawn). Map it like ASCII printable so a same-width titled rule still
+  # proves.
+  middot=$(printf '\302\267')
   spaces=${inner//"$dash"/ }
+  spaces=${spaces//"$middot"/ }
   spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
   case "$spaces" in
     *[![:space:]]*) return 1 ;;
