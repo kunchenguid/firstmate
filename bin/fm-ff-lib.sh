@@ -475,34 +475,20 @@ ff_target_jj() {
       echo "$label: already current"
       return 0
     fi
-    instr=$(jj_changed_instr "$dir" "@" "$base")
-    before=$(jj -R "$dir" log -r '@' --no-graph -T 'commit_id.short(7)' 2>/dev/null)
-    if ! jj -R "$dir" new "$base" >/dev/null 2>&1; then
-      echo "$label: skipped: could not move working copy to $base"
-      return 0
-    fi
-    after=$(jj -R "$dir" log -r "$base" --no-graph -T 'commit_id.short(7)' 2>/dev/null)
-    FF_STATUS="updated"
-    FF_INSTR="$instr"
-    if [ -n "$instr" ]; then
-      echo "$label: updated $before..$after (instructions changed: $instr)"
-    else
-      echo "$label: updated $before..$after"
-    fi
-    return 0
   fi
 
-  instr=$(jj_changed_instr "$dir" "$default" "$base")
-  before=$(jj -R "$dir" log -r "$default" --no-graph -T 'commit_id.short(7)' 2>/dev/null)
+  instr=$(jj_changed_instr "$dir" "@" "$base")
+  before=$(jj -R "$dir" log -r '@' --no-graph -T 'commit_id.short(7)' 2>/dev/null)
   if ! jj -R "$dir" new "$base" >/dev/null 2>&1; then
     echo "$label: skipped: could not move working copy to $base"
     return 0
   fi
-  if ! jj -R "$dir" bookmark set "$default" -r "$base" >/dev/null 2>&1; then
+  if [ "$cur_rev" != "$base_rev" ] \
+    && ! jj -R "$dir" bookmark set "$default" -r "$base" >/dev/null 2>&1; then
     echo "$label: skipped: could not advance $default to $base"
     return 0
   fi
-  after=$(jj -R "$dir" log -r "$default" --no-graph -T 'commit_id.short(7)' 2>/dev/null)
+  after=$(jj -R "$dir" log -r "$base" --no-graph -T 'commit_id.short(7)' 2>/dev/null)
   FF_STATUS="updated"
   FF_INSTR="$instr"
   if [ -n "$instr" ]; then

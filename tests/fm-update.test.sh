@@ -695,7 +695,11 @@ test_jj_stale_parked_wc_advances() {
   local w out
   w=$(new_jj_world jj7)
   bump_origin "$w" instr
+  jj -R "$w/main" git fetch --remote origin --quiet >/dev/null 2>&1
   jj -R "$w/main" bookmark set main -r main@origin >/dev/null 2>&1
+  [ "$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)" = \
+    "$(jj -R "$w/main" log -r main@origin --no-graph -T 'commit_id' 2>/dev/null)" ] \
+    || fail "JJ7 fixture did not park the bookmark on the origin tip"
 
   out=$(run_update "$w")
 
@@ -710,6 +714,30 @@ test_jj_stale_parked_wc_advances() {
     || fail "jj working copy not clean after advance"
   grep -q 'v2' "$w/main/AGENTS.md" || fail "jj files not at target content"
   pass "JJ7 a stale working copy under a current bookmark advances and rereads"
+}
+
+# --- JJ9: reread baselines on the working copy, not the bookmark --------------
+# A behind bookmark whose home parks @ on an older commit: the instruction list
+# and reread verdict must reflect the files actually served (the working copy),
+# even when the bookmark..base range itself touched no instruction file.
+test_jj_reread_baselines_on_working_copy() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out
+  w=$(new_jj_world jj9)
+  bump_origin "$w" instr
+  run_update "$w" >/dev/null
+  jj -R "$w/main" new main@origin- >/dev/null 2>&1
+  bump_origin "$w" readme
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "behind bookmark advanced"
+  assert_contains "$out" "(instructions changed: AGENTS.md, bin, .agents/skills)" \
+    "the instruction list reflects the working-copy baseline"
+  assert_contains "$out" "reread-firstmate: yes" \
+    "working-copy instruction movement turns the reread gate on"
+  grep -q 'v2' "$w/main/AGENTS.md" || fail "jj files not at target content"
+  pass "JJ9 the reread verdict baselines on the working copy for a behind bookmark"
 }
 
 # --- JJ8: current bookmark with a side-commit working copy is skipped --------
@@ -740,6 +768,7 @@ test_jj_described_skipped
 test_jj_parked_outside_skipped
 test_jj_stale_parked_wc_advances
 test_jj_side_commit_wc_skipped
+test_jj_reread_baselines_on_working_copy
 
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
