@@ -1533,15 +1533,16 @@ inject_msg() {  # <message> [state] [own-pending]
 # the earlier text is submitted and <message> stays buffered for a later flush
 # (INJECT_OWN_PENDING_SUBMITTED=1), so a newer escalation is never dropped.
 inject_submit_own_pending() {  # <message> <backend> <target>
-  local backend=$2 target=$3
+  local backend=$2 target=$3 composer
   if ! fm_backend_send_key "$backend" "$target" Enter >/dev/null 2>&1; then
     INJECT_LAST_FAILURE="Enter for this supervisor's own digest held in the composer could not be sent"
     log "inject failed at $INJECT_LAST_FAILURE"
     return 1
   fi
   sleep "${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}"
-  if fm_backend_composer_holds "$backend" "$target" "$INJECT_PENDING_TEXT"; then
-    INJECT_LAST_FAILURE="Enter for this supervisor's own digest held in the composer: the composer still holds it"
+  composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+  if [ "$composer" != empty ]; then
+    INJECT_LAST_FAILURE="Enter for this supervisor's own digest held in the composer: submit unconfirmed (state=${composer:-unknown})"
     log "inject failed at $INJECT_LAST_FAILURE"
     return 1
   fi

@@ -2347,6 +2347,41 @@ test_max_defer_submits_own_pending_digest_with_enter_only() {
   pass "max-defer submits this daemon's own digest held in the composer with Enter only, never retyped"
 }
 
+test_max_defer_own_pending_unconfirmed_enter_keeps_buffer() {
+  local dir state sent fakebin
+  own_pending_digest_case maxdefer-own-pending-unreadable
+  dir=$OWN_CASE_DIR
+  state="$dir/state"; sent="$dir/sent.log"; fakebin="$dir/fakebin"
+  # The Enter is swallowed and every later pane read fails.
+  mv "$fakebin/tmux" "$fakebin/tmux.real"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  send-keys)
+    for a in "\$@"; do
+      [ "\$a" = Enter ] && { printf '[ENTER]\n' >> "$sent"; touch "$dir/.unreadable"; exit 0; }
+    done ;;
+  capture-pane) [ -e "$dir/.unreadable" ] && exit 1 ;;
+esac
+exec "$fakebin/tmux.real" "\$@"
+SH
+  chmod +x "$fakebin/tmux"
+  LOG="$dir/daemon.log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_INJECT_CONFIRM_SLEEP=0.05 FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 \
+    housekeeping "$state"
+  [ "$(grep -c '\[ENTER\]' "$sent")" -eq 1 ] || fail "max-defer must press Enter once on its own held digest"
+  grep -F 'pick C' "$state/.subsuper-escalations" >/dev/null \
+    || fail "an unconfirmed Enter cleared the buffer"
+  [ "$(_file_age "$state/.subsuper-inject-wedged")" -lt 60 ] \
+    || fail "an unconfirmed Enter must still raise the wedge alarm"
+  grep -F 'submit unconfirmed (state=unknown)' "$dir/daemon.log" >/dev/null \
+    || fail "an unconfirmed Enter was not logged as a failed recovery"
+  ! grep -F 'inject recovered' "$dir/daemon.log" >/dev/null \
+    || fail "an unconfirmed Enter was logged as a recovery"
+  [ -n "$INJECT_PENDING_TEXT" ] || fail "an unconfirmed Enter forgot the held digest"
+  pass "max-defer keeps the buffer and alarms when its Enter on the held digest cannot be confirmed"
+}
+
 test_max_defer_own_pending_keeps_newer_escalations() {
   local dir state sent typed digest
   own_pending_digest_case maxdefer-own-pending-newer
@@ -3299,6 +3334,7 @@ test_max_defer_empty_swallow_types_once_and_alarms
 test_max_defer_flushes_empty_idle_pane
 test_max_defer_pending_composer_alarms_without_typing
 test_max_defer_submits_own_pending_digest_with_enter_only
+test_max_defer_own_pending_unconfirmed_enter_keeps_buffer
 test_max_defer_own_pending_keeps_newer_escalations
 test_max_defer_never_submits_own_digest_with_added_text
 test_normal_flush_clears_stale_wedge_marker
