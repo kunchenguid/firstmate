@@ -269,21 +269,24 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 }
 
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
-# composer pre-check, then the backend's submit machinery with a minimal retry
-# budget, verdict discarded.
-# Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
-# (the watcher re-rings later), 2 the backend send failed, 3 skipped because
-# the endpoint is positively dead or missing (nothing typed; recovery owns the
-# record). No return value is delivery proof; the acknowledgement move is the
-# only delivery signal.
-# The skip is deliberately narrow: only an exact `pending` verdict defers,
-# because there our Enter could submit someone's real half-typed content.
-# `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
+# composer pre-check, then the backend's submit machinery with submission
+# verification. An exact pending copy of this inbox's own bell is submitted in
+# place, without typing it again.
+# Returns 0 when the bell was submitted or an exact pending bell was
+# successfully submitted, 1 skipped because the composer PROVENLY holds other
+# pending text (the watcher re-rings later), 2 when submission failed or could
+# not be verified, 3 skipped because the endpoint is positively dead or missing
+# (nothing typed; recovery owns the record). The acknowledgement move remains
+# the only proof that the worker acted on the record.
+# A proven `pending` verdict defers unless the selected composer exactly
+# matches this inbox's own doorbell, because Enter could otherwise submit
+# someone's real half-typed content. `pending-unproven` and `unknown` still ring
+# unless the exact doorbell is identified; the worst outcome is a garbled
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict submit_status
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
@@ -292,18 +295,30 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
-    pending) return 1 ;;
+    pending|pending-unproven)
+      if fm_backend_composer_matches_text "$backend" "$target" "$line" "$label"; then
+        if fm_backend_submit_exact_pending "$backend" "$target" "$line" 3 0.4 "$label"; then
+          return 0
+        else
+          submit_status=$?
+        fi
+        [ "$submit_status" != 2 ] || return 2
+        return 1
+      fi
+      [ "$cstate" != pending ] || return 1
+      ;;
   esac
   # Accepted residual race: terminal input and Enter are separate delivery
   # steps, so an agent exiting after the liveness check could leave a bare
   # shell only a suffix; the `: ` prefix protects complete lines only. Do not
   # add process-bound atomic delivery here unless an incident reopens this.
-  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null); then
+  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 3 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi
-  # The verdict is read only to report a failed keystroke; every other value
-  # (empty, pending, unknown, ...) is deliberately ignored, never proof.
-  [ "$verdict" != send-failed ] || return 2
+  # A best-effort doorbell is still a send only when the adapter verified its
+  # submission. The durable record remains safe for the watcher's re-ring when
+  # the composer still holds it or the backend cannot prove the result.
+  [ "$verdict" = empty ] || return 2
   return 0
 }
 

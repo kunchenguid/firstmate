@@ -4092,6 +4092,30 @@ test_composer_state_codex_non_faint_same_text_is_pending() {
   pass "fm_backend_herdr_composer_state: non-faint codex prompt text still reads pending"
 }
 
+test_composer_matches_exact_firstmate_doorbell() {
+  local dir log resp fb state rec bell out
+  dir="$TMP_ROOT/composer-exact-doorbell"; mkdir -p "$dir/responses" "$dir/state"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  state="$dir/state"
+  rec=$(FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1"; fm_task_inbox_write "$FM_STATE_OVERRIDE" t1 "wake"' \
+    _ "$ROOT/bin/fm-task-inbox-lib.sh")
+  bell=$(FM_STATE_OVERRIDE="$state" bash -c \
+    '. "$1"; fm_task_inbox_doorbell_line "$2"' \
+    _ "$ROOT/bin/fm-task-inbox-lib.sh" "$rec")
+  printf '\xe2\x80\xba %s\n\n  gpt-5-codex xhigh \xc2\xb7 Context 100%% left\n' "$bell" > "$resp/1.out"
+  printf '\xe2\x80\xba %s extra\n\n  gpt-5-codex xhigh \xc2\xb7 Context 100%% left\n' "$bell" > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_matches_text herdr default:w1:p2 "$1"' \
+    "$ROOT" "$bell" && printf yes || printf no)
+  [ "$out" = yes ] || fail "the herdr composer reader should match the exact pending doorbell"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_matches_text herdr default:w1:p2 "$1"' \
+    "$ROOT" "$bell") && out=yes || out=no
+  [ "$out" = no ] || fail "a composer with additional text must not match Firstmate's pending doorbell"
+  pass "fm_backend_composer_matches_text: herdr recognizes only the exact pending doorbell in Codex's selected composer"
+}
+
 # --- wait_for_working: the native agent-state poll-and-classify primitive ---
 # Direct unit coverage for fm_backend_herdr_wait_for_working, the helper
 # fm_backend_herdr_send_text_submit now uses instead of composer scraping
@@ -5364,6 +5388,7 @@ test_composer_state_grok_bright_truecolor_real_text_is_pending
 test_composer_state_codex_bare_prompt_glyph_is_empty
 test_composer_state_codex_faint_suggestion_is_empty
 test_composer_state_codex_non_faint_same_text_is_pending
+test_composer_matches_exact_firstmate_doorbell
 test_wait_for_working_returns_busy_on_first_poll
 test_wait_for_working_catches_a_slow_transition_mid_window
 test_wait_for_working_samples_budget_endpoint_without_final_sleep

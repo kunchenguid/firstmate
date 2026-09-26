@@ -85,7 +85,8 @@
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
-#     is typed, so existing text is preserved instead of being concatenated.
+#     is typed, except for the exact Firstmate doorbell, which is submitted
+#     and verified before lifecycle control continues.
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
@@ -130,6 +131,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -443,7 +446,7 @@ retire_busy_incarnation() {
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped` or `stopped`.
 do_exit() {
-  local state cmd verdict composer_state cancel interrupt_result=not-needed
+  local state cmd verdict composer_state cancel interrupt_result=not-needed pending_bell
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -455,35 +458,48 @@ do_exit() {
     missing) die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action" ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
-  # A busy agent is interrupted first before the exit command is submitted.
-  case "$(busy_verdict)" in
-    busy*)
-      cancel=$(deliver_interrupt) || return $?
-      state=$(agent_state)
-      case "$state" in
-        dead)
-          retire_busy_incarnation
-          printf 'stopped'
-          return 0
-          ;;
-        alive) interrupt_result="delivered verified=agent-alive cancel=$cancel" ;;
-        missing) die "task $ID's recorded endpoint disappeared after interrupt delivery, so exit cannot prove whether the agent stopped" ;;
-        *) die "task $ID's endpoint reads '$state' after interrupt delivery rather than a positively classified state; exit cannot prove whether the agent stopped" ;;
-      esac
-      ;;
-  esac
   cmd=$(fm_control_exit_command "$HARNESS")
-  composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
-    || composer_state=unknown
-  case "$composer_state" in
-    empty) ;;
-    pending)
-      die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
-      ;;
-    *)
-      die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
-      ;;
-  esac
+  while :; do
+    # A busy agent is interrupted first before the exit command is submitted.
+    case "$(busy_verdict)" in
+      busy*)
+        cancel=$(deliver_interrupt) || return $?
+        state=$(agent_state)
+        case "$state" in
+          dead)
+            retire_busy_incarnation
+            printf 'stopped'
+            return 0
+            ;;
+          alive) interrupt_result="delivered verified=agent-alive cancel=$cancel" ;;
+          missing) die "task $ID's recorded endpoint disappeared after interrupt delivery, so exit cannot prove whether the agent stopped" ;;
+          *) die "task $ID's endpoint reads '$state' after interrupt delivery rather than a positively classified state; exit cannot prove whether the agent stopped" ;;
+        esac
+        ;;
+    esac
+    composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
+      || composer_state=unknown
+    case "$composer_state" in
+      empty) break ;;
+      pending|pending-unproven)
+        pending_bell=$(fm_task_inbox_doorbell_line "$STATE/$ID.inbox/001.msg" 2>/dev/null) \
+          || pending_bell=
+        if [ -n "$pending_bell" ] \
+           && fm_backend_composer_matches_text "$BACKEND" "$T" "$pending_bell" "$LABEL"; then
+          fm_backend_submit_exact_pending "$BACKEND" "$T" "$pending_bell" "$EXIT_RETRIES" "$POLL" "$LABEL" \
+            || die "task $ID's exact pending Firstmate doorbell could not be submitted and verified; refusing to type the $cmd exit command"
+          continue
+        fi
+        if [ "$composer_state" = pending ]; then
+          die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
+        fi
+        die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
+        ;;
+      *)
+        die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
+        ;;
+    esac
+  done
   # The submit verdict is NOT the postcondition here: a successful exit command
   # destroys the composer the verdict is read from, so a post-exit read can
   # legitimately report anything. Only a hard transport failure aborts; the

@@ -83,6 +83,9 @@ case "${1:-}" in
       esac
     else
       printf '%s\n' "$payload" >> "$D/keys"
+      if [ "$payload" = Enter ] && [ "${FM_FAKE_SUBMIT_PENDING_BELL:-}" = 1 ]; then
+        : > "$D/composer"
+      fi
       case "$payload" in
         'export GOTMPDIR='*)
           if [ -n "${FM_FAKE_TRACE_PREPARE:-}" ]; then
@@ -222,6 +225,7 @@ run_control() {  # <case-dir> <args...>
   mkdir -p "$dir/user-home"
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_FAKE_SUBMIT_PENDING_BELL="${FM_FAKE_SUBMIT_PENDING_BELL:-}" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
@@ -417,6 +421,36 @@ test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven() {
   assert_no_grep "/exit" "$dir/fake/literal" \
     "the exit command must not be typed when the composer state is not proven empty"
   pass "fm-control relaunch: an unreadable composer fails safe before the exit command is typed"
+}
+
+test_relaunch_submits_an_exact_pending_doorbell_before_exit() {
+  local dir rec bell out rc
+  dir=$(new_case pending-doorbell-exit rl45)
+  add_ship_task "$dir" rl45 claude
+  mkdir -p "$dir/home/state/rl45.inbox"
+  rec=$(FM_STATE_OVERRIDE="$dir/home/state" bash -c \
+    '. "$1"; fm_task_inbox_write "$FM_STATE_OVERRIDE" rl45 "resume work"' \
+    _ "$ROOT/bin/fm-task-inbox-lib.sh")
+  bell=$(FM_STATE_OVERRIDE="$dir/home/state" bash -c \
+    '. "$1"; fm_task_inbox_doorbell_line "$2"' \
+    _ "$ROOT/bin/fm-task-inbox-lib.sh" "$rec")
+  printf '%s' "$bell" > "$dir/fake/composer"
+  local matched
+  # shellcheck disable=SC2016
+  matched=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" bash -c \
+    '. "$1"; fm_backend_composer_matches_text tmux fmses:fm-rl45 "$2" fm-rl45 && printf yes || printf no' \
+    _ "$ROOT/bin/fm-backend.sh" "$bell")
+  [ "$matched" = yes ] || fail "the composer reader should recognize its exact doorbell text (got $matched)"
+
+  out=$(FM_FAKE_SUBMIT_PENDING_BELL=1 run_control "$dir" rl45 relaunch \
+    --note "replace the worker after submitting its pending doorbell"); rc=$?
+
+  expect_code 0 "$rc" "relaunch should submit its exact pending Firstmate doorbell before sending the exit command: $out"
+  assert_grep Enter "$dir/fake/keys" "the pending doorbell should be submitted without being retyped"
+  assert_grep "/exit" "$dir/fake/literal" "relaunch should continue with the exit command after the bell is submitted"
+  assert_present "$rec" "submitting a doorbell must leave its durable inbox record intact"
+  pass "fm-control relaunch: an exact pending Firstmate doorbell is submitted and does not strand lifecycle control"
 }
 
 test_relaunch_from_linked_home_preserves_recorded_worktree() {
@@ -1775,6 +1809,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
+test_relaunch_submits_an_exact_pending_doorbell_before_exit
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication

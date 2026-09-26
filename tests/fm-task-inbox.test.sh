@@ -279,6 +279,94 @@ test_ring_skips_dead_agent() {
   pass "inbox: the ring skips dead or missing endpoints and still rings live or unclassifiable endpoints"
 }
 
+test_ring_submits_an_exact_pending_doorbell_without_retyping_it() {
+  local dir state first second bell rc log composer
+  dir="$TMP_ROOT/ring-pending-bell"
+  state="$dir/state"
+  mkdir -p "$state"
+  first=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "first steer")
+  second=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "second steer")
+  bell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$first")
+  log="$dir/send.log"
+  composer="$dir/composer"
+  printf '%s\n' "$bell" > "$composer"
+  : > "$log"
+
+  rc=0
+  FM_FAKE_COMPOSER="$composer" FM_FAKE_COMPOSER_LOG="$log" \
+  FM_EXPECTED_DOORBELL="$bell" FM_FAKE_SWALLOW_FIRST_ENTER=1 \
+    bash -c '
+      . "$1"
+      fm_backend_agent_state() { printf idle; }
+      fm_backend_composer_state() {
+        if [ -s "$FM_FAKE_COMPOSER" ]; then printf pending; else printf empty; fi
+      }
+      fm_backend_composer_matches_text() {
+        [ "$3" = "$FM_EXPECTED_DOORBELL" ] \
+          && [ "$(cat "$FM_FAKE_COMPOSER")" = "$FM_EXPECTED_DOORBELL" ]
+      }
+      fm_backend_send_key() {
+        printf "%s\n" "$3" >> "$FM_FAKE_COMPOSER_LOG"
+        if [ "${FM_FAKE_SWALLOW_FIRST_ENTER:-}" = 1 ] \
+           && [ "$(wc -l < "$FM_FAKE_COMPOSER_LOG")" -eq 1 ]; then
+          return 0
+        fi
+        : > "$FM_FAKE_COMPOSER"
+      }
+      fm_backend_send_text_submit() {
+        printf "typed:%s\n" "$3" >> "$FM_FAKE_COMPOSER_LOG"
+        printf empty
+      }
+      fm_task_inbox_ring herdr lab:w1:p1 "$2" fm-t1
+    ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$second" || rc=$?
+
+  [ "$rc" = 0 ] || fail "an exact pending doorbell should be submitted and confirmed, got status $rc"
+  [ "$(cat "$log")" = $'Enter\nEnter' ] \
+    || fail "a swallowed submit should retry Enter without retyping: $(cat "$log")"
+  [ ! -s "$composer" ] || fail "the exact pending doorbell should leave the composer after submit"
+  [ -f "$first" ] && [ -f "$second" ] || fail "submitting the doorbell must leave both durable inbox records intact"
+  pass "inbox: an exact pending doorbell is submitted without retyping and later inbox records can ring"
+}
+
+test_ring_uses_verified_submit_retries() {
+  local dir state rec rc log
+  dir="$TMP_ROOT/ring-submit-retry"
+  state="$dir/state"
+  mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "retry steer")
+  log="$dir/send.log"
+  : > "$log"
+  rc=0
+  FM_TASK_INBOX_FAKE_LOG="$log" bash -c '
+    . "$1"
+    fm_backend_agent_state() { printf idle; }
+    fm_backend_composer_state() { printf empty; }
+    fm_backend_send_text_submit() {
+      printf "%s\n" "$4" >> "$FM_TASK_INBOX_FAKE_LOG"
+      printf "%s" "${FM_TASK_INBOX_FAKE_VERDICT:-empty}"
+    }
+    fm_task_inbox_ring tmux lab:bell "$2" || exit $?
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$rec" || rc=$?
+  [ "$rc" = 0 ] || fail "a confirmed ring should succeed, got status $rc"
+  [ "$(cat "$log")" = 3 ] || fail "the ring should allow three submit attempts without retyping, got: $(cat "$log")"
+
+  : > "$log"
+  rc=0
+  FM_TASK_INBOX_FAKE_LOG="$log" FM_TASK_INBOX_FAKE_VERDICT=pending bash -c '
+    . "$1"
+    fm_backend_agent_state() { printf idle; }
+    fm_backend_composer_state() { printf empty; }
+    fm_backend_send_text_submit() {
+      printf "%s\n" "$4" >> "$FM_TASK_INBOX_FAKE_LOG"
+      printf "%s" "$FM_TASK_INBOX_FAKE_VERDICT"
+    }
+    fm_task_inbox_ring tmux lab:bell "$2" || exit $?
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$rec" || rc=$?
+  [ "$rc" = 2 ] || fail "an unconfirmed ring should be reported as send failure, got status $rc"
+  [ "$(cat "$log")" = 3 ] || fail "an unconfirmed ring should use the bounded submit retry budget"
+  pass "inbox: fresh doorbells retry Enter and count only a verified submit as rung"
+}
+
 test_idempotent_write_dedups_exact_body() {
   local state r1 r2 r3 r4 count text
   state="$TMP_ROOT/idem/state"; mkdir -p "$state"
@@ -696,6 +784,8 @@ test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
+test_ring_submits_an_exact_pending_doorbell_without_retyping_it
+test_ring_uses_verified_submit_retries
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence

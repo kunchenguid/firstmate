@@ -858,6 +858,69 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
   esac
 }
 
+# fm_backend_composer_matches_text: prove that the selected live composer
+# contains exactly <text>. This is intentionally narrower than a pane search:
+# only the composer region may authorize submitting pending input.
+fm_backend_composer_matches_text() {  # <backend> <target> <text> [expected-label]
+  local backend=$1 target=$2 expected=$3 label=${4:-} cap caps actual styled
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux)
+      cap=$(fm_tmux_composer_capture "$target") || return 1
+      caps=$(fm_tmux_composer_caps)
+      ;;
+    herdr)
+      if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then
+        styled=1
+      else
+        cap=$(fm_backend_herdr_capture "$target" "$FM_COMPOSER_CAPTURE_LINES") || return 1
+        styled=0
+      fi
+      caps=$(printf 'styled=%s\ncursor=0\nidentity=0\nrows=%s' "$styled" "$FM_COMPOSER_CAPTURE_LINES")
+      ;;
+    zellij)
+      actual=$(fm_backend_zellij_composer_content "$target" "$label") || return 1
+      ;;
+    orca)
+      cap=$(fm_backend_orca_composer_capture "$target" "$label") || return 1
+      caps=$(fm_backend_orca_composer_caps)
+      ;;
+    cmux)
+      cap=$(fm_backend_cmux_composer_capture "$target" "$label") || return 1
+      caps=$(fm_backend_cmux_composer_caps)
+      ;;
+    *) return 1 ;;
+  esac
+  if [ "$backend" != zellij ]; then
+    actual=$(fm_composer_extract_selected_content "$caps" "$cap") || return 1
+  fi
+  fm_composer_normalize_spaces_var expected
+  fm_composer_normalize_spaces_var actual
+  [ "$actual" = "$expected" ]
+}
+
+# fm_backend_submit_exact_pending: submit an already typed composer line only
+# when its entire selected content matches <text>, retrying Enter while that
+# exact line remains pending. A changed, unknown, or unrelated composer fails
+# closed. Success requires an empty composer or a positively busy agent.
+fm_backend_submit_exact_pending() {  # <backend> <target> <text> <retries> <sleep> [expected-label]
+  local backend=$1 target=$2 text=$3 retries=$4 sleep_s=$5 label=${6:-}
+  local i=0 state busy
+  case "$retries" in ''|*[!0-9]*|0) retries=1 ;; esac
+  fm_backend_composer_matches_text "$backend" "$target" "$text" "$label" || return 1
+  while [ "$i" -lt "$retries" ]; do
+    fm_backend_send_key "$backend" "$target" Enter "$label" || return 2
+    sleep "$sleep_s"
+    state=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || state=unknown
+    [ "$state" = empty ] && return 0
+    fm_backend_composer_matches_text "$backend" "$target" "$text" "$label" || return 1
+    busy=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null) || busy=unknown
+    [ "$busy" = busy ] && return 0
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # fm_backend_target_exists: cheap, READ-ONLY existence check - does the
 # recorded TARGET endpoint still exist on BACKEND? Never starts a server or
 # session: for herdr this deliberately queries the pane directly instead of
