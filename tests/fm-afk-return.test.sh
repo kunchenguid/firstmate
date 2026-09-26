@@ -508,13 +508,13 @@ test_return_marks_the_window_read_on_a_host_home_only() {
 }
 
 # The return advances the read cursor only through what its brief presented:
-# every outcome no drain presented before the captain left is presented too,
-# labelled as from before the window, and routine rows beyond the display
-# limit in either group collapse into one line that counts them and names
-# their tasks, so nothing the cursor covers is silent. A row recorded in the
-# same second as /afk lands in exactly one group, by store sequence.
-test_return_presents_unread_outcomes_from_before_the_window() {
-  local dir fakebin out cursor n entered store earlier
+# every unread outcome, from before and during the away window alike, is one
+# list in store-sequence order with each row's time, captain rows and the
+# newest routine rows in full, and older routine rows in one line that counts
+# them and names their tasks, so each row is presented once and none is marked
+# read unseen - including one recorded in the same second as /afk.
+test_return_presents_every_unread_outcome_once() {
+  local dir fakebin out cursor n entered store t seen
   dir="$TMP_ROOT/window-earlier"
   install_runner "$dir"
   for f in fm-supervision-engine-lib.sh fm-harness.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
@@ -546,22 +546,23 @@ test_return_presents_unread_outcomes_from_before_the_window() {
   # shellcheck disable=SC2016 # the single-quoted script expands in the harness shell
   out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
     "$fakebin/claude" -c '"$0" begin 2>&1' "$dir/bin/fm-afk-return.sh") || fail "the return did not clear: $out"
-  assert_contains "$out" 'From before you left, not yet presented:' "the brief must label the unread rows from before the window"
-  assert_contains "$out" '  - early-cap: needs a merge decision (captain;' "an earlier captain row must be listed in full"
-  assert_contains "$out" '  - 1 earlier routine outcome(s) not listed in full, for: early-1' "the earlier overflow must be counted and named"
-  for n in 2 3 4 5 6; do
-    assert_contains "$out" "  - early-$n: early routine $n" "the newest earlier routine rows must be listed in full"
-  done
-  assert_contains "$out" '8 outcome(s) handled by the away session (8 routine, 0 escalated above)' "the same-second row must count once, in the window"
-  assert_contains "$out" '    - 3 earlier routine outcome(s) not listed in full, for: boundary, away-1, away-2' "the window overflow must be counted and named"
+  assert_contains "$out" '  1 captain outcome(s), listed in full under Outcomes since your last drain' "waiting on you must point at the captain row"
+  assert_contains "$out" '  15 outcome(s) no drain presented (14 routine, 1 captain), oldest first:' "the list must cover every unread row"
+  assert_contains "$out" '  - 9 earlier routine outcome(s) not listed in full, for: early-1, early-2, early-3, early-4, early-5, early-6, boundary, away-1, away-2' \
+    "the routine overflow must be counted and named"
+  assert_contains "$out" "  - [$(jq -rn --argjson e "$((entered - 10))" '$e | todate')] early-cap: needs a merge decision (captain;" \
+    "a captain row must be listed in full with its time"
   for n in 3 4 5 6 7; do
-    assert_contains "$out" "    - away-$n: away routine $n" "the newest away routine rows must be listed in full"
+    assert_contains "$out" "] away-$n: away routine $n" "the newest routine rows must be listed in full"
   done
-  earlier=$(printf '%s\n' "$out" | awk '/^From before you left/ { on = 1; next } on && /^[^ ]/ { on = 0 } on')
-  assert_not_contains "$earlier" 'boundary' "the same-second row must land in exactly one group"
+  [ "$(line_of "$out" 'early-cap: needs')" -lt "$(line_of "$out" 'away-3: away')" ] || fail "the list must run in store-sequence order: $out"
+  for t in early-1 early-2 early-3 early-4 early-5 early-6 early-cap boundary away-1 away-2 away-3 away-4 away-5 away-6 away-7; do
+    seen=$(printf '%s\n' "$out" | grep -oE -- "(^| )$t(:|,|\$)" | wc -l | tr -d ' ')
+    [ "$seen" = 1 ] || fail "row $t must be presented exactly once, seen $seen times: $out"
+  done
   cursor=$(cat "$dir/home/state/.branch-outcomes-cursor" 2>/dev/null || true)
   [ "$cursor" = 15 ] || fail "the return must mark read exactly the rows its brief presented, got '${cursor:-none}'"
-  pass "the return presents every unread outcome it marks read, collapsing routine overflow into a named count"
+  pass "the return presents every unread outcome once, in store order, before marking it read"
 }
 
 test_return_brief_lists_landed_work_awaiting_cleanup() {
@@ -986,7 +987,7 @@ test_missing_final_archive_keeps_retained_contract_gated
 test_return_brief_composes_from_record_store_and_held_set
 test_return_brief_lists_landed_work_awaiting_cleanup
 test_return_marks_the_window_read_on_a_host_home_only
-test_return_presents_unread_outcomes_from_before_the_window
+test_return_presents_every_unread_outcome_once
 test_return_brief_keeps_refresh_history
 test_malformed_posture_record_keeps_catchup_gated
 test_missing_epoch_record_stays_required_after_disappearing
