@@ -33,7 +33,7 @@ mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$RE
 cleanup() {
   local worker_pid=''
   touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" \
-    "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" 2>/dev/null || true
+    "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" "$TMP_ROOT/race-clone.release" 2>/dev/null || true
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
     "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
   if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
@@ -317,12 +317,32 @@ seed_env() {
 REAL_GIT=$(command -v git)
 cat > "$FAKEBIN/git" <<SH
 #!/usr/bin/env bash
-if [ "\${1:-}" = clone ] && [ "\${!#}" = "$TMP_ROOT/concurrent-home" ]; then
-  printf 'clone\n' >> "$TMP_ROOT/provision-clones"
-  if mkdir "$TMP_ROOT/provision-first" 2>/dev/null; then
-    touch "$TMP_ROOT/provision.entered"
-    while [ ! -f "$TMP_ROOT/provision.release" ]; do sleep 0.02; done
-  fi
+if [ "\${1:-}" = clone ]; then
+  case "\${!#}" in
+    "$TMP_ROOT/concurrent-home"|"$TMP_ROOT"/.fm-home-provisioning.*)
+      printf 'clone\n' >> "$TMP_ROOT/provision-clones"
+      if mkdir "$TMP_ROOT/provision-first" 2>/dev/null; then
+        touch "$TMP_ROOT/provision.entered"
+        while [ ! -f "$TMP_ROOT/provision.release" ]; do sleep 0.02; done
+      fi
+      ;;
+  esac
+fi
+if [ "\${1:-}" = clone ] && [ -n "\${FM_FAKE_CLONE_HOLD_DIR:-}" ] \
+  && [ "\$(dirname "\${!#}")" = "\$FM_FAKE_CLONE_HOLD_DIR" ]; then
+  hold_dest="\${!#}"
+  "$REAL_GIT" "\$@" &
+  hold_git=\$!
+  while [ ! -d "\$hold_dest/.git/objects" ]; do
+    kill -0 "\$hold_git" 2>/dev/null || break
+    sleep 0.005
+  done
+  kill -STOP "\$hold_git" 2>/dev/null || true
+  touch "$TMP_ROOT/race-clone.held"
+  while [ ! -f "$TMP_ROOT/race-clone.release" ] && [ -d "$TMP_ROOT" ]; do sleep 0.02; done
+  kill -CONT "\$hold_git" 2>/dev/null || true
+  wait "\$hold_git"
+  exit \$?
 fi
 exec "$REAL_GIT" "\$@"
 SH
@@ -357,6 +377,36 @@ wait "$provision_two" || fail "reconciled provisioning attempt failed"
 [ "$(grep -cF clone "$TMP_ROOT/provision-clones")" -eq 1 ] \
   || fail "reconciled provisioning cloned the already-published home"
 pass "overlapping remote home provisioning serializes through publication and rollback"
+
+# A competing cleanup aimed at the public home path must never reach a clone
+# that is still being written: the home clone is staged privately and published
+# by rename, so the racing rm -rf finds only an absent path.
+printf 'schema=fm-remote-home-provision.v1\nid_b64=%s\ncharter_b64=%s\nproject_count=0\n' \
+  "$(printf race | base64 | tr -d '\n')" \
+  "$(printf 'Cleanup-race provisioning charter.\n' | base64 | tr -d '\n')" \
+  > "$TMP_ROOT/race.manifest"
+PATH="$FAKEBIN:$PATH" FM_HOME="$TMP_ROOT/raced-home" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  FM_FAKE_CLONE_HOLD_DIR="$TMP_ROOT" \
+  "$REMOTE_ROOT/bin/fm-remote-home-provision.sh" < "$TMP_ROOT/race.manifest" \
+  > "$TMP_ROOT/race-provision.out" 2>&1 &
+race_provision=$!
+race_wait=0
+while [ ! -f "$TMP_ROOT/race-clone.held" ]; do
+  kill -0 "$race_provision" 2>/dev/null || fail "provision exited before its clone could be held"
+  race_wait=$((race_wait + 1))
+  [ "$race_wait" -le 250 ] || fail "provision clone never reached the held point"
+  sleep 0.02
+done
+rm -rf -- "$TMP_ROOT/raced-home"
+touch "$TMP_ROOT/race-clone.release"
+wait "$race_provision" \
+  || { sed 's/^/race-provision: /' "$TMP_ROOT/race-provision.out"; fail "competing home cleanup reached a live provisioning clone"; }
+[ "$(cat "$TMP_ROOT/raced-home/.fm-secondmate-home")" = race ] \
+  || fail "raced provisioning lost its published home marker"
+if find "$TMP_ROOT" -maxdepth 1 -name '.fm-home-provisioning.*' -print -quit | grep -q .; then
+  fail "raced provisioning left staging litter beside the home"
+fi
+pass "competing cleanup of the public home cannot reach a live provisioning clone"
 if [ "${FM_TEST_PROVISION_ONLY:-0}" = 1 ]; then
   echo "ALL TESTS PASSED"
   exit 0
