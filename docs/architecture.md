@@ -491,6 +491,11 @@ For a remote route, the configured code root updates from its own origin on that
 The primary update is fast-forward only, while a clean secondmate divergence may reconcile with `reset --keep` only when a three-way temporary-index proof shows its complete local tree result is already present at the target, including after a squash merge.
 Dirty, uniquely diverged, offline, and off-default targets are reported and left untouched, and genuine secondmate divergence remains visible through a durable reconciliation record until a later successful convergence clears it.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
+When the committed merge-poll template changes, the guarded update and secondmate convergence paths automatically refresh still-authenticated armed watches in the updated home's state, including after redundant-divergence reconciliation.
+Fleet sync applies that refresh only to the running Firstmate code root, including safe checkout recovery with or without a subsequent fast-forward; ordinary project clones cannot supply an update hook.
+This preserves merge monitoring without manual re-arming while leaving other operational data untouched.
+Invalid watches remain rejected and are reported; a refresh failure does not roll back the Git update.
+[`bin/fm-pr-poll-refresh.sh`](../bin/fm-pr-poll-refresh.sh)'s header owns the prior-commit proof, artifact authentication, locking, state scope, and retirement exclusions; `tests/fm-pr-check-security.test.sh --template-update` exercises the update transitions and rejection controls.
 The procedure and outcome vocabulary are owned by the [`/updatefirstmate` skill](../.agents/skills/updatefirstmate/SKILL.md); the relevant script headers own the mechanics.
 
 ## Restart-proof

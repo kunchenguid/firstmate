@@ -21,8 +21,9 @@
 # never touches the network. A local standalone clone moves through that path
 # only when it already has the target; otherwise it is skipped until the origin
 # path updates it.
-# After a fast-forward, fm-pr-poll-refresh.sh republishes authenticated merge
-# watches for the updated home when its committed template changed.
+# After a fast-forward or redundant-divergence reconciliation,
+# fm-pr-poll-refresh.sh republishes authenticated merge watches for the updated
+# home when its committed template changed.
 # Other gitignored operational data is left untouched.
 # The seeded .fm-secondmate-home identity marker is gitignored too; the local
 # sync tolerates only that marker during the one-time upgrade of pre-ignore
