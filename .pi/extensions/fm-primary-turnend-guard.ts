@@ -12,8 +12,6 @@ import {
 
 let guardFollowupActive = false;
 
-type LockOwnership = "owned" | "missing" | "other";
-
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
@@ -21,12 +19,6 @@ const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const marker = `${state}/.pi-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
-
-function parentPid(pid: string): string {
-  const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
-  if (result.status !== 0) return "";
-  return result.stdout.trim();
-}
 
 function pidAlive(pid: string): boolean {
   try {
@@ -37,25 +29,22 @@ function pidAlive(pid: string): boolean {
   }
 }
 
-function lockOwnership(): LockOwnership {
+function canPublishLoadedMarker(): boolean {
   let lockPid = "";
   try {
     lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
-  } catch {
-    return "missing";
+  } catch (error) {
+    return typeof error === "object" && error !== null && "code" in error &&
+      String((error as { code?: unknown }).code ?? "") === "ENOENT";
   }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
-  let pid = String(process.pid);
-  for (let i = 0; i < 8; i += 1) {
-    if (pid === lockPid) return "owned";
-    pid = parentPid(pid);
-    if (!pid || pid === "1") break;
-  }
-  return pidAlive(lockPid) ? "other" : "missing";
+  if (lockPid === String(process.pid)) return true;
+  return /^[0-9]+$/.test(lockPid) && lockPid !== "0" && lockPid !== "1" && !pidAlive(lockPid);
 }
 
 function markLoaded(): void {
-  if (!existsSync(state) || lockOwnership() === "other") return;
+  // The marker verifier requires the exact lock PID. Publish before the lock
+  // exists or after its owner died, but never let an owned descendant replace it.
+  if (!existsSync(state) || !canPublishLoadedMarker()) return;
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }
 

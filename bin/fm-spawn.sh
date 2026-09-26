@@ -167,8 +167,8 @@
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
-#   name from PATH once, probes that concrete path with --help, and launches the
-#   same path. It adds --tui-mode regular only when that help advertises the flag;
+#   name from PATH once, probes that concrete path with --no-extensions --help,
+#   and launches the same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
@@ -1857,7 +1857,7 @@ resolve_pi_executable() {
 # omits the flag so older Pi versions can still spawn.
 pi_supports_tui_mode() {
   local executable=$1 help
-  help=$("$executable" --help 2>&1) || return 1
+  help=$("$executable" --no-extensions --help 2>&1) || return 1
   printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--tui-mode([[:space:]=]|$)'
 }
 

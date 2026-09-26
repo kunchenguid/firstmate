@@ -20,6 +20,12 @@ make_spawn_pi_probe() {
   cat > "$fakebin/$tool" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ -n "${FM_FAKE_PI_PROBE_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FM_FAKE_PI_PROBE_LOG"
+fi
+if [ "${1:-}" = --no-extensions ]; then
+  shift
+fi
 if [ "${1:-}" = --help ]; then
   if [ "${FM_FAKE_PI_VERSION:-0.84.0}" = 0.82.0 ]; then
     printf '%s\n' 'Pi 0.82.0' 'Options: --help'
@@ -97,12 +103,14 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
+  : > "$launchlog.pi-probe"
   # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
   # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
   CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_PROBE_LOG="$launchlog.pi-probe" \
+    FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" \
@@ -878,7 +886,7 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
 }
 
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
-  local harness version rec id out status launch
+  local harness version rec id out status launch probe
   for harness in pi pi-signed; do
     for version in 0.82.0 0.84.0; do
       id="profile-${harness}-tui-${version//./}-z8d"
@@ -891,6 +899,9 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
       status=$?
       expect_code 0 "$status" "$harness $version spawn should succeed"
       launch=$(cat "$LAUNCH_LOG")
+      probe=$(cat "$LAUNCH_LOG.pi-probe")
+      [ "$probe" = "--no-extensions --help" ] \
+        || fail "$harness $version capability probe loaded discovered extensions: $probe"
       assert_contains "$launch" "'$FAKEBIN_DIR/$harness'" \
         "$harness $version launch must use the executable selected for probing"
       assert_not_contains "$launch" "FM_PI_HARNESS=$harness $harness" \
@@ -904,7 +915,7 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
       fi
     done
   done
-  pass "Pi launch probing omits --tui-mode on older Pi and preserves it on supporting Pi"
+  pass "Pi launch probing disables extension discovery, omits --tui-mode on older Pi, and preserves it on supporting Pi"
 }
 
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
