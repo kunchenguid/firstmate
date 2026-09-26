@@ -6466,6 +6466,12 @@ if [ -n "${FM_TEST_ONLY:-}" ]; then
   exit 0
 fi
 
+# Run focused late-defined watcher scenarios without the full triage suite.
+if [ -n "${FM_TEST_ONLY_LATE:-}" ]; then
+  "$FM_TEST_ONLY_LATE"
+  exit 0
+fi
+
 test_status_span_actionable_classifier
 test_status_span_survives_a_later_routine_append
 test_status_span_respects_decision_closure
