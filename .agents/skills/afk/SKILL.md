@@ -76,6 +76,7 @@ Hold-for-return remains the fallback when Pi has the exact owner destination but
 
 
 
+
 - The record exists, so the watcher never rechecks an item held for the captain, in either supervision shape; the return brief lists it instead.
   Declared external waits keep their condition-aware, hours-long recheck cadence (`bin/fm-watch.sh`, `bin/fm-classify-lib.sh`).
 - The away session acts on the captain's words.

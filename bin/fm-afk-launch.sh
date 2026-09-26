@@ -14,6 +14,7 @@
 # never waits for a go (bin/fm-afk-contract.sh owns the record schema; the words
 # are the whole mandate and no script parses them). The record is the posture in
 # every harness.
+
 # On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
 # on Pi, the ordinary supervision session keeps running in both postures, and
 # `start` refuses on those harnesses. The same holds for away mode (not quiet

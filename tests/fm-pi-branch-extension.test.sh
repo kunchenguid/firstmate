@@ -1858,6 +1858,7 @@ case "${2:-}" in
 
 
 
+
   queue-unprocessed) printf 'queued 1 away-email item(s)\n'; exit 0 ;;
   flush)
     if [ "$(cat "$FM_TEST_MAIL_STATUS_FILE")" = sent ]; then

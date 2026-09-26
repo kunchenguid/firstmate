@@ -111,6 +111,7 @@
 # CROSS-SUBSYSTEM LOCK (state/.afk-contract.lock; this script is its one owner).
 # This record is authority another subsystem reads and then ACTS on outside this
 # script: bin/fm-pr-merge.sh reads the record's presence as away merge authority
+
 # and afterwards hands a merge to the forge; bin/fm-afk-email.py validates the
 # live posture before an outbound flush or verified inbound reply handoff. A
 # publication, replacement, or archive landing between that read and the side
