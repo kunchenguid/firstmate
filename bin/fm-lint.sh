@@ -44,6 +44,11 @@
 # Lint defaults to two bounded workers over two stable logical shards.
 # Diagnostics replay in stable shard/root order. FM_LINT_JOBS=1 changes
 # concurrency, not diagnostics or exit selection.
+# Each shard's ShellCheck runs under a best-effort virtual-address-space cap of
+# FM_LINT_SHELLCHECK_MAX_MB (default 4096) so a pathological analysis fails that
+# shard instead of triggering the kernel OOM killer machine-wide. The cap is
+# only enforced where the platform honors RLIMIT_AS (Linux); on macOS bash
+# accepts ulimit -v but the kernel does not enforce it, so lint still runs.
 # --partition 1of2/2of2 splits the entire canonical inventory across
 # two CI runners, each with those same bounded workers. Partitions are complete,
 # disjoint, and byte-weight balanced; --list-files exposes their actual roots.
@@ -108,16 +113,25 @@ fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
     if [ "${FM_LINT_INTERNAL_FAST:-0}" -eq 1 ]; then
       shellcheck_args+=(--extended-analysis=false)
     fi
+    # Bound shellcheck's address space so a pathological analysis fails this
+    # shard loudly instead of triggering the kernel OOM killer machine-wide.
+    # The parent validated FM_LINT_SHELLCHECK_MAX_MB and passes it in KiB.
     : > "$output.out"
     if [ "${FM_LINT_INTERNAL_FOLLOW_SOURCES:-1}" -eq 1 ]; then
-      "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "${roots[@]}" >> "$output.out" 2>&1 &
+      (
+        ulimit -v "$FM_LINT_INTERNAL_SHELLCHECK_MAX_KIB" 2>/dev/null || true
+        exec "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "${roots[@]}"
+      ) >> "$output.out" 2>&1 &
       FM_LINT_WORKER_SHELLCHECK_PID=$!
       wait "$FM_LINT_WORKER_SHELLCHECK_PID" || rc=$?
       FM_LINT_WORKER_SHELLCHECK_PID=
     else
       for path in "${roots[@]}"; do
         invocation_rc=0
-        "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "$path" >> "$output.out" 2>&1 &
+        (
+          ulimit -v "$FM_LINT_INTERNAL_SHELLCHECK_MAX_KIB" 2>/dev/null || true
+          exec "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "$path"
+        ) >> "$output.out" 2>&1 &
         FM_LINT_WORKER_SHELLCHECK_PID=$!
         wait "$FM_LINT_WORKER_SHELLCHECK_PID" || invocation_rc=$?
         FM_LINT_WORKER_SHELLCHECK_PID=
@@ -140,7 +154,8 @@ if [ "${1:-}" = "--internal-worker" ]; then
     printf 'fm-lint.sh: --internal-worker is private to the lint owner.\n' >&2
     exit 2
   }
-  [ "$#" -eq 4 ] && [ -n "${FM_LINT_SHELLCHECK:-}" ] || exit 2
+  [ "$#" -eq 4 ] && [ -n "${FM_LINT_SHELLCHECK:-}" ] \
+    && [ -n "${FM_LINT_INTERNAL_SHELLCHECK_MAX_KIB:-}" ] || exit 2
   fm_lint_worker "$2" "$3" "$4"
   exit $?
 fi
@@ -399,6 +414,7 @@ fm_lint_run_backend_purity() {
 }
 
 JOBS=${FM_LINT_JOBS:-2}
+SHELLCHECK_MAX_MB=${FM_LINT_SHELLCHECK_MAX_MB:-4096}
 TELEMETRY=${FM_LINT_TELEMETRY:-}
 FAST=0
 ANALYSIS_MODE=full
@@ -477,6 +493,15 @@ case "$PARTITION" in
     ;;
   *) printf 'fm-lint.sh: --partition must be 1of2 or 2of2, got %s.\n' "$PARTITION" >&2; exit 2 ;;
 esac
+
+case "$SHELLCHECK_MAX_MB" in
+  0*|*[!0-9]*)
+    printf 'fm-lint.sh: FM_LINT_SHELLCHECK_MAX_MB must be a positive integer (MB), got %s.\n' \
+      "$SHELLCHECK_MAX_MB" >&2
+    exit 2
+    ;;
+esac
+SHELLCHECK_MAX_KIB=$(( SHELLCHECK_MAX_MB * 1024 ))
 
 if [ "$FAST" -eq 1 ] && { [ "${GITHUB_ACTIONS:-}" = true ] || [ "${CI:-}" = true ]; }; then
   printf 'fm-lint.sh: --fast is local-only; CI uses full ShellCheck analysis.\n' >&2
@@ -740,6 +765,7 @@ fm_lint_run_worker() {  # <worker-index>
         env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" \
         FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES" \
         FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+        FM_LINT_INTERNAL_SHELLCHECK_MAX_KIB="$SHELLCHECK_MAX_KIB" \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     else
       exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
@@ -747,6 +773,7 @@ fm_lint_run_worker() {  # <worker-index>
         env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" \
         FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES" \
         FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+        FM_LINT_INTERNAL_SHELLCHECK_MAX_KIB="$SHELLCHECK_MAX_KIB" \
         "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
     fi
   else
@@ -755,6 +782,7 @@ fm_lint_run_worker() {  # <worker-index>
       env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" \
       FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES" \
       FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
+      FM_LINT_INTERNAL_SHELLCHECK_MAX_KIB="$SHELLCHECK_MAX_KIB" \
       "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
   fi
 }
