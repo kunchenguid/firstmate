@@ -31,6 +31,9 @@
 #   parent_home=            absolute parent FM_HOME
 #   parent_status=          absolute path of parent state/<task_id>.status
 #   parent_status_scan_signature=
+#   parent_status_scan_offset= byte offset just past the last complete line the
+#                           resolve scan has read in that signature's file, so
+#                           the next scan reads only bytes appended after it
 #   request_summary=        short sanitized summary (no secrets by design)
 #   created_epoch=          when the expectation was created
 #   delivered_epoch=        when the marked request was confirmed delivered
@@ -578,15 +581,47 @@ fm_pending_reply_line_resolves() {  # <line> <corr_id>
 
 # Scan a status file for a correlated resolve. Prints the matching line or empty.
 fm_pending_reply_find_resolve_line() {  # <status-file> <corr_id>
-  local status_file=$1 corr=$2 line
+  fm_pending_reply_scan_resolve "$1" "$2" 0 || return 0
+  printf '%s' "$FM_PENDING_REPLY_SCAN_LINE"
+}
+
+# Scan a status file from <start-offset> for a correlated resolve, so a parent
+# log that grows to megabytes costs each poll only its newly appended bytes.
+# Sets FM_PENDING_REPLY_SCAN_LINE to the first resolving line read (or empty)
+# and FM_PENDING_REPLY_SCAN_END to the offset just past the last complete line
+# read, where the next scan resumes: a trailing partial line is still matched
+# but is read again next time. A start past the end of the file means it
+# shrank, so the whole file is read again. Only lines carrying the correlation
+# token reach fm_pending_reply_line_resolves, which alone decides the match.
+# Returns 1 only when no scratch file could be made.
+FM_PENDING_REPLY_SCAN_LINE=
+FM_PENDING_REPLY_SCAN_END=0
+fm_pending_reply_scan_resolve() {  # <status-file> <corr_id> <start-offset>
+  local status_file=$1 corr=$2 start=$3 size scratch read_bytes partial=0 token line
+  FM_PENDING_REPLY_SCAN_LINE=
+  FM_PENDING_REPLY_SCAN_END=0
   [ -f "$status_file" ] || return 0
-  while IFS= read -r line || [ -n "$line" ]; do
-    [ -n "$line" ] || continue
-    if fm_pending_reply_line_resolves "$line" "$corr"; then
-      printf '%s' "$line"
-      return 0
-    fi
-  done < "$status_file"
+  size=$(wc -c < "$status_file" 2>/dev/null) || size=0
+  size=${size//[[:space:]]/}
+  case "$start" in ''|*[!0-9]*) start=0 ;; esac
+  [ "$start" -le "${size:-0}" ] || start=0
+  scratch=$(mktemp "${TMPDIR:-/tmp}/fm-pending-reply-scan.XXXXXX") || return 1
+  tail -c +"$((start + 1))" -- "$status_file" > "$scratch" 2>/dev/null || :
+  read_bytes=$(wc -c < "$scratch")
+  read_bytes=${read_bytes//[[:space:]]/}
+  if [ -n "$(tail -c 1 "$scratch")" ]; then
+    partial=$(tail -n 1 "$scratch" | wc -c)
+    partial=${partial//[[:space:]]/}
+  fi
+  FM_PENDING_REPLY_SCAN_END=$((start + read_bytes - partial))
+  token=$(fm_pending_reply_corr_token "$corr")
+  FM_PENDING_REPLY_SCAN_LINE=$(LC_ALL=C grep -aF -e "$token" -- "$scratch" 2>/dev/null \
+    | while IFS= read -r line || [ -n "$line" ]; do
+        fm_pending_reply_line_resolves "$line" "$corr" || continue
+        printf '%s' "$line"
+        break
+      done)
+  rm -f "$scratch"
   return 0
 }
 
@@ -652,7 +687,7 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
 _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-override]
   local state=$1 corr=$2 status_override=${3-}
   local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now
-  local unconfirmed=0
+  local unconfirmed=0 start=0
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -674,11 +709,17 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
     signature=$(fm_pending_reply_file_signature "$status_file")
     previous=$(fm_pending_reply_get "$rec" parent_status_scan_signature)
     [ "$signature" != "$previous" ] || return 1
+    # Resume after the bytes the last scan of this same file (dev:inode) read.
+    if [ "${signature%:*:*:*}" = "${previous%:*:*:*}" ]; then
+      start=$(fm_pending_reply_get "$rec" parent_status_scan_offset)
+    fi
   fi
-  line=$(fm_pending_reply_find_resolve_line "$status_file" "$corr")
+  fm_pending_reply_scan_resolve "$status_file" "$corr" "$start" || return 1
+  line=$FM_PENDING_REPLY_SCAN_LINE
   if [ -z "$line" ]; then
     if [ -z "$status_override" ] && [ "$unconfirmed" = 0 ]; then
       fm_pending_reply_set "$rec" parent_status_scan_signature "$signature" || return 1
+      fm_pending_reply_set "$rec" parent_status_scan_offset "$FM_PENDING_REPLY_SCAN_END" || return 1
     fi
     return 1
   fi
@@ -1450,9 +1491,16 @@ fm_pending_reply_tick() {  # <state-dir>
     task_id=$(fm_pending_reply_get "$rec" task_id)
     phase=$(fm_pending_reply_get "$rec" phase)
     if [ "$phase" = resolved ]; then
-      # Cheap no-op unless an escalation for this record is still open; this is
+      # A no-op unless an escalation for this record is still open; this is
       # the retry that makes the close converge after a transient write failure.
-      fm_pending_reply_close_escalation "$state" "$corr" || true
+      # A resolved record's escalation fields never change again, so that check
+      # runs here unlocked first: a settled record costs one read per poll, not
+      # a library source and a per-record lock, which a ledger of thousands paid
+      # for minutes every cycle. The close re-checks under its lock.
+      if awk -F= '$1 == "escalated_epoch" { e = $2 } $1 == "escalation_closed_epoch" { c = $2 }
+        END { exit !(e != "" && c == "") }' "$rec" 2>/dev/null; then
+        fm_pending_reply_close_escalation "$state" "$corr" || true
+      fi
       continue
     fi
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true

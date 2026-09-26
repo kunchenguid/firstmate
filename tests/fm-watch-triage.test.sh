@@ -70,7 +70,9 @@ wait_live() {
 # machine a short fixed budget can reap a round before the cycle it asserts on
 # ever ran - and then every "no wake, no marker" assertion passes vacuously
 # while every "marker written" assertion fails spuriously.
-# The liveness beacon is touched at the TOP of every poll, so this drops any
+# The liveness beacon is touched at the TOP of every poll, and mid-cycle only
+# once it is a tenth of the stale grace old (30s by default), which these short
+# cycles never reach. So this drops any
 # beacon left by an earlier round, waits for THIS watcher to write a fresh one
 # (some poll's top), then waits for that one to advance (the next poll's top) -
 # and the whole cycle in between is what the caller's assertions describe.
@@ -6012,6 +6014,54 @@ test_beacon_stays_fresh_while_absorbing() {
   pass "the liveness beacon stays fresh while the watcher absorbs benign wakes (fm-guard never false-alarms)"
 }
 
+# --- the beacon marks phase progress, not cycle completion -------------------
+
+# A cycle whose signal triage is slowed by a 4-second current-state read must
+# refresh the beacon once that phase finishes, before the long terminal wait,
+# rather than leaving it at the cycle's top: otherwise a busy home whose cycle
+# outlasts the grace reads as a stale watcher while it is still making progress.
+# FM_WATCHER_STALE_GRACE=20 sets the mid-cycle refresh interval to 2 seconds,
+# and the 10-second terminal wait keeps the next cycle's top out of the check.
+test_beacon_refreshes_after_a_slow_phase() {
+  local dir state fakebin out pid finished done_at beat i
+  dir=$(make_case beacon-slow-phase); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  finished="$dir/crew-state-finished"
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 4
+date +%s > "$FM_TEST_PHASE_DONE"
+printf '%s\n' 'state: working · source: run-step · validating (running)'
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  printf 'working: a long validation\n' > "$state/task.status"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=10 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_SECONDMATE_LIVENESS_SECS=99999999 FM_WATCHER_STALE_GRACE=20 \
+    FM_TEST_PHASE_DONE="$finished" "$WATCH" > "$out" 2> "$dir/watch.err" &
+  pid=$!
+  i=0
+  while [ ! -s "$finished" ] && [ "$i" -lt 300 ]; do
+    kill -0 "$pid" 2>/dev/null || fail "watcher exited before its slow phase finished: $(cat "$out")"
+    sleep 0.1
+    i=$((i + 1))
+  done
+  done_at=$(cat "$finished" 2>/dev/null)
+  [ -n "$done_at" ] || { reap "$pid"; fail "the slowed signal triage never ran"; }
+  i=0
+  while [ "$i" -lt 50 ]; do
+    beat=$(file_mtime "$state/.last-watcher-beat")
+    [ -n "$beat" ] && [ "$beat" -ge "$done_at" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || fail "watcher exited while absorbing the slow phase: $(cat "$out")"
+  [ -n "$beat" ] && [ "$beat" -ge "$done_at" ] \
+    || { reap "$pid"; fail "the beacon was not refreshed after the slow phase (beacon ${beat:-absent}, phase done $done_at)"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "absorbing the slow phase enqueued a wake"; }
+  reap "$pid"
+  pass "a slow phase refreshes the beacon before the terminal wait, so a progressing cycle never reads stale"
+}
+
 # --- afk coherence: the daemon owns triage; the watcher does not double-triage ---
 
 test_afk_signal_records_heartbeat_endpoint() {
@@ -6449,6 +6499,7 @@ test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
 test_beacon_stays_fresh_while_absorbing
+test_beacon_refreshes_after_a_slow_phase
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

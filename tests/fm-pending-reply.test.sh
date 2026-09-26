@@ -29,6 +29,8 @@
 #  15. Remote parent-replies.status is not classified as wrong-home
 #  16. An escalated correlation stays retryable while undelivered, is never reset
 #      once delivered, and its delivery-unknown decision still closes on resolve
+#  17. The resolve scan reads a long parent log once, then only past its cursor
+#  18. The tick skips settled resolved records without their per-record lock
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -774,6 +776,98 @@ test_unrelated_and_stale_corr_cannot_resolve() {
   pass "unrelated events and stale correlation ids cannot resolve"
 }
 
+# A long parent log is read whole once, then only from the scan cursor: bytes
+# below it are never read again, so a reply planted there in place stays
+# unseen, while a line split across two appends is still matched once whole.
+# A log that shrank is read whole again.
+test_resolve_scan_reads_only_past_its_cursor() {
+  local home state corr status reply placeholder corr2 status2
+  home=$(setup_parent scan-cursor)
+  state="$home/state"
+  # shellcheck disable=SC2031
+  export FM_PENDING_REPLY_NOW=6500
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "long log")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  status="$state/hibit.status"
+  reply=$(printf 'done [corr=%s]: planted below the cursor' "$corr")
+  placeholder=$(printf '%*s' "${#reply}" '' | tr ' ' x)
+  printf '%s\n' "$placeholder" > "$status"
+  awk 'BEGIN { for (i = 1; i <= 20000; i++) printf "working [at=%d]: step %d of a long routed lane\n", 1000 + i, i }' >> "$status"
+  if fm_pending_reply_try_resolve "$state" "$corr"; then
+    fail "a long log without the reply must not resolve"
+  fi
+  printf '%s' "$reply" | dd of="$status" conv=notrunc 2>/dev/null \
+    || fail "could not rewrite the first line in place"
+  printf 'working: still going\n' >> "$status"
+  if fm_pending_reply_try_resolve "$state" "$corr"; then
+    fail "the second scan re-read bytes below its cursor"
+  fi
+  printf 'done [' >> "$status"
+  if fm_pending_reply_try_resolve "$state" "$corr"; then
+    fail "a partial line without the token must not resolve"
+  fi
+  printf 'corr=%s]: finished after a split write\n' "$corr" >> "$status"
+  fm_pending_reply_try_resolve "$state" "$corr" \
+    || fail "a reply completed across two appends should resolve"
+  [ "$(phase_of "$state" "$corr")" = resolved ] || fail "phase should be resolved"
+
+  corr2=$(fm_pending_reply_create "$home" "$state" "shrunk" "rotated log")
+  fm_pending_reply_mark_delivered "$state" "$corr2"
+  status2="$state/shrunk.status"
+  awk 'BEGIN { for (i = 1; i <= 2000; i++) printf "working: step %d\n", i }' > "$status2"
+  if fm_pending_reply_try_resolve "$state" "$corr2"; then
+    fail "a log without the reply must not resolve"
+  fi
+  printf 'done [corr=%s]: after the log shrank\n' "$corr2" > "$status2"
+  fm_pending_reply_try_resolve "$state" "$corr2" \
+    || fail "a log that shrank should be read whole again"
+  pass "the resolve scan reads a long log once, then only past its cursor"
+}
+
+# A resolved record with nothing left to close must not take its per-record lock
+# or re-source the lock library on every tick: a live holder of that lock cannot
+# stall the tick, while a resolved record whose escalation is still open is
+# still closed by the same tick.
+# shellcheck disable=SC2031 # $! and the fixture clock are read in this shell.
+test_tick_skips_settled_resolved_records_without_locking() {
+  local home state settled open_close rec lock ready holder tick_pid i
+  home=$(setup_parent settled-ledger)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=6700
+  settled=$(fm_pending_reply_create "$home" "$state" "hibit" "settled request")
+  fm_pending_reply_mark_delivered "$state" "$settled"
+  printf 'done [corr=%s]: answered\n' "$settled" > "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$settled" || fail "settled fixture should resolve"
+  open_close=$(fm_pending_reply_create "$home" "$state" "hibit" "resolved but escalation open")
+  fm_pending_reply_mark_delivered "$state" "$open_close"
+  rec=$(fm_pending_reply_path "$state" "$open_close")
+  fm_pending_reply_set "$rec" phase resolved || fail "open-close fixture should transition"
+  fm_pending_reply_set "$rec" escalated_epoch 6600 || fail "open-close fixture should record its escalation"
+  lock="$state/.pending-reply-$settled.lock"
+  ready="$home/lock-held"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_try_acquire "$2" || exit 1; : > "$3"; sleep 30' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$ready" > /dev/null 2>&1 &
+  holder=$!
+  i=0
+  while [ ! -e "$ready" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -e "$ready" ] || { kill "$holder" 2>/dev/null; fail "could not hold the settled record's lock"; }
+  fm_pending_reply_tick "$state" &
+  tick_pid=$!
+  i=0
+  while kill -0 "$tick_pid" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  if kill -0 "$tick_pid" 2>/dev/null; then
+    kill "$holder" "$tick_pid" 2>/dev/null
+    wait "$holder" "$tick_pid" 2>/dev/null
+    fail "the tick waited on a settled record's per-record lock"
+  fi
+  wait "$tick_pid" 2>/dev/null
+  kill "$holder" 2>/dev/null
+  wait "$holder" 2>/dev/null
+  [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
+    || fail "a resolved record with an open escalation was not closed"
+  pass "the tick skips settled resolved records without locking and still closes open escalations"
+}
+
 test_restart_preserves_expectation_and_parent_destination() {
   local home state corr rec parent_status parent_home
   home=$(setup_parent restart)
@@ -1052,17 +1146,12 @@ test_tick_skips_terminal_and_reuses_target_observation() {
     }
     # shellcheck disable=SC2329
     fm_backend_capture() { fail "native busy observations should not capture"; }
+    # Count every status scan, then run the real one.
+    eval "real_scan_resolve() $(declare -f fm_pending_reply_scan_resolve | tail -n +2)"
     # shellcheck disable=SC2329
-    fm_pending_reply_find_resolve_line() {
-      local status_file=$1 corr=$2 line
-      printf '%s\t%s\n' "$status_file" "$corr" >> "$scan_log"
-      [ -f "$status_file" ] || return 0
-      while IFS= read -r line || [ -n "$line" ]; do
-        fm_pending_reply_line_resolves "$line" "$corr" || continue
-        printf '%s' "$line"
-        return 0
-      done < "$status_file"
-      return 0
+    fm_pending_reply_scan_resolve() {
+      printf '%s\t%s\n' "$1" "$2" >> "$scan_log"
+      real_scan_resolve "$@"
     }
     fm_pending_reply_tick "$state"
     probes=$(wc -l < "$probe_log" | tr -d ' ')
@@ -1619,6 +1708,8 @@ test_undelivered_records_are_scan_immutable
 test_delivery_confirmation_fallback_reconciles
 test_delivery_confirmation_serializes_with_reconciliation
 test_unrelated_and_stale_corr_cannot_resolve
+test_resolve_scan_reads_only_past_its_cursor
+test_tick_skips_settled_resolved_records_without_locking
 test_restart_preserves_expectation_and_parent_destination
 test_wrong_home_detected_not_acknowledged
 test_unmarked_captain_input_creates_no_expectation
