@@ -66,8 +66,12 @@ if [ "${1:-}" = --audit ]; then
     || die "task metadata is unavailable"
   fm_pr_metadata_identity_parse "$META" \
     || die "task metadata does not contain a valid recorded PR identity"
-  [ "$FM_PR_META_PROVIDER" = github ] \
-    || die "task metadata does not identify a GitHub pull request"
+  if [ "$FM_PR_META_PROVIDER" != github ]; then
+    printf 'PR: %s\n' "$FM_PR_META_URL"
+    printf 'VERDICT: UNVERIFIED (live audit supports GitHub pull requests only)\n'
+    printf 'MERGE VERDICT: UNVERIFIED (live audit supports GitHub pull requests only)\n'
+    exit 0
+  fi
   URL=$FM_PR_META_URL
   RECORDED_HEAD=$(awk -F= '$1 == "pr_head" { count++; value = substr($0, index($0, "=") + 1) } END { if (count == 1) print value }' "$META")
   [ -z "$RECORDED_HEAD" ] || fm_pr_head_valid "$RECORDED_HEAD" \

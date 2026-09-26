@@ -80,7 +80,12 @@ printf 'mode=no-mistakes\nbackend=cmux\nwindow=fixture\npr=https://github.com/o/
   "$HEAD" > "$AUDIT_STATE/audit-ready.meta"
 printf 'mode=direct-PR\nbackend=cmux\nwindow=fixture\npr=https://github.com/o/r/pull/7\npr_head=%s\n' \
   "$HEAD" > "$AUDIT_STATE/audit-direct.meta"
-chmod 600 "$AUDIT_STATE/audit-ready.meta" "$AUDIT_STATE/audit-direct.meta"
+printf 'mode=no-mistakes\nbackend=cmux\nwindow=fixture\npr=https://gitlab.example.com/group/project/-/merge_requests/7\npr_head=%s\n' \
+  "$HEAD" > "$AUDIT_STATE/audit-gitlab.meta"
+printf 'mode=no-mistakes\nbackend=cmux\nwindow=fixture\npr=https://gerrit.example.com/c/project/+/7\npr_head=%s\n' \
+  "$HEAD" > "$AUDIT_STATE/audit-gerrit.meta"
+chmod 600 "$AUDIT_STATE/audit-ready.meta" "$AUDIT_STATE/audit-direct.meta" \
+  "$AUDIT_STATE/audit-gitlab.meta" "$AUDIT_STATE/audit-gerrit.meta"
 
 run_state() {
   PATH="$FAKEBIN:$PATH" "$SCRIPT" https://github.com/o/r/pull/7
@@ -320,6 +325,26 @@ test_audit_respects_delivery_mode_and_check_status() {
   pass "audit applies mode-specific review readiness while keeping merge evidence strict"
 }
 
+test_audit_reports_non_github_forges_as_unverified() {
+  local out expected
+  out=$(run_audit audit-gitlab) || fail "GitLab audit fixture was refused"
+  expected=$(printf '%s\n' \
+    'PR: https://gitlab.example.com/group/project/-/merge_requests/7' \
+    'VERDICT: UNVERIFIED (live audit supports GitHub pull requests only)' \
+    'MERGE VERDICT: UNVERIFIED (live audit supports GitHub pull requests only)')
+  [ "$out" = "$expected" ] \
+    || fail "a GitLab PR must be reported unverified, got: $out"
+
+  out=$(run_audit audit-gerrit) || fail "Gerrit audit fixture was refused"
+  expected=$(printf '%s\n' \
+    'PR: https://gerrit.example.com/c/project/+/7' \
+    'VERDICT: UNVERIFIED (live audit supports GitHub pull requests only)' \
+    'MERGE VERDICT: UNVERIFIED (live audit supports GitHub pull requests only)')
+  [ "$out" = "$expected" ] \
+    || fail "a Gerrit PR must be reported unverified, got: $out"
+  pass "audits for unsupported GitLab and Gerrit PRs return only unverified verdicts"
+}
+
 test_audit_reports_terminal_states_with_all_requested_fields() {
   local out
   out=$(FM_TEST_STATE=MERGED FM_TEST_MERGED_AT=2026-09-12T12:00:00Z run_audit) \
@@ -390,6 +415,7 @@ test_audit_reports_live_pr_worker_and_decision_evidence
 test_audit_blocks_stale_head_draft_and_incomplete_worker
 test_audit_respects_delivery_mode_and_check_status
 test_audit_requires_approval_for_merge_but_not_review_readiness
+test_audit_reports_non_github_forges_as_unverified
 test_audit_reports_terminal_states_with_all_requested_fields
 test_draft_is_a_blocker
 test_stale_blocking_reviews_explain_a_blocking_decision
