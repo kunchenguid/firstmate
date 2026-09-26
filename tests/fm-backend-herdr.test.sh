@@ -4802,7 +4802,73 @@ test_send_text_submit_long_literal_submits_when_composer_holds_every_byte() {
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 1 ] || fail "a fully observed long payload should be submitted once, sent $enter_count Enter(s)"
   [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "a proven payload must not be cleared"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''get' "$log")" -eq 0 ] || fail "a composer proven in the first read must not also read the viewport"
   pass "fm_backend_herdr_send_text_submit: a 1500-character payload a Claude composer still holds is submitted whole"
+}
+
+# herdr_slash_menu_screen: a Claude classic-renderer screen with `/exit` typed,
+# shaped like a live 39-row capture: the composer box, then the
+# completion menu Claude draws BELOW it (18 rows here). The composer's top
+# border sits 21 rows from the bottom, one row outside the 20-row tail.
+herdr_slash_menu_screen() {
+  local rule entry
+  rule=$(printf '\xe2\x94\x80%.0s' $(seq 1 94))
+  printf '%s\n' '● Done.' '' '✻ Cogitated for 10s · done 2:54 PM' '' "$rule"
+  printf '\xe2\x9d\xaf\xc2\xa0/exit\n'
+  printf '%s\n' "$rule"
+  for entry in exit quiet context pptx usage-credits skill-creator pdf docs doctor; do
+    printf '  /%-37sDescription of the %s command\n' "$entry" "$entry"
+    [ "$entry" = exit ] || [ "$entry" = context ] || printf '%39swrapped second line of that description\n' ''
+  done
+  printf '  /%-37sSweep the current session for knowledge\n' stow
+  printf '%39sand file it to disk\n' ''
+}
+
+# On a tall classic-renderer pane the menu pushes the composer's top border
+# out of the 20-row proof read, so the selector refuses it. The proof then
+# reads once more at the pane's visible height, sees the whole box, and a
+# typed slash command is submitted instead of reported as never sent.
+test_send_text_submit_claude_slash_menu_proves_through_the_viewport() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-slash-menu"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/2.out"
+  herdr_slash_menu_screen > "$resp/4.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","scroll":{"viewport_rows":39}}}}\n' > "$resp/5.out"
+  herdr_slash_menu_screen > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/9.out"
+  [ "$(herdr_slash_menu_screen | wc -l | tr -d ' ')" -gt 20 ] || fail "the slash-menu fixture must be taller than the 20-row tail"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 /exit 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a typed /exit whose composer the menu pushed out of the 20-row tail should be proven through the viewport, got '$out'"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''get'$'\x1f''w1:p2' "$log")" -eq 1 ] || fail "the refused tail read should ask for the viewport exactly once"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a proven slash command should be submitted once, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "a proven slash command must not be cleared"
+  pass "fm_backend_herdr_send_text_submit: a Claude slash command whose menu pushes the composer out of the 20-row tail is proven through the viewport and submitted"
+}
+
+# Without a readable viewport height the proof stays at the 20-row tail, where
+# the same screen is refused and cleared. This also keeps the case above from
+# passing vacuously: the widening is what proves it.
+test_send_text_submit_claude_slash_menu_without_viewport_is_refused() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-slash-menu-no-viewport"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/2.out"
+  herdr_slash_menu_screen > "$resp/4.out"
+  printf '1\n' > "$resp/5.exit"
+  printf '  \xe2\x9d\xaf\n' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 /exit 3 0.01 0.01' "$ROOT" )
+  [ "$out" = send-failed ] || fail "a slash-menu screen with no readable viewport should be refused and cleared, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 0 ] || fail "an unproven slash command must not be submitted, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 1 ] || fail "the refused slash command should be cleared with one Ctrl+U, sent $(herdr_ctrl_u_count "$log")"
+  pass "fm_backend_herdr_send_text_submit: a slash-menu screen stays refused when the viewport height cannot be read"
 }
 
 test_send_text_submit_refuses_enter_when_composer_holds_only_the_suffix() {
@@ -5882,6 +5948,8 @@ test_send_text_submit_lone_paste_placeholder_submits_the_long_payload
 test_send_text_submit_multiline_paste_placeholder_submits_the_long_payload
 test_send_text_submit_refuses_placeholder_followed_by_a_literal_remainder
 test_send_text_submit_three_paste_placeholders_submit_the_long_payload
+test_send_text_submit_claude_slash_menu_proves_through_the_viewport
+test_send_text_submit_claude_slash_menu_without_viewport_is_refused
 test_send_text_submit_non_claude_skips_the_payload_proof
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux

@@ -1152,6 +1152,30 @@ Observed 2026-08-19:
 ok - live Herdr submit confirm: Claude Code (2.1.236 (Claude Code)) on herdr 0.8.0 reports empty for a landed idle steer
 ```
 
+### Claude slash-command menu
+
+Measured 2026-09-25 against Herdr 0.8.2 and Claude Code 2.1.282, on a live 39-row remote second-mate pane and in isolated `fm-lab-` sessions.
+
+With the classic renderer (`tui` unset or `"default"`), a typed `/exit` opens Claude's completion menu below the composer.
+Claude 2.1.282 sizes that list to `max(6, floor(rows/2))` rows, capped at `rows-3`, and on the live 39-row pane it held 10 entries in 18 rows.
+The composer row, its bottom border, and that menu filled the 20-row tail, so the tail started at the `❯ /exit` row without its top border, and the shared selector refused it.
+Before the fix, exits of the classic-renderer Claude in that 39-row pane failed with `the exit command could not be sent`, even when idle.
+The fullscreen renderer (`"tui": "fullscreen"`) draws the same menu above the composer, inside the tail, so it never hit this.
+The payload proof now reads once more at the pane's visible height when the tail selects no composer, which `tests/fm-backend-herdr.test.sh` pins with a fixture of that live shape.
+Refresh the live proof, which forces the classic renderer through a project setting, with:
+
+```sh
+FM_HERDR_SLASH_MENU_LIVE=1 tests/fm-herdr-claude-slash-menu-live-e2e.test.sh
+```
+
+Observed 2026-09-25:
+
+```text
+ok - live Claude slash menu: Claude Code (2.1.282 (Claude Code)) on herdr 0.8.2 hides the composer from the 20-row tail on a 39-row pane, and the widened proof read shows /exit
+ok - live Claude slash menu: fm-control exit stops an idle classic-renderer Claude Code (2.1.282 (Claude Code)) on herdr 0.8.2
+ok - live Claude slash menu: fm-control exit interrupts and stops a busy classic-renderer Claude Code (2.1.282 (Claude Code)) on herdr 0.8.2
+```
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

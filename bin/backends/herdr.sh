@@ -3208,7 +3208,9 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # (Enter only, never retyped) until native agent-state, a cleared composer, or
 # fm_composer_queued_enter_verdict confirms delivery. When native identity is
 # Claude, text is typed only into an empty composer and Enter is sent only
-# after the composer shows the payload (fm_backend_herdr_composer_payload_shown).
+# after the composer shows the payload (fm_backend_herdr_composer_payload_shown),
+# read through fm_backend_herdr_proof_content so a completion menu open below
+# the composer cannot hide it.
 # A missing read, a shorter suffix, or a paste placeholder followed by a
 # literal remainder does not press Enter: the composer is cleared back to
 # empty and the verdict is send-failed, or unknown when the clear cannot be
@@ -3336,6 +3338,32 @@ fm_backend_herdr_composer_content() {  # <target> [lines]
   fm_composer_extract_selected_content "$caps" "$cap"
 }
 
+# fm_backend_herdr_viewport_rows: the pane's visible row count, from pane get.
+fm_backend_herdr_viewport_rows() {  # <target>
+  fm_backend_herdr_parse_target "$1" || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
+    | jq -er '.result.pane.scroll.viewport_rows | select(type == "number" and . > 0)'
+}
+
+# fm_backend_herdr_proof_content: the composer read the payload proof checks
+# after typing. It reads <lines> first; only when no composer can be selected
+# there does it read once more at the pane's full visible height. Claude's
+# classic renderer opens its completion menu for a typed `/exit` or `/<skill>`
+# BELOW the composer, sized max(6, rows/2) and capped at rows-3, so on a pane
+# taller than about 35 rows a 20-row tail starts at the composer row, never
+# sees its top border, and the selector rightly refuses (verified live on
+# Claude Code 2.1.282 and Herdr 0.8.2 with a 39-row pane). The fullscreen
+# renderer draws that menu above the composer, inside the tail. The wider read
+# stays on the visible screen, and the selector still takes the bottom-most
+# composer, so scrollback cannot outrank the live one.
+fm_backend_herdr_proof_content() {  # <target> <lines>
+  local target=$1 lines=$2 rows
+  fm_backend_herdr_composer_content "$target" "$lines" && return 0
+  rows=$(fm_backend_herdr_viewport_rows "$target") || return 1
+  [ "$rows" -gt "$lines" ] || return 1
+  fm_backend_herdr_composer_content "$target" "$rows"
+}
+
 # fm_backend_herdr_composer_payload_shown: 0 when <after>, read from a
 # composer that was empty before the send, shows <text>.
 # Literal equality ignores whitespace, the same comparison zellij uses, so a
@@ -3402,7 +3430,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   if [ "$proof" = 1 ]; then
-    if ! content=$(fm_backend_herdr_composer_content "$target" "$proof_lines") \
+    if ! content=$(fm_backend_herdr_proof_content "$target" "$proof_lines") \
       || ! fm_backend_herdr_composer_payload_shown "$text" "$content"; then
       if fm_backend_herdr_composer_clear "$target" "$text"; then
         printf 'send-failed'
