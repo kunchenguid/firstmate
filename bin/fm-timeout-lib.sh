@@ -22,15 +22,18 @@
 #       group at the bound, and KILL once <grace-seconds> more have passed,
 #       for a command that ignores TERM or is mid-way through work it will not
 #       abandon. A TERM, INT, or HUP delivered to the bounding process is
-#       forwarded to the group and starts the same grace, and the watchdog also
-#       starts that escalation when its own parent dies before it could be
-#       signalled (an owner torn down by an outer group-kill cannot leave the
-#       bounded subtree orphaned behind it). The owner is captured before the
-#       watchdog starts: FM_EXEC_TIMED_OWNER_PID when the caller names it, else
-#       the calling script ($$) when fm_exec_timed runs in a subshell, else the
-#       shell's parent. The escalation starts once that owner is gone or the
-#       watchdog's parent changes, so an owner that dies while the watchdog is
-#       still starting is detected too. Exit status is the
+#       forwarded to the group and starts the same grace. The perl watchdog
+#       also starts that escalation when its own parent dies before it could
+#       be signalled (an owner torn down by an outer group-kill cannot leave
+#       the bounded subtree orphaned behind it). The owner is captured before
+#       the watchdog starts: FM_EXEC_TIMED_OWNER_PID when the caller names it,
+#       else the calling script ($$) when fm_exec_timed runs in a subshell,
+#       else the shell's parent. The escalation starts once that owner is gone
+#       or the watchdog's parent changes, so an owner that dies while the
+#       watchdog is still starting is detected too. The timeout/gtimeout
+#       fallback does not track the owner: it bounds the command only by its
+#       deadline and grace, so a command whose owner dies runs on until that
+#       deadline. Exit status is the
 #       command's own, except 124 (the bound was hit) or 137 (GNU timeout's
 #       status when its KILL had to fire); fm_timed_out accepts both. Both
 #       values must be positive integers (125 otherwise). The perl watchdog is
