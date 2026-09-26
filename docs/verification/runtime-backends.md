@@ -314,13 +314,14 @@ tests/fm-backend-herdr.test.sh
 tests/fm-backend-zellij.test.sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend-cmux.test.sh
+tests/fm-backend-t3.test.sh
 ```
 
 Bounded output from the incident regression:
 
 ```text
 ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
-ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses
+ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, cmux, and T3 records validate while every empty backend target refuses
 ok - tmux backend: direct empty target returns nonzero without invoking tmux
 ok - process cleanup: creation-time PID identity removes only the exact child and preserves the control child
 ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and valid cleanup removes only the exact target
@@ -328,7 +329,7 @@ ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and 
 
 The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
 Valid cleanup removed only the exact task-bound target and left the control window live.
-The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
+The metadata-only validation covers tmux, Herdr, Zellij, Orca, cmux, and T3 before backend dispatch; a T3 record validates only when its `window=` equals its `t3_thread_id=` and a `t3_project_id=` is present (`tests/fm-backend-t3.test.sh` and `tests/fm-teardown-endpoint-safety.test.sh`).
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
 ### Endpoint close
@@ -362,6 +363,7 @@ The refusal is reached only through a close that could not do its job, and each 
 | zellij | 0, silent | 0, not yet distinguishable |
 | cmux | 0, silent | 0, not yet distinguishable |
 | herdr | 0, silent | 0 from this arm; `bin/fm-teardown.sh` gates every Herdr record removal on `fm_backend_herdr_endpoint_confirmed_gone` instead |
+| t3 | 0, silent (the server's not-found before the close) | 1 unless a re-read after stop and archive returns the server's own not-found; an archive the server accepted but did not apply, an unreadable re-read, or a session still live after the stop wait all refuse (`tests/fm-backend-t3.test.sh`) |
 
 The three arms that still report 0 need a presence re-read taken after their own close, and the close-then-read timing that re-read depends on cannot be established without the real Zellij, Orca, and cmux binaries.
 Guessing it is what a refusal must never rest on: a gate that refused an already-exited session would break ordinary cleanup on every task, which is a worse failure than the stranded endpoint it would be trying to prevent.
@@ -371,13 +373,14 @@ Any other read failure - a momentarily unresponsive server, or a teardown PATH w
 
 Two bounds of the refusal are known and deliberately not closed here.
 
-`--force` overrides it at exactly one site, the generic non-Herdr/non-Orca close.
+`--force` overrides it at exactly one site, the generic non-Herdr/non-Orca/non-T3 close.
 That is the only close where continuing is actually reachable: the worktree is already returned by then and nothing after it needs the backend that could not close, so `--force` - the operator's existing authority to discard a task's records - can mean something there.
 A forced run still prints the full diagnosis naming the backend, the target, and that the close failed, so what may survive is never silent.
 It states what `--force` authorizes rather than what will have happened, because a later refusal in the same run - the Herdr confirmed-gone gate, or the inactive-reconcile delivery gate - can still stop it with every record retained.
 
 The Orca close refuses under `--force` too.
 The step immediately after it removes the Orca worktree through the same CLI whose absence is the only thing that arm ever reports, so a forced continue would die there having removed nothing while claiming the records were already gone.
+The T3 close refuses under `--force` too, and runs before the worktree return rather than after it: a returned slot keeps the thread's `worktreePath`, so a forced continue would hand the pool a slot the still-open thread is bound to.
 The two child close sites inside forced secondmate cleanup also keep refusing: that path is only ever reached under `--force`, so honoring force there would delete the refusal rather than override it, and would contradict the adjacent Herdr child gate that stops forced cleanup for the same hazard.
 
 The retained record is this run's, not a durable guarantee.
@@ -1808,6 +1811,153 @@ FM_CMUX_CLAUDE_COMPOSER_LIVE=1 bin/fm-test-run.sh tests/fm-cmux-claude-composer-
 
 That guard still addresses the worker by task selector, so it no longer reaches the typed submit path and is not a current refresh entry point for this guarantee.
 The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
+
+## T3 Code
+
+Verified on 2026-09-23 against T3 Code v0.0.42 (`t3 v0.0.42`, the headless `t3 serve` service, origin `http://127.0.0.1:3773` read from `~/.t3/userdata/server-runtime.json`) on Linux aarch64, with Claude Code as the `claudeAgent` provider.
+Every probe used a scratch git repository registered as a scratch T3 project (`t3 project add /tmp/fm-t3-scratch/proj --title fm-t3-scratch`) and a linked scratch worktree at `/tmp/fm-t3-scratch/wt`; the scratch project was removed with `t3 project remove <id> --force`, every thread was archived or deleted, the worktree removed, and every bearer session minted for the probes revoked with `t3 auth session revoke <id>`.
+The firstmate and code projects were never touched.
+
+### Worktree binding
+
+`thread.create` with `worktreePath` set to the scratch worktree, followed by `thread.turn.start` asking for `pwd`:
+
+```text
+provider process: claude --output-format stream-json --verbose --input-format stream-json --model claude-haiku-4-5 --permission-prompt-tool stdio --mcp-config {...} --setting-sources=user,project,local --permission-mode bypassPermissions --allow-dangerously-skip-permissions ...
+cwd of that process (readlink /proc/<pid>/cwd): /tmp/fm-t3-scratch/wt
+assistant reply: /tmp/fm-t3-scratch/wt
+```
+
+The thread detail read back `worktreePath: /tmp/fm-t3-scratch/wt`, `branch: fm-probe`.
+A thread created without `worktreePath` runs in the project root (the earlier manual thread in the code project had cwd `/data/repos/code`), which is why the adapter never creates one that way.
+
+### What survives a T3-launched worker
+
+The worktree's `.claude/settings.local.json` carried `UserPromptSubmit`, `Stop`, and `SessionEnd` command hooks appending to a log, plus `"env": {"FM_T3_PROBE_ENV": "yes-from-settings", "GOTMPDIR": "/tmp/fm-t3-scratch/gotmp"}` and the attribution-off policy.
+
+```text
+hook log after one completed turn:        submit stop
+hook log after an interrupted turn:       submit stop sessionend
+hook log after thread.session.stop:       submit stop sessionend
+worker's bash printing "$FM_T3_PROBE_ENV|$GOTMPDIR": yes-from-settings|/tmp/fm-t3-scratch/gotmp
+```
+
+The provider command line above carries no `--append-system-prompt`, so the claude trust statement a terminal launch adds has no carrier; the launch brief's own worker-role section is what reaches the worker.
+
+### Session state transitions
+
+Sampled every 0.4s after `thread.turn.start` on a stopped thread:
+
+```text
+t+0.4s session=starting active=null turn=completed   (latestTurn still the previous turn)
+t+0.8s session=running  active=set  turn=running
+t+4.4s session=ready    active=null turn=completed
+```
+
+`session.status` `starting` or `running` is therefore the busy signal; `latestTurn` lags the turn start and is not used for it.
+
+### Concurrent turns, interrupt, stop, restart
+
+| Command | Observed |
+| --- | --- |
+| `thread.turn.start` while a turn was running | `200 {"sequence":...}`; the message appeared in the transcript and `UserPromptSubmit` fired for it mid-turn (T3 hands it to the provider as a queued user message). |
+| `thread.turn.interrupt` | `200`; session `ready` then `stopped` about two seconds later; provider process gone; hooks `stop` then `sessionend`; `latestTurn.state` read `completed`, not `interrupted`. |
+| `thread.session.stop` on a ready session | `200`; session `stopped` within two seconds; provider process gone; `sessionend` fired. |
+| `thread.turn.start` on a stopped thread | new provider process with `--resume=<claude session id>`; `starting` then `running`; the conversation continued. |
+| `thread.archive` | `200`; `GET /api/orchestration/threads/<id>` then answered `404 {"code":"not_found","reason":"thread_not_found"}` and the shell listing omitted the thread; the ready provider process it had kept running. |
+| `thread.turn.start` and `thread.session.stop` after archive | both `200` and both ignored: no message landed, the provider process stayed until `thread.delete` stopped it. |
+| `thread.delete` | `200`; the detail read stayed `404`; the provider process exited. |
+
+Those last rows are why `fm_backend_t3_kill` stops the session first and archives second, and why `fm_backend_t3_send_text_submit` proves delivery by re-reading the transcript for its message id rather than trusting the `200`.
+
+### Error shapes
+
+```text
+GET with a bad token:             401 {"_tag":"EnvironmentAuthInvalidError","code":"auth_invalid","reason":"invalid_credential"}
+GET with no token:                401 {"_tag":"EnvironmentAuthInvalidError","code":"auth_invalid","reason":"missing_credential"}
+GET unknown thread:               404 {"_tag":"EnvironmentResourceNotFoundError","code":"not_found","reason":"thread_not_found"}
+thread.create, unknown projectId: 500 {"_tag":"EnvironmentInternalError","code":"internal_error","reason":"orchestration_dispatch_failed"}
+malformed command body:           400, empty body
+```
+
+### Dispatch capability probe
+
+Run on 2026-09-24 against the same T3 Code v0.0.42 server with a five-minute bearer session (`t3 auth session issue --ttl 5m --label fm-t3-probe --json`, revoked afterwards with `t3 auth session revoke <sessionId>`):
+
+```text
+POST /api/orchestration/dispatch, body {}:                                  400, empty body; nothing dispatched
+POST /api/orchestration/dispatch, body {"type":"firstmate.capability-probe"}: 400, empty body
+POST /api/orchestration/dispatch, empty body:                               400, empty body
+POST /api/orchestration/dispatch-missing, body {}:                          404, empty body (an unknown route)
+POST /api/orchestration/dispatch, no token:                                 401 {"_tag":"EnvironmentAuthInvalidError","code":"auth_invalid","reason":"missing_credential"}
+POST /api/orchestration/nope, no token:                                     404, empty body
+GET /api/orchestration/dispatch:                                            200, the client's HTML shell (the SPA fallback), so a GET cannot probe the route
+```
+
+The v0.0.42 binary's HTTP contract (`EnvironmentOrchestrationHttpApi`) registers `GET /api/orchestration/snapshot`, `GET /api/orchestration/shell`, `GET /api/orchestration/threads/:threadId`, and `POST /api/orchestration/dispatch`; the Orchestrator V2 branch's `packages/contracts/src/environmentHttp.ts` (pingdotgg/t3code#2829, read 2026-09-24) registers the shell and thread GET reads plus two new thread reads and no dispatch POST.
+`fm_backend_t3_dispatch_check` therefore sends the authenticated empty-object POST and reads 400 as the endpoint present and 404 as the endpoint gone; the fake server's `no-dispatch-route` flag models the 404, and `tests/fm-backend-t3.test.sh` pins both outcomes for the adapter, a spawn, a relaunch, a control action, and a teardown.
+
+### Tokens and read cost
+
+```sh
+t3 auth session issue --ttl 2m --label fm-timing --json   # keys: client expiresAt method scopes sessionId subject token; ~0.7s
+t3 auth session revoke <sessionId>                        # ~0.7s
+```
+
+One `GET /api/orchestration/threads/<id>` took about 9ms; `?turnLimit=1` returned 5KB against 20KB for the full detail, which is why the adapter's state reads are limited to one turn and its capture to `FM_T3_CAPTURE_TURNS` turns.
+
+### Live adapter smoke
+
+Run on 2026-09-23 with the real adapter (`bin/backends/t3.sh`) against the same T3 Code v0.0.42 server, Treehouse v2.3.0, and Claude Code 2.1.281, from a scratch Firstmate home (`FM_HOME=/tmp/fm-t3-live/home`, `HOME=/tmp/fm-t3-live/user-home`, `T3CODE_HOME=/home/ubuntu/.t3`) against a scratch repository `/tmp/fm-t3-live/proj` whose brief asked the worker to print its working directory and append one `done` line.
+
+```sh
+bin/fm-spawn.sh t3livez1 /tmp/fm-t3-live/proj claude --model claude-haiku-4-5 --mode no-mistakes --yolo off --backend t3
+```
+
+```text
+spawned t3livez1 harness=claude kind=ship mode=no-mistakes yolo=off window=cecf0666-7f58-4c26-abba-5a8104221375 worktree=/tmp/fm-t3-live/user-home/.treehouse/proj-95b6d1/1/proj
+meta: backend=t3 t3_thread_id=cecf0666-... t3_project_id=df47497f-... worktree=<the leased Treehouse slot>
+provider: claude pid=3195769 cwd=<that worktree> args include --model claude-haiku-4-5 --setting-sources=user,project,local --permission-mode bypassPermissions
+settings.local.json: env {GOTMPDIR, COMPACT_ADVISER_DISABLE, CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION, CLAUDE_CODE_SEND_FEEDBACK, FM_TASK_ID}, feedbackDrafts off, attribution off, hooks SessionEnd Stop StopFailure UserPromptSubmit
+status: done [at=1790205849]: cwd=/tmp/fm-t3-live/user-home/.treehouse/proj-95b6d1/1/proj
+busy record: ... state=busy source=claude-hook event=user-prompt-submit, then state=idle source=claude-hook event=stop; state/<id>.turn-ended present
+fm-peek: [tool] Command run started ... [t3 thread=cecf0666-... session=running turn=running]
+fm-crew-state: state: working · source: pane · harness busy (claude-hook)
+```
+
+The lifecycle verbs, each through its ordinary Firstmate entry point:
+
+| Step | Result |
+| --- | --- |
+| `fm-send.sh t3livez1 '<steer>'` | exit 0; the worker appended `working [at=1790205910]: steer received` and moved the inbox record to `handled/`. |
+| `fm-control.sh t3livez1 interrupt` during a 60s sleep turn | `interrupt-delivered t3livez1 harness=claude backend=t3 verified=endpoint cancel=unconfirmed`; the sleep turn never completed; the busy record closed with `source=claude-hook event=session-end` when T3 stopped the provider. |
+| `fm-control.sh t3livez1 exit` on a ready session | `stopped t3livez1 ... backend=t3 endpoint=cecf0666-...`; T3 read `stopped`. |
+| `fm-control.sh t3livez1 exit` again | `already-stopped ...`. |
+| `fm-control.sh t3livez1 relaunch --note '...'` | `relaunched t3livez1 harness=claude from=claude model=claude-haiku-4-5 ... backend=t3 endpoint=cecf0666-...`; a new `spawn_gen`; the relaunched worker processed the pending inbox record and appended a second `done` line. |
+| `fm-teardown.sh t3livez1 --force` | `teardown t3livez1 complete`; the thread then read `missing` (archived), the record was removed, the Treehouse slot was returned (`treehouse status`: available), the home's `.t3-session` files were removed, and `t3 auth session list` showed no `firstmate:` session. |
+
+One steer sent right after the interrupt was not acted on until the relaunch delivered the brief again, so the wake path was re-probed directly with the adapter on a fresh scratch thread: a `thread.turn.start` after `thread.session.stop` had read `stopped`, after an interrupt had read `stopped`, and immediately after an interrupt while the session still read `ready` each restarted the provider (`starting` or `running`, then `ready`) and produced the requested reply.
+The unacted steer was therefore the worker not acting on a doorbell it received, which the durable steering-inbox record and the watcher's re-ring ladder cover on every backend, and which the relaunch resolved here.
+The scratch project was removed with `t3 project remove <id> --force` after each run, every scratch thread archived, and every `firstmate:` session revoked.
+
+### Project rooted at another clone
+
+Run on 2026-09-24 against the same T3 Code v0.0.42 server: a scratch bare origin with two clones, `clone-a` and `clone-b`.
+The T3 project was registered at `clone-a` with `t3 project add`, and its shell record carried `repositoryIdentity` `{canonicalKey, locator: {source: git-remote, remoteName: origin, remoteUrl: <the origin path>}}`.
+A thread created in that project with `worktreePath` set to a linked worktree of `clone-b` ran its provider with its cwd equal to that worktree, and the worker's `pwd -P` and `git rev-parse --show-toplevel` both printed the `clone-b` worktree path.
+The `Stop` hook from that worktree's `.claude/settings.local.json` fired.
+The thread was deleted and the project removed afterwards.
+
+### Regression entry points
+
+```sh
+tests/fm-backend-t3.test.sh
+tests/fm-backend.test.sh
+tests/fm-teardown-endpoint-safety.test.sh
+tests/fm-control.test.sh
+```
+
+The fake-server suite pins the response shapes above (including the accepted-but-dropped turn on an archived thread and the not-found after archive), token minting and refresh without leaking the token, the worktree-bound `thread.create`, the stop-then-archive close order and teardown's refusal to return the lease before that close is proven, the dispatch capability probe's supported, missing-endpoint, auth-failure, and server-failure outcomes, and the spawn, peek, control, and teardown paths.
 
 ## Codex App host tools
 

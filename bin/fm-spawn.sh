@@ -90,14 +90,17 @@
 #   docs/cmux-backend.md),
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter, verified herdr
-#   adapter, and experimental zellij, orca, and cmux adapters. Orca owns both
-#   the task worktree and terminal, so ship/scout Orca spawns do not run
+#   adapter, and experimental zellij, orca, cmux, and t3 adapters. Orca owns
+#   both the task worktree and terminal, so ship/scout Orca spawns do not run
 #   treehouse get; cmux is a session provider only, exactly like herdr/zellij,
-#   so it does. Auto-detected herdr stays silent like tmux; auto-detected cmux
-#   prints a loud stderr notice; zellij and orca are never auto-detected.
+#   so it does; t3 has no pane to type it into, so it takes a durable
+#   `treehouse get --lease` itself before creating the thread bound to that
+#   worktree. Auto-detected herdr stays silent like tmux; auto-detected cmux
+#   prints a loud stderr notice; zellij, orca, and t3 are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. cmux does not support --secondmate spawns yet.
+#   absent backend= means tmux. cmux and t3 do not support --secondmate spawns
+#   yet.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -150,9 +153,10 @@
 #   owns the claim and bin/fm-teardown.sh owns what it protects. A slot that
 #   cannot be claimed refuses the spawn rather than launching a worker whose slot
 #   could later be released out from under its successor. A spawn that aborts
-#   while it still holds the allocation lock drops its own claim; an abort after
-#   metadata publication has released that lock leaves the claim in place, and
-#   the next spawn's claim replaces it.
+#   while it still holds the allocation lock drops its own claim, except a t3
+#   abort whose thread close is unproven (spawn_abort_cleanup owns that rule);
+#   an abort after metadata publication has released that lock leaves the claim
+#   in place, and the next spawn's claim replaces it.
 #   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
@@ -1155,6 +1159,11 @@ BACKEND=
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+T3_ABORT_CLEANUP=0
+T3_THREAD_ID=
+T3_PROJECT_ID=
+T3_MODEL_SELECTION=
+T3_LEASED_WT=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -1214,8 +1223,16 @@ parse_orca_worktree_result() {
   fi
 }
 
+# `treehouse return --force` cleans and resets the slot, and a leased slot can
+# still hold a crashed worker's uncommitted work, so a T3 lease is returned
+# only from a worktree whose status reads clean.
+t3_leased_slot_clean() {
+  local porcelain
+  porcelain=$(git -C "$T3_LEASED_WT" status --porcelain 2>/dev/null) && [ -z "$porcelain" ]
+}
+
 spawn_abort_cleanup() {
-  local status=$?
+  local status=$? t3_unclosed=
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -1295,6 +1312,40 @@ spawn_abort_cleanup() {
             fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE" ||
             true
         fi
+      fi
+    fi
+  fi
+  # A T3 spawn leases its Treehouse slot itself before the thread exists
+  # (there is no pane to type `treehouse get` into), so an abort before the
+  # record is published archives the thread it created, under the Treehouse
+  # project lock such an abort still holds, and then:
+  #   - unproven close: keeps the lease and this task's claim, so no stale
+  #     owner's teardown recycles a slot an open thread is still bound to;
+  #   - proven close, dirty or unreadable slot: keeps the lease and releases
+  #     only this task's own claim below, so the slot's previous owner keeps
+  #     its unlanded-work protection at teardown;
+  #   - proven close, clean slot: returns the lease and releases the claim.
+  # Whatever is left in place is named in a warning. Once the record exists,
+  # teardown owns both, exactly as for every other backend.
+  if [ "$T3_ABORT_CLEANUP" = 1 ]; then
+    T3_ABORT_CLEANUP=0
+    if [ -n "${T3_THREAD_ID:-}" ]; then
+      if fm_backend_kill t3 "$T3_THREAD_ID" 2>/dev/null; then
+        SPAWN_ENDPOINT_CLOSED=1
+      else
+        t3_unclosed=$T3_THREAD_ID
+      fi
+    fi
+    if [ -n "${T3_LEASED_WT:-}" ] && [ -n "${PROJ_ABS:-}" ] &&
+      [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+      if [ -n "$t3_unclosed" ]; then
+        echo "warning: T3 thread $t3_unclosed could not be proven closed after the aborted spawn of $ID; its leased Treehouse worktree $T3_LEASED_WT and this task's slot claim were left in place for a person to reconcile" >&2
+        SPAWN_SLOT_CLAIMED=0
+      elif t3_leased_slot_clean; then
+        (cd "$PROJ_ABS" && treehouse return --force "$T3_LEASED_WT") >/dev/null 2>&1 ||
+          echo "warning: could not return the leased Treehouse worktree $T3_LEASED_WT after the aborted spawn of $ID" >&2
+      else
+        echo "warning: the leased Treehouse worktree $T3_LEASED_WT of task $ID holds uncommitted or unreadable work; it was left leased in place for a person to reconcile, and this task's own slot claim was released" >&2
       fi
     fi
   fi
@@ -1636,8 +1687,15 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: backend=cmux does not support --secondmate spawns yet" >&2
     exit 1
   fi
+  if [ "$BACKEND" = t3 ] && [ "$KIND" = secondmate ]; then
+    echo "error: backend=t3 does not support --secondmate spawns; a secondmate is a firstmate primary whose supervision protocol has no T3 shape yet" >&2
+    exit 1
+  fi
   if [ "$BACKEND" = orca ]; then
     fm_backend_orca_runtime_check || exit 1
+  fi
+  if [ "$BACKEND" = t3 ]; then
+    fm_backend_t3_runtime_check || exit 1
   fi
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
@@ -1686,6 +1744,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
+  # A T3 relaunch writes through the dispatch endpoint the adapter's version
+  # pin gates, so a server without it refuses here, before the thread is read
+  # or the record changes (bin/backends/t3.sh's header).
+  [ "$BACKEND" != t3 ] || fm_backend_t3_dispatch_check || exit 1
   # A relaunch must PROVE the previous agent is gone before it launches another
   # one into the same endpoint, and only tmux and herdr have a recovery-grade
   # classifier that can (bin/fm-control-lib.sh owns that capability table).
@@ -1722,7 +1784,26 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # owns that vocabulary). The proof itself lives in one place for the whole
   # control plane - fm_control_endpoint_absence_verdict - so `exit` and
   # `relaunch` cannot reach two different answers about one endpoint.
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  if [ "$BACKEND" = t3 ]; then
+    # A T3 thread reads alive whenever it exists (bin/backends/t3.sh): the
+    # agent-free condition a relaunch needs is "no live provider session",
+    # which `fm-control exit` produces through thread.session.stop. A gone
+    # thread cannot be re-created here - T3 has no rebind shape - so it refuses.
+    case "$(fm_backend_t3_session_status "$RELAUNCH_TARGET")" in
+      missing)
+        echo "error: task $ID's T3 thread $RELAUNCH_TARGET is archived or deleted; a relaunch cannot re-create a thread, so tear the task down and spawn it again" >&2
+        exit 1
+        ;;
+      unreadable)
+        echo "error: task $ID's T3 thread $RELAUNCH_TARGET could not be read; refusing to relaunch into an endpoint whose state is unknown" >&2
+        exit 1
+        ;;
+      starting | running | ready) RELAUNCH_STATE=alive ;;
+      *) RELAUNCH_STATE=dead ;;
+    esac
+  else
+    RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  fi
   if [ "$RELAUNCH_STATE" = missing ]; then
     RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET")
     case "${RELAUNCH_ABSENCE%%$'\t'*}" in
@@ -2350,6 +2431,7 @@ WORKER_ACCOUNT_DECLARED=${WORKER_ACCOUNT%%$'\t'*}
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT#*$'\t'}
 WORKER_ACCOUNT_PROVIDER=${WORKER_ACCOUNT_ROOT#*$'\t'}
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT_ROOT%%$'\t'*}
+[ "$BACKEND" != t3 ] || fm_backend_t3_account_pin_check "$HARNESS" "$WORKER_ACCOUNT" || exit 1
 if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
   if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
     export CLAUDE_CONFIG_DIR=$WORKER_ACCOUNT_ROOT
@@ -2845,6 +2927,17 @@ else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
   BRIEF="$DATA/$ID/brief.md"
+fi
+# The thread's model is resolved (and the claude-only harness rule enforced)
+# while nothing is registered, leased, or recorded; the project is only read
+# here, so a root T3 does not know yet has no project default to offer.
+if [ "$BACKEND" = t3 ]; then
+  if [ "$RELAUNCH" -eq 1 ]; then
+    T3_PROJECT_ID=$(fm_meta_get "$RELAUNCH_META" t3_project_id)
+  else
+    T3_PROJECT_ID=$(fm_backend_t3_project_find "$PROJ_ABS") || exit 1
+  fi
+  T3_MODEL_SELECTION=$(fm_backend_t3_model_selection "$HARNESS" "$MODEL" "$EFFORT" "$T3_PROJECT_ID") || exit 1
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
@@ -3362,6 +3455,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     T=$RELAUNCH_TARGET
     WT_TARGET=$T
     SES=${T%%:*}
+    [ "$BACKEND" != t3 ] || T3_THREAD_ID=$T
   else
     # The recorded endpoint is authoritatively gone, so there is nothing to
     # adopt: create ONE fresh endpoint for the same task, opened directly in the
@@ -3642,6 +3736,47 @@ EOF
     fi
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ;;
+  t3)
+    # T3 launches the provider itself, so a raw launch command has nothing to
+    # run it; refuse before anything is registered, leased, or created.
+    if [ "$RAW_LAUNCH" -eq 1 ]; then
+      echo "error: backend=t3 launches the provider through T3 Code, so a raw launch command cannot be honored; pass a harness name (claude) instead" >&2
+      exit 1
+    fi
+    [ -n "$T3_PROJECT_ID" ] || T3_PROJECT_ID=$(fm_backend_t3_project_ensure "$PROJ_ABS") || exit 1
+    # A T3 thread is bound to its worktree at creation, so the Treehouse slot
+    # is leased here, non-interactively, before the endpoint exists; every
+    # other session backend types `treehouse get` into the pane it just made.
+    # The lease is durable: the abort trap and t3_spawn_fail return it only
+    # once the thread's close is proven, the slot reads clean, and the
+    # Treehouse project lock could be taken. An unproven close keeps the lease
+    # and this task's claim; a proven close on a dirty or unreadable slot keeps
+    # the lease, and only the abort trap then releases this task's claim. Each
+    # is named in a warning; once the record exists, teardown returns it.
+    T3_LEASE_OUT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$W") || {
+      echo "error: treehouse get --lease failed for $PROJ_ABS; no T3 thread was created" >&2
+      exit 1
+    }
+    WT=$(printf '%s\n' "$T3_LEASE_OUT" | tail -n 1)
+    if [ -z "$WT" ] || [ ! -d "$WT" ]; then
+      echo "error: treehouse get --lease did not report a worktree path for $W" >&2
+      exit 1
+    fi
+    T3_LEASED_WT=$WT
+    T3_ABORT_CLEANUP=1
+    validate_spawn_worktree "treehouse get --lease" "$W"
+    if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+      if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
+        echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own" >&2
+        exit 1
+      fi
+      SPAWN_SLOT_CLAIMED=1
+    fi
+    T3_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    T3_THREAD_ID=$(fm_backend_t3_thread_create "$T3_PROJECT_ID" "$W" "$WT" "$T3_BRANCH" \
+      "$T3_MODEL_SELECTION" "$(fm_backend_t3_runtime_mode "$CLAUDE_PERM_FLAG")") || exit 1
+    T=$T3_THREAD_ID
+    ;;
   orca)
     set +e
     ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
@@ -3687,6 +3822,9 @@ spawn_send_text_line() { # <target> <text>
   zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
   orca) fm_backend_orca_send_text_line "$1" "$2" ;;
   cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
+  # A T3 thread has no pane shell: the pre-launch exports this channel carries
+  # reach the worker through its settings file instead (t3_launch_deliver).
+  t3) return 0 ;;
   esac
 }
 spawn_current_path() { # <target>
@@ -3695,6 +3833,7 @@ spawn_current_path() { # <target>
   herdr) fm_backend_herdr_current_path "$1" ;;
   zellij) fm_backend_zellij_current_path "$1" "$W" ;;
   cmux) fm_backend_cmux_current_path "$1" "$W" ;;
+  t3) fm_backend_t3_current_path "$1" ;;
   esac
 }
 spawn_send_literal() { # <target> <text>
@@ -3704,6 +3843,7 @@ spawn_send_literal() { # <target> <text>
   zellij) fm_backend_zellij_send_literal "$1" "$2" "$W" ;;
   orca) fm_backend_orca_send_literal "$1" "$2" ;;
   cmux) fm_backend_cmux_send_literal "$1" "$2" "$W" ;;
+  t3) fm_backend_t3_send_literal "$1" "$2" ;;
   esac
 }
 spawn_send_key() { # <target> <key>
@@ -3713,6 +3853,7 @@ spawn_send_key() { # <target> <key>
   zellij) fm_backend_zellij_send_key "$1" "$2" "$W" ;;
   orca) fm_backend_orca_send_key "$1" "$2" ;;
   cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
+  t3) fm_backend_t3_send_key "$1" "$2" ;;
   esac
 }
 
@@ -4010,6 +4151,124 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+# T3 launch delivery. T3 owns the provider command line, so nothing firstmate
+# normally puts on the launch line can ride it. What replaces each piece is
+# verified in bin/backends/t3.sh's header: the environment the pane exports
+# would have carried (GOTMPDIR, COMPACT_ADVISER_DISABLE, FM_TASK_ID, the
+# Lavish host, the trace carrier, claude's suggestion and feedback switches,
+# and the GIT_CONFIG_* core.hooksPath override for the AI-trailer strip)
+# goes into the worker settings file's `env` map, the attribution-off and
+# feedbackDrafts policies become settings keys in that same file, and the
+# launch brief is the thread's first turn, encoded exactly as a terminal
+# launch encodes it. The settings file already holds the claude busy and
+# turn-end hooks the shared claude arm wrote above; this merge only adds keys.
+# The claude --append-system-prompt trust statement has no settings carrier and
+# is the one launch-line piece a T3 worker does not receive.
+t3_launch_deliver() {
+  local settings="$WT/.claude/settings.local.json" tmp env_json brief_text task_marker='' lavish='' model_sel='' mode
+  [ "$KIND" != ship ] && [ "$KIND" != scout ] || task_marker=$ID
+  [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" != 1 ] || lavish=$LAVISH_AXI_HOST
+  [ "$RELAUNCH" -eq 0 ] || model_sel=$T3_MODEL_SELECTION
+  mode=$(fm_backend_t3_runtime_mode "$CLAUDE_PERM_FLAG")
+  [ -f "$settings" ] || {
+    t3_spawn_fail "the claude worker settings file $settings was not written before the T3 launch; refusing to start a worker with no busy or turn-end wiring"
+    return 1
+  }
+  env_json=$(jq -cn --arg gotmp "$TASK_TMP/gotmp" --arg task "$task_marker" --arg lavish "$lavish" \
+    --arg trace "${SPAWN_TRACEPARENT:-}" --arg hooks "$GIT_HOOKS_DIR" '
+    {GOTMPDIR: $gotmp, COMPACT_ADVISER_DISABLE: "1",
+     CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: "false", CLAUDE_CODE_SEND_FEEDBACK: "0",
+     GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.hooksPath", GIT_CONFIG_VALUE_0: $hooks}
+    + (if $task != "" then {FM_TASK_ID: $task} else {} end)
+    + (if $lavish != "" then {LAVISH_AXI_HOST: $lavish} else {} end)
+    + (if $trace != "" then {TRACEPARENT: $trace} else {} end)') || {
+    t3_spawn_fail "could not build the T3 worker environment for $settings"
+    return 1
+  }
+  tmp="$settings.t3.$$"
+  if ! jq --argjson env "$env_json" \
+    '. + {env: ((.env // {}) + $env), feedbackDrafts: "off",
+          attribution: {commit: "", pr: "", sessionUrl: false}}' "$settings" >"$tmp" ||
+    ! mv -f "$tmp" "$settings"; then
+    rm -f "$tmp"
+    t3_spawn_fail "could not merge the T3 worker environment into $settings"
+    return 1
+  fi
+  brief_text=$("$FM_ROOT/bin/fm-operational-input.sh" encode launch-brief <"$BRIEF") || {
+    t3_spawn_fail "could not encode the launch brief for the T3 thread $T"
+    return 1
+  }
+  if [ "$RELAUNCH" -eq 1 ] && ! fm_backend_t3_runtime_mode_ensure "$T" "$mode"; then
+    t3_spawn_fail "T3 thread $T could not be switched to runtime mode $mode, the posture config/claude-permission-mode now selects, so the relaunch brief was not sent"
+    return 1
+  fi
+  SPAWN_LAUNCH_SENT=1
+  fm_backend_t3_turn_start "$T" "$brief_text" "$mode" "$model_sel" >/dev/null || {
+    t3_spawn_fail "the launch brief could not be sent to T3 thread $T"
+    return 1
+  }
+  if ! fm_backend_t3_wait_session_started "$T" "$FM_T3_START_WAIT"; then
+    t3_spawn_fail "T3 thread $T accepted the launch brief but reported no starting or running session within ${FM_T3_START_WAIT}s (session status: $(fm_backend_t3_session_status "$T"))"
+    return 1
+  fi
+}
+
+# A T3 launch that never started is closed here, in the rovo/kimi shape. On a
+# fresh spawn the record's rollback in the abort trap removes what named the
+# thread, so the thread is archived and, once that close is proven, the leased
+# slot returned under the Treehouse project lock every slot return and claim
+# release holds; the claim is released only after the return. That lock is
+# only tried for a bounded time, because this process still holds the task's
+# meta lock and teardown takes the Treehouse lock before it. A relaunch
+# keeps its record, thread, and worktree - the work they hold is exactly what a
+# relaunch preserves, and an archived thread could never be relaunched again -
+# so it only stops whatever session the brief turn started.
+t3_spawn_fail() {  # <detail>
+  local attempt=0
+  printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
+  echo "error: $1" >&2
+  if [ "$RELAUNCH" -eq 1 ]; then
+    fm_backend_t3_session_stop "$T" 2>/dev/null || true
+    return 0
+  fi
+  if ! fm_backend_kill t3 "$T" 2>/dev/null; then
+    echo "warning: T3 thread $T could not be proven closed after the failed launch of $ID; leaving its leased Treehouse worktree $T3_LEASED_WT and slot claim in place" >&2
+    SPAWN_SLOT_CLAIMED=0
+    return 0
+  fi
+  SPAWN_ENDPOINT_CLOSED=1
+  [ -n "$T3_LEASED_WT" ] || return 0
+  if ! SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS"); then
+    echo "warning: could not resolve the Treehouse project lock for $PROJ_ABS; leaving the leased worktree $T3_LEASED_WT of closed T3 thread $T and its slot claim in place" >&2
+    SPAWN_SLOT_CLAIMED=0
+    return 0
+  fi
+  until fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 50 ]; then
+      echo "warning: the Treehouse project lock for $PROJ_ABS stayed held by another operation; leaving the leased worktree $T3_LEASED_WT of closed T3 thread $T and its slot claim in place" >&2
+      SPAWN_SLOT_CLAIMED=0
+      return 0
+    fi
+    sleep 0.1
+  done
+  SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
+  if ! t3_leased_slot_clean; then
+    echo "warning: the leased Treehouse worktree $T3_LEASED_WT of task $ID holds uncommitted or unreadable work; its lease and slot claim were left in place for a person to reconcile" >&2
+    SPAWN_SLOT_CLAIMED=0
+    return 0
+  fi
+  if ! (cd "$PROJ_ABS" && treehouse return --force "$T3_LEASED_WT") >/dev/null 2>&1; then
+    echo "warning: could not return the leased Treehouse worktree $T3_LEASED_WT of closed T3 thread $T after the failed launch of $ID; leaving its slot claim in place" >&2
+    SPAWN_SLOT_CLAIMED=0
+    return 0
+  fi
+  if [ "$SPAWN_SLOT_CLAIMED" = 1 ]; then
+    fm_treehouse_slot_owner_release "$T3_LEASED_WT" "$ID" || true
+    SPAWN_SLOT_CLAIMED=0
+  fi
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -4043,7 +4302,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     fi
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
-elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$BACKEND" != t3 ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -4675,7 +4934,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id t3_thread_id t3_project_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4723,6 +4982,10 @@ preserve_relaunch_meta() {
   if [ "$BACKEND" = cmux ]; then
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
     echo "cmux_surface_id=$CMUX_SURFACE_ID"
+  fi
+  if [ "$BACKEND" = t3 ]; then
+    echo "t3_thread_id=$T3_THREAD_ID"
+    echo "t3_project_id=$T3_PROJECT_ID"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
@@ -4823,6 +5086,7 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
 fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+[ "$BACKEND" = t3 ] && T3_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
@@ -5057,62 +5321,68 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
-# Implement the launch-delivery contract in this script's header. The full
-# home-identity hash isolates equal task ids across homes, and the spawn token in
-# the final filename keeps a buffered source line bound to this incarnation.
-spawn_launch_home_token() {
-  local home=$1 root hash
-  root=$(cd "$home" 2>/dev/null && pwd -P) || root=$home
-  if command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print $1}')
-  elif command -v sha256sum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$root" | sha256sum | awk '{print $1}')
-  else
-    return 1
-  fi
-  case "$hash" in
-    *[!0-9a-fA-F]*|'') return 1 ;;
-  esac
-  printf '%s' "$hash"
-}
-LAUNCH_HOME_TOKEN=$(spawn_launch_home_token "$FM_HOME") || LAUNCH_HOME_TOKEN=
-if [ -z "$LAUNCH_HOME_TOKEN" ]; then
-  echo "error: could not derive a home identity for the staged launch file" >&2
-  exit 1
-fi
-case "$SPAWN_GEN" in
-  *[!A-Za-z0-9.]*|'') echo "error: spawn incarnation token is not a usable launch-file nonce" >&2; exit 1 ;;
-esac
-LAUNCH_DIR="/tmp/fm-$ID+$LAUNCH_HOME_TOKEN"
-if ! (umask 077 && mkdir "$LAUNCH_DIR") 2>/dev/null; then
-  if [ -L "$LAUNCH_DIR" ] || [ ! -d "$LAUNCH_DIR" ] || [ ! -O "$LAUNCH_DIR" ] ||
-    [ -n "$(find "$LAUNCH_DIR" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] ||
-    ! chmod 700 "$LAUNCH_DIR"; then
-    echo "error: task launch directory $LAUNCH_DIR already exists and is not a private directory owned by this user; refusing to stage the launch command there; inspect and remove it, then retry" >&2
+if [ "$BACKEND" = t3 ]; then
+  # No pane, no staged launch file: the brief is the thread's first turn and
+  # the environment already rides the worker settings file (t3_launch_deliver).
+  t3_launch_deliver || exit 1
+else
+  # Implement the launch-delivery contract in this script's header. The full
+  # home-identity hash isolates equal task ids across homes, and the spawn token in
+  # the final filename keeps a buffered source line bound to this incarnation.
+  spawn_launch_home_token() {
+    local home=$1 root hash
+    root=$(cd "$home" 2>/dev/null && pwd -P) || root=$home
+    if command -v shasum >/dev/null 2>&1; then
+      hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print $1}')
+    elif command -v sha256sum >/dev/null 2>&1; then
+      hash=$(printf '%s' "$root" | sha256sum | awk '{print $1}')
+    else
+      return 1
+    fi
+    case "$hash" in
+      *[!0-9a-fA-F]*|'') return 1 ;;
+    esac
+    printf '%s' "$hash"
+  }
+  LAUNCH_HOME_TOKEN=$(spawn_launch_home_token "$FM_HOME") || LAUNCH_HOME_TOKEN=
+  if [ -z "$LAUNCH_HOME_TOKEN" ]; then
+    echo "error: could not derive a home identity for the staged launch file" >&2
     exit 1
   fi
+  case "$SPAWN_GEN" in
+    *[!A-Za-z0-9.]*|'') echo "error: spawn incarnation token is not a usable launch-file nonce" >&2; exit 1 ;;
+  esac
+  LAUNCH_DIR="/tmp/fm-$ID+$LAUNCH_HOME_TOKEN"
+  if ! (umask 077 && mkdir "$LAUNCH_DIR") 2>/dev/null; then
+    if [ -L "$LAUNCH_DIR" ] || [ ! -d "$LAUNCH_DIR" ] || [ ! -O "$LAUNCH_DIR" ] ||
+      [ -n "$(find "$LAUNCH_DIR" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] ||
+      ! chmod 700 "$LAUNCH_DIR"; then
+      echo "error: task launch directory $LAUNCH_DIR already exists and is not a private directory owned by this user; refusing to stage the launch command there; inspect and remove it, then retry" >&2
+      exit 1
+    fi
+  fi
+  LAUNCH_FILE="$LAUNCH_DIR/launch.$SPAWN_GEN.sh"
+  LAUNCH_STAGE="$LAUNCH_DIR/.launch.$SPAWN_GEN.tmp"
+  if [ -e "$LAUNCH_FILE" ] || [ -L "$LAUNCH_FILE" ]; then
+    echo "error: task launch file $LAUNCH_FILE already exists; refusing to replace it" >&2
+    exit 1
+  fi
+  if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
+    chmod 0600 "$LAUNCH_STAGE" && mv -f "$LAUNCH_STAGE" "$LAUNCH_FILE"); then
+    rm -f "$LAUNCH_STAGE"
+    echo "error: could not stage the launch command at $LAUNCH_FILE" >&2
+    exit 1
+  fi
+  sleep 0.3
+  SPAWN_LAUNCH_SENT=1
+  spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
+  sleep 0.3
+  if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+    spawn_herdr_presentation_order_lock_release
+  fi
+  spawn_send_key "$T" Enter
 fi
-LAUNCH_FILE="$LAUNCH_DIR/launch.$SPAWN_GEN.sh"
-LAUNCH_STAGE="$LAUNCH_DIR/.launch.$SPAWN_GEN.tmp"
-if [ -e "$LAUNCH_FILE" ] || [ -L "$LAUNCH_FILE" ]; then
-  echo "error: task launch file $LAUNCH_FILE already exists; refusing to replace it" >&2
-  exit 1
-fi
-if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
-  chmod 0600 "$LAUNCH_STAGE" && mv -f "$LAUNCH_STAGE" "$LAUNCH_FILE"); then
-  rm -f "$LAUNCH_STAGE"
-  echo "error: could not stage the launch command at $LAUNCH_FILE" >&2
-  exit 1
-fi
-sleep 0.3
-SPAWN_LAUNCH_SENT=1
-spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
-sleep 0.3
-if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
-  HERDR_PROJECTION_ABORT_CLEANUP=0
-  spawn_herdr_presentation_order_lock_release
-fi
-spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"

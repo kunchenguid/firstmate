@@ -247,18 +247,27 @@ fm_control_backend_supports_key() {  # <backend> <key>
     orca)
       case "$key" in Enter|C-c) return 0 ;; esac
       ;;
+    t3)
+      # A T3 thread has no terminal: Escape and Ctrl+C both become
+      # thread.turn.interrupt and Enter is a no-op, while a composer clear has
+      # nothing to clear (bin/backends/t3.sh's fm_backend_t3_send_key).
+      case "$key" in Escape|Enter|C-c) return 0 ;; esac
+      ;;
   esac
   return 1
 }
 
-# Whether <backend> has a recovery-grade agent-state classifier. Only tmux and
-# herdr implement fm_backend_agent_state; zellij, orca, and cmux report
-# `unverified`, so no reading of theirs can prove an agent stopped. The control
-# plane refuses a stop-proving verb there instead of reporting an unprovable
-# transition as success.
+# Whether <backend> has a recovery-grade agent-state classifier. tmux and
+# herdr implement fm_backend_agent_state from the process table; t3 answers
+# from the T3 Code server's own session record, which is the supervisor of the
+# provider process reporting its lifecycle (a stop reads `stopped` with the
+# process gone, verified live). zellij, orca, and cmux report `unverified`, so
+# no reading of theirs can prove an agent stopped. The control plane refuses a
+# stop-proving verb there instead of reporting an unprovable transition as
+# success.
 fm_control_backend_state_verified() {  # <backend>
   case "${1-}" in
-    tmux|herdr) return 0 ;;
+    tmux|herdr|t3) return 0 ;;
   esac
   return 1
 }
@@ -302,7 +311,9 @@ fm_control_backend_state_verified() {  # <backend>
 #     deadlocked as it was before this change - no worse - but deliberately.
 #
 # Both control-plane callers share this one implementation so the proof cannot
-# drift into two answers for the same endpoint.
+# drift into two answers for the same endpoint. t3 never reaches it: both
+# callers read a T3 thread's session status directly, where the owning server's
+# 404 already tells a gone thread from an unreachable server.
 fm_control_endpoint_absence_verdict() {  # <backend> <target>
   local backend=${1-} target=${2-}
   fm_backend_source "$backend" \

@@ -3142,7 +3142,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 # about its own close is bin/fm-backend.sh's fm_backend_kill contract.
 #
 # Returns 0 when the caller must continue anyway and 1 when it must stop.
-# <honors-force> is 1 at exactly one site, the generic non-Herdr/non-Orca
+# <honors-force> is 1 at exactly one site, the generic non-Herdr/non-Orca/non-T3
 # close, where --force is the operator's existing authority to discard this
 # task's records deliberately AND continuing is actually reachable: the
 # worktree is already returned by then and nothing after it needs the backend
@@ -3151,6 +3151,9 @@ preflight_firstmate_home_herdr_children() {  # <home>
 # the step immediately after it removes the Orca worktree through the same CLI
 # whose absence is the only thing that arm ever reports, so a forced continue
 # would die there having removed nothing while this message claimed otherwise.
+# The T3 site refuses under --force too, because it runs before the worktree
+# return: a forced continue would hand the pool a slot the still-open thread is
+# bound to, and T3 would start the provider there for the slot's next holder.
 # The two forced secondmate child sites refuse because that path is only ever
 # reached under --force, so honoring force would delete the refusal rather
 # than override it, and would contradict the adjacent Herdr child gate that
@@ -3446,6 +3449,17 @@ if [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
 
+# The T3 close below writes through the dispatch endpoint the adapter's version
+# pin gates, so a server without it, or one that cannot be reached, refuses
+# here, before the backlog marker, the run conclusion, or the process reap
+# (bin/backends/t3.sh's header). --force does not skip it: the close it gates
+# is never skipped either.
+if [ "$BACKEND" = t3 ]; then
+  fm_backend_source t3 || exit 1
+  fm_backend_t3_tool_check || exit 1
+  fm_backend_t3_dispatch_check || exit 1
+fi
+
 BACKLOG_CLOSED=0
 BACKLOG_TRANSITION=$TEARDOWN_BACKLOG_TRANSITION
 BACKLOG_TRANSITION_FLAGS=()
@@ -3541,6 +3555,14 @@ fi
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
+
+# A T3 thread keeps its worktreePath after the slot is returned, and T3 starts
+# the provider there again on its next turn, so the thread is closed and the
+# close proven before the lease or the claim is given back.
+if [ "$BACKEND" = t3 ]; then
+  fm_backend_kill t3 "$T" \
+    || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
+fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
@@ -3639,6 +3661,12 @@ elif [ "$BACKEND" = herdr ]; then
   else
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
+elif [ "$BACKEND" = t3 ]; then
+  # The T3 bearer session is a home-level credential the adapter minted for
+  # its tasks; once this home's last T3 task is closed it is revoked rather
+  # than left to expire (bin/backends/t3.sh's session contract).
+  fm_backend_t3_session_release_if_unused "$STATE" "$ID" \
+    || echo "warning: the T3 bearer session for this home could not be released after closing $ID; it expires on its own TTL" >&2
 elif [ "$BACKEND" != orca ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1

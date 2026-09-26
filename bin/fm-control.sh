@@ -113,9 +113,16 @@
 #   - A backend that cannot deliver the harness's interrupt key is refused
 #     (Orca's terminal API has no Escape).
 #   - `exit` and `relaunch` require a backend with a recovery-grade agent-state
-#     classifier (tmux, herdr), because without one the "the agent stopped"
-#     postcondition cannot be proven. zellij, orca, and cmux are refused rather
-#     than reported as successful blind.
+#     classifier (tmux, herdr, and t3, whose T3 Code server reports the
+#     provider session it supervises), because without one the "the agent
+#     stopped" postcondition cannot be proven. zellij, orca, and cmux are
+#     refused rather than reported as successful blind. On t3 the exit is
+#     thread.session.stop rather than a typed command, and an interrupt's
+#     postcondition is the thread still existing, because T3 itself stops the
+#     provider session after an interrupted turn and resumes it on the next
+#     message. A t3 task also refuses every verb up front when its T3 server
+#     no longer exposes the dispatch endpoint the verbs write through
+#     (bin/backends/t3.sh's version pin); no other backend runs that probe.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
@@ -353,6 +360,15 @@ fm_control_harness_supported "$HARNESS" \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
 
 fm_backend_validate "$BACKEND" || exit 1
+if [ "$BACKEND" = t3 ]; then
+  # The T3 verbs below call the adapter's own session primitives directly
+  # rather than through a dispatcher wrapper that would source it on demand;
+  # every other backend still reaches its adapter through those wrappers, so
+  # its startup is unchanged. The adapter's version pin then refuses a server
+  # without T3's dispatch endpoint before any verb acts (bin/backends/t3.sh).
+  fm_backend_source t3 || exit 1
+  fm_backend_t3_dispatch_check || exit 1
+fi
 
 # --- shared helpers ---------------------------------------------------------
 
@@ -530,6 +546,13 @@ verify_interrupt_running() {
   fm_backend_target_exists "$BACKEND" "$T" "$LABEL" \
     || die "task $ID's endpoint disappeared while interrupting it; no further control action is safe"
   proof=endpoint
+  if [ "$BACKEND" = t3 ]; then
+    # T3 stops the provider session about two seconds after an interrupted
+    # turn and starts it again on the next message (bin/backends/t3.sh), so
+    # "the agent is still running" is the thread still existing, proven above.
+    printf '%s' "$proof"
+    return 0
+  fi
   if fm_control_backend_state_verified "$BACKEND"; then
     # An interrupt cancels a turn; it must never have stopped the agent. This
     # is the postcondition that separates a landed interrupt from an accident.
@@ -554,11 +577,49 @@ retire_busy_incarnation() {
   fi
 }
 
+# do_exit_t3: a T3 thread has no composer to type /exit into. The stop is
+# thread.session.stop and the postcondition is T3's own session record reading
+# no live provider (bin/backends/t3.sh's header owns the mapping and evidence).
+# A running turn is interrupted first, as on every backend, and a thread the
+# server no longer knows is `endpoint-gone` exactly as a proven-gone Herdr pane.
+do_exit_t3() {
+  local status cancel interrupt_result=not-needed
+  status=$(fm_backend_t3_session_status "$T")
+  case "$status" in
+    missing)
+      printf 'endpoint-gone'
+      return 0
+      ;;
+    unreadable)
+      die "task $ID's T3 thread $T could not be read; refusing to claim anything about its agent"
+      ;;
+    starting|running|ready) ;;
+    *)
+      printf 'already-stopped'
+      return 0
+      ;;
+  esac
+  case "$(busy_verdict)" in
+    busy*)
+      cancel=$(deliver_interrupt) || return $?
+      interrupt_result="delivered cancel=$cancel"
+      ;;
+  esac
+  fm_backend_t3_session_stop "$T" "$EXIT_WAIT" \
+    || die "exit-delivered $ID interrupt=$interrupt_result exit-command=session.stop agent-state=$(fm_backend_t3_session_status "$T") exit=unconfirmed; T3 did not report the provider session stopped within ${EXIT_WAIT}s"
+  retire_busy_incarnation
+  printf 'stopped'
+}
+
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
   local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed
   require_state_verified_backend exit
+  if [ "$BACKEND" = t3 ]; then
+    do_exit_t3
+    return $?
+  fi
   state=$(agent_state)
   case "$state" in
     dead)
@@ -854,10 +915,14 @@ resolve_relaunch_profile() {
   # The launch owner applies this home's worker account pin too, but only after
   # the old agent has been stopped, so a pin that no longer resolves or is
   # signed out must refuse here, while nothing has changed yet.
-  local account_model=$TARGET_MODEL
+  local account_model=$TARGET_MODEL account
   [ "$account_model" != default ] || account_model=
-  fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
-    "$account_model" "$TARGET_HARNESS" >/dev/null || return 1
+  account=$(fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
+    "$account_model" "$TARGET_HARNESS") || return 1
+  if [ "$BACKEND" = t3 ]; then
+    fm_backend_t3_harness_check "$TARGET_HARNESS" || return 1
+    fm_backend_t3_account_pin_check "$TARGET_HARNESS" "$account" || return 1
+  fi
 }
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch

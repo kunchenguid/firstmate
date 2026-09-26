@@ -507,6 +507,13 @@ test_backend_key_capability_matrix() {
     && fail "orca's terminal API has no composer clear and must not claim one"
   fm_control_backend_supports_key orca C-c || fail "orca should deliver C-c"
   fm_control_backend_supports_key orca Enter || fail "orca should deliver Enter"
+  # A T3 thread has no terminal: Escape and C-c both interrupt the turn, Enter
+  # is a no-op, and there is no composer to clear.
+  for key in Escape Enter C-c; do
+    fm_control_backend_supports_key t3 "$key" || fail "t3 should deliver $key"
+  done
+  fm_control_backend_supports_key t3 C-u \
+    && fail "t3 has no composer and must not claim a composer clear"
   pass "fm-control-lib: the backend key matrix matches each adapter's real send-key surface"
 }
 
@@ -582,9 +589,12 @@ test_unverified_state_backends_refuse_stop_verbs() {
   pass "fm-control: a backend that cannot prove an agent stopped refuses exit and relaunch"
 }
 
-test_state_verified_backends_are_exactly_tmux_and_herdr() {
+test_state_verified_backends_are_exactly_tmux_herdr_and_t3() {
   fm_control_backend_state_verified tmux || fail "tmux has a recovery-grade classifier"
   fm_control_backend_state_verified herdr || fail "herdr has a recovery-grade classifier"
+  # T3's classifier is the T3 Code server's own session record for the
+  # provider process it supervises (bin/backends/t3.sh).
+  fm_control_backend_state_verified t3 || fail "t3 proves a stop from T3's session record"
   local backend
   for backend in zellij orca cmux; do
     fm_control_backend_state_verified "$backend" \
@@ -1046,7 +1056,7 @@ test_backend_key_capability_matrix
 test_harness_kind_capability
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
-test_state_verified_backends_are_exactly_tmux_and_herdr
+test_state_verified_backends_are_exactly_tmux_herdr_and_t3
 test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused
 test_unknown_task_is_refused
