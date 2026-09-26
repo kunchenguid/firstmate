@@ -296,8 +296,14 @@ catchup_summary() {
 return_guard() {
   local reasons
   if [ -e "$STATE/.afk" ] || fm_afk_contract_present "$STATE"; then
-    printf 'fm-afk-return: away mode is still active; run bin/fm-afk-return.sh before ordinary captain work\n' >&2
-    return 3
+    # The guard remains read-only: only source the wake library when a flag or
+    # posture record proves STATE already exists. It owns the flag's mode.
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$SCRIPT_DIR/fm-wake-lib.sh"
+    if [ "$(fm_afk_mode "$STATE")" = away ]; then
+      printf 'fm-afk-return: away mode is still active; run bin/fm-afk-return.sh before ordinary captain work\n' >&2
+      return 3
+    fi
   fi
   if [ -e "$GATE" ]; then
     if gate_has_blockers "$GATE"; then
