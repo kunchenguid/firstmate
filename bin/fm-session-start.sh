@@ -28,8 +28,9 @@
 #
 #   1. lock          - acquire the per-home session lock FIRST, before any
 #                       mutating step runs.
-#   2. bootstrap      - home-local stale Herdr projection cleanup runs only
-#                       when this session actually holds the lock. Detect-only
+#   2. bootstrap      - home-local stale Herdr projection cleanup and surviving
+#                       project-cluster reconciliation run only when this session
+#                       actually holds the lock. Detect-only
 #                       diagnostics always run. Bootstrap's six MUTATING sweeps
 #                       (same-home backlog reconciliation,
 #                       secondmate convergence, secondmate liveness, pending remote
@@ -121,8 +122,8 @@
 # and all of which are safe to compute without verified lock ownership.
 # It deliberately skips the network-only GitHub-auth probe because a read-only
 # session has no dispatch, spawn, steer, or merge action for that verdict to gate.
-# Only projection cleanup, the six bootstrap mutating sweeps, and wake-queue
-# presentation are skipped.
+# Only Herdr presentation cleanup and project-cluster reconciliation, the six
+# bootstrap mutating sweeps, and wake-queue presentation are skipped.
 # The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
 #
@@ -193,9 +194,10 @@
 #
 #   --reemit  This process ALREADY took the helm at its own startup and has
 #             only lost its context (a /clear or a compaction). Skip the
-#             mutating sweeps that startup already reconciled - the stale Herdr
-#             projection cleanup and bootstrap's six mutating sweeps (fleet
-#             sync, same-home backlog reconciliation, secondmate convergence and
+#             mutating sweeps that startup already reconciled - Herdr presentation
+#             cleanup and project-cluster reconciliation, plus bootstrap's six
+#             mutating sweeps (fleet sync, same-home backlog reconciliation,
+#             secondmate convergence and
 #             liveness, pending remote handoff retry, X-mode
 #             artifact writes) - and
 #             re-emit the rest. Wake-queue presentation is NOT skipped: queued
@@ -620,7 +622,8 @@ if [ "$REEMIT" -eq 1 ]; then
   printf 'context. Lock ownership is re-verified and the durable records below are\n'
   printf 'reprinted, but the sweeps startup already reconciled - project clone refresh,\n'
   printf 'secondmate convergence and liveness, pending remote handoff\n'
-  printf 'retry, X-mode artifact writes, and stale Herdr child cleanup - are NOT repeated.\n'
+  printf 'retry, X-mode artifact writes, stale Herdr child cleanup, and Herdr project-cluster\n'
+  printf 'reconciliation - are NOT repeated.\n'
   printf 'Queued wakes ARE still drained: they arrived after startup and are this turn work.\n'
 else
   section "SESSION START - $FM_HOME"
@@ -639,8 +642,8 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '%s\n' "$BAR"
     printf '●  READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED\n'
     printf '●  %s\n' "$LOCK_OUT"
-    printf '●  Skipping every mutating step: stale Herdr child cleanup,\n'
-    printf '●  secondmate convergence, secondmate liveness, pending remote handoff retry,\n'
+    printf '●  Skipping every mutating step: stale Herdr child cleanup and project-cluster\n'
+    printf '●  reconciliation, secondmate convergence, secondmate liveness, pending remote handoff retry,\n'
     printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
     printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
     printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'

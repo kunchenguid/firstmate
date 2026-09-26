@@ -84,11 +84,15 @@ ID=restored-idle-shell
 TITLE="└ $ID · p:$TOKEN"
 CANDIDATE=$(lab workspace create --cwd "$ROOT" --label "$TITLE" --no-focus) || fail 'could not create projected child fixture'
 WS=$(printf '%s' "$CANDIDATE" | jq -r '.result.workspace.workspace_id')
+TAB=$(printf '%s' "$CANDIDATE" | jq -r '.result.tab.tab_id')
 PANE=$(printf '%s' "$CANDIDATE" | jq -r '.result.root_pane.pane_id')
 {
-  printf 'version=1\n'
+  printf 'version=2\n'
   printf 'task_id=%s\n' "$ID"
   printf 'projection_id=%s\n' "$TOKEN"
+  printf 'home=%s\n' "$(cd "$HOME_DIR" && pwd -P)"
+  printf 'session=%s\nworkspace_id=%s\ntab_id=%s\npane_id=%s\n' "$HERDR_LAB_SESSION" "$WS" "$TAB" "$PANE"
+  printf 'parent_workspace_id=missing-project\nparent_label=Find My Matcha\nworkspace_label=%s\ntask_label=fm-%s\n' "$TITLE" "$ID"
 } > "$HOME_DIR/state/$ID.herdr-presentation"
 
 "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null || fail 'could not stop named lab for restored-shell reproduction'
@@ -131,7 +135,9 @@ if lab workspace get "$WS" >/dev/null 2>&1; then
   fail 'last-pane side effect did not remove the stale projected child workspace'
 fi
 [ ! -e "$HOME_DIR/state/$ID.herdr-presentation" ] || fail 'matching journal survived confirmed exact pane closure'
-pass 'real named lab cleanup closes only the exact stale pane and preserves exact focus'
+FIRSTMATE_COUNT=$(lab workspace list | jq '[.result.workspaces[] | select(.label == "firstmate" or .label == "Firstmate")] | length')
+[ "$FIRSTMATE_COUNT" = 0 ] || fail 'stale orphan reconciliation created an empty Firstmate workspace before retiring the orphan'
+pass 'real named lab cleanup retires a stale orphan before reconciliation, creates no empty Firstmate, and preserves exact focus'
 
 FM_HOME="$HOME_DIR" FM_BACKEND=herdr HERDR_SESSION="$HERDR_LAB_SESSION" \
   PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" "$ROOT/bin/fm-herdr-session-cleanup.sh" \

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Retire stale restored-shell Herdr presentation children at locked session start.
+# Retire stale restored-shell Herdr presentation children, then reconcile
+# surviving project clusters at locked session start.
 #
 # Usage: fm-herdr-session-cleanup.sh
 #
@@ -19,8 +20,11 @@
 # prerequisite is immediately rechecked before the existing exact-pane
 # focus-preserving close helper is called.
 # The script never closes a workspace. It removes only the matching journal,
-# and only after the exact pane is confirmed gone. Every error warns and returns
-# success so session startup continues conservatively.
+# and only after the exact pane is confirmed gone. Surviving valid version 2
+# journals then drive best-effort project-cluster reconciliation under the
+# shared presentation lock. docs/herdr-backend.md's "Presentation spaces"
+# section owns that contract.
+# Every error warns and returns success so session startup continues conservatively.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -292,6 +296,22 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   return 0
 }
 
+fm_herdr_reconcile_existing_layout() { # <session> <home-real>
+  local session=$1 home_real=$2 presentation_lock home_label
+  presentation_lock=$(fm_backend_herdr_presentation_session_lock_path "$session" 2>/dev/null) || {
+    fm_herdr_cleanup_warn 'existing project clusters skipped because the shared presentation lock is unavailable'
+    return 0
+  }
+  if ! fm_lock_try_acquire "$presentation_lock"; then
+    fm_herdr_cleanup_warn 'existing project clusters skipped because the shared presentation lock is busy'
+    return 0
+  fi
+  home_label=$(fm_backend_herdr_workspace_label)
+  fm_backend_herdr_projection_order_best_effort \
+    "$session" "" "$home_label" "" "$STATE" "$home_real"
+  fm_lock_release "$presentation_lock" || true
+}
+
 fm_herdr_session_cleanup() {
   local session home_real list candidates workspace title journal found=0
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
@@ -328,6 +348,14 @@ fm_herdr_session_cleanup() {
     [ -n "$workspace" ] && [ -n "$title" ] || continue
     fm_herdr_cleanup_one "$session" "$workspace" "$title" "$home_real"
   done <<< "$candidates"
+  found=0
+  for journal in "$STATE"/*"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"; do
+    if [ -f "$journal" ] && [ ! -L "$journal" ]; then
+      found=1
+      break
+    fi
+  done
+  [ "$found" -eq 0 ] || fm_herdr_reconcile_existing_layout "$session" "$home_real"
   return 0
 }
 
