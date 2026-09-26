@@ -545,5 +545,6 @@ PYTEST
 
 test_task_bound_rollouts
 
-python3 "$ROOT/tests/busy-recovery.py" "$ROOT" "$TMP_ROOT/recovery" || fail 'busy recovery regressions failed'
+python3 "$ROOT/tests/busy-recovery.py" "$ROOT" "$TMP_ROOT/recovery-codex" codex || fail 'Codex busy recovery regressions failed'
+python3 "$ROOT/tests/busy-recovery.py" "$ROOT" "$TMP_ROOT/recovery-traex" traex || fail 'TraeX busy recovery regressions failed'
 echo "all fm-busy-state tests passed"

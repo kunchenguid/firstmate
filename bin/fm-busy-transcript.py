@@ -84,8 +84,24 @@ def save(path, data):
 class Lock:
     def __init__(self, state, task):
         self.path = state / (task + ".busy-state.lock")
+        self.inherited = False
 
     def __enter__(self):
+        holder = os.environ.get("FM_BUSY_RECOVERY_LOCK_HOLDER")
+        if holder is not None:
+            expected_owner = os.environ.get("FM_BUSY_RECOVERY_LOCK_OWNER")
+            require(holder.isascii() and holder.isdigit() and int(holder) == os.getppid(),
+                    "recovery lock holder does not match the verifier parent")
+            require(expected_owner and self.path.is_symlink()
+                    and os.readlink(self.path) == expected_owner,
+                    "recovery lock is not the shared lock acquired by the parent")
+            owner = self.path.resolve(strict=True)
+            require(owner.is_dir() and owner.stat().st_uid == os.getuid(),
+                    "recovery lock owner is unavailable")
+            require((owner / "pid").read_text().strip() == holder,
+                    "recovery lock ownership changed before verification")
+            self.inherited = True
+            return self
         for _ in range(40):
             try:
                 self.path.mkdir()
@@ -96,6 +112,8 @@ class Lock:
         raise Unknown()
 
     def __exit__(self, *_):
+        if self.inherited:
+            return
         (self.path / "pid").unlink(missing_ok=True)
         self.path.rmdir()
 

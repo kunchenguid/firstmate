@@ -47,9 +47,9 @@ def serve(root, lab, tool):
                 name = 'Bash' if tool == 'traex' else 'exec_command'
                 args = {'command': 'sleep 6; exit 7'} if tool == 'traex' else {'cmd': 'sleep 6; exit 7', 'yield_time_ms': 10000}
                 if mode == 'ack':
-                    inbox = lab / 'home/state/traex.inbox'
+                    inbox = lab / ('home/state/' + tool + '.inbox')
                     command_text = 'cat ' + shlex.quote(str(inbox / '001.msg')) + '; mkdir -p ' + shlex.quote(str(inbox / 'handled')) + '; mv ' + shlex.quote(str(inbox / '001.msg')) + ' ' + shlex.quote(str(inbox / 'handled/001.msg'))
-                    args = {'command': command_text}
+                    args = {'command': command_text} if tool == 'traex' else {'cmd': command_text, 'yield_time_ms': 10000}
                 item = {'type': 'function_call', 'id': mid, 'call_id': 'call_' + uuid.uuid4().hex,
                         'name': name, 'arguments': json.dumps(args), 'status': 'completed'}
             else:
@@ -263,6 +263,25 @@ esac
                 '--check', '--terminal', pane_data['terminal_id'], '--pid', pid, env=recovery_env))
             command(root / 'bin/fm-busy-event.sh', 'recover', state, tool, '--apply', receipt, env=recovery_env)
             print('ok - ' + tool + ' real original-generation recovery', flush=True)
+            inbox = state / (tool + '.inbox')
+            inbox.mkdir()
+            record = inbox / '001.msg'
+            record.write_text('schema=fm-task-inbox.v1\n--\nRead and acknowledge this harmless lab instruction.\n')
+            record_bytes = record.read_bytes()
+            mode.write_text('ack')
+            ring_script = 'set -eu\nsource "$1/bin/fm-backend.sh"\nsource "$1/bin/fm-task-inbox-lib.sh"\nfm_task_inbox_ring herdr "$2" "$3" "fm-$4"\n'
+            command('bash', '-c', ring_script, '_', root, target, record, tool, env=recovery_env)
+            deadline = time.monotonic() + 15
+            handled = inbox / 'handled/001.msg'
+            while time.monotonic() < deadline:
+                if handled.exists():
+                    break
+                time.sleep(.2)
+            else:
+                raise AssertionError('recovered steering message was not acknowledged')
+            assert handled.read_bytes() == record_bytes
+            wait('idle ' + tool + '-transcript')
+            print('ok - ' + tool + ' recovered steering read and acknowledged one durable message', flush=True)
             mode.write_text('hold')
             send('Hold the simulated response.')
             wait('busy ' + tool + '-transcript')

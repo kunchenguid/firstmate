@@ -5,7 +5,9 @@
 # records. The caller must obtain ORIGINAL from retained launch evidence,
 # not infer historical ownership from today's pane label or current terminal.
 # --apply RECEIPT repeats every check under the task lease, control, metadata
-# and busy locks before publishing the original busy generation. No trust key,
+# and busy locks before publishing the original busy generation. It acquires
+# the busy lock through fm-wake-lib's stale-owner recovery and hands that exact
+# ownership to the transcript verifier. No trust key,
 # input, process replacement, spawn generation or cleanup authority is created.
 # Apply can be repeated with the same receipt. A signal between publications
 # leaves a refusal or the same proven process binding; rerun preflight/apply.
@@ -49,12 +51,16 @@ fm_refuse_if_gate_agent
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 META="$STATE/$ID.meta"
 META_LOCK=$(fm_meta_lock_path "$META")
+BUSY_LOCK="$STATE/$ID.busy-state.lock"
 LAUNCH_STATE=$(fm_meta_get "$META" launch_state || true)
 CONTROL_HELD=0
 META_HELD=0
+BUSY_HELD=0
+BUSY_OWNER=
 TMP=
 cleanup() {
   [ -z "$TMP" ] || rm -f "$TMP"
+  [ "$BUSY_HELD" = 0 ] || fm_lock_release "$BUSY_LOCK"
   [ "$META_HELD" = 0 ] || fm_lock_release "$META_LOCK"
   [ "$CONTROL_HELD" = 0 ] || fm_lock_release "$CONTROL_LOCK"
   fm_lease_guard_release
@@ -68,7 +74,17 @@ fm_lock_try_acquire "$CONTROL_LOCK" || { echo 'error: task lifecycle action in p
 CONTROL_HELD=1
 fm_lock_acquire_wait "$META_LOCK"
 META_HELD=1
-python3 "$SCRIPT_DIR/fm-busy-transcript.py" recover-apply "$STATE" "$ID" "$RECEIPT" >/dev/null
+if ! fm_lock_acquire_wait_bounded "$BUSY_LOCK" "${FM_BUSY_RECOVERY_LOCK_WAIT_SECS:-3}"; then
+  echo "error: recovery refused: transcript binding lock is held by a live or unverified process${FM_LOCK_HELD_PID:+ (pid $FM_LOCK_HELD_PID)}" >&2
+  exit 1
+fi
+BUSY_HELD=1
+BUSY_OWNER=$(readlink "$BUSY_LOCK") || {
+  echo 'error: recovery refused: transcript binding lock ownership is unreadable' >&2
+  exit 1
+}
+FM_BUSY_RECOVERY_LOCK_HOLDER=$$ FM_BUSY_RECOVERY_LOCK_OWNER=$BUSY_OWNER \
+  python3 "$SCRIPT_DIR/fm-busy-transcript.py" recover-apply "$STATE" "$ID" "$RECEIPT" >/dev/null
 DATA=${FM_DATA_OVERRIDE:-$FM_HOME/data}
 CONFIG=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
 FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-30}
