@@ -53,8 +53,9 @@ point of this mode (AGENTS.md section 8's away-mode stub, quiet branch).
   documents for its own return path (correct-ordered daemon shutdown,
   durable wake presentation and acknowledgement, escalation/wedge evidence,
   and the return-catch-up gate).
-  That script does not read or care about the flag's mode, so it needs no
-  quiet-specific variant.
+  Its return path does not read or care about the flag's mode, so it needs
+  no quiet-specific variant; only its read-only `guard` (which `/bearings`
+  consults) reads the mode, treating quiet as present rather than away.
 - A marked daemon escalation, or a message beginning `/quiet` while already
   in quiet mode (refresh, not exit) -> stay in quiet mode and process it, the
   same two carve-outs `/afk` documents for away mode.
