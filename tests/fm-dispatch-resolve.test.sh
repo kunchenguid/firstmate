@@ -246,6 +246,45 @@ assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
 
+# A quota-axi-configured provider has the same quotaSemantics contract and
+# competes by its own spendPriority when a profile declares that provider.
+CUSTOM_QUOTA="$TMP_ROOT/custom-quota.json"
+CUSTOM_RULES="$TMP_ROOT/custom-rules.json"
+jq '.providers += [{provider: "custom:foundry-ic", quotaSemantics: {status: "known", effectiveAvailability: [
+  {scope: "all_models", status: "known", effectivePercentRemaining: 85, runway: {status: "through_reset"}, selection: {spendPriority: 0.95}}
+]}}]' "$QUOTA" > "$CUSTOM_QUOTA"
+jq '.rules[3].use += [{harness: "opencode", model: "azure/gpt-5.6-sol", provider: "custom:foundry-ic"}]' "$BASE_RULES" > "$CUSTOM_RULES"
+cp "$CUSTOM_RULES" "$RULES"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$CUSTOM_QUOTA" run code out err "$BRIEF"
+expect_code 0 "$code" "custom provider resolves"
+assert_contains "$out" '  status: clear' "custom provider snapshot is valid"
+assert_contains "$out" "  profile: --harness 'opencode' --model 'azure/gpt-5.6-sol'" "custom provider wins on spendPriority"
+assert_contains "$out" 'candidate: opencode:azure/gpt-5.6-sol  provider=custom:foundry-ic  scope=all_models  remaining=85%  spendPriority=0.95  runway=through_reset  -> eligible' "custom provider row is ranked"
+
+jq '.rules[3].floor = {provider: "custom:foundry-ic", scope: "all_models", min_percent: 80}' "$CUSTOM_RULES" > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$CUSTOM_QUOTA" run code out err "$BRIEF"
+assert_contains "$out" "  profile: --harness 'opencode' --model 'azure/gpt-5.6-sol'" "custom provider rule floor uses its quota row"
+cp "$CUSTOM_RULES" "$RULES"
+
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" 'candidate: opencode:azure/gpt-5.6-sol  provider=custom:foundry-ic  -> eligible, unranked: provider custom:foundry-ic not in the quota snapshot' "a declared custom provider without a row remains unranked"
+cp "$BASE_RULES" "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$CUSTOM_QUOTA" run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "an additional valid custom row does not invalidate unrelated dispatch"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "unrelated dispatch keeps its ranking"
+for provider in 'custom:' 'custom:Bad' 'x:y'; do
+  jq --arg provider "$provider" '.providers[0].provider = $provider' "$CUSTOM_QUOTA" > "$TMP_ROOT/invalid-provider.json"
+  reset_log
+  TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/invalid-provider.json" run code out err "$BRIEF"
+  assert_contains "$out" '  reason: quota-axi --json returned an invalid snapshot' "malformed snapshot provider $provider is rejected"
+done
+pass "custom provider rows validate and rank; malformed identities fail closed"
+
 # --- rules are snapshotted and line output is injection-safe -------------------
 MUTATED_RULES="$TMP_ROOT/mutated-rules.json"
 jq '.rules[3].use = {"harness":"claude","model":"opus"}' "$BASE_RULES" > "$MUTATED_RULES"
@@ -874,12 +913,15 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"select":"mystery"}]}|unknown select: mystery' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"min_confidence":"high"}]}|min_confidence must be a number from 0 through 1 when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"min_confidence":1.5}]}|min_confidence must be a number from 0 through 1 when present' \
-  '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\z' \
-  '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20,"provider":"CLAUDE"}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\z' \
-  '{"rules":[{"when":"x","use":{"harness":"claude","provider":""}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
-  '{"rules":[{"when":"x","use":{"harness":"claude","provider":" claude"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
-  '{"rules":[{"when":"x","use":{"harness":"claude","provider":"claude\n"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
-  '{"rules":[{"when":"x","use":{"harness":"codex","floor":{"scope":"all_models","min_percent":20,"provider":"claude"}}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^(custom:)?[a-z0-9]+(-[a-z0-9]+)*\z' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20,"provider":"CLAUDE"}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^(custom:)?[a-z0-9]+(-[a-z0-9]+)*\z' \
+  '{"rules":[{"when":"x","use":{"harness":"claude","provider":""}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^(custom:)?[a-z0-9]+(-[a-z0-9]+)*\z when present' \
+  '{"rules":[{"when":"x","use":{"harness":"claude","provider":" claude"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^(custom:)?[a-z0-9]+(-[a-z0-9]+)*\z when present' \
+  '{"rules":[{"when":"x","use":{"harness":"claude","provider":"claude\n"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^(custom:)?[a-z0-9]+(-[a-z0-9]+)*\z when present' \
+  '{"rules":[{"when":"x","use":{"harness":"opencode","provider":"custom:"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^(custom:)?[a-z0-9]+(-[a-z0-9]+)*\z when present' \
+  '{"rules":[{"when":"x","use":{"harness":"opencode","provider":"custom:Bad"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^(custom:)?[a-z0-9]+(-[a-z0-9]+)*\z when present' \
+  '{"rules":[{"when":"x","use":{"harness":"opencode","provider":"x:y"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^(custom:)?[a-z0-9]+(-[a-z0-9]+)*\z when present' \
+  '{"rules":[{"when":"x","use":{"harness":"codex","floor":{"scope":"all_models","min_percent":20,"provider":"claude"}}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^(custom:)?[a-z0-9]+(-[a-z0-9]+)*\z when present' \
   '{"rules":[{"when":"x","use":[{"harness":"codex","model":"gpt-5.5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]}]}|each rule use must not contain duplicate harness, model, and effort profiles' \
   '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":[{"harness":"claude","model":"opus"},{"harness":"claude","model":"opus"}]}|default must not contain duplicate harness, model, and effort profiles' \
   '{"rules":[{"when":"x","use":{"harness":"spaceship"}}]}|each use profile must name a verified harness' \

@@ -76,6 +76,10 @@ if [ "${QUOTA_AXI_SCHEMA5_PAIR:-0}" = 1 ]; then
   printf '{"schemaVersion":5,"providers":[{"provider":"codex","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":3,"runway":{"status":"projected_exhaustion"}}]}},{"provider":"cursor","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":5,"runway":{"status":"through_reset"}}]}}]}\n'
   exit 0
 fi
+if [ "${QUOTA_AXI_CUSTOM:-0}" = 1 ]; then
+  printf '{"schemaVersion":5,"providers":[{"provider":"custom:foundry-ic","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":3,"runway":{"status":"through_reset"}}]}}]}\n'
+  exit 0
+fi
 if [ "${QUOTA_AXI_EXHAUSTED_DETAIL:-0}" = 1 ]; then
   printf '{"schemaVersion":5,"providers":[{"provider":"codex","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":10,"runway":{"status":"exhausted_now"}},{"scope":"model:foo","status":"known","effectivePercentRemaining":5,"runway":{"status":"through_reset"}}]}}]}\n'
   exit 0
@@ -179,13 +183,24 @@ fi
 [ "$err" = "error: --provider needs a value" ] || fail "missing provider value returned: $err"
 ok "arm rejects a missing provider value"
 
-for provider in -- codex-; do
+for provider in -- codex- 'custom:' 'custom:Bad' 'x:y'; do
   if err=$(QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" arm --provider "$provider" 2>&1); then
     fail "noncanonical provider unexpectedly armed a watch: $provider"
   fi
   [ "$err" = "error: invalid provider: $provider" ] || fail "noncanonical provider returned: $err"
 done
 ok "arm rejects noncanonical provider identities"
+
+out=$("$BIN/fm-procevent-quota.sh" source-id custom:foundry-ic)
+[ "$out" = 'quota-custom--foundry-ic' ] || fail "custom provider source id was not path-safe and distinct: $out"
+out=$("$BIN/fm-procevent-quota.sh" source-id custom-foundry-ic)
+[ "$out" = 'quota-custom-foundry-ic' ] || fail "ordinary provider source id collided with custom provider: $out"
+ok "custom provider source ids remain distinct from ordinary provider slugs"
+
+out=$(QUOTA_AXI_CUSTOM=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" \
+  "$BIN/fm-procevent-quota.sh" poll --interval 1 --threshold 10 --provider custom:foundry-ic --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: low' || fail "custom provider row did not trigger its quota watch"
+ok "custom provider watches validate and match their quota row"
 
 out=$(FM_HOME="$LAB/retire-home" FM_STATE_OVERRIDE="$LAB/retire-state" \
   "$BIN/fm-procevent-quota.sh" retire --provider codex)

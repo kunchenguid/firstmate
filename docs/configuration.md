@@ -1039,7 +1039,8 @@ Set it high when a wrong pick is costly and low when the rule is a safe runner-u
 
 **Provider identifiers and mappings**
 
-A profile `provider` optionally names the quota-axi provider family whose rows apply to that profile; when present, profile and rule-floor provider IDs must match the strict whole-string pattern `^[a-z0-9]+(-[a-z0-9]+)*\z`.
+A profile `provider` optionally names the quota-axi provider family whose rows apply to that profile; when present, profile and rule-floor provider IDs must match the strict whole-string pattern `^(custom:)?[a-z0-9]+(-[a-z0-9]+)*\z`.
+The `custom:<slug>` providers come from quota-axi's configuration, not from Firstmate's dispatch configuration.
 Bootstrap validates resolver-only `approval`, `min_confidence`, `floor`, and present `provider` values only while typed resolution is active; without the key those inert fields and the pre-existing verified-harness baseline preserve bootstrap behavior.
 
 Typed resolution additively recognizes `gemini` because AGENTS.md section 4 verifies it for crewmate and scout dispatch.
@@ -1123,6 +1124,7 @@ After the answer, code applies all remaining checks and ranking:
 - The numeric `spendPriority` argmax over candidates, using each candidate's limiting row.
 
 The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and schema 6 and implements the [account-matching contract](../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility).
+It validates every provider row before ranking, so an uninterpretable row invalidates the snapshot instead of being silently skipped; valid `custom:<slug>` rows with standard `quotaSemantics` rank normally.
 
 - An expanded provider with no matching account row leaves the candidate eligible but unranked.
 - Known applicable rows from a provider with partial quota semantics remain rankable; rows whose own status is not known remain unrankable.

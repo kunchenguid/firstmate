@@ -26,7 +26,8 @@
 #
 # The canonical source id is `quota` for the aggregate tracked provider.
 # A provider named with --provider sets the tracked provider and the source id
-# becomes `quota-<provider>`.
+# becomes `quota-<provider>`; a custom provider's `:` becomes `--` in that
+# path-safe source id, so `custom:foundry-ic` uses `quota-custom--foundry-ic`.
 #
 # Snapshots may be quota-axi schema 5 or 6 (bin/fm-quota-axi-lib.sh owns the
 # validator). Both watches read every matching account row independently,
@@ -72,8 +73,10 @@ resolve_provider() {
   local LC_ALL=C
   PROVIDER=${1:-}
   if [ -n "$PROVIDER" ]; then
-    [[ "$PROVIDER" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || die "invalid provider: $PROVIDER"
-    CANONICAL_SOURCE_ID="$SOURCE_ID_BASE-$PROVIDER"
+    fm_quota_provider_id_valid "$PROVIDER" || die "invalid provider: $PROVIDER"
+    # A source id cannot contain ':'. Double the separator so a custom id
+    # cannot collide with any ordinary provider slug.
+    CANONICAL_SOURCE_ID="$SOURCE_ID_BASE-${PROVIDER/:/--}"
   else
     CANONICAL_SOURCE_ID=$SOURCE_ID_BASE
     PROVIDER=
