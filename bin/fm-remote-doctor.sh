@@ -566,12 +566,19 @@ check_herdr() {
   local resolved selected
   if resolved=$(command -v herdr 2>/dev/null) && [ -x "$resolved" ]; then
     if herdr_adapter_load; then
-      fm_backend_herdr_client_select "$HERDR_SESSION_NAME"
-      selected=$(fm_backend_herdr_bin)
-      if [ "$selected" != herdr ] && [ "$selected" != "$resolved" ]; then
-        record herdr "ok: $selected (bypassing $resolved)"
-        return 0
-      fi
+      fm_backend_herdr_client_select "$HERDR_SESSION_NAME" force
+      case "${FM_BACKEND_HERDR_CLIENT_VERDICT:-default}" in
+        incompatible)
+          record herdr "human: $resolved is a protocol mismatch with the running session $HERDR_SESSION_NAME server and no other herdr client on the remote runtime PATH proved compatible" \
+            "run 'herdr status --json --session $HERDR_SESSION_NAME' on that account to see which side is stale, then either restart the session $HERDR_SESSION_NAME server on the build its clients speak or install a client whose protocol matches the running server; until then every pane read and doorbell fails with protocol_mismatch"
+          return 0
+          ;;
+        selected)
+          selected=$(fm_backend_herdr_bin)
+          record herdr "ok: $selected (bypassing $resolved)"
+          return 0
+          ;;
+      esac
     fi
     record herdr "ok: $resolved"
     return 0

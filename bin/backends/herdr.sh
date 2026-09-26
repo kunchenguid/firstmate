@@ -443,6 +443,16 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
 # PATH-first client. An unknown verdict (status supplies neither
 # .server.compatible nor both client and server protocols) always keeps the
 # PATH-first client.
+#
+# Selection records its outcome in FM_BACKEND_HERDR_CLIENT_VERDICT, exported
+# beside the choice: `default` (the PATH-first client is usable, or its
+# compatibility is unknown), `selected` (a later client was adopted), or
+# `incompatible` (a running server positively refuses the PATH-first client and
+# no client on PATH proves compatible, so every operational command will fail).
+# A readiness check must treat `incompatible` as a gap, never as a healthy
+# PATH default. The per-session cache lives in the calling shell: a call made
+# inside a command substitution runs in a subshell, so a selection made there
+# is not kept for the caller's next call.
 fm_backend_herdr_bin() {
   printf '%s' "${FM_BACKEND_HERDR_BIN:-herdr}"
 }
@@ -480,7 +490,8 @@ fm_backend_herdr_client_status() {  # <bin> <session>
 }
 
 # fm_backend_herdr_client_select: resolve the client for <session> once per
-# process (pass `force` to redo it), per the contract above.
+# shell (pass `force` to redo it), per the contract above. Always returns 0;
+# the outcome is FM_BACKEND_HERDR_CLIENT_VERDICT.
 fm_backend_herdr_client_select() {  # <session> [force]
   local session=$1 candidates first candidate running compatible
   if [ "${2:-}" != force ]; then
@@ -488,19 +499,22 @@ fm_backend_herdr_client_select() {  # <session> [force]
   fi
   FM_BACKEND_HERDR_BIN=
   FM_BACKEND_HERDR_CLIENT_SESSION=$session
-  export FM_BACKEND_HERDR_BIN FM_BACKEND_HERDR_CLIENT_SESSION
+  FM_BACKEND_HERDR_CLIENT_VERDICT=default
+  export FM_BACKEND_HERDR_BIN FM_BACKEND_HERDR_CLIENT_SESSION FM_BACKEND_HERDR_CLIENT_VERDICT
   candidates=$(fm_backend_herdr_client_candidates)
-  case "$candidates" in *$'\n'*) ;; *) return 0 ;; esac
+  [ -n "$candidates" ] || return 0
   first=${candidates%%$'\n'*}
   IFS='|' read -r running compatible \
     <<< "$(fm_backend_herdr_client_status "$first" "$session")"
   [ "$running" = true ] && [ "$compatible" = false ] || return 0
+  FM_BACKEND_HERDR_CLIENT_VERDICT=incompatible
   while IFS= read -r candidate; do
     [ "$candidate" != "$first" ] || continue
     IFS='|' read -r running compatible \
       <<< "$(fm_backend_herdr_client_status "$candidate" "$session")"
     if [ "$running" = true ] && [ "$compatible" = true ]; then
       FM_BACKEND_HERDR_BIN=$candidate
+      FM_BACKEND_HERDR_CLIENT_VERDICT=selected
       return 0
     fi
   done <<< "$candidates"
