@@ -1108,6 +1108,10 @@ require_current_away_authority() {
   FM_PR_AWAY_POSTURE=false
   if fm_afk_contract_present "$STATE"; then
     FM_PR_AWAY_POSTURE=true
+    if [ "${FM_PR_MERGE_WATCHER:-0}" = 1 ]; then
+      echo "error: watcher auto-merge is forbidden while the away-posture record exists" >&2
+      return 2
+    fi
     if [ "$PROVIDER" = github ] && [ "$FM_PR_GITHUB_AUTO_REQUESTED" = true ]; then
       echo "error: --auto is attended-only; while the away-posture record exists only a synchronous merge may run under its authority lock" >&2
       return 2

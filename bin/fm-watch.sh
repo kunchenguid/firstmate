@@ -2156,6 +2156,18 @@ run_merge_attempt_capture() {
   FM_MERGE_ATTEMPT_STATUS=
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
   chmod 0600 "$FM_CHECK_OUTPUT" || { fm_check_output_cleanup; return 1; }
+  if ! fm_afk_contract_lock_hold "$STATE"; then
+    FM_MERGE_ATTEMPT_STATUS=1
+    FM_CHECK_RESULT='watcher merge admission could not lock the away-posture record'
+    fm_check_output_cleanup
+    return 0
+  fi
+  if fm_afk_contract_present "$STATE"; then
+    fm_afk_contract_lock_release || return 1
+    FM_MERGE_ATTEMPT_STATUS=0
+    fm_check_output_cleanup
+    return 0
+  fi
   FM_CHECK_SIGNAL_PENDING=
   trap 'FM_CHECK_SIGNAL_PENDING=1' HUP INT TERM
   set -m
@@ -2166,6 +2178,7 @@ run_merge_attempt_capture() {
   set +m
   watcher_stop_signals
   [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
+  fm_afk_contract_lock_release || return 1
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true
@@ -2538,6 +2551,7 @@ watcher_cleanup() {
     fi
   fi
   fm_active_check_stop || cleanup_status=1
+  fm_afk_contract_lock_release || cleanup_status=1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
   if [ "$owns_lock" -eq 1 ] \
@@ -2793,7 +2807,7 @@ while :; do
             && [ "$(fm_meta_get "$STATE/$id.meta" yolo)" = on ]; then
             pr_poll_control_release || exit 1
             FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-              FM_ROOT_OVERRIDE="$FM_ROOT" \
+              FM_ROOT_OVERRIDE="$FM_ROOT" FM_PR_MERGE_WATCHER=1 \
               run_merge_attempt_capture "$SCRIPT_DIR/fm-pr-merge.sh" "$id" "$url" || exit 1
             merge_attempt_rc=$FM_MERGE_ATTEMPT_STATUS
             merge_attempt_out=$FM_CHECK_RESULT

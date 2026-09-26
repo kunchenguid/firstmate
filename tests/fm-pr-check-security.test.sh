@@ -152,6 +152,7 @@ case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
       *statusCheckRollup*)
+        [ -z "${FM_TEST_GH_VIEW_HOOK:-}" ] || "$FM_TEST_GH_VIEW_HOOK" || exit 1
         [ -z "${FM_TEST_GH_VIEW_STALL:-}" ] || sleep "$FM_TEST_GH_VIEW_STALL"
         if [ -n "${FM_TEST_GH_VIEW_JSON:-}" ]; then
           cat "$FM_TEST_GH_VIEW_JSON"
@@ -3097,6 +3098,75 @@ test_yolo_poll_never_merges_while_the_away_record_exists() {
   pass "a yolo poll never auto-merges while the away-posture record exists"
 }
 
+test_yolo_poll_rechecks_away_at_admission() {
+  local dir state url rc
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case yolo-poll-away-admission)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_poll_meta "$state" task-a "$url" yolo=on
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+  cat > "$dir/fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  */.fm-check-output.XXXXXX)
+    if [ -e "$FM_TEST_ADMISSION_SEEN" ] && [ ! -f "$FM_HOME/state/.afk-contract" ]; then
+      "$FM_TEST_AFK_SCRIPT" enter --words 'do not merge anything' >/dev/null || exit 1
+    fi
+    : > "$FM_TEST_ADMISSION_SEEN"
+    ;;
+esac
+exec "$FM_TEST_REAL_MKTEMP" "$@"
+SH
+  chmod +x "$dir/fakebin/mktemp"
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
+    FM_TEST_GLAB_LOG="$dir/glab.log" FM_TEST_ADMISSION_SEEN="$dir/poll-started" \
+    FM_TEST_REAL_MKTEMP="$(command -v mktemp)" FM_TEST_AFK_SCRIPT="$ROOT/bin/fm-afk-contract.sh" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "away admission watcher failed: $(cat "$dir/watch.err")"
+  [ -f "$state/.afk-contract" ] || fail "away entry did not run before merge admission"
+  assert_no_grep 'statusCheckRollup' "$dir/gh.log" "watcher invoked merge verification after away entry"
+  assert_no_grep 'pr merge' "$dir/gh.log" "watcher merged after away entry before admission"
+  [ -f "$state/task-a.check.sh" ] || fail "away admission retired the unmerged poll"
+  pass "watcher admission rechecks away presence before invoking the merge path"
+}
+
+test_yolo_poll_refuses_away_entry_during_verification() {
+  local dir state url rc
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case yolo-poll-away-race)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_poll_meta "$state" task-a "$url" yolo=on
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+  cat > "$dir/enter-away" <<'SH'
+#!/usr/bin/env bash
+"$FM_TEST_AFK_SCRIPT" enter --words 'do not merge anything' >/dev/null
+SH
+  chmod +x "$dir/enter-away"
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
+    FM_TEST_GLAB_LOG="$dir/glab.log" FM_TEST_GH_VIEW_HOOK="$dir/enter-away" \
+    FM_TEST_AFK_SCRIPT="$ROOT/bin/fm-afk-contract.sh" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "away race watcher failed: $(cat "$dir/watch.err")"
+  [ -f "$state/.afk-contract" ] || fail "away entry did not run during merge verification"
+  assert_grep 'watcher auto-merge is forbidden' "$state/.watch-triage.log" \
+    "watcher did not refuse the newly published away record"
+  assert_no_grep 'pr merge' "$dir/gh.log" "watcher merged after away entry during verification"
+  [ -f "$state/task-a.check.sh" ] || fail "away race retired the unmerged poll"
+  [ ! -e "$state/task-a.merge-authority" ] || fail "away race persisted merge authority"
+  [ ! -e "$state/task-a.pr-poll-merge-notified" ] || fail "away race recorded a landing"
+  pass "away entry after watcher admission refuses the merge and preserves its poll"
+}
+
 test_yolo_poll_queued_merge_keeps_polling() {
   local dir state url rc
   url=https://github.com/o/r/pull/1
@@ -3686,6 +3756,19 @@ SH
   pass "device re-record publication waits without rewriting its registration"
 }
 
+if [ "${1:-}" = --yolo-only ]; then
+  test_yolo_poll_merges_a_green_pr
+  test_yolo_poll_reports_only_for_non_yolo_and_red
+  test_yolo_poll_refuses_an_unreported_required_check
+  test_yolo_poll_never_merges_while_the_away_record_exists
+  test_yolo_poll_rechecks_away_at_admission
+  test_yolo_poll_refuses_away_entry_during_verification
+  test_yolo_poll_queued_merge_keeps_polling
+  test_yolo_poll_keeps_a_rebound_poll_armed
+  test_yolo_merge_attempt_is_bounded
+  exit 0
+fi
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_gerrit_merge_watch
@@ -3702,6 +3785,8 @@ test_yolo_poll_merges_a_green_pr
 test_yolo_poll_reports_only_for_non_yolo_and_red
 test_yolo_poll_refuses_an_unreported_required_check
 test_yolo_poll_never_merges_while_the_away_record_exists
+test_yolo_poll_rechecks_away_at_admission
+test_yolo_poll_refuses_away_entry_during_verification
 test_yolo_poll_queued_merge_keeps_polling
 test_yolo_poll_keeps_a_rebound_poll_armed
 test_yolo_merge_attempt_is_bounded
