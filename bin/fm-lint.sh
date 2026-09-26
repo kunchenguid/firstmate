@@ -58,7 +58,7 @@
 # process runs under an enforced envelope: a wall deadline
 # (FM_LINT_ROOT_SECONDS, default 1200), a terminate-then-kill cleanup grace
 # (FM_LINT_ROOT_GRACE, default 5), and a per-process address-space limit
-# (FM_LINT_ROOT_MEMORY_KIB, default 6291456 = 6 GiB of virtual address
+# (FM_LINT_ROOT_MEMORY_KIB, default 8388608 = 8 GiB of virtual address
 # space per analysis process). The sizing rationale and RSS reduction threshold
 # live beside ROOT_MEMORY_KIB below. This is not a resident-memory ceiling;
 # check aggregate runner RSS in CI. The watchdog uses the shared
@@ -160,18 +160,36 @@ fm_lint_root_rss() {  # <rss-file>
 }
 
 # Map a root's exit status onto the reported reason vocabulary without
-# pretending every signal or nonzero exit is a memory kill: only literal OOM
-# evidence in the root's own output earns the memory reason.
+# pretending every signal or nonzero exit is a memory kill: only explicit
+# memory-failure evidence earns the memory reason - GHC's heap-exhaustion
+# status 251 or literal OOM output - and that evidence is checked before a
+# generic findings or signal reason. ShellCheck echoes source lines beside
+# its findings, so a status-1 root counts as a memory death only when the
+# OOM text is a program-prefixed runtime error, never a quoted source line.
 fm_lint_classify_root() {  # <rc> <root-output-file>
   local rc=$1 out=$2
+  local oom='out of memory|memory exhausted|heap exhausted|cannot allocate|mmap failed|resource exhausted'
   case "$rc" in
     0) printf 'ok\n'; return 0 ;;
-    1) printf 'findings\n'; return 0 ;;
     97) printf 'limit-unavailable\n'; return 0 ;;
+    251) printf 'memory\n'; return 0 ;;
   esac
+  if [ "${FM_LINT_INTERNAL_BOUNDED:-none}" != none ] && [ "$rc" = 124 ]; then
+    printf 'timeout\n'; return 0
+  fi
+  if [ "$rc" = 1 ]; then
+    if grep -qiE "^[^[:space:]:]+: .*($oom)" "$out" 2>/dev/null; then
+      printf 'memory\n'
+    else
+      printf 'findings\n'
+    fi
+    return 0
+  fi
+  if grep -qiE "$oom" "$out" 2>/dev/null; then
+    printf 'memory\n'; return 0
+  fi
   if [ "${FM_LINT_INTERNAL_BOUNDED:-none}" != none ]; then
     case "$rc" in
-      124) printf 'timeout\n'; return 0 ;;
       137)
         # The perl watchdog exits 124 on its own bound, so a bare 137 is a real
         # SIGKILL of the child; GNU/BSD timeout instead report 137 when their
@@ -182,9 +200,6 @@ fm_lint_classify_root() {  # <rc> <root-output-file>
         printf 'timeout\n'; return 0
         ;;
     esac
-  fi
-  if grep -qiE 'out of memory|memory exhausted|cannot allocate|mmap failed|resource exhausted' "$out" 2>/dev/null; then
-    printf 'memory\n'; return 0
   fi
   case "$rc" in
     ''|*[!0-9]*) printf 'error\n' ;;
@@ -861,20 +876,23 @@ fi
 # ShellCheck process, unbounded, for local developer lint.
 ROOT_SECONDS=${FM_LINT_ROOT_SECONDS:-1200}
 ROOT_GRACE=${FM_LINT_ROOT_GRACE:-5}
-# 6 GiB of virtual address space per analysis process. ulimit -v caps
+# 8 GiB of virtual address space per analysis process. ulimit -v caps
 # address space, not resident memory, and ShellCheck's GHC runtime keeps
-# roughly a third of that space as reservation, so a 6 GiB cap yields about
-# a 4 GiB working heap budget per root. Measured on Linux during this
-# change: a 4 GiB cap left only about 2.7 GiB of working memory and eleven
-# real canonical roots ran out of memory under it, while the largest
-# passing root peaked near 2.8 GiB resident. Address-space caps do not
-# bound aggregate resident use, but two 6 GiB caps plus the runner's own
-# footprint keep the 16 GiB job honest: a root that exceeds the cap fails
-# by name instead of growing until the runner dies. The roots sidecar
-# records each root's peak RSS; roots peaking above about 3 GiB resident
-# are reduction candidates, bin/fm-pending-reply-lib.sh first (its
-# separate dedup fix is PR 5753).
-ROOT_MEMORY_KIB=${FM_LINT_ROOT_MEMORY_KIB:-6291456}
+# about a third of that space as reservation, so an 8 GiB cap yields about
+# 5.3 GiB of usable heap per root. Measured on Linux during this change:
+# a 4 GiB cap left only about 2.7 GiB of working memory and eleven real
+# canonical roots ran out of memory under it; x86_64 then measured hungrier
+# than aarch64, so under a 6 GiB cap seven roots stopped at its ~4.0 GiB
+# usable wall while the largest passing root peaked near 3.9 GiB resident.
+# Address-space caps do not bound aggregate resident use, but two
+# concurrent roots at ~5.3 GiB usable each is ~10.7 GiB worst-case resident,
+# which fits inside the 16 GiB runner with its own footprint: a root that
+# exceeds the cap fails by name instead of growing until the runner dies.
+# Never disable, narrow, or redirect source-following to fit a root under
+# the cap. The roots sidecar records each root's peak RSS; roots peaking
+# above about 3 GiB resident are reduction candidates,
+# bin/fm-pending-reply-lib.sh first (its separate dedup fix is PR 5753).
+ROOT_MEMORY_KIB=${FM_LINT_ROOT_MEMORY_KIB:-8388608}
 for bound_pair in \
   "FM_LINT_ROOT_SECONDS=$ROOT_SECONDS" \
   "FM_LINT_ROOT_GRACE=$ROOT_GRACE" \

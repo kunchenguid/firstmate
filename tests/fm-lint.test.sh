@@ -382,6 +382,22 @@ case "$target" in
       exit "$alloc_rc"
     fi
     ;;
+  *oom-exit1*)
+    printf 'shellcheck: malloc: resource exhausted (out of memory)\n' >&2
+    exit 1
+    ;;
+  *oom-heap*)
+    printf 'shellcheck: Heap exhausted;\n' >&2
+    exit 251
+    ;;
+  *oom-kill*)
+    printf 'shellcheck: out of memory (requested 1048576 bytes)\n' >&2
+    kill -KILL "$$"
+    ;;
+  *oom-text-findings*)
+    printf '\nIn %s line 2:\necho "out of memory" $x\n                    ^-- SC2086 (info): Double quote to prevent globbing and word splitting.\n' "$target"
+    exit 1
+    ;;
 esac
 printf '%s\n' "$target" >> "${FM_TEST_STUB_LOG:-/dev/null}"
 exit 0
@@ -1514,6 +1530,56 @@ test_root_memory_limit_reports_a_named_death() {
   pass "a root refused by its enforced memory limit fails by name with a memory reason"
 }
 
+test_memory_evidence_outranks_findings_and_signal_reasons() {
+  local tmp fakebin roots_log out rc name reason bounded
+  local -a roots modes
+  tmp=$(fm_test_tmproot fm-lint-memory-evidence)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_reactive_shellcheck "$fakebin"
+  roots=()
+  for name in oom-exit1 oom-heap oom-kill oom-text-findings; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/$name.sh"
+    roots+=("$tmp/$name.sh")
+  done
+  modes=(0)
+  if fm_lint_bounds_supported; then
+    modes+=(1)
+  fi
+
+  # A memory death reports memory whether the runtime exits 1 with a
+  # program-prefixed OOM error, exits with GHC's heap-exhaustion status, or is
+  # SIGKILLed after printing OOM text; a findings root whose echoed source line
+  # merely quotes "out of memory" stays findings.
+  for bounded in "${modes[@]}"; do
+    roots_log="$tmp/lint.$bounded.roots.tsv"
+    rc=0
+    if [ "$bounded" = 1 ]; then
+      out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_REQUIRE_BOUNDS=1 \
+        "$LINT" --telemetry "$tmp/lint.$bounded.tsv" "${roots[@]}" 2>&1) || rc=$?
+    else
+      out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 \
+        "$LINT" --telemetry "$tmp/lint.$bounded.tsv" "${roots[@]}" 2>&1) || rc=$?
+    fi
+    [ "$rc" -ne 0 ] || fail "memory deaths unexpectedly passed (bounded=$bounded)"
+    for name in oom-exit1 oom-heap oom-kill oom-text-findings; do
+      reason=$(awk -F '\t' -v root="/$name.sh" \
+        '$1 == "end" && substr($3, length($3) - length(root) + 1) == root { print $10 }' \
+        "$roots_log")
+      case "$name" in
+        oom-text-findings)
+          [ "$reason" = findings ] \
+            || fail "$name was classified '$reason', expected findings (bounded=$bounded)"$'\n'"$out"
+          ;;
+        *)
+          [ "$reason" = memory ] \
+            || fail "$name was classified '$reason', expected memory (bounded=$bounded)"$'\n'"$out"
+          ;;
+      esac
+    done
+  done
+  pass "explicit memory evidence outranks findings and signal reasons (modes: ${modes[*]})"
+}
+
 test_require_bounds_refuses_when_enforcement_is_missing() {
   local tmp fakebin stub_log fixture out rc lone_dir
   tmp=$(fm_test_tmproot fm-lint-require-bounds)
@@ -1587,7 +1653,7 @@ test_pinned_shellcheck_memory_limit() {
   [ "$rc" -eq 0 ] || fail "pinned ShellCheck did not lint under the default memory limit"$'\n'"$out"
   grep -q $'^meta\tbounds_enforced\t1$' "$roots_log" \
     || fail "the sidecar did not record enforced bounds"
-  grep -q $'^meta\troot_memory_limit_kib\t6291456$' "$roots_log" \
+  grep -q $'^meta\troot_memory_limit_kib\t8388608$' "$roots_log" \
     || fail "the sidecar did not record the applied memory limit"
   awk -F '\t' '$1 == "end" && $3 ~ /small\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
     "$roots_log" || fail "the pinned root did not complete ok under the memory limit"
@@ -1784,6 +1850,7 @@ test_jobs_are_deterministic_and_complete
 test_worker_trees_stop_on_signal
 test_root_deadline_names_the_root_and_reaps_the_tree
 test_root_memory_limit_reports_a_named_death
+test_memory_evidence_outranks_findings_and_signal_reasons
 test_require_bounds_refuses_when_enforcement_is_missing
 test_pinned_shellcheck_memory_limit
 test_sidecar_result_exit_reflects_final_status
