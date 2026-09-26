@@ -1988,17 +1988,26 @@ contribution_tasks_json() {
   done | jq -s .
 }
 
+JSON_TRANSPORT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.XXXXXX") \
+  || { echo "fm-fleet-snapshot: temporary transport directory creation failed" >&2; exit 1; }
+
 if [ "$OUTPUT_MODE" = contribution-input ]; then
   # Reuse the canonical backlog parser, without observing workers or other homes.
+  # Stage both documents through temporary files: record counts grow without
+  # bound, so neither may ride into jq as an argument (E2BIG, "Argument list
+  # too long" exactly when the fleet is largest).
   contribution_tasks=$(contribution_tasks_json) || { echo "fm-fleet-snapshot: contribution task read failed" >&2; exit 1; }
-  jq -n --argjson backlog "$BACKLOG_JSON" --argjson tasks "$contribution_tasks" '{backlog:$backlog,tasks:$tasks}'
+  printf '%s\n' "$BACKLOG_JSON" > "$JSON_TRANSPORT_DIR/backlog.json" \
+    || { echo "fm-fleet-snapshot: temporary backlog file write failed" >&2; exit 1; }
+  printf '%s\n' "$contribution_tasks" > "$JSON_TRANSPORT_DIR/contribution-tasks.json" \
+    || { echo "fm-fleet-snapshot: temporary contribution task file write failed" >&2; exit 1; }
+  jq -n --slurpfile backlog "$JSON_TRANSPORT_DIR/backlog.json" --slurpfile tasks "$JSON_TRANSPORT_DIR/contribution-tasks.json" \
+    '{backlog:$backlog[0],tasks:$tasks[0]}'
   exit 0
 fi
 prefetch_task_current_states || { echo "fm-fleet-snapshot: task observation failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
-JSON_TRANSPORT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.XXXXXX") \
-  || { echo "fm-fleet-snapshot: temporary transport directory creation failed" >&2; exit 1; }
 BACKLOG_JSON_FILE="$JSON_TRANSPORT_DIR/backlog.json"
 TASKS_JSON_FILE="$JSON_TRANSPORT_DIR/tasks.json"
 MAIN_INVENTORY_JSON_FILE="$JSON_TRANSPORT_DIR/main-inventory.json"

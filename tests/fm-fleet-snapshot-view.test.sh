@@ -1152,6 +1152,44 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+test_large_backlog_contribution_input_avoids_argument_limit() {
+  local home fakebin out records argmax expected note record bytes=0 i=0
+  home=$(make_home large-backlog)
+  fakebin=$(make_fakebin "$home/fakebin")
+  argmax=$(getconf ARG_MAX 2>/dev/null || printf 2097152)
+  # One structured record with a padded note; grow the list until the backlog
+  # comfortably exceeds ARG_MAX so an argv-bound jq invocation would fail with
+  # "Argument list too long" on any normal system.
+  note=$(printf 'x%.0s' $(seq 1 400))
+  {
+    printf '## Queued\n'
+    while [ "$bytes" -lt $((argmax * 2)) ]; do
+      i=$((i + 1))
+      printf -v record -- '- [ ] rec-%06d - Record %06d %s (repo: alpha) (since 2026-07-07)\n' "$i" "$i" "$note"
+      printf '%s' "$record"
+      bytes=$((bytes + ${#record}))
+    done
+  } > "$home/data/backlog.md"
+  expected=$i
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --contribution-input) \
+    || fail "large contribution-input snapshot failed: $out"
+  [ "$(printf '%s' "$out" | wc -c)" -gt "$argmax" ] \
+    || fail "generated backlog JSON did not exceed ARG_MAX; regression lost its force"
+  records=$(printf '%s' "$out" | jq '.backlog.records | length') \
+    || fail "large contribution-input snapshot produced invalid JSON"
+  [ "$records" -eq "$expected" ] \
+    || fail "record count $records does not match generated $expected (silent truncation)"
+  printf '%s' "$out" | jq -e \
+    --argjson n "$expected" --arg last_id "$(printf 'rec-%06d' "$expected")" '
+    (.backlog.records | length) == $n
+      and (.backlog.records | map(.id) | unique | length) == $n
+      and .backlog.records[0].id == "rec-000001"
+      and .backlog.records[-1].id == $last_id
+      and (.tasks | length) == 0
+  ' >/dev/null || fail "large contribution-input snapshot dropped or mangled records"
+  pass "contribution input stays complete with a backlog exceeding ARG_MAX"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
@@ -1167,6 +1205,7 @@ test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
+test_large_backlog_contribution_input_avoids_argument_limit
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
