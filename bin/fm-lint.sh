@@ -160,15 +160,13 @@ fm_lint_root_rss() {  # <rss-file>
 }
 
 # Map a root's exit status onto the reported reason vocabulary without
-# pretending every signal or nonzero exit is a memory kill: only explicit
+# pretending every signal or nonzero exit is a memory kill: only process-level
 # memory-failure evidence earns the memory reason - GHC's heap-exhaustion
-# status 251 or literal OOM output - and that evidence is checked before a
-# generic findings or signal reason. ShellCheck echoes source lines beside
-# its findings, so a status-1 root counts as a memory death only when the
-# OOM text is a program-prefixed runtime error, never a quoted source line.
-fm_lint_classify_root() {  # <rc> <root-output-file>
-  local rc=$1 out=$2
-  local oom='out of memory|memory exhausted|heap exhausted|cannot allocate|mmap failed|resource exhausted'
+# status 251, or OOM text on the root's stderr, where runtime errors land -
+# and that evidence is checked before a generic findings or signal reason.
+# Diagnostics and their echoed source excerpts are on stdout and never count.
+fm_lint_classify_root() {  # <rc> <root-stderr-file>
+  local rc=$1 err=$2
   case "$rc" in
     0) printf 'ok\n'; return 0 ;;
     97) printf 'limit-unavailable\n'; return 0 ;;
@@ -177,16 +175,11 @@ fm_lint_classify_root() {  # <rc> <root-output-file>
   if [ "${FM_LINT_INTERNAL_BOUNDED:-none}" != none ] && [ "$rc" = 124 ]; then
     printf 'timeout\n'; return 0
   fi
-  if [ "$rc" = 1 ]; then
-    if grep -qiE "^[^[:space:]:]+: .*($oom)" "$out" 2>/dev/null; then
-      printf 'memory\n'
-    else
-      printf 'findings\n'
-    fi
-    return 0
-  fi
-  if grep -qiE "$oom" "$out" 2>/dev/null; then
+  if grep -qiE 'out of memory|memory exhausted|heap exhausted|cannot allocate|mmap failed|resource exhausted' "$err" 2>/dev/null; then
     printf 'memory\n'; return 0
+  fi
+  if [ "$rc" = 1 ]; then
+    printf 'findings\n'; return 0
   fi
   if [ "${FM_LINT_INTERNAL_BOUNDED:-none}" != none ]; then
     case "$rc" in
@@ -218,6 +211,7 @@ fm_lint_classify_root() {  # <rc> <root-output-file>
 fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
   local index=$1 path=$2 output_dir=$3 shard_index=$4
   local root_out="$output_dir/root.$shard_index.$index.out"
+  local root_err="$output_dir/root.$shard_index.$index.err"
   local rss_file="$output_dir/root.$shard_index.$index.rss"
   local start_ms end_ms duration_ms invocation_rc=0 reason rss_kib
   start_ms=$(fm_lint_now_ms)
@@ -242,12 +236,12 @@ fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
         "${BASH:-bash}" "$SELF" --internal-timed \
         "$FM_LINT_INTERNAL_ROOT_SECS" "$FM_LINT_INTERNAL_GRACE" \
         "${BASH:-bash}" "$SELF" --internal-root "$rss_file" "$FM_LINT_INTERNAL_MEMORY_KIB" \
-        "$FM_LINT_SHELLCHECK" "${FM_LINT_WORKER_ARGS[@]}" -- "$path" ) > "$root_out" 2>&1 &
+        "$FM_LINT_SHELLCHECK" "${FM_LINT_WORKER_ARGS[@]}" -- "$path" ) > "$root_out" 2> "$root_err" &
     FM_LINT_WORKER_RUN_PID=$!
     wait "$FM_LINT_WORKER_RUN_PID" || invocation_rc=$?
     FM_LINT_WORKER_RUN_PID=
   else
-    "$FM_LINT_SHELLCHECK" "${FM_LINT_WORKER_ARGS[@]}" -- "$path" > "$root_out" 2>&1 &
+    "$FM_LINT_SHELLCHECK" "${FM_LINT_WORKER_ARGS[@]}" -- "$path" > "$root_out" 2> "$root_err" &
     FM_LINT_WORKER_RUN_PID=$!
     wait "$FM_LINT_WORKER_RUN_PID" || invocation_rc=$?
     FM_LINT_WORKER_RUN_PID=
@@ -255,7 +249,7 @@ fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
   end_ms=$(fm_lint_now_ms)
   duration_ms=$((end_ms - start_ms))
   rss_kib=$(fm_lint_root_rss "$rss_file")
-  reason=$(fm_lint_classify_root "$invocation_rc" "$root_out")
+  reason=$(fm_lint_classify_root "$invocation_rc" "$root_err")
   if [ -n "${FM_LINT_INTERNAL_ROOTS_LOG:-}" ]; then
     printf 'end\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$index" "$path" "$shard_index" "${FM_LINT_INTERNAL_MODE:-}" \
@@ -266,7 +260,7 @@ fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
     printf 'fm-lint: end %s reason=%s rc=%s duration_ms=%s rss_kib=%s\n' \
       "$path" "$reason" "$invocation_rc" "$duration_ms" "$rss_kib" >&2
   fi
-  cat "$root_out" >> "$output_dir/shard.$shard_index.out"
+  cat "$root_out" "$root_err" >> "$output_dir/shard.$shard_index.out"
   return "$invocation_rc"
 }
 

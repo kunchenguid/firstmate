@@ -395,7 +395,7 @@ case "$target" in
     kill -KILL "$$"
     ;;
   *oom-text-findings*)
-    printf '\nIn %s line 2:\necho "out of memory" $x\n                    ^-- SC2086 (info): Double quote to prevent globbing and word splitting.\n' "$target"
+    printf '\nIn %s line 2:\nshellcheck: out of memory $x\n                          ^-- SC2086 (info): Double quote to prevent globbing and word splitting.\n' "$target"
     exit 1
     ;;
 esac
@@ -1580,6 +1580,32 @@ test_memory_evidence_outranks_findings_and_signal_reasons() {
   pass "explicit memory evidence outranks findings and signal reasons (modes: ${modes[*]})"
 }
 
+test_source_excerpt_with_oom_text_stays_findings() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): OOM-text source excerpt check"
+    return
+  fi
+  local tmp fixture out rc reason
+  tmp=$(fm_test_tmproot fm-lint-oom-text-excerpt)
+  fixture="$tmp/excerpt.sh"
+  # The finding's echoed source excerpt reads like a runtime OOM error; the
+  # root still exits with ordinary findings and must be reported as findings.
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+x=$1
+shellcheck: out of memory $x
+SH
+  rc=0
+  out=$("$LINT" --telemetry "$tmp/lint.tsv" "$fixture" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "a root with an ordinary finding exited $rc, expected 1"$'\n'"$out"
+  assert_contains "$out" "shellcheck: out of memory" "the source excerpt was not echoed with the finding"
+  assert_contains "$out" "SC2086" "the ordinary finding was not reported"
+  reason=$(awk -F '\t' '$1 == "end" && $3 ~ /excerpt\.sh$/ { print $10 }' "$tmp/lint.roots.tsv")
+  [ "$reason" = findings ] \
+    || fail "a source excerpt quoting OOM text was classified '$reason', expected findings"$'\n'"$out"
+  pass "an echoed source excerpt quoting OOM text stays a findings result"
+}
+
 test_require_bounds_refuses_when_enforcement_is_missing() {
   local tmp fakebin stub_log fixture out rc lone_dir
   tmp=$(fm_test_tmproot fm-lint-require-bounds)
@@ -1851,6 +1877,7 @@ test_worker_trees_stop_on_signal
 test_root_deadline_names_the_root_and_reaps_the_tree
 test_root_memory_limit_reports_a_named_death
 test_memory_evidence_outranks_findings_and_signal_reasons
+test_source_excerpt_with_oom_text_stays_findings
 test_require_bounds_refuses_when_enforcement_is_missing
 test_pinned_shellcheck_memory_limit
 test_sidecar_result_exit_reflects_final_status
