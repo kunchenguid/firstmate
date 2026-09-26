@@ -81,8 +81,8 @@ case "${1:-}" in
     exit 1
     ;;
   terminal)
-    # Polling is persistent; individual issue batches do not retire the source.
-    exit 1
+    # Individual issue batches keep polling; permanent API failures end it.
+    jq -e '.kind == "poll-error" and .status == "error"' "$2" >/dev/null
     ;;
   autohandle)
     [ $# -eq 4 ] || die "autohandle requires source id, sequence, and result file"

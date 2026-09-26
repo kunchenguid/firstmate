@@ -104,6 +104,13 @@ def poll(database, state_path):
     while True:
         try:
             rows = fetch(database, os.environ["NOTION_TOKEN"])
+        except urllib.error.HTTPError as e:
+            if e.code in (408, 429, 500, 502, 503, 504):
+                time.sleep(POLL_SECONDS)
+                continue
+            print(json.dumps({"kind": "poll-error", "status": "error",
+                              "http_status": e.code}))
+            return
         except (OSError, ValueError, urllib.error.URLError, RuntimeError):
             # Keep the standing listener alive through transient API/network
             # outages; the next bounded poll retries without duplicating wakes.
