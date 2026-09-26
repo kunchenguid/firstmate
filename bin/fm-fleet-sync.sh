@@ -367,6 +367,10 @@ sync_project() {
   dirty=no
   [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
   recovered=no
+  previous_rev=$(git -C "$PROJ" rev-parse HEAD) || {
+    echo "$label: skipped: cannot read HEAD"
+    return 0
+  }
 
   if [ "$cur" != "$DEFAULT" ]; then
     # Off the default branch. Auto-recover only the one unambiguously safe drift:
@@ -410,6 +414,35 @@ sync_project() {
     echo "$label: skipped: cannot read $BASE"
     return 0
   }
+  if [ "$local_rev" != "$remote_rev" ]; then
+    if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BASE"; then
+      report_stuck "diverged $DEFAULT"
+      return 0
+    fi
+
+    before=$(git -C "$PROJ" rev-parse --short "$DEFAULT") || {
+      echo "$label: skipped: cannot read local $DEFAULT"
+      return 0
+    }
+    if ! merge_output=$(git -C "$PROJ" merge --ff-only "$BASE" 2>&1); then
+      reason="fast-forward failed"
+      if [ -n "$merge_output" ]; then
+        reason="$reason: $(first_line "$merge_output")"
+      fi
+      echo "$label: skipped: $reason"
+      return 0
+    fi
+  fi
+  # Only a sync of this running Firstmate code root may refresh this home's
+  # watches. Ordinary project clones never get to execute an update hook.
+  if { [ "$recovered" = yes ] || [ "$local_rev" != "$remote_rev" ]; } \
+    && [ "$proj_abs" = "$(cd "$FM_ROOT" && pwd -P)" ] \
+    && [ -x "$SCRIPT_DIR/fm-pr-poll-refresh.sh" ]; then
+    poll_state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+    FM_ROOT_OVERRIDE="$PROJ" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$poll_state" \
+      "$SCRIPT_DIR/fm-pr-poll-refresh.sh" "$previous_rev" \
+      || echo "$label: merge watch refresh incomplete; see pr-poll-refresh diagnostics" >&2
+  fi
   if [ "$local_rev" = "$remote_rev" ]; then
     if [ "$recovered" = yes ]; then
       echo "$label: recovered: re-attached $DEFAULT (already current)"
@@ -417,32 +450,6 @@ sync_project() {
       echo "$label: already current"
     fi
     return 0
-  fi
-  if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BASE"; then
-    report_stuck "diverged $DEFAULT"
-    return 0
-  fi
-
-  before=$(git -C "$PROJ" rev-parse --short "$DEFAULT") || {
-    echo "$label: skipped: cannot read local $DEFAULT"
-    return 0
-  }
-  if ! merge_output=$(git -C "$PROJ" merge --ff-only "$BASE" 2>&1); then
-    reason="fast-forward failed"
-    if [ -n "$merge_output" ]; then
-      reason="$reason: $(first_line "$merge_output")"
-    fi
-    echo "$label: skipped: $reason"
-    return 0
-  fi
-  # Only a sync of this running Firstmate code root may refresh this home's
-  # watches. Ordinary project clones never get to execute an update hook.
-  if [ "$proj_abs" = "$(cd "$FM_ROOT" && pwd -P)" ] \
-    && [ -x "$SCRIPT_DIR/fm-pr-poll-refresh.sh" ]; then
-    poll_state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
-    FM_ROOT_OVERRIDE="$PROJ" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$poll_state" \
-      "$SCRIPT_DIR/fm-pr-poll-refresh.sh" "$local_rev" \
-      || echo "$label: merge watch refresh incomplete; see pr-poll-refresh diagnostics" >&2
   fi
   after=$(git -C "$PROJ" rev-parse --short "$DEFAULT") || {
     echo "$label: skipped: fast-forward completed but cannot read local $DEFAULT"

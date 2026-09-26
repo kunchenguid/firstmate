@@ -3444,7 +3444,7 @@ SH
 # The real update entry point must migrate only polls authenticated against the
 # committed old template, retaining the watcher's strict current-byte contract.
 test_template_update_refreshes_registered_polls() {
-  local route=${1:-update} dir state id template old PR_CHECK WATCH out bad_before watch_home old_identity
+  local route=${1:-update} dir state id template old PR_CHECK WATCH out bad_before watch_home old_identity unique
   dir=$(make_case "template-$route")
   state="$dir/home/state"
   cp -R "$ROOT/bin/." "$dir/root/bin/"
@@ -3490,7 +3490,7 @@ test_template_update_refreshes_registered_polls() {
     cp "$dir/template-original" "$template"
   fi
   watch_home="$dir/home"
-  if [ "$route" = secondmate ]; then
+  if [[ "$route" = secondmate* ]]; then
     git clone -q "$dir/origin.git" "$dir/parent"
     printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s/home\n' "$dir" > "$dir/root/.fm-secondmate-parent"
     printf 'child\n' > "$dir/root/.fm-secondmate-home"
@@ -3501,22 +3501,66 @@ test_template_update_refreshes_registered_polls() {
     printf 'parent sentinel\n' > "$dir/home/state/untouched"
     printf -- '- child - domain supervisor (home: %s/root; scope: fixture; projects: p; added 2026-09-26)\n' "$dir" > "$dir/home/data/secondmates.md"
   fi
+  if [ "$route" = secondmate-redundant ]; then
+    printf 'already landed\n' > "$dir/root/landed"
+    git -C "$dir/root" add landed
+    git -C "$dir/root" commit -qm redundant-local
+    old=$(git -C "$dir/root" rev-parse HEAD)
+    git -C "$dir/root" checkout -qb unique-control
+    printf 'unlanded\n' > "$dir/root/unique"
+    git -C "$dir/root" add unique
+    git -C "$dir/root" commit -qm unique-control
+    unique=$(git -C "$dir/root" rev-parse HEAD)
+    git -C "$dir/root" checkout -q main
+    cp "$dir/root/landed" "$dir/upstream/landed"
+    git -C "$dir/upstream" add landed
+  fi
   printf '\n# Trusted repository template update.\n' >> "$dir/upstream/bin/fm-pr-poll.sh"
   git -C "$dir/upstream" add bin/fm-pr-poll.sh
   git -C "$dir/upstream" commit -qm update-template
+  case "$route" in
+    fleet-recover-*)
+      git -C "$dir/root" fetch -q "$dir/upstream" main
+      git -C "$dir/root" checkout -q --detach "$old"
+      git -C "$dir/root" branch -f main FETCH_HEAD
+      if [ "$route" = fleet-recover-ff ]; then
+        printf '\n# Further repository template update.\n' >> "$dir/upstream/bin/fm-pr-poll.sh"
+        git -C "$dir/upstream" add bin/fm-pr-poll.sh
+        git -C "$dir/upstream" commit -qm further-template
+      fi
+      ;;
+  esac
   git -C "$dir/upstream" push -q origin main
   case "$route" in
     update)
       FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" PATH="$dir/fakebin:$BASE_PATH" \
         "$dir/root/bin/fm-update.sh" > "$dir/update.out" 2> "$dir/update.err" ;;
-    fleet)
+    fleet|fleet-recover-*)
       FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" PATH="$dir/fakebin:$BASE_PATH" \
         "$dir/root/bin/fm-fleet-sync.sh" "$dir/root" > "$dir/update.out" 2> "$dir/update.err" ;;
-    secondmate)
+    secondmate|secondmate-redundant)
       FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/parent" PATH="$dir/fakebin:$BASE_PATH" \
         "$dir/parent/bin/fm-update.sh" > "$dir/update.out" 2> "$dir/update.err" ;;
   esac || fail "isolated $route failed: $(cat "$dir/update.err")"
   [ "$(git -C "$dir/root" rev-parse HEAD)" != "$old" ] || fail "fixture did not update"
+  case "$route" in
+    secondmate-redundant)
+      assert_contains "$(cat "$dir/update.out")" 'reconciled redundant divergence' 'redundant route taken'
+      if git -C "$dir/root" merge-base --is-ancestor "$old" HEAD; then fail "fixture did not diverge"; fi
+      old_identity=$(fm_pr_file_identity "$state/good-a.check.sh")
+      if FM_HOME="$watch_home" FM_ROOT_OVERRIDE="$dir/root" \
+        "$dir/root/bin/fm-pr-poll-refresh.sh" "$unique" > "$dir/unique.out" 2> "$dir/unique.err"; then
+        fail "refresh accepted nonredundant divergence"
+      fi
+      [ "$(fm_pr_file_identity "$state/good-a.check.sh")" = "$old_identity" ] || fail "refused refresh changed a watch"
+      ;;
+    fleet-recover-current)
+      assert_contains "$(cat "$dir/update.out")" 're-attached main (already current)' 'recovery without fast-forward'
+      ;;
+    fleet-recover-ff)
+      assert_contains "$(cat "$dir/update.out")" 're-attached main, synced' 'recovery with fast-forward'
+      ;;
+  esac
   for id in good-a good-b good-c; do
     if ! fm_pr_poll_artifacts_valid "$state" "$id" "$template"; then
       FM_TEST_GH_LOG="$dir/gh.log" run_watcher_bounded "$watch_home" "$dir/fakebin" \
@@ -3539,7 +3583,7 @@ test_template_update_refreshes_registered_polls() {
   assert_contains "$out" 'foreign.check.sh' 'foreign registered template still rejected'
   assert_not_contains "$out" 'good-a.check.sh' 'valid watch incorrectly rejected'
   [ ! -e "$dir/executed" ] && [ ! -e "$dir/foreign-executed" ] || fail "untrusted source executed"
-  if [ "$route" = secondmate ]; then
+  if [[ "$route" = secondmate* ]]; then
     [ "$(cat "$dir/home/state/untouched")" = 'parent sentinel' ] || fail "refresh touched parent state"
     [ ! -e "$dir/home/state/good-a.check.sh" ] || fail "refresh published into parent state"
   fi
@@ -3558,11 +3602,13 @@ test_template_update_refreshes_registered_polls() {
 }
 
 if [ "${1:-}" = --template-update ]; then
-  for route in update fleet secondmate; do test_template_update_refreshes_registered_polls "$route"; done
+  shift
+  [ "$#" -gt 0 ] || set -- update fleet secondmate secondmate-redundant fleet-recover-current fleet-recover-ff
+  for route in "$@"; do test_template_update_refreshes_registered_polls "$route"; done
   exit 0
 fi
 
-for route in update fleet secondmate; do test_template_update_refreshes_registered_polls "$route"; done
+for route in update fleet secondmate secondmate-redundant fleet-recover-current fleet-recover-ff; do test_template_update_refreshes_registered_polls "$route"; done
 
 test_parser_matrix
 test_gitlab_merge_watch

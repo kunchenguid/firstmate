@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Refresh merge watches after a trusted fast-forward of this Firstmate checkout.
+# Refresh merge watches after a trusted update of this Firstmate checkout.
 # Usage: fm-pr-poll-refresh.sh <previous-full-commit>
 # FM_ROOT_OVERRIDE selects the updated code root; FM_HOME / FM_STATE_OVERRIDE
 # select only the operational state belonging to that checkout.
-# The previous commit must be an ancestor of HEAD and both templates come from
-# Git objects, with the installed current template required to match HEAD.
+# The previous commit must be an ancestor of HEAD or provably redundant.
+# Both templates come from Git objects; the installed template must match HEAD.
 # Every prior poll must pass the unchanged strict authentication against the old
 # template (including registration hashes, file identities and canonical metadata).
 # Republishes through fm-pr-lib.sh under control, metadata and publication locks;
@@ -29,7 +29,10 @@ if [ "$#" -ne 1 ] || ! [[ "$1" =~ ^[0-9a-f]{40}$ ]]; then
 fi
 [ -d "$STATE" ] || exit 0
 [ ! -L "$STATE" ] || exit 1
-git -C "$FM_ROOT" merge-base --is-ancestor "$1" HEAD || exit 1
+if ! git -C "$FM_ROOT" merge-base --is-ancestor "$1" HEAD; then
+  . "$SCRIPT_DIR/fm-ff-lib.sh"
+  divergence_is_redundant "$FM_ROOT" "$1" HEAD || exit 1
+fi
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/fm-pr-poll-refresh.XXXXXX")
 trap 'rm -rf -- "$scratch"' EXIT
 trap 'exit 1' HUP INT TERM
