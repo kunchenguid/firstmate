@@ -1,0 +1,12 @@
+Direct CLI seed from the worktree code root:
+provisioned: /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3DMQT0WSYWHWAWC3C51SZVG/.live-provision.y1exzw/seed projects=0
+identity=live-seed
+head=31d46ab7
+git-status=0
+tracked-content=matches
+Converge same home:
+provisioned: /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3DMQT0WSYWHWAWC3C51SZVG/.live-provision.y1exzw/seed projects=0
+Reject an unmarked foreign home without altering it:
+error: existing remote home is not a safe Firstmate checkout
+foreign-content=foreign
+foreign-entries=1

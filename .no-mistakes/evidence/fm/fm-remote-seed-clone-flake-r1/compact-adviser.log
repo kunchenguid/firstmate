@@ -1,0 +1,23 @@
+ok - a remote-routed second mate starts with the compact adviser disabled, from the pane export and from the launch command alike
+ok - the remote route keeps the compact-adviser switch through the cleared allowlisted environment
+ALL TESTS PASSED
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home/state/parent-route/ios.git-hooks/pre-rebase: Permission denied
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home/state/parent-route/ios.git-hooks/pre-applypatch: Permission denied
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home/state/parent-route/ios.git-hooks/pre-auto-gc: Permission denied
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home/state/parent-route/ios.git-hooks/pre-merge-commit: Permission denied
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home/state/parent-route/ios.git-hooks/post-commit: Permission denied
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home/state/parent-route/ios.git-hooks/sendemail-validate: Permission denied
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home/state/parent-route/ios.git-hooks/applypatch-msg: Permission denied
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home/state/parent-route/ios.git-hooks/prepare-commit-msg: Permission denied
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home/state/parent-route/ios.git-hooks/post-checkout: Permission denied
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home/state/parent-route/ios.git-hooks/post-applypatch: Permission denied
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home/state/parent-route/ios.git-hooks/post-rewrite: Permission denied
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home/state/parent-route/ios.git-hooks/commit-msg: Permission denied
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home/state/parent-route/ios.git-hooks/pre-push: Permission denied
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home/state/parent-route/ios.git-hooks/post-merge: Permission denied
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home/state/parent-route/ios.git-hooks/pre-commit: Permission denied
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home/state/parent-route/ios.git-hooks: Directory not empty
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home/state/parent-route: Directory not empty
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home/state: Directory not empty
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag/remote-home: Directory not empty
+rm: /private/var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T/fm-remote-compact-adviser.0dRtag: Directory not empty

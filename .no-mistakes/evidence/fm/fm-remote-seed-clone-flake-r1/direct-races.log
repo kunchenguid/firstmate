@@ -1,0 +1,8 @@
+removed held real git child: 29173 T /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3DMQT0WSYWHWAWC3C51SZVG/.live-races.LKgAt9/.fm-home-provisioning.wpHqOp
+removed outcome=success
+removed: complete HEAD, fsck, clean status, content match; marker=race
+foreign held real git child: 34104 T /Users/kunchen/.no-mistakes/worktrees/52b07e9083e7/01M3DMQT0WSYWHWAWC3C51SZVG/.live-races.LKgAt9/.fm-home-provisioning.TG9b2a
+foreign outcome=failure
+error: remote home appeared while it was being provisioned
+foreign: operator-owned content intact and no nested stage
+no staging residue
