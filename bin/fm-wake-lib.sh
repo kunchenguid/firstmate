@@ -657,30 +657,18 @@ _fm_recovery_marker_write_locked() {
   # Mint and write with sequential assignments only: two sibling $() on one
   # command is a bash 5.2 parse-error landmine when a CHLD trap is set
   # (docs/watcher-continuity.md; scout fm-watch-trap-parse-error-ci).
+  # Pid/date failures stay unchecked like the pre-fix sibling assignment so a
+  # grammar-valid token is still minted and the durable wake row still appends.
   local marker=$1 kind=$2 generation=${3:-} status=${4:-pending} tmp pid epoch
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   case "$status" in pending|announced) ;; *) return 1 ;; esac
   tmp=$(mktemp "${marker}.tmp.XXXXXX") || return 1
   if [ -z "$generation" ]; then
     # Prefer fm_current_pid's output-var form so the pid is not itself a $().
-    if ! fm_current_pid pid; then
-      rm -f -- "$tmp"
-      return 1
-    fi
-    epoch=$(date +%s) || {
-      rm -f -- "$tmp"
-      return 1
-    }
+    fm_current_pid pid
+    epoch=$(date +%s)
     generation="${pid}.${epoch}.${tmp##*.}"
   fi
-  # Refuse an empty or grammar-invalid token rather than writing a marker
-  # fm_recovery_marker_read would reject (preserves ack contract: no weak ack).
-  case "$generation" in
-    ''|*[!A-Za-z0-9._-]*)
-      rm -f -- "$tmp"
-      return 1
-      ;;
-  esac
   if ! printf '%s:%s:%s\n' "$status" "$kind" "$generation" > "$tmp" \
     || ! chmod 0600 "$tmp" \
     || ! _fm_atomic_replace "$tmp" "$marker"; then

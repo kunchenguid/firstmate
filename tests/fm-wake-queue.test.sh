@@ -1812,10 +1812,10 @@ SH
 }
 
 # Recovery mint and wake-delivery logging must not use sibling $() on one
-# command (bash 5.2 CHLD-trap parse landmine). Empty minted tokens refuse
-# without writing a marker or durable queue row (ack contract stays intact).
+# command (bash 5.2 CHLD-trap parse landmine). Mint failure semantics stay as
+# before: a pid/date miss still yields a grammar-valid token and a durable row.
 test_recovery_mint_and_delivery_log_avoid_sibling_subst() {
-  local dir state marker generation fakebin rc line
+  local dir state marker generation line
   dir=$(make_case recovery-mint-sibling-subst)
   state="$dir/state"
 
@@ -1834,25 +1834,6 @@ test_recovery_mint_and_delivery_log_avoid_sibling_subst() {
     [0-9]*.[0-9]*.*) ;;
     *) fail "recovery mint generation lost pid.epoch.suffix shape: $generation" ;;
   esac
-
-  # Broken date must refuse mint: no empty-token marker, no durable wake.
-  fakebin="$dir/fakebin-date"
-  mkdir -p "$fakebin"
-  cat > "$fakebin/date" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-  chmod +x "$fakebin/date"
-  rm -f -- "$state/.watcher-down" "$state/.wake-queue" "$state/.wake-queue.seq"
-  set +e
-  PATH="$fakebin:$PATH" append_wake "$state" check empty-mint 'check: empty mint refuse'
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "a failed generation mint allowed wake append to succeed"
-  [ ! -e "$state/.watcher-down" ] \
-    || fail "a failed generation mint left a recovery marker: $(cat "$state/.watcher-down" 2>/dev/null || true)"
-  [ ! -s "$state/.wake-queue" ] \
-    || fail "a failed generation mint left a durable wake before recovery evidence"
 
   # Delivery log: sequential cleaners, then one printf (no sibling $() args).
   FM_STATE_OVERRIDE="$state" bash -c '
@@ -1890,7 +1871,7 @@ SH
     esac
   fi
 
-  pass "recovery mint and delivery log avoid sibling \$() and refuse empty tokens"
+  pass "recovery mint and delivery log avoid sibling \$()"
 }
 
 test_legacy_generationless_wake_is_adopted() {
