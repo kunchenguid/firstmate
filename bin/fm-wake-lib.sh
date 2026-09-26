@@ -971,7 +971,12 @@ fm_lock_holder_absent() {  # <pid> <current-pid>
 # no further mutex tier is needed.
 fm_lock_reclaim_dead_recovery() {  # <recovery-mutex> <observed-pid> <current-pid>
   local recovery=$1 observed=$2 current=$3 holder quarantine moved_pid
-  fm_lock_holder_absent "$observed" "$current" || return 2
+  case "$observed" in
+    ''|*[!0-9]*|0)
+      fm_lock_mid_acquire_is_fresh "$recovery" "$observed" && return 2
+      ;;
+    *) fm_lock_holder_absent "$observed" "$current" || return 2 ;;
+  esac
   if [ -L "$recovery" ]; then
     holder=$(fm_lock_link_owner "$recovery" 2>/dev/null) || return 1
   elif [ -d "$recovery" ]; then
@@ -986,7 +991,20 @@ fm_lock_reclaim_dead_recovery() {  # <recovery-mutex> <observed-pid> <current-pi
     return 1
   fi
   moved_pid=$(cat "$quarantine/holder/pid" 2>/dev/null || true)
-  if [ "$moved_pid" != "$observed" ] || ! fm_lock_holder_absent "$moved_pid" "$current"; then
+  if [ "$moved_pid" != "$observed" ]; then
+    if [ ! -e "$holder" ] && [ ! -L "$holder" ]; then
+      mv -- "$quarantine/holder" "$holder" 2>/dev/null || true
+    fi
+    rmdir "$quarantine" 2>/dev/null || true
+    return 1
+  fi
+  case "$moved_pid" in
+    ''|*[!0-9]*|0)
+      fm_lock_mid_acquire_is_fresh "$quarantine/holder" "$moved_pid" && moved_pid=fresh
+      ;;
+    *) fm_lock_holder_absent "$moved_pid" "$current" || moved_pid=live ;;
+  esac
+  if [ "$moved_pid" = fresh ] || [ "$moved_pid" = live ]; then
     if [ ! -e "$holder" ] && [ ! -L "$holder" ]; then
       mv -- "$quarantine/holder" "$holder" 2>/dev/null || true
     fi

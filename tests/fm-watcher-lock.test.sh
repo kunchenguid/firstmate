@@ -692,6 +692,32 @@ test_lock_dead_recovery_holder_is_reclaimed() {
   pass "dead recovery-mutex holder is reclaimed without a nested mutex"
 }
 
+test_lock_stale_empty_recovery_holder_is_reclaimed() {
+  local dir state lockdir dead out me
+  dir=$(make_case lock-empty-recovery)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  mkdir "$lockdir" "$lockdir.steal" "$lockdir.steal.recovery"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal/pid"
+  touch -t 202001010000 "$lockdir.steal.recovery"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=$?; fi
+    printf "rc=%s me=%s lockpid=%s\n" "$rc" "${BASHPID:-$$}" "$(cat "$2/pid" 2>/dev/null || true)"
+  ' _ "$LIB" "$lockdir" 2>&1)
+  case "$out" in
+    *"rc=0 "*) ;;
+    *) fail "stale empty recovery mutex wedged the lock: $out" ;;
+  esac
+  me=${out#*me=}; me=${me%% *}
+  [ "$me" = "${out#*lockpid=}" ] || fail "lock after empty recovery reclaim is not owned by the acquirer: $out"
+  [ ! -e "$lockdir.steal.recovery" ] && [ ! -L "$lockdir.steal.recovery" ] \
+    || fail "stale empty recovery mutex was not reclaimed"
+  pass "stale empty recovery mutex is reclaimed after the minimum grace"
+}
+
 test_lock_live_recovery_holder_is_not_reclaimed() {
   local dir state lockdir dead holder out
   dir=$(make_case lock-live-recovery)
@@ -1783,6 +1809,7 @@ test_lock_resumes_own_interrupted_steal_reap
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_wait_survives_errexit_contention
 test_lock_dead_recovery_holder_is_reclaimed
+test_lock_stale_empty_recovery_holder_is_reclaimed
 test_lock_live_recovery_holder_is_not_reclaimed
 test_lock_recovery_with_live_process_group_is_waited_out
 test_lock_legacy_nested_steal_does_not_wedge
