@@ -411,6 +411,12 @@ wait "$race_provision" \
   || { sed 's/^/race-provision: /' "$TMP_ROOT/race-provision.out"; fail "competing home cleanup reached a live provisioning clone"; }
 [ "$(cat "$TMP_ROOT/raced-home/.fm-secondmate-home")" = race ] \
   || fail "raced provisioning lost its published home marker"
+[ "$(git -C "$TMP_ROOT/raced-home" rev-parse --show-toplevel 2>/dev/null)" = "$TMP_ROOT/raced-home" ] \
+  && [ "$(git -C "$TMP_ROOT/raced-home" rev-parse HEAD)" = "$(git -C "$REMOTE_ROOT" rev-parse HEAD)" ] \
+  && git -C "$TMP_ROOT/raced-home" fsck --full --no-progress >/dev/null 2>&1 \
+  && [ -z "$(git -C "$TMP_ROOT/raced-home" status --porcelain)" ] \
+  && cmp -s "$REMOTE_ROOT/AGENTS.md" "$TMP_ROOT/raced-home/AGENTS.md" \
+  || fail "raced provisioning published an incomplete clone"
 if find "$TMP_ROOT" -maxdepth 1 -name '.fm-home-provisioning.*' -print -quit | grep -q .; then
   fail "raced provisioning left staging litter beside the home"
 fi
