@@ -575,8 +575,7 @@ A leftover `state/.afk` flag declines nothing.
   [Away email on Pi](afk-email.md) owns operator setup, message validation, and limits.
   The first run boundary after the record is archived, ordinarily the captain's return message, presents the accumulated rows with a fresh triggered budget exactly as after any other gap.
   `bin/fm-afk-return.sh` lists them under "waiting on you".
-  When the record selected email reach, these outcomes are durably batched and sent to the configured address; each item has its own expiring one-use reply code, and validated replies enter the captain inbox.
-  [Away email on Pi](afk-email.md) owns operator setup, message validation, and limits.
+  When email reach is selected, captain-facing outcomes use the [Away email on Pi](afk-email.md) delivery path.
 - Main's standing authority relocates to the branch, and nothing more.
   [Authority relocation](#authority-relocation) below gives the details.
 - The branch prompt's fixed "Postures" section states these rules once per firstmate version, so the prefix stays byte-stable.

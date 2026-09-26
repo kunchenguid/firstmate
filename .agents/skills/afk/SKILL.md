@@ -61,6 +61,7 @@ Hold-for-return remains the fallback when Pi has the exact owner destination but
 - On Pi with recorded email reach, captain-facing branch outcomes are durably batched into plain email updates to `johnpoyser@gmail.com` with one short, expiring code per item. A body is read only for mail from that exact address whose receiving-server Authentication-Results reports Gmail-aligned DKIM or DMARC pass; every other or unauthenticated message is silently ignored without a wake or untrusted-mail surface. The reply must begin with that item's exact code; only a sent, unused, unexpired code enters the captain inbox as words for that item. Other authenticated owner mail follows the ordinary mail wake path and is never treated as verified instructions. The email reply cannot authorize destructive, irreversible, or security-sensitive actions.
 
 
+
 - The record exists, so the watcher never rechecks an item held for the captain, in either supervision shape; the return brief lists it instead.
   Declared external waits keep their condition-aware, hours-long recheck cadence (`bin/fm-watch.sh`, `bin/fm-classify-lib.sh`).
 - The away session acts on the captain's words.

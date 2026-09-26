@@ -9,7 +9,6 @@ Other primary harnesses retain their existing away behavior and do not claim thi
 ## Setup
 
 Use a dedicated sending mailbox if practical, and create an app password for it rather than using your normal account password.
-Inbound replies are accepted only from `johnpoyser@gmail.com` when Google's receiving-server `Authentication-Results` reports a Gmail-aligned DKIM or DMARC pass; a `From` header by itself is not proof of identity.
 
 
 
@@ -47,7 +46,9 @@ No credential needs to be shared with Firstmate.
 
 Captain-facing Pi supervision outcomes are grouped into plain-text email updates, with the full pull-request URL retained when present and a short one-time reply code for each item. Outcome selection compares integer-second epochs, so an outcome recorded immediately before `/afk` in the same second may be included; this is a known boundary.
 To answer an item, reply from exactly `johnpoyser@gmail.com` and make the first non-empty line exactly `FM-AFK-REPLY FM-AFK-<code>`; put your words on the following lines before any quoted message.
-The poller reads a message body only when its single `From` address is the owner and the receiving server's `Authentication-Results` shows DKIM or DMARC passing with alignment to `gmail.com`. Other senders and messages without that authenticated result are silently ignored without a body read or mail wake.
+Only inline `text/plain` content is parsed; attachments and embedded forwarded messages are excluded, and recognized quoted-history markers end answer extraction.
+The poller reads a message body only when its single `From` address is the owner and the topmost `Authentication-Results` field is the Gmail receiver's result (`mx.google.com`) showing DKIM or DMARC pass aligned with `gmail.com`; lower sender-supplied copies are ignored.
+Other senders and messages without that authenticated result are silently ignored without a body read or mail wake.
 If an away record is present but invalid or unreadable, AFK-email polling defers all incoming mail, including authenticated replies, until the record is valid. The separate `fm-mail.sh read` path continues to apply its own authenticated-body restriction during away mode.
 Each code is accepted only for its own sent item, once, and for seven days after sending. Correctly authenticated owner messages larger than 256 KiB total, including attachments, are not processed as away-mode replies, but receive an ordinary mail wake marked that the body exceeds the limit. Replies over 8,000 characters are rejected with a notice in the durable mail wake.
 

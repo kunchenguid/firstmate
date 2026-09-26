@@ -194,7 +194,8 @@ While attended, a captain-facing branch outcome (verdict `captain`) is saved as 
 It then opens one processing turn on main for that sequence.
 The turn stays open until main acknowledges the sequence through its `fm_branch_processed` tool.
 While away, the entry is saved, but processing waits until the away-posture record is archived.
-When configured, Pi email reach sends the same captain-facing outcome set to the captain's mailbox.
+When configured, Pi email reach sends the same captain-facing outcome set to the captain's mailbox through the [away-email delivery path](afk-email.md).
+
 
 The branch prompt's "Verdict: routine or captain" section owns the distinction between captain-facing, unsolicited routine, and unchanged-review outcomes.
 
@@ -1401,7 +1402,9 @@ The mail plane (`bin/fm-mail.sh`) reads unseen IMAP messages and sends one SMTP 
 
 **Polling and delivery guarantees**
 Its `poll` command surfaces each eligible message as a durable `check: mail <uid>` wake, which is also what the standing received-mail check runs each watcher cycle.
-During an active Pi away-email posture, only mail from `johnpoyser@gmail.com` with Google's Gmail-aligned DKIM or DMARC pass is eligible; other or unauthenticated messages are silently cursor-recorded without body reads or wakes.
+During an active or malformed Pi away posture, only mail from `johnpoyser@gmail.com` with Google's Gmail-aligned DKIM or DMARC pass is eligible; other or unauthenticated messages are silently cursor-recorded without body reads or wakes.
+The `read` command fetches and prints bodies only for that authenticated owner while away; ordinary attended reads remain unchanged.
+
 
 
 Poll emission is exactly-once-recovering: a published wake always carries a durable journal record, and a poll interrupted before recording its uid is healed from that journal, so inbound mail is never silently missed.
@@ -1437,7 +1440,8 @@ The Pi `/afk` destination is separate from general mail transport and, when usin
 FM_AFK_EMAIL_TO=johnpoyser@gmail.com
 ```
 
-`FM_IMAP_PORT` (default 993), `FM_SMTP_PORT` (default 465), `FM_MAIL_TIMEOUT` (default 20 seconds), and `FM_MAIL_POLL_MAX_WAKES` (default 20, valid 1..200) are optional.
+`FM_IMAP_PORT` (default 993; integer 1..65535), `FM_SMTP_PORT` (default 465; integer 1..65535), `FM_MAIL_TIMEOUT` (default 20 seconds), and `FM_MAIL_POLL_MAX_WAKES` (default 20, valid 1..200) are optional.
+
 Pi away-email setup, its fixed destination, authenticated reply checks, and authority limit are documented in [Away email on Pi](afk-email.md).
 
 
@@ -2336,6 +2340,7 @@ FM_IMAP_HOST=      # mail-plane IMAP server hostname
 FM_IMAP_PORT=993   # mail-plane IMAP server port
 FM_SMTP_HOST=      # mail-plane SMTP server hostname
 FM_SMTP_PORT=465   # mail-plane SMTP server port
+FM_AFK_EMAIL_TO=  # fixed destination required for Pi /afk entry; see "Mail plane"
 FMX_PAIRING_TOKEN=      # Relay pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env

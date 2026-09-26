@@ -106,20 +106,21 @@
 #
 # CROSS-SUBSYSTEM LOCK (state/.afk-contract.lock; this script is its one owner).
 # This record is authority another subsystem reads and then ACTS on outside this
-# script: bin/fm-pr-merge.sh reads an away record as away merge authority
-# and afterwards hands a merge to the forge. A publication, replacement, or
-# archive landing between that read and the forge handoff would land a merge on
-# authority that no longer holds, so the two subsystems share one lock instead of
-# each locking its own records: the record-mutating subcommands (enter,
-# archive) hold it across their mutation, and a reader that acts on the record
-# holds it across both its read and that action (fm_afk_contract_lock_hold /
-# fm_afk_contract_lock_release). The read-only subcommands never take it, so a
-# holder can still read the record it locked. Neither side ever proceeds without
-# it: the acquire is bounded, and a bound that is hit refuses and names the live
-# holder rather than racing. That fixed bound is 120 seconds, sized so only a
-# genuinely wedged holder trips it. A lock left by a killed process is reclaimed
-# by the ordinary stale-owner recovery in bin/fm-wake-lib.sh, which owns the lock
-# primitive itself.
+# script: bin/fm-pr-merge.sh reads the record's presence as away merge authority
+# and afterwards hands a merge to the forge; bin/fm-afk-email.py validates the
+# live posture before an outbound flush or verified inbound reply handoff. A
+# publication, replacement, or archive landing between that read and the side
+# effect could authorize an action after the posture ended, so the writer and
+# each acting reader share one lock instead of locking separate records: the
+# record-mutating subcommands (enter, archive) hold it across their mutation,
+# and an acting reader holds it across both its read and side effect
+# (fm_afk_contract_lock_hold / fm_afk_contract_lock_release). Read-only
+# subcommands never take it, so a holder can still read the record it locked.
+# Neither side proceeds without it: acquisition is bounded, and a bound that is
+# hit refuses and names the live holder rather than racing. That fixed bound is
+# 120 seconds, sized so only a genuinely wedged holder trips it. A lock left by
+# a killed process is reclaimed by the ordinary stale-owner recovery in
+# bin/fm-wake-lib.sh, which owns the lock primitive itself.
 #
 # Sourceable: with the BASH_SOURCE guard, other scripts get the path, presence,
 # posture, and lock helpers (fm_afk_contract_path, fm_afk_contract_present,
