@@ -592,21 +592,20 @@ test_park_boundary_ends_the_park_before_the_hook_timeout() {
 
 # A close that lands while a turn is running can only wait: the host ends its
 # park at the bound regardless of how many closes are queued behind it. The
-# held turn is released once the refusal window opens (park bound minus the
-# turn bound and grace, read off the host's own start record), so the second
-# close can never take a turn of its own on any machine speed.
+# park runs on the test clock (FM_TEST_SUPERVISION_HOST_CLOCK), which the test
+# moves to the refusal window's opening (park bound minus the turn bound and
+# grace) before it releases the held turn, so the second close can never take
+# a turn of its own on any machine speed.
 test_park_boundary_holds_under_back_to_back_closes() {
-  # Derived, not pass margins: the first turn must start within the refusal
-  # window's opening, park - turn - grace, which keeps the 16s this case always
-  # gave the first turn to start. The held turn can last up to those 16s plus
-  # the stub's report work after release, which the 3s turn bound always
-  # covered, so turn = 16 + 3 and the product never kills the held turn; then
-  # park = 16 + turn + grace.
-  local home deadline park=36 turn=19 grace=1
+  # The turn bound is the one wall-clock bound left: it must cover the stub's
+  # report work after release, so the product never kills the held turn.
+  local home park=36 turn=19 grace=1
   home=$(make_home boundary-busy away)
   echo held > "$home/stub-mode"
   mkfifo "$home/stub-release"
-  FM_SUPERVISION_HOST_PARK_SECONDS=$park FM_SUPERVISION_HOST_TURN_TIMEOUT=$turn FM_SUPERVISION_ENGINE_GRACE=$grace start_host "$home"
+  echo 0 > "$home/park-clock"
+  FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" FM_SUPERVISION_HOST_PARK_SECONDS=$park \
+    FM_SUPERVISION_HOST_TURN_TIMEOUT=$turn FM_SUPERVISION_ENGINE_GRACE=$grace start_host "$home"
   wait_until 150 watcher_live "$home" || fail "boundary-busy: the host never started a watcher cycle: $(cat "$home/host.out")"
   append_status "$home" 'the first of many'
   wait_until 450 sh -c '[ -e "$1/engine-call.1" ] || [ -s "$1/host.rc" ]' _ "$home" \
@@ -614,16 +613,7 @@ test_park_boundary_holds_under_back_to_back_closes() {
   [ -e "$home/engine-call.1" ] \
     || fail "boundary-busy: the host exited without starting the first turn: $(cat "$home/host.out" "$home/state/.supervision-host.log" 2>/dev/null)"
   append_status "$home" 'queued while the first close is still handled'
-  # A turn may start only while it can still finish inside the park, so
-  # holding it until host-start + park - turn-bound - grace lands its end in
-  # the refusal window: the queued close can never take a turn of its own,
-  # however loaded the machine is. The start epoch is the host's own record.
-  deadline=$(awk -F '\t' -v window=$((park - turn - grace)) \
-    '$2 == "start" { g = $3; sub(/^gen=host-[0-9]+-/, "", g); printf "%d\n", g + window; exit }' \
-    "$home/state/.supervision-host.log")
-  case "$deadline" in ''|*[!0-9]*) fail "boundary-busy: the ledger has no start record" ;; esac
-  wait_until 450 sh -c '[ "$(date +%s)" -ge "$1" ]' _ "$deadline" \
-    || fail "boundary-busy: the refusal window never opened"
+  echo $((park - turn - grace)) > "$home/park-clock"
   exec 3<> "$home/stub-release"
   printf 'release\n' >&3
   wait_until 450 host_exited "$home" \
@@ -641,18 +631,17 @@ test_park_boundary_holds_under_back_to_back_closes() {
   pass "host: waiting closes cannot carry the park past its boundary"
 }
 
+# Rendering the wake prompt runs after the successor cycle has started; the
+# shim holds the render on a FIFO, and the test moves the park's test clock to
+# the refusal window's opening before releasing it, so the close passes the
+# arrival check and the pre-turn recheck must refuse on any machine speed. The
+# snapshot proves the successor arm it started can be checked afterwards.
 test_park_boundary_rechecked_just_before_the_engine_turn() {
-  # Derived, not pass margins: the close must pass the arrival check within
-  # the refusal window's opening, park - turn - grace, which keeps the 10s
-  # this case always gave it; no turn runs, so the turn bound stays 3s.
-  # Rendering the wake prompt runs after the successor cycle has started; the
-  # shim holds the render on a FIFO the test releases once the refusal window
-  # opens, so the pre-turn recheck must refuse on any machine speed. The
-  # snapshot proves the successor arm it started can be checked afterwards.
-  local home real_node pid deadline park=14 turn=3 grace=1
+  local home real_node pid park=14 turn=3 grace=1
   home=$(make_home boundary-late away)
   real_node=$(command -v node)
   mkfifo "$home/render-release"
+  echo 0 > "$home/park-clock"
   cat > "$home/fakebin/node" <<SH
 #!/usr/bin/env bash
 if [ "\${2:-}" = wake-prompt ]; then
@@ -662,23 +651,15 @@ fi
 exec "$real_node" "\$@"
 SH
   chmod +x "$home/fakebin/node"
-  FM_SUPERVISION_HOST_PARK_SECONDS=$park FM_SUPERVISION_HOST_TURN_TIMEOUT=$turn FM_SUPERVISION_ENGINE_GRACE=$grace start_host "$home"
+  FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" FM_SUPERVISION_HOST_PARK_SECONDS=$park \
+    FM_SUPERVISION_HOST_TURN_TIMEOUT=$turn FM_SUPERVISION_ENGINE_GRACE=$grace start_host "$home"
   wait_until 150 watcher_live "$home" || fail "boundary-late: the host never started a watcher cycle"
   append_status "$home" 'arrives with just enough margin'
   wait_until 300 sh -c '[ -s "$1/host-record-at-render" ] || [ -s "$1/host.rc" ]' _ "$home" \
     || fail "boundary-late: the host neither reached the wake render nor exited: $(cat "$home/host.out" "$home/state/.supervision-host.log" 2>/dev/null)"
   [ -s "$home/host-record-at-render" ] \
     || fail "the close was stopped before the successor started: $(cat "$home/host.out")"
-  # A turn may start only while it can still finish inside the park, so
-  # holding the render until host-start + park - turn-bound - grace lands the
-  # pre-turn recheck inside the refusal window on any machine speed. The
-  # start epoch is the host's own record.
-  deadline=$(awk -F '\t' -v window=$((park - turn - grace)) \
-    '$2 == "start" { g = $3; sub(/^gen=host-[0-9]+-/, "", g); printf "%d\n", g + window; exit }' \
-    "$home/state/.supervision-host.log")
-  case "$deadline" in ''|*[!0-9]*) fail "boundary-late: the ledger has no start record" ;; esac
-  wait_until 300 sh -c '[ "$(date +%s)" -ge "$1" ]' _ "$deadline" \
-    || fail "boundary-late: the refusal window never opened"
+  echo $((park - turn - grace)) > "$home/park-clock"
   exec 3<> "$home/render-release"
   printf 'release\n' >&3
   wait_until 300 host_exited "$home" || fail "boundary-late: the host did not end its park"
@@ -694,6 +675,28 @@ SH
   done < <(awk -F '\t' '$1 == "arm" { print $2 }' "$home/host-record-at-render")
   watcher_live "$home" && fail "the boundary left the watcher running"
   pass "host: a close whose margin runs out while the successor starts reaches main at the boundary without a turn"
+}
+
+# A leaked test clock in a real primary's environment must stay inert: the
+# host reads it only alongside the FM_TEST_SEAM marker that test suites set.
+test_park_test_clock_requires_the_marker() {
+  local home
+  home=$(make_home clock-armed away)
+  echo 99999 > "$home/park-clock"
+  FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
+  wait_until 150 host_exited "$home" || fail "clock-armed: the marked test clock did not end the park"
+  assert_re '^supervision-host: cycle boundary - ' "$home/host.out" "the marked test clock must drive the boundary"
+
+  home=$(make_home clock-unmarked away)
+  echo 99999 > "$home/park-clock"
+  FM_TEST_SEAM='' FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "clock-unmarked: the host never started a watcher cycle: $(cat "$home/host.out")"
+  append_status "$home" 'handled on the wall clock'
+  wait_until 250 handled_at_least "$home" 1 \
+    || fail "a test clock without FM_TEST_SEAM changed the park: $(cat "$home/host.out" "$home/state/.supervision-host.log")"
+  [ ! -s "$home/host.rc" ] || fail "a test clock without FM_TEST_SEAM ended the park: $(cat "$home/host.out")"
+  assert_no_re 'cycle boundary' "$home/host.out" "a test clock without FM_TEST_SEAM reached the boundary"
+  pass "host: the park's test clock is inert without the test marker"
 }
 
 # A park at or beyond the hook registration is refused for the default. The
@@ -1125,6 +1128,7 @@ test_restarted_host_stops_what_a_killed_predecessor_left
 test_park_boundary_ends_the_park_before_the_hook_timeout
 test_park_boundary_holds_under_back_to_back_closes
 test_park_boundary_rechecked_just_before_the_engine_turn
+test_park_test_clock_requires_the_marker
 test_park_seconds_at_or_beyond_the_hook_registration_fall_back_to_the_default
 test_park_limit_lets_a_turn_outlive_the_boundary
 test_first_cycle_status_streams_and_owner_options_reach_it

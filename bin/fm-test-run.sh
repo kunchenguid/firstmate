@@ -823,7 +823,7 @@ tests/fm-stow-cascade.test.sh 3022
 tests/fm-subagent-pretool-check.test.sh 949
 tests/fm-supervision-events.test.sh 659
 tests/fm-supervision-host-live-e2e.test.sh 50
-tests/fm-supervision-host.test.sh 182017
+tests/fm-supervision-host.test.sh 41512
 tests/fm-tangle-guard.test.sh 7470
 tests/fm-task-delivery.test.sh 19784
 tests/fm-task-inbox.test.sh 30004
