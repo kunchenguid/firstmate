@@ -1,6 +1,6 @@
 # Codex
 
-Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer version.
+The operating facts below are dated observations from the listed codex-cli versions; check the live model catalog for current model slugs and supported effort levels.
 
 ## Operating facts
 
@@ -12,13 +12,19 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Skill invocation | `$<skill>`, for example `$no-mistakes`; `/<skill>` is Claude-only and Codex rejects it as "Unrecognized command". |
 | Resume | `codex resume <session-id>`, using the id printed on quit. |
 | Model flag | `--model <model>`. |
-| Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh\|max>"'`, verified on codex-cli 0.142.1 whose installed schema contains `model_reasoning_effort`, active config uses it, and bundled catalog advertised only the first four values while omitting `max`; current codex-cli 0.153.4 catalog data at `${CODEX_HOME:-~/.codex}/models_cache.json` advertises `max` for `gpt-5.6-luna`, which Firstmate passes for that model. |
-| Model discovery | Open the current interactive session's `/model` picker. |
+| Effort flag | `-c 'model_reasoning_effort="<effort>"'`; the supported effort values can change by model and client version. |
+| Current model and effort catalog | `${CODEX_HOME:-~/.codex}/models_cache.json` is the authority for currently available model slugs and supported effort levels; consult it before choosing or documenting a model or effort. |
+| Model discovery | Use the live catalog above; the current interactive session's `/model` picker is also available. |
 | Marker | None; identity comes from ancestry, and `../../../bin/fm-harness.sh` is what keeps a retained foreign `CLAUDECODE` from renaming it. Verified on 2026-09-01 with codex-cli 0.152.0: the pane process is the `node` npm shim and the native `codex` binary runs as its foreground child, so a tool subprocess reaches the native name directly while the shim itself is identified from its script path. |
 
 A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
 Accept it with Enter and verify the instructions begin processing.
 The decision persists for the repository, so later worktrees of the same project skip it.
+
+Historical effort-schema observations: codex-cli 0.142.1 had the `model_reasoning_effort` config key, while its bundled catalog listed the first four effort values and omitted `max`.
+A recorded codex-cli 0.153.4 catalog observation advertised `max` for `gpt-5.6-luna`, which Firstmate passes for that model.
+On 2026-09-26, codex-cli 0.157.1's catalog included `gpt-6-astra`, `gpt-6-luna`, and `gpt-5.6-luna` as distinct slugs.
+These observations document version-specific changes; use the current catalog above for present-day slugs and effort support.
 
 ## Hook trust
 
