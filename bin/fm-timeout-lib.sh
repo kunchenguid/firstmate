@@ -22,7 +22,10 @@
 #       group at the bound, and KILL once <grace-seconds> more have passed,
 #       for a command that ignores TERM or is mid-way through work it will not
 #       abandon. A TERM, INT, or HUP delivered to the bounding process is
-#       forwarded to the group and starts the same grace. Exit status is the
+#       forwarded to the group and starts the same grace, and the watchdog also
+#       starts that escalation when its own parent dies before it could be
+#       signalled (an owner torn down by an outer group-kill cannot leave the
+#       bounded subtree orphaned behind it). Exit status is the
 #       command's own, except 124 (the bound was hit) or 137 (GNU timeout's
 #       status when its KILL had to fire); fm_timed_out accepts both. Both
 #       values must be positive integers (125 otherwise). The perl watchdog is
@@ -202,6 +205,7 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
       if ($pid == 0) { setpgid(0, 0); exec @ARGV; exit 127 }
       setpgid($pid, $pid);
       my $deadline = time + $bound;
+      my $owner = getppid();
       my ($kill_at, $timed_out) = (0, 0);
       for my $sig (qw(TERM INT HUP)) {
         $SIG{$sig} = sub { kill $sig, -$pid; $kill_at ||= time + $grace };
@@ -224,6 +228,9 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
           }
         } elsif (time >= $deadline) {
           $timed_out = 1;
+          $kill_at = time + $grace;
+          kill "TERM", -$pid;
+        } elsif (getppid() != $owner) {
           $kill_at = time + $grace;
           kill "TERM", -$pid;
         }
