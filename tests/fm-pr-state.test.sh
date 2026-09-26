@@ -255,11 +255,14 @@ test_audit_reports_live_pr_worker_and_decision_evidence() {
     "the audit reports GitHub closing issue references"
   assert_contains "$out" 'MILESTONE: Decision audit' "the audit reports the live milestone"
   assert_contains "$out" 'CHECK STATUS: lint (SUCCESS; pass)' "the audit reports required-check status"
+  assert_contains "$out" 'CHECK STATUS: reported required check results are non-blocking, but completeness is unverified; unreported required checks cannot be enumerated' \
+    "passing reported checks do not prove the full required-check set"
   assert_contains "$out" 'WORKER ENDPOINT: unverified' "unsupported endpoint classifiers stay explicit"
   assert_contains "$out" 'WORKER STATE: state: done' "the audit reads the worker's current state"
-  assert_contains "$out" 'VERDICT: READY FOR REVIEW' "a matching non-draft, done no-mistakes PR with passing checks is ready"
-  assert_contains "$out" 'MERGE VERDICT: READY (merge authority still applies)' \
-    "a clean merge verdict does not grant merge authority"
+  assert_contains "$out" 'VERDICT: UNVERIFIED (required check status is unverified)' \
+    "a matching no-mistakes PR cannot be ready without complete required-check evidence"
+  assert_contains "$out" 'MERGE VERDICT: UNVERIFIED (required check status is unverified)' \
+    "reported passing checks do not establish merge readiness"
   pass "audit reports current PR, check, issue, milestone, and worker evidence"
 }
 
@@ -279,6 +282,17 @@ test_audit_blocks_stale_head_draft_and_incomplete_worker() {
   assert_contains "$out" 'MERGE VERDICT: NOT READY (worker is not currently done)' \
     "an active worker cannot be represented as merge-ready"
   pass "audit blocks stale heads, drafts, and workers that have not completed"
+}
+
+test_audit_requires_approval_for_merge_but_not_review_readiness() {
+  local out
+  out=$(FM_TEST_VIEW_REVIEW_DECISION=REVIEW_REQUIRED run_audit audit-direct) \
+    || fail "review-required audit fixture was refused"
+  assert_contains "$out" 'VERDICT: READY FOR REVIEW' \
+    "an outstanding required review does not prevent review readiness"
+  assert_contains "$out" 'MERGE VERDICT: NOT READY (required review is outstanding)' \
+    "an outstanding required review blocks merge readiness"
+  pass "review-required decisions block merge readiness without blocking PR review readiness"
 }
 
 test_audit_respects_delivery_mode_and_check_status() {
@@ -375,6 +389,7 @@ test_terminal_state_is_the_whole_report
 test_audit_reports_live_pr_worker_and_decision_evidence
 test_audit_blocks_stale_head_draft_and_incomplete_worker
 test_audit_respects_delivery_mode_and_check_status
+test_audit_requires_approval_for_merge_but_not_review_readiness
 test_audit_reports_terminal_states_with_all_requested_fields
 test_draft_is_a_blocker
 test_stale_blocking_reviews_explain_a_blocking_decision

@@ -15,11 +15,13 @@
 # The --audit form reads the task's recorded GitHub PR and recorded pr_head,
 # then reports fresh PR fields, required-check results, and the worker's current
 # endpoint and state. A no-mistakes review-ready verdict requires a done worker,
-# matching head, non-draft PR, and passing reported required checks; direct-PR
-# does not wait for checks before review readiness. Merge readiness always
-# requires a matching head, non-draft PR, passing reported required checks,
-# mergeability, and no changes-requested decision. Unreported checks never prove
-# readiness. The verdict is evidence for reporting, not merge authority.
+# matching head, non-draft PR, and a provably complete passing required-check set;
+# direct-PR does not wait for checks before review readiness. Merge readiness
+# requires that complete check set, a matching head, non-draft PR, mergeability,
+# no changes-requested decision, and any required review to be approved. The
+# reported-check interface cannot prove completeness, so those verdicts stay
+# unverified when GitHub cannot prove the full set. The verdict is evidence for
+# reporting, not merge authority.
 #
 # Usage: fm-pr-state.sh <pr-url>
 #        fm-pr-state.sh --audit <task-id>
@@ -199,7 +201,6 @@ if [ -n "$CHECK_STATUS_NOTE" ]; then
     printf '%s\n' "$CHECK_STATUS_NOTE"
   fi
 else
-  CHECKS_STATUS=pass
   while IFS=$'\t' read -r check_name check_state check_bucket; do
     [ -n "$check_name" ] || continue
     CHECK_COUNT=$((CHECK_COUNT + 1))
@@ -217,10 +218,13 @@ else
 $CHECK_ROWS
 EOF_CHECKS
   if [ "$CHECK_COUNT" -eq 0 ]; then
-    CHECKS_STATUS=unverified
     CHECK_STATUS_NOTE="CHECKS: no required check result returned; readiness unconfirmed"
     [ "$AUDIT" -eq 1 ] && printf 'CHECK STATUS: no required check result returned; readiness unconfirmed\n' \
       || printf '%s\n' "$CHECK_STATUS_NOTE"
+  elif [ "$CHECKS_STATUS" = unverified ]; then
+    if [ "$AUDIT" -eq 1 ]; then
+      printf 'CHECK STATUS: reported required check results are non-blocking, but completeness is unverified; unreported required checks cannot be enumerated\n'
+    fi
   fi
 fi
 
@@ -321,7 +325,6 @@ if [ "$AUDIT" -eq 1 ]; then
     case "$MODE" in
       no-mistakes)
         case "$CHECKS_STATUS" in
-          pass) ;;
           blocked) REVIEW_REASONS+=("required checks are not all passing") ;;
           *) REVIEW_UNKNOWN+=("required check status is unverified") ;;
         esac
@@ -330,7 +333,6 @@ if [ "$AUDIT" -eq 1 ]; then
       *) REVIEW_UNKNOWN+=("delivery mode is unavailable or unsupported") ;;
     esac
     case "$CHECKS_STATUS" in
-      pass) ;;
       blocked) MERGE_REASONS+=("required checks are not all passing") ;;
       *) MERGE_UNKNOWN+=("required check status is unverified") ;;
     esac
@@ -340,6 +342,7 @@ if [ "$AUDIT" -eq 1 ]; then
       *) MERGE_UNKNOWN+=("PR mergeability is unverified") ;;
     esac
     [ "$REVIEW_DECISION" != CHANGES_REQUESTED ] || MERGE_REASONS+=("changes are requested")
+    [ "$REVIEW_DECISION" != REVIEW_REQUIRED ] || MERGE_REASONS+=("required review is outstanding")
 
     if [ "${#REVIEW_REASONS[@]}" -gt 0 ]; then
       printf 'VERDICT: NOT READY FOR REVIEW (%s)\n' "$(IFS=', '; printf '%s' "${REVIEW_REASONS[*]}")"
