@@ -966,9 +966,10 @@ fm_lock_holder_absent() {  # <pid> <current-pid>
 }
 
 # Returns 0 after removing a recovery mutex whose holder and process group are
-# provably gone, 1 when another process changed it first, and 2 when absence
-# cannot be proven. Renaming the holder record is the single atomic claim, so
-# no further mutex tier is needed.
+# provably gone (or whose pid-less holder record is past the mid-acquire grace),
+# 1 when another process changed it first, and 2 when absence cannot be proven.
+# Renaming the holder record is the single atomic claim, so no further mutex
+# tier is needed.
 fm_lock_reclaim_dead_recovery() {  # <recovery-mutex> <observed-pid> <current-pid>
   local recovery=$1 observed=$2 current=$3 holder quarantine moved_pid
   case "$observed" in
