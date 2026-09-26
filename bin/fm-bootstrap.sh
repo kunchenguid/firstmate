@@ -167,6 +167,11 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+  fm_session_lock_refuse_displaced "$STATE" || exit 1
+fi
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
@@ -218,7 +223,7 @@ network_phase() { [ "$FM_BOOTSTRAP_NETWORK_PHASE" != skip ]; }
 network_mutation_authorized() {
   local expected=${FM_BOOTSTRAP_NETWORK_LOCK_PID:-} current
   [ -n "$expected" ] || return 0
-  case "$expected" in *[!0-9]*) return 1 ;; esac
+  fm_session_identity_valid "$expected" || return 1
   [ -f "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ] || return 1
   current=$(cat "$STATE/.lock" 2>/dev/null) || return 1
   [ "$current" = "$expected" ]

@@ -1,26 +1,23 @@
 #!/usr/bin/env bash
 # Acquire or inspect the per-home firstmate session lock.
 #
-# Line 1 of state/.lock is the owning session's anchor pid, resolved by
-# fm_session_lock_anchor_pid in bin/fm-session-lock-lib.sh: the harness (agent)
-# process found by walking the shell's ancestry, which lives as long as the
-# firstmate session - unlike the transient subshell PID of any one tool call,
-# which is dead moments after it is written. For a Claude session that proves a
-# trusted session id the anchor is CLAUDE_PID, the model-loop process, so a
-# shared transient daemon or a front-end that outlives the session never keeps
-# a dead session's lock alive. Line 1 keeps its whole-line pid format because
-# every other reader takes the first line as the pid.
+# Line 1 of state/.lock is one complete session identity: normally a verified
+# harness anchor pid, or codex:<thread>:<state-root> when Codex's held writer
+# flock is the reliable identity. bin/fm-session-lock-lib.sh owns parsing,
+# liveness, and same-session verification. A trusted Claude id anchors its pid
+# on CLAUDE_PID, the model-loop process, rather than a shared transient daemon.
 #
 # The trusted id itself is recorded beside the lock in state/.lock-session, a
 # sidecar written only here and only under the claim lock: refreshed on every
 # confirmed-own acquisition, including the early already-mine exit that waits
 # for the claim lock, removed when the acquiring session proves no trusted id,
 # and left byte-identical when it already names that id. A same-session
-# confirmation never rewrites line 1 while the recorded pid is alive, because
-# bin/fm-startup-network.sh compares that pid across its deferred sweeps; a dead
-# recorded pid is reclaimed and rewritten to this session's anchor.
+# confirmation never rewrites line 1 while its recorded identity is live,
+# because bin/fm-startup-network.sh compares it across deferred sweeps.
 #
-# Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
+# Usage: fm-lock.sh           acquire, superseding a different live primary
+#                             session only from this home's primary context
+#        fm-lock.sh takeover  explicitly use the same acquisition path
 #        fm-lock.sh status    print holder and liveness; always exits 0.
 #                             A held lock is not proof the holder is consuming
 #                             wakes. Machine-readable lock fields live on
@@ -43,19 +40,61 @@ mkdir -p "$STATE" 2>/dev/null || {
 # Stop auto-arm applies the exact same identity contract.
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 
 if [ "${1:-}" = "status" ]; then
   fm_session_lock_inspect "$STATE"
   case "$FM_LOCK_INSPECT_STATE" in
     free) echo "lock: free" ;;
     unreadable) echo "lock: unreadable" ;;
-    held) echo "lock: held by live harness pid $FM_LOCK_INSPECT_PID" ;;
-    *) echo "lock: stale (pid $FM_LOCK_INSPECT_PID dead or not a harness)" ;;
+    held)
+      case "$FM_LOCK_INSPECT_PID" in
+        codex:*) echo "lock: held by live Codex thread $FM_LOCK_INSPECT_PID" ;;
+        *) echo "lock: held by live harness pid $FM_LOCK_INSPECT_PID" ;;
+      esac
+      ;;
+    stale) echo "lock: stale (identity $FM_LOCK_INSPECT_PID is no longer live)" ;;
+    *) echo "lock: unknown (identity $FM_LOCK_INSPECT_PID cannot be verified)" ;;
   esac
   exit 0
 fi
+case "${1:-}" in ''|takeover) ;; *) echo "usage: $(basename "$0") [takeover|status]" >&2; exit 2 ;; esac
 
-me=$(fm_session_lock_anchor_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+# A linked worker worktree, task-marked pane, secondmate home, or a command
+# aimed at some other FM_HOME may acquire an otherwise free lock by the old
+# contract, but can never displace a live owner. Test overrides use their own
+# temporary root/state fixture and still have to satisfy the primary scope.
+takeover_eligible() {
+  local root home
+  [ -z "${FM_TASK_ID:-}" ] || return 1
+  [ ! -e "$FM_ROOT/.fm-secondmate-home" ] && [ ! -L "$FM_ROOT/.fm-secondmate-home" ] || return 1
+  fm_root_is_secondmate_home "$FM_ROOT" && return 1
+  fm_primary_scope_matches "$FM_ROOT" "$STATE" || return 1
+  root=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || return 1
+  home=$(cd "$FM_HOME" 2>/dev/null && pwd -P) || return 1
+  [ "$root" = "$home" ]
+}
+
+# True while the startup sweep launched by holder $1's session start is still
+# genuinely running: a running record naming that holder, a live worker pid,
+# and a start time inside the sweep's own budget so a reused pid cannot pin it.
+startup_sweep_running() {  # <holder-identity>
+  local status="$STATE/.startup-network.status" pid started budget
+  [ -f "$status" ] && [ ! -L "$status" ] || return 1
+  [ "$(sed -n 's/^state=//p' "$status" 2>/dev/null | tail -1)" = running ] || return 1
+  [ "$(sed -n 's/^lock_pid=//p' "$status" 2>/dev/null | tail -1)" = "$1" ] || return 1
+  pid=$(sed -n 's/^pid=//p' "$status" 2>/dev/null | tail -1)
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  started=$(sed -n 's/^started=//p' "$status" 2>/dev/null | tail -1)
+  case "$started" in ''|*[!0-9]*) return 0 ;; esac
+  budget=${FM_STARTUP_NETWORK_TIMEOUT:-120}
+  case "$budget" in ''|*[!0-9]*|0) budget=120 ;; esac
+  [ $(( $(date +%s) - started )) -le $(( budget + 30 )) ]
+}
+
+me=$(fm_session_identity) || { echo "error: cannot locate a verified harness session identity" >&2; exit 1; }
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
@@ -74,6 +113,8 @@ LOCK_SESSION_PHASE=0
 LOCK_SESSION_KIND=0
 LOCK_SESSION_PREV="$STATE/.lock-session.prev"
 LOCK_LINE_PRE=
+LOCK_WRITE_TMP=
+DISPLACED_OWNER=
 release_claim_lock() {
   if [ "$CLAIM_LOCK_HELD" -eq 1 ]; then
     fm_lock_release "$CLAIM_LOCK"
@@ -101,6 +142,7 @@ commit_lock_session() {
 on_lock_exit() {
   restore_uncommitted_lock_session
   [ -n "$LOCK_LINE_PRE" ] && rm -f "$LOCK_LINE_PRE"
+  [ -z "$LOCK_WRITE_TMP" ] || rm -f "$LOCK_WRITE_TMP" 2>/dev/null || true
   release_claim_lock
 }
 trap on_lock_exit EXIT
@@ -170,7 +212,7 @@ confirm_own_lock() {  # <recorded-pid>
     publish_lock_session_or_die
     commit_lock_session
     release_claim_lock
-    echo "lock acquired: harness pid $recorded"
+    report_lock_acquired "$recorded"
     exit 0
   fi
   if [ "$waited" -eq 1 ]; then
@@ -179,7 +221,7 @@ confirm_own_lock() {  # <recorded-pid>
   return 1
 }
 
-refuse_live_owner() {  # <recorded-pid>
+refuse_live_owner() {  # <recorded-identity>
   local recorded
   if recorded=$(fm_session_lock_recorded_session_id "$STATE"); then
     echo "error: another live firstmate session holds the lock (pid $1, session $recorded); operate read-only until resolved" >&2
@@ -189,14 +231,18 @@ refuse_live_owner() {  # <recorded-pid>
   exit 1
 }
 
+report_lock_acquired() {  # <session-identity>
+  case "$1" in
+    codex:*) echo "lock acquired: session identity $1" ;;
+    *) echo "lock acquired: harness pid $1" ;;
+  esac
+}
+
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   old=$(cat "$LOCK" 2>/dev/null || true)
   if [ "$old" = "$me" ] || fm_session_lock_owned_by_self "$STATE"; then
     confirm_own_lock "$old"
     old=$(cat "$LOCK" 2>/dev/null || true)
-  fi
-  if fm_harness_pid_alive "$old"; then
-    refuse_live_owner "$old"
   fi
 fi
 
@@ -219,13 +265,31 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+  if [ "$old" != "$me" ] && fm_session_identity_liveness "$old"; then
     fm_session_lock_owned_by_self "$STATE" && confirm_own_lock "$old"
     old=$(cat "$LOCK" 2>/dev/null || true)
-    if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
-      refuse_live_owner "$old"
+    if [ "$old" != "$me" ] && fm_session_identity_liveness "$old"; then
+      takeover_eligible || refuse_live_owner "$old"
+      if startup_sweep_running "$old"; then
+        echo "error: the prior session's startup sweep is still running; operate read-only until it finishes" >&2
+        exit 1
+      fi
+      DISPLACED_OWNER=$old
     fi
   fi
+  # An unclassifiable holder is not proof of a dead lock or a safe takeover.
+  if [ "$old" != "$me" ] && [ -z "$DISPLACED_OWNER" ]; then
+    fm_session_identity_liveness "$old"
+    live_rc=$?
+    if [ "$live_rc" -eq 2 ]; then
+      echo "error: session lock owner cannot be verified; operate read-only until resolved" >&2
+      exit 1
+    fi
+  fi
+  [ -w "$LOCK" ] || {
+    echo "error: cannot write session lock; operate read-only until resolved" >&2
+    exit 1
+  }
 fi
 # The sidecar goes first: a fresh pid beside a previous session's id would let
 # that session's resume own this lock. If the sidecar changes before line 1 is
@@ -245,7 +309,12 @@ if [ -f "$LOCK" ]; then
   fi
 fi
 LOCK_SESSION_PHASE=2
-if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
+LOCK_WRITE_TMP=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
+  echo "error: cannot write session lock; operate read-only until resolved" >&2
+  exit 1
+}
+if ! { printf '%s\n' "$me" > "$LOCK_WRITE_TMP" && mv -f "$LOCK_WRITE_TMP" "$LOCK"; } 2>/dev/null; then
+  rm -f "$LOCK_WRITE_TMP" 2>/dev/null || true
   lock_unchanged=0
   if [ -n "$LOCK_LINE_PRE" ] && cmp -s "$LOCK_LINE_PRE" "$LOCK"; then
     lock_unchanged=1
@@ -272,4 +341,8 @@ if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
 fi
 commit_lock_session
 release_claim_lock
-echo "lock acquired: harness pid $me"
+if [ -n "$DISPLACED_OWNER" ]; then
+  echo "lock takeover: displaced live holder $DISPLACED_OWNER; lock acquired by $me"
+else
+  report_lock_acquired "$me"
+fi

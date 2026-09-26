@@ -15,7 +15,7 @@
 # while it exists.
 #
 # CONTRACT.
-#   - Lease file: $STATE/.lease-<task>, one line "<actor>\t<pid>\t<epoch>".
+#   - Lease file: $STATE/.lease-<task>, one line "<actor>\t<identity>\t<epoch>".
 #     Written atomically (temp + ln for claim, temp + mv for a same-actor
 #     refresh), with inspection and mutation serialized by the home-local
 #     lease-command lock; leases never coordinate across firstmate homes.
@@ -26,15 +26,17 @@
 #     supervision host's engine environment), not by agent memory. Any other
 #     value is refused loudly - an unknown actor is a wiring bug, not a third
 #     role.
-#   - Staleness: the recorded pid is the long-lived supervising process (the
+#   - Staleness: the recorded identity is the long-lived supervising session (the
 #     session-lock holder, or FM_LEASE_HOLDER_PID - see bin/fm-lease.sh), so a
-#     dead recorded pid means the supervising session died; the lease is
+#     dead recorded identity means the supervising session died; the lease is
 #     cleared at the next claim, guard, or sweep. Liveness is the pure record
-#     test, identical in every calling context: the recorded pid is alive and
+#     test, identical in every calling context: the recorded identity is live and
 #     IS the current state/.lock holder. So a lease left by an exited session
 #     goes stale for every reader, whichever harness now owns the home, and an
 #     unmarked main honors a live branch lease exactly as a Pi main does. The
-#     one residual is a recorded pid recycled onto the next session-lock holder
+#     uncertain-liveness case retains a matching lease rather than clearing a
+#     possibly active actor's claim. One residual is a recorded pid recycled onto
+#     the next session-lock holder
 #     itself; the host that owns a branch conversation releases that actor's
 #     leases when it activates a new one (the Pi branch extension's
 #     generation-activation cleanup; the supervision host also releases them
@@ -158,9 +160,11 @@ fm_lease_read() {
     main|branch) ;;
     *) FM_LEASE_ACTOR= ;;
   esac
-  case "$FM_LEASE_PID" in
-    '' | *[!0-9]*) FM_LEASE_PID= ;;
-  esac
+  if ! command -v fm_session_identity_valid >/dev/null 2>&1; then
+    # shellcheck source=/dev/null
+    . "$FM_LEASE_LIB_DIR/fm-session-lock-lib.sh"
+  fi
+  fm_session_identity_valid "$FM_LEASE_PID" || FM_LEASE_PID=
   return 0
 }
 
@@ -168,14 +172,20 @@ fm_lease_read() {
 # alive, and that pid IS the current session-lock holder (the staleness
 # contract above). The calling context never enters the verdict.
 fm_lease_live() {
-  local lock_pid
+  local lock_pid liveness
   fm_lease_read "$1" || return 1
   [ -n "$FM_LEASE_ACTOR" ] || return 1
   [ -n "$FM_LEASE_PID" ] || return 1
-  kill -0 "$FM_LEASE_PID" 2>/dev/null || return 1
+  if ! command -v fm_session_identity_liveness >/dev/null 2>&1; then
+    # shellcheck source=/dev/null
+    . "$FM_LEASE_LIB_DIR/fm-session-lock-lib.sh"
+  fi
   lock_pid=$(head -n 1 "$STATE/.lock" 2>/dev/null || true)
-  case "$lock_pid" in ''|0|1|*[!0-9]*) return 1 ;; esac
-  [ "$FM_LEASE_PID" = "$lock_pid" ]
+  fm_session_identity_valid "$lock_pid" || return 1
+  [ "$FM_LEASE_PID" = "$lock_pid" ] || return 1
+  fm_session_identity_liveness "$lock_pid"
+  liveness=$?
+  [ "$liveness" -ne 1 ]
 }
 
 # fm_lease_clear_stale <task>: remove the lease file when it exists but is not

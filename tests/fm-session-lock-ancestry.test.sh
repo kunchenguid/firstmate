@@ -718,7 +718,7 @@ expect_phase_owned() {  # <dir> <n> <expected-arms> <expected-lock-pid> <label>
 }
 
 # Not the owner: no arm, the guard's foreign-owner diagnostic naming the live
-# owner, and the lock refusal naming both the owner pid and its recorded id.
+# owner, and a lock refusal because the owner's startup sweep is still running.
 expect_phase_foreign() {  # <dir> <n> <expected-arms> <owner-pid> <label>
   local dir=$1 n=$2 arms=$3 owner=$4 label=$5
   expect_code 0 "$(phase_value "$dir" "$n" hook.rc)" "$label: the Stop auto-arm did not stand down"
@@ -727,13 +727,13 @@ expect_phase_foreign() {  # <dir> <n> <expected-arms> <owner-pid> <label>
   grep -q "OWNED BY ANOTHER LIVE SESSION.*lock owner pid $owner" "$dir/state/phase-$n/guard.out" \
     || fail "$label: the guard did not report the live owner $owner: $(cat "$dir/state/phase-$n/guard.out")"
   expect_code 1 "$(phase_value "$dir" "$n" lock.rc)" "$label: fm-lock.sh accepted a lock this session does not own"
-  grep -q "another live firstmate session holds the lock (pid $owner, session S1)" "$dir/state/phase-$n/lock.out" \
-    || fail "$label: the refusal did not name the owner pid and recorded session: $(cat "$dir/state/phase-$n/lock.out")"
+  grep -q "prior session's startup sweep is still running" "$dir/state/phase-$n/lock.out" \
+    || fail "$label: the running-sweep refusal was missing: $(cat "$dir/state/phase-$n/lock.out")"
   [ "$(phase_value "$dir" "$n" lock-after)" = "$owner" ] || fail "$label: a non-owner rewrote the lock"
 }
 
 test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
-  local dir frontend daemon ptyhost spare i
+  local dir frontend daemon ptyhost spare ptyhost_parent i
   dir="$TMP_ROOT/e2e-background-session"
   make_background_session_home "$dir"
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
@@ -753,21 +753,25 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   [ "$(tr -d '[:space:]' < "$dir/state/.lock-session")" = S1 ] \
     || fail "the front-end did not record its trusted session id beside the lock"
   cp "$dir/state/.lock-session" "$dir/sidecar-initial"
+  printf 'state=running\nlock_pid=%s\npid=%s\nstarted=%s\n' "$frontend" "$frontend" "$(date +%s)" > "$dir/state/.startup-network.status"
 
   # Phase 1: the healthy contiguous chain, the session's own id.
   fire_phase "$dir" 1 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
   grep -qx "$frontend" "$dir/state/phase-1/ancestry" || fail "the healthy chain did not reach the front-end"
   expect_phase_owned "$dir" 1 2 "$frontend" "healthy chain"
 
-  # Recycle the bridge: the daemon ends, the pty-host is reparented to init, and
-  # the front-end that holds the lock stays alive.
+  # Recycle the bridge: the daemon ends, the pty-host is adopted by init or a
+  # subreaper, and the front-end that holds the lock stays alive.
   kill -TERM "$daemon"
   i=0
-  while [ "$i" -lt 200 ] && { kill -0 "$daemon" 2>/dev/null || [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" != 1 ]; }; do
+  ptyhost_parent=$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')
+  while [ "$i" -lt 200 ] && [ "$ptyhost_parent" = "$daemon" ]; do
     sleep 0.05
     i=$((i + 1))
+    ptyhost_parent=$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')
   done
-  [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" = 1 ] || fail "the pty-host was not reparented to init after the daemon ended"
+  [ -n "$ptyhost_parent" ] && [ "$ptyhost_parent" != "$daemon" ] \
+    || fail "the pty-host was not adopted after the daemon ended (ppid $ptyhost_parent, daemon $daemon)"
   kill -0 "$frontend" 2>/dev/null || fail "the front-end died with the daemon, so the recycled case cannot be exercised"
 
   # Phase 2: the same session id over the broken chain - the reported drift.
@@ -1020,7 +1024,10 @@ test_failed_lock_write_restores_previous_sidecar() {
     "the first session could not acquire its lock: $(cat "$dir/state/acquire.out")"
   [ "$(tr -d '[:space:]' < "$dir/state/.lock-session")" = S1 ] \
     || fail "the first session did not record S1"
-  stale_pid=$(tr -d '[:space:]' < "$dir/state/stale-pid")
+  # A completed fixture process can remain a zombie under a subreaper, so use
+  # a guaranteed absent pid for the stale-owner write-failure path.
+  stale_pid=99999999
+  printf '%s\n' "$stale_pid" > "$dir/state/.lock"
   cp "$dir/state/.lock" "$dir/state/lock-before-reclaim"
   chmod a-w "$dir/state/.lock" || fail "could not make the stale lock read-only"
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
@@ -1049,7 +1056,7 @@ test_failed_lock_write_removes_new_sidecar_when_none_existed() {
   local dir
   dir="$TMP_ROOT/restore-absent-sidecar"
   mkdir -p "$dir/state"
-  printf '1\n' > "$dir/state/.lock"
+  printf '99999999\n' > "$dir/state/.lock"
   chmod a-w "$dir/state/.lock" || fail "could not make the stale lock read-only"
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
     FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \
@@ -1064,7 +1071,7 @@ test_failed_lock_write_removes_new_sidecar_when_none_existed() {
     || fail "the reclaim did not fail on the lock write: $(cat "$dir/state/reclaim.out")"
   [ ! -e "$dir/state/.lock-session" ] \
     || fail "the failed reclaim left sidecar $(cat "$dir/state/.lock-session"), expected none"
-  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = 1 ] \
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = 99999999 ] \
     || fail "the failed reclaim rewrote lock line 1"
   pass "session-lock: a failed lock write removes a newly created sidecar"
 }
@@ -1075,7 +1082,7 @@ test_verified_reclaim_keeps_new_sidecar() {
   local dir
   dir="$TMP_ROOT/verified-reclaim"
   mkdir -p "$dir/state"
-  printf '1\n' > "$dir/state/.lock"
+  printf '99999999\n' > "$dir/state/.lock"
   printf 'S1\n' > "$dir/state/.lock-session"
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
     FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \

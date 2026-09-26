@@ -72,6 +72,11 @@ STALE_BANNER_MARKER="$STATE/.guard-watcher-stale-banner"
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+if ! fm_session_lock_refuse_displaced "$STATE"; then
+  READ_ONLY=1
+fi
 
 # The current actor (fm_lease_actor is the one owner of that identity); a
 # malformed value is a wiring bug elsewhere, so the guard just warns as main.

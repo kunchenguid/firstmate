@@ -64,6 +64,9 @@ case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10
 # safe to split: the branch's ack can never remove a row it was not granted,
 # so it can never swallow a main-owned row still waiting for main.
 ACTOR=$(fm_lease_actor) || exit 2
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+fm_session_lock_refuse_displaced "$STATE" || exit 1
 ELIGIBLE_ROWS_FILE="$STATE/.branch-eligible-rows"
 ELIGIBLE_OWNER_FILE="$STATE/.branch-eligible-owner"
 MAIN_ROWS_FILE="$STATE/.main-eligible-rows"

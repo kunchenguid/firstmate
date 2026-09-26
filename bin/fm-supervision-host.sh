@@ -766,7 +766,7 @@ handle_away() {  # <reason-lines>
     [ -z "${FM_STATE_OVERRIDE:-}" ] || export FM_STATE_OVERRIDE
     [ -z "${FM_CONFIG_OVERRIDE:-}" ] || export FM_CONFIG_OVERRIDE
     export FM_SUPERVISION_ACTOR=branch
-    FM_LEASE_HOLDER_PID=$(sed -n '1p' "$STATE/.lock" 2>/dev/null | tr -cd '0-9')
+    FM_LEASE_HOLDER_PID=$(sed -n '1p' "$STATE/.lock" 2>/dev/null || true)
     export FM_LEASE_HOLDER_PID
     export FM_SUPERVISION_PRIMARY_HARNESS="$PRIMARY"
     export FM_BRANCH_REPORT_TURN="$turn"

@@ -158,6 +158,9 @@ fi
   exit 1
 }
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+fm_session_lock_refuse_displaced "$STATE" || exit 1
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 [ -d "$STATE" ] || {
   echo "error: state dir '$STATE' is missing; fm-control cannot resolve tasks for FM_HOME '$FM_HOME'" >&2

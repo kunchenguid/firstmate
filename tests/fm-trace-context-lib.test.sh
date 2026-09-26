@@ -112,6 +112,13 @@ FM_TRACE_CONTEXT=on fm_trace_context_session_start "$CFG_OFF" "$SESSION_STATE"
   || fail "a new session state must freeze an env-on override over an absent config file"
 pass "session start normalizes config and environment precedence into frozen on/off state"
 
+printf 'codex:fixture-thread:/tmp/codex-fixture\n' > "$SESSION_DIR/.lock"
+FM_TRACE_CONTEXT=on fm_trace_context_session_start "$CFG_OFF" "$SESSION_STATE"
+[ "$(cat "$SESSION_STATE")" = 'codex:fixture-thread:/tmp/codex-fixture on' ] \
+  || fail "a Codex session identity did not bind the frozen trace decision"
+printf '101\n' > "$SESSION_DIR/.lock"
+pass "a Codex identity binds frozen trace state without a numeric PID assumption"
+
 printf '100 on\n' > "$SESSION_STATE"
 chmod 0400 "$SESSION_STATE"
 FM_TRACE_CONTEXT=off fm_trace_context_session_start "$CFG_ON" "$SESSION_STATE"

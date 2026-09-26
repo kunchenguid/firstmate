@@ -137,7 +137,7 @@ fm_trace_context_enabled() {  # <config-dir>
   [ -f "$config_dir/trace-context" ]
 }
 
-# Echo the lock pid that owns the effective-state file's home, or fail when the
+# Echo the lock identity that owns the effective-state file's home, or fail when the
 # adjacent session lock is absent or malformed. Binding the decision to this
 # token makes a prior session's record inactive even if publication cannot
 # replace or remove that stale file.
@@ -149,10 +149,12 @@ fm_trace_context_session_lock() {  # <effective-state-file>
   # attempted: an absent lock is an ordinary silent "not locked" answer, and a
   # trailing 2>/dev/null on the bare read would still leak the open failure.
   { IFS= read -r lock_pid < "$state_dir/.lock"; } 2>/dev/null || return 1
-  case "$lock_pid" in
-    '' | *[!0-9]*) return 1 ;;
-  esac
-  [ "$lock_pid" -gt 1 ] || return 1
+  if ! command -v fm_session_identity_valid >/dev/null 2>&1; then
+    # shellcheck source=/dev/null
+    . "$(dirname -- "${BASH_SOURCE[0]}")/fm-session-lock-lib.sh"
+  fi
+  fm_session_identity_valid "$lock_pid" || return 1
+  case "$lock_pid" in *[!0-9]*) ;; *) [ "$lock_pid" -gt 1 ] || return 1 ;; esac
   printf '%s' "$lock_pid"
 }
 
