@@ -33,6 +33,12 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CAPTAIN_HOLD="$SCRIPT_DIR/fm-captain-hold.sh"
 
+# Sourced for fm_tasks_axi_archive_show alone, the single owner of the
+# archived-row fallback task_show needs below.
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+
 usage() {
   awk '
     NR == 1 { next }
@@ -58,8 +64,17 @@ compose() {  # <origin> <key>
   printf '%s-decision-%s' "$1" "$2"
 }
 
+# bin/fm-tasks-axi.sh owns the addressing, so the active read stays a
+# delegation to it rather than a bare tasks-axi call. An empty
+# FM_DATA_OVERRIDE is deliberate and not a no-op: it makes that command fall
+# back to $FM_HOME/data, so this shim always reads the home that owns the
+# task. When the id is not in the active backlog it may still be a resolved
+# hold that tasks-axi pruned into the archive past done_keep - command_resolve
+# below replays exactly those - so the archive is consulted before reporting
+# it absent, against the same $FM_HOME/data the delegation just used.
 task_show() {
-  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" show "$1" --full 2>/dev/null
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" show "$1" --full 2>/dev/null \
+    || fm_tasks_axi_archive_show "$FM_HOME/data" "$1" --full 2>/dev/null
 }
 
 show_field() {

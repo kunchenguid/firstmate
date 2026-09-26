@@ -27,6 +27,10 @@ It is an ordinary backlog task held for the captain, and the task id is the iden
 `bin/fm-captain-hold.sh` is the only lifecycle command layered on that primitive.
 The command addresses the active home's configured data directory.
 As a result, the existing backlog remains the only durable work database, and a secondmate-owned captain call stays in the secondmate home.
+Resolving a task id inside that directory reads the active backlog first and its `done-archive.md` second, because tasks-axi prunes a resolved row out of `data/backlog.md` once it ages past `done_keep` and an answered captain call is still a real record the completion gate and an idempotent answer replay must find.
+Both halves address the one backlog the command resolved, and the archive half inherits its caller's bound posture: under this command it carries the same `FM_BACKLOG_ROW_TIMEOUT_SECS` bound as the active read, and a bound hit there exits 124 rather than reporting the row absent.
+`bin/fm-tasks-axi-lib.sh` owns that fallback once for this command and its retired shim alike, including the archive path, which it resolves the way tasks-axi resolves it rather than assuming the archive sits beside the backlog file.
+The read-only `open` predicate below is deliberately not archive-aware: it answers from the active backlog row alone, so a pruned row still reads as absent there.
 It never reads report bodies, review artifacts, terminal output, or chat.
 
 ### Subcommands at a glance
@@ -523,6 +527,11 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
+
+### Archive-aware id resolution
+
+- Id resolution finds a resolved captain call after tasks-axi prunes it into the archive past `done_keep`, through the completion gate and through the shim's idempotent resolve replay alike.
+- That resolution follows the archive of the very backlog it addressed when a relocated data directory leaves a decoy archive beside that backlog.
 
 ### Legacy paths
 

@@ -364,16 +364,37 @@ require_tasks_axi() {
 # leaves 124 intact rather than collapsing to fail's 1 so a caller running this
 # inside a command substitution can still tell a wedged backend from a
 # genuinely unknown id.
+#
+# An id missing from the ACTIVE backlog is still not absence on its own:
+# tasks-axi prunes a done row into the archive once it ages past done_keep, so
+# a captain hold that was answered and closed leaves data/backlog.md while
+# remaining a real, findable record. The completion gate below reads exactly
+# those resolved holds, so the archive is consulted before absence is
+# reported. Both halves address the one resolved data directory, so the
+# archive read can never land on a different base than the active read used.
+#
+# The archive half is bounded exactly like the active half and its bound hit
+# stops the command through the same path: an archive read that wedged answers
+# 124, and returning the active half's 1 in its place would reintroduce the
+# false absence above through the door the fallback opened.
 TASK_SHOW_OUTPUT=
+task_show_bound_hit() {  # <id> <first-output-line>; never returns
+  printf 'fm-captain-hold: %s\n' \
+    "${2:-tasks-axi show $1 exceeded its backlog read bound}" >&2
+  exit 124
+}
+
 task_show() {  # <id>; sets TASK_SHOW_OUTPUT
-  local data status=0 reason
+  local data status=0 archive_out archive_status=0
   data=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: $DATA"
   TASK_SHOW_OUTPUT=$(fm_backlog_row_show "$data" "$1" --full 2>/dev/null) || status=$?
-  if [ "$status" -eq 124 ]; then
-    reason=${TASK_SHOW_OUTPUT%%$'\n'*}
-    printf 'fm-captain-hold: %s\n' \
-      "${reason:-tasks-axi show $1 exceeded its backlog read bound}" >&2
-    exit 124
+  [ "$status" -ne 124 ] || task_show_bound_hit "$1" "${TASK_SHOW_OUTPUT%%$'\n'*}"
+  if [ "$status" -ne 0 ]; then
+    archive_out=$(fm_tasks_axi_archive_show "$data" "$1" --full 2>/dev/null) || archive_status=$?
+    [ "$archive_status" -ne 124 ] || task_show_bound_hit "$1" "${archive_out%%$'\n'*}"
+    [ "$archive_status" -eq 0 ] || return "$status"
+    TASK_SHOW_OUTPUT=$archive_out
+    status=0
   fi
   return "$status"
 }

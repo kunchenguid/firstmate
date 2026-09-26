@@ -361,6 +361,228 @@ case "$(cat "$VERIFY_MIG_OUT")" in
 esac
 pass "a bound hit in the migrated-prefix scan stops verify by name instead of resolving to nothing"
 
+# --- the archive half of a lookup is bounded the same way --------------------
+#
+# The active backlog is not the only read a lookup makes. A row that is missing
+# from data/backlog.md is looked for in data/done-archive.md before it is called
+# absent, because tasks-axi prunes a resolved row there past done_keep. That
+# second read is bounded too, and its bound hit has to reach the caller AS a
+# bound: returning the active half's "absent" in its place hands a wedged
+# archive the one outcome the bound exists to prevent, and the hold path then
+# mints a duplicate row for an id that exists.
+
+ARCH="$TMP_ROOT/archive-bound"
+ARCH_FAKEBIN=$(fm_fakebin "$ARCH")
+mkdir -p "$ARCH/data" "$ARCH/state" "$ARCH/config"
+cp "$ROOT/.tasks.toml" "$ARCH/.tasks.toml"
+printf '# Backlog\n' > "$ARCH/data/backlog.md"
+# A genuinely archived row: gone from the active backlog, still a real record.
+cat > "$ARCH/data/done-archive.md" <<'MD'
+## Archived 2026-01-01
+
+- [x] archived-wedged-hold - Archived captain call
+MD
+
+# Prompt NOT_FOUND for the active read and a wedge for the archive read. Only
+# the archive half hands tasks-axi a normalized copy of the archive, so the
+# file argument is what tells the two reads apart.
+cat > "$ARCH_FAKEBIN/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  --version) printf '%s\n' '0.2.5'; exit 0 ;;
+  show)
+    case "$*" in
+      *fm-tasks-axi-archive*) sleep 300; exit 0 ;;
+    esac
+    printf 'code: NOT_FOUND\n' >&2
+    exit 1
+    ;;
+  update)
+    [ "${2:-}" = --help ] || exit 0
+    printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --body-file <path>' '  --archive-body'
+    exit 0
+    ;;
+  mv)
+    [ "${2:-}" = --help ] || exit 0
+    printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
+    exit 0
+    ;;
+  hold)
+    [ "${2:-}" = --help ] || exit 0
+    printf '%s\n' 'usage: tasks-axi hold <id> [flags]' '  --kind captain' '  --until <date>'
+    exit 0
+    ;;
+  add)
+    [ -z "${FM_TEST_TASKS_AXI_ADD_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TEST_TASKS_AXI_ADD_LOG"
+    exit 0
+    ;;
+  list)
+    printf 'count: 0\n'
+    printf 'tasks[0]{id,state,kind,repo,title,blocked_by,hold_kind,hold_reason}:\n'
+    exit 0
+    ;;
+esac
+exit 0
+SH
+chmod +x "$ARCH_FAKEBIN/tasks-axi"
+
+ARCH_ADD_LOG="$ARCH/add.log"
+ARCH_OUT="$ARCH/hold.out"
+ARCH_STATUS=0
+ARCH_START=$(date +%s)
+PATH="$ARCH_FAKEBIN:$BASE_PATH" FM_HOME="$ARCH" \
+  FM_STATE_OVERRIDE="$ARCH/state" FM_DATA_OVERRIDE="$ARCH/data" \
+  FM_CONFIG_OVERRIDE="$ARCH/config" FM_BACKLOG_ROW_TIMEOUT_SECS="$BOUND_SECS" \
+  FM_TEST_TASKS_AXI_ADD_LOG="$ARCH_ADD_LOG" \
+  "$ROOT/bin/fm-captain-hold.sh" hold archived-wedged-hold \
+  --title 'Archived captain call' --reason 'the archive read wedged' \
+  > "$ARCH_OUT" 2>&1 || ARCH_STATUS=$?
+ARCH_ELAPSED=$(elapsed_since "$ARCH_START")
+
+[ "$ARCH_ELAPSED" -lt "$BOUND_CEILING" ] \
+  || fail "the archive half ran unbounded: the read took ${ARCH_ELAPSED}s"
+[ ! -s "$ARCH_ADD_LOG" ] \
+  || fail "a wedged archive read was spent as absence: tasks-axi add ran anyway: $(cat "$ARCH_ADD_LOG")"
+[ "$ARCH_STATUS" -eq 124 ] \
+  || fail "a wedged archive read must surface as the bound sentinel, got status $ARCH_STATUS: $(cat "$ARCH_OUT")"
+case "$(cat "$ARCH_OUT")" in
+  *absent*) fail "a bound hit in the archive half was reported as an absent row: $(cat "$ARCH_OUT")" ;;
+esac
+case "$(cat "$ARCH_OUT")" in
+  *archived-wedged-hold*bound*) ;;
+  *) fail "the refusal must name the row and the bound it hit, got: $(cat "$ARCH_OUT")" ;;
+esac
+pass "a bound hit in the archive half stops the command as a bound instead of collapsing into absence"
+
+# --- the archive precheck is a cost guard, never the authority ---------------
+#
+# Every active-backlog miss reaches the archive fallback, and the sweeps that
+# miss most are the ones the bounds exist to keep fast, so a full copy of the
+# archive plus a backend spawn is spent only on an id that literally appears in
+# the archive. That guard must stay a guard: an id it passes is still answered
+# by tasks-axi's own parser, and a guard that could not run at all must fall
+# through to the full read rather than answer "absent" on the archive's behalf.
+
+PRE="$TMP_ROOT/archive-precheck"
+PRE_FAKEBIN=$(fm_fakebin "$PRE")
+mkdir -p "$PRE/data"
+cp "$ROOT/.tasks.toml" "$PRE/.tasks.toml"
+printf '# Backlog\n' > "$PRE/data/backlog.md"
+# The second row mentions a namesake in its own text: present to a substring
+# scan, absent to a parser. Which of the two answers decides is the point.
+cat > "$PRE/data/done-archive.md" <<'MD'
+## Archived 2026-01-01
+
+- [x] archived-real-row - Archived captain call
+- [x] archived-other-row - Superseded by ghost-namesake-row
+MD
+
+PRE_SPAWN_LOG="$PRE/spawn.log"
+# Stands in for tasks-axi's parser: only a real archived row answers, and every
+# spawn is recorded so "the expensive path never ran" is observed, not inferred.
+# It reads the archive without grep, so shadowing grep below breaks only the
+# precheck under test.
+cat > "$PRE_FAKEBIN/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_TEST_TASKS_AXI_SPAWN_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TEST_TASKS_AXI_SPAWN_LOG"
+case "${1:-}" in
+  --version) printf '%s\n' '0.2.5'; exit 0 ;;
+  show)
+    id=${2:-}
+    file=''
+    prev=''
+    for arg in "$@"; do
+      [ "$prev" != --file ] || file=$arg
+      prev=$arg
+    done
+    if [ -n "$file" ] && [ -f "$file" ]; then
+      while IFS= read -r line; do
+        case "$line" in
+          "- [x] $id - "*)
+            printf 'task: %s\n  state: done\n' "$id"
+            exit 0
+            ;;
+        esac
+      done < "$file"
+    fi
+    printf 'code: NOT_FOUND\n' >&2
+    exit 1
+    ;;
+esac
+exit 0
+SH
+chmod +x "$PRE_FAKEBIN/tasks-axi"
+
+# The library function is the executable interface here: the precheck has no
+# other caller, and a whole-script run cannot distinguish "skipped the spawn"
+# from "spawned and found nothing".
+archive_show_probe() {  # <fakebin> <id>; prints status=<n> and out=<row>
+  PATH="$1:$BASE_PATH" FM_TEST_TASKS_AXI_SPAWN_LOG="$PRE_SPAWN_LOG" \
+    bash -c '
+      set -u
+      . "$1/bin/fm-tasks-axi-lib.sh"
+      status=0
+      out=$(fm_tasks_axi_archive_show "$2" "$3" --full) || status=$?
+      printf "status=%s\n" "$status"
+      printf "out=%s\n" "$out"
+    ' _ "$ROOT" "$PRE/data" "$2" 2>&1
+}
+
+probe_status() {  # <probe-output>
+  printf '%s\n' "$1" | sed -n 's/^status=//p'
+}
+
+: > "$PRE_SPAWN_LOG"
+REAL_PROBE=$(archive_show_probe "$PRE_FAKEBIN" archived-real-row)
+[ "$(probe_status "$REAL_PROBE")" = 0 ] \
+  || fail "the precheck blocked a genuinely archived row: $REAL_PROBE"
+case "$REAL_PROBE" in
+  *archived-real-row*) ;;
+  *) fail "the archived row must come back from tasks-axi's own renderer, got: $REAL_PROBE" ;;
+esac
+pass "an id that is really in the archive still resolves through tasks-axi's own parser"
+
+: > "$PRE_SPAWN_LOG"
+MISS_PROBE=$(archive_show_probe "$PRE_FAKEBIN" nowhere-near-this-archive)
+[ "$(probe_status "$MISS_PROBE")" != 0 ] \
+  || fail "an id absent from the archive must not resolve: $MISS_PROBE"
+[ ! -s "$PRE_SPAWN_LOG" ] \
+  || fail "the precheck did not guard the cost: the backend was spawned anyway: $(cat "$PRE_SPAWN_LOG")"
+pass "an id that cannot be in the archive costs no archive copy and no backend spawn"
+
+: > "$PRE_SPAWN_LOG"
+NAMESAKE_PROBE=$(archive_show_probe "$PRE_FAKEBIN" ghost-namesake-row)
+[ "$(probe_status "$NAMESAKE_PROBE")" != 0 ] \
+  || fail "a mention inside another row's text was resolved as a row: $NAMESAKE_PROBE"
+[ -s "$PRE_SPAWN_LOG" ] \
+  || fail "the precheck answered on the parser's behalf: nothing was ever asked of the backend"
+pass "an id the precheck passes is still answered by tasks-axi, not by the substring scan"
+
+# A guard that cannot run must not answer. `grep` exiting 2 is a broken guard,
+# not a clean "no match", and a fallback that spends it as absence loses the
+# very archived row it exists to find.
+BROKEN="$TMP_ROOT/archive-precheck-broken"
+BROKEN_FAKEBIN=$(fm_fakebin "$BROKEN")
+cp "$PRE_FAKEBIN/tasks-axi" "$BROKEN_FAKEBIN/tasks-axi"
+cat > "$BROKEN_FAKEBIN/grep" <<'SH'
+#!/usr/bin/env bash
+printf 'grep: unusable in this environment\n' >&2
+exit 2
+SH
+chmod +x "$BROKEN_FAKEBIN/grep"
+
+: > "$PRE_SPAWN_LOG"
+BROKEN_PROBE=$(archive_show_probe "$BROKEN_FAKEBIN" archived-real-row)
+[ "$(probe_status "$BROKEN_PROBE")" = 0 ] \
+  || fail "a precheck that could not run was spent as absence: $BROKEN_PROBE"
+case "$BROKEN_PROBE" in
+  *archived-real-row*) ;;
+  *) fail "the fall-through must still return the archived row, got: $BROKEN_PROBE" ;;
+esac
+pass "a precheck that cannot run falls through to the full archive read instead of reporting absence"
+
 # --- half two: the digest still completes end to end ------------------------
 
 E2E="$TMP_ROOT/e2e"
