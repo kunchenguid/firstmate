@@ -1,0 +1,489 @@
+#!/usr/bin/env python3
+"""Task-local lifecycle record mechanics, called under the existing meta lock.
+
+Not a worker, queue or semantic acceptance engine.
+Public entry: fm-task-state.sh lifecycle|enroll|reconcile|action|observe TASK.
+Only main may mutate through the public entry; existing lease/meta locks own CAS.
+An open goal without a verified continuation remains due after presentation ack.
+Optional next_action.continuation has exactly one of these observation contracts:
+  executor: {type, task_id, execution_generation, handoff_id} OR
+            {type, task_id, execution_generation, inbox_id, sha256} OR
+            {type, task_id, execution_generation, brief_sha256}.
+    A spawn brief needs observed pi-ext/Codex/TraeX transcript activity, never
+    the synthetic fm-spawn busy seed, process presence, or a status report.
+    A matching handled inbox message plus current working executor proves receipt;
+    delivery alone is pending. This reader never sends, retries or relaunches.
+  blocker: {type, owner, dependency, release_ref, release_sha256, recovery_trigger}.
+    recovery_trigger is evidence-change; an unchanged bound dependency stays quiet
+    until deadline, then becomes due once. Changed evidence requests judgment,
+    never grants effect/merge/permission authority.
+Unknown, stale, missing or uncertain effects are due for readback, never replay.
+An action receipt is not goal acceptance. Acceptance is main's evidence-backed
+assessment with an empty remaining_gap. Archived goals never request execution.
+No cleanup, remote-followup, historical enrollment, or provider success acceptance. A supervisor supplies the
+assessment; we check revision, scope, evidence and transition invariants.
+Store: data/<task>/lifecycle.json (0600, single-link, bounded, atomic replace).
+Absent => legacy; invalid/changed brief/execution generation => unknown.
+Semantic disposition is independent of provider/process state and cleanup.
+Usage via fm-task-state.sh:
+  lifecycle ID
+  reconcile ID --expected-revision N --record private.json
+  action ID --action-id ID --phase attempted|uncertain|confirmed|refused
+            [--receipt-ref data/... --receipt-sha256 HASH]
+Enrollment is main-owned and holds the existing lease and metadata lock.
+One outstanding action, monotonic ids; a retry never rewrites its payload.
+Attempted/uncertain actions cannot be replaced or reset by reconciliation.
+No operation executes a payload, launches a worker or contacts a provider.
+"""
+import argparse
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+import tempfile
+import subprocess
+
+SCHEMA = 'fm-task-lifecycle.v1'
+MAX_BYTES = 262144
+MAX_INT = 9007199254740991
+KINDS = {'steer', 'relaunch', 'spawn', 'readback', 'wait', 'decision'}
+PHASES = {'prepared', 'attempted', 'confirmed', 'refused', 'uncertain'}
+
+
+class Refusal(Exception):
+    pass
+
+
+def require(ok, reason):
+    if not ok:
+        raise Refusal(reason)
+
+
+def atom(value):
+    return isinstance(value, str) and bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,159}', value))
+
+
+def integer(value, minimum=0):
+    return type(value) is int and minimum <= value <= MAX_INT
+
+
+def text(value, maximum=8192, empty=False):
+    return isinstance(value, str) and (empty or bool(value)) and len(value) <= maximum and '\0' not in value
+
+
+def digest(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def regular(path, private=False):
+    st = path.lstat()
+    require(stat.S_ISREG(st.st_mode) and st.st_nlink == 1, 'unsafe file: ' + str(path))
+    require(st.st_uid == os.getuid() and st.st_size <= MAX_BYTES, 'unsafe owner or size: ' + str(path))
+    if private:
+        require(stat.S_IMODE(st.st_mode) in (0o600, 0o400), 'private file mode required: ' + str(path))
+    return path.read_bytes()
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result, 'duplicate JSON key: ' + key)
+        result[key] = value
+    return result
+
+
+def load(path):
+    return json.loads(regular(path, True), object_pairs_hook=unique_object)
+
+
+def stamp(value):
+    require(isinstance(value, str) and re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ', value), 'invalid UTC timestamp')
+    return datetime.datetime.strptime(value, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc).timestamp()
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+class Task:
+    def __init__(self, task):
+        require(atom(task), 'invalid task id')
+        self.id = task
+        require(bool(os.environ.get('FM_HOME')), 'FM_HOME must be explicit')
+        self.home = Path(os.environ['FM_HOME']).resolve(strict=True)
+        self.data = Path(os.environ.get('FM_DATA_OVERRIDE', self.home / 'data')).resolve(strict=True)
+        self.state = Path(os.environ.get('FM_STATE_OVERRIDE', self.home / 'state')).resolve(strict=True)
+        self.directory = self.data / task
+        require(self.directory.is_dir() and not self.directory.is_symlink(), 'missing or unsafe task data directory')
+        self.path = self.directory / 'lifecycle.json'
+
+    def generation(self):
+        meta = self.state / (self.id + '.meta')
+        if not meta.exists() and not meta.is_symlink():
+            return None
+        fields = {}
+        for line in regular(meta).decode().splitlines():
+            key, sep, value = line.partition('=')
+            if sep and key in ('spawn_gen', 'executor', 'provider', 'remote_state'):
+                require(key not in fields, 'duplicate execution identity')
+                fields[key] = value
+        if fields.get('executor') in ('remote-agent', 'cloud-worker'):
+            if fields.get('provider') == 'aime':
+                state = load(self.state / 'cloud-tasks' / self.id / 'state.json')
+                generation = state.get('execution_generation')
+                require(state.get('task_id') == self.id and atom(generation), 'legacy AIME execution identity needs explicit reconciliation')
+                return generation
+            require(fields.get('provider') == 'ida', 'provider has no lifecycle execution-generation binding; continuation unsupported')
+            remote = self.state / 'remote-tasks' / self.id / 'state.json'
+            state = load(remote)
+            generation = state.get('generation', 1)
+            require(integer(generation, 1), 'invalid remote generation')
+            return 'remote-' + str(generation)
+        generation = fields.get('spawn_gen')
+        require(atom(generation), 'missing execution generation')
+        return generation
+
+    def reference(self, ref, sha=None):
+        require(text(ref, 4096), 'missing evidence reference')
+        path = Path(ref)
+        if not path.is_absolute():
+            path = self.home / path
+        require(not path.is_symlink(), 'symlink evidence')
+        resolved = path.resolve(strict=True)
+        require(resolved.is_relative_to(self.data) or resolved.is_relative_to(self.state), 'evidence outside this home data/state')
+        raw = regular(path)
+        if sha is not None:
+            require(sha == digest(raw), 'evidence digest changed: ' + ref)
+        return raw
+
+    def authority_identity(self, ref):
+        raw = self.reference(ref)
+        path = Path(ref)
+        if not path.is_absolute():
+            path = self.home / path
+        return str(path.resolve(strict=True)), digest(raw)
+
+    def validate(self, record, current=True):
+        require(isinstance(record, dict), 'record must be an object')
+        require(record.get('schema') == SCHEMA and record.get('task_id') == self.id, 'record identity/schema mismatch')
+        require(integer(record.get('revision'), 1) and integer(record.get('goal_revision'), 1), 'invalid revision')
+        require(record.get('disposition') in ('open', 'accepted', 'archived'), 'invalid disposition')
+        require(atom(record.get('execution_generation')), 'missing bound execution generation')
+        require(integer(record.get('next_action_seq'), 1), 'invalid action sequence')
+        for key in ('decision_ref', 'cleanup_ref'):
+            require(record.get(key) is None or text(record[key], 4096), 'invalid ' + key)
+        assessment = record.get('assessment')
+        require(isinstance(assessment, dict), 'missing assessment')
+        require(text(assessment.get('outcome')) and text(assessment.get('remaining_gap'), empty=True), 'missing outcome/gap')
+        stamp(assessment.get('assessed_at'))
+        require(text(assessment.get('authority_ref'), 4096), 'missing authority')
+        evidence = assessment.get('evidence')
+        require(isinstance(evidence, list) and 1 <= len(evidence) <= 64, 'missing or excessive evidence')
+        for item in evidence:
+            require(isinstance(item, dict) and text(item.get('ref'), 4096), 'invalid evidence')
+            require(bool(re.fullmatch('[a-f0-9]{64}', str(item.get('sha256')))), 'invalid evidence digest')
+        if record['disposition'] == 'accepted':
+            require(not assessment['remaining_gap'], 'accepted task still has a gap')
+        action = record.get('next_action')
+        if action is not None:
+            require(isinstance(action, dict) and atom(action.get('id')), 'invalid action identity')
+            require(action.get('kind') in KINDS and action.get('phase') in PHASES, 'invalid action kind/phase')
+            require(action.get('expected_execution_generation') == record['execution_generation'] or
+                    (action['phase'] in ('attempted', 'uncertain', 'confirmed') and action.get('result_execution_generation') == record['execution_generation']),
+                    'action generation mismatch')
+            require(integer(action.get('attempts')) and integer(action.get('attempt_limit'), 1) and action['attempt_limit'] <= 2 and action['attempts'] <= action['attempt_limit'], 'invalid retry budget')
+            require(stamp(action.get('recheck_at')) <= stamp(action.get('deadline')), 'invalid action deadline')
+            require(text(action.get('payload_ref'), 4096) and bool(re.fullmatch('[a-f0-9]{64}', str(action.get('payload_sha256')))), 'invalid action payload')
+            require(action.get('receipt_ref') is None or text(action['receipt_ref'], 4096), 'invalid receipt')
+            continuation = action.get('continuation')
+            if continuation is not None:
+                require(isinstance(continuation, dict), 'invalid continuation')
+                if continuation.get('type') == 'executor':
+                    require(atom(continuation.get('task_id')) and atom(continuation.get('execution_generation')), 'missing executor identity')
+                    identities = [key for key in ('handoff_id', 'inbox_id', 'brief_sha256') if key in continuation]
+                    require(len(identities) == 1, 'one exact executor receipt identity required')
+                    if identities[0] == 'handoff_id':
+                        require(atom(continuation['handoff_id']), 'invalid handoff identity')
+                    elif identities[0] == 'inbox_id':
+                        require(bool(re.fullmatch(r'[0-9]+', str(continuation['inbox_id']))) and
+                                bool(re.fullmatch(r'[a-f0-9]{64}', str(continuation.get('sha256', '')))), 'invalid inbox binding')
+                    else:
+                        require(action['kind'] == 'spawn' and bool(re.fullmatch(r'[a-f0-9]{64}', str(continuation['brief_sha256']))), 'invalid spawn brief binding')
+                elif continuation.get('type') == 'blocker':
+                    require(action['kind'] in ('wait', 'decision'), 'blocker requires wait/decision action')
+                    require(text(continuation.get('owner')) and text(continuation.get('dependency')), 'blocker needs owner and dependency')
+                    require(continuation.get('recovery_trigger') == 'evidence-change', 'unsupported recovery trigger')
+                    require(text(continuation.get('release_ref')) and bool(re.fullmatch(r'[a-f0-9]{64}', str(continuation.get('release_sha256', '')))), 'blocker needs observable release condition')
+                else:
+                    raise Refusal('unsupported continuation type')
+        if action and record['disposition'] != 'open':
+            require(action['phase'] in ('confirmed', 'refused'), 'unreconciled action prevents terminal acceptance')
+        if current:
+            require(record.get('brief_sha256') == digest(regular(self.directory / 'brief.md')), 'brief changed; explicit reconciliation required')
+            generation = self.generation()
+            require(generation is None or generation == record['execution_generation'], 'stale execution generation')
+        return record
+
+    def read(self, current=True):
+        if not self.path.exists() and not self.path.is_symlink():
+            return None
+        return self.validate(load(self.path), current)
+
+    def write(self, record):
+        record['assessment']['evidence_key'] = digest(json.dumps([
+            record['goal_revision'], record['execution_generation'], record['disposition'],
+            record['assessment']['evidence'], record['assessment']['remaining_gap'],
+            record.get('next_action'), record.get('decision_ref'), record.get('cleanup_ref'),
+        ], sort_keys=True).encode())
+        self.validate(record)
+        if self.path.exists() or self.path.is_symlink():
+            regular(self.path, True)
+        raw = (json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2) + '\n').encode()
+        require(len(raw) <= MAX_BYTES, 'record too large')
+        fd, temporary = tempfile.mkstemp(prefix='.lifecycle.', dir=self.directory)
+        try:
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.path)
+            directory_fd = os.open(self.directory, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    def reconcile(self, args):
+        prior = self.read(current=False)
+        require(args.expected_revision == (prior['revision'] if prior else 0), 'revision conflict')
+        candidate = load(Path(args.record))
+        candidate['revision'] = args.expected_revision + 1
+        self.validate(candidate)
+        candidate_authority = self.authority_identity(candidate['assessment']['authority_ref'])
+        for item in candidate['assessment']['evidence']:
+            self.reference(item['ref'], item['sha256'])
+        action = candidate.get('next_action')
+        if action:
+            self.reference(action['payload_ref'], action['payload_sha256'])
+            continuation = action.get('continuation', {})
+            if continuation.get('type') == 'blocker' and (not prior or action != prior.get('next_action')):
+                self.reference(continuation['release_ref'], continuation['release_sha256'])
+        if candidate['disposition'] != 'open' and action and (not prior or action != prior.get('next_action')):
+            require(action['kind'] in ('decision', 'readback', 'wait'), 'terminal task cannot prepare execution')
+        if prior:
+            require(candidate['goal_revision'] in (prior['goal_revision'], prior['goal_revision'] + 1), 'goal revision must advance once')
+            if candidate['execution_generation'] != prior['execution_generation']:
+                require(candidate['disposition'] == 'open' and ((prior['execution_generation'] == 'unassigned-g1' and not prior.get('next_action')) or
+                        (candidate['goal_revision'] == prior['goal_revision'] + 1 and candidate['assessment']['authority_ref'] != prior['assessment']['authority_ref'])),
+                        'replacement execution requires a newly authorized open goal; reconcile the replacement explicitly')
+            if prior['disposition'] != 'open' and candidate['disposition'] == 'open':
+                require(candidate['goal_revision'] == prior['goal_revision'] + 1 and candidate['assessment']['authority_ref'] != prior['assessment']['authority_ref'], 'reopen requires a new goal and explicit authority')
+            if prior['disposition'] != 'archived' and candidate['disposition'] == 'archived':
+                require(candidate_authority != self.authority_identity(prior['assessment']['authority_ref']), 'archive requires explicit stop authority')
+            old_action = prior.get('next_action')
+            if old_action and old_action['phase'] not in ('confirmed', 'refused'):
+                require(action == old_action, 'outstanding action must be confirmed/refused before replacement')
+            if action and (not old_action or old_action['id'] != action['id']):
+                require(action['id'] == f'{self.id}.g{candidate["goal_revision"]}.a{prior["next_action_seq"]}' and action['phase'] == 'prepared' and action['attempts'] == 0, 'new action identity/phase must be monotonic')
+                require(candidate['next_action_seq'] == prior['next_action_seq'] + 1, 'action sequence mismatch')
+                if old_action and old_action['phase'] == 'refused' and candidate['goal_revision'] == prior['goal_revision']:
+                    require((action['kind'], action['payload_sha256']) != (old_action['kind'], old_action['payload_sha256']),
+                            'same refused effect cannot reset its budget under a new id; choose a materially different authorized step')
+            else:
+                if action and old_action:
+                    require(action == old_action, 'action id collision; use a new action identity')
+                require(candidate['next_action_seq'] == prior['next_action_seq'], 'unexpected action sequence change')
+        elif action:
+            require(action['phase'] == 'prepared' and action['attempts'] == 0 and action['id'] == f'{self.id}.g1.a1' and candidate['next_action_seq'] == 2, 'invalid initial action')
+        # write() derives the evidence binding, including durable action state.
+        if prior:
+            compare = dict(candidate, revision=prior['revision'])
+            compare['assessment'] = dict(compare['assessment'], assessed_at=prior['assessment']['assessed_at'])
+            if compare == prior:
+                return prior
+        self.write(candidate)
+        return candidate
+
+    def action(self, args):
+        record = self.read()
+        require(record is not None, 'no goal assessment')
+        action = record.get('next_action')
+        require(action and action['id'] == args.action_id, 'action identity conflict')
+        if action['phase'] == args.phase:
+            return record
+        transitions = {'prepared': {'attempted', 'refused'}, 'attempted': {'confirmed', 'uncertain', 'refused'}, 'uncertain': {'confirmed', 'refused'}}
+        require(args.phase in transitions.get(action['phase'], set()), 'invalid action phase transition')
+        if args.phase == 'attempted':
+            require(record['disposition'] == 'open' or action['kind'] in ('decision', 'readback', 'wait'), 'terminal task cannot execute')
+            require(action['attempts'] < action['attempt_limit'] and stamp(action['deadline']) >= stamp(now()), 'action budget expired')
+            action['attempts'] += 1
+        else:
+            require(args.receipt_ref and args.receipt_sha256, 'phase change requires a bound owner receipt')
+            self.reference(args.receipt_ref, args.receipt_sha256)
+            action['receipt_ref'] = args.receipt_ref
+            action['receipt_sha256'] = args.receipt_sha256
+        if args.phase == 'confirmed' and action.get('continuation', {}).get('type') == 'executor':
+            require(self.observe_executor(action['continuation'])[0] == 'running', 'executor has not acknowledged its exact instruction')
+        action['phase'] = args.phase
+        record['revision'] += 1
+        self.write(record)
+        return record
+
+    def observe_executor(self, continuation):
+        target = continuation['task_id']
+        fields = {}
+        for line in regular(self.state / (target + '.meta')).decode().splitlines():
+            key, sep, value = line.partition('=')
+            if sep:
+                require(key not in fields, 'duplicate executor metadata')
+                fields[key] = value
+        require(fields.get('spawn_gen') == continuation['execution_generation'], 'executor generation changed')
+        require(fields.get('executor', 'local-agent') == 'local-agent' and fields.get('kind') != 'secondmate', 'executor receipt requires an ordinary local task')
+        directory = self.state / (target + '.inbox')
+        require(not directory.is_symlink(), 'unsafe inbox')
+        handled = directory / 'handled'
+        require(not handled.is_symlink(), 'unsafe handled inbox')
+        handoff = continuation.get('handoff_id')
+        if continuation.get('brief_sha256'):
+            self.reference(str(self.data / target / 'brief.md'), continuation['brief_sha256'])
+        elif handoff:
+            record = self.state / 'task-handoffs' / 'records' / (handoff + '.msg')
+            raw = self.reference(str(record)).decode()
+            header, body = raw.split('\n--\n', 1)
+            values = dict(line.split('=', 1) for line in header.splitlines() if '=' in line)
+            require(values.get('from') == self.id and values.get('target') == target, 'handoff task identity mismatch')
+            # Inbox owner already deduplicates queued and handled records by this id.
+            matches = []
+            for folder in (directory, handled):
+                if not folder.exists():
+                    continue
+                for path in folder.glob('*.msg'):
+                    raw_message = self.reference(str(path)).decode()
+                    headers, message_body = raw_message.split('\n--\n', 1)
+                    if ('handoff=' + handoff) in headers.splitlines():
+                        require(message_body == body, 'handoff body collision')
+                        matches.append(path)
+            require(len(matches) <= 1, 'duplicate handoff receipts')
+            if not matches or matches[0].parent != handled:
+                return 'pending', 'handoff queued or lease-refused; retry only the existing handoff id'
+            receipt = matches[0]
+        else:
+            receipt = handled / (continuation['inbox_id'] + '.msg')
+            if not receipt.exists():
+                return 'pending', 'executor has not handled the exact inbox message'
+            self.reference(str(receipt), continuation['sha256'])
+        # Current state is still owned by the provider-aware public reader.
+        result = subprocess.run([str(Path(__file__).with_name('fm-task-state.sh')), target],
+                                text=True, capture_output=True, timeout=3, check=False)
+        require(result.returncode == 0, 'executor state read failed')
+        match = re.search(r'(?:^|\n)state: ([a-z-]+)', result.stdout)
+        require(match is not None, 'executor state unreadable')
+        if match[1] != 'working':
+            return 'pending', 'executor receipt exists but current state is ' + match[1]
+        if continuation.get('brief_sha256'):
+            if not re.search(r'harness busy \((?:pi-ext|codex-transcript|traex-transcript)\)', result.stdout):
+                return 'pending', 'spawn brief is assigned but actual harness start is not observed'
+            return 'running', 'bound spawn brief and actual harness activity observed'
+        return 'running', 'exact handled inbox receipt and current working executor'
+
+    def observe(self):
+        record = self.read()
+        if record is None:
+            return {'task_id': self.id, 'state': 'unknown', 'reason': 'not enrolled', 'key': 'absent'}
+        disposition = record['disposition']
+        state, reason = disposition, 'semantic disposition recorded by main'
+        action = record.get('next_action')
+        observation = ''
+        if disposition == 'open':
+            state, reason = 'pending', 'no verified continuation; compare remaining acceptance with the brief'
+            if action:
+                continuation = action.get('continuation', {})
+                if action['phase'] in ('attempted', 'uncertain'):
+                    reason = 'effect may have happened; read back before any retry'
+                    if continuation.get('type') == 'executor':
+                        observed, detail = self.observe_executor(continuation)
+                        observation = observed + ': ' + detail
+                        if observed == 'running':
+                            reason = 'executor receipt/start observed; confirm the existing action without replay'
+                elif action['phase'] == 'refused':
+                    reason = 'action refused; choose a different authorized diagnostic or evidenced blocker'
+                elif continuation.get('type') == 'blocker':
+                    raw = self.reference(continuation['release_ref'])
+                    observation = digest(raw)
+                    if observation == continuation['release_sha256'] and stamp(now()) < stamp(action['deadline']):
+                        state, reason = 'blocked', continuation['owner'] + ': ' + continuation['dependency']
+                    else:
+                        reason = 'dependency evidence changed or blocker deadline expired; re-evaluate exact next action'
+                elif continuation.get('type') == 'executor':
+                    state, reason = self.observe_executor(continuation)
+                    if state == 'running' and stamp(now()) >= stamp(action['deadline']):
+                        state, reason = 'pending', 'execution observation deadline reached; read back without replay'
+        # Stable over re-reads and superficial no-change reassessments. Never a retry key for effects.
+        key = digest(json.dumps([self.id, record['goal_revision'], record['execution_generation'],
+                                 state, reason, observation, record['assessment']['remaining_gap'],
+                                 action], sort_keys=True).encode())
+        return {'task_id': self.id, 'state': state, 'reason': reason, 'key': key, 'revision': record['revision']}
+
+    def init(self):
+        prior = self.read()
+        if prior:
+            return prior
+        brief = self.directory / 'brief.md'
+        sha = digest(regular(brief))
+        generation = self.generation()
+        generation = generation or 'unassigned-g1'
+        ref = str(brief)
+        result = {
+            'schema': SCHEMA, 'task_id': self.id, 'revision': 1,
+            'goal_revision': 1, 'brief_sha256': sha,
+            'execution_generation': generation, 'disposition': 'open',
+            'decision_ref': None, 'cleanup_ref': None,
+            'assessment': {'evidence_key': sha, 'outcome': 'Execution published; acceptance has not been assessed.',
+                           'remaining_gap': 'Reconcile the requested outcome against the durable brief.',
+                           'evidence': [{'ref': ref, 'sha256': sha}],
+                           'authority_ref': ref, 'assessed_at': now()},
+            'next_action': None, 'next_action_seq': 1,
+        }
+        self.write(result)
+        return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('operation', choices=('read', 'init', 'reconcile', 'action', 'observe'))
+    parser.add_argument('task')
+    parser.add_argument('--expected-revision', type=int)
+    parser.add_argument('--record')
+    parser.add_argument('--action-id')
+    parser.add_argument('--phase', choices=tuple(PHASES))
+    parser.add_argument('--receipt-ref')
+    parser.add_argument('--receipt-sha256')
+    args = parser.parse_args()
+    try:
+        task = Task(args.task)
+        if args.operation == 'init':
+            result = task.init()
+        elif args.operation == 'reconcile':
+            require(integer(args.expected_revision) and args.record, 'reconcile needs revision and record')
+            result = task.reconcile(args)
+        elif args.operation == 'action':
+            result = task.action(args)
+        elif args.operation == 'observe':
+            result = task.observe()
+        else:
+            result = task.read()
+        print(json.dumps(result, ensure_ascii=False))
+    except (Refusal, OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired) as error:
+        print('REFUSED: lifecycle: ' + str(error), file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

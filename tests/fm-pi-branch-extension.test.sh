@@ -56,6 +56,7 @@ install_pi_branch_extension_fixture() {
   cp "$EXT" "$repo/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-task-continuation.ts" "$repo/.pi/extensions/lib/fm-task-continuation.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
@@ -1522,11 +1523,11 @@ bus.emit("firstmate:native-tools", {
   register: (tool) => nativeTools.set(tool.name, tool),
   allowMessageType: (type) => messageTypes.add(type),
 });
-if ([...nativeTools.keys()].sort().join(",") !== "fm_branch_outcomes,fm_branch_processed") throw new Error("native discovery exposed unrelated tools");
+if ([...nativeTools.keys()].sort().join(",") !== "fm_branch_outcomes,fm_branch_processed,fm_task_continuation") throw new Error("native discovery exposed unrelated tools");
 for (const tool of mainTools) {
   if (nativeTools.get(tool.name)?.execute !== tool.execute) throw new Error("native controls lost the original guards");
 }
-if ([...messageTypes].sort().join(",") !== "firstmate-sessionstart-nudge,fm-branch-merge,fm-branch-process") throw new Error("operational message allowlist changed");
+if ([...messageTypes].sort().join(",") !== "firstmate-sessionstart-nudge,fm-branch-merge,fm-branch-process,fm-heartbeat-request,fm-stow-request,fm-task-continuation") throw new Error("operational message allowlist changed");
 const processed = nativeTools.get("fm_branch_processed");
 if (!processed) throw new Error("main did not receive its acknowledgement tool");
 const routineAck = await processed.execute("ack-routine", { through: routineSeq }, undefined, undefined, {});
@@ -2075,7 +2076,7 @@ for (let i = 0; i < 250 && !globalThis.__fmPromptStarted; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 if (!globalThis.__fmPromptStarted) {
-  throw new Error("a co-present needs-decision row vetoed the accepted routine branch prompt");
+  throw new Error(`a co-present needs-decision row vetoed the accepted routine branch prompt: ${await Promise.race([offer.settlement.then(() => "settled", e => String(e)), Promise.resolve("still pending")])}`);
 }
 const snapshot = readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim().split("\n");
 if (!snapshot.includes("1") || snapshot.includes("2")) {
@@ -4665,6 +4666,7 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot(
   mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-task-continuation.ts" "$repo/.pi/extensions/lib/fm-task-continuation.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
@@ -5242,6 +5244,7 @@ test_outcomes_tool_uses_stock_execution_and_export_consumers() {
   cp "$EXT" "$fixture/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$fixture/.pi/extensions/lib/fm-native-contract.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-task-continuation.ts" "$fixture/.pi/extensions/lib/fm-task-continuation.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$fixture/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$fixture/.pi/extensions/lib/fm-branch-model-picker.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$fixture/.pi/extensions/lib/fm-calm-visibility.ts"
@@ -5936,6 +5939,90 @@ EOF
   pass "an extension-registered provider resolves in the isolated branch runtime"
 }
 
+test_continuation_survives_ack_compaction_and_unrelated_input() {
+  local repo home out rc
+  repo="$TMP_ROOT/continuation-root"; home="$TMP_ROOT/continuation-home"
+  install_pi_branch_extension_fixture "$repo"
+  set +e
+  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'JS'
+await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.test = {fire, outcomeScript, mainTools, defaultSessionCtx, sentToMain, home, piHandlers}; })()`);
+const {fire, outcomeScript, mainTools, defaultSessionCtx, sentToMain, home, piHandlers} = globalThis.test;
+const {mkdirSync, writeFileSync, readFileSync} = await import('node:fs');
+const {spawnSync} = await import('node:child_process');
+await fire('session_start', {}, defaultSessionCtx);
+mkdirSync(`${home}/data/prerequisite`,{recursive:true});
+writeFileSync(`${home}/data/prerequisite/brief.md`,'Apply prerequisite; verify operational acceptance.');
+writeFileSync(`${home}/state/prerequisite.meta`,'spawn_gen=g1\nkind=ship\n');
+const seq=Number(outcomeScript(['append','--task','prerequisite','--verdict','captain','--summary','Merged prerequisite needs an operator.']));
+await fire('turn_end',{},defaultSessionCtx);
+await fire('agent_settled',{},defaultSessionCtx);
+const reader=mainTools.find(t=>t.name==='fm_branch_outcomes');
+const ack=mainTools.find(t=>t.name==='fm_branch_processed');
+await reader.execute('read',{sequences:String(seq)});
+const result=await ack.execute('ack',{through:seq});
+if(result.isError) throw Error(JSON.stringify(result));
+if(outcomeScript(['unprocessed'])!=='') throw Error('presentation acknowledgement was not consumed');
+const path=`${home}/data/prerequisite/lifecycle.json`;
+if(JSON.parse(readFileSync(path)).disposition!=='open') throw Error('ack erased pending goal');
+let clock=Date.now();const originalNow=Date.now;Date.now=()=>clock;
+async function beforeSettle() {
+  const results=[];
+  for(const handler of piHandlers.get('agent_before_settle')||[]) results.push(await handler({},defaultSessionCtx));
+  return results.filter(Boolean).flatMap(r=>r.entries||[]).map(e=>e.content).join('\n');
+}
+const first=await beforeSettle();
+if(!first.includes('prerequisite: pending')) throw Error(`missing continuation: ${first}`);
+if(await beforeSettle()) throw Error('unchanged evidence retriggered without backoff');
+await fire('session_compact',{},defaultSessionCtx);
+await fire('before_agent_start',{prompt:'Separate request B: explain configuration.'},defaultSessionCtx);
+clock+=31_000;
+const next=await beforeSettle();
+if(!next.includes('prerequisite: pending') || !next.includes('Separate request B')) throw Error('later input or compaction dropped earlier obligation');
+const tool=mainTools.find(t=>t.name==='fm_task_continuation');
+const listing=JSON.parse((await tool.execute('list',{action:'list'})).content[0].text);
+const input=listing.inputs.find(i=>i.text.includes('Separate request B'));
+const answer=await tool.execute('answer',{action:'answer',input:input.id,answer:'Configuration uses the documented per-home file.'});
+if(answer.isError) throw Error(JSON.stringify(answer));
+clock+=61_000;
+if(await beforeSettle()) throw Error('unchanged exhausted obligation spammed');
+if(JSON.parse(readFileSync(path)).disposition!=='open') throw Error('retry budget exhaustion closed goal');
+// A material observation changes the fingerprint and earns one fresh check.
+const r=JSON.parse(readFileSync(path));r.assessment.remaining_gap='Apply now-authorized prerequisite, then validate.';
+writeFileSync(`${home}/data/proposal.json`,JSON.stringify(r),{mode:0o600});
+const cmd=spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`,['reconcile','prerequisite','--expected-revision',String(r.revision),'--record',`${home}/data/proposal.json`],{env:{...process.env,FM_SUPERVISION_ACTOR:'main'},encoding:'utf8'});
+if(cmd.status!==0) throw Error(cmd.stderr);
+if(!(await beforeSettle()).includes('prerequisite: pending')) throw Error('new actionable evidence suppressed');
+if(await beforeSettle()) throw Error('duplicate notification replayed new evidence');
+// A real bound dependency stays silent; its release triggers one exact check.
+const {createHash}=await import('node:crypto');
+const sha=(p)=>createHash('sha256').update(readFileSync(p)).digest('hex');
+writeFileSync(`${home}/data/release`,'awaiting exact authorization');
+const blocked=JSON.parse(readFileSync(path));
+blocked.next_action_seq=2;
+blocked.next_action={id:'prerequisite.g1.a1',kind:'wait',phase:'prepared',expected_execution_generation:'g1',attempts:0,attempt_limit:2,
+  recheck_at:'2026-01-01T00:00:00Z',deadline:'2099-01-01T00:00:00Z',payload_ref:'data/release',payload_sha256:sha(`${home}/data/release`),receipt_ref:null,
+  continuation:{type:'blocker',owner:'dependency-owner',dependency:'exact operation authorization',release_ref:'data/release',release_sha256:sha(`${home}/data/release`),recovery_trigger:'evidence-change'}};
+writeFileSync(`${home}/data/proposal.json`,JSON.stringify(blocked));
+const block=spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`,['reconcile','prerequisite','--expected-revision',String(blocked.revision),'--record',`${home}/data/proposal.json`],{env:{...process.env,FM_SUPERVISION_ACTOR:'main'},encoding:'utf8'});
+if(block.status!==0) throw Error(block.stderr);
+clock+=120_000;
+if(await beforeSettle()) throw Error('genuine unchanged blocker resumed');
+writeFileSync(`${home}/data/release`,'exact authorization recorded');
+if(!(await beforeSettle()).includes('dependency evidence changed')) throw Error('dependency release lost continuation');
+if(await beforeSettle()) throw Error('duplicate release notification replayed continuation');
+Date.now=originalNow;
+await fire('session_shutdown',{},defaultSessionCtx);
+console.log('continuation survived ack, compaction and later input; changed evidence rechecks once, unchanged waits stay quiet');
+process.exit(0);
+JS
+  )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "continuation extension public behavior: $out"
+  pass "$out"
+}
+
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
@@ -5986,3 +6073,5 @@ test_delivery_keeps_the_event_loop_live_and_ordered
 test_session_replacement_during_delivery_neither_loses_nor_duplicates
 test_store_failure_during_delivery_neither_loses_nor_duplicates
 test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication
+
+test_continuation_survives_ack_compaction_and_unrelated_input

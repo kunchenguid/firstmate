@@ -590,6 +590,14 @@ case "$CMD" in
       echo "error: refusing processed advancement because seq $THROUGH is not an unprocessed captain outcome" >&2
       exit 1
     fi
+    # Presentation is independent of the retained semantic obligation. Do not
+    # acquire task locks while holding the outcome lock.
+    # shellcheck source=bin/fm-task-lifecycle-lib.sh
+    . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
+    while IFS= read -r task; do
+      fm_task_lifecycle_ack_guard "$task" || { fm_lock_release "$LOCK"; exit 1; }
+    done < <(jq -r --argjson after "$PROCESSED_SEQ" --argjson through "$THROUGH" \
+      'select(.seq > $after and .seq <= $through and .verdict == "captain") | .task' "$STORE" | sort -u)
     write_processed "$THROUGH"
     fm_lock_release "$LOCK"
     ;;

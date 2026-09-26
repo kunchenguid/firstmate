@@ -27,6 +27,12 @@
 # accepted, not that stow succeeded. Exit 2 is bad input/configuration, 3 is an
 # ownership or compare-and-swap conflict, and 4 is durable I/O/verification
 # failure. This script owns coordination evidence only; it never edits memory.
+# reason=heartbeat replaces the automatic periodic producer, retaining the same
+# run/CAS/step/pending owner. Successful/skipped heartbeat receipts additionally
+# require heartbeat.{archival,continuation,knowledge}, each with status
+# complete|unchanged and an evidence_ref (home data/state) plus its sha256.
+# fm-heartbeat-receipt.py validates those evidence bindings, not goal semantics.
+# Manual/precompact and legacy in-flight periodic runs keep their old contract.
 set -u
 umask 077
 
@@ -97,12 +103,12 @@ state_filter='
     (.next_due_at == null or (.next_due_at | type == "string")) and
     (.pending == null or
       (.pending | type == "object" and
-        (.reasons | type == "array") and (.reasons | all(. == "periodic" or . == "manual" or . == "precompact" or . == "cascade")) and
+        (.reasons | type == "array") and (.reasons | all(. == "periodic" or . == "heartbeat" or . == "manual" or . == "precompact" or . == "cascade")) and
         (.target_session_id | type == "string") and (.target_session_file | type == "string") and
         (.target_entry_id | type == "string") and (.branch_fingerprint | test("^[0-9a-f]{64}$")))) and
     (.active == null or
       (.active | type == "object" and (.run_id | type == "string") and
-        (.reasons | type == "array") and (.reasons | all(. == "periodic" or . == "manual" or . == "precompact" or . == "cascade")) and
+        (.reasons | type == "array") and (.reasons | all(. == "periodic" or . == "heartbeat" or . == "manual" or . == "precompact" or . == "cascade")) and
         (.session_id | type == "string") and (.session_file | type == "string") and
         (.generation == null or (.generation | type == "string")) and
         (.offered_generation == null or (.offered_generation | type == "string")) and
@@ -254,7 +260,7 @@ case "$COMMAND" in
     printf '%s\n' "$STATE" | jq -c '. + {outcome:(if .active then .active.phase elif .pending then "pending" else "idle" end)}'
     ;;
   request)
-    case "$reason" in periodic|manual|precompact|cascade) ;; *) die 2 invalid-reason "unsupported request reason" ;; esac
+    case "$reason" in heartbeat|periodic|manual|precompact|cascade) ;; *) die 2 invalid-reason "unsupported request reason" ;; esac
     if ! valid_id "$session_id" || ! valid_id "$target_entry_id" || ! valid_sha "$branch_fingerprint"; then
       die 2 invalid-request "invalid session, entry, or branch fingerprint"
     fi
@@ -415,7 +421,12 @@ case "$COMMAND" in
       select(.version==1 and .run_id==$run and .generation==$gen) | .outcome |
       select(.=="succeeded" or .=="skipped" or .=="partial" or .=="blocked")
     ' "$RECEIPT" 2>/dev/null) || die 4 invalid-receipt "receipt identity or outcome is invalid"
-    periodic_run=$(printf '%s' "$STATE" | jq -r '[.active.reasons[]|select(.=="periodic")]|length>0')
+    periodic_run=$(printf '%s' "$STATE" | jq -r '[.active.reasons[]|select(.=="periodic" or .=="heartbeat")]|length>0')
+    heartbeat_run=$(printf '%s' "$STATE" | jq -r '[.active.reasons[]|select(.=="heartbeat")]|length>0')
+    if [ "$heartbeat_run" = true ] && { [ "$receipt_outcome" = succeeded ] || [ "$receipt_outcome" = skipped ]; }; then
+      python3 "$ROOT/bin/fm-heartbeat-receipt.py" "$HOME_CANON" "$RECEIPT" \
+        || die 4 unfinished-heartbeat "all three heartbeat duties require verified evidence; unfinished duties remain active"
+    fi
     if [ "$receipt_outcome" = succeeded ]; then
       jq -e '
         .budget.ok==true and
@@ -481,7 +492,7 @@ case "$COMMAND" in
     ;;
   disable)
     active_phase=$(printf '%s' "$STATE" | jq -r '.active.phase // ""')
-    periodic_only=$(printf '%s' "$STATE" | jq -r '(.active != null) and (.active.phase=="requested") and ((.active.reasons|length)>0) and ([.active.reasons[]|select(.!="periodic")]|length==0)')
+    periodic_only=$(printf '%s' "$STATE" | jq -r '(.active != null) and (.active.phase=="requested") and ((.active.reasons|length)>0) and ([.active.reasons[]|select(.!="periodic" and .!="heartbeat")]|length==0)')
     if [ "$periodic_only" = true ]; then
       STATE=$(printf '%s' "$STATE" | jq -c --argjson rev "$next_revision" '.revision=$rev|.active=null|.pending=null')
       commit_state "$STATE"

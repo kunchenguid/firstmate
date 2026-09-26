@@ -6,6 +6,13 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Live Pi continuation
+
+The 2026-09-26 Pi 0.87.1 / pi-openai-codex-compat 0.0.16 live run verified heartbeat delivery and retained task obligations through provider success and compaction on isolated Herdr.
+[Supervision verification](supervision.md#live-continuation-and-heartbeat) owns the exact command and output.
+The portable handoff matrix covers the unchanged inbox plane for tmux, Herdr, Zellij, Orca, and cmux through controlled backend fixtures.
+Codex primary and TraeX worker behavior gains no Pi scheduling loop; the shared semantic guards apply only after explicit task enrollment.
+
 ## Harness detection precedence
 
 `bin/fm-harness.sh` owns retained marker and process-ancestry precedence.

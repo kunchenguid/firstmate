@@ -263,6 +263,11 @@ trap control_cleanup EXIT
 fm_lock_try_acquire "$CONTROL_LOCK" \
   || die "another lifecycle action is already running for task $ID"
 CONTROL_LOCK_HELD=1
+if [ "$VERB" = relaunch ]; then
+  # shellcheck source=bin/fm-task-lifecycle-lib.sh
+  . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
+  fm_task_lifecycle_execution_guard "$ID" || exit 1
+fi
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ]; then
   case "$RAW_ID" in

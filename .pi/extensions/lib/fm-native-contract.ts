@@ -28,7 +28,7 @@ export function registerFirstmateTool<TParams extends TSchema, TDetails, TState>
       });
     }
     if (typeof discovery.allowMessageType === "function") {
-      for (const type of ["firstmate-sessionstart-nudge", "fm-branch-merge", "fm-branch-process"]) {
+      for (const type of ["firstmate-sessionstart-nudge", "fm-branch-merge", "fm-branch-process", "fm-task-continuation", "fm-heartbeat-request", "fm-stow-request"]) {
         discovery.allowMessageType(type);
       }
     }

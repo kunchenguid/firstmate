@@ -92,6 +92,7 @@ import {
 import { Box, Container, fuzzyFilter, Input, SelectList, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { registerFirstmateTool } from "./lib/fm-native-contract.ts";
+import { installTaskContinuation } from "./lib/fm-task-continuation.ts";
 import { runCommandAsync } from "./lib/fm-async-exec.ts";
 import { classifyFeishuMessage } from "./lib/fm-feishu-native-channel.ts";
 import {
@@ -1727,6 +1728,9 @@ ${context.command}
           trace("recheck", "task-generation-changed", admittedSeqs);
           throw new Error("wake scope changed before branch grant: task generation changed");
         }
+        const admittedTasks = new Set(admittedSeqs.map((seq) => scope.taskBySeq[seq]).filter(Boolean));
+        // Retain exact task obligations before granting branch acknowledgement.
+        await continuation.preserve([...admittedTasks]);
         const grant = await writeEligibleRowsSnapshot(
           state,
           admittedSeqs,
@@ -1740,7 +1744,6 @@ ${context.command}
         // the drain; that residual is accepted by the confused-agent-grade boundary.
         const reportRevisionBeforePrompt = durableReportRevision;
         const entryOffset = sessionManager.getEntries().length;
-        const admittedTasks = new Set(admittedSeqs.map((seq) => scope.taskBySeq[seq]).filter(Boolean));
         wakeTaskScope = heartbeat ? null : { rows: admittedSeqs, tasks: admittedTasks, token: offer.token };
         try {
           await session.prompt(
@@ -1916,7 +1919,8 @@ ${context.command}
     const prompt = event.prompt.trim();
     if (!prompt || isOperationalUserText(prompt)) return;
     const file = currentMainSession.getSessionFile() ?? "";
-    const index = mirrorCollection.collectAnchor?.index ?? currentMainSession.getEntries().length;
+    continuation.capture(prompt);
+    const index = currentMainSession.getEntries().length;
     pendingMirror.push({ tag: "captain", text: prompt });
     mirrorCollection.stagedCaptain = { file, index, text: prompt };
   });
@@ -1937,6 +1941,7 @@ ${context.command}
     // Context-only custom delivery may already be persisted before its event.
     if (last?.feishuKey === item.feishuKey && last.text === item.text) return;
     if (mirrorCollection.stagedFeishu.has(item.feishuKey)) return;
+    continuation.capture(item.text, item.feishuKey);
     pendingMirror.push({ tag: "captain", text: item.text });
     mirrorCollection.stagedFeishu.set(item.feishuKey, { file: currentMainSession.getSessionFile() ?? "", text: item.text });
   });
@@ -2716,6 +2721,15 @@ ${context.command}
             isError: true,
           };
         }
+        // Acknowledgement owns presentation only. Enrollment durably preserves
+        // the separate semantic obligation before this cursor can advance.
+        const pending = await readUnprocessedOutcomes(acknowledgedGeneration);
+        if (pending === null) return { content: [{ type: "text", text: "continuation preservation refused: outcome store unavailable" }], details: undefined, isError: true };
+        try {
+          await continuation.preserve(pending.filter((row) => row.seq <= through).map((row) => row.task));
+        } catch (error) {
+          return { content: [{ type: "text", text: `continuation preservation refused: ${String(error)}` }], details: undefined, isError: true };
+        }
         const marked = await runOutcomeScript(["mark-processed", "--through", String(through)]);
         if (!marked.ok) {
           return {
@@ -2768,5 +2782,10 @@ ${context.command}
       outputPad,
       0,
     );
+  });
+  // Register after the owning session boundary so a cold wake cannot be
+  // accepted between a helper callback and the main generation transition.
+  const continuation = installTaskContinuation(pi, {
+    root: fmRoot, home: fmHome, state, owns: () => generationOwnsLockSync(generation),
   });
 }

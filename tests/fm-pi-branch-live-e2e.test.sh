@@ -61,6 +61,7 @@ cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$repo/.pi/extensions/fm-bran
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
 cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
 cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
+cp "$ROOT/.pi/extensions/lib/fm-task-continuation.ts" "$repo/.pi/extensions/lib/fm-task-continuation.ts"
 cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
 cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
@@ -1497,6 +1498,9 @@ function ingress(label) {
   return message;
 }
 const idle = ingress("FEISHU_IDLE");
+// Continuation may add operational turns after an unanswered input; bind the
+// response to this ingress rather than assuming a global provider-call count.
+const idleReply = mainReplies + 1;
 stagedRefs.add(idle.details.deliveryRef);
 await session.sendCustomMessage(idle, { triggerTurn: true, deliverAs: "steer" });
 assert(beforePersistence[0]?.includes("[captain] FEISHU_IDLE"), "trusted idle Feishu input missing before dependent branch prompt");
@@ -1504,9 +1508,10 @@ await dispatch();
 let mirrored = snapshots.at(-1);
 assert.equal(mirrored.filter((s) => s === "[captain] FEISHU_IDLE").length, 1, "persisted idle ingress duplicated staged input");
 assert(mirrored.indexOf("[captain] TUI_INITIAL") < mirrored.indexOf("[main] MAIN_REPLY_1"));
-assert(mirrored.indexOf("[captain] FEISHU_IDLE") < mirrored.indexOf("[main] MAIN_REPLY_2"));
+assert(mirrored.indexOf("[captain] FEISHU_IDLE") < mirrored.indexOf(`[main] MAIN_REPLY_${idleReply}`));
 
 const streamed = ingress("FEISHU_STREAM");
+const streamReply = mainReplies + 1;
 holdMain = true;
 const streaming = session.prompt("TUI_STREAM");
 await waitFor(() => mainHeld, "main streaming");
@@ -1519,9 +1524,9 @@ assert(beforePersistence[1]?.includes("[captain] FEISHU_STREAM"), "trusted strea
 await dispatch();
 mirrored = snapshots.at(-1);
 assert.equal(mirrored.filter((s) => s === "[captain] FEISHU_STREAM").length, 1);
-assert(mirrored.indexOf("[captain] TUI_STREAM") < mirrored.indexOf("[main] MAIN_REPLY_3"));
-assert(mirrored.indexOf("[main] MAIN_REPLY_3") < mirrored.indexOf("[captain] FEISHU_STREAM"));
-assert(mirrored.indexOf("[captain] FEISHU_STREAM") < mirrored.indexOf("[main] MAIN_REPLY_4"));
+assert(mirrored.indexOf("[captain] TUI_STREAM") < mirrored.indexOf(`[main] MAIN_REPLY_${streamReply}`));
+assert(mirrored.indexOf(`[main] MAIN_REPLY_${streamReply}`) < mirrored.indexOf("[captain] FEISHU_STREAM"));
+assert(mirrored.indexOf("[captain] FEISHU_STREAM") < mirrored.indexOf(`[main] MAIN_REPLY_${streamReply + 1}`));
 
 for (const message of [
   { ...idle, content: "FORGED_BODY" },
@@ -1544,8 +1549,8 @@ mirrored = snapshots.at(-1);
 for (const label of ["TUI_INITIAL", "FEISHU_IDLE", "TUI_STREAM", "FEISHU_STREAM"]) {
   assert.equal(mirrored.filter((s) => s === `[captain] ${label}`).length, 1, `cold branch history lost or duplicated ${label}`);
 }
-assert(mirrored.indexOf("[captain] FEISHU_IDLE") < mirrored.indexOf("[main] MAIN_REPLY_2"));
-assert(mirrored.indexOf("[captain] FEISHU_STREAM") < mirrored.indexOf("[main] MAIN_REPLY_4"));
+assert(mirrored.indexOf("[captain] FEISHU_IDLE") < mirrored.indexOf(`[main] MAIN_REPLY_${idleReply}`));
+assert(mirrored.indexOf("[captain] FEISHU_STREAM") < mirrored.indexOf(`[main] MAIN_REPLY_${streamReply + 1}`));
 assert(!mirrored.some((s) => /FORGED_|INTERNAL_|BRANCH_RESULT|TOOL_RESULT/.test(s)));
 await session.dispose();
 console.log("FEISHU_MIRROR_OK");

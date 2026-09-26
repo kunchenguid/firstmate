@@ -286,7 +286,7 @@ const pi = {
     list.push(handler);
     handlers.set(name, list);
   },
-  events: { on() {} },
+  events: { on() {}, emit() {} },
   registerCommand(name, options) { commands.set(name, options.handler); },
   sendMessage(message, options) { messages.push({ message, options }); },
 };
@@ -353,6 +353,7 @@ await new Promise((resolve) => setTimeout(resolve, 6));
 await emit("agent_settled");
 await new Promise((resolve) => setTimeout(resolve, 6));
 await emit("agent_settled");
+if (messages.some((item) => item.message.customType !== "fm-heartbeat-request" || item.message.display !== false)) throw new Error("automatic maintenance did not use silent heartbeat delivery");
 if (messages.length !== 3) throw new Error(`expected three bounded offers, got ${messages.length}`);
 const ids = new Set(messages.map((item) => item.message.details.run_id));
 if (ids.size !== 1) throw new Error("redelivery changed run_id");
@@ -374,6 +375,40 @@ EOF
   pass "Pi coordinator stays default-off, waits for tools, queues, and editor input, then redelivers one run at most three times"
 }
 
+test_heartbeat_requires_three_verified_duties() {
+  local home session out run rev receipt proof hash
+  home=$(new_home heartbeat)
+  session=$(seed_session "$home" session)
+  out=$(request_run "$home" "$session" heartbeat) || fail "heartbeat request failed: $out"
+  run=$(printf '%s' "$out" | jq -r '.run_id')
+  rev=$(printf '%s' "$out" | jq -r '.revision')
+  out=$(run_main "$home" deliver --run-id "$run" --generation generation-1 --expected-revision "$rev") || fail "heartbeat delivery failed"
+  rev=$(printf '%s' "$out" | jq -r '.revision')
+  out=$(run_main "$home" begin --run-id "$run" --session-id session-1 --generation generation-1 \
+    --target-entry-id entry-1 --branch-fingerprint aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --expected-revision "$rev") || fail "heartbeat begin failed"
+  rev=$(printf '%s' "$out" | jq -r '.revision')
+  mkdir -p "$home/data/stow-runs/$run"
+  receipt="data/stow-runs/$run/receipt.json"
+  proof="data/stow-runs/$run/readback.md"
+  printf '%s\n' 'No accepted landed archive candidates; all continuations evidenced; pinned knowledge unchanged.' >"$home/$proof"
+  hash=$(sha256sum "$home/$proof" | awk '{print $1}')
+  jq -cn --arg run "$run" '{version:1,run_id:$run,generation:"generation-1",outcome:"succeeded",budget:{ok:true},local_steps:[],cascade:[],preflight:{complete:true,homes:[]}}' >"$home/$receipt"
+  if run_main "$home" finish --run-id "$run" --generation generation-1 --receipt-ref "$receipt" --interval-seconds 3600 --expected-revision "$rev" >/dev/null; then
+    fail "heartbeat completed without its three duty readbacks"
+  fi
+  [ "$(FM_HOME="$home" "$RUN" status | jq -r '.active.run_id')" = "$run" ] || fail "failed heartbeat lost its obligation"
+  jq --arg ref "$proof" --arg hash "$hash" '.heartbeat={archival:{status:"unchanged",evidence_ref:$ref,sha256:$hash},continuation:{status:"complete",evidence_ref:$ref,sha256:$hash},knowledge:{status:"unchanged",evidence_ref:$ref,sha256:$hash}}' "$home/$receipt" >"$home/next.json"
+  mv "$home/next.json" "$home/$receipt"
+  printf 'changed' >>"$home/$proof"
+  if run_main "$home" finish --run-id "$run" --generation generation-1 --receipt-ref "$receipt" --interval-seconds 3600 --expected-revision "$rev" >/dev/null; then
+    fail "heartbeat accepted changed readback evidence"
+  fi
+  printf '%s\n' 'No accepted landed archive candidates; all continuations evidenced; pinned knowledge unchanged.' >"$home/$proof"
+  out=$(run_main "$home" finish --run-id "$run" --generation generation-1 --receipt-ref "$receipt" --interval-seconds 3600 --expected-revision "$rev") || fail "verified heartbeat refused: $out"
+  [ "$(FM_HOME="$home" "$RUN" status | jq -r '.active')" = null ] || fail "verified heartbeat remains active"
+  pass "heartbeat retains failed duties and completes only with three unchanged bound readbacks"
+}
+
 test_status_is_read_only_and_default_idle
 test_request_delivery_begin_and_verified_finish
 test_cas_generation_and_role_refuse_stale_callers
@@ -382,3 +417,5 @@ test_later_cutoff_is_promoted_after_completed_run
 test_disable_withdraws_only_unconsumed_periodic_work
 test_receipts_and_corrupt_state_fail_closed
 test_pi_coordinator_waits_for_safe_settle_and_bounds_redelivery
+
+test_heartbeat_requires_three_verified_duties

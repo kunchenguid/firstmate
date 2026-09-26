@@ -1415,7 +1415,7 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
     || { kill "$presentation_holder" 2>/dev/null || true; fail "presentation deadline did not emit exactly one holder advisory"; }
   if grep -v '^WAKE_ACK_REQUIRED:' "$first_err" | grep . >/dev/null; then
     kill "$presentation_holder" 2>/dev/null || true
-    fail "presentation deadline leaked helper-process diagnostics"
+    fail "presentation deadline leaked helper-process diagnostics: $(cat "$first_err")"
   fi
   grep "$(printf '\tsignal\t')" "$first_out" >/dev/null \
     || { kill "$presentation_holder" 2>/dev/null || true; fail "bounded presentation dropped the durable wake row"; }
@@ -1544,6 +1544,27 @@ test_historical_annotation_skips_announced_status() {
   pass "historical annotations replay nothing already announced and keep everything new"
 }
 
+test_pi_ack_retains_exact_task_obligation() {
+  local dir state seq generation
+  dir=$(make_case continuation-ack)
+  state="$dir/state"
+  mkdir -p "$dir/data/task-a"
+  printf 'Apply prerequisite and verify it.\n' >"$dir/data/task-a/brief.md"
+  printf 'spawn_gen=g1\nkind=ship\n' >"$state/task-a.meta"
+  printf '%s\n' "$$" >"$state/.lock"
+  append_wake "$state" signal task-a.status 'done: prerequisite merged, operation remains'
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" PI_CODING_AGENT=true "$DRAIN" >"$dir/drain" 2>"$dir/ack" || fail "Pi presentation refused"
+  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*$/\1/p' "$dir/ack")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/ack")
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" PI_CODING_AGENT=true FM_SUPERVISION_ACTOR=main \
+    "$DRAIN" --ack-through "$seq" --recovery-generation "$generation" || fail "Pi acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "ack did not consume its own event"
+  FM_HOME="$dir" "$ROOT/bin/fm-task-state.sh" observe task-a | jq -e '.state=="pending"' >/dev/null \
+    || fail "wake acknowledgement erased the operational successor"
+  [ "$(FM_HOME="$dir" "$ROOT/bin/fm-task-state.sh" lifecycle task-a | jq -r '.revision')" = 1 ] || fail "ack fabricated semantic progress"
+  pass "Pi wake acknowledgement consumes only presentation and durably retains the exact unfinished task"
+}
+
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
@@ -1578,3 +1599,5 @@ test_stale_ack_that_consumes_nothing_names_the_current_wake
 test_branch_stale_ack_that_consumes_nothing_names_its_granted_wake
 test_recovery_ack_failure_is_reported
 test_interruption_before_and_after_raw_commit
+
+test_pi_ack_retains_exact_task_obligation

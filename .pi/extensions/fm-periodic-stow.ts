@@ -1,4 +1,5 @@
-// Default-off, in-session coordinator for periodic /stow.
+// Single in-session heartbeat clock; optional full maintenance is default-off.
+// Automatic maintenance replaces periodic stow; manual/precompact retain stow.
 //
 // This extension decides only when one stable run_id may be offered to the
 // lock-owning main Pi session. bin/fm-stow-run.sh owns durable run state and the
@@ -9,7 +10,7 @@ import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { FIRSTMATE_SESSION_START_SETTLED_EVENT } from "./lib/fm-operational-input.ts";
+import { encodeFirstmateOperationalInput, FIRSTMATE_SESSION_START_SETTLED_EVENT } from "./lib/fm-operational-input.ts";
 
 type PeriodicConfig = {
   version: 1;
@@ -62,6 +63,7 @@ let activeTools = 0;
 let blockingPrompt = false;
 let compacting = false;
 let lastConfigurationError = "";
+let lastDispatchError = "";
 
 function positiveInteger(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
@@ -187,7 +189,7 @@ function safeSettled(ctx: ExtensionContext): boolean {
   }
 }
 
-function request(kind: "periodic" | "manual" | "precompact", ctx: ExtensionContext): RunState | null {
+function request(kind: "heartbeat" | "manual" | "precompact", ctx: ExtensionContext): RunState | null {
   const generation = activeGeneration;
   const identity = sessionIdentity(ctx);
   if (!generation?.live || !identity || generation.sessionId !== identity.id || generation.sessionFile !== identity.file) return null;
@@ -199,8 +201,9 @@ function request(kind: "periodic" | "manual" | "precompact", ctx: ExtensionConte
 
 function promptFor(run: RunState["active"], generation: CoordinatorGeneration): string {
   const action = run?.phase === "partial" ? "recover" : "begin";
+  const heartbeat = run?.reasons.includes("heartbeat");
   return [
-    "FIRSTMATE PERIODIC STOW REQUEST",
+    heartbeat ? "FIRSTMATE HEARTBEAT CHECKLIST" : "FIRSTMATE COORDINATED STOW REQUEST",
     `run_id=${run?.run_id}`,
     `generation=${generation.token}`,
     `session_id=${generation.sessionId}`,
@@ -208,10 +211,18 @@ function promptFor(run: RunState["active"], generation: CoordinatorGeneration): 
     `branch_fingerprint=${run?.branch_fingerprint}`,
     `coordinator_action=${action}`,
     "This is an operational follow-up, not user input and not completion evidence.",
-    "User work has priority. If any known background validation, write-critical step, or required follow-up remains, call fm-stow-run.sh defer with this run_id and stop this pass.",
+    "User work has priority. If background validation or a write-critical step is currently running, call fm-stow-run.sh defer with this run_id and stop this pass.",
     "For an automatic full pass, preflight every registered home before beginning; an unreachable home or one without a safe receiver is unresolved and must defer the run, never fall back to raw commands.",
-    `Otherwise call fm-stow-run.sh ${action} with the current revision plus the session_id, cutoff_entry_id, and branch_fingerprint above, load the internal stow skill, and execute its complete semantics for the fixed cutoff.`,
+    `Otherwise call fm-stow-run.sh ${action} with the current revision plus the session_id, cutoff_entry_id, and branch_fingerprint above, load the internal stow skill, and execute ${heartbeat ? "its knowledge curation semantics plus the three duties below" : "its complete semantics"} for the fixed cutoff.`,
     "Before every mutation record a prepared step with original and target hashes; read back the effect and record verified. Reuse the original plan and correlations on recovery.",
+    ...(heartbeat ? [
+      "Account for all three duties in this one durable run: archival, continuation, knowledge. Do not invent work from idle time.",
+      "Archival: compare recorded goals with acceptance evidence, retain reports and unresolved decisions, and use only existing guarded backlog-close/teardown owners for confirmed landed work. A refusal retains the work and unfinished duty; never force, discard or delete source to complete a heartbeat.",
+      "Continuation: use canonical lifecycle observations; route authorized next actions to named executors through the existing lease/handoff/inbox owners and verify receipt/start. Preserve uncertain effects for readback, genuine blockers with their release trigger, and explicit stops. Healthy work stays running.",
+      "Knowledge: load the stow skill for its curation duty only, preserving privacy, pinned preferences, inspect-then-update, provenance and recoverable archives. Its manual/precompact semantics remain unchanged; task archival is the separate guarded duty above.",
+      "Supervisor coordinates and judges; authorized executors perform effects. Escalate only actual authority/acceptance decisions. Continue the same run_id after partial work; record each duty as complete or unchanged with evidence_ref and sha256 in receipt.heartbeat. A blocked duty cannot finish succeeded/skipped.",
+      "Keep unchanged passes silent. Delivery, plans, reported completion and heartbeat text are never proof that an operation happened.",
+    ] : []),
     "Finish only with a version=1 receipt proving local steps, budget, and every required cascade outcome. Sending this message or ending an agent turn is not completion.",
   ].join("\n");
 }
@@ -233,14 +244,19 @@ function dispatch(pi: ExtensionAPI, ctx: ExtensionContext): void {
       "--expected-revision", String(state.revision),
     ]);
     pi.sendMessage({
-      customType: "fm-stow-request",
-      content: promptFor(active, generation),
-      display: true,
+      customType: active.reasons.includes("heartbeat") ? "fm-heartbeat-request" : "fm-stow-request",
+      content: active.reasons.includes("heartbeat")
+        ? encodeFirstmateOperationalInput("watcher", promptFor(active, generation))
+        : promptFor(active, generation),
+      display: !active.reasons.includes("heartbeat"),
       details: { version: 1, run_id: active.run_id, generation: generation.token, attempt: offered.attempts },
     }, { triggerTurn: true, deliverAs: "followUp" });
     generation.lastOfferAt = Date.now();
+    lastDispatchError = "";
   } catch (error) {
-    if (ctx.hasUI) ctx.ui.notify(`Periodic stow waiting: ${String(error)}`, "warning");
+    const detail = String(error);
+    if (ctx.hasUI && detail !== lastDispatchError) ctx.ui.notify(`Heartbeat waiting: ${detail}`, "warning");
+    lastDispatchError = detail;
   } finally {
     generation.dispatching = false;
   }
@@ -289,7 +305,7 @@ function checkDue(pi: ExtensionAPI, ctx: ExtensionContext): void {
   generation.due = isDue(config, state);
   if (!generation.due) return;
   if (!state?.active) {
-    try { request("periodic", ctx); } catch (error) { notifyConfiguration(ctx, String(error)); return; }
+    try { request("heartbeat", ctx); } catch (error) { notifyConfiguration(ctx, String(error)); return; }
   }
   dispatch(pi, ctx);
 }
@@ -307,7 +323,10 @@ function activate(pi: ExtensionAPI, ctx: ExtensionContext): void {
     live: true, timer: null, due: false, dispatching: false, lastOfferAt: 0,
   };
   activeGeneration = generation;
-  generation.timer = setInterval(() => checkDue(pi, ctx), tickMs);
+  generation.timer = setInterval(() => {
+    if (safeSettled(ctx)) pi.events.emit("firstmate:heartbeat-tick", {});
+    checkDue(pi, ctx);
+  }, tickMs);
   checkDue(pi, ctx);
 }
 

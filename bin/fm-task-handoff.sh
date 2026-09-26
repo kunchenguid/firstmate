@@ -295,6 +295,15 @@ handoff_deliver_locked() {  # <id>
     handoff_reject_locked "$id" "target '$target' retired or changed route during delivery validation"
     return $?
   fi
+  # The original handoff remains durable on a semantic stop or uncertainty.
+  # A delivered retry above is readback only, never another enqueue.
+  # shellcheck source=bin/fm-task-lifecycle-lib.sh
+  . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
+  if ! fm_task_lifecycle_execution_guard "$source" || ! fm_task_lifecycle_execution_guard "$target"; then
+    fm_lock_release "$meta_lock"
+    handoff_retryable_locked "$id" "semantic stop or uncertain effect requires main reconciliation"
+    return $?
+  fi
   inbox_record=$(fm_task_inbox_write_handoff "$STATE" "$target" "$body" "$id") || write_rc=$?
   fm_lock_release "$meta_lock"
   if [ "$write_rc" -eq 2 ]; then

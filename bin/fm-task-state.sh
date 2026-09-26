@@ -4,6 +4,10 @@
 #
 # Usage:
 #   fm-task-state.sh <task-id>
+#   fm-task-state.sh lifecycle|observe|enroll <task-id>
+#   fm-task-state.sh reconcile <task-id> --expected-revision N --record private.json
+#   fm-task-state.sh action <task-id> --action-id ID --phase PHASE [receipt flags]
+# Canonical schema and flags: bin/fm-task-lifecycle.py --help.
 #
 # Legacy metadata and explicit executor=local-agent records delegate unchanged
 # to fm-crew-state.sh.
@@ -17,6 +21,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+
+# The task-local goal owner is opt-in through enrollment, independent of the
+# provider/process state below. No historical task is enrolled by a state read.
+case "${1:-}" in
+  lifecycle|observe|enroll|reconcile|action)
+    operation=$1; shift
+    id=${1:-}; [ -n "$id" ] || exit 2
+    shift
+    # shellcheck source=bin/fm-task-lifecycle-lib.sh
+    . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
+    case "$operation" in
+      lifecycle) fm_task_lifecycle read "$id" "$@" ;;
+      observe) fm_task_lifecycle observe "$id" "$@" ;;
+      enroll) fm_task_lifecycle_mutate init "$id" "$@" ;;
+      *) fm_task_lifecycle_mutate "$operation" "$id" "$@" ;;
+    esac
+    exit $?
+    ;;
+esac
 
 id=${1-}
 [ -n "$id" ] || { printf 'usage: fm-task-state.sh <task-id>\n' >&2; exit 2; }

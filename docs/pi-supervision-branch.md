@@ -20,6 +20,22 @@ The supervision branch itself is Pi-only by construction:
   A home on any harness that already has an outcome store still receives the shared drain compatibility recovery described in [Lost-wake outcome backstop](#lost-wake-outcome-backstop).
 - It does not change which harness is primary and never moves a home to Pi.
 
+## Live task continuation
+
+Presentation acknowledgement does not establish task acceptance.
+The main session retains an enrolled task's goal assessment in the canonical `data/<task>/lifecycle.json` owner, exposed by `bin/fm-task-state.sh`; `bin/fm-task-lifecycle.py --help` owns its schema and compare-and-swap transitions.
+Enrollment is limited to current task briefs named by an input route, wake claim, or processed outcome, with no historical fleet migration.
+Main records semantic acceptance, an explicit stopped disposition, a named executor with observed receipt/start, or a genuine blocker with responsible owner and observable release evidence.
+A queued handoff, successful send, provider terminal state, reported plan, or PR result cannot independently establish acceptance.
+The existing durable handoff owner retains lease conflicts and deduplicates retries by the original id.
+Uncertain effects remain readback work; the continuation observer never executes a payload or grants new authority.
+The Pi extension preserves separate input receipts through compaction, checks pending obligations before logical-run settlement, and uses the existing heartbeat coordinator's tick for bounded rechecks.
+Unchanged genuine blockers, healthy observed execution, accepted goals, and explicitly stopped goals stay quiet.
+Changing dependency evidence or a missing executor makes the precise retained obligation actionable again without re-presenting its already acknowledged outcome.
+The extension limits unchanged automatic prompts to two with backoff, retaining the pending record and one non-triggering next-turn reminder when that budget is exhausted.
+This safeguard applies while Pi is alive; it introduces no process-exit recovery, external watchdog, cleanup engine, or parallel lifecycle truth store.
+`tests/fm-task-handoff.test.sh`, `tests/fm-pi-branch-extension.test.sh`, and `tests/fm-periodic-stow-herdr-live-e2e.test.sh` exercise these boundaries through public interfaces.
+
 ## Components and their owners
 
 - Wake dispatch: `.pi/extensions/fm-primary-pi-watch.ts` stays the dispatcher; `.pi/extensions/lib/fm-branch-dispatch.ts` owns the offer handshake and row eligibility, while [`watcher-continuity.md`](watcher-continuity.md#per-actor-acknowledgement) owns the per-actor consume contract.
