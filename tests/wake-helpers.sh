@@ -58,6 +58,7 @@ make_case() {
   dir="$TMP_ROOT/$name"
   fakebin="$dir/fakebin"
   mkdir -p "$dir/state" "$fakebin"
+  fm_test_track_watcher_state "$dir/state"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -113,12 +114,16 @@ SH
 # A per-id override FM_FAKE_CREW_STATE_<sanitized-id> wins; otherwise the shared
 # FM_FAKE_CREW_STATE; otherwise an unknown verdict (NOT provably working), the
 # safe default so a test that forgets to set one surfaces rather than absorbs.
+# Exporting FM_FAKE_CREW_STATE_LOG appends one line per call, so a test that
+# asserts how many current-state reads a path spends - the reads are the costly
+# half of watcher triage - can count them instead of inferring them.
 make_fake_crew_state() {  # <fakebin>
   local fakebin=$1
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
 id=${1:-}
+[ -z "${FM_FAKE_CREW_STATE_LOG:-}" ] || printf '%s\n' "$id" >> "$FM_FAKE_CREW_STATE_LOG"
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
 var="FM_FAKE_CREW_STATE_$key"
 val=${!var:-${FM_FAKE_CREW_STATE:-}}
@@ -160,6 +165,7 @@ make_supercase() {
   dir="$TMP_ROOT/$name"
   fakebin="$dir/fakebin"
   mkdir -p "$dir/state" "$fakebin"
+  fm_test_track_watcher_state "$dir/state"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -239,6 +245,7 @@ make_bordered_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"; fakebin="$dir/fakebin"
   mkdir -p "$dir/state" "$fakebin"
+  fm_test_track_watcher_state "$dir/state"
   printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -285,6 +292,12 @@ case "${1:-}" in
       fi
     elif [ "$lit" = 1 ]; then
       [ "${FM_FAKE_SEND_FAIL:-0}" = 1 ] && exit 1
+      # FM_FAKE_SEND_MAX_BYTES models a transport ceiling on one literal send.
+      if [ -n "${FM_FAKE_SEND_MAX_BYTES:-}" ] \
+        && [ "$(printf '%s' "$text" | LC_ALL=C wc -c | tr -d ' ')" -gt "$FM_FAKE_SEND_MAX_BYTES" ]; then
+        echo "command too long" >&2
+        exit 1
+      fi
       [ -n "${FM_FAKE_SENT:-}" ] && printf '%s\n' "$text" >> "$FM_FAKE_SENT"
       write_composer "$text"
     fi
@@ -296,6 +309,9 @@ SH
   printf '%s\n' "$dir"
 }
 
+# Only pass a process owned by this test. A deadline must also bound cleanup:
+# TERM can be ignored or remain pending on a stopped child, so never follow it
+# with an unbounded wait. Keep process evidence before the final owned-PID kill.
 wait_for_exit() {
   local pid=$1 limit=${2:-50} i=0
   while [ "$i" -lt "$limit" ]; do
@@ -306,7 +322,18 @@ wait_for_exit() {
     sleep 0.1
     i=$((i + 1))
   done
-  kill "$pid" 2>/dev/null || true
+  printf 'wait_for_exit: owned pid %s exceeded %s polls; sending TERM\n' "$pid" "$limit" >&2
+  ps -p "$pid" -o pid= -o ppid= -o stat= -o command= >&2 2>/dev/null || true
+  kill -TERM "$pid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 20 ] && is_live_non_zombie "$pid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if is_live_non_zombie "$pid"; then
+    printf 'wait_for_exit: owned pid %s survived TERM; sending KILL\n' "$pid" >&2
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
   wait "$pid" 2>/dev/null || true
   return 124
 }

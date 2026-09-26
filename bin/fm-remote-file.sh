@@ -77,7 +77,7 @@ snapshot_bounded_file() { # <file> <max-bytes> <destination> <size-file>
 
 directory_identity() {
   if [ "$(uname)" = Darwin ]; then
-    stat -f '%d:%i' . 2>/dev/null
+    /usr/bin/stat -f '%d:%i' . 2>/dev/null
   else
     stat -c '%d:%i' . 2>/dev/null
   fi

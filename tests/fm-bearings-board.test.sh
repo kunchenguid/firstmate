@@ -13,22 +13,6 @@ TMP_ROOT=$(fm_test_tmproot fm-bearings-board)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
-# Every home this suite creates, so teardown can stop the listeners its builds
-# start. A detached runner is reparented, so removing the fixture directory
-# does not stop an already-running child.
-BOARD_HOMES=()
-
-board_teardown() {
-  local home
-  for home in ${BOARD_HOMES[@]+"${BOARD_HOMES[@]}"}; do
-    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-      FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
-      "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
-  done
-  fm_test_cleanup
-}
-trap board_teardown EXIT
-
 # A lavish-axi stub that reproduces the shapes verified against the real
 # lavish-axi 0.1.61, because the build's liveness verdict is read from what the
 # vendor emits. The load-bearing shape is the refusal: opening a session the
@@ -38,7 +22,10 @@ trap board_teardown EXIT
 # plain open refuse, and `refuse-reopen` makes even --reopen leave it dead.
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
-  BOARD_HOMES+=("$home")
+  # Registered with tests/lib.sh, not with a shell array: make_home is called
+  # inside a command substitution, so an array append here never reaches the
+  # caller and every listener this suite started used to survive the run.
+  fm_test_track_procevent_home "$home" "$home/procevent-claims"
   mkdir -p "$home/state" "$home/data" "$home/lavish-state"
   fakebin=$(fm_fakebin "$home")
   cat > "$fakebin/lavish-axi" <<'SH'
@@ -48,7 +35,7 @@ state=${LAVISH_FAKE_STATE:?}
 emit() {  # <canonical-file> <status>
   printf 'session:\n'
   printf '  file: %s\n' "$1"
-  printf '  url: "http://127.0.0.1:4387/session/deadbeef"\n'
+  printf '  url: "http://127.0.0.1:4387/session/0123456789abcdef"\n'
   printf '  status: %s\n' "$2"
 }
 case "${1-}" in
@@ -56,11 +43,20 @@ case "${1-}" in
   poll)
     # A real blocking listener: it returns only when the trigger appears, so a
     # live owner in these tests is a live process rather than a timing artifact.
-    while [ ! -e "$state/poll-trigger" ]; do sleep 0.05; done
+    # Both waits are bounded, so a listener that escapes its test cannot keep
+    # spawning processes for as long as the host stays up.
+    limit=${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}
+    while [ ! -e "$state/poll-trigger" ]; do
+      [ "$SECONDS" -lt "$limit" ] || exit 75
+      sleep 0.05
+    done
     printf 'session:\n  status: ended\n'
     if [ -e "$state/hold-after-terminal" ]; then
       : > "$state/terminal-emitted"
-      while [ -e "$state/hold-after-terminal" ]; do sleep 0.05; done
+      while [ -e "$state/hold-after-terminal" ]; do
+        [ "$SECONDS" -lt "$limit" ] || exit 75
+        sleep 0.05
+      done
     fi
     exit 0
     ;;
@@ -73,7 +69,7 @@ case "${1-}" in
     if [ -s "$state/open" ]; then
       while IFS= read -r listed; do
         [ -n "$listed" ] || continue
-        printf '  %s,open,"http://127.0.0.1:4387/session/deadbeef",0\n' "$listed"
+        printf '  %s,open,"http://127.0.0.1:4387/session/0123456789abcdef",0\n' "$listed"
       done < "$state/open"
     fi
     exit 0
@@ -95,6 +91,9 @@ if [ -e "$state/refuse-reopen" ]; then
 fi
 rm -f -- "$state/user-ended"
 printf '%s\n' "$real" > "$state/open"
+jq -n --arg file "$real" \
+  '{sessions:{"0123456789abcdef":{file:$file,url:"http://127.0.0.1:4387/session/0123456789abcdef"}}}' \
+  > "$state/state.json"
 emit "$real" opened
 exit 0
 SH
@@ -110,7 +109,7 @@ run_board() {  # <home> <args...>
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
-    LAVISH_FAKE_STATE="$home/lavish-state" \
+    LAVISH_FAKE_STATE="$home/lavish-state" LAVISH_AXI_STATE_DIR="$home/lavish-state" \
     "$BOARD" "$@"
 }
 
@@ -120,6 +119,7 @@ run_procevent() {  # <home> <command args...>
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    LAVISH_AXI_STATE_DIR="$home/lavish-state" \
     "$ROOT/bin/fm-procevent.sh" "$@"
 }
 
@@ -265,6 +265,20 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   [ "$rc" -ne 0 ] || fail "a fleet row without an explicit repo marker was accepted"
 
   write_valid_payload "$data"
+  jq '.underway = [{"id":"sample-task","repo":"sample","state":"working",
+    "kind":"ship","doing":"implementing"}]' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "an underway row without an explicit name marker was accepted"
+
+  for invalid_filed in "last Tuesday" "2026-13-01" "2026-08-14T99:30:00Z" "2026-02-29"; do
+    write_valid_payload "$data"
+    jq --arg filed "$invalid_filed" '.charted[0].filed = $filed' "$data" > "$data.tmp" \
+      && mv "$data.tmp" "$data"
+    set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+    [ "$rc" -ne 0 ] || fail "an invalid filed date was accepted: $invalid_filed"
+  done
+
+  write_valid_payload "$data"
   jq '.captains_call[0].allow_freeform = "yes"' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "a non-boolean renderer field was accepted"
@@ -338,10 +352,9 @@ test_build_injects_binds_then_arms() {
 }
 
 test_registration_cannot_consume_before_any_origin_binding() {
-  local home data runtime origin key hold board sid show
+  local home data origin key hold board sid show
   home=$(make_home order-proof)
   data="$home/payload.json"
-  runtime="$home/runtime"
   origin=order-proof-review
   key=captain-choice
   hold="$origin-decision-$key"
@@ -364,21 +377,6 @@ EOF
   jq --arg hold "$hold" '.captains_call[0].key = $hold' "$data" > "$data.tmp" \
     && mv "$data.tmp" "$data"
 
-  mkdir -p "$runtime"
-  cp -R "$ROOT/bin" "$runtime/bin"
-  cat > "$runtime/bin/fm-procevent-lavish.sh" <<'SH'
-#!/usr/bin/env bash
-set -eu
-if [ "${1:-}" = arm ]; then
-  artifact=${2:-}
-  "$REAL_LAVISH_ADAPTER" arm "$artifact" >/dev/null
-  sid=$("$REAL_LAVISH_ADAPTER" source-id "$artifact")
-  "$REAL_PROCEVENT" start "$sid" >/dev/null
-  exit 0
-fi
-exec "$REAL_LAVISH_ADAPTER" "$@"
-SH
-  chmod +x "$runtime/bin/fm-procevent-lavish.sh"
   cat > "$home/fakebin/lavish-axi" <<'SH'
 #!/usr/bin/env bash
 if [ -z "${1:-}" ]; then
@@ -390,6 +388,10 @@ fi
 if [ "${1:-}" != poll ]; then
   real=$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")
   printf '%s\n' "$real" > "$FM_HOME/order-open"
+  mkdir -p "$LAVISH_AXI_STATE_DIR"
+  jq -n --arg file "$real" \
+    '{sessions:{"0123456789abcdef":{file:$file,url:"http://127.0.0.1:14387/session/0123456789abcdef"}}}' \
+    > "$LAVISH_AXI_STATE_DIR/state.json"
   printf 'session:\n  status: opened\n'
   exit 0
 fi
@@ -403,17 +405,17 @@ EOF
 SH
   chmod +x "$home/fakebin/lavish-axi"
 
-  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$runtime" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
-    FM_BEARINGS_BOARD_TEMPLATE="$ROOT/.agents/skills/bearings/assets/board-template.html" \
-    REAL_LAVISH_ADAPTER="$ROOT/bin/fm-procevent-lavish.sh" \
-    REAL_PROCEVENT="$ROOT/bin/fm-procevent.sh" ORDER_PROOF_HOLD="$hold" \
-    "$runtime/bin/fm-bearings-board.sh" build "$data" >/dev/null \
+  ORDER_PROOF_HOLD="$hold" run_board "$home" build "$data" >/dev/null \
     || fail "the order-proof board build failed"
 
-  show=$(cd "$home" && tasks-axi show "$hold" --full) \
-    || fail "the order-proof captain hold disappeared"
+  # Arm starts the listener, which captures the answer and closes the hold on
+  # its own schedule after build returns.
+  for _ in $(seq 1 100); do
+    show=$(cd "$home" && tasks-axi show "$hold" --full) \
+      || fail "the order-proof captain hold disappeared"
+    case "$show" in *"state: done"*) break ;; esac
+    sleep 0.1
+  done
   assert_contains "$show" "state: done" \
     "registration consumed its answer before the any-origin binding existed"
   assert_contains "$show" "Resolution mode: answered" \

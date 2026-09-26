@@ -19,6 +19,68 @@ test_selected_harness_block_only() {
   pass "renderer prints exactly the selected harness block"
 }
 
+test_supervision_host_protocol_only_on_an_opted_in_claude_home() {
+  local home config plain hosted other
+  home="$TMP_ROOT/host-home"
+  config="$TMP_ROOT/host-config"
+  mkdir -p "$home/state" "$config"
+  plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness claude)
+  assert_not_contains "$plain" "Supervision host" "a claude home without config/supervision-host rendered the host protocol"
+  : > "$config/supervision-host"
+  hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness claude)
+  assert_contains "$hosted" "- Supervision host: on;" "an opted-in claude home did not render the host state line"
+  assert_contains "$hosted" "Mode: Claude Stop-hook-owned supervision." "the host protocol replaced the claude protocol instead of adding to it"
+  assert_contains "$hosted" "supervision-host: cycle boundary" "the host protocol did not tell main how to handle a park boundary"
+  assert_contains "$hosted" "never run the return from it" "the host protocol did not say a handed-back wake is not the captain's return"
+  [ "$(printf '%s\n' "$hosted" | grep -vF -e '- Supervision host: on;' | head -n "$(printf '%s\n' "$plain" | wc -l)")" = "$plain" ] \
+    || fail "the host protocol changed the claude block it should only append to"
+  other=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness pi)
+  assert_not_contains "$other" "Supervision host" "a pi primary rendered the host protocol"
+  pass "renderer adds the supervision-host protocol only on an opted-in claude home, leaving the claude block intact"
+}
+
+# Each non-Pi arm owner gets the host protocol in its own terms, and only its
+# own terms; Grok's model-owned arm command becomes the host; a home without
+# the file renders exactly what it did before, with no tag or placeholder.
+test_supervision_host_protocol_on_every_arm_owner() {
+  local home config harness plain hosted body
+  home="$TMP_ROOT/host-owners-home"
+  config="$TMP_ROOT/host-owners-config"
+  mkdir -p "$home/state" "$config"
+  for harness in claude cursor opencode omp grok codex; do
+    rm -f "$config/supervision-host"
+    plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness "$harness")
+    assert_not_contains "$plain" "Supervision host" "$harness: a home without config/supervision-host rendered the host protocol"
+    assert_not_contains "$plain" "__FM_" "$harness: a placeholder leaked into the rendered block"
+    : > "$config/supervision-host"
+    hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness "$harness")
+    assert_contains "$hosted" "- Supervision host: on;" "$harness: an opted-in home did not render the host state line"
+    body=$(printf '%s\n' "$hosted" | sed -n '/^Supervision host: on for this home/,$p')
+    [ -n "$body" ] || fail "$harness: the host protocol is missing"
+    printf '%s\n' "$body" | grep -E '^\{[a-z,]+\} ' >/dev/null && fail "$harness: a harness tag leaked into the rendered protocol: $body"
+    [ "$(printf '%s\n' "$body" | grep -c 'runs the supervision host')" -eq 1 ] \
+      || fail "$harness: the protocol must name exactly one arm owner: $body"
+    [ "$(printf '%s\n' "$body" | grep -c '^ *Only a wake the host hands back reaches you')" -eq 1 ] \
+      || fail "$harness: the protocol must name exactly one wake path: $body"
+    [ "$(printf '%s\n' "$body" | grep -c '^3\. ')" -eq 1 ] || fail "$harness: the protocol must say once how the park boundary arrives: $body"
+    [ "$(printf '%s\n' "$body" | grep -c '^6\. ./afk. writes only the record here')" -eq 1 ] \
+      || fail "$harness: the protocol must say once what /afk does here: $body"
+  done
+  rm -f "$config/supervision-host"
+  plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness grok)
+  assert_contains "$plain" 'exec bin/fm-watch-arm.sh`' "grok without the file must arm the plain watcher"
+  : > "$config/supervision-host"
+  hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness grok)
+  assert_contains "$hosted" 'exec bin/fm-supervision-host.sh park`' "grok with the file must arm the supervision host"
+  assert_not_contains "$hosted" 'fm-watch-arm.sh` call' "grok with the file must re-arm the supervision host, not the plain arm"
+  assert_contains "$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness grok --repair-line)" \
+    'bin/fm-supervision-host.sh park as its own Grok tracked background task' "grok's repair line must name the host"
+  hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness codex)
+  assert_contains "$hosted" 'FM_CODEX_WATCH_CHECKPOINT_AWAY' "codex must learn that an away checkpoint holds longer"
+  assert_contains "$hosted" 'checkpoint: no actionable wake within' "codex must learn how the park boundary arrives"
+  pass "renderer gives each non-Pi arm owner the host protocol in its own terms, and grok arms the host"
+}
+
 test_unknown_fallback() {
   local out
   out=$("$RENDER" --harness not-real)
@@ -40,6 +102,31 @@ test_conditional_stanzas() {
   assert_contains "$out" 'Mode: Codex foreground checkpoint.' "codex snippet missing"
   assert_not_contains "$out" "Source \`config/x-mode.env\`" "snippet kept the repo-relative x-mode config path"
   pass "renderer includes read-only, afk, and effective x-mode current-state stanzas"
+}
+
+test_quiet_mode_stanzas() {
+  local home config out
+  home="$TMP_ROOT/quiet-home"
+  config="$TMP_ROOT/quiet-config"
+  mkdir -p "$home/state" "$config"
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness codex --afk 1 --afk-mode quiet)
+  assert_contains "$out" "- Quiet mode: active" "quiet stanza missing"
+  assert_contains "$out" "load /quiet" "quiet stanza did not name the /quiet skill"
+  assert_contains "$out" "Ordinary captain chat does NOT exit it" "quiet stanza lost the explicit-only exit rule"
+  assert_not_contains "$out" "- Away mode: active" "quiet mode incorrectly rendered as away mode"
+  out=$(FM_HOME="$home" "$RENDER" --harness codex --afk 1 --afk-mode quiet --repair-line)
+  assert_contains "$out" "Quiet mode owns watcher supervision; load /quiet" "quiet repair line did not name /quiet"
+
+  out=$(FM_HOME="$home" "$RENDER" --harness codex --afk 1)
+  assert_contains "$out" "- Away mode: active" "omitting --afk-mode did not default to away (regression)"
+  assert_not_contains "$out" "Quiet mode" "omitting --afk-mode leaked quiet-mode text"
+
+  out=$(FM_HOME="$home" "$RENDER" --harness codex --afk 1 --afk-mode not-a-real-mode)
+  assert_contains "$out" "- Away mode: active" "unrecognized --afk-mode value did not fall back to away"
+
+  out=$(FM_HOME="$home" "$RENDER" --harness codex --afk 0)
+  assert_contains "$out" "- Away/quiet mode: inactive" "inactive stanza missing"
+  pass "renderer's away/quiet stanzas are mode-aware, default to away, and fall back safely on garbage input"
 }
 
 test_repair_lines() {
@@ -193,9 +280,12 @@ test_pi_snippet_uses_effective_extension_path() {
   pass "pi supervision snippet renders the effective extension path"
 }
 
+test_supervision_host_protocol_only_on_an_opted_in_claude_home
+test_supervision_host_protocol_on_every_arm_owner
 test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
+test_quiet_mode_stanzas
 test_repair_lines
 test_cross_harness_ordinary_continuation_and_repair_matrix
 test_pi_signed_preserves_identity_with_pi_supervision_protocol

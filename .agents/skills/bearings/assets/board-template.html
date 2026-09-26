@@ -439,6 +439,17 @@ __FM_BEARINGS_BOARD_DATA__
      so every count of queued work excludes them. */
   function isWarning(t) { return t && t.kind === "warning"; }
   function chartedQueued(rows) { return (rows || []).filter(function (t) { return !isWarning(t); }); }
+  /* Charted Next reads newest filed first, so the most recently filed upcoming
+     work is at the top. ISO filed dates compare as text; a row with no
+     comparable date keeps its payload order after every dated row. */
+  function chartedOrder(rows) {
+    var dated = [], undated = [];
+    (rows || []).forEach(function (t) {
+      if (t && typeof t.filed === "string" && t.filed) dated.push(t); else undated.push(t);
+    });
+    dated.sort(function (a, b) { return a.filed < b.filed ? 1 : (a.filed > b.filed ? -1 : 0); });
+    return dated.concat(undated);
+  }
   var chartedMoreQueued = data.charted_more || 0;
   var chartedMoreWarnings = data.charted_warning_more || 0;
   function utf8ByteLength(text) { return new TextEncoder().encode(text).length; }
@@ -617,10 +628,13 @@ __FM_BEARINGS_BOARD_DATA__
     var row = el("div", "bb-row");
     row.appendChild(badge(t.state === "working" ? "online" : "info", t.state));
     var main = el("div", "bb-row__main");
-    main.appendChild(el("div", "bb-row__title", t.doing));
+    /* the snapshot's durable name-or-id label leads the row so a scan says
+       WHICH task this is; the run status keeps its place on the second line */
+    main.appendChild(el("div", "bb-row__title", t.name));
     /* captain-facing rows name the repo; the internal task id shows only when
        no repo is known */
-    main.appendChild(el("div", "bb-row__sub", t.kind + " · " + (t.repo || t.id)));
+    main.appendChild(el("div", "bb-row__sub",
+      t.doing + " · " + t.kind + " · " + (t.repo || t.id)));
     row.appendChild(main);
     uw.appendChild(row);
   });
@@ -664,7 +678,7 @@ __FM_BEARINGS_BOARD_DATA__
   if (!chartedQueued(data.charted).length && !chartedMoreQueued) {
     ch.appendChild(el("div", "bb-empty", "Nothing is queued."));
   }
-  data.charted.forEach(function (t) {
+  chartedOrder(data.charted).forEach(function (t) {
     var row = el("div", "bb-row");
     if (t.dispatchable && !isWarning(t)) {
       anyPickable = true;

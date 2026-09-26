@@ -20,8 +20,21 @@
 // file lives in .pi/extensions, so no
 // other harness ever loads it. Supervision is default-on for every task once
 // this Pi session owns the fleet lock: no captain grant file is required.
-// Away mode (or a broken branch between its bounded recovery probes) keeps
-// today's wake-to-main behavior untouched regardless.
+// A broken branch between its bounded recovery probes keeps today's
+// wake-to-main behavior.
+//
+// Postures (docs/pi-supervision-branch.md "Postures"): the away-posture
+// record state/.afk-contract (owner: bin/fm-afk-contract.sh) is read as a
+// file at the tail of every wake and at every captain-outcome presentation,
+// never inferred from chat and never placed in the byte-stable prompt prefix.
+// While it exists the branch takes every row the dispatcher offers, the
+// record's read-back is appended to the wake message so the branch knows the
+// posture and the recorded facts at execution time, captain-verdict outcomes
+// accumulate unprocessed in the store instead of opening the processing turn
+// on the parked main, and the guarded scripts pass the branch actor under
+// main's standing authority (bin/fm-lease-lib.sh). The first unmarked captain
+// message archives the record; the next run boundary then presents the
+// accumulated captain rows exactly as after any other gap.
 //
 // Prefix stability (the cache contract, owner: bin/fm-branch-prompt.sh
 // header): the branch's system prompt is the generator's byte-stable output,
@@ -78,6 +91,7 @@ import {
   getAgentDir,
   keyHint,
   ModelRuntime,
+  type ModelRegistry,
   SessionManager,
   ToolExecutionComponent,
   type AgentSession,
@@ -87,6 +101,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, fuzzyFilter, Input, SelectList, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { registerFirstmateTool } from "./lib/fm-native-contract.ts";
 import { runCommandAsync } from "./lib/fm-async-exec.ts";
 import {
   type CalmPresentationState,
@@ -95,6 +110,9 @@ import {
 } from "./lib/fm-calm-visibility.ts";
 import {
   activateEligibleRowsOwner,
+  afkPostureRecordPresent,
+  awayPostureTailFor,
+  branchWakePrompt,
   deactivateEligibleRowsOwner,
   FM_BRANCH_DISPATCH_EVENT,
   releaseEligibleRowsSnapshot,
@@ -121,11 +139,11 @@ const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
-const afkFlag = join(state, ".afk");
 const sessionsDir = join(state, "branch-session");
 const sessionPointer = join(state, ".branch-session");
 const mirrorCursorFile = join(state, ".branch-mirror-cursor");
 const promptScript = join(fmRoot, "bin", "fm-branch-prompt.sh");
+const afkContractScript = join(fmRoot, "bin", "fm-afk-contract.sh");
 const outcomeScript = join(fmRoot, "bin", "fm-branch-outcome.sh");
 const leaseScript = join(fmRoot, "bin", "fm-lease.sh");
 const wakeGrantScript = join(fmRoot, "bin", "fm-wake-grant.sh");
@@ -204,8 +222,8 @@ function offerEligible(offer: BranchDispatchOffer): boolean {
   return offer.eligible === true;
 }
 
-function afkActive(): boolean {
-  return existsSync(afkFlag);
+function isProcessingCustomMessage(message: { role?: string; customType?: string }): boolean {
+  return message.role === "custom" && message.customType === PROCESSING_MESSAGE_TYPE;
 }
 
 // Pi persists provider failures as ordinary assistant messages and resolves
@@ -233,6 +251,9 @@ type BranchModel = NonNullable<ReturnType<ModelRuntime["getModel"]>>;
 type BranchEffort = ReturnType<NonNullable<ExtensionAPI["getThinkingLevel"]>>;
 type PinnedBranchModel = { model: BranchModel; modelRuntime: ModelRuntime };
 type BranchModelResolution = { ok: true; selection: PinnedBranchModel } | { ok: false; reason: string };
+type FollowMainResolution =
+  | { ok: true; selection: PinnedBranchModel }
+  | { ok: false; reason: string; refusesBuild: boolean };
 
 // Pi owns the effort vocabulary. The picker's options and every clamp still
 // come from Pi's own getSupportedThinkingLevels/clampThinkingLevel, so this
@@ -626,6 +647,8 @@ export default function (pi: ExtensionAPI) {
   // session generation.
   type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean };
   let processing: ProcessingState | null = null;
+  let queuedProcessingContent: string | null = null;
+  let processingOpenedThisRun = false;
   let processedInitializedGeneration = -1;
   // One revision for BOTH selections: a model or effort change invalidates an
   // in-flight branch build exactly the same way.
@@ -644,6 +667,11 @@ export default function (pi: ExtensionAPI) {
   // extension plus its model_select event, because createBranch runs at wake
   // time with no context of its own. It is what "follow main" applies.
   let mainModel: { provider: string; id: string } | null = null;
+  // Main's own model registry, captured from the contexts Pi hands this
+  // extension the same way mainModel is. It is the ONLY read path to
+  // providers an extension registered at runtime (pi-devin-auth's "devin"),
+  // which the branch's isolated ModelRuntime cannot see on its own.
+  let mainModelRegistry: ModelRegistry | null = null;
 
   // Main's own current effort needs no such tracking: Pi answers it directly
   // on demand, including at wake time. It throws only when the extension
@@ -657,8 +685,9 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function rememberMainModel(ctx?: { model?: { provider: string; id: string } }): void {
+  function rememberMainModel(ctx?: { model?: { provider: string; id: string }; modelRegistry?: ModelRegistry }): void {
     if (ctx?.model) mainModel = { provider: ctx.model.provider, id: ctx.model.id };
+    if (ctx?.modelRegistry) mainModelRegistry = ctx.modelRegistry;
   }
 
   function deliverBranchHealthNote(text: string): void {
@@ -708,10 +737,58 @@ export default function (pi: ExtensionAPI) {
   // and same user as main, so stored credentials keep their own semantics
   // (OAuth stays OAuth, an API key stays an API key) and nothing is ever
   // installed, converted, derived, or overwritten here.
+  // A provider that exists only because an extension registered it into
+  // main's runtime (pi-devin-auth's "devin", whose streamSimple is the custom
+  // gRPC path no static catalog can express) is invisible to an isolated
+  // branch runtime until its registration is copied across. The config object
+  // carries that streamSimple and oauth wiring by reference, so copying it
+  // reuses the provider's own registration rather than reimplementing its
+  // wire protocol; the copy is never persisted and stays scoped to this one
+  // runtime. One registration that fails to compose must not blind the rest,
+  // so each copy is isolated. A just-registered provider's auth check has not
+  // run yet, so the copied providers are refreshed here and every caller's
+  // hasConfiguredAuth verdict is real rather than the provisional entry
+  // registration leaves behind.
+  async function copyExtensionProviders(modelRuntime: ModelRuntime): Promise<void> {
+    if (!mainModelRegistry) return;
+    let providerIds: readonly string[];
+    try {
+      providerIds = mainModelRegistry.getRegisteredProviderIds();
+    } catch {
+      return;
+    }
+    const copied: string[] = [];
+    for (const providerId of providerIds) {
+      try {
+        const config = mainModelRegistry.getRegisteredProviderConfig(providerId);
+        if (config) {
+          modelRuntime.registerProvider(providerId, config);
+          copied.push(providerId);
+        }
+      } catch {
+        // A registration that fails to compose in the isolated runtime leaves
+        // that provider unavailable, exactly as if it were never copied.
+      }
+    }
+    if (copied.length === 0) return;
+    try {
+      await modelRuntime.refresh({ providers: copied, allowNetwork: false });
+    } catch {
+      // A failed availability refresh is answered by hasConfiguredAuth.
+    }
+  }
+
   async function resolveBranchModel(provider: string, modelId: string): Promise<BranchModelResolution> {
     const label = `${provider}/${modelId}`;
+    if (provider === "codex-native") {
+      return { ok: false, reason: `${label} belongs to the main native session; choose an ordinary Pi provider for supervision` };
+    }
     const modelRuntime = await ModelRuntime.create();
-    const model = modelRuntime.getModel(provider, modelId) as BranchModel | undefined;
+    let model = modelRuntime.getModel(provider, modelId) as BranchModel | undefined;
+    if (!model) {
+      await copyExtensionProviders(modelRuntime);
+      model = modelRuntime.getModel(provider, modelId) as BranchModel | undefined;
+    }
     if (!model) return { ok: false, reason: `${label} is unavailable to the isolated branch runtime` };
     if (!modelRuntime.hasConfiguredAuth(provider)) {
       return { ok: false, reason: `${label} has no configured credentials in the isolated branch runtime` };
@@ -727,25 +804,50 @@ export default function (pi: ExtensionAPI) {
     return resolved.selection;
   }
 
+  // "Follow main" is ONE rule, shared by every unpinned branch build and by
+  // the /supervision-model report, so the report describes exactly what the
+  // next build does. An ordinary Pi provider is applied as main's own model;
+  // when the isolated runtime cannot run it, the build passes no override at
+  // all (refusesBuild false). A native provider owns a persistent main
+  // thread, so the branch instead selects the same model through Pi's
+  // independent openai-codex provider, and when that model is unavailable the
+  // build refuses (refusesBuild true) rather than inheriting the native
+  // thread or silently restoring a recorded native selection.
+  async function followMainModel(main: { provider: string; id: string }): Promise<FollowMainResolution> {
+    const native = main.provider === "codex-native";
+    let resolved: BranchModelResolution;
+    try {
+      resolved = await resolveBranchModel(native ? "openai-codex" : main.provider, main.id);
+    } catch (error) {
+      resolved = { ok: false, reason: error instanceof Error ? error.message : String(error) };
+    }
+    if (resolved.ok) return resolved;
+    if (!native) return { ...resolved, refusesBuild: false };
+    return {
+      ok: false,
+      refusesBuild: true,
+      reason: `native main requires an independent Pi supervision model and ${resolved.reason}; the branch refuses to build until one is pinned with /supervision-model`,
+    };
+  }
+
   // The pin file's CURRENT state decides the model on every branch build,
   // create and reopen alike, and it overrides Pi's restore of whatever model
   // a reopened branch session recorded. With a pin, that model. With no pin,
-  // main's own model is applied EXPLICITLY - otherwise clearing the pin would
-  // report that the branch follows main while the reopened session quietly
-  // restored the model an earlier pin left behind. Only when main's model is
-  // genuinely unknown, or the isolated runtime cannot run it, does the build
+  // main's own model is applied EXPLICITLY through followMainModel -
+  // otherwise clearing the pin would report that the branch follows main
+  // while the reopened session quietly restored the model an earlier pin left
+  // behind. Only when main's model is genuinely unknown, or the follow rule
+  // says the isolated runtime cannot run an ordinary provider, does the build
   // fall back to passing no override at all, which is the pre-feature
-  // behavior; an unpinned branch is never refused over model choice alone.
+  // behavior.
   async function branchModelSelection(): Promise<PinnedBranchModel | undefined> {
     const pin = readModelPin();
     if (pin) return preparePinnedBranchModel(pin);
     if (!mainModel) return undefined;
-    try {
-      const resolved = await resolveBranchModel(mainModel.provider, mainModel.id);
-      return resolved.ok ? resolved.selection : undefined;
-    } catch {
-      return undefined;
-    }
+    const following = await followMainModel(mainModel);
+    if (following.ok) return following.selection;
+    if (following.refusesBuild) throw new Error(following.reason);
+    return undefined;
   }
 
   async function effectiveBranchModel(selected: BranchModel | undefined): Promise<BranchModel | undefined> {
@@ -943,6 +1045,16 @@ export default function (pi: ExtensionAPI) {
       processing = null;
       return true;
     }
+    // Away posture: main is parked, so no processing turn opens. The rows stay
+    // unprocessed in the store (their visible entries already exist), the
+    // volatile presentation state is dropped so the first presentation after
+    // the record is gone - the run boundary of the captain's return message,
+    // or session start - starts with a fresh triggered budget and hands them
+    // to main exactly as after any other gap.
+    if (afkPostureRecordPresent(state)) {
+      processing = null;
+      return true;
+    }
     const through = rows[rows.length - 1].seq;
     const sequences = rows.map((row) => row.seq).join(",");
     if (processing?.pending) return true;
@@ -953,6 +1065,13 @@ export default function (pi: ExtensionAPI) {
     // on after it.
     const content = await processingRequestInput(rows);
     if (!(await generationOwnsLock(expectedGeneration))) return false;
+    // The record is re-read immediately before the request would open: a
+    // record that appeared during the encoding await cancels this request
+    // rather than delivering it to a main that has just been parked.
+    if (afkPostureRecordPresent(state)) {
+      processing = null;
+      return true;
+    }
     if (processing?.pending) return true;
     if (!processing || processing.sequences !== sequences) {
       processing = { sequences, through, triggered: 0, pending: false, nextTurnQueued: false };
@@ -964,6 +1083,7 @@ export default function (pi: ExtensionAPI) {
     if (processing.triggered < PROCESSING_TRIGGERED_ATTEMPTS) {
       processing.triggered += 1;
       processing.pending = true;
+      queuedProcessingContent = content;
       pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
     } else if (!processing.nextTurnQueued) {
       processing.nextTurnQueued = true;
@@ -1306,7 +1426,25 @@ ${context.command}
     }
   }
 
-  function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false): Promise<void> {
+  // The away posture at the tail of a wake: the record's own read-back (the
+  // captain's words verbatim, the spend cap, expected return, and reach line)
+  // carried byte-for-byte, trailing blank lines included, plus the standing
+  // rule for acting under it. Read per wake so the byte-stable prefix never
+  // carries posture; a read-back that cannot be rendered still names the
+  // posture, because the record's presence is the fact the guarded scripts
+  // enforce either way.
+  async function awayPostureTail(): Promise<string> {
+    let readback = "";
+    try {
+      const rendered = await runCommandAsync("bash", [afkContractScript, "readback"], { cwd: fmRoot, env: scriptEnv });
+      if (rendered.status === 0) readback = rendered.stdout || "";
+    } catch {
+      readback = "";
+    }
+    return awayPostureTailFor(readback);
+  }
+
+  function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false, acceptedAwayOnly = false): Promise<void> {
     const acceptedSelectionRevision = branchSelectionRevision;
     const delivery = branchChain
       .then(async () => {
@@ -1331,7 +1469,14 @@ ${context.command}
         await flushMirror(session, acceptedGeneration);
         if (!(await actingAsOwner(acceptedGeneration))) throw new Error("supervision session no longer owns the fleet lock");
         const heartbeat = /^heartbeat($|:)/.test(message);
-        const scope = scopeForUnreadWake(state, heartbeat);
+        // The posture is read here, at the tail of this wake, never earlier
+        // and never into the prompt prefix.
+        // Accepted confused-agent-grade residual (bin/fm-lease-lib.sh role-
+        // partition paragraph): the record is validated then may be archived
+        // mid-operation; every relocated action revalidates at its own gate;
+        // rows are store-first and the durable queue keeps them.
+        const afk = afkPostureRecordPresent(state);
+        const scope = scopeForUnreadWake(state, heartbeat, afk);
         // A newly-arrived main-owned (check-kind) row never bounces this
         // whole recheck back to main - scopeForUnreadWake excludes it from
         // eligibleSeqs rather than vetoing the scan, in a heartbeat review as
@@ -1343,7 +1488,12 @@ ${context.command}
         // scopeForUnreadWake itself marks corrupted (the queue or its
         // metadata could not be read safely, or an unresolvable task-local
         // row) still falls back to main.
-        if (scope.status === "empty" || (!scope.corrupted && scope.eligibleSeqs.length === 0)) return;
+        if (scope.status === "empty" || (!scope.corrupted && scope.eligibleSeqs.length === 0)) {
+          if (acceptedAwayOnly) {
+            throw new Error("accepted away-only wake is no longer branch-eligible");
+          }
+          return;
+        }
         if (scope.corrupted) {
           throw new Error("the unread wake queue could not be read safely");
         }
@@ -1359,11 +1509,17 @@ ${context.command}
         // the drain; that residual is accepted by the confused-agent-grade boundary.
         const reportRevisionBeforePrompt = durableReportRevision;
         const entryOffset = sessionManager.getEntries().length;
-        wakeTaskScope = heartbeat ? null : { rows: [...scope.eligibleSeqs], tasks: new Set(scope.eligibleTasks) };
+        // A claimed check row names no task, so a prompt carrying one is not
+        // scoped by task (only possible in the away posture).
+        wakeTaskScope = heartbeat || scope.checkSeqs.length > 0 || scope.heartbeatSeqs.length > 0
+          ? null
+          : { rows: [...scope.eligibleSeqs], tasks: new Set(scope.eligibleTasks) };
+        // Same residual: archive during snapshot publish or read-back still
+        // lets this prompt proceed; the guarded scripts revalidate, and the
+        // durable queue keeps every row (bin/fm-lease-lib.sh role-partition).
+        const postureTail = afk ? await awayPostureTail() : "";
         try {
-          await session.prompt(
-            `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
-          );
+          await session.prompt(branchWakePrompt(message, "fm_branch_report", postureTail));
         } finally {
           wakeTaskScope = null;
         }
@@ -1462,7 +1618,6 @@ ${context.command}
     // effects.
     if (!offerEligible(offer)) return;
     if (!generationOwnsLockSync(generation)) return; // cold start pre-lock, secondary session, or shutdown
-    if (afkActive()) return; // the away daemon owns supervision while afk
     const recoveryProbe = Boolean(
       branchBroken &&
       providerRecovery &&
@@ -1472,7 +1627,7 @@ ${context.command}
     if (branchBroken && !recoveryProbe) return; // main owns every wake inside the cooldown window
     if (!collectCurrentMainDialog()) return;
     if (recoveryProbe && providerRecovery) providerRecovery.probeInFlight = true;
-    offer.accept(enqueueWake(offer.message, generation, recoveryProbe));
+    offer.accept(enqueueWake(offer.message, generation, recoveryProbe, offer.awayOnly === true));
   });
 
   // Pi awaits every extension event handler, so an awaited ownership read
@@ -1491,12 +1646,15 @@ ${context.command}
     // getEntries() here loses the captain request that the next wake may answer.
     // Stage it verbatim and remember the future persisted index for turn_end's
     // duplicate suppression. Operational extension injections are not dialog.
-    const prompt = event.prompt.trim();
-    if (!prompt || isOperationalUserText(prompt)) return;
+    const prompt = event.prompt;
+    processingOpenedThisRun = queuedProcessingContent !== null && prompt === queuedProcessingContent;
+    if (processingOpenedThisRun) queuedProcessingContent = null;
+    const trimmed = prompt.trim();
+    if (!trimmed || isOperationalUserText(trimmed)) return;
     const file = currentMainSession.getSessionFile() ?? "";
     const index = mirrorCollection.collectAnchor?.index ?? currentMainSession.getEntries().length;
-    pendingMirror.push({ tag: "captain", text: prompt });
-    mirrorCollection.stagedCaptain = { file, index, text: prompt };
+    pendingMirror.push({ tag: "captain", text: trimmed });
+    mirrorCollection.stagedCaptain = { file, index, text: trimmed };
   });
 
   pi.on?.("agent_start", () => {
@@ -1504,6 +1662,15 @@ ${context.command}
     // Pi delivers a queued nextTurn copy with the prompt that starts this run,
     // so a fresh copy may be queued again once this run settles unacknowledged.
     if (processing) processing.nextTurnQueued = false;
+  });
+  pi.on?.("context", (event, ctx) => {
+    if (!afkPostureRecordPresent(state)) return;
+    const messages = event.messages ?? [];
+    const kept = messages.filter((message) => !isProcessingCustomMessage(message));
+    if (kept.length === messages.length) return;
+    processing = null;
+    if (processingOpenedThisRun) ctx?.abort?.();
+    return { messages: kept };
   });
   pi.on?.("agent_end", () => {
     mainStreaming = false;
@@ -1516,6 +1683,8 @@ ${context.command}
   // reply that only paraphrased it - and is presented again.
   pi.on?.("agent_settled", async () => {
     mainStreaming = false;
+    queuedProcessingContent = null;
+    processingOpenedThisRun = false;
     if (processing) processing.pending = false;
     const settledGeneration = generation;
     await enqueueDelivery(async () => {
@@ -1659,9 +1828,10 @@ ${context.command}
       let available: string[];
       try {
         const modelRuntime = await ModelRuntime.create();
+        await copyExtensionProviders(modelRuntime);
         available = ctx.modelRegistry
           .getAvailable()
-          .filter((model) => modelRuntime.getModel(model.provider, model.id) && modelRuntime.hasConfiguredAuth(model.provider))
+          .filter((model) => model.provider !== "codex-native" && modelRuntime.getModel(model.provider, model.id) && modelRuntime.hasConfiguredAuth(model.provider))
           .map(modelLabel);
       } catch (error) {
         ctx.ui.notify(
@@ -1705,23 +1875,22 @@ ${context.command}
         modelReport = { message: `Supervision branch model: ${picked}.`, warning: false };
       } else {
         // Clearing the pin only follows main if main's model can actually be
-        // applied to the branch; say what will really happen rather than
-        // reporting a state that did not take effect.
-        try {
-          const following = mainModel ? await resolveBranchModel(mainModel.provider, mainModel.id) : null;
-          if (following?.ok) branchModel = following.selection.model;
-          modelReport = following?.ok
-            ? {
-                message: `Supervision branch follows main's model (${modelLabel(following.selection.model)}).`,
-                warning: false,
-              }
-            : {
-                message: `Supervision branch pin cleared, but main's model could not be applied (${following ? following.reason : "main's model is not known yet"}); the branch keeps the model its own session recorded until that conversation is replaced.`,
-                warning: true,
-              };
-        } catch (error) {
+        // applied to the branch; the same followMainModel rule the next build
+        // runs says what will really happen rather than reporting a state
+        // that did not take effect.
+        const following = mainModel ? await followMainModel(mainModel) : null;
+        if (following?.ok) {
+          branchModel = following.selection.model;
           modelReport = {
-            message: `Supervision branch pin cleared, but main's model could not be applied (${error instanceof Error ? error.message : String(error)}); the branch keeps the model its own session recorded until that conversation is replaced.`,
+            message: `Supervision branch follows main's model (${modelLabel(following.selection.model)}).`,
+            warning: false,
+          };
+        } else {
+          const consequence = following?.refusesBuild
+            ? ""
+            : "; the branch keeps the model its own session recorded until that conversation is replaced";
+          modelReport = {
+            message: `Supervision branch pin cleared, but main's model could not be applied (${following ? following.reason : "main's model is not known yet"})${consequence}.`,
             warning: true,
           };
         }
@@ -1977,7 +2146,7 @@ ${context.command}
     return shell;
   };
 
-  pi.registerTool?.({
+  registerFirstmateTool(pi, {
     name: "fm_branch_outcomes",
     label: "Read supervision branch outcomes",
     description:
@@ -2039,7 +2208,7 @@ ${context.command}
   // cursor, never backwards), and refused outside lock ownership, so neither a
   // paraphrase, an empty reply, nor a stale generation can mark an outcome
   // processed.
-  pi.registerTool?.({
+  registerFirstmateTool(pi, {
     name: "fm_branch_processed",
     label: "Acknowledge processed supervision outcomes",
     description:

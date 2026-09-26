@@ -493,6 +493,14 @@ fm_backend_zellij_capture() {  # <target> <lines> [expected-label]
   printf '%s' "$out" | tail -n "$lines"
 }
 
+# fm_backend_zellij_visible_capture: the visible viewport only. `dump-screen`
+# without --full is already viewport-bounded; this primitive keeps the dump
+# whole instead of trimming it to a caller's line bound.
+fm_backend_zellij_visible_capture() {  # <target> [expected-label]
+  fm_backend_zellij_target_ready "$1" "${2:-}" || return 1
+  fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action dump-screen --pane-id "$FM_BACKEND_ZELLIJ_PANE" 2>/dev/null
+}
+
 # --- zellij composer capture and capability primitives ----------------------
 #
 # `zellij action dump-screen --ansi` ("Preserve ANSI styling in the dump

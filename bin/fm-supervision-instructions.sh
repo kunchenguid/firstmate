@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Render the primary-harness supervision operating block for session start and
-# the short repair line used by guards and turn-end hooks.
+# the short repair line used by guards and turn-end hooks. On a non-Pi primary
+# with a supervision protocol (claude, cursor, opencode, omp, grok, codex) whose
+# home opted into the supervision host (config/supervision-host), the block
+# adds one state line and the host's main-side protocol
+# (docs/supervision-protocols/supervision-host.md, whose lines tagged
+# "{<harness>,...} " render only for the listed harnesses), and Grok's arm
+# command becomes the host; without that file the output is unchanged.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,16 +19,19 @@ DOC_DIR="$REPO_ROOT/docs/supervision-protocols"
 HARNESS=
 READ_ONLY=0
 AFK=0
+AFK_MODE=away
 X_MODE=0
 REPAIR_LINE=0
 QUEUE_PENDING=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
+Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--afk-mode away|quiet] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
 
 Print the current primary harness's supervision operating instructions.
 With --repair-line, print one concise repair instruction for guard and hook messages.
+--afk-mode only matters when --afk 1 (present); it selects the away-mode vs
+quiet-mode (kunchenguid/firstmate#2356) wording, and defaults to away.
 EOF
 }
 
@@ -48,6 +57,14 @@ while [ "$#" -gt 0 ]; do
     --afk)
       [ "$#" -gt 1 ] || { echo "error: --afk requires 0 or 1" >&2; exit 2; }
       AFK=$(bool_value "$2")
+      shift 2
+      ;;
+    --afk-mode)
+      [ "$#" -gt 1 ] || { echo "error: --afk-mode requires away or quiet" >&2; exit 2; }
+      case "$2" in
+        away|quiet) AFK_MODE=$2 ;;
+        *) AFK_MODE=away ;;
+      esac
       shift 2
       ;;
     --x-mode)
@@ -86,6 +103,16 @@ case "$HARNESS" in
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
 [ -f "$SNIPPET" ] || SNIPPET="$DOC_DIR/unknown.md"
+HOST_SNIPPET=
+grok_arm='bin/fm-watch-arm.sh'
+case "$HARNESS" in
+  claude|cursor|opencode|omp|grok|codex)
+    if [ -f "$CONFIG/supervision-host" ]; then
+      HOST_SNIPPET="$DOC_DIR/supervision-host.md"
+      grok_arm='bin/fm-supervision-host.sh park'
+    fi
+    ;;
+esac
 
 checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
 pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
@@ -106,17 +133,26 @@ if [ "$X_MODE" -eq 0 ] && [ -f "$x_mode_env" ]; then
   X_MODE=1
 fi
 
-render_snippet() {
-  local line
+render_snippet() {  # [snippet]
+  local line tags snippet=${1:-$SNIPPET}
   while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      '{'*'} '*)
+        tags=${line%%\} *}
+        tags=${tags#\{}
+        case ",$tags," in *",$HARNESS,"*) ;; *) continue ;; esac
+        line=${line#*\} }
+        ;;
+    esac
     line=${line//__FM_PI_EXT__/$pi_ext}
     line=${line//__FM_PI_TURNEND_EXT__/$pi_turnend_ext}
     line=${line//__FM_OMP_EXT__/$omp_ext}
     line=${line//__FM_OMP_TURNEND_EXT__/$omp_turnend_ext}
     line=${line//__FM_X_MODE_ENV_SH__/$x_mode_env_sh}
     line=${line//__FM_X_MODE_ENV__/$x_mode_env}
+    line=${line//__FM_GROK_ARM__/$grok_arm}
     printf '%s\n' "$line"
-  done < "$SNIPPET"
+  done < "$snippet"
 }
 
 repair_line() {
@@ -125,7 +161,11 @@ repair_line() {
     return 0
   fi
   if [ "$AFK" -eq 1 ]; then
-    printf '%s\n' 'Away mode owns watcher supervision; load /afk and ensure the daemon is running instead of starting normal supervision directly.'
+    if [ "$AFK_MODE" = quiet ]; then
+      printf '%s\n' 'Quiet mode owns watcher supervision; load /quiet and ensure the daemon is running instead of starting normal supervision directly.'
+    else
+      printf '%s\n' 'Away mode owns watcher supervision; load /afk and ensure the daemon is running instead of starting normal supervision directly.'
+    fi
     return 0
   fi
 
@@ -154,7 +194,7 @@ repair_line() {
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision by letting the OpenCode TUI plugin arm after idle; use bin/fm-watch-arm.sh only as a manual recovery probe if the plugin reports failure.'
       ;;
     grok)
-      printf '%s%s\n' "$prefix" 'repair missing watcher supervision with bin/fm-watch-arm.sh as its own Grok tracked background task, never shell &.'
+      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with ' "$grok_arm" ' as its own Grok tracked background task, never shell &.'
       ;;
     cursor)
       printf '%s%s\n' "$prefix" 'watcher supervision is owned by the stop-hook park; inspect the hook registration and watcher startup path before ending the turn.'
@@ -183,7 +223,7 @@ ordinary_wake_line() {
       printf '%s\n' '- Ordinary wake: the OpenCode TUI plugin already owns watcher continuity; do not arm manually.'
       ;;
     grok)
-      printf '%s\n' '- Ordinary wake: re-arm exactly one bin/fm-watch-arm.sh Grok tracked background task as directed below.'
+      printf '%s%s%s\n' '- Ordinary wake: re-arm exactly one ' "$grok_arm" ' Grok tracked background task as directed below.'
       ;;
     cursor)
       printf '%s\n' '- Ordinary wake: the stop-hook park (bin/fm-turnend-guard-cursor.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
@@ -210,16 +250,27 @@ else
   printf '%s\n' '- Lock: held by this session; this session owns normal supervision unless away mode says otherwise.'
 fi
 if [ "$AFK" -eq 1 ]; then
-  printf '%s\n' '- Away mode: active; load /afk and keep normal harness supervision paused while the daemon owns the watcher.'
+  if [ "$AFK_MODE" = quiet ]; then
+    printf '%s\n' '- Quiet mode: active; load /quiet and keep normal harness supervision paused while the daemon owns the watcher. Ordinary captain chat does NOT exit it - only an explicit /quiet off does.'
+  else
+    printf '%s\n' '- Away mode: active; load /afk and keep normal harness supervision paused while the daemon owns the watcher.'
+  fi
 else
-  printf '%s\n' '- Away mode: inactive.'
+  printf '%s\n' '- Away/quiet mode: inactive.'
 fi
 if [ "$X_MODE" -eq 1 ]; then
   printf '%s%s%s\n' '- X mode: active; source ' "$x_mode_env" ' before launching any watcher process so the 30s cadence is inherited.'
 else
   printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
 fi
+if [ -n "$HOST_SNIPPET" ]; then
+  printf '%s\n' '- Supervision host: on; it takes away-posture wakes itself and hands the rest to you (protocol at the end of this block).'
+fi
 ordinary_wake_line
 printf '\n'
 render_snippet
 printf '\n'
+if [ -n "$HOST_SNIPPET" ]; then
+  render_snippet "$HOST_SNIPPET"
+  printf '\n'
+fi

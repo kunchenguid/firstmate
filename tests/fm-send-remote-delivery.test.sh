@@ -299,8 +299,12 @@ test_remote_rerun_is_idempotent() {
   assert_contains "$err" "$expected_cmd" \
     "double transport loss must print the exact correlation-reusing resend command"
 
+  # A delivered record escalated for a missed report is genuinely stale: the
+  # request reached the mate, so the same correlation must never be resent.
+  fm_pending_reply_set "$pend" delivered_epoch 4242 \
+    || fail "could not mark the fixture expectation delivered"
   fm_pending_reply_set "$pend" phase escalated \
-    || fail "could not advance the ambiguous expectation to the escalated fixture phase"
+    || fail "could not advance the delivered expectation to the escalated fixture phase"
   ssh_before=$(cat "$ssh_log.count")
   rc=0
   send_env "$fb" "$home" "$ssh_log" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
@@ -314,8 +318,13 @@ test_remote_rerun_is_idempotent() {
     || fail "a stale explicit correlation minted a replacement expectation"
   [ "$(find "$rhome/state/parent-route/rsm.inbox" -name '*.msg' | wc -l | tr -d ' ')" = 1 ] \
     || fail "a stale explicit correlation created another remote record"
-  fm_pending_reply_set "$pend" phase delivery_unknown \
-    || fail "could not restore the ambiguous expectation for the supported resend"
+  # The watcher escalates an unknown delivery as soon as it sees it, so the
+  # printed resend routinely meets an escalated but still undelivered record;
+  # that record stays the owner's to resend under the same correlation.
+  fm_pending_reply_set "$pend" delivered_epoch "" \
+    || fail "could not restore the undelivered fixture expectation"
+  [ "$(fm_pending_reply_get "$pend" phase)" = escalated ] \
+    || fail "the undelivered fixture expectation must remain escalated before the resend"
 
   resend_cmd=$(tail -1 "$dir/err")
   rc=0
@@ -507,7 +516,7 @@ test_remote_resolve_key_closes_at_enqueue() {
   send_env "$fb" "$home" "$ssh_log" \
     "$SEND" rsm --resolve-key upgrade-window "the weekend, freeze Friday" >/dev/null 2>&1 || rc=$?
   expect_code 0 "$rc" "a durably recorded remote answer must exit 0"
-  grep -F 'resolved [key=upgrade-window]: answered: the weekend, freeze Friday' "$home/state/rsm.status" >/dev/null \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/rsm.status" | grep -qF 'resolved [key=upgrade-window]: answered: the weekend, freeze Friday' \
     || fail "a recorded remote answer must close the decision at enqueue: $(cat "$home/state/rsm.status")"
   out=$(drain_out "$home")
   if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then

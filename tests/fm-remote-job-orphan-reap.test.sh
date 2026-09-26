@@ -61,6 +61,30 @@ wait_child() { # <pid> <seconds>
   return 1
 }
 
+# True when <pid>'s parent is a reaper for orphaned processes: init itself, or
+# a subreaper systemd registers one hop below init (PR_SET_CHILD_SUBREAPER,
+# e.g. `systemd --user`) - a live host's per-user manager adopts orphans there
+# instead of letting them reach real init, and that is just as orphaned for
+# this fixture's purpose.
+is_orphaned() { # <pid>
+  local parent
+  parent=$(ppid_of "$1")
+  case "$parent" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$parent" = 1 ] && return 0
+  [ "$(ppid_of "$parent")" = 1 ]
+}
+
+# Wait up to <seconds> for <pid> to be reparented to an orphan reaper (see
+# is_orphaned) after its launching shell exits; 0 when it does.
+wait_orphaned() { # <pid> <seconds>
+  local pid=$1 deadline=$(( $(date +%s) + $2 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    is_orphaned "$pid" && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
 # --- a real worker fixture, launched exactly the way fm-on's Linux start does -
 
 # build_remote_root <dir>: a minimal but genuine Firstmate code root carrying
@@ -123,7 +147,7 @@ SERVE=$(pgrep -P "$WORKER" | head -n 1)
   fail "the serving child is outside the worker's process group"
 pass "the Linux start path puts the whole worker tree in its own process group"
 
-[ "$(ppid_of "$WORKER")" = 1 ] ||
+wait_orphaned "$WORKER" 5 ||
   fail "the fixture worker is not orphaned to init, so this case does not reproduce the leak"
 
 # The exact teardown shape that leaked in production: a fixture cleanup removes
@@ -137,7 +161,7 @@ kill -KILL "$SERVE" 2>/dev/null || true
 wait_gone "$SERVE" 10 || fail "the recorded serving child did not stop"
 alive "$WORKER" || fail "the fixture supervisor did not survive a lone child kill, so this case no longer covers the leak"
 wait_child "$WORKER" 15 || fail "the supervisor did not respawn after its recorded child pid was killed"
-pass "removing the state root and killing the recorded worker pid leaves the tree running at ppid 1"
+pass "removing the state root and killing the recorded worker pid leaves the tree running, orphaned"
 
 # A worker whose code root is intact is never a reap candidate, which is what
 # keeps the account's healthy LaunchAgent worker out of scope.

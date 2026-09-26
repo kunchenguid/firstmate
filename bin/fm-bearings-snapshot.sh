@@ -21,11 +21,16 @@
 # never ambiguous.
 #
 # This wrapper consumes canonical status decisions plus canonically normalized
-# backlog roles, unresolved blockers, and captain actionability. It never infers
+# backlog roles, unresolved blockers, and captain actionability.
+# Contributions project cached coverage and required actors from fm-contributions.sh;
+# only captain rows are exposed, with counts for the other actors and unmeasured homes. It never infers
 # decisions from report or visual-review prose or reimplements snapshot semantics.
 # Underway (in_flight) projects every main live worker plus every active child
 # from every readable secondmate ledger, independently of that home's
-# bearings_state. A home classified captain_decision because it has an open
+# bearings_state. Each row's name is the durable task title when nonblank and
+# its durable task id otherwise, so renderers always receive a task-identifying
+# label instead of having to substitute run status. A home classified
+# captain_decision because it has an open
 # captain hold still contributes each working child as its own Underway row;
 # the home row on secondmates[] keeps the decision and gate classification.
 # Captain-hold placement follows the canonical snapshot's hold_bucket and
@@ -41,11 +46,22 @@
 # Aging is a projection safety net only; the durable
 # deferral remains re-holding with --until.
 #
+# Ordinary Charted Next gates are ordered by durable filed date, newest first,
+# before the FM_BEARINGS_GATES bound is applied. Gates without a comparable filed
+# date keep their input order after dated gates. The synthetic (return-catchup)
+# posture row is reserved ahead of that ordering and bound so it always surfaces.
+#
 # Main-home inventory validity comes from the canonical snapshot's main_inventory
 # object (orphan structured in-flight without meta, unstructured current rows).
 # Bearings never invents Underway rows from backlog-only ids; it discloses those
 # gaps in omitted[] and, when invalid, a Charted Next gate line so the four-section
 # chat cannot claim an empty fleet while main current state is broken.
+#
+# An open away-return catch-up is disclosed the same way, as a single action-free
+# (return-catchup) gate row naming the blockers left to clear or the reason the
+# catch-up was retained. Reporting is not ordinary captain work, so the gate never
+# suppresses the digest; an ACTIVE away window still refuses, because the right
+# answer there is to run the return first. bin/fm-afk-return.sh owns the gate.
 #
 # The landed section merges this home's Done with the canonical snapshot's
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
@@ -55,7 +71,7 @@
 # The default landed baseline is balanced across homes: each home keeps its internal
 # newest-first ordering, homes iterate in deterministic id order, sparse homes do not
 # waste capacity, and --all-landed switches back to the complete global newest-first
-# order.
+# order. Which closed rows either side contributes is bin/fm-landed-lib.sh's rule.
 #
 # Flags:
 #   (default)        compact projection with bounded remote-ledger collection, TOON
@@ -82,6 +98,9 @@ FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-landed-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-landed-lib.sh"  # FM_LANDED_JQ_DEFS: the shared landed selector
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
@@ -126,12 +145,14 @@ Default collection performs bounded concurrent remote-ledger reads for registere
 remote homes under one shared snapshot budget and may refresh the parent-side cache.
 --include-prs additionally performs live GitHub discovery and checks.
 
-Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,doing},
+Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
-  gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
+  gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
+Default gates are selected newest filed first before their bound; undated gates
+  retain input order after dated gates.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
   with omitted[] disclosure. Default selection is balanced across deterministic home
@@ -185,10 +206,29 @@ done
 
 command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2; exit 1; }
 
-# The deterministic return-catch-up owner must clear before this or any other
-# ordinary captain request proceeds. Bearings does not reproduce that policy;
-# it only consults the shared read-only gate.
-"$SCRIPT_DIR/fm-afk-return.sh" guard || exit $?
+# The shared read-only away-return owner is consulted, not obeyed. An active
+# away window still refuses here: the correct answer to a bearings request then
+# is to run the return first. Return CATCH-UP is different - the captain is
+# back and asking for the picture, so the catch-up posture is reported as
+# content (a Charted Next gate row) and collection continues. bin/fm-afk-return.sh
+# owns both the gate format and the branch distinction; bearings reproduces
+# neither. Acting on the fleet still waits for its `check`.
+RETURN_CATCHUP=null
+GUARD_RC=0
+GUARD_ERR=$("$SCRIPT_DIR/fm-afk-return.sh" guard 2>&1 >/dev/null) || GUARD_RC=$?
+if [ "$GUARD_RC" -ne 0 ] && [ "$GUARD_RC" -ne 4 ]; then
+  [ -z "$GUARD_ERR" ] || printf '%s\n' "$GUARD_ERR" >&2
+  exit "$GUARD_RC"
+fi
+if [ "$GUARD_RC" -eq 4 ]; then
+  CATCHUP_LINE=$("$SCRIPT_DIR/fm-afk-return.sh" catchup-summary) || CATCHUP_LINE=""
+  CATCHUP_BLOCKERS=${CATCHUP_LINE%%$'\t'*}
+  case "$CATCHUP_BLOCKERS" in ''|*[!0-9]*) CATCHUP_BLOCKERS=0 ;; esac
+  CATCHUP_REASON=""
+  case "$CATCHUP_LINE" in *"$(printf '\t')"*) CATCHUP_REASON=${CATCHUP_LINE#*$'\t'} ;; esac
+  RETURN_CATCHUP=$(jq -n --argjson blockers "$CATCHUP_BLOCKERS" --arg reason "$CATCHUP_REASON" \
+    '{pending:true,blockers:$blockers,reason:$reason}')
+fi
 
 NOW=${FM_BEARINGS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 if [ "$ALL_LANDED" = 1 ] || [ "$ALL_SECONDMATES" = 1 ]; then
@@ -249,6 +289,12 @@ EOF
     for repo in $repos; do PR_REPOS_TOTAL=$((PR_REPOS_TOTAL + 1)); done
     nrepos=0; npr=0; nwarn=0; ncapped=0; rows='[]'
     pr_fetch_limit=$((FM_BEARINGS_PR_LIMIT + 1))
+    # The task side of the mapping rides a temp file, not an argv element: a
+    # fleet snapshot exceeds the ~128KB per-argument exec cap on large fleets,
+    # and an E2BIG there would drop the repo's PR rows into the warning count.
+    tasks_file=$(mktemp "${TMPDIR:-/tmp}/fm-bearings-tasks.XXXXXX") \
+      || { echo "fm-bearings-snapshot: cannot create a temporary tasks file" >&2; exit 1; }
+    printf '%s' "$SNAP" | jq '.tasks // []' > "$tasks_file"
     for repo in $repos; do
       if [ "$ALL_PR_REPOS" != 1 ] && [ "$nrepos" -ge "$FM_BEARINGS_PR_REPOS" ]; then break; fi
       nrepos=$((nrepos + 1))
@@ -256,11 +302,15 @@ EOF
         --json number,title,url,headRefName,reviewDecision,mergeable,statusCheckRollup 2>/dev/null) \
         || { nwarn=$((nwarn + 1)); continue; }
       [ -n "$out" ] || out='[]'
-      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" '
+      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" --slurpfile tasks "$tasks_file" '
+        ($tasks[0] // []) as $all_tasks
+        | def task_for_branch($ref):
+            ( [ $all_tasks[] | select((.branch // ("fm/" + .id)) == $ref) | .id ] | .[0] )
+            // (if ($ref | startswith("fm/")) then ($ref | ltrimstr("fm/")) else "-" end);
         [ .[] | {
           num:(.number|tostring),
           repo:$repo,
-          task:(if (.headRefName // "" | startswith("fm/")) then (.headRefName | ltrimstr("fm/")) else "-" end),
+          task:task_for_branch(.headRefName // ""),
           url:(.url // "-"),
           review:(.reviewDecision // "none"),
           mergeable:(.mergeable // "UNKNOWN"),
@@ -278,6 +328,7 @@ EOF
       npr=$((npr + cnt))
       rows=$(jq -n --argjson a "$rows" --argjson b "$repo_rows" '$a + $b')
     done
+    rm -f "$tasks_file"
     PR_REPOS_SHOWN=$nrepos
     PR_ROWS_CAPPED=$ncapped
     PR_ROWS_MIN_TOTAL=$((npr + ncapped))
@@ -328,7 +379,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
-  --argjson candidate_prs "$CANDIDATE_PRS" '
+  --argjson return_catchup "$RETURN_CATCHUP" \
+  --argjson candidate_prs "$CANDIDATE_PRS" "$FM_LANDED_JQ_DEFS"'
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
   def fit($n):
@@ -378,7 +430,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   def as_gate($owner):
     {id, title:(.title | trunc(60)),
      blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
-     reason:(hold_gate_reason | trunc(40)), owner:$owner};
+     reason:(hold_gate_reason | trunc(40)), owner:$owner,
+     filed:((.since // null) | trunc(40))};
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -390,8 +443,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | (($fl | index("paths")) != null) as $f_paths
   | (($fl | index("actions")) != null) as $f_actions
   | (($fl | index("endpoints")) != null) as $f_endpoints
-  | ([ .backlog.records[] | select(.state == "done" and .structured and .hold_kind != "captain")
-       | {id, title, pr_url, report_path, local_note, completion, home:"(main)", home_id:"(main)"} ]) as $main_done
+  | ([ .backlog.records[] | select(landed_record)
+       | {id, title, kind, hold_kind, pr_url, report_path, local_note, completion,
+          home:"(main)", home_id:"(main)"} ]) as $main_done
   | ((.secondmate_landed.records) // []) as $mate_done
   | ($main_done + $mate_done) as $all_landed_rows
   | ([ $all_landed_rows | group_by(.home_id)[]
@@ -453,6 +507,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | {id, kind,
         state: .current_state.state,
         repo:(.backlog.repo // .project // null),
+        name:((.backlog.title // "") as $name
+              | (if ($name | test("[^[:space:]]")) then $name else .id end) | trunc(70)),
         doing: ((.current_state.detail // "") as $d
                 | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
       } ]
@@ -462,6 +518,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             kind:(.kind // "secondmate"),
             state:(.state // "working"),
             repo:(.repo // null),
+            name:((.name // "") as $name
+                  | (if (($name | type) == "string" and ($name | test("[^[:space:]]")))
+                     then $name else ($m.id + "/" + .id) end) | trunc(70)),
             doing:((.doing // .state) | trunc(90))} ]) as $in_flight_all
   | ([ .backlog.records[]
          | . as $record
@@ -492,12 +551,26 @@ MODEL=$(printf '%s' "$SNAP" | jq \
      + [ (.secondmate_current.records // [])[] | .queued[]?
          | select(.hold_kind == "captain" and projected_deferred_hold) ]
      | length) as $decisions_marked_deferred
+  | (if ($return_catchup.pending // false) then
+       [{id:"(return-catchup)",
+         title:((if ($return_catchup.blockers // 0) > 0 then
+                   "\($return_catchup.blockers) blocker(s) to clear before ordinary work"
+                 elif (($return_catchup.reason // "") != "") then
+                   ("catch-up retained: " +
+                    ($return_catchup.reason | sub("[,;] *catch-up stays gated$"; "")))
+                 else "away-return catch-up is still open" end) | trunc(60)),
+         blocked_by:"-",
+         reason:"away-return catch-up",
+         owner:"(main)",
+         filed:null}]
+     else [] end) as $return_catchup_gate
   | ((if (.main_inventory.valid == false) then
         [{id:"(main-inventory)",
           title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),
           blocked_by:"-",
           reason:"main inventory",
-          owner:"(main)"}]
+          owner:"(main)",
+          filed:null}]
       else [] end)
      + [ .backlog.records[]
          | . as $record
@@ -518,12 +591,50 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))
        | {id, path} ]) as $reports_all
   | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta") | {id, url:.pr.url} ]) as $recorded_prs_all
-  | . as $snap
+  | def filed_epoch:
+      (.filed // null) as $filed
+      | if ($filed | type) != "string" then null
+        elif ($filed | test("T")) then try ($filed | fromdateiso8601) catch null
+        else try (($filed + "T00:00:00Z") | fromdateiso8601) catch null end;
+    def newest_filed_first:
+      to_entries
+      | sort_by((.value | filed_epoch) as $epoch
+          | if $epoch == null then [1, 0, .key] else [0, -$epoch, .key] end)
+      | map(.value);
+    . as $snap
   | {
       schema: "fm-bearings.v1",
       home: $home,
       generated: $now,
       prs: $prs,
+      contributions:(
+        ([$snap.contributions + {owner:"(main)"}]
+          + [($snap.secondmate_current.records // [])[] as $m | if $m.contributions == null then null else $m.contributions + {owner:$m.id} end])
+        | map(if . != null and .owner != "(main)" and .known > 0 and (.valid_until // 0) < ($now | fromdateiso8601)
+              then .complete=false | .proven_clear=false | .checked=0 | .captain=[]
+                | .unmeasured=(.unmeasured // 0)
+                | .counts={captain:0,fleet:(.known - .unmeasured),maintainer:0,nobody:0}
+              else . end) as $homes
+        | ([$homes[] | select(. != null)]) as $measured
+        | {scope:"owned contributions per home",known:([$measured[].known] | add // 0),
+           checked:([$measured[].checked] | add // 0),
+           counts:{captain:([$measured[].counts.captain] | add // 0),fleet:([$measured[].counts.fleet] | add // 0),
+                   maintainer:([$measured[].counts.maintainer] | add // 0),nobody:([$measured[].counts.nobody] | add // 0)},
+           complete:(all($homes[]; . != null and .complete) and ($snap.secondmate_current.truncated // 0) == 0
+                     and $snap.secondmate_current.registry.available != false
+                     and $snap.secondmate_current.registry.input_truncated != true
+                     and $snap.secondmate_current.registry.records_truncated != true),
+           proven_clear:(all($homes[]; . != null and .proven_clear) and ($snap.secondmate_current.truncated // 0) == 0
+                     and $snap.secondmate_current.registry.available != false
+                     and $snap.secondmate_current.registry.input_truncated != true
+                     and $snap.secondmate_current.registry.records_truncated != true),
+           unmeasured_homes:([$homes[] | select(. == null)] | length),
+           unreadable_records:([$measured[].unreadable_records] | add // 0),
+           unmeasured:([$measured[].unmeasured] | add // 0),
+           stale_verdicts:([$measured[].stale_verdicts] | add // 0),
+           missing_verdicts:([$measured[].missing_verdicts] | add // 0),
+           captain_omitted:([$measured[].captain_omitted] | add // 0),
+           captain:[$measured[] as $h | $h.captain[]? | . + {owner:$h.owner}]}),
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
       secondmates: (if $all_secondmates == 1 then $secondmates_all else $secondmates_all[:$secondmates_n] end),
       secondmate_reconcile: [ (.secondmate_current.records // [])[]
@@ -531,8 +642,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         | {id, spawn_gen:(.spawn_gen // null), host:(.host // null), kind:(.reconcile_inventory.kind // null), ids:((.reconcile_inventory.ids // []) | map(select(type == "string")) | sort)} ],
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
       landed: ($done | map({id, what:(.title | trunc(70)),
-                            artifact:(.pr_url // .report_path // .local_note // "-"),owner:.home_id})),
-      gates: (if $all_queued == 1 then $gates_all else $gates_all[:$gates_n] end),
+                            artifact:(landed_artifact // "-"),owner:.home_id})),
+      gates: ($return_catchup_gate
+              + ($gates_all | newest_filed_first
+                 | if $all_queued == 1 then . else .[:$gates_n] end)),
       reports: (if $all_reports == 1 then $reports_all else $reports_all[:$reports_n] end),
       recorded_prs: (if $all_recorded_prs == 1 then $recorded_prs_all else $recorded_prs_all[:$recorded_prs_n] end)
     }
@@ -589,8 +702,8 @@ if [ "$FORMAT" = json ]; then
 fi
 
 # --- TOON renderer (output boundary; parity with the JSON model) ------------
-# The model is a flat object of scalar fields plus arrays of uniform scalar
-# objects, so the encoder only needs object scalars, the tabular array form
+# Nested objects use indented keys; arrays of uniform scalar objects use
+# the tabular array form
 # (key[N]{fields}: + comma rows at +2 indent), and the empty-array form (key: []),
 # per the TOON spec. Quoting follows the spec exactly.
 TOON=$(printf '%s\n' "$MODEL" | jq -r '
@@ -611,7 +724,9 @@ TOON=$(printf '%s\n' "$MODEL" | jq -r '
     elif type == "number" then tostring
     else q end;
   def emit($k; $v):
-    if ($v | type) == "array" then
+    if ($v | type) == "object" then
+      "\($k): ", ($v | to_entries[] | emit(.key;.value) | "  " + .)
+    elif ($v | type) == "array" then
       if ($v | length) == 0 then "\($k): []"
       else
         ($v[0] | keys_unsorted) as $ks

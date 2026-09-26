@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Present durable watcher wake records, optionally acknowledge handled records,
+# Present durable watcher wake records, retire rows no actor could ever consume,
+# optionally acknowledge handled records,
 # annotate every unread line for validated signal status keys, surface unread
 # informational status lines, latest captain-facing statuses not covered by a
 # newer branch outcome, OPEN DECISIONS, and captain-call record divergence,
@@ -67,54 +68,90 @@ ELIGIBLE_ROWS_FILE="$STATE/.branch-eligible-rows"
 ELIGIBLE_OWNER_FILE="$STATE/.branch-eligible-owner"
 MAIN_ROWS_FILE="$STATE/.main-eligible-rows"
 
-rows_file_valid() {
-  [ -s "$1" ] && awk 'BEGIN { ok=1 } !/^[0-9]+$/ || seen[$0]++ { ok=0 } END { exit !ok }' "$1"
-}
-
-branch_grant_live_locked() {
-  local version pid identity generation current
-  [ -f "$ELIGIBLE_OWNER_FILE" ] && [ ! -L "$ELIGIBLE_OWNER_FILE" ] || return 1
-  exec 8< "$ELIGIBLE_OWNER_FILE" || return 1
-  IFS= read -r version <&8 || { exec 8<&-; return 1; }
-  IFS= read -r pid <&8 || { exec 8<&-; return 1; }
-  IFS= read -r identity <&8 || { exec 8<&-; return 1; }
-  IFS= read -r generation <&8 || { exec 8<&-; return 1; }
-  if IFS= read -r _extra <&8; then exec 8<&-; return 1; fi
-  exec 8<&-
-  [ "$version" = fm-branch-eligible-owner-v1 ] || return 1
-  case "$pid" in ''|*[!0-9]*|1) return 1 ;; esac
-  case "$generation" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-  current=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
-  [ -n "$current" ] && [ "$current" = "$identity" ]
-}
+rows_file_valid() { fm_wake_grant_rows_valid "$1"; }
 
 reclaim_stale_branch_grant_locked() {
   [ -e "$ELIGIBLE_ROWS_FILE" ] || [ -L "$ELIGIBLE_ROWS_FILE" ] || return 0
-  if ! rows_file_valid "$ELIGIBLE_ROWS_FILE" || ! branch_grant_live_locked; then
+  if ! fm_wake_branch_grant_live "$ELIGIBLE_ROWS_FILE" "$ELIGIBLE_OWNER_FILE"; then
     rm -f -- "$ELIGIBLE_ROWS_FILE" "$ELIGIBLE_OWNER_FILE"
   fi
+}
+
+# Retire rows no actor can ever consume. A claim, a presentation, and an
+# acknowledgement all require the five appended fields and a numeric sequence,
+# so a truncated or corrupted row is counted as queued while it can never be
+# presented and can never be named by an --ack-through cutoff: left alone it
+# wedges the queue for good. Main owns that repair - a branch grant can only
+# name sequences that were structurally valid when it was published - and it
+# runs under the queue lock, so no concurrent append is observed half-written.
+# A repair that cannot be written (state/ full, unwritable, unreadable) is
+# reported and never fatal: the usable rows are still presentable and
+# acknowledgeable, and failing the whole drain would strand them too.
+retire_unconsumable_rows_locked() {
+  local retired unusable queued kept
+  [ -f "$FM_WAKE_QUEUE" ] || return 0
+  if DRAIN_TMP=$(mktemp "$STATE/.wake-queue.retire.XXXXXX") \
+    && chmod 0600 "$DRAIN_TMP" \
+    && unusable=$(awk -F '\t' -v keep="$DRAIN_TMP" '
+      NF >= 5 && $2 ~ /^[0-9]+$/ { print > keep; next }
+      { shown++; if (shown <= 20) printf "wake drain:   %s\n", $0 }
+      END { if (shown > 20) printf "wake drain:   ... %d further unusable row(s) not shown\n", shown - 20 }
+    ' "$FM_WAKE_QUEUE"); then
+    queued=$(awk 'END { print NR }' "$FM_WAKE_QUEUE")
+    kept=$(awk 'END { print NR }' "$DRAIN_TMP")
+    retired=$(( queued - kept ))
+    if [ "$retired" -eq 0 ]; then
+      rm -f -- "$DRAIN_TMP"
+      DRAIN_TMP=
+      return 0
+    fi
+    if _fm_atomic_replace "$DRAIN_TMP" "$FM_WAKE_QUEUE"; then
+      DRAIN_TMP=
+      printf 'wake drain: retired %s unusable queue row(s) that carried no sequence to present or acknowledge:\n%s\n' \
+        "$retired" "$unusable" >&2
+      return 0
+    fi
+  fi
+  printf 'wake drain: unusable queue row(s) could not be retired (check that %s is readable and %s is writable); continuing with the rows that remain usable\n' \
+    "$FM_WAKE_QUEUE" "$STATE" >&2
+}
+
+# One bounded line naming the rows a live branch grant is holding, so a main
+# drain with nothing of its own never looks like a silently swallowed wake.
+print_branch_held_notice() {
+  local held seqs
+  held=$(fm_wake_actor_pending_count branch "$ELIGIBLE_ROWS_FILE" "$ELIGIBLE_OWNER_FILE") || return 0
+  [ "$held" -gt 0 ] || return 0
+  seqs=$(fm_wake_grant_rows_valid "$ELIGIBLE_ROWS_FILE" \
+    && awk 'NR <= 20 { printf "%s%s", (NR > 1 ? "," : ""), $1 } END { if (NR > 20) printf ",..." }' \
+      "$ELIGIBLE_ROWS_FILE")
+  printf 'WAKE ROWS HELD BY SUPERVISION BRANCH: %s queued row(s) (%s) are granted to the live supervision branch, which presents and acknowledges them.\n' \
+    "$held" "${seqs:-unknown}"
 }
 
 write_rows_file_locked() { # <target> <source>
   local target=$1 source=$2
   if [ ! -s "$source" ]; then
-    rm -f -- "$target"
+    rm -f -- "$target" "$source"
     return
   fi
   chmod 0600 "$source" || return 1
   _fm_atomic_replace "$source" "$target"
 }
 
+# claim_main_rows_locked [<cutoff>]: claim every unreserved queued row for main,
+# or with a cutoff only the unreserved rows at or below it. Rows main already
+# owns stay owned either way.
 claim_main_rows_locked() {
   DRAIN_TMP=$(mktemp "$STATE/.main-eligible-rows.tmp.XXXXXX") || return 1
-  awk -F '\t' -v branch="$ELIGIBLE_ROWS_FILE" -v main="$MAIN_ROWS_FILE" '
+  awk -F '\t' -v branch="$ELIGIBLE_ROWS_FILE" -v main="$MAIN_ROWS_FILE" -v cutoff="${1:-}" '
     BEGIN {
       while ((getline line < branch) > 0) reserved[line]=1
       while ((getline line < main) > 0) owned[line]=1
     }
     NF >= 5 && $2 ~ /^[0-9]+$/ {
       present[$2]=1
-      if (!($2 in reserved)) owned[$2]=1
+      if (!($2 in reserved) && (cutoff == "" || $2 + 0 <= cutoff + 0)) owned[$2]=1
     }
     END { for (seq in owned) if (seq in present) print seq }
   ' "$FM_WAKE_QUEUE" | LC_ALL=C sort -n > "$DRAIN_TMP" || return 1
@@ -606,6 +643,7 @@ else
 fi
 DRAIN_LOCK_HELD=true
 reclaim_stale_branch_grant_locked || exit 1
+[ "$ACTOR" != main ] || retire_unconsumable_rows_locked
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 
 if [ -n "$ACK_THROUGH" ]; then
@@ -615,13 +653,15 @@ if [ -n "$ACK_THROUGH" ]; then
     PRESENTED_MAX=$(presented_max_row "$MAIN_ROWS_FILE") || exit 1
   fi
   if [ "$ACTOR" = main ]; then
-    # Preserve main's original whole-cutoff acknowledgement contract: rows may
-    # arrive after presentation but before the printed ack runs, and a direct
-    # or replayed main ack still owns every unreserved row through its cutoff.
-    # Claim again under the queue lock so those rows cannot be stranded merely
-    # because they were not present during the earlier drain. A live branch
+    # Preserve main's original whole-cutoff acknowledgement contract: a direct
+    # or replayed main ack still owns every unreserved row through its cutoff,
+    # so claim those again under the queue lock and none is stranded merely
+    # because it was not present during the earlier drain. A row above the
+    # cutoff arrived after presentation and was never shown to main, so it
+    # stays unowned for whichever actor presents it next; claiming it here
+    # would hand every later away-session wake back to main. A live branch
     # grant remains excluded by claim_main_rows_locked.
-    claim_main_rows_locked || exit 1
+    claim_main_rows_locked "$ACK_THROUGH" || exit 1
   fi
   if [ "$ACTOR" = branch ]; then
     # check-kind rows (inactive-outcome receipts, secondmate stall markers)
@@ -756,6 +796,11 @@ if [ "$ACTOR" = main ]; then
   fi
   claim_main_rows_locked || exit 1
   if [ ! -s "$MAIN_ROWS_FILE" ]; then
+    # Every remaining row is reserved by the live branch grant, which presents
+    # and acknowledges them itself. Say so rather than exiting silently: a
+    # drain that prints nothing while the queue is visibly non-empty reads as a
+    # lost wake, and leaves the caller with no idea who owns what is queued.
+    print_branch_held_notice
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     DRAIN_LOCK_HELD=false
     (print_status_presentation) || true

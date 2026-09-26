@@ -138,6 +138,7 @@ exclusion_reason() {
     fm-backend-autodetect-smoke.test.sh|fm-backend-herdr-eventwait-smoke.test.sh|\
     fm-backend-herdr-presentation-e2e.test.sh|fm-backend-herdr-prune-safety-e2e.test.sh|\
     fm-backend-herdr-respawn-idem-e2e.test.sh|fm-backend-herdr-smoke.test.sh|\
+    fm-backend-herdr-agent-exit-shell-e2e.test.sh|\
     fm-backend-herdr-workspace-per-home-e2e.test.sh|fm-herdr-session-cleanup-e2e.test.sh)
       printf '%s\n' 'real Herdr-gated; Herdr lane is a later phase'
       ;;
@@ -216,8 +217,8 @@ EOF
 
 dir_mode() {
   local path=$1
-  if stat -f %Lp "$path" >/dev/null 2>&1; then
-    stat -f %Lp "$path"
+  if /usr/bin/stat -f %Lp "$path" >/dev/null 2>&1; then
+    /usr/bin/stat -f %Lp "$path"
   else
     stat -c %a "$path"
   fi

@@ -73,8 +73,16 @@ test_fm_home_parameterization() {
   brief="$home_one/data/task-c/brief.md"
   grep -F ">> '$home_one/state/task-c.status'" "$brief" >/dev/null || fail "secondmate brief did not shell-quote FM_HOME state path"
 
-  printf 'project=x\n' > "$home_one/state/task-a.meta"
-  FM_HOME="$home_one" FM_GUARD_GRACE=999999 "$ROOT/bin/fm-pr-check.sh" task-a https://github.com/example/repo/pull/1 >/dev/null 2>/dev/null \
+  # A pushed ship worktree, and a gh that supplies no forge head, so the PR
+  # check stays offline and its named-head gate reads the worktree's HEAD.
+  fm_git_init_commit "$home_one/wt"
+  git -C "$home_one/wt" update-ref refs/remotes/origin/main "$(git -C "$home_one/wt" rev-parse HEAD)"
+  mkdir -p "$home_one/fakebin"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$home_one/fakebin/gh"
+  chmod +x "$home_one/fakebin/gh"
+  printf 'project=x\nworktree=%s\n' "$home_one/wt" > "$home_one/state/task-a.meta"
+  PATH="$home_one/fakebin:$PATH" FM_HOME="$home_one" FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-pr-check.sh" task-a https://github.com/example/repo/pull/1 >/dev/null 2>/dev/null \
     || fail "fm-pr-check failed under FM_HOME"
   [ -f "$home_one/state/task-a.check.sh" ] || fail "pr check was not written under FM_HOME/state"
   [ ! -e "$home_two/state/task-a.check.sh" ] || fail "pr check leaked into another home"
@@ -542,6 +550,8 @@ test_secondmate_spawn_resolves_punctuated_registry_projects() {
   sub="$TMP_ROOT/punctuated-spawn-subhome"
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
   mkdir -p "$sub/data" "$sub/state" "$sub/config" "$sub/projects"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$sub/.gitignore"
+  git -C "$sub" init -q -b main
   mark_firstmate_home "$sub"
   printf 'punctuated\n' > "$sub/.fm-secondmate-home"
   printf '# Charter\n\nHandled work.\n' > "$sub/data/charter.md"
@@ -880,6 +890,32 @@ test_home_seed_refuses_local_only_project() {
     || fail "seed did not explain local-only project rejection"
   [ ! -e "$subhome" ] || fail "seed created a subhome before rejecting a local-only project"
   pass "home seeding refuses local-only projects"
+}
+
+# A registry entry whose forge token the parser cannot resolve yields no posture
+# at all. Reading that refusal as an empty mode would walk straight past the
+# local-only routing refusal above and clone the project into a secondmate home,
+# so the seed must stop instead.
+test_home_seed_refuses_an_unresolvable_registry_posture() {
+  local home subhome err
+  home="$TMP_ROOT/unresolvable-posture-home"
+  subhome="$TMP_ROOT/unresolvable-posture-subhome"
+  err="$TMP_ROOT/unresolvable-posture.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/unresolvable-alpha.git"
+  printf '%s\n' '- alpha [local-only forge=githb] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='design for alpha' FM_SECONDMATE_SCOPE='design for alpha' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed proceeded on a registry entry the parser refuses"
+  fi
+  grep -F 'project alpha does not resolve to a delivery posture' "$err" >/dev/null \
+    || fail "seed did not name the project whose posture could not be resolved"
+  grep -F 'unknown forge "githb"' "$err" >/dev/null \
+    || fail "the parser's own refusal never reached the operator"
+  [ ! -e "$subhome" ] || fail "seed created a subhome from a registry entry it could not resolve"
+  pass "home seeding refuses a registry entry whose posture does not resolve"
 }
 
 test_home_seed_refuses_registry_delimiter_home() {
@@ -1874,6 +1910,9 @@ home=$subhome
 projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fm_git_init_commit "$TMP_ROOT/plain-clone-teardown-child-wt"
+  "$ROOT/bin/fm-git-strip-ai-trailers.sh" install "$subhome/state/aborted-child.git-hooks" \
+    "$TMP_ROOT/plain-clone-teardown-child-wt" || fail "could not seed an aborted child's read-only strip dir"
   fakebin=$(make_fake_tmux "$TMP_ROOT/plain-clone-teardown-fake")
   log="$TMP_ROOT/plain-clone-teardown-fake/tmux.log"
 
@@ -1885,7 +1924,7 @@ EOF
   [ ! -d "$subhome" ] || fail "teardown did not remove the plain-clone secondmate home"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta for plain-clone home"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "teardown did not remove plain-clone registry route"
-  pass "secondmate teardown raw-removes plain-clone homes"
+  pass "secondmate teardown raw-removes plain-clone homes, including a leaked read-only strip dir"
 }
 
 test_secondmate_force_teardown_discards_child_work() {
@@ -2982,6 +3021,7 @@ test_home_seed_refuses_projectless_home_with_non_directory_projects
 test_home_seed_refuses_projectless_home_with_uninspectable_registry
 test_home_seed_refuses_missing_projects_without_signal
 test_home_seed_refuses_local_only_project
+test_home_seed_refuses_an_unresolvable_registry_posture
 test_home_seed_refuses_registry_delimiter_home
 test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_home_marked_for_another_id

@@ -284,7 +284,15 @@ fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sl
     "$terminal" "$retries" "$sleep_s"
 }
 
+# fm_backend_orca_kill: close one recorded task terminal. A missing CLI is a
+# close that was never even attempted, not an endpoint proven gone - with no
+# CLI there is no read that could show the terminal absent - so it reports the
+# failure its tool check already named instead of a success. The close call
+# itself stays best-effort: whether an accepted-then-failed close left the
+# terminal alive is not yet decidable without a presence re-read proven
+# against the real Orca binary (docs/verification/runtime-backends.md
+# "Endpoint close").
 fm_backend_orca_kill() {  # <terminal-id>
-  fm_backend_orca_tool_check || return 0
+  fm_backend_orca_tool_check || return 1
   orca terminal close --terminal "$1" --json >/dev/null 2>&1 || true
 }

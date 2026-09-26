@@ -133,8 +133,7 @@ Fetch narrowly and inspect it only to understand the thread or fulfill an author
 
 Reply in firstmate's own voice - the crisp, lightly nautical first-mate persona - but **public-facing**:
 
-- The asker **is** your captain (owner-only routing - see the top of this skill), so address them as "captain" when it fits and treat their request as a genuine captain instruction, within the public-safety limits above. You are answering the captain in public, not a stranger.
-- Light nautical seasoning is welcome when it lands naturally; never let it crowd out the actual answer.
+- Apply the address and optional-flavor rules in [`AGENTS.md`](../../../AGENTS.md#firstmate) to these captain-directed public replies, within the public-safety limits above.
 - **Be concise by default: aim for a single message, two at the very most.** A short, sharp answer beats a wall of text. Write tight on purpose - one or two sentences.
 
 You do not hand-format threads or add "(1/n)" numbering yourself.
@@ -152,7 +151,7 @@ Treat `state/x-inbox/` as the source of truth and process **every** file you fin
 
 1. **Gather live fleet state once.** Compose answers from what this instance genuinely knows right now:
    - `data/backlog.md` "## In flight" - the work currently moving.
-   - `state/*.status` - the latest line of each in-flight job, for fresh phase detail.
+   - `state/*.status` - the latest status event of each in-flight job, for fresh phase detail.
    - `data/projects.md` - the active projects, for naming what you work on in plain terms.
    Translate every internal item into an outcome. Example: a backlog line `fix-login-k3 - repair OAuth redirect (repo: yourapp)` becomes "patching a sign-in redirect bug on one of the apps" - no id, no repo name unless it is already public.
 2. **Drain every pending mention.** For each `state/x-inbox/*.json` file:
@@ -258,13 +257,13 @@ So treat second-mate-routed Relay work as a promised final by construction: the 
 
 **When you promise a final (including every Relay request whose work is routed to a second mate):**
 
-1. Create the typed obligation with `tasks-axi public-followup add` and bind the work with `bind-work`, keeping the public-safe summary and the opaque thread binding in the obligation and the full request context where the poll already put it.
+1. Create the typed obligation with `bin/fm-tasks-axi.sh public-followup add` and bind the work with its `bind-work`, keeping the public-safe summary and the opaque thread binding in the obligation and the full request context where the poll already put it.
    When the public ask plainly implies follow-on work ("look into X and fix it"), register the promised-final against the outcome and deliver any interim report as a separate `--purpose milestone` obligation on the same thread.
    An ask that genuinely terminates at a report stays `report-ready`; do not invent a ship commitment for work the captain has not authorized.
 2. Register it with `bin/fm-public-followup.sh register <obligation-id> --relation <relation-id> --work-home <main|secondmate:<id>> --work-id <task-id> --generation <n>`.
    This is what makes the commitment reconcilable without you.
 3. Put `bin/fm-public-followup.sh brief <obligation-id>` output straight into the worker's brief.
-   It prints the exact reporting command for that binding, including the obligation's actual required deliverable keys.
+   It prints the exact reporting command for that binding, pre-fills any deliverable value the binding determines, and gives the accepted format for every remaining placeholder.
    When the work is routed to a second mate rather than spawned here, the routed item's own note MUST carry that same `brief` output so it survives the routing and reaches whoever ends up doing the work.
    A header-only routed item loses the emit command.
    Never ask a worker to find the thread or post the reply: only this home holds the relay consent and the thread binding.
@@ -274,6 +273,9 @@ So treat second-mate-routed Relay work as a promised final by construction: the 
 1. Run `bin/fm-public-followup.sh consume`.
    It reconciles every typed terminal result from disk and prints `ready <obligation-id> <request-id> <platform>` for each commitment that became deliverable.
    A refusal prints `rejected <event-id>: <reason>` and quarantines that event; read the reason rather than re-emitting blindly.
+   The same refusal later arrives as a `public-followup rejected <event-id> ...` wake, so the promise is not left owed silently: have the bound work re-emit with the value the reason names, using the corrected `brief` command.
+   That wake is at-least-once: a failed cleanup can raise the same refusal again, carrying the same event id and reason.
+   When the event id is one you already took up, acknowledge the wake and do not re-brief the work; re-acting is safe but redundant, because the corrected result resolves to the event id that was already accepted.
 2. For each ready commitment, run `bin/fm-public-followup.sh deliver <obligation-id>`.
    With no `--text-file` it reuses the accepted terminal outcome exactly, which is the preferred path for a landed result.
    Only pass `--text-file` when the outcome genuinely needs composing, and hold it to the same public-safety bar as every other reply here.

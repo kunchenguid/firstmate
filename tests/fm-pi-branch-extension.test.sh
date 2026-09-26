@@ -54,6 +54,7 @@ install_pi_branch_extension_fixture() {
     "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
@@ -106,6 +107,10 @@ export class ModelRuntime {
   constructor() {
     this.models = (globalThis.__fmBranchStaticModels?.() ?? []).map((model) => ({ ...model }));
     this.authenticated = new Set(this.models.filter((model) => model.storedAuth !== false).map((model) => model.provider));
+    this.registeredProviderConfigs = new Map();
+    // Like the real runtime, a registered provider's credentials are only
+    // known once refresh() has run for it; registration alone is provisional.
+    this.pendingAuth = new Set();
   }
   static async create() {
     const queuedError = globalThis.__fmModelRuntimeErrors?.shift();
@@ -114,6 +119,18 @@ export class ModelRuntime {
     const runtime = new ModelRuntime();
     (globalThis.__fmModelRuntimes ??= []).push(runtime);
     return runtime;
+  }
+  registerProvider(providerId, config) {
+    this.registeredProviderConfigs.set(providerId, config);
+    for (const model of config.models ?? []) {
+      this.models.push({ ...model, provider: providerId });
+    }
+    if (config.oauth || config.apiKey) this.pendingAuth.add(providerId);
+  }
+  async refresh(options) {
+    for (const providerId of options?.providers ?? this.pendingAuth) {
+      if (this.pendingAuth.delete(providerId)) this.authenticated.add(providerId);
+    }
   }
   getModel(provider, id) {
     return this.models.find((model) => model.provider === provider && model.id === id);
@@ -446,6 +463,8 @@ const modelRegistry = {
   getAvailable: () => registryModels.filter((model) => model.mainAvailable !== false).slice(),
   find: (provider, id) => registryModels.find((model) => model.provider === provider && model.id === id),
   hasConfiguredAuth: (model) => model.mainAvailable !== false,
+  getRegisteredProviderConfig: (providerId) => globalThis.__fmExtensionProviderConfigs?.get(providerId),
+  getRegisteredProviderIds: () => [...(globalThis.__fmExtensionProviderConfigs?.keys() ?? [])],
 };
 function makeCtx(extra) {
   return {
@@ -581,14 +600,17 @@ const pi = {
 async function fire(event, payload, ctx) {
   const eventCtx = ctx;
   if (eventCtx?.sessionManager) activeMainSession = eventCtx.sessionManager;
-  for (const handler of piHandlers.get(event) ?? []) await handler(payload, eventCtx);
+  let result;
+  for (const handler of piHandlers.get(event) ?? []) result = await handler(payload, eventCtx);
+  return result;
 }
-function makeOffer(message, projects = [approvedProject], heartbeat = false, eligible = projects.length > 0 || heartbeat) {
+function makeOffer(message, projects = [approvedProject], heartbeat = false, eligible = projects.length > 0 || heartbeat, awayOnly = false) {
   const offer = {
     message,
     projects,
     heartbeat,
     eligible,
+    awayOnly,
     accepted: false,
     settlement: Promise.resolve(),
     accept(settlement = Promise.resolve()) {
@@ -1226,8 +1248,8 @@ test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home }; })()`);
-const { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home, bus }; })()`);
+const { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home, bus } = globalThis.__t;
 import { readFileSync, writeFileSync } from "node:fs";
 
 const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
@@ -1313,7 +1335,18 @@ if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcom
 }
 
 // Only the sequence-bound acknowledgement closes it.
-const processed = mainTools.find((tool) => tool.name === "fm_branch_processed");
+const nativeTools = new Map();
+const messageTypes = new Set();
+bus.emit("firstmate:native-tools", {
+  register: (tool) => nativeTools.set(tool.name, tool),
+  allowMessageType: (type) => messageTypes.add(type),
+});
+if ([...nativeTools.keys()].sort().join(",") !== "fm_branch_outcomes,fm_branch_processed") throw new Error("native discovery exposed unrelated tools");
+for (const tool of mainTools) {
+  if (nativeTools.get(tool.name)?.execute !== tool.execute) throw new Error("native controls lost the original guards");
+}
+if ([...messageTypes].sort().join(",") !== "firstmate-sessionstart-nudge,fm-branch-merge,fm-branch-process") throw new Error("operational message allowlist changed");
+const processed = nativeTools.get("fm_branch_processed");
 if (!processed) throw new Error("main did not receive its acknowledgement tool");
 const routineAck = await processed.execute("ack-routine", { through: routineSeq }, undefined, undefined, {});
 if (!routineAck.isError || !routineAck.content.some((item) => item.type === "text" && item.text.includes("not an unprocessed captain outcome"))) {
@@ -1342,6 +1375,7 @@ globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishReplaceme
 const replacementOffer = dispatch("signal: after replacement");
 if (!replacementOffer.accepted) throw new Error("branch refused a wake after the replacement");
 await settle(() => (globalThis.__fmSessions ?? []).length === 2, "replacement branch session");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "replacement branch prompt");
 const report2 = globalThis.__fmSessions[1].options.customTools.find((tool) => tool.name === "fm_branch_report");
 const beforePair = requests().length;
 const second = await report2.execute("captain-2", { task: "branch-driver", verdict: "captain", summary: "PR https://example.com/pr/e is ready for review" }, undefined, undefined, {});
@@ -1557,17 +1591,19 @@ if (dispatch("check: unresolved fleet event", []).accepted) {
   throw new Error("branch accepted an unscoped, non-heartbeat fleet wake");
 }
 
-// Away mode still owns supervision regardless of default-on eligibility.
+// The legacy away daemon flag means nothing on Pi, where the daemon is never
+// launched: the branch keeps accepting (docs/pi-supervision-branch.md
+// "Postures"; the away-posture record itself is covered by
+// test_away_record_parks_main_and_presents_after_archive).
 writeFileSync(`${home}/state/.afk`, "");
-if (dispatch("signal: while afk").accepted) throw new Error("branch accepted a wake during away mode");
+if (!dispatch("signal: legacy flag present").accepted) throw new Error("branch declined a wake over the legacy daemon flag");
 rmSync(`${home}/state/.afk`);
-if (!dispatch("signal: gates cleared").accepted) throw new Error("branch refused a wake with gates cleared");
 await settle(() => (globalThis.__fmPrompts ?? []).length === 3, "branch wake prompts");
 process.exit(0);
 EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
-  expect_code 0 "$status" "default-on eligibility, heartbeat routing, and afk gating must bind: $out"
+  expect_code 0 "$status" "default-on eligibility, heartbeat routing, and legacy-flag indifference must bind: $out"
 
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$TMP_ROOT/gating-home-2" FM_ROOT_OVERRIDE="$broken" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -1595,7 +1631,342 @@ EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "broken-branch settlement must return delivery ownership to the watcher: $out"
-  pass "branch default-on eligibility (task-scoped, heartbeat, afk) binds and a broken branch rejects to watcher fallback"
+  pass "branch default-on eligibility (task-scoped, heartbeat, legacy flag ignored) binds and a broken branch rejects to watcher fallback"
+}
+
+# The away posture on the branch side (docs/pi-supervision-branch.md
+# "Postures"): with the record present the wake carries the POSTURE: AWAY tail
+# ending in the record's read-back verbatim while the branch session and its
+# prefix are untouched; check and heartbeat rows are claimed and lift task
+# scoping; a captain outcome persists its visible entry but opens NO processing
+# turn on the parked main, at report time, at every run boundary, and at
+# session start; a request already pending when the record appears is
+# cancelled rather than re-presented; and the first run boundary after the
+# record is archived presents the accumulated rows with a fresh triggered
+# budget. Every record read goes through the real bin/fm-afk-contract.sh.
+test_away_record_parks_main_and_presents_after_archive() {
+  local repo home out status
+  repo="$TMP_ROOT/away-root"
+  home="$TMP_ROOT/away-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, outcomeScript, defaultSessionCtx, home, realRoot, bus, approvedProject }; })()`);
+const { fire, dispatch, settle, sentToMain, mainEntries, outcomeScript, defaultSessionCtx, home, realRoot, bus, approvedProject } = globalThis.__t;
+import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+
+const contract = (args) => {
+  const result = spawnSync("bash", [`${realRoot}/bin/fm-afk-contract.sh`, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state` },
+  });
+  if (result.status !== 0) throw new Error(`fm-afk-contract.sh ${args.join(" ")} failed: ${result.stderr}`);
+  return result.stdout || "";
+};
+const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
+const unprocessedSeqs = () => outcomeScript(["unprocessed"]).split("\n").filter(Boolean).map((line) => JSON.parse(line).seq);
+const runOf = async (fn) => { await fire("agent_start", {}); await fn?.(); await fire("agent_end", {}); await fire("agent_settled", {}); };
+
+await fire("session_start", {}, defaultSessionCtx);
+
+// 1. Attended: no tail, and the branch session is built from the generator.
+let finishPrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishPrompt = resolve; });
+const attendedOffer = dispatch("signal: attended wake");
+if (!attendedOffer.accepted) throw new Error("the attended wake was refused");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "attended branch prompt");
+const session = globalThis.__fmSessions[0];
+const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+if (globalThis.__fmPrompts[0].includes("POSTURE: AWAY")) throw new Error("an attended wake carried the away tail");
+// The prefix is the generator's output handed to the branch's resource
+// loader; the per-wake tail must never appear there.
+const systemPrompt = (globalThis.__fmLoaders ?? []).at(-1)?.options?.systemPrompt;
+if (typeof systemPrompt !== "string" || !systemPrompt.startsWith("You are the SUPERVISION BRANCH")) {
+  throw new Error("the branch session was not built from the byte-stable generator");
+}
+if (systemPrompt.includes("POSTURE: AWAY.")) throw new Error("the per-wake tail leaked into the prefix");
+if (!systemPrompt.includes("# Postures") || !systemPrompt.includes("# Ask-user authority policy")) {
+  throw new Error("the prefix lost its fixed Postures section or the ask-user-authority policy");
+}
+await report.execute("r1", { task: "branch-driver", verdict: "routine", summary: "worker healthy" }, undefined, undefined, {});
+finishPrompt();
+await attendedOffer.settlement;
+globalThis.__fmOnBranchPrompt = undefined;
+
+// 2. A captain outcome reported while main is already streaming queues a
+// followUp that joins this run. The record appearing before that follow-up
+// is consumed must strip the typed processing message at the context
+// boundary for followUp, nextTurn, and a dedicated processing turn.
+await fire("agent_start", {}, defaultSessionCtx);
+const first = await report.execute("c1", { task: "task-d", verdict: "captain", summary: "PR https://example.com/pr/1 is ready for review" }, undefined, undefined, {});
+if (first.isError) throw new Error(`attended captain report failed: ${JSON.stringify(first)}`);
+const seq1 = JSON.parse(outcomeScript(["list", "--recent", "1"])).seq;
+if (requests().length !== 1) throw new Error(`the attended captain outcome opened ${requests().length} requests, not 1`);
+const pending = requests()[0];
+if (pending.message.customType !== "fm-branch-process") {
+  throw new Error(`the first queued request was not a processing delivery: ${JSON.stringify(pending.message)}`);
+}
+if (pending.options.triggerTurn !== true || pending.options.deliverAs !== "followUp") {
+  throw new Error(`the first queued request was not a streaming followUp: ${JSON.stringify(pending.options)}`);
+}
+if (!pending.message.content.includes(`[seq ${seq1}]`)) {
+  throw new Error(`the first queued request lost seq ${seq1}: ${pending.message.content}`);
+}
+contract(["enter", "--words", "merge task-d when green, then cut the prerelease\n\n"]);
+const processingMsg = { role: "custom", customType: pending.message.customType, content: pending.message.content, display: false };
+let aborted = false;
+const abortCtx = { ...defaultSessionCtx, abort() { aborted = true; } };
+const streamingResult = await fire("context", {
+  messages: [
+    { role: "user", content: "captain still in this turn" },
+    { role: "assistant", content: [{ type: "toolCall", id: "t1" }] },
+    { role: "toolResult", toolCallId: "t1", content: "tool finished" },
+    processingMsg,
+  ],
+}, abortCtx);
+if (aborted) throw new Error("stripping processing aborted a captain-opened streaming turn after a tool call");
+if (streamingResult?.messages?.some((message) => message.customType === "fm-branch-process")) {
+  throw new Error(`streaming processing was not stripped: ${JSON.stringify(streamingResult)}`);
+}
+if (!streamingResult?.messages?.some((message) => message.role === "user")) {
+  throw new Error("streaming suppression dropped the captain turn");
+}
+aborted = false;
+const nextTurnResult = await fire("context", {
+  messages: [{ role: "user", content: "watcher: FAILED - repair the cycle" }, processingMsg],
+}, abortCtx);
+if (aborted) throw new Error("stripping a nextTurn processing message aborted the watcher-failure turn");
+if (nextTurnResult?.messages?.some((message) => message.customType === "fm-branch-process")) {
+  throw new Error(`nextTurn processing was not stripped: ${JSON.stringify(nextTurnResult)}`);
+}
+const history = [
+  { role: "user", content: "earlier captain request" },
+  { role: "assistant", content: "earlier firstmate reply" },
+];
+aborted = false;
+const openedByCaptain = await fire("context", {
+  messages: [...history, { role: "user", content: "current captain prompt" }, processingMsg],
+}, abortCtx);
+if (aborted) throw new Error("stripping processing aborted a captain-opened turn that had history");
+if (openedByCaptain?.messages?.some((message) => message.customType === "fm-branch-process")) {
+  throw new Error(`captain-opened processing was not stripped: ${JSON.stringify(openedByCaptain)}`);
+}
+aborted = false;
+await fire("before_agent_start", { prompt: "captain typed this now" }, abortCtx);
+const stolen = await fire("context", {
+  messages: [{ role: "user", content: "captain typed this now" }, processingMsg],
+}, abortCtx);
+if (aborted) throw new Error("a captain prompt that opened the run was aborted after a queued processing request joined it");
+if (stolen?.messages?.some((message) => message.customType === "fm-branch-process")) {
+  throw new Error(`joined processing was not stripped from the captain-opened run: ${JSON.stringify(stolen)}`);
+}
+await fire("agent_end", {});
+aborted = false;
+await fire("before_agent_start", { prompt: pending.message.content }, abortCtx);
+await fire("agent_start", {}, defaultSessionCtx);
+const openedByRequest = await fire("context", { messages: [...history, processingMsg] }, abortCtx);
+if (!aborted) throw new Error("a dedicated processing turn with history was not aborted under the record");
+if (openedByRequest?.messages?.some((message) => message.customType === "fm-branch-process")) {
+  throw new Error(`dedicated processing with history was not stripped: ${JSON.stringify(openedByRequest)}`);
+}
+await fire("agent_end", {});
+await fire("agent_settled", {});
+if (requests().length !== 1) throw new Error("a request pending when the record appeared was re-presented to the parked main");
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq1])) throw new Error(`the record moved the processed marker: ${unprocessedSeqs()}`);
+
+// 3. Under the record: the tail ends with the read-back verbatim, the branch
+// session is the same one (no rebuild, so the prefix is untouched), the
+// check and heartbeat rows are claimed, and a claimed check row lifts task
+// scoping so the branch may report fleet.
+writeFileSync(
+  `${home}/state/.wake-queue`,
+  "1\t1\tsignal\tbranch-driver.status\tsignal: away wake\n2\t2\tcheck\tmain-only\tcheck: task-d.check.sh: PR merged\n3\t3\theartbeat\theartbeat\theartbeat\n",
+);
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishPrompt = resolve; });
+const awayOffer = {
+  message: "signal: away wake",
+  projects: [approvedProject],
+  heartbeat: false,
+  eligible: true,
+  accepted: false,
+  settlement: Promise.resolve(),
+  accept(settlement = Promise.resolve()) {
+    awayOffer.accepted = true;
+    awayOffer.settlement = settlement;
+  },
+};
+bus.emit("fm-branch-supervision:dispatch", awayOffer);
+if (!awayOffer.accepted) throw new Error("the away wake was refused");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "away branch prompt");
+if (globalThis.__fmSessions.length !== 1) throw new Error("the away posture rebuilt the branch session");
+const awayPrompt = globalThis.__fmPrompts[1];
+const head = "FIRSTMATE SUPERVISION WAKE: signal: away wake\n\nHandle this per your operating procedure and finish with fm_branch_report.\n\nPOSTURE: AWAY. ";
+if (!awayPrompt.startsWith(head)) throw new Error(`the away wake lost its shape or its tail: ${awayPrompt}`);
+const readback = contract(["readback"]);
+if (!readback.endsWith("    merge task-d when green, then cut the prerelease\n    \n")) throw new Error(`the read-back lost the captain's words or their trailing blank line: ${JSON.stringify(readback)}`);
+if (!awayPrompt.includes("act on them by your own judgment")) throw new Error(`the away tail lost the words-execution rule: ${awayPrompt}`);
+if (awayPrompt.includes("does not execute them")) throw new Error(`the away tail still calls the words inert: ${awayPrompt}`);
+if (!awayPrompt.endsWith(`The record, verbatim:\n${readback}`)) throw new Error(`the tail does not end with the record's read-back verbatim, trailing whitespace included: ${JSON.stringify(awayPrompt)}`);
+const snapshot = readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim().split("\n").join(",");
+if (snapshot !== "1,2,3") throw new Error(`the away wake claimed rows ${snapshot}, not every row`);
+const fleet = await report.execute("c2", { task: "fleet", verdict: "captain", summary: "per your away instructions: merged task-d's PR once green" }, undefined, undefined, {});
+if (fleet.isError) throw new Error(`a fleet report under a claimed check row was refused: ${JSON.stringify(fleet)}`);
+finishPrompt();
+await awayOffer.settlement;
+globalThis.__fmOnBranchPrompt = undefined;
+const seq2 = JSON.parse(outcomeScript(["list", "--recent", "1"])).seq;
+
+// 4. No processing turn under the record: not at report time, not at a run
+// boundary, not at session start. The visible entry still persists.
+if (requests().length !== 1) throw new Error("a captain outcome under the record opened a processing turn on the parked main");
+if (!mainEntries.some((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === seq2)) {
+  throw new Error("the captain row's visible entry was not persisted under the record");
+}
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq1, seq2])) throw new Error(`the rows did not accumulate unprocessed: ${unprocessedSeqs()}`);
+await runOf();
+if (requests().length !== 1) throw new Error("a run boundary under the record opened a processing turn");
+await fire("session_shutdown", {});
+await fire("session_start", {}, defaultSessionCtx);
+if (requests().length !== 1) throw new Error("session start under the record opened a processing turn");
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq1, seq2])) throw new Error("the record moved the processed marker across a session start");
+
+// 5. The return archives the record; the first run boundary presents the
+// accumulated set as one request with a fresh triggered budget.
+contract(["archive"]);
+await runOf();
+if (requests().length !== 2) throw new Error(`the run boundary after archive presented ${requests().length - 1} requests, not 1`);
+const presented = requests()[1];
+if (presented.options.triggerTurn !== true || presented.options.deliverAs !== "followUp") {
+  throw new Error(`the post-archive presentation did not open its own turn: ${JSON.stringify(presented.options)}`);
+}
+for (const needle of [`[seq ${seq1}] task-d:`, `[seq ${seq2}] fleet:`, `through=${seq2}`]) {
+  if (!presented.message.content.includes(needle)) throw new Error(`the post-archive request lost ${needle}: ${presented.message.content}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "the away posture must park main and present after archive: $out"
+  pass "under the away-posture record the wake carries the verbatim read-back tail, claims every row, opens no processing turn, cancels a pending request, and presents the accumulated rows after archive"
+}
+
+test_away_only_wake_rejects_when_record_is_archived_before_drain() {
+  local repo home out status
+  repo="$TMP_ROOT/away-only-recheck-root"
+  home="$TMP_ROOT/away-only-recheck-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, home, realRoot, bus, makeOffer, mainUserMessages, approvedProject }; })()`);
+const { fire, home, realRoot, bus, makeOffer, mainUserMessages, approvedProject } = globalThis.__t;
+import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+
+const contract = (args) => {
+  const result = spawnSync("bash", [`${realRoot}/bin/fm-afk-contract.sh`, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state` },
+  });
+  if (result.status !== 0) throw new Error(`fm-afk-contract.sh ${args.join(" ")} failed: ${result.stderr}`);
+  return result.stdout || "";
+};
+
+await fire("session_start", {});
+contract(["enter"]);
+writeFileSync(`${home}/state/.wake-queue`, "1\t1\tcheck\tmain-only\tcheck: task-d.check.sh: PR merged\n");
+contract(["archive"]);
+const offer = makeOffer("check: task-d.check.sh: PR merged", [], false, true, true);
+bus.emit("fm-branch-supervision:dispatch", offer);
+if (!offer.accepted) throw new Error("the away check-only wake was refused at accept");
+const failure = await offer.settlement.then(() => null, (error) => error);
+if (!(failure instanceof Error) || !failure.message.includes("no longer branch-eligible")) {
+  throw new Error(`an away-only wake archived before accept quiet-no-op'd: ${String(failure)}`);
+}
+if ((globalThis.__fmPrompts ?? []).length !== 0) {
+  throw new Error(`the archived away-only wake still prompted the branch: ${JSON.stringify(globalThis.__fmPrompts)}`);
+}
+if (mainUserMessages.length !== 0) {
+  throw new Error("the rejected settlement leaked a main user message from the branch");
+}
+
+contract(["enter"]);
+writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tbranch-driver.status\tsignal: branch-driver.status\n");
+const taskLocal = makeOffer("signal: branch-driver.status", [approvedProject], false, true);
+bus.emit("fm-branch-supervision:dispatch", taskLocal);
+if (!taskLocal.accepted) throw new Error("the attended-eligible away wake was refused at accept");
+writeFileSync(`${home}/state/.wake-queue`, "");
+const quiet = await taskLocal.settlement.then(() => null, (error) => error);
+if (quiet instanceof Error) {
+  throw new Error(`an attended-eligible wake threw after it was drained: ${quiet.message}`);
+}
+if ((globalThis.__fmPrompts ?? []).length !== 0) {
+  throw new Error(`a drained task-local wake prompted the branch: ${JSON.stringify(globalThis.__fmPrompts)}`);
+}
+if (mainUserMessages.length !== 0) {
+  throw new Error("a drained task-local wake opened a redundant main turn");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "an accepted away-only wake must reject after archive: $out"
+  pass "an accepted away-only wake rejects after archive, while a drained task-local wake stays a quiet no-op"
+}
+
+test_away_claimed_heartbeat_on_a_task_wake_lifts_task_scoping() {
+  local repo home out status
+  repo="$TMP_ROOT/away-heartbeat-scope-root"
+  home="$TMP_ROOT/away-heartbeat-scope-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, settle, home, realRoot, bus, makeOffer, approvedProject, defaultSessionCtx }; })()`);
+const { fire, settle, home, realRoot, bus, makeOffer, approvedProject, defaultSessionCtx } = globalThis.__t;
+import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+
+const contract = (args) => {
+  const result = spawnSync("bash", [`${realRoot}/bin/fm-afk-contract.sh`, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state` },
+  });
+  if (result.status !== 0) throw new Error(`fm-afk-contract.sh ${args.join(" ")} failed: ${result.stderr}`);
+  return result.stdout || "";
+};
+
+await fire("session_start", {}, defaultSessionCtx);
+contract(["enter"]);
+writeFileSync(
+  `${home}/state/.wake-queue`,
+  "1\t1\tsignal\tbranch-driver.status\tsignal: branch-driver.status\n2\t2\theartbeat\theartbeat\theartbeat\n",
+);
+let finishPrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishPrompt = resolve; });
+const offer = makeOffer("signal: branch-driver.status", [approvedProject], false, true);
+bus.emit("fm-branch-supervision:dispatch", offer);
+if (!offer.accepted) throw new Error("the mixed away wake was refused");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "mixed away branch prompt");
+const snapshot = readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim().split("\n").join(",");
+if (snapshot !== "1,2") throw new Error(`the mixed away wake claimed rows ${snapshot}, not signal+heartbeat`);
+const session = globalThis.__fmSessions[0];
+const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+const fleet = await report.execute("fleet", { task: "fleet", verdict: "routine", summary: "fleet heartbeat under a task wake" }, undefined, undefined, {});
+if (fleet.isError) throw new Error(`a claimed heartbeat on a task wake still scoped the report: ${JSON.stringify(fleet)}`);
+finishPrompt();
+await offer.settlement;
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a claimed heartbeat on a non-heartbeat wake must lift task scoping: $out"
+  pass "a claimed heartbeat row on a non-heartbeat away wake lifts task scoping for the fleet report"
 }
 
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under() {
@@ -2612,6 +2983,16 @@ if (cleared.options.model?.id === "cheap-1") {
 if (cleared.options.model?.provider !== "anthropic" || cleared.options.model?.id !== "main-model") {
   throw new Error(`clearing the pin did not return the branch to main's model: ${JSON.stringify(cleared.options.model)}`);
 }
+// A native main must use an explicit independent ordinary-Pi branch.
+registryModels.push({ provider: "openai-codex", id: "gpt-6-astra" });
+await fire("session_shutdown", {});
+await fire("session_start", {}, makeCtx({ model: { provider: "codex-native", id: "gpt-6-astra" } }));
+dispatch("signal: native main ordinary branch");
+await settle(() => (globalThis.__fmSessions ?? []).length === 6, "native-main branch build");
+const nativeBranch = globalThis.__fmSessions[5].options.model;
+if (nativeBranch?.provider !== "openai-codex" || nativeBranch?.id !== "gpt-6-astra") {
+  throw new Error(`native main inherited an unsafe branch runtime: ${JSON.stringify(nativeBranch)}`);
+}
 process.exit(0);
 EOF
   status=$?
@@ -2821,6 +3202,52 @@ if (
 ) {
   throw new Error(`post-clear resolution failure was not reported honestly: ${JSON.stringify(clearFailureNotices)}`);
 }
+
+// Under a codex-native main, Follow main reports the ordinary openai-codex
+// model the next build actually runs, and the picker never offers the main
+// native provider itself.
+registryModels.push({ provider: "codex-native", id: "gpt-6-astra" }, { provider: "openai-codex", id: "gpt-6-astra" });
+const nativeCtx = makeCtx({ model: { provider: "codex-native", id: "gpt-6-astra" } });
+const nativePromptCount = uiPrompts.length;
+const nativeNoticeCount = notices.length;
+uiSelections.push("Follow main (codex-native/gpt-6-astra)");
+await command.handler("", nativeCtx);
+const nativeOffer = uiPrompts[nativePromptCount];
+if (nativeOffer.options[0] !== "Follow main (codex-native/gpt-6-astra)" || nativeOffer.options.includes("codex-native/gpt-6-astra")) {
+  throw new Error(`the picker must offer following a native main without offering its native provider: ${JSON.stringify(nativeOffer.options)}`);
+}
+const nativeNotices = notices.slice(nativeNoticeCount);
+if (nativeNotices.length !== 1 || nativeNotices[0].type !== "info" || !nativeNotices[0].message.includes("openai-codex/gpt-6-astra")) {
+  throw new Error(`following a native main did not report the ordinary Pi model the build uses: ${JSON.stringify(nativeNotices)}`);
+}
+dispatch("signal: native follow");
+await settle(() => (globalThis.__fmSessions ?? []).length === 6, "native-main follow build");
+const nativeFollowed = globalThis.__fmSessions[5].options.model;
+if (nativeFollowed?.provider !== "openai-codex" || nativeFollowed?.id !== "gpt-6-astra") {
+  throw new Error(`the build did not run the model the picker reported: ${JSON.stringify(nativeFollowed)}`);
+}
+
+// When that ordinary model is unavailable, the picker reports the refusal the
+// next build enforces instead of claiming the branch keeps a recorded model.
+registryModels.splice(registryModels.findIndex((model) => model.provider === "openai-codex" && model.id === "gpt-6-astra"), 1);
+const refusalNoticeCount = notices.length;
+uiSelections.push("Follow main (codex-native/gpt-6-astra)");
+await command.handler("", nativeCtx);
+const refusalNotices = notices.slice(refusalNoticeCount);
+if (
+  refusalNotices.length !== 1 ||
+  refusalNotices[0].type !== "warning" ||
+  !refusalNotices[0].message.includes("refuses to build") ||
+  refusalNotices[0].message.includes("keeps the model its own session recorded")
+) {
+  throw new Error(`following an unavailable native main did not report the build refusal: ${JSON.stringify(refusalNotices)}`);
+}
+const refusedOffer = dispatch("signal: native follow refused");
+const refusal = await refusedOffer.settlement.then(() => null, (error) => error);
+if (!(refusal instanceof Error) || !refusal.message.includes("refuses to build")) {
+  throw new Error(`the build did not refuse as the picker reported: ${String(refusal)}`);
+}
+if (globalThis.__fmSessions.length !== 6) throw new Error("a refused native follow still built a branch");
 process.exit(0);
 EOF
   status=$?
@@ -3358,6 +3785,18 @@ const unparseable = globalThis.__fmSessions[0].options.model;
 if (unparseable?.provider !== "anthropic" || unparseable?.id !== "main-model") {
   throw new Error(`an unparseable pin must be treated as no pin and follow main: ${JSON.stringify(unparseable)}`);
 }
+// Even a registered native provider cannot be selected by the independent
+// supervision session: its persistent native thread belongs to main.
+registryModels.push({ provider: "codex-native", id: "gpt-6-astra" });
+writeFileSync(`${home}/config/supervision-branch-model`, "codex-native/gpt-6-astra\n");
+await fire("session_shutdown", {});
+await fire("session_start", {}, makeCtx());
+const nativeOffer = dispatch("signal: native branch pin refused");
+const nativeFailure = await nativeOffer.settlement.then(() => null, (error) => error);
+if (!(nativeFailure instanceof Error) || !nativeFailure.message.includes("ordinary Pi provider")) {
+  throw new Error(`native branch pin was not explicitly refused: ${String(nativeFailure)}`);
+}
+if (globalThis.__fmSessions.length !== 1) throw new Error("native pin built a shared native branch");
 process.exit(0);
 EOF
   status=$?
@@ -3708,6 +4147,7 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot(
   home="$TMP_ROOT/dispatch-classify-home"
   mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
@@ -4136,6 +4576,7 @@ test_outcomes_tool_uses_stock_execution_and_export_consumers() {
   mkdir -p "$fixture/.pi/extensions/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$fixture/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$fixture/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$fixture/.pi/extensions/lib/fm-branch-model-picker.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$fixture/.pi/extensions/lib/fm-calm-visibility.ts"
@@ -4735,6 +5176,98 @@ EOF
   pass "a failed cursor write re-delivers a routine note exactly once more while a captain outcome stays deduplicated"
 }
 
+test_extension_registered_provider_resolves_in_the_branch() {
+  local repo home out status
+  repo="$TMP_ROOT/extprov-root"
+  home="$TMP_ROOT/extprov-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, makeCtx, registryModels, uiSelections, uiPrompts, notices, commands, home }; })()`);
+const { fire, dispatch, settle, makeCtx, registryModels, uiSelections, uiPrompts, notices, commands, home } = globalThis.__t;
+import { readFileSync, writeFileSync } from "node:fs";
+
+// An extension-registered provider exists only in main's registry, never in
+// the isolated branch runtime's static catalog. Registering its config on
+// main's registry is what makes it resolvable for the branch.
+registryModels.push(
+  { provider: "anthropic", id: "main-model" },
+  // Available in main's registry but absent from the branch runtime's static
+  // catalog, exactly like a provider an extension registered at runtime.
+  { provider: "devin", id: "swe-1-7", branchAvailable: false },
+);
+globalThis.__fmExtensionProviderConfigs = new Map([
+  [
+    "devin",
+    {
+      name: "Devin (Cognition)",
+      api: "devin-cloud",
+      baseUrl: "https://server.codeium.com",
+      models: [{ id: "swe-1-7", name: "SWE 1.7", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 8192 }],
+      oauth: { name: "Devin (Cognition / Windsurf)", login: async () => ({}), refreshToken: async (c) => c, getApiKey: (c) => c.access },
+      streamSimple: () => {},
+    },
+  ],
+]);
+
+await fire("session_start", {}, makeCtx());
+
+// The picker must offer the extension-registered model: it is available in
+// main's registry and resolvable in the branch runtime once its registration
+// is copied across.
+const command = commands.get("supervision-model");
+if (!command) throw new Error("the supervision-model command was not registered");
+uiSelections.push("devin/swe-1-7");
+await command.handler("", makeCtx());
+const offered = uiPrompts[0];
+if (!offered.options.includes("devin/swe-1-7")) {
+  throw new Error(`the picker must offer an extension-registered provider the branch can run: ${JSON.stringify(offered.options)}`);
+}
+if (readFileSync(`${home}/config/supervision-branch-model`, "utf8") !== "devin/swe-1-7\n") {
+  throw new Error("the extension-registered pick was not persisted");
+}
+dispatch("signal: extension provider pin");
+await settle(() => (globalThis.__fmSessions ?? []).length === 1, "pinned extension-provider branch build");
+const pinned = globalThis.__fmSessions[0].options.model;
+if (!pinned || pinned.provider !== "devin" || pinned.id !== "swe-1-7") {
+  throw new Error(`the extension-registered pin did not bind the branch: ${JSON.stringify(pinned)}`);
+}
+// Copying the provider registration must not loosen the branch's isolation:
+// the devin-pinned session still loads no extensions, skills, or context files.
+const pinnedLoader = globalThis.__fmLoaders.at(-1);
+for (const key of ["noExtensions", "noSkills", "noContextFiles"]) {
+  if (pinnedLoader.options[key] !== true) throw new Error(`devin-pinned branch loader must keep ${key}`);
+}
+
+// Without the registration, the same pin is unavailable and the branch
+// refuses to build rather than silently downgrading.
+globalThis.__fmExtensionProviderConfigs = new Map();
+await fire("session_shutdown", {});
+await fire("session_start", {}, makeCtx());
+const unregisteredOffer = dispatch("signal: unregistered provider pin");
+if (!unregisteredOffer.accepted) throw new Error("unregistered-pin wake was not initially accepted");
+const unregisteredFailure = await unregisteredOffer.settlement.then(
+  () => null,
+  (error) => error,
+);
+if (
+  !(unregisteredFailure instanceof Error) ||
+  !unregisteredFailure.message.includes("devin/swe-1-7") ||
+  !unregisteredFailure.message.includes("supervision model pin")
+) {
+  throw new Error(`the unregistered pin did not reject with its own name: ${String(unregisteredFailure)}`);
+}
+if ((globalThis.__fmSessions ?? []).length !== 1) throw new Error("an unregistered pin must not build a second branch session");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "an extension-registered provider must resolve in the isolated branch runtime: $out"
+  pass "an extension-registered provider resolves in the isolated branch runtime"
+}
+
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
@@ -4744,6 +5277,9 @@ test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
+test_away_record_parks_main_and_presents_after_archive
+test_away_only_wake_rejects_when_record_is_archived_before_drain
+test_away_claimed_heartbeat_on_a_task_wake_lifts_task_scoping
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under
 test_branch_report_refuses_a_task_the_wake_did_not_name
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work
@@ -4763,6 +5299,7 @@ test_supervision_model_picker_is_bounded_searchable_and_branch_only
 test_branch_model_picker_keeps_follow_main_first_under_ranking
 test_branch_effort_pin_applies_and_absent_pin_follows_main
 test_unpinned_branch_follows_main_effort_changes_live
+test_extension_registered_provider_resolves_in_the_branch
 test_supervision_model_command_picks_effort_after_the_model
 test_unusable_model_pin_falls_back_to_main
 test_replacement_activation_cleans_leases_and_retries_failure

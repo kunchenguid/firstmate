@@ -4,8 +4,12 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$ROOT/bin/fm-classify-lib.sh"
 
-# bin/fm-harness.sh checks verified ENV markers before ancestry. A suite run
+# bin/fm-harness.sh checks verified ENV markers before ancestry, but that
+# ordering settles the marker layer only: a structural (comm-strength)
+# ancestor of a different harness still outranks either marker. A suite run
 # from inside Cursor, Claude, Pi, or Grok inherits those markers, which outrank
 # the fake ancestry the detection cases set up. Drop the ambient markers so the
 # asserted verdict does not depend on which harness launched the suite.
@@ -69,6 +73,9 @@ case "${1:-}" in
       prev=$arg
     done
     if [ -n "$literal" ]; then
+      case "$literal" in
+        ". '"*"'") staged=${literal#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || literal=$(cat "$staged") ;;
+      esac
       case "$literal" in
         *'run --yolo'*)
           printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
@@ -274,7 +281,7 @@ test_rovo_effort_high_sets_config_override() {
 }
 
 test_rovo_readiness_gate_precedes_pointer() {
-  local id rec out rc
+  local id rec out rc line
   id="rovo-not-ready-z3-$$"
   rec=$(make_spawn_case not-ready "$id")
   read_spawn_record "$rec"
@@ -284,11 +291,18 @@ test_rovo_readiness_gate_precedes_pointer() {
   [ "$rc" -ne 0 ] || fail "rovo spawn without a ready signal should fail"
   assert_contains "$out" "rovo did not show a verified ready signal" \
     "rovo readiness failure lacked a loud diagnostic"
-  assert_grep 'failed: rovo did not show a verified ready signal' "$HOME_DIR/state/$id.status" \
+  line=$(cat "$HOME_DIR/state/$id.status")
+  [ "$(status_line_verb "$line")" = failed ] || fail "rovo readiness failure lost its failed verb"
+  assert_contains "$(status_line_note "$line")" 'rovo did not show a verified ready signal' \
     "rovo readiness failure did not leave a supervisor-visible failure"
   [ ! -s "$CASE_DIR/pointer.log" ] || fail "rovo pointer was sent before an observable ready signal"
   grep -q "kill-window.*fm-$id" "$CASE_DIR/tmux-calls.log" \
     || fail "a failed rovo readiness gate must tear down the exact endpoint it created instead of leaking an orphaned --yolo process"
+  status_line_at_epoch "$line" >/dev/null \
+    || fail "new rovo spawn failure has unknown emission time: $line"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf 'Rovo readiness failure CLI output:\n%s\nPersisted status:\n%s\n' "$out" "$line"
+  fi
   pass "fm-spawn: rovo never sends the brief pointer before an observable ready signal, and tears down the created endpoint on failure"
 }
 
@@ -306,7 +320,9 @@ test_rovo_unconfirmed_delivery_fails_loudly() {
   [ -n "$pointer" ] || fail "rovo never typed the pointer before the delivery gate"
   assert_contains "$out" "rovo brief pointer delivery was not confirmed" \
     "unconfirmed rovo delivery lacked a loud diagnostic"
-  assert_grep 'failed: rovo brief pointer delivery was not confirmed' "$HOME_DIR/state/$id.status" \
+  [ "$(status_line_verb "$(cat "$HOME_DIR/state/$id.status")")" = failed ] \
+    || fail "unconfirmed rovo delivery lost its failed verb"
+  assert_contains "$(status_line_note "$(cat "$HOME_DIR/state/$id.status")")" 'rovo brief pointer delivery was not confirmed' \
     "unconfirmed rovo delivery did not leave a supervisor-visible failure"
   grep -q "kill-window.*fm-$id" "$CASE_DIR/tmux-calls.log" \
     || fail "an unconfirmed rovo delivery must tear down the exact endpoint it created instead of leaking an orphaned --yolo process"
@@ -386,8 +402,15 @@ SH
     PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = rovo ] || fail "rovo's ROVODEV_CLI marker did not outrank an inherited CLAUDECODE, got '$out'"
 
+  # CLAUDECODE alone, with no rovo marker, is a marker-layer question, not an
+  # ancestry one: blind the walk so the rovo-resolving fake ps above (needed
+  # for the markerless-ancestry and marker+ancestry cases) cannot also decide
+  # this assertion, matching the sibling-file pattern.
+  local blind_fakebin
+  blind_fakebin=$(fm_fakebin "$dir/blind-ancestry")
+  fm_fake_blind_ancestry "$blind_fakebin"
   out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
-    CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
+    CLAUDECODE=1 PATH="$blind_fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = claude ] || fail "verified env-marker precedence changed, got '$out'"
   pass "fm-harness: rovo's markers outrank an inherited CLAUDECODE, and markerless ancestry still resolves rovo"
 }

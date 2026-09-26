@@ -2,9 +2,9 @@
 # fm-lint.sh - the single owner of firstmate's lint definition.
 #
 # Runs its file set with ShellCheck's default severity, extended analysis,
-# ambient configuration disabled, and one exact ShellCheck version. CI and
-# no-mistakes both invoke this script with no arguments, so this owner selects
-# the context-appropriate rule set without duplicating lint configuration.
+# ambient configuration disabled, and one exact ShellCheck version. CI selects
+# canonical partitions; no-mistakes invokes the context-selected default, so
+# both use this owner without duplicating lint configuration.
 # The explicit --fast mode is local-only and disables ShellCheck's extended
 # dataflow analysis while preserving ordinary shell lint checks and source
 # following. CI, main, and merge-base-less runs keep --norc --external-sources
@@ -33,14 +33,23 @@
 #     `gh`). That local pass drops --external-sources and excludes SC1091,
 #     SC2034, SC2153, and SC2329. A branch with zero matching changed files
 #     skips ShellCheck and prints a "no changed lint targets" note, then
-#     still validates workflows.
+#     still runs the backend-purity check and validates workflows.
 # Explicit paths always bypass this file-set selection and lint exactly the
 # given paths, matching the same config, without the workflow YAML check.
+# Explicit core bin/ and bin/backends/ scripts still receive the
+# backend-purity check. The backend-purity check rejects direct Beads CLI
+# invocations in the core bin/ and bin/backends/ scripts so every configured
+# backlog backend follows the same tasks-axi lifecycle path.
 #
-# Canonical lint defaults to two bounded workers over two stable logical shards.
-# Each shard writes separate diagnostics, and the parent replays those outputs in
-# deterministic shard and root order after every worker finishes. FM_LINT_JOBS=1
-# runs the same shards serially with byte-identical diagnostics and exit selection.
+# Lint defaults to two bounded workers over two stable logical shards.
+# Diagnostics replay in stable shard/root order. FM_LINT_JOBS=1 changes
+# concurrency, not diagnostics or exit selection.
+# --partition 1of2/2of2 splits the entire canonical inventory across
+# two CI runners, each with those same bounded workers. Partitions are complete,
+# disjoint, and byte-weight balanced; --list-files exposes their actual roots.
+# Partition mode is always full source-aware analysis, never changed-only or
+# --fast, and does not accept explicit paths. Each partition also runs workflow
+# lint and backend-purity checks, keeping either invocation independently useful.
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
@@ -50,6 +59,7 @@
 #   fm-lint.sh --fast [path]...       local lint with extended analysis disabled
 #   fm-lint.sh <path>...               lint explicit roots with the same config
 #   fm-lint.sh --jobs <1|2> [path]...  override bounded worker count
+#   fm-lint.sh --partition <1of2|2of2> lint one full-rigor canonical CI partition
 #   fm-lint.sh --telemetry <path> ...  write a quiet metrics snapshot
 #   fm-lint.sh --required-version      print the ShellCheck pin
 #   fm-lint.sh --list-files            print the file set that would be linted
@@ -60,9 +70,9 @@ REQUIRED_SHELLCHECK=0.11.0
 # Cross-file codes that need --external-sources. Local changed-file mode
 # cannot judge them, so they stay CI-only.
 LOCAL_NOX_EXCLUDE=SC1091,SC2034,SC2153,SC2329
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SELF="$SELF_DIR/fm-lint.sh"
-ROOT="$(cd "$SELF_DIR/.." && pwd)"
+ROOT="$(cd "$SELF_DIR/.." && pwd -P)"
 cd "$ROOT" || exit 1
 
 FM_LINT_WORKER_SHELLCHECK_PID=
@@ -155,10 +165,245 @@ fm_lint_run_workflows() {
   "$SELF_DIR/fm-lint-workflows.sh"
 }
 
+# Backend adapters belong behind tasks-axi. Keep direct Beads CLI invocations
+# out of firstmate's core scripts so every configured backend follows the same
+# lifecycle path.
+fm_lint_run_backend_purity() {
+  local findings path canonical
+  local -a purity_roots
+  purity_roots=()
+  if [ "$EXPLICIT_PATHS" -eq 0 ]; then
+    purity_roots=(bin/*.sh bin/backends/*.sh)
+  else
+    for path in "${ROOTS[@]}"; do
+      [ -f "$path" ] || continue
+      # shellcheck disable=SC2016 # Perl, not the shell, expands $ARGV.
+      canonical=$("$PERL_BIN" -MCwd=realpath -e '
+        my $resolved = realpath($ARGV[0]);
+        exit 1 unless defined $resolved;
+        print $resolved;
+      ' "$path" 2>/dev/null) || continue
+      case "$canonical" in
+        "$ROOT"/bin/*.sh|"$ROOT"/bin/backends/*.sh)
+          purity_roots+=("$canonical")
+          ;;
+      esac
+    done
+  fi
+  [ "${#purity_roots[@]}" -gt 0 ] || return 0
+  findings=$(LC_ALL=C awk '
+    function hex_value(character) {
+      return index("0123456789abcdef", tolower(character)) - 1
+    }
+    function ansi_number(digits, base,    i, value) {
+      value=0
+      for (i=1; i <= length(digits); i++) value=value * base + hex_value(substr(digits, i, 1))
+      return value
+    }
+    # Non-printable and non-ASCII bytes can never spell the bd command, so a
+    # placeholder keeps them from colliding into it.
+    function ansi_character(value) {
+      if (value < 32 || value > 126) return "?"
+      return sprintf("%c", value)
+    }
+    function invokes_bd(segment) {
+      sub(/^[[:space:]]+/, "", segment)
+      while (1) {
+        previous=segment
+        sub(/^(if|then|elif|else|while|until|do)[[:space:]]+/, "", segment)
+        sub(/^![[:space:]]+/, "", segment)
+        sub(/^(command|exec)[[:space:]]+/, "", segment)
+        sub(/^[[:alpha:]_][[:alnum:]_]*=[^[:space:]]+[[:space:]]+/, "", segment)
+        if (segment ~ /^env[[:space:]]+/) {
+          sub(/^env[[:space:]]+/, "", segment)
+          while (1) {
+            if (segment ~ /^--[[:space:]]+/) {
+              sub(/^--[[:space:]]+/, "", segment)
+              break
+            }
+            if (segment ~ /^(-u|--unset|-C|--chdir|-S|--split-string|--argv0)[[:space:]]+[^[:space:]]+[[:space:]]+/) {
+              sub(/^(-u|--unset|-C|--chdir|-S|--split-string|--argv0)[[:space:]]+[^[:space:]]+[[:space:]]+/, "", segment)
+              continue
+            }
+            if (segment ~ /^--(unset|chdir|split-string|argv0)=[^[:space:]]+[[:space:]]+/) {
+              sub(/^--(unset|chdir|split-string|argv0)=[^[:space:]]+[[:space:]]+/, "", segment)
+              continue
+            }
+            if (segment ~ /^(-i|--ignore-environment|-0|--null|-v|--debug)[[:space:]]+/) {
+              sub(/^(-i|--ignore-environment|-0|--null|-v|--debug)[[:space:]]+/, "", segment)
+              continue
+            }
+            if (segment ~ /^[[:alpha:]_][[:alnum:]_]*=[^[:space:]]+[[:space:]]+/) {
+              sub(/^[[:alpha:]_][[:alnum:]_]*=[^[:space:]]+[[:space:]]+/, "", segment)
+              continue
+            }
+            break
+          }
+        }
+        if (segment == previous) break
+      }
+      command_word=""
+      quote=""
+      ansi=0
+      for (position=1; position <= length(segment); position++) {
+        character=substr(segment, position, 1)
+        if (quote == "") {
+          if (character ~ /[[:space:]]/) break
+          if (character == "$" && position < length(segment)) {
+            next_character=substr(segment, position + 1, 1)
+            if (next_character == "\"" || next_character == sprintf("%c", 39)) {
+              position++
+              quote=next_character
+              ansi=(next_character == sprintf("%c", 39)) ? 1 : 0
+              continue
+            }
+          }
+          if (character == "\"" || character == sprintf("%c", 39)) {
+            quote=character
+            ansi=0
+            continue
+          }
+          if (character == "\\") {
+            position++
+            if (position > length(segment)) return 0
+            character=substr(segment, position, 1)
+          }
+          command_word=command_word character
+          continue
+        }
+        if (character == quote) {
+          quote=""
+          ansi=0
+          continue
+        }
+        if (character == "\\" && (quote == "\"" || ansi)) {
+          position++
+          if (position > length(segment)) return 0
+          escape=substr(segment, position, 1)
+          if (ansi) {
+            # ANSI-C quoting decodes escapes, so an encoded spelling of the
+            # command still runs bd and must be decoded here to be caught.
+            value=-1
+            if (escape == "x" || escape == "u" || escape == "U") {
+              max_digits=2
+              if (escape == "u") max_digits=4
+              if (escape == "U") max_digits=8
+              digits=""
+              while (length(digits) < max_digits && position < length(segment)) {
+                digit=substr(segment, position + 1, 1)
+                if (digit !~ /[0-9A-Fa-f]/) break
+                digits=digits digit
+                position++
+              }
+              if (digits == "") {
+                # An escape prefix with no digits yields the prefix character.
+                command_word=command_word escape
+                continue
+              }
+              value=ansi_number(digits, 16)
+            } else if (escape ~ /[0-7]/) {
+              digits=escape
+              while (length(digits) < 3 && position < length(segment)) {
+                digit=substr(segment, position + 1, 1)
+                if (digit !~ /[0-7]/) break
+                digits=digits digit
+                position++
+              }
+              value=ansi_number(digits, 8)
+            }
+            if (value >= 0) {
+              if (value == 0) {
+                # NUL truncates the bash word.
+                quote=""
+                break
+              }
+              command_word=command_word ansi_character(value)
+              continue
+            }
+            if (escape == "c") {
+              # Control characters can never spell the bd command.
+              if (position < length(segment)) position++
+              command_word=command_word "?"
+              continue
+            }
+            if (escape ~ /^[abeEfnrtv]$/) {
+              command_word=command_word "?"
+              continue
+            }
+            # Remaining ANSI-C escapes keep their character, and bash drops
+            # the backslash before any other character.
+            command_word=command_word escape
+            continue
+          }
+          character=escape
+        }
+        command_word=command_word character
+      }
+      if (quote != "") return 0
+      return command_word ~ /(^|\/)bd$/
+    }
+    function split_commands(line, segments,   position, character, quote, current, count) {
+      delete segments
+      count=0
+      current=""
+      quote=""
+      for (position=1; position <= length(line); position++) {
+        character=substr(line, position, 1)
+        if (quote != "") {
+          current=current character
+          if (character == quote) {
+            quote=""
+          } else if (quote == "\"" && character == "\\") {
+            position++
+            if (position <= length(line)) current=current substr(line, position, 1)
+          }
+          continue
+        }
+        if (character == "\\") {
+          current=current character
+          position++
+          if (position <= length(line)) current=current substr(line, position, 1)
+          continue
+        }
+        if (character == "\"" || character == sprintf("%c", 39)) {
+          quote=character
+          current=current character
+          continue
+        }
+        if (character ~ /[();|&{}]/) {
+          segments[++count]=current
+          current=""
+          continue
+        }
+        current=current character
+      }
+      if (quote != "") return split(line, segments, /[();|&{}]+/)
+      segments[++count]=current
+      return count
+    }
+    /^[[:space:]]*#/ { next }
+    {
+      count=split_commands($0, segments)
+      for (i=1; i<=count; i++) {
+        if (invokes_bd(segments[i])) {
+          print FILENAME ":" FNR ": direct Beads CLI invocation bypasses tasks-axi"
+          break
+        }
+      }
+    }
+  ' "${purity_roots[@]}")
+  [ -z "$findings" ] || {
+    printf '%s\n' "$findings" >&2
+    return 1
+  }
+}
+
 JOBS=${FM_LINT_JOBS:-2}
 TELEMETRY=${FM_LINT_TELEMETRY:-}
 FAST=0
 ANALYSIS_MODE=full
+PARTITION=
+PARTITION_REQUESTED=0
 LIST_FILES=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -178,6 +423,17 @@ while [ "$#" -gt 0 ]; do
       ;;
     --telemetry=*)
       TELEMETRY=${1#*=}
+      shift
+      ;;
+    --partition)
+      [ "$#" -ge 2 ] || { printf 'fm-lint.sh: --partition requires 1of2 or 2of2.\n' >&2; exit 2; }
+      PARTITION=$2
+      PARTITION_REQUESTED=1
+      shift 2
+      ;;
+    --partition=*)
+      PARTITION=${1#*=}
+      PARTITION_REQUESTED=1
       shift
       ;;
     --fast)
@@ -204,6 +460,22 @@ done
 case "$JOBS" in
   1|2) ;;
   *) printf 'fm-lint.sh: jobs must be 1 or 2, got %s.\n' "$JOBS" >&2; exit 2 ;;
+esac
+
+case "$PARTITION" in
+  '')
+    if [ "$PARTITION_REQUESTED" -eq 1 ]; then
+      printf 'fm-lint.sh: --partition requires 1of2 or 2of2.\n' >&2
+      exit 2
+    fi
+    ;;
+  1of2|2of2)
+    if [ "$FAST" -eq 1 ] || [ "$#" -gt 0 ]; then
+      printf 'fm-lint.sh: --partition requires full canonical lint; omit --fast and explicit paths.\n' >&2
+      exit 2
+    fi
+    ;;
+  *) printf 'fm-lint.sh: --partition must be 1of2 or 2of2, got %s.\n' "$PARTITION" >&2; exit 2 ;;
 esac
 
 if [ "$FAST" -eq 1 ] && { [ "${GITHUB_ACTIONS:-}" = true ] || [ "${CI:-}" = true ]; }; then
@@ -255,7 +527,7 @@ if [ "$#" -gt 0 ]; then
   ROOTS=("$@")
 else
   full_lint=1
-  if [ "${GITHUB_ACTIONS:-}" != true ] && [ "${CI:-}" != true ] \
+  if [ -z "$PARTITION" ] && [ "${GITHUB_ACTIONS:-}" != true ] && [ "${CI:-}" != true ] \
     && command -v git >/dev/null 2>&1 \
     && git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
     && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" != main ]; then
@@ -281,6 +553,38 @@ if [ "$CHANGED_MODE" -eq 1 ] && [ "$FAST" -eq 0 ]; then
   FOLLOW_SOURCES=0
   EXCLUDE_CODES=$LOCAL_NOX_EXCLUDE
   ANALYSIS_MODE=local
+fi
+# Stable largest-first packing is shared by cross-runner partition selection
+# and the two local workers. Weights are a scheduling proxy, never a skip rule.
+TAB=$(printf '\t')
+fm_lint_root_weights() {
+  local index=1 path weight
+  for path in "${ROOTS[@]}"; do
+    case "$path" in
+      *"$TAB"*|*$'\n'*)
+        printf 'fm-lint.sh: paths containing tabs or newlines are not supported: %s\n' "$path" >&2
+        return 2
+        ;;
+    esac
+    weight=1
+    if [ -f "$path" ]; then
+      weight=$(wc -c < "$path" 2>/dev/null | tr -d '[:space:]')
+    fi
+    case "$weight" in ''|*[!0-9]*) weight=1 ;; esac
+    printf '%s\t%s\t%s\n' "$weight" "$index" "$path"
+    index=$((index + 1))
+  done
+}
+
+if [ -n "$PARTITION" ]; then
+  PARTITION_ROOTS=()
+  partition_weights=$(fm_lint_root_weights) || exit $?
+  while IFS="$TAB" read -r index path; do
+    PARTITION_ROOTS+=("$path")
+  done < <(printf '%s\n' "$partition_weights" | LC_ALL=C sort -t "$TAB" -k1,1nr -k2,2n | awk -F '\t' -v want="${PARTITION%%of*}" '
+    { shard=(load[2] < load[1]) ? 2 : 1; load[shard]+=$1; if (shard == want) print $2 "\t" $3 }
+  ' | LC_ALL=C sort -t "$TAB" -k1,1n)
+  ROOTS=("${PARTITION_ROOTS[@]}")
 fi
 ROOT_COUNT=${#ROOTS[@]}
 
@@ -322,6 +626,7 @@ fi
 if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
   printf 'fm-lint.sh: no changed lint targets\n'
   overall_rc=0
+  fm_lint_run_backend_purity || overall_rc=$?
   fm_lint_run_workflows || overall_rc=$?
   exit "$overall_rc"
 fi
@@ -359,7 +664,6 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-TAB=$(printf '\t')
 WEIGHTS="$TMP_ROOT/weights"
 OUTPUT_DIR="$TMP_ROOT/output"
 mkdir -p "$OUTPUT_DIR"
@@ -370,24 +674,7 @@ while [ "$worker" -lt "$SHARD_COUNT" ]; do
   worker=$((worker + 1))
 done
 
-index=1
-: > "$WEIGHTS"
-for path in "${ROOTS[@]}"; do
-  case "$path" in
-    *"$TAB"*|*$'\n'*)
-      printf 'fm-lint.sh: paths containing tabs or newlines are not supported: %s\n' "$path" >&2
-      exit 2
-      ;;
-  esac
-  if [ -f "$path" ]; then
-    weight=$(wc -c < "$path" 2>/dev/null | tr -d '[:space:]')
-  else
-    weight=1
-  fi
-  case "$weight" in ''|*[!0-9]*) weight=1 ;; esac
-  printf '%s\t%s\t%s\n' "$weight" "$index" "$path" >> "$WEIGHTS"
-  index=$((index + 1))
-done
+fm_lint_root_weights > "$WEIGHTS" || exit $?
 
 # Largest-first deterministic greedy assignment keeps the two bounded workers
 # balanced without affecting replay order. Direct bytes are a stable portable
@@ -603,6 +890,7 @@ EOF
     printf 'content_cksum\t%s\n' "$content_cksum"
     printf 'shellcheck_version\t%s\n' "$resolved"
     printf 'analysis_mode\t%s\n' "$ANALYSIS_MODE"
+    printf 'partition\t%s\n' "${PARTITION:-all}"
     printf 'jobs\t%s\n' "$JOBS"
     printf 'root_count\t%s\n' "$ROOT_COUNT"
     printf 'direct_lines\t%s\n' "$direct_lines"
@@ -632,6 +920,12 @@ EOF
     printf 'fm-lint.sh: could not write telemetry to %s.\n' "$TELEMETRY" >&2
     [ "$overall_rc" -ne 0 ] || overall_rc=2
   fi
+fi
+
+purity_rc=0
+fm_lint_run_backend_purity || purity_rc=$?
+if [ "$overall_rc" -eq 0 ] && [ "$purity_rc" -ne 0 ]; then
+  overall_rc=$purity_rc
 fi
 
 if [ "$overall_rc" -eq 0 ]; then

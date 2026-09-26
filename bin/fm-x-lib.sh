@@ -8,6 +8,7 @@
 #
 # This file is sourced, never executed. It defines:
 #   fmx_env_get <key> <file>   - read one KEY=VALUE from a .env-style file
+#                                (defined by bin/fm-env-lib.sh, sourced here)
 #   fmx_load_config            - resolve FMX_TOKEN, FMX_RELAY, FMX_DRY, FMX_MAX,
 #                                and FMX_THREAD_MAX (env wins over .env)
 #   fmx_auth_header_file       - write the bearer header to a 0600 temp file
@@ -56,24 +57,9 @@ if ! command -v fm_backlog_atomic_transition >/dev/null 2>&1; then
   . "$_FM_X_LIB_DIR/fm-backlog-transition-lib.sh"
 fi
 
-# Read the value of KEY from a .env-style file: last assignment wins; tolerates a
-# leading "export ", surrounding whitespace, and one layer of matching single or
-# double quotes. Prints nothing (and succeeds) when the file or key is absent, so
-# callers can treat empty output as "unset".
-fmx_env_get() {
-  local key=$1 file=$2 line val
-  [ -f "$file" ] || return 0
-  line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" 2>/dev/null | tail -n1) || return 0
-  [ -n "$line" ] || return 0
-  val=${line#*=}
-  val=${val#"${val%%[![:space:]]*}"}   # strip leading whitespace
-  val=${val%"${val##*[![:space:]]}"}   # strip trailing whitespace (incl. CR)
-  case "$val" in
-    \"*\") val=${val#\"}; val=${val%\"} ;;
-    \'*\') val=${val#\'}; val=${val%\'} ;;
-  esac
-  printf '%s' "$val"
-}
+# fmx_env_get lives in bin/fm-env-lib.sh, the single owner of .env parsing.
+# shellcheck source=bin/fm-env-lib.sh
+. "$_FM_X_LIB_DIR/fm-env-lib.sh"
 
 fmx_poll_shim_content() {
   local home=$1 root=$2
@@ -89,8 +75,8 @@ fmx_single_link_file_valid() {
   local file=$1 expected_device=${2-} links device
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   if [ "$(uname)" = Darwin ]; then
-    links=$(stat -f %l "$file" 2>/dev/null) || return 1
-    device=$(stat -f %d "$file" 2>/dev/null) || return 1
+    links=$(/usr/bin/stat -f %l "$file" 2>/dev/null) || return 1
+    device=$(/usr/bin/stat -f %d "$file" 2>/dev/null) || return 1
   else
     links=$(stat -c %h "$file" 2>/dev/null) || return 1
     device=$(stat -c %d "$file" 2>/dev/null) || return 1
@@ -103,7 +89,7 @@ fmx_single_link_file_mode_valid() {
   local file=$1 expected_mode=$2 expected_device=${3-} mode
   fmx_single_link_file_valid "$file" "$expected_device" || return 1
   if [ "$(uname)" = Darwin ]; then
-    mode=$(stat -f %Lp "$file" 2>/dev/null) || return 1
+    mode=$(/usr/bin/stat -f %Lp "$file" 2>/dev/null) || return 1
   else
     mode=$(stat -c %a "$file" 2>/dev/null) || return 1
   fi
@@ -114,8 +100,8 @@ fmx_private_artifact_dir_device() {
   local dir=$1 mode device
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   if [ "$(uname)" = Darwin ]; then
-    mode=$(stat -f %Lp "$dir" 2>/dev/null) || return 1
-    device=$(stat -f %d "$dir" 2>/dev/null) || return 1
+    mode=$(/usr/bin/stat -f %Lp "$dir" 2>/dev/null) || return 1
+    device=$(/usr/bin/stat -f %d "$dir" 2>/dev/null) || return 1
   else
     mode=$(stat -c %a "$dir" 2>/dev/null) || return 1
     device=$(stat -c %d "$dir" 2>/dev/null) || return 1
@@ -410,7 +396,7 @@ fmx_request_relay_context() {
 
 fmx_context_registry_mtime() {
   local file=$1 mtime
-  mtime=$(stat -f '%m' "$file" 2>/dev/null) || mtime=$(stat -c '%Y' "$file" 2>/dev/null) || return 1
+  mtime=$(/usr/bin/stat -f '%m' "$file" 2>/dev/null) || mtime=$(stat -c '%Y' "$file" 2>/dev/null) || return 1
   case "$mtime" in
     ''|*[!0-9]*) return 1 ;;
   esac

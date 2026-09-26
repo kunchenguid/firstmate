@@ -33,6 +33,11 @@ FM_TEST_LIB_SOURCED=1
 # suite's fixtures were written against.
 umask 022
 
+# Fixture Git isolation for every suite that reaches this library; the helper's
+# header owns the invariant and the layers it deliberately leaves in force.
+# shellcheck source=tests/git-config-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/git-config-helpers.sh"
+
 # Exempt firstmate's own test suite from the gate-lifecycle refusal
 # (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
 # worktree - the exact environment that guard refuses - so without this every
@@ -42,11 +47,26 @@ umask 022
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Arms the test-only seams bin/ scripts expose (e.g. fm-afk-launch.sh's
+# FM_TEST_HARNESS harness pin). Normal primary launches do not arm it, so a
+# leaked harness pin alone stays inert outside a suite.
+export FM_TEST_SEAM=1
+
 # Clear the task-worker markers bin/fm-spawn.sh exports into ship and scout
 # panes. This suite builds git-init fixture repositories whose primary checkout
 # it runs a copied bin/fm-test-run.sh in, and that runner refuses the primary
 # under the task-id marker. Cases that verify ownership set the markers themselves.
 unset FM_TASK_ID FM_TASK_CAPABILITY
+
+# Clear the tasks-axi env overrides. An operator shell exports TASKS_AXI_FILE
+# (and may export TASKS_AXI_BACKEND) at its real home's backlog, and tasks-axi
+# resolves that env AHEAD of the .tasks.toml a fixture copies, so a suite that
+# seeds a temp home with bare `tasks-axi` would silently write the operator's
+# live backlog instead - tests/fm-public-followup.test.sh did exactly that. Every
+# fixture addresses its own data/backlog.md through its copied .tasks.toml, an
+# explicit --file, or bin/fm-tasks-axi.sh; a case that verifies the wrapper
+# against an ambient override sets TASKS_AXI_FILE itself.
+unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
@@ -96,14 +116,117 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
   return 1
 }
 
+# --- process-event runner reaping -------------------------------------------
+#
+# A process-event runner is detached into its own process group and reparents to
+# init, so removing a fixture directory does not stop one: only sweeping the home
+# that owns it does. Registration goes through a `$$`-keyed registry file for the
+# same reason the temp roots do - a fixture home is almost always built inside a
+# command substitution (`home=$(make_home x)`), and an array append there never
+# reaches the caller, so a suite that tracked its homes in a shell array was
+# silently tracking nothing and left every runner it started behind.
+#
+# The sweep is scoped to the exact home (and its claim root when the suite uses a
+# private one). It never matches on a script or process name, which would reach
+# into another home's live runners.
+
+FM_TEST_PROCEVENT_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-procevent.$$.XXXXXX") || return 1
+
+fm_test_track_procevent_home() {  # <home> [claim-root]
+  [ -n "${1:-}" ] || return 1
+  printf '%s\t%s\n' "$1" "${2-}" >> "$FM_TEST_PROCEVENT_REGISTRY"
+}
+
+fm_test_reap_procevent_homes() {
+  local home claim_root seen=$'\n'
+  [ -f "$FM_TEST_PROCEVENT_REGISTRY" ] || return 0
+  while IFS=$'\t' read -r home claim_root; do
+    [ -n "$home" ] || continue
+    case "$seen" in *$'\n'"$home"$'\n'*) continue ;; esac
+    seen+="$home"$'\n'
+    [ -d "$home/state/procevent" ] || continue
+    if [ -n "$claim_root" ]; then
+      FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_PROCEVENT_CLAIM_ROOT="$claim_root" \
+        "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
+    else
+      FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+        "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
+    fi
+  done < "$FM_TEST_PROCEVENT_REGISTRY"
+  rm -f "$FM_TEST_PROCEVENT_REGISTRY"
+}
+
+# --- armed watcher reaping ----------------------------------------------------
+#
+# A real bin/fm-watch.sh a suite arms for a temporary home is a long-lived
+# process that outlives the test on its own; only stopping the exact watcher the
+# home's lock names ends it. Registration goes through a `$$`-keyed registry
+# file for the same reason the runners above do. The reap is scoped to each
+# tracked state directory: it reads the home that watcher recorded in its own
+# lock and drives the arm's home-scoped --stop against it, which identity-checks
+# the pid before signalling, so it never matches on a script or process name and
+# never reaches another home's watcher. A tracked state directory a test already
+# deleted has no lock and is skipped; that watcher exits on its own home-gone
+# check within one poll.
+
+FM_TEST_WATCHER_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-watcher.$$.XXXXXX") || return 1
+
+fm_test_track_watcher_state() {  # <state-dir>
+  [ -n "${1:-}" ] || return 1
+  printf '%s\n' "$1" >> "$FM_TEST_WATCHER_REGISTRY"
+}
+
+fm_test_reap_watchers() {
+  local state lock_home seen=$'\n'
+  [ -f "$FM_TEST_WATCHER_REGISTRY" ] || return 0
+  while IFS= read -r state; do
+    [ -n "$state" ] || continue
+    case "$seen" in *$'\n'"$state"$'\n'*) continue ;; esac
+    seen+="$state"$'\n'
+    [ -f "$state/.watch.lock/pid" ] || continue
+    # A fixture that fabricates a lock naming this test process (the
+    # drain-liveness assertion writes $$ with the runner's own identity) is not
+    # an armed watcher. Stopping it would signal the runner, and the suite's
+    # TERM trap re-enters this reap, looping forever. Never reap our own pid.
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$$" ] || continue
+    lock_home=$(cat "$state/.watch.lock/fm-home" 2>/dev/null || true)
+    [ -n "$lock_home" ] || continue
+    FM_HOME="$lock_home" FM_STATE_OVERRIDE="$state" \
+      "$ROOT/bin/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
+  done < "$FM_TEST_WATCHER_REGISTRY"
+  rm -f "$FM_TEST_WATCHER_REGISTRY"
+}
+
+# Ceiling on how long a fixture's blocking stub may keep polling. A stub that
+# waits for a trigger file by re-running `sleep` is a high-frequency source of
+# process spawns, and one that outlives its test - because the test was killed
+# before any cleanup ran - is what turned leftover fixtures into a host-wide
+# process storm. Every blocking stub this suite writes stops itself at this
+# bound, so an escaped one is bounded in duration and cost on its own, before
+# its owner's guard reaps it.
+FM_TEST_STUB_MAX_BLOCK_SECONDS=${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}
+export FM_TEST_STUB_MAX_BLOCK_SECONDS
+
+# Remove a fixture tree even when it holds a read-only directory, such as the
+# spawn-owned state/<id>.git-hooks strip directory.
+fm_test_remove_tree() {
+  local dir=$1
+  if [ -d "$dir" ] && [ ! -L "$dir" ]; then
+    find "$dir" -type d -exec chmod u+rwx {} + 2>/dev/null || true
+  fi
+  rm -rf "$dir"
+}
+
 fm_test_cleanup() {
   local d
+  fm_test_reap_watchers
+  fm_test_reap_procevent_homes
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    [ -n "$d" ] && fm_test_remove_tree "$d"
   done
   if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
     while IFS= read -r d; do
-      [ -n "$d" ] && rm -rf "$d"
+      [ -n "$d" ] && fm_test_remove_tree "$d"
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi
@@ -126,6 +249,8 @@ fm_test_tmproot() {
 trap fm_test_cleanup EXIT
 trap 'fm_test_cleanup; exit 130' INT
 trap 'fm_test_cleanup; exit 143' TERM
+trap 'fm_test_cleanup; exit 129' HUP
+trap 'fm_test_cleanup; exit 131' QUIT
 
 # fm_test_reap_orphans: best-effort sweep for fixture roots left behind by a
 # prior run that was killed hard enough to skip the traps above (e.g. a
@@ -155,10 +280,7 @@ fm_test_reap_orphans() {
     mtime=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null) || continue
     [ $((now - mtime)) -ge "$FM_TEST_ORPHAN_MAX_AGE_SECONDS" ] || continue
     dir=$(dirname "$marker")
-    if [ -d "$dir" ] && [ ! -L "$dir" ]; then
-      find "$dir" -type d -exec chmod u+rwx {} + 2>/dev/null || true
-    fi
-    rm -rf "$dir"
+    fm_test_remove_tree "$dir"
   done
 }
 
@@ -328,6 +450,34 @@ SH
   chmod +x "$fakebin/fm-crash-inject"
 }
 
+# fm_fake_blind_ancestry <fakebin>
+# Blind the parent-chain walks: a query of the FIELD-FIRST per-pid form those walks
+# use - `ps -o comm=|args=|ppid= -p <pid>`, the shape in bin/fm-harness.sh,
+# bin/fm-session-lock-lib.sh, bin/fm-sessionstart-nudge.sh and bin/fm-backend.sh's
+# cmux ancestor detection - reports a bash ancestor terminating at pid 1, so ancestry
+# proves nothing and the marker a case sets is the only evidence left. A case that pins
+# its harness with a marker (CLAUDECODE=1 and friends) needs this, because a structural
+# ancestor of a DIFFERENT harness outranks a marker - without it, the harness the SUITE
+# was launched from decides the verdict.
+# Every other ps query reaches the real ps untouched, and the pid-first form is
+# deliberately among them: bin/fm-tmux-lib.sh and bin/backends/tmux.sh read pane and
+# cursor identity with `ps -p <pid> -o args=`, so intercepting that shape too would make
+# a pane assertion under a PATH-wide blind read `bash` and reject every cursor pane.
+fm_fake_blind_ancestry() {
+  local fakebin=$1 real_ps
+  real_ps=$(command -v ps) || return 1
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  '-o comm= -p '*) printf '%s\n' bash ;;
+  '-o args= -p '*) printf '%s\n' bash ;;
+  '-o ppid= -p '*) printf '%s\n' 1 ;;
+  *) exec "$real_ps" "\$@" ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+}
+
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>
 # The stub answers `--version` with <override-env-var> when that variable is set
 # and non-empty, and with <default-version> otherwise; every other invocation
@@ -345,6 +495,31 @@ SH
   chmod +x "$fakebin/$tool"
 }
 
+# --- portable file timestamps -----------------------------------------------
+
+# fm_touch_epoch <epoch> <path> [path...]: set each path's modification time to
+# an absolute epoch second on every supported host.
+#
+# There is no portable touch(1) flag that takes an epoch: `touch -d @<epoch>` is
+# a GNU extension and BSD touch rejects it outright ("out of range or illegal
+# time specification"), leaving the file at its current mtime. A test that wants
+# a beacon aged 700 seconds then silently measures a brand-new one.
+# `touch -t [[CC]YY]MMDDhhmm[.SS]` is POSIX and both accept it, so the only
+# host-specific step left is turning the epoch into that stamp, and date(1)
+# spells that two incompatible ways. Probe them in this order: GNU date rejects
+# `-r <seconds>` (its -r takes a file), while BSD date rejects `-d` as an
+# illegal option, so whichever runs is the one that understood the request.
+# TZ is pinned to UTC for date and touch so repeated DST hours stay unambiguous.
+fm_touch_epoch() {
+  local epoch=$1 stamp
+  shift
+  stamp=$(TZ=UTC0 date -d "@$epoch" +%Y%m%d%H%M.%S 2>/dev/null) \
+    || stamp=$(TZ=UTC0 date -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null) \
+    || fail "fm_touch_epoch: date(1) accepted neither -d @<epoch> nor -r <epoch>"
+  TZ=UTC0 touch -t "$stamp" "$@" \
+    || fail "fm_touch_epoch: touch -t $stamp failed for $*"
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so
@@ -356,11 +531,13 @@ fm_git_identity() {
 
 # fm_git_init_commit <dir>: create a git repo at <dir> with a README and one
 # commit. Uses an inline identity so it works whether or not fm_git_identity was
-# called.
+# called. The initial branch is pinned rather than inherited from
+# init.defaultBranch, so a fixture that names main resolves the same on a
+# developer machine and on a runner that still defaults to master.
 fm_git_init_commit() {
   local dir=$1
   mkdir -p "$dir"
-  git -C "$dir" init -q
+  git -C "$dir" init -q -b main
   printf '# %s\n' "$(basename "$dir")" > "$dir/README.md"
   git -C "$dir" add README.md
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
@@ -420,6 +597,16 @@ fm_write_secondmate_meta() {
 
 # --- common assertions ------------------------------------------------------
 
+# assert_equals <expected> <actual> <msg>
+assert_equals() {
+  [ "$1" = "$2" ] || fail "$3 (expected '$1', got '$2')"
+}
+
+# assert_not_equals <unexpected> <actual> <msg>
+assert_not_equals() {
+  [ "$1" != "$2" ] || fail "$3 (unexpectedly got '$1')"
+}
+
 # assert_contains <haystack> <needle> <msg>
 assert_contains() {
   case "$1" in
@@ -461,4 +648,44 @@ assert_absent() {
 # assert_present <path> <msg>: path must exist.
 assert_present() {
   [ -e "$1" ] || fail "$2"
+}
+
+# fm_test_base_path_sans <base_path> <tool...>: returns the path to a single
+# curated directory that resolves every tool <base_path> would have resolved,
+# except the named ones. Some hosts have real system binaries (node, orca,
+# ...) sitting in BASE_PATH; a fixture that simulates a tool as missing by
+# omitting it from fakebin still falls through to that host binary via
+# BASE_PATH, silently defeating the simulation. Dropping whole directories
+# out of BASE_PATH is not a safe fix: on a usr-merged host /bin, /sbin, and
+# /usr/sbin are symlinks that collapse to the same directory as /usr/bin, so
+# dropping any one of them because it resolves the excluded tool drops every
+# other tool a test still needs (git, awk, sed, ...) too. Building a curated
+# directory instead hides only the named tool(s). Use only at the specific
+# assertions that simulate a tool as absent - every other case keeps using
+# bare BASE_PATH.
+fm_test_base_path_sans() {
+  local base_path=$1 dir src entry name tool skip
+  shift
+  local tools=("$@")
+  dir=$(fm_test_tmproot fm-base-path-sans) || return 1
+  local dirs
+  IFS=: read -ra dirs <<< "$base_path"
+  for src in "${dirs[@]}"; do
+    [ -d "$src" ] || continue
+    for entry in "$src"/*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      name=${entry##*/}
+      [ -e "$dir/$name" ] && continue
+      skip=0
+      for tool in "${tools[@]}"; do
+        if [ "$name" = "$tool" ]; then
+          skip=1
+          break
+        fi
+      done
+      [ "$skip" -eq 1 ] && continue
+      ln -s "$entry" "$dir/$name" 2>/dev/null || true
+    done
+  done
+  printf '%s\n' "$dir"
 }
