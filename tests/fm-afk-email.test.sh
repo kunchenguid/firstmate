@@ -796,6 +796,7 @@ messages = {
 
 
 
+
 }
 
 class FakeMailbox:
@@ -811,6 +812,7 @@ class FakeMailbox:
     def uid(self, command, uid, spec):
         if command == "search":
             return "OK", [b"1 2 3 4"]
+
 
 
 
@@ -836,6 +838,7 @@ PY
   fetches=$(cat "$fetch_log")
   assert_contains "$fetches" $'3\t(BODY.PEEK[])' 'trusted pass above a sender copy permits the body read'
   assert_not_contains "$fetches" $'4\t(BODY.PEEK[])' 'receiver failure above a forged pass blocks the body read'
+
 
 
   assert_not_contains "$fetches" $'1\t(BODY.PEEK[])' 'spoofed sender body is never fetched while away'
@@ -870,6 +873,7 @@ PY
   assert_not_contains "$out" 'private attacker body' 'malformed away posture still hides spoofed sender bodies'
   assert_not_contains "$out" 'private unauthenticated body' 'malformed away posture still hides unauthenticated bodies'
   assert_not_contains "$out" 'private forged Gmail pass body' 'malformed posture still rejects a sender pass below receiver failure'
+
 
 
 
@@ -912,6 +916,7 @@ PY
   assert_not_contains "$fetches" $'1\t(BODY.PEEK[])' 'a stale off-posture snapshot cannot fetch an unauthenticated body'
 
 
+
   rm "$home/state/.afk-contract"
   : > "$fetch_log"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
@@ -923,11 +928,13 @@ PY
 
 
 
+
   fetches=$(cat "$fetch_log")
   assert_contains "$fetches" $'1\t(BODY.PEEK[])' 'attended read fetches the first unseen body'
   assert_contains "$fetches" $'2\t(BODY.PEEK[])' 'attended read fetches the second unseen body'
   assert_contains "$fetches" $'3\t(BODY.PEEK[])' 'attended read fetches the third unseen body'
   assert_contains "$fetches" $'4\t(BODY.PEEK[])' 'attended read fetches the fourth unseen body'
+
 
 
 
@@ -1163,6 +1170,7 @@ initial_rows = {fields[0]: fields for fields in (line.split("\t") for line in in
 assert set(initial_rows) == {"1", "2", "3", "4", "6", "7", "8", "9"}, initial_rows
 assert all(initial_rows[uid][4] == "ignored" for uid in ("1", "7", "8", "9")), initial_rows
 assert initial_rows["6"][4] == "ignored", initial_rows["6"]
+
 
 
 
