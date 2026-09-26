@@ -31,6 +31,7 @@ done
 cat > "$BRIEF" <<'MD'
 # Task
 Fix the off-by-one in the pager: root cause is the `<=` on line 40 of pager.sh, expected behavior is one page per call.
+Likely completion horizon: 3600 seconds
 MD
 
 cat > "$BASE_RULES" <<'JSON'
@@ -90,6 +91,11 @@ write_quota() {  # <path> <cursor spendPriority> [<claude all_models spendPriori
     { "provider": "google", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 72, "runway": { "status": "through_reset" }, "selection": { "spendPriority": 0.3 } } ] } },
     { "provider": "kimi", "state": { "status": "unknown" }, "quotaSemantics": { "status": "unknown", "effectiveAvailability": [] } }
+  ],
+  "exhaustion": [
+    { "provider": "claude", "scope": "all_models", "usableRunwaySeconds": 86400 },
+    { "provider": "claude", "scope": "model:fable", "usableRunwaySeconds": 86400 },
+    { "provider": "codex", "scope": "all_models", "usableRunwaySeconds": 86400 }
   ]
 }
 JSON
@@ -212,6 +218,47 @@ reset_log
 TYPESAFE_API_KEY=$KEY FM_CONFIG_OVERRIDE="$OVERRIDE_CONFIG" run code out err "$BRIEF" --project pager
 assert_contains "$out" '  status: clear' "FM_CONFIG_OVERRIDE selects the canonical rules directory"
 pass "TYPESAFE_API_KEY= in .env activates the tool; environment and config overrides work"
+
+# --- projected exhaustion must cover the explicit task horizon ---------------
+write_response "$RESPONSE" rule_4 0.9
+write_quota "$QUOTA" -0.9 0.95
+jq '(.exhaustion[] | select(.provider == "claude" and .scope == "all_models").usableRunwaySeconds) = 120' "$QUOTA" > "$TMP_ROOT/short-runway.json"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/short-runway.json" run code out err "$BRIEF" --project pager
+assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=0.95  runway=projected_exhaustion  -> not eligible: projected runway at all_models is shorter than likely completion horizon 3600 seconds' "insufficient projected runway fails feasibility before ranking"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "a candidate with sufficient through-reset runway remains rankable"
+
+write_quota "$QUOTA" -0.9 0.95
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high'" "projected runway covering the horizon may win by spendPriority"
+pass "projected runway is checked against the explicit likely-completion horizon before ranking"
+write_quota "$QUOTA" -0.9 0.95
+sed '/^Likely completion horizon:/d' "$BRIEF" > "$TMP_ROOT/brief-no-horizon.md"
+TYPESAFE_API_KEY=$KEY run code out err "$TMP_ROOT/brief-no-horizon.md" --project pager
+assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=0.95  runway=projected_exhaustion  -> eligible, unranked: likely completion horizon missing or invalid: disclosed uncertainty' "missing horizon discloses unresolved projected feasibility"
+assert_contains "$out" '  status: escalate' "higher-priority unresolved projected candidate prevents a lower-priority clear selection"
+assert_contains "$out" 'projected runway feasibility is unresolved for a candidate that could outrank the feasible selection' "escalation explains unresolved ranking risk"
+
+jq 'del(.exhaustion[] | select(.provider == "claude" and .scope == "all_models"))' "$QUOTA" > "$TMP_ROOT/missing-runway-evidence.json"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/missing-runway-evidence.json" run code out err "$BRIEF" --project pager
+assert_contains "$out" '  status: escalate' "missing matching runway evidence prevents a lower-priority clear selection"
+
+sed 's/Likely completion horizon: 3600 seconds/Likely completion horizon: 0 seconds/' "$BRIEF" > "$TMP_ROOT/brief-invalid-horizon.md"
+TYPESAFE_API_KEY=$KEY run code out err "$TMP_ROOT/brief-invalid-horizon.md" --project pager
+assert_contains "$out" '  status: escalate' "invalid completion horizon prevents a lower-priority clear selection"
+
+jq '.rules[3].use[0].model = "fable"' "$BASE_RULES" > "$RULES"
+write_quota "$QUOTA" -0.4 0.9
+jq '(.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability[] | select(.scope == "model:fable") | .selection.spendPriority) = -0.5 | (.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability[] | select(.scope == "model:fable") | .runway.status) = "through_reset"' "$QUOTA" > "$TMP_ROOT/multi-scope-runway.json"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/multi-scope-runway.json" run code out err "$TMP_ROOT/brief-no-horizon.md" --project pager
+assert_contains "$out" '  status: clear' "a non-limiting projected scope does not force escalation"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "candidate ranking uses the minimum known scope priority"
+jq '(.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability[] | select(.scope == "model:fable") | .selection) = {} | (.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability[] | select(.scope == "model:fable") | .runway.status) = "through_reset"' "$QUOTA" > "$TMP_ROOT/missing-scope-priority.json"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/missing-scope-priority.json" run code out err "$TMP_ROOT/brief-no-horizon.md" --project pager
+assert_contains "$out" '  status: clear' "missing priority in an applicable scope cannot trigger unresolved-runway escalation"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "a candidate without complete ranking evidence cannot outrank the feasible selection"
+cp "$BASE_RULES" "$RULES"
+pass "unresolved higher-priority projected runway forces escalation"
+write_quota "$QUOTA" 0.7597
 
 # --- clear: request shape, secret handling, argmax --------------------------
 reset_log
