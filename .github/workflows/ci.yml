@@ -57,6 +57,7 @@ jobs:
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-lint"
           bin/fm-lint.sh --partition "${{ matrix.partition }}of${{ strategy.job-total }}" \
+            --jobs 1 \
             --telemetry "$RUNNER_TEMP/fm-lint/partition-${{ matrix.partition }}.tsv"
       - name: Upload lint telemetry
         if: always()
