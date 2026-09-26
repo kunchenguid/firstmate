@@ -294,4 +294,4 @@ async function main() {
   else throw Error('use --help');
   console.log(JSON.stringify(result));
 }
-if (process.argv[1] && path.resolve(process.argv[1]) === script) main().catch(error => { console.error(error.message); process.exitCode = 1; });
+if (process.argv[1] && fs.realpathSync(path.resolve(process.argv[1])) === fs.realpathSync(script)) main().catch(error => { console.error(error.message); process.exitCode = 1; });

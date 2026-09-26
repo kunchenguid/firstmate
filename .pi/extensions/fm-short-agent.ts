@@ -14,6 +14,7 @@ export default function (pi: ExtensionAPI) {
   let service: ShortAgents | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
   let busy = false;
+  let active = false;
   let lastError = '';
   const owner = async () => {
     try {
@@ -39,22 +40,25 @@ export default function (pi: ExtensionAPI) {
     busy = true;
     try {
       if (!(await owner())) return;
-      await (await get()).reconcile(); lastError = ''; pi.events.emit('firstmate:outcomes-ready', {});
+      await (await get()).reconcile();
+      if (!active) return;
+      lastError = ''; pi.events.emit('firstmate:outcomes-ready', {});
     }
     catch (error) {
       const message = `Short-agent notification recovery failed: ${String(error).slice(0, 512)}`;
-      if (message !== lastError) pi.sendMessage({ customType: 'fm-short-agent-error', content: message, display: true });
+      if (active && message !== lastError) pi.sendMessage({ customType: 'fm-short-agent-error', content: message, display: true });
       lastError = message;
     }
     finally { busy = false; }
   };
   pi.on('session_start', () => {
+    active = true;
     if (timer) clearInterval(timer);
     timer = setInterval(() => { void reconcile(); }, 2000);
     timer.unref();
     void reconcile();
   });
-  pi.on('session_shutdown', () => { if (timer) clearInterval(timer); timer = undefined; });
+  pi.on('session_shutdown', () => { active = false; if (timer) clearInterval(timer); timer = undefined; });
   pi.registerTool({
     name: 'fm_short_submit', label: 'Submit read-only short task',
     description: 'Explicitly offload a bounded read-only analysis to an independent headless Pi session. Returns durable ID immediately. Choose an authenticated provider/model from Pi discovery; files are canonical explicit text snapshots. Reuse key only for identical retries. No terminal/worktree or parent history.',
