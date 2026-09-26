@@ -45,7 +45,7 @@ relaunch_cleanup() {
   for d in "${TASK_TMPS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
-  rm -rf "$TMP_ROOT"
+  fm_test_remove_tree "$TMP_ROOT"
 }
 trap relaunch_cleanup EXIT
 
@@ -2000,6 +2000,9 @@ case "${1:-} ${2:-}" in
         "$(cat "$D/herdr-pane")"
     fi
     exit 0 ;;
+  'pane read')
+    printf '╭────╮\n│    │\n╰────╯\n'
+    exit 0 ;;
   'pane send-text')
     # Mirrors the tmux fake's `becomes`: delivering the launch brief is what
     # makes an agent exist on this pane, so the control plane's alive-wait can
@@ -2012,6 +2015,16 @@ case "${1:-} ${2:-}" in
       ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || payload=$(cat "$staged") ;;
     esac
     case "$payload" in
+      /exit)
+        if [ -e "$D/herdr-close-on-exit" ]; then
+          printf 'gone' > "$D/herdr-pane"
+          rm -f "$D/herdr-agent-live"
+        fi
+        ;;
+      ': Firstmate instruction waiting: list '*)
+        corr=$(cat "$FM_HOME/state/rl76.inbox"/*.msg | grep -oE 'corr=[0-9a-f]{16}' | head -1)
+        printf 'done: %s open records persisted\n' "$corr" >> "$FM_HOME/state/rl76.status"
+        ;;
       *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
         printf '%s\n' "$payload" > "$D/launched-command"
         : > "$D/herdr-agent-live" ;;
@@ -2325,21 +2338,50 @@ test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause() {
   pass "reclaim: a rebind refused from a plain shell reports the real cause, not a fabricated session mismatch"
 }
 
-test_herdr_reclaim_of_a_secondmate_names_its_own_owner() {
-  local dir out rc
-  herdr_case_or_skip gone-herdr-secondmate rl76 fmlab '%none' || {
-    echo "skip - herdr reclaim needs jq (the herdr adapter parses JSON with it)"
-    return 0
-  }
-  dir=$HERDR_CASE_DIR
-  printf '%s\n' "kind=secondmate" "home=$dir/wt" >> "$dir/home/state/rl76.meta"
+test_herdr_reclaim_of_a_secondmate_restores_its_home() {
+  local dir out rc=0 timing
+  for timing in already-gone closes-on-exit; do
+    rc=0
+    herdr_case_or_skip gone-herdr-secondmate rl76 fmlab '%none' || {
+      echo "skip - herdr reclaim needs jq (the herdr adapter parses JSON with it)"
+      return 0
+    }
+    dir=$HERDR_CASE_DIR
+    mkdir -p "$dir/home/config"
+    printf 'claude\n' > "$dir/home/config/secondmate-harness"
+    printf '%s\n' "kind=secondmate" "home=$dir/wt" >> "$dir/home/state/rl76.meta"
+    mkdir -p "$dir/wt/bin" "$dir/wt/state" "$dir/wt/data"
+    printf 'rl76\n' > "$dir/wt/.fm-secondmate-home"
+    printf '# agents\n' > "$dir/wt/AGENTS.md"
+    printf '# charter preserved\n' > "$dir/wt/data/charter.md"
+    printf 'uncommitted child work\n' > "$dir/wt/state/child.meta"
 
-  out=$(run_spawn "$dir" rl76 --relaunch --harness claude); rc=$?
-  expect_code 1 "$rc" "a secondmate reclaim belongs to the secondmate respawn path"
-  assert_contains "$out" "--secondmate" "the refusal should name the path that owns this recovery"
-  assert_not_contains "$(cat "$dir/fake/herdr-log")" "tab create" \
-    "the refusal must happen before any endpoint is created"
-  pass "reclaim: a herdr secondmate whose endpoint is gone is sent to its own respawn owner"
+    if [ "$timing" = closes-on-exit ]; then
+      rm -f "$dir/fake/herdr-stopped"
+      printf '%%7' > "$dir/fake/herdr-pane"
+      : > "$dir/fake/herdr-agent-live"
+      : > "$dir/fake/herdr-close-on-exit"
+      out=$(CONTROL="$ROOT/bin/fm-secondmate-restart.sh" FM_SECONDMATE_PERSIST_WAIT=30 \
+        FM_SECONDMATE_PERSIST_POLL=1 run_control "$dir" rl76) || rc=$?
+      assert_contains "$out" 'summary: 1 of 1 restarted, 0 nudged, 0 unreached' "pane closure must complete the public restart"
+    else
+      out=$(run_control "$dir" rl76 relaunch) || rc=$?
+    fi
+    expect_code 0 "$rc" "a secondmate restart must recover its closed pane itself"$'\n'"$out"
+    [ "$(meta_field "$dir" rl76 herdr_pane_id)" = '%9' ] \
+      || fail "secondmate restart did not publish the replacement pane"
+    [ "$(meta_field "$dir" rl76 herdr_session)" = fmlab ] \
+      || fail "secondmate restart changed the recorded session"
+    [ "$(meta_field "$dir" rl76 home)" = "$dir/wt" ] \
+      || fail "secondmate restart changed the home"
+    [ "$(journal_field "$dir" rl76 phase)" = complete ] \
+      || fail "secondmate restart did not confirm its replacement"
+    assert_contains "$(cat "$dir/fake/herdr-log")" '--label 2ndmate-rl76' \
+      "replacement must use the secondmate home workspace, not the parent workspace"
+    assert_contains "$(cat "$dir/wt/data/charter.md")" 'charter preserved' "restart rewrote charter"
+    assert_contains "$(cat "$dir/wt/state/child.meta")" 'uncommitted child work' "restart lost child state"
+    pass "reclaim: secondmate $timing rebinds its pane in its own home workspace"
+  done
 }
 
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it() {
@@ -2453,7 +2495,7 @@ test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server
 test_herdr_rebind_stays_in_the_recorded_session
 test_herdr_reclaim_refuses_an_agent_that_came_back
 test_herdr_reclaim_keeps_the_task_whole
-test_herdr_reclaim_of_a_secondmate_names_its_own_owner
+test_herdr_reclaim_of_a_secondmate_restores_its_home
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight

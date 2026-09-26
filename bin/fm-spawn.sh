@@ -67,9 +67,8 @@
 #   identity for its endpoint, so no read here can tell a destroyed window from
 #   one on a tmux server this process cannot address. An endpoint that turns out
 #   to have survived refuses too. The worktree is reused untouched either way; a
-#   rebind is a recovery, never a teardown. Only a crewmate or scout rebinds: a
-#   secondmate whose endpoint is gone is respawned by its own owner
-#   (`--secondmate`, driven by the session-start liveness sweep).
+#   rebind is a recovery, never a teardown. A secondmate rebind uses the same
+#   validated home and per-home placement as an ordinary --secondmate respawn.
 #   The replacement still never starts outside the copy
 #   holding the work: a Herdr shell that has drifted out of the recorded
 #   worktree is told once to return, and only a shell that will not go refuses.
@@ -1751,16 +1750,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
-  # A secondmate whose endpoint is gone already has ONE owner for that
-  # recovery: the session-start liveness sweep respawns it with
-  # `fm-spawn.sh <id> --secondmate`, which stands its home's own workspace back
-  # up (bin/fm-bootstrap.sh; the secondmate-provisioning skill). Rebinding one
-  # here as well would be a second path to the same outcome, so this refuses
-  # and names the one that owns it.
-  if [ "$RELAUNCH_REBIND" -eq 1 ] && [ "$KIND" = secondmate ]; then
-    echo "error: secondmate $ID's recorded endpoint is gone; its recovery is owned by the secondmate respawn path, not by relaunch (run bin/fm-spawn.sh $ID --secondmate, or let the session-start liveness sweep do it)" >&2
-    exit 1
-  fi
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   if [ "$KIND" = ship ]; then
@@ -3394,6 +3383,14 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   exit 1
 fi
 
+# Fresh spawns and endpoint rebinds use the same per-home placement rule.
+# A secondmate owns its workspace even when the parent has a launcher pane.
+HERDR_LABEL_HOME=$FM_HOME
+HERDR_LAUNCHER_RELATIONSHIP=launcher-home
+if [ "$KIND" = secondmate ]; then
+  HERDR_LABEL_HOME=$PROJ_ABS
+  HERDR_LAUNCHER_RELATIONSHIP=other-home
+fi
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
   # A secondmate's home already resolved WT above through the same validation a
@@ -3420,8 +3417,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # Herdr is the ONLY backend that reaches here: the gate above rebinds only
     # on a PROVEN-gone endpoint, and absence is provable only on herdr, whose
     # every read is scoped to the session the record names
-    # (fm_control_endpoint_absence_verdict owns that argument). tmux and every
-    # secondmate were already refused, so there is no dispatch left to make.
+    # (fm_control_endpoint_absence_verdict owns that argument). The other
+    # backends were already refused, so there is no backend dispatch left.
     #
     # This deliberately uses the FLAT container shape rather than Herdr's
     # presentation projection: projection is a presentation-only layout that is
@@ -3442,8 +3439,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # onto another herdr server - an identity change, published as a
     # self-consistent but wrong record.
     HERDR_REBIND_SES=${RELAUNCH_TARGET%%:*}
-    HERDR_CONTAINER_RAW=$(HERDR_PANE_ID="$RELAUNCH_LAUNCHER_PANE_ID" \
-      fm_backend_herdr_container_ensure "$PROJ_ABS" launcher-home "$HERDR_REBIND_SES") || {
+    HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" HERDR_PANE_ID="$RELAUNCH_LAUNCHER_PANE_ID" \
+      fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP" "$HERDR_REBIND_SES") || {
       # container_ensure returns 1 for several unrelated reasons - a failed
       # version check, a server that will not start, an ambiguous workspace
       # label, a cross-session launcher identity, a failed workspace create -
@@ -3515,12 +3512,6 @@ else
     # workspace must never be adopted). A --secondmate launch is the exception -
     # it stands up a DIFFERENT home's own workspace by design - so it asks for
     # the per-home container instead of inheriting this launcher's.
-    HERDR_LABEL_HOME=$FM_HOME
-    HERDR_LAUNCHER_RELATIONSHIP=launcher-home
-    if [ "$KIND" = secondmate ]; then
-      HERDR_LABEL_HOME=$PROJ_ABS
-      HERDR_LAUNCHER_RELATIONSHIP=other-home
-    fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then

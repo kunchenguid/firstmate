@@ -42,7 +42,7 @@
 #          when a relaunch is actually authorized.
 #
 # Concurrency: fm_secondmate_liveness_lock serializes probe+kill+relaunch per
-# task across the bootstrap sweep and the watcher tick, so a concurrent
+# task across the bootstrap sweep, watcher tick, and persist-gated restart, so a concurrent
 # relaunch can never be observed mid-flight as a dead endpoint and killed.
 # The attempt ledger (.secondmate-relaunch-<id>, one line per attempt plus one
 # per outcome) is both the durable relaunch record and the input to the
@@ -62,6 +62,8 @@ FM_SM_LIVE_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 # Per-task probe+kill+relaunch serialization. A busy lock means another
 # supervisor (the other sweep, or a racing tick) is mid-episode on this mate;
 # callers skip and let that episode finish rather than probe a moving target.
+# The explicit restart passes wait, joining an earlier episode before it stops
+# the current agent; it holds the same lock until its replacement is confirmed.
 # The lock helpers live in bin/fm-wake-lib.sh, which creates the state
 # directory when sourced; load it only when a lock is actually taken so that
 # sourcing this library stays side-effect free for read-only bootstrap runs.
@@ -71,9 +73,13 @@ fm_sm_live_require_locks() {
   . "$FM_SM_LIVE_LIB_DIR/fm-wake-lib.sh"
 }
 
-fm_secondmate_liveness_lock() {  # <id>
+fm_secondmate_liveness_lock() {  # <id> [wait]
   fm_sm_live_require_locks || return 1
-  fm_lock_try_acquire "$STATE/.secondmate-liveness-$1.lock"
+  if [ "${2:-}" = wait ]; then
+    fm_lock_acquire_wait "$STATE/.secondmate-liveness-$1.lock"
+  else
+    fm_lock_try_acquire "$STATE/.secondmate-liveness-$1.lock"
+  fi
 }
 
 fm_secondmate_liveness_unlock() {  # <id>
