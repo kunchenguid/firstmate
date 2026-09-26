@@ -34,8 +34,7 @@
 # exists. Effort has no flag of its own: a requested level that the target
 # model lists among its reasoning levels becomes the `<model>(<level>)`
 # selector, and any other level is recorded by the caller but omitted. A model
-# that already names a variant keeps it. Model-group references pass through
-# unvalidated because the listing does not enumerate groups.
+# that already names a variant keeps it.
 #
 # Detached daemon. `polytoken new` double-forks a daemon (parent pid 1, its
 # own process group, cwd = the project) and the pane holds only the TUI. A
@@ -86,13 +85,6 @@ fm_polytoken_model_arg() {  # <bin> <model> <effort>
     echo "error: polytoken has no native ultra effort; choose low, medium, high, xhigh, or max" >&2
     return 1
   fi
-  case "$model" in
-    mg:*|@mg:*|modelgroup:*|@modelgroup:*)
-      [ -z "$effort" ] || echo "notice: polytoken model group '$model' names its own members; effort '$effort' is recorded but not applied" >&2
-      printf '%s' "$model"
-      return 0
-      ;;
-  esac
   catalog=$(fm_polytoken_catalog "$bin") || rc=$?
   if [ "$rc" -ne 0 ]; then
     if [ "$rc" -eq 124 ]; then

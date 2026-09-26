@@ -165,7 +165,7 @@ resolve() { fm_polytoken_model_arg "$pbin" "$1" "$2" 2>"$TMP_ROOT/resolve.err"; 
 assert_grep 'recorded but not applied' "$TMP_ROOT/resolve.err" 'omitted effort was silent'
 [ "$(resolve minimax/MiniMax-M3 high)" = minimax/MiniMax-M3 ] || fail 'a thinking-only model received an effort variant'
 [ "$(resolve 'codex/gpt-6-luna(low)' high)" = 'codex/gpt-6-luna(low)' ] || fail 'an explicit variant was replaced'
-[ "$(resolve 'mg:polytoken:plan' '')" = 'mg:polytoken:plan' ] || fail 'a model group was not passed through'
+! resolve 'mg:polytoken:plan' '' >/dev/null || fail 'an unlisted model group was accepted'
 [ -z "$(resolve '' '')" ] || fail 'no axes must keep the configured default'
 ! resolve gpt-6-luna '' >/dev/null || fail 'an unqualified model name was accepted'
 ! resolve 'codex/gpt-6-luna(bogus)' '' >/dev/null || fail 'an unlisted variant was accepted'
