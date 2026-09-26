@@ -312,10 +312,12 @@ test_version_check_refuses_old_protocol() {
 }
 
 test_version_check_refuses_missing_herdr() {
-  local dir out status
+  local dir out status dirname_bin
   dir="$TMP_ROOT/version-missing"; mkdir -p "$dir/empty-fakebin"
-  out=$( PATH="$dir/empty-fakebin:/usr/bin:/bin" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1 )
+  dirname_bin=$(command -v dirname) || fail "dirname is required for the missing-herdr fixture"
+  ln -s "$dirname_bin" "$dir/empty-fakebin/dirname"
+  out=$( PATH="$dir/empty-fakebin" \
+    /bin/bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "version_check should refuse when herdr is not installed"
   assert_contains "$out" "not installed" "version_check did not report herdr as missing"
@@ -1932,11 +1934,166 @@ test_projection_journal_v2_binds_and_advances_exact_endpoint() {
   pass "herdr presentation journal: version 2 binds exact home/endpoint/parent identities and advances atomically"
 }
 
-test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
-  local dir state log resp fb out token journal
-  dir="$TMP_ROOT/projection-create"; state="$dir/state"; mkdir -p "$dir/responses" "$state"
+test_projection_parent_sources_only_its_exact_project() {
+  local dir log resp fb out project other
+  dir="$TMP_ROOT/projection-parent-source"; project="$dir/project"; other="$dir/other"
+  mkdir -p "$dir/responses" "$project" "$other"
   log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"root_pane":{"pane_id":"w9:p1"}}}\n' > "$resp/1.out"
+  printf '{"result":{"type":"worktree_list","source":{"source_workspace_id":"w1","source_checkout_path":"%s"},"worktrees":[]}}\n' "$project" > "$resp/1.out"
+  cp "$resp/1.out" "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      if fm_backend_herdr_projection_parent_sources_project fmtest w1 "$1"; then printf "nested\n"; else printf "top\n"; fi
+      if fm_backend_herdr_projection_parent_sources_project fmtest w1 "$2"; then printf "nested\n"; else printf "top\n"; fi
+    ' "$ROOT" "$project" "$other")
+  [ "$out" = $'nested\ntop' ] \
+    || fail "project-source classifier did not separate exact and foreign project paths: $out"
+  pass "herdr presentation placement: only the exact parent-owned project is eligible for worktree nesting"
+}
+
+test_projection_recovery_proves_only_open_linked_worktree() {
+  local dir log resp fb proj other out status
+  dir="$TMP_ROOT/projection-recovery-nested"; proj="$dir/project"; other="$dir/other"
+  mkdir -p "$dir/responses" "$proj" "$other"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  run_recovery_proof() {  # <response-json>
+    rm -f "$resp/.count"
+    printf '%s\n' "$1" > "$resp/1.out"
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '
+        . "$0/bin/backends/herdr.sh"
+        fm_backend_herdr_projection_recovery_nested_worktree fmtest w1 w9 "$1" "$1"
+      ' "$ROOT" "$proj"
+  }
+  out=$(run_recovery_proof '{"result":{"type":"worktree_list","source":{"source_workspace_id":"w1","source_checkout_path":"'"$proj"'"},"worktrees":[{"path":"'"$proj"'","is_linked_worktree":true,"open_workspace_id":"w9"}]}}'); status=$?
+  [ "$status" -eq 0 ] && [ "$out" = "$proj" ] \
+    || fail "proven open linked worktree was not returned as the exact carried checkout: status=$status out=$out"
+  out=$(run_recovery_proof '{"result":{"type":"worktree_list","source":{"source_workspace_id":"w1","source_checkout_path":"'"$proj"'"},"worktrees":[]}}'); status=$?
+  [ "$status" -eq 1 ] \
+    || fail "a valid listing without the open linked child should positively not carry: status=$status out=$out"
+  out=$(run_recovery_proof '{"result":{"type":"worktree_list","source":{"source_workspace_id":"w1","source_checkout_path":"'"$other"'"},"worktrees":[{"path":"'"$proj"'","is_linked_worktree":true,"open_workspace_id":"w9"}]}}'); status=$?
+  [ "$status" -eq 1 ] \
+    || fail "a parent that sources another project must positively not carry: status=$status out=$out"
+  out=$(run_recovery_proof '{"result":{"type":"other","workspaces":[]}}'); status=$?
+  [ "$status" -eq 2 ] \
+    || fail "an unreadable worktree listing must stay ambiguous: status=$status out=$out"
+  out=$(run_recovery_proof '{"bogus":true}'); status=$?
+  [ "$status" -eq 2 ] \
+    || fail "a malformed worktree listing must stay ambiguous: status=$status out=$out"
+  pass "herdr presentation recovery: only a child positively open as a linked worktree is carried, and ambiguity refuses"
+}
+
+test_projection_recovery_classification_uses_journal_workspace() {
+  local dir state log resp fb proj home child parent out status open_json not_open_json lease_json v2journal v1journal
+  dir="$TMP_ROOT/projection-recovery-classify"; state="$dir/state"
+  proj="$dir/project"; home="$dir/home"
+  mkdir -p "$dir/responses" "$state" "$proj" "$home"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  child='w-child'; parent='w-home'
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      token=$(fm_backend_herdr_projection_journal_create "$1" task-v2) || exit 1
+      label=$(fm_backend_herdr_projection_workspace_label task-v2 "$token")
+      fm_backend_herdr_projection_journal_bind "$1/task-v2.herdr-presentation" task-v2 "$2" fmtest "$3" "$3:t1" "$3:p1" "$4" firstmate "$label" fm-task-v2 || exit 1
+      fm_backend_herdr_projection_journal_create "$1" task-v1 >/dev/null || exit 1
+    ' "$ROOT" "$state" "$home" "$child" "$parent" \
+    || fail "could not publish the recovery classification fixture journals"
+  v2journal="$state/task-v2.herdr-presentation"
+  v1journal="$state/task-v1.herdr-presentation"
+  run_classify() {  # <journal> <task-id> <recorded-path> <response-json>
+    rm -f "$resp/.count" "$resp/2.out"
+    if [ "$2" = task-v1 ]; then
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"'"$parent"'","label":"firstmate"}]}}' > "$resp/1.out"
+      printf '%s\n' "$4" > "$resp/2.out"
+    else
+      printf '%s\n' "$4" > "$resp/1.out"
+    fi
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '
+        . "$0/bin/backends/herdr.sh"
+        fm_backend_herdr_projection_recovery_classify_nested_worktree fmtest "$1" "$2" "$3" firstmate "$4"
+        printf "%s|%s|%s\n" "$FM_BACKEND_HERDR_RECOVERY_NESTED_WORKTREE" "$FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS" "$FM_BACKEND_HERDR_RECOVERY_NESTED_UNOPENED"
+      ' "$ROOT" "$1" "$2" "$3" "$proj"
+  }
+  open_json='{"result":{"type":"worktree_list","source":{"source_workspace_id":"'"$parent"'","source_checkout_path":"'"$proj"'"},"worktrees":[{"path":"'"$proj"'","is_linked_worktree":true,"open_workspace_id":"'"$child"'"}]}}'
+  not_open_json='{"result":{"type":"worktree_list","source":{"source_workspace_id":"'"$parent"'","source_checkout_path":"'"$proj"'"},"worktrees":[]}}'
+  lease_json='{"result":{"type":"worktree_list","source":{"source_workspace_id":"'"$parent"'","source_checkout_path":"'"$proj"'"},"worktrees":[{"path":"'"$proj"'","is_linked_worktree":true,"open_workspace_id":null}]}}'
+  out=$(run_classify "$v2journal" task-v2 "$proj" "$open_json"); status=$?
+  [ "$status" -eq 0 ] && [ "$out" = "$proj|0|" ] \
+    || fail "a version 2 journal workspace must still carry after metadata moved to the flat container: status=$status out=$out"
+  out=$(run_classify "$v2journal" task-v2 "$dir/missing-slot" "$open_json"); status=$?
+  [ "$status" -eq 0 ] && [ "$out" = "|1|" ] \
+    || fail "an unresolvable recorded checkout for a still-open nested version 2 binding must refuse: status=$status out=$out"
+  out=$(run_classify "$v2journal" task-v2 "$dir/missing-slot" "$not_open_json"); status=$?
+  [ "$status" -eq 0 ] && [ "$out" = "|0|" ] \
+    || fail "a legacy top-level version 2 binding with an unresolvable checkout must keep flat fallback: status=$status out=$out"
+  out=$(run_classify "$v2journal" task-v2 "$proj" "$lease_json"); status=$?
+  [ "$status" -eq 0 ] && [ "$out" = "|0|$proj" ] \
+    || fail "a version 2 checkout no longer rendered open must be reported for durable-ownership gating: status=$status out=$out"
+  out=$(run_classify "$v1journal" task-v1 "$proj" "$open_json"); status=$?
+  [ "$status" -eq 0 ] && [ "$out" = "$proj|0|" ] \
+    || fail "a version 1 checkout open under its owning parent must carry by path: status=$status out=$out"
+  out=$(run_classify "$v1journal" task-v1 "$proj" "$lease_json"); status=$?
+  [ "$status" -eq 0 ] && [ "$out" = "|0|$proj" ] \
+    || fail "a version 1 checkout no longer rendered open must be reported for durable-ownership gating: status=$status out=$out"
+  out=$(run_classify "$v2journal" task-v2 "$proj" '{"result":{"type":"other"}}'); status=$?
+  [ "$status" -eq 0 ] && [ "$out" = "|1|" ] \
+    || fail "an unreadable nested-worktree proof must refuse: status=$status out=$out"
+  pass "herdr presentation recovery classification: carries v1 and v2 journal checkouts, reports unopened checkouts, and keeps legacy flat fallback"
+}
+
+test_projection_recovery_proves_v1_checkout_by_path() {
+  local dir log resp fb proj out status
+  dir="$TMP_ROOT/projection-recovery-by-path"; proj="$dir/project"
+  mkdir -p "$dir/responses" "$proj"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  run_by_path() {  # <workspace-or-empty> <response-json>
+    rm -f "$resp/.count"
+    printf '%s\n' "$2" > "$resp/1.out"
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '
+        . "$0/bin/backends/herdr.sh"
+        fm_backend_herdr_projection_recovery_nested_worktree fmtest w1 "$1" "$2" "$2"
+      ' "$ROOT" "$1" "$proj"
+  }
+  run_is_linked_child() {  # <response-json>
+    rm -f "$resp/.count"
+    printf '%s\n' "$1" > "$resp/1.out"
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '
+        . "$0/bin/backends/herdr.sh"
+        if fm_backend_herdr_projection_recovery_workspace_is_linked_child fmtest w1 w-child "$1"; then exit 0; else exit $?; fi
+      ' "$ROOT" "$proj"
+  }
+  open_json='{"result":{"type":"worktree_list","source":{"source_workspace_id":"w1","source_checkout_path":"'"$proj"'"},"worktrees":[{"path":"'"$proj"'","is_linked_worktree":true,"open_workspace_id":"w-child"}]}}'
+  lease_json='{"result":{"type":"worktree_list","source":{"source_workspace_id":"w1","source_checkout_path":"'"$proj"'"},"worktrees":[{"path":"'"$proj"'","is_linked_worktree":true,"open_workspace_id":null}]}}'
+  out=$(run_by_path "" "$open_json"); status=$?
+  [ "$status" -eq 0 ] && [ "$out" = "$proj" ] \
+    || fail "a version 1 checkout open under its parent must be carried by path: status=$status out=$out"
+  out=$(run_by_path "" "$lease_json"); status=$?
+  [ "$status" -eq 1 ] \
+    || fail "a legacy process-lease checkout with no open workspace id must not carry: status=$status out=$out"
+  run_is_linked_child "$open_json"; status=$?
+  [ "$status" -eq 0 ] || fail "an open linked child workspace must be identified: status=$status"
+  run_is_linked_child '{"result":{"type":"worktree_list","source":{"source_workspace_id":"w1","source_checkout_path":"'"$proj"'"},"worktrees":[]}}'; status=$?
+  [ "$status" -eq 1 ] || fail "a workspace absent from the parent's worktrees must not be identified: status=$status"
+  run_is_linked_child '{"result":{"type":"other"}}'; status=$?
+  [ "$status" -eq 2 ] || fail "an unreadable worktree listing must stay ambiguous: status=$status"
+  pass "herdr presentation recovery: a version 1 checkout is proven by its exact path and an open workspace id"
+}
+
+test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
+  local dir state log resp fb out token journal proj
+  dir="$TMP_ROOT/projection-create"; state="$dir/state"; proj="$dir/proj"
+  mkdir -p "$dir/responses" "$state" "$proj"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"type":"worktree_opened","already_open":false,"workspace":{"workspace_id":"w9","active_tab_id":"w9:t1","worktree":{"checkout_path":"%s","is_linked_worktree":true}},"tab":{"tab_id":"w9:t1","workspace_id":"w9"},"root_pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"},"worktree":{"path":"%s","is_linked_worktree":true,"open_workspace_id":"w9"}}}\n' "$proj" "$proj" > "$resp/1.out"
   printf '{"result":{"tab":{"tab_id":"w9:t2"},"root_pane":{"pane_id":"w9:p2"}}}\n' > "$resp/2.out"
   printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/3.out"
   printf '{"result":{"panes":[{"pane_id":"w9:p1","tab_id":"w9:t1"},{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/4.out"
@@ -1948,6 +2105,7 @@ test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
   printf '{"error":{"code":"pane_not_found"}}\n' > "$resp/9.out"
   printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/10.out"
   printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/11.out"
+  printf '{"result":{"type":"worktree_list","source":{"source_workspace_id":"w1"},"worktrees":[{"path":"%s","is_linked_worktree":true,"open_workspace_id":"w9"}]}}\n' "$proj" > "$resp/12.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
     bash -c '
@@ -1956,27 +2114,52 @@ test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
       fm_backend_herdr_projection_focus_restore() { return 0; }
       token=$(fm_backend_herdr_projection_journal_create "$1" task-p2) || exit 1
       label=$(fm_backend_herdr_projection_workspace_label task-p2 "$token")
-      fm_backend_herdr_projection_create_task /tmp/proj "$label" fm-task-p2 || exit 1
+      fm_backend_herdr_projection_create_task "$2" "$label" fm-task-p2 w1 || exit 1
       printf "%s %s %s %s %s\n" \
         "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" \
         "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" \
         "$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID" \
         "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" \
         "$FM_BACKEND_HERDR_PROJECTION_PANE_ID"
-    ' "$ROOT" "$state") || fail "projection create should succeed from complete exact responses"
+    ' "$ROOT" "$state" "$proj") || fail "projection create should succeed from complete exact responses"
   [ "$out" = "w9 w9:t1 w9:p1 w9:t2 w9:p2" ] || fail "projection create did not retain exact response IDs: $out"
   journal="$state/task-p2.herdr-presentation"
   token=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_token "$1" task-p2' "$ROOT" "$journal") \
     || fail "projection journal was not readable"
-  assert_contains "$(cat "$log")" $'workspace\x1fcreate\x1f--cwd\x1f/tmp/proj\x1f--label\x1f└ task-p2 · p:'"$token"$'\x1f--no-focus' \
-    "projection workspace create did not use the corner label, full token, and --no-focus"
-  assert_contains "$(cat "$log")" $'tab\x1fcreate\x1f--workspace\x1fw9\x1f--cwd\x1f/tmp/proj\x1f--label\x1ffm-task-p2\x1f--no-focus' \
+  assert_contains "$(cat "$log")" $'worktree\x1fopen\x1f--workspace\x1fw1\x1f--path\x1f'"$proj"$'\x1f--label\x1f└ task-p2 · p:'"$token"$'\x1f--no-focus' \
+    "projection worktree open did not use the exact parent, linked checkout, corner label, full token, and --no-focus"
+  assert_contains "$(cat "$log")" $'tab\x1fcreate\x1f--workspace\x1fw9\x1f--cwd\x1f'"$proj"$'\x1f--label\x1ffm-task-p2\x1f--no-focus' \
     "projection task tab did not target the exact new workspace"
   assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p1' \
     "projection create did not prune the exact seeded root pane"
+  assert_contains "$(cat "$log")" $'worktree\x1flist\x1f--workspace\x1fw1' \
+    "projection create did not verify the nested child through its exact parent"
   assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
     "projection create must never call workspace close"
-  pass "herdr presentation create: exact response IDs yield one normal task pane with no workspace-close authority"
+  pass "herdr presentation create: exact worktree-open response IDs yield one nested normal task pane with no workspace-close authority"
+}
+
+test_projection_worktree_open_refuses_reused_or_mismatched_response() {
+  local dir log resp fb out status proj
+  dir="$TMP_ROOT/projection-worktree-reused"; proj="$dir/proj"
+  mkdir -p "$dir/responses" "$proj"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"type":"worktree_opened","already_open":true,"workspace":{"workspace_id":"foreign","active_tab_id":"foreign:t1","worktree":{"checkout_path":"%s","is_linked_worktree":true}},"tab":{"tab_id":"foreign:t1","workspace_id":"foreign"},"root_pane":{"pane_id":"foreign:p1","tab_id":"foreign:t1","workspace_id":"foreign"},"worktree":{"path":"%s","is_linked_worktree":true,"open_workspace_id":"foreign"}}}\n' "$proj" "$proj" > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_focus_snapshot() { printf "captain-ws\tcaptain-tab"; }
+      fm_backend_herdr_projection_focus_restore() { return 0; }
+      fm_backend_herdr_projection_create_task "$1" label fm-task-p2 w1
+    ' "$ROOT" "$proj" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an already-open linked checkout must not be adopted as a fresh projection"
+  assert_contains "$out" "did not return one fresh exact workspace, tab, and pane" \
+    "reused worktree-open response did not remain ambiguous"
+  assert_not_contains "$(cat "$log")" $'tab\x1fcreate' \
+    "reused worktree-open response was allowed to create a task tab"
+  pass "herdr presentation create: reused worktree-open responses are quarantined without adoption"
 }
 
 test_projection_create_never_closes_a_concurrent_same_label_tab() {
@@ -5756,7 +5939,12 @@ test_release_floor_verdict_survives_losing_either_signal
 test_presentation_preference_reports_three_distinct_states
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
+test_projection_parent_sources_only_its_exact_project
+test_projection_recovery_proves_only_open_linked_worktree
+test_projection_recovery_classification_uses_journal_workspace
+test_projection_recovery_proves_v1_checkout_by_path
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
+test_projection_worktree_open_refuses_reused_or_mismatched_response
 test_projection_create_never_closes_a_concurrent_same_label_tab
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
 test_projection_close_restores_exact_prior_focus

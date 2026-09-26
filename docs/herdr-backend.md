@@ -165,8 +165,9 @@ Closing its last tab can remove the workspace, and the next spawn recreates it.
 
 ## Presentation spaces
 
-Each new crewmate or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.
-This section calls that one-task workspace the projection.
+Each new crewmate or scout gets a one-task presentation workspace by default on Herdr 0.8.0 and newer.
+For a same-project task, that workspace is a durable Treehouse checkout opened as a Herdr worktree child; when the owning home represents another repository, it remains a disposable top-level workspace.
+This section calls either presentation shape the projection.
 Without the projection, tasks use the ordinary flat layout described under [Watching and task containers](#watching-and-task-containers).
 
 ### Setting values
@@ -266,10 +267,20 @@ It falls back to a unique home-label lookup only for a Firstmate outside Herdr.
 Projected children are never collapsed back into that parent.
 The parent is the placement and ordering reference the projection is bound under.
 
+When Herdr identifies that exact parent as the source workspace for the task's exact physical project checkout, Firstmate preallocates the task's durable Treehouse lease and opens that linked checkout through `herdr worktree open --workspace <exact-parent>`.
+That same-repository path renders a primary-home or secondmate-home task one level below its exact owner in Herdr instead of placing it beside the owner as a sibling.
+The response must prove a fresh, not-already-open linked checkout whose workspace, tab, pane, checkout path, and source-parent worktree listing all agree exactly before the spawn may continue.
+The preallocated checkout receives the same Firstmate slot claim as the ordinary interactive Treehouse path.
+An aborted spawn returns it under the existing project lock only after exact presentation cleanup has run.
+Herdr groups only linked Git worktree workspaces from the source workspace's repository, so it cannot nest a task from another project beneath that exact home.
+When the exact owning home represents another repository, Herdr cannot group the task checkout beneath it, so the established top-level disposable workspace path remains unchanged.
+A Holtek-project task launched by a home represented by a Firstmate-project workspace therefore remains a top-level sibling in a disposable workspace with the `└ ` corner label; the glyph and best-effort adjacency are not actual indentation.
+Firstmate does not create per-project home spaces, adopt another repository's source workspace, or weaken exact-parent binding to make it look nested.
+The exact owner remains the journal, placement, and ordering reference in either path, and projected children are never collapsed into that parent.
 The normal `fm-<id>` task tab is created in the exact new workspace returned by Herdr.
-Only the exact seeded default tab returned by the same workspace-create response can be pruned.
+Only the exact seeded default tab returned by the same workspace-create or worktree-open response can be pruned.
 Before and after create, prune, order, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
-An ambiguous response grants no mutation or cleanup authority.
+An ambiguous, reused, or mismatched response grants no mutation or cleanup authority.
 
 ### Ordering
 
@@ -326,13 +337,11 @@ The repositioning move-to-last preserves every surviving workspace's relative or
 Removal is confirmed against the exact moved workspace rather than inferred from pane disappearance.
 An unconfirmed removal then makes one verified attempt, under the same session lock, to roll the doomed workspace back to its exact original position.
 If that rollback cannot restore the verified original order, cleanup warns loudly and leaves the retained records for inspection rather than retrying the shared-layout mutation.
-
 The pane-death signals are pid-exact.
 The escalation re-reads the pane's process information and refuses unless the same shell pid still passes the strict bare-idle ownership proof, so an exited and reused pid is never signaled.
 
 A move-plan ambiguity, unsupported or failed move, or unproved shell falls back to the plain explicit close.
-Exact tab restoration remains the backstop whenever a surviving tab must be preserved.
-So degraded behavior is never worse than the pre-mitigation sub-second restore.
+Exact tab restoration remains the backstop whenever a surviving tab must be preserved, so degraded behavior is never worse than the pre-mitigation sub-second restore.
 
 ### Ordinary removal and cleanup locking
 
@@ -343,8 +352,9 @@ Ordinary non-projected task removal:
 - Keeps the legitimate plain close when the target is the active tab.
 - Refuses an unlocked close if the lock cannot be acquired.
 
-Task cleanup acquires that session lock before the task's isolated copy is returned.
-So a contended lock refuses up front while the copy, every durable record, and the endpoint are all intact for a plain rerun.
+Task cleanup acquires that session lock and binds the exact projected endpoint to its journal before any process reap or checkout return can drop the workspace it names.
+So a contended or ambiguous preflight refuses while the copy, every durable record, and the endpoint are all intact for a plain rerun.
+A linked-worktree workspace can disappear when Treehouse returns its checkout, but the pre-return binding permits retirement only after that same exact pane reports structured not-found; it never grants workspace-close authority.
 
 Forced secondmate cleanup recursively preflights every Herdr child endpoint and acquires every affected named-session lock before mutating any child.
 It then retains each child's durable identity unless that exact pane returns structured not-found after its close.
@@ -379,10 +389,22 @@ The replacement tab and pane are created and verified before the old pane is rec
 Then the journal advances atomically to the replacement endpoint before metadata publication.
 The reclaim path never moves, closes, deletes, or renames a workspace and never touches a parent, sibling, captain, or foreign pane.
 A failed replacement rolls back only the exact response-derived new pane when focus-safe verification permits it.
+A same-project nested task that owns a durable preallocated checkout reuses that exact recorded checkout across recovery instead of acquiring a second one.
+Recovery carries it only after proving over `worktree list` on the journal's exact parent, or for a version 1 journal on the owning home, that the recorded checkout belongs to that exact project.
+A linked checkout that the same listing no longer renders as that journal's open child is carried when the durable slot-owner claim names the recovering task, because its parked work would otherwise be stranded by a second allocation.
+That claim-gated carry also adopts a legacy top-level projection whose checkout was only a lapsed interactive process lease: the recorded checkout path resolves, the listing positively shows the checkout is not open, and the claim names the recovering task.
+`fm_backend_herdr_projection_recovery_nested_worktree` and its classify helper `fm_backend_herdr_projection_recovery_classify_nested_worktree` in `bin/backends/herdr.sh` implement that proof, and `spawn_herdr_recovery_classify_nested_worktree` in `bin/fm-spawn.sh` applies the claim check.
+A version 2 proof is pinned to the journal's own nested workspace id, and a version 1 proof is anchored by the recorded checkout path together with a non-empty open workspace id; both use the journal or the path rather than the current metadata endpoint, so a respawn whose metadata has already moved to the flat home container after an earlier flat-fallback recovery still carries the same lease.
+A carry additionally requires the durable slot-owner claim to still name the recovering task, so a claim naming a different task means reassignment and that checkout falls back flat and is never adopted or returned.
+The carried checkout is never freshened, reset, or reacquired, metadata keeps naming it, and teardown returns that same lease.
+An abort after a carried recovery republished the task record keeps both that record and the lease instead of rolling the record back or force-returning the checkout, so the parked work stays recoverable by a rerun or teardown.
+When a recorded path cannot be resolved, recovery refuses only after positively identifying that same-project journal's own workspace as a still-open nested child; a legacy top-level projection keeps its flat fallback.
+When the `worktree list` proof for a resolved same-project checkout cannot be read, is ambiguous, or otherwise cannot prove the exact checkout, recovery refuses with a clear diagnostic and leaves the durable lease and task record intact rather than allowing the generic path to allocate a second checkout.
+A proven same-project checkout whose exact projection cannot be reclaimed is still reused through the flat layout rather than reacquired.
 
 These cases fall back flat without mutating the old projection when duplicate-agent risk is positively absent:
 
-- Version 1 journals.
+- Version 1 journals with no proven durable checkout.
 - Dead or missing panes.
 - Duplicate or absent tokens.
 - Renamed or detached spaces.
@@ -471,7 +493,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 
 | Test | What it covers |
 | --- | --- |
-| `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path. |
+| `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, same-project worktree-child projection and durable-checkout recovery, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path. |
 | `tests/fm-herdr-session-cleanup.test.sh` | Every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary. |
 | `tests/fm-herdr-session-cleanup-e2e.test.sh` | The restored-shell cleanup in a guarded non-default named lab. |
 | `tests/fm-backend-herdr-focus-flash-e2e.test.sh` | Reproduces the raw explicit-close focus steal on the installed release, and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval. |
@@ -483,8 +505,8 @@ Any of these preserves the candidate and lets session startup continue with at m
 
 ## Default-tab prune safety
 
-`herdr workspace create` seeds one default tab.
-Firstmate prunes it only after a real task tab exists and only when the same create response supplied the seeded tab id.
+`herdr workspace create` and the projected `herdr worktree open` each seed one default tab.
+Firstmate prunes it only after a real task tab exists and only when the same create or worktree-open response supplied the seeded tab id.
 An adopted workspace never supplies that id and can never enter the prune path, regardless of labels or tab count.
 Immediately before close, Firstmate rechecks the exact tab, expected seed label, and native agent state.
 A working seed pane is never closed.

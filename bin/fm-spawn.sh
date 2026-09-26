@@ -115,15 +115,19 @@
 #   config/herdr-presentation-spaces file can say off to disable it or on to
 #   opt in below that floor; an empty file remains the historical opt-in form.
 #   A clean fresh task first writes state/<id>.herdr-presentation atomically,
-#   then creates a disposable
-#   workspace containing only the ordinary task pane. A successful clean create
-#   upgrades its attempt journal with exact home, session, workspace, tab, pane,
-#   parent, and label bindings. On a same-identity restart, that complete binding
-#   plus authoritative metadata may replace one exact agent-free husk in place.
-#   The journal, visible token, and labels alone are never endpoint or ownership
-#   authority, and every ambiguous recovery stays on the flat fallback after
-#   duplicate-agent risk is independently absent. Treehouse allocation and task
-#   metadata are unchanged.
+#   then creates its one-task presentation workspace containing only the
+#   ordinary task pane. When the launcher's exact workspace is the source
+#   workspace for the task's own project, Firstmate preallocates the task's
+#   durable Treehouse lease and opens that linked checkout as a real Herdr
+#   worktree child beneath the launcher, so the task renders one level below its
+#   owner; otherwise the established top-level disposable workspace path is
+#   unchanged. A successful clean create upgrades its attempt journal with exact
+#   home, session, workspace, tab, pane, parent, and label bindings. On a
+#   same-identity restart, that complete binding plus authoritative metadata may
+#   replace one exact agent-free husk in place. The journal, visible token, and
+#   labels alone are never endpoint or ownership authority, and every ambiguous
+#   recovery stays on the flat fallback after duplicate-agent risk is
+#   independently absent.
 #   A clean projected create or exact resume makes one bounded attempt to hold
 #   the one session-scoped presentation-order lock (keyed by named session plus
 #   canonical socket, outside any home's state/) through launch handoff. Lock
@@ -1181,6 +1185,9 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_TREEHOUSE_LEASED=0
+SPAWN_TREEHOUSE_RETURN_SAFE=0
+SPAWN_TREEHOUSE_CARRIED_OVER=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1308,7 +1315,9 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
   if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
-    if ! spawn_fresh_commit_rollback; then
+    if [ "$SPAWN_TREEHOUSE_CARRIED_OVER" = 1 ]; then
+      SPAWN_FRESH_COMMIT_PENDING=0
+    elif ! spawn_fresh_commit_rollback; then
       status=1
     fi
   fi
@@ -1331,6 +1340,28 @@ spawn_abort_cleanup() {
       fm_treehouse_slot_owner_release "$WT" "$ID" || true
     else
       echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
+    fi
+  fi
+  if [ "$SPAWN_TREEHOUSE_LEASED" = 1 ] && [ -n "${WT:-}" ]; then
+    if [ "$SPAWN_TREEHOUSE_CARRIED_OVER" = 1 ]; then
+      if [ "$status" -ne 0 ]; then
+        echo "warning: retaining carried durable Treehouse worktree $WT for $ID; its task record at $STATE/$ID.meta names it, so re-run the spawn or run teardown to return the lease" >&2
+      fi
+    elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+      if [ "$SPAWN_TREEHOUSE_RETURN_SAFE" != 1 ]; then
+        echo "warning: leaving preallocated Treehouse worktree $WT leased because the Herdr worktree-open result was ambiguous; its projection journal remains quarantined" >&2
+        status=1
+      elif [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+        if (cd "$PROJ_ABS" && treehouse return --force "$WT" >/dev/null 2>&1); then
+          SPAWN_TREEHOUSE_LEASED=0
+        else
+          echo "warning: could not return preallocated Treehouse worktree $WT after aborted Herdr projection; its durable lease is retained" >&2
+          status=1
+        fi
+      else
+        echo "warning: leaving preallocated Treehouse worktree $WT leased after aborted Herdr projection because its project lock is no longer held" >&2
+        status=1
+      fi
     fi
   fi
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
@@ -3348,6 +3379,33 @@ herdr_projection_existing_meta_allows_flat() { # <meta>
   esac
 }
 
+# Classify whether one recovered task owns a durable Treehouse checkout that
+# Herdr still renders as an open linked worktree child of its owning home, or
+# that the durable slot-owner claim still names this task for even though the
+# listing no longer renders it open. Either proof may carry the checkout into
+# the recovered task, and a claim naming a different task means reassignment and
+# is never carried; docs/herdr-backend.md "Presentation spaces" owns the full
+# carry rule. Sets:
+#   HERDR_RECOVERY_NESTED_WORKTREE   the proven or owned checkout path, else empty
+#   HERDR_RECOVERY_NESTED_AMBIGUOUS  1 when the exact proof could not be read
+spawn_herdr_recovery_classify_nested_worktree() { # <session> <journal> <meta>
+  local session=$1 journal=$2 meta=$3 recorded
+  recorded=$(herdr_projection_meta_field_exact "$meta" worktree 2>/dev/null) || recorded=""
+  fm_backend_herdr_projection_recovery_classify_nested_worktree \
+    "$session" "$journal" "$ID" "$recorded" "$HERDR_PARENT_LABEL" "$PROJ_ABS"
+  HERDR_RECOVERY_NESTED_WORKTREE=$FM_BACKEND_HERDR_RECOVERY_NESTED_WORKTREE
+  HERDR_RECOVERY_NESTED_AMBIGUOUS=$FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS
+  if [ -n "$HERDR_RECOVERY_NESTED_WORKTREE" ]; then
+    fm_treehouse_slot_owner_state "$HERDR_RECOVERY_NESTED_WORKTREE" "$ID"
+    [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || HERDR_RECOVERY_NESTED_WORKTREE=""
+  elif [ -n "$FM_BACKEND_HERDR_RECOVERY_NESTED_UNOPENED" ]; then
+    fm_treehouse_slot_owner_state "$FM_BACKEND_HERDR_RECOVERY_NESTED_UNOPENED" "$ID"
+    if [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ]; then
+      HERDR_RECOVERY_NESTED_WORKTREE=$FM_BACKEND_HERDR_RECOVERY_NESTED_UNOPENED
+    fi
+  fi
+}
+
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
 # become the sole owner of the row's In-flight transition, so prove the row is
 # transitionable BEFORE any endpoint, worktree, or record exists: a refusal here
@@ -3540,12 +3598,25 @@ else
         fi
         fm_backend_herdr_projection_recovery_allows_flat \
           "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
+        HERDR_RECOVERY_NESTED_WORKTREE=""
+        HERDR_RECOVERY_NESTED_AMBIGUOUS=0
+        if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ] &&
+          { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; }; then
+          spawn_herdr_recovery_classify_nested_worktree \
+            "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$STATE/$ID.meta"
+        fi
+        if [ "$HERDR_RECOVERY_NESTED_AMBIGUOUS" = 1 ]; then
+          echo "error: could not confirm the recorded durable Treehouse checkout for $ID; refusing recovery so its durable lease and task record stay intact" >&2
+          exit 1
+        fi
         if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ]; then
+          HERDR_RECLAIM_CWD=$PROJ_ABS
+          [ -z "$HERDR_RECOVERY_NESTED_WORKTREE" ] || HERDR_RECLAIM_CWD=$HERDR_RECOVERY_NESTED_WORKTREE
           set +e
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$W" "$HERDR_RECLAIM_CWD"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
@@ -3565,6 +3636,11 @@ else
             ;;
           *) exit 1 ;;
           esac
+          if [ -n "$HERDR_RECOVERY_NESTED_WORKTREE" ]; then
+            WT=$HERDR_RECOVERY_NESTED_WORKTREE
+            SPAWN_TREEHOUSE_LEASED=1
+            SPAWN_TREEHOUSE_CARRIED_OVER=1
+          fi
         else
           spawn_herdr_presentation_order_lock_release
         fi
@@ -3599,17 +3675,49 @@ else
             echo "warning: herdr presentation parent is absent or ambiguous; using the ordinary flat layout without projection" >&2
             spawn_herdr_presentation_order_lock_release
           else
+            HERDR_PROJECTION_WORKTREE_PARENT=""
+            HERDR_PROJECTION_CWD=$PROJ_ABS
+            if fm_backend_herdr_projection_parent_sources_project \
+              "$HERDR_SES" "$HERDR_PARENT_WORKSPACE_ID" "$PROJ_ABS"; then
+              WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || {
+                echo "error: treehouse get --lease failed before nested Herdr projection for $ID" >&2
+                exit 1
+              }
+              SPAWN_TREEHOUSE_LEASED=1
+              SPAWN_TREEHOUSE_RETURN_SAFE=1
+              if ! spawn_worktree_isolated "$WT"; then
+                echo "error: treehouse get --lease did not yield an isolated worktree (resolved '$WT'; worktree root '${SPAWN_WT_TOP:-none}'; spawning project '$PROJ_ABS'); refusing nested Herdr projection" >&2
+                exit 1
+              fi
+              if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+                if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
+                  echo "error: could not claim preallocated Treehouse pool slot $WT for task $ID; refusing nested Herdr projection" >&2
+                  exit 1
+                fi
+                SPAWN_SLOT_CLAIMED=1
+              fi
+              HERDR_PROJECTION_WORKTREE_PARENT=$HERDR_PARENT_WORKSPACE_ID
+              HERDR_PROJECTION_CWD=$WT
+            fi
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
+            if [ -n "$HERDR_PROJECTION_WORKTREE_PARENT" ]; then
+              SPAWN_TREEHOUSE_RETURN_SAFE=0
+            fi
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              "$HERDR_PROJECTION_CWD" "$HERDR_PROJECTION_LABEL" "$W" \
+              "$HERDR_PROJECTION_WORKTREE_PARENT"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
                 HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
                 HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+                SPAWN_TREEHOUSE_RETURN_SAFE=1
               fi
               exit 1
+            fi
+            if [ -n "$HERDR_PROJECTION_WORKTREE_PARENT" ]; then
+              SPAWN_TREEHOUSE_RETURN_SAFE=1
             fi
             HERDR_PROJECTED=1
             HERDR_SES=$FM_BACKEND_HERDR_PROJECTION_SESSION
@@ -3655,7 +3763,7 @@ else
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "${HERDR_RECOVERY_NESTED_WORKTREE:-$PROJ_ABS}" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -4091,7 +4199,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     fi
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
-elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -z "$WT" ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -4172,8 +4280,27 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     fi
     SPAWN_SLOT_CLAIMED=1
   fi
+elif [ "$KIND" != secondmate ] && [ "$BACKEND" = herdr ] && [ "$SPAWN_TREEHOUSE_LEASED" = 1 ]; then
+  # The nested projection was opened directly at a preallocated checkout, so
+  # there is no interactive `treehouse get` transition to observe. Prove that
+  # the exact response-derived task pane is nevertheless sitting in that exact
+  # checkout before freshening it or launching an agent. This also keeps a
+  # malformed or asynchronously-drifted child inside the normal abort cleanup
+  # boundary instead of publishing metadata for the wrong directory.
+  nested_wt_real=$(real_path_or_raw "$WT")
+  nested_seen=""
+  for _ in $(seq 1 10); do
+    nested_seen=$(spawn_current_path "$WT_TARGET" || true)
+    [ -z "$nested_seen" ] || [ "$(real_path_or_raw "$nested_seen")" != "$nested_wt_real" ] || break
+    sleep 0.5
+  done
+  if [ -z "$nested_seen" ] || [ "$(real_path_or_raw "$nested_seen")" != "$nested_wt_real" ]; then
+    echo "error: preallocated treehouse get --lease task pane did not enter an isolated worktree at '$WT' (last seen '${nested_seen:-none}'); inspect window $T" >&2
+    exit 1
+  fi
+  validate_spawn_worktree "treehouse get --lease" "$T"
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_TREEHOUSE_CARRIED_OVER" != 1 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
@@ -5273,7 +5400,9 @@ else
 fi
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   if [ "$RELAUNCH" -eq 0 ]; then
-    if spawn_fresh_commit_rollback; then
+    if [ "$SPAWN_TREEHOUSE_CARRIED_OVER" = 1 ]; then
+      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its carried durable checkout record at $STATE/$ID.meta and the lease it names were retained - fix the backlog and re-run the spawn, or run teardown to return the lease" >&2
+    elif spawn_fresh_commit_rollback; then
       echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
     else
       echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR), and failed-dispatch cleanup is incomplete; the provisional record may remain at $STATE/$ID.meta - close out endpoint $T and local copy $WT by hand, then remove the record and busy state before retrying" >&2

@@ -129,7 +129,7 @@ fi
 mutation=
 mutation_target=${3:-}
 case "${1:-} ${2:-}" in
-  "workspace create") mutation=workspace-create; mutation_target=$label ;;
+  "workspace create"|"worktree open") mutation=workspace-create; mutation_target=$label ;;
   "tab create") mutation=tab-create; mutation_target=$label ;;
   "pane close") mutation=pane-close ;;
   "tab focus") mutation=tab-focus ;;
@@ -173,6 +173,7 @@ if [ "$status" -eq 0 ] && [ "$mutation" = tab-create ]; then
       task=${label#fm-}
       mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$POST_CREATE_ABORT_CONTROL/$task/task-pane"
+      printf '%s\n' "$(arg_value --cwd "$@")" > "$POST_CREATE_ABORT_CONTROL/$task/worktree"
       ;;
   esac
 fi
@@ -209,7 +210,10 @@ set -u
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
 if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
-  exit 0
+  case " $* " in
+    *' --lease '*) ;;
+    *) exit 0 ;;
+  esac
 fi
 # Treehouse's pool allocator is outside the Herdr concurrency contract under
 # test. Serialize its calls so simultaneous recovery spawns cannot race for
@@ -471,7 +475,7 @@ log_line_count() { wc -l < "$HERDR_CALL_LOG" | tr -d '[:space:]'; }
 projection_labels_from_log() {  # <start-line>
   local start=$1
   sed -n "$((start + 1)),\$p" "$HERDR_CALL_LOG" | awk -F '\t' '
-    $1 == "workspace" && $2 == "create" {
+    $1 == "worktree" && $2 == "open" {
       for (i = 1; i < NF; i += 1) {
         if ($i == "--label" && $(i + 1) ~ /^└ /) {
           print $(i + 1)
@@ -499,7 +503,7 @@ assert_no_ordering_lifecycle_calls_since() {  # <line-count> <case-name>
 assert_no_projection_mutation_since() {  # <line-count> <case-name>
   local start=$1 name=$2 calls
   calls=$(sed -n "$((start + 1)),\$p" "$HERDR_CALL_LOG")
-  if printf '%s\n' "$calls" | grep -E $'^(workspace\t(create|close|rename)|tab\t(create|close)|pane\tclose|session\t(stop|delete)|server)' >/dev/null 2>&1; then
+  if printf '%s\n' "$calls" | grep -E $'^(workspace\t(create|close|rename)|worktree\topen|tab\t(create|close)|pane\tclose|session\t(stop|delete)|server)' >/dev/null 2>&1; then
     fail "$name performed a create, close, delete, rename, or lifecycle call during recovery inspection"
   fi
 }
@@ -542,9 +546,10 @@ remember_meta_worktree "$ANCHOR_META" >/dev/null
 FIRSTMATE_WSID=$(grep '^herdr_workspace_id=' "$ANCHOR_META" | cut -d= -f2-)
 [ -n "$FIRSTMATE_WSID" ] || fail "anchor metadata did not record the firstmate workspace"
 
-# The same task id and project run once opted out and once projected, so
-# Treehouse commands and metadata can be compared after normalizing endpoint
-# IDs and the deliberately fresh per-spawn incarnation.
+# The same task id and project run once opted out and once projected.
+# The nested path deliberately preallocates a durable Treehouse lease rather
+# than typing `treehouse get`, while the normalized metadata contract remains
+# unchanged apart from endpoint ids and the fresh spawn incarnation.
 : > "$TREEHOUSE_CALL_LOG"
 OFF_HERDR_START=$(log_line_count)
 OFF_MOVE_START=$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')
@@ -554,7 +559,6 @@ OFF_HERDR_END=$(log_line_count)
 OFF_META="$TMP_ROOT/off.meta"
 cp "$HOME_DIR/state/shape.meta" "$OFF_META"
 OFF_WT=$(remember_meta_worktree "$OFF_META")
-cp "$TREEHOUSE_CALL_LOG" "$TMP_ROOT/off-treehouse.log"
 [ "$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')" = "$OFF_MOVE_START" ] \
   || fail "opted-out spawn invoked the presentation-only workspace mover"
 OFF_HERDR_CALLS=$(sed -n "$((OFF_HERDR_START + 1)),${OFF_HERDR_END}p" "$HERDR_CALL_LOG")
@@ -642,8 +646,16 @@ assert_raw_presentation_mutations_preserved_since "$SHAPE_FOCUS_AUDIT_START" "pr
 ON_META="$TMP_ROOT/on.meta"
 cp "$HOME_DIR/state/shape.meta" "$ON_META"
 ON_WT=$(remember_meta_worktree "$ON_META")
-cmp -s "$TMP_ROOT/off-treehouse.log" "$TREEHOUSE_CALL_LOG" \
-  || fail "Treehouse command sequence changed between opted-out and projected spawns"
+awk -F '\t' '
+  $1 == "get" {
+    for (i = 2; i <= NF; i += 1) {
+      if ($i == "--lease") leased = 1
+      if ($i == "--lease-holder" && $(i + 1) == "shape") holder = 1
+    }
+  }
+  END { exit !(leased && holder) }
+' "$TREEHOUSE_CALL_LOG" \
+  || fail "same-project projection did not preallocate its exact Treehouse worktree durably"
 JOURNAL="$HOME_DIR/state/shape.herdr-presentation"
 [ -f "$JOURNAL" ] || fail "projected spawn did not publish its presentation journal"
 TOKEN=$(grep '^projection_id=' "$JOURNAL" | cut -d= -f2-)
@@ -657,6 +669,17 @@ PROJECTED_LABEL=$(printf '%s' "$PROJECTED_INFO" | jq -r '.result.workspace.label
   || fail "projected workspace label did not use the corner format with full token: $PROJECTED_LABEL"
 PROJECTED_TABS=$(lab tab list --workspace "$PROJECTED_WSID")
 PROJECTED_PANES=$(lab pane list --workspace "$PROJECTED_WSID")
+PROJECTED_WORKTREES=$(lab worktree list --workspace "$FIRSTMATE_WSID") \
+  || fail "could not inspect the projected worktree group"
+printf '%s' "$PROJECTED_WORKTREES" | jq -e \
+  --arg parent "$FIRSTMATE_WSID" --arg child "$PROJECTED_WSID" --arg path "$ON_WT" '
+    .result.type == "worktree_list"
+    and .result.source.source_workspace_id == $parent
+    and ([.result.worktrees[]?
+      | select(.open_workspace_id == $child)
+      | select(.path == $path and .is_linked_worktree == true)] | length) == 1
+  ' >/dev/null 2>&1 \
+  || fail "same-project projection was not rendered as the exact primary home's worktree child"
 [ "$(printf '%s' "$PROJECTED_TABS" | jq -r '.result.tabs | length')" = 1 ] \
   || fail "projected workspace retained a seeded or placeholder tab"
 [ "$(printf '%s' "$PROJECTED_PANES" | jq -r '.result.panes | length')" = 1 ] \
@@ -670,7 +693,7 @@ printf '%s' "$PROJECTED_PANES" | jq -e --arg pane "$PROJECTED_PANE" \
 SECOND_TWO_INFO=$(lab workspace get "$SECOND_TWO_WSID") || fail "focused secondmate disappeared during projected create"
 [ "$(printf '%s' "$SECOND_TWO_INFO" | jq -r '.result.workspace.focused')" = true ] \
   || fail "projected create or workspace.move stole focus from the captain's current space"
-pass "real Herdr lab: every projected create, task-tab create, seeded prune, and move preserves active workspace and tab"
+pass "real Herdr lab: a fresh same-project space renders one level below its exact home, with create, prune, and move preserving focus"
 
 mkdir -p "$ACTIVE_SEEDED_CONTROL"
 printf '%s\n' requested > "$ACTIVE_SEEDED_CONTROL/stage"
@@ -741,7 +764,7 @@ LOCK_CONTENTION_WSID=$(grep '^herdr_workspace_id=' "$LOCK_CONTENTION_META" | cut
 LOCK_CONTENTION_CALLS=$(sed -n "$((LOCK_CONTENTION_START + 1)),\$p" "$HERDR_CALL_LOG")
 # session list is required to resolve the shared session lock path before the
 # bounded acquire attempt; it must not unlock projection create or move.
-if printf '%s\n' "$LOCK_CONTENTION_CALLS" | grep -E $'^(workspace\tcreate|pane\tclose|api\tschema)' >/dev/null 2>&1; then
+if printf '%s\n' "$LOCK_CONTENTION_CALLS" | grep -E $'^(workspace\tcreate|worktree\topen|pane\tclose|api\tschema)' >/dev/null 2>&1; then
   fail "bounded lock contention performed an unlocked projection mutation or ordering capability call"
 fi
 [ "$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')" = "$LOCK_CONTENTION_MOVE_START" ] \
@@ -843,6 +866,7 @@ pass "real Herdr lab: forced workspace.move failure leaves a successful worker i
 mkdir -p "$POST_CREATE_ABORT_CONTROL"
 ABORT_START=$(log_line_count)
 ABORT_FOCUS_START=$(focus_audit_line_count)
+ABORT_TREEHOUSE_START=$(wc -l < "$TREEHOUSE_CALL_LOG" | tr -d '[:space:]')
 spawn_task abort-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-a.out" 2> "$TMP_ROOT/abort-a.err" &
 ABORT_A_PID=$!
 spawn_task abort-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-b.out" 2> "$TMP_ROOT/abort-b.err" &
@@ -860,15 +884,21 @@ grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 
   || fail "post-create abort fixture B did not reach the armed validation failure"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
-ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
-  $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
-  $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
-  $1 == "pane-close" && $4 == a { print "close-a" }
-  $1 == "pane-close" && $4 == b { print "close-b" }
+[ -s "$POST_CREATE_ABORT_CONTROL/abort-a/worktree" ] \
+  && [ -s "$POST_CREATE_ABORT_CONTROL/abort-b/worktree" ] \
+  || fail "post-create abort fixtures did not record their exact preallocated checkouts"
+ABORT_SEQUENCE=$(sed -n "$((ABORT_TREEHOUSE_START + 1)),\$p" "$TREEHOUSE_CALL_LOG" | awk -F '\t' '
+  $1 == "get" {
+    for (i = 2; i < NF; i += 1) {
+      if ($i == "--lease-holder" && $(i + 1) == "abort-a") { pending = "a"; print "get-a" }
+      if ($i == "--lease-holder" && $(i + 1) == "abort-b") { pending = "b"; print "get-b" }
+    }
+  }
+  $1 == "return" && pending != "" { print "return-" pending; pending = "" }
 ')
 case "$ABORT_SEQUENCE" in
-  $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;
-  *) fail "concurrent post-create abort cleanup interleaved outside the presentation lock: $ABORT_SEQUENCE" ;;
+  $'get-a\nreturn-a\nget-b\nreturn-b'|$'get-b\nreturn-b\nget-a\nreturn-a') ;;
+  *) fail "concurrent post-create abort cleanup and durable checkout return interleaved outside their lock: $ABORT_SEQUENCE" ;;
 esac
 ABORT_UNRESTORED=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
   ($1 == "workspace-create" || $1 == "tab-create" || $1 == "workspace-move" || ($1 == "pane-close" && $4 != a && $4 != b)) && $2 != $3 { print }
@@ -890,15 +920,200 @@ rm -rf "$POST_CREATE_ABORT_CONTROL"
 rm -f "$HOME_DIR/state/abort-a.herdr-presentation" "$HOME_DIR/state/abort-b.herdr-presentation"
 pass "real Herdr lab: concurrent post-create abort cleanup stays serialized with exact focus restoration"
 
+# An aborted recovery that is carrying a durable checkout must keep the task
+# record that names that lease and must never force-return it: the parked work
+# is preserved for a rerun, and the operator is told the real reason instead of
+# the ambiguous worktree-open wording that only applies to a fresh create. The
+# abort is forced after the record is republished, at the launch-directory
+# guard, so the provisional-record rollback would otherwise remove it.
+CARRY_ABORT_ID=carry-abort
+carry_abort_launch_dir() {  # <home>
+  local home=$1 root hash
+  root=$(cd "$home" 2>/dev/null && pwd -P) || root=$home
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print $1}')
+  else
+    hash=$(printf '%s' "$root" | sha256sum | awk '{print $1}')
+  fi
+  printf '/tmp/fm-%s+%s' "$CARRY_ABORT_ID" "$hash"
+}
+mkdir -p "$HOME_DIR/data/$CARRY_ABORT_ID"
+write_ship_brief "$HOME_DIR" "$CARRY_ABORT_ID" 'Carried recovery abort fixture.'
+spawn_task "$CARRY_ABORT_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/carry-abort-first.out" 2> "$TMP_ROOT/carry-abort-first.err" \
+  || fail "carry-abort projected spawn failed: $(cat "$TMP_ROOT/carry-abort-first.err")"
+CARRY_ABORT_META="$HOME_DIR/state/$CARRY_ABORT_ID.meta"
+CARRY_ABORT_WT=$(remember_meta_worktree "$CARRY_ABORT_META")
+CARRY_ABORT_WSID=$(grep '^herdr_workspace_id=' "$CARRY_ABORT_META" | cut -d= -f2-)
+CARRY_ABORT_LAUNCH_DIR=$(carry_abort_launch_dir "$HOME_DIR")
+[ -d "$CARRY_ABORT_LAUNCH_DIR" ] \
+  || fail "carry-abort first spawn did not stage its launch directory at $CARRY_ABORT_LAUNCH_DIR"
+lab workspace close "$CARRY_ABORT_WSID" >/dev/null \
+  || fail "could not close the task space for carry-abort"
+# The close above is the external task-space removal under test; Herdr's own
+# close steers focus to the closed space's neighbor. Re-baseline the captain's
+# focus so the recovery and later teardowns are judged on their own behavior.
+lab tab focus "$SECOND_TWO_TAB" >/dev/null \
+  || fail "could not restore the captain tab after removing the carry-abort task space"
+assert_focus_is "$CAPTAIN_FOCUS" "carry-abort task-space removal"
+chmod 777 "$CARRY_ABORT_LAUNCH_DIR" \
+  || fail "could not arm the launch-directory refusal for carry-abort"
+CARRY_ABORT_TREEHOUSE_START=$(wc -l < "$TREEHOUSE_CALL_LOG" | tr -d '[:space:]')
+if spawn_task "$CARRY_ABORT_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/carry-abort-resume.out" 2> "$TMP_ROOT/carry-abort-resume.err"; then
+  fail "carry-abort recovery unexpectedly succeeded after the armed launch-directory refusal"
+fi
+[ -e "$CARRY_ABORT_META" ] \
+  || fail "aborted carried recovery rolled back the task record that names its lease"
+[ "$(grep '^worktree=' "$CARRY_ABORT_META" | cut -d= -f2-)" = "$CARRY_ABORT_WT" ] \
+  || fail "aborted carried recovery changed the recorded durable checkout"
+grep -F "retaining carried durable Treehouse worktree $CARRY_ABORT_WT" "$TMP_ROOT/carry-abort-resume.err" >/dev/null 2>&1 \
+  || fail "aborted carried recovery did not report its retained carried lease: $(cat "$TMP_ROOT/carry-abort-resume.err")"
+if grep -F "worktree-open result was ambiguous" "$TMP_ROOT/carry-abort-resume.err" >/dev/null 2>&1; then
+  fail "aborted carried recovery used the fresh-create ambiguity wording for a carry"
+fi
+CARRY_ABORT_RETURNS=$(sed -n "$((CARRY_ABORT_TREEHOUSE_START + 1)),\$p" "$TREEHOUSE_CALL_LOG" | awk -F '\t' -v wt="$CARRY_ABORT_WT" '$1 == "return" && $NF == wt { print }')
+[ -z "$CARRY_ABORT_RETURNS" ] \
+  || fail "aborted carried recovery force-returned the retained lease: $CARRY_ABORT_RETURNS"
+# The retained lease and flat pane are cleaned up by hand so later fixtures
+# are unaffected; the record has already proven it names the lease.
+CARRY_ABORT_PANE=$(grep '^herdr_pane_id=' "$CARRY_ABORT_META" | cut -d= -f2-)
+[ -n "$CARRY_ABORT_PANE" ] \
+  || fail "aborted carried recovery record did not name its flat task pane"
+"$REAL_TREEHOUSE" return --force "$CARRY_ABORT_WT" >/dev/null 2>&1 || true
+lab pane close "$CARRY_ABORT_PANE" >/dev/null 2>&1 || true
+rm -rf "$CARRY_ABORT_LAUNCH_DIR"
+rm -f "$CARRY_ABORT_META" "$HOME_DIR/state/$CARRY_ABORT_ID.herdr-presentation"
+pass "real Herdr lab: an aborted carried recovery keeps the task record and durable lease for a rerun"
+
+# A carried recovery whose final backlog dispatch fails must keep the record
+# naming its durable lease: the direct final rollback must honor the same
+# carried-checkout preserve rule as the abort trap rather than removing the
+# record and stranding the lease.
+CARRY_BACKLOG_ID=carry-backlog
+mkdir -p "$HOME_DIR/data/$CARRY_BACKLOG_ID"
+write_ship_brief "$HOME_DIR" "$CARRY_BACKLOG_ID" 'Carried backlog-abort fixture.'
+spawn_task "$CARRY_BACKLOG_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/carry-backlog-first.out" 2> "$TMP_ROOT/carry-backlog-first.err" \
+  || fail "carry-backlog projected spawn failed: $(cat "$TMP_ROOT/carry-backlog-first.err")"
+CARRY_BACKLOG_META="$HOME_DIR/state/$CARRY_BACKLOG_ID.meta"
+CARRY_BACKLOG_WT=$(remember_meta_worktree "$CARRY_BACKLOG_META")
+CARRY_BACKLOG_WSID=$(grep '^herdr_workspace_id=' "$CARRY_BACKLOG_META" | cut -d= -f2-)
+lab workspace close "$CARRY_BACKLOG_WSID" >/dev/null \
+  || fail "could not close the task space for carry-backlog"
+lab tab focus "$SECOND_TWO_TAB" >/dev/null \
+  || fail "could not restore the captain tab after removing the carry-backlog task space"
+assert_focus_is "$CAPTAIN_FOCUS" "carry-backlog task-space removal"
+# The recovery is this home's first backlog-aware spawn. A self-contained fake
+# tasks-axi proves compatibility and reports the row Queued so the preflight and
+# the dispatch commit both reach their transition, then fails `start` so the
+# commit fails after the carry republishes the record. The fixture must not
+# depend on an installed tasks-axi: the Herdr lane installs only Herdr and
+# Treehouse.
+cat > "$HOME_DIR/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+EOF
+printf '# Backlog\n\n## In flight\n\n## Queued\n\n## Done\n' > "$HOME_DIR/data/backlog.md"
+cat > "$FAKEBIN/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version)
+    printf 'tasks-axi 0.2.6\n'
+    ;;
+  update)
+    printf 'options:\n  --archive-body\n'
+    ;;
+  mv)
+    printf 'usage: tasks-axi mv [<id>...]\n'
+    ;;
+  show)
+    printf '  state: queued\n'
+    ;;
+  start)
+    echo 'error: simulated backlog start failure' >&2
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+SH
+chmod +x "$FAKEBIN/tasks-axi"
+CARRY_BACKLOG_TREEHOUSE_START=$(wc -l < "$TREEHOUSE_CALL_LOG" | tr -d '[:space:]')
+if spawn_task "$CARRY_BACKLOG_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/carry-backlog-resume.out" 2> "$TMP_ROOT/carry-backlog-resume.err"; then
+  fail "carry-backlog recovery unexpectedly succeeded after the armed backlog dispatch failure"
+fi
+[ -e "$CARRY_BACKLOG_META" ] \
+  || fail "aborted carried recovery rolled back the task record that names its lease"
+[ "$(grep '^worktree=' "$CARRY_BACKLOG_META" | cut -d= -f2-)" = "$CARRY_BACKLOG_WT" ] \
+  || fail "aborted carried recovery changed the recorded durable checkout"
+grep -F "retaining carried durable Treehouse worktree $CARRY_BACKLOG_WT" "$TMP_ROOT/carry-backlog-resume.err" >/dev/null 2>&1 \
+  || fail "aborted carried recovery did not report its retained carried lease: $(cat "$TMP_ROOT/carry-backlog-resume.err")"
+CARRY_BACKLOG_RETURNS=$(sed -n "$((CARRY_BACKLOG_TREEHOUSE_START + 1)),\$p" "$TREEHOUSE_CALL_LOG" | awk -F '\t' -v wt="$CARRY_BACKLOG_WT" '$1 == "return" && $NF == wt { print }')
+[ -z "$CARRY_BACKLOG_RETURNS" ] \
+  || fail "aborted carried recovery force-returned the retained lease: $CARRY_BACKLOG_RETURNS"
+CARRY_BACKLOG_PANE=$(grep '^herdr_pane_id=' "$CARRY_BACKLOG_META" | cut -d= -f2-)
+lab pane close "$CARRY_BACKLOG_PANE" >/dev/null 2>&1 || true
+"$REAL_TREEHOUSE" return --force "$CARRY_BACKLOG_WT" >/dev/null 2>&1 || true
+rm -f "$FAKEBIN/tasks-axi" "$HOME_DIR/.tasks.toml" "$HOME_DIR/data/backlog.md" \
+  "$CARRY_BACKLOG_META" "$HOME_DIR/state/$CARRY_BACKLOG_ID.herdr-presentation"
+hash -r 2>/dev/null || true
+pass "real Herdr lab: an aborted carried recovery keeps its record through a backlog dispatch failure"
+
+# A nested task whose own task space was closed is no longer rendered as an open
+# worktree child. Its recorded checkout is still this task's own durable slot, so
+# recovery must carry that exact checkout instead of allocating a second one and
+# stranding its parked work.
+CLOSED_SPACE_ID=closed-space
+mkdir -p "$HOME_DIR/data/$CLOSED_SPACE_ID"
+write_ship_brief "$HOME_DIR" "$CLOSED_SPACE_ID" 'Closed task space carry fixture.'
+spawn_task "$CLOSED_SPACE_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/closed-space-first.out" 2> "$TMP_ROOT/closed-space-first.err" \
+  || fail "closed-space projected spawn failed: $(cat "$TMP_ROOT/closed-space-first.err")"
+CLOSED_SPACE_META="$HOME_DIR/state/$CLOSED_SPACE_ID.meta"
+CLOSED_SPACE_OLD_WT=$(remember_meta_worktree "$CLOSED_SPACE_META")
+CLOSED_SPACE_MARKER="$(dirname "$(cd "$CLOSED_SPACE_OLD_WT" && pwd -P)")/.fm-slot-owner"
+CLOSED_SPACE_OLD_WSID=$(grep '^herdr_workspace_id=' "$CLOSED_SPACE_META" | cut -d= -f2-)
+lab workspace close "$CLOSED_SPACE_OLD_WSID" >/dev/null \
+  || fail "could not close the task space for closed-space"
+lab tab focus "$SECOND_TWO_TAB" >/dev/null \
+  || fail "could not restore the captain tab after removing the closed-space task space"
+assert_focus_is "$CAPTAIN_FOCUS" "closed-space task-space removal"
+lab worktree list --workspace "$FIRSTMATE_WSID" | jq -e --arg path "$CLOSED_SPACE_OLD_WT" '
+  ([.result.worktrees[]? | select(.path == $path and .is_linked_worktree == true)] | length) == 1
+  and ([.result.worktrees[]? | select(.path == $path and ((.open_workspace_id // "") | length) > 0)] | length) == 0
+' >/dev/null 2>&1 \
+  || fail "closed-space checkout was not a linked but no longer open worktree"
+spawn_task "$CLOSED_SPACE_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/closed-space-resume.out" 2> "$TMP_ROOT/closed-space-resume.err" \
+  || fail "closed-space recovery failed: $(cat "$TMP_ROOT/closed-space-resume.err")"
+CLOSED_SPACE_NEW_WT=$(remember_meta_worktree "$CLOSED_SPACE_META")
+[ "$CLOSED_SPACE_NEW_WT" = "$CLOSED_SPACE_OLD_WT" ] \
+  || fail "closed-space recovery allocated a second checkout instead of carrying its durable slot"
+if grep -F "retaining carried durable Treehouse worktree" "$TMP_ROOT/closed-space-resume.err" >/dev/null 2>&1; then
+  fail "a successful carried recovery reported its retained lease as if the spawn had aborted"
+fi
+teardown_task "$CLOSED_SPACE_ID" "$HOME_DIR" > "$TMP_ROOT/closed-space-teardown.out" 2> "$TMP_ROOT/closed-space-teardown.err" \
+  || fail "closed-space teardown failed: $(cat "$TMP_ROOT/closed-space-teardown.err")"
+[ ! -e "$CLOSED_SPACE_MARKER" ] \
+  || fail "closed-space teardown stranded its durable slot claim"
+pass "real Herdr lab: a nested task whose task space was closed carries its own durable checkout through recovery"
+
 SHAPE_CLEANUP_AUDIT_START=$(focus_audit_line_count)
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/on-teardown.out" 2> "$TMP_ROOT/on-teardown.err" \
   || fail "projected teardown failed: $(cat "$TMP_ROOT/on-teardown.err")"
 assert_focus_is "$CAPTAIN_FOCUS" "projected teardown"
 assert_cleanup_focus_preserved "$SHAPE_CLEANUP_AUDIT_START" "$PROJECTED_PANE" "$CAPTAIN_FOCUS"
-pass "real Herdr lab: Treehouse commands and metadata shape are byte-identical except for endpoint IDs and spawn incarnation"
+pass "real Herdr lab: durable nested checkout allocation preserves the task metadata contract"
 if lab workspace get "$PROJECTED_WSID" >/dev/null 2>&1; then
   fail "closing the exact projected task pane did not remove its last-tab workspace"
 fi
+POST_CLEANUP_WORKTREES=$(lab worktree list --workspace "$FIRSTMATE_WSID") \
+  || fail "could not inspect the owning home after projected cleanup"
+printf '%s' "$POST_CLEANUP_WORKTREES" | jq -e \
+  --arg parent "$FIRSTMATE_WSID" --arg child "$PROJECTED_WSID" '
+    .result.source.source_workspace_id == $parent
+    and ([.result.worktrees[]? | select(.open_workspace_id == $child)] | length) == 0
+  ' >/dev/null 2>&1 \
+  || fail "projected cleanup did not retire only the exact worktree child's open workspace"
 lab pane get "$SECOND_TWO_PANE" >/dev/null 2>&1 \
   || fail "projected teardown affected the focused secondmate workspace"
 [ ! -e "$JOURNAL" ] || fail "confirmed projected teardown did not retire its presentation journal"
@@ -1094,7 +1309,7 @@ MULTI_EXPECTED=$(printf '%s\n' \
   2ndmate-bravo "$B1_LABEL" "$B2_LABEL")
 [ "$MULTI_LABELS" = "$MULTI_EXPECTED" ] \
   || fail "multi-home topology was not owning-parent grouped: $MULTI_LABELS"
-pass "real Herdr lab: primary and two secondmate homes each own a top-level contiguous child block"
+pass "real Herdr lab: primary and two secondmate homes each own a contiguous child block beneath its exact source workspace"
 
 # Concurrent cross-home wave under the one session lock.
 mkdir -p "$HOME_DIR/data/pcw" "$SECOND_HOME_A/data/acw" "$SECOND_HOME_B/data/bcw"
@@ -1322,8 +1537,20 @@ spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/p
 PRIMARY_WAVE_PID=$!
 spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/bravo-wave-resume.out" 2> "$TMP_ROOT/bravo-wave-resume.err" &
 BRAVO_WAVE_PID=$!
-wait "$PRIMARY_WAVE_PID" || fail "concurrent primary recovery failed: $(cat "$TMP_ROOT/primary-wave-resume.err")"
-wait "$BRAVO_WAVE_PID" || fail "concurrent secondmate recovery failed: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+if wait "$PRIMARY_WAVE_PID"; then PRIMARY_WAVE_STATUS=0; else PRIMARY_WAVE_STATUS=$?; fi
+if wait "$BRAVO_WAVE_PID"; then BRAVO_WAVE_STATUS=0; else BRAVO_WAVE_STATUS=$?; fi
+if [ "$PRIMARY_WAVE_STATUS" -ne 0 ]; then
+  grep -F "presentation recovery could not acquire its session lock" "$TMP_ROOT/primary-wave-resume.err" >/dev/null 2>&1 \
+    || fail "concurrent primary recovery failed: $(cat "$TMP_ROOT/primary-wave-resume.err")"
+  spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/primary-wave-resume.out" 2> "$TMP_ROOT/primary-wave-resume.err" \
+    || fail "concurrent primary recovery retry failed: $(cat "$TMP_ROOT/primary-wave-resume.err")"
+fi
+if [ "$BRAVO_WAVE_STATUS" -ne 0 ]; then
+  grep -F "presentation recovery could not acquire its session lock" "$TMP_ROOT/bravo-wave-resume.err" >/dev/null 2>&1 \
+    || fail "concurrent secondmate recovery failed: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+  spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/bravo-wave-resume.out" 2> "$TMP_ROOT/bravo-wave-resume.err" \
+    || fail "concurrent secondmate recovery retry failed: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+fi
 PRIMARY_WAVE_NEW_WT=$(remember_meta_worktree "$PRIMARY_WAVE_META")
 BRAVO_WAVE_NEW_WT=$(remember_meta_worktree "$BRAVO_WAVE_META")
 PRIMARY_WAVE_NEW_PANE=$(grep '^herdr_pane_id=' "$PRIMARY_WAVE_META" | cut -d= -f2-)
@@ -1382,6 +1609,91 @@ do
 done
 assert_focus_is "$CAPTAIN_FOCUS" "multi-home teardown"
 pass "real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority"
+
+# The deliberately interleaved legacy seed above is not adjacent to its owning
+# home, so the documented ordering behavior skips placement while it is present
+# and a later nested child stays outside its parent's block, where no exact
+# restart binding can be published. Its own assertions have passed; remove it so
+# the restart fixture below starts from an unambiguous layout.
+lab workspace close "$LEGACY_WSID" >/dev/null \
+  || fail "could not remove the interleaved legacy seed before the nested restart fixture"
+
+# A same-project nested task carries its durable preallocated checkout across a
+# full restart instead of acquiring a second one, and teardown returns that same
+# lease.
+NESTED_RESUME_ID=nested-resume
+mkdir -p "$HOME_DIR/data/$NESTED_RESUME_ID"
+write_ship_brief "$HOME_DIR" "$NESTED_RESUME_ID" 'Same-project nested projection restart fixture.'
+spawn_task "$NESTED_RESUME_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/nested-resume-first.out" 2> "$TMP_ROOT/nested-resume-first.err" \
+  || fail "nested-resume projected spawn failed: $(cat "$TMP_ROOT/nested-resume-first.err")"
+NESTED_RESUME_META="$HOME_DIR/state/$NESTED_RESUME_ID.meta"
+NESTED_RESUME_OLD_WT=$(remember_meta_worktree "$NESTED_RESUME_META")
+NESTED_RESUME_OLD_WSID=$(grep '^herdr_workspace_id=' "$NESTED_RESUME_META" | cut -d= -f2-)
+NESTED_RESUME_OLD_PANE=$(grep '^herdr_pane_id=' "$NESTED_RESUME_META" | cut -d= -f2-)
+NESTED_RESUME_JOURNAL="$HOME_DIR/state/$NESTED_RESUME_ID.herdr-presentation"
+[ "$(grep '^version=' "$NESTED_RESUME_JOURNAL")" = version=2 ] \
+  || fail "nested-resume fresh projection did not publish an exact restart binding"
+lab worktree list --workspace "$FIRSTMATE_WSID" | jq -e \
+  --arg child "$NESTED_RESUME_OLD_WSID" --arg path "$NESTED_RESUME_OLD_WT" '
+    ([.result.worktrees[]?
+      | select(.open_workspace_id == $child)
+      | select(.path == $path and .is_linked_worktree == true)] | length) == 1
+  ' >/dev/null 2>&1 \
+  || fail "nested-resume fresh fixture was not an exact nested durable worktree child"
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
+  || fail "could not stop the isolated session for nested-resume"
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+  || fail "could not reprovision the isolated session for nested-resume"
+spawn_task "$NESTED_RESUME_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/nested-resume-reclaim.out" 2> "$TMP_ROOT/nested-resume-reclaim.err" \
+  || fail "nested-resume reclaim failed: $(cat "$TMP_ROOT/nested-resume-reclaim.err")"
+NESTED_RESUME_NEW_WT=$(remember_meta_worktree "$NESTED_RESUME_META")
+NESTED_RESUME_NEW_WSID=$(grep '^herdr_workspace_id=' "$NESTED_RESUME_META" | cut -d= -f2-)
+NESTED_RESUME_NEW_PANE=$(grep '^herdr_pane_id=' "$NESTED_RESUME_META" | cut -d= -f2-)
+[ "$NESTED_RESUME_NEW_WT" = "$NESTED_RESUME_OLD_WT" ] \
+  || fail "nested-resume reclaim acquired a second checkout instead of carrying its durable lease"
+if grep -F "retaining carried durable Treehouse worktree" "$TMP_ROOT/nested-resume-reclaim.err" >/dev/null 2>&1; then
+  fail "a successful carried reclaim reported its retained lease as if the spawn had aborted"
+fi
+[ "$NESTED_RESUME_NEW_WSID" = "$NESTED_RESUME_OLD_WSID" ] \
+  || fail "nested-resume reclaim changed nested workspace identity"
+[ "$NESTED_RESUME_NEW_PANE" != "$NESTED_RESUME_OLD_PANE" ] \
+  || fail "nested-resume reclaim reused the old husk pane"
+teardown_task "$NESTED_RESUME_ID" "$HOME_DIR" > "$TMP_ROOT/nested-resume-teardown.out" 2> "$TMP_ROOT/nested-resume-teardown.err" \
+  || fail "nested-resume teardown failed: $(cat "$TMP_ROOT/nested-resume-teardown.err")"
+[ ! -e "$NESTED_RESUME_JOURNAL" ] \
+  || fail "nested-resume exact teardown did not retire its journal"
+lab worktree list --workspace "$FIRSTMATE_WSID" | jq -e \
+  --arg child "$NESTED_RESUME_OLD_WSID" '
+    ([.result.worktrees[]? | select(.open_workspace_id == $child)] | length) == 0
+  ' >/dev/null 2>&1 \
+  || fail "nested-resume teardown did not retire its exact worktree child"
+pass "real Herdr lab: a same-project nested checkout is carried across a full restart and returned by teardown"
+
+# A recovered checkout whose durable slot claim now names another task is never
+# adopted; recovery falls back to a fresh checkout instead of sharing it.
+SLOT_REASSIGN_ID=slot-reassign
+mkdir -p "$HOME_DIR/data/$SLOT_REASSIGN_ID"
+write_ship_brief "$HOME_DIR" "$SLOT_REASSIGN_ID" 'Reassigned durable slot fixture.'
+spawn_task "$SLOT_REASSIGN_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/slot-reassign-first.out" 2> "$TMP_ROOT/slot-reassign-first.err" \
+  || fail "slot-reassign projected spawn failed: $(cat "$TMP_ROOT/slot-reassign-first.err")"
+SLOT_REASSIGN_META="$HOME_DIR/state/$SLOT_REASSIGN_ID.meta"
+SLOT_REASSIGN_OLD_WT=$(remember_meta_worktree "$SLOT_REASSIGN_META")
+SLOT_REASSIGN_MARKER="$(dirname "$(cd "$SLOT_REASSIGN_OLD_WT" && pwd -P)")/.fm-slot-owner"
+printf 'task=slot-reassign-usurper\nhome=%s\n' "$HOME_DIR" > "$SLOT_REASSIGN_MARKER" \
+  || fail "could not stage a reassigned durable slot claim"
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
+  || fail "could not stop the isolated session for slot-reassign"
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+  || fail "could not reprovision the isolated session for slot-reassign"
+spawn_task "$SLOT_REASSIGN_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/slot-reassign-resume.out" 2> "$TMP_ROOT/slot-reassign-resume.err" \
+  || fail "slot-reassign recovery failed: $(cat "$TMP_ROOT/slot-reassign-resume.err")"
+SLOT_REASSIGN_NEW_WT=$(remember_meta_worktree "$SLOT_REASSIGN_META")
+[ "$SLOT_REASSIGN_NEW_WT" != "$SLOT_REASSIGN_OLD_WT" ] \
+  || fail "recovery adopted a durable slot whose claim named another task"
+teardown_task "$SLOT_REASSIGN_ID" "$HOME_DIR" > "$TMP_ROOT/slot-reassign-teardown.out" 2> "$TMP_ROOT/slot-reassign-teardown.err" \
+  || fail "slot-reassign teardown failed: $(cat "$TMP_ROOT/slot-reassign-teardown.err")"
+"$REAL_TREEHOUSE" return --force "$SLOT_REASSIGN_OLD_WT" >/dev/null 2>&1 || true
+pass "real Herdr lab: a durable slot claim naming another task is never adopted by recovery"
 
 # Missing, renamed, and duplicate tokens are read-only recovery diagnostics.
 # The duplicate case allows flat fallback only when every matching pane is

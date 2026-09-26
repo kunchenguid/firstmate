@@ -277,8 +277,19 @@ PRESU_JOURNAL="$PRES_HOME/state/presU.herdr-presentation"
   || fail "the projection bound a parent other than the launcher's own workspace ($WS_PRIMARY)"
 [ "$(journal_field "$PRESU_JOURNAL" workspace_id)" = "$PRESU_WS" ] \
   || fail "the projection journal does not name its own workspace"
+PRESU_WT=$(grep '^worktree=' "$PRESU_META" | cut -d= -f2-)
+PRESU_GROUP=$(lab worktree list --workspace "$WS_PRIMARY") \
+  || fail "could not inspect the launcher's project worktree group"
+printf '%s' "$PRESU_GROUP" | jq -e \
+  --arg parent "$WS_PRIMARY" --arg child "$PRESU_WS" --arg path "$PRESU_WT" '
+    .result.source.source_workspace_id == $parent
+    and ([.result.worktrees[]?
+      | select(.open_workspace_id == $child)
+      | select(.path == $path and .is_linked_worktree == true)] | length) == 1
+  ' >/dev/null 2>&1 \
+  || fail "same-project projection is not a real worktree child of the launcher's exact workspace"
 [ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a projected spawn stole focus from the captain's workspace"
-pass "real herdr E2E: presentation spaces still create the isolated child workspace and bind it under the launcher's exact parent, without stealing focus"
+pass "real herdr E2E: a same-project task renders as a worktree child under the launcher's exact home without stealing focus"
 
 # --- 3. duplicate label, launcher in the NON-first match, driven from a real
 #        Herdr pane so the identity comes from Herdr's own injection ----------
@@ -351,10 +362,16 @@ PRESD_ORDER=$(lab workspace list 2>/dev/null | jq -r --arg dup "$WS_PRIMARY_DUP"
   | ((map(select(.id == $child)) | .[0].i) - (map(select(.id == $dup)) | .[0].i))')
 [ "$PRESD_ORDER" = 1 ] \
   || fail "the projected child should sit immediately after the launcher's own workspace, offset was '$PRESD_ORDER'"
+PRIMARY_PROJECT_GROUP=$(lab worktree list --workspace "$WS_PRIMARY") \
+  || fail "could not inspect the primary project's worktree group"
+printf '%s' "$PRIMARY_PROJECT_GROUP" | jq -e --arg child "$PRESD_WS" \
+  '([.result.worktrees[]? | select(.open_workspace_id == $child)] | length) == 0' \
+  >/dev/null 2>&1 \
+  || fail "a task from a foreign project was incorrectly grouped under another project's source workspace"
 [ "$(tab_labels_of_workspace "$WS_PRIMARY")" = "$WS_PRIMARY_TABS_BEFORE" ] \
   || fail "the other same-labeled workspace was mutated by a projected spawn"
 [ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a projected spawn stole focus from the captain's workspace"
-pass "real herdr E2E: with a duplicated home label, a projected worker still hangs off the launcher's exact workspace and the sibling stays untouched"
+pass "real herdr E2E: a foreign-project task stays top-level beside its exact owning home and leaves the sibling untouched"
 
 # --- 4. duplicate label with NO launcher identity refuses before publishing --
 

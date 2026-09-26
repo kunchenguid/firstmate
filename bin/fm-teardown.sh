@@ -3524,15 +3524,73 @@ else
   fi
 fi
 
+# Bind a projected Herdr endpoint to its journal before any reap or checkout
+# return below can remove the workspace it names. reap_task_worktree_processes
+# kills every process whose cwd is under the task worktree, and a nested
+# projection's task pane shell runs with its cwd inside the checkout, so the
+# reap itself can make Herdr drop the workspace; Treehouse returning the
+# checkout can too. Losing it after the fact would turn an exact, cleanup-safe
+# binding into an ambiguous missing endpoint and strand the journal. This
+# remains a read-only candidate check: the exact task pane is the only Herdr
+# object any cleanup below may close, and retirement still requires that exact
+# pane to be confirmed gone afterward.
+HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
+HERDR_PRESENTATION_RETIRE_CANDIDATE=0
+HERDR_PRESENTATION_SESSION=
+HERDR_PRESENTATION_PANE=
+if [ "$BACKEND" = herdr ] \
+   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+  fm_backend_source herdr || true
+  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
+  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
+  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
+  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
+     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
+     && [ -n "$HERDR_PRESENTATION_PANE" ] \
+     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
+     && fm_backend_herdr_projection_endpoint_matches_journal \
+       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
+       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
+    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
+  fi
+fi
+
 # Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
-# --force, and before ANY destructive step below - a still-parked run or a
-# leaked process can own live work in this exact worktree. Not for
-# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
-# dedicated process-event and firstmate-home removal machinery further below,
-# not by task-worktree cleanup.
+# them). Settle any run that can still own this branch before closing its exact
+# projected endpoint. Not for kind=secondmate: a secondmate home's own runtime
+# lifecycle is owned by the dedicated process-event and firstmate-home removal
+# machinery further below, not by task-worktree cleanup.
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
+fi
+
+# Close a bound projected pane while its checkout and pane shell still exist.
+# Reaping a process whose cwd is inside a linked checkout, or returning that
+# checkout to Treehouse, may make Herdr remove the child workspace itself; that
+# implicit removal bypasses the exact-focus restore around the pane close. The
+# session lock acquired in preflight stays held across this close and every
+# later checkout mutation.
+if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+  if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
+    fm_backend_herdr_projection_close_pane_focus_preserving \
+      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" || true
+  else
+    echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
+  fi
+  if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
+    rm -f "$HERDR_PRESENTATION_JOURNAL"
+  else
+    echo "error: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal, checkout, endpoint, and every durable task record" >&2
+    echo "error: herdr pane $T for $ID is not confirmed gone; rerun teardown once the exact close can be verified" >&2
+    exit 1
+  fi
+fi
+
+# Fix 1 and Fix 2 (see script header) run here, unconditionally on --force,
+# and before any checkout mutation below. The exact projected pane above is
+# already gone, so reaping its worktree can no longer let Herdr implicitly
+# remove that workspace outside the focus-preserving close.
+if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 elif [ "$KIND" != secondmate ]; then
   reap_task_worktree_processes tasktmp "$TASK_TMP"
@@ -3595,44 +3653,10 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   fm_treehouse_slot_owner_release "$WT" "$ID"
 fi
 
-HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
-HERDR_PRESENTATION_RETIRE_CANDIDATE=0
-HERDR_PRESENTATION_SESSION=
-HERDR_PRESENTATION_PANE=
-if [ "$BACKEND" = herdr ] \
-   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  fm_backend_source herdr || true
-  HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
-  HERDR_PRESENTATION_WORKSPACE=$(meta_value "$META" herdr_workspace_id)
-  HERDR_PRESENTATION_PANE=$(meta_value "$META" herdr_pane_id)
-  if [ -n "$HERDR_PRESENTATION_SESSION" ] \
-     && [ -n "$HERDR_PRESENTATION_WORKSPACE" ] \
-     && [ -n "$HERDR_PRESENTATION_PANE" ] \
-     && [ "$T" = "$HERDR_PRESENTATION_SESSION:$HERDR_PRESENTATION_PANE" ] \
-     && fm_backend_herdr_projection_endpoint_matches_journal \
-       "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_WORKSPACE" \
-       "$HERDR_PRESENTATION_JOURNAL" "$ID"; then
-    HERDR_PRESENTATION_RETIRE_CANDIDATE=1
-  fi
-fi
-
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
-  # The presentation lock was acquired before the worktree return above; a
-  # contended lock already refused this teardown while everything was intact.
-  if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
-    # stderr is deliberately NOT discarded here. This is the highest-frequency
-    # projected-close call site, and the helper's only stderr output is a real
-    # warning - unverifiable workspace.move support, a refused focus-unsafe
-    # close, an unconfirmed repositioned-workspace removal, or a failed exact
-    # restore.
-    # Swallowing them left a wrong active workspace with no operator-visible
-    # signal at all. The close stays non-fatal exactly as before: the presence
-    # gate below is what decides whether any durable record may be removed.
-    fm_backend_herdr_projection_close_pane_focus_preserving \
-      "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE" || true
-  else
-    echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
-  fi
+  # The exact projected pane was already closed under this session lock before
+  # process reap or checkout return could remove its child workspace implicitly.
+  :
 elif [ "$BACKEND" = herdr ]; then
   if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
     fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
@@ -3643,14 +3667,9 @@ elif [ "$BACKEND" != orca ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
 fi
-if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
-  if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
-    rm -f "$HERDR_PRESENTATION_JOURNAL"
-  else
-    echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
-  fi
-elif [ "$BACKEND" = herdr ] \
-     && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
+if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" != 1 ] \
+   && [ "$BACKEND" = herdr ] \
+   && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
 fi
 # A refused, skipped, or failed Herdr close must never erase a live task's
