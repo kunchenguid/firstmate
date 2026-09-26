@@ -204,6 +204,31 @@ test_unsafe_artifacts_and_failure_restore_readonly_mode() {
   pass "unsafe shared captain artifacts are rejected and failure restores read-only mode"
 }
 
+test_header_check_names_the_missing_phrase() {
+  local valid_path missing_path out rc
+
+  valid_path="$TMP_ROOT/valid-header.md"
+  shared_header > "$valid_path"
+  out=$(shared_captain_header_valid "$valid_path"); rc=$?
+  [ "$rc" -eq 0 ] || fail "the valid fixture header should still pass"
+  [ -z "$out" ] || fail "a passing header should not report a missing phrase, got: $out"
+
+  missing_path="$TMP_ROOT/missing-phrase-header.md"
+  cat > "$missing_path" <<'EOF'
+# Shared captain preferences
+
+This file is main-authoritative in the main firstmate home.
+In secondmate homes it is read-only in secondmate homes.
+Route new captain-preference discoveries to the main firstmate through marked status or a document pointer.
+EOF
+  out=$(shared_captain_header_valid "$missing_path"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a header missing a required phrase should still fail"
+  assert_contains "$out" "must not be edited there" \
+    "the failure should name the one phrase this header is missing"
+
+  pass "the header check names the first required phrase it did not find, without widening the accept set"
+}
+
 make_fake_spawn_toolchain() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
@@ -400,5 +425,6 @@ test_spawn_convergence_point_copies_shared_file
 test_bootstrap_convergence_point_copies_shared_file
 test_config_push_convergence_point_updates_changed_source
 test_session_start_digest_labels_shared_file_and_read_once_rule
+test_header_check_names_the_missing_phrase
 
 echo "# all fm-shared-captain-inheritance tests passed"

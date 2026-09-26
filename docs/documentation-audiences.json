@@ -365,6 +365,14 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/gerrit-change-watch.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/gerrit-forge-integration.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/gitlab-merge-watch.md",
       "audience": "maintainer-verification"
     },
@@ -433,8 +441,16 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/supervision-protocols/supervision-host.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/supervision-protocols/unknown.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/supervision-host.md",
+      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/tmux-backend.md",

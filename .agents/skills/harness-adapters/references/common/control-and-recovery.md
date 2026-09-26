@@ -21,7 +21,7 @@ For Claude, load `references/harness/claude.md`; its workspace-trust section own
 agy gates every fresh worktree too; the spawn pre-registers it in agy's own store the same way, and a strict post-launch gate answers any dialog that still renders before the spawn reports success.
 Kimi gates every fresh folder too; the spawn pre-registers it in Kimi's own workspace-trust store so the dialog never renders, and the live readiness gate still answers one that does, so a failed registration costs the launch nothing but the fragile frame read.
 Cursor suppresses its dialog with launch-time `--trust`, and Muse suppresses its own with `--yolo`.
-Grok dodges its gate instead of granting trust, because its project picker appears only outside a project and the spawn starts in the isolated git root.
+Grok renders a folder-trust gate in a linked worktree, and `references/harness/grok.md` owns how to verify the worker's real location, answer it, and where the decision persists; the project picker is a separate dialog that stays absent when the spawn starts in a git root.
 Pi gates the fresh-worktree case too, but unlike Claude its dialog is answered with Enter, and `references/harness/pi.md` owns that recipe and where the decision persists.
 Codex shows a directory-trust dialog on the first run for a repository root.
 
