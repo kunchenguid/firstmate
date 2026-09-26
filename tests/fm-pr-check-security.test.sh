@@ -698,6 +698,55 @@ test_secondmate_record_refuses_a_pr_watch() {
   pass "fm-pr-check refuses to record a PR or arm a merge watch on a secondmate record"
 }
 
+test_verified_production_requires_recorded_github_reviewed_head() {
+  local dir rc head64
+
+  dir=$(make_case verified-production-github)
+  write_task_meta "$dir"
+  printf '%s\n' 'completion_policy=verified-production' >> "$dir/home/state/task-a.meta"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/9 \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "verified-production refused the supported GitHub head path"
+  grep -Eq '^pr_head=[0-9a-f]{40}$' "$dir/home/state/task-a.meta" \
+    || fail "verified-production did not retain the exact reviewed GitHub head"
+
+  dir=$(make_case verified-production-missing-head)
+  write_task_meta "$dir"
+  printf '%s\n' 'completion_policy=verified-production' >> "$dir/home/state/task-a.meta"
+  rc=0
+  FM_TEST_GH_HEAD=unavailable run_check_entry "$dir" task-a https://github.com/o/r/pull/9 \
+    > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "verified-production armed without a reviewed PR head"
+  assert_grep 'requires a canonical GitHub pull request with an exact 40-character reviewed pr_head' "$dir/stderr" \
+    "missing-head refusal did not name the completion evidence contract"
+  ! grep -q '^pr=' "$dir/home/state/task-a.meta" \
+    || fail "missing-head verified-production recorded PR metadata"
+  assert_absent "$dir/home/state/task-a.check.sh" \
+    "missing-head verified-production armed a merge watch"
+
+  dir=$(make_case verified-production-gitlab)
+  write_task_meta "$dir"
+  printf '%s\n' 'completion_policy=verified-production' >> "$dir/home/state/task-a.meta"
+  rc=0
+  run_check_entry "$dir" task-a https://gitlab.example/group/proj/-/merge_requests/9 \
+    > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "verified-production armed a GitLab merge request with no pr_head producer"
+  assert_contains "$(cat "$dir/stderr")" "requires a canonical GitHub pull request" \
+    "GitLab refusal did not name the supported provider boundary"
+
+  dir=$(make_case verified-production-64-head)
+  write_task_meta "$dir"
+  printf '%s\n' 'completion_policy=verified-production' >> "$dir/home/state/task-a.meta"
+  head64=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  rc=0
+  FM_TEST_GH_HEAD=$head64 run_check_entry "$dir" task-a https://github.com/o/r/pull/9 \
+    > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "verified-production accepted a head shape its outcome contract cannot bind"
+  assert_contains "$(cat "$dir/stderr")" "exact 40-character reviewed pr_head" \
+    "unsupported head-shape refusal did not name the source contract"
+  pass "verified-production arms only with the canonical GitHub 40-character reviewed head"
+}
+
 # With no forge-reported head (gh cannot supply one), the named head is the
 # worker copy's HEAD, and a HEAD that exists only there is refused.
 test_unpushed_named_head_refuses_registration() {
@@ -3466,6 +3515,7 @@ test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_draft_pull_request_is_not_armed
 test_secondmate_record_refuses_a_pr_watch
+test_verified_production_requires_recorded_github_reviewed_head
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
 test_valid_recording_and_merge_derivation

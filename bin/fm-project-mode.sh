@@ -29,7 +29,8 @@
 #   - <name> [<mode> +yolo branch=<prefix>] - <desc> (added <date>)  -> <mode> <yolo> <prefix>
 #   - <name> [<mode> forge=gerrit] - <desc> (added <date>)           -> <mode> off, --forge gerrit
 #   <name> may contain spaces; it ends at the literal " [" or " - " that follows it.
-#   Bracket tokens are order-independent: +yolo, branch=<prefix>, and forge=<value>
+#   Bracket tokens are order-independent: +yolo, branch=<prefix>, forge=<value>,
+#   and completion=landed|verified-production
 #   are recognized by their own shape wherever they appear, and whichever token is
 #   left over is the mode. <prefix> must not contain a space; an empty override
 #   ("branch=") resolves to "" for a bare "<task-id>" ship branch instead of the
@@ -93,7 +94,12 @@
 # to the forge binding, so it prints even when the forge token is malformed;
 # every path that reads the forge binding (default, --forge, and spawn's
 # forge-agreement check) still refuses.
-# Usage: fm-project-mode.sh [--raw|--branch-prefix|--forge] <project-name>
+# --completion-policy prints the registered completion boundary: `landed` by
+# default, or `verified-production` for a project whose product work stays open
+# through deployment and outcome verification. It is a project fact captured in
+# each fresh ship task's metadata, so a later registry edit cannot change an
+# in-flight task's cleanup boundary.
+# Usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--completion-policy] <project-name>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -104,17 +110,21 @@ REG="$DATA/projects.md"
 RAW=0
 BRANCH_PREFIX_QUERY=0
 WANT_FORGE=0
+WANT_COMPLETION_POLICY=0
 case "${1:-}" in
   --raw) RAW=1; shift ;;
   --branch-prefix) BRANCH_PREFIX_QUERY=1; shift ;;
   --forge) WANT_FORGE=1; shift ;;
+  --completion-policy) WANT_COMPLETION_POLICY=1; shift ;;
 esac
-NAME=${1:?usage: fm-project-mode.sh [--raw|--branch-prefix|--forge] <project-name>}
+NAME=${1:?usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--completion-policy] <project-name>}
 
 if [ ! -f "$REG" ]; then
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
   if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
     echo "fm/"
+  elif [ "$WANT_COMPLETION_POLICY" -eq 1 ]; then
+    echo landed
   elif [ "$WANT_FORGE" -eq 1 ]; then echo none; else echo "no-mistakes off"; fi
   exit 0
 fi
@@ -149,14 +159,15 @@ parsed=$(awk -v n="$NAME" '
     if (substr($0, 1, plen) != prefix) next
     after = substr($0, plen + 1);
     if (after != "" && substr(after, 1, 2) != " [" && substr(after, 1, 3) != " - ") next
-    mode="no-mistakes"; yolo="off"; branch="fm/"; forge="none";
+    mode="no-mistakes"; yolo="off"; branch="fm/"; forge="none"; completion="landed";
     if (substr(after, 1, 2) == " [") {
       s="";
       nk = split(after, rest, " ");
       for (i=1; i<=nk; i++) { s = s (s==""?"":" ") rest[i]; if (rest[i] ~ /\]$/) break }
       gsub(/^\[|\]$/, "", s);           # strip the surrounding brackets
       k = split(s, a, " ");
-      # Tokens are order-independent: +yolo, branch=<prefix>, and forge=<value>
+      # Tokens are order-independent: +yolo, branch=<prefix>, forge=<value>,
+      # and completion=<policy>
       # are recognized by their own shape wherever they appear, keyed tokens
       # that are neither are ignored (with a near-miss warning for the forge
       # spelling), and the first token left over is the mode.
@@ -165,6 +176,7 @@ parsed=$(awk -v n="$NAME" '
         if (a[j]=="+yolo") { yolo="on"; continue }
         if (a[j] ~ /^branch=/) { branch = substr(a[j], 8); continue }
         if (a[j] ~ /^forge=/) { forge = a[j]; continue }
+        if (a[j] ~ /^completion=/) { completion = a[j]; continue }
         if (a[j] ~ /^[^=]+=/) {
           key = substr(a[j], 1, index(a[j], "=") - 1);
           e = dist(key, "forge");
@@ -177,7 +189,7 @@ parsed=$(awk -v n="$NAME" '
     }
     # branch is printed LAST: an empty branch= override must survive as an
     # empty final field, which only holds when nothing follows it.
-    print "posture", mode, yolo, forge, branch; exit
+    print "posture", mode, yolo, forge, completion, branch; exit
   }
 ' "$REG")
 
@@ -185,6 +197,8 @@ if [ -z "$parsed" ]; then
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
   if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
     echo "fm/"
+  elif [ "$WANT_COMPLETION_POLICY" -eq 1 ]; then
+    echo landed
   elif [ "$WANT_FORGE" -eq 1 ]; then echo none; else echo "no-mistakes off"; fi
   exit 0
 fi
@@ -198,12 +212,13 @@ while IFS=' ' read -r kind rest; do
 done <<EOF
 $parsed
 EOF
-while IFS=' ' read -r m y f b; do
-  mode=$m; yolo=$y; rest_forge=$f; branch=$b
+while IFS=' ' read -r m y f c b; do
+  mode=$m; yolo=$y; rest_forge=$f; rest_completion=$c; branch=$b
 done <<EOF
 $posture
 EOF
 forge=${rest_forge:-none}
+completion=${rest_completion:-landed}
 case "$mode" in
   no-mistakes|direct-PR|local-only|no-mistakes-prod-only) ;;
   *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off; branch=fm/ ;;
@@ -214,6 +229,22 @@ if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
   exit 0
 fi
 
+case "$completion" in
+  landed|completion=landed|completion=verified-production) completion=${completion#completion=} ;;
+  completion=)
+    echo "refused: empty completion policy registered for $NAME in $REG; use completion=verified-production or omit the token for landed completion" >&2
+    exit 3 ;;
+  *)
+    echo "refused: unknown completion policy \"${completion#completion=}\" registered for $NAME in $REG; use completion=verified-production or omit the token for landed completion" >&2
+    exit 3 ;;
+esac
+# Completion is an independent project fact. Keep the legacy `landed` lookup
+# independent of forge validation so existing malformed-forge diagnostics still
+# come from the delivery-posture query that owns that field.
+if [ "$WANT_COMPLETION_POLICY" -eq 1 ] && [ "$completion" = landed ]; then
+  echo "$completion"
+  exit 0
+fi
 case "$forge" in
   none|forge=gerrit) forge=${forge#forge=} ;;
   forge=)
@@ -226,6 +257,18 @@ esac
 if [ "$forge" != none ] && [ "$mode" = local-only ]; then
   echo "refused: $NAME is registered local-only with forge=$forge in $REG; local-only publishes nothing, so a forge has no meaning there, and its landing would fast-forward local main with content the review server has never seen; register no-mistakes or direct-PR to publish through the forge, or drop the forge token to keep the project local" >&2
   exit 3
+fi
+if [ "$WANT_COMPLETION_POLICY" -eq 1 ]; then
+  if [ "$completion" = verified-production ] && [ "$mode" = local-only ]; then
+    echo "refused: completion=verified-production cannot be registered with local-only for $NAME because local-only records no PR or reviewed PR head for outcome-evidence binding" >&2
+    exit 3
+  fi
+  if [ "$completion" = verified-production ] && [ "$forge" = gerrit ]; then
+    echo "refused: completion=verified-production cannot be registered with forge=gerrit for $NAME because the Gerrit ready contract records no immutable reviewed head in task metadata for outcome-evidence binding" >&2
+    exit 3
+  fi
+  echo "$completion"
+  exit 0
 fi
 if [ "$WANT_FORGE" -eq 1 ]; then
   echo "$forge"

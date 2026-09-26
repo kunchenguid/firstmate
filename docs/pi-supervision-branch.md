@@ -609,11 +609,11 @@ It sets these limits:
 - A red merge is refused in this posture whatever the words say.
 - No relocation survives the return, because an archived record validates as absent and the words die with it.
 
-### Cleanup after a landed pull request
+### Cleanup after a pull request lands
 
-The ordinary cleanup of a task whose pull request has landed needs no relocation, because it is the branch's own job in both postures.
-`bin/fm-branch-prompt.sh` names the `check: merge landed:` wake, and any later stale or inactive-outcome row on that task, as the moment to attempt `bin/fm-teardown.sh` without `--force`.
-At that moment the branch reports any refusal instead of concluding there is "nothing to recover".
+The branch retains cleanup ownership in both postures when a task's pull request lands.
+`bin/fm-branch-prompt.sh` names the `check: merge landed:` wake, and any later stale or inactive-outcome row on that task, as the moment to reconcile the task's recorded completion policy before cleanup.
+The completion boundary and evidence requirements are owned by [configuration](configuration.md#format-and-lifecycle-references); the branch reports any teardown refusal instead of concluding there is "nothing to recover".
 
 ## Verification
 
