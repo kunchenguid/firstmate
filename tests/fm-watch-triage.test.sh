@@ -4543,9 +4543,12 @@ test_term_stops_a_watcher_blocked_inside_a_poll() {
 # stays behind as ordinary dead-pid evidence for the next arm to clear.
 
 # Start a watcher, hold its .watcher-down.lock from a live foreign subshell,
-# send exactly one TERM, and free the lock <release-ticks> tenths of a second
-# later (only after the watcher exits when empty). The caller's environment
-# reaches the watcher; its wait_for_exit code lands in HELD_MARKER_LOCK_RC.
+# and send exactly one TERM. Without <release-ticks> the lock stays held until
+# the watcher exits. With it, the holder serves its pid record through a FIFO
+# so the first read by the TERM'd watcher's cleanup marks real contention in
+# $dir/marker-lock-contended, then frees the lock <release-ticks> tenths of a
+# second later. The caller's environment reaches the watcher; its
+# wait_for_exit code lands in HELD_MARKER_LOCK_RC.
 term_watcher_with_held_marker_lock() {  # <dir> [release-ticks]
   local dir=$1 release_ticks=${2:-} state fakebin out capture_file window sig pid holder i
   state="$dir/state"; fakebin="$dir/fakebin"
@@ -4563,16 +4566,53 @@ term_watcher_with_held_marker_lock() {  # <dir> [release-ticks]
   fi
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1" || exit 1
-    fm_lock_try_acquire "$2" || exit 1
-    : > "$3"
+    lock=$2 held=$3 release=$4 armed=$5 contended=$6 release_ticks=$7
+    fm_lock_try_acquire "$lock" || exit 1
+    : > "$held"
     i=0
-    while [ ! -e "$4" ] && [ "$i" -lt 600 ]; do
+    while [ -n "$release_ticks" ] && [ ! -e "$armed" ] && [ "$i" -lt 600 ]; do
       sleep 0.1
       i=$((i + 1))
     done
-    fm_lock_release "$2"
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down.lock" \
-    "$dir/marker-lock-held" "$dir/release-marker-lock" &
+    if [ -n "$release_ticks" ]; then
+      record="$(fm_lock_link_owner "$lock")/pid"
+      mkfifo "$record.fifo" && mv -f "$record.fifo" "$record" || exit 1
+      (
+        exec 3> "$record"
+        printf "%s\n" "$$" > "$record.next" && mv -f "$record.next" "$record"
+        printf "%s\n" "$$" >&3
+        exec 3>&-
+        : > "$contended"
+      ) &
+      writer=$!
+      i=0
+      while [ ! -e "$contended" ] && [ ! -e "$release" ] && [ "$i" -lt 600 ]; do
+        sleep 0.1
+        i=$((i + 1))
+      done
+      if [ -e "$contended" ]; then
+        wait "$writer"
+      else
+        cat "$record" > /dev/null
+        wait "$writer"
+        rm -f "$contended"
+      fi
+      i=0
+      while [ "$i" -lt "$release_ticks" ]; do
+        sleep 0.1
+        i=$((i + 1))
+      done
+    else
+      i=0
+      while [ ! -e "$release" ] && [ "$i" -lt 600 ]; do
+        sleep 0.1
+        i=$((i + 1))
+      done
+    fi
+    fm_lock_release "$lock"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down.lock" "$dir/marker-lock-held" \
+    "$dir/release-marker-lock" "$dir/marker-lock-armed" "$dir/marker-lock-contended" \
+    "$release_ticks" &
   holder=$!
   i=0
   while [ ! -e "$dir/marker-lock-held" ] && [ "$i" -lt 100 ]; do
@@ -4584,14 +4624,7 @@ term_watcher_with_held_marker_lock() {  # <dir> [release-ticks]
     reap "$pid"; fail "the fixture could not take the downtime-marker lock"
   fi
   kill "$pid" 2>/dev/null || true
-  if [ -n "$release_ticks" ]; then
-    i=0
-    while [ "$i" -lt "$release_ticks" ]; do
-      sleep 0.1
-      i=$((i + 1))
-    done
-    : > "$dir/release-marker-lock"
-  fi
+  : > "$dir/marker-lock-armed"
   wait_for_exit "$pid" 100
   HELD_MARKER_LOCK_RC=$?
   : > "$dir/release-marker-lock"
@@ -4622,16 +4655,20 @@ test_term_stops_a_watcher_whose_cleanup_marker_lock_is_held() {
 }
 
 # The cleanup bound is decimal seconds: a zero spelled with leading zeros falls
-# back to the 2s default instead of giving up at once, and a leading-zero value
-# such as 08 is a real bound rather than an invalid octal literal. Either way a
-# marker lock freed shortly after the TERM lets the cleanup publish normally.
+# back to the 2s default instead of giving up at its first contended attempt,
+# and a leading-zero value such as 08 is an 8s bound rather than an invalid
+# octal literal or the 2s default, so it still outwaits a marker lock freed 3s
+# after the cleanup first contends on it.
 test_cleanup_marker_lock_bound_is_decimal_with_zero_default() {
-  local bound dir state
-  for bound in 00 08; do
+  local bound ticks dir state
+  for bound in 00:0 08:30; do
+    ticks=${bound#*:}; bound=${bound%%:*}
     dir=$(make_case "term-marker-lock-bound-$bound"); state="$dir/state"
-    FM_WATCHER_CLEANUP_LOCK_BOUND=$bound term_watcher_with_held_marker_lock "$dir" 3
+    FM_WATCHER_CLEANUP_LOCK_BOUND=$bound term_watcher_with_held_marker_lock "$dir" "$ticks"
     [ "$HELD_MARKER_LOCK_RC" -ne 124 ] \
       || fail "TERM did not stop a watcher with cleanup lock bound $bound"
+    [ -e "$dir/marker-lock-contended" ] \
+      || fail "cleanup lock bound $bound never contended on the held marker lock"
     [ ! -e "$state/.watch.lock" ] \
       || fail "cleanup lock bound $bound gave up before the marker lock freed"
     ack_stopped_cycle "$state" \
