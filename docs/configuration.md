@@ -2213,6 +2213,7 @@ FM_BACKEND=             # optional runtime backend override for new spawns; tmux
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
 FM_TASK_ID=             # internal task-id marker fm-spawn.sh exports into ship and scout panes, never set by hand; bin/fm-test-run.sh refuses a marked worker in the repository primary checkout
 FM_TASK_CAPABILITY=     # private per-launch worker capability exported beside FM_TASK_ID; only its hash is recorded, and it must match in the task's exact linked worktree for worker-owned no-mistakes axi run/respond
+FM_TASK_STATE_DIR=      # internal state directory holding the task's metadata, exported beside FM_TASK_ID so bin/no-mistakes reads the spawning home's state even when another checkout's bin/ is on PATH
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_SUBMIT_POLLS=6  # herdr-only: agent-state samples spread across each Enter attempt's budget when confirming a submit (docs/herdr-backend.md "Current transport behavior")
 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6  # herdr-only: minimum per-Enter confirmation budget before polling agent-state after an idle baseline

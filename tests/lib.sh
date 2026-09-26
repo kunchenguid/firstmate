@@ -56,7 +56,7 @@ export FM_TEST_SEAM=1
 # panes. This suite builds git-init fixture repositories whose primary checkout
 # it runs a copied bin/fm-test-run.sh in, and that runner refuses the primary
 # under the task-id marker. Cases that verify ownership set the markers themselves.
-unset FM_TASK_ID FM_TASK_CAPABILITY
+unset FM_TASK_ID FM_TASK_CAPABILITY FM_TASK_STATE_DIR
 
 # Clear the tasks-axi env overrides. An operator shell exports TASKS_AXI_FILE
 # (and may export TASKS_AXI_BACKEND) at its real home's backlog, and tasks-axi

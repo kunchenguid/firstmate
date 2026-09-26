@@ -1139,7 +1139,7 @@ test_launch_environment_allowlist() {
 #!/bin/sh
 printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "${FM_TEST_ALLOWED-unset}" \
   "${FM_TEST_EMPTY-unset}" "${FM_TEST_UNSET-unset}" "$HOME" "$PATH" "$TERM" "$TMUX" "$GOTMPDIR" \
-  "${FM_TASK_ID-unset}" "${FM_TASK_CAPABILITY-unset}"
+  "${FM_TASK_ID-unset}" "${FM_TASK_CAPABILITY-unset}" "${FM_TASK_STATE_DIR-unset}"
 SH
     out=$(FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated \
       run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
@@ -1155,7 +1155,7 @@ SH
         "$pane_shell" -c "printf %s \"\$PATH\"") \
         || fail "could not read $pane_shell startup PATH"
       result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
-      TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp FM_TASK_ID="$id" FM_TASK_CAPABILITY="$capability" \
+      TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp FM_TASK_ID="$id" FM_TASK_CAPABILITY="$capability" FM_TASK_STATE_DIR=/synthetic/state \
       FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED="$value" FM_TEST_EMPTY='' \
       "$pane_shell" -c "$launch") || fail "allowlist=$setting emitted launch failed in $pane_shell"
       case "$setting" in
@@ -1163,7 +1163,7 @@ SH
         enabled) expected=$(printf '%s\n' unset "$value" '' unset) ;;
         empty) expected=$(printf '%s\n' unset unset unset unset) ;;
       esac
-      expected="$expected"$'\n'"$HOME_DIR/user-home"$'\n'"$pane_path"$'\nxterm\nsynthetic-pane\n/synthetic/gotmp'$'\n'"$id"$'\n'"$capability"
+      expected="$expected"$'\n'"$HOME_DIR/user-home"$'\n'"$pane_path"$'\nxterm\nsynthetic-pane\n/synthetic/gotmp'$'\n'"$id"$'\n'"$capability"$'\n/synthetic/state'
       [ "$result" = "$expected" ] || fail "allowlist=$setting worker environment mismatch: $result"
     done
     pass "allowlist=$setting preserves the operational floor and filters only when opted in"

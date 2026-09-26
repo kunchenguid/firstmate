@@ -231,8 +231,9 @@
 #   that never reaches an isolated worktree refuses at the end of that wait,
 #   naming the last path seen and why it was rejected.
 #   That placement is proven only at launch. Every ship or scout pane therefore
-#   also receives `export FM_TASK_ID=<task-id>` and a private per-launch
-#   `FM_TASK_CAPABILITY` before the launch command, on the same channel as
+#   also receives `export FM_TASK_ID=<task-id>`, a private per-launch
+#   `FM_TASK_CAPABILITY`, and the `FM_TASK_STATE_DIR` holding its metadata
+#   before the launch command, on the same channel as
 #   GOTMPDIR. Only the capability hash is recorded in metadata, binding
 #   worker-owned dispatch to this launched incarnation; bin/fm-test-run.sh
 #   refuses to execute the behavior suite from the repository primary checkout
@@ -290,10 +291,11 @@
 #   TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH HERDR_PANE_ID
 #   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID CMUX_SOCKET_PATH
 #   ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION, plus the task
-#   markers FM_TASK_ID and FM_TASK_CAPABILITY that ship and scout panes receive
-#   above, plus the compact-adviser kill switch COMPACT_ADVISER_DISABLE, which
-#   the floor also pins to 1 with a literal assignment so it survives the cleared
-#   environment even on a host that never had it set.
+#   markers FM_TASK_ID, FM_TASK_CAPABILITY, and FM_TASK_STATE_DIR that ship and
+#   scout panes receive above, plus the compact-adviser kill switch
+#   COMPACT_ADVISER_DISABLE, which the floor also pins to 1 with a literal
+#   assignment so it survives the cleared environment even on a host that never
+#   had it set.
 #   An enabled task trace also retains TRACEPARENT. Explicit Firstmate launch
 #   assignments still apply inside the filtered environment. Raw commands must
 #   be POSIX sh compatible under this opt-in; the absent-file path is unchanged.
@@ -4995,13 +4997,15 @@ fi
 # Mark the pane as this exact task-worker incarnation. bin/fm-test-run.sh uses
 # the task id to refuse the suite in the repository's primary checkout, while
 # bin/no-mistakes verifies the private capability against durable metadata before
-# forwarding pipeline-driving operations. Ship and scout workers are the ones
-# assigned an isolated worktree; a secondmate runs its own home instead. Both
-# values use validated token charsets, so they carry no shell syntax of their
-# own.
+# forwarding pipeline-driving operations, reading that metadata from the
+# task's state directory because the boundary may run from another checkout.
+# Ship and scout workers are the ones assigned an isolated worktree; a
+# secondmate runs its own home instead. The id and capability use validated
+# token charsets, so they carry no shell syntax of their own.
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
   spawn_send_text_line "$T" "export FM_TASK_CAPABILITY=$WORKER_CAPABILITY"
+  spawn_send_text_line "$T" "export FM_TASK_STATE_DIR=$(shell_quote "$STATE")"
 fi
 # Send through the exact channel that already ships GOTMPDIR, so every backend
 # and harness - ship, scout, and secondmate - gets it before launch. Skipped
@@ -5029,7 +5033,7 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     TMPDIR TMP TEMP GOTMPDIR TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH \
     HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
     CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
-    FM_TASK_ID FM_TASK_CAPABILITY COMPACT_ADVISER_DISABLE LAVISH_AXI_HOST \
+    FM_TASK_ID FM_TASK_CAPABILITY FM_TASK_STATE_DIR COMPACT_ADVISER_DISABLE LAVISH_AXI_HOST \
     $LAUNCH_ENV_NAMES; do
     # Only validated names enter shell syntax. Values expand once, quoted, in
     # the pane shell and never become source text or spawn-process snapshots.
