@@ -1017,6 +1017,112 @@ test_own_and_absent_slot_claims_still_tear_down() {
   pass "fm-teardown: a task's own slot claim, and an unclaimed slot, both still tear down"
 }
 
+# Two task records naming one reused slot used to deadlock: the record scan ran
+# first and refused both, including under --force, so neither could ever be torn
+# down and the stale one kept its endpoint alive in the fleet view (observed
+# 2026-09-22). The slot's own claim is the only evidence that tells the pair
+# apart, so it is read first and, when it names one of them, the other's own
+# cleanup proceeds with every slot step skipped.
+assert_reused_slot_pair_refuses() {  # <case> <id> <other> <description>
+  local dir=$1 id=$2 other=$3 description=$4 rc
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "$description: teardown of one of two records naming a slot succeeded"
+  assert_present "$dir/home/state/$id.meta" "$description: the record was removed before refusing"
+  assert_present "$dir/home/state/$other.meta" "$description: the other record was removed"
+  assert_present "$dir/worktree/sentinel" "$description: the contested slot was reset"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "$description: teardown reached the runtime: $(cat "$dir/runtime.log")"
+}
+
+write_reused_slot_pair() {  # <case> <id> <other>
+  local dir=$1 id=$2 other=$3
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+}
+
+test_claim_breaks_the_two_record_slot_deadlock_only_for_the_non_owner() {
+  local dir stale=stale-task owner=live-task worker
+
+  dir=$(make_case slot-reuse-claimed)
+  mark_case_as_treehouse_pool "$dir"
+  write_reused_slot_pair "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$owner"
+  # Staged in this shell, not a command substitution: a background child of a
+  # $(...) subshell does not outlive it, and the point of this worker is to be
+  # alive in the slot while teardown runs.
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  run_case "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown of the record the slot claim disowns refused: $(cat "$dir/stderr")"
+  kill -0 "$worker" 2>/dev/null || fail "non-owner teardown killed the worker in the claimed slot"
+  assert_present "$dir/worktree/sentinel" "non-owner teardown reset the claimed slot"
+  assert_absent "$dir/home/state/$stale.meta" "non-owner teardown left its own record"
+  assert_present "$dir/home/state/$owner.meta" "non-owner teardown removed the slot owner's record"
+  assert_present "$dir/pool/1/.fm-slot-owner" "non-owner teardown removed the owner's slot claim"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "task=$owner" \
+    "non-owner teardown rewrote the owner's slot claim"
+  assert_present "$dir/pool/1/project/.git" "non-owner teardown removed the claimed slot's checkout"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "non-owner teardown returned the claimed slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$owner" \
+    "the warning should name the task the slot was reassigned to"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  # The other half of the deadlock: with the stale record cleared, the slot's
+  # real owner tears down normally and returns its slot.
+  : > "$dir/runtime.log"
+  run_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "the slot owner could not tear down after the stale record was cleared: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$owner.meta" "owner teardown left its record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "owner teardown left its spent slot claim behind"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "owner teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
+
+  # Only a claim naming a DIFFERENT task unblocks the pair. An absent claim is
+  # no evidence about which record is stale, so it keeps the record-scan refusal
+  # exactly as before the claim was consulted first.
+  dir=$(make_case slot-reuse-unclaimed)
+  mark_case_as_treehouse_pool "$dir"
+  write_reused_slot_pair "$dir" "$stale" "$owner"
+  assert_reused_slot_pair_refuses "$dir" "$stale" "$owner" "unclaimed contested slot"
+  assert_contains "$(cat "$dir/stderr")" "$owner" \
+    "the unclaimed-pair refusal should name the other record holding the slot"
+
+  # A claim naming THIS record proves the other record is the stale one, so the
+  # scan is still the right guard and still refuses.
+  dir=$(make_case slot-reuse-own-claim)
+  mark_case_as_treehouse_pool "$dir"
+  write_reused_slot_pair "$dir" "$stale" "$owner"
+  claim_pool_slot "$dir" "$stale"
+  assert_reused_slot_pair_refuses "$dir" "$stale" "$owner" "contested slot claimed by this record"
+  assert_contains "$(cat "$dir/stderr")" "$owner" \
+    "the own-claim refusal should name the other record holding the slot"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "task=$stale" \
+    "the own-claim refusal rewrote this record's slot claim"
+
+  # A claim that cannot be read proves nothing either way and must never unblock
+  # the pair.
+  dir=$(make_case slot-reuse-unreadable-claim)
+  mark_case_as_treehouse_pool "$dir"
+  write_reused_slot_pair "$dir" "$stale" "$owner"
+  printf 'not-a-claim\n' > "$dir/pool/1/.fm-slot-owner"
+  assert_reused_slot_pair_refuses "$dir" "$stale" "$owner" "contested slot with an unreadable claim"
+  assert_present "$dir/pool/1/.fm-slot-owner" "the unreadable-claim refusal removed the claim"
+  assert_contains "$(cat "$dir/stderr")" "$dir/pool/1/.fm-slot-owner" \
+    "the unreadable-claim refusal should name the claim file to inspect"
+
+  pass "fm-teardown: a slot claim naming another task clears the two-record deadlock, and no other claim state does"
+}
+
 # The tmux shim used by the endpoint-close tests below: every subcommand
 # reaches the real isolated server, so presence is always read from real tmux.
 # When FM_TEST_BLOCK_KILL is set, `kill-window` alone fails without forwarding,
@@ -1404,6 +1510,7 @@ test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_own_and_absent_slot_claims_still_tear_down
+test_claim_breaks_the_two_record_slot_deadlock_only_for_the_non_owner
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot

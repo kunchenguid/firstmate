@@ -83,34 +83,46 @@
 # name a slot a DIFFERENT live task now holds. Cleanup kills every process under
 # that path and hard-resets it before returning it, so releasing a slot that is
 # not genuinely this task's destroys another worker's live work. Before the first
-# cleanup step, teardown verifies record exclusivity: no OTHER task record in
-# this home or any locally registered Firstmate home may name the same live path
-# in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale.
-# That scan alone cannot prove THIS record is the current owner, because the task
-# that took the slot next may leave no record it can reach - its own worker may
-# have exited and its record been cleaned up, or it may live in a home this
-# machine does not register - which is how a released-then-reassigned slot was
-# returned out from under a live worker (observed 2026-09-07). So teardown also
-# reads the slot's own owner claim, written by bin/fm-spawn.sh at the moment the
-# slot is taken and dropped here once it is genuinely returned; bin/fm-wake-lib.sh
-# owns the claim, its location, and its states. A claim naming another task is
-# proof of reassignment: the slot is no longer this task's, so teardown warns,
-# names the claimant, and then finishes only this task's own cleanup - endpoint,
-# status, records, checks, backlog - while every step that would read or touch
-# that slot is skipped: no process kill under it, no dirty or landed-work
-# inspection of it, no branch or hook removal in it, no Treehouse return, and
-# never the other task's claim. Skipping the inspection discards nothing of this
-# task's: whatever unlanded work it had in that slot was already destroyed when
-# the pool handed the slot on. Refusing instead would strand the record, because
-# bin/fm-backend.sh's endpoint validation refuses an empty or missing worktree=
-# unconditionally, so there is no line an operator could clear to get past it.
+# cleanup step, teardown settles who owns that slot from two independent guards,
+# in this order.
+# First it reads the slot's own owner claim, written by bin/fm-spawn.sh at the
+# moment the slot is taken and dropped here once it is genuinely returned;
+# bin/fm-wake-lib.sh owns the claim, its location, and its states. A claim naming
+# another task is proof of reassignment: the slot is no longer this task's, so
+# teardown warns, names the claimant, and then finishes only this task's own
+# cleanup - endpoint, status, records, checks, backlog - while every step that
+# would read or touch that slot is skipped: no process kill under it, no dirty or
+# landed-work inspection of it, no branch or hook removal in it, no Treehouse
+# return, and never the other task's claim. Skipping the inspection discards
+# nothing of this task's: whatever unlanded work it had in that slot was already
+# destroyed when the pool handed the slot on. Refusing instead would strand the
+# record, because bin/fm-backend.sh's endpoint validation refuses an empty or
+# missing worktree= unconditionally, so there is no line an operator could clear
+# to get past it.
 # A claim that cannot be read proves nothing either way and refuses; inspect or
 # repair the claim file at the printed path and re-run - never remove it, since
-# an absent claim proceeds and would return a slot that may be another task's. An
-# absent claim - a slot taken before claims existed, or already returned - keeps
-# exactly the record-scan protection it had before, because refusing it would
-# strand every task in flight across that change on no evidence at all.
+# an absent claim proceeds and would return a slot that may be another task's.
+# Only when the claim does NOT settle ownership - it names this very task, or
+# there is no claim at all - does teardown then verify record exclusivity: no
+# OTHER task record in this home or any locally registered Firstmate home may
+# name the same live path in its worktree= or home=. One live path with two task
+# records is the reuse collision itself, whichever record is stale, and with no
+# claim naming a third party the scan cannot tell which of them is stale, so it
+# refuses both.
+# That scan runs second because it cannot prove THIS record is the current owner:
+# the task that took the slot next may leave no record it can reach - its own
+# worker may have exited and its record been cleaned up, or it may live in a home
+# this machine does not register - which is how a released-then-reassigned slot
+# was returned out from under a live worker (observed 2026-09-07). Running it
+# first instead deadlocked the very pair it protects: two records naming one
+# reused slot each refused on the other, including under --force, so neither
+# could ever be torn down and the stale one kept its endpoint alive in the fleet
+# view forever (observed 2026-09-22). The claim settles exactly that case,
+# because a claim naming a third task proves this record owns nothing in the slot
+# and so leaves the scan nothing to protect here.
+# An absent claim keeps exactly the record-scan protection it had before, because
+# refusing it would strand every task in flight across that change on no evidence
+# at all.
 # Why Treehouse's own state cannot answer this for crewmate slots, and why the
 # claim file sits on top of it, is owned by bin/fm-wake-lib.sh's slot-owner
 # claim comment.
@@ -2373,14 +2385,18 @@ require_exclusive_task_worktree_slot() {
 # Positive slot ownership, read from the claim the task that took the slot wrote
 # into the slot itself (bin/fm-wake-lib.sh owns the claim and its states).
 #
-# The record scan above proves that no OTHER task record names this slot. It
-# cannot prove that THIS record is not the stale one, because the task that took
-# the slot next may leave no record this scan can reach: its own worker may have
-# exited and its record been cleaned up, or it may belong to a home this machine
-# does not register. The claim closes that gap from the other side - it names the
-# task that actually took the slot, and it is written under the same project lock
-# that allocates it - so a claim naming another task is proof the slot was
-# reassigned after this record was written.
+# This is the FIRST of the two slot guards, ahead of the record-exclusivity scan
+# above, because only the claim can name the slot's actual owner. That scan
+# proves no OTHER task record names this slot; it can never say which of two
+# records naming one slot is the stale one, so on its own it refuses both and the
+# pair deadlocks (see the script header). The scan also cannot prove that THIS
+# record is not the stale one, because the task that took the slot next may leave
+# no record it can reach: its own worker may have exited and its record been
+# cleaned up, or it may belong to a home this machine does not register. The
+# claim closes both gaps from the other side: it names the task that actually
+# took the slot, and it is written under the same project lock that allocates
+# it, so a claim naming another task is proof the slot was reassigned after this
+# record was written, and settles ownership before the scan is consulted at all.
 #
 # A claim naming another task does not refuse: it means the slot is no longer
 # this task's, so the record's own cleanup proceeds and every slot step is
@@ -2392,7 +2408,8 @@ require_exclusive_task_worktree_slot() {
 # An absent claim proceeds as the slot's owner: a slot taken before claims
 # existed, or already returned to the pool, carries none, and refusing those
 # would strand every task in flight across the change for no evidence at all.
-# Those keep exactly the record-scan protection they had before.
+# Those, and a claim naming this task itself, go on to the record scan and keep
+# exactly the protection they had before.
 TEARDOWN_SLOT_REASSIGNED_RC=3
 require_owned_worktree_slot_record() {  # <task-id> <worktree>
   local record_id=$1 worktree=$2 marker
@@ -2434,6 +2451,18 @@ require_owned_task_worktree_slot() {
 
 teardown_owns_worktree() {
   [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ]
+}
+
+# The two slot guards in their one required order, run before any cleanup step.
+# The claim goes first and is authoritative: when it names another task, this
+# record owns nothing in the slot, so the reassignment carve-out runs and the
+# record scan - which exists only to protect a slot this record might otherwise
+# return - has nothing left to guard here. Every other claim state falls through
+# to the scan unchanged.
+require_task_worktree_slot_ownership() {
+  require_owned_task_worktree_slot || return 1
+  teardown_owns_worktree || return 0
+  require_exclusive_task_worktree_slot
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -2956,13 +2985,17 @@ preflight_descendant_treehouse_slots() {
       continue
     fi
     fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
-    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
+    # Same order as the task's own slot: the claim is authoritative, and a child
+    # slot it proves was reassigned skips the record scan along with every other
+    # slot step.
     owner_rc=0
     require_owned_worktree_slot_record "$task_id" "$worktree" || owner_rc=$?
     case "$owner_rc" in
-      0|"$TEARDOWN_SLOT_REASSIGNED_RC") ;;
+      "$TEARDOWN_SLOT_REASSIGNED_RC") continue ;;
+      0) ;;
       *) return 1 ;;
     esac
+    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
   done
 }
 
@@ -3305,8 +3338,7 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
-require_owned_task_worktree_slot || exit 1
+require_task_worktree_slot_ownership || exit 1
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 

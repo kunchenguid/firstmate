@@ -2029,6 +2029,76 @@ EOF
   pass "forced secondmate teardown refuses duplicated descendant pool slots"
 }
 
+# The descendant half of the two-record slot deadlock (bin/fm-teardown.sh's
+# header owns the ordering; tests/fm-teardown-endpoint-safety.test.sh pins the
+# task's own slot). Two child records naming one reused pool slot used to refuse
+# the whole forced teardown, because the record scan ran before the slot's own
+# claim. A claim naming a task neither record owns proves both are stale about
+# that slot, so the home is retired and the slot is left entirely alone.
+test_secondmate_force_teardown_clears_reassigned_duplicated_child_slot() {
+  local home subhome childproj childwt claim fakebin log err
+  home="$TMP_ROOT/force-reassigned-slot-home"
+  subhome="$TMP_ROOT/force-reassigned-slot-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/force-reassigned-slot-pool/1/alpha"
+  claim="$TMP_ROOT/force-reassigned-slot-pool/1/.fm-slot-owner"
+  err="$TMP_ROOT/force-reassigned-slot.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$(dirname "$childwt")"
+  fm_git_worktree "$childproj" "$childwt" reassigned-child
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$childwt" \
+    > "$TMP_ROOT/force-reassigned-slot-pool/treehouse-state.json"
+  : > "$childwt/held-by-the-claimant"
+  printf 'task=slot-claimant\nhome=%s\n' "$TMP_ROOT/force-reassigned-slot-claimant-home" > "$claim"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  for child in stale-child other-stale-child; do
+    cat > "$subhome/state/$child.meta" <<EOF
+window=firstmate:fm-$child
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  done
+  fakebin=$(make_fake_tmux "$TMP_ROOT/force-reassigned-slot-fake")
+  log="$TMP_ROOT/force-reassigned-slot-fake/tmux.log"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-reassigned-slot-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" \
+    || fail "forced secondmate teardown refused a duplicated child slot the claim reassigned: $(cat "$err")"
+  [ ! -d "$subhome" ] || fail "forced secondmate teardown kept the retired secondmate home"
+  [ ! -e "$home/state/domain.meta" ] || fail "forced secondmate teardown kept the parent record"
+  [ -d "$childwt" ] || fail "forced secondmate teardown removed a slot reassigned to another task"
+  [ -e "$childwt/held-by-the-claimant" ] \
+    || fail "forced secondmate teardown reset a slot reassigned to another task"
+  [ -e "$claim" ] || fail "forced secondmate teardown removed another task's slot claim"
+  grep -Fq 'task=slot-claimant' "$claim" \
+    || fail "forced secondmate teardown rewrote another task's slot claim"
+  grep -F "return --force $childwt" "$log" >/dev/null \
+    && fail "forced secondmate teardown returned a slot reassigned to another task"
+  grep -F 'slot-claimant' "$err" >/dev/null \
+    || fail "forced secondmate teardown did not name the task the slot was reassigned to"
+  grep -F 'kill-window -t =firstmate:=fm-stale-child' "$log" >/dev/null \
+    || fail "forced secondmate teardown did not kill the first stale child's window"
+  grep -F 'kill-window -t =firstmate:=fm-other-stale-child' "$log" >/dev/null \
+    || fail "forced secondmate teardown did not kill the second stale child's window"
+  pass "forced secondmate teardown clears a duplicated descendant slot the claim reassigned"
+}
+
 test_secondmate_force_teardown_preserves_child_on_unproven_lock() {
   local home subhome childproj childwt fakebin log err rc lock
   home="$TMP_ROOT/force-lock-home"
@@ -3051,6 +3121,7 @@ test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_refuses_duplicated_child_slot
+test_secondmate_force_teardown_clears_reassigned_duplicated_child_slot
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
 test_secondmate_force_teardown_allows_non_state_operational_dir_symlinks_inside_home
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home
