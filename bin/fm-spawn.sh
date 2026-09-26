@@ -324,6 +324,17 @@
 #   account_provider=) in the task record and on the spawned line. A local
 #   secondmate reads this launching home's file; pins are never inherited.
 #   bin/fm-worker-account-lib.sh owns parsing, the check, and the shed list.
+# Worker memory cap (config/worker-memory-max):
+#   Opt-in, Linux with systemd only. With no file, every launch is unchanged.
+#   With a file, a ship or scout launch (fresh and relaunch) whose harness and
+#   project match a rule runs inside a transient `systemd-run --user --scope`
+#   unit carrying MemoryMax and MemorySwapMax at the rule's cap, and a cgroup
+#   OOM kill of that scope is appended to the task's status log as `failed:`.
+#   The wrapped launch runs under /bin/sh, so raw commands must be POSIX sh
+#   compatible under this opt-in. A malformed file, or a matched cap on a host
+#   that cannot start the scope, refuses before any endpoint, worktree, or
+#   record exists. Secondmates are never capped, and the file is not inherited.
+#   bin/fm-worker-memory-cap.sh owns the rule format, probe, and outcome record.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
@@ -435,7 +446,7 @@
 # keeps no data/backlog.md. A configured non-markdown adapter remains
 # active without a markdown file; any active automatic backend without
 # compatible tasks-axi refuses before creating lifecycle state.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path> [account=<pin>]
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
@@ -2894,6 +2905,22 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
+# Worker memory cap (header above): resolved and probed before any endpoint,
+# worktree, or record exists, so a malformed rule or a host that cannot start
+# the capped scope refuses instead of launching the lane without its cap.
+MEMORY_MAX_MIB=
+if [ "$KIND" != secondmate ]; then
+  if ! MEMORY_MAX_PRESENT=$(fm_config_source_present "$CONFIG/worker-memory-max"); then
+    exit 1
+  fi
+  if [ "$MEMORY_MAX_PRESENT" = 1 ]; then
+    MEMORY_MAX_MIB=$("$SCRIPT_DIR/fm-worker-memory-cap.sh" resolve \
+      "$CONFIG/worker-memory-max" "$HARNESS" "${PROJ_ABS##*/}") || exit 1
+    if [ -n "$MEMORY_MAX_MIB" ]; then
+      "$SCRIPT_DIR/fm-worker-memory-cap.sh" probe || exit 1
+    fi
+  fi
+fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
@@ -5112,6 +5139,23 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX "'${TRACEPARENT+"TRACEPARENT=$TRACEPARENT"}'
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
+fi
+# Worker memory cap (header above): the whole launch runs inside one transient
+# systemd user scope. systemd-run --scope execs its command with the pane's own
+# environment, so the agent keeps every variable it would otherwise see and its
+# process still sits in the pane's foreground process group. The outcome step
+# runs back in the pane shell once the scope ends and records a cgroup OOM kill
+# as this lane's failure.
+if [ -n "$MEMORY_MAX_MIB" ]; then
+  MEMORY_SCOPE_UNIT="fm-$ID-$SPAWN_GEN.scope"
+  if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
+    MEMORY_SCOPE_CMD=$LAUNCH
+  else
+    MEMORY_SCOPE_CMD="/bin/sh -c $(shell_quote "$LAUNCH")"
+  fi
+  MEMORY_SCOPE_MARKER="$STATE/$ID-$SPAWN_GEN.scope-started"
+  MEMORY_SCOPE_CMD="/bin/sh -c $(shell_quote ": > $(shell_quote "$MEMORY_SCOPE_MARKER"); exec $MEMORY_SCOPE_CMD")"
+  LAUNCH="rm -f $(shell_quote "$MEMORY_SCOPE_MARKER"); systemd-run --user --scope --quiet --unit=$MEMORY_SCOPE_UNIT -p MemoryMax=${MEMORY_MAX_MIB}M -p MemorySwapMax=${MEMORY_MAX_MIB}M -p OOMPolicy=stop -- $MEMORY_SCOPE_CMD; scope_rc=\$?; $(shell_quote "$SCRIPT_DIR/fm-worker-memory-cap.sh") outcome $MEMORY_SCOPE_UNIT $MEMORY_MAX_MIB $(shell_quote "$STATE/$ID.status") $(shell_quote "$CONFIG") \$scope_rc $(shell_quote "$MEMORY_SCOPE_MARKER")"
 fi
 # Implement the launch-delivery contract in this script's header. The full
 # home-identity hash isolates equal task ids across homes, and the spawn token in
