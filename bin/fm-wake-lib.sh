@@ -1281,18 +1281,15 @@ fm_firstmate_root_home() {
   printf '%s\n' "$home"
 }
 
-# The one lock serializing Treehouse slot allocation and return for a project.
+# The identity a Treehouse project lock and a pool-slot proof share.
 #
-# It is anchored in the local root home's state directory so that every home on
-# this machine that can reach the same pool - the root, and each secondmate home
-# below it, including a remote-seeded home and its own local descendants -
-# derives the identical path. Its identity is the project's resolved origin, so
-# separate clones of one origin share a single lock; an origin-less local-only
-# project falls back to its own worktree top instead of failing to resolve.
-fm_treehouse_project_lock_path() {  # <project-dir>
-  local project=$1 root origin identity hash top
+# A configured origin is that identity, with a local path origin canonicalized
+# when the path exists. An origin-less local-only project falls back to its own
+# worktree top instead of failing to resolve. Two clones of one origin therefore
+# compare equal even though each has its own git common directory.
+fm_treehouse_project_identity() {  # <project-dir>
+  local project=$1 origin top
   [ -d "$project" ] || return 1
-  root=$(fm_firstmate_root_home "$FM_HOME") || return 1
   origin=$(git -C "$project" remote get-url origin 2>/dev/null || true)
   if [ -n "$origin" ]; then
     case "$origin" in
@@ -1300,32 +1297,69 @@ fm_treehouse_project_lock_path() {  # <project-dir>
       *://*|*:* ) ;;
       *) [ ! -d "$project/$origin" ] || origin=$(CDPATH='' cd -- "$project/$origin" 2>/dev/null && pwd -P) || return 1 ;;
     esac
-    identity=$origin
-  else
-    top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || return 1
-    top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
-    identity=$top
+    printf '%s\n' "$origin"
+    return 0
   fi
+  top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || return 1
+  top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
+  printf '%s\n' "$top"
+}
+
+# The one lock serializing Treehouse slot allocation and return for a project.
+#
+# It is anchored in the local root home's state directory so that every home on
+# this machine that can reach the same pool - the root, and each secondmate home
+# below it, including a remote-seeded home and its own local descendants -
+# derives the identical path. Its identity is fm_treehouse_project_identity, so
+# separate clones of one origin share a single lock.
+fm_treehouse_project_lock_path() {  # <project-dir>
+  local project=$1 root identity hash
+  [ -d "$project" ] || return 1
+  root=$(fm_firstmate_root_home "$FM_HOME") || return 1
+  identity=$(fm_treehouse_project_identity "$project") || return 1
   hash=$(printf '%s' "$identity" | git hash-object --stdin 2>/dev/null) || return 1
   [ -d "$root/state" ] || return 1
   printf '%s/.treehouse-project-%s.lock\n' "$root/state" "$hash"
 }
 
-# A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.
-# Require both its pool state and the same Git common directory as the recorded
-# project; an ordinary linked worktree is not evidence that Treehouse owns it.
-fm_treehouse_pool_slot() {  # <project-dir> <worktree>
-  local project=$1 worktree=$2 slot pool state project_common slot_common
-  [ -d "$project" ] && [ -d "$worktree" ] || return 1
+# A Treehouse pool's fixed <pool>/<slot>/<repo> layout, recognized from the
+# slot's own location. The pool state file two directories above the checkout
+# is the pool; an ordinary linked worktree has no such file.
+fm_treehouse_pool_layout() {  # <worktree>
+  local worktree=$1 slot pool state
+  [ -d "$worktree" ] || return 1
   slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
   pool=$(dirname "$(dirname "$slot")")
   state="$pool/treehouse-state.json"
-  [ -f "$state" ] && [ ! -L "$state" ] || return 1
-  project_common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
-  slot_common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
-  project_common=$(CDPATH='' cd -- "$project_common" 2>/dev/null && pwd -P) || return 1
-  slot_common=$(CDPATH='' cd -- "$slot_common" 2>/dev/null && pwd -P) || return 1
-  [ "$project_common" = "$slot_common" ]
+  [ -f "$state" ] && [ ! -L "$state" ]
+}
+
+# A Treehouse slot of this project.
+#
+# The pool is recognized from the slot's own location, then proved to be this
+# project's. The same git common directory is that proof when the pool is bound
+# to the recording home's clone. A pool bound to another home's clone of the
+# same project has a different common directory, and the shared project identity
+# is the proof instead: every home that cloned the project can still see the
+# slot as its own pool. A layout that matches neither is not this project's
+# slot. Callers that would kill or return a path must refuse that case rather
+# than treat it as an ordinary worktree.
+fm_treehouse_pool_slot() {  # <project-dir> <worktree>
+  local project=$1 worktree=$2 slot project_common slot_common project_id slot_id
+  [ -d "$project" ] && fm_treehouse_pool_layout "$worktree" || return 1
+  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  project_common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || project_common=
+  slot_common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || slot_common=
+  if [ -n "$project_common" ] && [ -n "$slot_common" ]; then
+    project_common=$(CDPATH='' cd -- "$project_common" 2>/dev/null && pwd -P) || project_common=
+    slot_common=$(CDPATH='' cd -- "$slot_common" 2>/dev/null && pwd -P) || slot_common=
+  fi
+  if [ -n "$project_common" ] && [ "$project_common" = "$slot_common" ]; then
+    return 0
+  fi
+  project_id=$(fm_treehouse_project_identity "$project") || return 1
+  slot_id=$(fm_treehouse_project_identity "$slot") || return 1
+  [ "$project_id" = "$slot_id" ]
 }
 
 # Slot-owner claim: which task a Treehouse pool slot currently belongs to.
