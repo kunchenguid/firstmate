@@ -284,6 +284,107 @@ test_ring_skips_dead_agent() {
   pass "inbox: the ring skips dead or missing endpoints and still rings live or unclassifiable endpoints"
 }
 
+# A fake tmux whose pane is a Claude-style composer that keeps its content in
+# FM_FAKE_COMPOSER: literal input appends to it, capture renders it wrapped
+# between rules, and Enter submits it (logged as SUBMIT) unless
+# FM_FAKE_DROP_ENTERS still holds a count of Enters to swallow.
+make_composer_stub() {  # <dir>
+  mkdir -p "$1/fakebin"
+  cat > "$1/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  send-keys)
+    shift
+    literal=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift ;;
+        *) break ;;
+      esac
+    done
+    if [ "$literal" = 1 ]; then
+      printf '%s' "$1" >> "$FM_FAKE_COMPOSER"
+    elif [ "${1:-}" = Enter ]; then
+      drops=$(cat "$FM_FAKE_DROP_ENTERS" 2>/dev/null || echo 0)
+      if [ "$drops" -gt 0 ]; then
+        echo $((drops - 1)) > "$FM_FAKE_DROP_ENTERS"
+      elif [ -s "$FM_FAKE_COMPOSER" ]; then
+        printf 'SUBMIT: %s\n' "$(cat "$FM_FAKE_COMPOSER")" >> "$FM_SEND_LOG"
+        : > "$FM_FAKE_COMPOSER"
+      fi
+    fi
+    exit 0 ;;
+  display-message)
+    case "$*" in *cursor_y*) printf '2\n'; exit 0 ;; esac
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane)
+    rule=$(printf '─%.0s' $(seq 64))
+    printf '● done\n%s\n' "$rule"
+    if [ -s "$FM_FAKE_COMPOSER" ]; then
+      fold -w 60 "$FM_FAKE_COMPOSER" | awk 'NR == 1 { print "❯ " $0; next } { print "  " $0 }'
+    else
+      printf '❯ \n'
+    fi
+    printf '%s\n  ? for shortcuts\n' "$rule"
+    exit 0 ;;
+  list-windows) printf 'fm-t1\n'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$1/fakebin/tmux"
+}
+
+# The stuck-doorbell deadlock: a doorbell whose Enter never landed sits in the
+# composer, and a ring that skipped every pending composer blocked all later
+# rings. Our own exact doorbell is submitted instead; any other pending text
+# still skips untouched; and a lost Enter after typing gets one retry.
+test_ring_submits_its_own_stuck_doorbell() {
+  local dir state rec doorbell log composer drops rc other
+  dir="$TMP_ROOT/ring-stuck"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_composer_stub "$dir"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  log="$dir/send.log"; composer="$dir/composer"; drops="$dir/drops"
+  ring() {
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
+      FM_FAKE_DROP_ENTERS="$drops" inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1
+  }
+
+  : > "$log"; printf '%s' "$doorbell" > "$composer"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "a composer holding our own stuck doorbell should be submitted, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "the stuck doorbell should be submitted exactly once, not retyped:"$'\n'"$(cat "$log")"
+  [ ! -s "$composer" ] || fail "the stuck doorbell was left in the composer"
+
+  : > "$log"; printf '%s' "$doorbell" > "$composer"; echo 1 > "$drops"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "a stuck doorbell whose first Enter is lost should still report rung, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "the retry Enter should submit the stuck doorbell once, not retype it:"$'\n'"$(cat "$log")"
+  [ ! -s "$composer" ] || fail "a lost Enter left the stuck doorbell unsubmitted"
+
+  for other in 'a half-typed draft' "$doorbell and a draft"; do
+    : > "$log"; printf '%s' "$other" > "$composer"
+    rc=0; ring || rc=$?
+    [ "$rc" = 1 ] || fail "other pending text should skip the ring, got rc $rc for: $other"
+    [ ! -s "$log" ] || fail "other pending text was submitted:"$'\n'"$(cat "$log")"
+    [ "$(cat "$composer")" = "$other" ] || fail "other pending text was changed: $(cat "$composer")"
+  done
+
+  : > "$log"; : > "$composer"; echo 1 > "$drops"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "a ring whose first Enter is lost should still report rung, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "the retry Enter should submit the doorbell once:"$'\n'"$(cat "$log")"
+  [ ! -s "$composer" ] || fail "a lost Enter left the doorbell unsubmitted"
+  pass "inbox: the ring submits its own stuck doorbell, skips other pending text, and retries a lost Enter once on both paths"
+}
+
 test_idempotent_write_dedups_exact_body() {
   local state r1 r2 r3 r4 count text
   state="$TMP_ROOT/idem/state"; mkdir -p "$state"
@@ -701,6 +802,7 @@ test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
+test_ring_submits_its_own_stuck_doorbell
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence

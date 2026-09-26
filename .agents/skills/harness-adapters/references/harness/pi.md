@@ -11,19 +11,20 @@ Verified on 2026-07-27 with Pi and Pi-signed 0.82.0 unless a fact gives another 
 | Exit command | `/quit`. |
 | Interrupt | Single Escape. |
 | Skill invocation | No separate verified form beyond normal command behavior; use natural language when the exact command is uncertain. |
-| Model flag | `--model <model>`. |
-| Effort flag | `--thinking <low\|medium\|high\|xhigh\|max>`; both identities expose the same levels and completed the same model-qualified max-thinking smoke. Pi 0.85.1 cannot reach `claude-opus-5` or `claude-fable-5` on the `anthropic` provider; see the note below the table. |
+| Model flag | `--model <model>`; under a home's worker account pin the model must be `<provider>/<id>` and Firstmate also passes `--provider <provider>` (`../../../docs/configuration.md` "Worker account pin"). |
+| Effort flag | `--thinking <low\|medium\|high\|xhigh\|max>`; both identities expose the same levels and completed the same model-qualified max-thinking smoke. Some Anthropic model requests may still fail; see the dated test below. |
 | Model discovery | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 
-**Pi 0.85.1 effort-level fault (reproduced 2026-09-18, OAuth credential, `pi -ne`).**
-`claude-opus-5` and `claude-fable-5` both return HTTP 400 `Invalid effort level` from the Anthropic API on every request.
-The requested thinking level makes no difference, and omitting `--thinking` makes no difference.
-The two models fail through different branches of `buildParams` in `packages/ai/src/api/anthropic-messages.ts`: `claude-opus-5` carries `supportsMidConvoEffort: true` in Pi's catalog, so `buildParams` hardcodes `output_config = { effort: "high" }` and sends it regardless of the requested level; `claude-fable-5` carries `forceAdaptiveThinking: true` instead, so it takes the neighbouring branch that forwards `output_config = { effort: options.effort }`, which the API also rejects.
-The source read covers both the `main` branch and the `v0.85.1` tag.
-`claude-sonnet-4-6` succeeds on the same credential, confirming the fault is model-specific.
-Behaviour on an API-key credential is untested.
-`claude-fable-5-1`, `claude-sonnet-5`, `claude-opus-4-5`, and `claude-sonnet-4-5` all return HTTP 404 on that account, so their behaviour under this fault is also untested.
-Use `claude-sonnet-4-6` until Pi is patched.
+**Anthropic effort-level behavior (Pi 0.85.1 reproduced 2026-09-18; re-tested with Pi 0.87.1 on 2026-09-26 UTC using Anthropic OAuth).**
+On Pi 0.85.1, `claude-opus-5` and `claude-fable-5` both returned HTTP 400 `Invalid effort level` with and without `--thinking`.
+That historical failure had two different request-building causes in `packages/ai/src/api/anthropic-messages.ts`: Pi's `claude-opus-5` catalog entry had `supportsMidConvoEffort: true`, so `buildParams` hardcoded `output_config = { effort: "high" }`; `claude-fable-5` had `forceAdaptiveThinking: true` and forwarded `output_config = { effort: options.effort }`.
+The Pi 0.87.1 source still contains those adjacent request-building branches, but the current API results differ from the 0.85.1 reproduction.
+Using `pi -ne -ns -nc -nt --no-session --provider anthropic --model <model> --thinking low -p 'Reply with exactly OK.'`, `claude-opus-5` returned `OK`; it also returned `OK` with `--thinking` omitted, so its earlier 400 did not reproduce.
+`claude-fable-5` returned HTTP 400 saying `claude-opus-4-8` is not a valid fallback target with `--thinking low`, and HTTP 400 `Invalid effort level` with `--thinking` omitted.
+Thus the exact `Invalid effort level` error remains reproducible for `claude-fable-5` when effort is omitted, while its explicit-low request currently fails for a different reason.
+`claude-sonnet-4-6` returned `OK` with `--thinking low` on the same account; treat this as verified only for Pi 0.87.1, this date, and this OAuth account, not as general advice.
+`claude-fable-5-1`, `claude-sonnet-5`, `claude-opus-4-5`, and `claude-sonnet-4-5` each returned HTTP 404 on this account, so their effort behavior remains untested.
+Pi 0.87.1 high/max efforts and API-key authentication were not tested.
 
 Native Codex sessions may request `ultra` through the native extension flag described by `../../../bin/fm-spawn.sh`; it is separate from Pi's thinking levels.
 Pi has no permission system, so workers are always autonomous.
@@ -42,7 +43,7 @@ Multiple positional arguments become separate queued messages; the spawn templat
 
 A project trust dialog can appear on the first Pi run in any not-yet-trusted directory, including a clean worktree.
 Accept it with Enter and verify the instructions begin processing.
-The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in the same pooled slot skip it.
+The decision persists per path in `~/.pi/agent/trust.json`, or in the pinned root's `trust.json` under a worker account pin, so later spawns in the same pooled slot under that root skip it.
 
 ## Worker turn-end extension
 

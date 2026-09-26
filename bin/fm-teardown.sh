@@ -287,6 +287,51 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SECONDMATE_REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
+# A missing `.` target is not a teardown result. Stock Bash 3.2 can abort it
+# into an EXIT trap whose status is 0, and a newer Bash can print the
+# diagnostic and continue into cleanup. Refuse by name before sourcing.
+teardown_require_source() {  # <path>
+  if [ ! -f "$1" ] || [ ! -r "$1" ]; then
+    echo "error: teardown refused: required source $(basename "$1") is missing or unreadable; nothing was changed" >&2
+    exit 1
+  fi
+}
+
+teardown_require_backend_prerequisites() {  # <backend> <task-id>
+  local backend=$1 task_id=$2
+  if ! fm_backend_source "$backend"; then
+    echo "error: teardown refused: required $backend source is missing or unreadable for $task_id; nothing was changed" >&2
+    return 1
+  fi
+}
+for _teardown_source in \
+  fm-tasks-axi-lib.sh \
+  fm-backlog-transition-lib.sh \
+  fm-timeout-lib.sh \
+  fm-backend.sh \
+  fm-control-lib.sh \
+  fm-lock-lib.sh \
+  fm-classify-lib.sh \
+  fm-gate-refuse-lib.sh \
+  fm-pr-lib.sh \
+  fm-public-followup-lib.sh \
+  fm-x-lib.sh \
+  fm-env-lib.sh \
+  fm-secondmate-registry-lib.sh \
+  fm-secondmate-parent-lib.sh \
+  fm-pending-reply-lib.sh \
+  fm-operational-input.sh \
+  fm-marker-lib.sh \
+  fm-tmux-lib.sh \
+  fm-composer-lib.sh \
+  fm-cursor-lib.sh \
+  fm-nm-run-lib.sh \
+  fm-wake-lib.sh \
+  fm-lease-lib.sh
+do
+  teardown_require_source "$SCRIPT_DIR/$_teardown_source"
+done
+unset _teardown_source
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
@@ -381,6 +426,7 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
 fi
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
+SM_LIVENESS_LOCK=
 META_LOCK=
 META_LOCK_HELD=0
 DESCENDANT_LOCK_PATHS=()
@@ -413,6 +459,10 @@ teardown_release_locks() {
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
     META_LOCK_HELD=0
+  fi
+  if [ -n "${SM_LIVENESS_LOCK:-}" ]; then
+    fm_lock_release "$SM_LIVENESS_LOCK" || true
+    SM_LIVENESS_LOCK=
   fi
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CONTROL_LOCK" || true
@@ -449,6 +499,17 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
 }
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
+# A secondmate's endpoint-liveness episodes (bin/fm-secondmate-liveness-lib.sh)
+# serialize on this lock; retirement holds it to the end so no probe or relaunch
+# can act on the route mid-teardown, and its relaunch ledger and park marker are
+# removed with the route instead of surviving for a reused id.
+if [ "$TEARDOWN_META_KIND" = secondmate ]; then
+  fm_lock_try_acquire "$STATE/.secondmate-liveness-$ID.lock" || {
+    echo "error: a secondmate liveness check is in progress for $ID; nothing was changed - retry teardown" >&2
+    exit 1
+  }
+  SM_LIVENESS_LOCK="$STATE/.secondmate-liveness-$ID.lock"
+fi
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
 TEARDOWN_META_SPAWN_GEN=
 TEARDOWN_LEGACY_PENDING=0
@@ -982,9 +1043,11 @@ remote_secondmate_teardown() {
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
+  [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
   status_retire_presentation_task "$STATE" "$ID" || return 1
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
-  rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress"
+  rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
+    "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
 }
@@ -1035,6 +1098,10 @@ else
   T=$FM_BACKEND_VALIDATED_TARGET
   [ "$BACKEND" != orca ] || T_ORCA=$T
 fi
+# The recorded backend, including every sibling its adapter sources, has to
+# be readable before the first destructive step. --force does not override
+# this. A forced descendant is proved in validate_firstmate_home_children_removal.
+teardown_require_backend_prerequisites "$BACKEND" "$ID" || exit 1
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
   "$FM_ROOT/bin/fm-guard.sh" || true
 fi
@@ -1920,7 +1987,7 @@ task_status_is_terminal_run() {  # <axi-status-output> <run-id>
   [ "$run_id" = "$expected_id" ] || return 1
   outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
   case "$outcome" in
-    cancelled|failed|passed|checks-passed) return 0 ;;
+    cancelled|failed|passed|checks-passed|passed-with-override|passed-with-skips) return 0 ;;
   esac
   return 1
 }
@@ -2277,7 +2344,11 @@ require_exclusive_worktree_slot_record() {
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
       [ -f "$other" ] && [ ! -L "$other" ] || continue
-      [ "$other" != "$record_meta" ] || continue
+      # Identity, not spelling: the same record reached through a differently
+      # resolved state dir (e.g. a symlinked $FM_HOME) is still this record. A
+      # differently named hardlink is another task's record, so the name must
+      # match too.
+      [ "${other##*/}" = "${record_meta##*/}" ] && [ "$other" -ef "$record_meta" ] && continue
       other_id=$(basename "$other" .meta)
       for field in worktree home; do
         other_path=$(fm_meta_get "$other" "$field")
@@ -2564,6 +2635,9 @@ remove_firstmate_home() {
     restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
     return 1
   fi
+  # Read-only strip dirs sit at state/<id>.git-hooks, and a remote secondmate's
+  # own one under state/parent-route/, so search the whole state tree.
+  find "$abs_home_path/state" -type d -name '*.git-hooks' -exec chmod u+w {} + 2>/dev/null || true
   if firstmate_home_has_treehouse_slot "$abs_home_path"; then
     command -v treehouse >/dev/null 2>&1 || {
       echo "error: treehouse command not found; cannot return $label $abs_home_path" >&2
@@ -2905,6 +2979,7 @@ validate_firstmate_home_children_removal() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
+    teardown_require_backend_prerequisites "$child_backend" "$child_id" || return 1
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -2950,10 +3025,7 @@ FMEOF
 
 teardown_herdr_require_prerequisites() {  # <task-id>
   local task_id=$1 prerequisite
-  if ! fm_backend_source herdr; then
-    echo "error: herdr teardown prerequisites are unavailable for $task_id; nothing was changed - restore the adapter and rerun teardown" >&2
-    return 1
-  fi
+  teardown_require_backend_prerequisites herdr "$task_id" || return 1
   for prerequisite in \
     fm_backend_herdr_parse_target \
     fm_backend_herdr_pane_presence_state \
@@ -3204,13 +3276,17 @@ cleanup_firstmate_home_children() {
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
     status_retire_presentation_task "$sub_state" "$child_id" || return 1
+    fm_wake_queue_prune_task "$sub_state" "$child_id" "$child_t" 2>/dev/null || true
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
       "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.omp-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
+      "$sub_state/$child_id.devin-config.json" \
       "$sub_state/.$child_id.branch-outcome-index"
+    chmod u+w "$sub_state/$child_id.git-hooks" 2>/dev/null || true
+    rm -rf "$sub_state/$child_id.git-hooks"
   done
 }
 
@@ -3652,19 +3728,27 @@ if [ -n "$LAUNCH_HOME_TOKEN" ]; then
 fi
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+# Opt-in fleet activity ledger (docs/fleet-ledger.md), before the status log is
+# retired so its last lines are captured; off costs one file test.
+[ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
 status_retire_presentation_task "$STATE" "$ID" || exit 1
+fm_wake_queue_prune_task "$STATE" "$ID" "$T" 2>/dev/null || true
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
-  "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
-  "$STATE/.$ID.branch-outcome-index"
+  "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" "$STATE/$ID.devin-config.json" \
+  "$STATE/.$ID.branch-outcome-index" \
+  "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
-rm -rf "$STATE/$ID.inbox"
+# state/<id>.git-hooks is the spawn-owned commit-msg strip directory, left
+# read-only by its installer.
+chmod u+w "$STATE/$ID.git-hooks" 2>/dev/null || true
+rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks"
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
 # racing the same id stays serialized exactly as it was before. A captain-held
