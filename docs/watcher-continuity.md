@@ -217,7 +217,8 @@ It mints a fresh generation so buried decisions still resurface once.
 
 ### Generation reuse
 
-Every watcher close attempts to publish downtime, and every durable queue append publishes it.
+An ordinary watcher close attempts to publish downtime, and every durable queue append publishes it.
+A handling successor closing to resurface recovery preserves the existing marker instead.
 If EXIT cleanup cannot acquire the downtime-marker lock within its bound, it retains the stale singleton for the next arm to publish the missing downtime before clearing that lock (see [Grace, beacon, and stop signals](#grace-beacon-and-stop-signals)).
 A downtime republication of any pending episode reuses its generation instead of minting a new one, and an already-announced generation stays announced.
 That reuse keeps a watcher close inside the handling window from orphaning the acknowledgement already presented and from trapping later arms in repeated recovery presentation.
