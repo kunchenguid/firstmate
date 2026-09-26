@@ -310,7 +310,10 @@ expect_withheld "a rule-criterion match" "brief text matches $NEVER_SEND line 1"
 SECOND_HOME="$TMP_ROOT/secondmate-home"
 mkdir -p "$SECOND_HOME/config"
 printf '%s\n' 'acme-ledger' > "$NEVER_SEND"
-( . "$ROOT/bin/fm-config-inherit-lib.sh" && propagate_inheritable_config "$HOME_DIR/config" "$SECOND_HOME/config" ) \
+# A child shell keeps the lib's own globals (such as out) out of this script
+# shellcheck disable=SC2016 # Expanded by the child shell
+bash -c '. "$1" && propagate_inheritable_config "$2" "$3"' _ \
+  "$ROOT/bin/fm-config-inherit-lib.sh" "$HOME_DIR/config" "$SECOND_HOME/config" \
   || fail "inheritance into the secondmate home failed"
 PRIMARY_HOME=$HOME_DIR
 HOME_DIR=$SECOND_HOME
