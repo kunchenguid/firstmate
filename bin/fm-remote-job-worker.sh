@@ -39,6 +39,10 @@
 # consecutive-failure backoff, but not that total restart guard, so a child
 # that dies just past the healthy threshold cannot restart without bound
 # either. fm-on's ensure path restarts a worker that gave up.
+#
+# Each serving iteration first confirms the ownership lock still names this
+# process; one that lost it stops its lanes and exits 0 without touching the
+# real owner's records, so its supervisor stops too instead of racing claims.
 set -u
 
 # A non-numeric override falls back to the default rather than crashing the
@@ -61,6 +65,7 @@ WORKER_LOCK=
 WORKER_LOCK_HELD=0
 WORKER_LOCK_BOUND=
 WORKER_RELEASE_OWNERSHIP=1
+WORKER_SERVE_OWNER=nobody
 WORKER_SUPERVISED_PID=
 WORKER_PREEMPTIBLE=0
 WORKER_PREEMPTED=0
@@ -251,6 +256,20 @@ worker_shutdown_owns_lock() {
   [ -d "$WORKER_LOCK" ] && [ ! -L "$WORKER_LOCK" ] || return 1
   owner_pid=$(fm_remote_job_read_single_line "$WORKER_LOCK/pid" 64 2>/dev/null || true)
   [ "$owner_pid" = "${BASHPID:-$$}" ]
+}
+
+# Serving-loop ownership check: 0 while this process owns the lock, 1 once the
+# directory is gone or its pid reads as another process, and 2 when the pid
+# cannot be read this poll, so a transient read failure never ends an owner.
+worker_serve_ownership() {
+  local owner_pid
+  [ "$WORKER_LOCK_HELD" -eq 1 ] || return 1
+  [ -d "$WORKER_LOCK" ] && [ ! -L "$WORKER_LOCK" ] || return 1
+  owner_pid=$(fm_remote_job_read_single_line "$WORKER_LOCK/pid" 64 2>/dev/null) || return 2
+  [ "$owner_pid" = "${BASHPID:-$$}" ] || {
+    WORKER_SERVE_OWNER=$owner_pid
+    return 1
+  }
 }
 
 worker_cleanup() {
@@ -1116,6 +1135,19 @@ main() {
   worker_publish_identity "$account_home" || { worker_error "cannot publish worker code identity"; exit 1; }
   worker_publish_pid || { worker_error "cannot publish worker pid"; exit 1; }
   while :; do
+    WORKER_SERVE_OWNER=nobody
+    worker_serve_ownership
+    case $? in
+      0) ;;
+      1)
+        worker_error "worker ownership now belongs to $WORKER_SERVE_OWNER; this worker stops serving"
+        worker_exit_lost_lock
+        ;;
+      *)
+        sleep "$FM_REMOTE_JOB_POLL_SECONDS"
+        continue
+        ;;
+    esac
     worker_write_heartbeat || { worker_error "cannot update worker heartbeat"; exit 1; }
     # Checked right after a fresh heartbeat, so the grace window cannot make a
     # still-healthy worker read as unready to a concurrent probe.

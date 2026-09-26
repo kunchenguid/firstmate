@@ -25,6 +25,8 @@ REPLACEMENT_OWNER_PID=
 STALL_WORKER_PID=
 STALL_REPLACEMENT_PID=
 STALL_JOB_GROUP=
+FOREIGN_HOLDER_PID=
+FOREIGN_HEARTBEAT_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -43,6 +45,8 @@ cleanup_remote_job_fixture() {
     wait "$stall_pid" 2>/dev/null || true
   done
   [ -z "$STALL_JOB_GROUP" ] || kill -KILL -- "-$STALL_JOB_GROUP" 2>/dev/null || true
+  [ -z "$FOREIGN_HEARTBEAT_PID" ] || kill -KILL "$FOREIGN_HEARTBEAT_PID" 2>/dev/null || true
+  [ -z "$FOREIGN_HOLDER_PID" ] || kill -KILL "$FOREIGN_HOLDER_PID" 2>/dev/null || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -76,6 +80,10 @@ SH
 cat > "$REMOTE_ROOT/bin/fm-touch-job.sh" <<'SH'
 #!/bin/bash
 printf 'ran\n' > "$1"
+SH
+cat > "$REMOTE_ROOT/bin/fm-append-job.sh" <<'SH'
+#!/bin/bash
+printf 'ran\n' >> "$1"
 SH
 cat > "$REMOTE_ROOT/bin/fm-shutdown-job.sh" <<'SH'
 #!/bin/bash
@@ -329,6 +337,140 @@ kill "$OTHER_PID" 2>/dev/null || true
 wait "$OTHER_PID" 2>/dev/null || true
 OTHER_PID=
 pass "stale ownership is reclaimed without signaling a reused pid"
+
+# Distinct process groups running this root's worker: one per worker tree.
+worker_tree_count() {
+  ps -A -o pgid= -o command= 2>/dev/null \
+    | awk -v worker="$REMOTE_ROOT/bin/fm-remote-job-worker.sh" '$3 == worker { print $1 }' \
+    | sort -u | wc -l | tr -d ' '
+}
+
+# A live owner whose lock record no longer verifies it (its recorded start
+# drifted) still holds the lock. ensure must stop it and install one verified
+# owner, never report success while starting a tree that cannot take the lock.
+# Earlier cases start workers outside an isolated group; begin from exactly
+# one tree started through ensure.
+pkill -KILL -f "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" 2>/dev/null || true
+for _ in $(seq 1 50); do
+  [ "$(worker_tree_count)" -eq 0 ] && break
+  sleep 0.1
+done
+rm -rf -- "$STATE_ROOT/worker.lock" "$STATE_ROOT/worker.pid" "$STATE_ROOT/worker.ready"
+fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
+STALE_OWNER_PID=$(cat "$STATE_ROOT/worker.lock/pid")
+STALE_OWNER_GROUP=$(fm_remote_job_process_pgid "$STALE_OWNER_PID") \
+  || fail "the stale-owner fixture could not resolve its process group"
+[ "$(worker_tree_count)" -eq 1 ] || fail "the stale-owner fixture did not start from one worker tree"
+printf 'Thu Jan  1 00:00:00 1970\n' > "$STATE_ROOT/worker.lock/start"
+for _ in 1 2 3; do
+  fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
+done
+! kill -0 -- "-$STALE_OWNER_GROUP" 2>/dev/null \
+  || fail "ensure left the unverifiable lock owner alive"
+fm_remote_job_lock_owner_matches_process "$ACCOUNT_HOME" \
+  || fail "ensure reported success without a verified lock owner"
+[ "$(worker_tree_count)" -eq 1 ] \
+  || fail "repeated ensure calls grew the worker tree count to $(worker_tree_count)"
+pass "ensure stops a live owner its lock record no longer verifies instead of leaking replacements"
+
+# A lock held by a live process ensure may not signal, with a heartbeat kept
+# fresh, can never be taken. The replacement must be reaped and the failure
+# named, and a later call must not leave another tree behind.
+fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || fail "could not stop the fixture worker"
+rm -rf -- "$STATE_ROOT/worker.lock" "$STATE_ROOT/worker.pid" "$STATE_ROOT/worker.ready"
+sleep 300 &
+FOREIGN_HOLDER_PID=$!
+mkdir "$STATE_ROOT/worker.lock"
+printf '%s\n' "$FOREIGN_HOLDER_PID" > "$STATE_ROOT/worker.lock/pid"
+printf 'unverifiable start\n' > "$STATE_ROOT/worker.lock/start"
+printf 'unverifiable command\n' > "$STATE_ROOT/worker.lock/command"
+printf '%s\n' "$FOREIGN_HOLDER_PID" > "$STATE_ROOT/worker.pid"
+fm_remote_job_code_identity "$REMOTE_ROOT" "$ACCOUNT_HOME" > "$STATE_ROOT/worker.identity"
+(
+  while :; do
+    printf '%s\n' "$FOREIGN_HOLDER_PID" > "$STATE_ROOT/worker.ready"
+    touch "$STATE_ROOT/worker.lock"
+    sleep 0.5
+  done
+) &
+FOREIGN_HEARTBEAT_PID=$!
+for _ in 1 2; do
+  if fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME"; then
+    fail "ensure reported success while a live unverifiable process held the ownership lock"
+  fi
+  assert_contains "$FM_REMOTE_JOB_ERROR" "never took ownership" "the failed replacement was not named"
+  [ "$(worker_tree_count)" -eq 0 ] \
+    || fail "a replacement that could not take the lock left $(worker_tree_count) worker tree(s) running"
+done
+kill -0 "$FOREIGN_HOLDER_PID" 2>/dev/null || fail "ensure signalled a lock holder that is not a worker"
+kill "$FOREIGN_HEARTBEAT_PID" "$FOREIGN_HOLDER_PID" 2>/dev/null || true
+wait "$FOREIGN_HEARTBEAT_PID" "$FOREIGN_HOLDER_PID" 2>/dev/null || true
+FOREIGN_HEARTBEAT_PID=
+FOREIGN_HOLDER_PID=
+rm -rf -- "$STATE_ROOT/worker.lock" "$STATE_ROOT/worker.pid" "$STATE_ROOT/worker.ready"
+fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
+pass "a replacement that cannot take the lock is reaped and reported, never left running"
+
+# The first host's split: two serving trees on one queue, the lock and
+# worker.pid naming tree A while tree B serves without it. B must notice by
+# itself and leave, supervisor included, while A keeps serving every job once.
+OWNER_PID=$(cat "$STATE_ROOT/worker.lock/pid")
+OWNER_GROUP=$(fm_remote_job_process_pgid "$OWNER_PID") || fail "the split fixture could not resolve the owner's group"
+kill -STOP -- "-$OWNER_GROUP"
+mv "$STATE_ROOT/worker.lock" "$TMP_ROOT/owner.lock"
+fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
+SPLIT_PID=$(cat "$STATE_ROOT/worker.lock/pid")
+SPLIT_GROUP=$(fm_remote_job_process_pgid "$SPLIT_PID") || fail "the split fixture could not resolve the second tree's group"
+[ "$SPLIT_GROUP" != "$OWNER_GROUP" ] || fail "the split fixture did not start a second worker tree"
+for file in pid start command; do
+  cp "$TMP_ROOT/owner.lock/$file" "$STATE_ROOT/worker.lock/$file"
+done
+printf '%s\n' "$OWNER_PID" > "$STATE_ROOT/worker.pid"
+kill -CONT -- "-$OWNER_GROUP"
+for _ in $(seq 1 100); do
+  kill -0 -- "-$SPLIT_GROUP" 2>/dev/null || break
+  sleep 0.1
+done
+! kill -0 -- "-$SPLIT_GROUP" 2>/dev/null || fail "a worker tree that lost the ownership lock kept running"
+kill -0 "$OWNER_PID" 2>/dev/null || fail "the lock owner stopped when the non-owner left"
+[ "$(cat "$STATE_ROOT/worker.lock/pid")" = "$OWNER_PID" ] || fail "the departing non-owner rewrote the owner's lock"
+[ "$(worker_tree_count)" -eq 1 ] || fail "the split left $(worker_tree_count) worker trees running"
+SPLIT_SIDE_EFFECT="$TMP_ROOT/split-side-effect"
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-append-job.sh "$SPLIT_SIDE_EFFECT" < /dev/null > /dev/null
+JOB_ID=$FM_REMOTE_JOB_ID
+fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+[ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "the owner did not complete the job staged after the split"
+[ "$(wc -l < "$SPLIT_SIDE_EFFECT" | tr -d ' ')" -eq 1 ] || fail "the job staged after the split did not run exactly once"
+fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the job staged after the split could not be reaped"
+fm_remote_job_probe "$ACCOUNT_HOME" || fail "the owner stopped heartbeating after the split"
+pass "a serving worker that lost the ownership lock stops itself and its supervisor"
+
+# A pgid lookup that fails (ps cannot fork under load) proves nothing about
+# who owns the lock. ensure must never stop the replacement it just started
+# on that basis and then report success with no worker serving.
+PGID_FAILED="$TMP_ROOT/pgid-failed"
+(
+  # shellcheck disable=SC2329 # Overrides the library lookup ensure calls.
+  fm_remote_job_process_pgid() {
+    if [ "${FUNCNAME[1]}" = fm_remote_job_wait_for_started_owner ] && [ ! -f "$PGID_FAILED" ]; then
+      : > "$PGID_FAILED"
+      return 1
+    fi
+    ps -p "$1" -o pgid= | tr -d '[:space:]'
+  }
+  fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" --replace || fail "$FM_REMOTE_JOB_ERROR"
+) || fail "ensure failed after a failed pgid lookup"
+assert_present "$PGID_FAILED" "the failing pgid lookup was never consulted"
+fm_remote_job_worker_owned_alive "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  || fail "ensure stopped its own replacement after a failed pgid lookup"
+[ "$(worker_tree_count)" -eq 1 ] || fail "the failed pgid lookup left $(worker_tree_count) worker trees running"
+PGID_SIDE_EFFECT="$TMP_ROOT/pgid-side-effect"
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-append-job.sh "$PGID_SIDE_EFFECT" < /dev/null > /dev/null
+JOB_ID=$FM_REMOTE_JOB_ID
+fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+[ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "no worker served the job staged after a failed pgid lookup"
+fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the job staged after a failed pgid lookup could not be reaped"
+pass "a failed pgid lookup never makes ensure stop the replacement it started"
 
 FM_REMOTE_JOB_TIMEOUT=1
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-timeout-job.sh < /dev/null > /dev/null
@@ -771,31 +913,25 @@ done
 [ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | tr -d ' ')" = T ] \
   || fail "the ownership-loss worker did not stop"
 rm -rf -- "$LOST_STATE/worker.lock"
-kill -CONT "$LOST_TERM_PID"
 LOST_READY_BEFORE=$(file_inode "$LOST_STATE/worker.ready")
-for _ in $(seq 1 100); do
-  LOST_READY_AFTER=$(file_inode "$LOST_STATE/worker.ready")
-  [ -n "$LOST_READY_AFTER" ] && [ "$LOST_READY_AFTER" != "$LOST_READY_BEFORE" ] && break
-  sleep 0.05
-done
-[ -n "${LOST_READY_AFTER:-}" ] && [ "$LOST_READY_AFTER" != "$LOST_READY_BEFORE" ] \
-  || fail "a worker with no ownership lock stopped publishing heartbeats before TERM"
-assert_absent "$LOST_STATE/worker.lock" "the ownership lock reappeared before TERM"
-kill -TERM "$LOST_TERM_PID"
+kill -CONT "$LOST_TERM_PID"
 for _ in $(seq 1 100); do
   kill -0 "$LOST_TERM_PID" 2>/dev/null || break
   sleep 0.05
 done
 if kill -0 "$LOST_TERM_PID" 2>/dev/null; then
-  fail "TERM after ownership loss left the serving worker alive"
+  fail "a serving worker kept running after it lost the ownership lock"
 fi
-wait "$LOST_TERM_PID" 2>/dev/null || true
+LOST_STATUS=0
+wait "$LOST_TERM_PID" 2>/dev/null || LOST_STATUS=$?
 LOST_TERM_PID=
-LOST_READY_SETTLED=$(file_inode "$LOST_STATE/worker.ready")
-sleep 0.3
-[ "$(file_inode "$LOST_STATE/worker.ready")" = "$LOST_READY_SETTLED" ] \
-  || fail "a worker that lost ownership kept replacing its heartbeat after TERM"
-pass "TERM after ownership loss stops the serving worker"
+[ "$LOST_STATUS" -eq 0 ] || fail "a worker that lost ownership exited $LOST_STATUS, which its supervisor would restart"
+assert_absent "$LOST_STATE/worker.lock" "a worker that lost ownership recreated the lock"
+[ "$(file_inode "$LOST_STATE/worker.ready")" = "$LOST_READY_BEFORE" ] \
+  || fail "a worker that lost ownership kept replacing its heartbeat"
+assert_contains "$(cat "$TMP_ROOT/lost-term.err")" "worker ownership now belongs to nobody" \
+  "the departing worker did not log why it stopped"
+pass "a serving worker that lost ownership stops itself without touching the records"
 
 HOLD_STARTED="$TMP_ROOT/hold-started"
 HOLD_SIDE_EFFECT="$TMP_ROOT/hold-side-effect"

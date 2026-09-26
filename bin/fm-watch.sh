@@ -149,6 +149,11 @@
 #                          budget and is parked until a probe reads it live
 #                          again (FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS and
 #                          FM_SECONDMATE_LIVENESS_WINDOW_SECS)
+#   check: secondmate <id> has stopped accepting work: <n> remote probes in a row did not complete (<reason>) - ...
+#                          a remote mate's bounded state probe failed to
+#                          complete FM_SECONDMATE_UNREACHABLE_PROBES times in a
+#                          row; one wake per episode, and any completed probe
+#                          starts a new one (bin/fm-secondmate-liveness-lib.sh)
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock. A live holder whose beacon is stale
@@ -357,6 +362,10 @@ SECONDMATE_LIVENESS_MAX_ATTEMPTS=${FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS:-}
 case "$SECONDMATE_LIVENESS_MAX_ATTEMPTS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_MAX_ATTEMPTS=3 ;; esac
 SECONDMATE_LIVENESS_WINDOW_SECS=${FM_SECONDMATE_LIVENESS_WINDOW_SECS:-}
 case "$SECONDMATE_LIVENESS_WINDOW_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_WINDOW_SECS=3600 ;; esac
+# A remote host that stops completing probes reads healthy to every other
+# check, so this many consecutive non-completing probes wake once per episode.
+SECONDMATE_UNREACHABLE_PROBES=${FM_SECONDMATE_UNREACHABLE_PROBES:-}
+case "$SECONDMATE_UNREACHABLE_PROBES" in ''|*[!0-9]*|0) SECONDMATE_UNREACHABLE_PROBES=3 ;; esac
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -1031,7 +1040,7 @@ secondmate_liveness_tick() {
   [ "$(age_of "$tick_marker")" -ge "$SECONDMATE_LIVENESS_SECS" ] || return 0
   touch "$tick_marker" || return 1
   local now=$(( $(date +%s) )) meta id kind
-  local bound_marker attempts notify_key reason queued err first_reason='' failed=0
+  local bound_marker attempts notify_key reason queued err unreachable first_reason='' failed=0
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     kind=$(fm_meta_get "$meta" kind 2>/dev/null || true)
@@ -1081,6 +1090,16 @@ secondmate_liveness_tick() {
         triage_log "secondmate $id liveness: $FM_SM_LIVE_REASON"
         ;;
     esac
+    if [ "$FM_SM_LIVE_UNREACHABLE" = 1 ]; then
+      if ! unreachable=$(fm_secondmate_liveness_unreachable_note "$id"); then
+        err="unreachable-probe counter could not be written; $FM_SM_LIVE_REASON"
+      elif [ "$unreachable" -eq "$SECONDMATE_UNREACHABLE_PROBES" ]; then
+        reason="check: secondmate $id has stopped accepting work: $unreachable remote probes in a row did not complete ($FM_SM_LIVE_REASON) - run fm-on.sh $id fm-remote-doctor.sh to see why"
+        notify_key="secondmate-unreachable-$id-$now"
+      fi
+    else
+      fm_secondmate_liveness_unreachable_clear "$id" || err="unreachable-probe counter could not be cleared"
+    fi
     if [ -n "$reason" ]; then
       queued=$(fm_wake_queued_keys check)
       if printf '%s\n' "$queued" | grep -Fx "$notify_key" >/dev/null 2>&1 \
