@@ -215,6 +215,17 @@ The first recovery marks that generation announced, and later arms wait until a 
 A non-successor watcher start after an announced-but-unacked episode is a new down stretch.
 It mints a fresh generation so buried decisions still resurface once.
 
+### Bounded reopen
+
+Nothing else ever retires that generation when no live session runs the printed acknowledgement.
+So a plain restart with no re-arm loop and no session would otherwise reopen the same stuck episode into a fresh generation forever, one resurface-then-exit cycle per restart.
+`state/.watcher-down.reopen-count` bounds that.
+Past `FM_RECOVERY_REOPEN_LIMIT` (default 3) consecutive reopens of one episode with no intervening explicit acknowledgement, the next reopen settles the episode to acked directly instead of minting another generation, so the watcher can finally start and stay up.
+The settle records that generation in `state/.watcher-down.reopen-settled`.
+A watcher start does not re-announce that bound-settled episode just because the queue is non-empty, so its queued rows cannot make the watcher exit; they stay durable and the next session's drain presents them.
+A genuinely acknowledged episode with queued rows still re-announces and resurfaces them on the next arm.
+A real acknowledgement, or a watcher start that mints a fresh episode from a missing or invalid marker, clears the counter, so this bound never shortens the once-per-genuine-generation resurface a live, attentive session relies on.
+
 ### Generation reuse
 
 Every watcher close and every durable queue append publishes downtime.
@@ -426,6 +437,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - Decision-only OPEN DECISIONS recovery.
 - Interrupted handling replay.
 - Generation-bound acknowledgement.
+- The bounded reopen of a stuck unacknowledged episode, with and without queued rows, and a genuine acknowledgement with a queued row that still resurfaces.
 - A persistent live successor after recovery.
 - A watcher close inside the handling window that must leave the printed acknowledgement valid.
 - A re-arm whose recovery cycle is slowed after confirmation and must still surface rather than read as a watcher that stayed live.
