@@ -75,6 +75,21 @@ fi
 [ $# -le 1 ] || { usage; exit 1; }
 
 project_label() {
+  local entry matched=
+  if [ -d "$PROJ" ]; then
+    for entry in "$PROJECTS"/*; do
+      [ -d "$entry" ] && [ "$entry" -ef "$PROJ" ] || continue
+      if [ "$entry" = "$PROJ" ]; then
+        basename "$entry"
+        return 0
+      fi
+      [ -n "$matched" ] || matched=$entry
+    done
+    if [ -n "$matched" ]; then
+      basename "$matched"
+      return 0
+    fi
+  fi
   case "$PROJ" in
     "$PROJECTS"/*) basename "$PROJ" ;;
     projects/*) basename "$PROJ" ;;

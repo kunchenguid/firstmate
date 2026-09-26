@@ -697,12 +697,45 @@ test_case_variant_clone_root_still_syncs() {
 
   out=$(run_sync "$home" "$variant")
 
-  assert_contains "$out" "casespelling: synced" \
+  assert_contains "$out" "CaseSpelling: synced" \
     "a case-only spelling of a real clone root must still fast-forward: $out"
   [ "$(head_sha "$clone")" != "$before" ] || fail "the clone did not advance"
   [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
     || fail "the clone was not fast-forwarded to origin/main"
   pass "a case-only clone-root spelling still fast-forwards"
+}
+
+test_case_variant_local_only_clone_never_fetches() {
+  local home clone variant ancestor out before remote_before
+  home="$TMP_ROOT/local-only-case-alias"
+  mkdir -p "$home/projects"
+  clone=$(build_pair "$home" CaseSpelling)
+  variant="${clone/CaseSpelling/casespelling}"
+  ancestor="$home/PROJECTS/CaseSpelling"
+  if [ ! "$variant" -ef "$clone" ] || [ ! "$ancestor" -ef "$clone" ]; then
+    pass "case-alias local-only refusal (case-sensitive filesystem; skipped)"
+    return 0
+  fi
+  mkdir -p "$home/data"
+  printf -- '- CaseSpelling [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+  before=$(head_sha "$clone")
+  remote_before=$(git -C "$clone" rev-parse origin/main)
+  advance_origin "$home" CaseSpelling C1
+
+  out=$(run_sync "$home" "$variant")
+  assert_contains "$out" "CaseSpelling: skipped: local-only project" \
+    "a case-only clone name must retain its registered posture: $out"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "clone-name alias fast-forwarded a local-only clone"
+  [ "$(git -C "$clone" rev-parse origin/main)" = "$remote_before" ] \
+    || fail "clone-name alias fetched a local-only clone"
+
+  out=$(run_sync "$home" "$ancestor")
+  assert_contains "$out" "CaseSpelling: skipped: local-only project" \
+    "a case-only ancestor path must retain its registered posture: $out"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "ancestor alias fast-forwarded a local-only clone"
+  [ "$(git -C "$clone" rev-parse origin/main)" = "$remote_before" ] \
+    || fail "ancestor alias fetched a local-only clone"
+  pass "case-only clone and ancestor aliases cannot fetch local-only projects"
 }
 
 test_symlinked_clone_still_syncs() {
@@ -768,4 +801,5 @@ test_non_signature_fetch_failure_is_not_retried
 test_non_clone_dir_never_syncs_the_enclosing_repo
 test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo
 test_case_variant_clone_root_still_syncs
+test_case_variant_local_only_clone_never_fetches
 test_symlinked_clone_still_syncs
