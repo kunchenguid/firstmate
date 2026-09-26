@@ -1998,7 +1998,9 @@ launch_template() {
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
-  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # OpenCode 1.18 applies OPENCODE_PERMISSION after project config. Explicit
+  # keys replace a project's tool-specific asks, which a lone "*" cannot do.
+  opencode) printf '%s' 'OPENCODE_PERMISSION='\''{"*":"allow","read":"allow","edit":"allow","glob":"allow","grep":"allow","list":"allow","bash":"allow","task":"allow","external_directory":"allow","todowrite":"allow","question":"allow","webfetch":"allow","websearch":"allow","lsp":"allow","doom_loop":"allow","skill":"allow","plan_enter":"allow","plan_exit":"allow"}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE__'
     if [ "$kind" = secondmate ]; then

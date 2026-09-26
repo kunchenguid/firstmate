@@ -712,6 +712,32 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+### 2026-09-25 OpenCode 1.18.32 permissions and Herdr composer
+
+`opencode --version` returned `1.18.32`.
+In an isolated temporary project, `opencode.json` set `*`, `edit`, `bash`, and `external_directory` to `ask`, with `bash` holding both `*` and `git *` ask patterns.
+The installed binary resolved explicit environment overrides after those project rules:
+
+```sh
+OPENCODE_PERMISSION='{"*":"allow","edit":"allow","bash":"allow","external_directory":"allow"}' opencode debug config --pure | jq -c '.permission | {"*": .["*"], edit, bash, external_directory}'
+```
+
+```text
+{"*":"allow","edit":"allow","bash":"allow","external_directory":"allow"}
+```
+
+OpenCode's [v1.18.32 config loader](https://github.com/anomalyco/opencode/blob/v1.18.32/packages/opencode/src/config/config.ts#L2543-L2569) applies this variable after the loaded config, and its [permission schema](https://github.com/anomalyco/opencode/blob/v1.18.32/packages/core/src/v1/config/permission.ts#L318-L355) lists the named keys.
+A local OpenCode 1.18.32 TUI capture on an isolated tmux socket showed `tab agents  ctrl+p commands` directly below the left-bar composer's `╹▀` floor.
+On 2026-09-25, OpenCode 1.18.32 in a guarded named Herdr 0.9.1 lab session produced a 20-row ANSI tail whose first row was the muted `Ask anything…` hint, followed by the mode footer, `╹▀` floor, and shortcut row.
+The leading blank left-bar row had fallen outside the tail, so the prior classifier reported `pending` on the idle composer.
+`tests/fixtures/opencode-herdr-1.18.32-idle.ansi` holds that live capture excerpt, and `tests/fm-composer-lib.test.sh` checks `empty` for its muted hint, `pending` for the same text in a bright draft, and `unknown` when styling is unavailable.
+`tests/fm-backend-herdr.test.sh` drives the same capture through the Herdr adapter and keeps the unclaimed-activity refusal.
+`FM_OPENCODE_HERDR_COMPOSER_LIVE=1 tests/fm-opencode-herdr-composer-live-e2e.test.sh` returned `ok - OpenCode 1.18.32 on Herdr 0.9.1: live idle composer is provably empty`.
+After a `--prompt` turn (how fm-spawn launches every worker), OpenCode 1.18.32 idles in its session view, where the row below the `╹▀` floor is `<cwd>  <tokens>  ctrl+p commands` instead of `tab agents  ctrl+p commands`; the classifier previously reported `unknown` for that visibly empty composer.
+`tests/fixtures/opencode-herdr-1.18.32-session-idle.ansi` holds that live Herdr 0.9.1 tail with the temporary paths rewritten, and both unit suites check `empty` for it.
+`FM_OPENCODE_HERDR_COMPOSER_LIVE=1 FM_OPENCODE_HERDR_COMPOSER_MODEL=<provider/model> tests/fm-opencode-herdr-composer-live-e2e.test.sh` also returned `ok - OpenCode 1.18.32 on Herdr 0.9.1: idle session-view composer after a --prompt turn is provably empty`.
+`tests/fm-spawn-dispatch-profile.test.sh` checks that the generated launch carries all named permission overrides.
+
 ### 2026-09-20 claude 2.1.236 statusLine footer through Herdr
 
 Verified on 2026-09-20 on macOS arm64 (Darwin 25.6.0) against Claude Code 2.1.236 running as Firstmate workers in Herdr 0.8.0 panes, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).

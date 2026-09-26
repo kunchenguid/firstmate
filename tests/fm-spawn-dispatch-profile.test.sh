@@ -737,7 +737,7 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
 }
 
 test_opencode_threads_model_and_ignores_effort_axis() {
-  local rec id out status launch
+  local rec id out status launch permission_json key
   id=profile-opencode-z7
   rec=$(make_spawn_case profile-opencode opencode "$id")
   read_case_record "$rec"
@@ -752,7 +752,14 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
-  pass "opencode receives --model and omits the unsupported effort axis"
+  permission_json=$(printf '%s' "$launch" | sed -n "s/.*OPENCODE_PERMISSION='\([^']*\)'.*/\1/p")
+  [ -n "$permission_json" ] || fail "opencode launch did not carry OPENCODE_PERMISSION"
+  for key in '*' read edit glob grep list bash task external_directory todowrite question webfetch websearch lsp doom_loop skill plan_enter plan_exit; do
+    printf '%s' "$permission_json" | jq -e --arg key "$key" '.[$key] == "allow"' >/dev/null \
+      || fail "opencode launch did not explicitly allow permission '$key'"
+  done
+  assert_not_contains "$launch" "OPENCODE_CONFIG_CONTENT" "opencode launch should not keep a redundant lower-precedence permission config"
+  pass "opencode receives --model, omits effort, and overrides every supported permission"
 }
 
 test_native_effort_validator_keeps_axes_separate() {

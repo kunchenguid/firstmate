@@ -3812,6 +3812,34 @@ test_composer_state_real_text_is_pending() {
   pass "fm_backend_herdr_composer_state: real composer text reads pending"
 }
 
+test_composer_state_opencode_shortcuts_below_leftbar() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-opencode-shortcuts"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  ┃\n  ┃  Ask anything… "Fix a TODO in the codebase"\n  ┃\n  ┃  Build · Big Pickle OpenCode Zen\n  ╹▀▀▀▀▀▀▀▀\n       tab agents  ctrl+p commands\n\n  ● Tip Run /connect to add an AI provider\n' > "$resp/1.out"
+  printf '  ┃\n  ┃  Reply with OK.\n  ┃\n  ┃  Build · Big Pickle OpenCode Zen\n  ╹▀▀▀▀▀▀▀▀\n       tab agents  ctrl+p commands\n' > "$resp/2.out"
+  printf '  ┃\n  ┃  Ask anything… "Fix a TODO in the codebase"\n  ┃\n  ┃  Build · Big Pickle OpenCode Zen\n  ╹▀▀▀▀▀▀▀▀\n       tab agents  ctrl+p commands\nWorking on request...\n' > "$resp/3.out"
+  cp "$ROOT/tests/fixtures/opencode-herdr-1.18.32-idle.ansi" "$resp/4.out"
+  cp "$ROOT/tests/fixtures/opencode-herdr-1.18.32-session-idle.ansi" "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "OpenCode's idle composer above its shortcut row should read empty on Herdr, got '$out'"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "OpenCode's typed composer above its shortcut row should read pending on Herdr, got '$out'"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "activity after OpenCode's shortcut row should refuse as unknown on Herdr, got '$out'"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "the real OpenCode idle capture clipped by Herdr should read empty, got '$out'"
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "the real OpenCode session view after a --prompt turn should read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: OpenCode shortcut furniture no longer blocks a proven empty composer"
+}
+
 # Issue #3436: Grok 1.0.5's real bottom border is three columns wider than
 # the aligned top and content rows. Herdr has no cursor anchor, so the old
 # geometry verdict was unknown even when this composer was genuinely idle.
@@ -5759,6 +5787,7 @@ test_busy_state_working_maps_to_busy
 test_busy_state_done_and_blocked_map_to_idle
 test_busy_state_unknown_on_no_agent
 test_composer_state_bare_prompt_is_empty
+test_composer_state_opencode_shortcuts_below_leftbar
 test_composer_state_styled_placeholder_draft_is_pending
 test_composer_state_real_text_is_pending
 test_composer_state_grok_oversized_title_preserves_safe_verdicts

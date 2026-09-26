@@ -1293,8 +1293,19 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # can prove it real, unknown otherwise.
 _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
   local screen=$1 styled=$2 first=$3 last=$4
-  local row raw content pending_seen=0 footer_re leading_blank=1 placeholder_position=0
+  local row raw content muted floor footer pending_seen=0 footer_re leading_blank=1 placeholder_position=0
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
+  # Herdr's bounded tail can start ON OpenCode's idle hint, losing the blank
+  # left-bar row that normally distinguishes a hint from a typed draft. In
+  # that case require the mode footer, the closing floor, and a hint whose
+  # muted truecolor styling strips at OpenCode's verified 1.18.32 luminance.
+  # Bright placeholder-like input still counts as pending.
+  footer=$(_fm_composer_row_content "$(_fm_composer_screen_row "$last" "$screen")" 0)
+  case "$footer" in '┃'*) footer=${footer#┃} ;; esac
+  fm_composer_normalize_trim_var footer
+  floor=$(_fm_composer_screen_row "$((last + 1))" "$screen")
+  floor=$(printf '%s\n' "$floor" | fm_composer_strip_ansi)
+  fm_composer_normalize_trim_var floor
   row=$first
   while [ "$row" -le "$last" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
@@ -1313,6 +1324,15 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
     if [ "$placeholder_position" = 1 ] \
        && fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive; then
       row=$((row + 1)); continue
+    fi
+    if [ "$row" -eq "$first" ] && [ "$styled" = 1 ] \
+       && fm_composer_idle_matches "$content" "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive \
+       && fm_composer_idle_matches "$footer" "$footer_re" sensitive \
+       && _fm_composer_leftbar_floor_row "$floor"; then
+      muted=$(FM_COMPOSER_GHOST_LUMA_MAX=160 _fm_composer_row_content "$raw" 1)
+      case "$muted" in '┃'*) muted=${muted#┃} ;; esac
+      fm_composer_normalize_trim_var muted
+      if [ -z "$muted" ]; then row=$((row + 1)); continue; fi
     fi
     if [ "$row" -eq "$last" ] \
        && fm_composer_idle_matches "$content" "$footer_re" sensitive; then
@@ -1335,6 +1355,17 @@ _fm_composer_leftbar_floor_row() {  # <trimmed-row>
     *) return 1 ;;
   esac
   [ -z "${blocks//▀/}" ]
+}
+
+# OpenCode 1.18.32 draws this shortcut row immediately below its left-bar
+# floor: `tab agents  ctrl+p commands` on the home screen, and
+# `<cwd>  <tokens>  ctrl+p commands` in a session view (every fm-spawn worker
+# after its --prompt turn). It is outside the input area but contiguous with
+# the composer, so a cursorless capture must skip exactly this row before the
+# staleness probe.
+_fm_composer_opencode_shortcuts_row() {  # <trimmed-row>
+  fm_composer_idle_matches "$1" \
+    '^(tab[[:space:]]+agents|[/~].*)[[:space:]]+ctrl\+p[[:space:]]+commands$' sensitive
 }
 
 # _fm_composer_row_is_composer_furniture: 0 when <trimmed-row> is DEMONSTRABLY
@@ -1428,7 +1459,7 @@ _fm_composer_locate_footer_zone() {  # <plain>
 }
 
 _fm_composer_select_cursorless() {
-  local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0
+  local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0 leftbar_floor=0
   FM_COMPOSER_SELECTED_KIND=
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
@@ -1515,6 +1546,7 @@ _fm_composer_select_cursorless() {
       fm_composer_normalize_trim_var trimmed
       if _fm_composer_leftbar_floor_row "$trimmed"; then
         boundary=$next
+        leftbar_floor=1
       fi
     fi
     # The same footer zone, read from the other side: rows this envelope's own
@@ -1523,6 +1555,14 @@ _fm_composer_select_cursorless() {
     next=$((boundary + 1))
     if [ "$footer" = 1 ] && [ "$FM_COMPOSER_FOOTER_AFTER" = "$boundary" ]; then
       next=$((FM_COMPOSER_FOOTER_LAST + 1))
+    fi
+    if [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] && [ "$leftbar_floor" = 1 ]; then
+      raw=$(_fm_composer_screen_row "$next" "$plain")
+      trimmed=$raw
+      fm_composer_normalize_trim_var trimmed
+      if _fm_composer_opencode_shortcuts_row "$trimmed"; then
+        next=$((next + 1))
+      fi
     fi
     raw=$(_fm_composer_screen_row "$next" "$plain")
     trimmed=$raw
