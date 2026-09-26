@@ -395,7 +395,7 @@ The watcher uses bash's native fatal handling for HUP and TERM, including during
 
 ### Pi and OpenCode watch extension
 
-`tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata, ownership-based redundant-call no-ops, reconciliation after both a new arm and an owned no-op, settlement-before-success, and fail-closed behavior when no branch accepts the request.
+`tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata, ownership-based redundant-call no-ops, reconciliation after both a new arm and an owned no-op, settlement-before-success, and Pi tool-error semantics when reconciliation is absent, declined, or rejected.
 It then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, and:
 
 - Blocks prompt delivery to prove the successor launches first.

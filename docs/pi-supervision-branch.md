@@ -223,6 +223,7 @@ A captain row advances the cursor only after its matching visible session entry 
 The shared event contract in `.pi/extensions/lib/fm-branch-dispatch.ts` couples an explicit watcher repair to this reconciliation without making the watcher read the outcome store itself.
 After either starting a new arm or finding its owned arm already running, the repair emits a request that the lock-owning branch accepts synchronously and serializes with its delivery queue.
 The repair reports success only after that reconciliation settles successfully; an absent or declining listener, lost ownership, or failed reconciliation makes the repair fail closed.
+The slash command renders that reconciliation failure as a warning, while the model-callable tool throws so Pi records a tool error rather than a successful result.
 Sequence-keyed visible entries and the processing request's pending state keep a repeated repair from presenting a missed captain outcome more than once.
 Locked session-start replay stops before the first captain row, so it cannot acknowledge that outcome through prose alone.
 
