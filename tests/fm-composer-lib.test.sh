@@ -700,6 +700,23 @@ test_matrix_pi_codex_usage_limit_banner_settles_a_stale_status() {
   assert_screen "banner with a non-pi identity" unknown "$CAPS_STYLED" "$screen" '' "$(printf 'zsh\t')"
   assert_screen "banner without identity capability" unknown "$CAPS_STYLED_NOID" "$screen"
   assert_screen "banner on a plain backend" unknown "$CAPS_PLAIN" "$screen"
+  # pi 0.87.1 draws a fixed bug-report hint directly below EVERY error banner
+  # ("If this looks like a pi bug, /bug sends a report to the developers."),
+  # so it now sits between the banner and the separator pair on live pi. That
+  # hint is vendor boilerplate attached to the banner itself, not a real
+  # transcript row, so one occurrence of it is tolerated and the banner
+  # beneath it still settles a stale status.
+  hint='If this looks like a pi bug, /bug sends a report to the developers.'
+  screen_hint=$' hello there\n\n '"$banner"$'\n '"$hint"$'\n\n────────────────────────\n\n────────────────────────\n/path/to/worktree\n0.0%/272k (auto)   gpt-5.5 • medium'
+  for st in idle 'done' working unknown blocked; do
+    id=$(printf 'pi\t%s' "$st")
+    assert_screen "banner with the bug-report hint over an empty pair with pi $st" empty \
+      "$CAPS_STYLED" "$screen_hint" '' "$id"
+  done
+  # Two hints in a row are not tolerated: only one boilerplate row is ever
+  # drawn per error, so a second one is real content and keeps refusing.
+  assert_screen "two bug-report hints in a row stay unknown" unknown "$CAPS_STYLED" \
+    "${screen_hint/$hint/$hint$'\n'  $hint}" '' "$(printf 'pi\tworking')"
   # A stale status is the ONLY thing the banner settles: a different error
   # text, a near-miss spelling, or the banner in a transcript row that is not
   # the last one above the pair keep the strict rule. Every divergence case

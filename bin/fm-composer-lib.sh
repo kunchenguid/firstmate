@@ -498,6 +498,13 @@ FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^P
 # discussing this text, or a wrapped copy of it never qualifies.
 # FM_COMPOSER_PI_TERMINAL_ERROR_RE overrides for an unverified rendering.
 FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT='^Error: Codex error: The usage limit has been reached$'
+# Pi draws this fixed bug-report hint directly below EVERY error banner
+# (verified live on pi 0.87.1), so it sits between the banner and the
+# separator pair on current pi releases. It is vendor boilerplate attached to
+# the banner itself, not a transcript row proving a new turn, so the scan
+# below skips at most one occurrence of it before testing for the banner.
+# FM_COMPOSER_PI_ERROR_HINT_RE overrides for an unverified rendering.
+FM_COMPOSER_PI_ERROR_HINT_RE_DEFAULT='^If this looks like a pi bug, /bug sends a report to the developers\.$'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
@@ -1833,21 +1840,31 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
 
 # _fm_composer_pi_terminal_banner_above: 0 when the last non-blank row above
 # the scanned pair's opening separator is pi's terminal provider-error banner
-# (FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT). Rows are read plain, so the red
-# styling pi gives the banner is neither required nor allowed to hide it, and
-# the row is matched whole after trimming: one transcript row, a menu, or a
-# retitled rule between the banner and the pair means the turn did not end
-# on this banner, and the caller keeps refusing.
+# (FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT), tolerating at most one occurrence
+# of pi's fixed bug-report hint row (FM_COMPOSER_PI_ERROR_HINT_RE_DEFAULT)
+# directly beneath it. Rows are read plain, so the red styling pi gives the
+# banner is neither required nor allowed to hide it, and each row is matched
+# whole after trimming: any other transcript row, a menu, or a retitled rule
+# between the banner and the pair means the turn did not end on this banner,
+# and the caller keeps refusing.
 _fm_composer_pi_terminal_banner_above() {  # <screen>
-  local screen=$1 row raw trimmed
+  local screen=$1 row raw trimmed hint_seen=0
   row=$((FM_COMPOSER_SCAN_PI_OPEN - 1))
   while [ "$row" -ge 0 ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
     trimmed=$(_fm_composer_row_content "$raw" 0)
     if [ -n "$trimmed" ]; then
-      fm_composer_idle_matches "$trimmed" \
-        "${FM_COMPOSER_PI_TERMINAL_ERROR_RE:-$FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT}" sensitive
-      return $?
+      if fm_composer_idle_matches "$trimmed" \
+        "${FM_COMPOSER_PI_TERMINAL_ERROR_RE:-$FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT}" sensitive; then
+        return 0
+      fi
+      if [ "$hint_seen" = 0 ] && fm_composer_idle_matches "$trimmed" \
+        "${FM_COMPOSER_PI_ERROR_HINT_RE:-$FM_COMPOSER_PI_ERROR_HINT_RE_DEFAULT}" sensitive; then
+        hint_seen=1
+        row=$((row - 1))
+        continue
+      fi
+      return 1
     fi
     row=$((row - 1))
   done
