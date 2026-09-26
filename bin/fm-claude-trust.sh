@@ -86,10 +86,12 @@
 # argument. Git is the ground truth, so the argument is never trusted on its
 # own word: a primary checkout (git dir == common dir), a worktree of an
 # unrelated repo, a subdirectory of a worktree, a plain directory, and a home
-# directory are each refused. Refusal is a non-zero exit, never a warning and
-# never a silent skip. When <project> is itself a linked worktree (a
-# secondmate home spawned from, rather than as, the primary checkout),
-# refusing outright would wedge a relaunch that is otherwise perfectly valid:
+# directory are each refused. On case-insensitive macOS, native path resolution
+# accepts an alternate letter-case spelling of the same checkout while keeping
+# the on-disk path spelling for the Claude config entry. Refusal is a non-zero
+# exit, never a warning and never a silent skip. When <project> is itself a
+# linked worktree (a secondmate home spawned from, rather than as, the
+# primary checkout), refusing outright would wedge a relaunch that is otherwise perfectly valid:
 # its own common dir already IS the primary checkout's own git dir (git's
 # git-common-dir answer never changes by which worktree asks), so the
 # checkout is derived structurally from it - its parent directory in the

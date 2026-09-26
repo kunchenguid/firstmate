@@ -15,11 +15,12 @@
 # and fetch failures. A project whose registry entry bin/fm-project-mode.sh
 # refuses is skipped too, naming that command so its refusal is readable, rather
 # than synced under a guessed posture.
-# A candidate under projects/ must be the root of its own work tree: git discovery
-# walks up, so a plain nested directory would otherwise resolve to the enclosing
-# repository (the firstmate checkout) and be synced under that directory's label.
-# Anything else is reported as "skipped: not a clone root" naming the repository
-# that would have been touched.
+# A candidate must be the root of its own work tree: git discovery walks up,
+# so a plain nested directory would otherwise resolve to the enclosing repo.
+# A non-root is reported as "skipped: not a clone root" naming that repo.
+# Before any fetch, its registry identity must resolve from on-disk entries in
+# this home's projects dir; unknown or ambiguous identities are skipped rather
+# than assigned a delivery posture from the caller's path spelling.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
 # When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
@@ -34,6 +35,10 @@
 # falling back to an explicit path. Example: from anywhere,
 # `fm-fleet-sync.sh dotfiles-private` syncs just that one clone, same as
 # passing its full projects/dotfiles-private path.
+# On case-insensitive filesystems, alternate letter case for the clone or its
+# projects/ ancestor resolves to the on-disk project entry for mode lookup.
+# Explicitly named symlinks keep their own registry identity where unambiguous;
+# symlinks to clones outside projects/ remain supported when uniquely identified.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
