@@ -899,7 +899,7 @@ The text is static and never executed or expanded; secondmate charters never tak
 Worker ship and scout launches run `bin/fm-holusight.sh` before the selected runtime starts.
 The default is enabled, and `config/holusight.json` may set `projects.<name>.enabled` to `false` or `true` for an explicit per-project choice.
 The helper resolves only an existing `HOLUS_EXECUTABLE`, `~/.local/bin/holus`, or PATH executable, and never installs, indexes, or enables egress.
-It passes explicit egress-deny environment signals, returns only bounded source and location references in the private launch instructions, and writes no files in the application repository.
+It passes explicit egress-deny environment signals and returns bounded Holusight evidence in the private launch instructions without intentionally retaining Firstmate files in the application repository.
 Holusight owns its local usage-event schema and records real invocation outcomes when the CLI is available.
 An unavailable or disabled lookup is reported explicitly as `not-used`, while token and usability dimensions remain `unknown` unless the runtime exposes measurements.
 Run `bin/fm-holusight.sh benchmark <project-root> <project-name>` for a bounded local enabled-versus-disabled comparison.
