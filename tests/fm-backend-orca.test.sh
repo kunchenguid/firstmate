@@ -859,7 +859,7 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
     "backend=orca" "orca_worktree_id=22ec401f-7dac-404b-b795-9594ac95aba0::$wt" \
     "decisions_reviewed=1" "decision_keys="
   orca_case teardown
-  printf '{"ok":true,"result":{"worktree":{"id":"22ec401f-7dac-404b-b795-9594ac95aba0::%s","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"22ec401f-7dac-404b-b795-9594ac95aba0::%s","path":"%s"}}}\n' "$wt" "$wt" > "$RESP/1.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -896,7 +896,7 @@ test_scout_teardown_refuses_orca_id_path_mismatch() {
     "backend=orca" "orca_worktree_id=22ec401f-7dac-404b-b795-9594ac95aba0::$wt" \
     "decisions_reviewed=1" "decision_keys="
   orca_case scout-mismatch
-  printf '{"ok":true,"result":{"worktree":{"id":"22ec401f-7dac-404b-b795-9594ac95aba0::%s","path":"%s"}}}\n' "$other_wt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"22ec401f-7dac-404b-b795-9594ac95aba0::%s","path":"%s"}}}\n' "$other_wt" "$other_wt" > "$RESP/1.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1056,7 +1056,7 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
     "harness=claude" "kind=ship" "mode=local-only" "yolo=off" \
     "backend=orca" "orca_worktree_id=22ec401f-7dac-404b-b795-9594ac95aba0::$wt"
   orca_case ship-match
-  printf '{"ok":true,"result":{"worktree":{"id":"22ec401f-7dac-404b-b795-9594ac95aba0::%s","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"22ec401f-7dac-404b-b795-9594ac95aba0::%s","path":"%s"}}}\n' "$wt" "$wt" > "$RESP/1.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1130,7 +1130,7 @@ test_ship_teardown_refuses_orca_id_path_mismatch() {
     "harness=claude" "kind=ship" "mode=local-only" "yolo=off" \
     "backend=orca" "orca_worktree_id=22ec401f-7dac-404b-b795-9594ac95aba0::$wt"
   orca_case ship-mismatch
-  printf '{"ok":true,"result":{"worktree":{"id":"22ec401f-7dac-404b-b795-9594ac95aba0::%s","path":"%s"}}}\n' "$other_wt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"22ec401f-7dac-404b-b795-9594ac95aba0::%s","path":"%s"}}}\n' "$other_wt" "$other_wt" > "$RESP/1.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1236,8 +1236,8 @@ test_secondmate_force_teardown_removes_orca_child_via_orca() {
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
     "backend=orca" "orca_worktree_id=22ec401f-7dac-404b-b795-9594ac95aba0::$childwt"
   orca_case secondmate-child-cleanup
-  printf '{"ok":true,"result":{"worktree":{"id":"22ec401f-7dac-404b-b795-9594ac95aba0::%s","path":"%s"}}}\n' "$childwt" > "$RESP/1.out"
-  printf '{"ok":true,"result":{"worktree":{"id":"22ec401f-7dac-404b-b795-9594ac95aba0::%s","path":"%s"}}}\n' "$childwt" > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"22ec401f-7dac-404b-b795-9594ac95aba0::%s","path":"%s"}}}\n' "$childwt" "$childwt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"22ec401f-7dac-404b-b795-9594ac95aba0::%s","path":"%s"}}}\n' "$childwt" "$childwt" > "$RESP/2.out"
   printf '{"ok":true,"result":{}}\n' > "$RESP/3.out"
   printf '{"ok":true,"result":{}}\n' > "$RESP/4.out"
   add_tmux_fake "$FB"
@@ -1282,7 +1282,7 @@ test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch() {
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
     "backend=orca" "orca_worktree_id=22ec401f-7dac-404b-b795-9594ac95aba0::$childwt"
   orca_case secondmate-child-mismatch
-  printf '{"ok":true,"result":{"worktree":{"id":"22ec401f-7dac-404b-b795-9594ac95aba0::%s","path":"%s"}}}\n' "$other_wt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"22ec401f-7dac-404b-b795-9594ac95aba0::%s","path":"%s"}}}\n' "$other_wt" "$other_wt" > "$RESP/1.out"
   add_tmux_fake "$FB"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
