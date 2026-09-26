@@ -203,5 +203,6 @@ It asserts that the script accepts no harness, model, or provider input, never c
 `tests/fm-bootstrap.test.sh` owns the quota-axi version-floor diagnostic.
 `tests/fm-quota-array-dispatch-live-e2e.test.sh` drives the public Pi skill-loading interface against one fake schema-5 snapshot per case, served as quota-axi's default TOON.
 It covers TOON-first `spendPriority` ranking among candidates that pass eligibility, reasoning-class, and runway-feasibility gates, explicit accounting for unmeasurable runway, the strongest-reasoning constraint, and the runway feasibility floor over a higher `spendPriority`.
-`tests/fm-dispatch-resolve.test.sh`, `tests/fm-quota-choose.test.sh`, and `tests/fm-procevent-quota.test.sh` cover schema-6 account-row binding, account separation, and schema-5 compatibility through the public script interfaces.
+`tests/fm-dispatch-resolve.test.sh` covers declared quality-preference routing plus schema-6 account-row binding, account separation, and schema-5 compatibility through the public script interface.
+`tests/fm-quota-choose.test.sh` and `tests/fm-procevent-quota.test.sh` cover the remaining public script interfaces for those schema contracts.
 The skill's primary path is that default TOON; `--json` is the documented defensive fallback, and this section records the producer `--json` shape that fallback consumes.

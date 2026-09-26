@@ -1077,6 +1077,12 @@ crew_dispatch_validate() {
       ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
       or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)))
       or ($typed and ($items | any(has("provider") and (provider_id(.provider) | not))));
+    def malformed_prefer_quality($items):
+      ($items | any(has("prefer_quality") and .prefer_quality != true));
+    def quality_policy_bad($p):
+      ($p | type) != "object"
+      or (($p.comfortable_percent | type) != "number") or ($p.comfortable_percent <= 0) or ($p.comfortable_percent > 100)
+      or (($p.reset_within_hours | type) != "number") or ($p.reset_within_hours <= 0);
     # A quota floor, on a rule or a profile: bin/fm-dispatch-resolve.sh applies
     # it in code against one quota-axi row, so scope and min_percent must be
     # concrete; a rule floor also names the provider whose row it reads.
@@ -1099,6 +1105,7 @@ crew_dispatch_validate() {
       | map("\(.h):\(.e)")
       | unique;
     if type != "object" then "top-level value must be an object"
+    elif has("quality_preference") and quality_policy_bad(.quality_preference) then "quality_preference needs comfortable_percent in (0,100] and reset_within_hours > 0"
     elif has("rules") and (.rules | type) != "array" then "rules must be an array"
     elif [(.rules // [])[]? | select(type != "object")] | length > 0 then "each rule must be an object"
     elif [(.rules // [])[]? | select((.when? | type) != "string" or (.when | length) == 0)] | length > 0 then "each rule needs non-empty when"
@@ -1110,6 +1117,7 @@ crew_dispatch_validate() {
       if $typed then "use profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
       else "use profile model and effort must be non-empty strings when present"
       end
+    elif malformed_prefer_quality([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile prefer_quality must be true when present"
     elif $typed and malformed_profile_floors([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile floor needs scope and min_percent 0..100"
     elif $typed and ([(.rules // [])[]? | select(has("approval") and .approval != "captain")] | length > 0) then "approval must be \"captain\" when present"
     elif $typed and ([(.rules // [])[]? | select(has("floor") and floor_bad(.floor; true))] | length > 0) then "rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\\z"
@@ -1121,10 +1129,12 @@ crew_dispatch_validate() {
     elif has("default") and ((.default | type) == "array" and (.default | length) == 0) then "default needs at least one profile"
     elif has("default") and ([profiles(.default)[]? | select(type != "object")] | length) > 0 then "each default profile must be an object"
     elif has("default") and ([profiles(.default)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length) > 0 then "each default profile needs harness"
+    elif (configured_profiles | any(.prefer_quality == true)) and (has("quality_preference") | not) then "prefer_quality profiles need top-level quality_preference"
     elif has("default") and malformed_optional_fields([profiles(.default)[]?]) then
       if $typed then "default profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
       else "default profile model and effort must be non-empty strings when present"
       end
+    elif has("default") and malformed_prefer_quality([profiles(.default)[]?]) then "default profile prefer_quality must be true when present"
     elif $typed and has("default") and malformed_profile_floors([profiles(.default)[]?]) then "default profile floor needs scope and min_percent 0..100"
     else
       (configured_profiles

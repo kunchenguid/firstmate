@@ -23,15 +23,17 @@
 #   after that is jq: the confidence floor (0.6 on the answer confidence, or a
 #   rule's declared `min_confidence` on that rule's probability, falling to the
 #   most probable other option that clears its own floor), the rule's declared
-#   `approval` and `floor`, each profile's declared `provider` and `floor`, the
-#   quota rows from ONE quota-axi --json snapshot (schema 5 or 6; each
-#   candidate binds to one row through quota_row in
+#   `approval` and `floor`, each profile's declared `provider`, `floor`, and
+#   `prefer_quality`, the config's optional `quality_preference`, and the quota
+#   rows from ONE quota-axi --json snapshot (schema 5 or 6; each candidate
+#   binds to one row through quota_row in
 #   bin/fm-quota-axi-lib.sh, so a Pi lane such as openai-codex-work/...
 #   reads its own account's row and an expanded provider with no row for the
-#   candidate is unmeasured, never blocked), and the spendPriority argmax over
-#   the eligible candidates. The model never sees quota, catalogs, approvals,
-#   confidence floors, `why`, or `use`. With no rules, it returns a non-clear
-#   result so firstmate keeps using the existing intake.
+#   candidate is unmeasured, never blocked), any declared quality preference
+#   filter, and the spendPriority argmax over the resulting pool. The model
+#   never sees quota, catalogs, approvals, confidence floors, `why`, or `use`.
+#   With no rules, it returns a non-clear result so firstmate keeps using the
+#   existing intake.
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields and
 #   "Typed dispatch resolution" owns this tool's operator contract.
 #
@@ -41,11 +43,15 @@
 #     model/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
 #     fallback: <runner-up rule taken when the picked rule missed its own floor>
 #     reason: <why the status is not clear>
-#     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
+#     note: <quality preference active/inactive, unranked candidates, when present>
+#     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=..
+#       [prefer_quality=.. resetsAt=.. quality_reason=.. for marked profiles]
+#       -> eligible | eligible, unranked: <reason> | not eligible: <reason>
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
 #   ambiguous -> confidence below the floor; decide as today from the probabilities
-#   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
+#   escalate  -> the rule requires captain approval, no candidate is rankable, a genuine
+#                tie, or declared quality profiles that did not qualify with no fallback
 #   error     -> API, network, response, or quota-axi failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
@@ -162,10 +168,17 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
     or ($p | has("effort") and ((.effort | type) != "string" or (.effort | length) == 0))
     or ($p | has("provider") and (provider_id(.provider) | not))
     or ($p | has("floor") and floor_bad(.floor; false));
+  def prefer_quality_bad($p):
+    ($p | has("prefer_quality") and .prefer_quality != true);
+  def quality_policy_bad($p):
+    ($p | type) != "object"
+    or (($p.comfortable_percent | type) != "number") or ($p.comfortable_percent <= 0) or ($p.comfortable_percent > 100)
+    or (($p.reset_within_hours | type) != "number") or ($p.reset_within_hours <= 0);
   def duplicate_profiles($items):
     ($items | map([.harness, (.model // null), (.effort // null)] | @json)) as $keys
     | ($keys | length) != ($keys | unique | length);
   if type != "object" then "top-level value must be an object"
+  elif has("quality_preference") and quality_policy_bad(.quality_preference) then "quality_preference needs comfortable_percent in (0,100] and reset_within_hours > 0"
   elif has("rules") and (.rules | type) != "array" then "rules must be an array"
   elif any((.rules // [])[]; type != "object") then "each rule must be an object"
   elif any((.rules // [])[]; (.when | type) != "string" or (.when | length) == 0) then "each rule needs non-empty when"
@@ -177,11 +190,14 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
     "unknown select: " + ([.rules[] | select(has("select") and .select != "quota-balanced") | .select] | unique | join(", "))
   elif any((.rules // [])[]; has("floor") and floor_bad(.floor; true)) then "rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\\z"
   elif any((.rules // [])[] | profiles(.use)[]; profile_bad(.)) then "each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
+  elif any((.rules // [])[] | profiles(.use)[]; prefer_quality_bad(.)) then "each use profile prefer_quality must be true when present"
   elif any((.rules // [])[]; duplicate_profiles(profiles(.use))) then "each rule use must not contain duplicate harness, model, and effort profiles"
   elif any((.rules // [])[] | profiles(.use)[]; (verified(.harness) | not)) then "each use profile must name a verified harness"
   elif any((.rules // [])[] | profiles(.use)[]; (effort_ok(.harness; .model; .effort) | not)) then "each use profile effort must be supported by its harness and model"
   elif has("default") and (profiles(.default) | length) == 0 then "default must be a profile object or non-empty profile array"
   elif has("default") and any(profiles(.default)[]; profile_bad(.)) then "each default profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
+  elif has("default") and any(profiles(.default)[]; prefer_quality_bad(.)) then "each default profile prefer_quality must be true when present"
+  elif ([((.rules // [])[]) | profiles(.use)[]] + profiles(.default // null) | any(.prefer_quality == true)) and (has("quality_preference") | not) then "prefer_quality profiles need top-level quality_preference"
   elif has("default") and duplicate_profiles(profiles(.default)) then "default must not contain duplicate harness, model, and effort profiles"
   elif has("default") and any(profiles(.default)[]; (verified(.harness) | not)) then "each default profile must name a verified harness"
   elif has("default") and any(profiles(.default)[]; (effort_ok(.harness; .model; .effort) | not)) then "each default profile effort must be supported by its harness and model"
@@ -319,6 +335,28 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
       .scope == "all_models" or .scope == "all_products" or
       ($m != "" and (.scope == ("model:" + $bare) or .scope == ("product:" + $bare)))
     )];
+  def iso_epoch($v):
+    try ($v | sub("\\.[0-9]+Z$"; "Z") | sub("\\.[0-9]+\\+00:00$"; "Z") | sub("\\+00:00$"; "Z") | fromdateiso8601) catch null;
+  def reset_at($p; $lane; $row):
+    (prov($p; $lane)) as $provider_row |
+    [($row.limitingWindowIds // [])[] as $id | $provider_row.windows[]? | select(.id == $id) | .resetsAt] | first // null;
+  def quality_state($c; $p; $lane; $row):
+    ($cfg.quality_preference // null) as $policy |
+    (reset_at($p; $lane; $row)) as $reset |
+    (iso_epoch($q.generatedAt)) as $generated_epoch |
+    (iso_epoch($reset)) as $reset_epoch |
+    if ($c.prefer_quality // false) != true or $policy == null then
+      {preferred: false, resetsAt: $reset, reason: "not declared"}
+    elif $row.effectivePercentRemaining >= $policy.comfortable_percent then
+      {preferred: true, resetsAt: $reset, reason: "comfortable headroom"}
+    elif $row.effectivePercentRemaining > 0 and ($row.runway.status // "") == "through_reset"
+         and $generated_epoch != null and $reset_epoch != null
+         and $reset_epoch >= $generated_epoch
+         and ($reset_epoch - $generated_epoch) <= ($policy.reset_within_hours * 3600) then
+      {preferred: true, resetsAt: $reset, reason: "headroom reaches a near reset"}
+    else
+      {preferred: false, resetsAt: $reset, reason: "quality preference threshold not met"}
+    end;
   def floor_state($f; $p; $lane):
     if $f == null then "none"
     elif prov($p; $lane) == null or (measured($p; $lane) | not) then "unknown"
@@ -370,8 +408,11 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
         {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: true, unranked: true, reason: "spendPriority missing or non-numeric at \($bad.scope): not rankable"}
       else
         ($rows | min_by(.selection.spendPriority)) as $limiting |
+        (quality_state($c; $p; $lane; $limiting)) as $quality |
         {profile: $c, provider: $p, bounds: $bounds, scope: $limiting.scope, pct: $limiting.effectivePercentRemaining,
-         spendPriority: $limiting.selection.spendPriority, runway: $limiting.runway.status, eligible: true, reason: "ok"}
+         spendPriority: $limiting.selection.spendPriority, runway: $limiting.runway.status,
+         resetsAt: $quality.resetsAt, qualityPreferred: $quality.preferred, qualityReason: $quality.reason,
+         eligible: true, reason: "ok"}
       end
     end;
   def rule_at($c):
@@ -435,10 +476,19 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     ([$cands[] | select(.unranked)]) as $unranked |
     if ($elig | length) == 0 then $ev + {status: "escalate", reason: "no rankable eligible candidate", note: $sel.note, candidates: $cands}
     else
-      ($elig | max_by(.spendPriority)) as $best |
-      ([$elig[] | select(.spendPriority == $best.spendPriority)] | length) as $ties |
-      if $ties > 1 then $ev + {status: "escalate", reason: "genuine spendPriority tie", note: $sel.note, candidates: $cands}
+      ([$elig[] | select(.profile.prefer_quality == true)]) as $quality_declared |
+      ([$quality_declared[] | select(.qualityPreferred == true)]) as $quality_preferred |
+      (if ($quality_preferred | length) > 0 then $quality_preferred
+       elif ($quality_declared | length) > 0 then [$elig[] | select((.profile.prefer_quality // false) != true)]
+       else $elig end) as $ranked_pool |
+      ($ranked_pool | max_by(.spendPriority)) as $best |
+      ([$ranked_pool[] | select(.spendPriority == $best.spendPriority)] | length) as $ties |
+      if ($ranked_pool | length) == 0 then $ev + {status: "escalate", reason: "declared quality profiles did not qualify and no fallback candidate is rankable", note: $sel.note, candidates: $cands}
+      elif $ties > 1 then $ev + {status: "escalate", reason: "genuine spendPriority tie", note: $sel.note, candidates: $cands}
       else $ev + {status: "clear", note: $sel.note, candidates: $cands, chosen: $best}
+        + (if ($quality_preferred | length) > 0 then {quality_note: "declared quality preference active; spendPriority ranked the qualifying quality profiles"}
+           elif ($quality_declared | length) > 0 then {quality_note: "declared quality preference inactive; spendPriority ranked the fallback profiles"}
+           else {} end)
         + (if ($unranked | length) > 0 then
              {unranked_note: "\($unranked | length) eligible candidate(s) unranked (\([$unranked[].provider] | unique | join(", ")))"}
            else {} end)
@@ -459,9 +509,11 @@ TEXT=$(jq -r '
   (if .reason then "  reason: \(.reason | flat)" else empty end),
   (if .note then "  note: \(.note | flat)" else empty end),
   (if .unranked_note then "  note: \(.unranked_note | flat)" else empty end),
+  (if .quality_note then "  note: \(.quality_note | flat)" else empty end),
   (.candidates[]? | "  candidate: \(.profile.harness | flat):\(show(.profile.model))"
       + (if .provider then "  provider=\(.provider | flat)" else "" end)
       + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
+      + (if .profile.prefer_quality == true then "  prefer_quality=\(show(.qualityPreferred))  resetsAt=\(show(.resetsAt))  quality_reason=\(show(.qualityReason))" else "" end)
       + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope | flat):\(show(.pct))%/\((.runway // .status) | flat)"] | join(",")) else "" end)
       + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
   (if .chosen then "  profile: --harness \(.chosen.profile.harness | shell_arg)"

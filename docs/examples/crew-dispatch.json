@@ -1,4 +1,5 @@
 {
+  "quality_preference": { "comfortable_percent": 50, "reset_within_hours": 72 },
   "rules": [
     {
       "when": "The task depends on fresh news, current events, live public facts, or recent market and product changes.",
@@ -20,7 +21,7 @@
     }
   ],
   "default": [
-    { "harness": "codex", "model": "gpt-5.5", "effort": "medium" },
-    { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium", "provider": "claude" }
+    { "harness": "pi", "model": "openai-codex/gpt-5.6-sol", "effort": "medium", "provider": "codex", "prefer_quality": true },
+    { "harness": "codex", "model": "gpt-5.6-luna", "effort": "medium" }
   ]
 }

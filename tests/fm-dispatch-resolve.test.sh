@@ -322,13 +322,32 @@ cp "$ROOT/docs/examples/crew-dispatch.json" "$RULES"
 cat > "$RESPONSE" <<'JSON'
 {"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"default","confidence":0.9,"probabilities":{"rule_1":0.02,"rule_2":0.02,"rule_3":0.02,"default":0.94}}},"usage":{"input_tokens":812,"output_tokens":60}}
 JSON
+QUALITY_QUOTA="$TMP_ROOT/quality-quota.json"
+jq '(.providers[] | select(.provider == "codex")) |=
+  (.windows = [{"id":"weekly","resetsAt":"2030-01-02T00:00:00Z"}] |
+   .quotaSemantics.effectiveAvailability[] |=
+     (.runway.status = "through_reset" | .limitingWindowIds = ["weekly"]))' "$QUOTA" > "$QUALITY_QUOTA"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$QUALITY_QUOTA" run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "the documented example passes opted-in resolution"
+assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=31%  spendPriority=-0.1649  runway=through_reset  prefer_quality=true  resetsAt=2030-01-02T00:00:00Z  quality_reason=headroom reaches a near reset  -> eligible' "near-reset Codex headroom activates the declared Sol quality route"
+assert_contains "$out" '  note: declared quality preference active; spendPriority ranked the qualifying quality profiles' "the quality override is explicit"
+assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex/gpt-5.6-sol' --effort 'medium'" "the active quality route selects Sol medium"
+assert_not_contains "$err" 'malformed rules file' "the documented example reaches resolution"
+
+COMFORT_QUOTA="$TMP_ROOT/comfort-quota.json"
+jq '(.providers[] | select(.provider == "codex") | .quotaSemantics.effectiveAvailability[] | select(.scope == "all_models") | .effectivePercentRemaining) = 60' "$QUOTA" > "$COMFORT_QUOTA"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$COMFORT_QUOTA" run code out err "$BRIEF"
+assert_contains "$out" 'prefer_quality=true  resetsAt=-  quality_reason=comfortable headroom' "comfortable headroom activates quality independently of reset evidence"
+assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex/gpt-5.6-sol' --effort 'medium'" "comfortable headroom selects Sol medium"
+
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
-assert_contains "$out" '  status: clear' "the documented example passes opted-in resolution"
-assert_contains "$out" 'candidate: pi:anthropic/claude-sonnet-5  provider=claude' "the documented Pi default uses its declared Claude provider"
-assert_not_contains "$err" 'malformed rules file' "the documented example reaches resolution"
+assert_contains "$out" '  note: declared quality preference inactive; spendPriority ranked the fallback profiles' "insufficient headroom and runway use the unmarked fallback"
+assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-luna' --effort 'medium'" "the fallback keeps Luna available without silently preferring it"
 cp "$BASE_RULES" "$RULES"
-pass "no-rule fallback, Agy, Gemini, and documented configurations resolve"
+pass "no-rule fallback, Agy, Gemini, and documented quality routing resolve"
 
 # --- ambiguous: fixed confidence floor -----------------------------------------
 reset_log
@@ -870,6 +889,9 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 2 "$code" "non-JSON rules exits 2"
 assert_contains "$err" 'not JSON' "non-JSON rules is named"
 for bad in \
+  '{"quality_preference":{"comfortable_percent":0,"reset_within_hours":72},"rules":[{"when":"x","use":{"harness":"claude"}}]}|quality_preference needs comfortable_percent in (0,100] and reset_within_hours > 0' \
+  '{"rules":[{"when":"x","use":{"harness":"claude","prefer_quality":true}}]}|prefer_quality profiles need top-level quality_preference' \
+  '{"quality_preference":{"comfortable_percent":50,"reset_within_hours":72},"rules":[{"when":"x","use":{"harness":"claude","prefer_quality":false}}]}|each use profile prefer_quality must be true when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"approval":"firstmate"}]}|approval must be "captain" when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"select":"mystery"}]}|unknown select: mystery' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"min_confidence":"high"}]}|min_confidence must be a number from 0 through 1 when present' \
