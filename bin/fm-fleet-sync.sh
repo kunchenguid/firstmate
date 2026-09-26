@@ -75,32 +75,35 @@ fi
 [ $# -le 1 ] || { usage; exit 1; }
 
 project_label() {
-  local entry matched= physical= matches=0 physical_matches=0
-  if [ -d "$PROJ" ]; then
-    for entry in "$PROJECTS"/*; do
-      [ -d "$entry" ] && [ "$entry" -ef "$PROJ" ] || continue
-      matches=$((matches + 1))
-      matched=$entry
-      if [ ! -L "$entry" ]; then
-        physical_matches=$((physical_matches + 1))
-        physical=$entry
-      fi
-    done
-    if [ "$physical_matches" -eq 1 ]; then
-      basename "$physical"
-      return 0
-    fi
-    if [ "$matches" -eq 1 ]; then
-      basename "$matched"
-      return 0
-    fi
-    [ "$matches" -eq 0 ] || return 1
+  local entry matched= physical= named= matches=0 physical_matches=0 name=
+  if [ "$(dirname "$PROJ")" -ef "$PROJECTS" ]; then
+    name=$(basename "$PROJ")
+    shopt -s nocasematch
   fi
-  case "$PROJ" in
-    "$PROJECTS"/*) basename "$PROJ" ;;
-    projects/*) basename "$PROJ" ;;
-    *) printf '%s\n' "$PROJ" ;;
-  esac
+  for entry in "$PROJECTS"/* "$PROJECTS"/.[!.]* "$PROJECTS"/..?*; do
+    [ -d "$entry" ] && [ "$entry" -ef "$PROJ" ] || continue
+    matches=$((matches + 1))
+    matched=$entry
+    if [ -n "$name" ] && [[ "${entry##*/}" == "$name" ]]; then
+      named=$entry
+    fi
+    if [ ! -L "$entry" ]; then
+      physical_matches=$((physical_matches + 1))
+      physical=$entry
+    fi
+  done
+  if [ "$physical_matches" -eq 1 ]; then
+    if [ "$matches" -gt 1 ]; then
+      [ -n "$named" ] && [ ! -L "$named" ] || return 1
+    fi
+    basename "$physical"
+    return 0
+  fi
+  if [ "$matches" -eq 1 ]; then
+    basename "$matched"
+    return 0
+  fi
+  return 1
 }
 
 # resolve_project_arg <arg>: accept a path (used as-is when it already exists)
@@ -322,10 +325,10 @@ report_stuck() {
 
 sync_project() {
   PROJ=$1
-  if ! label=$(project_label); then
-    echo "$PROJ: skipped: ambiguous project identity"
-    return 0
-  fi
+  label=$PROJ
+  case "$PROJ" in
+    "$PROJECTS"/*|projects/*) label=$(basename "$PROJ") ;;
+  esac
 
   if [ ! -d "$PROJ" ]; then
     echo "$label: skipped: not a directory"
@@ -349,6 +352,10 @@ sync_project() {
   # an enclosing repository has a different directory identity and is refused.
   if [ ! "$proj_top" -ef "$PROJ" ]; then
     echo "$label: skipped: not a clone root (git would act on $proj_top)"
+    return 0
+  fi
+  if ! label=$(project_label); then
+    echo "$PROJ: skipped: unknown or ambiguous project identity"
     return 0
   fi
   if ! mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null); then
