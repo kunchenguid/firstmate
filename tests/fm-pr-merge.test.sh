@@ -26,6 +26,15 @@ MR_URL="$MR_PROJECT_URL/-/merge_requests/7"
 MR_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 MR_STALE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
+# The Codebase fixture uses the one canonical host and two-segment repository
+# identity accepted by fm-pr-lib.sh.
+CB_PATH=chengyuhang/firstmate
+CB_URL="https://code.byted.org/$CB_PATH/merge_requests/7"
+CB_HEAD=cccccccccccccccccccccccccccccccccccccccc
+CB_CHANGED_HEAD=dddddddddddddddddddddddddddddddddddddddd
+CB_MERGE_COMMIT=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+CB_MR_ID=790451550483999
+
 JQ_BIN=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll publish"
 
@@ -339,6 +348,68 @@ make_gitlab_case() {
   printf '%s\n' "$case_dir"
 }
 
+write_codebase_status_json() {
+  local file=$1 state=${2:-open} head=${3:-$CB_HEAD}
+  cat > "$file" <<JSON
+{"status":"success","data":{"repository":{"path":"$CB_PATH","id":"1123836"},"merge_request":{"id":"$CB_MR_ID","number":7,"status":"$state","url":"$CB_URL","source_branch":"fm/codebase-merge","target_branch":"main","source_commit_id":"$head"},"mergeability":{"mergeable":true,"checks":[{"name":"checkMRStatus","passed":true,"reason":""}],"failed_checks":[]},"review":{"status":"passed"},"check_runs":{"summary":"all_passed","total_count":1,"page_size":100,"passed_count":1,"failed_count":0,"running_count":0,"items":[{"id":"check-1","commitId":"$head","mergeRequestId":"$CB_MR_ID","status":"completed","conclusion":"succeeded"}]}}}
+JSON
+}
+
+write_codebase_get_json() {
+  local file=$1 state=${2:-merged} head=${3:-$CB_HEAD}
+  local repo_path=${4:-$CB_PATH} merge_commit=${5:-$CB_MERGE_COMMIT}
+  cat > "$file" <<JSON
+{"status":"success","data":{"repository":{"path":"$repo_path","id":"1123836"},"merge_request":{"Id":"$CB_MR_ID","Number":7,"Status":"$state","SourceBranchName":"fm/codebase-merge","TargetBranchName":"main","URL":"$CB_URL","MergeCommitId":"$merge_commit"},"version":{"SourceCommitId":"$head"}}}
+JSON
+}
+
+add_bytedcli_mock() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/bytedcli" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_BYTEDCLI_LOG"
+case "${1:-} ${2:-} ${3:-} ${4:-}" in
+  "--json codebase mr status")
+    [ ! -e "$FM_TEST_CASE_DIR/codebase-status-fails" ] || exit 1
+    if [ -e "$FM_TEST_CASE_DIR/codebase-status-after-first.json" ] \
+      && [ -e "$FM_TEST_CASE_DIR/codebase-status-read-once" ]; then
+      cat "$FM_TEST_CASE_DIR/codebase-status-after-first.json"
+    else
+      : > "$FM_TEST_CASE_DIR/codebase-status-read-once"
+      cat "$FM_TEST_CODEBASE_STATUS"
+    fi
+    ;;
+  "--json codebase mr merge")
+    if [ -e "$FM_TEST_CASE_DIR/codebase-merge-fails" ]; then
+      echo 'error: Codebase merge failed' >&2
+      exit 9
+    fi
+    : > "$FM_TEST_CASE_DIR/codebase-merge-called"
+    cat "$FM_TEST_CODEBASE_MERGE_RESPONSE"
+    ;;
+  "--json codebase mr get")
+    [ ! -e "$FM_TEST_CASE_DIR/codebase-get-fails" ] || exit 1
+    cat "$FM_TEST_CODEBASE_GET"
+    ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/bytedcli"
+  ln -sf "$JQ_BIN" "$case_dir/fakebin/jq"
+}
+
+make_codebase_case() {
+  local name=$1 case_dir
+  case_dir=$(make_case "$name")
+  mkdir -p "$case_dir/wt"
+  : > "$case_dir/bytedcli.log"
+  printf '%s\n' '{"status":"success","data":{"merged":true}}' > "$case_dir/codebase-merge-response.json"
+  write_codebase_status_json "$case_dir/codebase-status.json"
+  write_codebase_get_json "$case_dir/codebase-get.json"
+  add_bytedcli_mock "$case_dir"
+  printf '%s\n' "$case_dir"
+}
+
 # mirror_path_without <dir> <tool> [<bindir> ...]: the whole search path
 # re-exposed by symlink except one tool, because a real copy anywhere on PATH
 # would prove nothing. The named bindirs are mirrored ahead of the search path,
@@ -396,6 +467,11 @@ run_pr_merge() {
   FM_TEST_REAL_MV="$REAL_MV" \
   FM_TEST_GLAB_LOG="$case_dir/glab.log" \
   FM_TEST_GLAB_JSON="$case_dir/mr.json" \
+  FM_TEST_CASE_DIR="$case_dir" \
+  FM_TEST_BYTEDCLI_LOG="$case_dir/bytedcli.log" \
+  FM_TEST_CODEBASE_STATUS="$case_dir/codebase-status.json" \
+  FM_TEST_CODEBASE_GET="$case_dir/codebase-get.json" \
+  FM_TEST_CODEBASE_MERGE_RESPONSE="$case_dir/codebase-merge-response.json" \
   HOME="${FM_TEST_USER_HOME:-$case_dir/user-home}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
@@ -1843,6 +1919,254 @@ test_github_still_forwards_sha_arg() {
   pass "fm-pr-merge refuses a caller --sha on GitHub because the head comes from the live read"
 }
 
+test_codebase_green_merge_and_repeat_are_verified() {
+  local case_dir merge_line
+  case_dir=$(make_codebase_case codebase-green-repeat)
+
+  run_pr_merge "$case_dir" task-x1 "$CB_URL" -- --merge-method rebase_merge \
+    >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "codebase-green-repeat: confirmed green merge failed"
+
+  merge_line=$(grep -F -- '--json codebase mr merge ' "$case_dir/bytedcli.log" || true)
+  [ "$merge_line" = "--json codebase mr merge 7 -R $CB_PATH --merge-method rebase_merge" ] \
+    || fail "codebase-green-repeat: unexpected merge invocation: '$merge_line'"
+  assert_grep "pr=$CB_URL" "$case_dir/state/task-x1.meta" \
+    "codebase-green-repeat: canonical PR metadata was not recorded"
+  assert_grep "pr_head=$CB_HEAD" "$case_dir/state/task-x1.meta" \
+    "codebase-green-repeat: verified source head was not recorded"
+  assert_present "$case_dir/state/task-x1.check.sh" \
+    "codebase-green-repeat: merge poll was not armed"
+  assert_grep codebase "$case_dir/state/task-x1.merge-authority" \
+    "codebase-green-repeat: accepted provider authority was not persisted"
+  assert_grep attended "$case_dir/state/task-x1.merge-authority" \
+    "codebase-green-repeat: attended merge authority was not persisted"
+  assert_grep "is merged at source head $CB_HEAD as merge commit $CB_MERGE_COMMIT" "$case_dir/stdout" \
+    "codebase-green-repeat: landed readback was not reported"
+  assert_grep "$CB_URL" "$case_dir/state/.wake-queue" \
+    "codebase-green-repeat: confirmed landing did not reach the outcome owner"
+
+  write_codebase_status_json "$case_dir/codebase-status.json" merged
+  run_pr_merge "$case_dir" task-x1 "$CB_URL" \
+    >"$case_dir/stdout-repeat" 2>"$case_dir/stderr-repeat" \
+    || fail "codebase-green-repeat: repeat confirmation failed"
+  [ "$(grep -c -F -- '--json codebase mr merge ' "$case_dir/bytedcli.log")" -eq 1 ] \
+    || fail "codebase-green-repeat: repeat handling issued another merge"
+  [ "$(grep -c -F "$CB_URL" "$case_dir/state/.wake-queue")" -eq 1 ] \
+    || fail "codebase-green-repeat: repeat handling duplicated the durable outcome"
+  assert_grep 'was already merged' "$case_dir/stdout-repeat" \
+    "codebase-green-repeat: repeat handling did not identify the existing landing"
+  pass "fm-pr-merge verifies a green Codebase landing and handles an exact repeat without another write"
+}
+
+test_codebase_premerged_without_persisted_authority_is_external() {
+  local case_dir
+  case_dir=$(make_codebase_case codebase-premerged-external)
+  write_codebase_status_json "$case_dir/codebase-status.json" merged
+
+  run_pr_merge "$case_dir" task-x1 "$CB_URL" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "codebase-premerged-external: confirmed existing landing failed"
+
+  assert_no_grep '--json codebase mr merge ' "$case_dir/bytedcli.log" \
+    "codebase-premerged-external: an already merged MR issued another merge"
+  assert_grep "check: merge landed: task-x1 $CB_URL external" "$case_dir/state/.wake-queue" \
+    "codebase-premerged-external: an external landing inherited this invocation's authority"
+  pass "fm-pr-merge attributes an already merged Codebase MR to persisted authority or external observation"
+}
+
+test_codebase_no_checks_is_a_confirmed_green_state() {
+  local case_dir
+  case_dir=$(make_codebase_case codebase-no-checks)
+  jq '.data.check_runs = {summary:"no_checks", total_count:0, page_size:100, passed_count:0, failed_count:0, running_count:0, items:[]}' \
+    "$case_dir/codebase-status.json" >"$case_dir/codebase-status.tmp"
+  mv "$case_dir/codebase-status.tmp" "$case_dir/codebase-status.json"
+
+  run_pr_merge "$case_dir" task-x1 "$CB_URL" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "codebase-no-checks: a confirmed empty check set should merge"
+  assert_grep 'is merged at source head' "$case_dir/stdout" \
+    "codebase-no-checks: confirmed landing was not reported"
+  pass "fm-pr-merge accepts Codebase's explicit no_checks state when every other gate passes"
+}
+
+test_codebase_failed_or_unknown_gates_refuse() {
+  local case_dir rc spec name expected filter
+  set -- \
+    'mergeability|mergeability gate|.data.mergeability.mergeable=false | .data.mergeability.checks[0].passed=false | .data.mergeability.failed_checks=["checkMRStatus"]' \
+    'review|review status|.data.review.status="pending"' \
+    'failed-check|check runs|.data.check_runs.summary="some_failed" | .data.check_runs.passed_count=0 | .data.check_runs.failed_count=1 | .data.check_runs.items[0].conclusion="failed"' \
+    'running-check|check runs|.data.check_runs.summary="running" | .data.check_runs.passed_count=0 | .data.check_runs.running_count=1 | .data.check_runs.items[0].status="running" | .data.check_runs.items[0].conclusion=""' \
+    'truncated-checks|check runs|.data.check_runs.total_count=101'
+  for spec in "$@"; do
+    name=${spec%%|*}
+    spec=${spec#*|}
+    expected=${spec%%|*}
+    filter=${spec#*|}
+    case_dir=$(make_codebase_case "codebase-refuse-$name")
+    jq "$filter" "$case_dir/codebase-status.json" >"$case_dir/codebase-status.tmp"
+    mv "$case_dir/codebase-status.tmp" "$case_dir/codebase-status.json"
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$CB_URL" \
+      >"$case_dir/stdout" 2>"$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "codebase-refuse-$name: unsafe status should refuse"
+    assert_grep "$expected" "$case_dir/stderr" \
+      "codebase-refuse-$name: refusal did not name the failed gate"
+    assert_no_grep '--json codebase mr merge ' "$case_dir/bytedcli.log" \
+      "codebase-refuse-$name: merge ran despite the failed gate"
+    assert_grep "pr=$CB_URL" "$case_dir/state/task-x1.meta" \
+      "codebase-refuse-$name: refusal did not preserve canonical metadata"
+  done
+  pass "fm-pr-merge refuses failed, pending, unknown, and truncated Codebase gates"
+}
+
+test_codebase_identity_and_argument_overrides_refuse() {
+  local case_dir rc args name
+  set -- \
+    'repo-id|--repo-id 99' \
+    'mr|--mr 8' \
+    'mr-id|--mr-id 790451550400000' \
+    'site|--site i18n-tt'
+  for args in "$@"; do
+    name=${args%%|*}
+    args=${args#*|}
+    case_dir=$(make_codebase_case "codebase-override-$name")
+    set +e
+    # shellcheck disable=SC2086 # The fixture deliberately expands two CLI words.
+    run_pr_merge "$case_dir" task-x1 "$CB_URL" -- $args \
+      >"$case_dir/stdout" 2>"$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "codebase-override-$name: target override should refuse"
+    assert_grep 'must not override the provider target, repository, or merge request identity' \
+      "$case_dir/stderr" "codebase-override-$name: refusal did not explain the protected identity"
+    assert_no_grep "pr=$CB_URL" "$case_dir/state/task-x1.meta" \
+      "codebase-override-$name: state was recorded before argument validation"
+  done
+
+  case_dir=$(make_codebase_case codebase-allow-red)
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$CB_URL" --allow-red ci \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "codebase-allow-red: a red-check waiver should refuse"
+  assert_grep '--allow-red applies only to GitHub' "$case_dir/stderr" \
+    "codebase-allow-red: refusal did not name the unsupported waiver"
+  pass "fm-pr-merge rejects Codebase target selectors and red-check waivers before side effects"
+}
+
+test_codebase_preflight_head_must_match_recorded_poll_candidate() {
+  local case_dir rc
+  case_dir=$(make_codebase_case codebase-preflight-head-change)
+  write_codebase_status_json "$case_dir/codebase-status-after-first.json" open "$CB_CHANGED_HEAD"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$CB_URL" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "codebase-preflight-head-change: changed registered candidate should refuse"
+  assert_grep "source head changed from recorded candidate $CB_HEAD to $CB_CHANGED_HEAD" \
+    "$case_dir/stderr" "codebase-preflight-head-change: candidate drift was not named"
+  assert_no_grep '--json codebase mr merge ' "$case_dir/bytedcli.log" \
+    "codebase-preflight-head-change: merge ran after the poll candidate changed"
+  pass "fm-pr-merge refuses when Codebase moves between poll registration and immediate preflight"
+}
+
+test_codebase_identity_changes_and_unconfirmed_readback_stay_unreported() {
+  local case_dir rc spec name expected
+  set -- \
+    "changed-head|source head $CB_CHANGED_HEAD after preflight verified $CB_HEAD|head" \
+    'changed-repo|repository, merge request, or branch identity|repo' \
+    'open-readback|readback status|open' \
+    'missing-merge-commit|source or merge commit|commit' \
+    'malformed-readback|landed state|malformed'
+  for spec in "$@"; do
+    name=${spec%%|*}
+    spec=${spec#*|}
+    expected=${spec%%|*}
+    spec=${spec#*|}
+    case_dir=$(make_codebase_case "codebase-unconfirmed-$name")
+    case "$spec" in
+      head) write_codebase_get_json "$case_dir/codebase-get.json" merged "$CB_CHANGED_HEAD" ;;
+      repo) write_codebase_get_json "$case_dir/codebase-get.json" merged "$CB_HEAD" other/repo ;;
+      open) write_codebase_get_json "$case_dir/codebase-get.json" open ;;
+      commit) write_codebase_get_json "$case_dir/codebase-get.json" merged "$CB_HEAD" "$CB_PATH" not-a-commit ;;
+      malformed) printf '%s\n' '{"status":"success","data":[]}' >"$case_dir/codebase-get.json" ;;
+    esac
+
+    set +e
+    run_pr_merge "$case_dir" task-x1 "$CB_URL" \
+      >"$case_dir/stdout" 2>"$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 0 "$rc" "codebase-unconfirmed-$name: accepted but unknown write must not invite retry"
+    assert_grep "$expected" "$case_dir/stderr" \
+      "codebase-unconfirmed-$name: ambiguous outcome was not explained"
+    assert_present "$case_dir/state/task-x1.check.sh" \
+      "codebase-unconfirmed-$name: merge poll was not left armed"
+    assert_absent "$case_dir/state/.wake-queue" \
+      "codebase-unconfirmed-$name: an unproved landing reached the outcome owner"
+  done
+  pass "fm-pr-merge reports Codebase identity drift and ambiguous readback without claiming a landing"
+}
+
+test_codebase_command_failure_and_ambiguous_response() {
+  local case_dir rc
+  case_dir=$(make_codebase_case codebase-command-fails)
+  : >"$case_dir/codebase-merge-fails"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$CB_URL" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 9 "$rc" "codebase-command-fails: provider failure should propagate"
+  assert_grep 'Codebase merge failed' "$case_dir/stderr" \
+    "codebase-command-fails: provider error was hidden"
+  assert_no_grep '--json codebase mr get ' "$case_dir/bytedcli.log" \
+    "codebase-command-fails: a failed command was treated as accepted"
+  assert_absent "$case_dir/state/.wake-queue" \
+    "codebase-command-fails: failed merge produced a landed outcome"
+
+  case_dir=$(make_codebase_case codebase-ambiguous-response)
+  printf '%s\n' 'not-json-but-zero-exit' >"$case_dir/codebase-merge-response.json"
+  run_pr_merge "$case_dir" task-x1 "$CB_URL" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "codebase-ambiguous-response: independent readback should prove the landing"
+  assert_grep 'is merged at source head' "$case_dir/stdout" \
+    "codebase-ambiguous-response: valid readback did not supersede ambiguous command prose"
+  pass "fm-pr-merge propagates Codebase command failure and relies on independent readback rather than response prose"
+}
+
+test_codebase_missing_tools_refuse_before_recording() {
+  local case_dir rc tool other
+  for tool in bytedcli jq; do
+    if [ "$tool" = bytedcli ]; then other=jq; else other=bytedcli; fi
+    case_dir=$(make_codebase_case "codebase-no-$tool")
+    mirror_path_without "$case_dir/no$tool" "$tool" "$case_dir/fakebin"
+    PATH="$case_dir/no$tool" command -v "$other" >/dev/null 2>&1 \
+      || fail "codebase-no-$tool: the isolated path lost the other prerequisite"
+    set +e
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+      PATH="$case_dir/no$tool" "$PR_MERGE" task-x1 "$CB_URL" \
+      >"$case_dir/stdout" 2>"$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 1 "$rc" "codebase-no-$tool: missing prerequisite should refuse"
+    assert_grep "requires $tool on PATH" "$case_dir/stderr" \
+      "codebase-no-$tool: refusal did not name the missing prerequisite"
+    assert_no_grep "pr=$CB_URL" "$case_dir/state/task-x1.meta" \
+      "codebase-no-$tool: state was recorded despite the missing prerequisite"
+  done
+  pass "fm-pr-merge refuses Codebase before recording when bytedcli or jq is absent"
+}
+
 # --- durable merge outcome ---------------------------------------------------
 # A merge that lands must leave a record outside the merging agent's memory.
 # bin/fm-merge-outcome-lib.sh owns where that record goes; these cases pin the
@@ -2197,6 +2521,15 @@ test_gitlab_stale_recorded_head_is_reported
 test_gitlab_unreadable_state_refuses
 test_gitlab_invalid_head_refuses
 test_gitlab_missing_tool_refuses_before_recording
+test_codebase_green_merge_and_repeat_are_verified
+test_codebase_premerged_without_persisted_authority_is_external
+test_codebase_no_checks_is_a_confirmed_green_state
+test_codebase_failed_or_unknown_gates_refuse
+test_codebase_identity_and_argument_overrides_refuse
+test_codebase_preflight_head_must_match_recorded_poll_candidate
+test_codebase_identity_changes_and_unconfirmed_readback_stay_unreported
+test_codebase_command_failure_and_ambiguous_response
+test_codebase_missing_tools_refuse_before_recording
 
 # The merge gate asks whether the task is still held for the captain. A home
 # that carries no backlog records no captain calls at all, so nothing can be

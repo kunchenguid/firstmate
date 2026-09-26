@@ -4,9 +4,9 @@
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
 # addressed through gh by the derived owner and repository; a GitLab merge
 # request is addressed through glab by the project URL rebuilt from the parsed
-# host and path, so any instance works and no host is hardcoded.
-# A canonical Codebase URL is refused before any recording or poll side effect,
-# because this script does not implement that provider's merge operation.
+# host and path, so any instance works and no host is hardcoded. A Codebase
+# merge request is addressed through the official bytedcli by its canonical
+# repository path and number.
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
@@ -23,9 +23,9 @@
 # state is recorded. An attended --allow-red <check-name> may be passed once,
 # with the name as a separate argument; it waives only checks with that exact
 # name, still requires every other check green, and still binds the head. It is
-# refused while the away-posture record exists, and it never
-# applies on GitLab, where a merge already requires the head pipeline to have
-# succeeded. After gh returns success, GitHub's live state is read back and
+# refused while the away-posture record exists, and it never applies on GitLab
+# or Codebase, where every check remains mandatory. After gh returns success,
+# GitHub's live state is read back and
 # accepted only when the pull request is merged or in the merge queue. gh's
 # GraphQL API supplies that queue-aware read; when that read fails, gh-axi's
 # own view still proves a landed merge, and every outcome it cannot prove
@@ -68,7 +68,19 @@
 # recorded value stale. Reading that state needs glab and jq, and either one
 # absent stops the merge before any state is recorded.
 #
-# Before either forge merge, the task's existing per-task control lock
+# A Codebase merge is refused unless one live aggregated status view proves the
+# canonical identity, an open merge request, a valid source head, mergeability,
+# passed review, every platform merge gate passed, and a complete all-green (or
+# empty) check-run set at that head. bytedcli's supported merge operation binds
+# the request identity but has no source-head condition, so this path does not
+# claim GitHub/GitLab's atomic candidate guarantee. It holds the ordinary task
+# and away-authority locks across the immediate preflight and synchronous merge,
+# then independently reads the MR back. Only an exact identity, the same source
+# head observed again, merged status, and merge commit reaches the landed-outcome
+# owner; a concurrent source change or ambiguous readback is reported without
+# claiming the preflight candidate landed.
+#
+# Before any forge merge, the task's existing per-task control lock
 # serializes the captain-hold check through the forge command. A still-held or
 # unreadable row refuses before that command, so a captain approval must be
 # recorded as an `answer --release` before this entrypoint is invoked. While
@@ -92,8 +104,10 @@
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
 # URL, nor --sha or --match-head-commit because the head comes only from the
-# live read. An existing task-meta pr= must equal the requested canonical URL;
-# a task cannot be rebound here. Auto-merge (--auto), a protection bypass
+# live read. Codebase also refuses repository/MR selectors and provider-target
+# globals because those identities come only from the canonical URL. An existing
+# task-meta pr= must equal the requested canonical URL; a task cannot be rebound
+# here. Auto-merge (--auto), a protection bypass
 # (--admin), and branch
 # deletion (--delete-branch, -d and short-flag clusters, and GitLab's
 # --remove-source-branch) are refused by default; --attended-override, parsed
@@ -103,10 +117,11 @@
 #
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [-- <extra forge merge args>]
 #
-# On GitLab, this script confirms the MR is actually merged before reporting it;
-# an auto-merge-queued or unconfirmed request leaves the poll armed and records
-# no landed outcome. bin/fm-merge-outcome-lib.sh owns a confirmed merge's
-# destination, normal-case deduplication, and at-least-once recovery.
+# On GitLab and Codebase, this script confirms the MR is actually merged before
+# reporting it; an auto-merge-queued, candidate-changed, or unconfirmed request
+# leaves the poll armed and records no landed outcome.
+# bin/fm-merge-outcome-lib.sh owns a confirmed merge's destination, normal-case
+# deduplication, and at-least-once recovery.
 # A landed merge whose outcome cannot be written is reported loudly rather than
 # misreported as a failed merge.
 set -eu
@@ -139,10 +154,6 @@ if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
 fi
 URL=$FM_PR_URL
 PROVIDER=$FM_PR_PROVIDER
-if [ "$PROVIDER" = codebase ]; then
-  echo "error: merging Codebase merge requests is not supported" >&2
-  exit 2
-fi
 PR_HOST=$FM_PR_HOST
 PR_PATH=$FM_PR_PATH
 PR_OWNER=$FM_PR_OWNER
@@ -178,9 +189,18 @@ while [ "$#" -gt 0 ]; do
     *) break ;;
   esac
 done
-if [ "${#ALLOW_RED[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
-  echo "error: --allow-red does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
-  exit 2
+if [ "${#ALLOW_RED[@]}" -gt 0 ]; then
+  case "$PROVIDER" in
+    github) ;;
+    gitlab)
+      echo "error: --allow-red does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
+      exit 2
+      ;;
+    codebase)
+      echo "error: --allow-red applies only to GitHub; Codebase merges require every check to be green" >&2
+      exit 2
+      ;;
+  esac
 fi
 
 caller_has_merge_method() {
@@ -265,6 +285,19 @@ reject_head_overrides() {
   done
 }
 
+reject_codebase_selector_overrides() {
+  local arg
+  [ "$PROVIDER" = codebase ] || return 0
+  for arg in "$@"; do
+    case "$arg" in
+      --repo-id|--repo-id=*|--mr|--mr=*|--mr-id|--mr-id=*|--site|--site=*|--auth-site|--auth-site=*|--as|--as=*|--profile|--profile=*|--vregion|--vregion=*|--vdc|--vdc=*)
+        echo "error: extra Codebase merge arguments must not override the provider target, repository, or merge request identity" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
 reject_protected_forge_args() {
   local arg
   [ "$ATTENDED_OVERRIDE" = true ] && return 0
@@ -287,6 +320,7 @@ reject_protected_forge_args() {
 
 reject_repo_overrides "$@" || exit 1
 reject_head_overrides "$@" || exit 1
+reject_codebase_selector_overrides "$@" || exit 1
 reject_protected_forge_args "$@" || exit 1
 
 FM_PR_GITHUB_AUTO_REQUESTED=false
@@ -379,9 +413,21 @@ if [ "$PROVIDER" = github ]; then
     exit 1
   fi
 fi
+CODEBASE_MISSING=
+if [ "$PROVIDER" = codebase ]; then
+  command -v bytedcli >/dev/null 2>&1 || CODEBASE_MISSING="bytedcli"
+  if ! command -v jq >/dev/null 2>&1; then
+    CODEBASE_MISSING="${CODEBASE_MISSING:+$CODEBASE_MISSING and }jq"
+  fi
+  if [ -n "$CODEBASE_MISSING" ]; then
+    echo "error: merging a Codebase merge request requires $CODEBASE_MISSING on PATH" >&2
+    exit 1
+  fi
+fi
 
-# The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
-# because that script re-records pr= and drops a pr_head= it cannot resolve.
+# GitLab's recorded head is read before bin/fm-pr-check.sh can drop a head it
+# cannot resolve. Codebase refreshes this value after registration so its
+# immediate preflight must still match the exact candidate the poll recorded.
 RECORDED_HEAD=
 if [ "$PROVIDER" = gitlab ]; then
   RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -392,6 +438,155 @@ fi
 # returns non-zero after reporting every condition that failed.
 FM_PR_MERGE_HEAD=
 FM_PR_GITLAB_ASYNC_CONFIGURED=false
+
+# Read the complete official Codebase status aggregation immediately before the
+# merge. Return 2 for an already-merged exact identity so the caller can prove
+# that landed state through the independent detail read without issuing another
+# merge request.
+codebase_verify_mergeable() {
+  local json fields line
+  local total=0 named=0 refusals=''
+  local counts_numeric=true value
+  local repo_path='' mr_id='' number='' state='' url=''
+  local source_branch='' target_branch='' live_head=''
+  local mergeable='' gates_total='' gates_passed='' failed_gates=''
+  local review_status='' summary='' checks_total='' page_size=''
+  local passed_count='' failed_count='' running_count='' items_count='' items_valid=''
+
+  if ! json=$(bytedcli --json codebase mr status "$PR_NUMBER" -R "$PR_PATH" --page-size 100 2>/dev/null) \
+    || [ -z "$json" ]; then
+    echo "error: could not read the Codebase merge request state before merging" >&2
+    return 1
+  fi
+  if ! fields=$(printf '%s' "$json" | jq -r '
+      if type == "object" and .status == "success" and (.data | type) == "object"
+      then . else error("invalid status payload") end
+      | .data.merge_request.source_commit_id as $head
+      | .data.merge_request.id as $mr_id
+      | "repo_path=" + ((.data.repository.path // "") | tostring),
+        "mr_id=" + (($mr_id // "") | tostring),
+        "number=" + ((.data.merge_request.number // "") | tostring),
+        "state=" + ((.data.merge_request.status // "") | tostring),
+        "url=" + ((.data.merge_request.url // "") | tostring),
+        "source_branch=" + ((.data.merge_request.source_branch // "") | tostring),
+        "target_branch=" + ((.data.merge_request.target_branch // "") | tostring),
+        "head=" + (($head // "") | tostring),
+        "mergeable=" + (if (.data.mergeability.mergeable | type) == "boolean" then (.data.mergeability.mergeable | tostring) else "" end),
+        "gates_total=" + (if (.data.mergeability.checks | type) == "array" then (.data.mergeability.checks | length | tostring) else "" end),
+        "gates_passed=" + (if (.data.mergeability.checks | type) == "array" then ([.data.mergeability.checks[] | select(.passed == true)] | length | tostring) else "" end),
+        "failed_gates=" + (if (.data.mergeability.failed_checks | type) == "array" then (.data.mergeability.failed_checks | length | tostring) else "" end),
+        "review_status=" + ((.data.review.status // "") | tostring),
+        "summary=" + ((.data.check_runs.summary // "") | tostring),
+        "checks_total=" + (if (.data.check_runs.total_count | type) == "number" then (.data.check_runs.total_count | tostring) else "" end),
+        "page_size=" + (if (.data.check_runs.page_size | type) == "number" then (.data.check_runs.page_size | tostring) else "" end),
+        "passed_count=" + (if (.data.check_runs.passed_count | type) == "number" then (.data.check_runs.passed_count | tostring) else "" end),
+        "failed_count=" + (if (.data.check_runs.failed_count | type) == "number" then (.data.check_runs.failed_count | tostring) else "" end),
+        "running_count=" + (if (.data.check_runs.running_count | type) == "number" then (.data.check_runs.running_count | tostring) else "" end),
+        "items_count=" + (if (.data.check_runs.items | type) == "array" then (.data.check_runs.items | length | tostring) else "" end),
+        "items_valid=" + (if (.data.check_runs.items | type) == "array" and
+          all(.data.check_runs.items[];
+            ((.commitId // .CommitId // "") == $head) and
+            (((.mergeRequestId // .MergeRequestId // "") | tostring) == (($mr_id // "") | tostring)) and
+            (((.status // .Status // "") | ascii_downcase) == "completed") and
+            (((.conclusion // .Conclusion // "") | ascii_downcase) as $conclusion |
+              ["success", "succeeded", "passed", "neutral", "skipped"] |
+              index($conclusion) != null)
+          ) then "true" else "false" end)
+      ' 2>/dev/null); then
+    echo "error: could not read the Codebase merge request state before merging" >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      repo_path=*) repo_path=${line#repo_path=} ;;
+      mr_id=*) mr_id=${line#mr_id=} ;;
+      number=*) number=${line#number=} ;;
+      state=*) state=${line#state=} ;;
+      url=*) url=${line#url=} ;;
+      source_branch=*) source_branch=${line#source_branch=} ;;
+      target_branch=*) target_branch=${line#target_branch=} ;;
+      head=*) live_head=${line#head=} ;;
+      mergeable=*) mergeable=${line#mergeable=} ;;
+      gates_total=*) gates_total=${line#gates_total=} ;;
+      gates_passed=*) gates_passed=${line#gates_passed=} ;;
+      failed_gates=*) failed_gates=${line#failed_gates=} ;;
+      review_status=*) review_status=${line#review_status=} ;;
+      summary=*) summary=${line#summary=} ;;
+      checks_total=*) checks_total=${line#checks_total=} ;;
+      page_size=*) page_size=${line#page_size=} ;;
+      passed_count=*) passed_count=${line#passed_count=} ;;
+      failed_count=*) failed_count=${line#failed_count=} ;;
+      running_count=*) running_count=${line#running_count=} ;;
+      items_count=*) items_count=${line#items_count=} ;;
+      items_valid=*) items_valid=${line#items_valid=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 21 ] || [ "$total" -ne 21 ]; then
+    echo "error: could not read the Codebase merge request state before merging" >&2
+    return 1
+  fi
+  if [ "$repo_path" != "$PR_PATH" ] || [ "$number" != "$PR_NUMBER" ] \
+    || [ "$url" != "$URL" ] || [ -z "$mr_id" ] \
+    || [ -z "$source_branch" ] || [ -z "$target_branch" ]; then
+    echo "error: Codebase merge request identity changed or could not be verified before merging" >&2
+    return 1
+  fi
+  if ! fm_pr_head_valid "$live_head"; then
+    echo "error: could not read the Codebase merge request source head before merging" >&2
+    return 1
+  fi
+  if [ -n "$RECORDED_HEAD" ] && [ "$RECORDED_HEAD" != "$live_head" ]; then
+    printf 'error: Codebase source head changed from recorded candidate %s to %s before merge preflight; refusing\n' \
+      "$RECORDED_HEAD" "$live_head" >&2
+    return 1
+  fi
+  FM_PR_MERGE_HEAD=$live_head
+  FM_PR_CODEBASE_MR_ID=$mr_id
+  FM_PR_CODEBASE_SOURCE_BRANCH=$source_branch
+  FM_PR_CODEBASE_TARGET_BRANCH=$target_branch
+  case "$state" in
+    merged) return 2 ;;
+    open|opened) ;;
+    *) refusals="$refusals  - status is \"${state:-unreadable}\", not open
+" ;;
+  esac
+  [ "$mergeable" = true ] \
+    || refusals="$refusals  - mergeable is \"${mergeable:-unreadable}\", not true
+"
+  [ -n "$gates_total" ] && [ "$gates_total" = "$gates_passed" ] && [ "$failed_gates" = 0 ] \
+    || refusals="$refusals  - one or more Codebase mergeability gates failed or were unreadable
+"
+  [ "$review_status" = passed ] \
+    || refusals="$refusals  - review status is \"${review_status:-unreadable}\", not passed
+"
+  for value in "$checks_total" "$page_size" "$passed_count" "$failed_count" "$running_count" "$items_count"; do
+    case "$value" in
+      ''|*[!0-9]*) counts_numeric=false ;;
+    esac
+  done
+  if [ "$counts_numeric" != true ] \
+    || [ "$checks_total" -gt "$page_size" ] || [ "$items_count" -ne "$checks_total" ] \
+    || [ "$passed_count" -ne "$checks_total" ] || [ "$failed_count" -ne 0 ] \
+    || [ "$running_count" -ne 0 ] || [ "$items_valid" != true ] \
+    || { [ "$checks_total" -eq 0 ] && [ "$summary" != no_checks ]; } \
+    || { [ "$checks_total" -gt 0 ] && [ "$summary" != all_passed ]; }; then
+    refusals="$refusals  - Codebase check runs are failed, running, unknown, or incomplete
+"
+  fi
+  if [ -n "$refusals" ]; then
+    printf 'error: refusing to merge %s\n' "$URL" >&2
+    printf '%s' "$refusals" >&2
+    return 1
+  fi
+  printf 'verified: %s is open and mergeable, with passed review and every Codebase check green at head %s\n' \
+    "$URL" "$live_head" >&2
+}
+
 gitlab_verify_mergeable() {
   local json fields line
   local total=0 named=0 refusals=''
@@ -872,6 +1067,13 @@ record_pr_metadata() {
     echo "error: PR metadata recording failed" >&2
     return 1
   }
+  if [ "$PROVIDER" = codebase ]; then
+    RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+    if ! fm_pr_head_valid "$RECORDED_HEAD"; then
+      echo "error: Codebase PR metadata recording did not preserve a valid source head" >&2
+      return 1
+    fi
+  fi
 }
 
 require_released_captain_hold() {
@@ -1127,6 +1329,88 @@ gitlab_confirm_merged() {
   [ "$state" = merged ]
 }
 
+# Independently confirm a Codebase landing through the official detail view.
+# Return 2 for every outcome that does not prove the same preflight candidate:
+# the merge request may already have landed, so the caller must leave the poll
+# armed and avoid an automatic retry or a landed-outcome claim.
+codebase_confirm_merged() {
+  local json fields line
+  local total=0 named=0
+  local repo_path='' mr_id='' number='' state='' url=''
+  local source_branch='' target_branch='' source_head='' merge_commit=''
+
+  if ! json=$(bytedcli --json codebase mr get "$PR_NUMBER" -R "$PR_PATH" 2>/dev/null) \
+    || [ -z "$json" ]; then
+    printf 'actionable: the Codebase landed state for %s could not be confirmed; the merge poll remains armed\n' \
+      "$URL" >&2
+    return 2
+  fi
+  if ! fields=$(printf '%s' "$json" | jq -r '
+      if type == "object" and .status == "success" and (.data | type) == "object"
+      then . else error("invalid detail payload") end
+      | "repo_path=" + ((.data.repository.path // "") | tostring),
+        "mr_id=" + ((.data.merge_request.Id // "") | tostring),
+        "number=" + ((.data.merge_request.Number // "") | tostring),
+        "state=" + ((.data.merge_request.Status // "") | tostring),
+        "url=" + ((.data.merge_request.URL // "") | tostring),
+        "source_branch=" + ((.data.merge_request.SourceBranchName // "") | tostring),
+        "target_branch=" + ((.data.merge_request.TargetBranchName // "") | tostring),
+        "source_head=" + ((.data.version.SourceCommitId // "") | tostring),
+        "merge_commit=" + ((.data.merge_request.MergeCommitId // "") | tostring)
+      ' 2>/dev/null); then
+    printf 'actionable: the Codebase landed state for %s could not be confirmed; the merge poll remains armed\n' \
+      "$URL" >&2
+    return 2
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      repo_path=*) repo_path=${line#repo_path=} ;;
+      mr_id=*) mr_id=${line#mr_id=} ;;
+      number=*) number=${line#number=} ;;
+      state=*) state=${line#state=} ;;
+      url=*) url=${line#url=} ;;
+      source_branch=*) source_branch=${line#source_branch=} ;;
+      target_branch=*) target_branch=${line#target_branch=} ;;
+      source_head=*) source_head=${line#source_head=} ;;
+      merge_commit=*) merge_commit=${line#merge_commit=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 9 ] || [ "$total" -ne 9 ]; then
+    printf 'actionable: the Codebase landed state for %s could not be confirmed; the merge poll remains armed\n' \
+      "$URL" >&2
+    return 2
+  fi
+  if [ "$repo_path" != "$PR_PATH" ] || [ "$mr_id" != "$FM_PR_CODEBASE_MR_ID" ] \
+    || [ "$number" != "$PR_NUMBER" ] || [ "$url" != "$URL" ] \
+    || [ "$source_branch" != "$FM_PR_CODEBASE_SOURCE_BRANCH" ] \
+    || [ "$target_branch" != "$FM_PR_CODEBASE_TARGET_BRANCH" ]; then
+    printf 'actionable: the Codebase repository, merge request, or branch identity for %s changed during readback; no landed outcome is recorded and the merge poll remains armed\n' \
+      "$URL" >&2
+    return 2
+  fi
+  if ! fm_pr_head_valid "$source_head" || ! fm_pr_head_valid "$merge_commit"; then
+    printf 'actionable: the Codebase source or merge commit for %s could not be confirmed; the merge poll remains armed\n' \
+      "$URL" >&2
+    return 2
+  fi
+  if [ "$source_head" != "$FM_PR_MERGE_HEAD" ]; then
+    printf 'actionable: Codebase reports %s at source head %s after preflight verified %s; a concurrent source change prevents an exact-candidate outcome claim, and the merge poll remains armed\n' \
+      "$URL" "$source_head" "$FM_PR_MERGE_HEAD" >&2
+    return 2
+  fi
+  if [ "$state" != merged ]; then
+    printf 'actionable: the Codebase readback status for %s is %s, not merged; the merge poll remains armed\n' \
+      "$URL" "${state:-unreadable}" >&2
+    return 2
+  fi
+  FM_PR_CODEBASE_MERGE_COMMIT=$merge_commit
+}
+
 # Record before either forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
@@ -1138,9 +1422,10 @@ record_pr_metadata || exit 1
 require_released_captain_hold || exit 1
 
 # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
-# oversight: if this lock-owning shell dies while its gh or glab child lives,
+# oversight: if this lock-owning shell dies while its forge child lives,
 # stale-owner recovery can release the record for archive or replacement and
 # the orphaned forge child can still merge on the lapsed away authority.
+FM_PR_MERGE_OUTCOME_ORIGIN=self
 case "$PROVIDER" in
   github)
     merge_output=
@@ -1232,6 +1517,65 @@ case "$PROVIDER" in
     gitlab_confirm_merged || gitlab_confirm_rc=$?
     [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
     ;;
+  codebase)
+    codebase_preflight_rc=0
+    codebase_verify_mergeable || codebase_preflight_rc=$?
+    case "$codebase_preflight_rc" in
+      0) ;;
+      2)
+        codebase_confirm_rc=0
+        codebase_confirm_merged || codebase_confirm_rc=$?
+        [ "$codebase_confirm_rc" -eq 0 ] || exit 1
+        FM_PR_MERGE_OUTCOME_ORIGIN=poll
+        if ! fm_merge_authority_read "$STATE" "$ID" \
+            "$PROVIDER" "$PR_HOST" "$PR_PATH" "$PR_NUMBER"; then
+          : # The authority reader sets external when no matching record exists.
+        fi
+        FM_PR_MERGE_AUTHORITY=$FM_MERGE_AUTHORITY
+        printf 'verified: %s was already merged at source head %s as merge commit %s\n' \
+          "$URL" "$FM_PR_MERGE_HEAD" "$FM_PR_CODEBASE_MERGE_COMMIT"
+        ;;
+      *) exit 1 ;;
+    esac
+    if [ "$codebase_preflight_rc" -eq 0 ]; then
+      # bytedcli binds this write to the canonical MR identity but exposes no
+      # supported source-head condition. The independent readback below is what
+      # prevents a changed candidate from being attributed to this preflight.
+      hold_away_record_for_merge || exit 1
+      away_status=0
+      require_current_away_authority || away_status=$?
+      [ "$away_status" -eq 0 ] || exit "$away_status"
+      merge_status=0
+      merge_output=$(bytedcli --json codebase mr merge "$PR_NUMBER" -R "$PR_PATH" "$@" 2>&1) \
+        || merge_status=$?
+      if [ "$merge_status" -ne 0 ]; then
+        fm_afk_contract_lock_release || true
+        fm_lock_release "$MERGE_CONTROL_LOCK" || true
+        MERGE_CONTROL_LOCK=
+        [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
+        exit "$merge_status"
+      fi
+      persist_accepted_merge_authority || exit 1
+      fm_afk_contract_lock_release || true
+      fm_lock_release "$MERGE_CONTROL_LOCK" || true
+      MERGE_CONTROL_LOCK=
+      codebase_confirm_rc=0
+      codebase_confirm_merged || codebase_confirm_rc=$?
+      if [ "$codebase_confirm_rc" -ne 0 ]; then
+        if [ -n "$merge_output" ]; then
+          echo "error: the merge command's own output follows, quoted; it is bytedcli's report, not this script's verdict:" >&2
+          while IFS= read -r line; do
+            printf 'error: > %s\n' "$line" >&2
+          done <<OUTPUT
+$merge_output
+OUTPUT
+        fi
+        exit 0
+      fi
+      printf 'verified: %s is merged at source head %s as merge commit %s\n' \
+        "$URL" "$FM_PR_MERGE_HEAD" "$FM_PR_CODEBASE_MERGE_COMMIT"
+    fi
+    ;;
   *)
     echo "error: invalid PR merge request" >&2
     exit 2
@@ -1242,7 +1586,7 @@ esac
 # refused or failed merge above, and a queued forge merge exits without an
 # outcome while its existing poll remains armed.
 outcome_rc=0
-fm_merge_outcome_report "$FM_HOME" "$STATE" "$ID" "$URL" self \
+fm_merge_outcome_report "$FM_HOME" "$STATE" "$ID" "$URL" "$FM_PR_MERGE_OUTCOME_ORIGIN" \
   "${FM_PR_MERGE_HEAD:-}" "${FM_PR_MERGE_AUTHORITY:-}" || outcome_rc=$?
 case "$outcome_rc" in
   0) ;;
