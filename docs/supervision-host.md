@@ -396,6 +396,7 @@ Each arm owner's own suite covers its host mode against a stub host.
 | `tests/fm-supervision-instructions.test.sh` | The rendered protocol, including Grok's arm command. |
 | `tests/fm-host-mirror.test.sh` | The dialog mirror's writers through the tracked Claude and Cursor registrations, the opt-in gate, the feed, and the verified-writer list. |
 | `tests/fm-afk-launch.test.sh` | `/quiet`'s check on an opted-in home: the statement, the paused statement, each named missing item, the quiet entry's refusal, and the refusal under a live away record, with or without a fallback quiet daemon, until the return. |
+| `tests/fm-afk-quiet-fallback.test.sh` | A malformed mirror forces quiet daemon entry, and a later `start` or `start-native` uses its recorded mode without a mode variable. |
 | `tests/fm-afk-return.test.sh` | The return's drain-owned read-cursor advance through the away window on a host home, and none on Pi. |
 | `tests/fm-supervision-host-live-e2e.test.sh` | Runs a real engine turn; opt-in because it spends tokens. |
 | `tests/fm-host-mirror-live-e2e.test.sh` | Proves the Claude and Cursor mirror writers against the real harnesses; opt-in because it spends tokens. |
