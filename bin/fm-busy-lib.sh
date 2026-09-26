@@ -36,13 +36,17 @@
 #                    cancellation emits no Stop, so control invalidates to unknown.
 #   gemini-hook      Gemini agent hooks (BeforeAgent opens; AfterAgent and
 #                    SessionEnd close)
+#   polytoken-hook   Polytoken pre_user_prompt opens and stop closes; Esc
+#                    cancellation and session end emit no hook, so control
+#                    invalidates to unknown after an interrupt.
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
 # Firstmate-owned sources accepted for every converted adapter:
 #   fm-spawn         the launch-brief turn seeded at spawn
 #   fm-interrupt     the legacy Claude fm-send --key Escape idle event, and the
-#                    unknown invalidation fm-control writes after a Devin interrupt
+#                    unknown invalidation fm-control writes after a Devin or
+#                    Polytoken interrupt
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
@@ -232,6 +236,7 @@ fm_busy_sources_for_harness() {  # <harness>
     opencode*) adapter=opencode-plugin ;;
     gemini*) adapter=gemini-hook ;;
     devin) adapter=devin-hook ;;
+    polytoken) adapter=polytoken-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
     kimi*)
@@ -992,10 +997,27 @@ fm_busy_gemini_launch_prompt_tail() {
   printf '%s' "$buf" | grep -qiE "${FM_BUSY_GEMINI_APIKEY_PROMPT_REGEX:-Enter Gemini API Key}"
 }
 
+# fm_busy_polytoken_launch_prompt_tail: Polytoken's license-agreement gate,
+# which opens before the session begins on a data directory whose acceptance
+# is missing or outdated and never auto-accepts (Firstmate must not accept a
+# license for the captain). Live-verified on polytoken 0.8.14 with a fresh
+# throwaway XDG_DATA_HOME (docs/verification/polytoken.md): a boxed `License
+# Agreement` titled dialog whose body ends `An explicit choice is required.`
+# over the options `View the agreement`, `Accept - agree and start the
+# session`, and `Reject - end the session and exit`. The title is paired with
+# the explicit-choice line or the Accept option, both required, so a worker
+# quoting the phrase `License Agreement` in its own output cannot match.
+fm_busy_polytoken_launch_prompt_tail() {
+  local buf
+  buf=$(cat)
+  printf '%s' "$buf" | grep -qE "${FM_BUSY_POLYTOKEN_LICENSE_PROMPT_REGEX:-License Agreement}" \
+    && printf '%s' "$buf" | grep -qE 'An explicit choice is required\.|Accept - agree and start the session'
+}
+
 # fm_busy_launch_prompt_parked: dispatch to the signature above for <harness>,
 # or fail when this harness has none. Consumes the tail on stdin. Scoped to
 # exactly the harnesses fm-spawn.sh arms with the fm-spawn busy source
-# (claude*, opencode*, pi, pi-signed, omp, gemini) since only those can ever
+# (claude*, opencode*, pi, pi-signed, omp, gemini, polytoken) since only those can ever
 # read a pinned "busy fm-spawn" record; codex and standalone Kimi already
 # classify unknown before a record is ever consulted, and opencode ships no
 # trust dialog at all.
@@ -1004,6 +1026,7 @@ fm_busy_launch_prompt_parked() {  # <harness>
     claude*) fm_busy_claude_launch_prompt_tail ;;
     pi | pi-signed | omp) fm_busy_pi_launch_prompt_tail ;;
     gemini) fm_busy_gemini_launch_prompt_tail ;;
+    polytoken) fm_busy_polytoken_launch_prompt_tail ;;
     *) return 1 ;;
   esac
 }

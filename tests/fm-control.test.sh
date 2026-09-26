@@ -35,7 +35,7 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse omp devin"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse omp devin polytoken"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
@@ -50,6 +50,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     pi-signed) printf '/quit\tEscape\t1\t\n' ;;
     omp) printf '/quit\tEscape\t1\t\n' ;;
     devin) printf '/quit\tEscape\t2\t\n' ;;
+    polytoken) printf '/quit\tEscape\t1\t\n' ;;
     grok) printf '/exit\tC-c\t1\t\n' ;;
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     cursor) printf '/exit\tEscape\t1\t\n' ;;
@@ -77,6 +78,13 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
 #            last Escape was a moment ago) ->picker, and picker->idle unless
 #            FM_FAKE_DEVIN_PICKER_STUCK is set. Real sleeps apply while it
 #            exists, so key-times carry the true gap between presses.
+#   polytoken  optional Polytoken screen model replaying the real 0.8.14
+#            captures under $FM_FAKE_POLYTOKEN_CAPTURES: `running`,
+#            `cancelled`, `idle`, `primed`, or `picker`. Escape moves
+#            running->cancelled (one press cancels), idle or cancelled->primed
+#            (the `Press Esc again` flash), primed->picker, and picker->idle
+#            unless FM_FAKE_POLYTOKEN_PICKER_STUCK is set. `draft` shows an
+#            unsubmitted two-row draft over an idle turn.
 # Two transitions make it a lifecycle model rather than a recorder: a literal
 # that is the harness's exit command flips `command` to a shell (the agent
 # stopped), and a literal carrying a launch brief flips it to the value in
@@ -137,6 +145,14 @@ case "${1:-}" in
     else
       printf '%s\n' "$payload" >> "$D/keys"
       printf '%s %s\n' "$(perl -MTime::HiRes=time -e 'printf "%.3f", time')" "$payload" >> "$D/key-times"
+      if [ "$payload" = Escape ] && [ -f "$D/polytoken" ]; then
+        case "$(cat "$D/polytoken")" in
+          running) printf cancelled > "$D/polytoken" ;;
+          idle|cancelled) printf primed > "$D/polytoken" ;;
+          primed) printf picker > "$D/polytoken" ;;
+          picker) [ -n "${FM_FAKE_POLYTOKEN_PICKER_STUCK:-}" ] || printf idle > "$D/polytoken" ;;
+        esac
+      fi
       if [ "$payload" = Escape ] && [ -f "$D/devin" ]; then
         case "$(cat "$D/devin")" in
           running) printf armed > "$D/devin" ;;
@@ -162,8 +178,11 @@ case "${1:-}" in
     for a in "$@"; do
       case "$a" in
         *cursor_y*)
-          # A modelled Devin screen parks the cursor on its composer row.
-          if [ -f "$D/devin" ]; then
+          # A modelled Devin screen parks the cursor on its composer row, and
+          # every captured Polytoken frame has it on row 27.
+          if [ -f "$D/polytoken" ]; then
+            printf '27\n'
+          elif [ -f "$D/devin" ]; then
             devin_screen "$(cat "$D/devin")" | awk '/^❭ /{ print NR - 1; exit }'
           else
             printf '1\n'
@@ -175,6 +194,17 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
+    if [ -f "$D/polytoken" ]; then
+      frame=$(cat "$D/polytoken")
+      [ "$frame" != running ] || frame=busy
+      [ "$frame" != picker ] || frame=rewind-picker
+      # Without -e, real tmux drops styling, and anchored footer reads need that.
+      case " $* " in
+        *' -e '*) cat "$FM_FAKE_POLYTOKEN_CAPTURES/$frame.ansi" ;;
+        *) LC_ALL=C sed "s/$(printf '\033')\[[0-9;:?]*[[:alpha:]]//g" "$FM_FAKE_POLYTOKEN_CAPTURES/$frame.ansi" ;;
+      esac
+      exit 0
+    fi
     if [ -f "$D/devin" ]; then devin_screen "$(cat "$D/devin")"; elif [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi
     exit 0 ;;
   list-windows)
@@ -249,6 +279,8 @@ run_control() {
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
     FM_FAKE_DEVIN_PICKER_STUCK="${FM_FAKE_DEVIN_PICKER_STUCK:-}" \
+    FM_FAKE_POLYTOKEN_PICKER_STUCK="${FM_FAKE_POLYTOKEN_PICKER_STUCK:-}" \
+    FM_FAKE_POLYTOKEN_CAPTURES="$ROOT/tests/captures/polytoken-0.8.14" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -405,6 +437,90 @@ test_devin_stuck_picker_refuses_and_exit_types_nothing() {
   pass "fm-control Devin: an open revert picker refuses every typed command"
 }
 
+polytoken_as() {  # <case-dir> <screen>
+  alive_as "$1" polytoken
+  printf '%s' "$2" > "$1/fake/polytoken"
+}
+
+# Polytoken emits no stop hook for an Esc cancellation, so a busy record is
+# invalidated to unknown after one press, never fabricated idle.
+test_polytoken_interrupt_invalidates_busy() {
+  local dir out
+  dir=$(new_case polytoken-busy)
+  add_task "$dir" t1 polytoken
+  polytoken_as "$dir" running
+  "$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1 >/dev/null
+  out=$(run_control "$dir" t1 interrupt) || fail "Polytoken interrupt failed: $out"
+  [ "$(keys_sent "$dir")" = Escape ] || fail "a running Polytoken turn needs exactly one Escape, got: $(keys_sent "$dir")"
+  assert_contains "$out" 'cancel=unconfirmed' 'Polytoken cancellation must not claim semantic confirmation'
+  assert_grep 'state=unknown source=fm-interrupt' "$dir/home/state/t1.busy-state" 'cancelled Polytoken turn stayed busy'
+  [ "$(cat "$dir/fake/polytoken")" = cancelled ] || fail "the press did not cancel the running turn"
+  pass "fm-control Polytoken interrupt: one Escape, then busy invalidated without fabricating idle"
+}
+
+# An idle record claims nothing a cancellation could falsify, so it stays.
+test_polytoken_idle_interrupt_keeps_idle_record() {
+  local dir out before
+  dir=$(new_case polytoken-idle)
+  add_task "$dir" t1 polytoken
+  polytoken_as "$dir" idle
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  "$ROOT/bin/fm-busy-event.sh" apply "$dir/home/state" t1 idle --gen "$gen" --source polytoken-hook --event stop >/dev/null
+  before=$(cat "$dir/home/state/t1.busy-state")
+  out=$(run_control "$dir" t1 interrupt) || fail "an idle Polytoken interrupt should still deliver: $out"
+  [ "$(cat "$dir/home/state/t1.busy-state")" = "$before" ] || fail "an idle Polytoken record was rewritten by an interrupt"
+  [ "$(cat "$dir/fake/polytoken")" = primed ] || fail "an idle Polytoken must be left at the rewind flash, not in the picker"
+  pass "fm-control Polytoken interrupt: an idle record is left alone"
+}
+
+# Two interrupts inside the rewind flash window open the picker, where Enter
+# rewinds the conversation; the control plane closes it with Escape.
+test_polytoken_interrupt_dismisses_rewind_picker() {
+  local dir out
+  dir=$(new_case polytoken-picker)
+  add_task "$dir" t1 polytoken
+  polytoken_as "$dir" primed
+  out=$(run_control "$dir" t1 interrupt) || fail "a Polytoken interrupt that opened the picker should close it: $out"
+  assert_contains "$out" 'rewind-picker=dismissed' 'the dismissed picker should be reported'
+  [ "$(cat "$dir/fake/polytoken")" = idle ] || fail "the rewind picker was left open: $(cat "$dir/fake/polytoken")"
+  [ -z "$(literals "$dir")" ] || fail "nothing may be typed into the rewind picker, got: $(literals "$dir")"
+  ! grep -qx Enter "$dir/fake/keys" || fail "Enter rewinds in the picker and must never be sent"
+  pass "fm-control Polytoken interrupt: a rewind picker a press opened is closed with Escape, never Enter"
+}
+
+test_polytoken_open_picker_refuses_exit() {
+  local dir out rc
+  dir=$(new_case polytoken-exit-picker)
+  add_task "$dir" t1 polytoken
+  polytoken_as "$dir" picker
+  out=$(FM_FAKE_POLYTOKEN_PICKER_STUCK=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "exit must refuse while the rewind picker is open"$'\n'"$out"
+  assert_contains "$out" 'rewind picker' 'the refusal should name the rewind picker'
+  [ -z "$(literals "$dir")" ] || fail "exit typed into the rewind picker: $(literals "$dir")"
+  ! grep -qx Enter "$dir/fake/keys" || fail "exit pressed Enter in the rewind picker"
+  pass "fm-control Polytoken: an open rewind picker refuses the exit command"
+}
+
+# The separated composer is proven empty only through the live Polytoken
+# identity the tmux probe reads from the pane's foreground process and turn row.
+test_polytoken_exit_proves_empty_composer_by_identity() {
+  local dir out rc
+  dir=$(new_case polytoken-exit)
+  add_task "$dir" t1 polytoken
+  polytoken_as "$dir" idle
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting an idle Polytoken should succeed"$'\n'"$out"
+  [ "$(literals "$dir")" = /quit ] || fail "exit should type /quit once, got: $(literals "$dir")"
+  dir=$(new_case polytoken-exit-draft)
+  add_task "$dir" t1 polytoken
+  polytoken_as "$dir" draft
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "exit must refuse over an unsubmitted Polytoken draft"$'\n'"$out"
+  assert_contains "$out" 'visibly holds pending text' 'the refusal should name the pending draft'
+  [ -z "$(literals "$dir")" ] || fail "exit typed onto the draft: $(literals "$dir")"
+  pass "fm-control Polytoken exit: an identity-proven empty composer receives /quit, a draft refuses"
+}
+
 # A recorded harness can carry a raw launch command's basename, so the tables
 # are reached through one prefix rule rather than an exact string match.
 test_harness_family_resolution() {
@@ -412,7 +528,7 @@ test_harness_family_resolution() {
   for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
       opencode:opencode grok:grok grok-2:grok kimi:kimi cursor:cursor \
       cursor-agent:cursor muse:muse muse-bin-0.1.0:muse pi:pi \
-      pi-signed:pi-signed omp:omp devin:devin; do
+      pi-signed:pi-signed omp:omp devin:devin polytoken:polytoken; do
     recorded=${pair%%:*}
     want=${pair#*:}
     got=$(fm_control_harness_family "$recorded") \
@@ -1038,6 +1154,11 @@ test_devin_idle_interrupt_sends_one_press
 test_devin_exit_after_turn_ended_types_quit_once
 test_devin_interrupt_dismisses_revert_picker
 test_devin_stuck_picker_refuses_and_exit_types_nothing
+test_polytoken_interrupt_invalidates_busy
+test_polytoken_idle_interrupt_keeps_idle_record
+test_polytoken_interrupt_dismisses_rewind_picker
+test_polytoken_open_picker_refuses_exit
+test_polytoken_exit_proves_empty_composer_by_identity
 test_opencode_interrupts_twice_and_others_once
 test_unverified_harness_is_refused
 test_harness_family_resolution

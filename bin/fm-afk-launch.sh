@@ -197,7 +197,7 @@ fm_afk_launch_primary_harness() {
   # detect_own precedence never reads either variable (see header).
   if [ "${FM_TEST_SEAM:-}" = 1 ]; then
     case "${FM_TEST_HARNESS:-}" in
-      claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | unknown)
+      claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | polytoken | unknown)
         printf '%s' "$FM_TEST_HARNESS"
         return
         ;;

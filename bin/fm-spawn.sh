@@ -163,7 +163,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|polytoken)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -179,6 +179,17 @@
 #   config/claude-permission-mode is not mapped: Devin auto approves read-only
 #   tools, unlike Claude auto. Effort is part of Devin model ids, so the
 #   independent --effort axis is recorded but omitted from argv.
+#   Polytoken is worker-only: `polytoken new --prompt` starts the supervised
+#   TUI with the brief, and the task worktree receives Firstmate's own
+#   .polytoken/hooks.json and .polytoken/config.yaml (bypass permissions),
+#   hidden through info/exclude. A project that owns either file refuses the
+#   spawn instead of being edited. --model and --effort are resolved against
+#   `polytoken models` before any endpoint exists: effort becomes the model's
+#   `(<level>)` selector only when that model lists the level, and is recorded
+#   but omitted otherwise. The launch-time update prompt is skipped for the one
+#   launch with POLYTOKEN_SKIP_UPDATE_CHECK=1, and a live Polytoken session
+#   already anchored at the worktree refuses the launch, because its detached
+#   daemon outlives a closed pane. bin/fm-polytoken-lib.sh owns all three.
 #   For omp (Oh My Pi), fm-spawn resolves the `omp` executable from PATH once and
 #   refuses when it is absent. Every omp launch clears the foreign harness
 #   markers (omp publishes none of its own), sets the Firstmate-owned
@@ -350,6 +361,7 @@
 #     __DEVINBIN__ resolved Devin executable
 #     __DEVINCONFIG__ private per-task Devin config with lifecycle hooks
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
+#     __POLYTOKENBIN__ resolved Polytoken executable
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -366,7 +378,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse, gemini, agy, and devin are crewmate/scout only and are refused for --secondmate.
+# log; muse, gemini, agy, devin, and polytoken are crewmate/scout only and are refused for --secondmate.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -608,6 +620,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-polytoken-lib.sh
+. "$SCRIPT_DIR/fm-polytoken-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -1806,7 +1820,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | polytoken)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -2111,6 +2125,15 @@ launch_template() {
   # appends native worker lifecycle hooks. Clear NO_COLOR so the shared
   # composer guard can distinguish the dim placeholder from a real draft.
   devin) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR __DEVINBIN__ --permission-mode dangerous --respect-workspace-trust false --config __DEVINCONFIG__ __MODELFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # Polytoken: `new` spawns a detached daemon session and attaches the TUI,
+  # and --prompt submits the typed launch envelope once the TUI attaches
+  # (verified multi-line and auto-submitted, polytoken 0.8.14). Autonomy and
+  # the busy-state hooks come from the worktree overlay written below, since
+  # Polytoken has no per-invocation flag for either. The launch-time update
+  # check would otherwise park a worker on its prompt at most once a day;
+  # POLYTOKEN_SKIP_UPDATE_CHECK=1 skips it for this launch only. Polytoken
+  # publishes no identity marker, so the foreign ones are cleared.
+  polytoken) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI POLYTOKEN_SKIP_UPDATE_CHECK=1 __POLYTOKENBIN__ new __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Kimi Code rejects a positional prompt, so it launches bare and receives
   # only an absolute brief pointer after the TUI readiness gate below.
   # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -2235,7 +2258,9 @@ esac
 # docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
 # devin has none either: only its worker lifecycle hooks are verified, and
 # docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ]; }; then
+# polytoken has none either: only its worker hooks are verified (polytoken
+# 0.8.14), and no Polytoken wake protocol exists.
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = polytoken ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -2253,6 +2278,12 @@ case "$HARNESS" in
 devin)
   DEVIN_BIN=$(command -v devin) || {
     echo "error: devin executable not found on PATH" >&2
+    exit 1
+  }
+  ;;
+polytoken)
+  POLYTOKEN_BIN=$(fm_polytoken_resolve_binary) || {
+    echo "error: polytoken executable not found on PATH; install Polytoken or select a different verified harness" >&2
     exit 1
   }
   ;;
@@ -2338,6 +2369,12 @@ if [ "$HARNESS" = omp ]; then
 fi
 if [ "$HARNESS" = agy ]; then
   agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
+fi
+# Polytoken's --model value carries any applicable effort as its variant, so
+# it is resolved once here, before any worktree or endpoint exists.
+POLYTOKEN_MODEL_ARG=
+if [ "$HARNESS" = polytoken ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  POLYTOKEN_MODEL_ARG=$(fm_polytoken_model_arg "$POLYTOKEN_BIN" "$MODEL" "$EFFORT") || exit 1
 fi
 # Worker account pin (header above): resolved before any endpoint, worktree, or
 # record exists. An absent pin selects nothing and leaves every later launch
@@ -2476,6 +2513,10 @@ muse_credential_present() {
 
 model_flag_for_harness() {
   local harness=$1 model=$2
+  if [ "$harness" = polytoken ]; then
+    [ -z "$POLYTOKEN_MODEL_ARG" ] || printf -- '--model %s ' "$(shell_quote "$POLYTOKEN_MODEL_ARG")"
+    return 0
+  fi
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
   claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
@@ -4212,6 +4253,22 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >>"$EXCL"
 }
+# A Polytoken daemon is detached from its pane and keeps working after its
+# TUI exits, so an agent-free pane does not prove an agent-free worktree.
+# Launching Polytoken, or replacing a Polytoken incarnation, first requires
+# that no live Polytoken session is anchored here (bin/fm-polytoken-lib.sh).
+POLYTOKEN_GUARD_BIN=
+if [ "$KIND" != secondmate ]; then
+  if [ "$HARNESS" = polytoken ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+    POLYTOKEN_GUARD_BIN=$POLYTOKEN_BIN
+  elif [ "$RELAUNCH" -eq 1 ] && [ "$(fm_control_harness_family "$RELAUNCH_PRIOR_HARNESS" 2>/dev/null || true)" = polytoken ]; then
+    POLYTOKEN_GUARD_BIN=$(fm_polytoken_resolve_binary) \
+      || echo "warning: the previous incarnation of $ID ran Polytoken, but polytoken is no longer on PATH, so its detached daemon cannot be ruled out" >&2
+  fi
+fi
+if [ -n "$POLYTOKEN_GUARD_BIN" ]; then
+  fm_polytoken_wait_no_live_session "$POLYTOKEN_GUARD_BIN" "$WT" || exit 1
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   # Retire the previous incarnation's per-task harness wiring before arming the
   # new one. Without this, a harness switch would leave the old adapter's hook
@@ -4254,7 +4311,7 @@ if [ "$KIND" != secondmate ]; then
     }
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
     ;;
-  gemini | devin)
+  gemini | devin | polytoken)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -4300,6 +4357,21 @@ EOF
   devin)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       "$SCRIPT_DIR/fm-devin-config.sh" "$STATE_REAL" "$ID" "$BUSY_GEN" || exit 1
+    fi
+    ;;
+  polytoken)
+    if [ "$RAW_LAUNCH" -eq 0 ]; then
+      # pre_user_prompt opens a turn and stop closes it (verified live on
+      # polytoken 0.8.14: a queued follow-up fires another pre_user_prompt and
+      # the turn still ends in one stop). Polytoken has no session-end hook and
+      # emits no stop for an Esc cancellation, so fm-control invalidates the
+      # record to unknown after an interrupt rather than claiming idle.
+      fm_polytoken_write_overlay "$WT" "$STATE_REAL" "$ID" "$BUSY_GEN" "$TURNEND" "$FM_ROOT" || exit 1
+      while IFS= read -r polytoken_rel; do
+        exclude_path "$polytoken_rel"
+      done <<EOF
+$(fm_polytoken_overlay_relpaths)
+EOF
     fi
     ;;
   gemini)
@@ -4865,6 +4937,7 @@ devin)
   LAUNCH=${LAUNCH//__DEVINCONFIG__/"$(shell_quote "$STATE_REAL/$ID.devin-config.json")"}
   ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+polytoken) LAUNCH=${LAUNCH//__POLYTOKENBIN__/"$(shell_quote "$POLYTOKEN_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 # A record-backed launch brief is published into the state dir of the pane
@@ -4883,7 +4956,7 @@ case "$LAUNCH" in
   ;;
 esac
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin)
+claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | polytoken)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac

@@ -517,6 +517,7 @@ An initial Pi signature sourced only from the installed binary's own UI strings 
 This guard's first live run caught that before it shipped, which is the evidence for why this class of check must be driven end to end rather than read off strings or a component name.
 
 Verified 2026-09-22 on Claude Code 2.1.278, pi 0.86.1, and gemini 0.60.0.
+Polytoken's license-gate signature is refreshed by its own worker guard instead, and [Polytoken verification](polytoken.md) records it.
 
 ```sh
 FM_LAUNCH_PROMPT_SIGNALS_LIVE=1 bash tests/fm-launch-prompt-signals-live-e2e.test.sh

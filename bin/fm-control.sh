@@ -25,9 +25,10 @@
 #              still exists, and the agent is still alive where the backend can
 #              classify that. Cancellation is confirmed only from an adapter-
 #              owned acknowledgement and otherwise reported unconfirmed. Busy
-#              state is never rewritten as proof of the action. Devin
-#              cancellation invalidates it to unknown because its native hooks
-#              emit no cancellation close; this is not a success claim.
+#              state is never rewritten as proof of the action. Devin and
+#              Polytoken cancellation invalidates it to unknown because their
+#              native hooks emit no cancellation close; this is not a success
+#              claim (fm_control_interrupt_invalidates_busy).
 #              An adapter whose repeated interrupt key does something else on
 #              an idle agent (Devin's revert picker) sends its later presses
 #              only after the first press rendered a running turn, and
@@ -411,18 +412,19 @@ wait_rendered() {  # <ere> <timeout>
 }
 
 # dismiss_interrupt_hazard <key> <ere>: after the presses, close a surface a
-# mistimed press opened (Devin's revert picker) with one more key, before
-# anything else can be typed into it. Sets INTERRUPT_HAZARD.
+# mistimed press opened (Devin's revert picker, Polytoken's rewind picker) with
+# one more key, before anything else can be typed into it. Sets INTERRUPT_HAZARD.
 dismiss_interrupt_hazard() {  # <key> <ere>
-  local key=$1 hazard=$2 gap
+  local key=$1 hazard=$2 gap name
   gap=$(fm_control_interrupt_press_gap "$HARNESS")
+  name=$(fm_control_interrupt_hazard_name "$HARNESS")
   sleep "$gap"
   rendered_matches "$hazard" || return 0
   fm_backend_send_key "$BACKEND" "$T" "$key" "$LABEL" \
-    || die "task $ID shows the $HARNESS revert picker after its interrupt, and the $key that closes it was not delivered; nothing else was typed. Close it with $key, never Enter, before any other action"
+    || die "task $ID shows the $HARNESS $name after its interrupt, and the $key that closes it was not delivered; nothing else was typed. Close it with $key, never Enter, before any other action"
   sleep "$gap"
   ! rendered_matches "$hazard" \
-    || die "task $ID still shows the $HARNESS revert picker after one $key; nothing else was typed. Close it with $key, never Enter, before any other action"
+    || die "task $ID still shows the $HARNESS $name after one $key; nothing else was typed. Close it with $key, never Enter, before any other action"
   INTERRUPT_HAZARD=dismissed
 }
 
@@ -448,7 +450,7 @@ send_interrupt_keys() {
   [ -z "$clear" ] || fm_control_backend_supports_key "$BACKEND" "$clear" \
     || die "harness $HARNESS needs $clear to clear its composer after an interrupt, which the $BACKEND backend cannot deliver; refusing to leave the cancelled prompt where the next submitted line would concatenate onto it"
   [ -z "$arm$hazard" ] || fm_backend_visible_capture_supported "$BACKEND" \
-    || die "harness $HARNESS must see its screen between interrupt presses, because a repeated $key on an idle agent opens its revert picker, and the $BACKEND backend has no verified viewport read; refusing to press blind"
+    || die "harness $HARNESS must see its screen around its interrupt presses, because a repeated $key on an idle agent opens its $(fm_control_interrupt_hazard_name "$HARNESS" || printf 'picker'), and the $BACKEND backend has no verified viewport read; refusing to press blind"
   INTERRUPT_ARMED=yes
   INTERRUPT_HAZARD=none
   while [ "$i" -lt "$repeat" ]; do
@@ -502,13 +504,16 @@ interrupt_cancel_claim() {
 # deliver_interrupt: deliver and observe the strongest adapter-owned
 # cancellation claim available after delivery. `not-running` means an armed
 # adapter's first press rendered no running turn, so nothing was cancelled; a
-# dismissed revert picker is reported beside the claim.
+# dismissed revert or rewind picker is reported beside the claim.
 deliver_interrupt() {
-  local cancel devin_gen=
-  # Devin does not emit Stop for cancellation. Capture this incarnation before
-  # keys, then invalidate its state conservatively rather than claiming idle.
-  if [ "$HARNESS" = devin ]; then
-    devin_gen=$(fm_busy_current_gen "$STATE" "$ID" 2>/dev/null || true)
+  local cancel invalidate_gen='' hazard_name
+  # Devin and Polytoken emit no turn close for cancellation. Capture this
+  # incarnation before keys, then invalidate its state conservatively rather
+  # than claiming idle. Only a record that reads busy is invalidated: an idle
+  # or unknown one already claims nothing the cancellation could falsify.
+  if fm_control_interrupt_invalidates_busy "$HARNESS" \
+    && [ "$(fm_busy_record_read "$STATE" "$ID" 2>/dev/null | cut -d' ' -f1)" = busy ]; then
+    invalidate_gen=$(fm_busy_current_gen "$STATE" "$ID" 2>/dev/null || true)
   fi
   prepare_interrupt_ack
   send_interrupt_keys
@@ -516,12 +521,15 @@ deliver_interrupt() {
     cancel=not-running
   else
     cancel=$(interrupt_cancel_claim)
-    if [ "$HARNESS" = devin ] && [ -n "$devin_gen" ]; then
+    if [ -n "$invalidate_gen" ]; then
       "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" unknown \
-        --gen "$devin_gen" --source fm-interrupt --event interrupt >/dev/null 2>&1 || true
+        --gen "$invalidate_gen" --source fm-interrupt --event interrupt >/dev/null 2>&1 || true
     fi
   fi
-  [ "$INTERRUPT_HAZARD" = none ] || cancel="$cancel revert-picker=$INTERRUPT_HAZARD"
+  if [ "$INTERRUPT_HAZARD" != none ]; then
+    hazard_name=$(fm_control_interrupt_hazard_name "$HARNESS")
+    cancel="$cancel ${hazard_name// /-}=$INTERRUPT_HAZARD"
+  fi
   printf '%s' "$cancel"
 }
 
@@ -622,7 +630,7 @@ do_exit() {
   cmd=$(fm_control_exit_command "$HARNESS")
   hazard=$(fm_control_interrupt_hazard_signal "$HARNESS")
   if [ -n "$hazard" ] && rendered_matches "$hazard"; then
-    die "task $ID shows the $HARNESS revert picker, where typed text becomes a search and Enter reverts file changes; refusing to type the $cmd exit command. Close it with $(fm_control_interrupt_key "$HARNESS"), never Enter, then retry '$VERB'"
+    die "task $ID shows the $HARNESS $(fm_control_interrupt_hazard_label "$HARNESS"); refusing to type the $cmd exit command. Close it with $(fm_control_interrupt_key "$HARNESS"), never Enter, then retry '$VERB'"
   fi
   composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
     || composer_state=unknown

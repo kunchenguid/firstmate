@@ -63,7 +63,7 @@ fm_control_verb_allowed() {  # <verb>
 # section 4's verified-adapter list; an unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harnesses() {
-  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin
+  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin polytoken
 }
 
 fm_control_harness_supported() {  # <harness>
@@ -81,7 +81,8 @@ fm_control_harness_supported() {  # <harness>
 # and friends. This is the one place that prefix rule is stated. `pi` and
 # `pi-signed` are exact because a `pi*` prefix would swallow the signed adapter,
 # `omp` is exact because an `omp*` prefix would claim unrelated commands, `agy`
-# is exact for the same reason on an even shorter name, and an
+# is exact for the same reason on an even shorter name, `devin` and `polytoken`
+# are exact like their anchored liveness names, and an
 # unrecognized value returns nonzero rather than being guessed into a family.
 fm_control_harness_family() {  # <recorded-harness>
   case "${1-}" in
@@ -90,6 +91,7 @@ fm_control_harness_family() {  # <recorded-harness>
     omp) printf 'omp' ;;
     agy) printf 'agy' ;;
     devin) printf 'devin' ;;
+    polytoken) printf 'polytoken' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -103,8 +105,8 @@ fm_control_harness_family() {  # <recorded-harness>
   esac
 }
 
-# Which task kinds an adapter is verified to run. muse, gemini, rovo, agy, and devin
-# are crewmate/scout adapters only: none has a primary supervision protocol,
+# Which task kinds an adapter is verified to run. muse, gemini, rovo, agy, devin,
+# and polytoken are crewmate/scout adapters only: none has a primary supervision protocol,
 # and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
@@ -113,7 +115,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    muse|gemini|rovo|agy|devin) [ "$kind" != secondmate ] || return 1 ;;
+    muse|gemini|rovo|agy|devin|polytoken) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }
@@ -127,10 +129,11 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 # with an idle composer and no repollution (verified live, agy 1.2.0 through
 # Herdr). omp (Oh My Pi) shares Pi's single Escape, empty composer
 # afterwards, and /quit exit (verified omp 18.1.2 in a PTY, re-verified 18.1.11
-# through Herdr).
+# through Herdr). polytoken cancels a running turn, tool included, on a single
+# Escape and leaves an empty composer (verified live, polytoken 0.8.14).
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin) printf 'Escape' ;;
+    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin|polytoken) printf 'Escape' ;;
     grok) printf 'C-c' ;;
     *) return 1 ;;
   esac
@@ -141,7 +144,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode|devin) printf '2' ;;
-    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) printf '1' ;;
+    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|polytoken) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -160,7 +163,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_arm_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'esc again to interrupt' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|polytoken) ;;
     *) return 1 ;;
   esac
 }
@@ -171,7 +174,7 @@ fm_control_interrupt_arm_signal() {  # <harness>
 fm_control_interrupt_press_gap() {  # <harness>
   case "${1-}" in
     devin) printf '0.5' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) printf '0.2' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|polytoken) printf '0.2' ;;
     *) return 1 ;;
   esac
 }
@@ -181,12 +184,48 @@ fm_control_interrupt_press_gap() {  # <harness>
 # when the adapter has none. Devin's revert picker is recognized by either of
 # two independent rows, its `Revert to step:` title or its `↵ revert` footer,
 # and Escape cancels it without reverting (verified live, devin 3000.11.1).
+# Polytoken's rewind picker opens when an idle agent receives a second Escape
+# while the first one's `Press Esc again to rewind to a prompt.` flash is still
+# showing, which two interrupts in quick succession can do; Enter there
+# rewinds the conversation destructively. It is recognized by its `┌Rewind`
+# title or its `Enter rewind  Esc close` footer, and one Escape closes it
+# (verified live, polytoken 0.8.14).
 fm_control_interrupt_hazard_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'Revert to step:|↵ revert' ;;
+    polytoken) printf '%s' '┌Rewind|Enter rewind[[:space:]]+Esc close' ;;
     claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) ;;
     *) return 1 ;;
   esac
+}
+
+# The short name of that surface, used in the interrupt outcome token.
+fm_control_interrupt_hazard_name() {  # <harness>
+  case "${1-}" in
+    devin) printf '%s' 'revert picker' ;;
+    polytoken) printf '%s' 'rewind picker' ;;
+    *) return 1 ;;
+  esac
+}
+
+# The name of that surface and what Enter does there, for refusal messages.
+fm_control_interrupt_hazard_label() {  # <harness>
+  case "${1-}" in
+    devin) printf '%s' 'revert picker, where typed text becomes a search and Enter reverts file changes' ;;
+    polytoken) printf '%s' 'rewind picker, where Enter rewinds the conversation and drops every later event' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Whether a delivered interrupt must invalidate the task's semantic busy
+# record to unknown. Devin and Polytoken emit no turn-closing hook for a
+# cancelled turn, so their record would otherwise keep claiming busy; the
+# control plane never fabricates idle from a delivered key instead.
+fm_control_interrupt_invalidates_busy() {  # <harness>
+  case "${1-}" in
+    devin|polytoken) return 0 ;;
+  esac
+  return 1
 }
 
 # The key that must follow the interrupt key to leave the composer empty, or
@@ -205,7 +244,7 @@ fm_control_interrupt_hazard_signal() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|polytoken) ;;
     *) return 1 ;;
   esac
 }
@@ -220,7 +259,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # rovo's TUI prints "Agent cancelled" on Escape, but for parity with
     # claude/cursor this stays 'none': the ack is a rendered string, not a
     # recorded state source, and rovo has no busy wiring to confirm against.
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|polytoken) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -229,7 +268,7 @@ fm_control_interrupt_ack_source() {  # <harness>
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
     claude|opencode|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
-    codex|pi|pi-signed|omp|gemini|agy|devin) printf '/quit' ;;
+    codex|pi|pi-signed|omp|gemini|agy|devin|polytoken) printf '/quit' ;;
     *) return 1 ;;
   esac
 }
@@ -366,6 +405,13 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     # the project, and nothing global is installed.
     gemini) printf '%s\n' "$state/$id.gemini-settings.json" ;;
     devin) printf '%s\n' "$state/$id.devin-config.json" ;;
+    # polytoken reads hooks and permissions only from the global layer and
+    # the project's .polytoken/ directory, so its overlay lives in the
+    # worktree (bin/fm-polytoken-lib.sh owns both paths and the writer).
+    polytoken)
+      printf '%s\n' "$wt/.polytoken/hooks.json"
+      printf '%s\n' "$wt/.polytoken/config.yaml"
+      ;;
   esac
 }
 
