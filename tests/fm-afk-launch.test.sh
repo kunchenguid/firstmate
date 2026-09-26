@@ -1013,9 +1013,9 @@ unit_supervision_host_quiet_check() {
   }
   QUIET_ENGINE="$st/no-claude" unready 'the claude engine executable is missing'
   printf 'codex\n' > "$st/config/supervision-host"
-  unready "no supervision engine (config/supervision-host names 'codex', which is not a verified supervision engine"
+  unready "no supervision engine: config/supervision-host names 'codex', which is not a verified supervision engine (verified: claude), so"
   : > "$st/config/supervision-host"
-  unready "no supervision engine (the primary harness 'cursor' has no verified supervision engine)" cursor
+  unready "no supervision engine: the primary harness 'cursor' has no verified supervision engine, so" cursor
   printf 'claude\n' > "$st/config/supervision-host"
   unready 'no verified dialog mirror for codex' codex
   printf '999999999\n' > "$st/state/.lock"

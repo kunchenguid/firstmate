@@ -251,7 +251,7 @@ fm_afk_launch_quiet_needs_nothing() {
   # shellcheck source=bin/fm-supervision-engine-lib.sh
   . "$FM_AFK_LAUNCH_DIR/fm-supervision-engine-lib.sh" || return 1
   if ! fm_supervision_host_attended_ready "$config" "$harness"; then
-    FM_AFK_LAUNCH_QUIET_WHY="$FM_SUPERVISION_HOST_UNREADY${FM_SUPERVISION_ENGINE_PROBLEM:+ ($FM_SUPERVISION_ENGINE_PROBLEM)}"
+    FM_AFK_LAUNCH_QUIET_WHY="$FM_SUPERVISION_HOST_UNREADY${FM_SUPERVISION_ENGINE_PROBLEM:+: $FM_SUPERVISION_ENGINE_PROBLEM}"
   elif ! fm_supervision_host_main_key "$FM_AFK_LAUNCH_STATE" >/dev/null; then
     FM_AFK_LAUNCH_QUIET_WHY="the main session could not be identified"
   elif ! FM_STATE_OVERRIDE="$FM_AFK_LAUNCH_STATE" "$FM_AFK_LAUNCH_DIR/fm-host-mirror.sh" check; then
