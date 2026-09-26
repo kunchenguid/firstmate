@@ -182,7 +182,7 @@ Every classification returns a verdict of busy, idle, unknown, or dead together 
 
 Pi reports its turn lifecycle through the Firstmate-owned extension's `agent_start` and `agent_settled`, confirmed by `ctx.isIdle()`.
 Model providers used through Pi inherit that lifecycle.
-Managed non-secondmate Codex and TraeX workers on tmux or Herdr use their bound structured transcript after structural process liveness is established; missing, unsupported, or unbound evidence remains unknown.
+Managed non-secondmate Codex and TraeX workers on Herdr use their bound structured transcript after structural process liveness is established; missing, unsupported, or unbound evidence remains unknown.
 Legacy TraeX tasks without transcript wiring retain Herdr's native busy-only fallback, while legacy Codex tasks remain `codex-unverified`.
 
 Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.
@@ -519,7 +519,7 @@ The procedure and outcome vocabulary are owned by the [`/updatefirstmate` skill]
 
 ## Restart-proof
 
-Fleet state lives in each task's session-provider backend (tmux by hard default, herdr or cmux when selected or auto-detected, zellij/orca when explicitly selected), no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, and persistent secondmate homes.
+Fleet state lives in each task's Herdr session, no-mistakes run records, status event logs, local markdown under `data/` including `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, and persistent secondmate homes.
 For herdr, respawning after a server-restored layout closes and replaces confirmed no-agent or dead task-tab husks instead of requiring manual tab cleanup.
 At session start, confirmed-dead secondmate agent endpoints are closed and relaunched through the same secondmate spawn path, while ambiguous liveness reads are left untouched to avoid duplicate supervisors.
 Use `/stow` before an intentional reset when the conversation may hold durable knowledge that has not yet been written to disk; after that, the next firstmate session can reconcile and carry on.

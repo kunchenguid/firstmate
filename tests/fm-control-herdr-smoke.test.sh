@@ -188,6 +188,10 @@ herdr pane get "$PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
 awk -F= '$1 == "harness" {$0="harness=pi"} {print}' "$HOME_DIR/state/hsmoke.meta" \
   > "$HOME_DIR/state/hsmoke.meta.tmp"
 mv "$HOME_DIR/state/hsmoke.meta.tmp" "$HOME_DIR/state/hsmoke.meta"
+# The relaunch above intentionally exercised Codex and therefore created its
+# transcript binding. The next section changes the fixture back to Pi, whose
+# lifecycle is extension-backed and must not inherit Codex's input fence.
+rm -f "$HOME_DIR/state/hsmoke.busy-session" "$HOME_DIR/state/hsmoke.busy-gen"
 pass "real herdr: a drifted agent-free shell returns to its worktree and reuses the same endpoint"
 
 if OUT=$(run_control hsmoke interrupt 2>&1); then

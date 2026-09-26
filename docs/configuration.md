@@ -1009,9 +1009,9 @@ Never describe this path as at-least-once, no-loss, or lossless.
 
 `bin/fm-inbox.sh` preserves ordinary text capture, status, list, drain and explicit acknowledgement without credentials or a model call.
 Each note has one durable record and one wake; a read leaves it pending until explicit acknowledgement moves it to handled evidence.
-The script's header and help own command mechanics and the optional `say` and `ask` configuration.
-Those model-backed input helpers stay disabled until configured, and send only the requested audio or question to Bedrock.
-Dedicated bidirectional voice transport and Firstmate's IMAP/SMTP mail plane are no longer provided.
+The script's header and help own command mechanics and the optional `ask` configuration.
+The model-backed side-question helper stays disabled until configured and sends only the requested question to Bedrock.
+Voice input and Firstmate's IMAP/SMTP mail plane are no longer provided.
 Existing private mail or voice records are not deleted or automatically migrated.
 Global mail skills and other installed tools are independent of these removed Firstmate integrations.
 
@@ -1166,9 +1166,8 @@ FM_CRASH_BACKOFF=60                # seconds to wait after crossing the crash th
 FM_CRASH_NORMAL_SLEEP=5            # seconds to wait after an isolated watcher crash
 FM_LOG_MAX_BYTES=1048576           # daemon log size that triggers trimming
 FM_LOG_KEEP_LINES=2000             # daemon log lines kept when trimming
-# optional model-backed inbox helpers; see "Captain inbox" above
-FM_INBOX_REGION=        # overrides config/inbox-region for fm-inbox.sh say and ask
-FM_INBOX_STT_MODEL=     # overrides config/inbox-stt-model for fm-inbox.sh say
+# optional model-backed inbox helper; see "Captain inbox" above
+FM_INBOX_REGION=        # overrides config/inbox-region for fm-inbox.sh ask
 FM_INBOX_ASK_MODEL=     # overrides config/inbox-ask-model for fm-inbox.sh ask
 FM_INBOX_PROFILE=       # overrides config/inbox-profile; explicitly empty forces ambient credentials
 ```

@@ -8,9 +8,6 @@
 #           answer. Writes a durable record and appends ONE `check` wake, so the
 #           note survives a crash and is presented at firstmate's next drain.
 #           This is the only subcommand that touches firstmate's wake queue.
-#   say     Same as `note`, but the body comes from spoken audio on stdin.
-#           Speech is an INPUT METHOD here, not an architecture: it transcribes
-#           and then takes exactly the `note` path.
 #   status  Answer "what is happening" from durable records ONLY. Reads no
 #           network and appends NO wake, so it never interrupts work and is safe
 #           to run in a loop.
@@ -20,7 +17,6 @@
 #
 # Usage:
 #   fm-inbox.sh note <text>...          | fm-inbox.sh note -   (body from stdin)
-#   fm-inbox.sh say  [<file.wav>]       (default: audio on stdin)
 #   fm-inbox.sh status
 #   fm-inbox.sh ask  <question>...
 #   fm-inbox.sh list
@@ -29,12 +25,11 @@
 # Configuration. A region, a model id and an AWS profile name somebody's account
 # and somebody's choices, so this file carries no default for any of them. Each is
 # read from the home's gitignored config/ directory, or from the matching
-# environment variable, and the model-backed subcommands refuse with the path to
+# environment variable, and the model-backed subcommand refuses with the path to
 # write rather than reaching for a value that belongs to another home. That
-# configuration is also the opt-in: `say` and `ask` are off until it exists.
+# configuration is also the opt-in: `ask` is off until it exists.
 #
-#   config/inbox-region     FM_INBOX_REGION     AWS region.            required
-#   config/inbox-stt-model  FM_INBOX_STT_MODEL  speech-to-text model.  required by say
+#   config/inbox-region     FM_INBOX_REGION     AWS region.            required by ask
 #   config/inbox-ask-model  FM_INBOX_ASK_MODEL  side-question model.   required by ask
 #   config/inbox-profile    FM_INBOX_PROFILE    AWS profile.           optional
 #
@@ -47,14 +42,14 @@
 # Environment:
 #   FM_HOME              operational home whose state/ and data/ are used.
 #
-# PRIVACY: `say` sends your audio and `ask` sends your question to Bedrock.
+# PRIVACY: `ask` sends your question to Bedrock.
 # `note`, `status`, `list` and `drain` make no network call at all.
 #
 set -euo pipefail
 
 # A non-interactive `ssh host fm-inbox.sh ...` does NOT get a login shell, so it
 # does not get ~/.toolbox/bin on PATH. The AWS profile's credential_process is
-# the bare word `ada`, so without this the model-backed subcommands fail with
+# the bare word `ada`, so without this the model-backed subcommand fails with
 # "[Errno 2] No such file or directory: 'ada'" while note/status still work.
 # Verified: this is exactly what happens over SSH without the fix.
 for _extra in "$HOME/.toolbox/bin" "$HOME/.local/bin"; do
@@ -101,7 +96,6 @@ require_setting() {  # <file-name> <env-var> <what>
 }
 
 REGION="${FM_INBOX_REGION:-}"
-STT_MODEL="${FM_INBOX_STT_MODEL:-}"
 ASK_MODEL="${FM_INBOX_ASK_MODEL:-}"
 # Unset falls through to config; explicitly empty means "use ambient credentials".
 PROFILE="${FM_INBOX_PROFILE-$(read_setting inbox-profile)}"
@@ -110,12 +104,6 @@ PROFILE="${FM_INBOX_PROFILE-$(read_setting inbox-profile)}"
 # and drain keep working in a home that has configured nothing.
 need_region() {
   [ -n "$REGION" ] || REGION=$(require_setting inbox-region FM_INBOX_REGION "AWS region")
-}
-
-need_stt_model() {
-  need_region
-  [ -n "$STT_MODEL" ] || STT_MODEL=$(require_setting inbox-stt-model \
-    FM_INBOX_STT_MODEL "speech-to-text model")
 }
 
 need_ask_model() {
@@ -127,7 +115,7 @@ need_ask_model() {
 need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 
 # The profile's credential_process (`ada`) costs a MEASURED ~1030ms on every
-# single call, which is about half the wall time of `say` and `ask`. If real
+# single call, which is about half the wall time of `ask`. If real
 # credentials are already in the environment, skip --profile entirely and let the
 # ambient ones win. Set FM_INBOX_PROFILE= (empty) to force that even without env
 # credentials present.
@@ -197,79 +185,6 @@ cmd_note() {
     body="$*"
   fi
   queue_note text "$body"
-}
-
-# ---------------------------------------------------------------- say
-
-cmd_say() {
-  # Before the tool checks, so an unconfigured home is told what to configure
-  # rather than what to install for a call it is not yet allowed to make.
-  need_stt_model
-  need aws
-  need python3
-  need base64
-
-  local src wav raw transcript
-  raw=$(mktemp /tmp/fm-inbox-audio-XXXXXX)
-  wav=$(mktemp /tmp/fm-inbox-wav-XXXXXX.wav)
-  # shellcheck disable=SC2064
-  trap "rm -f '$raw' '$wav' '$wav.json'" EXIT
-
-  if [ "$#" -ge 1 ] && [ "$1" != "-" ]; then
-    src=$1
-    [ -r "$src" ] || die "cannot read audio file: $src"
-    cat "$src" >"$raw"
-  else
-    cat >"$raw"
-  fi
-  [ -s "$raw" ] || die "no audio received on stdin"
-
-  # Accept a real WAV as-is; wrap headerless 16kHz mono s16le PCM if that is
-  # what arrived. Anything else is rejected rather than silently mistranscribed.
-  python3 - "$raw" "$wav" <<'PY'
-import sys, wave
-src, dst = sys.argv[1], sys.argv[2]
-data = open(src, 'rb').read()
-if data[:4] == b'RIFF':
-    open(dst, 'wb').write(data)
-    sys.stderr.write("fm-inbox: input is WAV, passing through\n")
-elif data[:4] in (b'OggS', b'fLaC') or data[:3] == b'ID3':
-    sys.exit("fm-inbox: got Ogg/FLAC/MP3; re-encode to WAV first")
-else:
-    if len(data) % 2:
-        data = data[:-1]
-    w = wave.open(dst, 'wb')
-    w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
-    w.writeframes(data); w.close()
-    sys.stderr.write("fm-inbox: input looked like raw PCM, wrapped as 16kHz mono WAV\n")
-PY
-
-  local secs
-  secs=$(python3 -c "
-import wave,sys
-w=wave.open('$wav'); print(round(w.getnframes()/w.getframerate(),2))")
-  printf 'fm-inbox: %ss of audio, transcribing with %s in %s\n' "$secs" "$STT_MODEL" "$REGION" >&2
-
-  python3 - "$wav" "$wav.json" <<'PY'
-import base64, json, sys
-b = base64.b64encode(open(sys.argv[1], 'rb').read()).decode()
-json.dump([{"role": "user", "content": [
-    {"audio": {"format": "wav", "source": {"bytes": b}}},
-    {"text": "Transcribe the speech exactly. Output only the transcript, nothing else."},
-]}], open(sys.argv[2], 'w'))
-PY
-
-  transcript=$(aws_call bedrock-runtime converse \
-    --model-id "$STT_MODEL" \
-    --messages "file://$wav.json" \
-    --inference-config '{"maxTokens":600,"temperature":0}' \
-    --query 'output.message.content[0].text' --output text) \
-    || die "transcription failed"
-
-  [ -n "${transcript//[[:space:]]/}" ] || die "transcription came back empty"
-  printf 'fm-inbox: heard: %s\n' "$transcript" >&2
-  queue_note voice "$transcript" "transcript_model=$STT_MODEL
-audio_seconds=$secs"
 }
 
 # ---------------------------------------------------------------- status
@@ -373,7 +288,6 @@ cmd_drain() {
 
 case "${1:-}" in
   note)   shift; cmd_note "$@" ;;
-  say)    shift; cmd_say "$@" ;;
   status) shift; cmd_status ;;
   ask)    shift; cmd_ask "$@" ;;
   list)   shift; cmd_list ;;

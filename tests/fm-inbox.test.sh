@@ -49,9 +49,9 @@ set +e
 say_out=$(printf '' | env "${inbox_env[@]}" "$ROOT/bin/fm-inbox.sh" say 2>&1)
 say_code=$?
 set -e
-[ "$say_code" -ne 0 ] || fail "say ran without a configured model"
-assert_contains "$say_out" 'inbox-stt-model' \
-  "the refusal should name the model file to write: $say_out"
+[ "$say_code" -ne 0 ] || fail "retired say command remained executable"
+assert_contains "$say_out" 'unknown subcommand: say' \
+  "the retired say command should be rejected by the public interface: $say_out"
 
 rm -f "$CONFIG_HOME/config/inbox-region"
 unconfigured_note=$(env "${inbox_env[@]}" \
@@ -60,13 +60,13 @@ unconfigured_note=$(env "${inbox_env[@]}" \
 assert_contains "$unconfigured_note" 'queued ' "note should still queue a record"
 assert_absent "$AWS_CALLED" \
   "no case above may reach a model: the aws stub recorded an attempt"
-pass "the model-backed subcommands refuse by name while note keeps working"
+pass "the ask helper stays opt-in, retired say is rejected, and note keeps working"
 
 # --help prints the whole header block, and finds where that block ends rather
 # than counting lines to it, so growing the header cannot silently truncate the
 # help again. The PRIVACY paragraph is the part that matters: it is the only place
-# a new operator is told which subcommands send audio or text off this host, and a
-# fixed line range had already dropped it.
+# a new operator is told which subcommand sends text off this host, and a fixed
+# line range had already dropped it.
 inbox_help=$("$ROOT/bin/fm-inbox.sh" --help) || fail "fm-inbox.sh --help failed"
 assert_contains "$inbox_help" 'PRIVACY:' \
   "the help must say which subcommands send anything to a model"
@@ -78,6 +78,8 @@ assert_contains "$inbox_help" 'inbox-ask-model' \
   "the help must name the files a home has to write"
 assert_contains "$inbox_help" 'fm-inbox.sh note' \
   "the help must still open with the usage it always had"
+assert_not_contains "$inbox_help" 'fm-inbox.sh say' \
+  "the help must not advertise the retired say command"
 pass "fm-inbox.sh --help prints its whole header, privacy paragraph included"
 
 

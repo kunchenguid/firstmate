@@ -153,6 +153,4 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-public-followup.sh`  | Reconcile and deliver typed public commitments, then rechain or explicitly retire their retained loops |
 | `fm-public-followup-emit.sh` | Report one typed terminal work result into the home that owes the public reply, or stage it when that home is on another machine |
 | `fm-public-followup-collect.sh` | Read and retire the typed terminal results a remote work home staged for the home that owes the public reply |
-| `fm-inbox.sh`            | The captain's out-of-band capture surface: queue a note, dictate one, read status, ask a side question |
-| `fm_voice_frame.py`      | The wire format both machines share, copied to the laptop beside the client          |
-| `fm_voice_records.py`    | What a spoken answer may read, and the handover that queues real work                |
+| `fm-inbox.sh`            | The captain's out-of-band text surface: queue a note, read status, ask a side question |
