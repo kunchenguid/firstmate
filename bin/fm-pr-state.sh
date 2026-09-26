@@ -14,11 +14,11 @@
 #
 # The --audit form reads the task's recorded GitHub PR and recorded pr_head,
 # then reports fresh PR fields, required-check results, and the worker's current
-# endpoint and state. A no-mistakes review-ready verdict requires a done worker,
-# matching head, non-draft PR, and a provably complete passing required-check set;
-# direct-PR does not wait for checks before review readiness. Merge readiness
-# requires that complete check set, a matching head, non-draft PR, mergeability,
-# no changes-requested decision, and any required review to be approved. The
+# endpoint and state. A review-ready verdict requires a done worker, matching
+# head, non-draft PR, and a provably complete passing required-check set for
+# every delivery mode. Merge readiness requires that complete check set, a
+# matching head, non-draft PR, mergeability, no changes-requested decision, and
+# any required review to be approved. The
 # reported-check interface cannot prove completeness, so those verdicts stay
 # unverified when GitHub cannot prove the full set. The verdict is evidence for
 # reporting, not merge authority.
@@ -326,14 +326,12 @@ if [ "$AUDIT" -eq 1 ]; then
         ;;
     esac
     [ "$REVIEW_DECISION" != CHANGES_REQUESTED ] || REVIEW_REASONS+=("changes are requested")
+    case "$CHECKS_STATUS" in
+      blocked) REVIEW_REASONS+=("required checks are not all passing") ;;
+      *) REVIEW_UNKNOWN+=("required check status is unverified") ;;
+    esac
     case "$MODE" in
-      no-mistakes)
-        case "$CHECKS_STATUS" in
-          blocked) REVIEW_REASONS+=("required checks are not all passing") ;;
-          *) REVIEW_UNKNOWN+=("required check status is unverified") ;;
-        esac
-        ;;
-      direct-PR) ;;
+      no-mistakes|direct-PR) ;;
       *) REVIEW_UNKNOWN+=("delivery mode is unavailable or unsupported") ;;
     esac
     case "$CHECKS_STATUS" in

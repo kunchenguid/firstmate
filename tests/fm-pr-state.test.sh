@@ -289,15 +289,15 @@ test_audit_blocks_stale_head_draft_and_incomplete_worker() {
   pass "audit blocks stale heads, drafts, and workers that have not completed"
 }
 
-test_audit_requires_approval_for_merge_but_not_review_readiness() {
+test_audit_requires_approval_for_merge() {
   local out
   out=$(FM_TEST_VIEW_REVIEW_DECISION=REVIEW_REQUIRED run_audit audit-direct) \
     || fail "review-required audit fixture was refused"
-  assert_contains "$out" 'VERDICT: READY FOR REVIEW' \
-    "an outstanding required review does not prevent review readiness"
+  assert_contains "$out" 'VERDICT: UNVERIFIED (required check status is unverified)' \
+    "review readiness remains unverified until required-check completeness is proven"
   assert_contains "$out" 'MERGE VERDICT: NOT READY (required review is outstanding)' \
     "an outstanding required review blocks merge readiness"
-  pass "review-required decisions block merge readiness without blocking PR review readiness"
+  pass "review-required decisions block merge readiness while incomplete checks withhold review readiness"
 }
 
 test_audit_respects_delivery_mode_and_check_status() {
@@ -318,11 +318,18 @@ test_audit_respects_delivery_mode_and_check_status() {
 
   out=$(FM_TEST_CHECKS_ERROR="no required checks reported on the 'fm/fixture' branch" \
     run_audit audit-direct) || fail "direct-PR audit fixture was refused"
-  assert_contains "$out" 'VERDICT: READY FOR REVIEW' \
-    "direct-PR review readiness is based on opening a non-draft PR, not waiting for CI"
+  assert_contains "$out" 'VERDICT: UNVERIFIED (required check status is unverified)' \
+    "direct-PR review readiness is withheld when check completeness is unknown"
   assert_contains "$out" 'MERGE VERDICT: UNVERIFIED (required check status is unverified)' \
     "an unreported check cannot support a merge-readiness claim"
-  pass "audit applies mode-specific review readiness while keeping merge evidence strict"
+
+  out=$(FM_TEST_REQUIRED_CHECKS='[{"name":"CI","state":"FAILURE","bucket":"fail"}]' \
+    run_audit audit-direct) || fail "direct-PR failing-check audit fixture was refused"
+  assert_contains "$out" 'VERDICT: NOT READY FOR REVIEW (required checks are not all passing)' \
+    "a failing required check blocks direct-PR review readiness"
+  assert_contains "$out" 'MERGE VERDICT: NOT READY (required checks are not all passing)' \
+    "a failing required check blocks direct-PR merge readiness"
+  pass "all delivery modes withhold readiness for incomplete or failing checks"
 }
 
 test_audit_reports_non_github_forges_as_unverified() {
@@ -414,7 +421,7 @@ test_terminal_state_is_the_whole_report
 test_audit_reports_live_pr_worker_and_decision_evidence
 test_audit_blocks_stale_head_draft_and_incomplete_worker
 test_audit_respects_delivery_mode_and_check_status
-test_audit_requires_approval_for_merge_but_not_review_readiness
+test_audit_requires_approval_for_merge
 test_audit_reports_non_github_forges_as_unverified
 test_audit_reports_terminal_states_with_all_requested_fields
 test_draft_is_a_blocker
