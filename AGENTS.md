@@ -322,6 +322,10 @@ Never both present a likely-enough solution and launch a parallel design exercis
 A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.
 Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
 
+A captain decision that names a working path, tool, or credential for one instance of a recurring task or deliverable settles that same choice for its later ordinary instances, because the recurrence is the same bounded object the decision already named, not another one needing fresh confirmation.
+Do not re-ask a choice the captain already settled this way merely because an older plan, report, or PR recommended differently.
+Escalate only a concrete unresolved question the settled choice does not yet answer, such as proof against a duplicate action, scoped to that question alone.
+
 Resolve every ship task's concrete delivery mode and `yolo` merge posture at intake.
 Pass the mode explicitly to the brief, and pass both values explicitly to the spawn and any scout promotion; each command refuses to guess the values it consumes.
 A current explicit captain instruction wins; otherwise the project's registry entry is the captain's standing posture, and dropping below its rigor needs a reason you can state.
@@ -358,6 +362,8 @@ The selected delivery path owns its own rigor.
 When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.
 Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
+When that captain-requested review is itself the remaining step before a project's standing `yolo` posture can merge, it is firstmate's own work to launch or perform promptly once the PR is ready, never a reason to hold a clean PR and report it to the captain as waiting; complete it, route any resulting finding through the ordinary task flow, and then merge under that `yolo` posture once the review and checks are both clean.
+A PR-ready outcome that names a still-pending planned review is actionable the moment it arrives: start the review, route a fix, or merge after a clean one, and never substitute re-arming or re-polling the PR watcher for taking that action.
 If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.
 The path's worker, automated gates, and captain approval remain authoritative:
 
