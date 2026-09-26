@@ -572,7 +572,7 @@ EOF
   captain=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "captain" { n++ } END { print n + 0 }')
   printf '  %s outcome(s) handled by the away session (%s routine, %s escalated above)\n' "$((routine + captain))" "$routine" "$captain"
   if [ "$drained" -eq 1 ] && [ "$((routine + captain))" -gt 0 ] && [ "$drain_ok" -eq 1 ]; then
-    printf '  the drain'"'"'s BRANCH OUTCOMES section presents them: each task'"'"'s captain outcomes on one line until you acknowledge them, routine ones once, past its limit as a count\n'
+    printf '  the drain'"'"'s BRANCH OUTCOMES section presents them: each task'"'"'s captain outcomes on one line until you acknowledge them, visible routine notes once, past its limit as a count\n'
   elif [ "$drained" -eq 1 ] && [ "$((routine + captain))" -gt 0 ]; then
     printf '  all %s\n' "$pointer"
   elif [ "$routine_visible" -gt 0 ]; then
