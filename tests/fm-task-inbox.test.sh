@@ -26,6 +26,10 @@
 #   6. Dead panes: the doorbell line is a shell no-op when executed by a bare
 #      shell, the ring skips an agent the backend classifies dead, and the
 #      watcher surfaces such a record exactly once instead of re-ringing.
+#   7. A pending composer holding the own doorbell recovers: on grok, Escape
+#      dismisses a popup and rings once empty; every other harness, and a
+#      still-sitting line, is submitted with Enter and never Escape; any other
+#      pending draft still skips.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -383,6 +387,161 @@ test_ring_submits_its_own_stuck_doorbell() {
     || fail "the retry Enter should submit the doorbell once:"$'\n'"$(cat "$log")"
   [ ! -s "$composer" ] || fail "a lost Enter left the doorbell unsubmitted"
   pass "inbox: the ring submits its own stuck doorbell, skips other pending text, and retries a lost Enter once on both paths"
+}
+
+repeat_char() {  # <char> <n>
+  local c=$1 n=$2 out='' i=0
+  while [ "$i" -lt "$n" ]; do
+    out="${out}${c}"
+    i=$((i + 1))
+  done
+  printf '%s' "$out"
+}
+
+grok_titled_pending_row() {  # <text>
+  local text=$1
+  local body="❯ $text"
+  local w pad between dashes title n pre
+  w=${#body}
+  [ "$w" -ge 72 ] || w=72
+  pad=$(repeat_char ' ' $((w - ${#body})))
+  between=" ${body}${pad}"
+  dashes=$(repeat_char '─' "${#between}")
+  title=' Grok 4.6 (xhigh) '
+  n=$((${#between} + 3 - ${#title} - 1))
+  pre=$(repeat_char '─' "$n")
+  printf '%s\n' "  ╭${dashes}╮" "  │${between}│" "  ╰${pre}${title}─╯"
+}
+
+# Fake tmux for the stranded-doorbell recovery: capture-pane replays
+# FM_FAKE_TMUX_CAPTURE until Escape is sent, then FM_FAKE_TMUX_CAPTURE_AFTER.
+# Named keys and literal text are both logged so the recovery keystroke is
+# observable without widening the shared watcher stub.
+make_doorbell_recovery_stubs() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  send-keys)
+    shift
+    literal=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift ;;
+        *) break ;;
+      esac
+    done
+    if [ "$literal" = 1 ]; then
+      printf 'literal:%s\n' "${1:-}" >> "${FM_SEND_LOG:-/dev/null}"
+    else
+      printf 'key:%s\n' "${1:-}" >> "${FM_SEND_LOG:-/dev/null}"
+      if [ "${1:-}" = Escape ]; then
+        : > "${FM_ESCAPED:-/dev/null}"
+      fi
+    fi
+    exit 0 ;;
+  display-message)
+    for a in "$@"; do
+      case "$a" in
+        *cursor_y*) printf '1\n'; exit 0 ;;
+      esac
+    done
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane)
+    if [ -n "${FM_ESCAPED:-}" ] && [ -f "${FM_ESCAPED:-}" ] \
+       && [ -n "${FM_FAKE_TMUX_CAPTURE_AFTER:-}" ] && [ -f "$FM_FAKE_TMUX_CAPTURE_AFTER" ]; then
+      cat "$FM_FAKE_TMUX_CAPTURE_AFTER"
+    elif [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] && [ -f "$FM_FAKE_TMUX_CAPTURE" ]; then
+      cat "$FM_FAKE_TMUX_CAPTURE"
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
+    exit 0 ;;
+  list-windows) printf 'fm-t1\n'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  cat > "$fb/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fb/sleep"
+  printf '%s\n' "$fb"
+}
+
+test_ring_skips_pending_draft() {
+  local dir state rec log rc capture
+  dir="$TMP_ROOT/ring-pending-draft"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_doorbell_recovery_stubs "$dir" >/dev/null
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  capture="$dir/capture"
+  grok_titled_pending_row "leftover txt" > "$capture"
+  log="$dir/send.log"; : > "$log"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$capture" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 1 ] || fail "a real pending draft should skip the ring, got $rc"
+  [ ! -s "$log" ] || fail "a real pending draft was typed into:"$'\n'"$(cat "$log")"
+  [ -f "$rec" ] || fail "skipping a pending draft must leave the durable record in place"
+  pass "inbox: a pending composer that is not the own doorbell still skips the ring"
+}
+
+test_ring_recovers_stranded_own_doorbell() {
+  local dir state rec log rc capture after doorbell
+  dir="$TMP_ROOT/ring-stranded-doorbell"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_doorbell_recovery_stubs "$dir" >/dev/null
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=grok"
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  capture="$dir/capture"
+  after="$dir/after"
+  grok_titled_pending_row "$doorbell" > "$capture"
+  grok_titled_pending_row "" > "$after"
+  log="$dir/send.log"; : > "$log"
+  rm -f "$dir/escaped"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CAPTURE_AFTER="$after" \
+    FM_ESCAPED="$dir/escaped" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 0 ] || fail "a stranded own-doorbell composer should recover and ring, got $rc"
+  grep -q '^key:Escape$' "$log" || fail "recovery should send Escape:"$'\n'"$(cat "$log")"
+  grep -qF "literal:$doorbell" "$log" \
+    || fail "after Escape the doorbell should be typed:"$'\n'"$(cat "$log")"
+  [ -f "$rec" ] || fail "recovering the doorbell must leave the durable record in place"
+  pass "inbox: a stranded own-doorbell pending row is dismissed with Escape and then rung"
+}
+
+test_ring_non_grok_stranded_doorbell_sends_no_escape() {
+  local dir state rec log rc capture doorbell
+  dir="$TMP_ROOT/ring-nongrok-stranded"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_doorbell_recovery_stubs "$dir" >/dev/null
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=claude"
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  capture="$dir/capture"
+  grok_titled_pending_row "$doorbell" > "$capture"
+  log="$dir/send.log"; : > "$log"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$capture" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 0 ] || fail "a non-grok stranded doorbell should still be submitted, got $rc"
+  grep -q '^key:Escape$' "$log" \
+    && fail "a non-grok stranded doorbell must not receive Escape:"$'\n'"$(cat "$log")"
+  grep -q '^key:Enter$' "$log" \
+    || fail "a non-grok stranded doorbell should be submitted with Enter:"$'\n'"$(cat "$log")"
+  [ -f "$rec" ] || fail "the durable record must survive a non-grok stranded doorbell"
+  pass "inbox: a non-grok stranded doorbell receives no Escape"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -803,6 +962,9 @@ test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_ring_submits_its_own_stuck_doorbell
+test_ring_skips_pending_draft
+test_ring_recovers_stranded_own_doorbell
+test_ring_non_grok_stranded_doorbell_sends_no_escape
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
