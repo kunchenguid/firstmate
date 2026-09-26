@@ -77,9 +77,14 @@
 # false before the dialog was ever shown, so that pair means "never asked" and
 # is treated like an absent flag - trust registered, no import consent.
 #
-# THE SCOPE TEST IS THE SAFETY PROPERTY, and it is STRUCTURAL rather than a
-# path policy. Each mode has its own, because the two directories have entirely
-# different shapes on disk.
+# THE SCOPE TEST IS THE SAFETY PROPERTY. Both modes refuse any registration
+# path that resolves to '/', equals the user's home or Claude config directory,
+# or contains either directory. This covers the task worktree, its canonical
+# primary checkout, and a seeded secondmate home, before any trust-store write.
+# Claude Code's trust check walks ancestors, so trusting one of these protected
+# paths would trust every folder beneath it. fm-spawn.sh refuses the launch
+# when registration fails. tests/fm-claude-trust.test.sh pins this boundary.
+# Each mode also requires structural evidence for its directory shape below.
 #
 # WORKTREE MODE. <worktree> must be a LINKED git worktree - its own git dir,
 # sharing <project>'s common dir - whose top level is exactly the resolved
@@ -247,15 +252,28 @@ if [ -z "$CONFIG_DIR_REAL" ]; then
 fi
 [ -n "$CONFIG_DIR_REAL" ] || refuse "Claude config directory '$CONFIG_DIR' does not exist and could not be created"
 
-# The filesystem root, a home directory, and the config directory are never
-# something this registers, in either mode. Checked explicitly so the refusal
-# names the real reason instead of the scope verdict behind it.
-[ "$TARGET_REAL" != / ] || refuse "'/' is the filesystem root, not a $SCOPE_NOUN"
-[ "$TARGET_REAL" != "$CONFIG_DIR_REAL" ] || refuse "'$TARGET_REAL' is the Claude config directory, not a $SCOPE_NOUN"
+# Apply the header's protected-path boundary to every path handed to the store
+# write: the task target here, then the canonical primary checkout below.
+HOME_REAL=
 if [ -n "${HOME:-}" ]; then
   HOME_REAL=$(real_dir "$HOME") || true
-  [ "$TARGET_REAL" != "${HOME_REAL:-}" ] || refuse "'$TARGET_REAL' is the home directory, not a $SCOPE_NOUN"
 fi
+refuse_protected() {  # <resolved path> <noun>
+  local path=$1 noun=$2
+  [ "$path" != / ] || refuse "'/' is the filesystem root, not a $noun"
+  [ "$path" != "$CONFIG_DIR_REAL" ] || refuse "'$path' is the Claude config directory, not a $noun"
+  [ "$path" != "$HOME_REAL" ] || refuse "'$path' is the home directory, not a $noun"
+  case $CONFIG_DIR_REAL/ in
+    "$path"/*) refuse "'$path' contains the Claude config directory '$CONFIG_DIR_REAL', so it is not a $noun" ;;
+  esac
+  if [ -n "$HOME_REAL" ]; then
+    case $HOME_REAL/ in
+      "$path"/*) refuse "'$path' contains the home directory '$HOME_REAL', so it is not a $noun" ;;
+    esac
+  fi
+  return 0
+}
+refuse_protected "$TARGET_REAL" "$SCOPE_NOUN"
 
 if [ "$MODE" = worktree ]; then
   WT_TOP=$(git -C "$TARGET_REAL" rev-parse --show-toplevel 2>/dev/null) || true
@@ -303,6 +321,7 @@ if [ "$MODE" = worktree ]; then
     [ -n "$CANON_GIT_DIR" ] && [ "$CANON_GIT_DIR" = "$PROJ_COMMON" ] \
       || refuse "project '$PROJ_REAL' is a linked worktree whose primary checkout could not be resolved"
   fi
+  refuse_protected "$PROJ_CANON" "project root"
 else
   # The seed evidence, in the order that names the most useful reason first: the
   # marker decides whether this is a secondmate home at all, the id decides
