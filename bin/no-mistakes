@@ -2,10 +2,11 @@
 # Firstmate's argv-level no-mistakes dispatch boundary.
 #
 # Put this directory before the upstream no-mistakes executable on PATH.
-# Ship and scout workers receive FM_TASK_ID and FM_TASK_STATE_DIR from
-# fm-spawn.sh and run in a linked task worktree. Invocations whose first two arguments are `axi run` or
-# `axi respond` are refused unless the task marker, private launch capability,
-# and current worktree match that task's durable metadata. Only a hash of the
+# Ship and scout workers receive FM_TASK_ID, FM_TASK_CAPABILITY, and
+# FM_TASK_STATE_DIR from fm-spawn.sh and run in a linked task worktree.
+# Invocations whose first two arguments are `axi run` or `axi respond` are
+# refused unless the task marker, private launch capability, and current
+# worktree match that task's durable metadata. Only a hash of the
 # capability is recorded, so a caller that merely knows the task id and
 # worktree is not accepted. Every other invocation is
 # forwarded unchanged to the first no-mistakes executable on PATH that is not a
