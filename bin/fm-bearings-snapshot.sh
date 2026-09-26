@@ -209,9 +209,9 @@ command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2
 # The shared read-only away-return owner is consulted, not obeyed. An active
 # away window still refuses here: the correct answer to a bearings request then
 # is to run the return first. Quiet mode is not an away window - the captain is
-# present - so the guard lets it through. Return CATCH-UP is different - the captain is
-# back and asking for the picture, so the catch-up posture is reported as
-# content (a Charted Next gate row) and collection continues. bin/fm-afk-return.sh
+# present - so the guard lets it through. Return CATCH-UP is different - the
+# captain is back and asking for the picture, so the catch-up posture is reported
+# as content (a Charted Next gate row) and collection continues. bin/fm-afk-return.sh
 # owns both the gate format and the branch distinction; bearings reproduces
 # neither. Acting on the fleet still waits for its `check`.
 RETURN_CATCHUP=null
