@@ -34,13 +34,14 @@
 # wakes reach main until it recovers, and when it retries. Either way a quiet
 # `enter` refuses there (exit 3) before writing anything, so a quiet entry
 # never leaves an away record that would park a present captain's main. While
-# the away record of an `/afk` on that home is live, `quiet-check` refuses
-# (exit 2) and a quiet `enter` refuses (exit 3), both naming the record: the
-# captain's return comes first (bin/fm-afk-return.sh and its catch-up gate),
-# then quiet-check again. Where
-# the home opted in but one of those is missing, `quiet-check` names what is
-# missing and quiet mode enters through the daemon as it does without the
-# host. A quiet daemon already running keeps running until `/quiet off`.
+# an away record is live on that home, whatever state/.afk says (a quiet
+# daemon's entry writes one too), `quiet-check` refuses (exit 2) and a quiet
+# `enter` refuses (exit 3), both naming the record: the captain's return comes
+# first (bin/fm-afk-return.sh and its catch-up gate), then quiet-check again.
+# Where the home opted in but one of those is missing, `quiet-check` names what
+# is missing and quiet mode enters through the daemon as it does without the
+# host. A quiet daemon already running keeps running until `/quiet off`, or on
+# that home until a later `/quiet` sends its record through the return.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/.
 #
@@ -242,20 +243,20 @@ fm_afk_launch_host_primary() {  # <harness>
 }
 
 # True when quiet mode needs nothing on this home (the header's QUIET MODE).
-# Returns 2 on a home that opted in while the away record is live, because the
-# captain's return comes first. Otherwise false, with FM_AFK_LAUNCH_QUIET_WHY
-# naming what the attended host lacks on a home that opted in, or empty where
-# quiet mode is the daemon's as it is without the host: no opt-in, another
-# primary, or a quiet daemon that already runs.
+# Returns 2 on a home that opted in while the away record is live, whatever
+# state/.afk says, because the captain's return comes first. Otherwise false,
+# with FM_AFK_LAUNCH_QUIET_WHY naming what the attended host lacks on a home
+# that opted in, or empty where quiet mode is the daemon's as it is without the
+# host: no opt-in, another primary, or a daemon flag without a record.
 fm_afk_launch_quiet_needs_nothing() {
   local harness config
   FM_AFK_LAUNCH_QUIET_WHY=
-  [ ! -e "$FM_AFK_LAUNCH_STATE/.afk" ] || return 1
   harness=$(fm_afk_launch_primary_harness)
   fm_afk_launch_host_primary "$harness" || return 1
   config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
   [ -f "$config/supervision-host" ] || return 1
   ! fm_afk_contract_present "$FM_AFK_LAUNCH_STATE" || return 2
+  [ ! -e "$FM_AFK_LAUNCH_STATE/.afk" ] || return 1
   # shellcheck source=bin/fm-supervision-engine-lib.sh
   . "$FM_AFK_LAUNCH_DIR/fm-supervision-engine-lib.sh" || return 1
   if ! fm_supervision_host_attended_ready "$config" "$harness"; then

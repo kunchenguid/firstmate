@@ -1043,7 +1043,9 @@ unit_supervision_host_quiet_check() {
   if FM_SUPERVISION_ENGINE_CLAUDE_BIN="$engine" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet \
     "$LAUNCH" start-native >/dev/null 2>&1 && [ "$(head -n 1 "$st/state/.afk")" = quiet ]; then
     out=$(quiet_check); rc=$?
-    [ "$rc" -eq 1 ] && [ -z "$out" ] || fail "quiet-check while a quiet daemon runs must exit 1 silently so /quiet refreshes it (rc=$rc): $out"
+    if [ "$rc" -ne 2 ] || ! printf '%s' "$out" | grep -F 'away record (state/.afk-contract) is live' >/dev/null; then
+      fail "quiet-check while a fallback quiet daemon runs on an opted-in home must name its live record (rc=$rc): $out"
+    fi
   else
     fail "a quiet start after a quiet entry must prepare the daemon"
   fi
@@ -1130,6 +1132,66 @@ unit_supervision_host_quiet_after_afk() {
   [ "$rc" -eq 3 ] && [ ! -e "$st/state/.afk-contract" ] && [ ! -e "$st/state/.afk" ] \
     || fail "a quiet enter after the return must write nothing where the attended host runs (rc=$rc): $out"
   pass "supervision host: after the /afk return and its catch-up gate, /quiet is the statement again"
+  rm -rf "$st"
+}
+
+# /quiet falls back to the daemon on an opted-in Claude home whose dialog
+# mirror is missing, then /afk, then /quiet: the live away record still means
+# the captain returned, whatever the quiet flag says, so quiet-check and a quiet
+# enter refuse and name it, and quiet proceeds once the return clears.
+unit_supervision_host_quiet_after_afk_over_quiet_daemon() {
+  local st engine out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-quiet-daemon-away.XXXXXX")
+  mkdir -p "$st/state" "$st/config" "$st/data"
+  engine="$st/claude-engine"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$engine"
+  chmod +x "$engine"
+  printf 'claude\n' > "$st/config/supervision-host"
+  printf '%s\n' "$$" > "$st/state/.lock"
+  cp "$ROOT/.tasks.toml" "$st/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$st/data/backlog.md"
+  in_home() {
+    FM_SUPERVISION_ENGINE_CLAUDE_BIN="$engine" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$@" 2>&1
+  }
+
+  out=$(in_home "$LAUNCH" quiet-check); rc=$?
+  if [ "$rc" -ne 1 ] || ! printf '%s' "$out" | grep -F 'the dialog mirror is missing or could not be read' >/dev/null; then
+    fail "quiet-check without the dialog mirror must name it and send quiet mode to the daemon (rc=$rc): $out"
+  fi
+  out=$(in_home env FM_AFK_MODE=quiet "$LAUNCH" enter --words "stay quiet"); rc=$?
+  [ "$rc" -eq 0 ] || fail "a quiet enter without the dialog mirror must write the record for the daemon (rc=$rc): $out"
+  out=$(in_home env FM_AFK_MODE=quiet "$LAUNCH" start-native); rc=$?
+  [ "$rc" -eq 0 ] && [ "$(head -n 1 "$st/state/.afk" 2>/dev/null)" = quiet ] \
+    || fail "a quiet start without the dialog mirror must prepare the quiet daemon (rc=$rc): $out"
+  out=$(in_home "$LAUNCH" enter --words "back after lunch"); rc=$?
+  [ "$rc" -eq 0 ] && [ -f "$st/state/.afk-contract" ] && [ "$(head -n 1 "$st/state/.afk" 2>/dev/null)" = quiet ] \
+    || fail "/afk over the quiet daemon must record the away words and leave the quiet flag (rc=$rc): $out"
+  cp "$st/state/.afk-contract" "$st/away-record"
+  out=$(in_home "$LAUNCH" quiet-check); rc=$?
+  if [ "$rc" -ne 2 ] || ! printf '%s' "$out" | grep -F 'away record (state/.afk-contract) is live' >/dev/null; then
+    fail "quiet-check under a live away record and a quiet flag must refuse and name the record (rc=$rc): $out"
+  fi
+  out=$(in_home env FM_AFK_MODE=quiet "$LAUNCH" enter --words "stay quiet"); rc=$?
+  if [ "$rc" -ne 3 ] || ! printf '%s' "$out" | grep -F 'away record (state/.afk-contract) is live' >/dev/null; then
+    fail "a quiet enter under a live away record and a quiet flag must refuse and name the record (rc=$rc): $out"
+  fi
+  cmp -s "$st/state/.afk-contract" "$st/away-record" \
+    || fail "a refused quiet enter must leave the away record untouched"
+  pass "supervision host: /quiet under a live away record over a fallback quiet daemon refuses and names the record"
+
+  touch "$st/state/.last-watcher-beat"
+  out=$(in_home "$ROOT/bin/fm-afk-return.sh"); rc=$?
+  if [ "$rc" -ne 0 ] || [ -e "$st/state/.afk-contract" ] || [ -e "$st/state/.afk" ] || [ -e "$st/state/.afk-return-catchup" ]; then
+    fail "the /afk return must stop the quiet daemon, archive the away record, and clear its catch-up gate (rc=$rc): $out"
+  fi
+  out=$(in_home "$LAUNCH" quiet-check); rc=$?
+  if [ "$rc" -ne 1 ] || ! printf '%s' "$out" | grep -F 'the dialog mirror is missing or could not be read' >/dev/null; then
+    fail "quiet-check after the return must again send quiet mode to the daemon (rc=$rc): $out"
+  fi
+  out=$(in_home env FM_AFK_MODE=quiet "$LAUNCH" enter --words "stay quiet"); rc=$?
+  [ "$rc" -eq 0 ] && [ -f "$st/state/.afk-contract" ] \
+    || fail "a quiet enter after the return must proceed to the daemon (rc=$rc): $out"
+  pass "supervision host: after the return, /quiet over a missing mirror proceeds to the quiet daemon"
   rm -rf "$st"
 }
 
@@ -1595,6 +1657,7 @@ unit_supervision_host_claude_home_runs_no_away_daemon
 unit_supervision_host_other_harnesses_run_no_away_daemon
 unit_supervision_host_quiet_check
 unit_supervision_host_quiet_after_afk
+unit_supervision_host_quiet_after_afk_over_quiet_daemon
 unit_native_entry_preserves_prepared_state
 unit_close_failure_preserves_record
 unit_record_publication_atomic

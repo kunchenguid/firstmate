@@ -21,7 +21,7 @@ The only things quiet mode changes are which mode the flag declares and what exi
 ## What it does
 
 0. **Check whether quiet mode needs anything here.**
-   If an away record `state/.afk-contract` is live and `state/.afk` is not already in quiet mode, first follow the `afk` skill's return and clear its catch-up gate before handling `/quiet`; then continue below.
+   If an away record `state/.afk-contract` is live and either the home opted into the supervision host (`config/supervision-host`) or `state/.afk` is not already in quiet mode, first follow the `afk` skill's return and clear its catch-up gate before handling `/quiet`; then continue below.
    On Pi or pi-signed, enter nothing: the in-process attended branch already keeps routine wakes off main (the `afk` skill's "What it does" step 2); tell the captain supervision is already quiet while they are present.
    Otherwise run `bin/fm-afk-launch.sh quiet-check` first.
    It exits 0 with one line where the attended supervision host runs (`docs/supervision-host.md` "Quiet mode"): enter nothing - no record, no daemon, no flag - and tell the captain in `AGENTS.md` section 9 language that supervision here already works that way: routine fleet events stay off this conversation, while decisions, failures, credentials, and review-ready work still reach them.
@@ -66,6 +66,8 @@ point of this mode (AGENTS.md section 8's away-mode stub, quiet branch).
 - A marked daemon escalation, or a message beginning `/quiet` while already
   in quiet mode (refresh, not exit) -> stay in quiet mode and process it, the
   same two carve-outs `/afk` documents for away mode.
+  On a home that opted into the supervision host, a `/quiet` under a live away
+  record is not a refresh: step 0 runs the return first.
 - Every other message while in quiet mode is simply answered as ordinary
   work; the flag and daemon are left untouched.
 
