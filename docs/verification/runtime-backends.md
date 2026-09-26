@@ -1344,7 +1344,9 @@ The same guarded named-lab command passed on 2026-09-03 against Herdr 0.8.2 afte
 It reported `steal_live=0 floor_verdict=0 default-session-tripwire=armed`, with the fleet's default session unchanged before and after.
 
 Part C is the case the suite could not reach before: a doomed pane whose shell holds a persistent background child fails the lone-idle-shell proof on every sample, so the plan takes the plain explicit close, in the geometry where the closing workspace's right neighbour is a spacer rather than the focused anchor.
-On 0.7.5 that fallback exposed a bounded four-sample wrong-focus window and restored the anchor exactly; on 0.8.0 the same fallback exposed none, which is why default-on projection is floored at 0.8.0 rather than mitigated further below it.
+On 0.7.5 that fallback exposed a four-sample wrong-focus window and restored the anchor exactly; on 0.8.0 the same fallback exposed none, which is why default-on projection is floored at 0.8.0 rather than mitigated further below it.
+On a defective release Part C now proves the fallback from the plain-close call log plus the exact post-close focus, and reports the sampler's wrong-focus count without requiring it, because that window can be shorter than one focus snapshot and a required sample would fail vacuously.
+The 0.7.5 fallback line above is the wording of that dated run; a rerun on a defective release prints `ok - fallback on a defective release: call log proved plain close and final focus was restored to the anchor (sampler wrong-focus observations: <count>)` instead.
 The suite also cross-checks its own Part A measurement against the floor classifier on whatever release it runs, so a drifted protocol-to-release mapping fails there rather than silently gating on the wrong thing.
 
 ### Attached foreground viewer
