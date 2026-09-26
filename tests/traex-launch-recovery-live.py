@@ -101,15 +101,14 @@ assert 'Hooks need review' in h('pane','read',pane,'--source','recent','--lines'
 print('ok - real hook trust is not accepted; failed spawn preserves original records and durable instruction',flush=True)
 # Approve only the generated private hook `true`, after exact screen evidence.
 h('pane','send-keys',pane,'enter')
-proof_path=lab/'proof.json'
 for _ in range(100):
     result=subprocess.run(list(map(str,recover+['--check','--terminal',terminal,'--pid',original_pid])),env=env,capture_output=True,text=True)
     if result.returncode==0:break
     time.sleep(.15)
 else:raise AssertionError('late trust never produced recovery provenance: '+result.stderr)
-proof_path.write_text(result.stdout)
-action(*recover,'--apply',proof_path)
-action(*recover,'--apply',proof_path)
+proof=result.stdout.strip()
+action(*recover,'--apply',proof)
+action(*recover,'--apply',proof)
 assert (state/'traex.busy-gen').read_text()==original_gen
 assert record.read_bytes()==inbox_bytes
 # Wait for the first real vendor turn to settle, then use the ordinary doorbell
@@ -137,8 +136,8 @@ meta.write_text(''.join(line+'\n' for line in meta.read_text().splitlines() if n
 data=json.loads((state/'traex.busy-session').read_text());data.pop('process_binding',None)
 (state/'traex.busy-session').write_text(json.dumps(data)+'\n')
 action(root/'bin/fm-busy-event.sh','retire',state,'traex','--gen',original_gen.strip())
-proof,_=action(*recover,'--check','--terminal',terminal,'--pid',original_pid);proof_path.write_text(proof)
-action(*recover,'--apply',proof_path);action(*recover,'--apply',proof_path)
+proof,_=action(*recover,'--check','--terminal',terminal,'--pid',original_pid)
+action(*recover,'--apply',proof);action(*recover,'--apply',proof)
 assert 'spawn_gen=' not in meta.read_text()
 assert (state/'traex.busy-gen').read_text()==original_gen
 before=json.loads((state/'traex.busy-session').read_text())['bound']['size']

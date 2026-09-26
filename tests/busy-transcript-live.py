@@ -258,9 +258,8 @@ esac
             info = json.loads(herdr('pane', 'process-info', '--pane', pane))['result']['process_info']
             pid, = [p['pid'] for p in info['foreground_processes'] if p['name'] == tool and any(arg.startswith('\u2063FIRSTMATE_OP: v1 launch-brief:') for arg in p.get('argv', []))]
             command(root / 'bin/fm-busy-event.sh', 'retire', state, tool, '--gen', gen)
-            receipt = lab / (tool + '-recovery.json')
-            receipt.write_text(command(root / 'bin/fm-busy-event.sh', 'recover', state, tool,
-                '--check', '--terminal', pane_data['terminal_id'], '--pid', pid, env=recovery_env))
+            receipt = command(root / 'bin/fm-busy-event.sh', 'recover', state, tool,
+                '--check', '--terminal', pane_data['terminal_id'], '--pid', pid, env=recovery_env)
             command(root / 'bin/fm-busy-event.sh', 'recover', state, tool, '--apply', receipt, env=recovery_env)
             print('ok - ' + tool + ' real original-generation recovery', flush=True)
             inbox = state / (tool + '.inbox')

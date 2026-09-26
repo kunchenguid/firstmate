@@ -112,8 +112,15 @@ try:
         set_transport()
     def check(ok=True):
         return call(event, 'recover', state, 'worker', '--check', '--terminal', 'term_original', '--pid', process.pid, ok=ok)
-    def apply(ok=True):
-        return call(event, 'recover', state, 'worker', '--apply', base / 'proof.json', ok=ok)
+    def check_apply(ok=True):
+        script = ('set -eu\nreceipt=$("$1" recover "$2" "$3" --check --terminal "$4" --pid "$5")\n'
+                  '"$1" recover "$2" "$3" --apply "$receipt"\n')
+        result = subprocess.run(['bash', '-c', script, '_', str(event), str(state), 'worker',
+                                 'term_original', str(process.pid)], env=env, capture_output=True, text=True)
+        assert (result.returncode == 0) == ok, (result.stdout, result.stderr)
+        return result.stdout.strip()
+    def apply(receipt=None, ok=True):
+        return call(event, 'recover', state, 'worker', '--apply', proof if receipt is None else receipt, ok=ok)
     reset()
     (state / 'worker.inbox').mkdir()
     (state / 'worker.inbox/001.msg').write_text('unchanged durable instruction\n')
@@ -122,12 +129,11 @@ try:
     before = snapshot_files()
     proof = check()
     assert snapshot_files() == before, 'preflight changed records'
-    (base / 'proof.json').write_text(proof)
     stale_lock = state / 'worker.busy-state.lock'
     stale_lock.mkdir()
     (stale_lock / 'pid').write_text('999999999\n')
     assert check() == proof, 'stale writer lock changed the read-only receipt'
-    apply()
+    check_apply()
     assert not stale_lock.is_dir() and stale_lock.is_symlink() is False, 'recovered lock was not released'
     assert (state / 'worker.busy-gen').read_text().strip() == gen
     assert 'spawn_gen=s-original' in (state / 'worker.meta').read_text()
@@ -184,14 +190,26 @@ try:
     # Replacement terminal, wrong live PID, stale gen, missing evidence.
     reset(); changed = copy.deepcopy(pane); changed['terminal_id'] = 'term_reused'; set_transport(changed)
     apply(ok=False); assert not (state / 'worker.busy-gen').exists()
-    for key, value in (('task', 'other-task'), ('state', str(base / 'other-home/state'))):
+    for key, value in (('task', 'other-task'), ('state', str(base / 'other-home/state')), ('gen', 'g-other')):
         reset(); changed_proof = json.loads(proof); changed_proof[key] = value
-        (base / 'proof.json').write_text(json.dumps(changed_proof))
-        apply(ok=False); assert not (state / 'worker.busy-gen').exists()
-    (base / 'proof.json').write_text(proof)
+        refused_before = snapshot_files(); apply(json.dumps(changed_proof), ok=False)
+        assert snapshot_files() == refused_before, 'changed ' + key + ' receipt changed protected state'
+    for key, value in (('terminal', 'term_other'), ('pid', os.getpid())):
+        reset(); changed_proof = json.loads(proof); changed_proof['process'][key] = value
+        refused_before = snapshot_files(); apply(json.dumps(changed_proof), ok=False)
+        assert snapshot_files() == refused_before, 'changed process ' + key + ' receipt changed protected state'
+    reset(); refused_before = snapshot_files(); apply('{malformed', ok=False)
+    assert snapshot_files() == refused_before, 'malformed inline receipt changed protected state'
+    reset(); refused_before = snapshot_files(); apply(json.dumps(['not', 'a', 'receipt']), ok=False)
+    assert snapshot_files() == refused_before, 'non-object inline receipt changed protected state'
+    receipt_file = base / 'proof.json'
+    receipt_file.write_text(proof)
+    reset(); apply(receipt_file)
+    assert (state / 'worker.busy-gen').read_text().strip() == gen
+    print('ok - malformed inline receipts refuse without effects and file receipts remain supported')
     reset(); changed_info = copy.deepcopy(info); changed_info['foreground_processes'][0]['pid'] = os.getpid(); set_transport(i=changed_info)
     check(ok=False)
-    reset(); (state / 'worker.busy-gen').write_text('g-replacement\n'); check(ok=False)
+    reset(); (state / 'worker.busy-gen').write_text('g-replacement\n'); apply(ok=False)
     reset(); (state / 'worker.meta').write_text(meta.replace(gen, 'g-other')); check(ok=False)
     reset(); (state / 'worker.busy-session').unlink(); check(ok=False)
     reset(); (state / 'worker.meta').write_text(meta.replace('spawn_gen=s-original', 'spawn_gen=new-spawn')); apply(ok=False)
@@ -202,7 +220,7 @@ try:
     # Interrupted verification under the busy lock must release it and allow
     # the same original receipt to converge; no new incarnation is created.
     reset(); (base / 'hold').touch()
-    child = subprocess.Popen([str(event), 'recover', str(state), 'worker', '--apply', str(base / 'proof.json')],
+    child = subprocess.Popen([str(event), 'recover', str(state), 'worker', '--apply', proof],
                              env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     for _ in range(100):
         if (base / 'hold.entered').exists(): break

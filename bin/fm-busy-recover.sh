@@ -4,11 +4,12 @@
 # --check --terminal ORIGINAL --pid ORIGINAL_PID prints a provenance receipt without changing
 # records. The caller must obtain ORIGINAL from retained launch evidence,
 # not infer historical ownership from today's pane label or current terminal.
-# --apply RECEIPT repeats every check under the task lease, control, metadata
-# and busy locks before publishing the original busy generation. It acquires
-# the busy lock through fm-wake-lib's stale-owner recovery and hands that exact
-# ownership to the transcript verifier. No trust key,
-# input, process replacement, spawn generation or cleanup authority is created.
+# --apply RECEIPT accepts the unchanged JSON printed by --check or a file
+# containing that JSON, then repeats every check under the task lease, control,
+# metadata and busy locks before publishing the original busy generation.
+# It acquires the busy lock through fm-wake-lib's stale-owner recovery and
+# hands that exact ownership to the transcript verifier. No trust key, input,
+# process replacement, spawn generation or cleanup authority is created.
 # Apply can be repeated with the same receipt. A signal between publications
 # leaves a refusal or the same proven process binding; rerun preflight/apply.
 # Missing provenance, changed terminal/process, conflicting generations and

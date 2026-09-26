@@ -6,12 +6,15 @@
 # Subcommands:
 #
 #   recover <state-dir> <id> --check --terminal <original-terminal-id> --pid <original-pid>
-#   recover <state-dir> <id> --apply <preflight-json-file>
+#   recover <state-dir> <id> --apply <preflight-json-or-file>
 #       Linux-local Herdr Codex/TraeX only. Read-only preflight proves the
 #       original generation in the live TUI argv and task transcript; apply
 #       repeats that proof under lifecycle locks, restores only that generation
 #       and reconciles the preserved launch. fm-busy-recover.sh owns the
 #       procedure. Never grants hook trust, spawns, sends or mints spawn_gen.
+#       Pass the unchanged check output directly: receipt=$(... --check ...);
+#       fm-busy-event.sh recover <state-dir> <id> --apply "$receipt". A file
+#       containing that exact JSON remains accepted for compatibility.
 #
 #   arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E]
 #       Mint a fresh incarnation gen token, write the gen sidecar, and seed
@@ -56,7 +59,7 @@ usage:
   fm-busy-event.sh progress <state-dir> <id> --gen G
   fm-busy-event.sh retire <state-dir> <id> (--gen G | --current-gen)
   fm-busy-event.sh recover <state-dir> <id> --check --terminal <original-terminal-id> --pid <original-pid>
-  fm-busy-event.sh recover <state-dir> <id> --apply <preflight-json-file>
+  fm-busy-event.sh recover <state-dir> <id> --apply <preflight-json-or-file>
 See the header comment for the full contract.
 EOF
   exit 2

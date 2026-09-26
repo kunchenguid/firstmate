@@ -438,7 +438,12 @@ def main():
             print(json.dumps(proof, sort_keys=True))
         else:
             task, value = args
-            expected = json.loads(Path(value).read_text())
+            try:
+                expected = json.loads(value)
+                require(isinstance(expected, dict))
+            except (ValueError, TypeError, Unknown):
+                expected = json.loads(Path(value).read_text())
+                require(isinstance(expected, dict))
             def interrupted(signum, _frame):
                 raise SystemExit(128 + signum)
             signal.signal(signal.SIGTERM, interrupted)
