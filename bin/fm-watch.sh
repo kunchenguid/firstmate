@@ -2728,7 +2728,8 @@ while :; do
   # The bot-manager issue ledger has one owner: the primary home. Its adapter
   # registers a long-polling Notion source once; this watcher cycle only keeps
   # that source registered and reconciles its runner.
-  if [ "$(cd "$FM_HOME" && pwd -P)" = "$(cd "$FM_ROOT" && pwd -P)" ]; then
+  if [ -z "${FM_STATE_OVERRIDE:-}" ] \
+    && [ "$(cd "$FM_HOME" && pwd -P)" = "$(cd "$FM_ROOT" && pwd -P)" ]; then
     if ! FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent-bot-manager.sh" ensure >/dev/null 2>&1; then
       fm_wake_append check bot-manager-autofix-source \
         "check: Bot Manager issue source could not be armed; inspect its registration and adapter" || exit 1
