@@ -34,7 +34,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. An endpoint reading `missing` goes through the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) the reclaim uses before anything is claimed about it, and only Herdr can supply one: proven gone reports `endpoint-gone` (the agent went with it, and the endpoint this verb normally preserves did not survive), a pane that turns out to be there and idle is the ordinary `already-stopped`, one whose agent is back takes the ordinary interrupt-then-exit path. A tmux `missing` always refuses rather than claim a stop it cannot see. |
-| `relaunch` | Replace the running agent with a new one in the same worktree - and, on tmux, the same endpoint; on Herdr, a fresh pane in the endpoint's own workspace - on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint the task's record now names, and that record names the harness that is actually running. |
+| `relaunch` | Replace the running agent with a new one in the same worktree - and the same endpoint, except that a Herdr crewmate or scout gets a fresh pane in that endpoint's own workspace - on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint the task's record now names, and that record names the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Interrupt never rewrites busy state as proof of its own success.
@@ -80,7 +80,7 @@ A relaunch does take one session reference when the endpoint's own runtime recor
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which reuses the recorded worktree instead of creating one, adopts the recorded endpoint when it still exists, clears the previous harness's per-task wiring, and arms a fresh busy generation.
-   On Herdr a surviving endpoint is not adopted as is: a fresh pane is created in the recorded worktree, in the same workspace and under the same label, and the old agent-free pane is closed once the republished record names the replacement.
+   A Herdr crewmate's or scout's surviving endpoint is not adopted as is: a fresh pane is created in the recorded worktree, in the same workspace and under the same label, and the old agent-free pane is closed once the republished record names the replacement.
    Herdr restores and resumes a pane in the directory it was created in, so this is what keeps a relaunched worker in its worktree across a later server restart ([`docs/herdr-backend.md`](herdr-backend.md) "Husks after a server restart").
    When the recorded endpoint is proven gone rather than merely idle or unreachable - which only Herdr can establish - the launch owner creates one fresh endpoint in that same worktree and the republished record rebinds the task to it - see [Reclaiming a task whose endpoint is gone](#reclaiming-a-task-whose-endpoint-is-gone).
 6. **Preserve runtime-bound status authority where supported.**
@@ -99,7 +99,7 @@ The task's worktree, branch, commits, and uncommitted changes all survive that; 
 
 Two endpoint verdicts are agent-free, and both license a relaunch:
 
-- `dead` - the endpoint exists and confidently holds no agent. On tmux it is **adopted**, so the task keeps its exact recorded address; on Herdr its pane is replaced within the same workspace, as step 5 above describes.
+- `dead` - the endpoint exists and confidently holds no agent. It is **adopted**, so the task keeps its exact recorded address, except that a Herdr crewmate's or scout's pane is replaced within the same workspace, as step 5 above describes.
 - gone, **proven** - there is no endpoint and therefore no agent, and it cannot be adopted, so the launch owner **creates one fresh endpoint in the recorded worktree** and the republished record rebinds the task to it.
 
 That proof is its own step, because the classifier's `missing` is not one state: it conflates *the endpoint was destroyed* with *the endpoint is unreachable from here right now*.

@@ -44,8 +44,9 @@
 #   secondmate's charter.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
-#   task's own recorded worktree, reusing its recorded endpoint when that
-#   endpoint still exists, instead of creating either from scratch. It is
+#   task's own recorded worktree, reusing its recorded endpoint (or, for a Herdr
+#   crewmate or scout, its workspace) when that endpoint still exists, instead
+#   of creating either from scratch. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
 #   owns the checkpoint, the progress note, stopping the previous agent, and the
 #   transaction; call fm-control rather than this flag directly unless you are
@@ -58,8 +59,11 @@
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), and clears the previous harness's per-task wiring before arming
 #   the new incarnation. Two verdicts are agent-free: a `dead` endpoint is
-#   ADOPTED as-is, while an endpoint PROVEN gone is RE-CREATED in the recorded
-#   worktree and the republished record rebinds the task to it. That proof is
+#   ADOPTED as-is - except that a Herdr crewmate or scout pane is REPLACED by a
+#   fresh one created in the recorded worktree, in the same workspace, because
+#   Herdr restores a pane where it was created - while an endpoint PROVEN gone
+#   is RE-CREATED in the recorded worktree and the republished record rebinds
+#   the task to it. That proof is
 #   its own step, because a backend's `missing` also covers an endpoint that is
 #   merely unreachable from here - and it is only available on HERDR, which must
 #   still read the recorded pane as gone once that session's server is running
@@ -71,8 +75,9 @@
 #   secondmate whose endpoint is gone is respawned by its own owner
 #   (`--secondmate`, driven by the session-start liveness sweep).
 #   The replacement still never starts outside the copy
-#   holding the work: a Herdr shell that has drifted out of the recorded
-#   worktree is told once to return, and only a shell that will not go refuses.
+#   holding the work: an adopted Herdr secondmate shell that has drifted out of
+#   its recorded home is told once to return, and only a shell that will not go
+#   refuses.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
