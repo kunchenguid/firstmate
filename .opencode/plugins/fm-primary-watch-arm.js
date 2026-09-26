@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 
@@ -105,11 +105,35 @@ function effectivePaths(root) {
   return { root: fmRoot, home: fmHome, state, config };
 }
 
-async function isPrimaryRoot(root, home) {
+// Mirror of fm_root_is_secondmate_home in bin/fm-primary-scope-lib.sh, which
+// owns the marker semantics: a genuine marker force-includes the root.
+function isSecondmateHome(root) {
+  if (!root) return false;
+  const marker = `${root}/.fm-secondmate-home`;
+  try {
+    const stat = lstatSync(marker);
+    if (stat.isSymbolicLink() || !stat.isFile()) return false;
+  } catch {
+    return false;
+  }
+  let content;
+  try {
+    content = readFileSync(marker, "utf8");
+  } catch {
+    return false;
+  }
+  const id = content.split("\n", 1)[0].replace(/\s/g, "");
+  if (!id) return false;
+  return /^[A-Za-z0-9._-]+$/.test(id);
+}
+
+async function isPrimaryRoot(root) {
   if (!root) return false;
   if (!existsSync(`${root}/AGENTS.md`) || !existsSync(`${root}/bin`)) return false;
-  if (existsSync(`${root}/.fm-secondmate-home`)) return false;
-  if (home && home !== root && existsSync(`${home}/.fm-secondmate-home`)) return false;
+  // Mirror of fm_primary_scope_matches: a valid secondmate marker
+  // force-includes a linked secondmate home and skips the git-dir check.
+  // Otherwise only a plain checkout is primary, never a linked worktree.
+  if (isSecondmateHome(root)) return true;
   const gitDir = await runProcess("git", ["-C", root, "rev-parse", "--git-dir"]);
   const commonDir = await runProcess("git", ["-C", root, "rev-parse", "--git-common-dir"]);
   if (gitDir.code !== 0 || commonDir.code !== 0) return false;
@@ -490,7 +514,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
 
 async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (!sessionID) return { status: "skipped", armChild: null };
-  if (!(await isPrimaryRoot(paths.root, paths.home))) return { status: "not-primary", armChild: null };
+  if (!(await isPrimaryRoot(paths.root))) return { status: "not-primary", armChild: null };
   if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
