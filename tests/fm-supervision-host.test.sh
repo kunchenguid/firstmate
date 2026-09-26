@@ -927,7 +927,7 @@ flood_signal() {  # <home>
 }
 
 test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event() {
-  local home cycle old
+  local home cycle old pid watcher
   home=$(make_home away-held-once away)
   echo captain > "$home/stub-mode"
   mkdir -p "$home/projects/held"
@@ -972,6 +972,13 @@ test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event() {
   [ "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list --recent 1 | sed -n 's/.*"task":"\([^"]*\)".*"verdict":"\([a-z]*\)".*/\1 \2/p')" = 'held captain' ] \
     || fail "held: the decision was not recorded as a captain outcome for the held task: $(cat "$home/state/branch-outcomes.jsonl")"
   unset FM_FAKE_CREW_STATE_held FM_INACTIVE_CREW_STATE_BIN FM_INACTIVE_RECONCILE_SECS
+  # Stop the host and its watcher here, so no cadence scan is still writing
+  # into this home while the suite's cleanup removes it.
+  pid=$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")
+  watcher=$(cat "$home/state/.watch.lock/pid")
+  kill -TERM "$pid"
+  wait_until 200 host_exited "$home" || fail "held: the host did not stop on TERM"
+  wait_until 100 sh -c '! kill -0 "$1" 2>/dev/null' _ "$watcher" || fail "held: a stopped host left its watcher running"
   pass "host: an unchanged held outcome reaches the captain once across cadences, and a later decision on the task still does"
 }
 
