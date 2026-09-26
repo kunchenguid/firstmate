@@ -60,7 +60,7 @@ case "${1:-}" in
     printf '╭────╮\n│    │\n╰────╯\n'
     exit 0 ;;
   list-windows)
-    printf 'foreign:%s\n' "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
+    printf 'foreign:%s\nfm-mpf-lane-m8\nfm-lane-ok\n' "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
     exit 0 ;;
 esac
 exit 0
@@ -101,7 +101,7 @@ test_exact_lane_id_send_still_works() {
     "$SEND" mpf-lane-m8 "lost dispatch" >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "exact task id send should succeed when metadata exists"
   got=$(cat "$log")
-  assert_contains "$got" "target=sess:fm-mpf-lane-m8 literal=1 arg=Firstmate instruction waiting" \
+  assert_contains "$got" "target=sess:fm-mpf-lane-m8 literal=1 arg=: Firstmate instruction waiting" \
     "exact id should ring the doorbell at the meta target"
   assert_contains "$got" "target=sess:fm-mpf-lane-m8 literal=0 arg=Enter" "exact id should submit the doorbell with Enter"
   grep -qF 'lost dispatch' "$home/state/mpf-lane-m8.inbox/001.msg" \
@@ -194,7 +194,7 @@ test_healthy_fm_id_send_still_works() {
     "$SEND" fm-lane-ok "hello captain" >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "healthy fm-id send should succeed"
   got=$(cat "$log")
-  assert_contains "$got" "target=sess:fm-lane-ok literal=1 arg=Firstmate instruction waiting" \
+  assert_contains "$got" "target=sess:fm-lane-ok literal=1 arg=: Firstmate instruction waiting" \
     "healthy send should ring the doorbell at the meta target"
   assert_contains "$got" "target=sess:fm-lane-ok literal=0 arg=Enter" "healthy send should submit the doorbell with Enter"
   grep -qF 'hello captain' "$home/state/lane-ok.inbox/001.msg" \

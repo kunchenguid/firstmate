@@ -29,7 +29,12 @@ type BranchOutcomeRecord = {
   summary: string;
 };
 
-const OUTCOME_KEYS = new Set(["seq", "epoch", "task", "wake", "verdict", "summary", "silent"]);
+// The exact key sets the store's own validator accepts, oldest first.
+const OUTCOME_KEY_SETS = [
+  ["epoch", "seq", "summary", "task", "verdict", "wake"],
+  ["epoch", "seq", "silent", "summary", "task", "verdict", "wake"],
+  ["epoch", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "verdict", "wake"],
+].map((keys) => keys.join(","));
 
 function singleLineText(value: string): string {
   return value.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
@@ -45,16 +50,19 @@ function parseOutcomeRecord(line: string): BranchOutcomeRecord | undefined {
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
   const record = parsed as Record<string, unknown>;
   const hasSilent = Object.prototype.hasOwnProperty.call(record, "silent");
-  const keys = Object.keys(record);
-  if (keys.length !== (hasSilent ? 7 : 6) || keys.some((key) => !OUTCOME_KEYS.has(key))) {
-    return undefined;
-  }
+  const hasStatus = Object.prototype.hasOwnProperty.call(record, "statusEndpoint");
+  if (!OUTCOME_KEY_SETS.includes(Object.keys(record).sort().join(","))) return undefined;
   if (typeof record.seq !== "number" || !Number.isInteger(record.seq) || record.seq < 1) return undefined;
   if (typeof record.epoch !== "number" || !Number.isInteger(record.epoch) || record.epoch < 0) return undefined;
   if (typeof record.task !== "string" || typeof record.wake !== "string") return undefined;
   if (typeof record.summary !== "string") return undefined;
   if (record.verdict !== "routine" && record.verdict !== "captain") return undefined;
   if (hasSilent && typeof record.silent !== "boolean") return undefined;
+  if (hasStatus) {
+    const endpoint = record.statusEndpoint;
+    if (typeof endpoint !== "number" || !Number.isInteger(endpoint) || endpoint < 0) return undefined;
+    if (typeof record.statusIdent !== "string" || /[\t\n]/.test(record.statusIdent)) return undefined;
+  }
   return { task: record.task, verdict: record.verdict, summary: record.summary };
 }
 

@@ -18,9 +18,9 @@
 #                                      pruned)
 #
 # Clear a legacy link without posting:
-#   fm-x-followup.sh --clear <task-id>
+#   fm-x-followup.sh --clear <task-id> [--expect-request <request-id>]
 #     idempotently removes only the X follow-up metadata for a typed terminal
-#     outcome.
+#     outcome. With --expect-request, a present link must match that request.
 #
 # Post (after composing the reply to a file or stdin):
 #   fm-x-followup.sh <task-id> [--image <path>] [--final] --text-file <path>
@@ -44,6 +44,9 @@
 #     Window or cap already exhausted: clears the link, posts nothing, exit 0
 #       (silent skip).
 #     Not linked: nothing to do, exit 0.
+#
+# An unknown dash-leading argument, a dash-leading task id, or more than one
+# text source is a usage error before the link is read or changed.
 #
 # --final marks this as the outcome reply: it always clears the link after a
 # successful post, even if follow-ups remain under the cap. Use it for the
@@ -72,22 +75,26 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
-  echo "usage: fm-x-followup.sh --check <task-id> | --clear <task-id> | <task-id> [--image <path>] [--final] --text-file <path> | <task-id> [--image <path>] [--final] -" >&2
+  echo "usage: fm-x-followup.sh --check <task-id> | --clear <task-id> [--expect-request <request-id>] | <task-id> [--image <path>] [--final] --text-file <path> | <task-id> [--image <path>] [--final] -" >&2
 }
 
 help() {
   cat <<'EOF'
 usage: fm-x-followup.sh --check <task-id>
-       fm-x-followup.sh --clear <task-id>
+       fm-x-followup.sh --clear <task-id> [--expect-request <request-id>]
        fm-x-followup.sh <task-id> [--image <path>] [--final] --text-file <path>
        fm-x-followup.sh <task-id> [--image <path>] [--final] -
 
 Post a completion follow-up (up to 3 per link, within a 7-day window) for an
 X-mode-linked task and manage the link's follow-up counter.
+Unknown options and extra text arguments are refused before checking the link.
+Text beginning with '-' must be supplied through --text-file or stdin.
 
 Options:
   --check          Print the request_id when a follow-up is due.
   --clear          Clear only the X follow-up link; never post.
+  --expect-request <request-id>
+                   With --clear, require a present link to match this request.
   --image <path>   Attach one local image file; threaded replies attach it to the opener tweet or message.
   --final          Clear the link after this post regardless of the remaining count.
   --text-file <path>
@@ -109,27 +116,41 @@ esac
 [ "$MAX_COUNT" -ge 1 ] 2>/dev/null || MAX_COUNT=3
 
 # Parse mode: --check is detection-only; otherwise it is a post, with the text
-# source (--text-file <path> | -) deferred until after the link/window/cap
-# check so a missing or exhausted link never consumes stdin or posts.
+# source (--text-file <path> | -) validated before the link/window/cap
+# check; the text itself is read only when the link is eligible to post.
 MODE=post
 case "${1:-}" in
   --help|-h) help; exit 0 ;;
 esac
 
 FINAL=0
+EXPECT_REQUEST_SET=0
+EXPECT_REQUEST=
 if [ "${1:-}" = --clear ]; then
   MODE=clear
   ID=${2:-}
-  if [ -z "$ID" ] || [ "$#" -gt 2 ]; then usage; exit 2; fi
+  if [ "$#" -eq 4 ] && [ "${3:-}" = --expect-request ]; then
+    EXPECT_REQUEST_SET=1
+    EXPECT_REQUEST=${4-}
+    case "$EXPECT_REQUEST" in
+      ''|-*) usage; exit 2 ;;
+    esac
+  elif [ "$#" -ne 2 ]; then
+    usage
+    exit 2
+  fi
+  case "$ID" in ''|-*) usage; exit 2 ;; esac
 elif [ "${1:-}" = --check ]; then
   MODE=check
   ID=${2:-}
-  if [ -z "$ID" ] || [ "$#" -gt 2 ]; then usage; exit 2; fi
+  if [ "$#" -gt 2 ]; then usage; exit 2; fi
+  case "$ID" in ''|-*) usage; exit 2 ;; esac
 else
   ID=${1:-}
-  if [ -z "$ID" ]; then usage; exit 2; fi
+  case "$ID" in ''|-*) usage; exit 2 ;; esac
   shift
   TS_ARGS=()
+  TEXT_SOURCES=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --final)
@@ -138,18 +159,32 @@ else
       --image)
         TS_ARGS+=("$1")
         shift
-        if [ "$#" -lt 1 ] || [ -z "$1" ]; then
-          echo "fm-x-followup: missing --image path" >&2
-          usage
-          exit 2
-        fi
+        case "${1:-}" in
+          ''|-*) echo "fm-x-followup: missing --image path" >&2; usage; exit 2 ;;
+        esac
         TS_ARGS+=("$1")
         ;;
-      *) TS_ARGS+=("$1") ;;
+      --text-file)
+        TS_ARGS+=("$1")
+        shift
+        case "${1:-}" in
+          ''|-*) echo "fm-x-followup: missing --text-file path" >&2; usage; exit 2 ;;
+        esac
+        TS_ARGS+=("$1")
+        TEXT_SOURCES=$((TEXT_SOURCES + 1))
+        ;;
+      -) TS_ARGS+=("$1"); TEXT_SOURCES=$((TEXT_SOURCES + 1)) ;;
+      -*) echo "fm-x-followup: unknown option '$1' (follow-up text comes only from --text-file or stdin)" >&2; usage; exit 2 ;;
+      *) TS_ARGS+=("$1"); TEXT_SOURCES=$((TEXT_SOURCES + 1)) ;;
     esac
     shift
   done
-  if [ "${#TS_ARGS[@]}" -lt 1 ]; then usage; exit 2; fi
+  if [ "$TEXT_SOURCES" -gt 1 ]; then
+    echo "fm-x-followup: unexpected extra arguments (exactly one text source: --text-file <path> or -)" >&2
+    usage
+    exit 2
+  fi
+  if [ "$TEXT_SOURCES" -lt 1 ]; then usage; exit 2; fi
 fi
 
 case "$ID" in
@@ -157,9 +192,18 @@ case "$ID" in
 esac
 
 META="$STATE/$ID.meta"
+if [ -e "$META" ] || [ -L "$META" ]; then
+  fm_backlog_record_present "$META" "task record" "$STATE" \
+    || { echo "fm-x-followup: unsafe task record in state/$ID.meta" >&2; exit 1; }
+fi
 if [ "$MODE" = clear ]; then
-  fmx_meta_link_clear "$META" \
-    || { echo "fm-x-followup: could not clear the link in state/$ID.meta" >&2; exit 1; }
+  if [ "$EXPECT_REQUEST_SET" -eq 1 ]; then
+    fmx_meta_link_clear "$META" "$EXPECT_REQUEST" \
+      || { echo "fm-x-followup: could not clear the link in state/$ID.meta" >&2; exit 1; }
+  else
+    fmx_meta_link_clear "$META" \
+      || { echo "fm-x-followup: could not clear the link in state/$ID.meta" >&2; exit 1; }
+  fi
   printf '%s\n' "$ID"
   exit 0
 fi

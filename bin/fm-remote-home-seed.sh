@@ -17,7 +17,8 @@
 # this home already has projects/<project>, whose origin is then read instead.
 # bin/fm-project-origin-lib.sh owns which URLs are accepted, and this home's
 # data/projects.md still owns the project's registered delivery mode, so an
-# unregistered or local-only project is refused rather than provisioned.
+# unregistered or local-only project, or one whose registry entry
+# bin/fm-project-mode.sh refuses, is refused rather than provisioned.
 # Seeding writes nothing under projects/ and needs no fleet sync first.
 #
 # Known provisioning failure rolls the registry back. SSH status 255 preserves
@@ -147,20 +148,32 @@ REG_EXISTED=0
 [ -f "$REG" ] && { cp "$REG" "$TMP/registry.before"; REG_EXISTED=1; }
 
 # Keep the parent charter as its durable source, but publish a remote copy whose
-# status path is the remote append-only relay log rather than a local Mac path.
+# status path is the remote append-only relay log and whose steering-inbox path
+# is the host-local parent-route inbox the remote control plane writes to,
+# rather than local Mac paths. The two parents differ only by suffix, so the
+# two whole-string rewrites are order-independent and every mention - bare
+# path, /*.msg listing, and handled/ acknowledgement - lands host-local.
+# Each rewrite stays its own plain assignment: on stock macOS bash a quoted
+# substitution nested inside a double-quoted argument leaks literal quotes
+# into the replacement text.
 PARENT_STATUS="$STATE/$ID.status"
 REMOTE_STATUS="$REMOTE_HOME/state/parent-replies.status"
+PARENT_INBOX="$STATE/$ID.inbox"
+REMOTE_INBOX="$REMOTE_HOME/state/parent-route/$ID.inbox"
 while IFS= read -r line || [ -n "$line" ]; do
-  printf '%s\n' "${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}"
+  line=${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}
+  line=${line//"$PARENT_INBOX"/"$REMOTE_INBOX"}
+  printf '%s\n' "$line"
 done < "$BRIEF" > "$TMP/charter.remote"
 
 PROJECTS_CSV=
 : > "$TMP/project.records"
 PROJECT_INDEX=0
-for project in "${PROJECT_NAMES[@]}"; do
+for project in "${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}"; do
   ORIGIN=${PROJECT_ORIGINS[$PROJECT_INDEX]}
   PROJECT_INDEX=$((PROJECT_INDEX + 1))
-  MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project")
+  MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project") ||
+    die "project $project does not resolve to a delivery posture (see the refusal above)"
   read -r MODE _ <<EOF
 $MODE_LINE
 EOF
@@ -242,7 +255,7 @@ if [ "$PREFLIGHT_RC" -ne 0 ]; then
 fi
 
 set +e
-PROVISION_OUT=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-home-provision.sh < "$TMP/manifest" 2>&1)
+PROVISION_OUT=$("$SCRIPT_DIR/fm-on.sh" --stdin "$ID" fm-remote-home-provision.sh < "$TMP/manifest" 2>&1)
 PROVISION_RC=$?
 set -e
 if [ "$PROVISION_RC" -ne 0 ]; then

@@ -16,7 +16,11 @@
 # The --text-file / stdin forms exist so a caller never has to inline reply text
 # (which may be influenced by a public mention) into a shell command, where shell
 # expansion or quote-breakage could bite. fmx-respond uses them; the positional
-# <text> form is kept for back-compat and tests.
+# <text> form is kept for back-compat and tests. Argument parsing is strict so a
+# mistyped flag can never become the posted text: an unknown dash-leading
+# argument, a dash-leading request_id, an option value that starts with '-', or a
+# surplus positional is a usage error before anything is recorded or posted, and
+# reply text that starts with '-' is only accepted via --text-file or stdin.
 #
 # Optional --image <path> attaches one local image file to the answer or followup
 # POST body as {media_type,data_base64}. Supported extension mapping includes
@@ -132,6 +136,10 @@ usage: fm-x-reply.sh <request_id> [--followup] [--image <path>] [--receipt-file 
        fm-x-reply.sh <request_id> [--followup] [--image <path>] [--receipt-file <path>] -
 
 Post a public-safe X-mode answer to the relay, or a completion follow-up with --followup.
+Unknown options and extra text arguments are refused before posting.
+Text beginning with '-' must be supplied through --text-file or stdin.
+Use fm-x-followup.sh <task-id> --final for a final linked-task outcome;
+--final is not an fm-x-reply.sh option.
 
 Options:
   --followup       POST to /connector/followup instead of /connector/answer.
@@ -150,10 +158,10 @@ case "${1:-}" in
 esac
 
 REQ=${1:-}
-if [ -z "$REQ" ]; then
-  usage
-  exit 2
-fi
+case "$REQ" in
+  '') usage; exit 2 ;;
+  -*) echo "fm-x-reply: unknown option '$REQ'" >&2; usage; exit 2 ;;
+esac
 shift
 
 # --followup selects the relay's /connector/followup endpoint instead of
@@ -169,22 +177,27 @@ while [ "$#" -gt 0 ]; do
     --followup) FOLLOWUP=1 ;;
     --image)
       shift
-      if [ "$#" -lt 1 ] || [ -z "$1" ]; then
-        echo "fm-x-reply: missing --image path" >&2
-        usage
-        exit 2
-      fi
+      case "${1:-}" in
+        ''|-*) echo "fm-x-reply: missing --image path" >&2; usage; exit 2 ;;
+      esac
       IMAGE_PATH=$1
       ;;
     --receipt-file)
       shift
-      if [ "$#" -lt 1 ] || [ -z "$1" ]; then
-        echo "fm-x-reply: missing --receipt-file path" >&2
-        usage
-        exit 2
-      fi
+      case "${1:-}" in
+        ''|-*) echo "fm-x-reply: missing --receipt-file path" >&2; usage; exit 2 ;;
+      esac
       RECEIPT_FILE=$1
       ;;
+    --text-file)
+      shift
+      case "${1:-}" in
+        ''|-*) echo "fm-x-reply: missing --text-file path" >&2; usage; exit 2 ;;
+      esac
+      ARGS+=(--text-file "$1")
+      ;;
+    -) ARGS+=("$1") ;;
+    -*) echo "fm-x-reply: unknown option '$1' (reply text starting with '-' needs --text-file or stdin)" >&2; usage; exit 2 ;;
     *) ARGS+=("$1") ;;
   esac
   shift
@@ -197,16 +210,26 @@ set -- "${ARGS[@]}"
 
 case "$1" in
   --text-file)
-    if [ "$#" -lt 2 ]; then
+    if [ "$#" -ne 2 ]; then
       echo "usage: fm-x-reply.sh <request_id> [--followup] [--image <path>] --text-file <path>" >&2
       exit 2
     fi
     TEXT=$(cat -- "$2") || { echo "fm-x-reply: cannot read text file: $2" >&2; exit 1; }
     ;;
   -)
+    if [ "$#" -ne 1 ]; then
+      echo "fm-x-reply: unexpected extra arguments after '-'" >&2
+      usage
+      exit 2
+    fi
     TEXT=$(cat)
     ;;
   *)
+    if [ "$#" -ne 1 ]; then
+      echo "fm-x-reply: unexpected extra arguments" >&2
+      usage
+      exit 2
+    fi
     TEXT=$1
     ;;
 esac

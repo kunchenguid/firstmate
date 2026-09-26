@@ -145,7 +145,7 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy")
   if [ "$verdict" = need-identity ]; then
     if ! identity=$(fm_tmux_composer_identity "$target") || [ -z "$identity" ]; then
-      identity=probe-absent
+      identity='probe-absent'
     fi
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy" "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown
@@ -279,13 +279,19 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state err
   # The turn-started baseline must predate our own typing: a pane already
   # busy before the text lands can turn "busy" for reasons unrelated to our
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
   baseline_state=$(fm_pane_busy_state "$target")
   [ "$baseline_state" = idle ] && baseline_idle=1
-  tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
+  # A failed literal send replays tmux's stderr (for example "command too
+  # long") so the caller can log why nothing was typed.
+  if ! err=$(tmux send-keys -t "$target" -l "$text" 2>&1 >/dev/null); then
+    [ -z "$err" ] || printf '%s\n' "$err" >&2
+    printf 'send-failed'
+    return 0
+  fi
   sleep "$settle"
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle"
 }

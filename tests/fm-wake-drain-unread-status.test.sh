@@ -158,6 +158,67 @@ test_pending_reply_resolution_surfaces_once() {
   pass "a pending-reply resolution buried under a later note surfaces once and closes OPEN DECISIONS"
 }
 
+# The watcher's pending-reply close goes through the self-announced append, so
+# it records its bytes as this home's own and never wakes. The drain must still
+# present that reserved-key resolution in UNREAD STATUS, its only guaranteed
+# presentation.
+test_self_announced_pending_reply_close_still_surfaces() {
+  local dir state out status corr
+  dir=$(make_case self-announced-pending-reply)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/task6.status"
+
+  run_pending_reply() {
+    FM_STATE_OVERRIDE="$state" FM_PENDING_REPLY_NOW=5000 bash -c '
+      . "$1"; . "$2"; shift 2; "$@"
+    ' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$ROOT/bin/fm-wake-lib.sh" "$@"
+  }
+
+  corr=$(run_pending_reply fm_pending_reply_create "$dir" "$state" task6 "ship it") \
+    || fail "could not create the pending-reply record"
+  run_pending_reply fm_pending_reply_mark_delivered "$state" "$corr" \
+    || fail "could not mark the pending-reply request delivered"
+  FM_STATE_OVERRIDE="$state" FM_PENDING_REPLY_NOW=5000 bash -c '
+    . "$1"; rec=$(fm_pending_reply_path "$2" "$3")
+    fm_pending_reply_set "$rec" phase escalated && fm_pending_reply_set "$rec" escalated_epoch 4950
+  ' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$state" "$corr" \
+    || fail "could not mark the pending-reply request escalated"
+
+  printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=task6 pending-reply-id=%s request=ship it\n' \
+    "$corr" "$corr" > "$status"
+  prime_status_seen "$state" "$status" || fail "could not mark the status file surfaced"
+  append_wake "$state" signal task6.status "signal: task6.status" \
+    || fail "queueing the pending-reply escalation signal failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null || fail "drain of the escalation failed"
+  printf 'done [corr=%s]: shipped after all\n' "$corr" >> "$status"
+  prime_status_seen "$state" "$status" || fail "could not mark the status file surfaced"
+  append_wake "$state" signal task6.status "signal: task6.status" \
+    || fail "queueing the delayed reply signal failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null || fail "drain of the delayed reply failed"
+
+  run_pending_reply fm_pending_reply_try_resolve "$state" "$corr" \
+    || fail "the delayed reply did not resolve the pending-reply record"
+  sed -E 's/ \[at=[0-9]+\]//' "$status" \
+    | grep -F "resolved [key=pending-reply-$corr]: pending-reply-resolved:" >/dev/null \
+    || fail "the resolve did not append the escalation close: $(cat "$status")"
+  [ -s "$state/.task6.home-appends" ] \
+    || fail "the escalation close did not go through the self-announced append"
+  run_pending_reply fm_wake_signal_seen_current "$state" "$status" \
+    || fail "the self-announced escalation close was left to re-wake this home"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain after the escalation close failed"
+  sed -E 's/ \[at=[0-9]+\]//' "$out" \
+    | grep -F "task6 resolved [key=pending-reply-$corr]: pending-reply-resolved: task=task6 pending-reply-id=$corr" >/dev/null \
+    || fail "the self-announced pending-reply resolution was hidden from UNREAD STATUS: $(cat "$out")"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "second drain after the escalation close failed"
+  if grep -F 'pending-reply-resolved:' "$out" >/dev/null; then
+    fail "an already-presented self-announced resolution was replayed: $(cat "$out")"
+  fi
+  pass "a self-announced pending-reply close does not wake yet still surfaces once in UNREAD STATUS"
+}
+
 test_unread_output_over_cap_remains_recoverable() {
   local dir state out status i payload
   dir=$(make_case unread-over-cap)
@@ -212,7 +273,7 @@ test_snapshot_does_not_ack_a_later_append() {
 }
 
 test_retired_task_id_starts_new_status_unread() {
-  local dir state out
+  local dir state out offset event old_ident
   dir=$(make_case retired-task-reuse)
   state="$dir/state"
   out="$dir/drain.out"
@@ -224,9 +285,40 @@ test_retired_task_id_starts_new_status_unread() {
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1/bin/fm-wake-lib.sh"
     . "$1/bin/fm-classify-lib.sh"
-    status_retire_presentation_task "$STATE" reused
-  ' _ "$ROOT" || fail "retiring the reused task presentation state failed"
-  printf 'note: first event from reused task id\n' > "$state/reused.status"
+    _fm_open_decisions_file_ident "$STATE/reused.status" > "$2"
+    printf "40@$(cat "$2")" > "$(status_signal_seen_marker_path "$STATE" reused)"
+    printf "40@$(cat "$2")" > "$(status_heartbeat_seen_marker_path "$STATE" reused)"
+    printf "40@$(cat "$2")" > "$(status_daemon_seen_marker_path "$STATE" reused)"
+    ledger=$(status_home_appends_path "$STATE/reused.status")
+    status_home_appends_record "$STATE/reused.status" 0 12 || exit 1
+    [ -f "$ledger" ] || exit 1
+    mkdir -p "$ledger.lock" || exit 1
+    printf "%s\n" 2147483646 > "$ledger.lock/pid" || exit 1
+    status_retire_presentation_task "$STATE" reused || exit 1
+    for marker in \
+      "$(status_signal_seen_marker_path "$STATE" reused)" \
+      "$(status_heartbeat_seen_marker_path "$STATE" reused)" \
+      "$(status_daemon_seen_marker_path "$STATE" reused)" \
+      "$ledger" "$ledger.lock"; do
+      [ ! -e "$marker" ] && [ ! -L "$marker" ] || exit 1
+    done
+  ' _ "$ROOT" "$dir/old-ident" || fail "retiring the reused task presentation state failed"
+  printf 'blocked: release host unavailable\nworking: routine padding after the reused task started again\nnote: first event from reused task id\n' \
+    > "$state/reused.status"
+  old_ident=$(cat "$dir/old-ident")
+  printf '40@%s' "$old_ident" > "$state/.seen-reused_status"
+  offset=$(bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-classify-lib.sh"
+    fm_wake_signal_seen_size "$2" "$2/reused.status"
+  ' _ "$ROOT" "$state")
+  [ "$offset" = 0 ] || fail "a retired file identity restored a stale offset after task reuse"
+  event=$(bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_span_first_actionable "$2/reused.status" "$3"
+  ' _ "$ROOT" "$state" "$offset")
+  [ "$event" = 'blocked: release host unavailable' ] \
+    || fail "retired supervision offsets hid the replacement task blocker: $event"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "drain failed after reusing a retired task id"
@@ -236,6 +328,37 @@ test_retired_task_id_starts_new_status_unread() {
     fail "retiring one task replayed a neighboring task's handled history: $(cat "$out")"
   fi
   pass "a reused task id starts its replacement status log unread at byte zero"
+}
+
+test_weak_identity_still_presents_and_advances() {
+  local dir state out second reader
+  dir=$(make_case weak-identity); state="$dir/state"
+  out="$dir/first.out"; second="$dir/second.out"; reader="$dir/identity-reader"
+  printf '#!/usr/bin/env bash\nprintf "weak:7:8"\n' > "$reader"; chmod +x "$reader"
+  printf 'needs-decision [key=release]: choose target\nnote: release context attached\n' > "$state/weak.status"
+  FM_STATUS_IDENTITY_READER="$reader" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed with the platform-strength fallback identity"
+  grep -F 'weak [key=release] needs-decision: choose target' "$out" >/dev/null \
+    || fail "weak identity omitted OPEN DECISIONS: $(cat "$out")"
+  grep -F 'weak note: release context attached' "$out" >/dev/null \
+    || fail "weak identity omitted unread status: $(cat "$out")"
+  FM_STATUS_IDENTITY_READER="$reader" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$second" \
+    || fail "second drain failed with the platform-strength fallback identity"
+  grep -F 'release context attached' "$second" >/dev/null \
+    && fail "weak identity did not advance the presented-status cursor"
+  pass "fallback identity still presents and advances status state"
+}
+
+test_snapshot_failure_is_visible() {
+  local dir state out reader
+  dir=$(make_case snapshot-failure); state="$dir/state"; out="$dir/drain.out"; reader="$dir/identity-reader"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$reader"; chmod +x "$reader"
+  printf 'needs-decision: choose target\n' > "$state/fail.status"
+  FM_STATUS_IDENTITY_READER="$reader" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain aborted instead of reporting its incomplete status surface"
+  grep -F 'STATUS PRESENTATION INCOMPLETE:' "$out" >/dev/null \
+    || fail "snapshot failure produced a silently incomplete drain: $(cat "$out")"
+  pass "snapshot failures are reported visibly"
 }
 
 test_open_decisions_fold_is_unchanged() {
@@ -277,7 +400,8 @@ test_empty_queue_does_not_swallow_later_signal_annotation() {
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "empty-queue drain failed before delayed signal publication"
-  [ ! -s "$out" ] || fail "routine status unexpectedly broke the silent empty-queue contract: $(cat "$out")"
+  grep -F 'task-delayed done: shipped before watcher published signal' "$out" >/dev/null \
+    || fail "the main-drain loss backstop did not surface the terminal event before its delayed signal: $(cat "$out")"
 
   append_wake "$state" signal task-delayed.status "signal: task-delayed.status" \
     || fail "publishing the delayed status signal failed"
@@ -285,27 +409,36 @@ test_empty_queue_does_not_swallow_later_signal_annotation() {
     || fail "drain failed after delayed signal publication"
   grep -F 'latest wake-EVENT observed at drain, not current state: task-delayed.status: done: shipped before watcher published signal' "$out" >/dev/null \
     || fail "the empty-queue drain acknowledged an event before its signal annotation: $(cat "$out")"
-  pass "an empty-queue drain preserves routine status for a later signal annotation"
+  pass "an empty-queue backstop presentation still preserves the status for its later signal annotation"
 }
 
-test_routine_working_lines_stay_silent_on_the_empty_queue() {
-  local dir state out
+test_routine_working_and_covered_done_stay_silent_on_the_empty_queue() {
+  local dir state out old
   dir=$(make_case silent-working)
   state="$dir/state"
   out="$dir/drain.out"
   printf 'working: on it\n' > "$state/task7.status"
   printf 'done: shipped clean\n' > "$state/task8.status"
+  old=$(( $(date +%s) - 20 ))
+  perl -e 'utime($ARGV[0], $ARGV[0], $ARGV[1]) or exit 1' "$old" "$state/task8.status" \
+    || fail "could not age the covered done fixture"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task8 --verdict captain --summary 'shipped clean was handled' >/dev/null \
+    || fail "could not record the newer branch outcome fixture"
 
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with only routine working/done lines"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with routine working and covered done lines"
 
   if grep -F 'UNREAD STATUS' "$out" >/dev/null; then
-    fail "routine working/done lines printed an UNREAD STATUS section: $(cat "$out")"
+    fail "routine working/covered done lines printed an UNREAD STATUS section: $(cat "$out")"
+  fi
+  if grep -F 'STATUS OUTCOME BACKSTOP' "$out" >/dev/null; then
+    fail "a covered done line printed the outcome backstop: $(cat "$out")"
   fi
   if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
-    fail "routine working/done lines printed OPEN DECISIONS: $(cat "$out")"
+    fail "routine working/covered done lines printed OPEN DECISIONS: $(cat "$out")"
   fi
-  [ ! -s "$out" ] || fail "the empty-queue routine case was not silent: $(cat "$out")"
-  pass "routine working/done lines still print nothing on an empty-queue drain"
+  [ ! -s "$out" ] || fail "the empty-queue covered routine case was not silent: $(cat "$out")"
+  pass "routine working and branch-covered done lines print nothing on an empty-queue drain"
 }
 
 test_incident_note_answer_buried_under_routine_note_surfaces_both
@@ -313,9 +446,12 @@ test_already_presented_notes_are_not_replayed
 test_brand_new_note_after_presentation_is_surfaced
 test_signal_annotation_surfaces_every_unread_note_not_only_the_newest
 test_pending_reply_resolution_surfaces_once
+test_self_announced_pending_reply_close_still_surfaces
 test_unread_output_over_cap_remains_recoverable
 test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread
+test_weak_identity_still_presents_and_advances
+test_snapshot_failure_is_visible
 test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation
-test_routine_working_lines_stay_silent_on_the_empty_queue
+test_routine_working_and_covered_done_stay_silent_on_the_empty_queue

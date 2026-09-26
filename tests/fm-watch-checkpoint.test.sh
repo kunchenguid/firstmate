@@ -51,9 +51,6 @@ test_registered_check_uses_preserved_watcher_environment() {
   home=$(make_home check-env)
   out="$home/out.txt"
   err="$home/err.txt"
-  printf '%s\n' fm-pr-check-migration-scan-v1 > "$home/state/.pr-check-migration-scan-v1"
-  printf '%s\n' fm-pr-check-migration-v1 > "$home/state/.pr-check-migration-v1"
-  chmod 0600 "$home/state/.pr-check-migration-scan-v1" "$home/state/.pr-check-migration-v1"
   cat > "$home/state/env-check.check.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'env check fired with FM_CHECK_INTERVAL=%s\n' "${FM_CHECK_INTERVAL:-missing}"
@@ -74,9 +71,6 @@ test_existing_singleton_watcher_is_not_success() {
   home=$(make_home singleton)
   out="$home/out.txt"
   err="$home/err.txt"
-  printf '%s\n' fm-pr-check-migration-scan-v1 > "$home/state/.pr-check-migration-scan-v1"
-  printf '%s\n' fm-pr-check-migration-v1 > "$home/state/.pr-check-migration-v1"
-  chmod 0600 "$home/state/.pr-check-migration-scan-v1" "$home/state/.pr-check-migration-v1"
   mkdir "$home/state/.watch.lock"
   printf '%s\n' "$$" > "$home/state/.watch.lock/pid"
   status=0
@@ -87,7 +81,101 @@ test_existing_singleton_watcher_is_not_success() {
   pass "checkpoint rejects an existing watcher singleton as unowned"
 }
 
+# A home opted into the supervision host whose checkpoint runs a stub host in
+# a fixture code root: the stub records the bound it was given, then closes
+# the way $FM_HOME/host-kind says.
+make_host_home() {  # <name>
+  local home
+  home=$(make_home "$1")
+  mkdir -p "$home/root/bin"
+  cp "$CHECKPOINT" "$home/root/bin/fm-watch-checkpoint.sh"
+  cat > "$home/root/bin/fm-supervision-host.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'args=%s\nprimary=%s\npark=%s\nlimit=%s\n' "$*" "${FM_SUPERVISION_HOST_PRIMARY:-}" \
+  "${FM_SUPERVISION_HOST_PARK_SECONDS:-}" "${FM_SUPERVISION_HOST_PARK_LIMIT:-}" > "$FM_HOME/host-env"
+case "$(cat "$FM_HOME/host-kind")" in
+  boundary) printf 'supervision-host: cycle boundary - fixture\n' ;;
+  handback)
+    printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+    printf 'signal: demo.status\nsupervision-host: the away session could not take this wake: fixture; this wake is yours\n'
+    ;;
+  stood-down) printf 'supervision-host stood down: this session no longer owns supervision\n' ;;
+esac
+SH
+  chmod +x "$home/root/bin/fm-watch-checkpoint.sh" "$home/root/bin/fm-supervision-host.sh"
+  : > "$home/config/supervision-host"
+  printf '%s\n' "$home"
+}
+
+run_host_checkpoint() {  # <home> <kind> [checkpoint args...]; sets STATUS
+  local home=$1
+  printf '%s\n' "$2" > "$home/host-kind"
+  shift 2
+  STATUS=0
+  FM_HOME="$home" "$home/root/bin/fm-watch-checkpoint.sh" "$@" >"$home/out.txt" 2>"$home/err.txt" || STATUS=$?
+}
+
+test_host_checkpoint_bounds_the_park_by_posture() {
+  local home
+  home=$(make_host_home host-bound)
+  run_host_checkpoint "$home" boundary --seconds 5
+  expect_code 124 "$STATUS" "a host park that reached its bound is a quiet checkpoint"
+  assert_contains "$(cat "$home/out.txt")" "checkpoint: no actionable wake within 5s" "the boundary must read as the ordinary quiet line"
+  assert_contains "$(cat "$home/host-env")" $'args=park\nprimary=codex\npark=5\nlimit=1235' \
+    "attended, the host must park for the checkpoint's own bound with the codex pin and a turn limit past it"
+  : > "$home/state/.afk-contract"
+  run_host_checkpoint "$home" boundary --seconds 5
+  expect_code 124 "$STATUS" "an away park that reached its bound is a quiet checkpoint"
+  assert_contains "$(cat "$home/out.txt")" "checkpoint: no actionable wake within 3600s" "away, the bound must be raised"
+  assert_contains "$(cat "$home/host-env")" 'park=3600' "away, the host must park for the away bound"
+  FM_CODEX_WATCH_CHECKPOINT_AWAY=900 run_host_checkpoint "$home" boundary --seconds 5
+  assert_contains "$(cat "$home/host-env")" 'park=900' "the away bound must be configurable"
+  FM_CODEX_WATCH_CHECKPOINT_AWAY=900 run_host_checkpoint "$home" boundary --seconds 1000
+  assert_contains "$(cat "$home/host-env")" 'park=1000' "the away bound must never shorten a longer checkpoint"
+  pass "checkpoint: an opted-in home runs the host for the checkpoint's bound, raised while away"
+}
+
+test_host_checkpoint_passes_a_handback_and_reports_a_stand_down() {
+  local home
+  home=$(make_host_home host-handback)
+  run_host_checkpoint "$home" handback --seconds 5
+  expect_code 0 "$STATUS" "a handed-back wake is an actionable checkpoint"
+  assert_contains "$(cat "$home/out.txt")" $'signal: demo.status\nsupervision-host: the away session could not take this wake' \
+    "the wake and its host line must pass through"
+  assert_not_contains "$(cat "$home/out.txt")" "watcher: started" "the host's cycle status is not part of the wake"
+  run_host_checkpoint "$home" stood-down --seconds 5
+  expect_code 1 "$STATUS" "a host that stood down is a failed checkpoint"
+  assert_contains "$(cat "$home/out.txt")" "supervision-host stood down" "the stand-down must be shown"
+  pass "checkpoint: a handed-back wake passes through, and a host stand-down is a failure"
+}
+
+# The real host under a fake Codex harness that holds the home's session lock.
+# shellcheck disable=SC2016 # the fake harness's script expands in its own shell
+test_real_host_checkpoint_ends_quietly_at_its_bound() {
+  local home fakebin status
+  home=$(make_home host-real)
+  : > "$home/config/supervision-host"
+  fakebin="$TMP_ROOT/host-real-bin"
+  mkdir -p "$fakebin"
+  ln -s /bin/bash "$fakebin/codex"
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$fakebin/codex" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    "$0" --seconds 4
+  ' "$CHECKPOINT" >"$home/out.txt" 2>"$home/err.txt" || status=$?
+  expect_code 124 "$status" "a quiet host checkpoint: $(cat "$home/out.txt" "$home/err.txt")"
+  assert_contains "$(cat "$home/out.txt")" "checkpoint: no actionable wake within 4s" "the real host's boundary must read as the quiet line"
+  assert_grep '	boundary	' "$home/state/.supervision-host.log" "the host must have ended its own park"
+  if [ -e "$home/state/.watch.lock/pid" ] && kill -0 "$(cat "$home/state/.watch.lock/pid")" 2>/dev/null; then
+    fail "a host checkpoint left its watcher running"
+  fi
+  pass "checkpoint: the real host ends its park at the checkpoint bound as a quiet checkpoint"
+}
+
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success
+test_host_checkpoint_bounds_the_park_by_posture
+test_host_checkpoint_passes_a_handback_and_reports_a_stand_down
+test_real_host_checkpoint_ends_quietly_at_its_bound

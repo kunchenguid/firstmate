@@ -73,8 +73,16 @@ test_fm_home_parameterization() {
   brief="$home_one/data/task-c/brief.md"
   grep -F ">> '$home_one/state/task-c.status'" "$brief" >/dev/null || fail "secondmate brief did not shell-quote FM_HOME state path"
 
-  printf 'project=x\n' > "$home_one/state/task-a.meta"
-  FM_HOME="$home_one" FM_GUARD_GRACE=999999 "$ROOT/bin/fm-pr-check.sh" task-a https://github.com/example/repo/pull/1 >/dev/null 2>/dev/null \
+  # A pushed ship worktree, and a gh that supplies no forge head, so the PR
+  # check stays offline and its named-head gate reads the worktree's HEAD.
+  fm_git_init_commit "$home_one/wt"
+  git -C "$home_one/wt" update-ref refs/remotes/origin/main "$(git -C "$home_one/wt" rev-parse HEAD)"
+  mkdir -p "$home_one/fakebin"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$home_one/fakebin/gh"
+  chmod +x "$home_one/fakebin/gh"
+  printf 'project=x\nworktree=%s\n' "$home_one/wt" > "$home_one/state/task-a.meta"
+  PATH="$home_one/fakebin:$PATH" FM_HOME="$home_one" FM_GUARD_GRACE=999999 \
+    "$ROOT/bin/fm-pr-check.sh" task-a https://github.com/example/repo/pull/1 >/dev/null 2>/dev/null \
     || fail "fm-pr-check failed under FM_HOME"
   [ -f "$home_one/state/task-a.check.sh" ] || fail "pr check was not written under FM_HOME/state"
   [ ! -e "$home_two/state/task-a.check.sh" ] || fail "pr check leaked into another home"
@@ -542,6 +550,8 @@ test_secondmate_spawn_resolves_punctuated_registry_projects() {
   sub="$TMP_ROOT/punctuated-spawn-subhome"
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
   mkdir -p "$sub/data" "$sub/state" "$sub/config" "$sub/projects"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$sub/.gitignore"
+  git -C "$sub" init -q -b main
   mark_firstmate_home "$sub"
   printf 'punctuated\n' > "$sub/.fm-secondmate-home"
   printf '# Charter\n\nHandled work.\n' > "$sub/data/charter.md"
@@ -880,6 +890,32 @@ test_home_seed_refuses_local_only_project() {
     || fail "seed did not explain local-only project rejection"
   [ ! -e "$subhome" ] || fail "seed created a subhome before rejecting a local-only project"
   pass "home seeding refuses local-only projects"
+}
+
+# A registry entry whose forge token the parser cannot resolve yields no posture
+# at all. Reading that refusal as an empty mode would walk straight past the
+# local-only routing refusal above and clone the project into a secondmate home,
+# so the seed must stop instead.
+test_home_seed_refuses_an_unresolvable_registry_posture() {
+  local home subhome err
+  home="$TMP_ROOT/unresolvable-posture-home"
+  subhome="$TMP_ROOT/unresolvable-posture-subhome"
+  err="$TMP_ROOT/unresolvable-posture.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/unresolvable-alpha.git"
+  printf '%s\n' '- alpha [local-only forge=githb] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='design for alpha' FM_SECONDMATE_SCOPE='design for alpha' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed proceeded on a registry entry the parser refuses"
+  fi
+  grep -F 'project alpha does not resolve to a delivery posture' "$err" >/dev/null \
+    || fail "seed did not name the project whose posture could not be resolved"
+  grep -F 'unknown forge "githb"' "$err" >/dev/null \
+    || fail "the parser's own refusal never reached the operator"
+  [ ! -e "$subhome" ] || fail "seed created a subhome from a registry entry it could not resolve"
+  pass "home seeding refuses a registry entry whose posture does not resolve"
 }
 
 test_home_seed_refuses_registry_delimiter_home() {
@@ -1874,6 +1910,9 @@ home=$subhome
 projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fm_git_init_commit "$TMP_ROOT/plain-clone-teardown-child-wt"
+  "$ROOT/bin/fm-git-strip-ai-trailers.sh" install "$subhome/state/aborted-child.git-hooks" \
+    "$TMP_ROOT/plain-clone-teardown-child-wt" || fail "could not seed an aborted child's read-only strip dir"
   fakebin=$(make_fake_tmux "$TMP_ROOT/plain-clone-teardown-fake")
   log="$TMP_ROOT/plain-clone-teardown-fake/tmux.log"
 
@@ -1885,7 +1924,7 @@ EOF
   [ ! -d "$subhome" ] || fail "teardown did not remove the plain-clone secondmate home"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta for plain-clone home"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "teardown did not remove plain-clone registry route"
-  pass "secondmate teardown raw-removes plain-clone homes"
+  pass "secondmate teardown raw-removes plain-clone homes, including a leaked read-only strip dir"
 }
 
 test_secondmate_force_teardown_discards_child_work() {
@@ -1936,16 +1975,17 @@ EOF
   pass "secondmate force teardown discards child work"
 }
 
-test_secondmate_force_teardown_refuses_child_quarantine_symlink() {
-  local home subhome childproj childwt external fakebin log err rc
-  home="$TMP_ROOT/force-quarantine-home"
-  subhome="$TMP_ROOT/force-quarantine-subhome"
+test_secondmate_force_teardown_refuses_duplicated_child_slot() {
+  local home subhome childproj childwt fakebin log err rc
+  home="$TMP_ROOT/force-duplicate-slot-home"
+  subhome="$TMP_ROOT/force-duplicate-slot-subhome"
   childproj="$subhome/projects/alpha"
-  childwt="$TMP_ROOT/force-quarantine-child-worktree"
-  external="$TMP_ROOT/force-quarantine-external"
-  err="$TMP_ROOT/force-quarantine.err"
-  mkdir -p "$home/state" "$home/data" "$subhome/state" "$external"
-  fm_git_worktree "$childproj" "$childwt" force-quarantine-child
+  childwt="$TMP_ROOT/force-duplicate-slot-pool/1/alpha"
+  err="$TMP_ROOT/force-duplicate-slot.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$(dirname "$childwt")"
+  fm_git_worktree "$childproj" "$childwt" duplicate-child
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$childwt" \
+    > "$TMP_ROOT/force-duplicate-slot-pool/treehouse-state.json"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
@@ -1959,8 +1999,9 @@ home=$subhome
 projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
-  cat > "$subhome/state/child.meta" <<EOF
-window=firstmate:fm-child
+  for child in stale-child live-child; do
+    cat > "$subhome/state/$child.meta" <<EOF
+window=firstmate:fm-$child
 worktree=$childwt
 project=$childproj
 harness=echo
@@ -1968,31 +2009,24 @@ kind=ship
 mode=no-mistakes
 yolo=off
 EOF
-  printf 'child check\n' > "$subhome/state/child.check.sh"
-  printf 'external quarantine artifact\n' > "$external/child.check.protected"
-  chmod 0640 "$external/child.check.protected"
-  ln -s "$external" "$subhome/state/.pr-check-quarantine"
-  fakebin=$(make_fake_tmux "$TMP_ROOT/force-quarantine-fake")
-  log="$TMP_ROOT/force-quarantine-fake/tmux.log"
+  done
+  fakebin=$(make_fake_tmux "$TMP_ROOT/force-duplicate-slot-fake")
+  log="$TMP_ROOT/force-duplicate-slot-fake/tmux.log"
 
   set +e
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
-    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-quarantine-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2> "$err"
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-duplicate-slot-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "force teardown accepted a child quarantine-directory symlink"
-  [ -d "$subhome" ] || fail "force teardown removed the subhome before quarantine refusal"
-  [ -d "$childwt" ] || fail "force teardown removed child work before quarantine refusal"
-  [ -e "$home/state/domain.meta" ] || fail "force teardown cleared parent meta before quarantine refusal"
-  [ -e "$subhome/state/child.meta" ] || fail "force teardown cleared child meta before quarantine refusal"
-  [ "$(cat "$subhome/state/child.check.sh")" = 'child check' ] || fail "force teardown removed the child check before quarantine refusal"
-  [ "$(cat "$external/child.check.protected")" = 'external quarantine artifact' ] \
-    || fail "force teardown changed the child quarantine symlink target"
-  [ "$(file_mode "$external/child.check.protected")" = 640 ] \
-    || fail "force teardown changed the child quarantine target mode"
-  grep -F 'kill-window' "$log" >/dev/null && fail "force teardown killed a window before child quarantine validation"
-  pass "secondmate force teardown prevalidates child quarantine cleanup without following symlinks"
+  [ "$rc" -ne 0 ] || fail "forced secondmate teardown returned a duplicated child slot"
+  [ -d "$childwt" ] || fail "forced secondmate teardown removed the duplicated child slot"
+  [ -e "$subhome/state/stale-child.meta" ] || fail "forced secondmate teardown removed the stale child record"
+  [ -e "$subhome/state/live-child.meta" ] || fail "forced secondmate teardown removed the live child record"
+  grep -F 'kill-window' "$log" >/dev/null && fail "forced secondmate teardown killed a child before detecting its slot collision"
+  grep -F 'live-child' "$err" >/dev/null || grep -F 'stale-child' "$err" >/dev/null \
+    || fail "forced secondmate teardown did not identify the duplicated child slot"
+  pass "forced secondmate teardown refuses duplicated descendant pool slots"
 }
 
 test_secondmate_force_teardown_preserves_child_on_unproven_lock() {
@@ -2000,10 +2034,12 @@ test_secondmate_force_teardown_preserves_child_on_unproven_lock() {
   home="$TMP_ROOT/force-lock-home"
   subhome="$TMP_ROOT/force-lock-subhome"
   childproj="$subhome/projects/alpha"
-  childwt="$TMP_ROOT/force-lock-child-worktree"
+  childwt="$TMP_ROOT/force-lock-child-pool/1/alpha"
   err="$TMP_ROOT/force-lock-child.err"
-  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$(dirname "$childwt")"
   fm_git_worktree "$childproj" "$childwt" force-child-lock
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$childwt" \
+    > "$TMP_ROOT/force-lock-child-pool/treehouse-state.json"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
@@ -2389,6 +2425,7 @@ EOF
 
 task_set_lock_path() {  # <state-dir>
   local state=$1
+  # shellcheck source=/dev/null
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_task_set_lock_path "$state" )
 }
 
@@ -2409,6 +2446,7 @@ hold_task_set_lock() {  # <state-dir> -> echoes "<holder-pid> <lock-path>"
     fm_lock_try_acquire "$lock" || exit 1
     sleep 30
   ) >/dev/null 2>&1 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   holder=$!
   while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
     sleep 0.1
@@ -2523,6 +2561,7 @@ SH
     XDG_STATE_HOME="$TMP_ROOT/taskset-state-absent-xdg" \
     FM_TASK_SET_TEST_READY="$ready" FM_TASK_SET_TEST_RELEASE="$release" \
     "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   pid=$!
   while [ ! -e "$ready" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 200 ]; do
     sleep 0.05
@@ -2796,6 +2835,7 @@ EOF
   out="$TMP_ROOT/watch-fake/watch.out"
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_LOG="$TMP_ROOT/watch-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/watch-fake/pane.txt" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$out" &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   pid=$!
   if ! wait_live "$pid" 25; then
     wait "$pid" || true
@@ -2981,6 +3021,7 @@ test_home_seed_refuses_projectless_home_with_non_directory_projects
 test_home_seed_refuses_projectless_home_with_uninspectable_registry
 test_home_seed_refuses_missing_projects_without_signal
 test_home_seed_refuses_local_only_project
+test_home_seed_refuses_an_unresolvable_registry_posture
 test_home_seed_refuses_registry_delimiter_home
 test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_home_marked_for_another_id
@@ -3009,7 +3050,7 @@ test_secondmate_force_teardown_preserves_nested_restore_status
 test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
-test_secondmate_force_teardown_refuses_child_quarantine_symlink
+test_secondmate_force_teardown_refuses_duplicated_child_slot
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
 test_secondmate_force_teardown_allows_non_state_operational_dir_symlinks_inside_home
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home

@@ -14,20 +14,17 @@
 # Every Herdr call, including adapter calls, is routed through bin/fm-herdr-lab.sh.
 set -u
 
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-if [ "${FM_HERDR_SUBMIT_CONFIRM_LIVE:-0}" != 1 ]; then
-  echo "skip: set FM_HERDR_SUBMIT_CONFIRM_LIVE=1 to run the live Herdr submit-confirmation guard"
-  exit 0
-fi
+fm_live_gate opt-in FM_HERDR_SUBMIT_CONFIRM_LIVE herdr jq claude
 
-command -v herdr >/dev/null 2>&1 || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 but herdr is not installed"
-command -v jq >/dev/null 2>&1 || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 but jq is not installed"
-command -v claude >/dev/null 2>&1 || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 but Claude Code is not installed"
 [ -x "$LAB_HELPER" ] || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 but the Herdr lab helper is not executable at $LAB_HELPER"
 
 # shellcheck source=tests/herdr-test-safety.sh
@@ -83,14 +80,26 @@ TARGET="$SESSION:$PANE"
 VERSION=$(PATH="$ORIGINAL_PATH" claude --version 2>/dev/null | head -1 || printf 'version-unknown')
 HERDR_VER=$(PATH="$ORIGINAL_PATH" herdr --version 2>/dev/null | head -1 || printf 'herdr-unknown')
 
-lab pane run "$PANE" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions" >/dev/null \
+lab pane run "$PANE" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'" >/dev/null \
   || fail "could not launch Claude Code ($VERSION) in the isolated Herdr pane"
 
 idle=0
 i=0
 while [ "$i" -lt 45 ]; do
   st=$(lab agent get "$PANE" 2>/dev/null | jq -r '.result.agent.agent_status // empty')
-  case "$st" in idle|done|blocked) idle=1; break ;; esac
+  case "$st" in
+    idle|done) idle=1; break ;;
+    blocked)
+      # A fresh checkout path stops on Claude's folder-trust prompt, which the
+      # pre-send proof would read as a non-empty composer. Accept it and keep
+      # waiting for a real idle composer. The prompt preselects "No, exit", so
+      # move to "Yes" before confirming; a bare Enter quits Claude.
+      case "$(lab pane read "$PANE" --source visible 2>/dev/null || true)" in
+        *'Yes, I trust this folder'*) lab pane send-keys "$PANE" down enter >/dev/null \
+          || fail "could not accept Claude's folder-trust prompt" ;;
+      esac
+      ;;
+  esac
   i=$((i + 1))
   sleep 1
 done
@@ -121,5 +130,40 @@ done
 [ "$landed" = 1 ] \
   || fail "Claude Code ($VERSION) on $HERDR_VER: submit reported '$verdict' but the expected reply never rendered"
 pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER reports empty and renders the requested reply in isolated session $SESSION"
+
+# Away-mode digests start with U+2063, which Claude's composer read-back drops.
+# The pre-Enter proof must still accept the rest of the payload.
+# shellcheck source=bin/fm-operational-input.sh
+. "$ROOT/bin/fm-operational-input.sh"
+i=0
+while [ "$i" -lt 45 ]; do
+  st=$(lab agent get "$PANE" 2>/dev/null | jq -r '.result.agent.agent_status // empty')
+  case "$st" in idle|done) break ;; esac
+  i=$((i + 1))
+  sleep 1
+done
+OP_TOKEN="FMHERDROPPONG$$_$RANDOM"
+op_text=
+fm_operational_input_encode away-supervisor "Reply with exactly $OP_TOKEN and nothing else." op_text \
+  || fail "could not encode an away-supervisor payload"
+verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "$op_text" 3 0.4 0.4) \
+  || fail "send_text_submit failed to run an operational payload against Claude Code ($VERSION) on $HERDR_VER"
+[ "$verdict" = empty ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a landed U+2063 operational payload must confirm empty, got '$verdict'"
+landed=0
+i=0
+while [ "$i" -lt 45 ]; do
+  screen=$(lab pane read "$PANE" --source recent --lines 200 2>/dev/null || true)
+  occurrences=$(printf '%s\n' "$screen" | grep -F -c "$OP_TOKEN" || true)
+  if [ "$occurrences" -ge 2 ]; then
+    landed=1
+    break
+  fi
+  i=$((i + 1))
+  sleep 1
+done
+[ "$landed" = 1 ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: operational submit reported '$verdict' but the expected reply never rendered"
+pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER submits a U+2063 away-supervisor payload whose read-back drops the mark"
 
 [ "$CHECKED" -gt 0 ] || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 checked no harness"

@@ -27,6 +27,16 @@
 #   1. an actionable watcher wake from the park;
 #   2. the bounded repair instruction when supervision could not be established.
 #
+# SUPERVISION HOST. A home opted in with config/supervision-host
+# (docs/configuration.md "Supervision host" owns the opt-in) parks on
+# bin/fm-supervision-host.sh in the arm's place, which takes away-posture wakes
+# itself and exits only when main is needed; its header owns the output this
+# park reads. A "supervision-host:" line is actionable like a wake line, and
+# the follow-up carries every such line in order while wake lines keep the
+# eight-line cap; "supervision-host stood down:" ends the park silently; a host
+# that died without a close is retried instead of being judged by the
+# healthy-watcher predicate. Without the file nothing below changes.
+#
 # LOOP BOUNDING IS DOUBLE, because either bound alone is insufficient:
 #   - `loop_limit` in .cursor/hooks.json is Cursor's own ceiling. Once
 #     loop_count reaches it Cursor stops INVOKING this hook at all, so it is the
@@ -49,6 +59,12 @@
 # park owner in state/.cursor-park-owner, and once a newer stop has published its
 # claim, an older park still running stands down without emitting. Newest stop
 # wins; the arm's own singleton keeps the overlap from starting a second watcher.
+#
+# PI STAND-DOWN. Exit 0 without parking when PI_CODING_AGENT=true and neither
+# CURSOR_AGENT nor CURSOR_INVOKED_AS is set, so a Pi host that loaded
+# .cursor/hooks.json via pi-cursor-sdk does not dual-watch against
+# fm_watch_arm_pi. Cursor identity keeps parking despite a leaked
+# PI_CODING_AGENT. docs/turnend-guard.md owns the contract.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -102,6 +118,14 @@ SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/nu
 case "$SESSION_ID" in ''|*[!A-Za-z0-9._-]*) SESSION_ID=unknown ;; esac
 
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+
+# Pi-host stand-down: docs/turnend-guard.md owns the PI_CODING_AGENT /
+# CURSOR_AGENT / CURSOR_INVOKED_AS contract summarized in this script's header.
+if [ "${PI_CODING_AGENT:-}" = "true" ] \
+  && [ -z "${CURSOR_AGENT:-}" ] \
+  && [ -z "${CURSOR_INVOKED_AS:-}" ]; then
+  exit 0
+fi
 
 lock_acquire_bounded() {  # <lock>
   local lock=$1 attempt=0
@@ -283,6 +307,13 @@ ARM_PID=
 ACTIONABLE=0
 HEALTHY=0
 STAND_DOWN=0
+HOST_MODE=0
+HOST_RC=0
+ACTIONABLE_RE='^(signal:|stale:|check:|heartbeat($|:))'
+if [ -f "$CONFIG/supervision-host" ]; then
+  HOST_MODE=1
+  ACTIONABLE_RE='^(signal:|stale:|check:|heartbeat($|:)|supervision-host:)'
+fi
 
 # Never leave an arm child or its capture file behind, on any exit path.
 trap '[ -n "$ARM_PID" ] && kill "$ARM_PID" 2>/dev/null; [ -n "$ARM_OUT" ] && rm -f "$ARM_OUT" 2>/dev/null; :' EXIT
@@ -292,7 +323,9 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
   current_session_still_ours || exit 0
   attempt=$((attempt + 1))
   ARM_OUT=$(mktemp "$STATE/.cursor-park-output.XXXXXX") || ARM_OUT=
-  if [ -n "$ARM_OUT" ]; then
+  if [ "$HOST_MODE" -eq 1 ]; then
+    FM_SUPERVISION_HOST_PRIMARY=cursor "$SCRIPT_DIR/fm-supervision-host.sh" park >"${ARM_OUT:-/dev/null}" 2>&1 &
+  elif [ -n "$ARM_OUT" ]; then
     "$SCRIPT_DIR/fm-watch-arm.sh" >"$ARM_OUT" 2>&1 &
   else
     "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 &
@@ -312,7 +345,8 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
     ARM_PID=
     exit 0
   fi
-  wait "$ARM_PID" 2>/dev/null || true
+  HOST_RC=0
+  wait "$ARM_PID" 2>/dev/null || HOST_RC=$?
   ARM_PID=
 
   # Away mode may have been entered while parked: the daemon owns triage now.
@@ -320,9 +354,26 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
 
   ACTIONABLE=0
   if [ -n "$ARM_OUT" ]; then
-    grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$ARM_OUT" 2>/dev/null && ACTIONABLE=1
+    grep -Eq "$ACTIONABLE_RE" "$ARM_OUT" 2>/dev/null && ACTIONABLE=1
   fi
   [ "$ACTIONABLE" -eq 1 ] && break
+
+  if [ "$HOST_MODE" -eq 1 ]; then
+    # The host stood down because this session no longer owns supervision:
+    # whoever does owns continuity now.
+    if [ -n "$ARM_OUT" ] && grep -q '^supervision-host stood down:' "$ARM_OUT" 2>/dev/null; then
+      exit 0
+    fi
+    # A host that died without a close may have left its cycle running with
+    # no owner to deliver the close; retrying lets the next host stop what it
+    # left and own a fresh cycle, which the healthy-watcher predicate cannot.
+    if [ "$HOST_RC" -gt 128 ] || [ -z "$ARM_OUT" ] || [ ! -s "$ARM_OUT" ]; then
+      [ "$attempt" -lt "$ARM_ATTEMPTS" ] || break
+      [ -z "$ARM_OUT" ] || rm -f "$ARM_OUT" 2>/dev/null
+      ARM_OUT=
+      continue
+    fi
+  fi
 
   # A non-actionable close is benign when another verified watcher already owns
   # this home and is still beating inside the shared grace window.
@@ -343,7 +394,15 @@ if ! fm_supervision_needed "$STATE" "$GRACE"; then
 fi
 
 if [ "$ACTIONABLE" -eq 1 ]; then
-  WAKE=$(grep -E '^(signal:|stale:|check:|heartbeat)' "$ARM_OUT" 2>/dev/null | head -8)
+  if [ "$HOST_MODE" -eq 1 ]; then
+    WAKE=$(awk '/^supervision-host:/ { print; next } /^(signal:|stale:|check:|heartbeat)/ && shown++ < 8' "$ARM_OUT" 2>/dev/null)
+    if [ -e "$STATE/.afk-contract" ]; then
+      WAKE="$WAKE
+This wake comes from automatic supervision under the away-posture record, not from the captain: it is not a return, so handle it under the away posture."
+    fi
+  else
+    WAKE=$(grep -E '^(signal:|stale:|check:|heartbeat)' "$ARM_OUT" 2>/dev/null | head -8)
+  fi
   emit_followup watcher "firstmate watcher wake - one supervision event needs a handling turn now.
 $WAKE
 

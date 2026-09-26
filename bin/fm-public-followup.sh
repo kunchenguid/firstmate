@@ -12,6 +12,10 @@
 #   state/x-context/            the private full request context (fm-x-lib.sh).
 #   bin/fm-x-reply.sh           posting to the relay, thread splitting, dry run.
 #   bin/fm-public-followup-lib.sh  the activation gate and private transport.
+#   bin/fm-on.sh                the SSH route to a REMOTE secondmate home, whose
+#                               state no local path can reach.
+#   bin/fm-public-followup-collect.sh  reading and retiring the typed terminal
+#                               results staged in a remote work home.
 # This script composes them; it never restates their contracts or schemas.
 #
 # ZERO OVERHEAD FOR HOMES THAT DO NOT USE THE RELAY: every subcommand gates
@@ -38,13 +42,24 @@
 #       registration: it creates this home's private public-followup directories
 #       (0700) and the bounded public-safe registration record, which is what
 #       later makes the presence checks O(1) and lets bound work report a typed
-#       terminal result. Refuses when the relay is not active for this home.
+#       terminal result. A direct emit reads what the obligation expects from
+#       tasks-axi, so work reporting into this home is refused at emit for an
+#       outcome, missing required key, or value tasks-axi would refuse.
+#       Refuses when the relay is not active for this home.
 #
 #   fm-public-followup.sh brief <obligation-id>
 #       Print the exact fm-public-followup-emit.sh command line the bound worker
 #       must run when its work reaches the promised terminal outcome, so the
 #       binding is copied into a brief instead of hand-assembled. The
-#       --deliverable flags name the obligation's actual required keys.
+#       --deliverable flags name the obligation's actual required keys, with
+#       every value the binding determines already filled in (report_path is
+#       data/<work-id>/report.md) and every other one left as a named
+#       placeholder followed by the format tasks-axi accepts. The same keys are
+#       repeated as --require-deliverable, so an emit that drops one is refused
+#       where it runs rather than quarantined here. For work
+#       bound to a REMOTE secondmate home, the command names that route's own
+#       code root and home with --stage-in, because neither this checkout's path
+#       nor this home's path exists on the machine that worker runs on.
 #
 #   fm-public-followup.sh consume
 #       Drain every pending typed terminal event: validate its derived identity,
@@ -52,8 +67,17 @@
 #       work-event`, and quarantine what tasks-axi refuses. Prints one
 #       "ready <obligation-id> <request-id> <platform>" line per obligation that
 #       became delivery-ready, and one "rejected <event-id>: <reason>" line per
-#       refusal. Silent when there is nothing to do. Duplicate events and restart
-#       replay are no-ops.
+#       refusal. A refusal's reason names the specific deliverable, outcome, or
+#       missing key at fault where one is identifiable, and each refusal also
+#       queues one wake for this home, which the relay poll raises
+#       (bin/fm-x-poll.sh). Silent when there is nothing to do. Duplicate events
+#       and restart replay are no-ops.
+#       An open loop bound to a REMOTE secondmate home is collected first: its
+#       staged results are pulled over that route into this home's own inbox and
+#       reconciled identically. The staged copy is retired only after this home
+#       holds the result, so a dropped connection cannot lose one. A route that
+#       could not be reached prints one "unreached <obligation-id>: ..." line and
+#       exits non-zero rather than reporting an empty inbox.
 #
 #   fm-public-followup.sh pending
 #       One bounded public-safe line per open public loop, for the session
@@ -105,7 +129,12 @@
 #   fm-public-followup.sh retire <obligation-id> --reason "<why the loop is done>" [--force]
 #       The only close. Drops the registration after recording --reason.
 #       --force is the explicit discard-approved escape hatch for an unresolved
-#       or missing obligation. --reason is required.
+#       or missing obligation. --reason is required. --force never covers
+#       clearing the bound legacy X link: a loop whose link is still verifiably
+#       in place is retained for reconciliation either way. When the bound work
+#       lives in a REMOTE secondmate home, that clear runs over the route's SSH
+#       transport, and a remote that never confirms it is reported as unknown
+#       completion to reconcile on that host, not as a definite failure.
 #
 # Requires jq and a compatible tasks-axi for registration, briefs,
 # reconciliation, delivery, cleanup guards, and retirement; only `active`
@@ -141,7 +170,8 @@ PF_TEMP_FILES=()
 PF_REGISTRY_LOCK_IDS=()
 pf_registry_lock_held() {
   local wanted=$1 held
-  for held in "${PF_REGISTRY_LOCK_IDS[@]}"; do
+  # bash 3.2 + set -u treats "${arr[@]}" on an empty array as unbound.
+  for held in ${PF_REGISTRY_LOCK_IDS[@]+"${PF_REGISTRY_LOCK_IDS[@]}"}; do
     [ "$held" = "$wanted" ] && return 0
   done
   return 1
@@ -157,10 +187,10 @@ pf_registry_lock_release() {
   local -a remaining=()
   pf_registry_lock_held "$id" || return 0
   fm_pf_registry_lock_release "$STATE" "$id"
-  for held in "${PF_REGISTRY_LOCK_IDS[@]}"; do
+  for held in ${PF_REGISTRY_LOCK_IDS[@]+"${PF_REGISTRY_LOCK_IDS[@]}"}; do
     [ "$held" = "$id" ] || remaining+=("$held")
   done
-  PF_REGISTRY_LOCK_IDS=("${remaining[@]}")
+  PF_REGISTRY_LOCK_IDS=(${remaining[@]+"${remaining[@]}"})
 }
 pf_cleanup() {
   local i
@@ -189,24 +219,16 @@ require_tools() {
   command -v tasks-axi >/dev/null 2>&1 || die "tasks-axi is required" 1
 }
 
-# Every tasks-axi call runs from the home whose backlog owns the obligation, the
-# same convention bin/fm-captain-hold.sh uses for typed backlog state.
-tx() { (cd "$FM_HOME" && tasks-axi "$@"); }
+# Every tasks-axi call addresses $FM_HOME/data, the home whose backlog owns the
+# obligation, through bin/fm-tasks-axi.sh. An inherited FM_DATA_OVERRIDE is
+# cleared because a caller such as a secondmate teardown names the parent home
+# in FM_HOME while its own data override is still in the environment.
+tx() { FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" "$@"; }
 
-# obligation_json <id>: the complete typed obligation payload on stdout, empty
-# when the backlog simply has no such public-followup item, and a non-zero exit
-# ONLY when the backlog could not be read at all. Callers depend on that
-# distinction to report the right thing, so jq runs without -e here. tasks-axi
-# stays the single source of truth; the registration record is never consulted
-# for state.
-obligation_json() {
-  local id=$1 out
-  out=$(tx public-followup list --json 2>/dev/null) || return 1
-  [ -n "$out" ] || return 1
-  printf '%s' "$out" | jq -c --arg id "$id" \
-    '(.public_followups // []) | map(select(.id == $id)) | .[0] // empty' 2>/dev/null \
-    || return 1
-}
+# obligation_json <id>: this home's typed obligation payload, through the shared
+# reader every consumer of the promised contract uses. tasks-axi stays the
+# single source of truth; the registration record is never consulted for state.
+obligation_json() { fm_pf_obligation_json "$FM_HOME" "$1"; }
 
 pf_field() { printf '%s' "$1" | jq -r "$2 // empty" 2>/dev/null; }
 
@@ -266,7 +288,7 @@ cmd_register() {
   payload=$(obligation_json "$id") \
     || die "could not read the backlog through tasks-axi" 1
   [ -n "$payload" ] \
-    || die "no public-followup obligation '$id' in this home's backlog; create it with tasks-axi public-followup add before registering" 1
+    || die "no public-followup obligation '$id' in this home's backlog; create it with bin/fm-tasks-axi.sh public-followup add before registering" 1
 
   # The relation must already be bound, so a registration can never describe a
   # binding tasks-axi does not have.
@@ -274,7 +296,7 @@ cmd_register() {
     '(.public_followup.work_relations // [])
        | map(select(.relation_id == $r and .work_ref.home_id == $h and .work_ref.task_id == $w))
        | length > 0' >/dev/null 2>&1 \
-    || die "obligation '$id' has no bound relation '$relation' for $work_home/$work_id; run tasks-axi public-followup bind-work first" 1
+    || die "obligation '$id' has no bound relation '$relation' for $work_home/$work_id; run bin/fm-tasks-axi.sh public-followup bind-work first" 1
 
   [ -n "$platform" ] || platform=$(pf_field "$payload" '.public_followup.request.platform')
   [ -n "$request" ] || request=$(pf_field "$payload" '.public_followup.request.request_id')
@@ -317,7 +339,8 @@ cmd_register() {
     return 0
   fi
   printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_home_path=%s\nwork_id=%s\ngeneration=%s\nplatform=%s\nrequest_id=%s\nstate=open\nfollowup_expires_at=%s\nrequest_context_b64=%s\n' \
-    "$id" "$relation" "$work_home" "$work_home_path" "$work_id" "$generation" "$platform" "$request" \
+    "$id" "$relation" "$work_home" "$work_home_path" "$work_id" "$generation" \
+    "$platform" "$request" \
     "$followup_expires_at" "$request_context_b64" \
     | fmx_private_artifact_publish_stdin "$(fm_pf_registry_dir "$STATE")" "$id" 600 \
     || die "could not write the registration record" 1
@@ -329,8 +352,49 @@ cmd_register() {
 
 # --- subcommand: brief ------------------------------------------------------
 
+# public_followup_route_kind <secondmate-id> <recorded-local-home>: print remote
+# or local only when the current route still proves which transport owns it.
+public_followup_route_kind() {
+  local id=$1 recorded_home=$2 resolved
+  if public_followup_route_is_remote "$id"; then
+    printf 'remote\n'
+    return 0
+  fi
+  [ -n "$recorded_home" ] || return 1
+  resolved=$(public_followup_secondmate_home "$id" 2>/dev/null) || return 1
+  [ "$resolved" = "$recorded_home" ] || return 1
+  printf 'local\n'
+}
+
+# brief_emit_target <work-home> <recorded-local-home>: two lines on stdout - the
+# absolute path of the emit script the bound worker must run, and its home flag.
+brief_emit_target() {
+  local work_home=$1 recorded_home=${2:-} sid kind root home configured_path
+  case "$work_home" in
+    secondmate:*) sid=${work_home#secondmate:} ;;
+    *) printf '%s\n--home %s\n' "$FM_ROOT/bin/fm-public-followup-emit.sh" "$FM_HOME"; return 0 ;;
+  esac
+  kind=$(public_followup_route_kind "$sid" "$recorded_home") || return 1
+  if [ "$kind" = local ]; then
+    printf '%s\n--home %s\n' "$FM_ROOT/bin/fm-public-followup-emit.sh" "$FM_HOME"
+    return 0
+  fi
+  root=$(secondmate_registry_field "$DATA/secondmates.md" "$sid" root 2>/dev/null) || root=
+  home=$(secondmate_registry_field "$DATA/secondmates.md" "$sid" home 2>/dev/null) || home=
+  case "$root" in /*) ;; *) return 1 ;; esac
+  case "$home" in /*) ;; *) return 1 ;; esac
+  case "$root$home" in *[!A-Za-z0-9/._+@:-]*) return 1 ;; esac
+  for configured_path in "$root" "$home"; do
+    case "/$configured_path/" in */../*|*/./*) return 1 ;; esac
+    case "$configured_path" in *'//'*) return 1 ;; esac
+  done
+  printf '%s\n--stage-in %s\n' "$root/bin/fm-public-followup-emit.sh" "$home"
+}
+
 cmd_brief() {
-  local id=${1:-} relation work_home work_id generation payload outcome keys key deliverable_flags
+  local id=${1:-} relation work_home work_home_path work_id generation payload expected keys key deliverable_flags
+  local outcome value format deliverable_formats require_flags
+  local emit_target emit_script emit_home_flag closing_note
   [ -n "$id" ] || { usage; exit 2; }
   fm_pf_slug_valid "$id" || die "unsafe obligation id: $id"
   fm_pf_relay_active "$FM_HOME" || die "the relay is not active for this home" 1
@@ -339,57 +403,117 @@ cmd_brief() {
 
   relation=$(fm_pf_registry_get "$STATE" "$id" relation_id)
   work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
+  work_home_path=$(fm_pf_registry_get "$STATE" "$id" work_home_path)
   work_id=$(fm_pf_registry_get "$STATE" "$id" work_id)
   generation=$(fm_pf_registry_get "$STATE" "$id" generation)
+
+  emit_target=$(brief_emit_target "$work_home" "$work_home_path") \
+    || die "the work home for '$id' is a remote route with no usable code root and home in data/secondmates.md; fix that record before briefing the bound worker" 1
+  emit_script=$(printf '%s\n' "$emit_target" | sed -n '1p')
+  emit_home_flag=$(printf '%s\n' "$emit_target" | sed -n '2p')
+  # The closing paragraph has to match the destination the command above names,
+  # because "the home above" is the owning home only when the work runs on this
+  # machine. A remote worker is told where its result waits instead.
+  case "$emit_home_flag" in
+    --stage-in*)
+      closing_note='Do not post anything publicly yourself and do not look for the public thread:
+the home that owes that reply is on another machine and owns it. Leave the
+result exactly where the command above puts it; that home collects it over the
+same route it reaches you on, and nothing here needs a path back to it.'
+      ;;
+    *)
+      closing_note='Do not post anything publicly yourself and do not look for the public thread:
+the home above owns the reply.'
+      ;;
+  esac
 
   require_tools
   payload=$(obligation_json "$id") \
     || die "could not read public-followup obligation '$id' through tasks-axi" 1
   [ -n "$payload" ] \
     || die "public-followup obligation '$id' is missing from tasks-axi" 1
-  outcome=$(pf_field "$payload" '.public_followup.expected_final.type')
-  [ -n "$outcome" ] \
+  expected=$(pf_field "$payload" '.public_followup.expected_final.type')
+  [ -n "$expected" ] \
     || die "public-followup obligation '$id' has no expected final type" 1
-  keys=$(printf '%s' "$payload" \
-    | jq -er '.public_followup.expected_final.required_deliverables
-        | select(type == "array" and length > 0
-            and (map(type == "string" and test("^[a-z0-9_]+$")) | all))
-        | .[]' 2>/dev/null) \
+  # The command must name the outcome that SATISFIES this final, which is not
+  # always the final's own name: tasks-axi answers a failure-outcome final with
+  # 'failed' and an explicit-answer final with 'local-main'.
+  outcome=$(fm_pf_expected_outcome "$expected") \
+    || die "public-followup obligation '$id' has an expected final type tasks-axi does not define: $expected" 1
+  printf '%s' "$payload" \
+    | jq -e '.public_followup.expected_final.required_deliverables
+        | type == "array" and (map(type == "string" and test("^[a-z][a-z0-9_]{0,63}$")) | all)' \
+      >/dev/null 2>&1 \
     || die "public-followup obligation '$id' has no readable required deliverable keys" 1
+  keys=$(printf '%s' "$payload" \
+    | jq -r '.public_followup.expected_final.required_deliverables[]' 2>/dev/null) || keys=
+  # Pre-fill every value the binding already determines, so the worker has
+  # nothing to guess; name each remaining one and state the format tasks-axi
+  # accepts for it, so a guess never travels back to be quarantined here. Each
+  # key is also named as --require-deliverable, which is how a staged emit
+  # learns what this obligation requires when it cannot read the registration.
   deliverable_flags=
+  deliverable_formats=
+  require_flags=
   while IFS= read -r key; do
     [ -n "$key" ] || continue
-    deliverable_flags="${deliverable_flags}    --deliverable ${key}=<value> \\
+    require_flags="${require_flags}    --require-deliverable ${key} \\
+"
+    value=
+    case "$key" in
+      report_path) value="data/$work_id/report.md" ;;
+    esac
+    if [ -n "$value" ] && fm_pf_deliverable_problem "$expected" "$outcome" "$key" "$value" >/dev/null; then
+      deliverable_flags="${deliverable_flags}    --deliverable ${key}=${value} \\
+"
+      continue
+    fi
+    deliverable_flags="${deliverable_flags}    --deliverable ${key}=<${key}> \\
+"
+    format=$(fm_pf_deliverable_format "$key") || format='the exact value tasks-axi requires for this key'
+    deliverable_formats="${deliverable_formats}  <${key}>: ${format}
 "
   done <<EOF
 $keys
 EOF
+  [ -z "$deliverable_formats" ] || deliverable_formats="
+Replace each placeholder with its exact value; the emit command refuses any
+other format:
+${deliverable_formats}"
 
   cat <<EOF
 When this work reaches its promised terminal outcome, report it as typed data
 (never as a sentence for someone to parse) by running exactly:
 
-  $FM_ROOT/bin/fm-public-followup-emit.sh \\
-    --home $FM_HOME \\
+  $emit_script \\
+    $emit_home_flag \\
     --obligation $id \\
     --relation $relation \\
     --source-home $work_home \\
     --work-id $work_id \\
     --generation $generation \\
     --outcome $outcome \\
-${deliverable_flags}    --outcome-text '<one bounded public-safe sentence>'
-
-Do not post anything publicly yourself and do not look for the public thread:
-the home above owns the reply.
+${require_flags}${deliverable_flags}    --outcome-text '<one bounded public-safe sentence>'
+${deliverable_formats}
+$closing_note
 EOF
 }
 
 # --- subcommand: consume ----------------------------------------------------
 
-# reject_event <file> <event-id> <reason>: quarantine one refused event with an
-# inspectable reason so it is never retried in a loop.
+# reject_event <file> <event-id> <reason> [<obligation-id>]: quarantine one
+# refused event with an inspectable reason so it is never retried in a loop, and
+# queue one wake line for this home so the refusal is never silent. The relay
+# poll prints that line and then removes it (bin/fm-x-poll.sh); delivery is
+# at-least-once, so a retry that re-queues an already-raised wake repeats it
+# with the same event id and reason rather than announcing a new refusal.
+# The pending event is the only thing that brings consume back to this refusal,
+# so it is removed last, after the wake is durably recorded. A step that fails
+# before that leaves the event in place and the whole quarantine is retried by
+# the next consume; every write here is keyed by the event id, so a retry
+# rewrites the same artifacts rather than adding another.
 reject_event() {
-  local file=$1 event_id=$2 reason=$3 rejected event_payload
+  local file=$1 event_id=$2 reason=$3 obligation=${4:-unknown} rejected event_payload wakes
   rejected=$(fm_pf_rejected_dir "$STATE")
   fmx_private_artifact_dir_prepare "$rejected" >/dev/null \
     || { printf 'rejected %s: %s (quarantine failed; event retained)\n' "$event_id" "$reason"; return 1; }
@@ -407,6 +531,13 @@ reject_event() {
     printf 'rejected %s: %s (quarantine failed; event retained)\n' "$event_id" "$reason"
     return 1
   fi
+  wakes=$(fm_pf_rejection_wakes_dir "$STATE")
+  if ! fmx_private_artifact_dir_prepare "$wakes" >/dev/null \
+    || ! printf 'public-followup rejected %s for obligation %s: %s\n' "$event_id" "$obligation" "$reason" \
+      | fmx_private_artifact_publish_stdin "$wakes" "$event_id" 600 2>/dev/null; then
+    printf 'rejected %s: %s (its wake could not be recorded; event retained)\n' "$event_id" "$reason"
+    return 1
+  fi
   if ! rm -f -- "$file" 2>/dev/null; then
     printf 'rejected %s: %s (quarantine cleanup failed; event retained)\n' "$event_id" "$reason"
     return 1
@@ -414,12 +545,167 @@ reject_event() {
   printf 'rejected %s: %s\n' "$event_id" "$reason"
 }
 
+# event_rejection_detail <payload>: the specific problem behind a tasks-axi
+# refusal, whose own sentence names no key or value. Checks each deliverable
+# against the mirrored rules, then the outcome and required keys against the
+# obligation's expected final. Prints nothing when no specific cause is found.
+event_rejection_detail() {
+  local payload=$1 outcome obligation key value problem expected expected_type expected_outcome carried
+  outcome=$(pf_field "$payload" '.outcome_type')
+  obligation=$(pf_field "$payload" '.obligation_id')
+  expected=$(obligation_json "$obligation" 2>/dev/null) || expected=
+  expected_type=$(pf_field "$expected" '.public_followup.expected_final.type')
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    if ! value=$(printf '%s' "$payload" | jq -er --arg k "$key" \
+        '.deliverables[$k] | select(type == "string")' 2>/dev/null); then
+      printf "deliverable '%s' is not a string\n" "$key"
+      return 0
+    fi
+    if ! problem=$(fm_pf_deliverable_problem "$expected_type" "$outcome" "$key" "$value"); then
+      printf '%s\n' "$problem"
+      return 0
+    fi
+  done <<EOF
+$(printf '%s' "$payload" | jq -r '(.deliverables // {}) | keys[]' 2>/dev/null)
+EOF
+
+  [ -n "$expected_type" ] || return 0
+  case "$outcome" in superseded) return 0 ;; esac
+  expected_outcome=$(fm_pf_expected_outcome "$expected_type") || return 0
+  if [ "$outcome" != failed ] && [ "$outcome" != "$expected_outcome" ]; then
+    printf "outcome '%s' does not match this obligation's expected final '%s', which needs outcome '%s'\n" \
+      "$outcome" "$expected_type" "$expected_outcome"
+    return 0
+  fi
+  carried=$(fm_pf_deliverable_keys "$expected_type" "$outcome") || carried=
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    if [ "$outcome" = failed ]; then
+      case " $carried " in
+        *" $key "*) ;;
+        *) continue ;;
+      esac
+    fi
+    printf '%s' "$payload" | jq -e --arg k "$key" '.deliverables[$k] | type == "string"' >/dev/null 2>&1 \
+      && continue
+    printf "required deliverable '%s' is missing; expected %s\n" "$key" \
+      "$(fm_pf_deliverable_format "$key" || printf 'the value tasks-axi requires for it')"
+    return 0
+  done <<EOF
+$(printf '%s' "$expected" | jq -r '.public_followup.expected_final.required_deliverables // [] | .[]' 2>/dev/null)
+EOF
+}
+
+# collect_remote_staged_events: pull every typed terminal result a REMOTE work
+# home has staged for this home into this home's own inbox, so the ordinary
+# reconciliation below sees it. The route transport only runs main -> secondmate,
+# so this is a pull; a worker on the other machine has no path back here.
+#
+# The current registry record is the route drained. A reassignment between
+# staging and collection is not detected; the staged result stays on the
+# original host and must be re-emitted after the reassignment.
+collect_remote_staged_events() {
+  local dir file id loop_state work_home work_home_path sid route_kind rc=0 collect_rc payload line event_id dropped
+  dir=$(fm_pf_registry_dir "$STATE")
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  for file in "$dir"/*; do
+    id=$(basename "$file")
+    fm_pf_slug_valid "$id" || continue
+    if [ ! -f "$file" ] || [ -L "$file" ]; then
+      printf 'unreached %s: registration is not a safe regular record, so its terminal result stays retained for reconciliation\n' "$id"
+      rc=1
+      continue
+    fi
+    loop_state=$(fm_pf_registry_loop_state "$STATE" "$id")
+    [ "$loop_state" = open ] || continue
+    if ! public_followup_registration_valid "$id"; then
+      work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
+      printf 'unreached %s: registration cannot resolve its work home route %s, so its terminal result stays retained for reconciliation\n' \
+        "$id" "${work_home:-unknown}"
+      rc=1
+      continue
+    fi
+    work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
+    case "$work_home" in secondmate:*) sid=${work_home#secondmate:} ;; *) continue ;; esac
+    work_home_path=$(fm_pf_registry_get "$STATE" "$id" work_home_path)
+    route_kind=$(public_followup_route_kind "$sid" "$work_home_path") || {
+      printf 'unreached %s: the work home route %s cannot be resolved; its terminal result stays retained for reconciliation; fix data/secondmates.md\n' \
+        "$id" "$sid"
+      rc=1
+      continue
+    }
+    [ "$route_kind" = remote ] || continue
+    command -v jq >/dev/null 2>&1 \
+      || die "jq is required to collect a terminal result from a remote work home" 1
+
+    collect_rc=0
+    payload=$("$FM_ROOT/bin/fm-on.sh" "$sid" fm-public-followup-collect.sh drain "$id") \
+      || collect_rc=$?
+    # fm-on.sh returns ssh's status unchanged, so 255 is the established
+    # "delivered but completion unknown" status this codebase reconciles rather
+    # than reads as done or refused.
+    if [ "$collect_rc" -eq 255 ]; then
+      printf 'unreached %s: the work home %s never answered, so its terminal result stays retained there for reconciliation\n' \
+        "$id" "$sid"
+      rc=1
+      continue
+    fi
+    if [ "$collect_rc" -ne 0 ]; then
+      printf 'unreached %s: the work home %s refused the collection (exit %s), so its terminal result stays retained there for reconciliation\n' \
+        "$id" "$sid" "$collect_rc"
+      rc=1
+      continue
+    fi
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      event_id=$(printf '%s' "$line" | jq -r '.event_id // empty' 2>/dev/null)
+      if [ "${#line}" -gt "$FM_PF_EVENT_BYTES_MAX" ] \
+        || [ -z "$event_id" ] || ! fm_pf_slug_valid "$event_id"; then
+        printf 'unreached %s: the work home %s returned an unusable terminal result, which stays retained there\n' \
+          "$id" "$sid"
+        rc=1
+        continue
+      fi
+      printf '%s\n' "$line" \
+        | fmx_private_artifact_publish_stdin_once "$(fm_pf_events_dir "$STATE")" "$event_id.json" 600
+      case $? in
+        0|1) ;;
+        *)
+          printf 'unreached %s: a collected terminal result could not be stored here, so it stays retained on %s\n' \
+            "$id" "$sid"
+          rc=1
+          continue
+          ;;
+      esac
+      # Retiring the staged copy is best effort by design: this home now holds
+      # the event durably, and a retained copy is only ever collected again and
+      # dropped as a duplicate.
+      dropped=0
+      "$FM_ROOT/bin/fm-on.sh" "$sid" fm-public-followup-collect.sh drop "$id" "$event_id" \
+        >/dev/null 2>&1 || dropped=$?
+      [ "$dropped" -eq 0 ] \
+        || printf 'collected %s: the copy staged on %s could not be retired and will be collected again\n' \
+             "$event_id" "$sid"
+    done <<EOF
+$payload
+EOF
+  done
+  return "$rc"
+}
+
 cmd_consume() {
   gate_or_exit
-  fm_pf_has_events "$STATE" || exit 0
+  local collect_rc=0
+  collect_remote_staged_events || collect_rc=1
+  if ! fm_pf_has_events "$STATE"; then
+    [ "$collect_rc" -eq 0 ] || exit 1
+    exit 0
+  fi
   require_tools
 
-  local events_dir consumed_dir stderr_file file event_id payload derived out rc reason consume_rc=0
+  local events_dir consumed_dir stderr_file file event_id payload derived out rc reason detail
+  local consume_rc=$collect_rc
   local obligation delivery request platform
   events_dir=$(fm_pf_events_dir "$STATE")
   consumed_dir=$(fm_pf_consumed_dir "$STATE")
@@ -493,8 +779,12 @@ cmd_consume() {
     fi
     if [ "$rc" -ne 0 ]; then
       reason=$( { cat "$stderr_file" 2>/dev/null; printf '%s\n' "$out"; } \
-        | grep -v '^[[:space:]]*$' | head -1 | fm_pf_clean_outcome_text | fm_pf_bound_bytes 400)
-      reject_event "$file" "$event_id" "${reason:-tasks-axi refused the event}" || consume_rc=1
+        | grep -v '^[[:space:]]*$' | head -1)
+      reason=${reason:-tasks-axi refused the event}
+      detail=$(event_rejection_detail "$payload")
+      [ -z "$detail" ] || reason="$detail (tasks-axi: $reason)"
+      reason=$(printf '%s' "$reason" | fm_pf_clean_outcome_text | fm_pf_bound_bytes 600)
+      reject_event "$file" "$event_id" "$reason" "$obligation" || consume_rc=1
       continue
     fi
 
@@ -697,11 +987,47 @@ public_followup_secondmate_home() {
   printf '%s\n' "$home"
 }
 
+# public_followup_route_is_remote <secondmate-id>: 0 when data/secondmates.md
+# holds a genuine REMOTE route for that id. The registry is the route authority
+# here for the same reason fm-on.sh and fm-send.sh treat it as one: a remote home
+# has no local path, so nothing on this disk can answer the question. Resolving
+# it live also means a registration written before this check (they all record an
+# empty work_home_path for a remote route) still resolves.
+public_followup_route_is_remote() {
+  local id=$1 remote
+  fm_pf_home_id_valid "secondmate:$id" || return 1
+  [ -f "$DATA/secondmates.md" ] && [ ! -L "$DATA/secondmates.md" ] || return 1
+  remote=$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null) || return 1
+  [ "$remote" = 1 ]
+}
+
+# clear_public_followup_link_remote <secondmate-id> <work-id> <request-id>:
+# clear the bound legacy X link inside a REMOTE secondmate home over that route's transport,
+# because the link lives in the remote home's state and no local path reaches it.
+# fm-on.sh returns ssh's status unchanged, so 255 is the established "delivered
+# but completion unknown" status this codebase already reconciles rather than
+# reads as done or refused (bin/fm-on.sh, bin/fm-remote-readiness-lib.sh,
+# bin/fm-teardown.sh). It is passed through so a caller can say the remote never
+# confirmed instead of claiming the clear definitely failed. The remote clear
+# is guarded by the registration's Relay request identity and remains idempotent
+# when the target has no link, so a reconciling retry is safe.
+clear_public_followup_link_remote() {
+  local id=$1 work_id=$2 request_id=$3 rc=0
+  "$FM_ROOT/bin/fm-on.sh" "$id" fm-x-followup.sh --clear "$work_id" \
+    --expect-request "$request_id" </dev/null >/dev/null || rc=$?
+  [ "$rc" -ne 255 ] || return 255
+  [ "$rc" -eq 0 ] || return 1
+  return 0
+}
+
+# Returns 0 when the link is cleared, 255 when a remote home never confirmed the
+# clear (completion unknown), and 1 for any other refusal.
 clear_public_followup_link() {
-  local id=$1 work_home work_home_path work_id home state rc
+  local id=$1 work_home work_home_path work_id request_id home state rc
   public_followup_registration_valid "$id" || return 1
   work_home=$(fm_pf_registry_get "$STATE" "$id" work_home)
   work_id=$(fm_pf_registry_get "$STATE" "$id" work_id)
+  request_id=$(fm_pf_registry_get "$STATE" "$id" request_id)
   [ -n "$work_home" ] && [ -n "$work_id" ] || return 1
   case "$work_home" in
     main)
@@ -709,6 +1035,13 @@ clear_public_followup_link() {
       state=$STATE
       ;;
     secondmate:*)
+      # A remote route is decided from the registry BEFORE any local path is
+      # consulted: the recorded remote home path is meaningful only on its own
+      # host, so a same-named local directory must never stand in for it.
+      if public_followup_route_is_remote "${work_home#secondmate:}"; then
+        clear_public_followup_link_remote "${work_home#secondmate:}" "$work_id" "$request_id"
+        return $?
+      fi
       work_home_path=$(fm_pf_registry_get "$STATE" "$id" work_home_path)
       case "$work_home_path" in /*) ;; *) return 1 ;; esac
       case "$work_home_path" in *$'\n'*|*$'\r'*) return 1 ;; esac
@@ -731,6 +1064,17 @@ clear_public_followup_link() {
   esac
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_ROOT_OVERRIDE="$FM_ROOT" \
     "$FM_ROOT/bin/fm-x-followup.sh" --clear "$work_id" >/dev/null
+}
+
+# pf_link_clear_note <rc>: the qualifier appended to a refusal when a bound
+# legacy X link is still in place. Empty for every local refusal, so those
+# messages are unchanged. A remote clear returns fm-on.sh's pass-through ssh
+# status, where 255 means the remote home never confirmed the clear: completion
+# is unknown and belongs to that host's reconciliation, never a definite failure
+# and never a silent success.
+pf_link_clear_note() {
+  [ "$1" -eq 255 ] || return 0
+  printf ' The remote home never confirmed the clear, so reconcile it on that host rather than assuming nothing changed.'
 }
 
 public_followup_legacy_link_status() {
@@ -832,7 +1176,7 @@ cmd_deliver() {
     || die "this home has not opted into the myfirstmate relay, so it cannot post a public reply" 1
   require_tools
 
-  local payload delivery attempt request platform text tmp_text hash chunks rc receipt receipt_fields receipt_dry_run link_status
+  local payload delivery attempt request platform text tmp_text hash chunks rc receipt receipt_fields receipt_dry_run link_status link_rc
   local loop_retained=0
   payload=$(obligation_json "$id") || die "could not read the backlog through tasks-axi" 1
   [ -n "$payload" ] || die "no public-followup obligation '$id' in this home's backlog" 1
@@ -846,8 +1190,10 @@ cmd_deliver() {
   case "$delivery" in
     posted|waived)
       if public_followup_registration_valid "$id"; then
-        if ! clear_public_followup_link "$id"; then
-          die "obligation '$id' is already $delivery, but its legacy X link could not be cleared; the registration was retained for reconciliation" 1
+        link_rc=0
+        clear_public_followup_link "$id" || link_rc=$?
+        if [ "$link_rc" -ne 0 ]; then
+          die "obligation '$id' is already $delivery, but its legacy X link could not be cleared; the registration was retained for reconciliation$(pf_link_clear_note "$link_rc")" 1
         fi
       else
         link_status=1
@@ -938,8 +1284,10 @@ EOF
       die "dry-run for '$id' did not post; recorded as retryable and left the obligation open" 1
     fi
     if record_posted "$id" "$attempt" "$request" "$platform" "$chunks"; then
-      if ! clear_public_followup_link "$id"; then
-        die "the public reply for '$id' POSTED and its receipt was recorded, but its legacy X link could not be cleared; the registration was retained for reconciliation" 1
+      link_rc=0
+      clear_public_followup_link "$id" || link_rc=$?
+      if [ "$link_rc" -ne 0 ]; then
+        die "the public reply for '$id' POSTED and its receipt was recorded, but its legacy X link could not be cleared; the registration was retained for reconciliation$(pf_link_clear_note "$link_rc")" 1
       fi
       if mark_loop_delivered "$id"; then loop_retained=1; fi
       printf 'delivered %s request=%s platform=%s chunks=%s\n' "$id" "$request" "$platform" "$chunks"
@@ -968,7 +1316,7 @@ EOF
 # --- subcommand: record-posted ---------------------------------------------
 
 cmd_record_posted() {
-  local id=${1:-} attempt='' chunks=''
+  local id=${1:-} attempt='' chunks='' link_rc
   [ -n "$id" ] || { usage; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -996,8 +1344,10 @@ cmd_record_posted() {
 
   record_posted "$id" "$attempt" "$request" "$platform" "$chunks" \
     || die "tasks-axi refused the receipt for '$id' attempt $attempt; the recorded attempt must match exactly" 1
-  if ! clear_public_followup_link "$id"; then
-    die "the receipt for '$id' was recorded, but its legacy X link could not be cleared; the registration was retained for reconciliation" 1
+  link_rc=0
+  clear_public_followup_link "$id" || link_rc=$?
+  if [ "$link_rc" -ne 0 ]; then
+    die "the receipt for '$id' was recorded, but its legacy X link could not be cleared; the registration was retained for reconciliation$(pf_link_clear_note "$link_rc")" 1
   fi
   if mark_loop_delivered "$id"; then loop_retained=1; fi
   printf 'recorded %s attempt=%s request=%s\n' "$id" "$attempt" "$request"
@@ -1121,9 +1471,8 @@ cmd_rechain() {
   fi
   local key
   for key in "${deliverable_keys[@]}"; do
-    case "$key" in
-      ''|*[!a-z0-9_]*) die "deliverable key must be lowercase [a-z0-9_], got '$key'" ;;
-    esac
+    fm_pf_deliverable_key_valid "$key" \
+      || die "deliverable key must be a lowercase letter then at most 63 more of [a-z0-9_], got '$key'"
   done
 
   # Claim the delivered baton before publishing its destination. The claim is
@@ -1250,7 +1599,7 @@ cmd_rechain() {
 # --- subcommand: retire -----------------------------------------------------
 
 cmd_retire() {
-  local id=${1:-} force=0 reason='' payload delivery task_state registry_file retired_dir retired_at
+  local id=${1:-} force=0 reason='' payload delivery task_state registry_file retired_dir retired_at link_rc
   local retirement_rc=0
   [ -n "$id" ] || { usage; exit 2; }
   shift
@@ -1283,8 +1632,10 @@ cmd_retire() {
         ;;
     esac
   fi
-  if ! clear_public_followup_link "$id"; then
-    die "could not clear the legacy X link for '$id'; its registration was retained for reconciliation" 1
+  link_rc=0
+  clear_public_followup_link "$id" || link_rc=$?
+  if [ "$link_rc" -ne 0 ]; then
+    die "could not clear the legacy X link for '$id'; its registration was retained for reconciliation$(pf_link_clear_note "$link_rc")" 1
   fi
   retired_dir=$(fm_pf_retired_dir "$STATE")
   retired_at=$(now_rfc3339)

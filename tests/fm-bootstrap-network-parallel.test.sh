@@ -64,6 +64,7 @@ print(parts[2] if len(parts) > 2 else "")
 ' "$argv_b64")
 command_name=$(printf '%s\n' "$cmd" | sed -n '1p')
 subcommand=$(printf '%s\n' "$cmd" | sed -n '2p')
+item_rel=$(printf '%s\n' "$cmd" | sed -n '3p')
 slow=0
 case "$command_name" in
   fm-remote-doctor.sh) slow=1 ;;
@@ -73,6 +74,14 @@ case "$command_name" in
 esac
 if [ "$slow" -eq 1 ]; then
   printf 'START %s %s %s\n' "$host" "$command_name" "$subcommand" >> "$log"
+  # Do not let scheduler latency turn the concurrency assertion into a race
+  # between equal sleeps. If the fetch worker was launched concurrently, give
+  # it a bounded opportunity to publish its START record.
+  waited=0
+  while ! grep -q '^START fleet-fetch ' "$log" && [ "$waited" -lt 500 ]; do
+    sleep 0.01
+    waited=$((waited + 1))
+  done
   sleep "$sleep_s"
   printf 'END %s %s %s\n' "$host" "$command_name" "$subcommand" >> "$log"
 else
@@ -115,6 +124,9 @@ case "$command_name" in
     exit 0
     ;;
   fm-remote-inherit.sh)
+    case "$subcommand" in
+      put) printf 'unchanged: %s\n' "$item_rel" ;;
+    esac
     exit 0
     ;;
 esac
@@ -137,6 +149,11 @@ for arg in "\$@"; do
 done
 if [ "\$slow" -eq 1 ]; then
   printf 'START fleet-fetch git fetch\n' >> '$log'
+  waited=0
+  while ! grep -q '^START host-.* fm-remote-doctor.sh ' '$log' && [ "\$waited" -lt 500 ]; do
+    sleep 0.01
+    waited=\$((waited + 1))
+  done
   sleep "\${FM_FAKE_GIT_FETCH_SLEEP:-0.4}"
   printf 'END fleet-fetch git fetch\n' >> '$log'
 fi
@@ -311,6 +328,80 @@ EOF
   pass "bootstrap network ($mode): per-mate output stays intact, fail-closed, and correctly sequenced"
 }
 
+test_remote_inheritance_failure_names_its_own_error_not_an_unchanged_item() {
+  local dir home primary fakebin log out sm_root sm_home line
+  dir="$TMP_ROOT/inherit-failure"
+  home="$dir/home"
+  primary="$dir/primary"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" "$primary"
+  git init -q -b main "$primary"
+  cp -R "$ROOT/bin" "$primary/bin"
+  printf 'test primary\n' > "$primary/AGENTS.md"
+  git -C "$primary" add AGENTS.md bin
+  git -C "$primary" commit -qm 'seed primary default branch'
+  fakebin=$(fm_fakebin "$dir")
+  fm_fake_exit0 "$fakebin" gh treehouse tmux node
+  log="$dir/probe.log"
+  : > "$log"
+  install_fake_ssh "$fakebin"
+
+  sm_root="$dir/remote/sm/root"
+  sm_home="$dir/remote/sm/home"
+  mkdir -p "$sm_root" "$sm_home"
+
+  : > "$home/data/secondmates.md"
+  write_remote_registry_line "$home/data/secondmates.md" sm host-sm "$sm_root" "$sm_home"
+  fm_write_secondmate_meta "$home/state/sm.meta" "$sm_home"
+  printf 'remote_host=host-sm\n' >> "$home/state/sm.meta"
+
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$dir/alpha.origin.git"
+
+  printf '{}\n' > "$home/config/crew-dispatch.json"
+  printf 'codex\n' > "$home/config/crew-harness"
+  # Header omits "must not be edited there" so the local check fails before
+  # any ssh call for this item, after the two config items above already
+  # reported "unchanged:" from the (faked) remote.
+  cat > "$home/data/captain-shared.md" <<'EOF'
+# Shared captain preferences
+
+This file is main-authoritative in the main firstmate home.
+In secondmate homes it is read-only in secondmate homes.
+Route new captain-preference discoveries to the main firstmate through marked status or a document pointer.
+EOF
+
+  out=$(
+    PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$primary" \
+    FM_BOOTSTRAP_NETWORK=only \
+    FM_SSH_BIN="$fakebin/fake-ssh" \
+    FM_FAKE_SSH_LOG="$log" \
+    FM_FAKE_SSH_SLEEP=0 \
+    FM_FAKE_GIT_FETCH_SLEEP=0 \
+    FM_INHERITABLE_CONFIG='crew-dispatch.json crew-harness' \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1
+  )
+
+  line=$(printf '%s\n' "$out" | grep '^SECONDMATE_SYNC: secondmate sm: skipped: remote inheritance failed on host-sm:' || true)
+  [ -n "$line" ] || fail "expected a remote inheritance failure line: $out"
+  case "$line" in
+    *"shared captain preferences"*) ;;
+    *) fail "the failure reason should name the shared captain header problem, got: $line" ;;
+  esac
+  case "$line" in
+    *"unchanged:"*) fail "the failure reason must not report an earlier unchanged item, got: $line" ;;
+  esac
+
+  if [ -n "${FM_TEST_EVIDENCE_FILE:-}" ]; then
+    printf '=== inherit-failure bootstrap output ===\n%s\n' "$out" >> "$FM_TEST_EVIDENCE_FILE"
+  fi
+
+  pass "a remote inheritance failure reports its own error line, not an earlier unchanged item"
+}
+
 test_remote_probe_scheduling_keeps_per_mate_lines parallel
 test_remote_probe_scheduling_keeps_per_mate_lines fallback
+test_remote_inheritance_failure_names_its_own_error_not_an_unchanged_item
 echo "# all fm-bootstrap-network-parallel tests passed"

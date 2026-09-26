@@ -33,6 +33,8 @@ install_pi_watch_extension_fixture() {
     "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   mkdir -p "$repo/bin"
@@ -423,6 +425,90 @@ EOF
   pass "Pi actionable close starts one successor before wake delivery settles"
 }
 
+# The arm child can publish its complete actionable line before its process
+# closes while the watcher finishes durable cleanup. The still-open predecessor
+# must never be mistaken for the successor merely because its readiness promise
+# already settled.
+test_pi_actionable_output_waits_for_predecessor_close() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-actionable-before-close-root"
+  home="$TMP_ROOT/pi-actionable-before-close-home"
+  log="$TMP_ROOT/pi-actionable-before-close.log"
+  stop="$TMP_ROOT/pi-actionable-before-close.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'handling-confirmed\n' >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=before-close-%s\n' "$$" "$count"
+if [ "$count" -eq 1 ]; then
+  printf 'actionable-emitted\n' >> "$FM_ARM_LOG"
+  printf 'signal: actionable output before predecessor close\n'
+  sleep 0.5
+  printf 'predecessor-closed\n' >> "$FM_ARM_LOG"
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const failNow = (message) => {
+  console.error(message);
+  process.exit(1);
+};
+let tool = null;
+const prompts = [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+    writeFileSync(process.env.FM_ARM_LOG, "delivery\n", { flag: "a" });
+  },
+  events: { on() {}, emit() {} },
+};
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("initial-arm", {}, undefined, undefined, {});
+await new Promise((resolve) => setTimeout(resolve, 1200));
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+const armIndexes = rows.map((row, index) => row.startsWith("arm=") ? index : -1).filter((index) => index >= 0);
+const closeIndex = rows.indexOf("predecessor-closed");
+const deliveryIndex = rows.indexOf("delivery");
+if (armIndexes.length !== 2) failNow(`expected a successor after the predecessor close: ${rows.join(" | ")}`);
+if (closeIndex < 0 || deliveryIndex < 0) failNow(`missing close or delivery evidence: ${rows.join(" | ")}`);
+if (armIndexes[1] < closeIndex) failNow(`successor started before predecessor close: ${rows.join(" | ")}`);
+if (deliveryIndex < armIndexes[1]) failNow(`wake was delivered before successor startup: ${rows.join(" | ")}`);
+if (prompts.length !== 1 || !prompts[0].includes("signal: actionable output before predecessor close")) {
+  failNow(`wrong actionable wake: ${prompts.join(" | ")}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi actionable output must wait for predecessor close before successor restoration"
+  [ -z "$out" ] || fail "Pi actionable-before-close test printed output: $out"
+  pass "Pi actionable output waits for predecessor close before successor restoration"
+}
+
 test_pi_branch_offer_owns_actionable_wake() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-branch-offer-root"
@@ -620,7 +706,7 @@ EOF
   pass "Pi dispatcher flags a fleet-wide heartbeat offer as branch-eligible"
 }
 
-test_pi_heartbeat_with_main_owned_queue_row_stays_on_main() {
+test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-heartbeat-mixed-queue-root"
   home="$TMP_ROOT/pi-heartbeat-mixed-queue-home"
@@ -684,23 +770,499 @@ writeFileSync(
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-heartbeat-mixed-queue", {}, undefined, undefined, {});
-for (let i = 0; i < 250 && !prompt; i += 1) {
+// The offer is what this asserts on, so wait for it and then give any
+// erroneous main delivery a real chance to land before calling it absent.
+for (let i = 0; i < 250 && offers.length === 0; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
-if (offers.length !== 1 || offers[0].heartbeat !== true || offers[0].eligible !== false) {
-  throw new Error(`mixed heartbeat offer had unsafe eligibility: ${JSON.stringify(offers)}`);
+for (let i = 0; i < 25 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
 }
-if (!prompt.includes("FIRSTMATE WATCHER WAKE: heartbeat")) {
-  throw new Error(`mixed heartbeat wake did not stay on main: ${prompt}`);
+if (offers.length !== 1 || offers[0].heartbeat !== true || offers[0].eligible !== true) {
+  throw new Error(`a co-present check row made the heartbeat offer ineligible: ${JSON.stringify(offers)}`);
+}
+if (prompt) {
+  throw new Error(`a co-present check row rode the heartbeat into main: ${prompt}`);
 }
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 process.exit(0);
 EOF
   )
   status=$?
-  expect_code 0 "$status" "heartbeat with a main-owned queue row must stay on main: $out"
+  expect_code 0 "$status" "a heartbeat must not ride a co-present check row into main: $out"
   [ -z "$out" ] || fail "Pi mixed heartbeat-queue test printed output: $out"
-  pass "heartbeat with a main-owned queue row stays on main"
+  pass "a co-present check row neither vetoes nor rides a heartbeat into main"
+}
+
+# Every check the main session alone can act on stays on main, even when an
+# unrelated task-local row in the same queue is perfectly branch-eligible. The
+# no-op checks the branch never sees are suppressed at their source instead
+# (bin/fm-procevent-lavish.sh "silent"), so what remains under a `check:`
+# trigger is exactly the main-only set, and each named class is driven here
+# through the real dispatcher.
+test_pi_main_only_check_classes_stay_on_main() {
+  local repo home plugin log stop out status reason label
+  repo="$TMP_ROOT/pi-main-only-check-root"
+  home="$TMP_ROOT/pi-main-only-check-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf '%s\n' "${FM_TEST_REASON:?}"
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  while IFS='|' read -r label reason; do
+    [ -n "$label" ] || continue
+    log="$TMP_ROOT/pi-main-only-check-$label.log"
+    stop="$TMP_ROOT/pi-main-only-check-$label.stop"
+    out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+      FM_TEST_REASON="$reason" node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const offers = [];
+let prompt = "";
+let tool = null;
+const handlers = new Map();
+const bus = {
+  on(channel, handler) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of handlers.get(channel) ?? []) handler(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  offers.push({ message: offer.message, eligible: offer.eligible });
+  if (offer.eligible) offer.accept();
+});
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt = message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+// A task-local row the branch would happily take sits in the same queue, so
+// only the check-kind TRIGGER itself can be what keeps this wake on main.
+writeFileSync(
+  `${process.env.FM_HOME}/state/.wake-queue`,
+  "1\t1\tsignal\ttask-a.status\tsignal: task-a.status\n2\t2\tcheck\tmain-only\t" + process.env.FM_TEST_REASON + "\n",
+);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-main-only-check", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (offers.length !== 1 || offers[0].eligible !== false) {
+  throw new Error(`a main-only check was offered to the branch: ${JSON.stringify(offers)}`);
+}
+if (!prompt.includes(`FIRSTMATE WATCHER WAKE: ${process.env.FM_TEST_REASON}`)) {
+  throw new Error(`a main-only check did not reach main: ${prompt}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+    )
+    status=$?
+    expect_code 0 "$status" "the $label check class must stay on main: $out"
+    [ -z "$out" ] || fail "Pi main-only check test ($label) printed output: $out"
+  done <<'CLASSES'
+relay-mention|check: x-mention 1234567890
+credential-failure|check: gh auth check failed; re-authenticate before dispatch
+merge-confirmation|check: task-a.check.sh: PR merged
+real-board-answer|check: procevent lavish lavish-abcdef0123456789 1
+CLASSES
+  pass "every main-only check class still reaches main, never the supervision branch"
+}
+
+# A surfaced captain-held signal uses the existing decision-owned payload, so a
+# co-present routine row cannot take the signal close away from main.
+test_pi_captain_held_signal_stays_on_main() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-captain-held-whitespace-root"
+  home="$TMP_ROOT/pi-captain-held-whitespace-home"
+  log="$TMP_ROOT/pi-captain-held-whitespace.log"
+  stop="$TMP_ROOT/pi-captain-held-whitespace.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
+  printf 'captain-held [key=route]: awaiting the captain\n \t \n' > "$home/state/task-a.status"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: task-a.status\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+    node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const offers = [];
+let prompt = "";
+let tool = null;
+const handlers = new Map();
+const bus = {
+  on(channel, handler) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of handlers.get(channel) ?? []) handler(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  offers.push({ message: offer.message, eligible: offer.eligible });
+  if (offer.eligible) offer.accept();
+});
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt = message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(
+  `${process.env.FM_HOME}/state/.wake-queue`,
+  "1\t1\tsignal\ttask-a.status\tneeds-decision: task-a.status\n" +
+    "1\t2\tsignal\ttask-a.status\tsignal: routine follow-up\n",
+);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-captain-held-signal", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (offers.length !== 1 || offers[0].eligible !== false) {
+  throw new Error(`a captain-held signal trigger was offered to the branch: ${JSON.stringify(offers)}`);
+}
+if (!prompt.includes("FIRSTMATE WATCHER WAKE: signal: task-a.status")) {
+  throw new Error(`a captain-held signal trigger did not reach main: ${prompt}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "a captain-held signal trigger must stay on main: $out"
+  [ -z "$out" ] || fail "Pi captain-held signal test printed output: $out"
+  pass "a captain-held signal trigger reaches main with routine rows present"
+}
+
+# An unread second-mate pending-reply escalation keeps a later stale reminder
+# under the same task's window alias on main until the decision row is read.
+test_pi_unread_pending_reply_forces_later_stale_alias_to_main() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-mixed-signal-root"
+  home="$TMP_ROOT/pi-mixed-signal-home"
+  log="$TMP_ROOT/pi-mixed-signal.log"
+  stop="$TMP_ROOT/pi-mixed-signal.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  printf 'project=%s/projects/approved\nwindow=fm-a\n' "$home" > "$home/state/task-a.meta"
+  printf 'blocked [key=pending-reply-0123456789abcdef]: pending-reply-missed: task=task-a pending-reply-id=0123456789abcdef request=finish report\n' \
+    > "$home/state/task-a.status"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'stale: fm-a (routine reminder)\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+    node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const offers = [];
+let prompt = "";
+let tool = null;
+const handlers = new Map();
+const bus = {
+  on(channel, handler) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of handlers.get(channel) ?? []) handler(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  offers.push({ message: offer.message, eligible: offer.eligible, projects: [...offer.projects] });
+  if (offer.eligible) offer.accept();
+});
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt = message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(
+  `${process.env.FM_HOME}/state/.wake-queue`,
+  "1\t1\tsignal\ttask-a.status\tneeds-decision: task-a.status\n" +
+    "2\t2\tstale\tfm-a\tstale: fm-a (routine reminder)\n",
+);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-later-stale-alias", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && offers.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+for (let i = 0; i < 250 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (offers.length !== 1 || offers[0].eligible !== false) {
+  throw new Error(`a later stale alias bypassed its unread decision: ${JSON.stringify(offers)}`);
+}
+if (!prompt.includes("FIRSTMATE WATCHER WAKE: stale: fm-a")) {
+  throw new Error(`a later stale alias with an unread decision did not wake main: ${prompt}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "an unread pending-reply escalation must keep a later stale alias on main: $out"
+  [ -z "$out" ] || fail "Pi unread pending-reply alias test printed output: $out"
+  pass "an unread pending-reply escalation keeps later stale aliases on main"
+}
+
+# The captain's accepted rule names ONE coalesced trigger batch, not only a
+# single status file with two rows: when a watcher poll bundles a routine
+# signal for one task and a needs-decision signal for a DIFFERENT task into
+# one "signal: <files>" close, the whole batch - both files - must reach main
+# together, never split so the routine file goes to the branch while only the
+# decision file goes to main. A `some`-vs-`every` regression on the file-list
+# cross-reference would pass the same-key test above (both entries share one
+# key) but must fail here, where the two files are genuinely distinct.
+test_pi_distinct_files_mixed_batch_routes_whole_batch_to_main() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-distinct-mixed-batch-root"
+  home="$TMP_ROOT/pi-distinct-mixed-batch-home"
+  log="$TMP_ROOT/pi-distinct-mixed-batch.log"
+  stop="$TMP_ROOT/pi-distinct-mixed-batch.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  printf 'project=%s/projects/approved\nwindow=fm-a\n' "$home" > "$home/state/task-a.meta"
+  printf 'project=%s/projects/approved\nwindow=fm-b\n' "$home" > "$home/state/task-b.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: task-a.status task-b.status\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+    node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const offers = [];
+let prompt = "";
+let tool = null;
+const handlers = new Map();
+const bus = {
+  on(channel, handler) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of handlers.get(channel) ?? []) handler(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  offers.push({ message: offer.message, eligible: offer.eligible, projects: [...offer.projects] });
+  if (offer.eligible) offer.accept();
+});
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt = message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(
+  `${process.env.FM_HOME}/state/.wake-queue`,
+  "1\t1\tsignal\ttask-a.status\tneeds-decision: task-a.status\n" +
+    "2\t2\tsignal\ttask-b.status\tsignal: task-b.status\n",
+);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-distinct-mixed-batch", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && offers.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+for (let i = 0; i < 250 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (offers.length !== 1 || offers[0].eligible !== false) {
+  throw new Error(`a distinct-file mixed batch was split, offering the routine file to the branch: ${JSON.stringify(offers)}`);
+}
+if (!prompt.includes("FIRSTMATE WATCHER WAKE: signal: task-a.status task-b.status")) {
+  throw new Error(`the distinct-file mixed batch did not reach main as one whole close: ${prompt}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "a distinct-file mixed batch must route wholly to main, not split: $out"
+  [ -z "$out" ] || fail "Pi distinct-file mixed-batch test printed output: $out"
+  pass "a mixed batch of two distinct files - one routine, one needs-decision - routes wholly to main"
+}
+
+# Independent heartbeat handling: a needs-decision row sitting elsewhere in the
+# unread queue is excluded and non-vetoing exactly like a check-kind row, so it
+# must neither block nor ride along with a co-present, otherwise-eligible
+# heartbeat scan (docs/pi-supervision-branch.md "Heartbeat routing").
+test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_needs_decision() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-heartbeat-needs-decision-root"
+  home="$TMP_ROOT/pi-heartbeat-needs-decision-home"
+  log="$TMP_ROOT/pi-heartbeat-needs-decision.log"
+  stop="$TMP_ROOT/pi-heartbeat-needs-decision.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'heartbeat\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const offers = [];
+let prompt = "";
+let tool = null;
+const handlers = new Map();
+const bus = {
+  on(channel, handler) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of handlers.get(channel) ?? []) handler(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  offers.push({ message: offer.message, heartbeat: offer.heartbeat, eligible: offer.eligible });
+  if (offer.eligible) offer.accept();
+});
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt = message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(
+  `${process.env.FM_HOME}/state/.wake-queue`,
+  "1\t1\theartbeat\theartbeat\theartbeat\n2\t2\tsignal\tdecision-task.status\tneeds-decision: decision-task.status\n",
+);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-heartbeat-needs-decision", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && offers.length === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+for (let i = 0; i < 25 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (offers.length !== 1 || offers[0].heartbeat !== true || offers[0].eligible !== true) {
+  throw new Error(`a co-present needs-decision row made the heartbeat offer ineligible: ${JSON.stringify(offers)}`);
+}
+if (prompt) {
+  throw new Error(`a co-present needs-decision row rode the heartbeat into main: ${prompt}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "a heartbeat must not ride a co-present needs-decision row into main: $out"
+  [ -z "$out" ] || fail "Pi heartbeat/needs-decision test printed output: $out"
+  pass "a co-present needs-decision row neither vetoes nor rides a heartbeat into main"
 }
 
 test_pi_heartbeat_restoration_failure_stays_on_main() {
@@ -848,6 +1410,181 @@ EOF
   expect_code 0 "$status" "watcher-failure repair must never be offered to the branch: $out"
   [ -z "$out" ] || fail "Pi watcher-failure test printed output: $out"
   pass "watcher-failure repair stays with main even with a live, accepting branch listener"
+}
+
+# Under the away-posture record the dispatcher offers every actionable row to
+# the branch - a check-kind trigger and a needs-decision signal included, the
+# two classes attended routing forces to main - while the two broken-queue
+# vetoes (an unresolvable task-local row, a structurally invalid row) and every
+# watcher-failure alarm still reach main exactly as attended
+# (docs/pi-supervision-branch.md "Postures").
+test_pi_away_record_collapses_eligibility_and_keeps_vetoes_on_main() {
+  local repo home plugin log stop out status label expect reason queue
+  repo="$TMP_ROOT/pi-away-root"
+  home="$TMP_ROOT/pi-away-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter >/dev/null || fail "away entry failed"
+  [ -f "$home/state/.afk-contract" ] || fail "the away-posture record was not written"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf '%s\n' "${FM_TEST_REASON:?}"
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  while IFS='|' read -r label expect reason queue; do
+    [ -n "$label" ] || continue
+    log="$TMP_ROOT/pi-away-$label.log"
+    stop="$TMP_ROOT/pi-away-$label.stop"
+    out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+      FM_TEST_REASON="$reason" FM_TEST_QUEUE="$queue" FM_TEST_EXPECT="$expect" node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const offers = [];
+let prompt = "";
+let tool = null;
+const handlers = new Map();
+const bus = {
+  on(channel, handler) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of handlers.get(channel) ?? []) handler(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  offers.push({ message: offer.message, eligible: offer.eligible });
+  if (offer.eligible) offer.accept();
+});
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt = message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(
+  `${process.env.FM_HOME}/state/.wake-queue`,
+  process.env.FM_TEST_QUEUE.replace(/\\t/g, "\t").replace(/\\n/g, "\n"),
+);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-away", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && offers.length === 0 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+// Give a wrongly-routed main follow-up time to show up before asserting its absence.
+for (let i = 0; i < 25 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (process.env.FM_TEST_EXPECT === "branch") {
+  if (offers.length !== 1 || offers[0].eligible !== true) {
+    throw new Error(`under the away-posture record this wake was not offered to the branch: ${JSON.stringify(offers)}`);
+  }
+  if (prompt) throw new Error(`a branch-eligible wake still woke the parked main: ${prompt}`);
+} else {
+  if (offers.length !== 1 || offers[0].eligible !== false) {
+    throw new Error(`a broken-queue wake was offered to the branch under the record: ${JSON.stringify(offers)}`);
+  }
+  if (!prompt.includes(`FIRSTMATE WATCHER WAKE: ${process.env.FM_TEST_REASON}`)) {
+    throw new Error(`a wake the branch cannot take did not fall back to main: ${prompt}`);
+  }
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+    )
+    status=$?
+    expect_code 0 "$status" "away routing for the $label case must bind: $out"
+    [ -z "$out" ] || fail "Pi away routing test ($label) printed output: $out"
+  done <<'CASES'
+check-trigger|branch|check: task-a.check.sh: PR merged|1\t1\tsignal\ttask-a.status\tsignal: task-a.status\n2\t2\tcheck\tmain-only\tcheck: task-a.check.sh: PR merged\n
+check-only|branch|check: x-mention 1234567890|1\t1\tcheck\tmain-only\tcheck: x-mention 1234567890\n
+needs-decision|branch|signal: task-a.status|1\t1\tsignal\ttask-a.status\tneeds-decision: [key=scope] skip or re-implement\n
+unresolvable|main|signal: task-zz.status|1\t1\tsignal\ttask-zz.status\tsignal: task-zz.status\n
+corrupt|main|signal: task-a.status|not a queue row\n
+CASES
+
+  # Only main can repair supervision itself: a watcher-failure alarm still
+  # reaches main with the record present and a live, accepting branch listener.
+  repo="$TMP_ROOT/pi-away-alarm-root"
+  mkdir -p "$repo/bin"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: healthy pid=1 (beacon 0s)\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const offers = [];
+let prompt = "";
+let handler = null;
+const handlers = new Map();
+const bus = {
+  on(channel, h) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), h]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const h of handlers.get(channel) ?? []) h(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  offers.push({ message: offer.message });
+  offer.accept();
+});
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand(name, options) {
+    if (name === "fm-watch-arm-pi") handler = options.handler;
+  },
+  registerTool() {},
+  sendUserMessage: async (message) => {
+    prompt = message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handler("", { ui: { notify() {} } });
+for (let i = 0; i < 250 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!prompt.includes("external healthy watcher")) {
+  throw new Error(`a watcher failure under the away-posture record did not reach main: ${prompt}`);
+}
+if (offers.length !== 0) {
+  throw new Error(`a watcher failure was offered to the branch under the record: ${JSON.stringify(offers)}`);
+}
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "a watcher-failure alarm must still reach main under the record: $out"
+  [ -z "$out" ] || fail "Pi away alarm test printed output: $out"
+  pass "under the away-posture record every actionable row is offered to the branch while broken-queue wakes and watcher-failure alarms still reach main"
 }
 
 test_pi_handling_delivery_failure_is_typed_once() {
@@ -1102,12 +1839,16 @@ import { pathToFileURL } from "node:url";
 
 let tool = null;
 const prompts = [];
+const handlers = new Map();
 const pi = {
-  on() {},
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
   registerCommand() {},
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
   },
+  // Nothing here consumes the follow-up: continuity must not depend on it.
   sendUserMessage: async (message) => {
     prompts.push(message);
   },
@@ -1410,18 +2151,31 @@ EOF
 }
 
 test_pi_session_transition_generation_owner() {
-  local repo home plugin child_pid_file child_marker_file marker_root arm_log out status
+  local repo home plugin child_pid_file child_marker_file marker_root arm_log fail_once out status
   repo="$TMP_ROOT/pi-session-transition-root"
   home="$TMP_ROOT/pi-session-transition-home"
   child_pid_file="$TMP_ROOT/pi-session-transition-child.pid"
   child_marker_file="$TMP_ROOT/pi-session-transition-child.marker"
   marker_root="$TMP_ROOT/pi-session-transition-markers"
   arm_log="$TMP_ROOT/pi-session-transition-arm.log"
+  fail_once="$TMP_ROOT/pi-session-transition-fail-once"
   mkdir -p "$repo/bin" "$home/state" "$home/config" "$marker_root"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
+# Model the real --restart arm taking over from the still-live replacement
+# predecessor only after this successor process has been committed.
+previous=$(cat "${FM_CHILD_PID_FILE:?}" 2>/dev/null || true)
+if [ -n "$previous" ] && kill -0 "$previous" 2>/dev/null; then
+  kill -TERM "$previous" 2>/dev/null || true
+fi
+if [ -f "${FM_FAIL_ONCE:?}" ]; then
+  rm -f "$FM_FAIL_ONCE"
+  printf 'failed-replacement-attempt\n' >> "${FM_ARM_LOG:?}"
+  printf 'watcher: FAILED - simulated replacement launch failure\n' >&2
+  exit 7
+fi
 # The marker identifies this exact process lifetime after its PID is recycled.
 marker=$(mktemp "${FM_MARKER_ROOT:?}/arm.XXXXXX") || exit 1
 cleanup() { rm -f "$marker"; }
@@ -1434,7 +2188,7 @@ printf 'arm pid=%s marker=%s\n' "$$" "$marker" >> "${FM_ARM_LOG:?}"
 while :; do sleep 0.2; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_CHILD_PID_FILE="$child_pid_file" FM_CHILD_MARKER_FILE="$child_marker_file" FM_MARKER_ROOT="$marker_root" FM_ARM_LOG="$arm_log" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_CHILD_PID_FILE="$child_pid_file" FM_CHILD_MARKER_FILE="$child_marker_file" FM_MARKER_ROOT="$marker_root" FM_ARM_LOG="$arm_log" FM_FAIL_ONCE="$fail_once" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -1483,6 +2237,15 @@ function currentArm() {
   }
 }
 
+function extensionOwner() {
+  const path = `${process.env.FM_HOME}/state/.pi-watch-extension-loaded`;
+  try {
+    return readFileSync(path, "utf8").trim().split("\n")[2] ?? "";
+  } catch {
+    return "";
+  }
+}
+
 function liveArmPids() {
   if (!existsSync(process.env.FM_ARM_LOG)) return [];
   return readFileSync(process.env.FM_ARM_LOG, "utf8")
@@ -1497,29 +2260,37 @@ function liveArmPids() {
     .map((arm) => arm.pid);
 }
 
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 
 const startup = makePi();
 mod.default(startup.pi);
-await startup.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
-const first = await startup.getTool().execute("startup", {}, undefined, undefined, {});
-if (!first.details?.ok || !String(first.details.message).includes("started Pi extension arm child")) {
-  throw new Error(`startup arm failed: ${JSON.stringify(first.details)}`);
+if (!/^generation=[1-9][0-9]* phase=active$/.test(extensionOwner())) {
+  throw new Error(`extension bind did not publish its pre-lock active generation: ${extensionOwner()}`);
 }
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await startup.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
 await waitFor(() => {
   const arm = currentArm();
   return arm.pid && arm.marker && existsSync(arm.marker) && pidAlive(arm.pid);
 }, "startup child");
 const { pid: startupChild, marker: startupMarker } = currentArm();
 if (!pidAlive(startupChild)) throw new Error("startup child was not alive");
+if (!/^generation=[1-9][0-9]* phase=active$/.test(extensionOwner())) {
+  throw new Error(`startup did not publish an active generation owner: ${extensionOwner()}`);
+}
 const staleTool = startup.getTool();
 
 async function replaceSession(previous, reason) {
   const previousArm = currentArm();
+  const previousOwner = extensionOwner();
+  const previousGeneration = /^generation=([1-9][0-9]*) phase=active$/.exec(previousOwner)?.[1];
+  if (!previousGeneration) throw new Error(`${reason} predecessor had no active generation owner: ${previousOwner}`);
   await previous.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason }, {});
-  if (previousArm.marker) {
-    await waitFor(() => !existsSync(previousArm.marker), `${reason} previous child exit`);
+  if (!previousArm.marker || !existsSync(previousArm.marker) || !pidAlive(previousArm.pid)) {
+    throw new Error(`${reason} shutdown retired the old generation before a successor owned recovery`);
+  }
+  if (extensionOwner() !== `generation=${previousGeneration} phase=handoff`) {
+    throw new Error(`${reason} shutdown did not publish its generation handoff: ${extensionOwner()}`);
   }
   const next = makePi();
   mod.default(next.pi);
@@ -1528,20 +2299,23 @@ async function replaceSession(previous, reason) {
     reason,
     previousSessionFile: `/tmp/previous-${reason}.jsonl`,
   }, {});
-  const armed = await next.getTool().execute(`arm-${reason}`, {}, undefined, undefined, {});
-  if (!armed.details?.ok) {
-    throw new Error(`${reason} replacement arm failed: ${JSON.stringify(armed.details)}`);
-  }
-  if (String(armed.details.message).includes("shutting down")) {
-    throw new Error(`${reason} replacement still refused with shutting-down latch`);
-  }
   await waitFor(() => {
     const arm = currentArm();
     return arm.pid && arm.marker && arm.marker !== previousArm.marker && existsSync(arm.marker) && pidAlive(arm.pid) && liveArmPids().includes(arm.pid);
   }, `${reason} replacement child and arm record`);
+  await waitFor(() => !existsSync(previousArm.marker), `${reason} previous child exit after successor claim`);
+  const nextOwner = extensionOwner();
+  const nextGeneration = /^generation=([1-9][0-9]*) phase=active$/.exec(nextOwner)?.[1];
+  if (!nextGeneration || nextGeneration === previousGeneration) {
+    throw new Error(`${reason} successor did not claim a distinct active generation: ${nextOwner}`);
+  }
   const live = liveArmPids();
   if (live.length !== 1) {
     throw new Error(`${reason} expected exactly one live arm child, got ${live.join(",") || "(none)"}`);
+  }
+  const redundant = await next.getTool().execute(`redundant-${reason}`, {}, undefined, undefined, {});
+  if (!redundant.details?.ok || !String(redundant.details.message).includes("unchanged")) {
+    throw new Error(`${reason} replacement lost automatic arm ownership: ${JSON.stringify(redundant.details)}`);
   }
   return next;
 }
@@ -1549,20 +2323,41 @@ async function replaceSession(previous, reason) {
 let current = await replaceSession(startup, "new");
 current = await replaceSession(current, "resume");
 current = await replaceSession(current, "fork");
+current = await replaceSession(current, "reload");
+
+// A replacement that kills the predecessor but fails before watcher readiness
+// remains generation-owned and reaches its bounded automatic retry.
+writeFileSync(process.env.FM_FAIL_ONCE, "fail once\n");
+current = await replaceSession(current, "resume");
+if (!readFileSync(process.env.FM_ARM_LOG, "utf8").includes("failed-replacement-attempt")) {
+  throw new Error("replacement launch failure did not exercise automatic retry");
+}
 
 // Same bound instance: ordinary shutdown then session_start without a fresh factory.
 const sameInstanceArm = currentArm();
+const sameInstanceGeneration = /^generation=([1-9][0-9]*) phase=active$/.exec(extensionOwner())?.[1];
 await current.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+if (!sameInstanceArm.marker || !existsSync(sameInstanceArm.marker) || !pidAlive(sameInstanceArm.pid)) {
+  throw new Error("same-instance shutdown retired the old generation before its replacement started");
+}
+if (!sameInstanceGeneration || extensionOwner() !== `generation=${sameInstanceGeneration} phase=handoff`) {
+  throw new Error(`same-instance shutdown did not publish its handoff generation: ${extensionOwner()}`);
+}
 await current.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
-const sameInstanceResult = await current.getTool().execute("same-instance", {}, undefined, undefined, {});
-if (!sameInstanceResult.details?.ok || String(sameInstanceResult.details.message).includes("shutting down")) {
-  throw new Error(`same-instance replacement arm failed: ${JSON.stringify(sameInstanceResult.details)}`);
-  }
-  await waitFor(() => {
+await waitFor(() => {
     const arm = currentArm();
     return arm.pid && arm.marker && arm.marker !== sameInstanceArm.marker && existsSync(arm.marker) && pidAlive(arm.pid) && liveArmPids().includes(arm.pid);
-  }, "same-instance replacement child and arm record");
-  await waitFor(() => !existsSync(sameInstanceArm.marker), "same-instance previous child exit");
+}, "same-instance replacement child and arm record");
+await waitFor(() => !existsSync(sameInstanceArm.marker), "same-instance previous child exit");
+const sameInstanceOwner = extensionOwner();
+const sameInstanceSuccessor = /^generation=([1-9][0-9]*) phase=active$/.exec(sameInstanceOwner)?.[1];
+if (!sameInstanceSuccessor || sameInstanceSuccessor === sameInstanceGeneration) {
+  throw new Error(`same-instance successor did not claim a distinct active generation: ${sameInstanceOwner}`);
+}
+const sameInstanceResult = await current.getTool().execute("same-instance-redundant", {}, undefined, undefined, {});
+if (!sameInstanceResult.details?.ok || !String(sameInstanceResult.details.message).includes("unchanged")) {
+  throw new Error(`same-instance replacement lost automatic arm ownership: ${JSON.stringify(sameInstanceResult.details)}`);
+}
 if (liveArmPids().length !== 1) {
   throw new Error(`same-instance expected one live arm child, got ${liveArmPids().join(",")}`);
 }
@@ -1595,6 +2390,7 @@ for (const reason of ["resume", "fork", "new", "resume"]) {
 const finalArm = currentArm();
 await current.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
 await waitFor(() => !existsSync(finalArm.marker), "terminal shutdown child exit");
+if (extensionOwner()) throw new Error(`terminal shutdown left an extension owner: ${extensionOwner()}`);
 const quitArm = await current.getTool().execute("after-quit", {}, undefined, undefined, {});
 if (quitArm.details?.ok !== false || quitArm.details.message !== "watcher: not armed - Pi session is shutting down") {
   throw new Error(`terminal quit must keep the shutting-down refusal: ${JSON.stringify(quitArm.details)}`);
@@ -1605,9 +2401,829 @@ if (liveArmPids().length !== 0) {
 EOF
 )
   status=$?
-  [ "$status" -eq 0 ] || fail "Pi session transitions must rearm through an explicit generation owner (exit $status): $out"
+  [ "$status" -eq 0 ] || fail "Pi session transitions must auto-arm through their generation owner (exit $status): $out"
   [ -z "$out" ] || fail "Pi session-transition generation owner test printed output: $out"
-  pass "Pi session transitions use a generation owner across /new /resume /fork, stale callbacks, and quit"
+  pass "Pi session transitions auto-arm through a generation owner across /new /resume /fork/reload, stale callbacks, and quit"
+}
+
+test_pi_session_replacement_carries_inflight_actionable_close() {
+  local repo home plugin log marker_root trigger stop out status
+  repo="$TMP_ROOT/pi-session-replacement-handoff-root"
+  home="$TMP_ROOT/pi-session-replacement-handoff-home"
+  log="$TMP_ROOT/pi-session-replacement-handoff.log"
+  marker_root="$TMP_ROOT/pi-session-replacement-handoff-markers"
+  trigger="$TMP_ROOT/pi-session-replacement-handoff.trigger"
+  stop="$TMP_ROOT/pi-session-replacement-handoff.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$marker_root"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+marker=$(mktemp "${FM_MARKER_ROOT:?}/arm.XXXXXX") || exit 1
+cleanup() { rm -f "$marker"; }
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+printf 'arm pid=%s marker=%s\n' "$$" "$marker" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=replacement-fixture\n' "$$"
+while :; do
+  if [ -e "$FM_TRIGGER_FILE" ]; then
+    outcome=$(cat "$FM_TRIGGER_FILE")
+    rm -f "$FM_TRIGGER_FILE"
+    printf 'signal: '
+    sleep 0.02
+    printf '%s\n' "$outcome"
+    exit 0
+  fi
+  [ ! -e "$FM_STOP_FILE" ] || exit 0
+  sleep 0.02
+done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_MARKER_ROOT="$marker_root" FM_TRIGGER_FILE="$trigger" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let releaseOldDelivery = () => {};
+const oldDeliveryRelease = new Promise((resolve) => {
+  releaseOldDelivery = resolve;
+});
+let oldDeliveryStarted = false;
+
+function makePi(blockDelivery = false) {
+  const handlers = new Map();
+  const eventHandlers = new Map();
+  let tool = null;
+  const prompts = [];
+  const pi = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
+    sendUserMessage: async (message) => {
+      prompts.push(message);
+    },
+    events: {
+      on(event, handler) {
+        eventHandlers.set(event, [...(eventHandlers.get(event) ?? []), handler]);
+      },
+      emit(event, data) {
+        if (blockDelivery && event === "fm-branch-supervision:dispatch") {
+          oldDeliveryStarted = true;
+          data.accept(oldDeliveryRelease);
+        }
+        for (const handler of eventHandlers.get(event) ?? []) handler(data);
+      },
+    },
+  };
+  return { pi, handlers, getTool: () => tool, prompts };
+}
+
+function pidAlive(pid) {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function armRows() {
+  if (!existsSync(process.env.FM_ARM_LOG)) return [];
+  return readFileSync(process.env.FM_ARM_LOG, "utf8")
+    .trim()
+    .split(/\n/)
+    .filter((row) => row.startsWith("arm "))
+    .map((row) => {
+      const match = /pid=(\d+) marker=(\S+)/.exec(row);
+      return match ? { pid: match[1], marker: match[2] } : { pid: "", marker: "" };
+    });
+}
+
+function liveArms() {
+  return armRows().filter((arm) => arm.pid && arm.marker && existsSync(arm.marker) && pidAlive(arm.pid));
+}
+
+async function waitFor(pred, label, attempts = 500) {
+  for (let i = 0; i < attempts; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/replacement-race.meta`, "project=/projects/replacement-race\nwindow=fm-replacement-race\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\treplacement-race.status\tsignal: replacement-race actionable outcome\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const previous = makePi(true);
+mod.default(previous.pi);
+const initial = await previous.getTool().execute("initial-arm", {}, undefined, undefined, {});
+if (!initial.details?.ok || !String(initial.details.message).includes("started Pi extension arm child")) {
+  throw new Error(`initial arm failed: ${JSON.stringify(initial.details)}`);
+}
+await waitFor(() => liveArms().length === 1, "initial live arm");
+
+writeFileSync(process.env.FM_TRIGGER_FILE, "replacement-race actionable outcome\n");
+await waitFor(() => oldDeliveryStarted, "old-session accepted branch delivery");
+if (previous.prompts.length !== 0) {
+  throw new Error(`accepted old-session branch wake reached main: ${previous.prompts.join(" | ")}`);
+}
+await waitFor(() => liveArms().length === 1 && armRows().length >= 2, "old-session successor");
+writeFileSync(process.env.FM_TRIGGER_FILE, "replacement-successor actionable outcome\n");
+await waitFor(() => liveArms().length === 0, "mid-delivery successor actionable close");
+
+await previous.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+await waitFor(() => liveArms().length === 0, "retired old-session successor");
+
+const replacement = makePi(false);
+const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=durable-handoff`);
+replacementMod.default(replacement.pi);
+const replacementStart = replacement.handlers.get("session_start")?.({
+  type: "session_start",
+  reason: "new",
+  previousSessionFile: "/tmp/previous.jsonl",
+}, {});
+await new Promise((resolve) => setTimeout(resolve, 50));
+await waitFor(() => liveArms().length === 1 && armRows().length >= 3, "replacement arm before old delivery settlement");
+if (replacement.prompts.some((message) => message.includes("signal: replacement-race actionable outcome"))) {
+  throw new Error(`replacement raced the accepted old-session delivery: ${replacement.prompts.join(" | ")}`);
+}
+writeFileSync(
+  `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`,
+  "{malformed handoff\n",
+);
+releaseOldDelivery();
+await replacementStart;
+await waitFor(
+  () => replacement.prompts.some((message) => message.includes("signal: replacement-successor actionable outcome")),
+  "replacement-session successor actionable delivery",
+);
+if (replacement.prompts.some((message) => message.includes("signal: replacement-race actionable outcome"))) {
+  throw new Error(`settled old-session branch delivery was replayed: ${replacement.prompts.join(" | ")}`);
+}
+if (replacement.prompts.filter((message) => message.includes("signal: replacement-successor actionable outcome")).length !== 1) {
+  throw new Error(`replacement session did not receive exactly one carried successor outcome: ${replacement.prompts.join(" | ")}`);
+}
+if (!replacement.prompts.some((message) => message.includes("could not clear a delivered replacement-session actionable wake"))) {
+  throw new Error(`handoff cleanup failure was not surfaced: ${replacement.prompts.join(" | ")}`);
+}
+await new Promise((resolve) => setTimeout(resolve, 700));
+if (replacement.prompts.filter((message) => message.includes("could not clear a delivered replacement-session actionable wake")).length !== 1) {
+  throw new Error(`persistent handoff cleanup failure repeated alerts: ${replacement.prompts.join(" | ")}`);
+}
+await waitFor(() => liveArms().length === 1 && armRows().length >= 3, "replacement live arm");
+const redundant = await replacement.getTool().execute("replacement-redundant", {}, undefined, undefined, {});
+if (!redundant.details?.ok || !String(redundant.details.message).includes("unchanged")) {
+  throw new Error(`replacement did not retain automatic arm ownership: ${JSON.stringify(redundant.details)}`);
+}
+
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (liveArms().length !== 1) {
+  throw new Error(`old delivery completion disturbed replacement ownership: ${JSON.stringify(liveArms())}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi session replacement must auto-arm and carry an in-flight actionable close"
+  [ -z "$out" ] || fail "Pi session-replacement handoff test printed output: $out"
+  pass "Pi session replacement auto-arms and carries its in-flight actionable close"
+}
+
+test_pi_streaming_followup_is_replayed_after_replacement() {
+  local repo home plugin trigger out status
+  repo="$TMP_ROOT/pi-streaming-followup-replacement-root"
+  home="$TMP_ROOT/pi-streaming-followup-replacement-home"
+  trigger="$TMP_ROOT/pi-streaming-followup-replacement.trigger"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+trap 'exit 0' TERM INT
+printf 'watcher: started pid=%s\n' "$$"
+while :; do
+  if [ -e "$FM_TRIGGER_FILE" ]; then
+    rm -f "$FM_TRIGGER_FILE"
+    printf 'signal: streaming queued actionable outcome\n'
+    exit 0
+  fi
+  sleep 0.02
+done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_TRIGGER_FILE="$trigger" node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+function makePi() {
+  const handlers = new Map();
+  const prompts = [];
+  let tool = null;
+  const pi = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
+    sendUserMessage: async (message) => {
+      prompts.push(message);
+    },
+    events: { on() {}, emit() {} },
+  };
+  return { pi, handlers, prompts, getTool: () => tool };
+}
+
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const originalMod = await import(pathToFileURL(process.env.PLUGIN).href);
+const original = makePi();
+originalMod.default(original.pi);
+await original.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+original.handlers.get("agent_start")?.({}, {});
+writeFileSync(process.env.FM_TRIGGER_FILE, "trigger\n");
+await waitFor(
+  () => original.prompts.some((message) => message.includes("signal: streaming queued actionable outcome")),
+  "old-session queued follow-up",
+);
+await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+
+const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=streaming-followup`);
+const replacement = makePi();
+replacementMod.default(replacement.pi);
+await replacement.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+await waitFor(
+  () => replacement.prompts.some((message) => message.includes("signal: streaming queued actionable outcome")),
+  "replacement-session replay",
+);
+if (replacement.prompts.filter((message) => message.includes("signal: streaming queued actionable outcome")).length !== 1) {
+  throw new Error(`replacement did not replay the unconsumed follow-up exactly once: ${replacement.prompts.join(" | ")}`);
+}
+await replacement.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+
+const finalMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=idle-followup`);
+const finalSession = makePi();
+finalMod.default(finalSession.pi);
+const { unlinkSync } = await import("node:fs");
+unlinkSync(`${process.env.FM_HOME}/state/.lock`);
+await finalSession.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+if (finalSession.prompts.length !== 0) throw new Error("lockless replacement adopted its handoff early");
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const reclaimed = await finalSession.getTool().execute("reclaimed-arm", {}, undefined, undefined, {});
+if (!reclaimed.details?.ok) throw new Error(`reclaimed arm failed: ${JSON.stringify(reclaimed.details)}`);
+await waitFor(
+  () => finalSession.prompts.some((message) => message.includes("signal: streaming queued actionable outcome")),
+  "second replacement replay before idle consumption",
+);
+if (finalSession.prompts.filter((message) => message.includes("signal: streaming queued actionable outcome")).length !== 1) {
+  throw new Error(`second replacement did not replay the idle queued follow-up exactly once: ${finalSession.prompts.join(" | ")}`);
+}
+finalSession.handlers.get("before_agent_start")?.({ prompt: finalSession.prompts[0] }, {});
+await new Promise((resolve) => setTimeout(resolve, 20));
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi replacement must replay a streaming follow-up before consumption"
+  [ -z "$out" ] || fail "Pi streaming follow-up replacement test printed output: $out"
+  pass "Pi replacement replays a streaming follow-up before consumption"
+}
+
+# The 2026-09-02 incident: a wake delivered while main was mid-turn never raised
+# before_agent_start, the extension waited for it, and every later actionable
+# close was dropped. Continuity must settle on Pi accepting the follow-up, while
+# consumption still decides what a replacement replays.
+test_pi_streaming_time_delivery_keeps_the_successor_chain() {
+  local repo home plugin log trigger out status
+  repo="$TMP_ROOT/pi-streaming-chain-root"
+  home="$TMP_ROOT/pi-streaming-chain-home"
+  log="$TMP_ROOT/pi-streaming-chain.log"
+  trigger="$TMP_ROOT/pi-streaming-chain.trigger"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed=%s\n' "$2" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=chain-%s\n' "$$" "$count"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_TRIGGER_FILE.$count" ]; do sleep 0.02; done
+printf 'signal: streaming chain wake %s\n' "$count"
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_TRIGGER_FILE="$trigger" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const prompts = [];
+let streaming = false;
+let beforeAgentStarts = 0;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  // The real Pi prompt path: a follow-up sent while the agent is streaming is
+  // queued for the running run and raises no before_agent_start; only a send
+  // to an idle agent starts a run and raises it with the exact text.
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+    if (streaming) return;
+    beforeAgentStarts += 1;
+    handlers.get("before_agent_start")?.({ prompt: message }, {});
+  },
+  events: { on() {}, emit() {} },
+};
+// The running run reaching a queued follow-up: Pi emits the user message.
+const consumeQueued = (message) =>
+  handlers.get("message_start")?.({ message: { role: "user", content: [{ type: "text", text: message }] } }, {});
+const arms = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm=")).length
+  : 0;
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+const wakes = (text) => prompts.filter((message) => message.includes(text)).length;
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+await waitFor(() => arms() === 1, "first arm");
+streaming = true;
+writeFileSync(`${process.env.FM_TRIGGER_FILE}.1`, "close\n");
+await waitFor(() => prompts.length === 1, "first wake delivered while main streams");
+if (wakes("signal: streaming chain wake 1") !== 1) throw new Error(`wrong first wake: ${prompts.join(" | ")}`);
+await waitFor(() => arms() === 2, "successor after the streaming-time delivery");
+writeFileSync(`${process.env.FM_TRIGGER_FILE}.2`, "close\n");
+await waitFor(() => prompts.length === 2, "second wake delivered while main still streams");
+if (wakes("signal: streaming chain wake 2") !== 1) throw new Error(`wrong second wake: ${prompts.join(" | ")}`);
+await waitFor(() => arms() === 3, "successor after the second streaming-time delivery");
+if (beforeAgentStarts !== 0) throw new Error(`streaming follow-ups raised before_agent_start ${beforeAgentStarts} times`);
+
+// The run reaches the first queued follow-up; the second is still queued when
+// the captain replaces the session, so only the second rides the handoff.
+consumeQueued(prompts[0]);
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+const handoff = JSON.parse(readFileSync(handoffPath, "utf8"));
+if (handoff.pending.length !== 1 || handoff.pending[0].delivered || !handoff.pending[0].message.includes("signal: streaming chain wake 2")) {
+  throw new Error(`replacement handoff did not carry exactly the unconsumed wake: ${JSON.stringify(handoff)}`);
+}
+streaming = false;
+const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=streaming-chain`);
+replacementMod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+await waitFor(() => prompts.length === 3, "replacement replay of the unconsumed wake");
+if (wakes("signal: streaming chain wake 2") !== 2 || wakes("signal: streaming chain wake 1") !== 1) {
+  throw new Error(`replacement replayed the wrong wakes: ${prompts.join(" | ")}`);
+}
+if (beforeAgentStarts !== 1) throw new Error(`idle replay raised before_agent_start ${beforeAgentStarts} times`);
+await waitFor(() => arms() === 4, "replacement arm");
+await waitFor(() => !existsSync(handoffPath), "consumed replay clears its handoff record");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi streaming-time wake delivery must keep the successor chain and replay only unconsumed wakes"
+  [ -z "$out" ] || fail "Pi streaming-time delivery chain test printed output: $out"
+  pass "Pi streaming-time wake delivery keeps the successor chain and replays only unconsumed wakes"
+}
+
+# A verified successor can die while the wake it was started for is still
+# being delivered (a branch turn can take minutes). Its failure close arrives
+# while the pipeline is busy, so the ordinary retry path must be deferred to
+# the end of that delivery rather than skipped, or the live generation is left
+# with no watcher and no retry.
+test_pi_successor_failure_during_delivery_is_retried_after_delivery() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-successor-dies-mid-delivery-root"
+  home="$TMP_ROOT/pi-successor-dies-mid-delivery-home"
+  log="$TMP_ROOT/pi-successor-dies-mid-delivery.log"
+  stop="$TMP_ROOT/pi-successor-dies-mid-delivery.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$count" -eq 1 ]; then
+  printf 'signal: wake before the successor dies\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  sleep 0.1
+  printf 'watcher: FAILED - successor lost its beacon\n'
+  exit 3
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let releaseBranch = () => {};
+const branchSettlement = new Promise((resolve) => {
+  releaseBranch = resolve;
+});
+let branchAccepted = false;
+let tool = null;
+const prompts = [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+  events: {
+    on() {},
+    emit(event, data) {
+      if (event !== "fm-branch-supervision:dispatch") return;
+      branchAccepted = true;
+      data.accept(branchSettlement);
+    },
+  },
+};
+const arms = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm=")).length
+  : 0;
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/mid-delivery.meta`, "project=/projects/mid-delivery\nwindow=fm-mid-delivery\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\tmid-delivery.status\tsignal: wake before the successor dies\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("initial-arm", {}, undefined, undefined, {});
+await waitFor(() => branchAccepted, "branch accepted the wake behind a verified successor");
+if (arms() !== 2) throw new Error(`expected the verified successor before delivery, got ${arms()} arms`);
+// The successor dies while the branch still holds the delivery.
+await new Promise((resolve) => setTimeout(resolve, 300));
+if (arms() !== 2) throw new Error(`a retry launched while the delivery was still in flight: ${arms()} arms`);
+releaseBranch();
+await waitFor(() => arms() === 3, "a retry watcher after the delivery settled");
+await new Promise((resolve) => setTimeout(resolve, 150));
+if (arms() !== 3) throw new Error(`the deferred retry was not single-flight: ${arms()} arms`);
+if (prompts.length !== 0) throw new Error(`a bounded retry surfaced a failure prompt: ${prompts.join(" | ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must retry a verified successor that failed during wake delivery"
+  [ -z "$out" ] || fail "Pi successor-dies-mid-delivery test printed output: $out"
+  pass "Pi retries a verified successor that failed during wake delivery once that delivery settles"
+}
+
+test_pi_late_retiring_actionable_reaches_replacement() {
+  local repo home plugin count out status
+  repo="$TMP_ROOT/pi-late-retiring-actionable-root"
+  home="$TMP_ROOT/pi-late-retiring-actionable-home"
+  count="$TMP_ROOT/pi-late-retiring-actionable.count"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$FM_ARM_COUNT" ] || count=$(cat "$FM_ARM_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_ARM_COUNT"
+previous=$(cat "$FM_ARM_COUNT.pid" 2>/dev/null || true)
+printf '%s\n' "$$" > "$FM_ARM_COUNT.pid"
+[ -z "$previous" ] || kill -TERM "$previous" 2>/dev/null || true
+late_close() {
+  sleep 0.15
+  printf 'signal: late retiring actionable outcome\n'
+  exit 0
+}
+trap late_close TERM INT
+printf 'watcher: started pid=%s\n' "$$"
+while :; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_COUNT="$count" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+function makePi() {
+  const handlers = new Map();
+  let tool = null;
+  const prompts = [];
+  const pi = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
+    sendUserMessage: async (message) => {
+      prompts.push(message);
+    },
+    events: { on() {}, emit() {} },
+  };
+  return { pi, handlers, getTool: () => tool, prompts };
+}
+
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const originalMod = await import(pathToFileURL(process.env.PLUGIN).href);
+const original = makePi();
+originalMod.default(original.pi);
+const armed = await original.getTool().execute("initial-arm", {}, undefined, undefined, {});
+if (!armed.details?.ok) throw new Error(`initial arm failed: ${JSON.stringify(armed.details)}`);
+await waitFor(() => existsSync(process.env.FM_ARM_COUNT) && readFileSync(process.env.FM_ARM_COUNT, "utf8").trim() === "1", "original arm");
+await original.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+writeFileSync(`${process.env.FM_HOME}/state/extensions`, "block late handoff publication\n");
+const foreignState = `${process.env.FM_HOME}/foreign-state`;
+const { mkdirSync } = await import("node:fs");
+mkdirSync(foreignState, { recursive: true });
+writeFileSync(`${foreignState}/.lock`, `${process.pid}\n`);
+process.env.FM_STATE_OVERRIDE = foreignState;
+const foreignMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=foreign-state`);
+const foreign = makePi();
+foreignMod.default(foreign.pi);
+await foreign.handlers.get("session_start")?.({ type: "session_start", reason: "resume" }, {});
+await new Promise((resolve) => setTimeout(resolve, 250));
+if (foreign.prompts.some((message) => message.includes("signal: late retiring actionable outcome"))) {
+  throw new Error(`late old-state outcome crossed into foreign state: ${foreign.prompts.join(" | ")}`);
+}
+await foreign.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+delete process.env.FM_STATE_OVERRIDE;
+
+const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=late-retiring-close`);
+const replacement = makePi();
+replacementMod.default(replacement.pi);
+await replacement.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+await waitFor(
+  () => replacement.prompts.some((message) => message.includes("signal: late retiring actionable outcome")),
+  "late actionable delivery to replacement",
+);
+const latePrompts = replacement.prompts.filter((message) => message.includes("signal: late retiring actionable outcome"));
+if (latePrompts.length !== 1) {
+  throw new Error(`replacement did not receive exactly one late outcome: ${replacement.prompts.join(" | ")}`);
+}
+if (!latePrompts[0].includes("watcher: FAILED - Pi extension could not persist a late replacement-session actionable wake")) {
+  throw new Error(`late handoff publication failure was not surfaced: ${latePrompts[0]}`);
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi replacement must receive an actionable close after retirement timeout"
+  [ -z "$out" ] || fail "Pi late retiring actionable test printed output: $out"
+  pass "Pi replacement receives actionable closes after retirement timeout"
+}
+
+test_pi_replacement_tokens_are_process_unique() {
+  local repo home plugin count out status
+  repo="$TMP_ROOT/pi-replacement-token-uniqueness-root"
+  home="$TMP_ROOT/pi-replacement-token-uniqueness-home"
+  count="$TMP_ROOT/pi-replacement-token-uniqueness.count"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$FM_ARM_COUNT" ] || count=$(cat "$FM_ARM_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_ARM_COUNT"
+previous=$(cat "$FM_ARM_COUNT.pid" 2>/dev/null || true)
+printf '%s\n' "$$" > "$FM_ARM_COUNT.pid"
+[ -z "$previous" ] || kill -TERM "$previous" 2>/dev/null || true
+late_close() {
+  sleep 0.08
+  printf 'signal: module-%s late actionable outcome\n' "$count"
+  exit 0
+}
+trap late_close TERM INT
+printf 'watcher: started pid=%s\n' "$$"
+while :; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_COUNT="$count" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=10 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+Date.now = () => 1700000000000;
+
+function makePi() {
+  const handlers = new Map();
+  let tool = null;
+  const pi = {
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool(candidate) {
+      if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+    },
+    sendUserMessage: async () => {},
+    events: { on() {}, emit() {} },
+  };
+  return { pi, handlers, getTool: () => tool };
+}
+
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+for (let moduleIndex = 1; moduleIndex <= 2; moduleIndex += 1) {
+  const mod = await import(`${pathToFileURL(process.env.PLUGIN).href}?token-module=${moduleIndex}`);
+  const instance = makePi();
+  mod.default(instance.pi);
+  const armed = await instance.getTool().execute(`arm-${moduleIndex}`, {}, undefined, undefined, {});
+  if (!armed.details?.ok) throw new Error(`module ${moduleIndex} arm failed: ${JSON.stringify(armed.details)}`);
+  await waitFor(
+    () => existsSync(process.env.FM_ARM_COUNT) && Number(readFileSync(process.env.FM_ARM_COUNT, "utf8").trim()) >= moduleIndex,
+    `module ${moduleIndex} arm`,
+  );
+  await instance.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+}
+// Replacement shutdown deliberately retains the established module-2 arm until
+// a successor commits. Start that successor so both retiring modules publish
+// their late actionable closes under distinct process-wide tokens.
+const collectorMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?token-module=collector`);
+const collector = makePi();
+collectorMod.default(collector.pi);
+const collectorArm = await collector.getTool().execute("arm-collector", {}, undefined, undefined, {});
+if (!collectorArm.details?.ok) throw new Error(`collector arm failed: ${JSON.stringify(collectorArm.details)}`);
+await waitFor(
+  () => existsSync(process.env.FM_ARM_COUNT) && Number(readFileSync(process.env.FM_ARM_COUNT, "utf8").trim()) >= 3,
+  "collector arm",
+);
+const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
+await waitFor(() => existsSync(handoffPath), "replacement handoff");
+await waitFor(() => JSON.parse(readFileSync(handoffPath, "utf8")).pending.length === 2, "two distinct handoff outcomes");
+const handoff = JSON.parse(readFileSync(handoffPath, "utf8"));
+if (new Set(handoff.pending.map((item) => item.token)).size !== 2) {
+  throw new Error(`fresh modules reused a replacement token: ${JSON.stringify(handoff)}`);
+}
+for (const moduleIndex of [1, 2]) {
+  if (!handoff.pending.some((item) => item.message.includes(`signal: module-${moduleIndex} late actionable outcome`))) {
+    throw new Error(`module ${moduleIndex} outcome was dropped: ${JSON.stringify(handoff)}`);
+  }
+}
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi replacement handoff tokens must stay unique across fresh modules"
+  [ -z "$out" ] || fail "Pi replacement token uniqueness test printed output: $out"
+  pass "Pi replacement handoff tokens stay unique across fresh modules"
+}
+
+test_pi_replacement_persistence_failure_keeps_predecessor_until_successor() {
+  local repo home plugin count marker out status
+  repo="$TMP_ROOT/pi-replacement-persistence-failure-root"
+  home="$TMP_ROOT/pi-replacement-persistence-failure-home"
+  count="$TMP_ROOT/pi-replacement-persistence-failure.count"
+  marker="$TMP_ROOT/pi-replacement-persistence-failure.marker"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$FM_ARM_COUNT" ] || count=$(cat "$FM_ARM_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_ARM_COUNT"
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s\n' "$$"
+  printf 'signal: persistence failure actionable outcome\n'
+  exit 0
+fi
+previous=$(cat "$FM_CHILD_MARKER" 2>/dev/null || true)
+if [ -n "$previous" ] && kill -0 "$previous" 2>/dev/null; then
+  kill -TERM "$previous" 2>/dev/null || true
+  while kill -0 "$previous" 2>/dev/null; do sleep 0.01; done
+fi
+cleanup() { rm -f "$FM_CHILD_MARKER"; }
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+printf '%s\n' "$$" > "$FM_CHILD_MARKER"
+printf 'watcher: started pid=%s\n' "$$"
+while :; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_COUNT="$count" FM_CHILD_MARKER="$marker" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let tool = null;
+let deliveryStarted = false;
+const prompts = [];
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    deliveryStarted = true;
+    prompts.push(message);
+  },
+  events: { on() {}, emit() {} },
+};
+
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+const armed = await tool.execute("initial-arm", {}, undefined, undefined, {});
+if (!armed.details?.ok) throw new Error(`initial arm failed: ${JSON.stringify(armed.details)}`);
+await waitFor(() => deliveryStarted && existsSync(process.env.FM_CHILD_MARKER), "blocked delivery and successor child");
+writeFileSync(`${process.env.FM_HOME}/state/extensions`, "block handoff directory\n");
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+if (!existsSync(process.env.FM_CHILD_MARKER)) {
+  throw new Error("replacement shutdown retired the established predecessor after handoff persistence failed");
+}
+const { unlinkSync } = await import("node:fs");
+unlinkSync(`${process.env.FM_HOME}/state/extensions`);
+const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=persistence-failure`);
+replacementMod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
+await waitFor(() => prompts.length >= 2, "in-process handoff after persistence failure");
+if (!prompts[1].includes("signal: persistence failure actionable outcome")) {
+  throw new Error(`replacement lost the in-process actionable outcome: ${prompts.join(" | ")}`);
+}
+if (!prompts[1].includes("could not persist a replacement-session actionable wake")) {
+  throw new Error(`replacement did not surface the persistence failure: ${prompts[1]}`);
+}
+handlers.get("before_agent_start")?.({ prompt: prompts[1] }, {});
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi replacement persistence failure must keep its predecessor until a successor commits"
+  [ -z "$out" ] || fail "Pi replacement persistence-failure continuity test printed output: $out"
+  pass "Pi replacement persistence failure keeps its predecessor until a successor commits"
 }
 
 test_pi_process_exit_cleanup_listener_lifecycle() {
@@ -2043,6 +3659,85 @@ EOF
   [ "$status" -eq 0 ] || fail "OpenCode watch plugin must start one successor before wake prompt delivery settles: $out"
   [ -z "$out" ] || fail "OpenCode rearm test printed output: $out"
   pass "OpenCode watcher plugin starts one successor before wake prompt delivery settles"
+}
+
+# An opted-in home spawns the supervision host in the arm's place; its
+# streamed status line drives readiness and the handling handoff, and a
+# handed-back wake is delivered with every host line and the away note.
+test_opencode_primary_watch_plugin_runs_the_supervision_host() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-host-root"
+  home="$TMP_ROOT/opencode-host-home"
+  log="$TMP_ROOT/opencode-host.log"
+  stop="$TMP_ROOT/opencode-host.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  : > "$home/state/.afk-contract"
+  : > "$home/config/supervision-host"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'plain-arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+exit 1
+SH
+  cat > "$repo/bin/fm-supervision-host.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'host=%s args=%s primary=%s predecessor=%s\n' "$$" "$*" "${FM_SUPERVISION_HOST_PRIMARY:-}" \
+  "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^host=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  sleep 0.3
+  printf 'signal: synthetic wake\nsupervision-host: the away session could not take this wake: fixture; this wake is yours\nsupervision-host: outcome 1 for demo [captain]: fixture\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const prompts = [];
+const client = { session: { promptAsync: async (request) => { prompts.push(request.body.parts[0].text); } } };
+const hooks = await mod.FmPrimaryWatchArm({ client, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 400 && prompts.length < 1; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+const rows = existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n") : [];
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+if (rows.some((row) => row.startsWith("plain-arm="))) throw new Error(`an opted-in home ran the plain arm: ${rows.join(" | ")}`);
+const hosts = rows.filter((row) => row.startsWith("host="));
+if (hosts.length !== 2) throw new Error(`expected the host and one successor host, got: ${rows.join(" | ")}`);
+if (!hosts.every((row) => / args=park --restart primary=opencode /.test(row))) throw new Error(`the host must run as 'park --restart' with the opencode pin: ${hosts.join(" | ")}`);
+if (!/predecessor=[0-9]+$/.test(hosts[1])) throw new Error(`the successor host did not receive the closed host as its predecessor: ${hosts[1]}`);
+if (!rows.some((row) => row === "confirmed generation=fixture-generation watcher=" + hosts[1].replace(/^host=([0-9]+).*/, "$1"))) {
+  throw new Error(`the handling handoff was not confirmed against the successor host's cycle: ${rows.join(" | ")}`);
+}
+if (prompts.length !== 1) throw new Error(`expected one wake prompt, got ${prompts.length}`);
+for (const needle of [
+  "signal: synthetic wake",
+  "supervision-host: the away session could not take this wake: fixture; this wake is yours",
+  "supervision-host: outcome 1 for demo [captain]: fixture",
+  "not from the captain: it is not a return",
+]) {
+  if (!prompts[0].includes(needle)) throw new Error(`the wake prompt lacks '${needle}': ${prompts[0]}`);
+}
+EOF
+  )
+  status=$?
+  [ "$status" -eq 0 ] || fail "OpenCode watch plugin must run the supervision host on an opted-in home: $out"
+  [ -z "$out" ] || fail "OpenCode host test printed output: $out"
+  pass "OpenCode watcher plugin runs the supervision host on an opted-in home and relays every host line"
 }
 
 test_opencode_pre_ready_actionable_close_preserves_its_successor() {
@@ -2703,11 +4398,18 @@ test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
+test_pi_actionable_output_waits_for_predecessor_close
 test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
-test_pi_heartbeat_with_main_owned_queue_row_stays_on_main
+test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
+test_pi_main_only_check_classes_stay_on_main
+test_pi_captain_held_signal_stays_on_main
+test_pi_unread_pending_reply_forces_later_stale_alias_to_main
+test_pi_distinct_files_mixed_batch_routes_whole_batch_to_main
+test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_needs_decision
 test_pi_heartbeat_restoration_failure_stays_on_main
 test_pi_watcher_failure_never_offered_to_branch
+test_pi_away_record_collapses_eligibility_and_keeps_vetoes_on_main
 test_pi_handling_delivery_failure_is_typed_once
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
@@ -2717,6 +4419,13 @@ test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
 test_pi_session_transition_generation_owner
+test_pi_session_replacement_carries_inflight_actionable_close
+test_pi_streaming_followup_is_replayed_after_replacement
+test_pi_streaming_time_delivery_keeps_the_successor_chain
+test_pi_successor_failure_during_delivery_is_retried_after_delivery
+test_pi_late_retiring_actionable_reaches_replacement
+test_pi_replacement_tokens_are_process_unique
+test_pi_replacement_persistence_failure_keeps_predecessor_until_successor
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_plugin_package_boundary_is_explicit_esm
@@ -2725,6 +4434,7 @@ test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
+test_opencode_primary_watch_plugin_runs_the_supervision_host
 test_opencode_pre_ready_actionable_close_preserves_its_successor
 test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry

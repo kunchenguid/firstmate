@@ -4,6 +4,9 @@
 # only one exact fm-test- workspace through the normal scout lifecycle.
 set -u
 
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TASK="fm-test-cmux-claude-composer-$$"
 LAB=
@@ -12,12 +15,17 @@ SPAWNED=0
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
+# The scout brief instructs the optional `[at=<epoch>]` stamp on every append,
+# and a live worker may place it before or after a key. Match these events with
+# the stamp removed instead of pinning one spelling.
+untimed_status() { sed -E 's/ \[at=[0-9]+\]//g' "$1" 2>/dev/null; }
+
 cleanup() {
   [ "$SPAWNED" -eq 0 ] || {
     mkdir -p "$LAB/data/$TASK"
     : > "$LAB/data/$TASK/report.md"
-    if grep -q '^needs-decision \[key=probe-decision\]' "$LAB/state/$TASK.status" 2>/dev/null \
-      && ! grep -q '^resolved \[key=probe-decision\]' "$LAB/state/$TASK.status" 2>/dev/null; then
+    if untimed_status "$LAB/state/$TASK.status" | grep -q '^needs-decision \[key=probe-decision\]' \
+      && ! untimed_status "$LAB/state/$TASK.status" | grep -q '^resolved \[key=probe-decision\]'; then
       printf '%s\n' 'resolved [key=probe-decision]: live guard cleanup' >> "$LAB/state/$TASK.status"
     fi
     FM_HOME="$LAB" "$ROOT/bin/fm-decision-hold.sh" complete "$TASK" --none >/dev/null 2>&1 || true
@@ -26,16 +34,8 @@ cleanup() {
   [ -z "$LAB" ] || rm -rf -- "$LAB"
 }
 
-if [ "${FM_CMUX_CLAUDE_COMPOSER_LIVE:-0}" != 1 ]; then
-  echo "skip: set FM_CMUX_CLAUDE_COMPOSER_LIVE=1 to run the real cmux Claude composer drift guard"
-  exit 0
-fi
+fm_live_gate opt-in FM_CMUX_CLAUDE_COMPOSER_LIVE claude cmux jq treehouse python3
 
-command -v claude >/dev/null 2>&1 || fail "FM_CMUX_CLAUDE_COMPOSER_LIVE=1 but Claude Code is not installed"
-command -v cmux >/dev/null 2>&1 || fail "FM_CMUX_CLAUDE_COMPOSER_LIVE=1 but cmux is not installed"
-command -v jq >/dev/null 2>&1 || fail "FM_CMUX_CLAUDE_COMPOSER_LIVE=1 but jq is not installed"
-command -v treehouse >/dev/null 2>&1 || fail "FM_CMUX_CLAUDE_COMPOSER_LIVE=1 but treehouse is not installed"
-command -v python3 >/dev/null 2>&1 || fail "FM_CMUX_CLAUDE_COMPOSER_LIVE=1 but python3 is not installed"
 cmux ping >/dev/null 2>&1 || fail "FM_CMUX_CLAUDE_COMPOSER_LIVE=1 but the cmux socket is unavailable"
 
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-cmux-claude-composer.XXXXXX") || fail "could not create an isolated cmux Claude lab"
@@ -60,9 +60,9 @@ brief = Path(sys.argv[1])
 status = sys.argv[2]
 brief.write_text(brief.read_text().replace("{TASK}", f'''Run a cmux communication probe.
 
-Immediately append `working: cmux composer probe ready` to `{status}`.
-Then append exactly `needs-decision [key=probe-decision]: awaiting codeword` to that file and stop to wait for a firstmate message.
-When you receive a firstmate message containing `ALBATROSS`, append `done: received ALBATROSS` to that status file and stop.
+Immediately append `working [at=<epoch>]: cmux composer probe ready` to `{status}`, substituting `<epoch>` as rule 4 instructs.
+Then append exactly `needs-decision [at=<epoch>] [key=probe-decision]: awaiting codeword` to that file and stop to wait for a firstmate message.
+When you receive a firstmate message containing `ALBATROSS`, append `done [at=<epoch>]: received ALBATROSS` to that status file and stop.
 Do not change project files or make a commit.'''))
 PY
 
@@ -83,10 +83,10 @@ for _ in $(seq 1 45); do
   case "$CAPTURE" in
     *'Yes, I trust this folder'*) FM_HOME="$LAB" "$ROOT/bin/fm-send.sh" "$TASK" --key Enter || fail "could not accept Claude's folder-trust prompt" ;;
   esac
-  grep -q '^needs-decision \[key=probe-decision\]' "$STATUS" 2>/dev/null && break
+  untimed_status "$STATUS" | grep -q '^needs-decision \[key=probe-decision\]' && break
   sleep 2
 done
-grep -q '^needs-decision \[key=probe-decision\]' "$STATUS" 2>/dev/null \
+untimed_status "$STATUS" | grep -q '^needs-decision \[key=probe-decision\]' \
   || fail "Claude $(claude --version) did not reach the communication decision"
 
 COMPOSER=$(fm_backend_cmux_composer_state "$TARGET" "$TASK")
@@ -96,12 +96,12 @@ pass "cmux classifies the real Claude borderless composer as empty"
 FM_SEND_SETTLE=0 FM_HOME="$LAB" "$ROOT/bin/fm-send.sh" "$TASK" --resolve-key probe-decision ALBATROSS \
   || fail "cmux did not confirm the real Claude steer"
 for _ in $(seq 1 30); do
-  grep -q '^done: received ALBATROSS' "$STATUS" 2>/dev/null && break
+  untimed_status "$STATUS" | grep -q '^done: received ALBATROSS' && break
   sleep 2
 done
-grep -q '^resolved \[key=probe-decision\]: answered: ALBATROSS' "$STATUS" \
+untimed_status "$STATUS" | grep -q '^resolved \[key=probe-decision\]: answered: ALBATROSS' \
   || fail "confirmed cmux delivery did not close the keyed decision"
-grep -q '^done: received ALBATROSS' "$STATUS" \
+untimed_status "$STATUS" | grep -q '^done: received ALBATROSS' \
   || fail "the real Claude worker did not complete after the confirmed steer"
 
 CAPTURE=$(fm_backend_cmux_capture "$TARGET" 200 "$TASK")
