@@ -60,8 +60,10 @@ Grok alone retains its isolated rendered-tail fallback.
 Cleanup keeps all shared Firstmate safety checks.
 A scout still requires its report and completed decision inventory.
 A ship still refuses dirty or unlanded work.
-Before release, cleanup resolves the recorded Orca worktree id and verifies its path matches the recorded worktree path.
+Cleanup resolves the recorded Orca worktree id and verifies its path matches the recorded worktree path once, before any destructive step - before the task's no-mistakes run is concluded, before leaked processes under the worktree are reaped, and before the branch delete, terminal close, and worktree release.
+`--force` does not lift that proof: it authorizes discarding this task's own unlanded work, never acting on a worktree that may not be this task's.
 A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
+A recorded worktree path that no longer exists has nothing left to protect, so cleanup proceeds without asking Orca.
 After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command.
 It never raw-deletes an Orca worktree.
 A close the CLI never attempted, because `orca` is not on the path, stops cleanup with the metadata intact even under `--force`: removing those records would leave nothing on disk naming a terminal that may still be live.
