@@ -933,7 +933,29 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         if [ "$(strip_quotes "$(nm_field branch)")" = "$CREW_BRANCH" ]; then
           known_run_id=$(strip_quotes "$(nm_field id)")
         fi
-        emit unknown run-step "${run_choice#*|}${known_run_id:+; last reported run id: $known_run_id}"
+        # Keep this as detail about the recorded run, never as RUN_STATE: the
+        # unreadable inventory cannot prove that the crew is currently done or
+        # failed, and stale run details must not be presented as the crew's own.
+        # The candidate precedence contract is documented in docs/architecture.md.
+        known_detail=""
+        if [ -n "$known_run_id" ] && ! fm_nm_run_is_active "$RUN_OUT"; then
+          ids_field=${run_choice##*run ids: }
+          [ "$ids_field" != "$run_choice" ] || ids_field=""
+          contradicted=0
+          if [ -n "$ids_field" ]; then
+            contradicted=1
+            IFS=',' read -ra candidate_ids_arr <<< "$ids_field"
+            if [ "$(trim "${candidate_ids_arr[0]}")" = "$known_run_id" ]; then
+              contradicted=0
+            fi
+          fi
+          if [ "$contradicted" = 0 ]; then
+            known_outcome=$(strip_quotes "$(nm_field outcome)")
+            [ -n "$known_outcome" ] || known_outcome=$(strip_quotes "$(nm_field status)")
+            [ -z "$known_outcome" ] || known_detail=" (already $known_outcome)"
+          fi
+        fi
+        emit unknown run-step "${run_choice#*|}${known_run_id:+; last reported run id: $known_run_id}${known_detail}"
         ;;
       selected\|*)
         IFS='|' read -r _ selected_id selected_status candidate_ids <<< "$run_choice"
