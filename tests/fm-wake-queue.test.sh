@@ -253,9 +253,16 @@ foreign_stall_watch_leg() {  # <dir> <leg> <now> [observation]
       sleep 0.1
       i=$((i + 1))
     done
-    ! is_live_non_zombie "$pid" || kill -TERM "$pid" 2>/dev/null || true
+    # This leg tests the queue observation, not watcher shutdown/recovery.
+    # TERM can leave bash waiting in a child on some runners; stop the owned
+    # fixture process and clear only its watcher lifecycle state before the
+    # next leg starts against the same queue and progress marker.
+    ! is_live_non_zombie "$pid" || kill -KILL "$pid" 2>/dev/null || true
   fi
   wait_for_exit "$pid" 600 || true
+  if [ -n "$observation" ]; then
+    rm -rf -- "$dir/state/.watch.lock" "$dir/state/.watcher-down"
+  fi
   if [ -n "$observation" ]; then
     [ "$(cat "$marker" 2>/dev/null || true)" = "$observation" ] \
       || fail "watcher leg $leg did not record observation '$observation': $(cat "$marker" 2>/dev/null)"
@@ -2757,6 +2764,9 @@ make_secondmate_liveness_case() {
   home="$TMP_ROOT/$name-mate"
   mkdir -p "$dir/state" "$dir/config" "$dir/data" "$fakebin" \
     "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
+  # A secondmate home is a git checkout: the AI-trailer strip hook refuses a
+  # launch whose worktree is not git.
+  git init -q -b main "$home"
   printf 'sm1\n' > "$home/.fm-secondmate-home"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf 'charter\n' > "$home/data/charter.md"
@@ -2907,6 +2917,7 @@ test_secondmate_liveness_tick_relaunches_every_dead_mate_before_waking() {
   state="$dir/state"
   home="$TMP_ROOT/liveness-several-mate2"
   mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
+  git init -q -b main "$home"
   printf 'sm2\n' > "$home/.fm-secondmate-home"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf 'charter\n' > "$home/data/charter.md"
@@ -3107,6 +3118,7 @@ test_secondmate_liveness_tick_error_keeps_scanning_and_wakes() {
   state="$dir/state"
   home="$TMP_ROOT/liveness-mid-error-mate2"
   mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
+  git init -q -b main "$home"
   printf 'sm2\n' > "$home/.fm-secondmate-home"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf 'charter\n' > "$home/data/charter.md"

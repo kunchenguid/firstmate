@@ -172,6 +172,63 @@ test_live_stale_watch_lock_is_actionable() {
   pass "live watcher lock with stale heartbeat is actionable"
 }
 
+test_live_stalled_watch_lock_is_replaced_past_hard_bound() {
+  # A live holder whose beacon is stale past the ordinary grace is refused, but
+  # a beacon stale past the hard bound evicts that holder (identity-verified
+  # TERM) and the arm starts in its place - the deadlock where every re-arm
+  # died against a live-but-stalled watcher while nothing polled the home.
+  local dir state fakebin out err status holder identity pid i lock_pid
+  dir=$(make_case live-stalled-lock)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  err="$dir/watch.err"
+  sleep 300 &
+  holder=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$holder") || fail "could not identify the fake holder"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$holder" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  # Beacon decades old: past the grace, but a bound beyond it -> still refused.
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  status=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_WATCHER_STALL_BOUND=9999999999 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
+  [ "$status" -ne 0 ] || fail "watcher replaced a holder whose beacon was under the hard bound"
+  grep -F 'heartbeat is stale' "$err" >/dev/null || fail "under-bound stale holder lost its refusal"
+  is_live_non_zombie "$holder" || fail "under-bound stale holder was signalled"
+  # Same holder and beacon, a bound it is past -> evicted and replaced.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_WATCHER_STALL_BOUND=3 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" &
+  pid=$!
+  i=0
+  lock_pid=
+  while [ "$i" -lt 100 ]; do
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ "$lock_pid" = "$pid" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$pid" || fail "replacement watcher did not stay alive: $(cat "$err")"
+  [ "$lock_pid" = "$pid" ] || fail "replacement watcher did not take the lock (holder=$lock_pid)"
+  is_live_non_zombie "$holder" && fail "stalled holder survived the eviction"
+  # The lock pid is written inside fm_lock_try_acquire; the replacement message
+  # is echoed just after, so poll for the message rather than grep once and race
+  # the acquire/echo gap.
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -E "^watcher: replaced stalled pid $holder \(beacon [0-9]+s past hard bound 3s\)\$" "$out" >/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -E "^watcher: replaced stalled pid $holder \(beacon [0-9]+s past hard bound 3s\)\$" "$out" >/dev/null \
+    || fail "watcher did not report the replacement: $(cat "$out" "$err")"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "live watcher lock with a beacon past the hard bound is replaced, under it is still refused"
+}
+
 test_guard_warnings() {
   # The guard's two operator-visible states, with resilient substrings instead of
   # four copy-coupled tests:
@@ -1200,6 +1257,7 @@ test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
+test_live_stalled_watch_lock_is_replaced_past_hard_bound
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock

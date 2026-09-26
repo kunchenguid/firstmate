@@ -401,6 +401,18 @@
 # Claude-Session link, or generated-with line into a commit or PR body;
 # launch_template() below owns the reason it cannot come from the captain's own
 # settings.
+# Cursor and the other non-Claude runtimes have no equivalent per-launch
+# settings overlay: Cursor injects a Co-Authored-By trailer at the tooling
+# layer after the worker types a clean message, and a per-machine
+# ~/.cursor/cli-config.json attribution-off is not durable (it does not travel
+# with this repo, defaults back to on when unset, and only feeds the CLI's
+# request to the server, so it suppresses the trailer rather than preventing
+# it). Every spawn therefore installs state/<id>.git-hooks as a GIT_CONFIG
+# core.hooksPath for the pane, so git commit-msg strips known AI trailers at
+# the commit object for every launched runtime, Claude included as defense
+# in depth. bin/fm-git-strip-ai-trailers.sh owns the identities, the hook
+# install, and chaining the repository git is actually running in so a
+# project husky hook still runs. Author identity is not rewritten.
 # Publishing the record and moving this home's backlog item to In flight are one
 # step, not two: bin/fm-backlog-transition-lib.sh owns that invariant, and this
 # script performs the transition under the task's own meta lock before it reports
@@ -1169,6 +1181,9 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+GIT_HOOKS_DIR=
+SPAWN_LAUNCH_SENT=0
+SPAWN_ENDPOINT_CLOSED=0
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -1244,7 +1259,7 @@ spawn_abort_cleanup() {
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
     if [ -n "${ORCA_TERMINAL:-}" ]; then
-      fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
+      fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
     fi
     if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
       if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
@@ -1327,6 +1342,18 @@ spawn_abort_cleanup() {
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
+  fi
+  # The per-id spawn lock is retaken so a concurrent spawn of the same id, which
+  # reinstalls this strip dir, is never undone. A launched agent whose endpoint
+  # was not closed may still be committing, so it keeps its strip.
+  if [ "$status" -ne 0 ] && [ -n "$GIT_HOOKS_DIR" ] &&
+    { [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; } &&
+    fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
+    if [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+      chmod u+w "$GIT_HOOKS_DIR" 2>/dev/null || true
+      rm -rf "$GIT_HOOKS_DIR" 2>/dev/null || true
+    fi
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
   return "$status"
 }
@@ -3912,12 +3939,12 @@ rovo_spawn_fail() { # <detail>
 # for the record's own teardown, which owns worktree deletion.
 rovo_endpoint_cleanup() {
   if [ "$BACKEND" = orca ]; then
-    fm_backend_kill orca "$T" 2>/dev/null || true
+    fm_backend_kill orca "$T" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
     return 0
   fi
   local tab_id=
   [ "$BACKEND" = zellij ] && tab_id=$ZELLIJ_TAB_ID
-  fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true
+  fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
 }
 
 # agy carries its brief on the launch command, so it needs no delivery gate,
@@ -4564,6 +4591,20 @@ EOF
   esac
 fi
 
+# Per-task git hooksPath that strips AI commit trailers at the commit object.
+# Installed for every kind, including secondmate: Cursor and other non-Claude
+# runtimes inject the trailer after the typed message, so the typed message is
+# not the object. The pane receives this directory via GIT_CONFIG_* below,
+# which overrides a project's husky core.hooksPath without rewriting it; the
+# installer chains the previous hooks so they still run. Real secondmate
+# homes are firstmate clones; a launch whose worktree is not git fails closed
+# rather than shipping a runtime that cannot strip.
+GIT_HOOKS_DIR="$STATE_REAL/$ID.git-hooks"
+"$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" install "$GIT_HOOKS_DIR" "$WT" || {
+  echo "error: could not install the AI-trailer strip hooks for $ID" >&2
+  exit 1
+}
+
 # Delivery posture recorded in meta so fm-teardown's safety check and the
 # validate/merge stages can branch on it. A ship task carries the explicit
 # per-task decision validated above; a secondmate's posture is fixed; a scout
@@ -4873,6 +4914,12 @@ if [ "$KIND" = secondmate ]; then
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
+# Pane-scoped override: git in this worker reads our commit-msg strip without
+# rewriting the project's core.hooksPath. GIT_CONFIG_* takes precedence over
+# config files and is inherited by child git processes. An export statement
+# inside the pane command, like COMPACT_ADVISER_DISABLE below, so it reaches
+# every step of a compound raw launch while firstmate's own git is unchanged.
+LAUNCH="export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=$(shell_quote "$GIT_HOOKS_DIR"); $LAUNCH"
 # Every agent this fleet launches - crewmate, scout, and secondmate, on a fresh
 # spawn and on a relaunch alike - runs with the compact-adviser kill switch on.
 # This is an export statement rather than a forwarded ambient name or a
@@ -5036,6 +5083,7 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
   exit 1
 fi
 sleep 0.3
+SPAWN_LAUNCH_SENT=1
 spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then

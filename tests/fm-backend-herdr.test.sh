@@ -68,6 +68,7 @@ if [ "${1:-}" = terminal ] && [ "${2:-}" = title ] && [ "${3:-}" = clear ]; then
 fi
 n=$next
 echo "$n" > "$COUNT_FILE"
+[ -f "$RESP/$n.err" ] && cat "$RESP/$n.err" >&2
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
@@ -3911,6 +3912,20 @@ test_composer_state_pi_separator_idle_is_empty() {
   pass "fm_backend_herdr_composer_state: a native idle Pi separator composer reads empty"
 }
 
+test_composer_state_pi_dollar_status_footer_is_empty() {
+  # `$0.000 (sub) 5.4%/272k (auto)` at column 0 made herdr composer_state
+  # unknown, so exit and relaunch refused on an otherwise idle Pi pane.
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-pi-dollar-status"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' $'transcript\n─────────────────────────────────────────────────────\n\n─────────────────────────────────────────────────────\n$0.000 (sub) 5.4%/272k (auto)' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "an idle Pi composer with a dollar-first status footer should read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: a dollar-first Pi status footer reads empty, not a dead shell"
+}
+
 # A pi worker parked on an interactive prompt (permission dialog, question
 # menu, trust dialog) reports agent_status=blocked: it is waiting on a human
 # keystroke. The menu is drawn ABOVE the separator pair, so the composer region
@@ -4299,6 +4314,26 @@ test_send_text_submit_detects_swallowed_enter() {
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
   [ "$out" = pending ] || fail "send_text_submit should report pending once retries are exhausted with agent_status never going busy and the composer still holding the text, got '$out'"
   pass "fm_backend_herdr_send_text_submit: reports 'pending' when agent_status stays idle and the composer still holds unsent text after retried Enters (swallowed)"
+}
+
+test_send_text_submit_replays_literal_send_stderr() {
+  local dir log resp fb out err
+  dir="$TMP_ROOT/submit-send-stderr"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  err="$dir/stderr"
+  # 1: agent get (a non-Claude identity skips the payload proof)
+  # 2: send-text fails the way an oversized argument does, before herdr runs
+  printf '{"result":{"agent":{"agent":"codex","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf 'herdr: Argument list too long\n' > "$resp/2.err"
+  printf '126\n' > "$resp/2.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" 2>"$err" )
+  [ "$out" = send-failed ] || fail "a failed literal send should report send-failed, got '$out'"
+  grep -F 'Argument list too long' "$err" >/dev/null \
+    || fail "the literal send's stderr was not replayed to the caller: $(cat "$err")"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''send-keys' "$log")" -eq 0 ] \
+    || fail "no Enter may follow a failed literal send"
+  pass "fm_backend_herdr_send_text_submit: a failed literal send reports send-failed and replays the transport's stderr"
 }
 
 # Regression coverage for the 2026-07-03 incident using the NEW mechanism: a
@@ -5732,6 +5767,7 @@ test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found
 test_composer_state_pi_parked_prompt_is_not_empty
 test_composer_state_pi_separator_idle_is_empty
+test_composer_state_pi_dollar_status_footer_is_empty
 test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
@@ -5754,6 +5790,7 @@ test_wait_for_working_returns_unknown_when_never_readable
 test_wait_for_working_treats_blocked_as_submit_active
 test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
+test_send_text_submit_replays_literal_send_stderr
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_preexisting_working_pending_is_queued_enter

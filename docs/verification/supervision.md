@@ -290,7 +290,7 @@ ok - cursor primary: an away-mode escalation is delivered, confirmed, and proces
 The live run proved that session start acquires the fleet lock through Cursor's structural process identity in `bin/fm-cursor-lib.sh`; `tests/fm-session-lock-ancestry.test.sh` pins the same ancestry path portably.
 It also proved that Cursor's `autoarm` supervision model lets the mid-turn pull guard accept a fresh beacon after the between-turn watcher closes; `tests/fm-guard-stale-banner.test.sh` pins that model-aware verdict.
 The baton is claimed only by the next `stop`, so an actionable close before that claim can still produce one real follow-up from the sole existing park; durable wake handling is idempotent, and any older park still running after the claim stands down.
-Cursor's `beforeSubmitPrompt` step could close that exact window because it fires once on a real captain message and not on hook-driven follow-ups, but registering it is deliberately deferred alongside `preCompact`.
+The step is now registered for the dialog mirror, but still does not invalidate the park baton; [turnend-guard.md](../turnend-guard.md) owns the remaining pre-claim window and deferred fix.
 
 Away-mode delivery needed no daemon change once the composer reader was correct for Cursor; [`runtime-backends.md`](runtime-backends.md#composer) owns that evidence.
 
@@ -683,6 +683,32 @@ tests/fm-omp-harness.test.sh
 tests/fm-watch-checkpoint.test.sh
 tests/fm-supervision-instructions.test.sh
 tests/fm-afk-launch.test.sh
+```
+
+### Dialog mirror writers
+
+This supports [The dialog mirror](../supervision-host.md#the-dialog-mirror): the tracked Claude and Cursor registrations record the captain's prompt and main's reply, and Claude's Stop-hook rewake is not recorded as the captain's words.
+It was measured on 2026-09-25 on macOS 26.5.2 arm64 with Claude Code 2.1.282 (`haiku`) and cursor-agent 2026.09.23-86fc751, each in a disposable lab primary on a private tmux socket.
+
+```text
+$ FM_HOST_MIRROR_LIVE_E2E=1 tests/fm-host-mirror-live-e2e.test.sh
+ok - claude 2.1.282 (Claude Code): a turn the harness started itself was not mirrored as the captain's words
+ok - claude 2.1.282 (Claude Code): the tracked registrations mirrored the captain prompt and main reply
+ok - cursor 2026.09.23-86fc751: the tracked registrations mirrored the captain prompt and main reply
+ok - host mirror live: 2 harness(es) proved their writers
+```
+
+The run above exercised these payload fields:
+
+| Primary | Captain text | Main text |
+| --- | --- | --- |
+| Claude | `UserPromptSubmit` `.prompt` | `Stop` `.last_assistant_message` |
+| Cursor | `beforeSubmitPrompt` `.prompt` | `afterAgentResponse` `.text` |
+
+Deterministic entry point:
+
+```sh
+tests/fm-host-mirror.test.sh
 ```
 
 ## Wedge-alarm channels

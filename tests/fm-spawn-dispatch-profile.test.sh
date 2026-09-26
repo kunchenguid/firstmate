@@ -83,6 +83,14 @@ make_seeded_secondmate_home() {
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter for %s\n' "$id" > "$home/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$home/.gitignore"
+  git -C "$home" init -q -b main
+}
+
+ai_trailer_hooks_prefix() {  # <home> <id>
+  local state
+  state=$(CDPATH='' cd -- "$1/state" && pwd -P) || fail "cannot resolve state dir $1/state"
+  printf "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='%s'; " "$state/$2.git-hooks"
 }
 
 run_spawn() {
@@ -133,7 +141,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="export COMPACT_ADVISER_DISABLE=1; env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
+  expected="export COMPACT_ADVISER_DISABLE=1; $(ai_trailer_hooks_prefix "$HOME_DIR" "$id")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -383,10 +391,33 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
   # The unverified-adapter escape hatch is still an agent this fleet launched,
-  # so it carries the compact-adviser floor; nothing else may rewrite the
-  # captain's own command.
-  [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  # so it carries the compact-adviser floor and the AI-trailer strip; nothing
+  # else may rewrite the captain's own command.
+  [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; $(ai_trailer_hooks_prefix "$HOME_DIR" "$id")custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
+}
+
+test_chained_raw_launch_strips_ai_trailer_in_every_step() {
+  local rec id out status launch body
+  id=chained-raw-z15
+  rec=$(make_spawn_case chained-raw claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "cd . && git commit -q --allow-empty --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: chained raw launch'")
+  status=$?
+  expect_code 0 "$status" "chained raw launch should spawn: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  (
+    cd "$WT_DIR" || exit 1
+    unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+    fm_git_identity 'Captain Tests' 'captain@example.invalid'
+    bash -c "$launch"
+  ) || fail "executing the chained raw launch failed"$'\n'"launch: $launch"
+  body=$(git -C "$WT_DIR" log -1 --format=%B)
+  assert_contains "$body" "fix: chained raw launch" "the chained launch did not commit"
+  assert_not_contains "$body" "cursoragent@cursor.com" "the AI trailer reached a commit made after the first step of a chained raw launch"
+  pass "a chained raw launch commits through the AI-trailer strip in every step"
 }
 
 test_claude_threads_model_and_effort() {
@@ -1393,7 +1424,7 @@ SH
 # permission flag, and any other token refuses before endpoint or metadata.
 claude_expected_launch() {  # <home> <id> <permission-flag>
   local home=$1 id=$2 flag=$3
-  printf '%s' "export COMPACT_ADVISER_DISABLE=1; env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $flag --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$home/data/$id/launch-brief.md')\""
+  printf '%s' "export COMPACT_ADVISER_DISABLE=1; $(ai_trailer_hooks_prefix "$home" "$id")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $flag --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$home/data/$id/launch-brief.md')\""
 }
 
 test_claude_permission_mode_bypass_matches_absent_launch() {
@@ -1493,6 +1524,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_threads_model_and_max_effort
