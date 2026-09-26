@@ -167,7 +167,7 @@ Other final-component symlink directories, including `~/.local/bin`, are exclude
 ### Stale Herdr clients
 
 Because `~/.local/bin` precedes the package-manager directories, a stale self-updated `herdr` there shadows the one the account's login shell may resolve.
-The Herdr adapter steps around a client the running server refuses, and `fm-remote-doctor.sh` names which client it selected ([`herdr-backend.md`](herdr-backend.md#client-selection)).
+The Herdr adapter steps around a client the running server refuses, and `fm-remote-doctor.sh` names which client it selected; when no client on `PATH` proves compatible it reports a `human:` gap instead of passing the host ([`herdr-backend.md`](herdr-backend.md#client-selection)).
 
 ### How the entrypoint resolves git
 
