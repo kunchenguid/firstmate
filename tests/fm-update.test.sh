@@ -646,10 +646,55 @@ test_jj_already_current() {
   pass "JJ4 already-current jj home reports already current"
 }
 
+# --- JJ5: a described working-copy commit is skipped and preserved -----------
+test_jj_described_skipped() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out before
+  w=$(new_jj_world jj5)
+  bump_origin "$w" instr
+  before=$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)
+  jj -R "$w/main" describe -m wip >/dev/null 2>&1
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: described working copy commit" \
+    "described jj working copy skipped"
+  [ "$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)" = "$before" ] \
+    || fail "described jj home advanced"
+  [ "$(jj -R "$w/main" log -r '@' --no-graph -T 'description.first_line()' 2>/dev/null)" = "wip" ] \
+    || fail "described working-copy commit was left behind"
+  pass "JJ5 described working-copy commit is skipped and preserved"
+}
+
+# --- JJ6: a working copy parked outside the target is skipped -----------------
+test_jj_parked_outside_skipped() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out before parked
+  w=$(new_jj_world jj6)
+  bump_origin "$w" instr
+  before=$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)
+  printf 'parked work\n' >> "$w/main/AGENTS.md"
+  jj -R "$w/main" commit -m parked >/dev/null 2>&1
+  parked=$(jj -R "$w/main" log -r '@-' --no-graph -T 'commit_id' 2>/dev/null)
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: working copy parked outside main@origin" \
+    "parked jj working copy skipped"
+  [ "$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)" = "$before" ] \
+    || fail "parked jj home advanced"
+  [ "$(jj -R "$w/main" log -r '@-' --no-graph -T 'commit_id' 2>/dev/null)" = "$parked" ] \
+    || fail "parked commit was left behind"
+  grep -q 'parked work' "$w/main/AGENTS.md" || fail "parked jj work discarded"
+  pass "JJ6 working copy parked outside the target is skipped, commit preserved"
+}
+
 test_jj_colocated_advances
 test_jj_dirty_skipped
 test_jj_diverged_skipped
 test_jj_already_current
+test_jj_described_skipped
+test_jj_parked_outside_skipped
 
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
