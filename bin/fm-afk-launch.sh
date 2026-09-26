@@ -24,7 +24,7 @@
 # runs the daemon for now, so `start` and `start-native` require the record
 # `enter` wrote before they launch the daemon.
 # QUIET MODE needs nothing where the attended supervision host runs
-# (docs/supervision-host.md "Postures"): the home opted in, its host primary
+# (docs/supervision-host.md "Quiet mode"): the home opted in, its host primary
 # is attended-ready (fm_supervision_host_attended_ready: engine, tools, and a
 # verified dialog-mirror writer), the main session can be identified, and the
 # dialog mirror passes the feed's own validation (bin/fm-host-mirror.sh
