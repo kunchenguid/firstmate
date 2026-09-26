@@ -91,6 +91,10 @@ head -c 1200000 < /dev/zero
 head -c 1200000 < /dev/zero >&2
 exit 23
 SH
+cat > "$REMOTE_ROOT/bin/fm-block-job.sh" <<'SH'
+#!/bin/bash
+while [ ! -f "$1" ]; do sleep 0.02; done
+SH
 chmod +x "$REMOTE_ROOT/bin"/*.sh
 cat > "$RUNTIME_BIN/perl" <<'SH'
 #!/bin/bash
@@ -98,6 +102,25 @@ printf 'invoked\n' >> "$FM_FAKE_PERL_LOG"
 exit 127
 SH
 chmod +x "$RUNTIME_BIN/perl"
+# A controllable clock lets the queue/execution-window test below advance
+# deterministically instead of racing real sleeps under runner load, matching
+# the fake-date-on-PATH convention tests/fm-contributions.test.sh already
+# uses. The worker started below is long-lived for this whole file, so the
+# fake binary must be on PATH before its first start; it falls through to the
+# real date until FM_REMOTE_JOB_TEST_CLOCK names an existing file, which stays
+# unset for every other test in this file.
+mkdir -p "$TMP_ROOT/fakebin"
+export FM_REMOTE_JOB_TEST_CLOCK="$TMP_ROOT/fake-clock"
+cat > "$TMP_ROOT/fakebin/date" <<'SH'
+#!/bin/sh
+if [ "$*" = +%s ] && [ -n "$FM_REMOTE_JOB_TEST_CLOCK" ] && [ -f "$FM_REMOTE_JOB_TEST_CLOCK" ]; then
+  cat "$FM_REMOTE_JOB_TEST_CLOCK"
+else
+  exec /bin/date "$@"
+fi
+SH
+chmod +x "$TMP_ROOT/fakebin/date"
+export PATH="$TMP_ROOT/fakebin:$PATH"
 
 git -C "$REMOTE_ROOT" init -q -b main
 git -C "$REMOTE_ROOT" config user.email test@example.com
@@ -359,12 +382,19 @@ fm_remote_job_reap "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "the blocking job cou
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the expired queued job could not be reaped"
 pass "the worker expires queued jobs before they can mutate"
 
-FIRST_DELAYED_SIDE_EFFECT="$TMP_ROOT/first-delayed-side-effect"
-SECOND_DELAYED_SIDE_EFFECT="$TMP_ROOT/second-delayed-side-effect"
+# This proves a queued job's execution window is measured fresh from when it
+# actually starts, not debited by how long it waited behind another job. The
+# fake clock (installed on PATH above) advances that queue wait deterministically
+# instead of racing real sleeps: the first job blocks on a marker rather than
+# sleeping, so the only real wall-clock time this test spends is scheduling
+# overhead, never the timeouts under test.
+BLOCKING_RELEASE="$TMP_ROOT/blocking-release"
+SECOND_QUEUED_SIDE_EFFECT="$TMP_ROOT/second-queued-side-effect"
 FM_REMOTE_JOB_QUEUE_TIMEOUT=5
 FM_REMOTE_JOB_TIMEOUT=3
+printf '%s\n' "$(command date +%s)" > "$FM_REMOTE_JOB_TEST_CLOCK"
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
-  fm-delay-job.sh 1.8 "$FIRST_DELAYED_SIDE_EFFECT" < /dev/null > /dev/null
+  fm-block-job.sh "$BLOCKING_RELEASE" < /dev/null > /dev/null
 FIRST_JOB_ID=$FM_REMOTE_JOB_ID
 FIRST_JOB_DIR="$STATE_ROOT/jobs/$FIRST_JOB_ID"
 for _ in $(seq 1 100); do
@@ -372,16 +402,22 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 [ "$(fm_remote_job_read_state "$FIRST_JOB_DIR" 2>/dev/null || true)" = running ] \
-  || fail "the first delayed job did not begin running"
+  || fail "the blocking job did not begin running"
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
-  fm-delay-job.sh 1.8 "$SECOND_DELAYED_SIDE_EFFECT" < /dev/null > /dev/null
+  fm-touch-job.sh "$SECOND_QUEUED_SIDE_EFFECT" < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
+# Advance the clock to just under the 5-second queue budget, simulating the
+# second job having waited nearly the full queue window, then release the
+# first job so the second dequeues at this advanced time.
+printf '%s\n' "$(( $(cat "$FM_REMOTE_JOB_TEST_CLOCK") + 4 ))" > "$FM_REMOTE_JOB_TEST_CLOCK"
+: > "$BLOCKING_RELEASE"
 fm_remote_job_wait "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
 fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+rm -f -- "$FM_REMOTE_JOB_TEST_CLOCK"
 [ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "queue time consumed the second job's execution timeout"
-assert_present "$SECOND_DELAYED_SIDE_EFFECT" "the queued job did not receive its full execution timeout"
-fm_remote_job_reap "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "the first delayed job could not be reaped"
-fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the second delayed job could not be reaped"
+assert_present "$SECOND_QUEUED_SIDE_EFFECT" "the queued job did not receive its full execution timeout"
+fm_remote_job_reap "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "the blocking job could not be reaped"
+fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the second queued job could not be reaped"
 pass "queued jobs receive a fresh bounded execution window"
 
 if command -v shasum >/dev/null 2>&1; then
