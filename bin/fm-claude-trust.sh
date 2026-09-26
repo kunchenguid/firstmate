@@ -110,12 +110,13 @@
 # establish a shared git common dir, and orca is macOS-only and was not installed
 # where this was written. If Orca clones instead of linking, its git dir equals
 # its common dir, so this refuses it as a primary checkout and an orca claude
-# spawn fails loudly here rather than wedging on the dialog later. fm-spawn.sh's
-# own validate_spawn_worktree would not catch that case first: it compares the
-# worktree root against the primary and never compares common dirs, so an
-# independent clone passes it. Close this on a box that has Orca through the live
-# opt-in guard family (FM_*_LIVE_E2E=1) and record the result in
-# docs/verification/runtime-backends.md, rather than assuming the shape here.
+# spawn fails loudly rather than wedging on the dialog later. fm-spawn.sh's own
+# validate_spawn_worktree requires the same shared common dir and runs first,
+# so such a clone is refused there for every harness before this script is
+# reached; this refusal is the second line, not the only one. Close this on a
+# box that has Orca through the live opt-in guard family (FM_*_LIVE_E2E=1) and
+# record the result in docs/verification/runtime-backends.md, rather than
+# assuming the shape here.
 #
 # SECONDMATE-HOME MODE. A secondmate home is a whole firstmate instance rather
 # than a task worktree, and bin/fm-home-seed.sh produces it in two shapes: a
