@@ -95,7 +95,7 @@
 # serializes the captain-hold check through the forge command. A still-held or
 # unreadable row refuses before that command, so a captain approval must be
 # recorded as an `answer --release` before this entrypoint is invoked. While
-# state/.afk-contract exists any green merge may proceed under away authority:
+# state/.afk-contract exists a supervision-initiated green merge may proceed under away authority:
 # the record's presence is the whole mechanical fact, and which merge the
 # captain's away words meant is the supervision session's reading
 # (bin/fm-branch-prompt.sh "Postures"). An unreadable record refuses rather
@@ -127,11 +127,18 @@
 #
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--allow-missing <check-name>] [-- <extra forge merge args>]
 #
-# bin/fm-watch.sh invokes this same entrypoint itself when a task's armed merge
-# poll finds the PR still open and the task meta records yolo=on: the live
-# verification above is what decides the PR is green and mergeable, so a red,
-# unmergeable, or unverifiable PR is refused here and its poll stays armed.
-# Every guard in this script applies unchanged to that caller.
+# bin/fm-watch.sh invokes this entrypoint when an armed merge poll finds the PR
+# still open, the task meta records yolo=on, and no away-posture record exists.
+# Admission holds the existing .afk-contract.lock through the absence check and
+# child launch, then releases it before this script takes its own locks.
+# The watcher sets FM_PR_MERGE_WATCHER=1: this script refuses that caller if the
+# away record appears during verification, rechecking under the same away lock
+# before the forge command. The watcher cannot interpret the captain's away
+# words; away merges remain the supervision session's decision.
+# All existing merge guards still apply. The live verification above decides
+# whether the PR is green and mergeable; a refusal or timeout keeps polling,
+# as does a queued or unconfirmed merge. A confirmed landing uses the shared
+# durable outcome emitter, and only the still-matching PR poll is retired.
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records

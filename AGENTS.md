@@ -368,7 +368,7 @@ The path's worker, automated gates, and captain approval remain authoritative:
 Delivery mode and `yolo` are orthogonal.
 `yolo` governs merge authority only: with it off, the captain approves every PR merge and every local-only landing; with it on, firstmate merges green, in-scope work itself.
 Never merge a red PR, or one with a required check that has not reported, under either setting unless a current explicit captain instruction names the GitHub check to waive; `bin/fm-pr-merge.sh`'s header owns the attended-only waiver mechanics and remaining guards.
-For a PR-based task the armed merge poll applies that authority itself: when the poll finds the PR still open and the task records `yolo=on`, `bin/fm-watch.sh` runs `bin/fm-pr-merge.sh` directly, so a green mergeable PR lands without waiting for a firstmate turn.
+The attended-only watcher merge contract for `yolo` tasks is owned by `bin/fm-pr-merge.sh`'s header.
 Destructive, irreversible, and security-sensitive merges still escalate.
 Without a current explicit captain instruction that states the concrete merge, the green default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
 Load `ask-user-authority` before deciding any ask-user finding; the implementation worker never answers its own finding.
