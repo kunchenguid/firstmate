@@ -105,8 +105,11 @@
 #                          source owned closes that episode); the queued
 #                          payload names what to check. These three kinds are
 #                          joined with `;` when more than one surfaces in a cycle
-#   check: rejected unauthenticated state checks: <paths>
-#                          unsafe state checks were refused without execution
+#   check: rejected state checks: <classified diagnostics>
+#                          checks were refused without execution; the diagnostic
+#                          distinguishes a proven authentication mismatch, a
+#                          malformed or unsupported registration, and an
+#                          incomplete PR-poll publication, with a valid next step
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
@@ -2484,6 +2487,30 @@ pr_poll_publish_release() {
   PR_POLL_PUBLISH_LOCK=
 }
 
+CHECK_REJECTION_MARKER="$STATE/.check-rejection-notified"
+
+check_rejection_marker_matches() {  # <reason>
+  local reason=$1 state_device
+  state_device=$(fm_pr_file_device "$STATE") || return 1
+  fm_pr_private_file_valid "$CHECK_REJECTION_MARKER" 600 "$state_device" || return 1
+  cmp -s "$CHECK_REJECTION_MARKER" <(printf '%s\n' "$reason")
+}
+
+check_rejection_marker_update() {  # <reason>
+  local reason=$1 state_device tmp
+  state_device=$(fm_pr_file_device "$STATE") || return 1
+  fm_pr_regular_destination_on_device_or_absent "$CHECK_REJECTION_MARKER" "$state_device" || return 1
+  tmp=$(umask 077; mktemp "$STATE/.check-rejection-notified.XXXXXX") || return 1
+  if ! printf '%s\n' "$reason" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_private_file_valid "$tmp" 600 "$state_device" \
+    || ! fm_pr_regular_destination_on_device_or_absent "$CHECK_REJECTION_MARKER" "$state_device" \
+    || ! mv -f -- "$tmp" "$CHECK_REJECTION_MARKER"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
 watcher_cleanup() {
   local cleanup_status=0 owns_lock=0 transition=release-lock
   pr_poll_publish_release || cleanup_status=1
@@ -2695,7 +2722,9 @@ while :; do
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
-    rejected_checks=
+    authentication_failed_checks=
+    invalid_check_records=
+    incomplete_pr_polls=
     contribution_check_output=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
@@ -2706,30 +2735,52 @@ while :; do
           FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
           out=$FM_CHECK_RESULT
         else
-          rejected_checks="$rejected_checks $c"
+          authentication_failed_checks="$authentication_failed_checks $c"
           continue
         fi
       else
         id=$(basename "$c" .check.sh)
-        if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
-          || { rerecord_device_shifted_pr_poll "$id" \
-            && fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; }; then
-          is_pr_poll=1
-          provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
-          url=$FM_PR_POLL_SNAPSHOT_URL
-          host=$FM_PR_POLL_SNAPSHOT_HOST
-          path=$FM_PR_POLL_SNAPSHOT_PATH
-          number=$FM_PR_POLL_SNAPSHOT_NUMBER
-          PR_POLL_CONTROL_LOCK="$STATE/.control-$id.lock"
-          fm_lock_acquire_wait "$PR_POLL_CONTROL_LOCK" || exit 1
-          if ! fm_pr_poll_snapshot_matches "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
-            pr_poll_control_release || exit 1
-            triage_log "PR poll for $id changed before its validated check; skipping the stale snapshot"
+        if [ -e "$STATE/$id.pr-poll" ] || [ -L "$STATE/$id.pr-poll" ] \
+          || [ -e "$STATE/$id.pr-poll-registration" ] || [ -L "$STATE/$id.pr-poll-registration" ]; then
+          # The publisher holds this lock across metadata and all poll-artifact
+          # renames. Waiting here makes an ordinary A-to-B re-arm one generation
+          # instead of a false authentication incident.
+          PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$id.lock"
+          fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK" || exit 1
+          if ! fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+            pr_poll_publish_release || exit 1
+            rerecord_device_shifted_pr_poll "$id" || true
+            PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$id.lock"
+            fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK" || exit 1
+          fi
+          if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+            pr_poll_publish_release || exit 1
+            is_pr_poll=1
+            provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
+            url=$FM_PR_POLL_SNAPSHOT_URL
+            host=$FM_PR_POLL_SNAPSHOT_HOST
+            path=$FM_PR_POLL_SNAPSHOT_PATH
+            number=$FM_PR_POLL_SNAPSHOT_NUMBER
+            PR_POLL_CONTROL_LOCK="$STATE/.control-$id.lock"
+            fm_lock_acquire_wait "$PR_POLL_CONTROL_LOCK" || exit 1
+            if ! fm_pr_poll_snapshot_matches "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+              pr_poll_control_release || exit 1
+              triage_log "PR poll for $id changed before its validated check; skipping the stale snapshot"
+              continue
+            fi
+            run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
+              "$provider" "$url" "$host" "$path" "$number" || exit 1
+            out=$FM_CHECK_RESULT
+          else
+            fm_pr_poll_rejection_classify "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"
+            pr_poll_publish_release || exit 1
+            case "$FM_PR_POLL_REJECTION_CLASS" in
+              authentication-failed) authentication_failed_checks="$authentication_failed_checks $c" ;;
+              publication-incomplete) incomplete_pr_polls="$incomplete_pr_polls $c" ;;
+              *) invalid_check_records="$invalid_check_records $c" ;;
+            esac
             continue
           fi
-          run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
-            "$provider" "$url" "$host" "$path" "$number" || exit 1
-          out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
           run_check_capture "$custom_snapshot" || exit 1
@@ -2737,7 +2788,10 @@ while :; do
           fm_custom_check_snapshot_cleanup
         else
           fm_custom_check_snapshot_cleanup
-          rejected_checks="$rejected_checks $c"
+          case "$FM_CUSTOM_CHECK_REJECTION_CLASS" in
+            authentication-failed) authentication_failed_checks="$authentication_failed_checks $c" ;;
+            *) invalid_check_records="$invalid_check_records $c" ;;
+          esac
           continue
         fi
       fi
@@ -2810,11 +2864,26 @@ EOF
       fi
       pr_poll_control_release || exit 1
     done
-    if [ -n "$rejected_checks" ]; then
-      reason="check: rejected unauthenticated state checks:$rejected_checks"
-      fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
-      touch "$STATE/.last-check"
-      wake "$reason"
+    rejection_reason=
+    if [ -n "$authentication_failed_checks" ]; then
+      rejection_reason="${rejection_reason} authentication failed, not run; inspect unexpected changes before intentional registration:$authentication_failed_checks;"
+    fi
+    if [ -n "$invalid_check_records" ]; then
+      rejection_reason="${rejection_reason} malformed or unsupported registration, not run; inspect its producer and version, then use the owner's registration command only for a supported record or unregister it if obsolete:$invalid_check_records;"
+    fi
+    if [ -n "$incomplete_pr_polls" ]; then
+      rejection_reason="${rejection_reason} PR poll publication incomplete, not run; wait for active registration to finish, then run bin/fm-pr-check.sh again if it persists:$incomplete_pr_polls;"
+    fi
+    if [ -n "$rejection_reason" ]; then
+      reason="check: rejected state checks:${rejection_reason%;}"
+      if ! check_rejection_marker_matches "$reason"; then
+        fm_wake_append check state-check-rejections "$reason" || exit 1
+        check_rejection_marker_update "$reason" || exit 1
+        touch "$STATE/.last-check"
+        wake "$reason"
+      fi
+    else
+      rm -f -- "$CHECK_REJECTION_MARKER"
     fi
     touch "$STATE/.last-check"
     if [ -n "$contribution_check_output" ]; then
