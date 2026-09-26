@@ -6,8 +6,8 @@
 # exactly as the captain set it (model roles, theme, providers, compaction).
 # Each key below pins one setting whose captain-facing value would park an
 # unattended worker on an interactive prompt, change its pinned model under it,
-# or make its composer unreadable to bin/fm-composer-lib.sh. Verified against
-# omp 18.1.11's own settings schema (`omp config list`).
+# make its composer unreadable to bin/fm-composer-lib.sh, or vocalize its
+# output. Verified against omp 18.2.5's own settings schema (`omp config list`).
 composer:
   # Renders a bare `❯` (U+276F) row, a glyph the shared composer classifier
   # already reads; the shipped default `band` and six other shapes are not in
@@ -25,3 +25,8 @@ retry:
   # `confirm` pops a dialog when a usage window runs low; `auto` lets omp fall
   # through the captain's own fallback chain without a keystroke.
   usageReservePolicy: auto
+speech:
+  # Text-to-speech of assistant output is a captain-level setting inherited
+  # from ~/.omp/agent/config.yml; an unattended worker or secondmate must never
+  # speak, whatever the captain has enabled for their own session.
+  enabled: false
