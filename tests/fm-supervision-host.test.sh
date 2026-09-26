@@ -302,12 +302,11 @@ test_report_surface_enforces_actor_turn_and_scope() {
   pass "report surface: only the branch actor's current turn may report, and only on the tasks its wake names"
 }
 
-# The return brief is rendered after the record is archived, so a report made
-# after that may be missing from it: the report itself queues the relay for
-# main, durably, while a report made during the away window only waits for the
-# brief.
+# The return brief is rendered after the record is archived, so a non-silent
+# report made after that may be missing from it: the report queues its relay
+# for main, while a report made during the away window only waits for the brief.
 test_report_after_the_return_is_queued_for_main() {
-  local home state out rc drained
+  local home state out rc drained queue_before
   home="$TMP_ROOT/report-return"
   state="$home/state"
   mkdir -p "$state"
@@ -326,10 +325,19 @@ test_report_after_the_return_is_queued_for_main() {
     "a report after the return must say it is queued for main"
   assert_re $'\tcheck\tsupervision-host-return:2\tcheck: supervision-host outcome 2 for alpha \\[captain\\] was recorded after the captain returned.*relay it to the captain: PR ready for review$' \
     "$state/.wake-queue" "the late outcome must be a durable check wake for main"
+  queue_before=$(cat "$state/.wake-queue")
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" \
+    --task alpha --verdict routine --summary 'still building; nothing new has happened; no action was taken' --silent true 2>&1); rc=$?
+  expect_code 0 "$rc" "a silent report after the return must be recorded"
+  assert_contains "$out" "silent outcome remains in the outcome store" "the post-return silent report lost its durability note"
+  assert_grep '"task":"alpha","wake":"signal: alpha.status","verdict":"routine","summary":"still building; nothing new has happened; no action was taken","silent":true' \
+    "$state/branch-outcomes.jsonl" "the post-return silent outcome was not retained"
+  [ "$(cat "$state/.wake-queue")" = "$queue_before" ] || fail "a silent report after the return queued another check wake"
   drained=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" 2>&1)
   assert_contains "$drained" "supervision-host outcome 2 for alpha [captain] was recorded after the captain returned" \
     "main's drain must present the late outcome"
-  pass "report surface: an outcome recorded after the captain returned is queued durably for main"
+  assert_not_contains "$drained" 'still building; nothing new has happened' "main's drain rendered the post-return silent note"
+  pass "report surface: visible late outcomes queue a relay, while silent outcomes remain stored without a wake or note"
 }
 
 # --- dispatch entry -----------------------------------------------------------

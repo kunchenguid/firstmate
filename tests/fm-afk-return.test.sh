@@ -502,7 +502,7 @@ test_return_brief_points_at_the_drain_on_a_host_home_only() {
     if [ "$harness" = claude ]; then
       assert_contains "$out" "  1 captain outcome(s) escalated by the away session, presented in the drain's BRANCH OUTCOMES section" \
         "a host home's brief must point at the drain for its captain outcomes"
-      assert_contains "$out" "the drain's BRANCH OUTCOMES section presents them" "a host home's brief must point at the drain"
+      assert_contains "$out" "the drain's BRANCH OUTCOMES section presents the visible outcomes" "a host home's brief must point at the visible outcomes in the drain"
       assert_not_contains "$out" 'PR ready for review' "a host home's brief must leave the captain outcome to the drain"
       assert_not_contains "$out" 'routine 6' "a host home's brief must leave the routine outcomes to the drain"
     else
@@ -512,6 +512,35 @@ test_return_brief_points_at_the_drain_on_a_host_home_only() {
     [ ! -e "$dir/home/state/.branch-outcomes-cursor" ] || fail "$harness: the return moved the outcome store's read cursor"
   done
   pass "the return brief points at the drain for branch outcomes on a host home and leaves the read cursor to it, and a Pi home's brief is unchanged"
+}
+
+test_return_brief_all_silent_window_does_not_point_at_drain() {
+  local dir fakebin out f
+  dir="$TMP_ROOT/window-pointer-silent"
+  install_runner "$dir"
+  for f in fm-supervision-engine-lib.sh fm-harness.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
+    cp "$ROOT/bin/$f" "$dir/bin/"
+  done
+  : > "$dir/home/config/supervision-host"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  ln -s /bin/bash "$fakebin/claude"
+  contract_in "$dir" enter --words 'watch the fleet' >/dev/null 2>&1 || fail "could not record the away posture"
+  outcome_in "$dir" append --task demo --verdict routine --summary 'still building; nothing new has happened; no action was taken' --silent true >/dev/null \
+    || fail "could not seed the silent routine outcome"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  # shellcheck disable=SC2016 # the single-quoted script expands in the harness shell
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
+    "$fakebin/claude" -c '"$0" begin 2>&1' "$dir/bin/fm-afk-return.sh") || fail "the all-silent return did not clear: $out"
+  assert_contains "$out" '1 outcome(s) handled by the away session (1 routine, 0 escalated above)' \
+    "the all-silent window's stored outcome count was lost"
+  assert_contains "$out" '1 routine outcome(s) recorded; none were visible.' \
+    "the all-silent window should report no visible routine notes"
+  assert_not_contains "$out" 'still building' "the return brief rendered the silent routine note"
+  assert_not_contains "$out" 'BRANCH OUTCOMES section' "the all-silent brief pointed at a drain section that does not exist"
+  [ ! -e "$dir/home/state/.branch-outcomes-cursor" ] || fail "the return moved the outcome store's read cursor"
+  pass "the all-silent return keeps the outcome stored without promising a drain presentation"
 }
 
 # The drain is the only presenter of branch outcomes and owner of their read
@@ -555,9 +584,9 @@ EOF
   assert_contains "$out" 'durable wake drain failed; retry catch-up before ordinary work' "the gate did not name the drain failure"
   assert_contains "$out" '1 captain outcome(s) escalated by the away session, awaiting a successful drain' \
     "a failed drain's brief must say its captain outcomes await a successful drain"
-  assert_contains "$out" 'all awaiting a successful drain' "a failed drain's brief must say its handled outcomes await a successful drain"
+  assert_contains "$out" 'visible outcomes awaiting a successful drain' "a failed drain's brief must say its visible outcomes await a successful drain"
   assert_not_contains "$out" 'presented in the drain' "a failed drain's brief must not claim the drain presented its outcomes"
-  assert_not_contains "$out" 'section presents them' "a failed drain's brief must not claim the drain presents its outcomes"
+  assert_not_contains "$out" 'section presents the visible outcomes' "a failed drain's brief must not claim the drain presents its outcomes"
   [ ! -e "$dir/home/state/.branch-outcomes-cursor" ] || fail "the stuck cursor moved"
   rm -f "$dir/home/cursor-stuck"
   # shellcheck disable=SC2016 # the single-quoted script expands in the harness shell
@@ -994,6 +1023,7 @@ test_missing_final_archive_keeps_retained_contract_gated
 test_return_brief_composes_from_record_store_and_held_set
 test_return_brief_lists_landed_work_awaiting_cleanup
 test_return_brief_points_at_the_drain_on_a_host_home_only
+test_return_brief_all_silent_window_does_not_point_at_drain
 test_return_keeps_catchup_gated_when_the_drain_cannot_record_outcomes
 test_return_brief_keeps_refresh_history
 test_malformed_posture_record_keeps_catchup_gated

@@ -29,16 +29,17 @@
 # store refused or failed (nothing recorded), 2 usage, 3 refused (actor, turn,
 # or scope).
 #
-# A row an away turn recorded after the captain returned (the turn record
-# says posture=away, or predates the posture field, and the away-posture
+# A non-silent row an away turn recorded after the captain returned (the turn
+# record says posture=away, or predates the posture field, and the away-posture
 # record is gone) may be missing from the return brief, so it is also queued
 # for MAIN as a durable check wake keyed supervision-host-return:<seq>,
 # presented by the drain until MAIN acknowledges it. bin/fm-afk-return.sh
 # archives the record before it reads the store and this check follows the
-# append, so every row is in the brief, queued, or both: the relay does not
-# depend on the host surviving its turn or on its owner delivering the host's
-# own handback. An attended turn queues nothing: its captain rows reach MAIN
-# through the host's branch-outcome exit and the drain's BRANCH OUTCOMES
+# append, so every visible row is in the brief, queued, or both: the relay does
+# not depend on the host surviving its turn or on its owner delivering the
+# host's own handback. Silent outcomes remain in the store but are not queued
+# or relayed as notes. An attended turn queues nothing: its captain rows reach
+# MAIN through the host's branch-outcome exit and the drain's BRANCH OUTCOMES
 # section (bin/fm-wake-drain.sh), and its routine rows stay in the store.
 set -u
 
