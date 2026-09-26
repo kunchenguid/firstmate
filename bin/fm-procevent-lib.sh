@@ -211,22 +211,50 @@ fm_procevent_launch_floor_seconds() {
   printf '%s\n' "$value"
 }
 
-fm_procevent_launch_floor_reset_locked() {  # <state-root> <source-id> <registration-identity>
+# How long reconcile waits for a runner it just detached to prove it took the
+# source's claim. Confirmation reads durable evidence, so a healthy launch
+# settles on the first poll and only a launch not yet proved spends the
+# window. The default stays well below FM_POLL because bin/fm-watch.sh runs
+# reconcile once per supervision cycle, and every launch of a cycle shares ONE
+# window rather than taking a window each.
+FM_PROCEVENT_LAUNCH_CONFIRM_DEFAULT_SECONDS=3
+FM_PROCEVENT_LAUNCH_CONFIRM_MIN_SECONDS=1
+FM_PROCEVENT_LAUNCH_CONFIRM_MAX_SECONDS=600
+
+fm_procevent_launch_confirm_seconds() {
+  local value=${FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS-}
+  if [ -z "$value" ]; then
+    printf '%s\n' "$FM_PROCEVENT_LAUNCH_CONFIRM_DEFAULT_SECONDS"
+    return 0
+  fi
+  case "$value" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$value" -ge "$FM_PROCEVENT_LAUNCH_CONFIRM_MIN_SECONDS" ] || return 1
+  [ "$value" -le "$FM_PROCEVENT_LAUNCH_CONFIRM_MAX_SECONDS" ] || return 1
+  printf '%s\n' "$value"
+}
+
+# The one place the launch-pacing stamp's name is constructed. Every writer,
+# pruner and reader goes through here so the naming rule is stated once.
+fm_procevent_launch_floor_stamp_path() {  # <state-root> <source-id> <registration-identity>
   local reg identity
   case "$3" in *:*) ;; *) return 1 ;; esac
   case "$3" in ''|*[!0-9:]*) return 1 ;; esac
+  fm_procevent_source_id_valid "$2" || return 1
   reg=$(fm_procevent_registry_dir "$1") || return 1
   identity=${3//:/-}
-  rm -f -- "$reg/$2.$identity.last-launch"
+  printf '%s\n' "$reg/$2.$identity.last-launch"
+}
+
+fm_procevent_launch_floor_reset_locked() {  # <state-root> <source-id> <registration-identity>
+  local stamp
+  stamp=$(fm_procevent_launch_floor_stamp_path "$1" "$2" "$3") || return 1
+  rm -f -- "$stamp"
 }
 
 fm_procevent_launch_floor_prune_locked() {  # <state-root> <source-id> <registration-identity>
-  local reg identity keep stamp
-  case "$3" in *:*) ;; *) return 1 ;; esac
-  case "$3" in ''|*[!0-9:]*) return 1 ;; esac
+  local reg keep stamp
+  keep=$(fm_procevent_launch_floor_stamp_path "$1" "$2" "$3") || return 1
   reg=$(fm_procevent_registry_dir "$1") || return 1
-  identity=${3//:/-}
-  keep="$reg/$2.$identity.last-launch"
   for stamp in "$reg/$2".*.last-launch "$reg/$2.last-launch"; do
     [ "$stamp" = "$keep" ] && continue
     [ -e "$stamp" ] || [ -L "$stamp" ] || continue
@@ -235,12 +263,9 @@ fm_procevent_launch_floor_prune_locked() {  # <state-root> <source-id> <registra
 }
 
 fm_procevent_launch_floor_wait() {  # <state-root> <source-id> <registration-identity> <seconds>
-  local state=$1 id=$2 expected=$3 floor=$4 reg stamp identity registration current_identity status=0
-  case "$expected" in *:*) ;; *) return 1 ;; esac
-  case "$expected" in ''|*[!0-9:]*) return 1 ;; esac
+  local state=$1 id=$2 expected=$3 floor=$4 reg stamp registration current_identity status=0
+  stamp=$(fm_procevent_launch_floor_stamp_path "$state" "$id" "$expected") || return 1
   reg=$(fm_procevent_registry_dir "$state") || return 1
-  identity=${expected//:/-}
-  stamp="$reg/$id.$identity.last-launch"
   [ ! -L "$stamp" ] || return 1
   [ ! -e "$stamp" ] || [ -f "$stamp" ] || return 1
   perl -MTime::HiRes=clock_gettime,sleep,CLOCK_MONOTONIC -e '
@@ -351,6 +376,41 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
   tmp=$(umask 077; mktemp "$reg/.source.XXXXXX") || return 1
   if {
     printf 'adapter=%s\n' "$adapter"
+    printf 'argc=%s\n' "$#"
+    printf 'argv:\n'
+    printf '%s\n' "$@"
+  } > "$tmp" && chmod 0600 "$tmp" \
+    && identity=$(fm_pr_file_identity "$tmp") \
+    && fm_procevent_launch_floor_reset_locked "$state" "$id" "$identity" \
+    && mv -f -- "$tmp" "$dest"; then
+    fm_procevent_launch_floor_prune_locked "$state" "$id" "$identity" 2>/dev/null || :
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+
+# Publish one task-owned registration. The single source record persists across
+# rounds; the handled marker, not a second ownership record, holds the round open.
+fm_procevent_task_registration_publish_locked() {  # <state> <adapter> <source-id> <task-id> <argv...>
+  local state=$1 adapter=$2 id=$3 task=$4 reg dest tmp arg identity
+  shift 4
+  fm_procevent_adapter_valid "$adapter" || return 1
+  fm_procevent_source_id_valid "$id" || return 1
+  fm_pr_task_id_valid "$task" || return 1
+  [ "$#" -ge 1 ] || return 1
+  for arg in "$@"; do
+    case "$arg" in *$'\n'*) return 1 ;; esac
+  done
+  reg=$(fm_procevent_registry_dir "$state")
+  (umask 077; mkdir -p "$reg") || return 1
+  [ -d "$reg" ] && [ ! -L "$reg" ] || return 1
+  dest="$reg/$id.source"
+  tmp=$(umask 077; mktemp "$reg/.source.XXXXXX") || return 1
+  if {
+    printf 'adapter=%s\n' "$adapter"
+    printf 'kind=task-owned\n'
+    printf 'owner_task=%s\n' "$task"
     printf 'argc=%s\n' "$#"
     printf 'argv:\n'
     printf '%s\n' "$@"
@@ -607,6 +667,29 @@ fm_procevent_claim_generation_gone_locked() {
     && ! fm_procevent_group_alive "${FM_PROCEVENT_CLAIM_PID:-}"
 }
 
+# fm_procevent_claim_undisplaceable_locked <source-id>
+# The single owner of "this stale claim is one no unattended caller may
+# displace". True when a claim record is still present for the source and its
+# generation is NOT provably gone. Call it only where
+# fm_procevent_claim_state_locked has just returned 1, so the FM_PROCEVENT_CLAIM_*
+# globals below describe this source: that same return also covers a source with
+# no claim record at all, which leaves those globals holding whatever the
+# previous load put there, so the record check has to travel with the generation
+# check rather than being left to each caller.
+#
+# What the surviving process group means is why this refuses rather than
+# relaunches. fm_procevent_group_alive probes the runner's OWN process group,
+# and the runner leads that group with its polling source child inside it, so
+# "the group still has members" can mean that child is still attached to the
+# session the source collects from. Starting a replacement there puts a second
+# destructive poller on one session, which drains and loses what the source was
+# collecting. A source that needs a human beats a source that silently eats what
+# it was supposed to deliver.
+fm_procevent_claim_undisplaceable_locked() {  # <source-id>
+  [ -e "$(fm_procevent_claim_path "$1")" ] || return 1
+  ! fm_procevent_claim_generation_gone_locked
+}
+
 # Capture-reservation cleanup for a claim being reclaimed.
 #
 # Reservation records are keyed by CLAIM TOKEN, and every replacement claims a
@@ -707,6 +790,26 @@ fm_procevent_claim_acquire_locked() {
           if [ "$status" -eq 0 ]; then
             fm_procevent_claim_capture_reservation_reclaim_locked || status=1
           fi
+          # Every cleanup above tidies leftovers that belong to the DEAD
+          # generation - its staging file and its capture reservation, both keyed
+          # by ITS claim token - and a replacement always claims a fresh token,
+          # so nothing a failed tidy-up leaves behind can collide with the
+          # generation that replaces it.
+          # fm_procevent_claim_capture_reservation_reclaim_locked already states
+          # that rule for the reservation record; the staging file takes the same
+          # rule here, and so does the shape check on the registry directory
+          # recorded to hold it, which only decides whether that removal is safe
+          # to attempt. Once the stale owner and the
+          # independently absent process group prove the whole generation gone,
+          # the documented ownership promise is already granted, so a failed
+          # tidy-up may leave litter and nothing more. Vetoing the claim instead
+          # is what leaves a provably dead runner owning the source permanently,
+          # where no reconcile, no retire and no fresh arm can displace it.
+          if [ "$status" -ne 0 ] && fm_procevent_claim_generation_gone_locked; then
+            status=0
+          fi
+          # Two owners is the one outcome worse than none: never proceed on a
+          # claim record that is still there.
           [ "$status" -ne 0 ] || rm -f -- "$claim" || status=1
         else
           status=1
@@ -941,7 +1044,7 @@ fm_procevent_capture_reservation_remove_claim() {  # <state> <claim-token>
   done
 }
 
-# fm_procevent_capture <state> <source-id> <adapter> <output-file>
+# fm_procevent_capture <state> <source-id> <adapter> <output-file> [<task-id>]
 #   [<extension-id> <extension-version> <capability-version> <package-digest> <binding-digest>]
 # Atomically store the completed output at 0600 and print its durable path. The
 # rename is the commit point; nothing referencing this result may be published
@@ -950,11 +1053,14 @@ fm_procevent_capture_reservation_remove_claim() {  # <state> <claim-token>
 # silently move to a replacement binding.
 fm_procevent_capture() {
   local state=$1 id=$2 adapter=$3 src=$4 extension_id=${5-} extension_version=${6-}
-  local capability_version=${7-} package_digest=${8-} binding_digest=${9-}
-  local inbox seq dest tmp adapter_dest adapter_tmp extension_dest='' extension_tmp=''
-  [ "$#" -eq 4 ] || [ "$#" -eq 9 ] || return 1
+  local capability_version=${7-} package_digest=${8-} binding_digest=${9-} task_owner=${5-}
+  local inbox seq dest tmp adapter_dest adapter_tmp owner_dest='' owner_tmp='' extension_dest='' extension_tmp=''
+  [ "$#" -eq 4 ] || [ "$#" -eq 5 ] || [ "$#" -eq 9 ] || return 1
   fm_procevent_source_id_valid "$id" || return 1
   fm_procevent_adapter_valid "$adapter" || return 1
+  if [ "$#" -eq 5 ]; then
+    fm_pr_task_id_valid "$task_owner" || return 1
+  fi
   if [ "$#" -eq 9 ]; then
     fm_procevent_extension_id_valid "$extension_id" || return 1
     fm_procevent_extension_version_valid "$extension_version" || return 1
@@ -983,23 +1089,33 @@ fm_procevent_capture() {
   while [ -e "$inbox/$id.$seq.result" ]; do seq=$((seq + 1)); done
   dest="$inbox/$id.$seq.result"
   adapter_dest="$inbox/$id.$seq.adapter"
+  if [ "$#" -eq 5 ]; then
+    owner_dest="$inbox/$id.$seq.owner-task"
+  fi
   if [ "$#" -eq 9 ]; then
     [ ! -e "$dest" ] && [ ! -L "$dest" ] \
       && [ ! -e "$adapter_dest" ] && [ ! -L "$adapter_dest" ] || return 1
   fi
   tmp=$(umask 077; mktemp "$inbox/.capture.XXXXXX") || return 1
   adapter_tmp=$(umask 077; mktemp "$inbox/.adapter.XXXXXX") || { rm -f -- "$tmp"; return 1; }
+  if [ "$#" -eq 5 ]; then
+    owner_tmp=$(umask 077; mktemp "$inbox/.owner-task.XXXXXX") || { rm -f -- "$tmp" "$adapter_tmp"; return 1; }
+  fi
   if [ "$#" -eq 9 ]; then
     extension_dest="$inbox/$id.$seq.extension"
     [ ! -e "$extension_dest" ] && [ ! -L "$extension_dest" ] || {
-      rm -f -- "$tmp" "$adapter_tmp"
+      rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp"
       return 1
     }
     extension_tmp=$(umask 077; mktemp "$inbox/.extension.XXXXXX") \
-      || { rm -f -- "$tmp" "$adapter_tmp"; return 1; }
+      || { rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp"; return 1; }
   fi
-  if ! cat "$src" > "$tmp"; then rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"; return 1; fi
-  if ! printf '%s\n' "$adapter" > "$adapter_tmp"; then rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"; return 1; fi
+  if ! cat "$src" > "$tmp"; then rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp" "$extension_tmp"; return 1; fi
+  if ! printf '%s\n' "$adapter" > "$adapter_tmp"; then rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp" "$extension_tmp"; return 1; fi
+  if [ "$#" -eq 5 ] && ! printf '%s\n' "$task_owner" > "$owner_tmp"; then
+    rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp" "$extension_tmp"
+    return 1
+  fi
   if [ "$#" -eq 9 ] && ! {
     printf 'schema=fm-procevent-extension-owner.v1\n'
     printf 'extension_id=%s\n' "$extension_id"
@@ -1008,24 +1124,32 @@ fm_procevent_capture() {
     printf 'package_digest=%s\n' "$package_digest"
     printf 'binding_digest=%s\n' "$binding_digest"
   } > "$extension_tmp"; then
-    rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"
+    rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp" "$extension_tmp"
     return 1
   fi
   if ! chmod 0600 "$tmp" "$adapter_tmp"; then
-    rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"
+    rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp" "$extension_tmp"
+    return 1
+  fi
+  if [ "$#" -eq 5 ] && ! chmod 0600 "$owner_tmp"; then
+    rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp" "$extension_tmp"
     return 1
   fi
   if [ "$#" -eq 9 ] && ! chmod 0600 "$extension_tmp"; then
-    rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"
+    rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp" "$extension_tmp"
     return 1
   fi
-  if ! mv -f -- "$adapter_tmp" "$adapter_dest"; then rm -f -- "$tmp" "$adapter_tmp" "$extension_tmp"; return 1; fi
+  if ! mv -f -- "$adapter_tmp" "$adapter_dest"; then rm -f -- "$tmp" "$adapter_tmp" "$owner_tmp" "$extension_tmp"; return 1; fi
+  if [ "$#" -eq 5 ] && ! mv -f -- "$owner_tmp" "$owner_dest"; then
+    rm -f -- "$tmp" "$adapter_dest" "$owner_tmp" "$extension_tmp"
+    return 1
+  fi
   if [ "$#" -eq 9 ] && ! mv -f -- "$extension_tmp" "$extension_dest"; then
-    rm -f -- "$tmp" "$adapter_dest" "$extension_tmp"
+    rm -f -- "$tmp" "$adapter_dest" "$owner_dest" "$extension_tmp"
     return 1
   fi
   if ! mv -f -- "$tmp" "$dest"; then
-    rm -f -- "$tmp" "$adapter_dest"
+    rm -f -- "$tmp" "$adapter_dest" "$owner_dest"
     [ -z "$extension_dest" ] || rm -f -- "$extension_dest"
     return 1
   fi
@@ -1034,6 +1158,17 @@ fm_procevent_capture() {
   else
     printf '%s\n' "$dest"
   fi
+}
+
+fm_procevent_result_owner_task() {  # <result-path>
+  local file="${1%.result}.owner-task" task extra
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  {
+    IFS= read -r task && ! IFS= read -r extra
+  } < "$file" || return 1
+  [ -z "$extra" ] || return 1
+  fm_pr_task_id_valid "$task" || return 1
+  printf '%s\n' "$task"
 }
 
 # fm_procevent_pending <state>

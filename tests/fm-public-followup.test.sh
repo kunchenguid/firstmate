@@ -268,6 +268,55 @@ expect_failure() {
   fi
 }
 
+# --- 0. the suite's seeding never reaches a real backlog ------------------------
+
+# An operator shell exports TASKS_AXI_FILE at its live home's backlog, and
+# tasks-axi resolves that env ahead of the fixture's .tasks.toml. This suite
+# seeds obligations with bare `tasks-axi` from the fixture home, so before
+# tests/lib.sh cleared the ambient overrides, every seed landed in the operator's
+# real backlog while the consumer read the empty fixture. Re-enter the suite's
+# seeding exactly as a test process begins (source tests/lib.sh, then seed from
+# the fixture) under a decoy "live" backlog and a backend tasks-axi refuses: the
+# decoy must stay byte-identical and the fixture must hold the obligation.
+test_ambient_tasks_axi_env_never_reaches_a_real_backlog() {
+  local home decoy_dir decoy fixture_state
+  home=$(make_home ambient-env)
+  decoy_dir="$TMP_ROOT/ambient-live/data"
+  decoy="$decoy_dir/backlog.md"
+  mkdir -p "$decoy_dir"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$decoy"
+  cp "$decoy" "$decoy.expected"
+  jq -n '{request_id:"req-amb", platform:"discord",
+          context_binding:{version:"ctx1", value:"ctx1_req-amb"},
+          public_safe_summary:"seeded under an ambient tasks-axi override",
+          received_at:"2026-07-30T10:00:00Z",
+          followup_expires_at:"2026-08-06T10:00:00Z",
+          reservation_expires_at:"2026-08-06T10:00:00Z"}' > "$home/request.json"
+  jq -n '{type:"pr-merged", project:"firstmate",
+          required_deliverables:["pr_url"], completion_policy:"all-required"}' \
+    > "$home/expected.json"
+
+  TASKS_AXI_FILE="$decoy" TASKS_AXI_BACKEND=no-such-backend bash -c '
+    set -u
+    . "$1/tests/lib.sh"
+    [ -z "${TASKS_AXI_FILE+x}" ] || { echo "TASKS_AXI_FILE survived tests/lib.sh"; exit 1; }
+    [ -z "${TASKS_AXI_BACKEND+x}" ] || { echo "TASKS_AXI_BACKEND survived tests/lib.sh"; exit 1; }
+    cd "$2" && tasks-axi public-followup add pf-ambient \
+      --request-context-file "$2/request.json" --purpose promised-final \
+      --expected-final-file "$2/expected.json" --expires-at 2026-10-01T00:00:00Z >/dev/null
+  ' _ "$ROOT" "$home" \
+    || fail "seeding under an ambient tasks-axi override did not reach the fixture backlog"
+
+  cmp -s "$decoy" "$decoy.expected" \
+    || fail "the suite's seeding wrote the ambient TASKS_AXI_FILE backlog instead of the fixture"
+  [ "$(find "$decoy_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort | tr '\n' ' ')" = "backlog.md backlog.md.expected " ] \
+    || fail "the suite's seeding left an artifact beside the ambient TASKS_AXI_FILE backlog: $(find "$decoy_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort | tr '\n' ' ')"
+  fixture_state=$(task_state "$home" pf-ambient)
+  [ "$fixture_state" != absent ] \
+    || fail "the fixture backlog does not hold the obligation seeded under the ambient override"
+  pass "the suite's seeding never reaches a backlog named by ambient TASKS_AXI_FILE/BACKEND"
+}
+
 # --- 0. bounded, single-line, character-safe outcome text -----------------------
 
 # The outcome sentence becomes a public reply, so bounding it must not mangle
@@ -379,6 +428,39 @@ test_restart_e2e_delivers_exactly_once() {
   pass "restart end-to-end: typed result reconciles from disk and delivers one reply to the original thread"
 }
 
+# A promised-final expecting pr-merged whose bound work ends failed (the only
+# typed outcome a failed or parked lane can report) must still become
+# deliverable, so the owed public reply carries the honest outcome instead of
+# stranding at pending-work with no delivery path. Needs tasks-axi 0.2.6.
+test_failed_work_on_pr_merged_promise_delivers_honest_outcome() {
+  local home log out posts
+  home=$(make_home failed-deliver)
+  log="$home/curl.log"; : > "$log"
+  seed_commitment "$home" pf-failed req-failed discord main work-failed
+  "$EMIT" --home "$home" --obligation pf-failed --relation rel-code --source-home main \
+    --work-id work-failed --generation 1 --outcome failed --deliverable error_code=quota-exhausted \
+    --outcome-text 'This one did not pan out: the worker ran out of quota before it could open a fix.' \
+    >/dev/null || fail "the failed terminal result could not be reported"
+
+  out=$(FAKE_CURL_LOG="$log" run_pf "$home" consume) || fail "reconciliation failed: $out"
+  assert_contains "$out" "ready pf-failed req-failed discord" \
+    "a failed outcome on a pr-merged promise must become delivery-ready"
+  [ "$(delivery_state "$home" pf-failed)" = ready ] \
+    || fail "the failed outcome must move the commitment to ready, got '$(delivery_state "$home" pf-failed)'"
+
+  out=$(FAKE_CURL_LOG="$log" run_pf "$home" deliver pf-failed) || fail "delivery failed: $out"
+  assert_contains "$out" "delivered pf-failed request=req-failed platform=discord" \
+    "delivery must report the original request binding"
+  posts=$(followup_posts "$log")
+  [ "$posts" -eq 1 ] || fail "expected exactly one public reply, got $posts"
+  assert_grep '"request_id":"req-failed"' "$log" "the reply must target the original request"
+  assert_grep 'the worker ran out of quota before it could open a fix' "$log" \
+    "the reply must carry the accepted failed outcome text verbatim"
+  [ "$(task_state "$home" pf-failed)" = 'done' ] \
+    || fail "the commitment must be Done after the posted receipt"
+  pass "failed work on a pr-merged promise delivers its honest outcome exactly once"
+}
+
 # --- 2. idempotency ------------------------------------------------------------
 
 test_duplicate_event_and_replay_are_noops() {
@@ -425,7 +507,7 @@ test_invalid_events_are_refused_and_quarantined() {
   expect_failure "a wrong source home must be refused" \
     "$EMIT" --home "$home" --obligation pf-refuse --relation rel-code \
     --source-home secondmate:other --work-id work-real --generation 1 \
-    --outcome pr-merged --deliverable pr_url=https://example.invalid/1 \
+    --outcome pr-merged --deliverable pr_url=https://example.invalid/example/repo/pulls/1 \
     --outcome-text 'x'
   assert_contains "$EXPECT_OUT" "does not match this home's registration" \
     "the refusal must name the mismatch"
@@ -433,12 +515,12 @@ test_invalid_events_are_refused_and_quarantined() {
   expect_failure "a wrong work id must be refused" \
     "$EMIT" --home "$home" --obligation pf-refuse --relation rel-code \
     --source-home main --work-id work-other --generation 1 \
-    --outcome pr-merged --deliverable pr_url=https://example.invalid/1 \
+    --outcome pr-merged --deliverable pr_url=https://example.invalid/example/repo/pulls/1 \
     --outcome-text 'x'
   expect_failure "a stale generation must be refused" \
     "$EMIT" --home "$home" --obligation pf-refuse --relation rel-code \
     --source-home main --work-id work-real --generation 0 \
-    --outcome pr-merged --deliverable pr_url=https://example.invalid/1 \
+    --outcome pr-merged --deliverable pr_url=https://example.invalid/example/repo/pulls/1 \
     --outcome-text 'x'
 
   events="$home/state/public-followup/events"
@@ -451,13 +533,11 @@ test_invalid_events_are_refused_and_quarantined() {
   assert_absent "$events/deadbeef.json" "a refused event must leave the pending inbox"
   assert_present "$rejected/deadbeef.reason" "a refusal must keep an inspectable reason"
 
-  # A deliverable the expected-final type does not permit. The emitter accepts the
-  # shape; tasks-axi is the authority that refuses the semantics.
-  "$EMIT" --home "$home" --obligation pf-refuse --relation rel-code \
-    --source-home main --work-id work-real --generation 1 \
-    --outcome pr-merged --deliverable report_path=data/x/report.md \
-    --outcome-text 'wrong deliverable for a merged PR' >/dev/null \
-    || fail "the emitter should publish a shape-valid event"
+  # A deliverable the expected-final type does not permit, from a producer that
+  # skipped the emitter's own refusal: tasks-axi still refuses the semantics.
+  publish_raw_event "$events" pf-refuse main work-real pr-merged \
+    '{"report_path":"data/x/report.md"}' >/dev/null \
+    || fail "could not publish the unsupported deliverable"
   out=$(run_pf "$home" consume) || fail "consume must survive an unsupported deliverable"
   assert_contains "$out" "rejected " "an unsupported deliverable must be refused by tasks-axi"
   [ "$(delivery_state "$home" pf-refuse)" = pending-work ] \
@@ -1507,7 +1587,7 @@ test_rechain_delivers_second_post_on_same_thread() {
     || fail "rechain failed: $out"
   assert_contains "$out" "retired public-final-a reason=handed on to public-final-b" \
     "rechain must retire the source loop"
-  assert_contains "$out" "--deliverable pr_url=<value>" \
+  assert_contains "$out" "--deliverable pr_url=<pr_url>" \
     "rechain brief must name the actual required deliverable key"
   command_log="$parent/brief-command.args"
   cat > "$parent/fakebin/record-emit" <<'SH'
@@ -1521,8 +1601,11 @@ SH
   ')
   assert_contains "$command" "--outcome-text" \
     "the exact rechain command must remain continuous through outcome text"
-  command=${command/"$ROOT/bin/fm-public-followup-emit.sh"/"$parent/fakebin/record-emit"}
-  command=${command//<value>/https://github.com/example/repo/pull/99}
+  # Bash 3 parses a quoted absolute path in ${value/pattern/replacement} as
+  # slash-delimited pieces. Replace the known first command word by preserving
+  # only the suffix after it, so this executable-interface check is portable.
+  command="  $parent/fakebin/record-emit${command#*"$ROOT/bin/fm-public-followup-emit.sh"}"
+  command=${command//<pr_url>/https://github.com/example/repo/pull/99}
   RECORD_ARGS="$command_log" bash -c "$command" \
     || fail "the exact rechain command must execute after filling its deliverable value"
   assert_grep '--deliverable' "$command_log" \
@@ -2186,7 +2269,7 @@ SH
       run_pf "$home" brief pf-brief
     assert_contains "$EXPECT_OUT" "no readable required deliverable keys" \
       "brief must reject the complete contract when any key is invalid"
-    assert_not_contains "$EXPECT_OUT" "--deliverable pr_url=<value>" \
+    assert_not_contains "$EXPECT_OUT" "--deliverable pr_url=" \
       "brief must not emit a partial contract from an invalid key array"
   done
   pass "brief fails explicitly when typed deliverable keys are unavailable"
@@ -2780,7 +2863,6 @@ test_remote_work_home_emit_reaches_owning_home() {
   # Run exactly what the worker on the far machine was told to run. The fixture
   # checkout really exists at the route's remote root, so the printed command is
   # literally executable there.
-  command=${command//<value>/data/work-remote/report.md}
   command=${command//<one bounded public-safe sentence>/The remote lane finished its investigation.}
   printf 'mini-default\n' > "$remote/.fm-secondmate-home"
   bash -c "$command" >/dev/null || fail "the worker's own instructions must run in its home"
@@ -2799,6 +2881,36 @@ test_remote_work_home_emit_reaches_owning_home() {
   pass "a typed terminal result emitted in a remote work home reaches the owning home"
 }
 
+# Not every promise owes a deliverable: an explicit-answer final is kept by the
+# answer itself, so its required list is empty. That promise must still be
+# briefable, and the command the remote worker is handed must really report the
+# result - the worker has no other way to reach the owning home.
+test_remote_promise_without_deliverables_is_briefable() {
+  local home remote out command staged
+  remote_fixture_prepare
+  home=$(make_home remote-explicit)
+  remote=$(make_remote_route "$home" mini-default)
+  seed_typed_commitment "$home" pf-remote-explicit req-remote-explicit explicit-answer '[]' \
+    secondmate:mini-default work-explicit
+
+  out=$(run_pf "$home" brief pf-remote-explicit) || fail "brief failed: $out"
+  command=$(brief_emit_command "$out")
+  [ -n "$command" ] || fail "a promise that requires no deliverable must still print an emit command"
+  assert_contains "$command" "--stage-in $remote" \
+    "the remote worker must be told to stage its result in its own home"
+  assert_not_contains "$command" "--deliverable" \
+    "a promise that requires no deliverable must not ask the worker to invent one"
+
+  command=${command//<one bounded public-safe sentence>/The question is answered on main.}
+  printf 'mini-default\n' > "$remote/.fm-secondmate-home"
+  bash -c "$command" >/dev/null || fail "the worker's own instructions must run in its home"
+
+  staged=$(run_pf_remote "$home" consume) || fail "consume failed: $staged"
+  assert_contains "$staged" "ready pf-remote-explicit" \
+    "the answer alone must keep a promise that requires no deliverable"
+  pass "a promise that requires no deliverable is briefable and reportable"
+}
+
 # A duplicate report from the other machine must stay a no-op: the staged copy is
 # collected again after a failed retirement, and a replayed emit derives the same
 # event id, so neither can produce a second public reply.
@@ -2811,7 +2923,6 @@ test_remote_collection_is_idempotent() {
 
   out=$(run_pf "$home" brief pf-remote-twice) || fail "brief failed: $out"
   command=$(brief_emit_command "$out")
-  command=${command//<value>/data/work-twice/report.md}
   command=${command//<one bounded public-safe sentence>/The remote lane finished its investigation.}
   printf 'mini-default\n' > "$remote/.fm-secondmate-home"
   bash -c "$command" >/dev/null || fail "the worker's own instructions must run in its home"
@@ -2900,7 +3011,6 @@ test_remote_collection_refuses_unreadable_outbox() {
 
   out=$(run_pf "$home" brief pf-outbox-unreadable) || fail "brief failed: $out"
   command=$(brief_emit_command "$out")
-  command=${command//<value>/data/work-unreadable/report.md}
   command=${command//<one bounded public-safe sentence>/The result remains staged while its outbox is unreadable.}
   printf 'mini-default\n' > "$remote/.fm-secondmate-home"
   bash -c "$command" >/dev/null || fail "the worker must stage its terminal result"
@@ -2929,7 +3039,6 @@ test_invalid_registration_fails_remote_collection() {
 
   out=$(run_pf "$home" brief pf-invalid-registration) || fail "brief failed: $out"
   command=$(brief_emit_command "$out")
-  command=${command//<value>/data/work-invalid/report.md}
   command=${command//<one bounded public-safe sentence>/The remote lane finished before registration damage.}
   printf 'mini-default\n' > "$remote/.fm-secondmate-home"
   bash -c "$command" >/dev/null || fail "the remote route must stage its terminal result"
@@ -2963,7 +3072,6 @@ test_unsafe_registration_entry_fails_remote_collection() {
 
   out=$(run_pf "$home" brief pf-unsafe-registration) || fail "brief failed: $out"
   command=$(brief_emit_command "$out")
-  command=${command//<value>/data/work-unsafe/report.md}
   command=${command//<one bounded public-safe sentence>/The remote lane finished before registration replacement.}
   printf 'mini-default\n' > "$remote/.fm-secondmate-home"
   bash -c "$command" >/dev/null || fail "the remote route must stage its terminal result"
@@ -2997,7 +3105,6 @@ test_remote_route_loss_fails_brief_and_collection() {
 
   out=$(run_pf "$home" brief pf-route-lost) || fail "brief failed before route loss: $out"
   command=$(brief_emit_command "$out")
-  command=${command//<value>/data/work-lost/report.md}
   command=${command//<one bounded public-safe sentence>/The remote lane finished before its route record was lost.}
   printf 'mini-default\n' > "$remote/.fm-secondmate-home"
   bash -c "$command" >/dev/null || fail "the staged result must exist before route loss"
@@ -3075,7 +3182,6 @@ test_local_work_home_emit_path_is_unchanged() {
   assert_contains "$out" "the home above owns the reply" \
     "a local work home's instructions must still close on the home named above"
 
-  command=${command//<value>/data/work-local/report.md}
   command=${command//<one bounded public-safe sentence>/The local lane finished its investigation.}
   bash -c "$command" >/dev/null || fail "the local emit command must run as printed"
   [ -n "$(ls -A "$home/state/public-followup/events" 2>/dev/null)" ] \
@@ -3088,6 +3194,721 @@ test_local_work_home_emit_path_is_unchanged() {
   pass "a local work home's emit path is unchanged"
 }
 
+# --- deliverable format: brief, emit, and rejection wake ----------------------
+
+# seed_typed_commitment <home> <obligation> <request> <expected-type> <keys-json> <work-home> <work-id>
+# A promised-final commitment of any expected-final type, so a deliverable rule
+# can be pinned against the real tasks-axi consumer for every key it checks.
+seed_typed_commitment() {
+  local home=$1 obligation=$2 request=$3 expected=$4 keys=$5 work_home=$6 work_id=$7
+  jq -n --arg r "$request" \
+    '{request_id:$r, platform:"discord",
+      context_binding:{version:"ctx1", value:("ctx1_" + $r)},
+      public_safe_summary:"pin a deliverable rule",
+      received_at:"2026-08-21T01:12:00Z",
+      followup_expires_at:"2026-08-28T01:12:00Z",
+      reservation_expires_at:"2026-08-28T01:12:00Z"}' > "$home/request.json"
+  jq -n --arg t "$expected" --argjson k "$keys" \
+    '{type:$t, project:"firstmate", required_deliverables:$k, completion_policy:"all-required"}' \
+    > "$home/expected.json"
+  jq -n --arg h "$work_home" --arg w "$work_id" \
+    '{relation_id:"rel-code", work_ref:{home_id:$h, task_id:$w},
+      role:"fulfills", required:true, generation:1}' > "$home/relation.json"
+  tasks_in "$home" public-followup add "$obligation" --request-context-file "$home/request.json" \
+    --purpose promised-final --expected-final-file "$home/expected.json" \
+    --expires-at 2026-10-01T00:00:00Z >/dev/null || fail "add failed for $obligation"
+  tasks_in "$home" public-followup bind-work "$obligation" --relation-file "$home/relation.json" >/dev/null \
+    || fail "bind-work failed for $obligation"
+  FM_HOME="$home" FMX_NOW_OVERRIDE="$PF_TEST_NOW" bash -c \
+    ". '$ROOT/bin/fm-x-lib.sh'; fmx_context_registry_set '$home/state' '$request' discord 2000" \
+    || fail "context retain failed for $obligation"
+  run_pf "$home" register "$obligation" --relation rel-code --work-home "$work_home" \
+    --work-id "$work_id" --generation 1 >/dev/null || fail "register failed for $obligation"
+}
+
+# publish_raw_event <dir> <obligation> <work-home> <work-id> <outcome> <deliverables-json>
+# Publish a well-formed terminal event WITHOUT the emitter's deliverable checks:
+# what an emitter from before those checks, or any other producer, would write.
+# The identity is derived exactly as the emitter derives it, so the only thing
+# under test downstream is the deliverable value. Prints the event id.
+publish_raw_event() {
+  FM_PF_TEST_DIR=$1 FM_PF_TEST_OBL=$2 FM_PF_TEST_HOME_ID=$3 FM_PF_TEST_WORK=$4 \
+    FM_PF_TEST_OUTCOME=$5 FM_PF_TEST_DELIV=$6 bash -c '
+      . "$1/bin/fm-public-followup-lib.sh"
+      d=$(printf "%s" "$FM_PF_TEST_DELIV" | jq -Sc .) || exit 1
+      id=$(fm_pf_event_id "$FM_PF_TEST_OBL" rel-code "$FM_PF_TEST_HOME_ID" \
+        "$FM_PF_TEST_WORK" 1 "$FM_PF_TEST_OUTCOME" "$d") || exit 1
+      jq -Sc -n --arg id "$id" --arg o "$FM_PF_TEST_OBL" --arg h "$FM_PF_TEST_HOME_ID" \
+        --arg w "$FM_PF_TEST_WORK" --arg t "$FM_PF_TEST_OUTCOME" --argjson d "$d" \
+        "{schema_version:1, event_id:\$id, obligation_id:\$o, relation_id:\"rel-code\",
+          work_id:\$w, generation:1, source_home_id:\$h, outcome_type:\$t,
+          deliverables:\$d, public_safe_outcome:\"The work finished.\",
+          occurred_at:\"2026-08-21T02:00:00Z\", successor:null}" \
+        | fmx_private_artifact_publish_stdin_once "$FM_PF_TEST_DIR" "$id.json" 600 || exit 1
+      printf "%s\n" "$id"
+    ' _ "$ROOT"
+}
+
+run_poll() {  # <home>
+  PATH="$1/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$1" \
+    FM_STATE_OVERRIDE="$1/state" "$POLL" 2>&1
+}
+
+# The reported failure, first part: the instructions a bound worker received
+# printed a bare "<value>" for report_path, so the worker guessed an absolute
+# path. The brief knows the only report path tasks-axi accepts for its own work
+# id, and must state the format of anything it cannot know.
+test_brief_prefills_known_deliverables_and_states_formats() {
+  local home out command
+  home=$(make_home brief-format)
+  seed_repro_commitment "$home" pf-brief-report req-brief-report main work-report
+
+  out=$(run_pf "$home" brief pf-brief-report) || fail "brief failed: $out"
+  assert_not_contains "$out" "<value>" "a brief must never print a bare value placeholder"
+  command=$(brief_emit_command "$out")
+  assert_contains "$command" "--deliverable report_path=data/work-report/report.md" \
+    "a report-ready brief must pre-fill the report path tasks-axi accepts for its work id"
+
+  # Writing only the outcome sentence makes the printed command complete, and
+  # its result satisfies tasks-axi.
+  command=${command//<one bounded public-safe sentence>/The investigation report is ready.}
+  bash -c "$command" >/dev/null || fail "the pre-filled emit command must run as printed"
+  out=$(run_pf "$home" consume) || fail "consume failed: $out"
+  assert_contains "$out" "ready pf-brief-report" "the pre-filled report path must satisfy tasks-axi"
+
+  # A value the brief cannot know keeps a named placeholder plus its format.
+  seed_typed_commitment "$home" pf-brief-pr req-brief-pr pr-merged '["pr_url"]' main work-pr
+  out=$(run_pf "$home" brief pf-brief-pr) || fail "brief failed: $out"
+  assert_not_contains "$out" "<value>" "a pr-merged brief must not print a bare value placeholder"
+  assert_contains "$out" "--deliverable pr_url=<pr_url>" \
+    "a value the brief cannot know keeps a named placeholder"
+  assert_contains "$out" "https://github.com/<owner>/<repo>/pull/<n>" \
+    "the brief must state the GitHub pull request URL shape tasks-axi accepts"
+  assert_contains "$out" "https://<host>/<owner>/<repo>/pulls/<n>" \
+    "the brief must state the Forgejo pull request URL shape tasks-axi accepts"
+  pass "brief pre-fills the report path and states the format of every value it cannot know"
+}
+
+# The reported failure, second part: an absolute report_path left the worker's
+# home unchallenged and was refused only later, in another home. The emitter
+# must refuse it at the edge, naming the key, the bad value, and the format, for
+# both the direct and the staged destination.
+test_emit_refuses_a_deliverable_tasks_axi_would_reject() {
+  local home staging
+  home=$(make_home emit-format)
+  seed_repro_commitment "$home" pf-emit-format req-emit-format main work-format
+
+  expect_failure "an absolute report path must be refused at emit" \
+    "$EMIT" --home "$home" --obligation pf-emit-format --relation rel-code \
+    --source-home main --work-id work-format --generation 1 --outcome report-ready \
+    --deliverable report_path=/Users/someone/fm-home/data/work-format/report.md \
+    --outcome-text 'The report is ready.'
+  assert_contains "$EXPECT_OUT" "report_path" "the refusal must name the key"
+  assert_contains "$EXPECT_OUT" "/Users/someone/fm-home/data/work-format/report.md" \
+    "the refusal must show the bad value"
+  assert_contains "$EXPECT_OUT" "data/<task-id>/report.md" \
+    "the refusal must state the expected format"
+  [ -z "$(ls -A "$home/state/public-followup/events" 2>/dev/null)" ] \
+    || fail "a refused deliverable must publish nothing"
+
+  staging="$TMP_ROOT/emit-format-staging"
+  mkdir -p "$staging/state"
+  printf 'axi-a1\n' > "$staging/.fm-secondmate-home"
+  expect_failure "a staged emit must apply the same deliverable rules" \
+    "$EMIT" --stage-in "$staging" --obligation pf-emit-format --relation rel-code \
+    --source-home secondmate:axi-a1 --work-id work-format --generation 1 --outcome report-ready \
+    --deliverable report_path=/abs/data/work-format/report.md \
+    --outcome-text 'The report is ready.'
+  assert_contains "$EXPECT_OUT" "data/<task-id>/report.md" \
+    "a staged refusal must state the expected format"
+  assert_absent "$staging/state/public-followup" "a refused staged deliverable must stage nothing"
+
+  expect_failure "a deliverable key this promise never carries must be refused at emit" \
+    "$EMIT" --home "$home" --obligation pf-emit-format --relation rel-code \
+    --source-home main --work-id work-format --generation 1 --outcome report-ready \
+    --deliverable pr_url=https://github.com/example/repo/pull/12 \
+    --deliverable report_path=data/work-format/report.md \
+    --outcome-text 'Wrong key for a report.'
+  assert_contains "$EXPECT_OUT" "report-ready" "the refusal must name the outcome"
+  assert_contains "$EXPECT_OUT" "report_path" "the refusal must name the key this promise carries"
+  pass "the emitter refuses a deliverable tasks-axi would reject, naming key, value, and format"
+}
+
+# A repeated --deliverable key would serialize only its last value, so which
+# value was meant is ambiguous; the emitter refuses it by name in both modes
+# rather than judging or publishing either value.
+test_emit_refuses_a_repeated_deliverable_key() {
+  local home staging
+  home=$(make_home emit-repeat)
+  seed_repro_commitment "$home" pf-emit-repeat req-emit-repeat main work-repeat
+
+  expect_failure "a repeated deliverable key must be refused at emit" \
+    "$EMIT" --home "$home" --obligation pf-emit-repeat --relation rel-code \
+    --source-home main --work-id work-repeat --generation 1 --outcome report-ready \
+    --deliverable report_path=/abs/data/work-repeat/report.md \
+    --deliverable report_path=data/work-repeat/report.md \
+    --outcome-text 'The report is ready.'
+  assert_contains "$EXPECT_OUT" "'report_path' is repeated" \
+    "the refusal must name the repeated key"
+  assert_not_contains "$EXPECT_OUT" "data/<task-id>/report.md" \
+    "a repeated key must be refused before any value is judged"
+  [ -z "$(ls -A "$home/state/public-followup/events" 2>/dev/null)" ] \
+    || fail "a repeated deliverable key must publish nothing"
+
+  staging="$TMP_ROOT/emit-repeat-staging"
+  mkdir -p "$staging/state"
+  printf 'axi-a1\n' > "$staging/.fm-secondmate-home"
+  expect_failure "a staged emit must refuse a repeated deliverable key" \
+    "$EMIT" --stage-in "$staging" --obligation pf-emit-repeat --relation rel-code \
+    --source-home secondmate:axi-a1 --work-id work-repeat --generation 1 --outcome report-ready \
+    --deliverable report_path=data/work-repeat/report.md \
+    --deliverable report_path=data/work-repeat/report.md \
+    --outcome-text 'The report is ready.'
+  assert_contains "$EXPECT_OUT" "'report_path' is repeated" \
+    "a staged refusal must name the repeated key"
+  assert_absent "$staging/state/public-followup" "a repeated deliverable key must stage nothing"
+  pass "the emitter refuses a repeated deliverable key by name in both destinations"
+}
+
+# The same mistake with the value left out entirely: an event that never carries
+# the key its obligation requires can only ever be quarantined by the owning
+# home, so the emitter must refuse it before it travels, in both destinations.
+test_emit_refuses_a_missing_required_deliverable() {
+  local home remote out command n=0 expected key format
+  home=$(make_home emit-missing)
+
+  # Writing straight into the owning home: that home's own registration records
+  # what its promise cannot be kept without.
+  while IFS='|' read -r expected key format; do
+    [ -n "$expected" ] || continue
+    n=$((n + 1))
+    seed_typed_commitment "$home" "pf-missing-$n" "req-missing-$n" "$expected" \
+      "[\"$key\"]" main "work-missing-$n"
+    expect_failure "a $expected event carrying no deliverable at all must be refused at emit" \
+      "$EMIT" --home "$home" --obligation "pf-missing-$n" --relation rel-code \
+      --source-home main --work-id "work-missing-$n" --generation 1 \
+      --outcome "$expected" --outcome-text 'The work finished.'
+    assert_contains "$EXPECT_OUT" "$key" "the refusal must name the missing key"
+    assert_contains "$EXPECT_OUT" "$format" "the refusal must state the expected format"
+    [ -z "$(ls -A "$home/state/public-followup/events" 2>/dev/null)" ] \
+      || fail "an event missing $key must publish nothing"
+  done <<'CASES'
+report-ready|report_path|data/<task-id>/report.md
+pr-merged|pr_url|/pull/<n>
+local-main|commit_sha|lowercase hex commit SHA
+CASES
+  [ "$n" -eq 3 ] || fail "the missing-deliverable table ran only $n cases"
+
+  # A failure report is a different terminal outcome that never carries the
+  # promised key, so requiring that key must not block reporting one.
+  "$EMIT" --home "$home" --obligation pf-missing-1 --relation rel-code \
+    --source-home main --work-id work-missing-1 --generation 1 --outcome failed \
+    --deliverable error_code=ci-red --outcome-text 'The work could not finish.' >/dev/null \
+    || fail "a failed outcome must not be held to the promised deliverable key"
+  rm -f "$home"/state/public-followup/events/*.json
+
+  # Staging for a home on another machine: no registration is readable there, so
+  # the requirement travels in the command `brief` prints. Run exactly that
+  # command with its deliverable line dropped, which is the mistake itself.
+  remote_fixture_prepare
+  remote=$(make_remote_route "$home" mini-default)
+  seed_repro_commitment "$home" pf-missing-remote req-missing-remote \
+    secondmate:mini-default work-missing-remote
+  printf 'mini-default\n' > "$remote/.fm-secondmate-home"
+  out=$(run_pf "$home" brief pf-missing-remote) || fail "brief failed: $out"
+  command=$(brief_emit_command "$out")
+  assert_contains "$command" "--require-deliverable report_path" \
+    "a staged brief must carry the obligation's required keys into the emit command"
+  command=${command//<one bounded public-safe sentence>/The remote lane finished its investigation.}
+  command=$(printf '%s\n' "$command" | grep -v '^[[:space:]]*--deliverable ')
+  expect_failure "a staged emit that drops a required deliverable must be refused" \
+    bash -c "$command"
+  assert_contains "$EXPECT_OUT" "report_path" "the staged refusal must name the missing key"
+  assert_contains "$EXPECT_OUT" "data/<task-id>/report.md" \
+    "the staged refusal must state the expected format"
+  [ -z "$(ls -A "$remote/state/public-followup/outbox" 2>/dev/null)" ] \
+    || fail "a staged event missing a required deliverable must stage nothing"
+  pass "the emitter refuses an event missing a required deliverable in both destinations"
+}
+
+# The emitter mirrors tasks-axi's work-event rules because tasks-axi exposes no
+# validation-only command. Pin the two together across the whole contract:
+# every expected final against every outcome, then missing, extra, and
+# malformed deliverables. Each case runs through the real emitter AND, bypassing
+# it, through the real tasks-axi consumer against a really registered
+# obligation, and both must reach the table's verdict, so neither side can drift
+# from the other silently. A stage-in case is briefed exactly as `brief` briefs
+# a remote worker - one --require-deliverable per key the obligation requires -
+# because that side of a machine boundary knows only what it was told.
+# pad_run <n>: n repeats of 'x', so a length-boundary case can be written as a
+# short marker in the table below instead of a 500-character line.
+pad_run() {
+  local n=$1 out=''
+  while [ "${#out}" -lt "$n" ]; do out="${out}xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; done
+  printf '%s' "${out:0:$n}"
+}
+
+test_emit_rules_agree_with_tasks_axi() {
+  local home n=0 expected required outcome deliverables verdict mode
+  local emit_verdict axi_verdict obligation out pair key pad staging registry
+  local -a emit_args emit_destination
+  home=$(make_home emit-agreement)
+  # A work home on the far side of a machine boundary, which is the only place
+  # --stage-in is ever used from: it cannot read the obligation record at all.
+  staging="$home/staged-work-home"
+  mkdir -p "$staging/state"
+  printf 'agree\n' > "$staging/.fm-secondmate-home"
+  while IFS='|' read -r expected required outcome deliverables verdict mode; do
+    [ -n "$expected" ] || continue
+    n=$((n + 1))
+    obligation="pf-agree-$n"
+    while :; do
+      case "$deliverables" in
+        *'<pad:'*) ;;
+        *) break ;;
+      esac
+      pad=${deliverables#*<pad:}
+      pad=${pad%%>*}
+      deliverables=${deliverables/"<pad:$pad>"/$(pad_run "$pad")}
+    done
+    seed_typed_commitment "$home" "$obligation" "req-agree-$n" "$expected" "$required" \
+      main "work-agree-$n"
+    # A registration written before this home recorded anything about the
+    # promise: the contract has to come from tasks-axi for it to be enforced.
+    if [ "$mode" = legacy ]; then
+      registry="$home/state/public-followup/registry/$obligation"
+      grep -v '^expected_final=' "$registry" | grep -v '^required_deliverables=' > "$registry.strip" \
+        || fail "could not rewrite the registration for case $n"
+      mv "$registry.strip" "$registry"
+    fi
+
+    emit_destination=(--home "$home" --source-home main)
+    [ "$mode" != stage-in ] \
+      || emit_destination=(--stage-in "$staging" --source-home secondmate:agree)
+    emit_args=()
+    if [ "$mode" = stage-in ]; then
+      while IFS= read -r key; do
+        [ -n "$key" ] || continue
+        emit_args+=(--require-deliverable "$key")
+      done <<EOF
+$(printf '%s' "$required" | jq -r '.[]')
+EOF
+    fi
+    while IFS= read -r pair; do
+      [ -n "$pair" ] || continue
+      emit_args+=(--deliverable "$pair")
+    done <<EOF
+$(printf '%s' "$deliverables" | jq -r 'to_entries[] | "\(.key)=\(.value)"')
+EOF
+
+    if "$EMIT" "${emit_destination[@]}" --obligation "$obligation" --relation rel-code \
+        --work-id "work-agree-$n" --generation 1 --outcome "$outcome" \
+        ${emit_args[@]+"${emit_args[@]}"} --outcome-text 'The work finished.' >/dev/null 2>&1; then
+      emit_verdict=accept
+      rm -f "$home/state/public-followup/events"/*.json
+      rm -f "$staging/state/public-followup/outbox"/*.json
+    else
+      emit_verdict=reject
+    fi
+
+    publish_raw_event "$home/state/public-followup/events" "$obligation" main "work-agree-$n" \
+      "$outcome" "$deliverables" >/dev/null || fail "could not publish the raw case $n"
+    out=$(run_pf "$home" consume 2>&1) || true
+    case "$out" in
+      *"rejected "*) axi_verdict=reject ;;
+      *) axi_verdict=accept ;;
+    esac
+
+    [ "$axi_verdict" = "$verdict" ] \
+      || fail "case $n ($expected final, $outcome outcome, $deliverables): tasks-axi says $axi_verdict, the table says $verdict - re-pin the mirrored rule"
+    [ "$emit_verdict" = "$axi_verdict" ] \
+      || fail "case $n ($expected final, $outcome outcome, $deliverables, ${mode:-direct} emit): the emitter says $emit_verdict but tasks-axi says $axi_verdict"
+  done <<'CASES'
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12"}|accept
+pr-merged|["pr_url"]|report-ready|{"report_path":"data/work-a/report.md"}|reject
+pr-merged|["pr_url"]|local-main|{"commit_sha":"0123abc"}|reject
+pr-merged|["pr_url"]|failed|{"error_code":"ci-red"}|accept
+pr-merged|["pr_url"]|superseded|{}|reject
+report-ready|["report_path"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12"}|reject
+report-ready|["report_path"]|report-ready|{"report_path":"data/work-a/report.md"}|accept
+report-ready|["report_path"]|local-main|{"commit_sha":"0123abc"}|reject
+report-ready|["report_path"]|failed|{"error_code":"ci-red"}|accept
+report-ready|["report_path"]|superseded|{}|reject
+local-main|["commit_sha"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12"}|reject
+local-main|["commit_sha"]|report-ready|{"report_path":"data/work-a/report.md"}|reject
+local-main|["commit_sha"]|local-main|{"commit_sha":"0123abc"}|accept
+local-main|["commit_sha"]|failed|{"error_code":"ci-red"}|accept
+local-main|["commit_sha"]|superseded|{}|reject
+failure-outcome|["error_code"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12"}|reject
+failure-outcome|["error_code"]|report-ready|{"report_path":"data/work-a/report.md"}|reject
+failure-outcome|["error_code"]|local-main|{"commit_sha":"0123abc"}|reject
+failure-outcome|["error_code"]|failed|{"error_code":"ci-red"}|accept
+failure-outcome|["error_code"]|superseded|{}|reject
+explicit-answer|[]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12"}|reject
+explicit-answer|[]|report-ready|{"report_path":"data/work-a/report.md"}|reject
+explicit-answer|[]|local-main|{"commit_sha":"0123abc"}|reject
+explicit-answer|[]|failed|{"error_code":"ci-red"}|accept
+explicit-answer|[]|superseded|{}|reject
+pr-merged|["pr_url"]|pr-merged|{}|reject
+report-ready|["report_path"]|report-ready|{}|reject
+local-main|["commit_sha"]|local-main|{}|reject
+failure-outcome|["error_code"]|failed|{}|reject
+explicit-answer|[]|local-main|{}|accept
+pr-merged|["pr_url"]|failed|{}|accept
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12","report_path":"data/work-a/report.md"}|reject
+pr-merged|["pr_url"]|failed|{"error_code":"ci-red","report_path":"data/work-a/report.md"}|reject
+pr-merged|["pr_url"]|failed|{"pr_url":"https://github.com/example/repo/pull/12"}|reject
+failure-outcome|["error_code"]|failed|{"error_code":"ci-red","report_path":"data/work-a/report.md"}|reject
+report-ready|["report_path"]|report-ready|{"report_path":"/Users/x/home/data/work-a/report.md"}|reject
+report-ready|["report_path"]|report-ready|{"report_path":"data/work-a/notes.md"}|reject
+report-ready|["report_path"]|report-ready|{"report_path":"./data/work-a/report.md"}|reject
+report-ready|["report_path"]|report-ready|{"report_path":"data/.hidden/report.md"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12?x=1"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"http://github.com/example/repo/pull/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://user@github.com/example/repo/pull/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12/files"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"github.com/example/repo/pull/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://git.example.com/acme/repo/pulls/12"}|accept
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://git.example.com/acme/repo/pull/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/repo/pulls/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/01"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://GitHub.com/example/repo/pull/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12/"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/org/example/repo/pull/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://git.example.com/../repo/pulls/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://git.example.com:8443/acme/repo/pulls/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"report_path":"data/work-a/report.md"}|reject
+local-main|["commit_sha"]|local-main|{"commit_sha":"0123ABC"}|reject
+local-main|["commit_sha"]|local-main|{"commit_sha":"012"}|reject
+pr-merged|["pr_url"]|failed|{"error_code":"CI red"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/<pad:465>/pull/12"}|accept
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/<pad:466>/pull/12"}|reject
+report-ready|["report_path"]|report-ready|{"report_path":"data/<pad:485>/report.md"}|accept
+report-ready|["report_path"]|report-ready|{"report_path":"data/<pad:486>/report.md"}|reject
+pr-merged|["pr_url"]|pr-merged|{"9bad":"https://github.com/example/repo/pull/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"a<pad:64>":"https://github.com/example/repo/pull/12"}|reject
+report-ready|["report_path"]|report-ready|{}|reject|legacy
+report-ready|["report_path"]|report-ready|{}|reject|stage-in
+pr-merged|["pr_url"]|pr-merged|{}|reject|stage-in
+report-ready|["report_path"]|report-ready|{"report_path":"data/work-a/report.md"}|accept|stage-in
+pr-merged|["pr_url"]|failed|{}|accept|stage-in
+report-ready|[]|report-ready|{}|accept
+pr-merged|[]|pr-merged|{}|accept
+explicit-answer|[]|local-main|{}|accept|stage-in
+report-ready|[]|report-ready|{}|accept|stage-in
+report-ready|["report_path"]|report-ready|{"report_path":"/abs/data/work-a/report.md"}|reject|stage-in
+failure-outcome|["error_code"]|failed|{}|reject|stage-in
+CASES
+  [ "$n" -ge 74 ] || fail "the agreement table ran only $n cases"
+  pass "the emitter's work-event rules agree with the real tasks-axi consumer on $n cases"
+}
+
+# The reported failure, third part: consume quarantined the event with only
+# tasks-axi's generic sentence, and nothing woke the owning home. A rejection
+# must record the specific reason and raise one wake through the relay poll.
+test_rejected_event_wakes_owning_home_with_specific_reason() {
+  local home event_id out first second reason
+  home=$(make_home reject-wake)
+  seed_repro_commitment "$home" pf-reject-wake req-reject-wake main work-wake
+
+  event_id=$(publish_raw_event "$home/state/public-followup/events" pf-reject-wake main work-wake \
+    report-ready '{"report_path":"/Users/someone/home/data/work-wake/report.md"}') \
+    || fail "could not publish the raw event"
+  run_poll "$home" >/dev/null   # the arrival wake, owned by the existing path
+  out=$(run_pf "$home" consume) || true
+  assert_contains "$out" "rejected $event_id" "consume must refuse the absolute report path"
+  assert_contains "$out" "report_path" "the consume refusal must name the deliverable key"
+  reason=$(cat "$home/state/public-followup/rejected/$event_id.reason")
+  assert_contains "$reason" "report_path" "the recorded reason must name the deliverable key"
+  assert_contains "$reason" "data/<task-id>/report.md" "the recorded reason must state the expected format"
+
+  first=$(run_poll "$home")
+  assert_contains "$first" "public-followup rejected $event_id" \
+    "a rejected event must wake the owning home through the relay poll"
+  assert_contains "$first" "pf-reject-wake" "the wake must name the obligation"
+  assert_contains "$first" "report_path" "the wake must carry the specific reason"
+  second=$(run_poll "$home")
+  assert_not_contains "$second" "rejected" "a rejection must wake the owning home once, not every cycle"
+  pass "a rejected event records a specific reason and wakes the owning home once"
+}
+
+# The incident's exact shape: the bad value came from a REMOTE secondmate and
+# was quarantined in the owning main home after collection. The owning home is
+# the one that must be woken.
+test_remote_rejected_event_wakes_owning_home() {
+  local home remote event_id out wake
+  remote_fixture_prepare
+  home=$(make_home remote-reject-wake)
+  remote=$(make_remote_route "$home" axi-a1)
+  seed_repro_commitment "$home" pf-remote-reject req-remote-reject secondmate:axi-a1 work-remote-reject
+  printf 'axi-a1\n' > "$remote/.fm-secondmate-home"
+  event_id=$(publish_raw_event "$remote/state/public-followup/outbox" pf-remote-reject \
+    secondmate:axi-a1 work-remote-reject report-ready \
+    '{"report_path":"/home/axi/fm-home/data/work-remote-reject/report.md"}') \
+    || fail "could not stage the raw event"
+
+  out=$(run_pf_remote "$home" consume) || true
+  assert_contains "$out" "rejected $event_id" "the owning home must refuse the collected event"
+  wake=$(run_poll "$home")
+  assert_contains "$wake" "public-followup rejected $event_id" \
+    "the owning home must be woken for a rejection it collected from a remote secondmate"
+  assert_contains "$wake" "report_path" "the wake must carry the specific reason"
+  [ -z "$(ls -A "$remote/state/public-followup/rejected" 2>/dev/null)" ] \
+    || fail "the rejection belongs to the owning home, not the remote work home"
+  pass "a rejection collected from a remote secondmate wakes the owning home"
+}
+
+# A promise names the value its public reply needs, so switching to another
+# successful outcome cannot be the way to drop that value. Only failed and
+# superseded are exempt: those two report that the promise could not be kept as
+# promised, and carry nothing it promised.
+test_emit_requires_promised_deliverable_under_any_successful_outcome() {
+  local home staging
+  home=$(make_home emit-outcome-swap)
+  seed_typed_commitment "$home" pf-outcome-swap req-outcome-swap pr-merged '["pr_url"]' \
+    main work-swap
+  staging="$TMP_ROOT/outcome-swap-staging"
+  mkdir -p "$staging/state"
+  printf 'axi-a1\n' > "$staging/.fm-secondmate-home"
+
+  expect_failure "a pr-merged promise cannot be answered with a report-ready result" \
+    "$EMIT" --home "$home" --obligation pf-outcome-swap --relation rel-code \
+    --source-home main --work-id work-swap --generation 1 --outcome report-ready \
+    --deliverable report_path=data/work-swap/report.md \
+    --outcome-text 'The report is ready.'
+  assert_contains "$EXPECT_OUT" "pr-merged" "the refusal must name the outcome this promise expects"
+  assert_contains "$EXPECT_OUT" "report-ready" "the refusal must name the outcome that cannot satisfy it"
+  [ -z "$(ls -A "$home/state/public-followup/events" 2>/dev/null)" ] \
+    || fail "an outcome swap that drops the promised key must publish nothing"
+
+  expect_failure "a staged outcome swap must be refused by the same rule" \
+    "$EMIT" --stage-in "$staging" --obligation pf-outcome-swap --relation rel-code \
+    --source-home secondmate:axi-a1 --work-id work-swap --generation 1 \
+    --outcome report-ready --require-deliverable pr_url \
+    --deliverable report_path=data/work-swap/report.md \
+    --outcome-text 'The report is ready.'
+  assert_contains "$EXPECT_OUT" "pr_url" "the staged refusal must name the promised key"
+  assert_absent "$staging/state/public-followup" \
+    "a refused staged outcome swap must stage nothing"
+
+  "$EMIT" --home "$home" --obligation pf-outcome-swap --relation rel-code \
+    --source-home main --work-id work-swap --generation 1 --outcome failed \
+    --deliverable error_code=ci-red --outcome-text 'The work could not finish.' >/dev/null \
+    || fail "a failed outcome must stay reportable without the promised key"
+  expect_failure "a superseded outcome cannot be reported from here at all" \
+    "$EMIT" --home "$home" --obligation pf-outcome-swap --relation rel-code \
+    --source-home main --work-id work-swap --generation 1 --outcome superseded \
+    --outcome-text 'This work was superseded.'
+  assert_contains "$EXPECT_OUT" "successor" \
+    "the refusal must say what tasks-axi needs for a superseded event"
+  "$EMIT" --stage-in "$staging" --obligation pf-outcome-swap --relation rel-code \
+    --source-home secondmate:axi-a1 --work-id work-swap --generation 1 --outcome failed \
+    --require-deliverable pr_url --deliverable error_code=ci-red \
+    --outcome-text 'The work could not finish.' >/dev/null \
+    || fail "a staged failed outcome must stay reportable without the promised key"
+  pass "only a failed result may answer a promise without the deliverable it promised"
+}
+
+# The narrow edge of that exemption: when the promise's expected final IS the
+# failure, its error_code is not a deliverable some other outcome would have
+# carried - it is the one the failure itself owes.
+test_emit_requires_error_code_on_a_failure_promise() {
+  local home staging out
+  home=$(make_home emit-failure-promise)
+  seed_typed_commitment "$home" pf-failure-promise req-failure-promise failure-outcome \
+    '["error_code"]' main work-failure
+  staging="$TMP_ROOT/failure-promise-staging"
+  mkdir -p "$staging/state"
+  printf 'axi-a1\n' > "$staging/.fm-secondmate-home"
+
+  expect_failure "a failure promise reported without its error_code must be refused" \
+    "$EMIT" --home "$home" --obligation pf-failure-promise --relation rel-code \
+    --source-home main --work-id work-failure --generation 1 --outcome failed \
+    --outcome-text 'The work could not finish.'
+  assert_contains "$EXPECT_OUT" "error_code" "the refusal must name the missing key"
+  [ -z "$(ls -A "$home/state/public-followup/events" 2>/dev/null)" ] \
+    || fail "a failure promise missing its error_code must publish nothing"
+
+  expect_failure "a staged failure promise must apply the same rule" \
+    "$EMIT" --stage-in "$staging" --obligation pf-failure-promise --relation rel-code \
+    --source-home secondmate:axi-a1 --work-id work-failure --generation 1 --outcome failed \
+    --require-deliverable error_code --outcome-text 'The work could not finish.'
+  assert_contains "$EXPECT_OUT" "error_code" "the staged refusal must name the missing key"
+  assert_absent "$staging/state/public-followup" \
+    "a staged failure promise missing its error_code must stage nothing"
+
+  "$EMIT" --home "$home" --obligation pf-failure-promise --relation rel-code \
+    --source-home main --work-id work-failure --generation 1 --outcome failed \
+    --deliverable error_code=ci-red --outcome-text 'The work could not finish.' >/dev/null \
+    || fail "the failure promise must be reportable once it carries its error_code"
+  out=$(run_pf "$home" consume) || fail "consume failed: $out"
+  assert_contains "$out" "ready pf-failure-promise" \
+    "the error_code the emitter required must be the one tasks-axi accepts"
+  pass "a failure promise keeps needing its own error_code"
+}
+
+# The pending event is the only thing that brings consume back to a refusal, so
+# it must outlive every step that can still fail. While the wake cannot be
+# recorded, nothing is dropped and the next consume repeats the whole rejection.
+test_rejection_is_retried_until_its_wake_is_recorded() {
+  local home event_id out rc=0 wakes
+  home=$(make_home reject-wake-durable)
+  seed_repro_commitment "$home" pf-wake-durable req-wake-durable main work-wake-durable
+  event_id=$(publish_raw_event "$home/state/public-followup/events" pf-wake-durable main \
+    work-wake-durable report-ready '{"report_path":"/abs/data/work-wake-durable/report.md"}') \
+    || fail "could not publish the raw event"
+
+  # A plain file where the wake directory belongs: the refusal is recordable,
+  # its wake is not.
+  wakes="$home/state/public-followup/rejection-wakes"
+  printf 'not a directory\n' > "$wakes"
+  out=$(run_pf "$home" consume) || rc=$?
+  [ "$rc" -ne 0 ] || fail "consume must fail while a refusal's wake cannot be recorded"
+  assert_contains "$out" "wake could not be recorded" \
+    "consume must say the wake is what could not be recorded"
+  assert_present "$home/state/public-followup/events/$event_id.json" \
+    "the refused event must stay pending while its wake cannot be recorded"
+  assert_not_contains "$(run_poll "$home")" "rejected" \
+    "no rejection wake may be raised before one is recorded"
+
+  rm -f "$wakes"
+  out=$(run_pf "$home" consume) || fail "consume must succeed once the wake can be recorded: $out"
+  assert_contains "$out" "rejected $event_id" "the retried consume must quarantine the event"
+  assert_absent "$home/state/public-followup/events/$event_id.json" \
+    "the retried quarantine must drain the pending event"
+  assert_contains "$(run_poll "$home")" "public-followup rejected $event_id" \
+    "the retried rejection must still wake the owning home"
+  pass "a rejection whose wake cannot be recorded is retried rather than lost"
+}
+
+# The poll's stdout IS the wake, so a poll that could not write its line has
+# woken nobody. The queued wake is this home's only remaining copy of the
+# refusal and must survive that cycle.
+test_rejection_wake_survives_a_poll_that_cannot_write() {
+  local home event_id out
+  home=$(make_home reject-wake-write)
+  seed_repro_commitment "$home" pf-wake-write req-wake-write main work-wake-write
+  event_id=$(publish_raw_event "$home/state/public-followup/events" pf-wake-write main \
+    work-wake-write report-ready '{"report_path":"/abs/data/work-wake-write/report.md"}') \
+    || fail "could not publish the raw event"
+  out=$(run_pf "$home" consume) || true
+  assert_contains "$out" "rejected $event_id" "consume must refuse the absolute report path"
+  assert_present "$home/state/public-followup/rejection-wakes/$event_id" \
+    "a refusal must queue a wake"
+
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" "$POLL" >&- 2>/dev/null || true
+  assert_present "$home/state/public-followup/rejection-wakes/$event_id" \
+    "a wake whose line could not be written must stay queued"
+  assert_contains "$(run_poll "$home")" "public-followup rejected $event_id" \
+    "the retained wake must reach the owning home on the next poll"
+  assert_not_contains "$(run_poll "$home")" "rejected" \
+    "a wake already written must not be raised again"
+  pass "a rejection wake survives a poll that could not write its line"
+}
+
+# The write is not the only boundary that can silently swallow a wake: a poll
+# that could not READ the queued line has raised nothing either, so the file
+# must survive to be raised once it becomes readable again.
+test_rejection_wake_survives_a_poll_that_cannot_read() {
+  local home event_id out wake
+  home=$(make_home reject-wake-read)
+  seed_repro_commitment "$home" pf-wake-read req-wake-read main work-wake-read
+  event_id=$(publish_raw_event "$home/state/public-followup/events" pf-wake-read main \
+    work-wake-read report-ready '{"report_path":"/abs/data/work-wake-read/report.md"}') \
+    || fail "could not publish the raw event"
+  out=$(run_pf "$home" consume) || true
+  assert_contains "$out" "rejected $event_id" "consume must refuse the absolute report path"
+  wake="$home/state/public-followup/rejection-wakes/$event_id"
+  assert_present "$wake" "a refusal must queue a wake"
+
+  chmod 000 "$wake"
+  out=$(run_poll "$home")
+  chmod 600 "$wake"
+  assert_not_contains "$out" "rejected" "a wake that could not be read must raise nothing"
+  assert_present "$wake" "a wake that could not be read must stay queued"
+
+  assert_contains "$(run_poll "$home")" "public-followup rejected $event_id" \
+    "the retained wake must reach the owning home once its line can be read"
+  assert_not_contains "$(run_poll "$home")" "rejected" \
+    "a raised wake must not be raised again"
+  pass "a rejection wake survives a poll that could not read its line"
+}
+
+# The wake is at-least-once, not exactly-once: dropping a raised line is
+# best-effort, so a wake directory that cannot be written raises the same
+# refusal again. A repeat must be recognizable as the refusal already taken up -
+# same event id, same reason - and must leave the quarantine as it found it, so
+# acknowledging it without re-acting is safe.
+test_an_undroppable_wake_repeats_the_same_refusal() {
+  local home event_id out wakes reason first second
+  home=$(make_home reject-wake-repeat)
+  seed_repro_commitment "$home" pf-wake-repeat req-wake-repeat main work-wake-repeat
+  event_id=$(publish_raw_event "$home/state/public-followup/events" pf-wake-repeat main \
+    work-wake-repeat report-ready '{"report_path":"/abs/data/work-wake-repeat/report.md"}') \
+    || fail "could not publish the raw event"
+  out=$(run_pf "$home" consume) || true
+  assert_contains "$out" "rejected $event_id" "consume must refuse the absolute report path"
+  reason=$(cat "$home/state/public-followup/rejected/$event_id.reason")
+
+  wakes="$home/state/public-followup/rejection-wakes"
+  chmod 500 "$wakes"
+  first=$(run_poll "$home" | grep '^public-followup rejected' || true)
+  second=$(run_poll "$home" | grep '^public-followup rejected' || true)
+  chmod 700 "$wakes"
+  assert_contains "$first" "public-followup rejected $event_id" \
+    "a refusal must wake the owning home"
+  [ "$second" = "$first" ] \
+    || fail "a wake raised again must repeat the same refusal, not announce a new one"
+  [ "$(cat "$home/state/public-followup/rejected/$event_id.reason")" = "$reason" ] \
+    || fail "a repeated wake must leave the quarantined reason unchanged"
+  assert_absent "$home/state/public-followup/consumed/$event_id" \
+    "a repeated wake must not accept the refused event"
+
+  assert_contains "$(run_poll "$home")" "public-followup rejected $event_id" \
+    "the wake stays queued until it can be dropped"
+  assert_not_contains "$(run_poll "$home")" "rejected" \
+    "a dropped wake stops repeating"
+  pass "a wake that cannot be dropped repeats the same refusal"
+}
+
+# The other repeat path: a refusal whose event could not be drained is
+# quarantined again by the next consume, which re-queues a wake the poll may
+# already have raised. That repeat must also be the same refusal, and must not
+# disturb anything the first quarantine recorded.
+test_a_retained_refusal_repeats_its_wake_rather_than_a_new_one() {
+  local home event_id out rc=0 events reason first second
+  home=$(make_home reject-wake-retained)
+  seed_repro_commitment "$home" pf-wake-retained req-wake-retained main work-wake-retained
+  event_id=$(publish_raw_event "$home/state/public-followup/events" pf-wake-retained main \
+    work-wake-retained report-ready '{"report_path":"/abs/data/work-wake-retained/report.md"}') \
+    || fail "could not publish the raw event"
+
+  events="$home/state/public-followup/events"
+  chmod 500 "$events"
+  out=$(run_pf "$home" consume) || rc=$?
+  chmod 700 "$events"
+  [ "$rc" -ne 0 ] || fail "consume must report a quarantine it could not finish"
+  assert_contains "$out" "cleanup failed" "consume must say the refused event was retained"
+  assert_present "$events/$event_id.json" "the refused event must stay pending"
+  reason=$(cat "$home/state/public-followup/rejected/$event_id.reason")
+
+  first=$(run_poll "$home" | grep '^public-followup rejected' || true)
+  assert_contains "$first" "public-followup rejected $event_id" \
+    "the refusal must wake the owning home"
+  assert_not_contains "$(run_poll "$home")" "rejected" "the raised wake must be dropped"
+
+  out=$(run_pf "$home" consume) \
+    || fail "consume must finish the quarantine once the event can be drained: $out"
+  assert_absent "$events/$event_id.json" "the retried quarantine must drain the refused event"
+  second=$(run_poll "$home" | grep '^public-followup rejected' || true)
+  [ "$second" = "$first" ] \
+    || fail "a re-queued wake must repeat the same refusal, not announce a new one"
+  [ "$(cat "$home/state/public-followup/rejected/$event_id.reason")" = "$reason" ] \
+    || fail "the retried quarantine must leave the recorded reason unchanged"
+  pass "a refusal whose event was retained repeats its wake instead of a new one"
+}
+
 # CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2 empty-lock
 # register regression. The rest of this file is not a 3.2 snapshot suite.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -3095,8 +3916,10 @@ if [ -n "${FM_TEST_ONLY:-}" ]; then
   exit 0
 fi
 
+test_ambient_tasks_axi_env_never_reaches_a_real_backlog
 test_outcome_text_is_bounded_without_corrupting_characters
 test_restart_e2e_delivers_exactly_once
+test_failed_work_on_pr_merged_promise_delivers_honest_outcome
 test_duplicate_event_and_replay_are_noops
 test_invalid_events_are_refused_and_quarantined
 test_relay_failure_holds_without_false_completion
@@ -3158,6 +3981,7 @@ test_remote_retire_accepts_nonwritable_absence
 test_remote_retire_refuses_unacquirable_lock_without_hanging
 test_remote_unconfirmed_clear_is_unknown_completion
 test_remote_work_home_emit_reaches_owning_home
+test_remote_promise_without_deliverables_is_briefable
 test_remote_collection_transport_failure_is_loud
 test_remote_collection_refuses_unreadable_outbox
 test_invalid_registration_fails_remote_collection
@@ -3168,3 +3992,17 @@ test_remote_brief_rejects_traversal_route_paths
 test_local_work_home_emit_path_is_unchanged
 test_remote_collection_is_idempotent
 test_stage_in_refuses_ambiguous_or_unusable_homes
+test_brief_prefills_known_deliverables_and_states_formats
+test_emit_refuses_a_deliverable_tasks_axi_would_reject
+test_emit_refuses_a_repeated_deliverable_key
+test_emit_refuses_a_missing_required_deliverable
+test_emit_rules_agree_with_tasks_axi
+test_rejected_event_wakes_owning_home_with_specific_reason
+test_remote_rejected_event_wakes_owning_home
+test_emit_requires_promised_deliverable_under_any_successful_outcome
+test_emit_requires_error_code_on_a_failure_promise
+test_rejection_is_retried_until_its_wake_is_recorded
+test_rejection_wake_survives_a_poll_that_cannot_write
+test_rejection_wake_survives_a_poll_that_cannot_read
+test_an_undroppable_wake_repeats_the_same_refusal
+test_a_retained_refusal_repeats_its_wake_rather_than_a_new_one

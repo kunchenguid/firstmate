@@ -39,30 +39,26 @@
 #   3. wake-drain     - presents durable wakes and advances recovery handling
 #                       state, so it only runs when locked. The local bounded
 #                       inactive-outcome startup scan runs in the deferred worker.
-#   4. handover       - a handover a previous session released, printed in full
-#                       rather than pointed at. Read-only, so it runs in both
-#                       locked and lock-refused mode; only the session that holds
-#                       the helm may consume it.
-#   5. supervision-instructions - the one emitted operating block for the
+#   4. supervision-instructions - the one emitted operating block for the
 #                       detected primary harness.
-#   6. read-once contract - the do-not-re-read contract covering every source
+#   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
-#   7. fleet digest   - a compact data/backlog.md identity/metadata listing,
+#   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       the away posture (state/.afk-contract and the legacy
 #                       state/.afk daemon flag), and a cheap per-task
 #                       endpoint-liveness read:
 #                       read-only, always runs.
-#   8. network checks - the result of the deferred network stage started back at
+#   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
-#   9. context digest - data/projects.md, data/secondmates.md, data/captain.md,
+#   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
 #                       always safe, always runs.
-#  10. closing reminder - prints the context-specific watcher next step; this
+#   9. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
 #
-# Those ten names are also the runtime-bound stage list below, so a truncated
+# Those nine names are also the runtime-bound stage list below, so a truncated
 # startup can name exactly which of them never ran.
 #
 # NO NETWORK ON THE BLOCKING PATH. This digest runs on a session-open hook that
@@ -158,7 +154,7 @@
 # stay out of the startup digest; the same never-bound-a-held-or-blocked-row
 # rule applies, recognized there from the title line's own hold/blocked-by
 # markers.
-# Full bodies are targeted follow-up only: `tasks-axi show <id> --full` when
+# Full bodies are targeted follow-up only: `bin/fm-tasks-axi.sh show <id> --full` when
 # compatible tasks-axi is available, or `data/backlog.md` when the file body is
 # truly needed.
 #
@@ -206,10 +202,11 @@
 #             records are this turn's work queue, they arrived after startup,
 #             and a session that owns the lock is exactly the session that must
 #             handle and acknowledge them. Lock acquisition still runs, because
-#             ownership must be re-verified rather than assumed: fm-lock.sh already treats a lock
-#             this session's own harness holds as its own, so the re-emit
-#             proceeds, while a lock another live session took meanwhile still
-#             produces the ordinary read-only path.
+#             ownership must be re-verified rather than assumed: fm-lock.sh
+#             already treats a lock owned through shared ancestry or a trusted
+#             same-session Claude id as its own, so the re-emit proceeds, while
+#             a lock another live session took meanwhile still produces the
+#             ordinary read-only path.
 #
 #   --source  The native session-open source, supplied only by
 #             fm-sessionstart-run.sh. A genuine `startup` that owns the active
@@ -265,7 +262,7 @@ done
 # The ordered stage list is the contract behind the truncation banner: the child
 # names the stage it is entering, and the parent reports every stage at or after
 # that one as never emitted. Keep it in the exact order the digest prints.
-SESSION_START_STAGES='lock bootstrap wake-queue handover supervision-instructions read-once fleet-state network-checks context next-step'
+SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
 
 stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
   [ -n "${FM_SESSION_START_STAGE_FILE:-}" ] || return 0
@@ -390,7 +387,7 @@ print_file_or_absent() {
 }
 
 print_backlog_pointer() {
-  printf 'Full task bodies remain available on demand: tasks-axi show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
+  printf 'Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
 }
 
 # A queued title line whose own text already marks it held or blocked. The
@@ -457,8 +454,8 @@ strip_axi_help() {
 # and every other line it prints (its count, its public-followup line) passes
 # through untouched. Whatever is cut is disclosed exactly.
 print_ready_queued_bounded() {
-  local ready=$1 path=$2
-  printf '%s\n' "$ready" | awk -v max="$QUEUED_LIMIT" -v path="$path" '
+  local ready=$1
+  printf '%s\n' "$ready" | awk -v max="$QUEUED_LIMIT" '
     /^help\[/ { exit }
     /^ready\[/ { rows = 1; print; next }
     rows && /^[[:space:]]/ {
@@ -471,7 +468,7 @@ print_ready_queued_bounded() {
       if (total > 0) {
         printf "(shown %d of %d ready queued item(s))\n", shown, total
         if (total > shown) {
-          printf "(%d more queued - tasks-axi ready --file %s)\n", total - shown, path
+          printf "(%d more queued - bin/fm-tasks-axi.sh ready)\n", total - shown
         }
       }
     }
@@ -498,7 +495,7 @@ print_backlog_tasks_axi_compact() {
     printf '\nblocked queued:\n'
     printf '%s\n' "$blocked" | strip_axi_help
     printf '\nready queued (dispatchable now):\n'
-    print_ready_queued_bounded "$ready" "$path"
+    print_ready_queued_bounded "$ready"
     return 0
   fi
   printf 'tasks-axi compact listing failed; falling back to title-line rendering.\n'
@@ -749,35 +746,11 @@ else
   fi
 fi
 
-# --- 4. handover from the previous session ----------------------------------
-# A released handover is the one thing a replacement must read before it acts, so
-# the record itself prints here rather than a pointer to it. A pointer would cost
-# the replacement a second read of a file this digest already holds, and the whole
-# point of the read-once contract below is that it does not pay that twice.
-#
-# A lock-refused session still sees all of it and is told not to consume it.
-# Information is never withheld from a refused session; only the ability to mutate
-# is, exactly as the rest of session start works. A refused session that consumed
-# the record would leave the session that actually takes the helm told nothing is
-# waiting.
-stage handover
-if "$SCRIPT_DIR/fm-handover.sh" pending 2>/dev/null; then
-  section "HANDOVER FROM THE PREVIOUS SESSION"
-  "$SCRIPT_DIR/fm-handover.sh" show 2>&1 || true
-  printf '\nThis record is ADVISORY. Reconcile every line against the durable records it\n'
-  printf 'names and against the digests below; those win on any disagreement.\n'
-  if [ "$READ_ONLY" -eq 1 ]; then
-    printf 'READ-ONLY: this session does not hold the helm, so it must NOT consume this\n'
-    printf 'handover. Leave it waiting for the session that takes the helm.\n'
-  else
-    printf 'Run bin/fm-handover.sh consume once you have picked it up.\n'
-  fi
-fi
-
-# --- 5. supervision operating instructions ----------------------------------
+# --- 4. supervision operating instructions ----------------------------------
 stage supervision-instructions
 AFK_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_PRESENT=1
+AFK_MODE=$(fm_afk_mode "$STATE")
 X_MODE_PRESENT=0
 [ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
 
@@ -791,7 +764,7 @@ if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
   [ "$PRIMARY_HARNESS" != pi ] || PI_RESTART_COMMAND='plain pi'
   PI_WATCH_VERSION=$(fm_pi_extension_version "$PI_EXT" || printf '')
   PI_TURNEND_VERSION=$(fm_pi_extension_version "$PI_TURNEND_EXT" || printf '')
-  if ! fm_pi_extension_loaded "$PI_WATCH_MARKER" "$PI_WATCH_VERSION" "$PI_LOCK" \
+  if ! fm_pi_extension_loaded "$PI_WATCH_MARKER" "$PI_WATCH_VERSION" "$PI_LOCK" active \
     || ! fm_pi_extension_loaded "$PI_TURNEND_MARKER" "$PI_TURNEND_VERSION" "$PI_LOCK"; then
     printf 'PI_WATCH_EXTENSION: not loaded - approve Pi project trust once per clone, then restart %s so %s and %s auto-load for turn-end guard and background wake coverage; use -e %s -e %s only if project hooks are not trusted\n' "$PI_RESTART_COMMAND" "$PI_TURNEND_EXT" "$PI_EXT" "$PI_TURNEND_EXT" "$PI_EXT"
   fi
@@ -818,9 +791,10 @@ fi
   --harness "$PRIMARY_HARNESS" \
   --read-only "$READ_ONLY" \
   --afk "$AFK_PRESENT" \
+  --afk-mode "$AFK_MODE" \
   --x-mode "$X_MODE_PRESENT"
 
-# --- 6. read-once contract -------------------------------------------------
+# --- 5. read-once contract -------------------------------------------------
 # Ahead of the two digests it governs, not after them: a truncated tail is
 # exactly what drops a closing reminder, and this contract is what stops the
 # next turn from re-reading everything the digest just printed. Because it now
@@ -836,8 +810,6 @@ and data/learnings.md.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
 data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.
-A handover printed above was printed in full too, so do NOT re-read
-data/handover.md either.
 
 Go to a source directly only when:
   - this digest flagged it ABSENT (then rebuild or create it per AGENTS.md),
@@ -845,7 +817,7 @@ Go to a source directly only when:
   - an individual full status log is needed for older wake-event history, or a
     status line was capped and its tail matters (each task's full log path is
     printed with its tail),
-  - a full task body is needed (tasks-axi show <id> --full, or data/backlog.md),
+  - a full task body is needed (bin/fm-tasks-axi.sh show <id> --full, or data/backlog.md),
   - the backlog listing disclosed omitted queued items and this turn needs them,
   - the NETWORK CHECKS section reported its checks still IN PROGRESS and this
     turn needs their verdict (bin/fm-startup-network.sh report),
@@ -853,7 +825,7 @@ Go to a source directly only when:
     which case that stage's sources were never emitted and must be reconciled.
 EOF
 
-# --- 7. fleet-state digest ---------------------------------------------
+# --- 6. fleet-state digest ---------------------------------------------
 # Before CONTEXT: see this file's ORDERING note. Live fleet identity is what a
 # truncated tail must never take.
 stage fleet-state
@@ -910,12 +882,20 @@ if [ -f "$STATE/.afk-contract" ]; then
   printf 'present - away posture recorded at %s (hold-for-return only; bin/fm-afk-contract.sh readback for the mandate)' \
     "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)"
   if [ -e "$STATE/.afk" ]; then
-    printf '; the away daemon owns the watcher.\n'
+    if [ "$AFK_MODE" = quiet ]; then
+      printf '; the quiet daemon owns the watcher.\n'
+    else
+      printf '; the away daemon owns the watcher.\n'
+    fi
   else
     printf '; no daemon runs, the ordinary supervision session continues.\n'
   fi
 elif [ -e "$STATE/.afk" ]; then
-  printf 'present - away-mode supervision is active; the daemon owns the watcher (legacy flag with no posture record).\n'
+  if [ "$AFK_MODE" = quiet ]; then
+    printf 'present - quiet-mode supervision is active; the daemon owns the watcher, only an explicit /quiet off exits it (legacy flag with no posture record).\n'
+  else
+    printf 'present - away-mode supervision is active; the daemon owns the watcher (legacy flag with no posture record).\n'
+  fi
 else
   printf 'absent\n'
 fi
@@ -938,7 +918,7 @@ if fm_pf_relay_active "$FM_HOME" \
   fi
 fi
 
-# --- 8. network checks ------------------------------------------------------
+# --- 7. network checks ------------------------------------------------------
 # Deliberately here and not later: these lines are actionable (a stuck clone, a
 # secondmate that could not be relaunched, broken GitHub auth), and the section
 # after this one is the curated memory a truncated tail is meant to take first.
@@ -957,7 +937,7 @@ else
   "$SCRIPT_DIR/fm-startup-network.sh" harvest --pid $$ 2>&1 || true
 fi
 
-# --- 9. context digest -----------------------------------------------------
+# --- 8. context digest -----------------------------------------------------
 # Last of the bulk sections deliberately: curated memory is stable session to
 # session, already governed by config/startup-memory-budget, and recoverable
 # with one targeted read, so it is the cheapest thing for a truncated tail to
@@ -970,7 +950,7 @@ print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 
-# --- 10. closing reminder -----------------------------------------------
+# --- 9. closing reminder -----------------------------------------------
 stage next-step
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then
@@ -978,6 +958,14 @@ if [ "$READ_ONLY" -eq 1 ]; then
 This session did not acquire the fleet lock. Stay read-only: do not arm,
 drain, spawn, steer, merge, or repair fleet state from here. Only a session
 with verified fleet-lock ownership may perform mutable follow-up.
+
+EOF
+elif [ "$AFK_PRESENT" -eq 1 ] && [ "$AFK_MODE" = quiet ]; then
+  cat <<'EOF'
+Quiet mode is active. Follow the supervision operating instructions block
+above: load /quiet and ensure the daemon is running, because the daemon owns
+watcher supervision. Ordinary captain chat does not exit it; only an
+explicit /quiet off does.
 
 EOF
 elif [ "$AFK_PRESENT" -eq 1 ]; then

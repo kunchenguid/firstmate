@@ -12,6 +12,9 @@ set -u
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 # shellcheck disable=SC1091
 . "$ROOT/bin/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+# shellcheck disable=SC1091
+. "$ROOT/bin/fm-tasks-axi-lib.sh"
 
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
 TASKS_AXI_BIN=$(command -v tasks-axi || true)
@@ -380,6 +383,8 @@ test_domain_alpha_stale_parent_event_does_not_become_current_work() {
     .secondmate_current.records[] | select(.id == "domain-alpha")
     | .provenance.selected == "structured-home"
       and .freshness.status == "fresh"
+      and .parent_event.age_seconds == null
+      and (.parent_event | has("emitted_at_epoch") | not)
       and .terminal_evidence.provenance == "parent-direct-report-terminal"
       and .terminal_evidence.trust == "untrusted-supplement"
       and .terminal_evidence.captured == true
@@ -429,7 +434,11 @@ SH
       and .parent_event.activity_scan.available == true
   ' >/dev/null || fail "GNU stat fixture corrupted the authoritative secondmate summary: $canonical"
   assert_contains "$(cat "$stat_log")" '-c %a' "GNU registry mode must use stat -c"
-  assert_contains "$(cat "$stat_log")" '-c %Y' "GNU parent-event mtime must use stat -c"
+  assert_contains "$(cat "$stat_log")" '-c %Y' "GNU status-observation mtime must use stat -c"
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "domain-alpha")
+    | .parent_event.age_seconds == null and (.parent_event | has("emitted_at_epoch") | not)
+  ' >/dev/null || fail "legacy event acquired an age from GNU stat"
   assert_contains "$(cat "$stat_log")" '-c %s' "GNU parent-event size must use stat -c"
   if grep -q '^-f ' "$stat_log"; then
     fail "GNU snapshot invoked BSD stat -f before its GNU file reads: $(cat "$stat_log")"
@@ -1411,9 +1420,38 @@ test_include_prs_is_the_only_fetch_path() {
     .prs | startswith("checked")
   ' >/dev/null || fail "--include-prs must report checked PR state"
   printf '%s' "$json" | jq -e '
-    .candidate_prs | any(.[]; .num == "9" and .branch == "fm/ship-task" and .checks == "passing" and .review == "APPROVED")
-  ' >/dev/null || fail "candidate_prs must carry the fetched PR labelled by its head branch: $json"
+    .candidate_prs | any(.[]; .num == "9" and .task == "ship-task" and .checks == "passing" and .review == "APPROVED")
+  ' >/dev/null || fail "candidate_prs must carry the fetched PR cross-referenced to its task: $json"
   pass "--include-prs is the only path that fetches, and it enriches correctly"
+}
+
+test_include_prs_maps_custom_branch_prefix_to_task() {
+  local home fakebin json
+  home=$(make_home custom-prefix); write_fixture "$home"
+  fm_write_meta "$home/state/ship-task.meta" \
+    "window=firstmate:fm-ship-task" \
+    "worktree=$home/projects/ship-wt" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "branch=fix/ship-task" \
+    "pr=https://github.com/kunchenguid/firstmate/pull/9"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+echo "gh $*" >> "$NET_LOG"
+if [ "${FAKE_GH_FAIL:-0}" = 1 ]; then exit 1; fi
+cat <<'JSON'
+[{"number":9,"title":"Ship the thing","url":"https://github.com/kunchenguid/firstmate/pull/9","headRefName":"fix/ship-task","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]
+JSON
+SH
+  chmod +x "$fakebin/gh"
+  json=$(run "$home" "$fakebin" --include-prs --json)
+  printf '%s' "$json" | jq -e '
+    .candidate_prs | any(.[]; .num == "9" and .task == "ship-task")
+  ' >/dev/null || fail "a PR on a custom (non-fm/) branch prefix must still map to its recorded task, not fall to '-': $json"
+  pass "--include-prs maps a custom branch-prefix PR back to its recorded task"
 }
 
 test_partial_github_failure_degrades() {
@@ -1621,6 +1659,10 @@ test_landed_accepts_only_kind_owned_delivery_artifacts() {
   local home fakebin json main_backlog report_path report_pr
   local keyword_report shipping_report fleet_json created_kind failures=''
   [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the landed-selector regression"
+  fm_tasks_axi_compatible || {
+    echo "skip: installed tasks-axi predates ${FM_TASKS_AXI_MIN}, so the real backlog mutations this regression needs are refused"
+    return 0
+  }
   home=$(make_home kind-owned-landed)
   write_fixture "$home"
   fakebin=$(make_fakebin "$home")
@@ -1773,6 +1815,10 @@ EOF
 test_kind_fallback_matches_tasks_axi_word_boundaries() {
   local home fakebin id title kind producer_kind fleet_json json
   [ -n "$TASKS_AXI_BIN" ] || fail "tasks-axi is required for the kind-boundary regression"
+  fm_tasks_axi_compatible || {
+    echo "skip: installed tasks-axi predates ${FM_TASKS_AXI_MIN}, so the real backlog mutations this regression needs are refused"
+    return 0
+  }
   home=$(make_home kind-word-boundaries)
   fakebin=$(make_fakebin "$home")
   : > "$home/net.log"
@@ -2400,6 +2446,139 @@ EOF
       and (.secondmates | any(.id == "busy-hold" and .state == "active_child_work"))
   ' >/dev/null || fail "active-children-only Underway projection changed: $json"
   pass "active children reach Underway independently of a home captain hold"
+}
+
+test_nameless_legacy_summary_uses_its_durable_identifier() {
+  local parent remote_home fakebin json
+  parent=$(make_home nameless-legacy-summary)
+  make_remote_ledger_fleet "$parent" 1
+  remote_home="$TMP_ROOT/remote-ledger-home-1"
+  fakebin=$(make_remote_ledger_ssh "$parent/remote-ssh")
+  jq '
+    .active_children = [
+      {id:"legacy-child",kind:"ship",state:"working",repo:null,
+       source:"remote-ledger",doing:"running review"},
+      {id:"blank-name-child",kind:"ship",state:"working",repo:null,name:" \t ",
+       source:"remote-ledger",doing:"running tests"}
+    ]
+    | .counts.active_children = 2
+    | .state = "active_child_work"
+  ' "$remote_home/state/home-summary.json" > "$remote_home/state/legacy-summary.json"
+  mv "$remote_home/state/legacy-summary.json" "$remote_home/state/home-summary.json"
+
+  json=$(run_remote_ledger_bearings "$parent" "$fakebin" 1100) \
+    || fail "nameless legacy summary bearings failed"
+  printf '%s' "$json" | jq -e '
+    (.in_flight | any(.id == "ledger-1/legacy-child"
+      and .name == "ledger-1/legacy-child"
+      and .doing == "running review"
+      and .name != .doing))
+    and (.in_flight | any(.id == "ledger-1/blank-name-child"
+      and .name == "ledger-1/blank-name-child"
+      and .doing == "running tests"
+      and .name != .doing))
+  ' >/dev/null || fail "a blank legacy child name was not replaced by its id: $json"
+  pass "blank legacy summary names use their durable identifier"
+}
+
+test_newest_filed_gates_are_selected_before_snapshot_bounds() {
+  local home mate fakebin json i
+  home=$(make_home newest-before-bounds)
+  : > "$home/data/secondmates.md"
+  printf '## In flight\n\n## Queued\n' > "$home/data/backlog.md"
+  i=1
+  while [ "$i" -le 20 ]; do
+    printf -- '- [ ] old-%02d - Older gate %02d (repo: sample) (kind: ship) (since 2026-06-%02d)\n' \
+      "$i" "$i" "$i" >> "$home/data/backlog.md"
+    i=$((i + 1))
+  done
+  printf -- '- [ ] newest - Newest gate (repo: sample) (kind: ship) (since 2026-07-01)\n\n## Done\n' \
+    >> "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.gates | length) == 20 and .gates[0].id == "newest"
+      and (.gates | any(.id == "old-01") | not)
+  ' >/dev/null || fail "the bearings gate bound dropped the newest filed row: $json"
+
+  mate="$TMP_ROOT/newest-before-bounds-mate"
+  make_valid_secondmate_home bounded-mate "$mate"
+  : > "$home/data/backlog.md"
+  append_secondmate_registry "$home" bounded-mate "$mate"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] mate-eligible - Eligible remote gate (repo: sample) (kind: ship) (since 2026-07-08)
+- [ ] mate-call-one - Newer captain call (repo: sample) (kind: captain) (hold: choose one) (hold-kind: captain) (since 2026-07-10)
+- [ ] mate-call-two - Newest captain call (repo: sample) (kind: captain) (hold: choose two) (hold-kind: captain) (since 2026-07-11)
+
+## Done
+EOF
+  json=$(FM_SNAPSHOT_SECONDMATE_QUEUED=2 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    [.gates[].id] == ["mate-eligible"]
+      and (.decisions_open | any(.id == "bounded-mate/mate-call-one"))
+      and (.decisions_open | any(.id == "bounded-mate/mate-call-two"))
+  ' >/dev/null || fail "captain calls crowded eligible Charted work out of the bound: $json"
+  pass "newest filed gates are selected before snapshot bounds"
+}
+
+# A captain scanning Underway must be able to tell WHICH task a row is, and the
+# board orders Charted Next by the durable filed date, so both facts have to come
+# out of fleet state rather than being invented at render time.
+test_underway_and_gate_rows_carry_the_durable_name_and_filed_date() {
+  local home mate fakebin json
+  home=$(make_home durable-name-filed)
+  : > "$home/data/secondmates.md"
+  mate="$TMP_ROOT/durable-name-home"
+  make_valid_secondmate_home named-mate "$mate"
+  append_secondmate_registry "$home" named-mate "$mate"
+  mkdir -p "$home/projects/main-wt"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] main-ship - Rename the fleet board rows (repo: firstmate) (kind: ship) (since 2026-07-09)
+
+## Queued
+- [ ] newer-gate - Filed later (repo: firstmate) (kind: ship) (since 2026-07-10)
+- [ ] older-gate - Filed earlier (repo: firstmate) (kind: ship) (since 2026-07-01)
+- [ ] undated-gate - Filed before dates were recorded (repo: firstmate) (kind: ship)
+
+## Done
+EOF
+  fm_write_meta "$home/state/main-ship.meta" \
+    "window=firstmate:fm-main-ship" "worktree=$home/projects/main-wt" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$home/state" main-ship busy
+  printf 'working: no-mistakes review round 2\n' > "$home/state/main-ship.status"
+
+  printf '## In flight\n' > "$mate/data/backlog.md"
+  printf -- '- [ ] mate-child - Tighten the ledger contract (repo: sample) (kind: ship) (since 2026-07-08)\n' \
+    >> "$mate/data/backlog.md"
+  printf '\n## Queued\n\n## Done\n' >> "$mate/data/backlog.md"
+  mkdir -p "$mate/projects/mate-child"
+  fm_write_meta "$mate/state/mate-child.meta" \
+    "window=firstmate:fm-mate-child" "worktree=$mate/projects/mate-child" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" mate-child busy
+  printf 'working: waiting on the pipeline\n' > "$mate/state/mate-child.status"
+
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight | any(.id == "main-ship"
+      and .name == "Rename the fleet board rows"
+      and (.doing | type == "string") and (.doing | length) > 0
+      and .doing != .name))
+      and (.in_flight | any(.id == "named-mate/mate-child"
+        and .name == "Tighten the ledger contract"
+        and (.doing | type == "string") and (.doing | length) > 0
+        and .doing != .name))
+      and (.gates | any(.id == "newer-gate" and .filed == "2026-07-10"))
+      and (.gates | any(.id == "older-gate" and .filed == "2026-07-01"))
+      and (.gates | any(.id == "undated-gate" and .filed == null))
+  ' >/dev/null || fail "durable Underway names or gate filed dates are missing: $json"
+  pass "Underway rows carry the durable task name and gates carry their filed date"
 }
 
 test_mixed_secondmate_roles_partial_state_and_captain_readiness() {
@@ -3214,6 +3393,9 @@ test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
 test_working_captain_holds_keep_their_bucket_surfaces
 test_active_children_project_independent_of_home_captain_hold
+test_nameless_legacy_summary_uses_its_durable_identifier
+test_newest_filed_gates_are_selected_before_snapshot_bounds
+test_underway_and_gate_rows_carry_the_durable_name_and_filed_date
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection
 test_completed_scout_report_not_pending
@@ -3221,6 +3403,7 @@ test_open_decision_surfaces_end_to_end
 test_report_pointers_surface
 test_queued_item_prose_never_hides_it
 test_include_prs_is_the_only_fetch_path
+test_include_prs_maps_custom_branch_prefix_to_task
 test_partial_github_failure_degrades
 test_perl_fallback_bounds_github_call
 test_section_caps_and_expansion_flags

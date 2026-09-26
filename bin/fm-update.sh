@@ -6,9 +6,11 @@
 # registered secondmate home. Local homes are treehouse worktrees or standalone
 # clones; remote routes update their configured code root on that host and then
 # fast-forward the persistent home to that root. FAST-FORWARD ONLY, exactly like
-# fm-fleet-sync.sh: never force, never create a merge commit, never stash;
-# advance a target only when it is a clean fast-forward, otherwise skip and
-# report. A tracked-files fast-forward never touches the gitignored operational
+# fm-fleet-sync.sh: never force, never create a merge commit, never stash.
+# A secondmate divergence whose complete local tree result is already present at
+# the target is reconciled with reset --keep; every other unsafe target is
+# skipped and reported, with divergence recorded durably by fm-ff-lib.sh.
+# A tracked-files update never touches the gitignored operational
 # dirs (data/, state/, config/, projects/, .no-mistakes/), so a secondmate's
 # in-flight work is never disrupted. Worktrees of this repo share one object
 # store, so a single fetch refreshes them all; standalone-clone homes are
@@ -42,14 +44,23 @@
 #
 # Only two things keep a live mate out of the restart set, and neither is papered
 # over as a reload:
-#   - its home was SKIPPED (dirty, diverged, offline, unsafe). It is not on the
-#     new bytes, nothing here forces, stashes, or discards it, and it gets no
-#     action at all.
+#   - its home was SKIPPED (dirty, uniquely diverged, offline, unsafe). It is not
+#     on the new bytes, nothing here forces, stashes, or discards it, and it gets
+#     no action at all. A divergence remains in the durable reconciliation record
+#     that this or a later bootstrap/update pass surfaces.
 #   - its runtime cannot prove the old agent stopped and a replacement came up
 #     (bin/fm-secondmate-restart-lib.sh owns that test), so it falls to the
 #     honest re-read steer and is reported as a nudge, never as a reload.
 # A positively dead or missing endpoint has no agent to replace and is left to
 # the ordinary startup recovery.
+#
+# A fast-forward that lands changes bytes under bin/ in place, which desyncs
+# the trust binding of any locally armed fm-procevent-when watch whose action
+# executable lives in the updated repo; left alone, the watch's next fire
+# would be wrongly refused. After each home's own update (primary and every
+# local secondmate), this script best-effort runs that home's own
+# fm-procevent-when.sh rebind-all to republish those bindings against the new
+# bytes; a failure there is swallowed rather than failing the update.
 #
 # Usage: fm-update.sh [--help]
 set -eu
@@ -78,8 +89,19 @@ fi
 
 reread_firstmate="no"
 ff_target "$FM_ROOT" "firstmate" origin no no
-if [ "$FF_STATUS" = "updated" ] && [ -n "$FF_INSTR" ]; then
-  reread_firstmate="yes"
+if [ "$FF_STATUS" = "updated" ]; then
+  if [ -n "$FF_INSTR" ]; then
+    reread_firstmate="yes"
+  fi
+  # A fast-forward changes bin/'s bytes out from under any locally armed
+  # fm-procevent-when watch's trust binding, with no tampering involved; left
+  # alone, the very next fire is refused and the watch dies silently. Refresh
+  # every such watch now, right after the update that broke it. FM_ROOT_OVERRIDE
+  # is passed explicitly rather than relying on the script's own location: this
+  # process's own FM_ROOT is the repo that was just updated, which is not
+  # always where this very script file happens to live (FM_ROOT_OVERRIDE, as
+  # this test suite uses to point fm-update.sh at a fixture checkout).
+  FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" "$SCRIPT_DIR/fm-procevent-when.sh" rebind-all || true
 fi
 
 # --- secondmates -----------------------------------------------------------
@@ -137,6 +159,15 @@ claim_settled_secondmate() {  # <id>
 # bin/fm-ff-lib.sh calls this for each local home it left AT the base with a live
 # endpoint - status "updated" or "current" alike. A skipped home never gets here.
 fm_ff_after_secondmate_settled() {  # <id> <home> <window> <status> <instr>
+  # Same bin/-changed-out-from-under-a-watch problem as the primary home
+  # above, for a local secondmate's own worktree; "current" means bin/ did
+  # not move there this pass, so there is nothing to rebind. Run the
+  # secondmate's OWN copy of the script, explicitly overriding FM_ROOT to its
+  # own worktree rather than letting an outer FM_ROOT_OVERRIDE (this process's
+  # own, if the caller set one) leak into the child and misscope it.
+  if [ "${4:-}" = "updated" ] && [ -x "$2/bin/fm-procevent-when.sh" ]; then
+    FM_HOME="$2" FM_ROOT_OVERRIDE="$2" "$2/bin/fm-procevent-when.sh" rebind-all || true
+  fi
   claim_settled_secondmate "$1"
 }
 

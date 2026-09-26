@@ -41,7 +41,9 @@ watch_delivery_clean_reason() {
 }
 
 watch_delivery_publish() {
-  local reason=$1 i size tmp raw
+  # Identity/reason cleaning are sequential $(): sibling $() args to one
+  # printf are a bash 5.2 parse-error landmine when a CHLD trap is set.
+  local reason=$1 i size tmp raw ident cleaned_reason
   [ -n "$FM_WATCH_DELIVERY_PID" ] || return 0
   [ -n "$FM_WATCH_DELIVERY_IDENTITY" ] || return 0
   i=0
@@ -50,10 +52,12 @@ watch_delivery_publish() {
     sleep 0.02
     i=$((i + 1))
   done
+  ident=$(watch_delivery_clean_identity "$FM_WATCH_DELIVERY_IDENTITY")
+  cleaned_reason=$(watch_delivery_clean_reason "$reason")
   printf '%s\t%s\t%s\n' \
     "$FM_WATCH_DELIVERY_PID" \
-    "$(watch_delivery_clean_identity "$FM_WATCH_DELIVERY_IDENTITY")" \
-    "$(watch_delivery_clean_reason "$reason")" >> "$WATCH_DELIVERY_LOG" 2>/dev/null || true
+    "$ident" \
+    "$cleaned_reason" >> "$WATCH_DELIVERY_LOG" 2>/dev/null || true
   size=$(wc -c < "$WATCH_DELIVERY_LOG" 2>/dev/null | tr -d '[:space:]')
   case "$size" in
     ''|*[!0-9]*) ;;
@@ -150,7 +154,7 @@ handle_push_transition() {  # <backend> <session> <record>
   # external dependency, or the captain a verified hold transferred the work to.
   # Either way the wait is durably recorded, so absorb the immediate escalation
   # and leave the bounded re-surface to the watcher's own pause cadence.
-  if status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+  if status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")"; then
     triage_log "absorbed push $to (declared wait, awaiting external or captain): $window"
     fm_backend_commit_transition "$backend" "$STATE" "$session" "$record" || exit 1
     return

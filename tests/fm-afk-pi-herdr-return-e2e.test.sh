@@ -10,7 +10,8 @@
 #     records the posture with no daemon terminal, pid, or flag;
 #   - a real Pi draft is never touched by away mode (nothing injects on Pi);
 #   - an unmarked return request is recognized as the return, opens the
-#     catch-up gate before Bearings on the live blocker, and renders the brief;
+#     catch-up gate on the live blocker, renders the brief, and still lets
+#     Bearings report that catch-up posture as content;
 #   - remediation/resolution clears the gate, and re-entry is idempotent.
 # The 2026-07-14 two-owner incident's daemon-injection assertions retired with
 # the daemon on Pi; the daemon transport keeps its coverage in
@@ -180,14 +181,12 @@ START_RC=$?
 set -e
 [ "$START_RC" -ne 0 ] || fail "the away daemon launched on a Pi primary"
 assert_contains "$START_OUT" 'the away daemon is no longer launched on pi' "the Pi refusal did not name its reason"
-PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  PI_CODING_AGENT=true "$ROOT/bin/fm-afk-launch.sh" propose >/dev/null || fail "the away posture read-back failed on Pi"
-CONFIRM_OUT=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  PI_CODING_AGENT=true "$ROOT/bin/fm-afk-launch.sh" confirm 2>&1) || fail "the away posture could not be recorded on Pi: $CONFIRM_OUT"
-assert_contains "$CONFIRM_OUT" 'hold-for-return only' "the entry announcement did not say hold-for-return"
-[ -f "$STATE/.afk-contract" ] || fail "confirm did not write the away-posture record"
-[ ! -e "$STATE/.afk" ] || fail "confirm wrote the daemon flag on Pi"
-[ ! -e "$STATE/.afk-daemon-terminal" ] || fail "confirm recorded a daemon terminal on Pi"
+ENTER_OUT=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
+  PI_CODING_AGENT=true "$ROOT/bin/fm-afk-launch.sh" enter 2>&1) || fail "the away posture could not be recorded on Pi: $ENTER_OUT"
+assert_contains "$ENTER_OUT" 'hold-for-return only' "the entry announcement did not say hold-for-return"
+[ -f "$STATE/.afk-contract" ] || fail "enter did not write the away-posture record"
+[ ! -e "$STATE/.afk" ] || fail "enter wrote the daemon flag on Pi"
+[ ! -e "$STATE/.afk-daemon-terminal" ] || fail "enter recorded a daemon terminal on Pi"
 sleep 2
 [ ! -s "$STATE/.supervise-daemon.pid" ] || fail "an away daemon started on Pi"
 pass "real Pi primary: the away posture is recorded with no daemon launched"
@@ -252,26 +251,28 @@ assert_contains "$RETURN_OUT" 'firstmate-actionable blocker: repair-task [key=sy
 assert_contains "$RETURN_OUT" '=== Return brief (away ' "the return did not render the brief"
 assert_contains "$RETURN_OUT" 'Supervisor health:' "the brief did not lead with supervisor health"
 [ ! -f "$STATE/.afk-contract" ] || fail "the return did not archive the away-posture record"
-set +e
 BEARINGS_OUT=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJECT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  "$ROOT/bin/fm-bearings-snapshot.sh" --json 2>&1)
-BEARINGS_RC=$?
-set -e
-[ "$BEARINGS_RC" -eq 3 ] || fail "Bearings bypassed the return gate (rc=$BEARINGS_RC): $BEARINGS_OUT"
-pass "real unmarked Pi return renders the brief, opens catch-up, and blocks Bearings before the unresolved blocker can be deferred"
+  "$ROOT/bin/fm-bearings-snapshot.sh" --json 2>&1) \
+  || fail "Bearings refused behind the return gate instead of reporting it: $BEARINGS_OUT"
+printf '%s' "$BEARINGS_OUT" | jq -e '
+  (.in_flight | any(.id == "repair-task"))
+  and (.gates | any(.id == "(return-catchup)" and .reason == "away-return catch-up"))
+  and ([.decisions_open[].id] | index("(return-catchup)") | not)' >/dev/null \
+  || fail "Bearings did not surface the catch-up posture as content: $BEARINGS_OUT"
+pass "real unmarked Pi return renders the brief, opens catch-up, and reports that posture through Bearings while the blocker stays Firstmate's to remediate"
 
 printf 'resolved [key=synthetic-dependency]: refreshed the synthetic token and resumed the task\n' >> "$STATE/repair-task.status"
 PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJECT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
   "$ROOT/bin/fm-afk-return.sh" check >/dev/null || fail "remediated blocker did not clear return catch-up"
 PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJECT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  "$ROOT/bin/fm-bearings-snapshot.sh" --json >/dev/null || fail "Bearings remained gated after blocker remediation"
+  "$ROOT/bin/fm-bearings-snapshot.sh" --json \
+  | jq -e '[.gates[].id] | index("(return-catchup)") | not' >/dev/null \
+  || fail "Bearings kept the catch-up posture row after the gate cleared"
 
 # A clean re-entry records a fresh posture, and an immediate return is
 # idempotently clear because the keyed blocker is resolved.
 PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  PI_CODING_AGENT=true "$ROOT/bin/fm-afk-launch.sh" propose >/dev/null || fail "clean away re-entry read-back failed"
-PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
-  PI_CODING_AGENT=true "$ROOT/bin/fm-afk-launch.sh" confirm >/dev/null || fail "clean away re-entry failed"
+  PI_CODING_AGENT=true "$ROOT/bin/fm-afk-launch.sh" enter >/dev/null || fail "clean away re-entry failed"
 PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJECT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
   PI_CODING_AGENT=true "$ROOT/bin/fm-afk-return.sh" begin >/dev/null \
   || fail "clean away re-entry/return was not idempotent"

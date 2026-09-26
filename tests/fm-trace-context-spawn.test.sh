@@ -79,7 +79,11 @@ case "${1:-}" in
           -t) skip_next=1; continue ;;
           -l) continue ;;
           Enter|C-m) continue ;;
-          *) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
+          *)
+            case "$a" in
+              ". '"*"'") staged=${a#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || a=$(cat "$staged") ;;
+            esac
+            printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
         esac
       done
     fi
@@ -206,6 +210,8 @@ run_two_level() {
   printf '# Firstmate\n' > "$sm/AGENTS.md"
   printf 'sm-%s\n' "$name" > "$sm/.fm-secondmate-home"
   printf 'charter\n' > "$sm/data/charter.md"
+  git -C "$sm" init -q -b main
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$sm/.gitignore"
 
   # Spawn 1: the primary launches the secondmate; capture what it injects.
   sm_id="sm-$name"
@@ -214,8 +220,12 @@ run_two_level() {
   smlog="$base/sm-launch.log"
   smfake=$(make_spawn_fakebin "$base/sm-fake")
   : > "$smlog"
+  # A claude secondmate spawn pre-registers workspace trust for the HOME it
+  # launches into (bin/fm-claude-trust.sh), so this runs against a throwaway
+  # HOME; without it this suite would write the developer's real ~/.claude.json.
+  mkdir -p "$base/user-home"
   env FM_TRACE_CONTEXT="$penv" \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" HOME="$base/user-home" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
     FM_PROJECTS_OVERRIDE="$prim/projects" FM_CONFIG_OVERRIDE="$prim/config" \
     FM_SPAWN_NO_GUARD=1 CLAUDECODE=1 TMUX="fake,1,0" \
@@ -385,10 +395,15 @@ test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
   printf '# Firstmate\n' > "$sm/AGENTS.md"
   printf '%s\n' "$id" > "$sm/.fm-secondmate-home"
   printf 'charter\n' > "$sm/data/charter.md"
+  git -C "$sm" init -q -b main
   fake=$(make_spawn_fakebin "$base/fake")
 
+  # A claude secondmate spawn pre-registers workspace trust for the HOME it
+  # launches into (bin/fm-claude-trust.sh), so this runs against a throwaway
+  # HOME; without it this suite would write the developer's real ~/.claude.json.
+  mkdir -p "$base/user-home"
   out=$(env -u FM_TRACE_CONTEXT \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" HOME="$base/user-home" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
     FM_PROJECTS_OVERRIDE="$prim/projects" FM_CONFIG_OVERRIDE="$prim/config" \
     FM_SPAWN_NO_GUARD=1 CLAUDECODE=1 TMUX="fake,1,0" \

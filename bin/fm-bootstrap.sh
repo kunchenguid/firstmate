@@ -6,6 +6,7 @@
 #          exits 0.
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
+#                 "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=<floor>; install: <command>) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
@@ -14,6 +15,7 @@
 #                 "HOME_SUMMARY: <ledger never published|not republished since
 #                 <stamp>>; <n> failed attempt(s) ... last: <recorded failure>",
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
+#                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
@@ -57,11 +59,13 @@
 #          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md).
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
 #          LAVISH_AXI_MIN below; the per-tool owners point there. An installed
-#          build below its floor reports MISSING like no-mistakes, so the operator
-#          is asked to upgrade rather than silently running an older tool.
+#          essential build below its floor reports MISSING like no-mistakes.
+#          Missing or incompatible lavish-axi reports PRESENTATION_UNAVAILABLE:
+#          nonvisual dispatch continues with plain-text decisions and reports,
+#          but Lavish use still requires a compatible build at or above its floor.
 #          tasks-axi feature probes remain a separate defense-in-depth check.
-#          tasks-axi and quota-axi are required bootstrap tools (same class as
-#          lavish-axi). A compatible tasks-axi default backend is silent.
+#          tasks-axi and quota-axi are essential bootstrap tools.
+#          A compatible tasks-axi default backend is silent.
 #          quota-axi is required for the agent-owned dispatch-profile array
 #          procedure in AGENTS.md section 4 and
 #          .agents/skills/quota-array-dispatch/SKILL.md.
@@ -94,6 +98,9 @@
 #          reads or writes another home; the fleet snapshot's classifier and
 #          bin/fm-secondmate-reconcile.sh's nudge stay as backstops. Replayed
 #          transitions and restored In-flight rows print BOOTSTRAP_INFO facts.
+#          The `code-root <file>` variant is a detect-only local check that runs
+#          even in a read-only session; detect_code_root_backlog_fork owns what
+#          it reports.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (backlog_record_reconcile, secondmate_sync,
 #          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
@@ -144,7 +151,14 @@
 #          keeps detect-only meaning unlocked, exactly as before.
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
+#        fm-bootstrap.sh lavish-compatible
+#          Exit 0 when lavish-axi meets LAVISH_AXI_MIN, 1 otherwise, printing
+#          nothing; bin/fm-brief.sh uses it to gate scout Lavish hosting.
 set -u
+
+TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
+export -n TYPESAFE_API_KEY_PRIVATE 2>/dev/null || true
+unset TYPESAFE_API_KEY
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -159,6 +173,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-quota-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
+# shellcheck source=bin/fm-control-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-env-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-env-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
@@ -177,6 +195,11 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# Shared secondmate endpoint probe + guarded relaunch; the watcher's poll tick
+# drives the same library so session start and ordinary supervision recover
+# from identical evidence through an identical path.
+# shellcheck source=/dev/null # Analyzed separately as a canonical lint root.
+. "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
 # fm-timing-lib.sh is inert unless FM_TIMING_LOG names a file, which only the
 # deferred network stage sets, so an ordinary bootstrap run records nothing.
 # shellcheck source=bin/fm-timing-lib.sh disable=SC1091
@@ -608,7 +631,7 @@ secondmate_sync() {
       "$SCRIPT_DIR/fm-remote-inherit-push.sh" "$id" "$remote_generation" 2>&1); then
       if printf '%s\n' "$inherit_out" | grep -Eq '^(pushed|removed):'; then nudge_needed=1; fi
     else
-      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $(first_line "$inherit_out")"
+      echo "SECONDMATE_SYNC: secondmate $id: skipped: remote inheritance failed on $remote_host: $(remote_inherit_failure_reason "$inherit_out")"
       converged=0
     fi
     [ "$remote_pending" -eq 0 ] || nudge_needed=1
@@ -666,7 +689,8 @@ report_relaunch() {  # <id> <cause> <where>
 }
 
 secondmate_liveness_sweep() {
-  # Idempotent secondmate liveness guarantee - SESSION START ONLY. The detailed
+  # Idempotent secondmate liveness guarantee at session start; the watcher's
+  # secondmate_liveness_tick owns the same guarantee mid-session. The detailed
   # state machine and its only recovery-authorizing states are owned by
   # fm_backend_agent_state. A missing tmux pane is not enough: tmux must prove
   # the window or session absent. This preserves duplicate prevention for
@@ -675,8 +699,8 @@ secondmate_liveness_sweep() {
   # lacked.
   # A meta with no window remains owned by secondmate-provisioning recovery.
   # Secondmate homes never contain kind=secondmate meta, so this is naturally a
-  # primary-only no-op there. Mid-session liveness remains explicitly out of
-  # scope and requires a separate periodic signal.
+  # primary-only no-op there. The probe/relaunch mechanics live in
+  # bin/fm-secondmate-liveness-lib.sh; this sweep keeps the reporting.
   [ -d "$STATE" ] || return 0
   local meta id remote_host label __fm_timing_stamp parallel=0
   SECONDMATE_RESPAWNED_IDS=""
@@ -713,123 +737,36 @@ secondmate_liveness_one_timed() {  # <meta> <id> <label>
 # timed; every `return` here was a `continue` in the loop and means exactly the
 # same thing - move on to the next secondmate. Respawned ids are recorded through
 # secondmate_note_respawned so a concurrent sweep can collect them after wait.
+# Probe classification, kill, and spawn live in fm-secondmate-liveness-lib.sh;
+# this function keeps this sweep's exact reporting.
 secondmate_liveness_one() {  # <meta> <id>
   local meta=$1 id=$2
-  local window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
-  window=$(fm_meta_get "$meta" window)
-  [ -n "$window" ] || return 0
-  harness=$(fm_meta_get "$meta" harness)
-  remote_host=$(fm_meta_get "$meta" remote_host)
-  if [ -n "$remote_host" ]; then
-    remote_rc=0
-    fm_remote_readiness_ensure "$SCRIPT_DIR" "$id" || remote_rc=$?
-    if [ "$remote_rc" -eq 255 ]; then
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint state unknown; route preserved on $remote_host"
-      return 0
-    fi
-    if [ "$remote_rc" -ne 0 ]; then
-      readiness_reason=$(printf '%s\n' "$FM_REMOTE_READINESS_OUT" \
-        | awk '/^check [^=]+=(fixable|human):|^action:|^error:/ { print; exit }')
-      [ -n "$readiness_reason" ] || readiness_reason=$(first_line "$FM_REMOTE_READINESS_OUT")
-      [ -n "$readiness_reason" ] || readiness_reason="unknown readiness failure"
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote readiness failed on $remote_host: $readiness_reason"
-      return 0
-    fi
-    if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
-      remote_rc=0
-    else
-      remote_rc=$?
-    fi
-    if [ "$remote_rc" -eq 255 ]; then
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint state unknown; route preserved on $remote_host"
-      return 0
-    fi
-    if [ "$remote_rc" -ne 0 ]; then
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint probe unreadable on $remote_host"
-      return 0
-    fi
-    agent_state=$(printf '%s\n' "$out" | tail -1)
-    case "$agent_state" in
-      alive)
-        if route_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh route "$id" < /dev/null 2>/dev/null); then
-          remote_rc=0
-        else
-          remote_rc=$?
-        fi
-        if [ "$remote_rc" -eq 255 ]; then
-          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote host unavailable or endpoint route unknown; route preserved on $remote_host"
-          return 0
-        fi
-        if [ "$remote_rc" -ne 0 ]; then
-          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: alive remote endpoint route is unreadable on $remote_host; inspect and migrate or retire it explicitly"
-          return 0
-        fi
-        remote_backend=$(printf '%s\n' "$route_out" | sed -n 's/^backend=//p' | tail -1)
-        if [ "$remote_backend" != herdr ]; then
-          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: alive remote endpoint is recorded on backend '${remote_backend:-missing}'; migrate or retire it explicitly"
-          return 0
-        fi
-        [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: remote secondmate $id already live (host=$remote_host)"
-        ;;
-      dead|missing)
-        cause="remote endpoint $agent_state on its configured host"
-        if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
-          secondmate_note_respawned "$id"
-          report_relaunch "$id" "$cause" "host=$remote_host"
-        else
-          echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
-        fi
-        ;;
-      ambiguous|unreadable|unverified)
-        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint state is $agent_state on $remote_host"
-        ;;
-      *) echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote endpoint returned an invalid state" ;;
-    esac
+  if ! fm_secondmate_liveness_lock "$id"; then
+    echo "SECONDMATE_LIVENESS: secondmate $id: skipped: another liveness check is already in progress"
     return 0
   fi
-  backend=$(fm_backend_of_meta "$meta")
-  target=$(fm_backend_target_of_meta "$meta")
-  [ -n "$target" ] || target="$window"
-  agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
-  case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|omp) ;;
-    *)
-      case "$agent_state" in dead|missing) agent_state=unverified-harness ;; esac
+  fm_secondmate_liveness_probe "$meta" "$id" full
+  case "$FM_SM_LIVE_STATUS" in
+    silent)
       ;;
-  esac
-  case "$agent_state" in
     alive)
-      if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
-        echo "BOOTSTRAP_INFO: secondmate $id already live (backend=$backend)"
-      fi
+      [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: $FM_SM_LIVE_LINE"
       ;;
-    dead|missing)
-      if [ "$agent_state" = dead ]; then
-        cause="confirmed agent absence on existing endpoint"
-        fm_backend_kill "$backend" "$target" 2>/dev/null || true
-      else
-        cause="recorded endpoint confidently missing"
-      fi
-      if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+    relaunchable)
+      if fm_secondmate_liveness_relaunch "$meta" "$id"; then
         secondmate_note_respawned "$id"
-        report_relaunch "$id" "$cause" "backend=$backend"
+        report_relaunch "$id" "$FM_SM_LIVE_CAUSE" "$FM_SM_LIVE_WHERE"
+      elif [ "$FM_SM_LIVE_STATUS" = skipped ]; then
+        echo "SECONDMATE_LIVENESS: secondmate $id: skipped: $FM_SM_LIVE_REASON"
       else
-        echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $cause: $(first_line "$out")"
+        echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed after $FM_SM_LIVE_CAUSE: $(first_line "$FM_SM_LIVE_OUT")"
       fi
       ;;
-    ambiguous)
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: existing endpoint has ambiguous agent process (backend=$backend)"
-      ;;
-    unreadable)
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: endpoint probe unreadable (backend=$backend)"
-      ;;
-    unverified-harness)
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: recorded harness '$harness' is unverified for recovery (backend=$backend)"
-      ;;
-    *)
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: agent recovery classifier unverified (backend=$backend)"
+    skipped)
+      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: $FM_SM_LIVE_REASON"
       ;;
   esac
+  fm_secondmate_liveness_unlock "$id"
   return 0
 }
 
@@ -888,7 +825,7 @@ missing_tool_diagnostic() {
 # fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
 # never told tmux is missing, and only orca drops treehouse. A backend value with
 # no verified dependency set is reported before the universal checks continue.
-COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi"
+COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi tasks-axi quota-axi"
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
 if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
@@ -905,7 +842,7 @@ NO_MISTAKES_MIN=1.46.0
 # tasks-axi feature probes are an independent defense-in-depth concern, not part
 # of its floor.
 GH_AXI_MIN=0.1.29
-LAVISH_AXI_MIN=0.1.46
+LAVISH_AXI_MIN=0.1.77
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
@@ -1092,7 +1029,7 @@ EOF
 }
 
 crew_dispatch_validate() {
-  local file err
+  local file err verified_harnesses typed_key typed_active=false
   file="$CONFIG/crew-dispatch.json"
   [ -f "$file" ] || return 0
   if ! command -v jq >/dev/null 2>&1; then
@@ -1103,15 +1040,25 @@ crew_dispatch_validate() {
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON"
     return 0
   fi
-  err=$(jq -r '
-    def verified($h): ["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","muse","rovo","omp"] | index($h);
+  typed_key=$TYPESAFE_API_KEY_PRIVATE
+  [ -n "$typed_key" ] || typed_key=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
+  [ -z "$typed_key" ] || typed_active=true
+  if $typed_active; then
+    verified_harnesses=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
+  else
+    verified_harnesses='["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp","devin"]'
+  fi
+  err=$(jq -r --argjson typed "$typed_active" --argjson verified_harnesses "$verified_harnesses" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
+    def verified($h): $verified_harnesses | index($h);
+    def provider_id($p): ($p | type) == "string" and ($p | test($provider_re));
     def effort_ok($h; $m; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
       elif $e == "ultra" then (($h == "pi" or $h == "pi-signed") and (($m | type) == "string") and ($m | startswith("codex-native/")) and ($m | length) > 13)
       elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
-      elif $h == "codex" then (["low","medium","high","xhigh"] | index($e))
+      elif $h == "codex" then ((["low","medium","high","xhigh"] | index($e)) != null or ($e == "max" and $m == "gpt-5.6-luna"))
       elif $h == "grok" then (["low","medium","high"] | index($e))
+      elif $h == "agy" then (["low","medium","high"] | index($e))
       elif $h == "pi" or $h == "pi-signed" or $h == "omp" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "muse" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "rovo" then (["low","medium","high","max"] | index($e))
@@ -1128,7 +1075,21 @@ crew_dispatch_validate() {
         + (if has("default") then [profiles(.default)[]?] else [] end));
     def malformed_optional_fields($items):
       ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
-      or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)));
+      or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)))
+      or ($typed and ($items | any(has("provider") and (provider_id(.provider) | not))));
+    # A quota floor, on a rule or a profile: bin/fm-dispatch-resolve.sh applies
+    # it in code against one quota-axi row, so scope and min_percent must be
+    # concrete; a rule floor also names the provider whose row it reads.
+    def floor_bad($f; $need_provider):
+      ($f | type) != "object"
+      or (($f.scope | type) != "string") or (($f.scope | length) == 0)
+      or (($f.min_percent | type) != "number") or ($f.min_percent < 0) or ($f.min_percent > 100)
+      or (if $need_provider
+          then (provider_id($f.provider) | not)
+          else ($f | has("provider"))
+          end);
+    def malformed_profile_floors($items):
+      ($items | any(has("floor") and floor_bad(.floor; false)));
     def bad_efforts:
       configured_profiles
       | map({h: .harness, m: .model, e: .effort})
@@ -1145,7 +1106,14 @@ crew_dispatch_validate() {
     elif [(.rules // [])[]? | select((.use? | type) == "array" and (.use | length) == 0)] | length > 0 then "each rule needs at least one use profile"
     elif [(.rules // [])[]? | profiles(.use?)[]? | select(type != "object")] | length > 0 then "each use profile must be an object"
     elif [(.rules // [])[]? | profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
-    elif malformed_optional_fields([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile model and effort must be non-empty strings when present"
+    elif malformed_optional_fields([(.rules // [])[]? | profiles(.use?)[]?]) then
+      if $typed then "use profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
+      else "use profile model and effort must be non-empty strings when present"
+      end
+    elif $typed and malformed_profile_floors([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile floor needs scope and min_percent 0..100"
+    elif $typed and ([(.rules // [])[]? | select(has("approval") and .approval != "captain")] | length > 0) then "approval must be \"captain\" when present"
+    elif $typed and ([(.rules // [])[]? | select(has("floor") and floor_bad(.floor; true))] | length > 0) then "rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\\z"
+    elif $typed and ([(.rules // [])[]? | select(has("min_confidence") and ((.min_confidence | type) != "number" or .min_confidence < 0 or .min_confidence > 1))] | length > 0) then "min_confidence must be a number from 0 through 1 when present"
     elif [(.rules // [])[]? | select(has("select") and ((.select? | type) != "string" or (.select | length) == 0))] | length > 0 then "select must be a non-empty string"
     elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced")] | length > 0 then
       "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced") ] | unique | join(", "))
@@ -1153,7 +1121,11 @@ crew_dispatch_validate() {
     elif has("default") and ((.default | type) == "array" and (.default | length) == 0) then "default needs at least one profile"
     elif has("default") and ([profiles(.default)[]? | select(type != "object")] | length) > 0 then "each default profile must be an object"
     elif has("default") and ([profiles(.default)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length) > 0 then "each default profile needs harness"
-    elif has("default") and malformed_optional_fields([profiles(.default)[]?]) then "default profile model and effort must be non-empty strings when present"
+    elif has("default") and malformed_optional_fields([profiles(.default)[]?]) then
+      if $typed then "default profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
+      else "default profile model and effort must be non-empty strings when present"
+      end
+    elif $typed and has("default") and malformed_profile_floors([profiles(.default)[]?]) then "default profile floor needs scope and min_percent 0..100"
     else
       (configured_profiles
         | map(.harness)
@@ -1329,6 +1301,11 @@ startup_memory_budget_setup() {
   fi
 }
 
+if [ "${1:-}" = "lavish-compatible" ]; then
+  tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"
+  exit
+fi
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -1425,8 +1402,8 @@ detect_local_tools() {
   if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
     echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"
   fi
-  if command -v lavish-axi >/dev/null 2>&1 && ! tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"; then
-    echo "MISSING: lavish-axi (install: $(install_cmd lavish-axi))"
+  if ! tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"; then
+    echo "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=$LAVISH_AXI_MIN; install: $(install_cmd lavish-axi)) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish"
   fi
   if command -v quota-axi >/dev/null 2>&1 && ! fm_quota_axi_compatible; then
     echo "MISSING: quota-axi (install: $(install_cmd quota-axi))"
@@ -1467,7 +1444,25 @@ detect_local_config() {
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"
   fi
+  detect_code_root_backlog_fork
   detect_home_summary_publication
+}
+
+# Shadow-backlog check. When this home's data directory is not the code root's,
+# a code-root data/backlog.md or data/done-archive.md that is not this home's
+# own file is a queue a cwd-relative tasks-axi write has already forked; a link
+# into the home does not survive such a write (docs/configuration.md "Backlog
+# backend" owns why). Detect-only: neither copy is a safe winner, so nothing is
+# merged here.
+detect_code_root_backlog_fork() {
+  local name root_copy
+  [ "$FM_ROOT/data" -ef "$DATA" ] && return 0
+  for name in backlog.md done-archive.md; do
+    root_copy="$FM_ROOT/data/$name"
+    [ -e "$root_copy" ] || [ -L "$root_copy" ] || continue
+    [ "$root_copy" -ef "$DATA/$name" ] && continue
+    echo "BACKLOG_RECONCILE: code-root $root_copy is not this home's $DATA/$name; tasks-axi wrote the code root instead of this home, so rows in it may be missing here - merge it into this home's copy and move it aside"
+  done
 }
 
 # This home's ledger publication is deliberately best-effort: every lifecycle
@@ -1581,6 +1576,13 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   fi
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
   local_phase && x_mode_setup
+  # Adopt existing durable contribution links without making a network call.
+  # Detection-only startup must never publish a check registration.
+  if local_phase && command -v jq >/dev/null 2>&1 \
+    && [ -d "$DATA" ] && [ -x "$SCRIPT_DIR/fm-contributions.sh" ]; then
+    "$SCRIPT_DIR/fm-contributions.sh" arm --if-owned >/dev/null \
+      || echo "MISSING: contribution observation could not be armed; coverage is unconfirmed"
+  fi
   if [ -n "$fleet_sync_pid" ]; then
     wait "$fleet_sync_pid" || true
     cat "$fleet_sync_out"

@@ -182,6 +182,11 @@ test_fixture_snapshot_json() {
       and (.actions.watch | contains("do not routinely fm-peek"))
   ' >/dev/null || fail "secondmate return-channel guidance missing"
   printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "secondmate-task")
+    | .paths.status_log.last_event
+    | has("age_seconds") and .age_seconds == null
+  ' >/dev/null || fail "legacy event must have an explicit unknown age"
+  printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "cmux-task")
     | .backend == "cmux"
       and .paths.worktree.present == false
@@ -194,7 +199,60 @@ test_fixture_snapshot_json() {
     .backlog.records[] | select(.id == "done-task")
     | .state == "done" and .pr_url == "https://github.com/kunchenguid/firstmate/pull/7"
   ' >/dev/null || fail "done backlog PR row missing"
-  pass "fixture snapshot covers task rows, backlog rows, pointers, and stable ordering"
+
+  local line expected_age before after emitted epoch observed
+  printf 'secondmate-task\n' > "$home/secondmate-home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home" \
+    > "$home/secondmate-home/.fm-secondmate-parent"
+  before=$(date +%s)
+  FM_HOME="$home/secondmate-home" "$ROOT/bin/fm-secondmate-report.sh" \
+    'done' 0123456789abcdef 'audit complete' || fail "parent report failed"
+  after=$(date +%s)
+  emitted=$(tail -1 "$home/state/secondmate-task.status")
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$ROOT/bin/fm-classify-lib.sh"
+  epoch=$(status_line_at_epoch "$emitted") || fail "new parent report has unknown time"
+  [ "$epoch" -ge "$before" ] && [ "$epoch" -le "$after" ] \
+    || fail "parent report did not record emission time"
+  for line in "$emitted" 'working: legacy' 'working [at=1700000000]: timed' \
+    'working [at=1700000200]: future' 'working [at=oops]: malformed'; do
+    printf '%s\n\n' "$line" > "$home/state/secondmate-task.status"
+    # Deliberately unrelated file age must never substitute for event age.
+    touch -t 202001010000 "$home/state/secondmate-task.status"
+    expected_age=null; observed=1700000100
+    case "$line" in
+      "$emitted") expected_age=100; observed=$((epoch + 100)) ;;
+      *1700000000*) expected_age=100 ;;
+    esac
+    out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW_EPOCH=$observed "$SNAPSHOT" --json)
+    printf '%s' "$out" | jq -e --argjson age "$expected_age" '
+      .tasks[] | select(.id == "secondmate-task")
+      | .paths.status_log.last_event
+      | has("age_seconds") and .age_seconds == $age
+        and (has("emitted_at_epoch") | not)
+    ' >/dev/null || fail "event age came from something other than the record: $line"
+    # parent_event age is the emission age; freshness is how old this snapshot's
+    # own observation of the file is, so the 2020 mtime must show up there and
+    # only there.
+    printf '%s' "$out" | jq -e --argjson age "$expected_age" '
+      .secondmate_current.records[] | select(.id == "secondmate-task")
+      | .current.state == "unknown"
+        and .parent_event.age_seconds == $age
+        and (.parent_event | has("emitted_at_epoch") | not)
+        and (.freshness.age_seconds | type) == "number"
+        and .freshness.age_seconds > 100000000
+    ' >/dev/null || fail "fallback confused event age, observation freshness, and current state: $line"
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '$ touch -t 202001010000 %s\n' "$home/state/secondmate-task.status"
+      printf '$ FM_HOME=%s FM_SNAPSHOT_NOW_EPOCH=%s bin/fm-fleet-snapshot.sh --json\n' "$home" "$observed"
+      printf '%s' "$out" | jq '{
+        last_event: (.tasks[] | select(.id == "secondmate-task") | .paths.status_log.last_event),
+        secondmate: (.secondmate_current.records[] | select(.id == "secondmate-task")
+          | {current, parent_event, freshness})
+      }'
+    fi
+  done
+  pass "fixture snapshot covers task rows, backlog rows, pointers, stable ordering, and emission-time event age"
 }
 
 # R1 owner contract: main_inventory discloses orphan in-flight and unstructured
@@ -893,7 +951,7 @@ test_open_decision_clears_on_keyed_resolution() {
 # must not linger as pending. Decisions come purely from the keyed fold reconciled
 # against the crew lifecycle; report prose never opens or reopens a decision.
 test_completed_scout_report_is_pointer_not_pending() {
-  local home fakebin out
+  local home fakebin out kind terminal id phase single mate single_state mate_state
   home=$(make_home completed-scout)
   mkdir -p "$home/projects/scout-wt" "$home/data/lavish-103"
   fm_write_meta "$home/state/lavish-103.meta" \
@@ -918,6 +976,55 @@ test_completed_scout_report_is_pointer_not_pending() {
       and (.hints.open_decisions | length) == 0
       and .hints.scout_report_present == true
   ' >/dev/null || fail "a completed scout report must be a pointer, not a pending decision: $out"
+
+  # Same terminal-supersession contract across ship/scout/secondmate, both snapshot
+  # modes, and reopen/resolve after cleanup.
+  home=$(make_home terminal-cleanup)
+  mkdir -p "$home/projects/task"
+  fakebin=$(make_fakebin "$home")
+  for kind in ship scout secondmate; do
+    for terminal in 'done' failed; do
+      id="$kind-$terminal"
+      fm_write_meta "$home/state/$id.meta" \
+        "window=firstmate:fm-$id" "worktree=$home/projects/task" \
+        "kind=$kind" "harness=claude"
+      record_claude_idle "$home/state" "$id"
+      printf 'blocked [key=access]: waiting\nneeds-decision [key=choice]: choose a route\n%s: final outcome\nnote: cleanup complete\n' \
+        "$terminal" > "$home/state/$id.status"
+    done
+  done
+  for phase in terminal reopened resolved; do
+    case "$phase" in
+      terminal) single='[]'; mate='["access","choice"]'; single_state=unknown; mate_state=parked ;;
+      reopened) single='["access","new-choice"]'; mate='["access","choice","new-choice"]'; single_state=parked; mate_state=parked ;;
+      resolved) single='[]'; mate='["choice"]'; single_state=unknown; mate_state=parked ;;
+    esac
+    for kind in ship scout secondmate; do
+      for terminal in 'done' failed; do
+        id="$kind-$terminal"
+        case "$phase" in
+          reopened) printf 'blocked [key=access]: reopened access\nneeds-decision [key=new-choice]: a new choice\nnote: more cleanup\n' >> "$home/state/$id.status" ;;
+          resolved) printf 'resolved [key=access]: access granted\nresolved [key=new-choice]: answered\nnote: final cleanup\n' >> "$home/state/$id.status" ;;
+        esac
+      done
+    done
+    out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+    printf '%s' "$out" | jq -e --argjson single "$single" --argjson mate "$mate" \
+      --arg single_state "$single_state" --arg mate_state "$mate_state" '
+      .tasks | length == 6 and all(.[];
+        (.kind == "secondmate") as $persistent
+        | (.hints.open_decisions | map(.key) | sort) == (if $persistent then $mate else $single end)
+          and .current_state.state == (if $persistent then $mate_state else $single_state end)
+          and .hints.blocked_event == (if $persistent then $mate else $single end | index("access") != null)
+          and .hints.pending_decision == (if $persistent then $mate else $single end | any(. != "access")))
+    ' >/dev/null || fail "$phase snapshot revived a completed decision or lost a current one: $out"
+    out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+    printf '%s' "$out" | jq -e --argjson single "$single" --argjson mate "$mate" '
+      (.decisions_open | map({id,key}) | sort_by(.id,.key)) ==
+        (([ ("ship-done","ship-failed","scout-done","scout-failed") as $id | $single[] | {id:$id,key:.} ]
+          + [ ("secondmate-done","secondmate-failed") as $id | $mate[] | {id:$id,key:.} ]) | sort_by(.id,.key))
+    ' >/dev/null || fail "$phase home summary revived a completed decision or lost a current one: $out"
+  done
   pass "a completed scout's stale decision surfaces as a report pointer, not pending"
 }
 

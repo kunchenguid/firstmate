@@ -4,19 +4,22 @@
 # Pooled project clones do not keep their local default branch current, so this
 # helper compares remote-backed projects against origin/<default> after fetching
 # the default branch, and local-only projects against the local default branch.
-# When state/<id>.meta records pr= (URL or number) for an open PR, the compare
-# side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
-# current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
-# only a fallback when fetch fails (stale recorded SHAs must never win over a
-# reachable remote PR head). If neither PR head can be resolved, fall back to
-# the local branch with a warning. Without pr=, compare the local branch.
-#
-# The crewmate's branch name is no longer a fixed fm/<id> (see bin/fm-brief.sh
-# branch convention), so it is discovered from the worktree's checked-out HEAD.
-# Pass --branch <name> to name it directly when that HEAD is detached, matching
-# bin/fm-merge-local.sh: a readable HEAD stays authoritative, and a --branch that
-# disagrees with one is refused rather than silently reviewed.
-# Usage: fm-review-diff.sh <task-id> [--stat] [--branch <name>]
+# When state/<id>.meta records pr= as a GitHub pull-request URL or a bare
+# number for an open PR, the compare side is ALWAYS a freshly fetched
+# refs/pull/<n>/head by default so review stays current after no-mistakes fix
+# rounds push to the PR. A recorded pr_head= is only a fallback when fetch fails
+# (stale recorded SHAs must never win over a reachable remote PR head). If
+# neither PR head can be resolved, fall back to the local branch with a warning.
+# A GitLab merge request and a Gerrit change expose no comparable ref and record
+# no pr_head, so a task recording one always takes that warning path;
+# docs/architecture.md owns that fallback. Without pr=, compare the task's
+# immutable ship branch recorded in state/<id>.meta ("fm/<id>" for records
+# created before that field existed), or the worktree's checked-out branch when
+# that branch does not exist in the worktree. A recorded branch that is not a
+# valid git branch name is refused instead of taking that fallback, the same
+# refusal fm-merge-local.sh applies, so a corrupt meta record can never turn a
+# review into a diff of the wrong content.
+# Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu
 
@@ -27,7 +30,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
-  echo "usage: fm-review-diff.sh <task-id> [--stat] [--branch <name>]" >&2
+  echo "usage: fm-review-diff.sh <task-id> [--stat]" >&2
 }
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
@@ -37,25 +40,13 @@ fi
 
 ID=${1:-}
 [ -n "$ID" ] || { usage; exit 1; }
-shift
 STAT_ONLY=false
-BRANCH_OVERRIDE=
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --stat) STAT_ONLY=true; shift ;;
-    --branch)
-      BRANCH_OVERRIDE=${2:-}
-      [ -n "$BRANCH_OVERRIDE" ] || { echo "error: --branch needs a branch name" >&2; exit 1; }
-      shift 2
-      ;;
-    --branch=*)
-      BRANCH_OVERRIDE=${1#--branch=}
-      [ -n "$BRANCH_OVERRIDE" ] || { echo "error: --branch needs a branch name" >&2; exit 1; }
-      shift
-      ;;
-    *) usage; exit 1 ;;
-  esac
-done
+case "${2:-}" in
+  '') ;;
+  --stat) STAT_ONLY=true ;;
+  *) usage; exit 1 ;;
+esac
+[ $# -le 2 ] || { usage; exit 1; }
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
@@ -85,21 +76,18 @@ default_branch() {
 
 DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 
-# The crewmate's branch is whatever the worktree has checked out; the name is no
-# longer a fixed fm/<id> (see bin/fm-brief.sh branch convention). A readable HEAD
-# is authoritative; --branch only recovers the detached case.
-DISCOVERED=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-if [ -n "$DISCOVERED" ]; then
-  if [ -n "$BRANCH_OVERRIDE" ] && [ "$BRANCH_OVERRIDE" != "$DISCOVERED" ]; then
-    echo "error: --branch $BRANCH_OVERRIDE disagrees with the branch task $ID has checked out ($DISCOVERED); --branch only recovers a detached worktree" >&2
-    exit 1
-  fi
-  BRANCH=$DISCOVERED
-else
-  BRANCH=$BRANCH_OVERRIDE
-  [ -n "$BRANCH" ] || { echo "error: worktree $WT for task $ID is detached; no branch to diff (pass --branch <name>)" >&2; exit 1; }
+BRANCH=$(grep '^branch=' "$META" | cut -d= -f2- || true)
+[ -n "$BRANCH" ] || BRANCH="fm/$ID"
+if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+  echo "error: task $ID has an invalid recorded ship branch '$BRANCH'" >&2
+  exit 1
 fi
-git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $WT" >&2; exit 1; }
+if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
+  WANT=$BRANCH
+  BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  [ -n "$BRANCH" ] || { echo "error: ship branch $WANT does not exist and worktree $WT is detached" >&2; exit 1; }
+  git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $WT" >&2; exit 1; }
+fi
 
 pr_number_from_target() {
   local target=$1 n

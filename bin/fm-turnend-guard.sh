@@ -66,7 +66,11 @@
 # auto-arm (bin/fm-claude-stop-autoarm.sh), which fires on the same Stop event:
 #   1. a live identity-matched watcher with a fresh beacon - or, in away mode, a
 #      live identity-matched daemon with a fresh beacon - allows immediately;
-#   2. otherwise wait briefly (FM_CLAUDE_AUTOARM_SYNC_WAIT_MS, default 800ms)
+#   2. an unhealthy session with a verified live session-lock owner it does not
+#      own under the shared ancestry-or-trusted-id verdict exits with a read-only
+#      diagnostic instead of blocking a session that cannot repair supervision
+#      without stealing ownership;
+#   3. otherwise wait briefly (FM_CLAUDE_AUTOARM_SYNC_WAIT_MS, default 800ms)
 #      for the auto-arm to claim this home (a live OPEN generation claim in the
 #      state/.claude-autoarm-epoch ledger - fm_autoarm_claim_open - or a legacy
 #      build's lock-holding claim under the legacy abandonment proof) or to
@@ -75,11 +79,16 @@
 #      without consuming a continuation, so one event epoch yields exactly one recovery turn;
 #      the first fresh exhausted-failure epoch preserves the bounded progression,
 #      while later fresh failed epochs consume it instead of resetting it;
-#   3. only when neither materializes is the auto-arm genuinely absent: re-block
+#   4. only when neither materializes is the auto-arm genuinely absent: re-block
 #      with the repair banner, bounded to FM_CLAUDE_TURNEND_BLOCK_BUDGET
 #      (default 3) consecutive blocks per session - safely below Claude Code's
 #      hard 8-consecutive-block override - then allow one loud attended
-#      fail-open only for an already verified failure episode.
+#      fail-open only for an already verified failure episode. The budget
+#      charges each event epoch once, and it also charges every re-block
+#      against an epoch the auto-arm never advanced past the previous
+#      re-block (budget_account_current_epoch owns that rule), so an inert
+#      hook that leaves the ledger frozen cannot hold the guard in an
+#      unbounded re-block loop below that override.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -162,6 +171,10 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+if [ "$CLAUDE_MODE" -eq 1 ]; then
+  # shellcheck source=bin/fm-session-lock-lib.sh
+  . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+fi
 
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
@@ -241,6 +254,18 @@ block_stop() {
   exit 2
 }
 
+# Another verified live session owns the home lock under the shared
+# ancestry-or-trusted-id verdict. This session is read-only and cannot arm or
+# repair supervision without
+# stealing ownership, so blocking its Stop would create an impossible loop.
+# Report the ownership conflict as a diagnostic and let this turn end safely;
+# the owning session remains responsible for restoring the watcher.
+if [ "$CLAUDE_MODE" -eq 1 ] && fm_session_lock_foreign_owner_live "$STATE"; then
+  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS OWNED BY ANOTHER LIVE SESSION: this read-only session cannot and should not arm or repair the watcher (lock owner pid %s). Allowing this turn to end safely; the owning session must restore supervision."}\n' \
+    "$FM_SESSION_LOCK_FOREIGN_OWNER_PID"
+  exit 0
+fi
+
 if [ "$CLAUDE_MODE" -eq 0 ]; then
   block_stop
 fi
@@ -249,12 +274,31 @@ fi
 # The Stop-owned auto-arm fires on the same Stop event. Give it a brief bounded
 # window to prove it owns recovery for this event epoch before consuming one of
 # Claude's bounded continuations.
-budget_account_current_epoch() {
-  local current_epoch outcome old_session old_count old_epoch tmp initialized
+#
+# Budget accounting, under the budget lock. Sets COUNT (the session's
+# consumed continuations, including this one) and BUDGET_INITIALIZED_FAILURE.
+# The ledger's epoch identity is what is charged: a new epoch charges once,
+# and an epoch this same invocation already charged is never charged again,
+# because the wait loop above can observe one fresh terminal epoch many times
+# before the block decision. Across Stops the two callers differ:
+#   - observe (the allow paths in autoarm_owns_recovery): seeing an
+#     already-charged epoch again is free - it is the same claim, seen again.
+#   - block (the re-block path): a re-block against the epoch the previous
+#     re-block already charged is a new consumed continuation, because the
+#     auto-arm advanced nothing between the two Stops - it did not participate
+#     at all, which is exactly the absence this budget bounds. Charging only
+#     epoch changes let an inert hook (identity-gated, never fired, or failing
+#     before its generation claim) freeze the ledger and the count together,
+#     so the guard re-blocked without limit and the attended fail-open below
+#     never became reachable.
+BUDGET_CHARGED_EPOCH=
+budget_account_current_epoch() {  # [observe|block]
+  local mode=${1:-observe} current_epoch outcome old_session old_count old_epoch tmp initialized charged
   fm_lock_try_acquire "$BUDGET_LOCK" || return 1
   current_epoch=$(sed -n '1s/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   initialized=0
+  charged=0
   COUNT=0
   if [ -f "$BUDGET_FILE" ]; then
     old_session=$(sed -n '1s/^session=//p' "$BUDGET_FILE" 2>/dev/null || true)
@@ -266,13 +310,18 @@ budget_account_current_epoch() {
     if [ "$old_session" = "$SESSION_ID" ]; then
       COUNT=$old_count
       if [ -n "$current_epoch" ] && [ "$old_epoch" = "$current_epoch" ]; then
-        :
+        if [ "$mode" = block ] && [ "$BUDGET_CHARGED_EPOCH" != "$current_epoch" ]; then
+          COUNT=$((COUNT + 1))
+          charged=1
+        fi
       else
         COUNT=$((COUNT + 1))
+        charged=1
       fi
     fi
   fi
   if [ ! -f "$BUDGET_FILE" ] || [ "${old_session:-}" != "$SESSION_ID" ]; then
+    charged=1
     case "$outcome" in
       failed|failed-suppressed)
         if [ -e "$FAILURE_NOTICE" ]; then
@@ -293,6 +342,7 @@ budget_account_current_epoch() {
     return 1
   fi
   rm -f "$tmp" 2>/dev/null || true
+  [ "$charged" -eq 0 ] || BUDGET_CHARGED_EPOCH=$current_epoch
   BUDGET_INITIALIZED_FAILURE=$initialized
   fm_lock_release "$BUDGET_LOCK"
   return 0
@@ -456,7 +506,7 @@ fi
 
 # The auto-arm genuinely failed to establish: consume the bounded re-block
 # budget before considering the verified one-time attended fail-open.
-budget_account_current_epoch || block_stop
+budget_account_current_epoch block || block_stop
 terminal_fail_open
 terminal_status=$?
 if [ "$terminal_status" -eq 0 ]; then

@@ -73,6 +73,17 @@ FM_BACKLOG_ROW_HOLD_KIND=
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 FM_BACKLOG_CLOSE_REPLAY_RESULT=
 
+# Bounded execution is fm-timeout-lib.sh's alone; source it rather than
+# re-deriving a deadline here. It is stateless, so the memoisation reason this
+# library does not source fm-tasks-axi-lib.sh does not apply.
+# shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
+
+# Latched when a row read hits its bound. fm_backlog_row_show runs inside a
+# command substitution, so the subshell can READ this latch but cannot set it;
+# the callers that capture its status own the write.
+FM_BACKLOG_ROW_SHOW_WEDGED=0
+
 # Emit each byte of a value as a decimal number, locale-independently.
 # Deliberately perl rather than od: the spawn and teardown lifecycle runs under a
 # curated PATH (tests/fm-teardown.test.sh make_path_without_lsof pins that set)
@@ -308,28 +319,17 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
 # Run `tasks-axi` with an optional FM_TASKS_AXI_TIMEOUT bound. A caller that
 # holds a lock across the call - the spawn commit and its preservation
 # read-back run under the per-task meta lock - sets the bound, so an
-# unresponsive tasks-axi cannot hold that lock open indefinitely; a timed-out
-# call exits 124, or 137 when the kill-after had to fire (GNU timeout's own
-# status for a KILL-forced expiry), and the callers treat either as the bound
-# expiring and report the timeout as the reason through their existing error
-# plumbing. GNU timeout is used where it exists,
-# gtimeout where coreutils ships under that name, and a small perl watchdog
-# elsewhere (a stock macOS host has perl but no timeout variant; perl is
-# already a hard dependency of this library's byte validators, so the
-# fallback adds no new tool). Every bounded path forces termination: a
-# tasks-axi that ignores SIGTERM must not outlive the bound, since an
-# unbounded call under the lock is exactly the hang the bound exists to
-# prevent - so the GNU variants carry a kill-after of one further bound
-# (TERM at the bound, KILL after that grace) and the watchdog kills the
-# same way. When a bound was requested but no bounding mechanism exists at
-# all, the call fails closed instead of running unbounded. Must be the last
-# command of a subshell: the exec keeps the tasks-axi process exactly where
-# the plain call sat, and the bound kills the child, not the caller.
+# unresponsive tasks-axi cannot hold that lock open indefinitely. The bound is
+# fm_exec_timed's (bin/fm-timeout-lib.sh), with one further bound of grace
+# before KILL so a tasks-axi that ignores SIGTERM cannot outlive it either; the
+# callers treat fm_timed_out statuses as the bound expiring and report the
+# timeout as the reason through their existing error plumbing. A bound that
+# cannot be enforced on this host fails closed instead of running unbounded.
+# Must be the last command of a subshell: the exec keeps the tasks-axi process
+# exactly where the plain call sat, and the bound kills the child, not the
+# caller.
 fm_tasks_axi_timeout_expired() {  # <status>
-  case $1 in
-    124 | 137) return 0 ;;
-  esac
-  return 1
+  fm_timed_out "$1"
 }
 
 fm_tasks_axi() {
@@ -337,67 +337,67 @@ fm_tasks_axi() {
   if [ -z "$bound" ]; then
     exec tasks-axi "$@"
   fi
-  if command -v timeout >/dev/null 2>&1; then
-    exec timeout -k "$bound" "$bound" tasks-axi "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    exec gtimeout -k "$bound" "$bound" tasks-axi "$@"
-  elif command -v perl >/dev/null 2>&1; then
-    # Fork, run tasks-axi in the child, and poll waitpid(WNOHANG) until the
-    # child exits or the bound expires: the same contract as
-    # `timeout $bound tasks-axi ...`. Expiry kills the child with TERM, waits
-    # one further bound of grace, then KILL, and exits 124 so the callers'
-    # timeout plumbing reports it. Polling rather than alarm+die keeps the
-    # bound off perl's platform-dependent syscall-restart signal semantics.
-    exec perl -MPOSIX=WNOHANG -e '
-      my $bound = shift;
-      exit 127 unless defined $bound && $bound =~ /\A[0-9]+\z/;
-      my $pid = fork;
-      exit 127 unless defined $pid;
-      if ($pid == 0) { exec @ARGV; exit 127 }
-      my $step = 0.05;
-      my $elapsed = 0;
-      while (1) {
-        my $done = waitpid $pid, WNOHANG;
-        exit(($? & 127) ? 128 + ($? & 127) : $? >> 8) if $done == $pid;
-        exit 127 if $done == -1;
-        if ($elapsed >= $bound) {
-          kill "TERM", $pid;
-          my $grace = 0;
-          my $gone = waitpid $pid, WNOHANG;
-          while ($gone == 0 && $grace < $bound) {
-            select undef, undef, undef, $step;
-            $grace += $step;
-            $gone = waitpid $pid, WNOHANG;
-          }
-          kill "KILL", $pid if $gone == 0;
-          waitpid $pid, 0;
-          exit 124;
-        }
-        select undef, undef, undef, $step;
-        $elapsed += $step;
-      }
-    ' -- "$bound" tasks-axi "$@"
-  fi
-  printf 'fm_tasks_axi: cannot bound tasks-axi within %ss: none of timeout, gtimeout, or perl is available\n' "$bound" >&2
-  exit 127
+  fm_exec_timed "$bound" "$bound" tasks-axi "$@"
 }
 
-# Print one row's `tasks-axi show` output (plus stderr); the exit status is
-# tasks-axi's. Extra flags (such as --full) are passed through.
+# Print one row's `tasks-axi show` output (plus stderr) from the addressing
+# fm_backlog_tasks_axi_addressing resolved, with `--file` only for the markdown
+# backend. Addressing or backend-resolution errors return before tasks-axi runs;
+# otherwise its exit status is preserved. Extra flags (--full) pass through.
+#
+# Every read is bounded, because a wedged backend read here is what blinds a
+# whole session start: bin/fm-bootstrap.sh's reconcile and close-replay sweeps
+# call this once per item, and one unbounded read consumes the entire
+# FM_SESSION_START_TIMEOUT and truncates the digest before the wake queue,
+# supervision instructions, fleet state and context sections ever print. The
+# bound turns that into a loud partial reconcile: the caller reports the item it
+# could not read and moves to the next one.
+#
+# A per-item bound alone is not enough on a home carrying a large fleet, because
+# N wedged items still cost N bounds and the digest is truncated anyway. So the
+# first bound hit latches FM_BACKLOG_ROW_SHOW_WEDGED and every later read in the
+# same sweep returns immediately, still naming its own item so nothing is
+# silently skipped. This function only READS that latch: it runs inside a
+# command substitution, and a write here would die with the subshell, so the
+# callers that capture its status set it. The latch is deliberately
+# process-wide because these scripts are short-lived and a backend that wedged
+# once will wedge again within the same run.
 fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
-  local data=$1 id=$2 addressing_status
+  local data=$1 id=$2 out status addressing_status secs=${FM_BACKLOG_ROW_TIMEOUT_SECS:-10}
   shift 2
+  # A non-positive bound is not a bound (fm-timeout-lib.sh), and a padded zero
+  # such as 00 is still zero, so the digits test alone would let the very read
+  # this bound exists to prevent back in. Compare arithmetically, tolerating a
+  # value too large for the shell to compare at all.
+  case "$secs" in ''|*[!0-9]*) secs=10 ;; esac
+  [ "$secs" -gt 0 ] 2>/dev/null || secs=10
   fm_backlog_tasks_axi_addressing "$data"
   addressing_status=$?
   if [ "$addressing_status" -ne 0 ]; then
     [ -z "${FM_BACKLOG_TRANSITION_ERROR:-}" ] || printf '%s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2
     return "$addressing_status"
   fi
-  if [ -n "$FM_BACKLOG_AXI_FILE" ]; then
-    (cd "$FM_BACKLOG_AXI_ROOT" 2>/dev/null && fm_tasks_axi show "$id" "$@" --file "$FM_BACKLOG_AXI_FILE" 2>&1)
-  else
-    (cd "$FM_BACKLOG_AXI_ROOT" 2>/dev/null && fm_tasks_axi show "$id" "$@" 2>&1)
+  if [ "$FM_BACKLOG_ROW_SHOW_WEDGED" = 1 ]; then
+    printf 'tasks-axi show %s skipped: the backlog backend already exceeded its %ss read bound\n' "$id" "$secs"
+    return 124
   fi
+  if [ -n "$FM_BACKLOG_AXI_FILE" ]; then
+    set -- "$@" --file "$FM_BACKLOG_AXI_FILE"
+  fi
+  # shellcheck disable=SC2016  # Expansion is deliberately deferred to the child shell.
+  out=$(fm_run_timed "$secs" bash -c 'cd "$1" 2>/dev/null || exit 1; shift; exec tasks-axi show "$@"' \
+    _ "$FM_BACKLOG_AXI_ROOT" "$id" "$@" 2>&1)
+  status=$?
+  # A backend that wrote a header or a progress line before wedging leaves that
+  # fragment as the first output line, and every caller reads the first line as
+  # the failure reason. Whatever a timed-out read managed to emit is incomplete
+  # by definition, so the bound speaks for it instead.
+  if [ "$status" -eq 124 ]; then
+    printf 'tasks-axi show %s exceeded its %ss backlog read bound\n' "$id" "$secs"
+  else
+    printf '%s\n' "$out"
+  fi
+  return "$status"
 }
 
 fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
@@ -436,6 +436,7 @@ fm_backlog_row_probe() {  # <data-dir> <id>
   fi
   out=$(fm_backlog_row_show "$data" "$id")
   command_status=$?
+  [ "$command_status" -ne 124 ] || FM_BACKLOG_ROW_SHOW_WEDGED=1
   if [ "$command_status" -ne 0 ]; then
     if printf '%s\n' "$out" | grep -q '^code: NOT_FOUND$'; then
       FM_BACKLOG_ROW_RESULT=not_found
@@ -559,19 +560,29 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
   if [ -n "$deliverable" ]; then
     out=$(fm_backlog_row_show "$data" "$id" --full)
     command_status=$?
+    [ "$command_status" -ne 124 ] || FM_BACKLOG_ROW_SHOW_WEDGED=1
     if [ "$command_status" -ne 0 ]; then
       FM_BACKLOG_TRANSITION_ERROR=$(printf '%s\n' "$out" | sed -n '1p')
       [ -n "$FM_BACKLOG_TRANSITION_ERROR" ] \
         || FM_BACKLOG_TRANSITION_ERROR="tasks-axi show $id failed with no output"
       return "$command_status"
     fi
+    # The leading quote selects a JSON-encoded bare string, which is exactly the
+    # value an older JSON::PP rejects unless allow_nonref is asked for, so the
+    # decoder below requests it rather than inheriting the local default. It then
+    # writes bytes, because printing the decoded characters to a stream with no
+    # :raw layer emits a codepoint at or below U+00FF as one latin-1 byte and
+    # silently corrupts the body this rewrites.
     body=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1 \
       | LC_ALL=C perl -MJSON::PP -e '
         local $/;
         my $shown = <STDIN>;
         $shown =~ s/\s+\z//;
         exit 0 if $shown eq "" || $shown eq "-";
-        my $value = $shown =~ /\A"/ ? decode_json($shown) : $shown;
+        my $value = $shown =~ /\A"/
+          ? JSON::PP->new->utf8->allow_nonref->decode($shown) : $shown;
+        binmode STDOUT, ":raw";
+        utf8::encode($value) if utf8::is_utf8($value);
         print $value unless $value eq "-";
       ') || {
       FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"

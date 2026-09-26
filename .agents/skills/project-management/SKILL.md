@@ -29,13 +29,14 @@ Apply `AGENTS.md` section 7's authoritative secondmate routing rules; if an exis
 Absence from the main `data/projects.md` registry is never evidence that no second mate owns the domain.
 If the owning second mate cannot accept the route, report that concrete blocker or obtain an explicit captain redirection rather than silently duplicating the project in the main home.
 
-Resolve the project name, destination, delivery posture, autonomy posture, and ticket mandate before changing local or remote state.
+Resolve the project name, destination, delivery posture, and autonomy posture before changing local or remote state.
 Keep a newly added clone and its registry entry consistent, and roll back only artifacts created by the incomplete operation when a later initialization step fails and that rollback is safe.
 Do not overwrite or repurpose an existing path.
 
 ## Delivery posture
 
-The registry records the project's standing posture, which is the captain's default for the work rather than any task's answer; `AGENTS.md` section 7 owns how each task's concrete mode and yolo are resolved at intake and passed explicitly to the brief, the spawn, and any promotion.
+The registry records the project's standing delivery posture and optional ship-branch prefix, which are the captain's defaults rather than any task's answer.
+`AGENTS.md` section 7 owns how each task's concrete mode, yolo, and branch prefix are resolved at intake and passed explicitly to the brief, the spawn, and any promotion.
 Choose that posture when adding or creating the project:
 
 - `no-mistakes` runs the full validation pipeline before a PR.
@@ -52,12 +53,17 @@ The optional `+yolo` posture changes merge authority only and does not change th
 Default it off for every project and every posture, and enable it only on the captain's explicit instruction.
 `AGENTS.md` section 7 owns the merge-authority contract.
 
-The optional `+ticket:<prefix>` flag records that the project mandates a tracker ticket per change, and is likewise orthogonal to the delivery mode.
-Set it only when the captain confirms the mandate and names the tracker's id prefix; `bin/fm-brief.sh` owns what it does to the crew branch name.
+The optional `forge=` token records which forge the project's remote actually is; its one value is `forge=gerrit`.
+It is orthogonal to the mode and to `+yolo`, so it is never derived from either, and it is never inferred at use time from a remote name, host, port, or push target.
+At add or create intake, run `bin/fm-forge-detect.sh projects/<name>` once the clone exists and propose its answer alongside the posture; the captain's confirmation is what binds it, and the registry token is the durable record of that confirmation.
+Never register the binding from detection alone, and never re-derive it later from the clone.
+A forge composes with `no-mistakes`, `direct-PR`, and `no-mistakes-prod-only`, and the registry refuses it on `local-only`, which publishes nothing; a Gerrit-hosted project kept local registers `local-only` with no forge token.
+`yolo` is inactive on a `forge=gerrit` project, so never propose `+yolo` alongside it.
+`bin/fm-project-mode.sh`'s header owns the binding and `bin/fm-dod-lib.sh` owns what it changes for a worker.
 
 ## Add or clone an existing project
 
-Confirm the source URL, local project name, delivery posture, autonomy posture, and ticket mandate, stating the resolved default for each rather than asking the captain to invent one.
+Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.

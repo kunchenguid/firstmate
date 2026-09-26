@@ -33,6 +33,11 @@ FM_TEST_LIB_SOURCED=1
 # suite's fixtures were written against.
 umask 022
 
+# Fixture Git isolation for every suite that reaches this library; the helper's
+# header owns the invariant and the layers it deliberately leaves in force.
+# shellcheck source=tests/git-config-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/git-config-helpers.sh"
+
 # Exempt firstmate's own test suite from the gate-lifecycle refusal
 # (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
 # worktree - the exact environment that guard refuses - so without this every
@@ -42,11 +47,26 @@ umask 022
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Arms the test-only seams bin/ scripts expose (e.g. fm-afk-launch.sh's
+# FM_TEST_HARNESS harness pin). Normal primary launches do not arm it, so a
+# leaked harness pin alone stays inert outside a suite.
+export FM_TEST_SEAM=1
+
 # Clear the task-worker marker bin/fm-spawn.sh exports into ship and scout
 # panes. This suite builds git-init fixture repositories whose primary checkout
 # it runs a copied bin/fm-test-run.sh in, and that runner refuses the primary
 # under the marker. A case that verifies the refusal sets FM_TASK_ID itself.
 unset FM_TASK_ID
+
+# Clear the tasks-axi env overrides. An operator shell exports TASKS_AXI_FILE
+# (and may export TASKS_AXI_BACKEND) at its real home's backlog, and tasks-axi
+# resolves that env AHEAD of the .tasks.toml a fixture copies, so a suite that
+# seeds a temp home with bare `tasks-axi` would silently write the operator's
+# live backlog instead - tests/fm-public-followup.test.sh did exactly that. Every
+# fixture addresses its own data/backlog.md through its copied .tasks.toml, an
+# explicit --file, or bin/fm-tasks-axi.sh; a case that verifies the wrapper
+# against an ambient override sets TASKS_AXI_FILE itself.
+unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
@@ -136,6 +156,47 @@ fm_test_reap_procevent_homes() {
   rm -f "$FM_TEST_PROCEVENT_REGISTRY"
 }
 
+# --- armed watcher reaping ----------------------------------------------------
+#
+# A real bin/fm-watch.sh a suite arms for a temporary home is a long-lived
+# process that outlives the test on its own; only stopping the exact watcher the
+# home's lock names ends it. Registration goes through a `$$`-keyed registry
+# file for the same reason the runners above do. The reap is scoped to each
+# tracked state directory: it reads the home that watcher recorded in its own
+# lock and drives the arm's home-scoped --stop against it, which identity-checks
+# the pid before signalling, so it never matches on a script or process name and
+# never reaches another home's watcher. A tracked state directory a test already
+# deleted has no lock and is skipped; that watcher exits on its own home-gone
+# check within one poll.
+
+FM_TEST_WATCHER_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-watcher.$$.XXXXXX") || return 1
+
+fm_test_track_watcher_state() {  # <state-dir>
+  [ -n "${1:-}" ] || return 1
+  printf '%s\n' "$1" >> "$FM_TEST_WATCHER_REGISTRY"
+}
+
+fm_test_reap_watchers() {
+  local state lock_home seen=$'\n'
+  [ -f "$FM_TEST_WATCHER_REGISTRY" ] || return 0
+  while IFS= read -r state; do
+    [ -n "$state" ] || continue
+    case "$seen" in *$'\n'"$state"$'\n'*) continue ;; esac
+    seen+="$state"$'\n'
+    [ -f "$state/.watch.lock/pid" ] || continue
+    # A fixture that fabricates a lock naming this test process (the
+    # drain-liveness assertion writes $$ with the runner's own identity) is not
+    # an armed watcher. Stopping it would signal the runner, and the suite's
+    # TERM trap re-enters this reap, looping forever. Never reap our own pid.
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$$" ] || continue
+    lock_home=$(cat "$state/.watch.lock/fm-home" 2>/dev/null || true)
+    [ -n "$lock_home" ] || continue
+    FM_HOME="$lock_home" FM_STATE_OVERRIDE="$state" \
+      "$ROOT/bin/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
+  done < "$FM_TEST_WATCHER_REGISTRY"
+  rm -f "$FM_TEST_WATCHER_REGISTRY"
+}
+
 # Ceiling on how long a fixture's blocking stub may keep polling. A stub that
 # waits for a trigger file by re-running `sleep` is a high-frequency source of
 # process spawns, and one that outlives its test - because the test was killed
@@ -146,15 +207,26 @@ fm_test_reap_procevent_homes() {
 FM_TEST_STUB_MAX_BLOCK_SECONDS=${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}
 export FM_TEST_STUB_MAX_BLOCK_SECONDS
 
+# Remove a fixture tree even when it holds a read-only directory, such as the
+# spawn-owned state/<id>.git-hooks strip directory.
+fm_test_remove_tree() {
+  local dir=$1
+  if [ -d "$dir" ] && [ ! -L "$dir" ]; then
+    find "$dir" -type d -exec chmod u+rwx {} + 2>/dev/null || true
+  fi
+  rm -rf "$dir"
+}
+
 fm_test_cleanup() {
   local d
+  fm_test_reap_watchers
   fm_test_reap_procevent_homes
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    [ -n "$d" ] && fm_test_remove_tree "$d"
   done
   if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
     while IFS= read -r d; do
-      [ -n "$d" ] && rm -rf "$d"
+      [ -n "$d" ] && fm_test_remove_tree "$d"
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi
@@ -208,10 +280,7 @@ fm_test_reap_orphans() {
     mtime=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null) || continue
     [ $((now - mtime)) -ge "$FM_TEST_ORPHAN_MAX_AGE_SECONDS" ] || continue
     dir=$(dirname "$marker")
-    if [ -d "$dir" ] && [ ! -L "$dir" ]; then
-      find "$dir" -type d -exec chmod u+rwx {} + 2>/dev/null || true
-    fi
-    rm -rf "$dir"
+    fm_test_remove_tree "$dir"
   done
 }
 
@@ -379,6 +448,34 @@ echo "fm-crash-inject: pid $target still running 30s after SIGKILL" >&2
 exit 1
 SH
   chmod +x "$fakebin/fm-crash-inject"
+}
+
+# fm_fake_blind_ancestry <fakebin>
+# Blind the parent-chain walks: a query of the FIELD-FIRST per-pid form those walks
+# use - `ps -o comm=|args=|ppid= -p <pid>`, the shape in bin/fm-harness.sh,
+# bin/fm-session-lock-lib.sh, bin/fm-sessionstart-nudge.sh and bin/fm-backend.sh's
+# cmux ancestor detection - reports a bash ancestor terminating at pid 1, so ancestry
+# proves nothing and the marker a case sets is the only evidence left. A case that pins
+# its harness with a marker (CLAUDECODE=1 and friends) needs this, because a structural
+# ancestor of a DIFFERENT harness outranks a marker - without it, the harness the SUITE
+# was launched from decides the verdict.
+# Every other ps query reaches the real ps untouched, and the pid-first form is
+# deliberately among them: bin/fm-tmux-lib.sh and bin/backends/tmux.sh read pane and
+# cursor identity with `ps -p <pid> -o args=`, so intercepting that shape too would make
+# a pane assertion under a PATH-wide blind read `bash` and reject every cursor pane.
+fm_fake_blind_ancestry() {
+  local fakebin=$1 real_ps
+  real_ps=$(command -v ps) || return 1
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  '-o comm= -p '*) printf '%s\n' bash ;;
+  '-o args= -p '*) printf '%s\n' bash ;;
+  '-o ppid= -p '*) printf '%s\n' 1 ;;
+  *) exec "$real_ps" "\$@" ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
 }
 
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>

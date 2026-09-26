@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Parity guard for firstmate's shell-lint definition.
 #
-# bin/fm-lint.sh must be the single owner that BOTH CI
-# (.github/workflows/ci.yml) and the pre-push gate (.no-mistakes.yaml
-# commands.lint) invoke, so the local lint can never diverge from CI again.
+# bin/fm-lint.sh is the single owner invoked by CI
+# (.github/workflows/ci.yml) and by the pre-push gate (.no-mistakes.yaml
+# commands.lint). CI runs its two full-rigor canonical partitions; the local
+# gate uses its context-selected default. Their selection differs deliberately,
+# while this owner keeps analysis flags, configuration, and tool versions from
+# drifting.
 # Regression origin: with no commands.lint configured, the local no-mistakes
-# lint step never ran the deterministic
-# `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh`, so PRs passed local
-# validation yet failed that exact check in CI on info/warning findings such as
-# SC2015, SC1007, and SC2034. A second axis was tool-version skew: CI's
-# ShellCheck floated with the runner image and still emitted SC2015, which
-# ShellCheck retired in 0.11.0. fm-lint.sh now pins one exact version and both
-# gates resolve it, so command, file set, config, AND version all match.
+# lint step never ran the deterministic shell lint, so PRs passed local
+# validation yet failed CI on info/warning findings such as SC2015, SC1007, and
+# SC2034. A second axis was tool-version skew: CI's ShellCheck floated with the
+# runner image and still emitted SC2015, which ShellCheck retired in 0.11.0.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -176,6 +176,48 @@ test_list_files_reports_the_shell_inventory() {
   [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
     || fail "fm-lint.sh --list-files did not return the complete shell inventory"
   pass "fm-lint.sh --list-files reports the complete shell inventory"
+}
+
+test_canonical_partitions_preserve_full_lint() {
+  local tmp fakebin all part selected log flags mode rc option
+  tmp=$(fm_test_tmproot fm-lint-partitions)
+  fakebin="$tmp/bin"
+  mkdir -p "$fakebin"
+  all=$(CI=true "$LINT" --list-files | LC_ALL=C sort)
+  : > "$tmp/union"
+  for part in 1of2 2of2; do
+    selected=$(CI=false GITHUB_ACTIONS=false "$LINT" --partition "$part" --list-files) \
+      || fail "partition $part must select full canonical roots even on a local branch"
+    [ -n "$selected" ] || fail "empty lint partition $part"
+    printf '%s\n' "$selected" >> "$tmp/union"
+    [ "$selected" = "$("$LINT" --partition "$part" --list-files)" ] \
+      || fail "partition $part is nondeterministic"
+    log="$tmp/$part.roots"
+    flags="$tmp/$part.flags"
+    mode="$tmp/$part.mode"
+    fm_lint_stub_shellcheck "$fakebin" "$log"
+    PATH="$fakebin:$PATH" FM_TEST_FLAG_LOG="$flags" FM_TEST_MODE_LOG="$mode" \
+      "$LINT" --partition "$part" > "$tmp/$part.out" 2>&1 \
+      || fail "canonical partition $part failed: $(cat "$tmp/$part.out")"
+    [ "$(LC_ALL=C sort "$log")" = "$(printf '%s\n' "$selected" | LC_ALL=C sort)" ] \
+      || fail "partition $part executed a different root set than it listed"
+    [ "$(LC_ALL=C sort -u "$flags")" = "$(printf 'exclude=none\nexternal-sources=yes')" ] \
+      || fail "partition $part weakened source-aware analysis"
+    [ "$(LC_ALL=C sort -u "$mode")" = on ] || fail "partition $part disabled full analysis"
+  done
+  [ "$(LC_ALL=C sort "$tmp/union")" = "$all" ] || fail "lint partitions lose or duplicate canonical roots"
+  for option in 0of2 3of2 1of3; do
+    rc=0
+    "$LINT" --partition "$option" --list-files > "$tmp/refused" 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "invalid partition $option was not refused"
+  done
+  rc=0
+  "$LINT" --partition 1of2 --fast > "$tmp/refused" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "partition accepted --fast"
+  rc=0
+  "$LINT" --partition 1of2 bin/fm-lint.sh > "$tmp/refused" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "partition accepted an explicit subset"
+  pass "two canonical lint partitions preserve complete source-aware coverage and reject weakened modes"
 }
 
 # fm_lint_stub_git <fakebin-dir>: install a git stub for the changed-file mode
@@ -530,7 +572,7 @@ test_changed_mode_drops_external_sources_and_excludes_cross_file_codes() {
     "changed-mode local lint did not disclose dropped source following"
   assert_grep $'analysis_mode\tlocal' "$telemetry" \
     "telemetry did not record local analysis mode"
-  assert_grep $'source_directives\t4' "$telemetry" \
+  assert_grep $'source_directives\t5' "$telemetry" \
     "telemetry did not count the changed root's source directives"
   assert_grep $'source_followed_directives\t0' "$telemetry" \
     "telemetry reported followed sources in no-external-sources mode"
@@ -669,10 +711,16 @@ test_changed_mode_hides_cross_file_codes_that_ci_still_sees() {
     pass "SKIP (ShellCheck $REQUIRED not resolved): changed-mode exclusion behavior"
     return
   fi
-  local tmp fakebin diff_file fixture out rc
+  local tmp fakebin diff_file fixture out rc test_root lint
   tmp=$(fm_test_tmproot fm-lint-local-exclude-behavior)
-  fixture="$ROOT/tests/fm-lint-local-exclude-fixture.test.sh"
-  printf '%s\n' "$fixture" >> "$FM_TEST_CLEANUP_REGISTRY"
+  test_root="$tmp/repo"
+  mkdir -p "$test_root/bin/backends" "$test_root/tests" "$test_root/.github/workflows"
+  lint="$test_root/bin/fm-lint.sh"
+  cp "$LINT" "$lint"
+  cp "$ROOT/bin/fm-lint-workflows.sh" "$test_root/bin/"
+  cp "$ROOT"/.github/workflows/* "$test_root/.github/workflows/"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$test_root/bin/backends/noop.sh"
+  fixture="$test_root/tests/fm-lint-local-exclude-fixture.test.sh"
   cat > "$fixture" <<'SH'
 #!/usr/bin/env bash
 # Assigned here and only consumed by a library the local gate does not follow.
@@ -696,14 +744,14 @@ SH
   rc=0
   out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
     FM_TEST_GIT_BRANCH=feature \
-    FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" 2>&1) || rc=$?
+    FM_TEST_GIT_DIFF_FILE="$diff_file" "$lint" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] \
     || fail "changed-mode local lint failed a cross-file-only fixture"$'\n'"$out"
   assert_not_contains "$out" "SC2034" "changed-mode local lint still reported SC2034"
   assert_not_contains "$out" "SC2329" "changed-mode local lint still reported SC2329"
 
   rc=0
-  out=$("$LINT" "$fixture" 2>&1) || rc=$?
+  out=$("$lint" "$fixture" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "explicit-path lint passed a cross-file-only fixture"$'\n'"$out"
   assert_contains "$out" "SC2034" "explicit-path lint did not keep SC2034"
   assert_contains "$out" "SC2329" "explicit-path lint did not keep SC2329"
@@ -1364,6 +1412,7 @@ SH
 
 test_help_reports_the_complete_interface
 test_list_files_reports_the_shell_inventory
+test_canonical_partitions_preserve_full_lint
 test_fast_mode_disables_extended_analysis
 test_ci_defaults_to_full_analysis
 test_ci_rejects_explicit_fast_mode

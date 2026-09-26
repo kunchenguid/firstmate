@@ -105,15 +105,22 @@
 #                                 (tests); receives task_id and full message as args
 #   FM_PENDING_REPLY_NOW          optional fixed epoch for deterministic tests
 
+# This directive does double duty: it also binds _FM_PENDING_REPLY_LIB_DIR as
+# the bin/ source prefix so the deliberately undirected lazy sources below
+# still resolve for ShellCheck instead of warning SC1091.
 # shellcheck source=bin/fm-marker-lib.sh
 _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_PENDING_REPLY_LIB_DIR="."
 # shellcheck source=bin/fm-marker-lib.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-backend.sh"
-# shellcheck source=bin/fm-tmux-lib.sh
+# Deliberately undirected: this library consumes no symbols from
+# bin/fm-tmux-lib.sh, so following it under ShellCheck's external-source
+# traversal would expand that graph for zero cross-file checks.
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-tmux-lib.sh"
-# shellcheck source=bin/fm-classify-lib.sh
+# Deliberately undirected: bin/fm-classify-lib.sh is already expanded inside
+# bin/fm-wake-lib.sh's single directed expansion below; a second directive
+# here would re-expand the same transitive graph.
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-classify-lib.sh"
 
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
@@ -1098,15 +1105,16 @@ fm_pending_reply_escalation_payload() {  # <record-path> <kind>
 # that exact escalation remains open. If an unrelated decision has since taken
 # over that key, the close is withheld so the unrelated decision is not cleared.
 fm_pending_reply_escalation_line() {  # <status-file> <record-path> <corr_id>
-  local status_file=$1 rec=$2 corr=$3 line found='' kind payload own_key
+  local status_file=$1 rec=$2 corr=$3 line found='' kind payload own_key untimed
   [ -f "$status_file" ] || return 0
   [ "$(fm_pending_reply_get "$rec" corr_id)" = "$corr" ] || return 0
   own_key=$(fm_pending_reply_escalation_key "$corr")
   while IFS= read -r line || [ -n "$line" ]; do
     [ "$(status_line_verb "$line")" = blocked ] || continue
+    _fm_status_untimed "$line" untimed
     for kind in missed delivery-unknown recovery-delivery; do
       payload=$(fm_pending_reply_escalation_payload "$rec" "$kind") || continue
-      case "$line" in
+      case "$untimed" in
         "blocked [key=$own_key]: $payload"|"blocked: $payload") found=$line; break ;;
         "blocked [key=$own_key]: $payload "*|"blocked: $payload "*) found=$line; break ;;
       esac
@@ -1131,7 +1139,9 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
-  # shellcheck source=bin/fm-wake-lib.sh
+  # Deliberately undirected: bin/fm-wake-lib.sh is expanded once at the
+  # fm_pending_reply_try_resolve site; each directed site would re-expand its
+  # whole transitive graph under ShellCheck's external-source traversal.
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$lock" || return 1
   _fm_pending_reply_close_escalation_locked "$@" || rc=$?
@@ -1197,7 +1207,9 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
-  # shellcheck source=bin/fm-wake-lib.sh
+  # Deliberately undirected: bin/fm-wake-lib.sh is expanded once at the
+  # fm_pending_reply_try_resolve site; each directed site would re-expand its
+  # whole transitive graph under ShellCheck's external-source traversal.
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$lock" || return 1
   _fm_pending_reply_maybe_escalate_locked "$@" || rc=$?
@@ -1260,8 +1272,8 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   [ -n "$parent_status" ] || return 1
   mkdir -p "$(dirname "$parent_status")" 2>/dev/null || return 1
   line="blocked [key=$(fm_pending_reply_escalation_key "$corr")]: $payload"
-  if ! grep -Fqx "$line" "$parent_status" 2>/dev/null; then
-    printf '%s\n' "$line" >> "$parent_status" 2>/dev/null || return 1
+  if ! status_event_recorded "$parent_status" "$line"; then
+    printf '%s\n' "$(status_stamp_line "$line")" >> "$parent_status" 2>/dev/null || return 1
   fi
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1
@@ -1352,7 +1364,10 @@ fm_pending_reply_restatement_copy_same_basename() {  # <state-dir> <corr_id> <se
   [ "$stranded" != "$parent_status" ] || return 1
   line=$(fm_pending_reply_find_resolve_line "$stranded" "$corr")
   [ -n "$line" ] || return 1
-  # shellcheck source=bin/fm-parent-channel-lib.sh
+  # Deliberately undirected: bin/fm-parent-channel-lib.sh is expanded once at
+  # the fm_pending_reply_detect_wrong_home site; each directed site would
+  # re-expand its whole transitive graph under ShellCheck's external-source
+  # traversal.
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-parent-channel-lib.sh"
   fm_parent_channel_append_once "$parent_status" "$line"
 }

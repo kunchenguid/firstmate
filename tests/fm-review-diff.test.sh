@@ -11,8 +11,10 @@
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
-#   (f) detached worktree HEAD -> refuse, then recover with --branch; a readable
-#       HEAD still outranks a disagreeing --branch
+#   (f) meta records branch=<custom-prefix> -> the recorded ship branch is
+#       reviewed even when the worktree HEAD has moved off it
+#   (g) meta records a corrupt branch= -> refused, never silently reviewed as
+#       the moved worktree HEAD
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -150,43 +152,6 @@ test_no_pr_meta_uses_local_branch() {
   pass "fm-review-diff without pr= keeps the worktree-branch diff"
 }
 
-# A detached worktree used to be a dead end here, while the sibling merge path
-# could still recover; --branch closes that gap on the same terms.
-test_detached_head_recovers_with_branch_override() {
-  local case_dir out err rc branch
-  case_dir=$(make_case detached-override)
-  stale_and_pr_commits "$case_dir"
-  write_task_meta "$case_dir"
-  branch=$(git -C "$case_dir/wt" symbolic-ref --short HEAD)
-  git -C "$case_dir/wt" checkout -q --detach
-
-  # Without the override the detached worktree still refuses, but now it says how.
-  set +e
-  run_review_diff "$case_dir" task-x1 > /dev/null 2> "$case_dir/stderr"; rc=$?
-  set -e
-  err=$(cat "$case_dir/stderr")
-  [ "$rc" -ne 0 ] || fail "detached-override: a detached worktree with no override must still refuse"
-  assert_contains "$err" "pass --branch <name>" "detached-override: refusal must name the recovery"
-
-  out=$(run_review_diff "$case_dir" task-x1 --branch "$branch" 2> "$case_dir/stderr")
-  assert_contains "$out" '+stale-local' "detached-override: --branch must diff the named branch"
-
-  # A readable HEAD stays authoritative, so a disagreeing --branch is refused.
-  case_dir=$(make_case attached-override-mismatch)
-  stale_and_pr_commits "$case_dir"
-  write_task_meta "$case_dir"
-  git -C "$case_dir/project" branch feat/unrelated main
-  set +e
-  run_review_diff "$case_dir" task-x1 --branch feat/unrelated > /dev/null 2> "$case_dir/stderr"; rc=$?
-  set -e
-  err=$(cat "$case_dir/stderr")
-  [ "$rc" -ne 0 ] || fail "attached-override-mismatch: must refuse a --branch that is not the checked-out branch"
-  assert_contains "$err" "disagrees with the branch task task-x1 has checked out" \
-    "attached-override-mismatch: must explain the mismatch"
-
-  pass "fm-review-diff --branch recovers a detached worktree and defers to a readable HEAD"
-}
-
 test_unreachable_pr_head_falls_back_with_warning() {
   local case_dir out err
   case_dir=$(make_case fetch-fallback)
@@ -208,9 +173,53 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+test_recorded_branch_beats_moved_worktree_head() {
+  local case_dir out
+  case_dir=$(make_case recorded-branch)
+  # The task ships on its recorded custom-prefix branch; the worktree's HEAD
+  # has since moved to an unrelated branch and the legacy fm/<id> branch is
+  # gone, so only meta can anchor the diff to the shipped work.
+  git -C "$case_dir/wt" checkout -q -b fix/task-x1
+  printf 'recorded-ship\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "recorded ship work"
+  git -C "$case_dir/wt" checkout -q -b roam main
+  git -C "$case_dir/wt" branch -q -D fm/task-x1
+  write_task_meta "$case_dir" "branch=fix/task-x1"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+recorded-ship' \
+    "recorded-branch: diff must use the meta-recorded ship branch, not the moved worktree HEAD"
+  pass "fm-review-diff reviews the meta-recorded ship branch even when the worktree HEAD moved off it"
+}
+
+test_corrupt_recorded_branch_is_refused() {
+  local case_dir out status
+  case_dir=$(make_case corrupt-branch)
+  stale_and_pr_commits "$case_dir"
+  # A space can never be part of a branch name, so this record can only be a
+  # hand-edited or corrupt one: refusing is the only outcome that cannot diff
+  # the wrong content by falling back to the moved worktree HEAD.
+  write_task_meta "$case_dir" "branch=fix task-x1"
+
+  set +e
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "corrupt-branch: a corrupt recorded ship branch was accepted and reviewed the worktree HEAD"
+  assert_contains "$(cat "$case_dir/stderr")" "invalid recorded ship branch 'fix task-x1'" \
+    "corrupt-branch: the refusal did not name the branch it refused"
+  assert_not_contains "$out" '+stale-local' \
+    "corrupt-branch: the corrupt branch silently fell back to the worktree HEAD diff"
+  pass "fm-review-diff refuses a corrupt recorded ship branch instead of reviewing the wrong content"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
-test_detached_head_recovers_with_branch_override
 test_unreachable_pr_head_falls_back_with_warning
+test_recorded_branch_beats_moved_worktree_head
+test_corrupt_recorded_branch_is_refused
