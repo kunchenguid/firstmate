@@ -626,7 +626,7 @@ At that moment the branch reports any refusal instead of concluding there is "no
 - Dispatch, and signal and stale report scoping with unscoped heartbeat reports.
 - The new branch conversation at every main session start with continuation inside one session, and the mirror re-anchor that pairs with it.
 - Requested-versus-unsolicited delivery, exact visible entry content, and no unkeyed model turn.
-- The sequence-keyed processing request and its acknowledgement.
+- The sequence-keyed processing request and its acknowledgement, including exact successor replay when a fresh captain prompt overlaps a pending request and duplicate-safe acknowledgement.
 - Re-presentation after an empty reply and after an unrelated prior answer, the triggered-then-next-turn pacing, and session-start re-presentation.
 - Routine outcomes staying turn-free, and the processed-marker migration.
 - Idle and busy main state, and incident-shaped compaction and unrelated-assistant context.
