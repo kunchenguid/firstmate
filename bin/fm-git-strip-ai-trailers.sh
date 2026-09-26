@@ -7,17 +7,25 @@
 #       Commit-msg hook mode. Git passes the proposed message file as $1.
 #       Rewrites that file in place, then exits 0 so the commit proceeds.
 #   fm-git-strip-ai-trailers.sh install <hooks-dir> <worktree>
-#       Recreate <hooks-dir> as a core.hooksPath for this launch: a commit-msg
-#       hook that runs this strip, plus one wrapper per client-side hook name
-#       git documents except reference-transaction and post-index-change,
-#       which are deliberately excluded (see FM_GIT_CLIENT_HOOKS below).
-#       Each wrapper unsets GIT_CONFIG_* and then resolves
-#       core.hooksPath (or $GIT_DIR/hooks) in the repository git is actually
-#       running in, so a husky directory that only appears after npm install
-#       still runs, and git -C some-other-repo does not inherit the task
-#       worktree's hooks. Does not touch the project's git config; the caller
-#       prefixes the pane with GIT_CONFIG_COUNT / GIT_CONFIG_KEY_0 /
-#       GIT_CONFIG_VALUE_0.
+#       Prepare the strip for one fleet launch and print, on stdout, the one
+#       export statement the caller prefixes to the pane command. The pane
+#       receives the strip through GIT_CONFIG_COUNT / GIT_CONFIG_KEY_<n> /
+#       GIT_CONFIG_VALUE_<n>, so the project's own git config is never touched.
+#       When the git on PATH runs config-defined hooks (git hook list knows
+#       hook.<name>.event; git 2.54 and later), the statement defines the strip
+#       as the config hook fm-strip-ai-trailers on commit-msg and sets no
+#       core.hooksPath, and any <hooks-dir> left by an earlier launch is removed.
+#       Git runs config hooks first and the repository's own hooks directory
+#       last, so the project's hooks run natively.
+#       Otherwise it recreates <hooks-dir> as a core.hooksPath for this launch:
+#       a commit-msg hook that runs this strip, plus one wrapper per client-side
+#       hook name git documents except reference-transaction and
+#       post-index-change, which are deliberately excluded (see
+#       FM_GIT_CLIENT_HOOKS below). Each wrapper unsets GIT_CONFIG_* and then
+#       resolves core.hooksPath (or $GIT_DIR/hooks) in the repository git is
+#       actually running in, so a husky directory that only appears after npm
+#       install still runs, and git -C some-other-repo does not inherit the
+#       task worktree's hooks.
 #
 # WHY THIS EXISTS. Claude launches already carry attribution-off in their
 # per-launch --settings JSON. Cursor and other non-Claude runtimes inject a
@@ -41,16 +49,26 @@
 # trailer found on a fleet commit therefore points at one of those two paths,
 # not at an unnoticed hole in the matcher.
 #
-# ACCEPTED RESIDUAL, ruled 2026-09-17. Inside a fleet pane git reports this
-# directory as the repository's hooks directory, so a hook manager run there
-# (lefthook's npm postinstall, pre-commit install) targets it and would
-# displace the strip. install leaves the directory and every hook in it
-# read-only, so such a manager fails loudly instead of silently winning. Hook
-# managers therefore cannot install from inside fleet panes until a registered
-# project genuinely needs it. Whoever removes the directory restores the owner
-# write bit first.
+# HOOK MANAGERS INSIDE FLEET PANES, ruled 2026-09-26. A hook manager run in a
+# pane (devenv git-hooks via pre-commit, lefthook's npm postinstall, husky)
+# asks git for the repository's hooks directory and installs there. The config
+# hook sets no core.hooksPath, so the manager resolves and writes the
+# repository's real hooks directory, its hooks run on commit, and nothing it
+# writes can displace the strip, which lives only in the pane's environment.
+#
+# ACCEPTED RESIDUAL, ruled 2026-09-17, now limited to a git without config
+# hooks. There install falls back to <hooks-dir>, which git then reports as
+# the repository's hooks directory, so a hook manager run in the pane targets
+# it. The directory and every hook in it are read-only, so the manager fails
+# loudly instead of silently displacing the strip. Whoever removes the
+# directory restores the owner write bit first.
+#
+# KNOWN LIMIT. The config-hook probe runs the git on install's PATH. A pane
+# whose PATH resolves an older git that ignores hook.<name> config commits
+# without the strip, so a fleet pane is expected to resolve the same git as
+# the spawn that launched it.
 set -u
-unset CDPATH GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+unset CDPATH GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1
 
 SELF="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
 
@@ -190,6 +208,28 @@ FM_GIT_CLIENT_HOOKS='applypatch-msg pre-applypatch post-applypatch pre-commit
 pre-merge-commit prepare-commit-msg post-commit pre-rebase post-checkout
 post-merge pre-push post-rewrite pre-auto-gc sendemail-validate'
 
+# Friendly name of the config-defined commit-msg hook that carries the strip.
+FM_GIT_CONFIG_HOOK=fm-strip-ai-trailers
+
+# Print GIT_CONFIG_* assignments defining the strip as a config hook. The
+# command is shell-quoted once for git, which runs it through the shell, and
+# the whole assignment list is shell-quoted again for the pane statement.
+config_hook_assignments() {
+  printf 'GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=%s GIT_CONFIG_VALUE_0=%s GIT_CONFIG_KEY_1=%s GIT_CONFIG_VALUE_1=commit-msg' \
+    "hook.$FM_GIT_CONFIG_HOOK.command" "$(quote_for_hook "$(quote_for_hook "$SELF")")" \
+    "hook.$FM_GIT_CONFIG_HOOK.event"
+}
+
+# True when the git on PATH, run in <worktree>, lists the strip as a
+# commit-msg hook once it is defined in config. A git without config hooks
+# rejects hook list or omits the name, so the probe tests behavior rather than
+# a version number.
+git_runs_config_hooks() {
+  local wt=$1 listed
+  listed=$(eval "$(config_hook_assignments)"' git -C "$wt" hook list commit-msg' 2>/dev/null) || return 1
+  printf '%s\n' "$listed" | grep -Fqx "$FM_GIT_CONFIG_HOOK"
+}
+
 install_hooks() {
   local hooks_dir=$1 wt=$2 name
   [ -n "$hooks_dir" ] && [ -n "$wt" ] || usage
@@ -203,6 +243,10 @@ install_hooks() {
   }
   chmod u+w "$hooks_dir" 2>/dev/null
   rm -rf "$hooks_dir"
+  if git_runs_config_hooks "$wt"; then
+    printf 'export %s\n' "$(config_hook_assignments)"
+    return 0
+  fi
   mkdir -p "$hooks_dir" || return 1
   chmod 700 "$hooks_dir" 2>/dev/null || true
   hooks_dir=$(CDPATH='' cd -- "$hooks_dir" && pwd -P) || return 1
@@ -222,6 +266,8 @@ $(runtime_chain_body "$hooks_dir")
 EOF
   done
   chmod 500 "$hooks_dir"
+  printf 'export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=%s\n' \
+    "$(quote_for_hook "$hooks_dir")"
 }
 
 CMD=${1:-}

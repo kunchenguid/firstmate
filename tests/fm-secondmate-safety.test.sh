@@ -1910,9 +1910,11 @@ home=$subhome
 projects=alpha
 EOF
   printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
-  fm_git_init_commit "$TMP_ROOT/plain-clone-teardown-child-wt"
-  "$ROOT/bin/fm-git-strip-ai-trailers.sh" install "$subhome/state/aborted-child.git-hooks" \
-    "$TMP_ROOT/plain-clone-teardown-child-wt" || fail "could not seed an aborted child's read-only strip dir"
+  # A spawn on a git without config hooks leaves this read-only strip dir.
+  mkdir -p "$subhome/state/aborted-child.git-hooks" ||
+    fail "could not seed an aborted child's read-only strip dir"
+  printf '#!/bin/sh\n' >"$subhome/state/aborted-child.git-hooks/commit-msg"
+  chmod 500 "$subhome/state/aborted-child.git-hooks/commit-msg" "$subhome/state/aborted-child.git-hooks"
   fakebin=$(make_fake_tmux "$TMP_ROOT/plain-clone-teardown-fake")
   log="$TMP_ROOT/plain-clone-teardown-fake/tmux.log"
 

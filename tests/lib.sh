@@ -217,6 +217,25 @@ fm_test_remove_tree() {
   rm -rf "$dir"
 }
 
+# fm_test_ai_trailer_hooks_prefix <home> <id>
+# The pane export statement, plus "; ", that a spawn of <id> in <home> puts in
+# front of its launch. bin/fm-git-strip-ai-trailers.sh picks the mode: a spawn
+# that left state/<id>.git-hooks used the core.hooksPath fallback, and any other
+# spawn used the config-hook statement the installer prints for every worktree.
+fm_test_ai_trailer_hooks_prefix() {
+  local state probe stmt
+  state=$(CDPATH='' cd -- "$1/state" && pwd -P) || fail "cannot resolve state dir $1/state"
+  if [ -d "$state/$2.git-hooks" ]; then
+    printf "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='%s'; " "$state/$2.git-hooks"
+    return 0
+  fi
+  probe="$state/.ai-trailer-prefix-probe"
+  stmt=$("$ROOT/bin/fm-git-strip-ai-trailers.sh" install "$probe" "$ROOT") ||
+    fail "could not read the config-hook pane statement"
+  [ ! -e "$probe" ] || fail "spawn used config hooks but this shell's git does not run them"
+  printf '%s; ' "$stmt"
+}
+
 fm_test_cleanup() {
   local d
   fm_test_reap_watchers

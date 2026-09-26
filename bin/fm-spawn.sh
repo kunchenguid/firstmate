@@ -414,12 +414,12 @@
 # ~/.cursor/cli-config.json attribution-off is not durable (it does not travel
 # with this repo, defaults back to on when unset, and only feeds the CLI's
 # request to the server, so it suppresses the trailer rather than preventing
-# it). Every spawn therefore installs state/<id>.git-hooks as a GIT_CONFIG
-# core.hooksPath for the pane, so git commit-msg strips known AI trailers at
-# the commit object for every launched runtime, Claude included as defense
-# in depth. bin/fm-git-strip-ai-trailers.sh owns the identities, the hook
-# install, and chaining the repository git is actually running in so a
-# project husky hook still runs. Author identity is not rewritten.
+# it). Every spawn therefore gives the pane a GIT_CONFIG commit-msg hook, so
+# git strips known AI trailers at the commit object for every launched runtime,
+# Claude included as defense in depth. bin/fm-git-strip-ai-trailers.sh owns the
+# identities, the choice between a config-defined hook and a read-only
+# state/<id>.git-hooks core.hooksPath, and keeping the project's own hooks and
+# hook installers working. Author identity is not rewritten.
 # Publishing the record and moving this home's backlog item to In flight are one
 # step, not two: bin/fm-backlog-transition-lib.sh owns that invariant, and this
 # script performs the transition under the task's own meta lock before it reports
@@ -1189,6 +1189,7 @@ RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 GIT_HOOKS_DIR=
+GIT_HOOKS_EXPORT=
 SPAWN_LAUNCH_SENT=0
 SPAWN_ENDPOINT_CLOSED=0
 
@@ -4646,16 +4647,18 @@ EOF
   esac
 fi
 
-# Per-task git hooksPath that strips AI commit trailers at the commit object.
+# Per-task commit-msg hook that strips AI commit trailers at the commit object.
 # Installed for every kind, including secondmate: Cursor and other non-Claude
 # runtimes inject the trailer after the typed message, so the typed message is
-# not the object. The pane receives this directory via GIT_CONFIG_* below,
-# which overrides a project's husky core.hooksPath without rewriting it; the
-# installer chains the previous hooks so they still run. Real secondmate
-# homes are firstmate clones; a launch whose worktree is not git fails closed
-# rather than shipping a runtime that cannot strip.
+# not the object. The installer prints the GIT_CONFIG_* export statement the
+# pane receives below: a config-defined hook where git supports one, so a
+# project's own hook manager installs into its real hooks directory, else a
+# read-only core.hooksPath at state/<id>.git-hooks that chains the project's
+# hooks. Real secondmate homes are firstmate clones; a launch whose worktree
+# is not git fails closed rather than shipping a runtime that cannot strip.
 GIT_HOOKS_DIR="$STATE_REAL/$ID.git-hooks"
-"$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" install "$GIT_HOOKS_DIR" "$WT" || {
+GIT_HOOKS_EXPORT=$("$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" install "$GIT_HOOKS_DIR" "$WT") &&
+  [ -n "$GIT_HOOKS_EXPORT" ] || {
   echo "error: could not install the AI-trailer strip hooks for $ID" >&2
   exit 1
 }
@@ -4992,12 +4995,12 @@ if [ "$KIND" = secondmate ]; then
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
-# Pane-scoped override: git in this worker reads our commit-msg strip without
-# rewriting the project's core.hooksPath. GIT_CONFIG_* takes precedence over
+# Pane-scoped override: git in this worker runs our commit-msg strip without
+# rewriting the project's git config. GIT_CONFIG_* takes precedence over
 # config files and is inherited by child git processes. An export statement
 # inside the pane command, like COMPACT_ADVISER_DISABLE below, so it reaches
 # every step of a compound raw launch while firstmate's own git is unchanged.
-LAUNCH="export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=$(shell_quote "$GIT_HOOKS_DIR"); $LAUNCH"
+LAUNCH="$GIT_HOOKS_EXPORT; $LAUNCH"
 # Every agent this fleet launches - crewmate, scout, and secondmate, on a fresh
 # spawn and on a relaunch alike - runs with the compact-adviser kill switch on.
 # This is an export statement rather than a forwarded ambient name or a

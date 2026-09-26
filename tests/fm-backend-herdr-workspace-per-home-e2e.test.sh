@@ -73,7 +73,7 @@ cleanup_all() {
   [ -n "$WT1" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT1" >/dev/null 2>&1
   [ -n "$WT2" ] && command -v treehouse >/dev/null 2>&1 && treehouse return --force "$WT2" >/dev/null 2>&1
   herdr_safe_stop_and_delete "$SESSION"
-  # Spawn leaves each state/<id>.git-hooks strip dir read-only.
+  # A spawn on a git without config hooks leaves a read-only state/<id>.git-hooks.
   find "$TMP_ROOT" -type d -exec chmod u+rwx {} + 2>/dev/null
   rm -rf "$TMP_ROOT"
 }
