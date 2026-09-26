@@ -203,7 +203,9 @@ harness_process_verdict() {  # <pid>
     # MainThread to the interpreter arm to close this: that would make the
     # args of EVERY node process searchable and let an unrelated node
     # command carrying a harness name in its arguments claim an identity.
-    *claude*) echo "comm claude"; return ;;
+    # claude in any letter case: a `Claude` typed on macOS's case-insensitive
+    # filesystem runs claude under that spelling of the process name.
+    *[Cc][Ll][Aa][Uu][Dd][Ee]*) echo "comm claude"; return ;;
     *codex*) echo "comm codex"; return ;;
     *opencode*) echo "comm opencode"; return ;;
     *grok*) echo "comm grok"; return ;;

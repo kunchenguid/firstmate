@@ -39,8 +39,10 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     muse|muse-bin-*) printf 'agent' ;;
     # omp (Oh My Pi) is anchored for the same reason as muse: its live process
     # name is the bare word `omp` (verified, omp 18.1.11) and a glob would claim
-    # unrelated commands such as ompd or comp.
-    *claude*|*codex*|*opencode*|*grok*|*kimi*|*rovo*|pi|pi-signed|pi-launcher|Pi|omp) printf 'agent' ;;
+    # unrelated commands such as ompd or comp. claude matches in any letter
+    # case: a `Claude` typed on macOS's case-insensitive filesystem runs claude
+    # under that spelling of the process name.
+    *[Cc][Ll][Aa][Uu][Dd][Ee]*|*codex*|*opencode*|*grok*|*kimi*|*rovo*|pi|pi-signed|pi-launcher|Pi|omp) printf 'agent' ;;
     # agy (Antigravity CLI) is anchored for the same reason as muse and omp: its
     # live process name is the bare word `agy` (verified, agy 1.2.0: a Go-compiled
     # single binary, comm=agy with argv[0]=agy), and a glob would claim

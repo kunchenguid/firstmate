@@ -56,7 +56,8 @@ fm_harness_path_name() {  # <path>
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
 # Evidence, in order:
-#   1. the basename of the reported command name, against FM_HARNESS_RE.
+#   1. the basename of the reported command name: claude in any letter case,
+#      then FM_HARNESS_RE.
 #   2. an exact harness component in that command path or in argv[0]. Both are
 #      needed because the two platforms report different things: macOS reports
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
@@ -69,8 +70,11 @@ fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
+  # claude matches in any letter case: macOS's case-insensitive filesystem runs
+  # a typed `Claude` as claude, and ps then reports that spelling as the
+  # process name.
+  case "$base" in *[Cc][Ll][Aa][Uu][Dd][Ee]*) FM_HARNESS_IS_CLAUDE=1; return 0 ;; esac
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
-    case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
   argv0=${args%% *}
