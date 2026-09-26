@@ -26,6 +26,18 @@ TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 FM_DAEMON_PRIMARY_HARNESS=claude
 export FM_DAEMON_PRIMARY_HARNESS
 
+# What the pinned claude primary received: each typed line, with every
+# record-backed doorbell followed by the envelope its record holds.
+delivered_digest() {  # <sent-log>
+  local line record
+  while IFS= read -r line; do
+    printf '%s\n' "$line"
+    fm_operational_doorbell_path "$line" record || continue
+    cat "$record" 2>/dev/null
+    printf '\n'
+  done <"$1"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
@@ -683,7 +695,7 @@ test_unknown_wake_ack_failure_still_clears_delivered_digest() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" 2>/dev/null \
     || fail "a delivered digest was reported undelivered after its acknowledgement write failed"
-  grep -F 'unknown wake: frobnicate: ack-write-fails' "$sent" >/dev/null \
+  delivered_digest "$sent" | grep -F 'unknown wake: frobnicate: ack-write-fails' >/dev/null \
     || fail "the digest was not delivered: $(cat "$sent")"
   [ ! -s "$state/.subsuper-escalations" ] \
     || fail "a delivered digest stayed buffered for re-injection: $(cat "$state/.subsuper-escalations")"
@@ -1516,7 +1528,7 @@ test_housekeeping_orca_persistent_stale_resolves_terminal() {
 }
 
 test_escalate_batches_into_one_digest() {
-  local dir state fakebin sent capture n
+  local dir state fakebin sent capture n record
   dir=$(make_supercase batch)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -1528,17 +1540,74 @@ test_escalate_batches_into_one_digest() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
     || fail "escalate_flush failed"
-  grep -F 'FIRSTMATE_OP: v1 away-supervisor: ' "$sent" >/dev/null \
-    || fail "batch digest lacks the exact current away-supervisor kind"
-  grep -F "event A" "$sent" >/dev/null || fail "batch digest missing event A"
-  grep -F "event B" "$sent" >/dev/null || fail "batch digest missing event B"
-  grep -F 'event A: done: PR 1 | event B: done: PR 2' "$sent" >/dev/null \
+  # A Claude Code primary strips U+2063 from submitted prompts, so the digest
+  # travels as a record in this home's operational inbox behind a plain doorbell.
+  record=$(sed -n "s/.*: Firstmate operational input waiting: read '\([^']*\)'.*/\1/p" "$sent" | head -1)
+  [ -n "$record" ] || fail "batch digest was not typed as a record-backed doorbell for the claude primary: $(cat "$sent")"
+  grep -F "$FM_OPERATIONAL_MARK" "$sent" >/dev/null \
+    && fail "the claude primary was typed the invisible marker it strips"
+  [ "$(cd "$(dirname "$record")" && pwd -P)" = "$(cd "$state/operational-inbox" && pwd -P)" ] \
+    || fail "the doorbell names a record outside this home's operational inbox: $record"
+  grep -F "${FM_OPERATIONAL_PREFIX}v1 away-supervisor: " "$record" >/dev/null \
+    || fail "the digest record lacks the exact current away-supervisor envelope"
+  grep -F "event A" "$record" >/dev/null || fail "batch digest missing event A"
+  grep -F "event B" "$record" >/dev/null || fail "batch digest missing event B"
+  grep -F 'event A: done: PR 1 | event B: done: PR 2' "$record" >/dev/null \
     || fail "batch digest did not join events with literal ' | '"
   [ -s "$state/.subsuper-escalations" ] && fail "escalation buffer not cleared after flush"
   [ -e "$state/.subsuper-escalations.since" ] && fail "first-append sidecar not cleared after flush"
   n=$(grep -c '\[ENTER\]' "$sent")
   [ "$n" -eq 1 ] || fail "expected one injected digest, got $n send-keys submits"
   pass "multiple escalations flush as a single batched digest"
+}
+
+test_escalate_marker_preserving_primary_types_envelope() {
+  local dir state fakebin sent capture
+  dir=$(make_supercase batch-typed-envelope)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; printf '\342\235\257 \n' > "$capture"
+  escalate_add "$state" "event C: done: PR 3"
+  afk_enter "$state"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 FM_DAEMON_PRIMARY_HARNESS=codex \
+    escalate_flush "$state" || fail "escalate_flush failed for a marker-preserving primary"
+  grep -F "${FM_OPERATIONAL_PREFIX}v1 away-supervisor: " "$sent" >/dev/null \
+    || fail "a marker-preserving primary lost the typed away-supervisor envelope"
+  grep -F 'event C: done: PR 3' "$sent" >/dev/null || fail "typed digest missing event C"
+  grep -F 'Firstmate operational input waiting' "$sent" >/dev/null \
+    && fail "a marker-preserving primary was sent a record-backed doorbell"
+  [ ! -e "$state/operational-inbox" ] || fail "a marker-preserving primary published an operational record"
+  pass "a marker-preserving primary still receives the typed U+2063 away-supervisor envelope and no record"
+}
+
+test_record_doorbell_detection() {
+  local dir state other doorbell stray missing
+  dir=$(make_supercase doorbell-detect)
+  state="$dir/state"
+  other="$dir/other-state"
+  mkdir -p "$other"
+  afk_enter "$state"
+  fm_operational_record_write "$state" away-supervisor "Supervisor escalate: done" doorbell \
+    || fail "could not publish an away-supervisor record"
+  message_is_injection "$doorbell" "$state" \
+    || fail "a doorbell for this home's own record was not detected as an injection"
+  should_exit_afk "$state" "$doorbell" \
+    && fail "a doorbell for this home's own record exited afk"
+  fm_operational_record_write "$other" away-supervisor "Supervisor escalate: done" stray \
+    || fail "could not publish another home's record"
+  should_exit_afk "$state" "$stray" \
+    || fail "a doorbell naming another home's record kept afk"
+  missing=${doorbell%.msg\'*}-gone.msg${doorbell##*.msg}
+  should_exit_afk "$state" "$missing" \
+    || fail "a doorbell naming no record kept afk"
+  should_exit_afk "$state" "FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate: done" \
+    || fail "a typed ASCII FIRSTMATE_OP label kept afk"
+  rm -f "$state"/operational-inbox/*.msg
+  should_exit_afk "$state" "$doorbell" \
+    || fail "a doorbell whose record was pruned kept afk"
+  pass "record-backed doorbell: only a doorbell naming this home's own record stays afk; a bare ASCII label, a missing record, and another home's record exit"
 }
 
 test_escalate_batch_age_uses_first_append() {
@@ -1555,7 +1624,7 @@ test_escalate_batch_age_uses_first_append() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=90 FM_HOUSEKEEPING_TICK=0 \
     housekeeping "$state"
-  grep -F 'event A: done: PR 1 | event B: done: PR 2' "$sent" >/dev/null \
+  delivered_digest "$sent" | grep -F 'event A: done: PR 1 | event B: done: PR 2' >/dev/null \
     || fail "backdated batch did not flush as a joined digest (max-delay measured from last append)"
   [ -s "$state/.subsuper-escalations" ] && fail "escalation buffer not cleared after backdated flush"
   [ -e "$state/.subsuper-escalations.since" ] && fail "first-append sidecar not cleared after flush"
@@ -2188,7 +2257,7 @@ test_max_defer_empty_swallow_types_once_and_alarms() {
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
     FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 housekeeping "$state"
-  [ "$(grep -c 'Supervisor escalate' "$sent" 2>/dev/null || true)" -eq 1 ] \
+  [ "$(delivered_digest "$sent" 2>/dev/null | grep -c 'Supervisor escalate' || true)" -eq 1 ] \
     || fail "max-defer typed the digest more than once"
   [ -s "$state/.subsuper-inject-wedged" ] \
     || fail "stuck max-defer inject did not raise a wedge alarm marker"
@@ -2270,7 +2339,7 @@ test_oversized_digest_is_bounded_and_kept_durable() {
   LOG="$dir/daemon.log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
     FM_FAKE_SEND_MAX_BYTES=131071 FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" \
     || fail "oversized digest was not delivered: $(cat "$dir/daemon.log" 2>/dev/null)"
-  digest=$(grep -F 'Supervisor escalate' "$sent")
+  digest=$(delivered_digest "$sent" | grep -F 'Supervisor escalate')
   [ "$(printf '%s\n' "$digest" | wc -l | tr -d ' ')" -eq 1 ] || fail "expected exactly one typed digest"
   [ "$(printf '%s' "$digest" | LC_ALL=C wc -c | tr -d ' ')" -le 16384 ] \
     || fail "delivered digest is not bounded well below the transport ceilings"
@@ -2299,7 +2368,7 @@ test_digest_budget_counts_omitted_events() {
   afk_enter "$state"
   LOG="$dir/daemon.log" PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
     FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" || fail "many-event digest was not delivered"
-  digest=$(grep -F 'Supervisor escalate' "$sent")
+  digest=$(delivered_digest "$sent" | grep -F 'Supervisor escalate')
   assert_contains "$digest" 'Supervisor escalate (20 event(s)): event 1: x' "digest header must count every buffered event"
   more=$(printf '%s' "$digest" | sed -n 's/.* | +\([0-9][0-9]*\) more event(s).*/\1/p')
   [ -n "$more" ] || fail "an exhausted budget left no '+K more event(s)' tail: $digest"
@@ -2383,7 +2452,7 @@ test_bounded_digest_full_text_kept_after_typing() {
     escalate_flush "$state"; then
     fail "escalate_flush reported success on a swallowed Enter"
   fi
-  digest=$(grep -F 'Supervisor escalate' "$sent")
+  digest=$(delivered_digest "$sent" | grep -F 'Supervisor escalate')
   full=$(printf '%s' "$digest" | sed -n 's/.*full text of every event: \([^ )]*\).*/\1/p')
   [ -n "$full" ] && [ -f "$full" ] || fail "a typed bounded digest names a full-text file that was removed: $digest"
   cmp -s "$full" "$dir/buffer.orig" || fail "kept full-text file does not hold the buffered event verbatim"
@@ -2995,12 +3064,14 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
     fm_backend_composer_state() { printf 'empty'; }
     fm_backend_send_text_submit() {
       [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected send_text_submit args: $1 $2"
-      case "$3" in *"hello"*) : ;; *) fail "digest text missing from send_text_submit: $3" ;; esac
+      printf '%s\n' "$3" > "$dir/sent.log"
       printf 'empty'
     }
     FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" \
       || fail "inject_msg should succeed when send_text_submit confirms empty"
   ) || fail "herdr successful-submit inject_msg subshell failed"
+  delivered_digest "$dir/sent.log" | grep -F 'hello' >/dev/null \
+    || fail "digest text missing from send_text_submit: $(cat "$dir/sent.log")"
   pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
 }
 
@@ -3099,6 +3170,8 @@ test_marker_detection
 test_afk_turn_exemption
 test_should_exit_afk_when_afk_inactive
 test_strip_injection_marker
+test_escalate_marker_preserving_primary_types_envelope
+test_record_doorbell_detection
 test_pane_input_pending_detects_partial_input
 test_pane_input_pending_blank_defers_strict
 test_pane_input_pending_requires_proven_empty_prompt

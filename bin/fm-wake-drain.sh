@@ -664,12 +664,15 @@ if [ -n "$ACK_THROUGH" ]; then
     claim_main_rows_locked "$ACK_THROUGH" || exit 1
   fi
   if [ "$ACTOR" = branch ]; then
-    # check-kind rows (inactive-outcome receipts, secondmate stall markers)
-    # are never in a branch's eligible snapshot - they are main-only by
-    # construction (docs/pi-supervision-branch.md) - so a branch-actor ack
-    # never removes one and these scans would find nothing relevant anyway.
-    ACK_FINGERPRINTS=
-    ACK_NOTICE_FINGERPRINTS=
+    # An away-posture grant can name check-kind rows - the attended
+    # partition's check/decision exclusions lift under the away record
+    # (docs/pi-supervision-branch.md "Postures") - so a branch ack must retire
+    # the inactive-outcome and notice receipts carried by the exact granted
+    # sequences it consumes. Otherwise the receipt stays pending and every
+    # later reconcile scan re-queues the same fingerprint. Attended, a grant
+    # names no check row and both scans find nothing.
+    ACK_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-outcome:' "$ELIGIBLE_ROWS_FILE") || exit 1
+    ACK_NOTICE_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-reconcile:' "$ELIGIBLE_ROWS_FILE") || exit 1
   else
     if { [ -e "$MAIN_ROWS_FILE" ] || [ -L "$MAIN_ROWS_FILE" ]; } \
       && ! rows_file_valid "$MAIN_ROWS_FILE"; then
@@ -699,6 +702,10 @@ if [ -n "$ACK_THROUGH" ]; then
       BEGIN { while ((getline line < seqs) > 0) if (line ~ /^[0-9]+$/) keep[line] = 1 }
       NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff || !($2 in keep) { print }
     ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
+    fm_wake_commit_secondmate_stall_receipts_through "$ACK_THROUGH" "$ELIGIBLE_ROWS_FILE" || {
+      echo "wake drain: secondmate stall receipt could not be recorded safely" >&2
+      exit 1
+    }
   else
     awk -F '\t' -v cutoff="$ACK_THROUGH" -v seqs="$MAIN_ROWS_FILE" '
       BEGIN { while ((getline line < seqs) > 0) owned[line]=1 }
