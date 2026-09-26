@@ -16,6 +16,7 @@ A future Codex App backend must satisfy the same lifecycle contract as terminal-
 
 The status return channel is mandatory.
 A visible thread that cannot report into Firstmate's normal lifecycle is not a complete backend.
+T3 Code is the first GUI host to satisfy this contract, through its owner-authenticated HTTP API; [`t3-backend.md`](t3-backend.md) owns that backend.
 
 ## Current blocker
 

@@ -569,6 +569,7 @@ test_backend_validate_spawn_accepts_orca() {
   fm_backend_validate_spawn zellij 2>/dev/null || fail "fm_backend_validate_spawn should accept zellij"
   fm_backend_validate_spawn orca 2>/dev/null || fail "fm_backend_validate_spawn should accept orca"
   fm_backend_validate_spawn cmux 2>/dev/null || fail "fm_backend_validate_spawn should accept cmux"
+  fm_backend_validate_spawn t3 2>/dev/null || fail "fm_backend_validate_spawn should accept t3"
   out=$(fm_backend_validate_spawn bogus 2>&1) && fail "fm_backend_validate_spawn should still refuse unknown backends"
   assert_contains "$out" "unknown backend 'bogus'" "fm_backend_validate_spawn did not preserve unknown-backend validation"
   out=$(fm_backend_validate_spawn codex-app 2>&1) && fail "fm_backend_validate_spawn should refuse codex-app"
@@ -658,7 +659,13 @@ test_backend_of_selector_matches_explicit_target_meta() {
   fm_write_meta "$state/tmux-task.meta" "window=firstmate:fm-tmux-task"
   fm_write_meta "$state/custom-window-task.meta" "window=custom-window"
   fm_write_meta "$state/orca-task.meta" "window=fm-orca-task" "terminal=term-orca-task" "backend=orca"
+  fm_write_meta "$state/t3-task.meta" "window=0f6a4c1e-2f5e-4c3b-9a1d-7b2c3d4e5f60" \
+    "backend=t3" "t3_thread_id=0f6a4c1e-2f5e-4c3b-9a1d-7b2c3d4e5f60" "t3_project_id=p-1"
 
+  [ "$(fm_backend_resolve_selector 'fm-t3-task' "$state")" = 0f6a4c1e-2f5e-4c3b-9a1d-7b2c3d4e5f60 ] \
+    || fail "T3 fm-<id> selector should resolve to the recorded thread id"
+  [ "$(fm_backend_of_selector '0f6a4c1e-2f5e-4c3b-9a1d-7b2c3d4e5f60' '0f6a4c1e-2f5e-4c3b-9a1d-7b2c3d4e5f60' "$state")" = t3 ] \
+    || fail "matching an explicit T3 thread id should inherit the t3 backend from metadata"
   [ "$(fm_backend_of_selector 'dotfiles-d6' 'default:wA:p2' "$state")" = herdr ] \
     || fail "bare non-fm task id selector should use its recorded backend"
   [ "$(fm_backend_of_selector 'fm-turnend-all-harnesses-v9' 'default:wB:p3' "$state")" = herdr ] \

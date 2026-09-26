@@ -26,7 +26,13 @@
 # the documented macOS fallback signals when cmux's claude wrapper strips that
 # marker) with no explicit backend setting - unlike Orca, which stays
 # never-auto-detected because it also owns the task worktree; see
-# docs/cmux-backend.md for its empirical basis.
+# docs/cmux-backend.md for its empirical basis. P6 adds bin/backends/t3.sh,
+# EXPERIMENTAL and spawn-capable, behind `--backend t3`/`FM_BACKEND=t3`/
+# `config/backend` and never auto-detected: the endpoint is a T3 Code thread
+# bound to the task's Treehouse worktree and driven over T3's owner-
+# authenticated HTTP API, the first GUI host to meet the acceptance contract
+# docs/codex-app-backend.md states; see docs/t3-backend.md for its empirical
+# basis.
 # Codex App is intentionally not in the known set yet.
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
@@ -34,7 +40,7 @@
 # treats that as `tmux` (fm_backend_of_meta), and fm-spawn.sh does not write
 # `backend=tmux` for a default-backend task, so existing and newly spawned
 # default-path metas stay byte-identical. Only a task spawned on a non-tmux
-# spawn-capable backend, currently herdr, zellij, orca, or cmux, carries an
+# spawn-capable backend, currently herdr, zellij, orca, cmux, or t3, carries an
 # explicit `backend=` line.
 #
 # Event-source framing (herdr-addendum "Events as the core abstraction"): a
@@ -66,9 +72,12 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # spawn-capable; unlike tmux/herdr/zellij it is also the worktree provider.
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
+# t3 is EXPERIMENTAL and spawn-capable, a GUI-host thread provider driven over
+# HTTP with Treehouse still providing the worktree - verified against the real
+# T3 Code v0.0.42 server (docs/t3-backend.md).
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
-FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
+FM_BACKEND_KNOWN="tmux herdr zellij orca cmux t3"
+FM_BACKEND_SPAWN="tmux herdr zellij orca cmux t3"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -296,12 +305,13 @@ fm_backend_validate_spawn() {  # <name>
 # docs/configuration.md "Toolchain" and bootstrap's COMMON list). This is the
 # single owner of the per-backend dependency delta, so bootstrap follows the
 # RESOLVED backend instead of demanding an inactive backend's tools. Each set is:
-#   - the session-provider CLI itself (tmux/herdr/zellij/orca/cmux);
-#   - jq, for the JSON-emitting adapters (herdr, zellij, cmux) whose spawn/liveness
+#   - the session-provider CLI itself (tmux/herdr/zellij/orca/cmux/t3);
+#   - jq, for the JSON-emitting adapters (herdr, zellij, cmux, t3) whose spawn/liveness
 #     paths parse the backend's JSON output (see each adapter's
-#     tool check, e.g. fm_backend_herdr_tool_check);
+#     tool check, e.g. fm_backend_herdr_tool_check), plus curl for t3, whose
+#     whole transport is HTTP;
 #   - the treehouse worktree provider for every session-provider-only backend
-#     (tmux, herdr, zellij, cmux); orca owns its own task worktree and terminal,
+#     (tmux, herdr, zellij, cmux, t3); orca owns its own task worktree and terminal,
 #     so it drops both treehouse and any other backend's session CLI.
 # Prints a single space-separated line and returns 0 for a known backend; returns
 # 1 and prints nothing for an unknown backend.
@@ -312,6 +322,7 @@ fm_backend_required_tools() {  # <backend>
     zellij) printf '%s' 'zellij jq treehouse' ;;
     cmux)   printf '%s' 'cmux jq treehouse' ;;
     orca)   printf '%s' 'orca' ;;
+    t3)     printf '%s' 't3 curl jq treehouse' ;;
     *) return 1 ;;
   esac
 }
@@ -406,7 +417,7 @@ fm_backend_orca_worktree_id_valid() {  # <value>
 
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
-  local session pane recorded_session workspace tab terminal worktree_id surface
+  local session pane recorded_session workspace tab terminal worktree_id surface thread project_id
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
@@ -544,6 +555,22 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         return 1
       fi
       ;;
+    t3)
+      # A T3 record's window IS the thread id; t3_thread_id repeats it as the
+      # exact binding and t3_project_id names the project the thread lives in.
+      [ "$binding" = "$id" ] || {
+        echo "REFUSED: T3 endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
+        return 1
+      }
+      thread=$(fm_backend_meta_exact_value "$meta" t3_thread_id) || thread=
+      project_id=$(fm_backend_meta_exact_value "$meta" t3_project_id) || project_id=
+      if [ -z "$thread" ] || [ -z "$project_id" ] || [ "$window" != "$thread" ] \
+        || ! fm_backend_endpoint_atom_valid "$thread" \
+        || ! fm_backend_endpoint_atom_valid "$project_id"; then
+        echo "REFUSED: T3 endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
+        return 1
+      fi
+      ;;
   esac
   # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
   FM_BACKEND_VALIDATED_BACKEND=$backend
@@ -611,7 +638,7 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 
 # fm_backend_source: source the named backend's adapter file, once per shell.
 # Each adapter is an independently linted canonical root. The /dev/null source
-# boundaries keep runtime dispatch from importing all five adapter ASTs into
+# boundaries keep runtime dispatch from importing all six adapter ASTs into
 # every dispatcher consumer while preserving the runtime source operations.
 # Bash 3.2 can enter an EXIT trap with status 0 after `set -e` aborts on a
 # missing or unreadable dot-sourced file, and a newer Bash can print that
@@ -640,6 +667,9 @@ fm_backend_source() {  # <name>
       ;;
     cmux)
       siblings="fm-backend-hometag-lib.sh fm-composer-lib.sh"
+      ;;
+    t3)
+      siblings=
       ;;
     *)
       return 1
@@ -685,6 +715,13 @@ fm_backend_source() {  # <name>
         # shellcheck source=/dev/null
         . "$adapter" || return 1
         _FM_BACKEND_CMUX_SOURCED=1
+      fi
+      ;;
+    t3)
+      if [ -z "${_FM_BACKEND_T3_SOURCED:-}" ]; then
+        # shellcheck source=/dev/null
+        . "$adapter" || return 1
+        _FM_BACKEND_T3_SOURCED=1
       fi
       ;;
   esac
@@ -758,6 +795,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     zellij) fm_backend_zellij_capture "$@" ;;
     orca) fm_backend_orca_capture "$@" ;;
     cmux) fm_backend_cmux_capture "$@" ;;
+    t3) fm_backend_t3_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -803,6 +841,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
     zellij) fm_backend_zellij_send_key "$@" ;;
     orca) fm_backend_orca_send_key "$@" ;;
     cmux) fm_backend_cmux_send_key "$@" ;;
+    t3) fm_backend_t3_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -820,6 +859,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     zellij) fm_backend_zellij_send_text_submit "$@" ;;
     orca) fm_backend_orca_send_text_submit "$@" ;;
     cmux) fm_backend_cmux_send_text_submit "$@" ;;
+    t3) fm_backend_t3_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -832,10 +872,11 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
 # naming the endpoint (bin/fm-teardown.sh's retain-and-stop path).
 # How much each adapter can prove differs, and no arm ever guesses: tmux
 # resolves a failed close against the window's exact recorded identity, Orca
-# reports a close its missing CLI never attempted, and the remaining arms
-# still report 0 for a close command that failed after being accepted.
-# docs/verification/runtime-backends.md "Endpoint close" is the per-backend
-# record.
+# reports a close its missing CLI never attempted, T3 proves its close by
+# re-reading the thread and reporting 0 only on the server's own not-found,
+# and the remaining arms still report 0 for a close command that failed after
+# being accepted. docs/verification/runtime-backends.md "Endpoint close" is
+# the per-backend record.
 fm_backend_kill() {  # <backend> <target>
   local backend=$1
   shift
@@ -847,6 +888,7 @@ fm_backend_kill() {  # <backend> <target>
     zellij) fm_backend_zellij_kill "$@" ;;
     orca) fm_backend_orca_kill "$@" ;;
     cmux) fm_backend_cmux_kill "$@" ;;
+    t3) fm_backend_t3_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -873,7 +915,8 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
 
 # fm_backend_busy_state: semantic busy/idle/unknown for backends that expose
 # native agent-state (herdr-addendum "busy state" row - the first backend
-# where this gets real semantics beyond pane-regex). Backends with no such
+# where this gets real semantics beyond pane-regex; T3 reports its session's
+# starting/running state the same way). Backends with no such
 # primitive (tmux) report unknown. Callers own the fallback policy: fm-watch.sh
 # uses unknown as the cue for harness-scoped pane-tail detection, while
 # fm-crew-state.sh also corroborates native idle verdicts with the recorded
@@ -884,6 +927,7 @@ fm_backend_busy_state() {  # <backend> <target>
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     herdr) fm_backend_herdr_busy_state "$@" ;;
+    t3) fm_backend_t3_busy_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -910,6 +954,7 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
     orca) fm_backend_orca_composer_state "$@" ;;
     cmux) fm_backend_cmux_composer_state "$@" ;;
     zellij) fm_backend_zellij_composer_state "$@" ;;
+    t3) fm_backend_t3_composer_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -959,6 +1004,10 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       fm_backend_source cmux || return 1
       fm_backend_cmux_target_ready "$target" "$expected_label"
       ;;
+    t3)
+      fm_backend_source t3 || return 1
+      fm_backend_t3_target_exists "$target" "$expected_label"
+      ;;
     *)
       return 1
       ;;
@@ -985,12 +1034,18 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # `missing` only in this recovery-grade view. Zellij remains unverified because
 # its secondmate ghost-tab and agent-process recovery path has not been
 # empirically validated. Orca and cmux do not support secondmate spawns.
+# The T3 adapter answers from the server's own thread and session records
+# rather than an OS process table: T3 supervises the provider process itself,
+# a readable unarchived thread is `alive` because T3 resumes its provider on
+# the next turn, a provider error is `dead`, and the server's not-found is
+# `missing` (bin/backends/t3.sh's header owns that mapping and its evidence).
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
+    t3) fm_backend_t3_agent_state "$target" ;;
     *) printf 'unverified' ;;
   esac
 }
