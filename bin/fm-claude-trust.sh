@@ -86,7 +86,8 @@
 # argument. Git is the ground truth, so the argument is never trusted on its
 # own word: a primary checkout (git dir == common dir), a worktree of an
 # unrelated repo, a subdirectory of a worktree, a plain directory, and a home
-# directory are each refused. Refusal is a non-zero exit, never a warning and
+# directory are each refused, and so is a primary checkout that is, or
+# contains, the home or Claude config directory or is '/'. Refusal is a non-zero exit, never a warning and
 # never a silent skip. When <project> is itself a linked worktree (a
 # secondmate home spawned from, rather than as, the primary checkout),
 # refusing outright would wedge a relaunch that is otherwise perfectly valid:
@@ -248,14 +249,32 @@ fi
 [ -n "$CONFIG_DIR_REAL" ] || refuse "Claude config directory '$CONFIG_DIR' does not exist and could not be created"
 
 # The filesystem root, a home directory, and the config directory are never
-# something this registers, in either mode. Checked explicitly so the refusal
-# names the real reason instead of the scope verdict behind it.
-[ "$TARGET_REAL" != / ] || refuse "'/' is the filesystem root, not a $SCOPE_NOUN"
-[ "$TARGET_REAL" != "$CONFIG_DIR_REAL" ] || refuse "'$TARGET_REAL' is the Claude config directory, not a $SCOPE_NOUN"
+# something this registers, in either mode, and neither is any directory that
+# contains the home or config directory: Claude Code's trust check walks
+# ancestors, so one entry there would trust every folder beneath it. Every path
+# handed to the store write passes through refuse_protected - the task target
+# here, and the primary checkout in worktree mode once it is derived below - so
+# the refusal names the real reason instead of the scope verdict behind it.
+HOME_REAL=
 if [ -n "${HOME:-}" ]; then
   HOME_REAL=$(real_dir "$HOME") || true
-  [ "$TARGET_REAL" != "${HOME_REAL:-}" ] || refuse "'$TARGET_REAL' is the home directory, not a $SCOPE_NOUN"
 fi
+refuse_protected() {  # <resolved path> <noun>
+  local path=$1 noun=$2
+  [ "$path" != / ] || refuse "'/' is the filesystem root, not a $noun"
+  [ "$path" != "$CONFIG_DIR_REAL" ] || refuse "'$path' is the Claude config directory, not a $noun"
+  [ "$path" != "$HOME_REAL" ] || refuse "'$path' is the home directory, not a $noun"
+  case $CONFIG_DIR_REAL/ in
+    "$path"/*) refuse "'$path' contains the Claude config directory '$CONFIG_DIR_REAL', so it is not a $noun" ;;
+  esac
+  if [ -n "$HOME_REAL" ]; then
+    case $HOME_REAL/ in
+      "$path"/*) refuse "'$path' contains the home directory '$HOME_REAL', so it is not a $noun" ;;
+    esac
+  fi
+  return 0
+}
+refuse_protected "$TARGET_REAL" "$SCOPE_NOUN"
 
 if [ "$MODE" = worktree ]; then
   WT_TOP=$(git -C "$TARGET_REAL" rev-parse --show-toplevel 2>/dev/null) || true
@@ -303,6 +322,7 @@ if [ "$MODE" = worktree ]; then
     [ -n "$CANON_GIT_DIR" ] && [ "$CANON_GIT_DIR" = "$PROJ_COMMON" ] \
       || refuse "project '$PROJ_REAL' is a linked worktree whose primary checkout could not be resolved"
   fi
+  refuse_protected "$PROJ_CANON" "project root"
 else
   # The seed evidence, in the order that names the most useful reason first: the
   # marker decides whether this is a secondmate home at all, the id decides
