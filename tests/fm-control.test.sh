@@ -778,6 +778,29 @@ test_already_stopped_exit_is_idempotent() {
   pass "fm-control exit: an already-stopped agent is idempotent success with no bytes sent"
 }
 
+test_already_stopped_exit_retires_stale_busy_record() {
+  local dir out rc gen
+  dir=$(new_case idem-busy)
+  add_task "$dir" t1 claude
+  # The worker died mid-turn: its endpoint holds only a shell, but its busy
+  # record and generation sidecar from the killed incarnation are still armed.
+  alive_as "$dir" zsh
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  [ -e "$dir/home/state/t1.busy-state" ] && [ -e "$dir/home/state/t1.busy-gen" ] \
+    || fail "the test must stage both a busy record and its gen sidecar"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting an already-stopped agent should succeed"$'\n'"$out"
+  assert_contains "$out" "already-stopped t1" "the outcome should say it was already stopped"
+  [ -z "$(literals "$dir")" ] || fail "an already-stopped agent must not be sent an exit command"
+  [ -z "$(keys_sent "$dir")" ] || fail "an already-stopped agent must not be sent an interrupt key"
+  [ ! -e "$dir/home/state/t1.busy-state" ] \
+    || fail "exit on an already-stopped agent must retire the stale busy record"
+  [ ! -e "$dir/home/state/t1.busy-gen" ] \
+    || fail "exit on an already-stopped agent must retire the gen sidecar"
+  pass "fm-control exit: an already-stopped agent retires its busy record and sidecar with no bytes sent"
+}
+
 test_missing_tmux_endpoint_refuses_rather_than_claiming_a_stop() {
   local dir out rc
   dir=$(new_case gone)
@@ -1095,6 +1118,7 @@ test_verb_allowlist_is_closed
 test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs
 test_already_stopped_exit_is_idempotent
+test_already_stopped_exit_retires_stale_busy_record
 test_missing_tmux_endpoint_refuses_rather_than_claiming_a_stop
 test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses

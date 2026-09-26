@@ -562,6 +562,10 @@ do_exit() {
   state=$(agent_state)
   case "$state" in
     dead)
+      # Idempotent exit must still retire this incarnation's busy wiring: a
+      # dead agent can never settle its own busy record, so leaving it armed
+      # would let a stopped worker be misread as working.
+      retire_busy_incarnation
       printf 'already-stopped'
       return 0
       ;;
@@ -587,7 +591,10 @@ do_exit() {
           # The endpoint was only unreachable and is there after all, holding
           # no agent - a herdr pane whose session server was merely stopped is
           # the common case. Nothing is gone, so this is the ordinary
-          # already-stopped outcome.
+          # already-stopped outcome. Its incarnation's busy wiring is retired
+          # here for the same reason as the dead branch above: no agent runs in
+          # this endpoint, so nothing could ever settle the record itself.
+          retire_busy_incarnation
           printf 'already-stopped'
           return 0
           ;;
