@@ -3046,10 +3046,10 @@ const isTitle = (frame) => /Van Buren|1838/.test(frame.map(strip).join(" "));
   for (let step = 0; step < 64; step += 1) {
     const frame = animation.render(width);
     seenPhases.add(animation.waterPhase());
-    check(frame.length === 2, `water phase ${animation.waterPhase()} changed the row count`);
+    check(frame.length === 10, `gait phase ${animation.waterPhase()} changed the row count`);
     check(
-      visibleWidth(frame[1]) === width,
-      `water phase ${animation.waterPhase()} changed the visible width`,
+      visibleWidth(frame[frame.length - 1]) === width,
+      `gait phase ${animation.waterPhase()} changed the visible width`,
     );
     animation.tick();
   }

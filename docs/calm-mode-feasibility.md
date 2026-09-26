@@ -160,9 +160,9 @@ Pi emits `agent_settled` from a `finally` block once a run will not continue aut
 Repeated `agent_start` events inside one run are idempotent, and Pi disposes the previous component before installing a replacement under the same key and when it clears extension widgets, so the frame timer cannot duplicate or outlive the widget.
 Pi's above-editor widget container reserves one spacer row whether or not a widget is present, so removing the working presentation leaves no residual blank row.
 
-The sprite is two rows when the usable width admits the procession: geometric ` o  o  o ` heads over `/|\/|\/|\` bodies on a `─` path, with a forced-removal label when space remains.
-Figures walk away to the right; when they reach the right edge, a separate title names President Martin Van Buren for a short hold, then the walk restarts from the left.
-The title never shares the path with the walkers, so the drawing does not place him in the Cherokee forced removal of 1838-1839.
+The sprite is a multi-row memorial when the usable width admits the horse and walkers: geometric ` o  o  o ` figures walking ahead of a detailed horse and rider, on a `─` path, with a forced-removal label and a symbolic Van Buren caption.
+Figures walk away to the right; when they reach the right edge the procession restarts from the left.
+The horseback figure is labeled as symbolic, not a historical personal escort of the Cherokee forced removal of 1838-1839.
 The ground row fills the complete supplied width, the track is recomputed and clamped from that width on every frame so a resize cannot wrap or strand the figures offscreen, and widths too narrow for the procession fall back to a deterministic compact walker.
 
 One scheduler drives two linked cadences.

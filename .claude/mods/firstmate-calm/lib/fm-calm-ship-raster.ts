@@ -46,8 +46,20 @@ export type CalmShipPaletteFamily = "dark" | "light";
  * built-in theme tables.
  */
 export const CALM_SHIP_RASTER_PALETTES: Readonly<Record<CalmShipPaletteFamily, CalmShipRasterPalette>> = {
-  dark: { plain: CALM_SHIP_RASTER_DEFAULT_COLOR, water: 0x93a5ff, boat: 0xd77757 },
-  light: { plain: CALM_SHIP_RASTER_DEFAULT_COLOR, water: 0x5769f7, boat: 0xd77757 },
+  dark: {
+    plain: CALM_SHIP_RASTER_DEFAULT_COLOR,
+    water: 0x93a5ff,
+    boat: 0xd77757,
+    horse: 0xc48a4a,
+    rider: 0x8aa0c8,
+  },
+  light: {
+    plain: CALM_SHIP_RASTER_DEFAULT_COLOR,
+    water: 0x5769f7,
+    boat: 0xd77757,
+    horse: 0xa86b32,
+    rider: 0x4d6fa8,
+  },
 };
 
 /**

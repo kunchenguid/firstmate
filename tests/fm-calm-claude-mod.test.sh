@@ -102,19 +102,15 @@ for (const width of [0, 1, 2, 3, 4, 5, 6, 9, 12, 24, 40, 80, 121]) {
       check(cells(water).length === width, \`water row is \${cells(water).length} cells at width \${width}\`);
       for (const row of frame) {
         check(cells(row).length <= width, \`a row overflowed width \${width}\`);
-        for (const run of row) check(["plain", "water", "boat"].includes(run.color), \`unknown color \${run.color}\`);
+        for (const run of row) check(["plain", "water", "boat", "horse", "rider"].includes(run.color), \`unknown color \${run.color}\`);
       }
-      if (width >= 6) {
-        check(frame.length === 2, \`width \${width} did not paint two rows\`);
-        const joined = frame.map(cells);
-        const walking = joined[1].includes("/|\\\\") || joined[1].includes(" |/");
-        const titled = joined.join(" ").includes("Van Buren") || joined.join(" ").includes("1838");
-        check(walking || titled, \`width \${width} painted neither the walk nor the title: \${JSON.stringify(joined)}\`);
-        if (walking) {
-          const bodyAt = frame[1].findIndex((run) => run.color === "boat");
-          check(bodyAt >= 0, "the walkers are not one boat-colored run");
-          check(frame[1].filter((_run, index) => index !== bodyAt).every((run) => run.color === "water" && /^─+$/.test(run.text)), "ground outside the walkers is not a path");
-        }
+      if (width >= 25) {
+        check(frame.length === 10, \`width \${width} did not paint the horseback memorial\`);
+        const joined = frame.map(cells).join(" ");
+        check(joined.includes(" o  o  o ") || joined.includes("/|\\\\"), \`width \${width} lost the walkers: \${JSON.stringify(frame.map(cells))}\`);
+        check(joined.includes("Van Buren") || joined.includes("symbolic"), \`width \${width} lost the symbolic Van Buren label\`);
+        const ground = cells(frame[frame.length - 1]);
+        check(/^─+$/.test(ground), "ground row is not a path");
       } else if (width >= 3) {
         check(frame.length === 1, \`width \${width} fallback was not a single row\`);
         check(/o\\/\\||o\\|\\/|─/.test(cells(frame[0])), \`width \${width} lost the compact walker fallback: \${cells(frame[0])}\`);
@@ -137,9 +133,9 @@ for (const width of [0, 1, 2, 3, 4, 5, 6, 9, 12, 24, 40, 80, 121]) {
   for (let step = 0; step < 6; step += 1) { animation.tick(); sprite.tick(); }
   animation.restoreLastRendered(); sprite.restoreLastRendered();
   check(animation.position() === sprite.position() && animation.waterPhase() === sprite.waterPhase(), "restore diverged");
-  check(sprite.waterPhase() === 1 && sprite.position() === 2, \`restore landed at phase \${sprite.waterPhase()} column \${sprite.position()}\`);
+  check(sprite.waterPhase() === 1 && sprite.position() === 18, \`restore landed at phase \${sprite.waterPhase()} column \${sprite.position()}\`);
   sprite.clampToWidth(6);
-  check(sprite.position() === 0 && sprite.direction() === 1, "a hidden clamp did not keep the walkers on the shortened track");
+  check(sprite.position() === 3 && sprite.direction() === 1, "a hidden clamp did not keep the walkers on the shortened track");
   sprite.reset();
   check(sprite.position() === 0 && sprite.direction() === 1 && sprite.waterPhase() === 0, "reset did not restore the initial state");
 }

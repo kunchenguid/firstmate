@@ -36,11 +36,13 @@ import {
 export { CALM_WORKING_SHIP_TICK_MS, CALM_WORKING_SHIP_TICKS_PER_MOVE };
 
 // Standard ANSI foreground codes only: no theme lookup, bright variant, or 256/RGB.
-// Ground is a single blue path; the walkers are a single yellow so a figure never
-// splits into mismatched colors. Historical labels stay uncolored (plain).
+// Ground is a single blue path; walkers are yellow; the horse is red; the rider is
+// cyan. Labels stay uncolored (plain).
 const ANSI_FOREGROUND: Record<Exclude<CalmWorkingShipColor, "plain">, string> = {
   water: "\u001b[34m",
   boat: "\u001b[33m",
+  horse: "\u001b[31m",
+  rider: "\u001b[36m",
 };
 // Restores the default foreground so color never bleeds into padding or later frames.
 const RESET = "\u001b[39m";
