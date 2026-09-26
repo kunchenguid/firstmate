@@ -52,18 +52,20 @@
 # --fast, and does not accept explicit paths. Each partition also runs workflow
 # lint and backend-purity checks, keeping either invocation independently useful.
 #
-# Every per-root ShellCheck process runs under an enforced envelope: a wall
-# deadline (FM_LINT_ROOT_SECONDS, default 1200), a terminate-then-kill cleanup
-# grace (FM_LINT_ROOT_GRACE, default 5), and configured rlimits
-# (FM_LINT_ROOT_RLIMITS, default "v:4194304", a 4 GiB address-space cap per
-# analysis process) applied inside the child before exec, so two concurrent
-# roots stay well inside a 16 GiB job. The watchdog is the shared
-# bin/fm-timeout-lib.sh group-kill pattern, so a deadline or an interrupt
-# removes the whole owned tree. A host that cannot apply a configured bound
-# (macOS rejects ulimit -v, for example) drops it with a one-line stderr
-# disclosure instead of pretending protection; with FM_LINT_REQUIRE_BOUNDS=1,
-# which CI sets, any unenforceable configured bound instead refuses the run
-# outright rather than lint uncapped.
+# With FM_LINT_REQUIRE_BOUNDS=1, which CI sets, every per-root ShellCheck
+# process runs under an enforced envelope: a wall deadline
+# (FM_LINT_ROOT_SECONDS, default 1200), a terminate-then-kill cleanup grace
+# (FM_LINT_ROOT_GRACE, default 5), and a per-process address-space limit
+# (FM_LINT_ROOT_MEMORY_KIB, default 6291456 = 6 GiB per analysis process, so
+# two concurrent roots stay inside a 16 GiB job with headroom). The watchdog
+# is the shared bin/fm-timeout-lib.sh group-kill pattern, so a deadline or an
+# interrupt removes the whole owned tree. Bounds mode proves the watchdog can
+# actually bound a probe command and that the host accepts the memory limit
+# BEFORE any root starts; when either check fails the run refuses with a
+# named error, so a required-bounds run never lints uncapped. Without
+# FM_LINT_REQUIRE_BOUNDS (a local developer lint, where hosts like macOS
+# cannot apply the address-space limit at all) each root still runs in its
+# own ShellCheck process with identical diagnostics, just unbounded.
 #
 # Per-root evidence is incremental: workers append begin/end records (root,
 # mode, shard, start, end, duration, exit status, reason, peak RSS) to a roots
@@ -99,10 +101,9 @@ SELF="$SELF_DIR/fm-lint.sh"
 ROOT="$(cd "$SELF_DIR/.." && pwd -P)"
 cd "$ROOT" || exit 1
 
-# When the sibling timeout library is present it supplies the shared
-# group-kill watchdog used to bound each root; a lone copied fixture script
-# falls back to unbounded per-root execution instead of failing closed outside
-# the CI path that requires the bounds.
+# The sibling timeout library supplies the shared group-kill watchdog that
+# bounds each root when FM_LINT_REQUIRE_BOUNDS=1 requires it; without the
+# library a required-bounds run refuses in preflight rather than lint uncapped.
 if [ -r "$SELF_DIR/fm-timeout-lib.sh" ]; then
   # shellcheck source=bin/fm-timeout-lib.sh
   . "$SELF_DIR/fm-timeout-lib.sh"
@@ -216,7 +217,7 @@ fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
     ( exec "${FM_LINT_PERL_BIN:-perl}" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
         "${BASH:-bash}" "$SELF" --internal-timed \
         "$FM_LINT_INTERNAL_ROOT_SECS" "$FM_LINT_INTERNAL_GRACE" \
-        "${BASH:-bash}" "$SELF" --internal-root "$rss_file" "${FM_LINT_INTERNAL_RLIMITS:-}" \
+        "${BASH:-bash}" "$SELF" --internal-root "$rss_file" "${FM_LINT_INTERNAL_MEMORY_KIB:--}" \
         "$FM_LINT_SHELLCHECK" "${FM_LINT_WORKER_ARGS[@]}" -- "$path" ) > "$root_out" 2>&1 &
     FM_LINT_WORKER_RUN_PID=$!
     wait "$FM_LINT_WORKER_RUN_PID" || invocation_rc=$?
@@ -299,9 +300,9 @@ if [ "${1:-}" = "--internal-worker" ]; then
 fi
 
 # Private per-root payload mode used only by the bounded runner above: apply
-# the configured rlimits (space-separated ulimit flag:value specs), then exec
+# the per-process address-space limit (KiB, or - for none), then exec
 # /usr/bin/time for the per-root peak-RSS record when it is available, else the
-# tool itself. An rlimit the host cannot apply exits 97 so the parent reports
+# tool itself. A limit the host cannot apply exits 97 so the parent reports
 # limit-unavailable instead of running uncapped.
 if [ "${1:-}" = "--internal-root" ]; then
   [ "${FM_LINT_INTERNAL:-}" = 1 ] || {
@@ -310,19 +311,15 @@ if [ "${1:-}" = "--internal-root" ]; then
   }
   [ "$#" -ge 4 ] || exit 2
   internal_rss_file=$2
-  internal_rlimits=$3
+  internal_memory_kib=$3
   shift 3
-  internal_specs=()
-  read -ra internal_specs <<< "$internal_rlimits" || true
-  for internal_spec in "${internal_specs[@]:-}"; do
-    [ -n "$internal_spec" ] || continue
-    internal_flag=${internal_spec%%:*}
-    internal_value=${internal_spec#*:}
-    ulimit "-$internal_flag" "$internal_value" 2>/dev/null || {
-      printf 'fm-lint.sh: rlimit %s is not enforceable on this host\n' "$internal_spec" >&2
+  if [ "$internal_memory_kib" != - ]; then
+    ulimit -v "$internal_memory_kib" 2>/dev/null || {
+      printf 'fm-lint.sh: per-root memory limit %s KiB is not enforceable on this host\n' \
+        "$internal_memory_kib" >&2
       exit 97
     }
-  done
+  fi
   if [ "$internal_rss_file" != - ] && [ -x /usr/bin/time ]; then
     if [ "$(uname)" = Darwin ]; then
       exec /usr/bin/time -l -o "$internal_rss_file" "$@"
@@ -843,73 +840,72 @@ if [ -n "$TELEMETRY" ]; then
   }
 fi
 
-# Per-root bounded-execution envelope. Each configured bound is probed once
-# here so the run either enforces it or discloses/refuses it before any root
-# starts; nothing falls back to uncapped execution silently.
+# Per-root bounded-execution envelope. Under FM_LINT_REQUIRE_BOUNDS=1 every
+# bound is exercised here before any root starts, and any bound the host
+# cannot enforce refuses the run with a named error; a required-bounds run
+# never lints uncapped. Without it each root still runs alone in its own
+# ShellCheck process, unbounded, for local developer lint.
 ROOT_SECONDS=${FM_LINT_ROOT_SECONDS:-1200}
 ROOT_GRACE=${FM_LINT_ROOT_GRACE:-5}
-ROOT_RLIMITS=${FM_LINT_ROOT_RLIMITS-'v:4194304'}
-case "$ROOT_SECONDS" in
-  ''|0|*[!0-9]*)
-    printf 'fm-lint.sh: FM_LINT_ROOT_SECONDS must be a positive integer, got %s.\n' "$ROOT_SECONDS" >&2
-    exit 2
-    ;;
-esac
-case "$ROOT_GRACE" in
-  ''|0|*[!0-9]*)
-    printf 'fm-lint.sh: FM_LINT_ROOT_GRACE must be a positive integer, got %s.\n' "$ROOT_GRACE" >&2
-    exit 2
-    ;;
-esac
-
-BOUND_MECH=none
-if declare -F fm_exec_timed >/dev/null 2>&1; then
-  if command -v perl >/dev/null 2>&1; then
-    BOUND_MECH=perl
-  elif command -v timeout >/dev/null 2>&1; then
-    BOUND_MECH=timeout
-  elif command -v gtimeout >/dev/null 2>&1; then
-    BOUND_MECH=gtimeout
-  fi
-fi
-
-RLIMITS_EFFECTIVE=
-RLIMITS_DROPPED=
-root_rlimit_specs=()
-read -ra root_rlimit_specs <<< "$ROOT_RLIMITS" || true
-for spec in "${root_rlimit_specs[@]:-}"; do
-  [ -n "$spec" ] || continue
-  if (ulimit "-${spec%%:*}" "${spec#*:}") 2>/dev/null; then
-    RLIMITS_EFFECTIVE="${RLIMITS_EFFECTIVE:+$RLIMITS_EFFECTIVE }$spec"
-  else
-    RLIMITS_DROPPED="${RLIMITS_DROPPED:+$RLIMITS_DROPPED }$spec"
-  fi
+# 6 GiB of address space per analysis process. ulimit -v caps virtual address
+# space, not resident memory, and ShellCheck's GHC runtime keeps roughly a
+# third of that space as reservation, so 6 GiB yields about a 4 GiB working
+# heap budget per root. Measured on Linux during this change: eleven real
+# canonical roots ran out of memory under a 4 GiB cap while the largest
+# passing root peaked near 2.8 GiB resident. Two 6 GiB roots plus the runner's
+# own footprint stay inside the 16 GiB job with headroom. A root that still
+# exceeds the cap fails by name; the roots sidecar records each root's peak
+# RSS so roots approaching the budget stay visible as reduction candidates.
+ROOT_MEMORY_KIB=${FM_LINT_ROOT_MEMORY_KIB:-6291456}
+for bound_pair in \
+  "FM_LINT_ROOT_SECONDS=$ROOT_SECONDS" \
+  "FM_LINT_ROOT_GRACE=$ROOT_GRACE" \
+  "FM_LINT_ROOT_MEMORY_KIB=$ROOT_MEMORY_KIB"; do
+  case "${bound_pair#*=}" in
+    ''|0|*[!0-9]*)
+      printf 'fm-lint.sh: %s must be a positive integer, got %s.\n' \
+        "${bound_pair%%=*}" "${bound_pair#*=}" >&2
+      exit 2
+      ;;
+  esac
 done
 
+BOUND_MECH=none
 if [ "${FM_LINT_REQUIRE_BOUNDS:-0}" = 1 ]; then
   bounds_problems=()
-  [ "$BOUND_MECH" = none ] && \
-    bounds_problems+=('no watchdog mechanism (need perl, timeout, or gtimeout)')
-  [ "${#root_rlimit_specs[@]}" -eq 0 ] && \
-    bounds_problems+=('no per-root rlimit specs configured')
-  [ -n "$RLIMITS_DROPPED" ] && \
-    bounds_problems+=("per-root rlimits not enforceable on this host: $RLIMITS_DROPPED")
+  if declare -F fm_exec_timed >/dev/null 2>&1; then
+    # perl is mandatory above, so fm_exec_timed always takes its perl watchdog.
+    BOUND_MECH=perl
+  else
+    bounds_problems+=('bin/fm-timeout-lib.sh is missing beside fm-lint.sh, so no watchdog is available')
+  fi
+  if [ "$BOUND_MECH" != none ]; then
+    # Exercise the real bound end to end before any root starts: a clean probe
+    # must exit 0 and an over-deadline probe must come back as a timeout, so a
+    # watchdog that cannot actually bound a command (a perl without
+    # Time::HiRes, say) refuses the run here instead of failing every root at
+    # run time.
+    probe_rc=0
+    ( fm_exec_timed 30 1 true ) >/dev/null 2>&1 || probe_rc=$?
+    if [ "$probe_rc" -ne 0 ]; then
+      bounds_problems+=("the timeout watchdog could not run a probe command (rc=$probe_rc)")
+    else
+      probe_rc=0
+      ( fm_exec_timed 2 1 sleep 30 ) >/dev/null 2>&1 || probe_rc=$?
+      case "$probe_rc" in
+        124|137) : ;;
+        *) bounds_problems+=("the timeout watchdog did not bound an over-deadline probe (rc=$probe_rc)") ;;
+      esac
+    fi
+  fi
+  ( ulimit -v "$ROOT_MEMORY_KIB" ) 2>/dev/null \
+    || bounds_problems+=("per-root memory limit FM_LINT_ROOT_MEMORY_KIB=$ROOT_MEMORY_KIB KiB is not enforceable on this host (ulimit -v)")
   if [ "${#bounds_problems[@]}" -gt 0 ]; then
     for problem in "${bounds_problems[@]}"; do
       printf 'fm-lint.sh: bounds required but %s.\n' "$problem" >&2
     done
     printf 'fm-lint.sh: refusing to lint uncapped under FM_LINT_REQUIRE_BOUNDS=1.\n' >&2
     exit 2
-  fi
-else
-  if [ "$BOUND_MECH" = none ]; then
-    printf 'fm-lint.sh: no watchdog mechanism (perl, timeout, or gtimeout); roots run without a wall deadline.\n' >&2
-  fi
-  if [ "${#root_rlimit_specs[@]}" -eq 0 ]; then
-    printf 'fm-lint.sh: no per-root rlimits configured (FM_LINT_ROOT_RLIMITS is empty); running without a memory bound.\n' >&2
-  elif [ -n "$RLIMITS_DROPPED" ]; then
-    printf 'fm-lint.sh: per-root rlimits not enforceable on this host (%s); running without that bound.\n' \
-      "$RLIMITS_DROPPED" >&2
   fi
 fi
 
@@ -955,6 +951,17 @@ else
   ROOTS_LOG=$TMP_ROOT/roots.tsv
 fi
 : > "$ROOTS_LOG"
+if [ "$BOUND_MECH" != none ]; then
+  bounds_applied=1
+  root_deadline_meta=$ROOT_SECONDS
+  root_grace_meta=$ROOT_GRACE
+  root_memory_meta=$ROOT_MEMORY_KIB
+else
+  bounds_applied=0
+  root_deadline_meta=unbounded
+  root_grace_meta=unbounded
+  root_memory_meta=unbounded
+fi
 {
   printf 'format\t%s\n' 'fm-lint-roots-v1'
   printf 'meta\t%s\t%s\n' 'shellcheck_version' "$resolved"
@@ -964,10 +971,10 @@ fi
   printf 'meta\t%s\t%s\n' 'mode' "$ANALYSIS_MODE"
   printf 'meta\t%s\t%s\n' 'partition' "${PARTITION:-all}"
   printf 'meta\t%s\t%s\n' 'jobs' "$JOBS"
-  printf 'meta\t%s\t%s\n' 'root_seconds' "$ROOT_SECONDS"
-  printf 'meta\t%s\t%s\n' 'root_kill_grace_seconds' "$ROOT_GRACE"
-  printf 'meta\t%s\t%s\n' 'root_rlimits' "${RLIMITS_EFFECTIVE:-none}"
-  printf 'meta\t%s\t%s\n' 'root_rlimits_dropped' "${RLIMITS_DROPPED:-none}"
+  printf 'meta\t%s\t%s\n' 'bounds_enforced' "$bounds_applied"
+  printf 'meta\t%s\t%s\n' 'root_deadline_seconds' "$root_deadline_meta"
+  printf 'meta\t%s\t%s\n' 'root_kill_grace_seconds' "$root_grace_meta"
+  printf 'meta\t%s\t%s\n' 'root_memory_limit_kib' "$root_memory_meta"
   printf 'meta\t%s\t%s\n' 'timing_mechanism' "$BOUND_MECH"
 } >> "$ROOTS_LOG"
 
@@ -1044,7 +1051,7 @@ fm_lint_run_worker() {  # <worker-index>
     FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES"
     FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES"
     FM_LINT_INTERNAL_BOUNDED="$BOUND_MECH"
-    FM_LINT_INTERNAL_RLIMITS="$RLIMITS_EFFECTIVE"
+    FM_LINT_INTERNAL_MEMORY_KIB="$ROOT_MEMORY_KIB"
     FM_LINT_INTERNAL_ROOT_SECS="$ROOT_SECONDS"
     FM_LINT_INTERNAL_GRACE="$ROOT_GRACE"
     FM_LINT_INTERNAL_ROOTS_LOG="$ROOTS_LOG"
@@ -1124,7 +1131,8 @@ while [ "$worker" -lt "$SHARD_COUNT" ]; do
 done
 
 # Close the roots log with completion counts so a mid-run kill leaves
-# begun-but-unfinished roots attributable by name.
+# begun-but-unfinished roots attributable by name. result_exit is appended
+# after the purity and workflow checks so it records the run's final status.
 if [ -s "$ROOTS_LOG" ]; then
   read -r roots_completed roots_unfinished roots_begun <<EOF
 $(awk -F '\t' '
@@ -1138,8 +1146,19 @@ EOF
     printf 'meta\t%s\t%s\n' 'roots_begun' "$roots_begun"
     printf 'meta\t%s\t%s\n' 'roots_completed' "$roots_completed"
     printf 'meta\t%s\t%s\n' 'roots_unfinished' "$roots_unfinished"
-    printf 'meta\t%s\t%s\n' 'result_exit' "$overall_rc"
   } >> "$ROOTS_LOG"
+fi
+
+purity_rc=0
+fm_lint_run_backend_purity || purity_rc=$?
+if [ "$overall_rc" -eq 0 ] && [ "$purity_rc" -ne 0 ]; then
+  overall_rc=$purity_rc
+fi
+
+if [ "$overall_rc" -eq 0 ]; then
+  fm_lint_run_workflows || overall_rc=$?
+else
+  fm_lint_run_workflows || true
 fi
 
 if [ -n "$TELEMETRY" ]; then
@@ -1225,10 +1244,10 @@ EOF
     printf 'analysis_mode\t%s\n' "$ANALYSIS_MODE"
     printf 'partition\t%s\n' "${PARTITION:-all}"
     printf 'jobs\t%s\n' "$JOBS"
-    printf 'root_deadline_seconds\t%s\n' "$ROOT_SECONDS"
-    printf 'root_kill_grace_seconds\t%s\n' "$ROOT_GRACE"
-    printf 'root_rlimits_applied\t%s\n' "${RLIMITS_EFFECTIVE:-none}"
-    printf 'root_rlimits_dropped\t%s\n' "${RLIMITS_DROPPED:-none}"
+    printf 'root_bounds_enforced\t%s\n' "$bounds_applied"
+    printf 'root_deadline_seconds\t%s\n' "$root_deadline_meta"
+    printf 'root_kill_grace_seconds\t%s\n' "$root_grace_meta"
+    printf 'root_memory_limit_kib\t%s\n' "$root_memory_meta"
     printf 'root_timing_mechanism\t%s\n' "$BOUND_MECH"
     printf 'root_count\t%s\n' "$ROOT_COUNT"
     printf 'direct_lines\t%s\n' "$direct_lines"
@@ -1260,16 +1279,8 @@ EOF
   fi
 fi
 
-purity_rc=0
-fm_lint_run_backend_purity || purity_rc=$?
-if [ "$overall_rc" -eq 0 ] && [ "$purity_rc" -ne 0 ]; then
-  overall_rc=$purity_rc
-fi
-
-if [ "$overall_rc" -eq 0 ]; then
-  fm_lint_run_workflows || overall_rc=$?
-else
-  fm_lint_run_workflows || true
+if [ -s "$ROOTS_LOG" ]; then
+  printf 'meta\t%s\t%s\n' 'result_exit' "$overall_rc" >> "$ROOTS_LOG"
 fi
 
 exit "$overall_rc"

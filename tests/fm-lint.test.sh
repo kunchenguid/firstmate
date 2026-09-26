@@ -333,14 +333,27 @@ SH
   chmod +x "$fakebin/shellcheck"
 }
 
+# fm_lint_bounds_supported: the platform pair the bounded per-root envelope
+# needs - a watchdog mechanism and an enforceable address-space limit. macOS
+# rejects ulimit -v, so bounded-mode tests run there only when this is true.
+fm_lint_bounds_supported() {
+  [ -r "$ROOT/bin/fm-timeout-lib.sh" ] || return 1
+  ( ulimit -v 65536 ) 2>/dev/null || return 1
+  command -v perl >/dev/null 2>&1 \
+    || command -v timeout >/dev/null 2>&1 \
+    || command -v gtimeout >/dev/null 2>&1 || return 1
+  return 0
+}
+
 # fm_lint_stub_reactive_shellcheck <fakebin-dir>: a ShellCheck stub whose
 # behavior is steered by the basename of the root it is asked to analyze, so
-# bounded-execution tests can mix a hang, a resource-limit death, and clean
+# bounded-execution tests can mix a hang, a memory-limit death, and clean
 # roots in one run. A *blocker* root spawns a tracked child (pid written to
 # FM_TEST_CHILD_PID), records its own pid on FM_TEST_STUB_PID, and then blocks;
-# a *hoarder* root execs a writer that floods FM_TEST_ALLOC_FILE until a file
-# size rlimit kills it; anything else records its path on FM_TEST_STUB_LOG and
-# exits cleanly.
+# a *hoarder* root runs a perl allocator that grows past any address-space
+# limit, translating whatever way perl reports the refused allocation into a
+# deterministic out-of-memory exit; anything else records its path on
+# FM_TEST_STUB_LOG and exits cleanly.
 fm_lint_stub_reactive_shellcheck() {
   local fakebin=$1
   cat > "$fakebin/shellcheck" <<'SH'
@@ -358,8 +371,9 @@ case "$target" in
     exec sleep "${FM_TEST_BLOCK_SECS:-300}"
     ;;
   *hoarder*)
-    exec head -c "${FM_TEST_ALLOC_BYTES:-1048576}" /dev/zero \
-      >> "${FM_TEST_ALLOC_FILE:-/dev/null}"
+    perl -e 'my $s = ""; for (1..1024) { $s .= "x" x 1048576 }' 2>&1
+    printf 'shellcheck: out of memory\n' >&2
+    exit 2
     ;;
 esac
 printf '%s\n' "$target" >> "${FM_TEST_STUB_LOG:-/dev/null}"
@@ -1383,6 +1397,10 @@ SH
 }
 
 test_root_deadline_names_the_root_and_reaps_the_tree() {
+  if ! fm_lint_bounds_supported; then
+    pass "SKIP (host cannot enforce the bounded envelope): root deadline kill check"
+    return
+  fi
   local tmp fakebin stub_log telemetry roots_log out rc
   local blocker ok sentinel_pid child_pid_file stub_pid_file child_pid stub_pid
   tmp=$(fm_test_tmproot fm-lint-bound-deadline)
@@ -1402,6 +1420,7 @@ test_root_deadline_names_the_root_and_reaps_the_tree() {
   sentinel_pid=$!
   rc=0
   out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_PROGRESS=1 \
+    FM_LINT_REQUIRE_BOUNDS=1 \
     FM_LINT_ROOT_SECONDS=1 FM_LINT_ROOT_GRACE=1 \
     FM_TEST_STUB_LOG="$stub_log" FM_TEST_CHILD_PID="$child_pid_file" \
     FM_TEST_STUB_PID="$stub_pid_file" FM_TEST_BLOCK_SECS=300 \
@@ -1435,40 +1454,49 @@ test_root_deadline_names_the_root_and_reaps_the_tree() {
   pass "a root pinned at the wall deadline fails by name, reaps its tree, and leaves the sentinel alive"
 }
 
-test_root_rlimit_reports_a_named_limit_death() {
-  local tmp fakebin stub_log telemetry roots_log out rc hoarder ok alloc_file
-  tmp=$(fm_test_tmproot fm-lint-bound-rlimit)
+test_root_memory_limit_reports_a_named_death() {
+  if ! fm_lint_bounds_supported; then
+    pass "SKIP (host cannot enforce the bounded envelope): memory-limit death check"
+    return
+  fi
+  local tmp fakebin stub_log telemetry roots_log out rc hoarder ok
+  local sentinel_pid
+  tmp=$(fm_test_tmproot fm-lint-bound-memory)
   fakebin=$(fm_fakebin "$tmp")
   fm_lint_stub_reactive_shellcheck "$fakebin"
   stub_log="$tmp/stub.log"
   telemetry="$tmp/lint.tsv"
   roots_log="$tmp/lint.roots.tsv"
-  alloc_file="$tmp/alloc.out"
   hoarder="$tmp/hoarder.sh"
   ok="$tmp/ok.sh"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$hoarder"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$ok"
 
-  # ulimit -f (file size) is the one resource limit enforceable on both Linux
-  # and macOS, so it exercises the same flag:value spec seam that CI uses for
-  # the memory envelope without needing a real allocation failure locally.
+  # The hoarder stub allocates a full GiB; under a 256 MiB address-space limit
+  # the allocator is refused and the run must name the root, not survive.
+  sleep 300 &
+  sentinel_pid=$!
   rc=0
   out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_PROGRESS=1 \
-    FM_LINT_ROOT_RLIMITS='f:64' \
-    FM_TEST_STUB_LOG="$stub_log" FM_TEST_ALLOC_FILE="$alloc_file" \
+    FM_LINT_REQUIRE_BOUNDS=1 FM_LINT_ROOT_MEMORY_KIB=262144 \
+    FM_TEST_STUB_LOG="$stub_log" \
     "$LINT" --telemetry "$telemetry" "$ok" "$hoarder" 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "a root killed by its rlimit unexpectedly passed"
-  assert_contains "$out" "hoarder.sh" "the rlimit-killed root was not named"
-  assert_contains "$out" "reason=signal:XFSZ" "the rlimit kill was not reported as a signal death"
-  awk -F '\t' '$1 == "end" && $3 ~ /hoarder\.sh$/ && $10 == "signal:XFSZ" { found=1 } END { exit !found }' \
-    "$roots_log" || fail "the sidecar did not record the rlimit-killed root by name"
+  [ "$rc" -ne 0 ] || fail "a root killed by its memory limit unexpectedly passed"
+  assert_contains "$out" "hoarder.sh" "the memory-limited root was not named"
+  assert_contains "$out" "reason=memory" "the memory-limit death was not classified as memory"
+  kill -0 "$sentinel_pid" 2>/dev/null \
+    || fail "the memory-limit kill took an unrelated sentinel process with it"
+  kill -KILL "$sentinel_pid" 2>/dev/null || true
+  wait "$sentinel_pid" 2>/dev/null || true
+  awk -F '\t' '$1 == "end" && $3 ~ /hoarder\.sh$/ && $10 == "memory" { found=1 } END { exit !found }' \
+    "$roots_log" || fail "the sidecar did not record the memory-limited root by name"
   awk -F '\t' '$1 == "end" && $3 ~ /ok\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
     "$roots_log" || fail "the sidecar lost the clean root's record"
-  pass "a root killed by its enforced rlimit fails by name with a signal reason"
+  pass "a root refused by its enforced memory limit fails by name with a memory reason"
 }
 
-test_require_bounds_refuses_unenforceable_limits() {
-  local tmp fakebin stub_log fixture out rc
+test_require_bounds_refuses_when_enforcement_is_missing() {
+  local tmp fakebin stub_log fixture out rc lone_dir
   tmp=$(fm_test_tmproot fm-lint-require-bounds)
   fakebin=$(fm_fakebin "$tmp")
   fm_lint_stub_shellcheck "$fakebin" "$tmp/stub.log"
@@ -1476,21 +1504,127 @@ test_require_bounds_refuses_unenforceable_limits() {
   fixture="$tmp/clean.sh"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fixture"
 
+  # A script copied without its sibling watchdog library cannot enforce the
+  # wall deadline, so a required-bounds run must refuse before ShellCheck.
+  lone_dir="$tmp/lone"
+  mkdir -p "$lone_dir"
+  cp "$LINT" "$lone_dir/fm-lint.sh"
+  chmod +x "$lone_dir/fm-lint.sh"
   rc=0
   out=$(PATH="$fakebin:$PATH" FM_LINT_REQUIRE_BOUNDS=1 \
-    FM_LINT_ROOT_RLIMITS='z:9' "$LINT" "$fixture" 2>&1) || rc=$?
-  [ "$rc" -eq 2 ] || fail "unenforceable bounds under REQUIRE_BOUNDS exited $rc, expected 2"
-  assert_contains "$out" "z:9" "the refusal did not name the unenforceable bound"
+    "$lone_dir/fm-lint.sh" "$fixture" 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] || fail "a watchdog-less run under REQUIRE_BOUNDS exited $rc, expected 2"
+  assert_contains "$out" "fm-timeout-lib.sh" "the refusal did not name the missing watchdog library"
   assert_contains "$out" "refusing to lint uncapped" "the refusal did not explain itself"
   [ ! -s "$stub_log" ] \
-    || fail "a bound-refused run still invoked ShellCheck"
+    || fail "a watchdog-refused run still invoked ShellCheck"
 
+  if ( ulimit -v 65536 ) 2>/dev/null; then
+    # The host accepts the memory limit, so a required-bounds run proceeds and
+    # still lints the root.
+    rc=0
+    out=$(PATH="$fakebin:$PATH" FM_LINT_REQUIRE_BOUNDS=1 \
+      "$LINT" "$fixture" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || fail "an enforceable bounded run was refused"$'\n'"$out"
+    [ -s "$stub_log" ] || fail "an enforceable bounded run never invoked ShellCheck"
+  else
+    # The host rejects the address-space limit outright (macOS), so the run
+    # must refuse by name rather than lint uncapped.
+    rc=0
+    out=$(PATH="$fakebin:$PATH" FM_LINT_REQUIRE_BOUNDS=1 \
+      "$LINT" "$fixture" 2>&1) || rc=$?
+    [ "$rc" -eq 2 ] || fail "an unenforceable memory limit under REQUIRE_BOUNDS exited $rc, expected 2"
+    assert_contains "$out" "FM_LINT_ROOT_MEMORY_KIB" \
+      "the refusal did not name the unenforceable memory limit"
+    assert_contains "$out" "refusing to lint uncapped" "the refusal did not explain itself"
+    [ ! -s "$stub_log" ] \
+      || fail "a bound-refused run still invoked ShellCheck"
+  fi
+  pass "FM_LINT_REQUIRE_BOUNDS refuses missing enforcement and proceeds when enforceable"
+}
+
+test_pinned_shellcheck_memory_limit() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): pinned memory-envelope check"
+    return
+  fi
+  if ! fm_lint_bounds_supported; then
+    pass "SKIP (host cannot enforce the bounded envelope): pinned memory-envelope check"
+    return
+  fi
+  local tmp telemetry roots_log out rc fixture
+  tmp=$(fm_test_tmproot fm-lint-pinned-memory)
+  telemetry="$tmp/lint.tsv"
+  roots_log="$tmp/lint.roots.tsv"
+  fixture="$tmp/small.sh"
+  printf '#!/usr/bin/env bash\nprintf ok\n' > "$fixture"
+
+  # The pinned ShellCheck must start and lint under the configured memory
+  # limit - this is what proves the address-space cap leaves GHC enough head
+  # room instead of discovering the conflict mid-partition in CI.
   rc=0
-  out=$(PATH="$fakebin:$PATH" FM_LINT_REQUIRE_BOUNDS=1 \
-    FM_LINT_ROOT_RLIMITS='f:64' "$LINT" "$fixture" 2>&1) || rc=$?
-  [ "$rc" -eq 0 ] || fail "an enforceable bound under REQUIRE_BOUNDS was refused"$'\n'"$out"
-  [ -s "$stub_log" ] || fail "an enforceable bounded run never invoked ShellCheck"
-  pass "FM_LINT_REQUIRE_BOUNDS refuses unenforceable limits and proceeds on enforceable ones"
+  out=$(FM_LINT_REQUIRE_BOUNDS=1 "$LINT" \
+    --telemetry "$telemetry" "$fixture" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "pinned ShellCheck did not lint under the default memory limit"$'\n'"$out"
+  grep -q $'^meta\tbounds_enforced\t1$' "$roots_log" \
+    || fail "the sidecar did not record enforced bounds"
+  grep -q $'^meta\troot_memory_limit_kib\t6291456$' "$roots_log" \
+    || fail "the sidecar did not record the applied memory limit"
+  awk -F '\t' '$1 == "end" && $3 ~ /small\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
+    "$roots_log" || fail "the pinned root did not complete ok under the memory limit"
+
+  # A far-too-small limit must bind the same pinned binary: the root is
+  # refused or killed and named, never silently uncapped.
+  rc=0
+  out=$(FM_LINT_REQUIRE_BOUNDS=1 FM_LINT_ROOT_MEMORY_KIB=262144 \
+    FM_LINT_PROGRESS=1 "$LINT" --telemetry "$tmp/tiny.tsv" "$fixture" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "pinned ShellCheck ignored a 256 MiB address-space limit"
+  assert_contains "$out" "small.sh" "the memory-bound pinned root was not named"
+  if printf '%s\n' "$out" | grep -q 'reason=\(ok\|findings\)'; then
+    fail "the over-limit pinned root was misclassified as a lint result"$'\n'"$out"
+  fi
+  pass "the pinned ShellCheck both respects and survives under the memory envelope"
+}
+
+test_sidecar_result_exit_reflects_final_status() {
+  local tmp fakebin log telemetry roots_log out rc
+  tmp=$(fm_test_tmproot fm-lint-sidecar-result)
+  fakebin=$(fm_fakebin "$tmp")
+  log="$tmp/shellcheck.log"
+  telemetry="$tmp/lint.tsv"
+  roots_log="$tmp/lint.roots.tsv"
+  mkdir -p "$tmp/repo/bin/backends" "$tmp/repo/tests" "$tmp/repo/.github/workflows"
+  cp "$LINT" "$tmp/repo/bin/fm-lint.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$tmp/repo/bin/fm-timeout-lib.sh"
+  cat > "$tmp/repo/bin/fm-lint-workflows.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$tmp/repo/bin/backends/noop.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$tmp/repo/tests/noop.test.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  printf '#!/usr/bin/env bash\nbd close fm-example\n' > "$tmp/repo/bin/direct-beads.sh"
+  chmod +x "$tmp/repo/bin/fm-lint.sh" "$tmp/repo/bin/fm-lint-workflows.sh"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  # Every ShellCheck root passes, then the backend-purity check fails the run:
+  # the retained records must carry that final status, not the clean lint exit.
+  rc=0
+  out=$(cd "$tmp/repo" && CI=true PATH="$fakebin:$PATH" \
+    "$tmp/repo/bin/fm-lint.sh" --telemetry "$telemetry" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "a backend-purity failure did not fail the lint run (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "direct Beads CLI invocation bypasses tasks-axi" \
+    "the run did not report its backend-purity failure"
+  grep -q $'^meta\tresult_exit\t1$' "$roots_log" \
+    || fail "the sidecar recorded the pre-check status instead of the final exit"
+  grep -q $'^result_exit\t1$' "$telemetry" \
+    || fail "telemetry recorded the pre-check status instead of the final exit"
+  pass "the roots sidecar and telemetry record the run's final exit status"
 }
 
 test_roots_sidecar_records_per_root_lifecycle() {
@@ -1514,10 +1648,14 @@ test_roots_sidecar_records_per_root_lifecycle() {
   [ -f "$roots_log" ] || fail "the run wrote no per-root sidecar beside telemetry"
   grep -q $'^format\tfm-lint-roots-v1$' "$roots_log" \
     || fail "the sidecar is missing its format header"
-  grep -q $'^meta\ttiming_mechanism\t' "$roots_log" \
+  grep -q $'^meta\tbounds_enforced\t0$' "$roots_log" \
+    || fail "the sidecar did not record the unenforced bounds state"
+  grep -q $'^meta\ttiming_mechanism\tnone$' "$roots_log" \
     || fail "the sidecar did not record the timing mechanism"
-  grep -q $'^meta\troot_seconds\t1200$' "$roots_log" \
-    || fail "the sidecar did not record the default deadline"
+  grep -q $'^meta\troot_deadline_seconds\tunbounded$' "$roots_log" \
+    || fail "the sidecar did not record the unbounded deadline state"
+  grep -q $'^meta\troot_memory_limit_kib\tunbounded$' "$roots_log" \
+    || fail "the sidecar did not record the unbounded memory state"
   grep -q $'^meta\troots_completed\t3$' "$roots_log" \
     || fail "the sidecar did not count three completed roots"
   [ "$(grep -c '^begin' "$roots_log")" -eq 3 ] \
@@ -1624,8 +1762,10 @@ test_clean_fixture_passes
 test_jobs_are_deterministic_and_complete
 test_worker_trees_stop_on_signal
 test_root_deadline_names_the_root_and_reaps_the_tree
-test_root_rlimit_reports_a_named_limit_death
-test_require_bounds_refuses_unenforceable_limits
+test_root_memory_limit_reports_a_named_death
+test_require_bounds_refuses_when_enforcement_is_missing
+test_pinned_shellcheck_memory_limit
+test_sidecar_result_exit_reflects_final_status
 test_roots_sidecar_records_per_root_lifecycle
 test_seeded_module_boundary_parity
 test_changed_mode_lints_only_the_changed_file
