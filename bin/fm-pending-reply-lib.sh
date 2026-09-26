@@ -156,7 +156,7 @@ fm_pending_reply_new_id() {
   if command -v openssl >/dev/null 2>&1; then
     raw=$(openssl rand -hex 8 2>/dev/null || true)
   fi
-  if [ -z "$raw" ]; then
+  if [ -z "${raw:-}" ]; then
     raw=$(printf '%s' "$$-$(date +%s%N 2>/dev/null || date +%s)-$RANDOM$RANDOM" | cksum 2>/dev/null | awk '{print $1}')
     hex=$(printf '%s' "$raw$RANDOM$RANDOM" | shasum -a 256 2>/dev/null | awk '{print $1}')
     raw=${hex:0:16}
