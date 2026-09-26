@@ -17,6 +17,16 @@ Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue be
 | Trust dialog | None. |
 | Marker | None; OpenCode publishes no identity marker, so `../../../bin/fm-harness.sh` identifies it from process ancestry. |
 
+## Free model selection
+
+| Fact | Value |
+|---|---|
+| Current free catalog | OpenCode Zen listed Big Pickle (`big-pickle`), Space Bunny Free (`space-bunny-free`), LongCat 2.5 Preview Free (`longcat-2.5-preview-free`), MiMo-V2.6-Flash Free (`mimo-v2.6-flash-free`), MiMo-V2.5 Free (`mimo-v2.5-free`), Ling 3.0 Flash Fin Free (`ling-3.0-flash-fin-free`), Nemotron 3 Ultra Free (`nemotron-3-ultra-free`), Nemotron 3.5 Lightning Free (`nemotron-3.5-lightning-free`), Muse Spark 1.3 Contributor Free (`muse-spark-1.3-contributor-free`), and Jev 1.13 Free (`jev-1.13-free`) when checked on 2026-09-26. This promotional catalog can change; check the [current Zen catalog](https://opencode.ai/docs/zen/) and run `opencode models opencode` at dispatch time. |
+| Data handling | The Zen privacy policy says providers default to zero retention and no model training, with listed exceptions. Space Bunny Free and LongCat 2.5 Preview Free are explicitly zero-retention and exclude training; Jev 1.13 Free has no listed exception to Zen's default. Big Pickle, both MiMo models, and Ling 3.0 Flash Fin Free may use collected data to improve models; Muse Spark 1.3 Contributor Free may use prompts and completions to train future Meta models; both Nemotron free models are trial-use only and must not receive personal or confidential data. For work that may contain private code or secrets, use only models covered by a current zero-retention policy; never send sensitive content to a training-use or trial-only model. Recheck the [Zen privacy terms](https://opencode.ai/docs/zen/) before dispatch. |
+| Capability checks | The Zen documentation does not specify per-model context windows, rate limits, or tool-use support. Before assigning a model to coding work, run a smoke test with non-sensitive input to verify the required context size, rate behavior, and tool calls. |
+| Candidate preference | Prefer a free model only after its coding behavior has been validated on a representative non-sensitive task; tool-integration evidence does not establish model coding quality. |
+| Default | Do not hardcode a free model name as the standard default. Promotional free access can end or change, so use the live `opencode models` catalog and recheck policy and capability at dispatch time. |
+
 OpenCode can auto-upgrade in the background, and the running TUI can exit mid-task.
 That behavior was observed live during an upgrade from 1.15.7 to 1.17.3.
 If the pane shows the exit banner, use the verified resume path above.
