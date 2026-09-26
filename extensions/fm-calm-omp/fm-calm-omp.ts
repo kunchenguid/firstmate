@@ -1,8 +1,7 @@
-// OMP Calm delegates to the native tool-activity visibility action, including
-// settings persistence, tool images, and terminal-history repainting.
-// OMP has no public extension setter for this action. Its widget factory gives
-// us the live TUI, whose focused CustomEditor exposes the native callback.
-// Probe that seam for each command; never patch or retain an editor instance.
+// OMP applies visibility, images, history repainting, and persistence through
+// its live display setting; use the loader-provided settings singleton.
+import type { Settings } from "@oh-my-pi/pi-coding-agent";
+import { cfgDisplayHideToolActivity } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import {
   CALM_WORKING_SHIP_TICK_MS,
   createCalmWorkingShipAnimation,
@@ -17,7 +16,7 @@ type Context = { hasUI: boolean; ui: UI };
 type ExtensionAPI = {
   // The loader provides its own live namespace; importing the package again can
   // create a second settings singleton when OMP runs from its bundled CLI.
-  pi?: { settings?: { get: (key: "display.hideToolActivity") => unknown } };
+  pi?: { settings?: Settings };
   on?: (event: string, handler: (event: { willContinue?: boolean }, ctx: Context) => void) => void;
   registerCommand: (
     name: string,
@@ -25,7 +24,6 @@ type ExtensionAPI = {
   ) => void;
 };
 
-const WIDGET_KEY = "fm-calm-omp-action-probe";
 const BOAT_KEY = "firstmate-calm-omp-working-ship";
 const FALLBACK = "Use Ctrl+Shift+O or /settings > Appearance > Display > Hide Tool Activity.";
 
@@ -55,7 +53,7 @@ export default function calmOmp(omp: ExtensionAPI): void {
     if (!context?.hasUI || !context.ui.setWidget) return;
     let hidden: unknown;
     try {
-      hidden = omp.pi?.settings?.get("display.hideToolActivity");
+      hidden = omp.pi?.settings ? cfgDisplayHideToolActivity.get(omp.pi.settings) : undefined;
     } catch {
       hidden = undefined;
     }
@@ -127,43 +125,17 @@ export default function calmOmp(omp: ExtensionAPI): void {
         ctx.ui.notify("Usage: /calm-omp (toggles OMP tool activity visibility)", "warning");
         return;
       }
-      if (!ctx.hasUI || typeof ctx.ui.setWidget !== "function") {
+      if (!ctx.hasUI) {
         ctx.ui.notify("/calm-omp requires OMP's interactive terminal UI.", "warning");
         return;
       }
 
-      let toggle: (() => void) | undefined;
-      let probing = true;
       try {
-        ctx.ui.setWidget(WIDGET_KEY, (tui) => {
-          // A future asynchronous widget factory must not act after this command.
-          if (probing && tui && typeof (tui as any).getFocused === "function") {
-            const focused = (tui as any).getFocused();
-            if (focused && typeof focused.onToggleToolActivity === "function") {
-              toggle = () => focused.onToggleToolActivity();
-            }
-          }
-          return { render: () => [], invalidate: () => {} };
-        });
-      } catch {
-        toggle = undefined;
-      } finally {
-        probing = false;
-        try {
-          ctx.ui.setWidget(WIDGET_KEY, undefined);
-        } catch {
-          // Do not change visibility if the temporary UI probe cannot be removed.
-          toggle = undefined;
-        }
-      }
-
-      if (!toggle) {
-        ctx.ui.notify(`/calm-omp: OMP's focused editor visibility action is unavailable. ${FALLBACK}`, "warning");
-        return;
-      }
-      try {
-        // The native action reports hidden/visible itself and persists its setting.
-        toggle();
+        const settings = omp.pi?.settings;
+        if (!settings) throw new Error("OMP settings are unavailable");
+        const hidden = !cfgDisplayHideToolActivity.get(settings);
+        cfgDisplayHideToolActivity.set(settings, hidden);
+        ctx.ui.notify(`Tool activity: ${hidden ? "hidden" : "visible"}`);
         syncBoat();
       } catch {
         ctx.ui.notify(`/calm-omp: OMP's tool visibility action failed; check the current display setting. ${FALLBACK}`, "error");

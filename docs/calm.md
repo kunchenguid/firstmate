@@ -112,12 +112,14 @@ Calm on OMP is the standalone `fm-calm-omp` package under `extensions/fm-calm-om
 To unload it, run `omp plugin disable fm-calm-omp`. The package lives outside `.omp/extensions/` on purpose: OMP de-duplicates extension entries by absolute path rather than realpath, so a project-local copy plus a global link would load twice in sessions that run inside a firstmate checkout.
 The installer retires a legacy project-local `.omp/extensions/fm-calm-omp.ts` for the same reason, removing an identical copy and renaming a divergent one to `.bak`.
 
-OMP exposes no extension setter for tool-activity visibility, so `/calm-omp` reaches the native toggle through a one-shot widget probe of the focused editor and delegates to it, including its own persisted `display.hideToolActivity` setting, tool images, and terminal-history repainting.
+`/calm-omp` uses OMP's typed `display.hideToolActivity` setting and live settings instance, which apply persistence, tool-image visibility, and terminal-history repainting.
 While that setting hides tool activity and a run is under way, the extension draws the same two-row sailboat animation from the vendored working-ship module in `extensions/fm-calm-omp/lib/`.
-When the probe finds no visibility action the command reports the fallback (`Ctrl+Shift+O` or `/settings > Appearance > Display > Hide Tool Activity`) and changes nothing.
+If the setting cannot be changed, the command reports the fallback (`Ctrl+Shift+O` or `/settings > Appearance > Display > Hide Tool Activity`).
 
 Regression entry point:
 
 ```sh
 tests/fm-omp-calm-install.test.sh
+tests/fm-omp-calm.test.sh
+tests/fm-omp-calm-live-e2e.test.sh
 ```

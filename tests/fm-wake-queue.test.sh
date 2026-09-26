@@ -361,6 +361,8 @@ SH
 #                              rewrote the progress marker
 #   stall-file <task> <row-key>
 #                              stall marker file records <row-key>
+#   cleared-stall <empty-task> <task> <row-key>
+#                              empty progress removed and stall marker recorded
 #   drained <task> <queue>     child queue emptied, the doorbell was submitted,
 #                              and that tick rewrote the progress marker
 #   alert                      the watcher exited on the stall wake
@@ -389,6 +391,10 @@ stall_watch_record_met() { # <mode> <marker> <want> <progress> <progress-start> 
       ;;
     stall-file)
       [ -f "$marker" ] && [ ! -L "$marker" ] \
+        && [ "$(cat "$marker" 2>/dev/null || true)" = "$want" ]
+      ;;
+    cleared-stall)
+      [ ! -e "$progress" ] && [ -f "$marker" ] && [ ! -L "$marker" ] \
         && [ "$(cat "$marker" 2>/dev/null || true)" = "$want" ]
       ;;
     drained)
@@ -434,6 +440,11 @@ secondmate_stall_watch_leg() { # <dir> <leg> <mode> [arg...]
     stall-file)
       marker="$dir/state/.secondmate-wake-stall-$1"
       want=$2
+      ;;
+    cleared-stall)
+      progress="$dir/state/.secondmate-wake-progress-$1"
+      marker="$dir/state/.secondmate-wake-stall-$2"
+      want=$3
       ;;
     drained)
       marker=$2
@@ -1138,15 +1149,24 @@ test_empty_prefix_mate_preserves_other_mate_receipt() {
     || fail "ios-ui stall publication could not be acknowledged"
 
   fakebin="$dir/fakebin"
+  # A heartbeat is published before queue observation. Keep that window open so
+  # the checkpoint must await the actual records even on an otherwise idle host.
+  cat > "$fakebin/touch" <<SH
+#!/usr/bin/env bash
+"$(command -v touch)" "\$@" || exit
+case "\$*" in *last-watcher-beat*) sleep 2 ;; esac
+SH
+  chmod +x "$fakebin/touch"
   round=1
   while [ "$round" -le 2 ]; do
     printf 'seed\n' > "$state/.secondmate-wake-progress-ios"
+    rm -f "$state/.secondmate-wake-stall-ios-ui"
     PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
       FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='' \
       FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
       FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-      secondmate_stall_watch_leg "$dir" "$round" tick
+      secondmate_stall_watch_leg "$dir" "$round" cleared-stall ios ios-ui "$epoch-9"
     [ ! -e "$state/.secondmate-wake-progress-ios" ] \
       || fail "empty ios queue was not observed on round $round"
     [ -f "$state/.secondmate-wake-stall-ios-ui" ] && [ ! -L "$state/.secondmate-wake-stall-ios-ui" ] \

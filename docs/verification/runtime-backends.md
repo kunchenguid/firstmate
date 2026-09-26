@@ -6,6 +6,21 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## OMP Calm visibility
+
+Verified on 2026-09-25 with OMP 18.3.1 in an isolated 110-column interactive terminal.
+The token-free live regression resumes a stored tool call, invokes `/calm-omp`, and observes the tool row disappear and return while the user message remains visible.
+
+```sh
+bash tests/fm-omp-calm-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - OMP omp/18.3.1: /calm-omp hides and restores native tool activity
+```
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.
