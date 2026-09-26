@@ -363,6 +363,9 @@ META="$STATE/$ID.meta"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+fm_session_lock_refuse_displaced "$STATE" || exit 1
 # Role partition: merging is MAIN-owned while attended; the Pi supervision
 # branch reports the green PR and never merges (contract: bin/fm-lease-lib.sh;
 # no-op in homes without a branch actor). While the away-posture record exists

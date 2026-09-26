@@ -518,10 +518,12 @@ run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
     env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+      FM_FAKE_HARNESS_PID="${FM_FAKE_HARNESS_PID:-$SESSION_START_TEST_HARNESS_PID}" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   else
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      FM_FAKE_HARNESS_PID="${FM_FAKE_HARNESS_PID:-$SESSION_START_TEST_HARNESS_PID}" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   fi
@@ -769,7 +771,7 @@ EOF
 # --- lock refusal: read-only path --------------------------------------------
 
 test_lock_refusal_read_only_path() {
-  local rec root home fakebin holder_pid out status
+  local rec root home fakebin out status
   rec=$(new_world lock-refusal)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -787,18 +789,14 @@ EOF
   append_wake "$home/state" signal sm-x "done: surfaced before refusal" || fail "seed wake failed"
   git -C "$root" checkout -q -B fm/read-only-tangle
 
-  sleep 300 &
-  holder_pid=$!
-  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  mkdir "$home/state/.lock"
 
   status=0
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
-  kill "$holder_pid" 2>/dev/null || true
-  wait "$holder_pid" 2>/dev/null || true
 
   expect_code 0 "$status" "fm-session-start.sh must exit 0 even on a lock refusal"
   assert_contains "$out" "READ-ONLY SESSION" "read-only banner missing on lock refusal"
-  assert_contains "$out" "another live firstmate session holds the lock" "read-only banner did not surface fm-lock.sh's own error text"
+  assert_contains "$out" "session lock is not a regular file" "read-only banner did not surface fm-lock.sh's own error text"
   assert_contains "$out" "Skipping every mutating step" "read-only banner did not explain what was skipped"
   assert_contains "$out" "skipped (read-only session)" "wake-queue section did not report itself skipped"
   assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" "read-only guard did not surface watcher-liveness alarm"
@@ -827,6 +825,34 @@ EOF
   assert_contains "$out" "NEXT STEP" "closing reminder missing on the read-only path"
 
   pass "a lock refusal prints a loud read-only banner, skips every mutating step, and still completes the digest"
+}
+
+test_old_idle_live_pane_is_superseded_on_start() {
+  local rec root home fakebin holder_pid out
+  rec=$(new_world lock-takeover)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  mkdir -p "$root/bin"
+  : > "$root/AGENTS.md"
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  printf '%s\n' "$holder_pid" > "$home/state/.session-start-complete"
+
+  out=$(FM_FAKE_LIVE_HOLDER_PID="$holder_pid" FM_STATE_OVERRIDE="$home/state" run_session_start "$root" "$root" "$fakebin:$BASE_PATH")
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$out" "lock takeover: displaced live holder $holder_pid" \
+    "new primary did not announce the old idle pane it superseded"
+  assert_not_contains "$out" "READ-ONLY SESSION" \
+    "a live idle previous pane still locked the new primary out"
+  [ "$(cat "$home/state/.lock")" != "$holder_pid" ] \
+    || fail "the old idle pane still owns the session lock"
+  pass "a new full session start supersedes an old idle live pane and proceeds with the digest"
 }
 
 test_lock_write_failure_read_only_path() {
@@ -865,22 +891,19 @@ EOF
   make_fake_ps_claude "$fakebin"
   : > "$home/config/trace-context"
 
-  FM_TRACE_CONTEXT=off run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+  FM_FAKE_HARNESS_PID=$$ FM_TRACE_CONTEXT=off run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
   [ "$(awk '{print $2}' "$home/state/.trace-context-effective")" = off ] \
     || fail "session start must freeze an env-off override over a present config flag"
 
   rm "$home/config/trace-context"
-  FM_TRACE_CONTEXT=on run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+  out=$(FM_FAKE_HARNESS_PID=$$ FM_TRACE_CONTEXT=on run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   [ "$(awk '{print $2}' "$home/state/.trace-context-effective")" = on ] \
-    || fail "a new session start must freeze an env-on override over an absent config flag"
+    || fail "a new session start must freeze an env-on override over an absent config flag: $(cat "$home/state/.trace-context-effective" 2>/dev/null); $out"
   frozen=$(cat "$home/state/.trace-context-effective")
 
-  sleep 300 &
-  holder_pid=$!
-  printf '%s\n' "$holder_pid" > "$home/state/.lock"
-  out=$(FM_TRACE_CONTEXT=off run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  kill "$holder_pid" 2>/dev/null || true
-  wait "$holder_pid" 2>/dev/null || true
+  rm -f "$home/state/.lock"
+  mkdir "$home/state/.lock"
+  out=$(FM_FAKE_HARNESS_PID=$$ FM_TRACE_CONTEXT=off run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "READ-ONLY SESSION" "trace-context refusal fixture did not enter read-only mode"
   [ "$(cat "$home/state/.trace-context-effective")" = "$frozen" ] \
     || fail "a lock-refused session must not mutate the frozen trace-context state"
@@ -1648,7 +1671,7 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  printf '999999\n' > "$home/state/.lock"
+  mkdir "$home/state/.lock"
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -2248,7 +2271,8 @@ EOF
   holder_pid=$!
   printf '%s\n%s\n' "$holder_pid" "$(hash_file_for_test "$root/AGENTS.md")" \
     > "$home/state/.session-start-agents-baseline"
-  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  rm -f "$home/state/.lock"
+  mkdir "$home/state/.lock"
   baseline_before=$(cat "$home/state/.session-start-agents-baseline")
   completion_before=$(cat "$home/state/.session-start-complete")
 
@@ -2257,7 +2281,7 @@ EOF
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
 
-  assert_contains "$out" "READ-ONLY SESSION" "competing live lock owner did not force read-only mode"
+  assert_contains "$out" "READ-ONLY SESSION" "non-regular lock did not force read-only mode"
   assert_contains "$out" "READ_ONLY_AGENTS=current" \
     "read-only compact trusted another session's equal baseline"
   [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline_before" ] \
@@ -2344,7 +2368,8 @@ EOF
   make_fake_ps_claude "$fakebin"
   git -C "$root" checkout -q -B fm/reemit-tangle
 
-  reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+  reemit=$(FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     "$SESSION_START" --reemit)
 
@@ -2358,8 +2383,9 @@ EOF
   rm -f "$home/state/.lock"
   sleep 300 &
   holder_pid=$!
-  printf '%s\n' "$holder_pid" > "$home/state/.lock"
-  readonly_out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+  mkdir "$home/state/.lock"
+  readonly_out=$(FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     "$SESSION_START" --reemit)
   kill "$holder_pid" 2>/dev/null || true
@@ -2705,6 +2731,7 @@ EOF
 
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
+test_old_idle_live_pane_is_superseded_on_start
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock
 test_session_lock_concurrent_single_winner

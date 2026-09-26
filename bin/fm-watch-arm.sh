@@ -89,6 +89,13 @@ fi
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+fm_session_lock_refuse_displaced "$STATE" || exit 1
+WATCH_SESSION_IDENTITY=
+if fm_session_lock_owned_by_self "$STATE"; then
+  WATCH_SESSION_IDENTITY=$(cat "$STATE/.lock" 2>/dev/null || true)
+fi
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
@@ -536,9 +543,9 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
 # collapsing when startup begins just before the next second boundary.
 deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
 if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
-  FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
+  FM_WATCH_SESSION_IDENTITY="$WATCH_SESSION_IDENTITY" FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
 else
-  "$WATCH" >"$child_out" &
+  FM_WATCH_SESSION_IDENTITY="$WATCH_SESSION_IDENTITY" "$WATCH" >"$child_out" &
 fi
 child=$!
 cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"

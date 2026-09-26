@@ -6,6 +6,28 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Codex session lock writer identity
+
+Verified on 2026-09-25 with codex-cli 0.157.0 on Linux 6.18.33.1-microsoft-standard-WSL2 inside an active Codex thread.
+The live guard reads Codex's thread marker and state root, proves the thread's writer flock is held, and proves the same thread marker under a different state root is not held.
+The portable takeover regression exercises the same lock identity alongside a live PID holder without a vendor process.
+
+```sh
+bin/fm-test-run.sh tests/fm-session-lock-codex-live-e2e.test.sh
+bin/fm-test-run.sh tests/fm-lock-supersede.test.sh
+```
+
+The live command returned:
+
+```text
+FM_TEST_BEGIN 2026-09-25T14:42:48Z tests/fm-session-lock-codex-live-e2e.test.sh family=live-harness-optin expected_gate_skip=live-capability
+ok - codex-cli 0.157.0: live Codex thread writer flock identifies this session and its state root
+FM_TEST_END 2026-09-25T14:42:48Z tests/fm-session-lock-codex-live-e2e.test.sh exit=0 duration_ms=629 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=739
+FM_TEST_SUMMARY_FAMILY family=live-harness-optin count=1 duration_ms=629 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-session-lock-codex-live-e2e.test.sh duration_ms=629
+```
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.

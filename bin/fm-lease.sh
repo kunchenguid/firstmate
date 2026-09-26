@@ -119,12 +119,12 @@ case "$CMD" in
     # The lease outlives this CLI call, so its liveness pid must be the
     # long-lived supervising process: FM_LEASE_HOLDER_PID when the caller
     # provides one (the Pi branch extension passes the session-lock holder),
-    # else the session-lock holder (state/.lock is the harness pid), else this
+    # else the session-lock holder (PID or Codex thread identity), else this
     # shell; without a matching session lock the resulting lease is stale.
     HOLDER_PID=${FM_LEASE_HOLDER_PID:-}
     case "$HOLDER_PID" in *[!0-9]*) HOLDER_PID= ;; esac
     if [ -z "$HOLDER_PID" ]; then
-      HOLDER_PID=$(head -n 1 "$STATE/.lock" 2>/dev/null | tr -cd '0-9' || true)
+      HOLDER_PID=$(head -n 1 "$STATE/.lock" 2>/dev/null || true)
     fi
     [ -n "$HOLDER_PID" ] || HOLDER_PID=$$
     TMP=$(mktemp "$STATE/.fm-lease-tmp.XXXXXX")

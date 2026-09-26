@@ -2327,6 +2327,17 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
 
+# A watcher launched by an interactive owner carries the exact lock identity
+# it started under. When a new pane supersedes that owner, this watcher exits
+# quietly on its next cycle without signalling or touching the old pane.
+watch_session_still_current() {
+  local current
+  [ -n "${FM_WATCH_SESSION_IDENTITY:-}" ] || return 0
+  current=$(cat "$STATE/.lock" 2>/dev/null) || return 1
+  [ "$current" = "$FM_WATCH_SESSION_IDENTITY" ]
+}
+watch_session_still_current || exit 0
+
 # FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS is validated here, at arm time, and an
 # unusable value refuses to arm. This is deliberately NOT symmetry with the
 # tunables above, which this watcher only defaults and never validates. The
@@ -2486,6 +2497,12 @@ pr_poll_publish_release() {
 
 watcher_cleanup() {
   local cleanup_status=0 owns_lock=0 transition=release-lock
+  if ! watch_session_still_current; then
+    if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
+      fm_lock_release "$WATCH_LOCK" || cleanup_status=1
+    fi
+    return "$cleanup_status"
+  fi
   pr_poll_publish_release || cleanup_status=1
   pr_poll_control_release || cleanup_status=1
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
@@ -2583,6 +2600,7 @@ resurface_after_downtime() {
 }
 
 while :; do
+  watch_session_still_current || exit 0
   # Home-gone exit: a deleted home, state directory, or code root means this
   # watcher's world is gone (a torn-down temporary home or a discarded
   # disposable checkout). Exit with a logged reason rather than writing state
