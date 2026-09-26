@@ -15,7 +15,12 @@ brief="$TMP/brief.md"
 fake="$TMP/fake-holus"
 mkdir -p "$home/config" "$project"
 printf '%s\n' 'base' > "$brief"
-printf '%s\n' '#!/usr/bin/env bash' 'set -u' 'printf "%s" "$HOLUS_EGRESS|$HOLUSIGHT_EGRESS|$FLEET_HOLUSIGHT_EGRESS|$PWD" > "$FM_FAKE_MARKER"' 'printf "%s" "{coverage: sufficient, egress: {occurred: false}, evidence: [{source: src/main.py, location: line 4}]}"' > "$fake"
+cat > "$fake" <<'EOF'
+#!/usr/bin/env bash
+set -u
+printf "%s" "$HOLUS_EGRESS|$HOLUSIGHT_EGRESS|$FLEET_HOLUSIGHT_EGRESS|$PWD" > "$FM_FAKE_MARKER"
+printf "%s" "{coverage: sufficient, egress: {occurred: false}, evidence: [{source: src/main.py, location: line 4}]}"
+EOF
 chmod +x "$fake"
 
 printf '%s\n' '{"default":{"enabled":true},"projects":{"off":{"enabled":false},"on":{"enabled":true}}}' > "$home/config/holusight.json"
@@ -36,7 +41,7 @@ pass 'enabled project invokes an existing executable with egress denied and retu
 
 mkdir -p "$home/.local/bin"
 cp "$fake" "$home/.local/bin/holus"
-FM_HOME="$home" HOME="$home" FM_CONFIG_OVERRIDE="$home/config" HOLUS_EXECUTABLE= PATH=/usr/bin:/bin FM_FAKE_MARKER="$TMP/path.marker" \
+FM_HOME="$home" HOME="$home" FM_CONFIG_OVERRIDE="$home/config" HOLUS_EXECUTABLE='' PATH=/usr/bin:/bin FM_FAKE_MARKER="$TMP/path.marker" \
   "$HELPER" "$project" on "$brief" >"$TMP/path.out" || fail 'local executable fallback failed'
 grep -q 'used: local evidence lookup completed' "$TMP/path.out" || fail 'home-local executable was not discovered independently of PATH'
 pass 'home-local executable fallback works without PATH discovery'
