@@ -671,6 +671,142 @@ test_hold_creates_a_captain_row_when_beads_requires_due_without_custom_type() {
 # prose, no held backlog item or open status exists, and the authoritative
 # Bearings view correctly omits it. Completion must now refuse before teardown can
 # erase the source.
+# The deck renders a Captain's Call dialog from the durable card written at
+# hold time: an authored --card-file, or a mechanical baseline carrying the
+# reason untruncated. Resolution retires it so a later hold starts clean.
+test_hold_persists_the_authored_decision_card() {
+  local home card store id
+  home=$(make_home authored-card)
+  id=sample-authored-card
+  store="$home/state/decision-cards"
+  card="$home/card.json"
+  cat > "$card" <<'EOF'
+{
+  "key": "sample-authored-card",
+  "type": "decision",
+  "repo": "sample",
+  "title": "Fix the hanging validation step",
+  "about": "The fallback worker never exits after its verdict.",
+  "decide": "Apply the guard now, or wait out the allowance?",
+  "options": [
+    { "value": "apply-narrow", "label": "Apply the narrow guard", "hint": "Pipeline's worker only" },
+    { "value": "wait-codex", "label": "Wait for the allowance" }
+  ],
+  "recommend_value": "apply-narrow",
+  "close": "release",
+  "allow_freeform": true
+}
+EOF
+  run_captain "$home" hold "$id" --title "Choose the validation fix" \
+    --reason "captain guard choice pending" --repo sample \
+    --card-file "$card" >/dev/null \
+    || fail "hold with a composed card failed"
+  [ -f "$store/$id.json" ] || fail "the composed card was not persisted with the hold"
+  jq -e --arg id "$id" '
+    .schema == "fm-decision-card.v1"
+      and .card.key == $id
+      and .card.title == "Fix the hanging validation step"
+      and .card.close == "release"
+      and .card.recommend_value == "apply-narrow"
+      and ([.card.options[].value] == ["apply-narrow", "wait-codex", "reconcile"])
+  ' "$store/$id.json" >/dev/null \
+    || fail "the persisted card does not carry the composed fields: $(cat "$store/$id.json")"
+  pass "hold persists the composed decision card with the reconcile choice"
+}
+
+test_hold_writes_a_baseline_card_for_the_full_reason() {
+  local home reason store id
+  home=$(make_home baseline-card)
+  id=sample-baseline-card
+  store="$home/state/decision-cards"
+  reason="Decision needed before the lane can build: apply the verified host change that stops the hanging test step? Root cause is proven, option A is additive and reversible without a restart, option B covers every one-shot run with a wider blast radius, and option C waits out the allowance until it returns early on Sunday."
+  [ "${#reason}" -gt 200 ] || fail "the fixture reason is not longer than the snapshot's truncation"
+  run_captain "$home" hold "$id" --title "Choose the build guard" \
+    --reason "$reason" --repo sample >/dev/null \
+    || fail "hold without a card file failed"
+  jq -e --arg id "$id" --arg reason "$reason" '
+    .schema == "fm-decision-card.v1"
+      and .card.key == $id
+      and .card.type == "decision"
+      and .card.title == "Choose the build guard"
+      and .card.about == $reason
+      and .card.allow_freeform == true
+      and ([.card.options[].value] == ["reconcile"])
+  ' "$store/$id.json" >/dev/null \
+    || fail "the baseline card lost the hold reason or its reconcile choice"
+  pass "a hold without a card stores the reason untruncated as its about line"
+}
+
+test_hold_refuses_an_invalid_card_before_holding() {
+  local home card out rc
+  home=$(make_home invalid-card)
+  card="$home/bad-card.json"
+  printf '{"key":"sample-bad-card","type":"decision","repo":"sample","title":"Bad card","options":"not-an-array"}\n' > "$card"
+  set +e
+  out=$(run_captain "$home" hold sample-bad-card --title "Bad card" \
+    --reason "captain choice" --card-file "$card" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "hold accepted a card that does not satisfy the contract"
+  assert_contains "$out" "fm-decision-card" \
+    "the refusal did not name the card contract: $out"
+  assert_absent "$home/state/decision-cards/sample-bad-card.json" \
+    "a refused hold stored a card"
+  if tasks_in "$home" show sample-bad-card >/dev/null 2>&1; then
+    fail "a refused card still created the task"
+  fi
+  pass "an invalid decision card refuses before any task or hold is written"
+}
+
+test_release_retires_the_card_so_a_new_hold_starts_clean() {
+  local home card store id
+  home=$(make_home card-rehold)
+  id=sample-rehold-work
+  store="$home/state/decision-cards"
+  card="$home/card.json"
+  tasks_in "$home" add "$id" "Ship the sample rework" --kind ship --repo sample >/dev/null \
+    || fail "could not create the work item"
+  printf '{"type":"decision","repo":"sample","title":"Ship path for the rework","options":[{"value":"ship","label":"Ship it"}],"close":"release"}\n' > "$card"
+  run_captain "$home" hold "$id" --reason "captain go needed to ship" \
+    --card-file "$card" >/dev/null \
+    || fail "could not hold the work item with a card"
+  [ "$(jq -r '.card.title' "$store/$id.json")" = "Ship path for the rework" ] \
+    || fail "the authored card was not stored"
+  printf 'Ship it.\n' > "$home/go.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/go.txt" --release >/dev/null \
+    || fail "answer --release failed"
+  assert_absent "$store/$id.json" "a released call kept its stored card"
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold "$id" \
+    --reason "captain pricing call needed" >/dev/null \
+    || fail "could not re-hold the released work item"
+  [ "$(jq -r '.card.title' "$store/$id.json")" = "Ship the sample rework" ] \
+    || fail "the re-hold did not start from a fresh baseline card"
+  [ "$(jq -r '.card.about' "$store/$id.json")" = "captain pricing call needed" ] \
+    || fail "the fresh baseline card did not carry the new reason"
+  pass "a released call retires its card and a re-hold starts from a fresh baseline"
+}
+
+test_reconcile_close_retires_the_card() {
+  local home card store id
+  home=$(make_home reconcile-card)
+  id=sample-reconcile-card
+  store="$home/state/decision-cards"
+  card="$home/card.json"
+  tasks_in "$home" add "$id" "Ship the reconciled rework" --kind ship --repo sample >/dev/null \
+    || fail "could not create the work item"
+  printf '{"type":"decision","repo":"sample","title":"Reconcile the rework","options":[{"value":"ship","label":"Ship it"}],"close":"release"}\n' > "$card"
+  run_captain "$home" hold "$id" --reason "captain re-check needed" \
+    --card-file "$card" >/dev/null \
+    || fail "could not hold the work item with a card"
+  request_reconciles "$home" sample-reconcile-card-source "$id" >/dev/null \
+    || fail "could not record the reconcile request"
+  printf 'The premise dissolved; nothing ships.\n' > "$home/evidence.txt"
+  run_captain "$home" reconcile close "$id" --evidence-file "$home/evidence.txt" >/dev/null \
+    || fail "reconcile close failed"
+  assert_absent "$store/$id.json" "a reconciled call kept its stored card"
+  pass "an evidence-backed reconcile close retires the stored card"
+}
+
 test_uninventoried_report_decision_refuses_completion() {
   local home id json rc
   home=$(make_home omitted-decision)
@@ -4037,6 +4173,11 @@ test_retained_body_keeps_its_utf8_bytes() {
 test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes
+test_hold_persists_the_authored_decision_card
+test_hold_writes_a_baseline_card_for_the_full_reason
+test_hold_refuses_an_invalid_card_before_holding
+test_release_retires_the_card_so_a_new_hold_starts_clean
+test_reconcile_close_retires_the_card
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work

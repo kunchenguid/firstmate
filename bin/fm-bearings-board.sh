@@ -63,14 +63,16 @@
 # keyed-answer intake as a blind close, are owned by
 # docs/captain-hold-lifecycle.md.
 #
-# DURABLE DECISION CARDS. `build` also writes every surviving decision card to
+# DURABLE DECISION CARDS. `build` writes every surviving decision card to
 # state/decision-cards/<task>.json (schema fm-decision-card.v1), because the
 # board page is rebuilt from scratch and a card absent from the newest payload
-# would otherwise be lost to later readers such as the captain's deck. The stored
-# record is the EFFECTIVE card, reconcile choice included. A record whose task
-# is definitely no longer an open captain call is pruned; an absent or
-# unestablished task keeps its record, because a card wrongly hidden is worse
-# than one wrongly shown.
+# would otherwise be lost to later readers such as the captain's deck.
+# bin/fm-decision-card-lib.sh owns that store; bin/fm-captain-hold.sh already
+# wrote the card composed with the call (or its mechanical baseline) at hold
+# time, and this build refreshes it with the EFFECTIVE card, reconcile choice
+# included. A record whose task is definitely no longer an open captain call is
+# pruned; an absent or unestablished task keeps its record, because a card
+# wrongly hidden is worse than one wrongly shown.
 #
 # Validation is fail-closed: the payload must be valid JSON with
 # schema=fm-bearings-board.v1 and every renderer-consumed field must satisfy
@@ -105,6 +107,10 @@ TEMPLATE="${FM_BEARINGS_BOARD_TEMPLATE:-$SCRIPT_DIR/../.agents/skills/bearings/a
 PLACEHOLDER='__FM_BEARINGS_BOARD_DATA__'
 BOARD_SCHEMA=fm-bearings-board.v1
 
+# shellcheck source=bin/fm-decision-card-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-decision-card-lib.sh"
+
 usage() {
   awk '
     NR == 1 { next }
@@ -121,10 +127,8 @@ fail() {
 board_path() { printf '%s/.lavish/bearings-board.html\n' "$FM_HOME"; }
 
 validate_payload() {  # <data.json>
-  jq -e --arg schema "$BOARD_SCHEMA" '
-    def nonempty_string: type == "string" and length > 0;
-    def slug($max): type == "string" and test("^[A-Za-z0-9._-]{1," + ($max | tostring) + "}$");
-    def repo_marker: has("repo") and (.repo == null or (.repo | type == "string"));
+  jq -e -L "$SCRIPT_DIR" --arg schema "$BOARD_SCHEMA" '
+    include "fm-decision-card";
     def name_marker: has("name") and (.name | nonempty_string);
     def valid_filed:
       . as $filed
@@ -136,48 +140,6 @@ validate_payload() {  # <data.json>
         end);
     def optional_filed:
       (has("filed") | not) or (.filed == null) or (.filed | valid_filed);
-    def optional_string($name): (has($name) | not) or (.[$name] | type == "string");
-    def optional_https_url($name):
-      (has($name) | not)
-      or (.[$name]
-        | type == "string"
-          and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$"));
-    def version: type == "string" and test("^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$");
-    def optional_subject:
-      (has("subject") | not)
-      or (.subject
-        | type == "object"
-          and (keys | sort) == ["artifact", "version"]
-          and (.artifact | slug(128))
-          and (.version | version));
-    def call_item:
-      type == "object"
-      and (.key | slug(128))
-      and (.type == "decision" or .type == "merge" or .type == "credential")
-      and repo_marker
-      and (.title | nonempty_string)
-      and (.options | type == "array")
-      and ((.options | length) > 0 or .allow_freeform == true)
-      and ([.options[]
-        | type == "object"
-          and (.value | slug(128))
-          and (.label | nonempty_string)
-          and optional_string("hint")] | all)
-      and (optional_string("about"))
-      and (optional_string("decide"))
-      and (optional_string("detail"))
-      and (optional_https_url("pr_url"))
-      and optional_subject
-      and (if has("subject") then .type == "decision" else true end)
-      and (optional_string("freeform_hint"))
-      and ((has("close") | not) or (.close == "done" or .close == "release"))
-      and ((has("allow_freeform") | not) or (.allow_freeform | type == "boolean"))
-      and ((has("recommend_value") | not)
-        or ((.recommend_value | slug(128))
-          and (.recommend_value as $recommend
-            | ([.options[].value] | index($recommend) != null))))
-      and ([.options[].value] | index("reconcile") == null)
-      and (if .type == "merge" then (.risk | nonempty_string) else true end);
     def underway_item:
       type == "object" and repo_marker and name_marker and (.id | nonempty_string)
       and (.state | nonempty_string) and (.doing | nonempty_string) and (.kind | nonempty_string);
@@ -331,17 +293,14 @@ effective_payload() {  # <data.json> <dest.json>
     drop=$drop$key$'\n'
   done < <(jq -r '.captains_call[]? | select(.type == "decision") | .key' "$data")
   tmp=$(printf '%s' "$drop" | jq -R -s 'split("\n") | map(select(length > 0))') || return 1
-  jq --argjson dropped "$tmp" '
+  jq -L "$SCRIPT_DIR" --argjson dropped "$tmp" '
+    include "fm-decision-card";
     .captains_call = [
       .captains_call[]
       | . as $card
       | select($card.type != "decision" or (($dropped | index($card.key)) == null))
       | if .type == "decision"
-        then .options += [{
-          value: "reconcile",
-          label: "Reconcile",
-          hint: "Re-check the latest state, then close this with evidence or keep it open with a note"
-        }]
+        then .options += [reconcile_option]
         else . end
     ]' "$data" > "$dest" || return 1
 }
@@ -350,39 +309,23 @@ effective_payload() {  # <data.json> <dest.json>
 # The board is rebuilt from scratch on every composition, so a card that is not
 # in the newest payload disappears with it. The Deck and any later reader still
 # need the options the captain was shown, so every surviving card is persisted
-# per task under state/decision-cards/. A record whose task is definitely no
-# longer an open captain call is pruned; a task whose state cannot be
-# established is kept, because a card wrongly hidden is worse than one wrongly
-# shown - the same asymmetry as the card hygiene above.
-
-DECISION_CARDS_DIR="$FM_HOME/state/decision-cards"
+# per task under state/decision-cards/ through bin/fm-decision-card-lib.sh, the
+# store bin/fm-captain-hold.sh already filled when the call was held. A record
+# whose task is definitely no longer an open captain call is pruned; a task
+# whose state cannot be established is kept, because a card wrongly hidden is
+# worse than one wrongly shown - the same asymmetry as the card hygiene above.
 
 persist_decision_cards() {  # <effective-payload.json>
-  local data=$1 key card tmp existing task rc keep=''
-  if [ -d "$DECISION_CARDS_DIR" ] && [ ! -L "$DECISION_CARDS_DIR" ]; then
-    :
-  elif ! (umask 077; mkdir -p "$DECISION_CARDS_DIR"); then
-    return 1
-  fi
-  [ -d "$DECISION_CARDS_DIR" ] && [ ! -L "$DECISION_CARDS_DIR" ] || return 1
+  local data=$1 key card existing task rc keep=''
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     keep=$keep$key$'\n'
-    card=$(jq -c --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      --arg key "$key" \
-      '.captains_call[] | select(.key == $key)
-       | {schema:"fm-decision-card.v1",generated:$generated,card:.}' "$data") || return 1
+    card=$(jq -c --arg key "$key" \
+      '.captains_call[] | select(.key == $key)' "$data") || return 1
     [ -n "$card" ] || return 1
-    tmp=$(umask 077; mktemp "$DECISION_CARDS_DIR/.card.XXXXXX") || return 1
-    if printf '%s\n' "$card" > "$tmp" \
-      && chmod 0600 "$tmp" \
-      && mv -f -- "$tmp" "$DECISION_CARDS_DIR/$key.json"; then
-      continue
-    fi
-    rm -f -- "$tmp"
-    return 1
+    fm_decision_card_persist "$FM_HOME" "$card" || return 1
   done < <(jq -r '.captains_call[]?.key' "$data")
-  for existing in "$DECISION_CARDS_DIR"/*.json; do
+  for existing in "$(fm_decision_card_store_dir "$FM_HOME")"/*.json; do
     [ -f "$existing" ] && [ ! -L "$existing" ] || continue
     task=$(basename "$existing" .json)
     case $'\n'"$keep" in
@@ -435,7 +378,7 @@ command_build() {
   fi
   persist_decision_cards "$effective" || {
     rm -f -- "$effective"
-    fail "cannot persist the decision cards under $DECISION_CARDS_DIR"
+    fail "cannot persist the decision cards under $(fm_decision_card_store_dir "$FM_HOME")"
   }
   json=$(jq -c . "$effective") || { rm -f -- "$effective"; fail "cannot compact the board data"; }
   rm -f -- "$effective"
