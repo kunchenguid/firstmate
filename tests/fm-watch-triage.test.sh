@@ -70,26 +70,32 @@ wait_live() {
 # machine a short fixed budget can reap a round before the cycle it asserts on
 # ever ran - and then every "no wake, no marker" assertion passes vacuously
 # while every "marker written" assertion fails spuriously.
-# The liveness beacon is touched at the TOP of every poll, so this drops any
-# beacon left by an earlier round, waits for THIS watcher to write a fresh one
-# (some poll's top), then waits for that one to advance (the next poll's top) -
-# and the whole cycle in between is what the caller's assertions describe.
+# This synchronizes on the cycle-turnover marker, not on the liveness beacon.
+# The beacon is touched at every proven-progress point inside a cycle, so two
+# distinct beacon mtimes prove only that some work advanced, and a reader that
+# treats them as a completed cycle returns in the first fraction of one - before
+# the signal scan every caller here asserts on has run.
+# The marker is touched exactly once per cycle, immediately before the terminal
+# wait, so this drops any marker left by an earlier round, waits for THIS watcher
+# to write a fresh one (some cycle's end), then waits for that one to advance
+# (the next cycle's end) - and the whole cycle in between is what the caller's
+# assertions describe.
 # 0 if the watcher is still alive after a completed cycle, 1 if it exited.
 wait_poll_cycle() {  # <state> <pid> [limit-ticks]
-  local state=$1 pid=$2 limit=${3:-300} beat first now i=0
-  beat="$state/.last-watcher-beat"
-  rm -f "$beat"
+  local state=$1 pid=$2 limit=${3:-300} turnover first now i=0
+  turnover="$state/.last-cycle-turnover"
+  rm -f "$turnover"
   first=""
   while [ "$i" -lt "$limit" ]; do
     kill -0 "$pid" 2>/dev/null || return 1
-    first=$(file_mtime "$beat")
+    first=$(file_mtime "$turnover")
     [ -n "$first" ] && break
     sleep 0.1
     i=$((i + 1))
   done
   while [ "$i" -lt "$limit" ]; do
     kill -0 "$pid" 2>/dev/null || return 1
-    now=$(file_mtime "$beat")
+    now=$(file_mtime "$turnover")
     if [ -n "$now" ] && [ "$now" != "$first" ]; then
       return 0
     fi
@@ -810,6 +816,60 @@ test_signal_crew_provably_working_classifier() {
     || fail "an empty signal file list was treated as benign"
   unset FM_FAKE_CREW_STATE_a FM_FAKE_CREW_STATE_b
   pass "signal_crew_provably_working: benign only when every referenced crew is provably working"
+}
+
+# The provably-working check costs up to FM_WORKTREE_WRITE_TIMEOUT per task and
+# short-circuits only on the first task that is not working, so its cost scales
+# with the fleet while a caller's staleness grace does not. It must therefore
+# report progress once per task examined, not once per call: a caller judged by
+# elapsed time reads a healthy worker as hung otherwise, which is the 370-seconds
+# silent case this exists to prevent.
+test_provably_working_reports_progress_per_task() {
+  local dir fakebin state log count first_line
+  dir=$(make_case provably-working-progress); fakebin="$dir/fakebin"; state="$dir/state"
+  log="$dir/progress.log"
+  : > "$log"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE_a='state: working · source: run-step · running'
+  export FM_FAKE_CREW_STATE_b='state: working · source: run-step · running'
+  export FM_FAKE_CREW_STATE_c='state: working · source: run-step · running'
+  export FM_FAKE_CREW_STATE_d='state: done · source: run-step · run passed'
+
+  # Three working tasks: one report each, and the verdict is unchanged.
+  FM_CLASSIFY_PROGRESS_HOOK="printf 'tick\n' >> $(printf '%q' "$log")" \
+    signal_crew_provably_working "$state/a.status" "$state/b.status" "$state/c.status" \
+    || fail "three provably-working crews were not benign"
+  count=$(grep -c '^tick$' "$log" || true)
+  [ "$count" -eq 3 ] \
+    || fail "expected one progress report per task over three tasks, got $count"
+
+  # The short-circuit path must report the task it examined too, otherwise the
+  # longest silent span - many working tasks ahead of a stopped one - is exactly
+  # the span that goes unreported.
+  : > "$log"
+  FM_CLASSIFY_PROGRESS_HOOK="printf 'tick\n' >> $(printf '%q' "$log")" \
+    signal_crew_provably_working "$state/a.status" "$state/b.status" "$state/d.status" \
+    && fail "a batch containing a stopped crew was treated as benign"
+  count=$(grep -c '^tick$' "$log" || true)
+  [ "$count" -eq 3 ] \
+    || fail "expected a progress report for every task examined before the short-circuit, got $count"
+
+  # No hook set is a no-op that cannot change a verdict.
+  : > "$log"
+  unset FM_CLASSIFY_PROGRESS_HOOK
+  signal_crew_provably_working "$state/a.status" \
+    || fail "an unset progress hook changed the benign verdict"
+  [ ! -s "$log" ] || fail "an unset progress hook still wrote progress"
+
+  # A failing hook must not change the verdict either.
+  FM_CLASSIFY_PROGRESS_HOOK='false' \
+    signal_crew_provably_working "$state/a.status" \
+    || fail "a failing progress hook changed the benign verdict"
+
+  first_line=$(head -1 "$log" 2>/dev/null || true)
+  [ -z "$first_line" ] || fail "unexpected progress output: $first_line"
+  unset FM_FAKE_CREW_STATE_a FM_FAKE_CREW_STATE_b FM_FAKE_CREW_STATE_c FM_FAKE_CREW_STATE_d
+  pass "the provably-working check reports progress once per task, including the short-circuiting one, and never lets reporting change its verdict"
 }
 
 test_secondmate_status_routine_absorbed_routed_surfaced_classifier() {
@@ -6012,6 +6072,222 @@ test_beacon_stays_fresh_while_absorbing() {
   pass "the liveness beacon stays fresh while the watcher absorbs benign wakes (fm-guard never false-alarms)"
 }
 
+# The turnover marker is what wait_poll_cycle above synchronizes on, so it is
+# only usable while it means "a cycle ended" and nothing else. Touching it at a
+# progress point too would make it a second beacon and silently return every one
+# of this file's ~50 cycle waits early, which is the regression this pins.
+# Cycles are counted independently of the marker: the terminal wait is the only
+# `sleep POLL` in the watcher, so with a distinctive POLL the count of those
+# sleeps is the count of completed cycles.
+test_cycle_turnover_marker_is_touched_once_per_cycle() {
+  local dir state fakebin out pid touch_log sleep_log touch_sample
+  local cycles turnovers beats sampled i
+  dir=$(make_case cycle-turnover-once); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  touch_log="$dir/touch.log"
+  sleep_log="$dir/sleep.log"
+  touch_sample="$dir/touch.sample"
+  : > "$touch_log"
+  : > "$sleep_log"
+
+  # Log every touched path, then delegate to the real touch. Absolute candidates
+  # rather than PATH games, because fakebin is deliberately first on PATH.
+  cat > "$fakebin/touch" <<'SH'
+#!/usr/bin/env bash
+set -u
+for _a in "$@"; do
+  case "$_a" in
+    -*) ;;
+    *) printf '%s\n' "$_a" >> "$FM_FAKE_TOUCH_LOG" ;;
+  esac
+done
+for _c in /usr/bin/touch /bin/touch; do
+  [ -x "$_c" ] && exec "$_c" "$@"
+done
+exit 127
+SH
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "${1:-}" >> "$FM_FAKE_SLEEP_LOG"
+for _c in /bin/sleep /usr/bin/sleep; do
+  [ -x "$_c" ] && exec "$_c" "$@"
+done
+exit 127
+SH
+  chmod +x "$fakebin/touch" "$fakebin/sleep"
+
+  # No status file, so nothing is actionable and the watcher just cycles. POLL 3
+  # is distinct from the grace (1) and from the internal 0.01 waits, so counting
+  # `sleep 3` counts terminal waits. Launched inline rather than through
+  # watch_bg because that helper hardcodes FM_POLL=1.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_SECONDMATE_LIVENESS_SECS=99999999 \
+    FM_FAKE_TOUCH_LOG="$touch_log" FM_FAKE_SLEEP_LOG="$sleep_log" \
+    "$WATCH" > "$out" &
+  pid=$!
+  # Sample while the watcher is alive and parked in a terminal wait, never around
+  # the reap: a TERM landing between the turnover touch and the `sleep 3` that
+  # follows it would leave a turnover with no matching cycle and fail a correct
+  # watcher. A logged `sleep 3` proves its own cycle's turnover already happened,
+  # so counting turnovers a moment into that wait pins both counts to the same set
+  # of cycles with most of a POLL as margin. The sample is accepted only if the
+  # sleep count is still unmoved a moment AFTER the copy, because a cycle touches
+  # the marker tens of milliseconds before its own sleep is logged: a copy landing
+  # inside that gap would hold one turnover more than the cycles it is compared
+  # against, and the later recheck is what rejects exactly that window.
+  # Deliberately not wait_poll_cycle: that helper reads the marker this case is
+  # bounding, so using it here would let the bug hide its own symptom and report
+  # a vacuity failure instead of the real one.
+  cycles=""
+  for i in $(seq 1 120); do
+    kill -0 "$pid" 2>/dev/null || fail "watcher exited during the sampling window: $(cat "$out")"
+    sampled=$(grep -cx '3' "$sleep_log" || true)
+    if [ "$sampled" -lt 3 ]; then
+      sleep 0.2
+      continue
+    fi
+    sleep 0.3
+    cp "$touch_log" "$touch_sample"
+    sleep 0.3
+    [ "$(grep -cx '3' "$sleep_log" || true)" = "$sampled" ] || continue
+    cycles=$sampled
+    break
+  done
+  kill -0 "$pid" 2>/dev/null || fail "watcher exited during the sampling window: $(cat "$out")"
+  reap "$pid"
+  [ -n "$cycles" ] || fail "never caught the watcher parked in a terminal wait long enough to sample"
+
+  turnovers=$(grep -cxF "$state/.last-cycle-turnover" "$touch_sample" || true)
+  beats=$(grep -cxF "$state/.last-watcher-beat" "$touch_sample" || true)
+
+  # Non-vacuity first: without at least two observed cycles and more beats than
+  # turnovers, the equality below could hold while proving nothing.
+  [ "$cycles" -ge 2 ] \
+    || fail "counted only $cycles completed cycles, too few to bound the marker"
+  [ "$beats" -gt "$turnovers" ] \
+    || fail "the beacon was touched $beats times against $turnovers turnovers, so the two signals are not distinct"
+  [ "$turnovers" -eq "$cycles" ] \
+    || fail "the turnover marker was touched $turnovers times across $cycles cycles; it must be touched exactly once per cycle"
+  pass "the cycle-turnover marker is touched exactly once per cycle and stays distinct from the liveness beacon ($turnovers turnovers, $beats beats, $cycles cycles)"
+}
+
+# count_beats <dir> <state> <fakebin> <call>: run <call> against the watcher's
+# own functions in a sourced subshell and print how many times it touched
+# state/.last-watcher-beat. Counting real beacon writes through a logging `touch`
+# on PATH is what makes the rate observable; a live watcher cannot be used here
+# because its other per-cycle beats swamp the per-item ones.
+count_beats() {  # <dir> <state> <fakebin> <call>
+  local dir=$1 state=$2 fakebin=$3 call=$4 log="$1/beat-touch.log"
+  cat > "$fakebin/touch" <<'SH'
+#!/usr/bin/env bash
+set -u
+for _a in "$@"; do
+  case "$_a" in
+    -*) ;;
+    *) printf '%s\n' "$_a" >> "$FM_FAKE_TOUCH_LOG" ;;
+  esac
+done
+for _c in /usr/bin/touch /bin/touch; do
+  [ -x "$_c" ] && exec "$_c" "$@"
+done
+exit 127
+SH
+  chmod +x "$fakebin/touch"
+  PATH="$fakebin:$PATH" FM_FAKE_TOUCH_LOG="$log" FM_HOME="$dir" \
+    FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+    bash -c ". \"\$1\"
+      : > \"\$FM_FAKE_TOUCH_LOG\"
+      $call >/dev/null 2>&1 || true
+      grep -cxF \"\$STATE/.last-watcher-beat\" \"\$FM_FAKE_TOUCH_LOG\" || true" \
+    _ "$WATCH"
+}
+
+# Every per-item loop in the watcher reports progress once per item, and reports
+# it before the item can leave the body early - at the top of the body, or for
+# the pane capture immediately after the capture - so an item that exits early
+# is still reported. The staleness grace does not scale with the fleet, so a loop that
+# reports only on the paths that run to the bottom leaves its longest span - a
+# whole fleet of items that each exit early - entirely unreported, which is the
+# false hung-supervision alarm this contract exists to prevent.
+#
+# Exact equalities, not lower bounds: the count is what distinguishes per-item
+# reporting from once-per-call, and the items that leave early - unclassifiable
+# logs, a provably-working task, an unchanged pane - are what distinguish a
+# report before the early exit from one after it.
+test_per_item_loops_beat_once_per_item() {
+  local dir state fakebin beats i
+  dir=$(make_case per-item-beats); state="$dir/state"; fakebin="$dir/fakebin"
+  mkdir -p "$dir/config"
+
+  # 1. The benign absorb path: three routine-only logs, nothing actionable.
+  for i in 1 2 3; do
+    printf 'working: routine note %s\n' "$i" > "$state/absorb$i.status"
+  done
+  # shellcheck disable=SC2016 # single quotes are deliberate: count_beats expands $STATE itself, against the case state dir
+  beats=$(count_beats "$dir" "$state" "$fakebin" 'signal_files_actionable "$STATE"/*.status')
+  [ "$beats" -eq 3 ] \
+    || fail "the signal scan reported $beats times over three absorbed logs; it must report once per log"
+
+  # 2. Placement: two symlinked logs cannot be classified, return rc==2, and leave
+  # through the body's second continue. The two readable routine logs are absorbed
+  # but still return rc==1 WITH their classified endpoint as the record, so the
+  # empty-record continue does not fire for them and they reach the bottom of the
+  # body. A report at the top counts all four; one below the continues counts two.
+  rm -f "$state"/*.status
+  for i in 1 2; do
+    printf 'working: routine note %s\n' "$i" > "$state/plain$i.status"
+    printf 'working: linked note %s\n' "$i" > "$dir/linked$i.log"
+    ln -sf "$dir/linked$i.log" "$state/linked$i.status"
+  done
+  # shellcheck disable=SC2016 # single quotes are deliberate: count_beats expands $STATE itself, against the case state dir
+  beats=$(count_beats "$dir" "$state" "$fakebin" 'signal_files_actionable "$STATE"/*.status')
+  [ "$beats" -eq 4 ] \
+    || fail "the signal scan reported $beats times over four logs, two of which exit the body early; it must report once per log"
+  beats=$(count_beats "$dir" "$state" "$fakebin" heartbeat_scan_finds_actionable)
+  [ "$beats" -eq 4 ] \
+    || fail "the heartbeat scan reported $beats times over four logs, two of which exit the body early; it must report once per log"
+
+  # 3. The churn absorb path's four loops: a whole-fleet metadata snapshot over
+  # every RECORDED task, the batch-to-snapshot lookup and the provably-working
+  # walk over every BATCHED task, and the pane capture over every batched task
+  # that is not provably working. churn1 is provably working, so the walk leaves
+  # it through its early continue. churn2 is not, so it reaches the capture, whose
+  # pane is unchanged against its recorded hash and returns right after the
+  # capture. Three plus two plus two plus one.
+  rm -f "$state"/*.status
+  : > "$dir/config/turnend-churn-absorb"
+  for i in 1 2 3; do
+    printf 'window=sess:w%s\nbackend=tmux\nkind=crew\n' "$i" > "$state/churn$i.meta"
+  done
+  : > "$state/churn1.turn-ended"
+  : > "$state/churn2.turn-ended"
+  printf 'quiet pane\n' > "$dir/churn-capture.txt"
+  printf '%s' "$(hash_text 'quiet pane')" > "$state/.hash-sess_w2"
+  : > "$dir/churn-capture.count"
+
+  # churn2 must fall back to the fake's not-working default, so clear the shared
+  # verdict that earlier cases in this file export and leave set.
+  unset FM_FAKE_CREW_STATE
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE_churn1='state: working · source: run-step · running'
+  export FM_FAKE_TMUX_CAPTURE="$dir/churn-capture.txt"
+  export FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$dir/churn-capture.count"
+  # shellcheck disable=SC2016 # single quotes are deliberate: count_beats expands $STATE itself, against the case state dir
+  beats=$(count_beats "$dir" "$state" "$fakebin" \
+    'signal_turnend_panes_churned "$STATE/churn1.turn-ended" "$STATE/churn2.turn-ended"')
+  unset FM_FAKE_CREW_STATE_churn1 FM_FAKE_TMUX_CAPTURE FM_FAKE_TMUX_CAPTURE_COUNT_FILE
+  [ "$(cat "$dir/churn-capture.count")" = 1 ] \
+    || fail "the churn fixture captured $(cat "$dir/churn-capture.count") panes; it must capture exactly the one batched task that is not provably working"
+  [ "$beats" -eq 8 ] \
+    || fail "the churn absorb path reported $beats times over three recorded tasks, a two-task batch and one capture; it must report once per item in each of its four loops, including the working task that leaves the walk early and the unchanged pane that returns after its capture (expected 8)"
+
+  pass "every per-item watcher loop reports progress once per item, before any early exit, so an item that exits early is still reported"
+}
+
 # --- afk coherence: the daemon owns triage; the watcher does not double-triage ---
 
 test_afk_signal_records_heartbeat_endpoint() {
@@ -6338,6 +6614,7 @@ test_empty_write_prune_widens_the_probe
 test_empty_write_prune_from_the_environment_widens_the_probe
 test_worktree_write_probe_is_wall_clock_bounded
 test_signal_crew_provably_working_classifier
+test_provably_working_reports_progress_per_task
 test_secondmate_status_routine_absorbed_routed_surfaced_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
@@ -6449,6 +6726,8 @@ test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
 test_beacon_stays_fresh_while_absorbing
+test_cycle_turnover_marker_is_touched_once_per_cycle
+test_per_item_loops_beat_once_per_item
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

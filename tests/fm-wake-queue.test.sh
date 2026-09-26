@@ -1880,11 +1880,11 @@ test_stale_recovery_generation_cannot_touch_a_newer_episode() {
   grep "$(printf '\tcheck\tthird\t')" "$state/.wake-queue" >/dev/null \
     || fail "the second row above the acknowledged sequence was consumed"
   case "$(cat "$state/.watcher-down")" in
-    pending:*) ;;
-    *) fail "an episode with rows still queued was retired" ;;
+    acked:*) ;;
+    *) fail "an acknowledgement that consumed its own rows left the episode open" ;;
   esac
 
-  # Retire that episode, then let a genuinely newer one open.
+  # The rows above the cutoff stay queued and resurface on the next drain.
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/replay.out" 2> "$dir/replay.err" \
     || fail "remaining wake could not be re-drained"
   replay_err="$dir/replay.err"

@@ -717,7 +717,17 @@ if [ -n "$ACK_THROUGH" ]; then
     }
   fi
   ACK_REMOVED=$(( $(awk 'END { print NR }' "$FM_WAKE_QUEUE") - $(awk 'END { print NR }' "$DRAIN_TMP") ))
-  if [ ! -s "$DRAIN_TMP" ]; then
+  # Retire the episode whenever this acknowledgement settled what was presented:
+  # it consumed its rows, or it had none to consume and no presented row waits
+  # above its cutoff. A row appended after presentation stays queued and still
+  # resurfaces (its own wake, or the next start's recovery check on a queue that
+  # is not empty), so keeping the episode open for it only leaves an episode no
+  # acknowledgement can ever retire while the fleet stays busy - which is what
+  # made every later start re-announce recovery instead of supervising.
+  # A stale acknowledgement (nothing consumed while a presented row waits above
+  # the cutoff) settles nothing and leaves the episode open, so the remedy below
+  # can still name its live generation.
+  if [ "$ACK_REMOVED" -gt 0 ] || [ "$PRESENTED_MAX" -le "$ACK_THROUGH" ]; then
     fm_recovery_marker_ack "$RECOVERY_MARKER" "$ACK_GENERATION"
     RECOVERY_ACK_STATUS=$?
     case "$RECOVERY_ACK_STATUS" in

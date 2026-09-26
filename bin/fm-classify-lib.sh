@@ -2525,6 +2525,26 @@ FM_WORKTREE_WRITE_MAXDEPTH=${FM_WORKTREE_WRITE_MAXDEPTH:-6}
 # gets it too.
 FM_WORKTREE_WRITE_TIMEOUT=${FM_WORKTREE_WRITE_TIMEOUT:-10}
 
+# Optional command run after each item a bounded per-item loop in this library
+# finishes, so a caller whose liveness is judged by elapsed time can prove
+# progress inside one call instead of only when the call returns.
+#
+# A caller needs this because a per-item check costs per item while its own
+# staleness bound does not scale: crew_is_provably_working spends up to
+# FM_WORKTREE_WRITE_TIMEOUT per task and short-circuits only on the first task
+# that is not working, so a home where many tasks are working ahead of one that
+# is not spends that bound once per working task. Measured on a 38-task home, one
+# signal_crew_provably_working call stayed silent for about 370 seconds against a
+# 300-second watcher grace, which read a healthy watcher as hung.
+#
+# Unset is a no-op, so every caller that does not set it is unaffected. Failures
+# are swallowed: progress reporting must never change a classification verdict.
+fm_classify_progress() {
+  [ -n "${FM_CLASSIFY_PROGRESS_HOOK:-}" ] || return 0
+  eval "$FM_CLASSIFY_PROGRESS_HOOK" >/dev/null 2>&1 || true
+  return 0
+}
+
 # 0 when some regular file under <id>'s recorded worktree is newer than
 # <anchor-file>: positive evidence the crew is still producing work even though its
 # rendered pane has gone quiet. This is the third liveness input the wedge detector
@@ -2651,7 +2671,15 @@ signal_crew_provably_working() {  # <file> ...
     esac
     case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
-    crew_is_provably_working "$task" || return 1
+    # Each task costs up to FM_WORKTREE_WRITE_TIMEOUT, so report progress per
+    # task rather than once for the whole list; fm_classify_progress owns why.
+    # It runs before the verdict check so the last task examined is reported
+    # even when it is the one that short-circuits the loop.
+    if ! crew_is_provably_working "$task"; then
+      fm_classify_progress
+      return 1
+    fi
+    fm_classify_progress
   done
   [ -n "$seen" ] || return 1
   return 0
