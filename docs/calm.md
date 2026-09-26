@@ -4,7 +4,8 @@ Calm is Firstmate's conversation-only transcript presentation toggle.
 It is fully supported on Pi, and available on Claude Code behind that harness's default-off early-access function-hooks flag, as the [Claude Code](#claude-code) section below describes.
 It is off by default, and the last `/calm` choice persists for the effective Firstmate home across session starts and resumes on either harness, through the one shared preference file [`configuration.md`](configuration.md#calm-preference-configcalm) owns.
 Across both harnesses, Calm evaluates each settled assistant text block from a model step that stopped to call tools, or exhausted its token limit while carrying tool calls.
-It hides a block only when its raw text contains no newline and its trimmed length is below `CALM_PRESERVE_MIN_CHARS` (240); a newline or at least 240 trimmed characters preserves the block as substantive captain-facing content, while streaming text and the genuine reply that ends a response remain visible.
+It hides a block only when its raw text contains no newline, its trimmed length is below `CALM_PRESERVE_MIN_CHARS` (240), and every sentence in it reads as routine working narration: the model announcing its own next step, an in-progress gerund, or routine monitoring state.
+A newline, at least 240 trimmed characters, or substantive content such as a captain-directed reply, an outcome report, or a completed-work confirmation preserves the block as captain-facing content, while streaming text and the genuine reply that ends a response remain visible.
 
 ## Pi
 
