@@ -17,9 +17,12 @@ key=$(_fm_decision_key "$line" 2>/dev/null) || key=
 
 case "$verb:$key" in
   needs-decision:nm-*)
-    "$SCRIPT_DIR/fm-discord-notify.sh" ask-user "$task_id" "$key" \
-      "제안된 변경 사항에 대한 결정이 필요합니다." \
-      "제안된 변경 사항 승인|현재 동작 유지"
+    # A raw ask-user gate is not a captain-facing event: firstmate decides most
+    # findings in-scope (ask-user-authority) with no captain involvement at all.
+    # A genuine escalation records a captain-held task instead
+    # (bin/fm-captain-hold.sh hold), which pushes its own Discord notification
+    # carrying the real question, at the point firstmate actually escalates.
+    exit 0
     ;;
   needs-decision:pr-ready-*)
     note=$(status_line_note "$line")
@@ -33,7 +36,27 @@ case "$verb:$key" in
     case "$detail" in
       *" pull request ready: "*) url=${detail#* pull request ready: }; url=${url%% choose *} ;;
     esac
-    summary="검토할 풀 리퀘스트가 준비되었습니다."
+    # Name the repo up front (from a GitHub owner/repo or GitLab project path)
+    # so a captain merging non-IMAC repos manually from this ping knows which
+    # project it is without parsing the URL.
+    repo=''
+    case "$url" in
+      https://github.com/*/*/pull/*)
+        repo=${url#https://github.com/}
+        repo=${repo%%/pull/*}
+        repo=${repo##*/}
+        ;;
+      https://*/*/-/merge_requests/*)
+        repo=${url#https://*/}
+        repo=${repo%%/-/merge_requests/*}
+        repo=${repo##*/}
+        ;;
+    esac
+    if [ -n "$repo" ]; then
+      summary="$repo 저장소: 검토할 풀 리퀘스트가 준비되었습니다."
+    else
+      summary="검토할 풀 리퀘스트가 준비되었습니다."
+    fi
     [ -z "$url" ] || summary="$summary $url"
     "$SCRIPT_DIR/fm-discord-notify.sh" pr-ready "$route_task_id" "$key" \
       "$summary" "병합|열어 두기" "$task_id"

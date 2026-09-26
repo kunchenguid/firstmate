@@ -51,6 +51,8 @@ State all five of these elements in one concise, evidence-first escalation:
 5. A recommendation with the reason it best serves the accepted intent.
 
 Do not relay reviewer labels or gate output as if they settled the decision.
+Record the escalation as a captain-held task through `bin/fm-captain-hold.sh hold <task-id> --reason "<one-line question+options>"` (`AGENTS.md` section 10; the gated work item's own id, not a new row), carrying the actual question and options in `--reason` rather than a generic placeholder - that is the content a Discord decision push relays verbatim, and it is also what makes this event, not the raw gate, the captain-facing one.
+A finding decided in-scope never calls `hold`: no held task, no Discord push, no captain noise for work the captain does not need to see.
 
 ## Classification examples
 

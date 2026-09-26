@@ -902,7 +902,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
-  local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason previous_origin='' hold_status=0
+  local existing_hold_kind='' existing_held='' preserve_hold_set=0 discord_summary
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -1009,8 +1009,13 @@ command_hold() {
     || fail "task $id lost its hold-set stamp while being held"
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
   release_task_control_lock || fail "cannot release task control for $id"
+  # A valid one-line reason can still exceed Discord's 2000-character message
+  # limit once the rest of the rendered message (task id, options, footer) is
+  # added; truncate well under that so the send never fails outright.
+  discord_summary=$reason
+  [ "${#discord_summary}" -le 1800 ] || discord_summary="${discord_summary:0:1800}…"
   "$SCRIPT_DIR/fm-discord-notify.sh" captain-hold "$id" "captain-hold-$id-$occurrence" \
-    "작업에 대한 결정이 필요합니다." "요청대로 진행|보류 상태로 두기" >/dev/null \
+    "$discord_summary" "요청대로 진행|보류 상태로 두기" >/dev/null \
     || printf 'actionable: captain hold %s was recorded but Discord notification failed\n' "$id" >&2
   printf '%s\n' "$id"
 }

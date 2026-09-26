@@ -184,8 +184,62 @@ test_captain_hold_triggers_push() {
   record=$(find "$home/state/x-context" -name 'discord-notify-*.json' -print -quit)
   assert_equals "captain-hold" "$(jq -r '.trigger' "$record")" "captain-hold trigger type"
   assert_equals "task-hold" "$(jq -r '.task_id' "$record")" "captain-hold task id"
-  assert_equals "작업에 대한 결정이 필요합니다." "$(jq -r '.summary' "$record")" "hold summary uses plain language"
-  pass "a durable captain hold triggers a Discord decision push"
+  assert_equals "Choose how the change should proceed" "$(jq -r '.summary' "$record")" \
+    "hold summary carries the caller's actual reason, not generic filler"
+  pass "a durable captain hold triggers a Discord decision push with the real reason text"
+}
+
+test_captain_hold_truncates_long_reason_for_discord() {
+  local home record long_reason summary
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    pass "captain-hold Discord truncation skipped because tasks-axi is unavailable"
+    return 0
+  fi
+  home="$TMP_ROOT/captain-hold-long-reason"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  printf '%s\n' '## In flight' '' '## Queued' '' '## Done' > "$home/data/backlog.md"
+  make_fake_node "$home"
+  long_reason=$(printf 'word %.0s' $(seq 1 500))
+  FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$home/posts.jsonl" \
+    PATH="$home/fake-bin:$BASE_PATH:$(dirname "$(command -v tasks-axi)")" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
+    "$ROOT/bin/fm-captain-hold.sh" hold task-hold-long \
+      --title "Choose the next step" --reason "$long_reason" \
+      >/dev/null || fail "captain hold with a long reason failed"
+  record=$(find "$home/state/x-context" -name 'discord-notify-*.json' -print -quit)
+  summary=$(jq -r '.summary' "$record")
+  [ "${#summary}" -le 1801 ] || fail "Discord summary was not truncated: ${#summary} chars"
+  [ "${#summary}" -lt "${#long_reason}" ] || fail "Discord summary was not shortened from the full reason"
+  pass "a captain hold with a reason near Discord's message limit gets truncated before sending"
+}
+
+test_ask_user_escalation_hold_carries_finding_text() {
+  local home record reason
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    pass "ask-user escalation content integration skipped because tasks-axi is unavailable"
+    return 0
+  fi
+  home="$TMP_ROOT/ask-user-escalation-hold"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  printf '%s\n' '## In flight' '' '## Queued' '' '## Done' > "$home/data/backlog.md"
+  make_fake_node "$home"
+  reason="allow the migration to drop the legacy column now, or keep it for one more release"
+  FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$home/posts.jsonl" \
+    PATH="$home/fake-bin:$BASE_PATH:$(dirname "$(command -v tasks-axi)")" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
+    "$ROOT/bin/fm-captain-hold.sh" hold nm-task \
+      --title "ask-user gate" --reason "$reason" \
+      >/dev/null || fail "captain hold for an escalated ask-user gate failed"
+  record=$(find "$home/state/x-context" -name 'discord-notify-*.json' -print -quit)
+  assert_equals "$reason" "$(jq -r '.summary' "$record")" \
+    "escalated ask-user gate's Discord push carries the real finding text"
+  pass "a genuinely escalated ask-user gate pushes a Discord decision with the real finding text"
 }
 test_reply_to_notification_enters_existing_inbox() {
   local home record wake req inbox
@@ -293,23 +347,23 @@ test_no_unrelated_reply_is_captured() {
   pass "ordinary Discord replies do not enter the decision inbox"
 }
 
-test_ask_user_gate_triggers_push() {
-  local home record
-  home="$TMP_ROOT/ask-user-trigger"
+test_ask_user_gate_alone_triggers_no_push() {
+  local home posts
+  home="$TMP_ROOT/ask-user-decided-in-scope"
   mkdir -p "$home/state/x-context"
   chmod 700 "$home/state" "$home/state/x-context"
   make_fake_node "$home"
-  FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$home/posts.jsonl" \
+  posts="$home/posts.jsonl"
+  FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$posts" \
     PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
     "$ROOT/bin/fm-discord-notify-status.sh" task-a \
       'needs-decision [key=nm-run42-review]: ask-user findings=f1 file=/private/findings.txt' \
-    >/dev/null || fail "ask-user status did not trigger a push"
-  record=$(find "$home/state/x-context" -name 'discord-notify-*.json' -print -quit)
-  assert_equals "ask-user" "$(jq -r '.trigger' "$record")" "ask-user trigger type"
-  assert_equals "nm-run42-review" "$(jq -r '.key' "$record")" "ask-user key"
-  assert_equals "task-a" "$(jq -r '.task_id' "$record")" "ask-user task id"
-  pass "only an nm-keyed ask-user status triggers a decision push"
+    >/dev/null || fail "ask-user status classification failed"
+  [ ! -s "$posts" ] || fail "a raw ask-user gate alone sent a Discord notification"
+  [ -z "$(find "$home/state/x-context" -name 'discord-notify-*.json' -print -quit)" ] \
+    || fail "a raw ask-user gate created a notification record"
+  pass "a raw ask-user gate never pushes on its own - firstmate may still decide it in-scope"
 }
 
 test_pr_push_requires_yolo_off() {
@@ -336,8 +390,27 @@ test_pr_push_requires_yolo_off() {
   assert_equals "pr-ready" "$(jq -r '.trigger' "$record")" "PR-ready trigger type"
   assert_equals "task-a" "$(jq -r '.task_id' "$record")" "PR-ready task id"
   assert_contains "$(jq -r '.summary' "$record")" "https://github.com/acme/app/pull/42" "PR summary includes review link"
+  assert_contains "$(jq -r '.summary' "$record")" "app" "PR summary names the repo extracted from the PR URL"
   assert_equals "1" "$(wc -l < "$posts" | tr -d '[:space:]')" "one yolo-off notification sent"
   pass "PR-ready notifications require yolo=off"
+}
+
+test_pr_push_names_gitlab_project() {
+  local home record
+  home="$TMP_ROOT/pr-trigger-gitlab"
+  mkdir -p "$home/state/x-context"
+  chmod 700 "$home/state" "$home/state/x-context"
+  make_fake_node "$home"
+  FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$home/posts.jsonl" \
+    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
+    "$ROOT/bin/fm-discord-notify-status.sh" task-a \
+    'needs-decision [key=pr-ready-task-a]: task=task-a yolo=off pull request ready: https://gitlab.example.com/some-group/widgets-service/-/merge_requests/7 choose merge or leave open' >/dev/null \
+    || fail "yolo-off GitLab MR status did not trigger a push"
+  record=$(find "$home/state/x-context" -name 'discord-notify-*.json' -print -quit)
+  assert_contains "$(jq -r '.summary' "$record")" "widgets-service" \
+    "PR summary names the project extracted from the GitLab MR URL, independent of the URL substring"
+  pass "PR-ready notifications name the project for an accepted GitLab merge-request URL too"
 }
 
 test_no_token_is_inert
@@ -346,9 +419,12 @@ test_failed_notification_retries_from_durable_outbox
 test_profile_failure_keeps_retryable_intent
 test_stale_sending_notification_recovers_without_duplicate_post
 test_captain_hold_triggers_push
+test_captain_hold_truncates_long_reason_for_discord
 test_reply_to_notification_enters_existing_inbox
 test_captured_reply_without_offer_recovers_one_wake
 test_unauthorized_decision_reply_is_ignored
 test_no_unrelated_reply_is_captured
-test_ask_user_gate_triggers_push
+test_ask_user_gate_alone_triggers_no_push
+test_ask_user_escalation_hold_carries_finding_text
 test_pr_push_requires_yolo_off
+test_pr_push_names_gitlab_project

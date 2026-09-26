@@ -1426,8 +1426,10 @@ Optional configuration variables in `.env`:
 - `FM_DISCORD_AUTHORIZED_USER_IDS`: comma-separated Discord user IDs allowed to answer pushed decisions, including the captain and any trusted operators; unset or empty authorizes nobody.
 Replies and follow-ups for self-hosted Discord mentions post directly to Discord's REST API using `FM_DISCORD_BOT_TOKEN`.
 
-When the self-hosted connector is enabled, firstmate also posts captain decisions to the first configured channel: a newly recorded captain hold, an `nm-` ask-user gate, or a pull request ready for review when `yolo=off`.
-Each message includes the task id, a plain-language summary, and the available choices.
+When the self-hosted connector is enabled, firstmate also posts captain decisions to the first configured channel: a newly recorded captain hold (including a genuinely escalated `nm-` ask-user gate, held with the real question in its reason per `ask-user-authority`) or a pull request ready for review when `yolo=off`.
+A raw `nm-` ask-user gate observed in a worker's status log never posts by itself - most gates are decided in-scope with no captain involvement, so only the captain-hold recorded at actual escalation time reaches Discord.
+Each message includes the task id, a plain-language summary carrying the actual decision content, and the available choices.
+Pull-request review messages name the repository or project when the URL is an accepted GitHub or GitLab merge-request URL, so the captain can identify it before opening it.
 Keep the configured channel private to the captain and trusted operators; only IDs in `FM_DISCORD_AUTHORIZED_USER_IDS` can answer decisions, and replies from other channel members are ignored.
 Reply directly to a decision message.
 The watcher captures that reply into the existing `state/x-inbox/` flow and `fmx-respond` applies it through `fm-captain-hold.sh answer-one` for a held task, or `fm-send.sh --resolve-key` for other keyed decisions.

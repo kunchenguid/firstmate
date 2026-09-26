@@ -162,9 +162,9 @@ PATH="$multi_home/fakebin:$PATH" FM_TEST_REAL_NODE="$real_node" \
   "$ROOT/bin/fm-watch.sh" > "$multi_home/watch.out" &
 multi_pid=$!
 wait_for_exit "$multi_pid" 200 || fail "watcher did not finish the multiple-gate wake"
-[ "$(wc -l < "$multi_home/posts.jsonl" | tr -d ' ')" = 1 ] || fail "watcher did not notify only the unmatched gate"
-case "$(cat "$multi_home/state/x-context"/*.json)" in *'"key":"nm-b"'*) ;; *) fail "unmatched gate notification was not recorded" ;; esac
-case "$(cat "$multi_home/state/x-context"/*.json)" in *'"key":"nm-a"'*) fail "resolved gate notification was recorded" ;; esac
+[ ! -s "$multi_home/posts.jsonl" ] || fail "watcher pushed a Discord notification for a raw ask-user gate"
+[ -z "$(find "$multi_home/state/x-context" -maxdepth 1 -name 'discord-notify-*.json' -print -quit 2>/dev/null)" ] \
+  || fail "a raw ask-user gate created a Discord notification record"
 case "$(cat "$multi_home/state/.wake-queue")" in *$'\tsignal\tmulti.status\tneeds-decision:'*) ;; *) fail "remaining open gate lost decision-owned wake routing" ;; esac
 case "$(open_decisions multi "$multi_home/state")" in *$'nm-b\tneeds-decision\t'*) ;; *) fail "unmatched gate is no longer open" ;; esac
-pass "one resolved gate suppresses only its notification; sibling remains decision-owned"
+pass "a resolved gate and its still-open sibling both stay silent on Discord; the open one remains decision-owned for firstmate to triage"
