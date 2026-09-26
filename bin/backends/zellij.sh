@@ -224,19 +224,65 @@ fm_backend_zellij_session_exists() {  # <session>
   zellij list-sessions --short --no-formatting 2>/dev/null | grep -qxF "$1"
 }
 
+# fm_backend_zellij_native_windows: true on native Windows under Git for
+# Windows / MSYS2 (Git Bash or MinGW), false everywhere else - Cygwin
+# included. Decided by `uname -s` (MINGW64_NT-*, MINGW32_NT-*, MSYS_NT-*),
+# not by OSTYPE: current Git for Windows ships a bash built for the Cygwin
+# runtime (verified 2026-09-14 on Git for Windows 2.55.0, whose
+# `bash --version` reports x86_64-pc-cygwin), so Git Bash reports
+# OSTYPE=cygwin exactly like a real Cygwin install and OSTYPE can no longer
+# tell the two apart. The kernel name still does: Git for Windows reports
+# MINGW*/MSYS*, while Cygwin reports CYGWIN_NT-*.
+fm_backend_zellij_native_windows() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*) return 0 ;;
+  esac
+  return 1
+}
+
 # fm_backend_zellij_server_ensure: create the named session in the background,
 # headless (no attached client), if it does not already exist - mirrors
 # tmux's `tmux has-session || tmux new-session -d` and herdr's server_ensure.
-# Verified: `zellij attach -b <name>` with stdin redirected from /dev/null and
-# no controlling TTY creates the session and returns promptly (it cannot
-# actually attach without a TTY, so it exits after creating); running it again
-# against an EXISTING session prints "Session already exists" and exits 1 -
-# harmless here because existence is checked first and the launch is
-# backgrounded, its exit status never inspected.
+# On the default branch - everything but Git Bash/MSYS, Cygwin included,
+# whose real fork/setsid makes `&` detach properly - verified: `zellij attach
+# -b <name>` with stdin redirected from /dev/null and no controlling TTY
+# creates the session and returns promptly (it cannot actually attach without
+# a TTY, so it exits after creating); running it again against an EXISTING
+# session prints "Session already exists" and exits 1 - harmless here because
+# existence is checked first and the launch is backgrounded, its exit status
+# never inspected.
+#
+# On native Windows (Git Bash/MSYS, not Cygwin), that same command never
+# comes up: Git Bash's `&` backgrounding does not achieve real OS-level
+# process detachment the way a Unix double-fork/setsid does, so the
+# backgrounded zellij server is tied to the invoking bash process's lifetime
+# and dies the instant this one-shot function's subshell exits, before the
+# poll loop below ever finds it. Verified live by elimination on Windows 11
+# (Developer Mode on, Zellij 0.45.1): the identical `zellij attach -b <name>`
+# launched instead as a genuinely separate Windows process via PowerShell's
+# Start-Process persists independently and is found by `zellij list-sessions`
+# afterward, proving Zellij's own background-session support works fine there
+# - only this script's Unix-style backgrounding idiom does not survive. The
+# session name is interpolated into a single-quoted PowerShell string, so
+# that branch charset-guards it first even though it is normally only the
+# fixed default "firstmate" or an operator-supplied FM_ZELLIJ_SESSION
+# (fm_backend_zellij_session above), never arbitrary task-controlled content.
 fm_backend_zellij_server_ensure() {  # <session>
   local session=$1 i
   fm_backend_zellij_session_exists "$session" && return 0
-  ( nohup zellij attach -b "$session" </dev/null >/dev/null 2>&1 & ) || return 1
+  if fm_backend_zellij_native_windows; then
+    case "$session" in
+      ''|*[!A-Za-z0-9._-]*)
+        echo "error: refusing zellij session name '$session' (must match [A-Za-z0-9._-]+)" >&2
+        return 1
+        ;;
+    esac
+    powershell.exe -NoProfile -NonInteractive -Command \
+      "Start-Process -FilePath 'zellij.exe' -ArgumentList 'attach','-b','$session' -WindowStyle Hidden" \
+      >/dev/null 2>&1 || return 1
+  else
+    ( nohup zellij attach -b "$session" </dev/null >/dev/null 2>&1 & ) || return 1
+  fi
   for i in $(seq 1 20); do
     fm_backend_zellij_session_exists "$session" && return 0
     sleep 0.5
