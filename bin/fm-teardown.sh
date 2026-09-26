@@ -85,8 +85,18 @@
 # not genuinely this task's destroys another worker's live work. Before the first
 # cleanup step, teardown verifies record exclusivity: no OTHER task record in
 # this home or any locally registered Firstmate home may name the same live path
-# in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale.
+# in its worktree= or home= unless the slot's own owner claim resolves the
+# collision. One live path with two task records is the reuse collision itself,
+# whichever record is stale, so the claim decides it at the collision: a claim
+# naming THIS task proves the duplicate is the stale leftover and the normal path
+# proceeds, a claim naming another task takes the reassignment path below, and a
+# claim that proves neither refuses. A collision touching a secondmate home is
+# never deferred: a secondmate home is seeded through Treehouse's durable lease
+# and writes no claim, so a claim that predates the seeding proves nothing about
+# the home now in the slot.
+# Cleaning a slot's stale duplicates before its claim's owner returns the slot
+# drains it fully; once the owner has returned it, the claim is gone and any
+# duplicates left behind have no claim to resolve them and still refuse.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -2338,7 +2348,7 @@ collect_local_firstmate_states() {
 
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
-  local slot state_dir other other_id field other_path other_slot
+  local slot state_dir other other_id field other_path other_slot other_kind
   slot=$(canonical_existing_dir "$worktree") || return 0
   collect_local_firstmate_states "$record_state" || return 1
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
@@ -2355,6 +2365,25 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
+        # A secondmate home is seeded into its slot through Treehouse's durable
+        # lease, and bin/fm-home-seed.sh never writes a slot claim, so a claim
+        # that predates the seeding can outlive it and prove nothing about the
+        # home now in the slot. A collision touching a secondmate record is
+        # therefore never deferred to the claim: it keeps the refusal.
+        other_kind=$(fm_meta_get "$other" kind)
+        if [ "$other_kind" != secondmate ]; then
+          # A duplicate record alone cannot say which record is current, but the
+          # slot's own owner claim can: bin/fm-spawn.sh writes it under the same
+          # allocation lock this teardown holds. A claim for THIS task proves the
+          # duplicate is the stale leftover, so the normal path proceeds and
+          # leaves the duplicate for its own cleanup. A claim for another task
+          # lets the ownership check below apply the reassignment skip. Only a
+          # claim that proves neither keeps the refusal.
+          fm_treehouse_slot_owner_state "$slot" "$record_id"
+          case "$FM_TREEHOUSE_SLOT_OWNER" in
+            mine|other) return 0 ;;
+          esac
+        fi
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
         echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
         echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
@@ -2373,14 +2402,18 @@ require_exclusive_task_worktree_slot() {
 # Positive slot ownership, read from the claim the task that took the slot wrote
 # into the slot itself (bin/fm-wake-lib.sh owns the claim and its states).
 #
-# The record scan above proves that no OTHER task record names this slot. It
-# cannot prove that THIS record is not the stale one, because the task that took
-# the slot next may leave no record this scan can reach: its own worker may have
-# exited and its record been cleaned up, or it may belong to a home this machine
-# does not register. The claim closes that gap from the other side - it names the
-# task that actually took the slot, and it is written under the same project lock
-# that allocates it - so a claim naming another task is proof the slot was
-# reassigned after this record was written.
+# The record scan above proves that no OTHER task record names this slot, or -
+# when duplicate records do collide and none touches a secondmate home - that
+# this same claim already resolved them: a claim naming THIS task rejected the
+# duplicates as stale leftovers, and one naming another task is handled here. A
+# collision touching a secondmate home keeps the refusal.
+# The scan cannot prove that THIS record is not the stale one, because the task
+# that took the slot next may leave no record this scan can reach: its own worker
+# may have exited and its record been cleaned up, or it may belong to a home this
+# machine does not register. The claim closes that gap from the other side - it
+# names the task that actually took the slot, and it is written under the same
+# project lock that allocates it - so a claim naming another task is proof the
+# slot was reassigned after this record was written.
 #
 # A claim naming another task does not refuse: it means the slot is no longer
 # this task's, so the record's own cleanup proceeds and every slot step is
