@@ -52,7 +52,8 @@ for backend in absent tmux cmux zellij orca unknown; do
     "$ROOT/bin/fm-control.sh" "$id" "$verb" > "$TMP_ROOT/refusal" 2>&1 && fail "historical $verb was accepted"
   done
   "$ROOT/bin/fm-peek.sh" "$id" > "$TMP_ROOT/refusal" 2>&1 && fail "historical peek was accepted"
-  "$ROOT/bin/fm-teardown.sh" "$id" > "$TMP_ROOT/refusal" 2>&1 && fail "historical teardown was accepted"
+  PI_CODING_AGENT=true "$ROOT/bin/fm-teardown.sh" "$id" > "$TMP_ROOT/refusal" 2>&1 && fail "historical teardown was accepted"
+  assert_absent "$FM_STATE_OVERRIDE/.fm-lease-command.lock" "refused teardown leaked the Pi supervision command lock"
   FM_SPAWN_NO_GUARD=1 "$ROOT/bin/fm-spawn.sh" "$id" "$TMP_ROOT/work" --scout --harness pi > "$TMP_ROOT/refusal" 2>&1 && fail "new intake overwrote historical identity"
   cmp "$meta" "$TMP_ROOT/snapshot" || fail "historical metadata mutated"
   assert_present "$FM_STATE_OVERRIDE/$id.status" "history disappeared"

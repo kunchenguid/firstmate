@@ -348,7 +348,10 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
   # Remote routes have their own identity and retirement transaction below;
   # their absent local backend is not a historical local tmux endpoint.
   if [ -z "$(fm_meta_get "$META" remote_host)" ]; then
-    fm_backend_validate "$TEARDOWN_LOCK_BACKEND" || exit 1
+    fm_backend_validate "$TEARDOWN_LOCK_BACKEND" || {
+      fm_lease_guard_release
+      exit 1
+    }
   fi
   TEARDOWN_LOCK_WT=$(fm_meta_get "$META" worktree)
   TEARDOWN_LOCK_PROJECT=$(fm_meta_get "$META" project)
