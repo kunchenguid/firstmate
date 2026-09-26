@@ -1274,8 +1274,8 @@ test_outcome_after_the_return_survives_a_host_killed_at_the_turn_end() {
   pass "host: an outcome recorded after the return reaches main even when its host dies at the turn's end"
 }
 
-# A host killed outright mid-turn runs no cleanup; the next host's activation
-# stops the engine it left and removes that turn's files.
+# A host killed outright mid-turn leaves turn files, but the bounded engine's
+# watchdog stops the engine when its owner dies. The next host clears the files.
 test_next_host_clears_a_turn_its_killed_predecessor_left() {
   local home host engine
   home=$(make_home away-killed-mid-turn away)
@@ -1289,18 +1289,18 @@ test_next_host_clears_a_turn_its_killed_predecessor_left() {
   kill -KILL "$host"
   wait_until 100 host_exited "$home" || fail "killed: the host did not die"
   ls "$home"/state/.supervision-host-result.* >/dev/null 2>&1 || fail "fixture: the killed turn left no result file, so this case proves nothing"
-  kill -0 "$engine" 2>/dev/null || fail "fixture: the engine died with its host, so this case proves nothing"
+  wait_until 100 sh -c '! kill -0 "$1" 2>/dev/null' _ "$engine" || fail "the bounded engine survived its killed host"
 
   rm -f "$home/host.rc"
   start_host "$home"
   wait_until 250 host_exited "$home" || fail "killed: the next host did not resurface the queued outcome"
-  wait_until 100 sh -c '! kill -0 "$1" 2>/dev/null' _ "$engine" || fail "the next host left its killed predecessor's engine running"
+  ! kill -0 "$engine" 2>/dev/null || fail "the next host revived its killed predecessor's engine"
   for f in "$home"/state/.supervision-host-result.* "$home"/state/.supervision-host-errors.* \
     "$home"/state/.supervision-host-descendants.* "$home/state/.supervision-host-turn"; do
     [ -e "$f" ] && fail "the next host left its killed predecessor's turn file behind: $f"
   done
   assert_re '^check: rearm-resurface$' "$home/host.out" "the next host's first cycle must resurface the queue"
-  pass "host: the next host stops the engine a killed predecessor left mid-turn and removes that turn's files"
+  pass "host: a killed predecessor's engine is reaped and the next host removes its turn files"
 }
 
 test_report_without_acknowledgement_hands_the_wake_to_main() {
