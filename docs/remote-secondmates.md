@@ -346,6 +346,12 @@ That clone's configured origin is then read instead of being retyped.
 It decides on structure and safety alone, so no forge, domain, or host is privileged and a self-hosted server works exactly as a hosted one does.
 The primary validates every resolved origin before transport, and the receiving host validates it again before cloning.
 
+An accepted origin may carry a `user:pass@host` authority, so errors for an existing seeded clone with a missing or mismatched origin in `bin/fm-home-seed.sh` and origin-validation errors in `bin/fm-remote-home-seed.sh` name clones or arguments instead of printing the URL.
+To compare mismatched origins, run `git remote get-url origin` in both named clones; when the seeded clone has no origin, inspect the named source clone.
+For a rejected origin, inspect the supplied `<project>=<origin-url>` argument or the named clone, as directed by the error.
+This guarantee covers those diagnostics only: Git subprocess output and receiving-host validation in [`bin/fm-remote-home-provision.sh`](../bin/fm-remote-home-provision.sh) can still include origin URLs.
+The credential-bearing origin cases in [`tests/fm-secondmate-safety.test.sh`](../tests/fm-secondmate-safety.test.sh) cover these four diagnostics.
+
 ### Delivery mode
 
 The project's registered delivery mode still comes from this machine's `data/projects.md`.
