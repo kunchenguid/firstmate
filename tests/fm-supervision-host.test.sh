@@ -33,6 +33,8 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 # The stub engine. It records its environment and arguments, then acts like a
 # branch turn through the real scripts according to $FM_HOME/stub-mode:
 #   handle      drain, claim the task's lease, report, acknowledge, release
+#   captain     the same as handle, but report verdict captain naming the rows
+#               the drain presented
 #   hold-lease  the same, but leave the lease held (the host must release it)
 #   return      handle, but the captain returns (the record is archived) before
 #               the turn ends
@@ -71,11 +73,17 @@ task=$(sed -n 's/^tasks=//p' "$STATE/.supervision-host-turn" | awk '{ print $1 }
 [ -n "$task" ] || task=fleet
 case "$mode" in
   fail) exit 3 ;;
-  handle|hold-lease|return|return-fail|return-first|noack|chain|emptyresult)
+  handle|captain|hold-lease|return|return-fail|return-first|noack|chain|emptyresult)
     [ "$mode" != return-first ] || "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1
     "$FM_REPO/bin/fm-lease.sh" claim "$task" >> "$FM_HOME/engine-lease.log" 2>&1
-    "$FM_REPO/bin/fm-branch-report.sh" --task "$task" --verdict routine --summary "stub handled $task" \
-      >> "$FM_HOME/engine-report.log" 2>&1
+    if [ "$mode" = captain ]; then
+      "$FM_REPO/bin/fm-branch-report.sh" --task "$task" --verdict captain \
+        --summary "stub escalated: $(printf '%s\n' "$drain" | grep -v '^WAKE_' | tr '\n' ' ' | cut -c1-400)" \
+        >> "$FM_HOME/engine-report.log" 2>&1
+    else
+      "$FM_REPO/bin/fm-branch-report.sh" --task "$task" --verdict routine --summary "stub handled $task" \
+        >> "$FM_HOME/engine-report.log" 2>&1
+    fi
     # shellcheck disable=SC2086 # the printed acknowledgement arguments
     [ -z "$ack" ] || [ "$mode" = noack ] || "$FM_REPO/bin/fm-wake-drain.sh" $ack >> "$FM_HOME/engine-ack.log" 2>&1
     [ "$mode" = hold-lease ] || "$FM_REPO/bin/fm-lease.sh" release "$task" >> "$FM_HOME/engine-lease.log" 2>&1
@@ -897,6 +905,83 @@ test_latch_leaves_attended_and_unopted_homes_unchanged() {
   pass "host: the latch changes nothing for an attended close or a home without config/supervision-host"
 }
 
+# The 2026-09-25 away-window flood: a held, green PR on a finished task was
+# re-escalated on every inactive-outcome cadence, because the branch
+# acknowledgement consumed the check row but left its terminal-outcome receipt
+# pending, so each later scan re-queued the same fingerprint. Through the real
+# watcher cadence, host, report surface, and drain, that unchanged situation
+# now reaches the captain exactly once, and a new event on the same task - a
+# decision - still reaches the captain path afterwards.
+scan_marker_age() {  # <home> -> seconds since the last inactive-outcome scan
+  perl -e 'my @s = stat $ARGV[0] or exit 1; print time - $s[9]' "$1/state/.inactive-outcome-reconcile"
+}
+scan_ran() { [ "$(scan_marker_age "$1" 2>/dev/null || echo 999999)" -lt 60 ]; }
+captain_rows() {  # <home>
+  local rows
+  rows=$(grep -c '"verdict":"captain"' "$1/state/branch-outcomes.jsonl" 2>/dev/null)
+  printf '%s\n' "${rows:-0}"
+}
+captain_rows_at_least() { [ "$(captain_rows "$1")" -ge "$2" ]; }
+flood_signal() {  # <home>
+  captain_rows_at_least "$1" 2 || grep -qs '	inactive-outcome:' "$1/state/.wake-queue"
+}
+
+test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event() {
+  local home cycle old pid watcher
+  home=$(make_home away-held-once away)
+  echo captain > "$home/stub-mode"
+  mkdir -p "$home/projects/held"
+  git -C "$home/projects/held" init -q
+  git -C "$home/projects/held" -c user.name=fmtest -c user.email=fmtest@example.invalid \
+    commit -q --allow-empty -m init
+  fm_write_meta "$home/state/held.meta" \
+    'window=fm-held' "worktree=$home/projects/held" "project=$home/projects/held" \
+    'harness=claude' 'kind=ship' 'mode=no-mistakes' 'yolo=off' 'spawn_gen=g1' \
+    'pr=https://example.test/o/r/pull/153'
+  printf 'done: PR https://example.test/o/r/pull/153 open, green, mergeable\n' > "$home/state/held.status"
+  old=$(( $(date +%s) - 600 ))
+  perl -e 'my $t = shift; utime $t, $t, @ARGV or exit 1' "$old" \
+    "$home/state/held.meta" "$home/state/held.status" \
+    || fail "fixture: could not age the held task's records"
+  prime_status_seen "$home/state" "$home/state/held.status"
+
+  export FM_FAKE_CREW_STATE_held='state: done · source: fake'
+  export FM_INACTIVE_CREW_STATE_BIN="$home/fakebin/fm-crew-state.sh" FM_INACTIVE_RECONCILE_SECS=60
+  start_host "$home"
+  wait_until 250 captain_rows_at_least "$home" 1 \
+    || fail "held: the first cadence never escalated the held outcome: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  assert_grep 'child=held' "$home/state/branch-outcomes.jsonl" "held: the escalation did not name the held task's outcome: $(cat "$home"/engine-drain.* "$home/state/.supervision-host.log")"
+  wait_until 150 handled_at_least "$home" 1 || fail "held: the escalating turn never finished"
+  assert_no_grep '	inactive-outcome:' "$home/state/.wake-queue" "held: the branch acknowledgement left the presentation row queued"
+
+  for cycle in 1 2 3 4; do
+    old=$(( $(date +%s) - 120 ))
+    perl -e 'my $t = shift; utime $t, $t, @ARGV or exit 1' "$old" "$home/state/.inactive-outcome-reconcile" \
+      || fail "held: could not age the scan marker before cadence $cycle"
+    wait_until 150 scan_ran "$home" || fail "held: cadence $cycle never rescanned"
+    ! wait_until 30 flood_signal "$home" \
+      || fail "held: cadence $cycle re-escalated the unchanged held outcome: $(cat "$home/state/branch-outcomes.jsonl")"
+  done
+  [ "$(captain_rows "$home")" -eq 1 ] || fail "held: the unchanged situation reached the captain $(captain_rows "$home") times"
+  [ -s "$home/host.rc" ] && fail "held: the host handed a wake to main: $(cat "$home/host.out")"
+
+  printf 'needs-decision [key=merge-153]: merge PR 153 now or hold it for the return?\n' >> "$home/state/held.status"
+  wait_until 250 captain_rows_at_least "$home" 2 \
+    || fail "held: the new decision never reached the captain path: $(cat "$home/state/branch-outcomes.jsonl")"
+  [ "$(captain_rows "$home")" -eq 2 ] || fail "held: the decision escalated $(captain_rows "$home") rows, not one"
+  [ "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" list --recent 1 | sed -n 's/.*"task":"\([^"]*\)".*"verdict":"\([a-z]*\)".*/\1 \2/p')" = 'held captain' ] \
+    || fail "held: the decision was not recorded as a captain outcome for the held task: $(cat "$home/state/branch-outcomes.jsonl")"
+  unset FM_FAKE_CREW_STATE_held FM_INACTIVE_CREW_STATE_BIN FM_INACTIVE_RECONCILE_SECS
+  # Stop the host and its watcher here, so no cadence scan is still writing
+  # into this home while the suite's cleanup removes it.
+  pid=$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")
+  watcher=$(cat "$home/state/.watch.lock/pid")
+  kill -TERM "$pid"
+  wait_until 200 host_exited "$home" || fail "held: the host did not stop on TERM"
+  wait_until 100 sh -c '! kill -0 "$1" 2>/dev/null' _ "$watcher" || fail "held: a stopped host left its watcher running"
+  pass "host: an unchanged held outcome reaches the captain once across cadences, and a later decision on the task still does"
+}
+
 test_unverified_engine_hands_every_away_wake_to_main() {
   local home
   home=$(make_home no-engine away 'pi')
@@ -986,6 +1071,7 @@ test_park_boundary_rechecked_just_before_the_engine_turn
 test_park_seconds_at_or_beyond_the_hook_registration_fall_back_to_the_default
 test_park_limit_lets_a_turn_outlive_the_boundary
 test_first_cycle_status_streams_and_owner_options_reach_it
+test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event
 test_unverified_engine_hands_every_away_wake_to_main
 test_host_outside_the_lock_owner_stands_down
 test_superseded_host_leaves_the_owner_untouched
