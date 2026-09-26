@@ -1652,15 +1652,28 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
 # call. The server outlives its launcher and passes its startup environment to
 # every later pane, so remove home, harness identity, and supervision selection
 # inherited from whichever agent happened to start it. Bounded poll for the
-# server to report running.
+# server to report running. Where setsid(1) is available, detach into a new
+# POSIX session so Herdr advertises detached_server_daemon for saved machines.
+# Keep the existing launch on systems without that utility.
 fm_backend_herdr_server_ensure() {  # <session>
-  local session=$1 running out i
+  local session=$1 running out i client_bin
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = "true" ] && return 0
   (
     unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
       CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL
-    fm_backend_herdr_cli "$session" server >/dev/null 2>&1 &
+    if command -v setsid >/dev/null 2>&1; then
+      # Match fm_backend_herdr_cli's session-scoped client selection. setsid
+      # needs an executable, not that shell function; util-linux forks if the
+      # launcher is already a process-group leader (setsid(2) would fail).
+      client_bin=herdr
+      if [ "${FM_BACKEND_HERDR_CLIENT_SESSION:-}" = "$session" ]; then
+        client_bin=$(fm_backend_herdr_bin)
+      fi
+      HERDR_SESSION="$session" setsid "$client_bin" server --session "$session" >/dev/null 2>&1 &
+    else
+      fm_backend_herdr_cli "$session" server >/dev/null 2>&1 &
+    fi
   ) || return 1
   for i in $(seq 1 20); do
     running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
