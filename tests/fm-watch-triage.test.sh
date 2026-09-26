@@ -2727,6 +2727,47 @@ parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absor
   return 0
 }
 
+# --- a live worker parked on a declared wait: first stale names the wait ----
+# Observed 2026-09-21 on two live idle panes whose last status line was a valid
+# `paused:` with no until time. pause_state_class answers `none` for a still-live
+# agent, so first sight of that hash reaches surface_nonterminal_stale. That first
+# sight must still wake - the pane is inconclusive - but the payload must name the
+# declared pause the same way handle_paused_stale names a later same-hash recheck.
+# A bare `stale: <pane>` cannot be told from a wedge and costs a full inspection.
+test_live_paused_first_stale_carries_declared_pause_annotation() {
+  local dir state fakebin out capture_file statusf window key sig wakes bare
+  dir=$(make_case live-paused-first-stale); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/parked.status"
+  window="test:fm-parked"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+  printf 'paused: holding for the upstream check approval\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'parked, elapsed 1s' > "$capture_file"
+  printf '%s' "$(hash_text 'parked, elapsed 1s')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+    || fail "first sight of a live paused worker did not surface"
+  grep -F "stale: $window" "$out" >/dev/null \
+    || fail "first sight of a live paused worker printed no stale wake: $(cat "$out")"
+  grep -Fx "stale: $window" "$out" >/dev/null \
+    && fail "first sight of a live paused worker was a bare pane-keyed stale: $(cat "$out")"
+  grep -E "paused [0-9]+s, awaiting external - declared pause" "$out" >/dev/null \
+    || fail "first sight of a live paused worker omitted the declared-pause annotation: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null \
+    && fail "first sight of a live paused worker was labeled a possible wedge: $(cat "$out")"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 1 ] || fail "first sight of a live paused worker produced $wakes wakes instead of one"
+  [ "$bare" -eq 0 ] || fail "first sight of a live paused worker queued a bare pane-keyed stale"
+  grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
+    || fail "first sight of a live paused worker queued no declared-pause payload: $(cat "$state/.wake-queue")"
+  pass "first stale of a live paused worker names the declared pause instead of a bare pane id"
+}
+
 # --- a live worker parked on a declared wait: pane churn must not re-alarm ----
 # The 2026-08/09 alarm loop, in both observed forms - a worker parked on the
 # CAPTAIN (captain-held, five consecutive alarms) and one parked on the PIPELINE
@@ -2737,17 +2778,20 @@ parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absor
 # clock, a token counter), so every tick used to re-enter that first-sight path and
 # wake firstmate - the throttle was written by the very wake it should have
 # prevented, and the hash-change path cleared it again before it was ever read.
-# The contract pinned here: the FIRST sight still surfaces, further sights inside
-# PAUSE_RESURFACE_SECS are absorbed, and the window's end still re-surfaces once,
-# so a forgotten wait cannot rot invisibly.
+# The contract pinned here: the FIRST sight still surfaces and names the declared
+# wait, further sights inside PAUSE_RESURFACE_SECS are absorbed, and the window's
+# end still re-surfaces once with that same named-wait reason, so a forgotten wait
+# cannot rot invisibly and cannot be read as a wedge.
 test_live_declared_wait_churn_honors_the_resurface_throttle() {
   local spec name status_line dir state fakebin out capture_file statusf window key
-  local sig round wakes bare text throttle replacement
+  local sig round wakes bare text throttle replacement expected_note
   for spec in \
     'paused-pipeline-churn|paused: waiting on the validation run to finish' \
     'captain-held-churn|captain-held [key=route]: awaiting the captain on the routing call'
   do
     name=${spec%%|*}; status_line=${spec#*|}
+    expected_note='awaiting external'
+    case "$name" in captain-held-churn) expected_note='awaiting the captain' ;; esac
     dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/parked.status"
     window="test:fm-parked"
@@ -2765,6 +2809,10 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
     printf '1\n' > "$state/.count-$key"
     parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
       || fail "[$name] first sight of a parked live worker did not surface"
+    grep -Fx "stale: $window" "$out" >/dev/null \
+      && fail "[$name] first sight of a parked live worker was a bare pane-keyed stale: $(cat "$out")"
+    grep -F "$expected_note" "$out" >/dev/null \
+      || fail "[$name] first sight of a parked live worker omitted its wait annotation: $(cat "$out")"
     ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the first surface"
     [ -e "$throttle" ] || fail "[$name] the first surface recorded no re-surface throttle"
 
@@ -2801,7 +2849,9 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
     bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' \
       "$state/.wake-queue" 2>/dev/null || echo 0)
     [ "$wakes" -eq 1 ] || fail "[$name] replacement declared wait produced $wakes first wakes instead of one"
-    [ "$bare" -eq 1 ] || fail "[$name] replacement declared wait changed the wake identity: $(cat "$state/.wake-queue")"
+    [ "$bare" -eq 0 ] || fail "[$name] replacement declared wait was a bare pane-keyed stale: $(cat "$state/.wake-queue")"
+    grep -F "$expected_note" "$state/.wake-queue" >/dev/null \
+      || fail "[$name] replacement declared wait omitted its wait annotation: $(cat "$state/.wake-queue")"
     ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the replacement wait's first surface"
 
     printf 'replacement wait, elapsed 2s' > "$capture_file"
@@ -2811,8 +2861,9 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
       "$state/.wake-queue" 2>/dev/null || echo 0)
     [ "$wakes" -eq 0 ] || fail "[$name] replacement wait re-alarmed $wakes time(s) inside its own re-surface window"
 
-    # End of the window: the wait must re-surface exactly once, on the same plain
-    # identity as before, so absorbing churn never becomes silence.
+    # End of the window: the wait must re-surface exactly once, with the same
+    # named-wait reason as first sight, so absorbing churn never becomes silence
+    # and the recheck cannot be read as a wedge.
     set_mtime "$(( $(date +%s) - 2000 ))" "$throttle"
     printf 'parked, elapsed 5s' > "$capture_file"
     parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
@@ -2822,7 +2873,9 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
     bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' \
       "$state/.wake-queue" 2>/dev/null || echo 0)
     [ "$wakes" -eq 1 ] || fail "[$name] elapsed re-surface window produced $wakes wakes instead of one"
-    [ "$bare" -eq 1 ] || fail "[$name] elapsed re-surface changed the wake identity: $(cat "$state/.wake-queue")"
+    [ "$bare" -eq 0 ] || fail "[$name] elapsed re-surface was a bare pane-keyed stale: $(cat "$state/.wake-queue")"
+    grep -F "$expected_note" "$state/.wake-queue" >/dev/null \
+      || fail "[$name] elapsed re-surface omitted its wait annotation: $(cat "$state/.wake-queue")"
   done
   pass "a parked live worker surfaces once, absorbs pane churn for the whole re-surface window, then re-surfaces when it elapses"
 }
@@ -6410,6 +6463,7 @@ test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
+test_live_paused_first_stale_carries_declared_pause_annotation
 test_live_declared_wait_churn_honors_the_resurface_throttle
 test_live_paused_until_controls_recheck_time
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
