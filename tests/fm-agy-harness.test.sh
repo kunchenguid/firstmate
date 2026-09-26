@@ -551,8 +551,12 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+# With a third argument, build the pooled-worktree shape instead: the worktree
+# is linked to a sibling clone of the same origin, not to the spawning home's
+# own project, exactly as a shared Treehouse pool handed out from another
+# home's clone of that origin would be.
 make_agy_spawn_case() {
-  local name=$1 id=$2 case_dir home proj wt fakebin
+  local name=$1 id=$2 pooled=${3:-} case_dir home proj wt fakebin owner
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
@@ -571,7 +575,14 @@ EOF
   mkdir -p "$home/.gemini/antigravity-cli"
   printf '%s\n' '{"model":"Gemini 3.8 Flash (High)","trustedWorkspaces":["/home/someone/elsewhere"]}' \
     > "$home/.gemini/antigravity-cli/settings.json"
-  fm_git_worktree "$proj" "$wt" "wt-$name"
+  owner="$proj"
+  if [ -n "$pooled" ]; then
+    owner="$case_dir/other-clone"
+    fm_git_worktree "$owner" "$wt" "wt-$name"
+    git clone --quiet "$owner.origin.git" "$proj"
+  else
+    fm_git_worktree "$proj" "$wt" "wt-$name"
+  fi
   touch "$home/state/.last-watcher-beat"
   : > "$case_dir/launch.log"
   : > "$case_dir/tmux-calls.log"
@@ -756,6 +767,79 @@ test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog() {
   pass "fm-spawn: agy pre-registers the worktree and launches straight into a busy turn"
 }
 
+# A Treehouse pool is keyed by the project's resolved origin, not by which
+# local clone asked for it (bin/fm-wake-lib.sh's fm_treehouse_project_lock_path:
+# "separate clones of one origin share a single lock"), and Treehouse hands out
+# worktrees from whichever clone's pool already exists on disk. So a second
+# home that clones the same origin into its OWN projects/<name> directory can
+# be handed a pool worktree linked to a DIFFERENT home's clone - the one that
+# happened to create the shared pool first. Reproducing that needs no real
+# Treehouse pool: a worktree linked to a sibling clone of the spawning
+# project's own origin is the same structural shape. The spawn must derive the
+# agy-trust <project> argument from the worktree's own git common dir so the
+# helper's structural scope test sees the linkage that actually exists;
+# passing the home's own registered project asserts a false linkage, the scope
+# test correctly refuses it, and the spawn falls back to answering the
+# folder-trust dialog after launch on every cross-clone spawn.
+test_agy_spawn_trusts_a_worktree_pooled_against_a_sibling_clone() {
+  local id rec out rc store enters
+  id="agy-pooled-z15-$$"
+  rec=$(make_agy_spawn_case pooled "$id" pooled)
+  read_agy_spawn_record "$rec"
+  store="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low)
+  rc=$?
+  expect_code 0 "$rc" "an agy spawn into a worktree pooled against a sibling clone of its project's own origin must succeed: $out"
+  assert_not_contains "$out" "could not pre-register" \
+    "a worktree pooled against a sibling clone failed trust pre-registration"
+  assert_agy_trusted "$store" "$WT_DIR" \
+    "the agy spawn did not pre-register the pooled worktree in agy's trust store"
+  assert_agy_not_trusted "$store" "$PROJ_DIR" \
+    "the agy spawn wrongly trusted its own registered project clone instead of the worktree's real primary checkout"
+  [ "$(cat "$CASE_DIR/agy.state")" = busy ] \
+    || fail "the spawn reported success before the pane reached a busy turn (state: $(cat "$CASE_DIR/agy.state"))"
+  enters=$(count_enter_sends "$CASE_DIR/tmux-calls.log")
+  [ "$enters" -eq 1 ] \
+    || fail "a pooled worktree pre-registered against its real primary checkout must receive only the launch Enter, got $enters Enter sends"
+  pass "fm-spawn: agy pre-trusts a worktree pooled against a sibling clone of its project's own origin"
+}
+
+# ADVERSARIAL COUNTERPART to the pooled case above. The isolation guard that
+# screens the acquired path compares the candidate's git dir against the
+# SPAWNING project's common dir, so a primary checkout of a DIFFERENT clone of
+# the same origin is not the spawning project and passes that screen. Deriving
+# the agy-trust <project> argument from the worktree's own common dir names
+# that same checkout, so the derivation must not turn into a way to assert
+# trust for a primary checkout: the helper's scope test still has to refuse it,
+# the store must stay clean, and the spawn must take the warn-and-answer
+# fallback instead of pre-registering a whole clone.
+test_agy_spawn_refuses_to_pre_trust_a_sibling_primary_checkout() {
+  local id rec out rc store sibling enters
+  id="agy-sibling-primary-z16-$$"
+  rec=$(make_agy_spawn_case sibling-primary "$id")
+  read_agy_spawn_record "$rec"
+  store="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+  sibling="$CASE_DIR/sibling-clone"
+  git clone --quiet "$PROJ_DIR.origin.git" "$sibling"
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$sibling" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low)
+  rc=$?
+  expect_code 0 "$rc" "the spawn should still reach its brief through the dialog fallback: $out"
+  assert_contains "$out" "could not pre-register agy workspace trust" \
+    "a refused primary checkout did not surface the registration warning"
+  assert_agy_not_trusted "$store" "$sibling" \
+    "the derivation pre-registered a sibling clone's primary checkout in agy's trust store"
+  assert_agy_trusted "$store" "/home/someone/elsewhere" \
+    "a refused registration rewrote the store it was supposed to leave alone"
+  [ "$(cat "$CASE_DIR/agy.state")" = busy ] \
+    || fail "the fallback reported success before the pane reached a busy turn (state: $(cat "$CASE_DIR/agy.state"))"
+  enters=$(count_enter_sends "$CASE_DIR/tmux-calls.log")
+  [ "$enters" -eq 2 ] \
+    || fail "the refused path must fall back to answering the dialog exactly once, got $enters Enter sends"
+  pass "fm-spawn: agy never pre-trusts a sibling clone's primary checkout the derivation names"
+}
+
 test_agy_dialog_despite_registration_is_answered_once() {
   local id rec out rc enters
   id="agy-vendor-z10-$$"
@@ -910,6 +994,8 @@ test_agy_trust_registers_the_logical_and_resolved_worktree_paths
 test_agy_trust_creates_a_missing_store
 test_agy_trust_refuses_out_of_scope_paths
 test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog
+test_agy_spawn_trusts_a_worktree_pooled_against_a_sibling_clone
+test_agy_spawn_refuses_to_pre_trust_a_sibling_primary_checkout
 test_agy_dialog_despite_registration_is_answered_once
 test_agy_unregistered_path_ignores_busy_until_the_dialog_is_answered
 test_agy_unregistered_path_without_a_dialog_fails_the_spawn

@@ -4216,7 +4216,33 @@ claude*)
   ;;
 agy)
   if [ "$KIND" != secondmate ]; then
-    if "$FM_ROOT/bin/fm-agy-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
+    # $PROJ_ABS is the project registered for THIS spawn's own home, but a
+    # pooled worktree is not necessarily linked to it: a Treehouse pool is
+    # keyed by the project's resolved origin and shared by every local clone
+    # of that origin (bin/fm-wake-lib.sh's fm_treehouse_project_lock_path:
+    # "separate clones of one origin share a single lock"), so an existing
+    # pool can already be anchored to a DIFFERENT home's clone of the same
+    # origin. Passing $PROJ_ABS there fails bin/fm-agy-trust.sh's structural
+    # scope test - correctly, because the assertion is false - and every
+    # cross-clone spawn then runs the warn-and-fallback path: the folder-trust
+    # dialog is answered after launch instead of pre-registered, so readiness
+    # depends on the dialog rendering, one Enter landing, and a busy verdict
+    # all inside one bounded window, and a structurally normal fleet shape
+    # warns on every spawn. $WT's own git common dir names its REAL primary
+    # checkout - the common dir's parent, in git's standard non-bare layout -
+    # so derive the trust <project> argument from $WT directly rather than
+    # trusting the home's own registration. This is a no-op whenever the pool
+    # already is anchored to $PROJ_ABS, which stays the fallback whenever
+    # $WT's common dir cannot be resolved at all. The scope test itself is
+    # unchanged: it still refuses anything that is not a linked worktree of
+    # exactly the project passed.
+    trust_project=$PROJ_ABS
+    wt_pool_common=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || wt_pool_common=
+    if [ -n "$wt_pool_common" ]; then
+      wt_pool_owner=$(cd -P -- "$(dirname -- "$wt_pool_common")" 2>/dev/null && pwd -P) || wt_pool_owner=
+      [ -z "$wt_pool_owner" ] || trust_project=$wt_pool_owner
+    fi
+    if "$FM_ROOT/bin/fm-agy-trust.sh" "$WT" "$trust_project" >/dev/null; then
       AGY_TRUST_PREREGISTERED=1
     else
       echo "warning: could not pre-register agy workspace trust for $WT; the launch will answer the folder-trust dialog in window $T instead" >&2

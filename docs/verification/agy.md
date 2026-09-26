@@ -58,8 +58,28 @@ Antigravity CLI requires permission to read, edit, and execute files here.
 `agy --help` (1.2.0) lists no trust flag or pre-registration command, but agy honours a `trustedWorkspaces` entry written to `~/.gemini/antigravity-cli/settings.json` ahead of launch.
 Verified under a throwaway `HOME` holding a copy of `~/.gemini` (the real settings file was never written): a folder appended to that array by hand launched `--prompt-interactive` straight into its turn and rendered the reply with no dialog, while an unregistered sibling folder launched the same way parked on the dialog.
 agy compares the pane's logical working directory, not its resolved path: a symlinked cwd whose real path alone was registered still parked on the dialog, so `bin/fm-agy-trust.sh` records both the logical path and its resolved form when they differ.
-`bin/fm-spawn.sh` runs that helper before launch at the same point it pre-registers claude trust; the helper applies the same structural scope test (a linked worktree of the spawning project, never a primary checkout, a subdirectory, a plain directory, or the home directory), preserves every other key in the store, and writes atomically with a fingerprint check.
+`bin/fm-spawn.sh` runs that helper before launch at the same point it pre-registers claude trust, and derives its `<project>` argument from the acquired worktree's own git common dir rather than the home's own registration: a Treehouse pool is keyed by the project's resolved origin and shared by every local clone of that origin, so the worktree can be linked to a different home's clone, and asserting the spawning home's registered project would fail the scope test for a structurally normal fleet shape (the registered project stays the fallback when the common dir cannot be resolved).
+The helper applies the same structural scope test (a linked worktree of that derived project, never a primary checkout, a subdirectory, a plain directory, or the home directory), preserves every other key in the store, and writes atomically with a fingerprint check.
 A failed registration is a stderr warning rather than a refusal, because agy's dialog preselects the safe answer and the gate below can answer it.
+The pooled-worktree derivation was verified as a portable regression on 2026-09-20, with a worktree linked to a sibling clone of the spawning project's own origin standing in for the cross-home pool shape (no real Treehouse pool is needed to exercise the same structural mismatch):
+
+```sh
+bin/fm-test-run.sh tests/fm-agy-harness.test.sh
+```
+
+Before the derivation, the spawn still succeeded and the gate answered the dialog inside its bounded window - every gate failure path fails the spawn with endpoint cleanup rather than wedging - but each cross-clone spawn depended on the dialog rendering, a single non-retried Enter landing, and a busy verdict all inside that window, on the route whose unanswered-dialog behavior was never fully explained (below), and warned on every spawn:
+
+```text
+not ok - a worktree pooled against a sibling clone failed trust pre-registration (unexpected: 'could not pre-register')
+error: refusing to pre-register agy trust: '<tmp>/wt' is not a worktree of project '<tmp>/project'
+warning: could not pre-register agy workspace trust for <tmp>/wt; the launch will answer the folder-trust dialog in window firstmate:fm-agy-pooled-<id> instead
+```
+
+After `bin/fm-spawn.sh` derived the agy-trust `<project>` argument from the worktree's own git common dir, the same run and the full existing suite passed, including every prior dialog, race, and fail-and-close case:
+
+```text
+ok - fm-spawn: agy pre-trusts a worktree pooled against a sibling clone of its project's own origin
+```
 Two supervised Herdr runs in treehouse worktrees completed file-writing turns while the dialog was still unanswered at observation time (worker file and `done:` status line both verified on disk before Enter was ever sent to those panes).
 Isolated runs in untrusted `/tmp` directories never reached the workspace until Enter: the turn spun through exploratory tool calls in agy's own scratch directory instead, and only the queued prompt ran after the answer.
 One run left unanswered for several minutes wrote its file to agy's scratch directory instead of the workspace once finally answered.
@@ -68,7 +88,7 @@ The spawn therefore does not depend on it: after pre-registration, `bin/fm-spawn
 It polls the pane capture, answers the dialog with a single Enter the first time the `Do you trust the contents of this project?` text renders, and reports success only once `fm_busy_classify` returns a busy verdict for the pane (Herdr's native `working` status or the pinned `esc to cancel` status row).
 Because Herdr's native `working` verdict is known to coexist with an unanswered dialog, the gate is strict about order: a busy verdict counts as ready only when the worktree was pre-registered before launch or the dialog has already been seen and answered; on an unregistered path it keeps polling for the dialog instead of accepting the early busy verdict.
 When the brief cannot be confirmed to run within the window (an answered dialog never turns busy, a pre-trusted pane never turns busy, or an unregistered pane never shows the dialog), the spawn fails, records `failed:` in the task status, and closes the endpoint so no orphan worker survives outside task control.
-`tests/fm-agy-harness.test.sh` covers the helper's registration and scope refusals against a throwaway store, and drives a fake pane whose dialog decision reads the store the spawn just wrote: the pre-trusted launch with no dialog, a dialog that renders anyway answered exactly once, the premature busy verdict on an unregistered path waiting for the dialog, and both fail-and-close paths.
+`tests/fm-agy-harness.test.sh` covers the helper's registration and scope refusals against a throwaway store, and drives a fake pane whose dialog decision reads the store the spawn just wrote: the pre-trusted launch with no dialog, a pooled-sibling worktree pre-trusted through its real primary checkout, a sibling clone's primary checkout that the same derivation names but the scope test still refuses (the spawn warns and falls back rather than trusting a whole checkout), a dialog that renders anyway answered exactly once, the premature busy verdict on an unregistered path waiting for the dialog, and both fail-and-close paths.
 
 ## Model and effort
 
