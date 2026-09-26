@@ -121,6 +121,17 @@ Project instructions still govern the work wherever they do not conflict with th
 EOF
 }
 
+# fm_home_data_path_rule owns the one rule that maps a relative firstmate-home
+# `data/<task-id>/...` path to its absolute home path. Both crewmate scaffolds
+# render it under rule 2, and a promoted scout keeps it with its other safety
+# rules. A relative form resolves inside the project worktree, so a worker that
+# writes it literally commits firstmate-private files into the project while the
+# home copy is never written.
+fm_home_data_path_rule() {  # <data-dir> <task-id>
+  local data=$1 id=$2
+  printf '%s\n' "   Any firstmate-home file the Task or spec names as \`data/$id/<file>\` or \`data/<task-id>/<file>\` means the absolute \`$data/$id/<file>\` in the firstmate home, never a path inside this worktree; write it at that absolute path."
+}
+
 # Closed-set gate shared by every forge-aware renderer and bin/fm-brief.sh, so a
 # caller cannot reach a half-rendered contract. local-only is refused rather than
 # rendered with an inert annotation: it publishes nothing, and its landing

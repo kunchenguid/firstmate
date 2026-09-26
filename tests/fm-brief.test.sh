@@ -484,6 +484,44 @@ test_ask_user_escalation_format() {
   pass "fm-brief.sh: no-mistakes ask-user findings use one event plus a verbatim snapshot"
 }
 
+# A relative data/<task-id>/... firstmate-home path named by a Task or spec
+# resolves inside the worker's project worktree. Workers then commit
+# firstmate-private files into the project, and the home copy is never written.
+# Every crewmate scaffold must map that form to the absolute home path and let
+# the worker write it.
+test_home_data_path_rule_is_absolute_firstmate_home() {
+  local home id brief abs kind
+  home="$TMP_ROOT/home-data-path-home"
+  mkdir -p "$home/data"
+  home=$(cd "$home" && pwd -P)
+
+  for kind in no-mistakes direct-PR local-only scout; do
+    id="brief-home-path-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$kind" >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    abs="$home/data/$id/<file>"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    case "$abs" in
+      /*) ;;
+      *) fail "$kind home data path is not absolute: $abs" ;;
+    esac
+    assert_grep "\`data/$id/<file>\` or \`data/<task-id>/<file>\` means the absolute \`$abs\` in the firstmate home, never a path inside this worktree" "$brief" \
+      "$kind brief must map a relative data/<task-id>/ path to the absolute firstmate-home path"
+    assert_grep "the firstmate-home files this brief names." "$brief" \
+      "$kind rule 2 must permit writing the firstmate-home files the brief names"
+    assert_no_grep "modify nothing outside it" "$brief" \
+      "$kind rule 2 still forbids the firstmate-home writes the brief requires"
+    assert_no_grep "code-review.md" "$brief" \
+      "$kind brief must not add a dedicated review-proof deliverable"
+  done
+
+  pass "fm-brief.sh: crewmate briefs map data/<task-id>/ paths to the absolute firstmate home"
+}
+
 # The project-memory section bounds crewmate edits of a project's AGENTS.md or
 # CLAUDE.md to corrections of factually wrong information - including wrong
 # information the task itself introduced - and never invites additions of
@@ -998,7 +1036,8 @@ test_scout_and_secondmate_scaffold() {
   brief="$BRIEF_HOME/data/brief-scout-q6/brief.md"
   assert_present "$brief" "scout brief was not scaffolded"
   assert_grep "SCOUT task" "$brief" "scout brief must declare itself a scout task"
-  assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
+  assert_grep "$BRIEF_HOME/data/brief-scout-q6/report.md" "$brief" \
+    "scout brief must point at the absolute firstmate-home report path"
   assert_grep "## Captain's intent" "$brief" "scout brief missing Captain's intent subsection"
   assert_grep "## Firstmate spec" "$brief" "scout brief missing Firstmate spec subsection"
   assert_grep "{FIRSTMATE_SPEC}" "$brief" "scout brief missing the spec placeholder"
@@ -1329,6 +1368,7 @@ test_no_mistakes_dod_wording
 test_no_mistakes_dod_green_detection
 test_pr_based_dod_requires_non_draft
 test_ask_user_escalation_format
+test_home_data_path_rule_is_absolute_firstmate_home
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
