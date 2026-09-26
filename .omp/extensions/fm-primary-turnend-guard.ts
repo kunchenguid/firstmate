@@ -471,6 +471,9 @@ function runGuard(stopHookActive: boolean): Promise<{ code: number; stderr: stri
     });
     child.on("error", () => resolveResult({ code: 0, stderr: "" }));
     child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
+    // A child that exits before reading stdin makes the write fail with
+    // EPIPE; without this listener that throw is unhandled and crashes omp.
+    child.stdin.on("error", () => {});
     child.stdin.end(JSON.stringify({ stop_hook_active: stopHookActive }));
   });
 }
