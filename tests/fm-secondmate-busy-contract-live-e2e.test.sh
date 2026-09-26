@@ -34,7 +34,11 @@ SKIPPED=
 
 cleanup_all() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
-  [ -n "${LAB:-}" ] && rm -rf "$LAB"
+  if [ -n "${LAB:-}" ]; then
+    # fm-spawn leaves each mate's per-task git hooks directory read-only.
+    chmod -R u+w "$LAB" 2>/dev/null || true
+    rm -rf "$LAB"
+  fi
   fm_test_cleanup
 }
 trap cleanup_all EXIT
