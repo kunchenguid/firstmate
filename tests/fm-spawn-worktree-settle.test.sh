@@ -5,13 +5,13 @@
 # On some tmux/WSL setups a brand-new window's pane_current_path transiently
 # reports a stale, unrelated-but-real path on the very first poll, before the
 # pane actually settles into the worktree treehouse get moved it to. That stale
-# path still passes the loop's "differs from the project" check and
-# validate_spawn_worktree's "is a real, distinct worktree" check (it IS a real
-# git checkout, just the wrong one), so a naive single-read loop silently
+# path can still pass the isolation check when it is another linked worktree
+# of the same repository, so a naive single-read loop silently
 # records the wrong worktree= in state/<id>.meta. This test simulates that
 # transient-then-settled pane_current_path sequence with a fake tmux and
 # asserts the recorded worktree resolves to the real, settled worktree, never
-# the stale first read.
+# the stale first read. A worktree from a different clone of the same origin
+# must instead be rejected by the shared isolation check before Codex starts.
 #
 # The same loop has a second transient to survive: `treehouse get` reports the
 # REPOSITORY's primary checkout as its own cwd while it is still preparing a
@@ -56,7 +56,10 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys) exit 0 ;;
+  send-keys)
+    printf '%s\n' "$*" >> "${FM_FAKE_PANE_COUNTFILE}.sent"
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -66,10 +69,9 @@ SH
 }
 
 # make_settle_case <name> <id> <stale_reads> builds a home, a primary project
-# with a real worktree (the eventual settled path), and a separate real git
-# repo standing in for the stale path (a real checkout of something else
-# entirely, distinct from both the project and the worktree - mirroring the
-# live incident where the stale read was another real firstmate home).
+# with a real worktree (the eventual settled path), and another linked worktree
+# standing in for the stale path. Both paths pass the repository ownership
+# check, so only the confirming read can distinguish the settled worktree.
 make_settle_case() {
   local name=$1 id=$2 stale_reads=$3 case_dir home proj wt stale fakebin countfile
   case_dir="$TMP_ROOT/$name"
@@ -82,7 +84,7 @@ make_settle_case() {
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
-  fm_git_init_commit "$stale"
+  git -C "$proj" worktree add --quiet --detach "$stale" HEAD
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
@@ -221,6 +223,37 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
 
+test_wrong_clone_of_same_origin_is_rejected() {
+  local rec id out status origin other_clone
+  id=settle-wrong-clone-z5
+  rec=$(make_primary_case settle-wrong-clone "$id" 0)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  origin="$TMP_ROOT/settle-wrong-clone/origin.git"
+  other_clone="$TMP_ROOT/settle-wrong-clone/other-clone"
+  git clone --quiet --bare "$STALE_DIR" "$origin"
+  git -C "$PROJ_DIR" remote set-url origin "$origin"
+  git clone --quiet "$origin" "$other_clone"
+  WT_DIR="$TMP_ROOT/settle-wrong-clone/other-slot"
+  git -C "$other_clone" worktree add --quiet --detach "$WT_DIR" HEAD
+  [ "$(git -C "$WT_DIR" remote get-url origin)" = "$(git -C "$PROJ_DIR" remote get-url origin)" ] \
+    || fail "fixture clones do not share an origin"
+  [ "$(git -C "$WT_DIR" rev-parse --path-format=absolute --git-common-dir)" != \
+    "$(git -C "$PROJ_DIR" rev-parse --path-format=absolute --git-common-dir)" ] \
+    || fail "fixture worktree belongs to the spawning clone"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "Codex spawn accepted a worktree from another clone of the same origin"$'\n'"$out"
+  assert_contains "$out" "not a worktree of the spawning project's repository" \
+    "refusal did not explain the repository ownership mismatch"
+  assert_contains "$out" "$WT_DIR" "refusal did not identify the wrong-clone worktree"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  assert_no_grep 'codex' "${COUNTFILE}.sent" "refused spawn sent a worker launch command"
+  pass "Codex rejects a different clone's worktree even when both clones share an origin"
+}
+
+test_wrong_clone_of_same_origin_is_rejected
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
