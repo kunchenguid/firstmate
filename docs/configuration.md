@@ -1434,11 +1434,7 @@ FM_IMAP_HOST=   # IMAP server hostname
 FM_SMTP_HOST=   # SMTP server hostname
 ```
 
-The Pi `/afk` destination is separate from general mail transport and, when using that setup, must be present exactly as shown; a missing or different value refuses Pi `/afk` entry:
-
-```sh
-FM_AFK_EMAIL_TO=johnpoyser@gmail.com
-```
+Pi's optional `/afk` email destination is separate from general mail transport; see [Away email on Pi](afk-email.md) for its required setting and setup gate.
 
 Pi's optional `/afk` email destination is separate from general mail transport; see [Away email on Pi](afk-email.md) for its required setting and setup gate.
 
@@ -1452,6 +1448,7 @@ FM_AFK_EMAIL_TO=johnpoyser@gmail.com
 
 
 Pi away-email setup, its fixed destination, authenticated reply checks, and authority limit are documented in [Away email on Pi](afk-email.md).
+
 
 
 
@@ -2353,6 +2350,7 @@ FM_IMAP_PORT=993   # mail-plane IMAP server port
 FM_SMTP_HOST=      # mail-plane SMTP server hostname
 FM_SMTP_PORT=465   # mail-plane SMTP server port
 FM_AFK_EMAIL_TO=  # Pi /afk email destination; see docs/afk-email.md
+
 
 FMX_PAIRING_TOKEN=      # Relay pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainly for local relay development

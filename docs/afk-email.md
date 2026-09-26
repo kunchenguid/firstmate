@@ -47,6 +47,7 @@ Pi refuses `/afk` before writing or announcing an active posture if `FM_AFK_EMAI
 With the exact destination but incomplete or invalid mail transport settings, away mode retains the hold-for-return behavior instead.
 
 
+
 No credential needs to be shared with Firstmate.
 
 ## Replies and limits
