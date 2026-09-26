@@ -1152,6 +1152,40 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+# A backlog whose parsed JSON exceeds the kernel's per-argument size limit
+# (MAX_ARG_STRLEN, 128 KiB on Linux) must not be handed to jq as a single
+# --argjson command-line value, or jq fails with "Argument list too long"
+# and the snapshot (and everything that reads it at session start and every
+# heartbeat) comes back incomplete.
+test_oversized_backlog_survives_argument_size_limit() {
+  local home fakebin out n pad json_bytes
+  home=$(make_home oversized-backlog)
+  pad=$(printf 'x%.0s' $(seq 1 200))
+  {
+    printf '## In flight\n\n## Queued\n'
+    for n in $(seq -w 1 2000); do
+      printf -- '- [ ] bulk-%s - Bulk padding task %s %s (repo: alpha) (kind: ship)\n' "$n" "$n" "$pad"
+    done
+    printf '\n## Done\n'
+  } > "$home/data/backlog.md"
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --contribution-input) \
+    || fail "contribution-input mode failed on an oversized backlog: $out"
+  json_bytes=$(printf '%s' "$out" | jq -r '.backlog.records | tojson | length')
+  [ "$json_bytes" -gt 131072 ] \
+    || fail "fixture did not actually exceed the 128 KiB per-argument limit (only $json_bytes bytes)"
+  printf '%s' "$out" | jq -e '(.backlog.records | length) == 2000 and (.tasks | length) == 0' >/dev/null \
+    || fail "contribution-input mode dropped or miscounted the oversized backlog: $out"
+  pass "contribution-input mode survives a backlog past the per-argument size limit"
+
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "json mode failed on an oversized backlog: $out"
+  printf '%s' "$out" | jq -e '(.backlog.records | length) == 2000' >/dev/null \
+    || fail "json mode dropped or miscounted the oversized backlog: $out"
+  pass "json mode survives a backlog past the per-argument size limit"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
@@ -1168,5 +1202,6 @@ test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
+test_oversized_backlog_survives_argument_size_limit
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
