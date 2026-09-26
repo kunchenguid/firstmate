@@ -549,12 +549,18 @@ EOF
   [ -f "$gate" ] || fail "a drain that could not record its outcomes did not retain the return gate"
   assert_contains "$out" 'BRANCH OUTCOMES: the store could not record this presentation' "the return did not surface the drain's failure"
   assert_contains "$out" 'durable wake drain failed; retry catch-up before ordinary work' "the gate did not name the drain failure"
+  assert_contains "$out" '1 captain outcome(s) escalated by the away session, awaiting a successful drain' \
+    "a failed drain's brief must say its captain outcomes await a successful drain"
+  assert_contains "$out" 'all awaiting a successful drain' "a failed drain's brief must say its handled outcomes await a successful drain"
+  assert_not_contains "$out" 'presented in the drain' "a failed drain's brief must not claim the drain presented its outcomes"
+  assert_not_contains "$out" 'section presents them' "a failed drain's brief must not claim the drain presents its outcomes"
   [ ! -e "$dir/home/state/.branch-outcomes-cursor" ] || fail "the stuck cursor moved"
   rm -f "$dir/home/cursor-stuck"
   # shellcheck disable=SC2016 # the single-quoted script expands in the harness shell
   out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
     "$fakebin/claude" -c '"$0" check 2>&1' "$dir/bin/fm-afk-return.sh") || fail "catch-up did not clear once the drain recorded its outcomes: $out"
   assert_contains "$out" 'catch-up clear' "the recorded presentation did not clear catch-up"
+  assert_contains "$out" "presented in the drain's BRANCH OUTCOMES section" "a successful drain's brief must point at its presentation"
   assert_contains "$out" 'demo: PR ready for review' "the clearing check did not present the captain outcome through the drain"
   assert_not_contains "$out" 'durable wake drain failed' "the cleared gate retained stale drain evidence"
   [ "$(cat "$dir/home/state/.branch-outcomes-cursor")" = 2 ] || fail "the drain did not record its presentation once it could"

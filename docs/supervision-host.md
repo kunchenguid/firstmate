@@ -123,7 +123,7 @@ The engine turn runs beside a captain who is present, so its guarded actions tak
 ### Away
 
 Every close goes to the engine; captain outcomes remain in the store until the return drain presents them (see [Captain outcomes](#captain-outcomes)).
-A close accepted away whose turn starts attended, because the captain returned in between, meets the attended rule then, and one the session may not take reaches main unchanged.
+Every turn that starts attended meets the attended rule again at its start, and the offer's scan is the scope the turn claims: a close accepted away whose turn starts attended, because the captain returned in between, or an attended close whose task turned main-only (a decision appeared) while the successor started, reaches main unchanged.
 A captain who leaves while an attended turn runs turns its captain outcomes into away outcomes: they wait for the return too.
 
 ## The dialog mirror

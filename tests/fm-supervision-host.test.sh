@@ -742,6 +742,40 @@ test_attended_close_with_unidentified_main_session_passes_to_main() {
   pass "host: an attended close whose main session cannot be identified reaches main and runs no engine turn"
 }
 
+# The close is accepted attended as routine, then its task turns main-only (a
+# decision is recorded) while the successor starts: the turn meets the offer
+# rule again, so the close reaches main exactly as the arm printed it and no
+# engine turn runs on the stale offer.
+test_attended_close_that_turns_main_only_before_its_turn_passes_to_main() {
+  local home real_mktemp
+  home=$(make_home attended-turns-main-only attended)
+  real_mktemp=$(command -v mktemp)
+  cat > "$home/fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *.supervision-host-arm.*)
+    ! grep -q 'step one' "\$FM_HOME/state/demo.status" 2>/dev/null \
+      || grep -q 'which export format?' "\$FM_HOME/state/demo.status" \
+      || printf 'needs-decision [at=%s]: which export format?\n' "\$(date +%s)" >> "\$FM_HOME/state/demo.status" ;;
+esac
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$home/fakebin/mktemp"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "turns-main-only: the host never started a watcher cycle"
+  append_status "$home" 'step one'
+  wait_until 250 host_exited "$home" || fail "turns-main-only: the close did not reach main: $(cat "$home/state/.supervision-host.log")"
+  assert_grep 'which export format?' "$home/state/demo.status" "fixture: the decision was not recorded before the turn"
+  expect_code 0 "$(cat "$home/host.rc")" "the close must exit 0"
+  assert_re '^signal: .*demo.status' "$home/host.out" "the close must carry the watcher's reason line"
+  assert_no_re '^supervision-host' "$home/host.out" "the close must reach main exactly as the arm printed it"
+  [ "$(engine_calls "$home")" -eq 0 ] || fail "turns-main-only: the engine ran on a stale offer"
+  assert_grep 'demo.status' "$home/state/.wake-queue" "the wake must stay queued for main"
+  assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "the ledger must record why the close went to main"
+  watcher_live "$home" && fail "the pass-through left the successor watcher running"
+  pass "host: an attended close whose task turns main-only before its turn still reaches main unchanged"
+}
+
 # The captain returns after the loop accepted a decision close away but before
 # its turn starts: the turn meets the attended rule, so the close still reaches
 # main exactly as the arm printed it instead of being scoped to nothing.
@@ -1906,6 +1940,7 @@ test_captain_leaving_mid_turn_keeps_its_captain_outcome_for_the_return
 test_attended_main_only_close_passes_straight_to_main
 test_attended_close_with_unidentified_main_session_passes_to_main
 test_close_accepted_away_that_turns_attended_passes_to_main
+test_attended_close_that_turns_main_only_before_its_turn_passes_to_main
 test_primary_without_a_verified_mirror_runs_away_only
 test_attended_wake_carries_the_dialog_mirror
 test_dialog_bearing_files_are_owner_only

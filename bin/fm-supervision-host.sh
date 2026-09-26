@@ -47,9 +47,10 @@
 #     so main-only classes (check triggers, decision-owned triggers, a scan
 #     that is unsafe or holds nothing for the branch) stay main's;
 #   - away (the record exists): every close goes to the engine.
-# A close accepted away whose turn starts attended (the captain returned in
-# between) meets the same attended rule then, and one it may not take reaches
-# main exactly as the arm printed it.
+# Every turn that starts attended meets that rule again at its start, so a
+# close accepted away whose turn starts attended (the captain returned in
+# between) or an attended close whose task turned main-only while the
+# successor started reaches main exactly as the arm printed it.
 # A close the engine takes is handled in one order: it starts and verifies the
 # successor watcher cycle and confirms the handling handoff (the order
 # docs/watcher-continuity.md owns), computes the rows the branch may claim in
@@ -227,7 +228,6 @@ ARM_TEXT=
 CLOSED_ARM_PID=
 HANDLE_WHY=
 HANDLE_RC=0
-ACCEPTED_POSTURE=
 ENGINE_SUBSHELL=
 SUCCESSOR_PID=
 SUCCESSOR_OUT=
@@ -703,32 +703,30 @@ health_record() {  # <engine-error 0|1> <reports>
 
 # Handle one close on the engine, in the posture the record gives when the
 # turn starts (TURN_POSTURE). Returns 0 when the wake is handled (or held
-# nothing the branch may claim), 2 with ATTENDED_WHY set when a close accepted
-# away turns attended and the supervision session may not take it
-# (attended_acceptor), else sets HANDLE_WHY and returns 1; sets ENGINE_ERROR
+# nothing the branch may claim), 2 with ATTENDED_WHY set when the turn starts
+# attended and the supervision session may not take the close
+# (attended_acceptor, whose offer scan is the turn's scope), else sets HANDLE_WHY and returns 1; sets ENGINE_ERROR
 # when the turn failed on the engine itself. Runs in the host's own shell,
 # never a subshell, because it advances the host's grant and turn state.
-handle_wake() {  # <reason-lines> <accepted-posture>
-  local reason=$1 accepted=$2 first scope status corrupted rows tasks unscoped rc turn readback
-  local receipts usage result errors unacked away_flag mirror
+handle_wake() {  # <reason-lines>
+  local reason=$1 first scope status corrupted rows tasks unscoped rc turn readback
+  local receipts usage result errors unacked mirror
   LAST_TURN=
   ENGINE_ERROR=0
   HEALTH_NOTE=
   TURN_POSTURE=attended
-  away_flag=
-  if [ -f "$STATE/.afk-contract" ]; then
-    TURN_POSTURE=away
-    away_flag=--afk
-  fi
+  [ ! -f "$STATE/.afk-contract" ] || TURN_POSTURE=away
   first=$(printf '%s\n' "$reason" | head -n 1)
-  if [ "$TURN_POSTURE" = attended ] && [ "$accepted" = away ] && ! attended_acceptor "$first"; then
-    return 2
-  fi
-  set --
-  case "$first" in heartbeat*) set -- --heartbeat ;; esac
-  if ! scope=$(node "$SCRIPT_DIR/fm-branch-dispatch.mjs" scope "$@" ${away_flag:+"$away_flag"} 2>/dev/null); then
-    HANDLE_WHY="branch eligibility could not be computed"
-    return 1
+  if [ "$TURN_POSTURE" = attended ]; then
+    attended_acceptor "$first" || return 2
+    scope=$ATTENDED_OFFER
+  else
+    set --
+    case "$first" in heartbeat*) set -- --heartbeat ;; esac
+    if ! scope=$(node "$SCRIPT_DIR/fm-branch-dispatch.mjs" scope "$@" --afk 2>/dev/null); then
+      HANDLE_WHY="branch eligibility could not be computed"
+      return 1
+    fi
   fi
   status=$(printf '%s\n' "$scope" | sed -n 's/^status=//p')
   corrupted=$(printf '%s\n' "$scope" | sed -n 's/^corrupted=//p')
@@ -895,10 +893,12 @@ turn_captain_seqs() {  # <turn>
 }
 
 # Why an attended close stays with main exactly as the plain arm delivers it,
-# or nothing when the supervision session may take it. Sets ATTENDED_WHY.
+# or nothing when the supervision session may take it. Sets ATTENDED_WHY, and
+# ATTENDED_OFFER to the offer's verdict and the scope it judged.
 attended_acceptor() {  # <first-reason-line>
-  local offer
+  local offer=
   ATTENDED_WHY=
+  ATTENDED_OFFER=
   if ! fm_supervision_host_attended_ready "$CONFIG" "$PRIMARY"; then
     ATTENDED_WHY=$FM_SUPERVISION_HOST_UNREADY
   elif ! fm_supervision_host_main_key "$STATE" >/dev/null; then
@@ -910,6 +910,7 @@ attended_acceptor() {  # <first-reason-line>
   elif [ "$(printf '%s\n' "$offer" | sed -n 's/^eligible=//p')" != 1 ]; then
     ATTENDED_WHY="main-only"
   fi
+  ATTENDED_OFFER=$offer
   [ -z "$ATTENDED_WHY" ]
 }
 
@@ -956,7 +957,6 @@ while :; do
   # Attended: the close reaches main exactly as the plain arm delivers it,
   # unless the supervision session may take it (attended_acceptor).
   if [ ! -f "$STATE/.afk-contract" ]; then
-    ACCEPTED_POSTURE=attended
     if ! attended_acceptor "$(printf '%s\n' "$REASON" | head -n 1)"; then
       log_line "pass-through	attended	$ATTENDED_WHY	$(printf '%s\n' "$REASON" | head -n 1)"
       emit
@@ -964,7 +964,6 @@ while :; do
     fi
     host_still_owner || stand_down "this session no longer owns supervision"
   else
-    ACCEPTED_POSTURE=away
     if ! host_still_owner; then
       stand_down "this session no longer owns supervision"
     fi
@@ -995,7 +994,7 @@ while :; do
 
   # The captain returned during that turn: the return brief was rendered
   # before its outcomes existed, so main relays them now, handled or not.
-  handle_wake "$REASON" "$ACCEPTED_POSTURE"
+  handle_wake "$REASON"
   HANDLE_RC=$?
   if [ "$HANDLE_RC" -eq 2 ]; then
     log_line "pass-through	attended	$ATTENDED_WHY	$(printf '%s\n' "$REASON" | head -n 1)"
