@@ -509,30 +509,57 @@ test_branch_outcomes_present_a_long_away_window_once() {
 # The section's budgets count bytes: a multibyte summary is cut by whole
 # characters so each item and the routine list stay inside their byte caps.
 test_branch_outcomes_budgets_count_bytes() {
-  local home drained wide n routine_block
-  home="$TMP_ROOT/drain-bytes"
-  mkdir -p "$home/state" "$home/config"
-  : > "$home/config/supervision-host"
+  local home drained wide n routine_block locale
   wide=$(awk 'BEGIN { for (i = 0; i < 300; i++) printf "\342\234\223" }')
-  for n in 1 2 3 4 5 6; do
-    FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task "wide-$n" --verdict routine --summary "$wide" >/dev/null \
-      || fail "fixture: could not record routine outcome $n"
+  for locale in '' C; do
+    home="$TMP_ROOT/drain-bytes-${locale:-inherited}"
+    mkdir -p "$home/state" "$home/config"
+    : > "$home/config/supervision-host"
+    for n in 1 2 3 4 5 6; do
+      FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task "wide-$n" --verdict routine --summary "$wide" >/dev/null \
+        || fail "fixture: could not record routine outcome $n"
+    done
+    FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task wide-cap --verdict captain --summary "$wide" >/dev/null \
+      || fail "fixture: could not record the captain outcome"
+    drained=$(LC_ALL=$locale FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+    assert_contains "$drained" "wide-cap: " "the captain outcome must be presented (locale '$locale')"
+    printf '%s\n' "$drained" | LC_ALL=C awk '/^\[seq [0-9]+\] wide-/ && length($0) > 599 { bad = 1 } END { exit bad }' \
+      || fail "an item exceeded its 599-byte cap (locale '$locale'): $drained"
+    printf '%s\n' "$drained" | grep '^\[seq [0-9]*\] wide-' | grep -qv ' \[truncated\]$' \
+      && fail "an over-long multibyte item was not cut with the truncation marker (locale '$locale'): $drained"
+    printf '%s\n' "$drained" | grep '^\[seq [0-9]*\] wide-' | perl -ne 'utf8::decode($_) or exit 1' \
+      || fail "an item was cut inside a character (locale '$locale')"
+    routine_block=$(printf '%s\n' "$drained" | sed -n '/^BRANCH OUTCOMES, ROUTINE/,$p' | grep '^\[seq [0-9]*\] wide-[0-9]')
+    [ "$(printf '%s\n' "$routine_block" | LC_ALL=C wc -c | tr -d ' ')" -le 2000 ] \
+      || fail "the routine list exceeded its 2000-byte budget (locale '$locale'): $routine_block"
+    assert_re '^\([0-9]+ earlier routine outcome\(s\) not shown; bin/fm-branch-outcome.sh list keeps them\)$' <(printf '%s\n' "$drained") \
+      "the routine rows past the byte budget must collapse into a count (locale '$locale')"
   done
-  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task wide-cap --verdict captain --summary "$wide" >/dev/null \
+  pass "drain: the BRANCH OUTCOMES budgets count bytes, cutting multibyte summaries by whole characters in any locale"
+}
+
+# A drain whose projection of the store fails has rendered nothing it can
+# vouch for, so it marks nothing read and exits nonzero for the return's gate.
+test_branch_outcomes_stay_unread_when_a_projection_fails() {
+  local home drained rc
+  home="$TMP_ROOT/drain-projection"
+  mkdir -p "$home/state" "$home/config" "$home/bin"
+  : > "$home/config/supervision-host"
+  printf '#!/usr/bin/env bash\ncase "$*" in *"newest of"*) exit 5 ;; esac\nexec %q "$@"\n' "$(command -v jq)" > "$home/bin/jq"
+  chmod +x "$home/bin/jq"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task demo --verdict routine --summary 'merged the docs fix' >/dev/null \
+    || fail "fixture: could not record the routine outcome"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task cap --verdict captain --summary 'needs your merge call' >/dev/null \
     || fail "fixture: could not record the captain outcome"
+  rc=0
+  drained=$(PATH="$home/bin:$PATH" FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a drain whose projection failed must exit nonzero: $drained"
+  assert_contains "$drained" "BRANCH OUTCOMES SKIPPED: the outcome store could not be projected safely" \
+    "a failed projection must be reported"
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
-  assert_contains "$drained" "wide-cap: " "the captain outcome must be presented"
-  printf '%s\n' "$drained" | LC_ALL=C awk '/^\[seq [0-9]+\] wide-/ && length($0) > 599 { bad = 1 } END { exit bad }' \
-    || fail "an item exceeded its 599-byte cap: $drained"
-  printf '%s\n' "$drained" | grep '^\[seq [0-9]*\] wide-' | grep -qv ' \[truncated\]$' \
-    && fail "an over-long multibyte item was not cut with the truncation marker: $drained"
-  printf '%s\n' "$drained" | grep '^\[seq [0-9]*\] wide-' | perl -ne 'utf8::decode($_) or exit 1' \
-    || fail "an item was cut inside a character"
-  routine_block=$(printf '%s\n' "$drained" | sed -n '/^BRANCH OUTCOMES, ROUTINE/,$p' | grep '^\[seq [0-9]*\] wide-[0-9]')
-  [ "$(printf '%s\n' "$routine_block" | LC_ALL=C wc -c | tr -d ' ')" -le 2000 ] || fail "the routine list exceeded its 2000-byte budget: $routine_block"
-  assert_re '^\([0-9]+ earlier routine outcome\(s\) not shown; bin/fm-branch-outcome.sh list keeps them\)$' <(printf '%s\n' "$drained") \
-    "the routine rows past the byte budget must collapse into a count"
-  pass "drain: the BRANCH OUTCOMES budgets count bytes, cutting multibyte summaries by whole characters"
+  assert_contains "$drained" "[seq 1] demo: merged the docs fix" "a routine outcome behind a failed projection must follow on the next drain"
+  assert_contains "$drained" "[seq 2] cap: needs your merge call" "a captain outcome behind a failed projection must follow on the next drain"
+  pass "drain: branch outcomes stay unread when a projection of the store fails"
 }
 
 # A drain that cannot print the section, because its output is already
@@ -1820,6 +1847,7 @@ test_branch_outcomes_put_captain_first_and_collapse_routine_overflow
 test_branch_outcomes_collapse_repeated_captain_outcomes_per_task
 test_branch_outcomes_present_a_long_away_window_once
 test_branch_outcomes_budgets_count_bytes
+test_branch_outcomes_stay_unread_when_a_projection_fails
 test_branch_outcomes_stay_unread_when_the_drain_cannot_print
 test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main
 test_attended_captain_outcome_reaches_main_through_branch_outcomes

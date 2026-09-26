@@ -196,8 +196,8 @@ The drain's header owns the section's bounds; these rules keep it bounded and in
 The section runs only for main on an opted-in home whose primary is not Pi, and never while the away record exists.
 The drain is the only presenter of these outcomes and the only owner of their read cursor, the away window's included: the return brief counts the window's outcomes and points at the section instead of listing them.
 So a long away window costs one short drain, with each task's captain outcomes collapsed to one line and routine ones past the section's limit collapsed into a count, and once main acknowledges the captain outcomes no later drain shows anything from the window again.
-A drain that cannot read the store, print the section, or advance its read cursor says so and exits nonzero, so the return keeps its catch-up gated until a check drains again and records the presentation, rather than clearing over outcomes a later drain would present again.
-The section's budgets count bytes, so a multibyte summary is cut by whole characters to fit them.
+A drain that cannot read or project the store, print the section, or advance its read cursor says so and marks nothing it has not shown as read, and it exits nonzero, so the return keeps its catch-up gated until a check drains again and records the presentation, rather than clearing over outcomes a later drain would present again.
+The section's budgets count bytes in any locale, so a multibyte summary is cut on a whole UTF-8 character boundary to fit them.
 An unprocessed captain outcome is never adopted as processed, so a home that opts in mid-session cannot lose its first one.
 Anything main must act on while attended to move the work forward, such as a local-only branch to land or a pull request to merge, is a captain outcome on the host even when the captain asked not to hear about that work, reported once per unchanged situation (`bin/fm-branch-prompt.sh` "Verdict: routine or captain"), because a routine outcome opens no main turn.
 

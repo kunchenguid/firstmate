@@ -582,8 +582,8 @@ EOF
 # presented row, which is what lets mark-processed accept main's
 # acknowledgement and keeps a routine row from repeating; a drain stopped
 # before it prints leaves every row unread. The budgets count bytes. When the
-# store cannot be read, the section cannot be printed, or its read cursor
-# cannot advance, the section says so on stderr and fails, and the drain exits
+# store cannot be read or projected, the section cannot be printed, or its read
+# cursor cannot advance, the section says so on stderr and fails, and the drain exits
 # nonzero after the rest of its presentation, so a caller such as the return
 # (bin/fm-afk-return.sh) keeps its catch-up gated instead of clearing over
 # outcomes a later drain would present again.
@@ -603,15 +603,20 @@ print_branch_outcomes_section() {
     return 1
   fi
   [ -n "$rows" ] || return 0
-  through=$(printf '%s\n' "$rows" | jq -s 'map(select(.unread) | .seq) | max // 0' 2>/dev/null)
-  case "$through" in ''|*[!0-9]*) through=0 ;; esac
+  if ! through=$(printf '%s\n' "$rows" | jq -s 'map(select(.unread) | .seq) | max // 0' 2>/dev/null) \
+    || ! captain=$(printf '%s\n' "$rows" | jq -rs '
+      map(select(.verdict == "captain")) | sort_by(.seq)
+      | reduce .[] as $r ({count: {}, lines: []};
+          .count[$r.task] += 1
+          | .lines += ["\($r.seq)\t\($r.task)\t[seq \($r.seq)\(if .count[$r.task] > 1 then ", newest of \(.count[$r.task]) for this task" else "" end)] \($r.task): \($r.summary | gsub("[\t\n\r]"; " "))"])
+      | .lines[]' 2>/dev/null) \
+    || ! routine=$(printf '%s\n' "$rows" | jq -rs 'map(select(.unread and .verdict == "routine" and .silent != true)) | sort_by(.seq) | reverse | .[]
+      | "[seq \(.seq)] \(.task): \(.summary | gsub("[\t\n\r]"; " "))"' 2>/dev/null) \
+    || case "$through" in ''|*[!0-9]*) true ;; *) false ;; esac; then
+    printf 'BRANCH OUTCOMES SKIPPED: the outcome store could not be projected safely; nothing was marked read, so these outcomes are presented again on the next drain.\n' >&2
+    return 1
+  fi
 
-  captain=$(printf '%s\n' "$rows" | jq -rs '
-    map(select(.verdict == "captain")) | sort_by(.seq)
-    | reduce .[] as $r ({count: {}, lines: []};
-        .count[$r.task] += 1
-        | .lines += ["\($r.seq)\t\($r.task)\t[seq \($r.seq)\(if .count[$r.task] > 1 then ", newest of \(.count[$r.task]) for this task" else "" end)] \($r.task): \($r.summary | gsub("[\t\n\r]"; " "))"])
-    | .lines[]' 2>/dev/null)
   target=0
   while IFS=$(printf '\t') read -r seq task task_line; do
     case "$seq" in ''|*[!0-9]*) continue ;; esac
@@ -650,8 +655,6 @@ ROWS
 "
   fi
 
-  routine=$(printf '%s\n' "$rows" | jq -r 'select(.unread and .verdict == "routine" and .silent != true)
-    | "[seq \(.seq)] \(.task): \(.summary | gsub("[\t\n\r]"; " "))"' 2>/dev/null)
   used=0
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -670,7 +673,7 @@ $routine_lines"
     used=$((used + bytes))
     routine_shown=$((routine_shown + 1))
   done <<ROWS
-$(printf '%s\n' "$routine" | awk 'NF { lines[++n] = $0 } END { for (i = n; i >= 1; i--) print lines[i] }')
+$routine
 ROWS
   if [ "$routine_count" -gt 0 ]; then
     text="${text}BRANCH OUTCOMES, ROUTINE (handled by the supervision session since your last drain; for your awareness, nothing to acknowledge):
@@ -689,28 +692,32 @@ ROWS
   fi
 }
 
-# The byte length of <text> in OUTCOME_LINE_BYTES, whatever the locale.
-outcome_line_bytes() {  # <text>
-  local LC_ALL=C
-  OUTCOME_LINE_BYTES=${#1}
-}
-
-# BRANCH OUTCOMES' per-item cut: the shared digest cap, then whole characters
-# off the end until the line fits <max> bytes, so a multibyte summary keeps
-# the section inside its byte budgets. Sets OUTCOME_LINE and
-# OUTCOME_LINE_BYTES.
+# BRANCH OUTCOMES' per-item cut: the shared digest marker in place of the
+# tail once the line passes <max> bytes, cut bytewise whatever the caller's
+# locale and backed off to the last whole UTF-8 character, so a multibyte
+# summary keeps the section inside its byte budgets and stays valid text. Sets
+# OUTCOME_LINE and OUTCOME_LINE_BYTES.
 cap_outcome_line() {  # <line> <max-bytes>
-  local max=$2 body drop
-  fm_cap_line_var "$1" "$max"
-  OUTCOME_LINE=$FM_LINE_CAP_LINE
-  outcome_line_bytes "$OUTCOME_LINE"
-  body=${OUTCOME_LINE%"$FM_LINE_CAP_SUFFIX"}
-  while [ "$OUTCOME_LINE_BYTES" -gt "$max" ]; do
-    drop=$(( (OUTCOME_LINE_BYTES - max + 3) / 4 ))
-    body=${body:0:$(( ${#body} - drop ))}
-    OUTCOME_LINE=$body$FM_LINE_CAP_SUFFIX
-    outcome_line_bytes "$OUTCOME_LINE"
-  done
+  local LC_ALL=C line=$1 max=$2 keep body tail rest need
+  if [ "${#line}" -le "$max" ]; then
+    OUTCOME_LINE=$line
+    OUTCOME_LINE_BYTES=${#line}
+    return 0
+  fi
+  keep=$((max - ${#FM_LINE_CAP_SUFFIX}))
+  [ "$keep" -ge 0 ] || keep=0
+  body=${line:0:keep}
+  tail=${body##*[!$'\x80'-$'\xbf']}
+  rest=${body%"$tail"}
+  case "${rest: -1}" in
+    [$'\xc0'-$'\xdf']) need=1 ;;
+    [$'\xe0'-$'\xef']) need=2 ;;
+    [$'\xf0'-$'\xf7']) need=3 ;;
+    *) need=0 ;;
+  esac
+  [ "${#tail}" -ge "$need" ] || body=${rest%?}
+  OUTCOME_LINE=$body$FM_LINE_CAP_SUFFIX
+  OUTCOME_LINE_BYTES=${#OUTCOME_LINE}
 }
 
 print_status_sections() {
