@@ -423,6 +423,7 @@ def cmd_read():
                 trusted_sender = (
                     from_is_configured(dec(mi.get('From')), OWNER_EMAIL)
 
+
                     and gmail_authentication_pass(mi)
                 )
                 if not trusted_sender:

@@ -29,6 +29,7 @@ if [ "${1:-}" = afk-email ] || [ "${1:-}" = read ]; then
 
 
 
+
   exec "$(dirname "$0")/fm-mail-real.sh" "$@"
 fi
 [ "${1:-}" = send ] || exit 2
@@ -53,6 +54,7 @@ if [ -n "${FM_TEST_SMTP_STARTED:-}" ] && [ -n "${FM_TEST_SMTP_RELEASE:-}" ]; the
     sleep 0.02
   done
 fi
+
 
 
 
@@ -149,6 +151,7 @@ wait_for_file() {  # <path>
   done
   [ -e "$path" ]
 }
+
 
 
 
@@ -757,6 +760,7 @@ test_read_gates_unauthenticated_bodies_during_away() {
   home=$(make_home read-auth-gate configured)
   run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
   cp "$home/state/.afk-contract" "$home/valid-away-record"
+
   fakepy="$TMP_ROOT/read-auth-python"
   mkdir -p "$fakepy"
   cat > "$fakepy/sitecustomize.py" <<'PY'
@@ -789,6 +793,7 @@ messages = {
     ),
 
 
+
 }
 
 class FakeMailbox:
@@ -804,6 +809,7 @@ class FakeMailbox:
     def uid(self, command, uid, spec):
         if command == "search":
             return "OK", [b"1 2 3 4"]
+
 
 
         raw = messages[uid]
@@ -853,6 +859,7 @@ path = Path(sys.argv[1])
 path.write_text(path.read_text().replace("imap.example.test", "imap.gmail.com"))
 PY
 
+
   printf 'version: 99\nentered_epoch: 100\nreach_channels: email\n' > "$home/state/.afk-contract"
   : > "$fetch_log"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
@@ -861,6 +868,7 @@ PY
   assert_not_contains "$out" 'private attacker body' 'malformed away posture still hides spoofed sender bodies'
   assert_not_contains "$out" 'private unauthenticated body' 'malformed away posture still hides unauthenticated bodies'
   assert_not_contains "$out" 'private forged Gmail pass body' 'malformed posture still rejects a sender pass below receiver failure'
+
 
 
   fetches=$(cat "$fetch_log")
@@ -901,6 +909,7 @@ PY
   fetches=$(cat "$fetch_log")
   assert_not_contains "$fetches" $'1\t(BODY.PEEK[])' 'a stale off-posture snapshot cannot fetch an unauthenticated body'
 
+
   rm "$home/state/.afk-contract"
   : > "$fetch_log"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
@@ -911,11 +920,13 @@ PY
   assert_contains "$out" 'private forged Gmail pass body' 'attended read still shows bodies without away authentication gating'
 
 
+
   fetches=$(cat "$fetch_log")
   assert_contains "$fetches" $'1\t(BODY.PEEK[])' 'attended read fetches the first unseen body'
   assert_contains "$fetches" $'2\t(BODY.PEEK[])' 'attended read fetches the second unseen body'
   assert_contains "$fetches" $'3\t(BODY.PEEK[])' 'attended read fetches the third unseen body'
   assert_contains "$fetches" $'4\t(BODY.PEEK[])' 'attended read fetches the fourth unseen body'
+
 
 
   pass "fm-mail read gates bodies to authenticated Gmail during away mode"
@@ -1920,6 +1931,7 @@ test_branch_prompt_preserves_wake_after_verification_error() {
 
 
 
+
   printf '%s' "$prompt" | python3 -c '
 import sys
 steps = [line for line in sys.stdin.read().splitlines() if line.startswith("6. Acknowledge")]
@@ -2013,6 +2025,7 @@ PY
   assert_not_contains "$summary" 'a' 'short secret cannot survive in the redacted summary or marker'
   pass "short secrets cannot erase the redaction marker or unrelated outcome text"
 }
+
 
 test_flush_holds_away_lock_until_send_completes() {
   local home entered started release archive_out flush_rc archive_rc
@@ -2127,6 +2140,7 @@ SH
 
 
 
+
 test_destination_is_required_for_pi_entry
 test_shared_owner_source_drives_configuration_and_sender_auth
 
@@ -2169,6 +2183,7 @@ test_read_gates_unauthenticated_bodies_during_away
 
 
 
+
 test_voice_inbox_note_remains_ordinary_during_away_mode
 test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit
 test_over_limit_reply_is_explicitly_rejected
@@ -2179,6 +2194,7 @@ test_expired_and_unknown_codes_are_untrusted
 test_reply_survives_crash_after_smtp_acceptance
 test_short_configured_secret_is_redacted_before_storage_and_send
 test_redaction_marker_cannot_be_eaten_by_a_short_secret
+
 test_flush_holds_away_lock_until_send_completes
 test_receive_batch_holds_away_lock_through_reply_handoff
 test_branch_prompt_preserves_wake_after_verification_error
