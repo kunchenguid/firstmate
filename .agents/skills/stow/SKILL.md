@@ -91,6 +91,9 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    When a read-only shared entry appears to require one of those changes, leave it untouched, report the required change as an ownership exception, and route it to the primary owner.
 3. Build one whole-file retention plan before editing, ordered by likelihood of informing a future session.
    Keep in always-loaded memory only current captain preferences, authority and safety boundaries, recurring working style, fleet-wide or frequently relevant operating facts, and concise pointers that are expensive to rediscover.
+   Enforce cross-file deduplication: `data/captain.md` owns user preferences and federation policies; `data/learnings.md` owns technical telemetry and runtime gotchas.
+   Never duplicate a policy or invariant across both.
+   Format all retained entries in telegraphic invariant syntax (`Action/Rule: [Fact] [Constraint/Path]`), stripping conversational connective filler.
    Prefer offloading current but conditional, narrow, project-specific, or context-specific material to a live on-demand owner, and archive stale, superseded, or low-recurrence material to the cold tier.
    Retain lower-utility material only while budget remains.
 4. Reinforce and stamp.
@@ -107,9 +110,11 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    `pinned` is exempt from this automatic decay step entirely.
 6. Consolidate every editable memory file as needed, not only the file apparently related to a new finding.
    Prefer one concise current rule or authoritative pointer over duplicate prose.
+   Introduce a proactive headroom target: aim to maintain at least 15% (or >= 1,500 tokens) of effective budget headroom.
+   When available headroom drops below this floor, execute telegram-style compression on verbose existing entries before admitting new non-essential learnings.
    Archive completed incident and release chronology, stale versions and paths, transient task state, resolved alternatives, old metrics, and report-sized procedures; merge or remove only superseded claims and duplicates whose facts are preserved elsewhere.
    Never plainly remove a unique current fact: every such exit must archive it with provenance in the recoverable cold tier or relocate it to a live JIT owner or a consolidation merge that preserves the fact.
-7. When the total is still over budget after decay and consolidation, make aggressive reduction the default, using editable files only and in this order: archive every editable stale, superseded, or low-utility entry that is eligible for archival; consolidate tighter; run the over-budget offload sweep below and autonomously relocate every eligible non-pinned conditional entry into an already-existing allowed owner only after that owner holds it; then, only when the convergence precondition below holds, archive eligible `aging` entries oldest-reinforced-first until within budget.
+7. When the total is still over budget after decay and consolidation, make aggressive reduction the default, using editable files only and in this order: archive every editable stale, superseded, or low-utility entry that is eligible for archival; consolidate tighter to recover the proactive headroom target; run the over-budget offload sweep below and autonomously relocate every eligible non-pinned conditional entry into an already-existing allowed owner only after that owner holds it; then, only when the convergence precondition below holds, archive eligible `aging` entries oldest-reinforced-first until within budget.
    A proposal, a future migration, or an accepted exception is never budget relief in this pass.
    Budget eviction considers only editable `aging` entries that carry a last-reinforced date and are not pending offload; a `<!--g-->` legacy-grace entry is ineligible until its grace cycle resolves, so eviction can neither cancel a promised grace cycle nor prefer just-validated entries over unvalidated ones.
    Convergence precondition: before evicting anything, total the eligible pool and check that archiving all of it would reach the budget; when even that cannot, skip the eviction rung entirely, archive nothing for budget reasons, and carry the concrete inability to the final step, naming the exempt pinned floor that crowds out the budget.
