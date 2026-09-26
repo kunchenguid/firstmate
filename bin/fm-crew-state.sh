@@ -877,7 +877,11 @@ nm_ci_checks_state() {
 # pipeline-continuation recognition
 # (model-routing-benchmark-hardening: an active fix round whose head object the
 # task copy never fetched used to be rejected here, letting the older failed row
-# answer as current), so both attribution routes share one rule.
+# answer as current), so both attribution routes share one rule. That same
+# anchored recognition also keeps a live validation from reading as failed
+# after a rebase: the newer running row's head diverges from the local tip
+# while an older failed row still names it, and the failed row anchors the
+# live run instead of answering as current.
 # The same reader checks for conflicting run records when the AXI overview
 # cannot identify this branch's run.
 nm_runs_list() {

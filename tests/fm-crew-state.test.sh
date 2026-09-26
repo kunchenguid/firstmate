@@ -2040,6 +2040,32 @@ EOF
   pass "a terminal run with no live sibling is unchanged"
 }
 
+# A rebase moves the live run onto a head the local tip is not an ancestor of.
+# The runs list is newest-first, so that running row comes before an older
+# failed row that still names the local tip. The failed row must not win.
+test_newer_running_row_outranks_failed_row_on_local_tip() {
+  reset_fakes
+  local d short; d=$(new_case rebase-running-outranks-failed)
+  make_repo_on_branch "$d/wt" fm/feat-rebased
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-rebased.meta" "window=fm:fm-feat-rebased" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-09-19 12:10
+  running    fm/feat-rebased ccccccc  2026-09-19 12:05
+  failed     fm/feat-rebased ${short}  2026-09-19 11:00
+EOF
+)"
+  local out; out=$(run_crew_state "$d" feat-rebased)
+  assert_contains "$out" "state: working" "newer running row stays working"
+  assert_contains "$out" "validating (background run)" "coarse running detail"
+  assert_contains "$out" "source: run-step" "running row is the run step"
+  assert_not_contains "$out" "state: failed" "older failed row on the local tip must not win"
+  assert_not_contains "$out" "run failed" "failed detail must not be reported"
+  pass "newer running row outranks an older failed row on the local tip"
+}
+
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
   reset_fakes
   local d short; d=$(new_case coarse-ready-other-log)
@@ -5305,6 +5331,7 @@ test_unfetched_older_live_sibling_does_not_hide_failure
 test_only_terminal_rows_keep_newest_first_precedence
 test_unknown_status_row_keeps_newest_first_precedence
 test_terminal_run_without_live_sibling_is_unchanged
+test_newer_running_row_outranks_failed_row_on_local_tip
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_unpushed_ship_done_is_blocked
