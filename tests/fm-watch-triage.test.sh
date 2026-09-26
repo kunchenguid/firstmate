@@ -5699,6 +5699,15 @@ test_procevent_headlines_classify_queue_keys() {
     || fail "a stranded source was headlined as a captured result: $(cat "$out")"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "stranded headline fixture drain failed"
 
+  dir=$(make_case procevent-headline-runner-died); state="$dir/state"; out="$dir/watch.out"
+  append_wake "$state" check "procevent:died-src:runner-died:4242-9" "check: process-event source died-src had a runner that claimed it and then died inside its source command"
+  surface_once "$dir" "$out" || fail "a runner-death key was not surfaced: $(cat "$out")"
+  grep -F "check: process-event source runner died: procevent:died-src:runner-died:4242-9" "$out" >/dev/null \
+    || fail "a dead runner did not surface under its own headline: $(cat "$out")"
+  ! grep -F "result captured" "$out" >/dev/null \
+    || fail "a dead runner was headlined as a captured result: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "runner-death headline fixture drain failed"
+
   dir=$(make_case procevent-headline-joined); state="$dir/state"; out="$dir/watch.out"
   append_wake "$state" check "procevent:cap2-src:1" "check: procevent lavish cap2-src 1"
   append_wake "$state" check "procevent:str2-src:stranded:tok-2" "check: process-event source str2-src is registered but nothing can arm it"

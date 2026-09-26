@@ -858,21 +858,50 @@ publish_pending() {  # [result-file-to-skip]
   printf '%s\n' "$published"
 }
 
-# Start one command as the leader of a fresh process group, either waiting for
-# it (the public `start` boundary) or detaching from it (reconcile's restart and
-# the runner's own owner guard). The guard deliberately gets its OWN group
-# rather than joining the runner's: it has to survive the group signal it sends,
-# and a member of the runner's group would also make that group read as alive
-# after the runner itself is gone.
+# Start one command as the leader of a fresh SESSION, either waiting for it (the
+# public `start` boundary) or detaching from it (reconcile's restart and the
+# runner's own owner guard). The guard deliberately gets its OWN session rather
+# than joining the runner's: it has to survive the group signal it sends, and a
+# member of the runner's group would also make that group read as alive after
+# the runner itself is gone, and it has to keep witnessing that runner after
+# whatever ended the runner's session.
+#
+# A new session, not just a new process group, is what the isolation has to be.
+# A process that leads its own group but stays in the session that launched it
+# is still reachable by every hangup delivered to that session, which is the one
+# sweep a persistent source is most likely to meet: it dies mid-poll, so no
+# result is ever captured, and the vulnerability window is exactly the ordinary
+# case where the launching agent is still alive. An own-group runner reparented
+# to init LOOKS detached while remaining session-reachable, and it survives such
+# a sweep only when its session leader happens to have exited first - POSIX
+# shields an orphaned group from terminal hangup - which is accident, not
+# isolation.
+#
+# setsid(2) is the whole sequence, and it is right here because it does in one
+# uninterruptible step what this needs and setpgrp cannot do at all: the child
+# becomes session leader, becomes leader of a NEW process group in that session,
+# and drops its controlling terminal. It is called in the child after fork
+# precisely because it refuses for a process that already leads a group, which a
+# forked child never does. Every existing group-leadership property the stop,
+# group-liveness, and guard paths depend on is preserved, because setsid leaves
+# pgid == sid == pid.
+#
+# The isolation is proved before exec rather than assumed: setsid(2) returns the
+# new session id, and getpgrp is an independent second read of the kernel. Either
+# disagreeing with this child's own pid exits 125 exactly as a failed fork does,
+# because a runner that half-escaped its session is worse than one that refused
+# to start - it presents as armed while a hangup can still reach it.
 isolate_process() {  # <wait|detach> <command> [argv...]
   local mode=$1 program
   shift
   # shellcheck disable=SC2016 # Perl owns every $ expression in this literal program.
-  program='my $mode = shift @ARGV;
+  program='use POSIX ();
+    my $mode = shift @ARGV;
     defined(my $pid = fork) or exit 125;
     if ($pid == 0) {
-      setpgrp(0, 0) or exit 125;
-      $ENV{FM_PROCEVENT_RUNNER_GROUP} = $$;
+      POSIX::setsid() == $$ or exit 125;
+      getpgrp() == $$ or exit 125;
+      $ENV{FM_PROCEVENT_RUNNER_SESSION} = $$;
       exec @ARGV;
       exit 125;
     }
@@ -892,18 +921,30 @@ isolate_runner() {  # <wait|detach> <source-id>
   isolate_process "$1" "$SCRIPT_DIR/fm-procevent.sh" _start "$2"
 }
 
-require_isolated_group() {  # <role>
+# Confirm across the exec boundary that this process really is the isolated
+# leader isolate_process created, and refuse to go on collecting if it is not.
+#
+# The marker carries the session id setsid(2) itself returned and getpgrp
+# independently confirmed before exec; the `ps` read here is a third read, taken
+# after exec in this process. It reads the process GROUP because that is the
+# only identifier POSIX `ps` is required to expose - there is no portable
+# session column, `sess` being a session address rather than a session id on the
+# BSD platforms this fleet also runs on - and for a process that reached here
+# through isolate_process it settles the session too, since setsid is the only
+# thing that put this process at the head of its own group and it leaves
+# pgid == sid == pid.
+require_isolated_session() {  # <role>
   local role=$1 pgid
-  [ "${FM_PROCEVENT_RUNNER_GROUP:-}" = "$$" ] \
-    || die "$role process group was not isolated"
+  [ "${FM_PROCEVENT_RUNNER_SESSION:-}" = "$$" ] \
+    || die "$role session was not isolated"
   pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]') \
     || die "cannot inspect $role process group"
   [ -n "$pgid" ] || die "cannot inspect $role process group"
-  [ "$pgid" = "$$" ] || die "$role does not lead its process group"
-  unset FM_PROCEVENT_RUNNER_GROUP
+  [ "$pgid" = "$$" ] || die "$role does not lead its own session"
+  unset FM_PROCEVENT_RUNNER_SESSION
 }
 
-require_runner_group() { require_isolated_group runner; }
+require_runner_session() { require_isolated_session runner; }
 
 # Record owner-presence activity for this home. Skipped under the inherited
 # FM_PROCEVENT_IN_RUNNER marker, so a runner and its ordinary children do not
@@ -948,7 +989,7 @@ cmd_start() {
   local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0 task_owner='' task_pending
   local extension_owner=0 extension_load_state extension_sequence='' extension_request_id=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
-  require_runner_group
+  require_runner_session
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
   if [ ! -f "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
     fm_procevent_source_lock_release "$id"
@@ -1397,7 +1438,7 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
   [ "${ready%/*}" = "$REG" ] && [ -f "$ready" ] && [ ! -L "$ready" ] \
     || die "owner guard readiness boundary is invalid"
   trap 'printf "failed\n" > "$ready" 2>/dev/null || true' EXIT
-  require_isolated_group guard
+  require_isolated_session guard
   lease=$(fm_procevent_owner_lease_seconds) \
     || die "FM_PROCEVENT_OWNER_LEASE_SECONDS must be whole seconds from $FM_PROCEVENT_OWNER_LEASE_MIN_SECONDS to $FM_PROCEVENT_OWNER_LEASE_MAX_SECONDS"
   tick=$(fm_procevent_owner_check_seconds) \
@@ -1429,7 +1470,28 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
     fm_procevent_pid_state "$pid" "$identity"
     pid_state=$?
     case "$pid_state" in
-      1|3) exit 0 ;;
+      # The runner is gone and its group is empty, which is every ordinary end
+      # of a round AND every clean death of one. The guard cannot tell them
+      # apart from the pid, so it asks the record that already distinguishes
+      # them: a runner marker still naming THIS runner means it never reached
+      # any of its own ways out, so the round was lost.
+      #
+      # This is the soonest anything can know. The guard is already watching
+      # this exact pid on a half-interval cadence, so it notices the death well
+      # before the next reconcile cycle would - and it notices at all only
+      # because it is isolated into its own session too, which is what lets it
+      # outlive whatever ended the runner's.
+      #
+      # State 3 is deliberately not reported here: a leaderless group is the
+      # ambiguous crash shape reconcile already announces as a strand naming
+      # its own recovery, and a second announcement of the same event would be
+      # the parallel mechanism this avoids. It is left with its marker, which
+      # reconcile reads once that group empties and the claim reads stale.
+      1)
+        report_runner_death_guarded "$id" "$pid"
+        exit 0
+        ;;
+      3) exit 0 ;;
       0) ;;
       *) continue ;;
     esac
@@ -1450,6 +1512,7 @@ cmd_owner_watchdog() {  # <source-id> <runner-pid> <runner-identity> <ready-file
     misses=$((misses + 1))
     [ "$misses" -ge 2 ] || continue
     if stop_runner_pid "$pid" "$identity"; then
+      clear_runner_marker_guarded "$id" "$pid" || true
       exit 0
     fi
     # Identity/group inspection and signalling can fail transiently. Keep the
@@ -1555,6 +1618,78 @@ stranded_leaderless_detail() {  # <source-id>
   printf '%s' "its runner died and its polling child may still be attached to the source's session, so reconcile preserves that claim and starts no replacement, and nothing automatic will touch that group. Verify whether anything is still polling $1; once that process group is empty, the next reconcile reclaims the source on its own."
 }
 
+# Announce that a runner which had already claimed its source and entered its
+# source command died without finishing a round, so the source stopped
+# collecting and nothing else would say so.
+#
+# This adds no record of its own, because one already exists. The runner marker
+# means exactly "a runner is inside its source command for this source": the
+# runner writes it after it claims and removes it on every ordinary way out -
+# a durable capture, a poll with no usable result, and a superseded generation -
+# and retirement removes it too. A marker that outlives its runner is therefore
+# already a durable statement that a round was lost. Until now nobody read it as
+# one: the poll died mid-call, no result was ever captured, and the absence was
+# visible to nothing but a later sweep. Clearing it here also retires the orphan
+# that would otherwise fail this home's sweep preflight for reasons nobody could
+# trace back to the death that caused it.
+#
+# Two readers call this - the runner's own owner guard, which is watching that
+# pid and sees the death within half a check interval, and reconcile, which is
+# the backstop for a death the guard did not outlive. Removing the marker is
+# what makes exactly one of them announce, so neither needs to know about the
+# other. It is removed only AFTER the wake lands, so a failed announcement is
+# retried by the next reader rather than being silently marked delivered, which
+# is the same discipline announce_source_once applies to the markers it owns;
+# this does not use that helper because the marker it keys on is one it must
+# REMOVE rather than write, and writing a second marker beside it would be a
+# parallel record of a fact this one already carries.
+#
+# The key carries a nonce because the watcher remembers every key it has
+# surfaced for good and a pid is reusable; the marker, not the key, is what
+# keeps one death from announcing twice.
+#
+# KNOWN LIMIT: this covers built-in sources. An extension-owned round keeps its
+# runner marker inside the pinned capture inbox rather than the registry, so
+# there is no registry marker to read and its deaths are still only visible to
+# the existing strand and launch-failure reports.
+report_runner_death() {  # <source-id> [expected-runner-pid]
+  local id=$1 expected=${2-} marker recorded
+  marker=$(runner_file "$id")
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  IFS= read -r recorded < "$marker" 2>/dev/null || recorded=
+  case "$recorded" in ''|*[!0-9]*) recorded=unknown ;; esac
+  [ -z "$expected" ] || [ "$expected" = "$recorded" ] || return 1
+  fm_wake_append check "procevent:$id:runner-died:$recorded-$RANDOM$RANDOM" \
+    "check: process-event source $id had a runner that claimed it and then died inside its source command, so that round captured nothing and the source stopped collecting; its claim is released and reconcile starts a replacement on its next cycle. One death is one lost round, but a source that keeps dying is a source that is not collecting: check the source command and the adapter binary the registration names, check whether something is killing the runner (a home-wide or session-wide sweep reaches everything it started), and run an attached bin/fm-procevent.sh start $id to see any refusal on its stderr, which a detached launch discards." \
+    || return 1
+  rm -f -- "$marker"
+}
+
+# The guard's entry to the announcement above. It takes the source boundary
+# WITHOUT waiting, because reconcile and retirement hold that lock while waiting
+# on this very runner and a guard that blocked for it would turn a lost round
+# into a deadlock. A contended attempt simply declines; the marker survives, and
+# reconcile's backstop reports the same death on a later cycle.
+report_runner_death_guarded() {  # <source-id> <dead-runner-pid>
+  fm_procevent_source_lock_try_acquire "$1" 2>/dev/null || return 1
+  report_runner_death "$1" "$2"
+  local status=$?
+  fm_procevent_source_lock_release "$1" 2>/dev/null || true
+  return "$status"
+}
+
+clear_runner_marker_guarded() {  # <source-id> <stopped-runner-pid>
+  local marker recorded
+  fm_procevent_source_lock_try_acquire "$1" 2>/dev/null || return 1
+  marker=$(runner_file "$1")
+  if [ -f "$marker" ] && [ ! -L "$marker" ] \
+    && IFS= read -r recorded < "$marker" 2>/dev/null \
+    && [ "$recorded" = "$2" ]; then
+    rm -f -- "$marker"
+  fi
+  fm_procevent_source_lock_release "$1" 2>/dev/null || true
+}
+
 cmd_reconcile() {
   local rec id published started=0 stopped=0 uncertain=0 failed=0 claim owner pid token identity claim_state stop_state task_pending
   local launch_identity launch_stamp launch_mark unconfirmed entry
@@ -1643,6 +1778,14 @@ cmd_reconcile() {
             fm_procevent_source_lock_release "$id"
             continue
           fi
+          # A released or stale claim with its runner marker still in place is a
+          # runner that died inside its source command. The owner guard normally
+          # reports that first and clears the marker; this is the backstop for a
+          # death the guard did not outlive, and it runs before the relaunch
+          # below so the replacement's own marker cannot be mistaken for the
+          # dead one's. Whichever reader gets there first is the only one that
+          # announces (report_runner_death owns that).
+          report_runner_death "$id" || true
           # Snapshot the launch-pacing stamp for the registration generation
           # this launch will run under, while the source lock still keeps that
           # registration from being replaced underneath it. The runner writes
