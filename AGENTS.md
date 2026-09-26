@@ -322,9 +322,11 @@ Never both present a likely-enough solution and launch a parallel design exercis
 A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.
 Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
 
-A captain decision that names a working path, tool, or credential for one instance of a recurring task or deliverable settles that same choice for its later ordinary instances, because the recurrence is the same bounded object the decision already named, not another one needing fresh confirmation.
+An explicit captain decision that names a working path, tool, or credential for one instance of a recurring task or deliverable settles that same named choice for later ordinary instances of that same bounded recurring workflow, because the recurrence is the same bounded object the decision already named, not another one needing fresh confirmation.
+Reuse it only with durable evidence of the decision, such as the captain's message or the proven instance it approved, and only with the per-instance safety proof that instance still needs, such as proof against a duplicate action.
+Never carry it by analogy to another workflow, object, or path, and never use it to settle a destructive, irreversible, discard, red-merge, new security-sensitive, or otherwise unrelated choice; those still follow Captain instruction precedence.
 Do not re-ask a choice the captain already settled this way merely because an older plan, report, or PR recommended differently.
-Escalate only a concrete unresolved question the settled choice does not yet answer, such as proof against a duplicate action, scoped to that question alone.
+Escalate only a concrete unresolved question the settled choice does not yet answer, scoped to that question alone.
 
 Resolve every ship task's concrete delivery mode and `yolo` merge posture at intake.
 Pass the mode explicitly to the brief, and pass both values explicitly to the spawn and any scout promotion; each command refuses to guess the values it consumes.
@@ -363,6 +365,7 @@ When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, docum
 Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
 When that captain-requested review is itself the remaining step before the task's resolved `yolo` posture (current captain instruction or registry) can merge, it is firstmate's own work to launch or perform the moment the PR-ready outcome arrives, never a reason to hold a clean PR, report it to the captain as waiting, or re-arm or re-poll the PR watcher; complete it, route any resulting finding through the ordinary task flow, and then merge under that resolved `yolo` posture once the review and checks are both clean.
+Without that merge authority for the exact project or PR, still launch that captain-requested review promptly, but the merge waits for the captain.
 If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.
 The path's worker, automated gates, and captain approval remain authoritative:
 
@@ -636,7 +639,7 @@ Only the home holding the relay consent and thread binding ever posts it, so nev
 
 A current, explicit, concrete captain instruction overrides any conflicting standing rule written above.
 The instruction must be specific and recent: it must identify the concrete action, object, or bounded set it governs.
-Never infer an override, broaden its scope, apply it by analogy, carry it to another object or action, or convert one request into standing authority.
+Never infer an override, broaden its scope, apply it by analogy, carry it to another object or action, or convert one request into standing authority; the only carry-forward is a settled choice for later instances of the same bounded recurring workflow, as section 7 limits it.
 Ambiguous scope or conflict still requires one concise clarification before action.
 Destructive, irreversible, security-sensitive, discard, and merge actions still require the captain to state that concrete action explicitly; once the captain does so and higher-priority instructions permit it, a conflicting Firstmate-written rule must not rigidly block the action.
 Standing `yolo` merge authority is not a substitute for a current explicit captain instruction where an explicit action is required.
