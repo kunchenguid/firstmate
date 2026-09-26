@@ -508,10 +508,13 @@ test_return_marks_the_window_read_on_a_host_home_only() {
 }
 
 # The return advances the read cursor only through what its brief presented:
-# an attended outcome no drain presented before the captain left is presented
-# too, labelled as from before the window, rather than silently marked read.
+# every outcome no drain presented before the captain left is presented too,
+# labelled as from before the window, and routine rows beyond the display
+# limit in either group collapse into one line that counts them and names
+# their tasks, so nothing the cursor covers is silent. A row recorded in the
+# same second as /afk lands in exactly one group, by store sequence.
 test_return_presents_unread_outcomes_from_before_the_window() {
-  local dir fakebin out cursor
+  local dir fakebin out cursor n entered store earlier
   dir="$TMP_ROOT/window-earlier"
   install_runner "$dir"
   for f in fm-supervision-engine-lib.sh fm-harness.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
@@ -521,22 +524,44 @@ test_return_presents_unread_outcomes_from_before_the_window() {
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
   ln -s /bin/bash "$fakebin/claude"
-  outcome_in "$dir" append --task early --verdict routine --summary 'merged the attended docs fix' >/dev/null \
-    || fail "could not seed the attended routine row"
-  sleep 1
+  for n in 1 2 3 4 5 6; do
+    outcome_in "$dir" append --task "early-$n" --verdict routine --summary "early routine $n" >/dev/null \
+      || fail "could not seed attended routine row $n"
+  done
+  outcome_in "$dir" append --task early-cap --verdict captain --summary 'needs a merge decision' >/dev/null \
+    || fail "could not seed the attended captain row"
+  outcome_in "$dir" append --task boundary --verdict routine --summary 'recorded as the captain left' >/dev/null \
+    || fail "could not seed the boundary row"
   contract_in "$dir" enter --words 'watch the fleet' >/dev/null 2>&1 || fail "could not record the away posture"
-  outcome_in "$dir" append --task demo --verdict routine --summary 'rebased while away' >/dev/null || fail "could not seed the away row"
+  entered=$(contract_in "$dir" field entered_epoch)
+  store="$dir/home/state/branch-outcomes.jsonl"
+  jq -c --argjson e "$entered" 'if .seq < 8 then .epoch = $e - 10 else .epoch = $e end' "$store" > "$store.new" \
+    && mv "$store.new" "$store" || fail "could not date the seeded rows"
+  for n in 1 2 3 4 5 6 7; do
+    outcome_in "$dir" append --task "away-$n" --verdict routine --summary "away routine $n" >/dev/null \
+      || fail "could not seed away row $n"
+  done
   touch "$dir/home/state/.last-watcher-beat"
   : > "$dir/home/state/.fake-drain"
   # shellcheck disable=SC2016 # the single-quoted script expands in the harness shell
   out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
     "$fakebin/claude" -c '"$0" begin 2>&1' "$dir/bin/fm-afk-return.sh") || fail "the return did not clear: $out"
   assert_contains "$out" 'From before you left, not yet presented:' "the brief must label the unread rows from before the window"
-  assert_contains "$out" '  - early: merged the attended docs fix' "the brief must present the unread attended routine row"
-  assert_contains "$out" '1 outcome(s) handled by the away session (1 routine, 0 escalated above)' "the earlier row must not count as handled while away"
+  assert_contains "$out" '  - early-cap: needs a merge decision (captain;' "an earlier captain row must be listed in full"
+  assert_contains "$out" '  - 1 earlier routine outcome(s) not listed in full, for: early-1' "the earlier overflow must be counted and named"
+  for n in 2 3 4 5 6; do
+    assert_contains "$out" "  - early-$n: early routine $n" "the newest earlier routine rows must be listed in full"
+  done
+  assert_contains "$out" '8 outcome(s) handled by the away session (8 routine, 0 escalated above)' "the same-second row must count once, in the window"
+  assert_contains "$out" '    - 3 earlier routine outcome(s) not listed in full, for: boundary, away-1, away-2' "the window overflow must be counted and named"
+  for n in 3 4 5 6 7; do
+    assert_contains "$out" "    - away-$n: away routine $n" "the newest away routine rows must be listed in full"
+  done
+  earlier=$(printf '%s\n' "$out" | awk '/^From before you left/ { on = 1; next } on && /^[^ ]/ { on = 0 } on')
+  assert_not_contains "$earlier" 'boundary' "the same-second row must land in exactly one group"
   cursor=$(cat "$dir/home/state/.branch-outcomes-cursor" 2>/dev/null || true)
-  [ "$cursor" = 2 ] || fail "the return must mark read exactly the rows its brief presented, got '${cursor:-none}'"
-  pass "the return presents unread outcomes from before the away window before marking them read"
+  [ "$cursor" = 15 ] || fail "the return must mark read exactly the rows its brief presented, got '${cursor:-none}'"
+  pass "the return presents every unread outcome it marks read, collapsing routine overflow into a named count"
 }
 
 test_return_brief_lists_landed_work_awaiting_cleanup() {

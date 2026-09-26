@@ -156,17 +156,18 @@ window_start_epoch() {
 }
 
 # Reads the store through its owner so a malformed store refuses rather than
-# misleads. STORE_ROWS is the away window's outcomes. Where main processes
-# outcomes through the drain's BRANCH OUTCOMES section (the supervision host
-# off Pi, fm_supervision_host_outcomes_drained), EARLIER_ROWS is every outcome
-# from before the window that no drain presented yet, and PRESENTED_THROUGH is
+# misleads. STORE_ROWS is the away window's outcomes: every row from the first
+# one recorded at or after the window start, so the window is one run of store
+# sequence. Where main processes outcomes through the drain's BRANCH OUTCOMES
+# section (the supervision host off Pi, fm_supervision_host_outcomes_drained),
+# EARLIER_ROWS is every unread row before that run, and PRESENTED_THROUGH is
 # the newest seq of both, which the brief presents; on Pi the branch extension
 # owns the read cursor, so both stay empty.
 STORE_ROWS=
 EARLIER_ROWS=
 PRESENTED_THROUGH=0
 store_rows_load() {  # <since-epoch>
-  local since=$1 raw unread
+  local since=$1 raw unread start
   STORE_ROWS=
   EARLIER_ROWS=
   PRESENTED_THROUGH=0
@@ -174,16 +175,19 @@ store_rows_load() {  # <since-epoch>
   case "$since" in ''|*[!0-9]*) since=0 ;; esac
   raw=$("$SCRIPT_DIR/fm-branch-outcome.sh" list --recent 1000000 2>/dev/null) \
     || return 1
-  STORE_ROWS=$(printf '%s\n' "$raw" | jq -r --argjson since "$since" \
-    'select(.epoch >= $since) | [.seq, .task, .verdict, (.statusEndpoint // 0), (.summary // "")] | @tsv' 2>/dev/null) \
+  start=$(printf '%s\n' "$raw" | jq -s --argjson since "$since" \
+    '(map(select(.epoch >= $since) | .seq) | min) // ((map(.seq) | max // 0) + 1)' 2>/dev/null) \
+    || return 1
+  STORE_ROWS=$(printf '%s\n' "$raw" | jq -r --argjson start "$start" \
+    'select(.seq >= $start) | [.seq, .task, .verdict, (.statusEndpoint // 0), (.summary // "")] | @tsv' 2>/dev/null) \
     || { STORE_ROWS=; return 1; }
   # shellcheck source=bin/fm-supervision-engine-lib.sh
   . "$SCRIPT_DIR/fm-supervision-engine-lib.sh" || return 0
   fm_supervision_host_outcomes_drained "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" || return 0
   unread=$("$SCRIPT_DIR/fm-branch-outcome.sh" unread 2>/dev/null) \
     || { STORE_ROWS=; return 1; }
-  EARLIER_ROWS=$(printf '%s\n' "$unread" | jq -r --argjson since "$since" \
-    'select(.epoch < $since) | [.seq, .task, .verdict, (.statusEndpoint // 0), (.summary // "")] | @tsv' 2>/dev/null) \
+  EARLIER_ROWS=$(printf '%s\n' "$unread" | jq -r --argjson start "$start" \
+    'select(.seq < $start) | [.seq, .task, .verdict, (.statusEndpoint // 0), (.summary // "")] | @tsv' 2>/dev/null) \
     || { STORE_ROWS=; EARLIER_ROWS=; return 1; }
   PRESENTED_THROUGH=$(printf '%s\n%s\n' "$STORE_ROWS" "$EARLIER_ROWS" \
     | awk -F '\t' '$1 ~ /^[0-9]+$/ && $1 + 0 > max { max = $1 + 0 } END { print max + 0 }')
@@ -449,6 +453,28 @@ scan_landed_awaiting_cleanup() {  # -> <task>\t<url> rows
   done
 }
 
+# The newest routine rows in full at <indent>. Where the return marks the
+# rows read, the older ones collapse into one line that counts them and names
+# their tasks, so every row it covers is presented.
+render_routine_rows() {  # <rows> <indent>
+  printf '%s\n' "$1" | awk -F '\t' -v indent="$2" -v keep=5 -v collapse="$PRESENTED_THROUGH" '
+    $3 == "routine" { n++; task[n] = $2; line[n] = $5 }
+    END {
+      first = n - keep + 1
+      if (first < 1) first = 1
+      if (first > 1 && collapse + 0 > 0) {
+        tasks = ""
+        for (i = 1; i < first; i++) {
+          if (task[i] in seen) continue
+          seen[task[i]] = 1
+          tasks = tasks (tasks == "" ? "" : ", ") task[i]
+        }
+        printf "%s- %d earlier routine outcome(s) not listed in full, for: %s\n", indent, first - 1, tasks
+      }
+      for (i = first; i <= n; i++) printf "%s- %s: %s\n", indent, task[i], line[i]
+    }'
+}
+
 render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
   local evidence=$1 blockers=$2 since=$3 now record superseded superseded_at archive_dir stamp
   local tag task key summary count routine captain live held_err last verb rows status url
@@ -571,7 +597,7 @@ EOF
   printf '  %s outcome(s) handled by the away session (%s routine, %s escalated above)\n' "$((routine + captain))" "$routine" "$captain"
   if [ "$routine" -gt 0 ]; then
     printf '  %s routine outcome(s) recorded; the latest:\n' "$routine"
-    printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { printf "    - %s: %s\n", $2, $5 }' | tail -5
+    render_routine_rows "$STORE_ROWS" '    '
   else
     printf '  (no routine outcomes recorded in the store for this window)\n'
   fi
@@ -585,7 +611,7 @@ EOF
     if [ "$count" -gt 5 ]; then
       printf '  %s routine outcome(s); the latest:\n' "$count"
     fi
-    printf '%s\n' "$EARLIER_ROWS" | awk -F '\t' '$3 == "routine" { printf "  - %s: %s\n", $2, $5 }' | tail -5
+    render_routine_rows "$EARLIER_ROWS" '  '
   fi
 
   # 7. cost.

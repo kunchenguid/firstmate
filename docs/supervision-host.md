@@ -195,6 +195,7 @@ The drain's header owns the section's bounds; these rules keep it bounded and in
 
 The section runs only for main on an opted-in home whose primary is not Pi, and never while the away record exists.
 The return brief presents the away window's outcomes and, labelled as from before the captain left, every earlier outcome no drain presented yet, so the return advances the read cursor through exactly those rows once the brief has rendered.
+The window is one run of store sequence from the first row recorded at or after the captain left, so each row lands in exactly one group, and routine outcomes beyond the brief's display limit collapse into one line that counts them and names their tasks, so no row the cursor covers is silent.
 The first drain after the return therefore lists only what arrived after the brief, plus each task's unacknowledged captain outcomes, one line per task.
 An unprocessed captain outcome is never adopted as processed, so a home that opts in mid-session cannot lose its first one.
 Anything main must act on while attended to move the work forward, such as a local-only branch to land or a pull request to merge, is a captain outcome on the host even when the captain asked not to hear about that work, reported once per unchanged situation (`bin/fm-branch-prompt.sh` "Verdict: routine or captain"), because a routine outcome opens no main turn.
