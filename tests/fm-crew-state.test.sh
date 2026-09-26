@@ -1683,6 +1683,7 @@ test_terminal_failed() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-e.meta" "window=fm:fm-feat-e" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-e)"
+  FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS/status: completed/status: failed}
   local out; out=$(run_crew_state "$d" feat-e)
   assert_contains "$out" "state: failed" "failed run -> failed"
   assert_contains "$out" "source: run-step" "failed -> run-step source"
@@ -1864,8 +1865,8 @@ checks failed: 1 of 2 checks red" ;;
 # child contradicting an In flight row. Unknown remains explicitly partial.
 test_cancelled_fleet_inventory_is_unverified_not_contradictory() {
   reset_fakes
-  local d out summary backlog_before status_before
-  d=$(new_case cancelled-inventory)
+  local d out summary backlog_before status_before scenario=${1:-synthetic}
+  d=$(new_case "cancelled-inventory-$scenario")
   make_repo_on_branch "$d/wt" fm/cancelled
   make_fakebin "$d" >/dev/null
   mkdir -p "$d/data" "$d/config" "$d/projects"
@@ -1890,6 +1891,41 @@ EOF
   FM_FAKE_AXI_STATUS="$(run_failed fm/cancelled)"
   FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS//failed/cancelled}
   FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS/status: completed/status: cancelled}
+  if [ "$scenario" = captured ]; then
+    # Real record supplied read-only from axi status --run
+    # 01M2SXM5NDEWK2KY5TG8DDYJMV; only branch/head are rebound for attribution.
+    # Skipped rebase and cancelled CI monitoring remain synthetic cases above.
+    FM_FAKE_AXI_STATUS="$(cat <<EOF
+current_branch: fm/fm-abort-autorise-nest-pas-un-echec
+other_branch_run:
+id: "01M2SXM5NDEWK2KY5TG8DDYJMV"
+branch: fm/cancelled
+status: cancelled
+head: ${FM_FAKE_RUN_HEAD:0:8}
+head_sha: $FM_FAKE_RUN_HEAD
+pr: "https://github.com/kunchenguid/firstmate/pull/4818"
+findings: 2 awaiting
+steps[9]{step,status,findings,duration_ms}:
+intent,completed,0,32
+rebase,completed,0,1137
+review,failed,2,652115
+test,pending,0,0
+document,pending,0,0
+lint,pending,0,0
+push,pending,0,0
+pr,pending,0,0
+ci,pending,0,0
+outcome: cancelled
+error: "cancelled: aborted by user"
+EOF
+)"
+  fi
+  out=$(FM_HOME="$d" run_crew_state "$d" cancelled)
+  assert_contains "$out" 'state: unknown' "$scenario cancellation has no verdict: $out"
+  assert_contains "$out" 'source: run-step' "$scenario retains run attribution"
+  assert_contains "$out" 'run cancelled: no verdict' "$scenario cancellation outweighs interrupted steps"
+  assert_not_contains "$out" 'state: failed' "$scenario cancellation is not a failure"
+  assert_not_contains "$out" 'held for merge' "$scenario has no positive delivery evidence"
   summary=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_ROOT_OVERRIDE="$d/fixture-root" \
     "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
   printf '%s' "$summary" | jq -e '
@@ -1899,7 +1935,13 @@ EOF
   ' >/dev/null || fail "cancellation must not report a terminal/backlog contradiction: $summary"
   assert_equals "$backlog_before" "$(cat "$d/data/backlog.md")" 'correct backlog is unchanged'
   assert_equals "$status_before" "$(cat "$d/state/cancelled.status")" 'historical event is unchanged'
-  pass 'cancelled run leaves fleet inventory unverified without a failure contradiction'
+  pass "$scenario cancelled run leaves fleet inventory unverified without a failure contradiction"
+}
+
+# Replay the recorded producer output through both public consumers, without
+# starting or aborting a daemon run or claiming live cancellation evidence.
+test_captured_cancelled_review_has_no_verdict() {
+  test_cancelled_fleet_inventory_is_unverified_not_contradictory captured
 }
 
 test_terminal_failed_ci_orphan_after_green_reads_done() {
@@ -5461,7 +5503,8 @@ test_captured_inventory_replay
 test_captured_authority_transition
 test_captured_completed_history
 cancellation_failures=0
-for cancellation_test in test_terminal_green_delivery_disposition \
+for cancellation_test in test_captured_cancelled_review_has_no_verdict \
+  test_terminal_green_delivery_disposition \
   test_cancelled_without_delivery_has_no_verdict \
   test_cancelled_fleet_inventory_is_unverified_not_contradictory \
   test_cancelled_delivery_and_skipped_rebase; do
