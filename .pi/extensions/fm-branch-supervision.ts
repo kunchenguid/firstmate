@@ -648,6 +648,13 @@ export default function (pi: ExtensionAPI) {
   type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean };
   let processing: ProcessingState | null = null;
   let queuedProcessingContent: string | null = null;
+  // Keep the exact durable obligation available when Pi lets a fresh captain
+  // prompt win a run boundary over a queued processing message. The queue may
+  // have consumed, replaced, or dropped that message without raising a
+  // before_agent_start for it, so the captain turn must schedule a successor
+  // copy before ordinary work can continue.
+  let lastProcessingContent: string | null = null;
+  let captainPromptOverlappedProcessing = false;
   let processingOpenedThisRun = false;
   let processedInitializedGeneration = -1;
   // One revision for BOTH selections: a model or effort change invalidates an
@@ -1080,6 +1087,7 @@ export default function (pi: ExtensionAPI) {
     // until that run settles, sending a widened or identical copy would hand
     // overlapping requests to the same run.
     const message = { customType: PROCESSING_MESSAGE_TYPE, content, display: false };
+    lastProcessingContent = content;
     if (processing.triggered < PROCESSING_TRIGGERED_ATTEMPTS) {
       processing.triggered += 1;
       processing.pending = true;
@@ -1648,6 +1656,10 @@ ${context.command}
     // duplicate suppression. Operational extension injections are not dialog.
     const prompt = event.prompt;
     processingOpenedThisRun = queuedProcessingContent !== null && prompt === queuedProcessingContent;
+    captainPromptOverlappedProcessing =
+      !processingOpenedThisRun &&
+      !isOperationalUserText(prompt.trim()) &&
+      processing?.pending === true;
     if (processingOpenedThisRun) queuedProcessingContent = null;
     const trimmed = prompt.trim();
     if (!trimmed || isOperationalUserText(trimmed)) return;
@@ -1659,9 +1671,28 @@ ${context.command}
 
   pi.on?.("agent_start", () => {
     mainStreaming = true;
-    // Pi delivers a queued nextTurn copy with the prompt that starts this run,
-    // so a fresh copy may be queued again once this run settles unacknowledged.
+    // Pi can let a newly submitted captain prompt consume the run boundary
+    // that a hidden processing request was waiting for. Re-queue the exact
+    // sequence-keyed obligation after that prompt has started. This is
+    // intentionally at-least-once: fm_branch_processed remains the only
+    // durable acknowledgement and rejects anything not listed in the active
+    // request, so a duplicate can never advance the marker or lose an outcome.
     if (processing) processing.nextTurnQueued = false;
+    if (
+      captainPromptOverlappedProcessing &&
+      processing &&
+      lastProcessingContent
+    ) {
+      processing.pending = true;
+      processing.nextTurnQueued = true;
+      const replay = { customType: PROCESSING_MESSAGE_TYPE, content: lastProcessingContent, display: false };
+      try {
+        pi.sendMessage(replay, { deliverAs: "nextTurn" });
+      } catch {
+        if (processing) processing.nextTurnQueued = false;
+      }
+    }
+    captainPromptOverlappedProcessing = false;
   });
   pi.on?.("context", (event, ctx) => {
     if (!afkPostureRecordPresent(state)) return;

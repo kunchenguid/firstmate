@@ -420,6 +420,8 @@ The extension presents the current unprocessed sequence set again at the next ma
 ### Re-presentation pacing
 
 A presentation already pending its run boundary is not resent or widened.
+If a fresh captain prompt takes that boundary before the hidden processing request is consumed, the extension queues the same sequence-keyed request after the captain turn starts.
+This is deliberately at-least-once delivery: only `fm_branch_processed` can advance the durable marker, and duplicate requests cannot acknowledge a sequence that is not listed in the active request.
 Once that run settles, the extension presents the then-current sequence set.
 
 The first two presentations of a given sequence set open a turn of their own.
@@ -624,7 +626,7 @@ At that moment the branch reports any refusal instead of concluding there is "no
 - Dispatch, and signal and stale report scoping with unscoped heartbeat reports.
 - The new branch conversation at every main session start with continuation inside one session, and the mirror re-anchor that pairs with it.
 - Requested-versus-unsolicited delivery, exact visible entry content, and no unkeyed model turn.
-- The sequence-keyed processing request and its acknowledgement.
+- The sequence-keyed processing request and its acknowledgement, including exact successor replay when a fresh captain prompt overlaps a pending request and duplicate-safe acknowledgement.
 - Re-presentation after an empty reply and after an unrelated prior answer, the triggered-then-next-turn pacing, and session-start re-presentation.
 - Routine outcomes staying turn-free, and the processed-marker migration.
 - Idle and busy main state, and incident-shaped compaction and unrelated-assistant context.
