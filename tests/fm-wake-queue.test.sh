@@ -2780,6 +2780,26 @@ test_wake_queue_prune_task() {
   pass "fm_wake_queue_prune_task: prunes wakes for target task without touching other tasks"
 }
 
+# Scratch a drain minted under the queue lock and never removed was left by a
+# drain that died mid-write; the next locked drain rotates it away.
+test_drain_rotates_orphaned_scratch() {
+  local dir state name
+  dir=$(make_case scratch-rotation)
+  state="$dir/state"
+  for name in .main-eligible-rows.tmp.dead01 .wake-rows.consume.dead02 .wake-queue.retire.dead03 \
+    .wake-queue.ack.dead04 .wake-queue.actor-view.dead05; do
+    : > "$state/$name"
+  done
+  : > "$state/.main-eligible-rows"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "drain failed with orphaned scratch present"
+  for name in .main-eligible-rows.tmp.dead01 .wake-rows.consume.dead02 .wake-queue.retire.dead03 \
+    .wake-queue.ack.dead04 .wake-queue.actor-view.dead05; do
+    [ ! -e "$state/$name" ] || fail "drain left orphaned scratch $name behind"
+  done
+  [ -e "$state/.main-eligible-rows" ] || fail "scratch rotation removed the live main rows claim"
+  pass "drain rotates scratch files an interrupted drain left under the queue lock"
+}
+
 # --- secondmate endpoint liveness tick ---------------------------------------
 # bin/fm-watch.sh's secondmate_liveness_tick drives the shared
 # bin/fm-secondmate-liveness-lib.sh probe+relaunch machinery during ordinary
@@ -3335,6 +3355,7 @@ test_branch_stale_ack_that_consumes_nothing_names_its_granted_wake
 test_recovery_ack_failure_is_reported
 test_interruption_before_and_after_raw_commit
 test_wake_queue_prune_task
+test_drain_rotates_orphaned_scratch
 test_secondmate_liveness_tick_relaunches_dead_endpoint_once
 test_secondmate_liveness_tick_relaunches_missing_endpoint
 test_secondmate_liveness_tick_relaunches_every_dead_mate_before_waking

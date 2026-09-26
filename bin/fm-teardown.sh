@@ -78,6 +78,17 @@
 # task state when that proof fails; otherwise it removes the task's check,
 # trust record, PR sidecar, and publication record with the rest of the
 # volatile state.
+# That volatile state includes the watcher's per-task markers - the .seen-*
+# signatures for the task's status and turn-ended files and its .hb-surfaced-
+# heartbeat marker, minted by bin/fm-wake-lib.sh and bin/fm-classify-lib.sh -
+# and, once the recorded pane is proven gone, an orphaned Herdr presentation
+# journal: a binding of exactly that pane, or a version 1 attempt whose
+# token-bearing projected workspace is itself confirmed gone, names nothing the
+# session-start sweep could still close, while a journal bound to any other pane
+# - or a version 1 attempt whose workspace is still present or unreadable - may
+# name a live quarantined space and is retained for that sweep.
+# data/<id>/ is deliberately left in place: a successor spawn reads brief.md
+# from it.
 # Worktree-slot ownership (teardown-slot-collision): a treehouse pool slot is
 # reused across tasks, so a stale, duplicated, or drifted worktree= record can
 # name a slot a DIFFERENT live task now holds. Cleanup kills every process under
@@ -1047,6 +1058,7 @@ remote_secondmate_teardown() {
   status_retire_presentation_task "$STATE" "$ID" || return 1
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
   rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
+    "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
     "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
@@ -3279,6 +3291,7 @@ cleanup_firstmate_home_children() {
     fm_wake_queue_prune_task "$sub_state" "$child_id" "$child_t" 2>/dev/null || true
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
+      "$(fm_wake_signal_seen_path "$sub_state" "$sub_state/$child_id.turn-ended")" \
       "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.omp-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
@@ -3596,6 +3609,22 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
+# teardown_herdr_journal_orphaned: true when the task's own journal names
+# nothing the session-start sweep could still close - a version 1 attempt whose
+# token-bearing projected workspace is confirmed gone, or a version 2 binding of
+# exactly the recorded pane this teardown proves gone. Unreadable, malformed, or
+# otherwise-bound journals, and a version 1 workspace still present or
+# unreadable, are not orphans.
+teardown_herdr_journal_orphaned() {
+  fm_backend_source herdr || return 1
+  fm_backend_herdr_projection_journal_snapshot "$HERDR_PRESENTATION_JOURNAL" "$ID" || return 1
+  if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 1 ]; then
+    fm_backend_herdr_projection_token_workspace_gone \
+      "$TEARDOWN_HERDR_SESSION" "$HERDR_PRESENTATION_JOURNAL" "$ID"
+  else
+    [ "$FM_BACKEND_HERDR_JOURNAL_SESSION:$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$T" ]
+  fi
+}
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=
 HERDR_PRESENTATION_PANE=
@@ -3651,7 +3680,7 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   fi
 elif [ "$BACKEND" = herdr ] \
      && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
-  echo "warning: herdr presentation journal for $ID remains quarantined; no workspace cleanup was attempted" >&2
+  echo "warning: herdr presentation journal for $ID was not retired by its close; no workspace cleanup was attempted" >&2
 fi
 # A refused, skipped, or failed Herdr close must never erase a live task's
 # durable endpoint identity: unless the exact pane is confirmed gone, retain
@@ -3734,6 +3763,7 @@ retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 fm_wake_queue_prune_task "$STATE" "$ID" "$T" 2>/dev/null || true
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
+  "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
@@ -3749,6 +3779,18 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
 # read-only by its installer.
 chmod u+w "$STATE/$ID.git-hooks" 2>/dev/null || true
 rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks"
+# A presentation journal the close path left behind is orphaned once the
+# recorded pane is proven gone (the Herdr gate above) unless it still names a
+# live projected workspace - a version 2 binding of some other pane, or a
+# version 1 attempt whose token-bearing workspace is still present - which the
+# session-start sweep alone may judge (header).
+if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
+  if teardown_herdr_journal_orphaned; then
+    rm -f "$HERDR_PRESENTATION_JOURNAL"
+  else
+    echo "warning: retaining herdr presentation journal for $ID; it still names a projected workspace the session-start sweep owns, not the closed endpoint" >&2
+  fi
+fi
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
 # racing the same id stays serialized exactly as it was before. A captain-held

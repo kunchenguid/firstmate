@@ -3001,6 +3001,20 @@ fm_backend_herdr_projection_endpoint_matches_journal() {  # <session> <workspace
   [ "$matches" = "$workspace_id" ]
 }
 
+# fm_backend_herdr_projection_token_workspace_gone: true only when the named
+# session's workspace list is readable and no workspace label still carries the
+# journal's token. A version 1 attempt journal binds no pane, so its projected
+# workspace is confirmed gone only by this token absence; an unreadable list
+# refuses so the session-start sweep keeps the journal.
+fm_backend_herdr_projection_token_workspace_gone() {  # <session> <journal> <task-id>
+  local session=$1 journal=$2 id=$3 token list
+  token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || return 1
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  printf '%s' "$list" | jq -e '(.result.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
+  ! printf '%s' "$list" | jq -e --arg suffix " · p:$token" \
+    'any(.result.workspaces[]?; (.label | type) == "string" and (.label | endswith($suffix)))' >/dev/null 2>&1
+}
+
 # fm_backend_herdr_parse_target: split "<session>:<pane_id>" (pane_id itself
 # contains a colon, e.g. "w1:p2") on the FIRST colon only. Sets
 # FM_BACKEND_HERDR_SESSION and FM_BACKEND_HERDR_PANE for the caller.
