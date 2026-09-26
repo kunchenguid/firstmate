@@ -182,7 +182,7 @@ WATCH_HOME_EXISTED=0
 # without sourcing the entire watcher graph.
 # The shared transition owner is a canonical lint root itself. Stop duplicate
 # source-graph expansion here: following its backend graph from this large
-# runtime can exceed the bounded CI lint worker while adding no uncovered file.
+# runtime needlessly spends per-root CI lint memory while adding no uncovered file.
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-push-transition-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -198,8 +198,8 @@ WATCH_HOME_EXISTED=0
 # This library is a canonical lint root in its own right, and it reaches the
 # wake queue, PR identity, and secondmate parent libraries. Keep it an analysis
 # boundary here for the same reason as the transition and inbox owners above and
-# below: following its graph from this large runtime exceeds the bounded CI lint
-# worker while adding no uncovered file.
+# below: following its graph from this large runtime needlessly spends per-root
+# CI lint memory while adding no uncovered file.
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
 # The durable merge-authority owner is shared with bin/fm-pr-merge.sh. The
