@@ -1079,6 +1079,43 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
+test_legacy_ship_relaunch_preserves_missing_completion_policy_for_capture() {
+  local dir out
+  dir=$(new_case legacycompletion rl78)
+  add_ship_task "$dir" rl78 claude
+  mkdir -p "$dir/home/data"
+  printf '%s\n' '- proj [no-mistakes completion=verified-production] - fixture (added 2026-09-24)' \
+    > "$dir/home/data/projects.md"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl78 --relaunch)
+  assert_contains "$out" "spawned rl78" "the legacy task should relaunch normally"
+  [ -z "$(meta_field "$dir" rl78 completion_policy)" ] \
+    || fail "relaunch permanently defaulted a missing legacy completion policy"
+
+  cat > "$dir/fake/gh" <<'GH'
+#!/bin/sh
+printf '%s\n' https://github.com/example/proj
+GH
+  chmod +x "$dir/fake/gh"
+  PATH="$dir/fake:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-capture-completion-policy.sh" rl78 --if-absent >/dev/null \
+    || fail "the relaunched legacy task should remain eligible for one-time policy capture"
+  [ "$(meta_field "$dir" rl78 completion_policy)" = verified-production ] \
+    || fail "one-time capture did not bind the relaunched task to verified-production"
+
+  printf '%s\n' '- proj [no-mistakes] - changed after capture (added 2026-09-24)' \
+    > "$dir/home/data/projects.md"
+  printf '#!/bin/sh\nexit 1\n' > "$dir/fake/gh"
+  chmod +x "$dir/fake/gh"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl78 --relaunch)
+  assert_contains "$out" "spawned rl78" \
+    "captured verified-production should relaunch without a live policy/provider lookup"
+  [ "$(meta_field "$dir" rl78 completion_policy)" = verified-production ] \
+    || fail "relaunch changed the captured completion policy after registry drift"
+  pass "fm-spawn --relaunch: legacy absence survives capture and captured policy ignores later registry/provider drift"
+}
+
 # A promoted scout records kind=ship and a custom ship branch in its meta, but
 # its brief is the scout scaffold: it never gained a Ship branch line, and a
 # relaunch cannot regenerate the brief (--branch-prefix is refused there). The
@@ -1800,6 +1837,10 @@ test_spawn_relaunch_refuses_contradicting_flags() {
   out=$(run_spawn "$dir" rl16 --relaunch --scout); rc=$?
   expect_code 1 "$rc" "--scout should be refused alongside --relaunch"
   assert_contains "$out" "recorded kind" "the refusal should name the recorded kind rule"
+  out=$(run_spawn "$dir" rl16 --relaunch --completion-policy landed); rc=$?
+  expect_code 1 "$rc" "--completion-policy should be refused alongside --relaunch"
+  assert_contains "$out" "recorded completion policy" \
+    "the refusal should say relaunch preserves the captured completion policy"
   out=$(run_spawn "$dir" rl16 "$dir/proj" --relaunch); rc=$?
   expect_code 1 "$rc" "a project positional should be refused alongside --relaunch"
   assert_contains "$out" "takes the task id only" "the refusal should name the positional rule"
@@ -2361,6 +2402,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_legacy_ship_relaunch_preserves_missing_completion_policy_for_capture
 test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired

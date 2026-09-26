@@ -365,11 +365,19 @@ fi
 ID=$1
 FORCE=
 LEGACY_RECORD_GIVEN=0
+OUTCOME_EVIDENCE=
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --outcome-evidence)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || {
+        echo "error: --outcome-evidence requires an exact retained JSON path" >&2
+        exit 2
+      }
+      OUTCOME_EVIDENCE=$2
+      shift ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -499,6 +507,24 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
 }
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
+TEARDOWN_COMPLETION_POLICY=$(fm_meta_get "$META" completion_policy)
+[ -n "$TEARDOWN_COMPLETION_POLICY" ] || TEARDOWN_COMPLETION_POLICY=landed
+case "$TEARDOWN_COMPLETION_POLICY" in
+  landed|verified-production) ;;
+  *)
+    echo "REFUSED: task $ID records unknown completion policy '$TEARDOWN_COMPLETION_POLICY'; nothing was changed" >&2
+    exit 1 ;;
+esac
+if [ "$TEARDOWN_META_KIND" = ship ] && [ "$TEARDOWN_COMPLETION_POLICY" = verified-production ] && [ "$FORCE" != --force ]; then
+  [ -n "$OUTCOME_EVIDENCE" ] || {
+    echo "REFUSED: task $ID requires verified production outcome evidence; keep its owner and state, then run teardown with --outcome-evidence <retained outcome-evidence.json>" >&2
+    exit 1
+  }
+  "$SCRIPT_DIR/fm-outcome-evidence.py" "$ID" "$META" "$OUTCOME_EVIDENCE" || exit 1
+elif [ -n "$OUTCOME_EVIDENCE" ]; then
+  echo "REFUSED: task $ID does not require --outcome-evidence; nothing was changed" >&2
+  exit 1
+fi
 # A secondmate's endpoint-liveness episodes (bin/fm-secondmate-liveness-lib.sh)
 # serialize on this lock; retirement holds it to the end so no probe or relaunch
 # can act on the route mid-teardown, and its relaunch ledger and park marker are
@@ -1543,6 +1569,26 @@ pr_is_merged() {
     PR_URL=$resolved_url
   fi
   return 0
+}
+
+verified_production_pr_matches_outcome() {
+  local view state remainder head resolved_url merge_revision evidence_revision
+  [ -n "$PR_URL" ] && [ -d "$PROJ" ] || return 1
+  view=$(cd "$PROJ" && gh pr view "$PR_URL" --json state,headRefOid,url,mergeCommit -q '.state + "\t" + .headRefOid + "\t" + .url + "\t" + (.mergeCommit.oid // "")' 2>/dev/null) || return 1
+  state=${view%%$'\t'*}
+  remainder=${view#*$'\t'}
+  [ "$state" != "$view" ] || return 1
+  head=${remainder%%$'\t'*}
+  remainder=${remainder#*$'\t'}
+  [ "$head" != "$remainder" ] || return 1
+  resolved_url=${remainder%%$'\t'*}
+  merge_revision=${remainder#*$'\t'}
+  [ "$resolved_url" != "$remainder" ] || return 1
+  case "$state" in MERGED|merged) ;; *) return 1 ;; esac
+  [ "$resolved_url" = "$PR_URL" ] && [ "$head" = "$(fm_meta_get "$META" pr_head)" ] || return 1
+  printf '%s' "$merge_revision" | LC_ALL=C grep -Eq '^[0-9a-f]{40}$' || return 1
+  evidence_revision=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release"]["merge_revision"])' "$OUTCOME_EVIDENCE" 2>/dev/null) || return 1
+  [ "$evidence_revision" = "$merge_revision" ]
 }
 
 # Is the branch's content already present in the up-to-date default branch? Fetches
@@ -3414,6 +3460,13 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   fi
   require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
   ORCA_PATH_MATCH_VERIFIED=1
+fi
+
+if [ "$TEARDOWN_META_KIND" = ship ] && [ "$TEARDOWN_COMPLETION_POLICY" = verified-production ] && [ "$FORCE" != --force ]; then
+  verified_production_pr_matches_outcome || {
+    echo "REFUSED: verified-production outcome does not match the recorded merged PR and canonical merge revision" >&2
+    exit 1
+  }
 fi
 
 if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then

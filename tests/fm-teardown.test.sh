@@ -201,6 +201,133 @@ write_meta() {
     "spawn_gen=teardown-test-task-x1"
 }
 
+write_verified_production_meta() {
+  local case_dir=$1 pr_head=$2
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' \
+    'completion_policy=verified-production' \
+    'pr=https://github.com/example/repo/pull/7' \
+    "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
+}
+
+write_outcome_evidence() {
+  local path=$1 verdict=$2 issue=$3 pr_url=$4 pr_head=$5 merge_revision=$6 runtime_revision=$7
+  mkdir -p "$(dirname "$path")"
+  cat > "$path" <<EOF
+{
+  "schema_version": 1,
+  "verdict": "$verdict",
+  "issue": "$issue",
+  "acceptance": "The deployed outcome works in production.",
+  "tested_source": {"revision": "$merge_revision", "worktree_fingerprint": null},
+  "release": {"pr_url": "$pr_url", "pr_head_revision": "$pr_head", "merge_revision": "$merge_revision"},
+  "target": {
+    "environment": "production",
+    "identity": "recruitmagic-production",
+    "runtime_revision": "$runtime_revision",
+    "runtime_revision_evidence": "provider deployment receipt",
+    "database_identity": null
+  },
+  "boundaries": [{"name": "product", "actions": ["exercise outcome"], "expected": "works", "actual": "works", "artifacts": ["receipt"]}],
+  "cleanup": {"run_owned_resources": [], "removed": [], "residuals": []},
+  "unverified_paths": [],
+  "evidence_ref": "retained://task-x1/outcome",
+  "created_at": "2026-09-24T12:00:00Z"
+}
+EOF
+}
+
+add_gh_verified_pr() {
+  local case_dir=$1 head=$2 merge=$3
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"state,headRefOid,url,mergeCommit"*) printf '%s\\t%s\\t%s\\t%s\\n' MERGED '$head' 'https://github.com/example/repo/pull/7' '$merge' ; exit 0 ;;
+  *"state,headRefOid,url"*) printf '%s\\t%s\\t%s\\n' MERGED '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+test_verified_production_requires_exact_outcome_evidence() {
+  local case_dir head merge evidence rc
+  case_dir=$(make_case verified-production-gate)
+  wt_commit_file "$case_dir" product.txt shipped "ship product"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_fork_with_pushed_branch "$case_dir"
+  write_verified_production_meta "$case_dir" "$head"
+  merge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  evidence="$case_dir/outcome-evidence.json"
+  add_gh_pr_merged_for_head "$case_dir" "$head"
+  add_gh_verified_pr "$case_dir" "$head" "$merge"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/no-evidence.stdout" 2> "$case_dir/no-evidence.stderr" || rc=$?
+  expect_code 1 "$rc" "verified-production teardown without evidence should refuse"
+  assert_present "$case_dir/state/task-x1.meta" "missing evidence removed task metadata"
+  assert_present "$case_dir/wt" "missing evidence removed the isolated copy"
+
+  write_outcome_evidence "$evidence" INCOMPLETE REC-2127 \
+    https://github.com/example/repo/pull/7 "$head" "$merge" "$merge"
+  rc=0
+  run_teardown "$case_dir" --outcome-evidence "$evidence" > "$case_dir/incomplete.stdout" 2> "$case_dir/incomplete.stderr" || rc=$?
+  expect_code 1 "$rc" "incomplete production evidence should refuse"
+  assert_present "$case_dir/state/task-x1.meta" "incomplete evidence removed task metadata"
+
+  write_outcome_evidence "$evidence" VERIFIED REC-2127 \
+    https://github.com/example/repo/pull/7 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "$merge" "$merge"
+  rc=0
+  run_teardown "$case_dir" --outcome-evidence "$evidence" > "$case_dir/stale.stdout" 2> "$case_dir/stale.stderr" || rc=$?
+  expect_code 1 "$rc" "stale source evidence should refuse"
+  assert_present "$case_dir/state/task-x1.meta" "stale evidence removed task metadata"
+
+  write_outcome_evidence "$evidence" VERIFIED REC-2127 \
+    https://github.com/example/repo/pull/7 "$head" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  rc=0
+  run_teardown "$case_dir" --outcome-evidence "$evidence" > "$case_dir/wrong-merge.stdout" 2> "$case_dir/wrong-merge.stderr" || rc=$?
+  expect_code 1 "$rc" "wrong canonical merge revision should refuse"
+  assert_present "$case_dir/state/task-x1.meta" "wrong merge revision removed task metadata"
+  assert_present "$case_dir/wt" "wrong merge revision removed the isolated copy"
+
+  write_outcome_evidence "$evidence" VERIFIED REC-2127 \
+    https://github.com/example/repo/pull/7 "$head" "$merge" "$merge"
+  rc=0
+  run_teardown "$case_dir" --outcome-evidence "$evidence" > "$case_dir/verified.stdout" 2> "$case_dir/verified.stderr" || rc=$?
+  expect_code 0 "$rc" "exact verified production evidence should allow teardown"
+  assert_absent "$case_dir/state/task-x1.meta" "verified teardown left task metadata"
+  pass "verified-production teardown rejects missing, incomplete, and stale evidence before accepting exact proof"
+}
+
+test_verified_production_with_missing_legacy_worktree_checks_merge() {
+  local case_dir head merge evidence rc
+  case_dir=$(make_case verified-production-missing-legacy-worktree)
+  head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  merge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  evidence="$case_dir/outcome-evidence.json"
+  write_windowless_legacy_meta "$case_dir" no-mistakes ship "$case_dir/missing-wt"
+  printf '%s\n' 'completion_policy=verified-production' \
+    'pr=https://github.com/example/repo/pull/7' "pr_head=$head" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  add_gh_verified_pr "$case_dir" "$head" "$merge"
+
+  write_outcome_evidence "$evidence" VERIFIED REC-2127 \
+    https://github.com/example/repo/pull/7 "$head" cccccccccccccccccccccccccccccccccccccccc cccccccccccccccccccccccccccccccccccccccc
+  rc=0
+  run_teardown "$case_dir" --outcome-evidence "$evidence" > "$case_dir/wrong-merge.stdout" 2> "$case_dir/wrong-merge.stderr" || rc=$?
+  expect_code 1 "$rc" "missing worktree with wrong merge revision should refuse"
+  assert_present "$case_dir/state/task-x1.meta" "wrong merge revision removed legacy task metadata"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] || fail "wrong merge revision closed the legacy backlog item"
+
+  write_outcome_evidence "$evidence" VERIFIED REC-2127 \
+    https://github.com/example/repo/pull/7 "$head" "$merge" "$merge"
+  rc=0
+  run_teardown "$case_dir" --outcome-evidence "$evidence" > "$case_dir/verified.stdout" 2> "$case_dir/verified.stderr" || rc=$?
+  expect_code 0 "$rc" "missing worktree with canonical merge revision should allow teardown"
+  assert_absent "$case_dir/state/task-x1.meta" "verified legacy teardown left task metadata"
+  pass "verified-production legacy teardown binds the merge revision without a task worktree"
+}
+
 # Commit something on the worktree's task branch. Args: case_dir [message]
 wt_commit() {
   local case_dir=$1 msg=${2:-wt work}
@@ -4065,6 +4192,8 @@ test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
+test_verified_production_requires_exact_outcome_evidence
+test_verified_production_with_missing_legacy_worktree_checks_merge
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses

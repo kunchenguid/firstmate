@@ -100,6 +100,20 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 
 ### Format and lifecycle references
 
+`data/projects.md` may add `completion=verified-production` inside a project's bracketed delivery annotation when that project's product work must remain owned through deployment and outcome verification.
+The default is `landed`, which preserves the existing merge-and-cleanup boundary.
+Fresh ship spawns resolve this project fact and record `completion_policy=` in task metadata; relaunch uses that captured value, so a later registry edit cannot change an in-flight task.
+At fresh ship dispatch or scout promotion, the trusted owner can pass the closed-set `--completion-policy landed|verified-production` selection.
+Omit it for the registered project default.
+For an in-flight legacy ship task without a captured policy, the trusted owner can use `bin/fm-capture-completion-policy.sh <task-id> --if-absent` once, optionally adding `--completion-policy landed|verified-production`; omission captures the current registered project default, and an existing captured value cannot be changed.
+The explicit `landed` selection is only for a bounded accepted deliverable with no production surface; task paths and task prose are not authority, scouts and secondmates cannot take the flag, and relaunch refuses any policy override.
+`verified-production` requires a PR-backed task whose reviewed head is recorded.
+Configuration refuses it with `local-only` or `forge=gerrit`, and an effective task selection of `local-only` is refused unless its trusted owner explicitly selected the bounded `landed` exception.
+For `verified-production`, `bin/fm-teardown.sh` requires `--outcome-evidence <path>` and mechanically binds the retained schema-version-1 `VERIFIED` artifact to the task's exact PR URL, recorded PR head, and forge-reported canonical merge revision before any cleanup, including when the task worktree is missing.
+Missing, incomplete, stale, failed, or mismatched evidence refuses teardown and preserves the task's recoverable state.
+The project's trusted verifier owns the semantic verdict and deployed-revision proof; pre-merge worker text and validation evidence do not satisfy this gate.
+This is an operator authority boundary, not isolation from other processes running as the same operating-system user.
+
 - `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 
 - `bin/fm-contributions.sh` owns durable published-contribution records under each task, observation bounds, equivalent triage-label configuration, and the authenticated contribution check.

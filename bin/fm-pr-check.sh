@@ -27,6 +27,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-completion-policy-lib.sh
+. "$SCRIPT_DIR/fm-completion-policy-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
@@ -135,6 +137,12 @@ fi
 
 MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PROJECT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
+COMPLETION_POLICY=$(grep '^completion_policy=' "$META" | tail -1 | cut -d= -f2- || true)
+[ -n "$COMPLETION_POLICY" ] || COMPLETION_POLICY=landed
+if ! fm_completion_policy_pr_head_valid "$COMPLETION_POLICY" "$PROVIDER" "$PR_HEAD"; then
+  echo "error: completion_policy=verified-production requires a canonical GitHub pull request with an exact 40-character reviewed pr_head; no merge watch was armed" >&2
+  exit 1
+fi
 # The gate is asked about the ready report this task's worker was told to give;
 # on a Gerrit change both publishing modes report the same published line.
 case "$PROVIDER:$MODE" in

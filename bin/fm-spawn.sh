@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--completion-policy <landed|verified-production>] [--branch-prefix <prefix>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -31,6 +31,11 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
+#   --completion-policy is an optional trusted intake decision for the bounded
+#   ship-task exception whose accepted deliverable has no production surface.
+#   Omit it to capture the project's registered policy. It is refused for
+#   scouts, secondmates, and relaunches; relaunch always preserves the captured
+#   task policy, so later task text cannot downgrade the completion boundary.
 #   --branch-prefix is the optional prefix selected at intake for this ship's
 #   immutable branch, defaulting to "fm/". It must agree with the branch recorded
 #   in the brief, and is refused on scouts, secondmates, and relaunches. When the
@@ -600,6 +605,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-completion-policy-lib.sh
+. "$SCRIPT_DIR/fm-completion-policy-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
@@ -624,6 +631,8 @@ EFFORT=
 BACKEND_ARG=
 MODE=
 YOLO=
+COMPLETION_POLICY=landed
+COMPLETION_POLICY_ARG=
 BRANCH_PREFIX=fm/
 TRACEPARENT_ARG=
 HARNESS_SET=0
@@ -632,6 +641,7 @@ EFFORT_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
+COMPLETION_POLICY_SET=0
 BRANCH_PREFIX_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
@@ -669,6 +679,10 @@ for a in "$@"; do
     yolo)
       YOLO=$a
       YOLO_SET=1
+      ;;
+    completion-policy)
+      COMPLETION_POLICY_ARG=$a
+      COMPLETION_POLICY_SET=1
       ;;
     branch-prefix)
       BRANCH_PREFIX=$a
@@ -726,6 +740,11 @@ for a in "$@"; do
     YOLO=${a#--yolo=}
     YOLO_SET=1
     ;;
+  --completion-policy) want_value="completion-policy" ;;
+  --completion-policy=*)
+    COMPLETION_POLICY_ARG=${a#--completion-policy=}
+    COMPLETION_POLICY_SET=1
+    ;;
   --branch-prefix) want_value="branch-prefix" ;;
   --branch-prefix=*)
     BRANCH_PREFIX=${a#--branch-prefix=}
@@ -767,6 +786,17 @@ done
   echo "error: --yolo requires a non-empty value" >&2
   exit 1
 }
+[ "$COMPLETION_POLICY_SET" -eq 0 ] || [ -n "$COMPLETION_POLICY_ARG" ] || {
+  echo "error: --completion-policy requires a non-empty value" >&2
+  exit 1
+}
+case "$COMPLETION_POLICY_ARG" in
+'' | landed | verified-production) ;;
+*)
+  echo "error: --completion-policy must be landed or verified-production (got '$COMPLETION_POLICY_ARG')" >&2
+  exit 1
+  ;;
+esac
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || {
   echo "error: --traceparent requires a non-empty value" >&2
   exit 1
@@ -811,6 +841,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
   [ "$YOLO_SET" -eq 0 ] || {
     echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2
+    exit 1
+  }
+  [ "$COMPLETION_POLICY_SET" -eq 0 ] || {
+    echo "error: --relaunch reuses the task's recorded completion policy; --completion-policy cannot override it" >&2
     exit 1
   }
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || {
@@ -860,6 +894,10 @@ else
     }
     [ "$BRANCH_PREFIX_SET" -eq 0 ] || {
       echo "error: --branch-prefix applies only to ship spawns; a scout makes no branch and a secondmate records no ship branch" >&2
+      exit 1
+    }
+    [ "$COMPLETION_POLICY_SET" -eq 0 ] || {
+      echo "error: --completion-policy applies only to ship spawns; scouts deliver reports and secondmates record no ship completion boundary" >&2
       exit 1
     }
   fi
@@ -1442,6 +1480,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   # spanning several modes is two invocations rather than a silent mixed dispatch.
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
+  [ "$COMPLETION_POLICY_SET" -eq 0 ] || shared_args+=(--completion-policy "$COMPLETION_POLICY_ARG")
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || shared_args+=(--branch-prefix "$BRANCH_PREFIX")
   for pair in "${POS[@]}"; do
     case "$pair" in
@@ -1758,6 +1797,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  COMPLETION_POLICY=$(fm_meta_get "$RELAUNCH_META" completion_policy)
   if [ "$KIND" = ship ]; then
     BRANCH=$(fm_meta_get "$RELAUNCH_META" branch)
     [ -n "$BRANCH" ] || BRANCH="fm/$ID"
@@ -2926,6 +2966,18 @@ delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task 
 # differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
   PROJ_NAME=$(basename "$PROJ_ABS")
+  if [ "$RELAUNCH" -ne 1 ]; then
+    if ! REGISTERED_COMPLETION_POLICY=$("$FM_ROOT/bin/fm-project-mode.sh" --completion-policy "$PROJ_NAME" 2>/dev/null); then
+      "$FM_ROOT/bin/fm-project-mode.sh" --completion-policy "$PROJ_NAME" >/dev/null || true
+      echo "error: $ID cannot launch: the registry entry for $PROJ_NAME has no valid completion policy (see the refusal above); correct data/projects.md and spawn again" >&2
+      exit 1
+    fi
+    if [ "$COMPLETION_POLICY_SET" -eq 1 ]; then
+      COMPLETION_POLICY=$COMPLETION_POLICY_ARG
+    else
+      COMPLETION_POLICY=$REGISTERED_COMPLETION_POLICY
+    fi
+  fi
   # The parser's own refusal reaches the operator here rather than being
   # discarded: an entry it refuses (an unknown forge token, or a forge on
   # local-only) resolves to no posture at all, and launching on the silent
@@ -2937,6 +2989,14 @@ if [ "$KIND" = ship ]; then
     exit 1
   fi
   [ -n "$STANDING_FORGE" ] || STANDING_FORGE=none
+  if [ "$RELAUNCH" -eq 1 ]; then
+    case "$COMPLETION_POLICY" in
+      ''|landed|verified-production) ;;
+      *) echo "error: task $ID has unknown recorded completion policy '$COMPLETION_POLICY'; refusing relaunch" >&2; exit 1 ;;
+    esac
+  else
+    fm_completion_policy_supported "$COMPLETION_POLICY" "$MODE" "$PROJ_ABS" "$STANDING_FORGE" "task $ID cannot launch" || exit 1
+  fi
   STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   BRIEF_FORGE=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]forge=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
@@ -4675,7 +4735,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo completion_policy branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4690,6 +4750,10 @@ preserve_relaunch_meta() {
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
+  # A legacy ship record with no policy must stay absent on relaunch so the
+  # explicit one-time capture command can still bind it during activation.
+  # Fresh ship spawns always resolve a non-empty registered/default policy.
+  [ "$KIND" != ship ] || [ -z "$COMPLETION_POLICY" ] || echo "completion_policy=$COMPLETION_POLICY"
   [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
