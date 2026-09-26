@@ -258,6 +258,8 @@ JSON
   expect_code 1 $? "a project that already declined external imports must be refused: $out"
   assert_contains "$out" "declined external CLAUDE.md imports" \
     "the refusal did not name the declined-consent reason"
+  assert_contains "$out" "approve the imports dialog interactively" \
+    "the refusal did not name the recovery"
   after=$(cat "$store")
   [ "$before" = "$after" ] || fail "the store was modified despite the refusal"
   assert_not_trusted "$store" "$WT" "the worktree entry was registered despite the refusal"

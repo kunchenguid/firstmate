@@ -303,9 +303,9 @@ Both choices are local to each Firstmate home and are not part of secondmate inh
 The optional local, gitignored `config/supervision-host` enables a supervision host for this home.
 The host runs the supervision branch's contract on a headless engine session beside a non-Pi primary.
 [docs/supervision-host.md](supervision-host.md) defines its design, current scope, and verified engines.
-A Claude, Cursor, OpenCode, omp, Grok, or Codex primary can run the host, only while away.
+A Claude, Cursor, OpenCode, omp, Grok, or Codex primary can run the host.
 With the file present, the primary's arm owner runs the host in place of the watcher arm.
-The host handles wakes on the engine while `state/.afk-contract` exists.
+The host handles wakes on the engine while `state/.afk-contract` exists, and also while attended on a Claude or Cursor primary, whose dialog mirror is verified ([supervision-host.md](supervision-host.md#postures)).
 On that home, `/afk` launches no away daemon; `/quiet` still does.
 The file also gates the primary's dialog-mirror hooks (`bin/fm-host-mirror.sh`), which record on a Claude or Cursor primary ([supervision-host.md](supervision-host.md#the-dialog-mirror)).
 
@@ -1316,7 +1316,8 @@ This section is the single owner of the canonical schema.
 **Entry fields and probe behavior**
 
 - Each entry needs a `name` and at least one of `command` or `git`; an entry may carry both.
-- A `command` entry gives the `PATH` comparison above, and adding `announce_pattern` also reports the tool's own update announcement, which is how a tool that already reports its own updates is read rather than reimplemented.
+- A `command` entry gives the `PATH` comparison above, and adding `announce_pattern` also reads the tool's own update announcement, which is how a tool that already reports its own updates is read rather than reimplemented.
+- The announcement counts as `update available` only when the version it names is newer than the newest installed copy found; a version already installed is reported only as `update not in effect`, so one completed install does not report both in the same sweep. An announcement naming no readable version is reported as an available update as before.
 - A tool does not always announce a new release on the command that prints its version: `no-mistakes --version` prints only the version, while its other commands carry the announcement.
 - `announce_args` names the command to search for the announcement in that case, and it is asked only of the copy `PATH` resolves; without it the version probe's own output is searched.
 - An `announce_pattern` that is not a usable extended regular expression stops `arm`, and during a sweep it is reported as that one tool's own check failure so one broken pattern never stops the other watched tools from being checked.

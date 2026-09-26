@@ -654,11 +654,22 @@ _fm_atomic_replace() {
 }
 
 _fm_recovery_marker_write_locked() {
-  local marker=$1 kind=$2 generation=${3:-} status=${4:-pending} tmp
+  # Mint and write with sequential assignments only: two sibling $() on one
+  # command is a bash 5.2 parse-error landmine when a CHLD trap is set
+  # (regression: test_recovery_mint_and_delivery_log_avoid_sibling_subst in
+  # tests/fm-wake-queue.test.sh).
+  # Pid/date failures stay unchecked like the pre-fix sibling assignment so a
+  # grammar-valid token is still minted and the durable wake row still appends.
+  local marker=$1 kind=$2 generation=${3:-} status=${4:-pending} tmp pid epoch
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   case "$status" in pending|announced) ;; *) return 1 ;; esac
   tmp=$(mktemp "${marker}.tmp.XXXXXX") || return 1
-  [ -n "$generation" ] || generation="$(fm_current_pid).$(date +%s).${tmp##*.}"
+  if [ -z "$generation" ]; then
+    # Prefer fm_current_pid's output-var form so the pid is not itself a $().
+    fm_current_pid pid
+    epoch=$(date +%s)
+    generation="${pid}.${epoch}.${tmp##*.}"
+  fi
   if ! printf '%s:%s:%s\n' "$status" "$kind" "$generation" > "$tmp" \
     || ! chmod 0600 "$tmp" \
     || ! _fm_atomic_replace "$tmp" "$marker"; then
