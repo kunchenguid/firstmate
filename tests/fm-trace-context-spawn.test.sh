@@ -419,7 +419,7 @@ test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
 }
 
 test_relaunch_reuses_recorded_carrier() {
-  local rec out status meta first second injected
+  local rec out status meta first second injected status_file status_lines
   rec=$(make_spawn_case tc-relaunch)
   read_case_record "$rec"
   : > "$HOME_DIR/config/trace-context"
@@ -444,7 +444,17 @@ test_relaunch_reuses_recorded_carrier() {
   injected=$(injected_traceparent "$LAUNCH_LOG")
   [ "$second" = "$first" ] || fail "relaunch must reuse the recorded carrier in meta (first='$first' second='$second')"
   [ "$injected" = "$first" ] || fail "relaunch must inject the same recorded carrier (first='$first' injected='$injected')"
-  pass "relaunch reuses the recorded carrier verbatim for both the meta record and the injected export"
+  status_file="$HOME_DIR/state/$CASE_ID.status"
+  status_lines=$(wc -l <"$status_file")
+  [ "$status_lines" -eq 1 ] || fail "relaunch must preserve existing status history without appending an initial line"
+  rm "$status_file"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "relaunch with an empty status file should succeed"
+  [ -s "$status_file" ] || fail "relaunch must seed an empty status file before the worker starts"
+  status_line=$(cat "$status_file")
+  [[ "$status_line" =~ ^working\ \[at=[1-9][0-9]*\]:\ spawned$ ]] || fail "relaunch should seed a well-formed initial status line"
+  pass "relaunch reuses the recorded carrier and maintains its status log"
 }
 
 test_session_start_freezes_env_override_and_ignores_later_edits() {

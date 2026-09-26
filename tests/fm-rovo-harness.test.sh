@@ -291,7 +291,7 @@ test_rovo_readiness_gate_precedes_pointer() {
   [ "$rc" -ne 0 ] || fail "rovo spawn without a ready signal should fail"
   assert_contains "$out" "rovo did not show a verified ready signal" \
     "rovo readiness failure lacked a loud diagnostic"
-  line=$(cat "$HOME_DIR/state/$id.status")
+  line=$(tail -n 1 "$HOME_DIR/state/$id.status")
   [ "$(status_line_verb "$line")" = failed ] || fail "rovo readiness failure lost its failed verb"
   assert_contains "$(status_line_note "$line")" 'rovo did not show a verified ready signal' \
     "rovo readiness failure did not leave a supervisor-visible failure"
@@ -320,7 +320,7 @@ test_rovo_unconfirmed_delivery_fails_loudly() {
   [ -n "$pointer" ] || fail "rovo never typed the pointer before the delivery gate"
   assert_contains "$out" "rovo brief pointer delivery was not confirmed" \
     "unconfirmed rovo delivery lacked a loud diagnostic"
-  [ "$(status_line_verb "$(cat "$HOME_DIR/state/$id.status")")" = failed ] \
+  [ "$(status_line_verb "$(tail -n 1 "$HOME_DIR/state/$id.status")")" = failed ] \
     || fail "unconfirmed rovo delivery lost its failed verb"
   assert_contains "$(status_line_note "$(cat "$HOME_DIR/state/$id.status")")" 'rovo brief pointer delivery was not confirmed' \
     "unconfirmed rovo delivery did not leave a supervisor-visible failure"

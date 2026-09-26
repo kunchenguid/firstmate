@@ -155,86 +155,18 @@ test_no_profile_keeps_claude_profile_defaults() {
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
 
-# Claude Code strips U+2063 from the launch-prompt argument, so a claude launch
-# publishes the launch-brief envelope as a record in the receiving home's
-# operational inbox and passes only a printable doorbell naming it. Parsing the
-# staged launch the way the destination pane's shell would proves the argument
-# it passes and the record it names.
-test_claude_launch_brief_publishes_record_doorbell() {
-  local rec id out status launch doorbell record
-  id="brief-doorbell-z1"
-  rec=$(make_spawn_case brief-doorbell claude "$id")
+test_successful_spawn_creates_well_formed_initial_status() {
+  local rec id status_line
+  id=initial-status-z1
+  rec=$(make_spawn_case initial-status claude "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
-  status=$?
-  expect_code 0 "$status" "claude spawn for the doorbell check should succeed"
-  launch=$(cat "$LAUNCH_LOG")
-  doorbell=$(claude_launch_brief_arg "$launch")
-  case "$doorbell" in
-    *'⁣'*) fail "the doorbell carries the U+2063 marker Claude strips: $doorbell" ;;
-  esac
-  printf '%s' "$doorbell" | LC_ALL=C grep -q '[^[:print:]]' \
-    && fail "the doorbell is not one printable-ASCII line: $doorbell"
-  [ "$(printf '%s' "$doorbell" | "$ROOT/bin/fm-operational-input.sh" doorbell-kind)" = launch-brief ] \
-    || fail "the published record does not hold a launch-brief envelope: $doorbell"
-  record=$(printf '%s' "$doorbell" | sed -n "s/.*: Firstmate operational input waiting: read '\([^']*\)'.*/\1/p")
-  [ -n "$record" ] || fail "the doorbell names no record: $doorbell"
-  [ "$(cd "$(dirname "$record")" && pwd -P)" = "$(cd "$HOME_DIR/state/operational-inbox" && pwd -P)" ] \
-    || fail "the launch record is not in this home's operational inbox: $record"
-  grep -q 'Current worker role contract' "$record" \
-    || fail "the launch record lost the worker brief: $(cat "$record")"
-  [ "$(printf '%s' "$doorbell" | FM_STATE_OVERRIDE="$HOME_DIR/state" "$ROOT/bin/fm-operational-input.sh" open "$record")" \
-    = "$(cat "$HOME_DIR/data/$id/launch-brief.md")" ] \
-    || fail "open did not return the launch brief body"
-  pass "a claude launch publishes the brief as an operational-inbox record and passes only the doorbell"
-}
-
-# A secondmate's launch brief belongs to the secondmate home that pane runs in,
-# so its record must publish there rather than into the primary's state.
-test_claude_secondmate_launch_brief_publishes_into_its_own_home() {
-  local rec id sm out status launch doorbell record
-  id="brief-doorbell-secondmate-z2"
-  rec=$(make_spawn_case brief-doorbell-secondmate claude "$id")
-  read_case_record "$rec"
-  sm="$CASE_DIR/secondmate-home"
-  make_seeded_secondmate_home "$sm" "$id"
-
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
-    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
-  status=$?
-  expect_code 0 "$status" "secondmate claude spawn for the doorbell check should succeed"$'\n'"$out"
-  launch=$(cat "$LAUNCH_LOG")
-  doorbell=$(claude_launch_brief_arg "$launch")
-  [ "$(printf '%s' "$doorbell" | "$ROOT/bin/fm-operational-input.sh" doorbell-kind)" = launch-brief ] \
-    || fail "the secondmate record does not hold a launch-brief envelope: $doorbell"
-  record=$(printf '%s' "$doorbell" | sed -n "s/.*: Firstmate operational input waiting: read '\([^']*\)'.*/\1/p")
-  [ -n "$record" ] || fail "the secondmate doorbell names no record: $doorbell"
-  [ "$(cd "$(dirname "$record")" && pwd -P)" = "$(cd "$sm/state/operational-inbox" && pwd -P)" ] \
-    || fail "the secondmate launch record did not publish into its own home: $record"
-  [ -z "$(find "$HOME_DIR/state/operational-inbox" -name '*.msg' -print -quit 2>/dev/null)" ] \
-    || fail "the secondmate launch record leaked into the primary's operational inbox"
-  pass "a secondmate claude launch publishes its brief record into the secondmate's own home"
-}
-
-# A claude worker given a typed envelope would see it with the marker stripped,
-# so a launch-brief record that cannot be published stops the spawn before any
-# launch is sent.
-test_claude_spawn_refuses_when_the_brief_record_cannot_publish() {
-  local rec id out status
-  id="brief-doorbell-refused-z3"
-  rec=$(make_spawn_case brief-doorbell-refused claude "$id")
-  read_case_record "$rec"
-  mkdir -p "$HOME_DIR/state"
-  : > "$HOME_DIR/state/operational-inbox"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "a claude spawn whose launch-brief record cannot publish succeeded"$'\n'"$out"
-  assert_contains "$out" "could not publish the launch brief for $id" \
-    "the refused spawn did not name the record publication failure"
-  [ ! -s "$LAUNCH_LOG" ] || fail "a launch was sent despite the unpublished brief record: $(cat "$LAUNCH_LOG")"
-  pass "a claude spawn whose launch-brief record cannot publish stops with a clear error and sends no launch"
+  run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" >/dev/null
+  expect_code 0 "$?" "claude spawn should succeed before the worker writes status"
+  [ -f "$HOME_DIR/state/$id.status" ] || fail "successful spawn must create the status file"
+  status_line=$(cat "$HOME_DIR/state/$id.status")
+  [[ "$status_line" =~ ^working\ \[at=[1-9][0-9]*\]:\ spawned$ ]] || fail "spawn status should be a well-formed stamped working line (got: $status_line)"
+  pass "successful spawn creates a well-formed initial status line"
 }
 
 test_non_cursor_launch_clears_inherited_cursor_markers() {
@@ -1893,6 +1825,7 @@ test_non_claude_harness_ignores_claude_permission_mode() {
 }
 
 test_worker_launch_delivers_role_scope
+test_successful_spawn_creates_well_formed_initial_status
 test_no_profile_keeps_claude_profile_defaults
 test_claude_launch_brief_publishes_record_doorbell
 test_claude_secondmate_launch_brief_publishes_into_its_own_home

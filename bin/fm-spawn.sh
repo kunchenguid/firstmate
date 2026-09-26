@@ -5419,6 +5419,12 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
+if [ ! -s "$STATE/$ID.status" ]; then
+  if ! printf '%s\n' "$(status_stamp_line 'working: spawned')" >>"$STATE/$ID.status"; then
+    echo "error: task $ID was staged for launch, but its initial status line could not be written to $STATE/$ID.status" >&2
+    exit 1
+  fi
+fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
