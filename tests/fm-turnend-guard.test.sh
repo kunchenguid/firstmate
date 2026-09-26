@@ -2186,6 +2186,162 @@ test_hook_no_afk_ignores_poll_derived_grace() {
   pass "fm-turnend-guard: with away mode off, the poll-derived grace never applies"
 }
 
+# --- EXTENSION MODEL: the watch extension owns supervision -------------------
+#
+# On an extension-model primary (pi, pi-signed, omp) the watch extension retires
+# the watcher on EVERY actionable wake and spawns the replacement itself, so the
+# singleton lock is legitimately unheld between cycles and a turn boundary
+# regularly lands in that hand-off with nothing wrong. The guard must accept a
+# proven live extension pair there, and must keep blocking on every genuine
+# lapse: a stale beacon, a marker that does not match the on-disk build, a
+# missing half of the pair, a dead session-lock owner, and - unlike away mode -
+# a watcher lock that IS held but unhealthy, which stays on the strict path.
+
+extension_version() {  # <dir> <file>
+  local dir=$1 file=$2
+  FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pi_extension_version "$2"' \
+    _ "$dir/bin/fm-wake-lib.sh" "$file"
+}
+
+# Record the Pi extension pair the way the extensions do at load time: each
+# marker names its extension build's version hash plus the session-lock pid that
+# loaded it, and state/.lock names that same session process.
+record_pi_extension_pair() {  # <dir> <session-pid> [watch-marker-version-override]
+  local dir=$1 pid=$2 override=${3:-} version
+  local ext="$dir/.pi/extensions"
+  mkdir -p "$ext"
+  printf 'watch extension build\n' > "$ext/fm-primary-pi-watch.ts"
+  printf 'turn-end guard extension build\n' > "$ext/fm-primary-turnend-guard.ts"
+  printf '%s\n' "$pid" > "$dir/state/.lock"
+  version=${override:-$(extension_version "$dir" "$ext/fm-primary-pi-watch.ts")}
+  printf '%s\n%s\n' "$version" "$pid" > "$dir/state/.pi-watch-extension-loaded"
+  printf '%s\n%s\n' "$(extension_version "$dir" "$ext/fm-primary-turnend-guard.ts")" "$pid" \
+    > "$dir/state/.pi-turnend-extension-loaded"
+}
+
+# An extension-model home mid-watcher-cycle: work in flight, a fresh beacon from
+# the watcher that just exited, and NO watcher lock at all.
+make_extension_home_between_cycles() {  # <dir-path>
+  local dir=$1
+  dir=$(make_primary_dir "$dir")
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"
+  printf '%s\n' "$dir"
+}
+
+test_hook_extension_allows_between_watcher_cycles() {
+  local dir pid out status
+  dir=$(make_extension_home_between_cycles "$TMP_ROOT/hook-ext-live")
+  sleep 60 &
+  pid=$!
+  record_pi_extension_pair "$dir" "$pid"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "a proven live extension pair must not block between watcher cycles"
+  [ -z "$out" ] || fail "extension ownership still produced a block banner: $out"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "--claude must honor the same extension ownership proof"
+  [ -z "$out" ] || fail "--claude extension ownership still produced a block banner: $out"
+  pass "fm-turnend-guard: a live extension pair satisfies supervision with no watcher holding the lock"
+}
+
+test_hook_extension_blocks_on_stale_beacon() {
+  local dir pid out status beat
+  dir=$(make_extension_home_between_cycles "$TMP_ROOT/hook-ext-stale-beacon")
+  sleep 60 &
+  pid=$!
+  record_pi_extension_pair "$dir" "$pid"
+  beat=$(( $(date +%s) - 7200 ))
+  fm_touch_epoch "$beat" "$dir/state/.last-watcher-beat"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "extension ownership must not survive a beacon past grace"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: a cycle the extension never restored still blocks once the beacon is stale"
+}
+
+test_hook_extension_blocks_on_drifted_marker() {
+  local dir pid out status
+  dir=$(make_extension_home_between_cycles "$TMP_ROOT/hook-ext-drift")
+  sleep 60 &
+  pid=$!
+  # The marker records a build this checkout no longer carries, which is what a
+  # session running a version-drifted extension looks like on disk.
+  record_pi_extension_pair "$dir" "$pid" "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a marker that does not match the on-disk build must prove nothing"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: a version-drifted extension marker never satisfies supervision"
+}
+
+test_hook_extension_blocks_on_missing_half_of_pair() {
+  local dir pid out status
+  dir=$(make_extension_home_between_cycles "$TMP_ROOT/hook-ext-half-pair")
+  sleep 60 &
+  pid=$!
+  record_pi_extension_pair "$dir" "$pid"
+  # The turn-end guard extension is the structural backstop, so a home carrying
+  # only the watch extension has no benign hand-off to tolerate.
+  rm -f "$dir/state/.pi-turnend-extension-loaded"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "half a loaded extension pair must not satisfy supervision"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: both primary extensions are required before a hand-off is tolerated"
+}
+
+test_hook_extension_blocks_on_dead_session_owner() {
+  local dir dead out status
+  dir=$(make_extension_home_between_cycles "$TMP_ROOT/hook-ext-dead-owner")
+  dead=$(nonexistent_pid)
+  record_pi_extension_pair "$dir" "$dead"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "an exited session cannot vouch for continuity it no longer owns"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: extension ownership dies with the session that recorded it"
+}
+
+test_hook_extension_blocks_on_held_but_unhealthy_lock() {
+  local dir pid dead out status
+  dir=$(make_extension_home_between_cycles "$TMP_ROOT/hook-ext-held-unhealthy")
+  sleep 60 &
+  pid=$!
+  record_pi_extension_pair "$dir" "$pid"
+  # Unlike the away-mode daemon branch, the extension tolerance covers a
+  # GENUINELY unheld lock only: a lock recording a pid stays on the strict
+  # watcher path, so a dead watcher lock the extension failed to clear blocks.
+  dead=$(nonexistent_pid)
+  record_watcher_lock "$dir" "$dead" "dead watcher identity"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a held but unhealthy watcher lock must stay on the strict predicate"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: extension tolerance covers an unheld lock only, never an unhealthy held one"
+}
+
+test_hook_extension_markers_ignored_without_a_pair_on_disk() {
+  local dir pid out status
+  dir=$(make_extension_home_between_cycles "$TMP_ROOT/hook-ext-no-files")
+  sleep 60 &
+  pid=$!
+  record_pi_extension_pair "$dir" "$pid"
+  # Markers alone prove nothing: the version is read from the checkout's own
+  # extension build, so a home with no extensions cannot satisfy the proof.
+  rm -rf "$dir/.pi"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "state markers must never stand in for an extension build on disk"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: an unloaded extension checkout is loud immediately"
+}
+
 test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
@@ -2275,3 +2431,10 @@ test_hook_away_daemon_allows_beacon_within_poll_derived_grace
 test_hook_away_daemon_blocks_dead_daemon_despite_poll_derived_grace
 test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace
 test_hook_no_afk_ignores_poll_derived_grace
+test_hook_extension_allows_between_watcher_cycles
+test_hook_extension_blocks_on_stale_beacon
+test_hook_extension_blocks_on_drifted_marker
+test_hook_extension_blocks_on_missing_half_of_pair
+test_hook_extension_blocks_on_dead_session_owner
+test_hook_extension_blocks_on_held_but_unhealthy_lock
+test_hook_extension_markers_ignored_without_a_pair_on_disk
