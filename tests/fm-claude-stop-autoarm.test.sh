@@ -203,6 +203,27 @@ printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
 exit 0
 SH
       ;;
+    continuity-park)
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
+printf '%s\n' "${FM_WATCH_CONTINUITY_REARM:-unset}" > "$FM_HOME/state/continuity-rearm"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "${FM_WATCH_CONTINUITY_REARM:-0}" != 1 ]; then
+  printf 'check: rearm-resurface\n'
+  exit 0
+fi
+while [ ! -e "$FM_HOME/state/arm-release" ]; do sleep 0.05; done
+exit 0
+SH
+      ;;
+    real-check)
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'check: fixture-real\n'
+exit 0
+SH
+      ;;
     attached-delivered)
       cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
@@ -1543,6 +1564,57 @@ test_host_crash_is_retried_then_reported() {
   pass "auto-arm: a host that died without a close is retried, then reported as a failure"
 }
 
+# The foreground Stop arm is a continuity re-arm. An announced episode must not
+# come back as check: rearm-resurface, and the hook keeps waiting instead of
+# exiting 2. A missing switch makes this fixture emit that line, which is the
+# wake the hook must not manufacture.
+test_announced_continuity_rearm_does_not_rewake() {
+  local dir i
+  dir=$(make_primary_dir "$TMP_ROOT/continuity-announced")
+  : > "$dir/state/task.meta"
+  printf 'announced:downtime:fixture-generation\n' > "$dir/state/.watcher-down"
+  write_arm_fixture "$dir" continuity-park
+  run_autoarm_bg "$dir" "$dir/state/hook.out"
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ "$(cat "$dir/state/continuity-rearm" 2>/dev/null || true)" = 1 ] && break
+    kill -0 "$RUN_AUTOARM_BG_PID" 2>/dev/null || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$(cat "$dir/state/continuity-rearm" 2>/dev/null || true)" = 1 ] \
+    || fail "the foreground arm did not observe the continuity re-arm switch: $(cat "$dir/state/continuity-rearm" 2>/dev/null || true)"
+  kill -0 "$RUN_AUTOARM_BG_PID" 2>/dev/null \
+    || fail "auto-arm exited instead of waiting on an already-announced episode: $(cat "$dir/state/hook.out")"
+  sleep 0.4
+  kill -0 "$RUN_AUTOARM_BG_PID" 2>/dev/null \
+    || fail "auto-arm exited 2 while the announced episode stayed quiet: $(cat "$dir/state/hook.out")"
+  ! grep -F 'check: rearm-resurface' "$dir/state/hook.out" >/dev/null 2>&1 \
+    || fail "auto-arm delivered check: rearm-resurface for an announced episode: $(cat "$dir/state/hook.out")"
+  ! grep -F 'firstmate watcher wake' "$dir/state/hook.out" >/dev/null 2>&1 \
+    || fail "auto-arm woke the model for an announced episode: $(cat "$dir/state/hook.out")"
+  : > "$dir/state/arm-release"
+  wait "$RUN_AUTOARM_BG_PID" 2>/dev/null || true
+  ! grep -F 'check: rearm-resurface' "$dir/state/hook.out" >/dev/null 2>&1 \
+    || fail "auto-arm delivered check: rearm-resurface after the quiet park: $(cat "$dir/state/hook.out")"
+  ! grep -F 'firstmate watcher wake' "$dir/state/hook.out" >/dev/null 2>&1 \
+    || fail "auto-arm woke the model after the quiet park: $(cat "$dir/state/hook.out")"
+  pass "auto-arm: an announced episode on a continuity re-arm does not wake the model"
+}
+
+test_real_check_still_rewakes() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/real-check")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" real-check
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a real check must still rewake"
+  assert_contains "$out" "check: fixture-real" "the rewake must carry the real check"
+  ! grep -F 'check: rearm-resurface' <<<"$out" >/dev/null \
+    || fail "a real check was reported as a recovery resurface: $out"
+  pass "auto-arm: a real check still wakes the model"
+}
+
 test_fm_lock_status_still_works_with_shared_lib() {
   local out
   out=$(FM_HOME="$TMP_ROOT/lock-status-home" bash "$ROOT/bin/fm-lock.sh" status 2>&1)
@@ -1601,5 +1673,7 @@ test_plain_arm_banner_keeps_its_wake_line_cap
 test_host_handback_carries_every_host_line
 test_host_stand_down_is_silent
 test_host_crash_is_retried_then_reported
+test_announced_continuity_rearm_does_not_rewake
+test_real_check_still_rewakes
 test_fm_lock_status_still_works_with_shared_lib
 test_stands_down_only_on_pi_code_transcript_path

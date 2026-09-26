@@ -863,10 +863,10 @@ _fm_recovery_marker_arm_check() {
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 }
 
-# A non-successor watcher start after an announced-but-unacked episode is a new
-# down stretch: mint a fresh pending generation so a still-open decision or
-# buried note can be presented once more. Handling successors must not call
-# this, because Option B re-arm is not a new down stretch.
+# Mint a fresh pending generation from an announced-but-unacked episode.
+# A handling successor must not call this, and neither must a continuity re-arm:
+# neither start is a new down stretch.
+# docs/watcher-continuity.md owns the recovery-episode contract.
 _fm_recovery_marker_reopen_announced() {
   local marker=$1 lock
   lock="${marker}.lock"

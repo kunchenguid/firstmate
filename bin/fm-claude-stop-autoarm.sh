@@ -315,10 +315,12 @@ trap 'handle_autoarm_signal INT' INT
 ARM_PID=
 CLOSED_ARM_PID=
 run_arm() {  # <output file, or empty for none>
+  # This foreground arm is a continuity re-arm, so the watcher must observe
+  # FM_WATCH_CONTINUITY_REARM. docs/watcher-continuity.md owns that contract.
   if [ -n "$1" ]; then
-    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >"$1" 2>&1 &
+    FM_WATCH_CONTINUITY_REARM=1 FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >"$1" 2>&1 &
   else
-    FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 &
+    FM_WATCH_CONTINUITY_REARM=1 FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 &
   fi
   ARM_PID=$!
   wait "$ARM_PID" || true

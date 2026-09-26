@@ -2399,7 +2399,10 @@ WATCHER_RECOVERY_PENDING=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
-if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ]; then
+# A continuity re-arm is not a new down stretch, so it must not reopen an
+# announced episode. docs/watcher-continuity.md owns that rule.
+# A handling successor is separate and also skips this reopen.
+if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ] && [ "${FM_WATCH_CONTINUITY_REARM:-0}" != 1 ]; then
   if ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER"; then
     echo "watcher: recovery state could not be reopened safely; retaining stale lock evidence" >&2
     exit 1
@@ -2413,6 +2416,10 @@ if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
   WATCHER_RECOVERY_PENDING=0
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
+elif [ "${FM_WATCH_CONTINUITY_REARM:-0}" = 1 ]; then
+  # A reclaimed dead lock is not a new down stretch on this start.
+  # A still-pending episode already took the recover branch above.
+  WATCHER_RECOVERY_PENDING=0
 fi
 # Side-band ledger publication, detached from the poll loop.
 #

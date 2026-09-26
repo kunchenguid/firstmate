@@ -181,6 +181,73 @@ start_rearm_arm() {  # <home> <state> <fakebin> <arm-out> [predecessor-arm-pid]
   return 0
 }
 
+# Same arm as start_rearm_arm, with the continuity re-arm switch the Stop hook
+# and the Cursor park set. The switch is on the arm invocation: the watcher
+# has to observe it through that process, not through a direct env prefix.
+start_continuity_rearm() {  # <home> <state> <fakebin> <arm-out>
+  local home=$1 state=$2 fakebin=$3 armout=$4 i
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
+    FM_WATCH_CONTINUITY_REARM=1 \
+    "$WATCH_ARM" --restart > "$armout" &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt "$REARM_REPORT_POLLS" ]; do
+    grep -q '^watcher: started ' "$armout" 2>/dev/null && return 0
+    is_live_non_zombie "$ARM_PID" || return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 0
+}
+
+rearm_line_count() {  # <arm-out>
+  grep -cF 'check: rearm-resurface' "$1" 2>/dev/null || true
+}
+
+beacon_mtime() {  # <path>
+  if [ "$(uname)" = Darwin ]; then
+    /usr/bin/stat -f %m "$1" 2>/dev/null || true
+  else
+    stat -c %Y "$1" 2>/dev/null || true
+  fi
+}
+
+# 0: still live after the beacon advanced, and no recovery announcement.
+# 1: the arm exited or printed check: rearm-resurface.
+# 2: still inside the first poll when the wait expired.
+wait_for_quiet_second_poll() {  # <state> <arm-pid> <arm-out>
+  local state=$1 arm=$2 armout=$3 beat before now i
+  beat="$state/.last-watcher-beat"
+  before=
+  i=0
+  while [ "$i" -lt "$REARM_EXIT_POLLS" ]; do
+    if grep -F 'check: rearm-resurface' "$armout" >/dev/null 2>&1; then
+      return 1
+    fi
+    if ! is_live_non_zombie "$arm"; then
+      return 1
+    fi
+    now=$(beacon_mtime "$beat")
+    if [ -z "$before" ] && [ -n "$now" ]; then
+      before=$now
+    elif [ -n "$before" ] && [ -n "$now" ] && [ "$now" != "$before" ]; then
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 2
+}
+
+stop_live_arm() {  # <pid>
+  if is_live_non_zombie "$1"; then
+    kill -TERM "$1" 2>/dev/null || true
+    wait "$1" 2>/dev/null || true
+  fi
+}
+
 test_attached_arm_reports_the_delivered_wake() {
   local dir state fakebin out armout status
   dir=$(make_case attached-delivered-wake)
@@ -1068,6 +1135,97 @@ test_watcher_exits_when_its_home_is_removed() {
   pass "watch-arm: a watcher exits when its home is removed"
 }
 
+# A continuity re-arm announces a still-pending episode once, then the next
+# continuity re-arm leaves that announced generation alone and stays in the poll.
+test_continuity_rearm_announces_a_pending_episode_once() {
+  local dir home state fakebin generation count quiet
+  dir=$(make_case continuity-pending)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  generation=fixture-generation
+  mkdir -p "$home/data"
+  printf 'pending:downtime:%s\n' "$generation" > "$state/.watcher-down"
+
+  start_continuity_rearm "$home" "$state" "$fakebin" "$dir/first.out"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" \
+    || fail "a pending episode on a continuity re-arm did not announce: $(cat "$dir/first.out")"
+  count=$(rearm_line_count "$dir/first.out")
+  [ "$count" = 1 ] \
+    || fail "a pending continuity re-arm announced $count times: $(cat "$dir/first.out")"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "announced:downtime:$generation" ] \
+    || fail "the pending episode was not marked announced on its own generation: $(cat "$state/.watcher-down" 2>/dev/null || true)"
+
+  start_continuity_rearm "$home" "$state" "$fakebin" "$dir/second.out"
+  quiet=0
+  wait_for_quiet_second_poll "$state" "$ARM_PID" "$dir/second.out" || quiet=$?
+  [ "$quiet" -eq 0 ] \
+    || fail "the next continuity re-arm announced again or died (rc=$quiet): $(cat "$dir/second.out")"
+  count=$(rearm_line_count "$dir/second.out")
+  [ "$count" = 0 ] \
+    || fail "the next continuity re-arm printed check: rearm-resurface: $(cat "$dir/second.out")"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "announced:downtime:$generation" ] \
+    || fail "the next continuity re-arm minted a generation: $(cat "$state/.watcher-down" 2>/dev/null || true)"
+  is_live_non_zombie "$ARM_PID" \
+    || fail "the next continuity re-arm did not stay alive"
+  stop_live_arm "$ARM_PID"
+  pass "watch-arm: a continuity re-arm announces a pending episode once and the next one stays quiet"
+}
+
+# An episode that is already announced is not a new down stretch on a continuity re-arm.
+test_continuity_rearm_leaves_an_announced_episode_quiet() {
+  local dir home state fakebin generation count quiet
+  dir=$(make_case continuity-announced)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  generation=fixture-generation
+  mkdir -p "$home/data"
+  printf 'announced:downtime:%s\n' "$generation" > "$state/.watcher-down"
+
+  start_continuity_rearm "$home" "$state" "$fakebin" "$dir/arm.out"
+  quiet=0
+  wait_for_quiet_second_poll "$state" "$ARM_PID" "$dir/arm.out" || quiet=$?
+  [ "$quiet" -eq 0 ] \
+    || fail "an announced continuity re-arm announced or died (rc=$quiet): $(cat "$dir/arm.out")"
+  count=$(rearm_line_count "$dir/arm.out")
+  [ "$count" = 0 ] \
+    || fail "an announced continuity re-arm printed check: rearm-resurface: $(cat "$dir/arm.out")"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "announced:downtime:$generation" ] \
+    || fail "an announced continuity re-arm changed the episode: $(cat "$state/.watcher-down" 2>/dev/null || true)"
+  is_live_non_zombie "$ARM_PID" \
+    || fail "an announced continuity re-arm did not stay alive"
+  stop_live_arm "$ARM_PID"
+  pass "watch-arm: a continuity re-arm of an announced episode stays in the poll"
+}
+
+# Without the switch, a later non-successor start is still a new down stretch.
+test_ordinary_rearm_still_announces_an_announced_episode() {
+  local dir home state fakebin generation count marker
+  dir=$(make_case ordinary-announced-rearm)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  generation=fixture-generation
+  mkdir -p "$home/data"
+  printf 'announced:downtime:%s\n' "$generation" > "$state/.watcher-down"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/arm.out"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" \
+    || fail "an ordinary re-arm of an announced episode did not announce: $(cat "$dir/arm.out")"
+  count=$(rearm_line_count "$dir/arm.out")
+  [ "$count" = 1 ] \
+    || fail "an ordinary re-arm announced $count times: $(cat "$dir/arm.out")"
+  marker=$(cat "$state/.watcher-down" 2>/dev/null || true)
+  case "$marker" in
+    announced:downtime:*) ;;
+    *) fail "an ordinary re-arm did not leave the new episode announced: $marker" ;;
+  esac
+  [ "$marker" != "announced:downtime:$generation" ] \
+    || fail "an ordinary re-arm reused the announced generation: $marker"
+  pass "watch-arm: an ordinary non-successor start still announces an announced episode once"
+}
+
 # tests/lib.sh's exit-time reaper must stop a watcher a suite armed for a
 # temporary home, through the home-scoped stop, so no test leaves one behind.
 # The reaper is driven with a private registry so this suite's own registry
@@ -1109,3 +1267,6 @@ test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink
 test_stop_ends_the_home_watcher_and_publishes_downtime
+test_continuity_rearm_announces_a_pending_episode_once
+test_continuity_rearm_leaves_an_announced_episode_quiet
+test_ordinary_rearm_still_announces_an_announced_episode

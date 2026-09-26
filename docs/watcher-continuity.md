@@ -212,7 +212,13 @@ It is retired only by the generation-bound acknowledgement the drain prints as `
 
 An unacknowledged downtime generation is announced at most once.
 The first recovery marks that generation announced, and later arms wait until a new down stretch mints a new generation.
-A non-successor watcher start after an announced-but-unacked episode is a new down stretch.
+A continuity re-arm is not a new down stretch.
+Claude's Stop hook sets `FM_WATCH_CONTINUITY_REARM` on its foreground turn-end arm, and Cursor's park sets it on the watcher arm it parks.
+That start does not mint a generation from an announced episode, so the watcher stays in its poll loop and prints no `check: rearm-resurface`.
+A still-pending episode is announced exactly once on a continuity re-arm, and the next continuity re-arm does not announce it again.
+A handling successor is not a continuity re-arm.
+Its flag also suppresses that first announcement, which is why the two starts stay separate.
+A non-successor watcher start that is not a continuity re-arm, after an announced-but-unacked episode, is a new down stretch.
 It mints a fresh generation so buried decisions still resurface once.
 
 ### Generation reuse
