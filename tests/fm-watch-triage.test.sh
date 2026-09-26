@@ -899,6 +899,64 @@ test_turn_ended_provably_working_absorbed() {
   pass "a bare turn-end whose crew is provably working (busy pane) is absorbed"
 }
 
+# A changed turn-end is observed first, then deleted or restored to its
+# already-reported timestamp during the real 30-second grace.
+# Both first-scan signals must still wake.
+run_turnend_grace_case() (
+  local name=$1 dir state marker watcher i trace out
+  dir="$TMP_ROOT/grace-turnend-$name"; state="$dir/state"; marker="$state/unit.turn-ended"
+  mkdir -p "$state" "$dir/config" "$dir/fakebin"
+  printf '#!/bin/sh\nexit 0\n' > "$dir/fakebin/tmux"
+  printf '#!/bin/sh\nprintf "state: unknown · source: none · no current-state source available\\n"\n' \
+    > "$dir/fakebin/fm-crew-state.sh"
+  chmod +x "$dir/fakebin/tmux" "$dir/fakebin/fm-crew-state.sh"
+  printf 'working: %s\n' "$(printf '%055d' 0)" > "$state/unit.status"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_wake_status_mark_current "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$state" "$state/unit.status" \
+    || fail "$name: could not prime the status baseline"
+  : > "$marker"
+  touch -t 200109090146.40 "$marker"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    seen=$(fm_wake_signal_seen_path "$2" "$3")
+    fm_wake_signal_sig "$3" > "$seen"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$marker" \
+    || fail "$name: could not prime the turn-end baseline"
+  touch "$marker"
+  trace="$dir/watch.trace"; out="$dir/watch.out"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
+    FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_HEARTBEAT=999999 FM_CHECK_INTERVAL=999999 \
+    /bin/bash -x "$ROOT/bin/fm-watch.sh" > "$out" 2> "$trace" &
+  watcher=$!
+  trap 'kill "$watcher" 2>/dev/null || true; wait "$watcher" 2>/dev/null || true' EXIT
+  for ((i=0; i<300; i++)); do
+    grep -F '+ sleep 30' "$trace" >/dev/null 2>&1 && break
+    kill -0 "$watcher" 2>/dev/null || fail "$name: watcher exited before grace: $(cat "$out")"
+    /bin/sleep 0.1
+  done
+  grep -F '+ sleep 30' "$trace" >/dev/null \
+    || fail "$name: watcher never entered signal grace"
+  case "$name" in
+    delete) rm "$marker" ;;
+    restore) touch -t 200109090146.40 "$marker" ;;
+  esac
+  for ((i=0; i<650; i++)); do
+    [ -s "$out" ] && break
+    [ "$(grep -Fc '+ scan_signals' "$trace" 2>/dev/null || true)" -lt 3 ] || break
+    /bin/sleep 0.1
+  done
+  grep -F "signal: $marker" "$out" >/dev/null \
+    || fail "$name: first-scan turn-end was lost during grace (scans=$(grep -Fc '+ scan_signals' "$trace"))"
+  grep -F "$marker" "$state/.wake-queue" >/dev/null \
+    || fail "$name: turn-end wake was not queued"
+  pass "first-scan turn-end still wakes after grace when $name"
+)
+
+test_turnend_grace_delete() { run_turnend_grace_case delete || fail "deleted turn-end grace case failed"; }
+test_turnend_grace_restore() { run_turnend_grace_case restore || fail "restored turn-end grace case failed"; }
+
 # --- a no-verb signal whose crew is NOT provably working SURFACES -------------
 # This is the swallowed-finish fix: a crew that finished (or stopped and waits)
 # reports its final turn-end with no captain-relevant status and no running
@@ -6372,6 +6430,8 @@ test_folded_worker_decision_without_home_append_still_wakes
 test_separate_self_announced_answers_after_fold_wake_once
 test_self_announced_close_after_fold_still_surfaces_folded_worker_failure
 test_self_announced_close_after_fold_still_surfaces_folded_secondmate_lines
+test_turnend_grace_delete || exit 1
+test_turnend_grace_restore || exit 1
 test_actionable_signal_surfaced
 test_needs_decision_signal_payload_marked_for_branch_exclusion
 test_needs_decision_reconciliation_required_still_marked

@@ -2825,12 +2825,25 @@ EOF
   # On the first changed signal, linger one grace period and re-scan before
   # classifying: a crewmate's final status write and the same turn's turn-end
   # hook land seconds apart, and reporting them as separate actionable wakes
-  # costs a full firstmate turn each. The re-scan also picks up a newer
-  # signature for an already-pending file (last write wins below).
+  # costs a full firstmate turn each. Re-scan status files only: an answerer
+  # may finish self-announcing its append during grace, while a first-scan
+  # turn-end must still surface if its marker changes again or disappears.
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
-    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    first_turnends=$(printf '%s\n' "$pending" | while IFS=$(printf '\t') read -r sf sig f; do
+      if [[ $f == *.turn-ended ]]; then
+        printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
+      fi
+    done)
+    rescanned=$(scan_signals)
+    if [ -n "$first_turnends" ]; then
+      pending=$(printf '%s\n%s' "$first_turnends" "$rescanned")
+    else
+      pending=$rescanned
+    fi
+  fi
+  if [ -n "$pending" ]; then
     # The final coalesced signal set is the watcher-carried status-change
     # trigger for this home's published summary. Start it before either
     # surfacing or absorbing the signal, but never wait on it: see
