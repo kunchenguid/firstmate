@@ -337,6 +337,124 @@ test_lock_single_winner_under_concurrency() {
   pass "concurrent fm_lock_try_acquire yields exactly one winner"
 }
 
+test_lock_wait_treats_missing_primary_as_contention_during_steal() {
+  local dir state lockdir holder_file holder out rc i fakebin real_sleep
+  dir=$(make_case lock-missing-primary-live-steal)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  holder_file="$dir/holder"
+  fakebin="$dir/fakebin"
+  real_sleep=$(command -v sleep)
+  cat > "$fakebin/sleep" <<'SH'
+#!/bin/sh
+: > "$FM_TEST_SLEEP_MARKER"
+exec "$FM_TEST_REAL_SLEEP" "$@"
+SH
+  chmod +x "$fakebin/sleep"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2.steal" || exit 7
+    trap '\''fm_lock_release "$2.steal"'\'' EXIT
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    i=0
+    while [ ! -e "$4" ] && [ "$i" -lt 100 ]; do
+      sleep 0.02
+      i=$((i + 1))
+    done
+    [ -e "$4" ] || exit 8
+    fm_lock_release "$2.steal"
+    trap - EXIT
+  ' _ "$LIB" "$lockdir" "$holder_file" "$dir/waiter-slept" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$holder_file" ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -s "$holder_file" ] || fail "live steal mutex holder did not start"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_TEST_SLEEP_MARKER="$dir/waiter-slept" \
+    FM_TEST_REAL_SLEEP="$real_sleep" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait_or_fail_on_create_error "$2" || exit $?
+    printf acquired
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir") || rc=$?
+  wait "$holder" || fail "live steal mutex holder failed"
+  [ "$rc" -eq 0 ] && [ "$out" = acquired ] \
+    || fail "lock waiter treated a temporarily absent primary as a create error (rc=$rc, out=$out)"
+  pass "lock waiter retries after a live steal owner temporarily removes the primary"
+}
+
+test_lock_wait_returns_create_error_without_recursing() {
+  local dir state lockdir fakebin pid status
+  dir=$(make_case lock-create-error)
+  state="$dir/state"
+  lockdir="$state/.unavailable.lock"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/mktemp" <<'SH'
+#!/bin/sh
+exit 1
+SH
+  chmod +x "$fakebin/mktemp"
+
+  status=0
+  PATH="$fakebin:$PATH" FUNCNEST=32 FM_STATE_OVERRIDE="$state" \
+    bash -c '
+      . "$1"
+      fm_lock_acquire_wait_or_fail_on_create_error "$2"
+    ' _ "$LIB" "$lockdir" >/dev/null 2>&1 &
+  pid=$!
+  wait_for_exit "$pid" 30 || status=$?
+  [ "$status" -eq 2 ] || fail "lock creation failure did not return status 2 promptly (rc=$status)"
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
+    || fail "failed lock creation left a primary lock behind"
+  pass "uncreatable lock path returns an infrastructure error without recursive recovery"
+}
+
+test_lock_stale_recovery_releases_steal_after_create_error() {
+  local dir state lockdir fakebin count_file real_mktemp dead pid status count
+  dir=$(make_case lock-stale-recovery-create-error)
+  state="$dir/state"
+  lockdir="$state/.stale.lock"
+  fakebin="$dir/fakebin"
+  count_file="$dir/mktemp-count"
+  real_mktemp=$(command -v mktemp)
+  dead=$(dead_pid)
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  cat > "$fakebin/mktemp" <<'SH'
+#!/bin/sh
+count=0
+[ ! -f "$FM_TEST_MKTEMP_COUNT" ] || count=$(cat "$FM_TEST_MKTEMP_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_TEST_MKTEMP_COUNT"
+[ "$count" -lt 3 ] || exit 1
+exec "$FM_TEST_REAL_MKTEMP" "$@"
+SH
+  chmod +x "$fakebin/mktemp"
+
+  status=0
+  PATH="$fakebin:$PATH" FM_TEST_MKTEMP_COUNT="$count_file" \
+    FM_TEST_REAL_MKTEMP="$real_mktemp" FM_LOCK_STALE_AFTER=0 \
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$2"
+    ' _ "$LIB" "$lockdir" >/dev/null 2>&1 &
+  pid=$!
+  wait_for_exit "$pid" 30 || status=$?
+  [ "$status" -eq 2 ] || fail "stale recovery did not propagate owner-dir creation error (rc=$status)"
+  count=$(cat "$count_file" 2>/dev/null || true)
+  [ "$count" = 3 ] || fail "expected failure while recreating the primary after acquiring .steal (mktemp calls=$count)"
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
+    || fail "failed stale recovery left the primary lock behind"
+  [ ! -e "$lockdir.steal" ] && [ ! -L "$lockdir.steal" ] \
+    || fail "failed stale recovery left the .steal mutex behind"
+  pass "stale recovery propagates primary recreation errors and releases .steal"
+}
+
 test_lock_steals_dead_pid_lock() {
   local dir state lockdir dead rc newpid
   dir=$(make_case lock-dead-steal)
@@ -1541,6 +1659,9 @@ test_live_stale_watch_lock_is_actionable
 test_live_stalled_watch_lock_is_replaced_past_hard_bound
 test_guard_warnings
 test_lock_single_winner_under_concurrency
+test_lock_wait_treats_missing_primary_as_contention_during_steal
+test_lock_wait_returns_create_error_without_recursing
+test_lock_stale_recovery_releases_steal_after_create_error
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_reclaims_dead_steal_owner_without_nested_markers
