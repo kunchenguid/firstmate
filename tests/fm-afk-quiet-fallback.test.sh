@@ -35,7 +35,10 @@ check_status 0 env FM_AFK_MODE=quiet "$LAUNCH" enter --words 'stay quiet'
 # this deliberately unsupported backend avoids launching a real terminal.
 check_status 1 env FM_SUPERVISOR_TARGET=unused FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start
 grep -F "no non-visible daemon-launch primitive for backend 'unsupported'" "$st/output" >/dev/null
-! grep -F 'away-posture record is the posture here' "$st/output" >/dev/null
+if grep -F 'away-posture record is the posture here' "$st/output" >/dev/null; then
+  printf 'quiet entry was incorrectly described as away posture\n' >&2
+  exit 1
+fi
 check_status 0 "$LAUNCH" start-native
 [ "$(head -n 1 "$st/state/.afk")" = quiet ]
 [ "$(cut -f1 "$st/state/.afk-daemon-terminal")" = none ]
