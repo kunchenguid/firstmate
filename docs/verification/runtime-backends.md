@@ -2304,7 +2304,7 @@ The merge suite and the security suite dominate the wall time.
 
 ### 2026-09-24 email reach for Pi away supervision
 
-The email path is configuration-gated to Pi away records with a configured mail plane and `FM_AFK_EMAIL_TO`; unconfigured and non-Pi entry keep hold-for-return behavior.
+The email path is enabled only for Pi away records with the exact `FM_AFK_EMAIL_TO` destination and a valid mail plane; with that destination but incomplete mail transport, Pi retains hold-for-return, while non-Pi entry does not claim email reach.
 The offline regression uses synthetic outcomes and mail plus a local fake SMTP command, and covers batching, full PR URLs, credential redaction, send-rate limiting, per-item one-use expiration, configured-sender matching, spoof rejection, and the unchanged disabled path.
 
 ```sh
