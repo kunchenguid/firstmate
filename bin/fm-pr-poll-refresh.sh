@@ -30,6 +30,7 @@ fi
 [ -d "$STATE" ] || exit 0
 [ ! -L "$STATE" ] || exit 1
 if ! git -C "$FM_ROOT" merge-base --is-ancestor "$1" HEAD; then
+  # shellcheck source=bin/fm-ff-lib.sh
   . "$SCRIPT_DIR/fm-ff-lib.sh"
   divergence_is_redundant "$FM_ROOT" "$1" HEAD || exit 1
 fi
