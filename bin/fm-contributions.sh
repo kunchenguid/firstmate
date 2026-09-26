@@ -44,6 +44,10 @@
 # to every owner without another forge read. When the budget runs out
 # mid-observation, the poll ends with that URL's records untouched; only a
 # genuine forge failure or head change records an error.
+# A five-second read timeout outside the budget's own deadline leaves a fresh
+# prior observation untouched and retries next poll. Once that observation
+# exceeds FM_CONTRIBUTIONS_MAX_AGE (or none exists), the timeout records an
+# unavailable error and wakes once per failure episode.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
@@ -193,6 +197,8 @@ forge() {
   if [ "$rc" -eq 124 ] && [ "$bounded" -eq 1 ]; then
     BUDGET_EXHAUSTED=1
     : > "$TMP/budget-exhausted"
+  elif [ "$rc" -eq 124 ]; then
+    : > "$TMP/forge-timeout"
   elif [ "$rc" -ne 0 ]; then
     : > "$TMP/forge-unavailable"
   fi
@@ -215,7 +221,7 @@ observe() { # canonical GitHub URL -> normalized JSON
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
-  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable"
+  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable" "$TMP/forge-timeout"
   forge api "$endpoint" > "$TMP/core.json" || return 1
   jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || return 1
   if [ "$kind" = pull ]; then
@@ -356,6 +362,18 @@ poll() {
     # An observation the budget cut short is unmeasured, not unavailable: keep
     # every owner's prior record so the URL is observed first next poll.
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
+    # A single read timeout does not invalidate an otherwise fresh URL.
+    # Preserve its last good evidence and retry next poll; a missing or stale
+    # observation still takes the normal unavailable path below.
+    if [ "$observed" -ne 0 ] && [ -e "$TMP/forge-timeout" ] && [ ! -e "$TMP/forge-unavailable" ] \
+      && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" \
+        --argjson now "$EPOCH" --argjson max_age "$MAX_AGE" '
+          any($saved[0][] | .records[] | select(.url == $url);
+            .error == null and .observation != null and .checked_at != null
+            and ($now - (.checked_at | fromdateiso8601)) >= 0
+            and ($now - (.checked_at | fromdateiso8601)) <= $max_age)' >/dev/null; then
+      continue
+    fi
     # Wake once per failure episode: only when no owner has a prior error.
     if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
       'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
