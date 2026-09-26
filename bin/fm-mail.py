@@ -260,10 +260,39 @@ def cmd_read():
             print('(no unseen mail)')
             m.logout()
             return 0
+        away_posture = os.environ.get('FM_AFK_POSTURE') == '1'
         for i in ids[-READ_LIMIT:]:
             uid = i.decode() if isinstance(i, bytes) else str(i)
-            typ, msg = m.uid('fetch', i, '(BODY.PEEK[])')
-            if typ != 'OK' or not msg or not msg[0] or not msg[0][1]:
+            message_bytes = None
+            if away_posture:
+                typ, headers = m.uid('fetch', i, '(BODY.PEEK[HEADER])')
+                header_bytes = fetched_literal(headers) if typ == 'OK' else None
+                if not header_bytes:
+                    print('---')
+                    print('Uid:', uid)
+                    print('From:', '(unfetchable)')
+                    print('Date:', '')
+                    print('Subj:', 'unfetchable header - see fm-mail read')
+                    print('Body:', '(body unavailable)')
+                    continue
+                mi = email.message_from_bytes(header_bytes)
+                trusted_sender = (
+                    from_is_configured(dec(mi.get('From')), AFK_OWNER_EMAIL)
+                    and gmail_authentication_pass(mi)
+                )
+                if not trusted_sender:
+                    print('---')
+                    print('From:', dec(mi.get('From')))
+                    print('Date:', dec(mi.get('Date')))
+                    print('Subj:', dec(mi.get('Subject')))
+                    print('Body:', '(away-mode message body not read)')
+                    continue
+                typ, body_data = m.uid('fetch', i, '(BODY.PEEK[])')
+                message_bytes = fetched_literal(body_data) if typ == 'OK' else None
+            else:
+                typ, body_data = m.uid('fetch', i, '(BODY.PEEK[])')
+                message_bytes = fetched_literal(body_data) if typ == 'OK' else None
+            if not message_bytes:
                 print('---')
                 print('Uid:', uid)
                 print('From:', '(unfetchable)')
@@ -271,7 +300,7 @@ def cmd_read():
                 print('Subj:', 'unfetchable body - see fm-mail read')
                 print('Body:', '(body unavailable)')
                 continue
-            mi = email.message_from_bytes(msg[0][1])
+            mi = email.message_from_bytes(message_bytes)
             print('---')
             print('From:', dec(mi.get('From')))
             print('Date:', dec(mi.get('Date')))

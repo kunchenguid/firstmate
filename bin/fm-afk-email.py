@@ -31,6 +31,10 @@ MAX_BATCH_BYTES = 24000
 MAX_REPLY_CHARS = 8000
 OWNER_EMAIL = "johnpoyser@gmail.com"
 TOKEN_RE = re.compile(r"^FM-AFK-[A-Za-z0-9_-]{16}$")
+
+
+class AfkContractLockError(RuntimeError):
+    pass
 NOTE_ID_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9._-]+$")
 REPLY_LINE_RE = re.compile(r"^FM-AFK-REPLY (FM-AFK-[A-Za-z0-9_-]{16})$")
 QUOTED_HEADER_RE = re.compile(r"^(?:From|Sent|To|Subject):", re.IGNORECASE)
@@ -93,6 +97,46 @@ def afk_state_lock():
         os.chmod(LOCK, 0o600)
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         yield
+
+
+@contextmanager
+def afk_contract_lock():
+    contract = ROOT / "bin" / "fm-afk-contract.sh"
+    lock_script = (
+        '. "$1"\n'
+        "trap 'fm_afk_contract_lock_release || true' EXIT\n"
+        'fm_afk_contract_lock_hold "$2" || exit 1\n'
+        'printf "locked\\n"\n'
+        'IFS= read -r release\n'
+        '[ "$release" = release ]\n'
+    )
+    try:
+        process = subprocess.Popen(
+            ["bash", "-c", lock_script, "fm-afk-email-lock", str(contract), str(STATE)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            env=os.environ.copy(),
+        )
+    except OSError as error:
+        raise AfkContractLockError("could not start the away-posture lock owner") from error
+    ready = process.stdout.readline()
+    if ready != "locked\n":
+        result = process.wait()
+        process.stdout.close()
+        raise AfkContractLockError(f"could not acquire the away-posture lock (exit {result})")
+    try:
+        yield
+    finally:
+        if process.poll() is None:
+            try:
+                process.stdin.write("release\n")
+                process.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
+            process.stdin.close()
+            process.wait()
+        process.stdout.close()
 
 
 def atomic_json(path, value):
@@ -250,6 +294,15 @@ def queue_unprocessed():
 
 
 def flush():
+    try:
+        with afk_contract_lock():
+            return flush_while_contract_locked()
+    except AfkContractLockError as error:
+        print(f"fm-afk-email: {error}; no email was sent", file=sys.stderr)
+        return 1
+
+
+def flush_while_contract_locked():
     posture, config = live_mail_context()
     if posture is None:
         return 0
@@ -658,6 +711,15 @@ def token_record(token):
 
 
 def receive_batch():
+    try:
+        with afk_contract_lock():
+            return receive_batch_while_contract_locked()
+    except AfkContractLockError as error:
+        print(f"fm-afk-email: {error}; reply was not handed off", file=sys.stderr)
+        return 1
+
+
+def receive_batch_while_contract_locked():
     posture, config = live_mail_context()
     if posture is None:
         return 0

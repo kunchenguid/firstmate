@@ -17,7 +17,7 @@ export CAPTURE
 cat > "$REPO/bin/fm-mail.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-if [ "${1:-}" = afk-email ]; then
+if [ "${1:-}" = afk-email ] || [ "${1:-}" = read ]; then
   exec "$(dirname "$0")/fm-mail-real.sh" "$@"
 fi
 [ "${1:-}" = send ] || exit 2
@@ -29,6 +29,13 @@ count=$(find "$CAPTURE" -maxdepth 1 -name '*.txt' | wc -l | tr -d ' ')
 path="$CAPTURE/$count.txt"
 printf 'to=%s\nsubject=%s\n' "$2" "$3" > "$path"
 cat >> "$path"
+if [ -n "${FM_TEST_SMTP_STARTED:-}" ] && [ -n "${FM_TEST_SMTP_RELEASE:-}" ]; then
+  : > "$FM_TEST_SMTP_STARTED"
+  deadline=$((SECONDS + ${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}))
+  while [ ! -e "$FM_TEST_SMTP_RELEASE" ] && [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 0.02
+  done
+fi
 printf 'fake SMTP accepted\n' >&2
 SH
 chmod 700 "$REPO/bin/fm-mail.sh"
@@ -90,6 +97,15 @@ message() {  # <home> <uid> <sender> <subject> <body>
 
 count_sends() {
   find "$CAPTURE" -maxdepth 1 -name '*.txt' -type f | wc -l | tr -d ' '
+}
+
+wait_for_file() {  # <path>
+  local path=$1 attempts=0
+  while [ ! -e "$path" ] && [ "$attempts" -lt 200 ]; do
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ -e "$path" ]
 }
 
 # Pi entry requires the fixed owner destination; other harnesses keep hold-for-return.
@@ -464,6 +480,96 @@ mail.subprocess.run = deny_posture_read
 poll_and_assert("unreadable posture")
 PY
   pass "invalid and unreadable away records suppress normal mail and retain retry eligibility"
+}
+
+test_read_gates_unauthenticated_bodies_during_away() {
+  local home fakepy fetch_log out fetches
+  home=$(make_home read-auth-gate configured)
+  run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
+  fakepy="$TMP_ROOT/read-auth-python"
+  mkdir -p "$fakepy"
+  cat > "$fakepy/sitecustomize.py" <<'PY'
+import imaplib
+import os
+
+messages = {
+    b"1": (
+        b"From: Attacker <attacker@example.com>\r\nDate: Thu, 25 Sep 2026 00:00:00 +0000\r\n"
+        b"Subject: spoofed sender\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=gmail.com\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n\r\nprivate attacker body\r\n"
+    ),
+    b"2": (
+        b"From: johnpoyser@gmail.com\r\nDate: Thu, 25 Sep 2026 00:00:00 +0000\r\n"
+        b"Subject: failed authentication\r\nAuthentication-Results: mx.google.com; dkim=fail header.d=gmail.com\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n\r\nprivate unauthenticated body\r\n"
+    ),
+    b"3": (
+        b"From: John Poyser <johnpoyser@gmail.com>\r\nDate: Thu, 25 Sep 2026 00:00:00 +0000\r\n"
+        b"Subject: authenticated captain\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=gmail.com; dmarc=pass header.from=gmail.com\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n\r\nauthenticated captain body\r\n"
+    ),
+}
+
+class FakeMailbox:
+    def login(self, *_):
+        return "OK", [b"logged in"]
+
+    def select(self, *_):
+        return "OK", [b"3"]
+
+    def logout(self):
+        return "BYE", [b"logged out"]
+
+    def uid(self, command, uid, spec):
+        if command == "search":
+            return "OK", [b"1 2 3"]
+        raw = messages[uid]
+        with open(os.environ["FM_MAIL_TEST_FETCH_LOG"], "a", encoding="utf-8") as log:
+            log.write(f"{uid.decode()}\t{spec}\n")
+        if spec == "(BODY.PEEK[HEADER])":
+            raw = raw.split(b"\r\n\r\n", 1)[0] + b"\r\n\r\n"
+        elif spec != "(BODY.PEEK[])":
+            raise AssertionError(f"unexpected FETCH specification: {spec}")
+        return "OK", [(b"fetch response", raw), b")"]
+
+imaplib.IMAP4_SSL = lambda *args, **kwargs: FakeMailbox()
+PY
+  fetch_log="$TMP_ROOT/read-away.fetches"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
+    PYTHONPATH="$fakepy" FM_MAIL_TEST_FETCH_LOG="$fetch_log" "$REPO/bin/fm-mail.sh" read 2>&1) \
+    || fail "read with an active away record failed: $out"
+  assert_contains "$out" 'authenticated captain body' 'authenticated owner mail remains readable while away'
+  assert_not_contains "$out" 'private attacker body' 'spoofed sender body is not printed while away'
+  assert_not_contains "$out" 'private unauthenticated body' 'unauthenticated owner body is not printed while away'
+  fetches=$(cat "$fetch_log")
+  assert_contains "$fetches" $'3\t(BODY.PEEK[])' 'authenticated owner body is fetched while away'
+  assert_not_contains "$fetches" $'1\t(BODY.PEEK[])' 'spoofed sender body is never fetched while away'
+  assert_not_contains "$fetches" $'2\t(BODY.PEEK[])' 'unauthenticated sender body is never fetched while away'
+
+  printf 'version: 99\nentered_epoch: 100\nreach_channels: email\n' > "$home/state/.afk-contract"
+  : > "$fetch_log"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
+    PYTHONPATH="$fakepy" FM_MAIL_TEST_FETCH_LOG="$fetch_log" "$REPO/bin/fm-mail.sh" read 2>&1) \
+    || fail "read with a malformed away record failed: $out"
+  assert_not_contains "$out" 'private attacker body' 'malformed away posture still hides spoofed sender bodies'
+  assert_not_contains "$out" 'private unauthenticated body' 'malformed away posture still hides unauthenticated bodies'
+  fetches=$(cat "$fetch_log")
+  assert_contains "$fetches" $'3\t(BODY.PEEK[])' 'malformed posture still allows the authenticated owner body'
+  assert_not_contains "$fetches" $'1\t(BODY.PEEK[])' 'malformed posture never fetches a spoofed sender body'
+  assert_not_contains "$fetches" $'2\t(BODY.PEEK[])' 'malformed posture never fetches an unauthenticated body'
+
+  rm "$home/state/.afk-contract"
+  : > "$fetch_log"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
+    PYTHONPATH="$fakepy" FM_MAIL_TEST_FETCH_LOG="$fetch_log" "$REPO/bin/fm-mail.sh" read 2>&1) \
+    || fail "attended read without an away record failed: $out"
+  assert_contains "$out" 'private attacker body' 'attended read still shows bodies without an away record'
+  assert_contains "$out" 'private unauthenticated body' 'attended read retains normal access without an away record'
+  fetches=$(cat "$fetch_log")
+  assert_contains "$fetches" $'1\t(BODY.PEEK[])' 'attended read fetches the first unseen body'
+  assert_contains "$fetches" $'2\t(BODY.PEEK[])' 'attended read fetches the second unseen body'
+  assert_contains "$fetches" $'3\t(BODY.PEEK[])' 'attended read fetches the third unseen body'
+  pass "fm-mail read gates bodies to authenticated Gmail during away mode"
 }
 
 test_voice_inbox_note_remains_ordinary_during_away_mode() {
@@ -903,6 +1009,7 @@ PY
 test_branch_prompt_preserves_wake_after_verification_error() {
   local prompt
   prompt=$("$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generation failed"
+  # shellcheck disable=SC2016
   printf '%s' "$prompt" | python3 -c '
 import sys
 steps = [line for line in sys.stdin.read().splitlines() if line.startswith("6. Acknowledge")]
@@ -959,6 +1066,116 @@ PY
   pass "short configured secrets are redacted before persistence and delivery"
 }
 
+test_flush_holds_away_lock_until_send_completes() {
+  local home entered started release archive_out flush_rc archive_rc
+  local flush_pid archive_pid
+  home=$(make_home flush-return-lock configured)
+  run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
+  entered=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field entered_epoch)
+  write_outcomes "$home" "$entered"
+  run_email "$home" queue-unprocessed >/dev/null || fail "queueing outcomes failed"
+  started="$TMP_ROOT/flush-send.started"
+  release="$TMP_ROOT/flush-send.release"
+  FM_TEST_SMTP_STARTED="$started" FM_TEST_SMTP_RELEASE="$release" \
+    run_email "$home" flush > "$TMP_ROOT/flush-send.out" 2>&1 &
+  flush_pid=$!
+  if ! wait_for_file "$started"; then
+    touch "$release"
+    wait "$flush_pid" || true
+    fail "flush never reached the held SMTP send"
+  fi
+
+  archive_out="$TMP_ROOT/flush-archive.out"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$REPO/bin/fm-afk-contract.sh" archive > "$archive_out" 2>&1 &
+  archive_pid=$!
+  sleep 0.2
+  if [ ! -f "$home/state/.afk-contract" ] || [ -s "$archive_out" ]; then
+    touch "$release"
+    wait "$flush_pid" || true
+    wait "$archive_pid" || true
+    fail "return archived the away record before the email send finished"
+  fi
+
+  touch "$release"
+  if wait "$flush_pid"; then flush_rc=0; else flush_rc=$?; fi
+  if wait "$archive_pid"; then archive_rc=0; else archive_rc=$?; fi
+  expect_code 0 "$flush_rc" "away-email flush must finish successfully under the record lock"
+  expect_code 0 "$archive_rc" "return archive must acquire the released record lock"
+  [ -f "$home/state/afk-email/sent/1.json" ] || fail "the locked flush did not persist its sent outcome"
+  [ ! -e "$home/state/.afk-contract" ] || fail "return did not archive after the send completed"
+  [ -n "$(find "$home/state/afk-contracts" -name '*.afk-contract' -print -quit)" ] \
+    || fail "return archive did not preserve the away record"
+  pass "away-email flush holds the return lock through SMTP completion"
+}
+
+test_receive_batch_holds_away_lock_through_reply_handoff() {
+  local home entered send_index token started release archive_out receive_rc archive_rc note
+  local receive_pid archive_pid
+  home=$(make_home reply-return-lock configured)
+  run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
+  entered=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field entered_epoch)
+  write_outcomes "$home" "$entered"
+  run_email "$home" queue-unprocessed >/dev/null || fail "queueing outcomes failed"
+  send_index=$(count_sends)
+  run_email "$home" flush >/dev/null || fail "sending outcomes failed"
+  token=$(grep -oE 'FM-AFK-[A-Za-z0-9_-]{16}' "$CAPTURE/$send_index.txt" | sed -n '1p')
+  [ -n "$token" ] || fail "sent update omitted its reply code"
+
+  mv "$REPO/bin/fm-inbox.sh" "$REPO/bin/fm-inbox-real.sh"
+  cat > "$REPO/bin/fm-inbox.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = note ] && [ -n "${FM_TEST_INBOX_STARTED:-}" ] && [ -n "${FM_TEST_INBOX_RELEASE:-}" ]; then
+  : > "$FM_TEST_INBOX_STARTED"
+  deadline=$((SECONDS + ${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}))
+  while [ ! -e "$FM_TEST_INBOX_RELEASE" ] && [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 0.02
+  done
+fi
+exec "$(dirname "$0")/fm-inbox-real.sh" "$@"
+SH
+  chmod 700 "$REPO/bin/fm-inbox.sh"
+
+  started="$TMP_ROOT/reply-handoff.started"
+  release="$TMP_ROOT/reply-handoff.release"
+  printf '[{"uidvalidity":"44","uid":"901","from":"%s","subject":"reply","body":"FM-AFK-REPLY %s\\nPlease merge the UI pull request"}]\n' \
+    "$AFK_OWNER_EMAIL" "$token" \
+    | FM_TEST_INBOX_STARTED="$started" FM_TEST_INBOX_RELEASE="$release" \
+      run_email "$home" receive-batch > "$TMP_ROOT/reply-handoff.out" 2>&1 &
+  receive_pid=$!
+  if ! wait_for_file "$started"; then
+    touch "$release"
+    wait "$receive_pid" || true
+    fail "reply handoff never reached the held inbox write"
+  fi
+
+  archive_out="$TMP_ROOT/reply-archive.out"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$REPO/bin/fm-afk-contract.sh" archive > "$archive_out" 2>&1 &
+  archive_pid=$!
+  sleep 0.2
+  if [ ! -f "$home/state/.afk-contract" ] || [ -s "$archive_out" ]; then
+    touch "$release"
+    wait "$receive_pid" || true
+    wait "$archive_pid" || true
+    fail "return archived the away record before the reply handoff finished"
+  fi
+
+  touch "$release"
+  if wait "$receive_pid"; then receive_rc=0; else receive_rc=$?; fi
+  if wait "$archive_pid"; then archive_rc=0; else archive_rc=$?; fi
+  expect_code 0 "$receive_rc" "verified reply handoff must finish under the record lock"
+  expect_code 0 "$archive_rc" "return archive must acquire the released record lock"
+  [ ! -e "$home/state/.afk-contract" ] || fail "return did not archive after reply handoff completed"
+  note=$(find "$home/state/inbox" -maxdepth 1 -name '*.note' -print -quit)
+  [ -n "$note" ] || fail "verified reply was not handed to the captain inbox"
+  assert_contains "$(cat "$note")" 'Please merge the UI pull request' 'the complete answer was handed off before return'
+  [ -n "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("used_epoch", ""))' \
+    "$home/state/afk-email/sent/1.json")" ] || fail "reply use was not persisted before return"
+  pass "away-email reply handoff holds the return lock through inbox delivery"
+}
+
 test_destination_is_required_for_pi_entry
 # The active feature is tested with synthetic mail and a local fake SMTP command; no network or mailbox is used.
 test_batched_mail_redacts_secrets_and_replies_are_item_bound
@@ -970,10 +1187,13 @@ test_missing_outcome_store_is_empty_but_invalid_store_fails
 test_processed_marker_cannot_suppress_outcomes
 test_invalid_away_record_does_not_enable_email
 test_invalid_or_unreadable_posture_suppresses_mail
+test_read_gates_unauthenticated_bodies_during_away
 test_voice_inbox_note_remains_ordinary_during_away_mode
 test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit
 test_over_limit_reply_is_explicitly_rejected
 test_expired_and_unknown_codes_are_untrusted
 test_reply_survives_crash_after_smtp_acceptance
 test_short_configured_secret_is_redacted_before_storage_and_send
+test_flush_holds_away_lock_until_send_completes
+test_receive_batch_holds_away_lock_through_reply_handoff
 test_branch_prompt_preserves_wake_after_verification_error
