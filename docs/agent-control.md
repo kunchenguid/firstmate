@@ -81,11 +81,10 @@ A relaunch does take one session reference when the endpoint's own runtime recor
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which reuses the recorded worktree instead of creating one, adopts the recorded endpoint when it still exists, clears the previous harness's per-task wiring, and arms a fresh busy generation.
    When the recorded endpoint is proven gone rather than merely idle or unreachable - which only Herdr can establish - the launch owner creates one fresh endpoint in that same worktree and the republished record rebinds the task to it - see [Reclaiming a task whose endpoint is gone](#reclaiming-a-task-whose-endpoint-is-gone).
-6. **Keep a runtime's session authority valid.**
-   A runtime can bind a pane's agent status to one session identity and ignore reports carrying another, so a replacement that starts a fresh session reports into a pane that discards it and the pane keeps showing the previous agent's last state.
-   The launch owner therefore passes the session reference the endpoint's own runtime recorded back to a replacement that can consume it - the read is the backend's, the per-harness rule is the control plane's, and the launch argument is the launch owner's - and every other case launches exactly what it did before: a fresh session.
-   Nothing here relaxes a guard, and the reference is a launch input, never authority to send, close, or act on the pane.
-   [`docs/herdr-backend.md`](herdr-backend.md#agent-status-authority-and-relaunch) owns the mechanism and the measured behavior; `bin/fm-control-lib.sh`'s `fm_control_relaunch_resume_flag` and `relaunch_resume_args` in `bin/fm-spawn.sh` own the implementation.
+6. **Preserve runtime-bound status authority where supported.**
+   The endpoint's runtime may bind pane status to one session identity; the launch owner preserves it only when that runtime records a reference the replacement adapter can consume, and otherwise launches the ordinary fresh session.
+   This reference is a launch input, never authority to send, close, or act on the pane.
+   [`docs/herdr-backend.md`](herdr-backend.md#agent-status-authority-and-relaunch) owns the mechanism and measured behavior.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
