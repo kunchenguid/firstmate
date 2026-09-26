@@ -15,6 +15,8 @@
 # "off" preferences propagate as files. Primary
 # config/trace-context is copied at the launch convergence point as part of the
 # default-off W3C trace-context setup, while live convergence leaves it unchanged.
+# Primary config/lavish-axi-host carries the one per-machine Lavish server address
+# to every worker so a worker never starts a second server on another interface.
 # The primary passes its frozen home-session decision into a newly launched
 # Secondmate; see docs/trace-context.md.
 # Primary config/claude-permission-mode is a captain-wide safety preference
@@ -66,7 +68,7 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode lavish-axi-host}"
 
 # Items whose value is a home-SESSION enablement decision rather than durable
 # local configuration. They are inherited at the launch convergence point, where
@@ -218,14 +220,18 @@ warn_inheritable_config_error() {
   echo "fm-config-inherit: error: $reason $item at $dest" >&2
 }
 
+# Prints nothing and returns 0 when the header carries every required phrase.
+# Otherwise prints the first required phrase it did not find on stdout and
+# returns 1, so a caller can name the concrete gap instead of a generic
+# rejection. The accept set itself is unchanged.
 shared_captain_header_valid() {
   local src=$1 head
   head=$(sed -n '1,12p' "$src" 2>/dev/null) || return 1
-  case "$head" in *main-authoritative*) ;; *) return 1 ;; esac
-  case "$head" in *"read-only in secondmate homes"*) ;; *) return 1 ;; esac
-  case "$head" in *"must not be edited there"*) ;; *) return 1 ;; esac
-  case "$head" in *"main firstmate"*) ;; *) return 1 ;; esac
-  case "$head" in *"marked status"*|*"document pointer"*) ;; *) return 1 ;; esac
+  case "$head" in *main-authoritative*) ;; *) printf '%s' "main-authoritative"; return 1 ;; esac
+  case "$head" in *"read-only in secondmate homes"*) ;; *) printf '%s' "read-only in secondmate homes"; return 1 ;; esac
+  case "$head" in *"must not be edited there"*) ;; *) printf '%s' "must not be edited there"; return 1 ;; esac
+  case "$head" in *"main firstmate"*) ;; *) printf '%s' "main firstmate"; return 1 ;; esac
+  case "$head" in *"marked status"*|*"document pointer"*) ;; *) printf '%s' "marked status\" or \"document pointer"; return 1 ;; esac
 }
 
 shared_captain_dir_safe() {
@@ -324,7 +330,7 @@ copy_shared_captain_file() {
 }
 
 propagate_shared_captain_preferences() {
-  local src_data=$1 dest_data=$2 src dest src_hash dest_hash dest_parent dest_home quarantine reason rc
+  local src_data=$1 dest_data=$2 src dest src_hash dest_hash dest_parent dest_home quarantine reason rc missing
   [ -n "$src_data" ] || return 1
   [ -n "$dest_data" ] || return 1
   src="$src_data/$FM_SHARED_CAPTAIN_FILE"
@@ -340,8 +346,9 @@ propagate_shared_captain_preferences() {
       record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
       return 1
     fi
-    if ! shared_captain_header_valid "$src"; then
+    if ! missing=$(shared_captain_header_valid "$src"); then
       reason="primary source header missing required main-authoritative warning"
+      [ -z "$missing" ] || reason="$reason: missing \"$missing\""
       warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$src" "$reason"
       record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
       return 1

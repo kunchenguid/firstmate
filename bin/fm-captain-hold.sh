@@ -40,12 +40,18 @@
 # task first when no work item exists to hold (--title required to create; the
 # optional --origin records provenance in the new task's body and supplies the
 # default repo from that origin's metadata). Prefer holding the work item the
-# question gates over minting a new row. The command records a UTC `Captain
-# hold set:` timestamp in the task body: repeating an active hold preserves the
-# existing timestamp, while re-holding released work starts a new lifecycle.
-# A task already closed is refused rather than reopened. `--until` records the
-# captain's own deferral date through `tasks-axi hold --until`, so a "revisit
-# later" answer is stored as a date instead of a live card.
+# question gates over minting a new row. Creating a missing row uses
+# `tasks-axi add --kind captain`: that kind is backlog metadata, and the Beads
+# adapter maps it to native issue type `task`. Captain holds have no due
+# semantics (`--until` is the optional hold deferral), so the create waives
+# Beads `due.required` through `BD_DUE_REQUIRED` rather than inventing a due
+# date or registering a `types.custom` captain issue type. The command records
+# a UTC `Captain hold set:` timestamp in the task body: repeating an active
+# hold preserves the existing timestamp, while re-holding released work starts
+# a new lifecycle. A task already closed is refused rather than reopened.
+# `--until` records the captain's own deferral date through `tasks-axi hold
+# --until`, so a "revisit later" answer is stored as a date instead of a live
+# card.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -389,13 +395,17 @@ show_field() {  # <show-output> <field>
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
 }
 
+# A shown scalar field arrives as a JSON-encoded bare string, which decode_json
+# accepts only where the installed JSON::PP defaults allow_nonref on. Older
+# libraries default it off and reject the whole value as "must be object or
+# array", so ask for it explicitly rather than inheriting the local default.
 decode_shown_value() {  # <shown-field>
   local value=$1
   case "$value" in
     \"*\")
       printf '%s' "$value" | perl -MJSON::PP -e '
         local $/;
-        my $value = decode_json(<STDIN>);
+        my $value = JSON::PP->new->utf8->allow_nonref->decode(<STDIN>);
         binmode STDOUT, ":raw";
         utf8::encode($value) if utf8::is_utf8($value);
         print $value;
@@ -436,23 +446,6 @@ sorted_key_union() {  # <comma-list> <newline-or-space-separated-new-keys>
 
 meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
-}
-
-origin_open_decisions() {  # <origin-id>
-  local origin=$1 meta="$STATE/$1.meta" status_file="$STATE/$1.status" open kind last verb
-  open=$(status_open_decisions "$status_file")
-  [ -n "$open" ] || return 0
-  [ -f "$meta" ] || { printf '%s' "$open"; return 0; }
-  kind=$(meta_value "$meta" kind)
-  [ -n "$kind" ] || kind=ship
-  if [ "$kind" != secondmate ]; then
-    last=$(last_status_line "$status_file")
-    verb=$(status_line_verb "$last")
-    case "$verb" in
-      done|failed) return 0 ;;
-    esac
-  fi
-  printf '%s' "$open"
 }
 
 # A resolution record written by this script or by the retired
@@ -877,11 +870,14 @@ command_hold() {
     [ -n "$repo" ] || repo=firstmate
     validate_one_line repo "$repo"
     [ -z "$origin" ] || body=$(printf 'Origin: %s' "$origin")
+    # tasks-axi add never passes --due. Beads due.required would refuse this
+    # create, and captain holds have no due semantics, so waive it for this
+    # call only. --kind captain stays metadata; Beads native type is task.
     if [ -n "$body" ]; then
-      tasks_axi add "$id" "$title" --kind captain --repo "$repo" --body "$body" >/dev/null \
+      BD_DUE_REQUIRED=false tasks_axi add "$id" "$title" --kind captain --repo "$repo" --body "$body" >/dev/null \
         || fail "could not create task $id"
     else
-      tasks_axi add "$id" "$title" --kind captain --repo "$repo" >/dev/null \
+      BD_DUE_REQUIRED=false tasks_axi add "$id" "$title" --kind captain --repo "$repo" >/dev/null \
         || fail "could not create task $id"
     fi
   fi
@@ -1625,7 +1621,7 @@ reconcile_note() {
 }
 
 command_complete() {
-  local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open raw_open has_meta=0 transfer_rc resolved
+  local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open has_meta=0 transfer_rc transfers=() resolved
   local resolved_how attested_by_prefix=''
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
@@ -1669,8 +1665,7 @@ EOF
   fi
 
   status_file="$STATE/$origin.status"
-  raw_open=$(status_open_decisions "$status_file")
-  open=$(origin_open_decisions "$origin")
+  open=$(status_open_decisions "$status_file")
   if [ -n "$open" ] && [ -z "$keys" ]; then
     fail "origin $origin still has open captain decisions in its status stream; hold a captain task for what remains, or answer them, before attesting --none"
   fi
@@ -1684,20 +1679,22 @@ EOF
 
     # Transfer every still-open status decision to the durable captain-held
     # inventory so the live status fold does not duplicate the same Captain's
-    # Call item. The transfer line is this home's own bookkeeping close,
-    # written by the turn that just reviewed the inventory, so it uses the
-    # guarded self-announced append (bin/fm-wake-lib.sh) and does not wake this
-    # same session; an append failure still fails this command loudly.
+    # Call item. The transfer lines are this home's own bookkeeping closes,
+    # written by the turn that just reviewed the inventory, so they go through
+    # ONE guarded self-announced append (bin/fm-wake-lib.sh) and do not wake
+    # this same session; an append failure still fails this command loudly.
     if [ -n "$keys" ]; then
       while IFS=$'\t' read -r key _verb _summary; do
         [ -n "$key" ] || continue
-        transfer_rc=0
-        fm_wake_status_append_self_announced "$STATE" "$status_file" \
-          "captain-held [key=$key]: tracked by $keys" || transfer_rc=$?
-        [ "$transfer_rc" -ne 2 ] || fail "cannot append the captain-held transfer for $origin/$key"
+        transfers+=("captain-held [key=$key]: tracked by $keys")
       done <<EOF
-$raw_open
+$open
 EOF
+      if [ "${#transfers[@]}" -gt 0 ]; then
+        transfer_rc=0
+        fm_wake_status_append_self_announced "$STATE" "$status_file" "${transfers[@]}" || transfer_rc=$?
+        [ "$transfer_rc" -ne 2 ] || fail "cannot append the captain-held transfer for $origin"
+      fi
     fi
   fi
   printf 'complete: %s captain-call inventory reviewed%s%s\n' "$origin" "${keys:+ ($keys)}" \
@@ -1722,7 +1719,7 @@ command_verify() {
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
   fi
-  open=$(origin_open_decisions "$origin")
+  open=$(status_open_decisions "$STATE/$origin.status")
   while IFS=$'\t' read -r key _verb _summary; do
     [ -n "$key" ] || continue
     fail "open captain decision $origin/$key is not transferred to the captain-held inventory; re-run complete"

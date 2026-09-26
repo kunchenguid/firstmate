@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Shared validation and atomic artifact helpers for merge polling on the
-# supported forges. Callers must validate task IDs and raw PR/MR URLs before
-# constructing task paths or performing any side effect.
+# Shared PR/MR record reads, validation, and atomic artifact helpers for merge
+# polling on the supported forges. Callers must validate task IDs and raw PR/MR
+# URLs before constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub and an
-# arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
-# project can sit at any depth, so no owner/repository pair can address one and
-# the sidecar carries the whole path instead. GitLab also runs on self-hosted
-# instances, so the host is part of that identity rather than a constant. Every
-# consumer re-derives the identity from the stored URL and refuses any record
-# whose parts do not reconstruct that exact URL.
+# "path" is the full project path, which is owner/repository on GitHub, an
+# arbitrarily nested group/subgroup/project namespace on GitLab, and an
+# arbitrarily nested project name on Gerrit, where "number" is the change
+# number. A GitLab or Gerrit project can sit at any depth, so no
+# owner/repository pair can address one and the sidecar carries the whole path
+# instead. Both also run on self-hosted instances, and Gerrit runs nowhere else,
+# so the host is part of that identity rather than a constant. Every consumer re-derives the identity
+# from the stored URL and refuses any record whose parts do not reconstruct that
+# exact URL.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -74,6 +76,8 @@ FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=
 FM_PR_POLL_SNAPSHOT_CHECK_IDENTITY=
 FM_PR_POLL_SNAPSHOT_REG_HASH=
 FM_PR_POLL_SNAPSHOT_REG_IDENTITY=
+FM_PR_POLL_REARM_DATA_IDENTITY=
+FM_PR_POLL_REARM_CHECK_IDENTITY=
 FM_PR_RETIRE_ID=
 FM_PR_RETIRE_PROVIDER=
 FM_PR_RETIRE_URL=
@@ -88,6 +92,8 @@ FM_PR_RETIRE_REG_HASH=
 FM_PR_RETIRE_REG_IDENTITY=
 FM_PR_RETIRE_RECEIPT_HASH=
 FM_PR_RETIRE_RECEIPT_IDENTITY=
+FM_PR_RECORD_STATE=
+FM_PR_RECORD_MERGED=
 FM_PR_POLL_RETIREMENT_REJECTED=
 
 fm_task_id_path_safe() {
@@ -109,14 +115,14 @@ fm_task_id_creation_valid() {
   [ "${#id}" -le 64 ]
 }
 
-# GitLab serves self-hosted instances, so the host is part of the identity
-# rather than a constant. It is accepted only as a lowercase DNS name with no
-# userinfo, port, or trailing dot, which keeps one canonical spelling per MR.
-# github.com is refused here even though its shape is otherwise valid: it is
-# GitHub's own host and never a GitLab instance, so a URL like
+# GitLab and Gerrit both serve self-hosted instances, so the host is part of the
+# identity rather than a constant. It is accepted only as a lowercase DNS name
+# with no userinfo, port, or trailing dot, which keeps one canonical spelling per
+# change. github.com is refused here even though its shape is otherwise valid:
+# it is GitHub's own host and never another forge's instance, so a URL like
 # https://github.com/o/r/-/merge_requests/1 (a typo'd or spoofed GitHub URL)
-# would otherwise be armed as a GitLab watch that can never succeed.
-fm_pr_gitlab_host_valid() {
+# would otherwise be armed as a watch that can never succeed.
+fm_pr_forge_host_valid() {
   local host=${1-} label
   local LC_ALL=C
   local -a labels
@@ -156,15 +162,42 @@ fm_pr_gitlab_path_valid() {
   done
 }
 
-# Parse a canonical PR or MR URL into the provider-tagged identity. Validation
-# is strict and per provider: the GitHub username and repository rules are
-# unchanged, and GitLab gets its own host and namespace rules rather than a
-# loosened GitHub rule.
+# A Gerrit project name is itself a path at no fixed depth, and it needs no
+# enclosing group, so a single segment is canonical here where GitLab needs at
+# least two. Gerrit reserves no route segment inside the name, so nothing
+# corresponds to GitLab's "-": the change URL's literal "/+/" is what ends the
+# project instead. A ".git" suffix is refused because Gerrit strips it and the
+# stripped name is the canonical one, and a leading hyphen is refused because a
+# project path is what names the project to any CLI that takes one, where a
+# leading hyphen reads as an option instead.
+fm_pr_gerrit_path_valid() {
+  local path=${1-} segment
+  local LC_ALL=C
+  local -a segments
+  [ "${#path}" -ge 1 ] && [ "${#path}" -le 1024 ] || return 1
+  case "$path" in
+    /*|*/|*//*) return 1 ;;
+  esac
+  IFS=/ read -ra segments <<< "$path"
+  [ "${#segments[@]}" -ge 1 ] && [ "${#segments[@]}" -le 20 ] || return 1
+  for segment in "${segments[@]}"; do
+    [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || return 1
+    case "$segment" in
+      .|..|-*|*.git|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+  done
+}
+
+# Parse a canonical pull request, merge request, or Gerrit change URL into the
+# provider-tagged identity. Validation is strict and per provider: the GitHub
+# username and repository rules are unchanged, and GitLab and Gerrit each get
+# their own namespace rules rather than a loosened GitHub rule.
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
-# them empty, and that path addresses the project by FM_PR_HOST and FM_PR_PATH
-# instead, so a merge request on any instance resolves without a hardcoded host.
+# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab or gerrit
+# URL leaves them empty, and those paths address the project by FM_PR_HOST and
+# FM_PR_PATH instead, so a change on any instance resolves without a hardcoded
+# host.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path
   local LC_ALL=C
@@ -195,12 +228,31 @@ fm_pr_url_parse() {
   # "/-/merge_requests/". Any earlier separator therefore lands inside the
   # captured path, where the reserved "-" segment is refused.
   pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/-/merge_requests/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    path=${BASH_REMATCH[2]}
+    fm_pr_forge_host_valid "$host" || return 1
+    fm_pr_gitlab_path_valid "$path" || return 1
+    FM_PR_PROVIDER=gitlab
+    FM_PR_URL=$raw
+    FM_PR_HOST=$host
+    FM_PR_PATH=$path
+    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  # A Gerrit change URL is https://<host>/c/<project>/+/<number>. "+" is outside
+  # the path class, so the project can never contain the "/+/" separator and this
+  # match needs no greediness argument: a second "/+/" makes the URL match
+  # nothing rather than splitting somewhere else. The project keeps its whole
+  # nested path for the same reason GitLab's does, so it is never flattened into
+  # an owner/repository pair that cannot address it.
+  pattern='^https://([a-z0-9.-]{1,253})/c/([A-Za-z0-9._/-]+)/\+/([1-9][0-9]*)$'
   [[ "$raw" =~ $pattern ]] || return 1
   host=${BASH_REMATCH[1]}
   path=${BASH_REMATCH[2]}
-  fm_pr_gitlab_host_valid "$host" || return 1
-  fm_pr_gitlab_path_valid "$path" || return 1
-  FM_PR_PROVIDER=gitlab
+  fm_pr_forge_host_valid "$host" || return 1
+  fm_pr_gerrit_path_valid "$path" || return 1
+  FM_PR_PROVIDER=gerrit
   FM_PR_URL=$raw
   FM_PR_HOST=$host
   FM_PR_PATH=$path
@@ -211,6 +263,17 @@ fm_pr_head_valid() {
   local head=${1-}
   local LC_ALL=C
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+}
+
+# The one reading of a GitHub pull request's draft state. Prints "true" or
+# "false" for a boolean isDraft and nothing for anything else, so a caller can
+# tell a positive draft from an unreadable payload. bin/fm-pr-merge.sh refuses
+# a merge unless this prints "false"; bin/fm-pr-check.sh refuses to arm a merge
+# poll only when it prints "true".
+fm_pr_json_draft_state() {  # <pull-request-json>
+  printf '%s' "${1-}" | jq -r '
+    if type == "object" and (.isDraft | type) == "boolean" then (.isDraft | tostring) else "" end
+  ' 2>/dev/null || true
 }
 
 fm_pr_file_mode() {
@@ -245,6 +308,11 @@ fm_pr_file_inode() {
   fi
 }
 
+# device:inode names one file object, since an inode number is unique only
+# within its filesystem. The device part is not stable across a volume remount:
+# APFS can renumber st_dev on reboot while every inode and byte is unchanged, so
+# an identity persisted before the remount no longer matches the live file
+# (fm_pr_poll_registration_rerecord_device).
 fm_pr_file_identity() {
   local device inode
   device=$(fm_pr_file_device "$1") || return 1
@@ -263,6 +331,11 @@ fm_pr_sha256() {
   fi
 }
 
+# Callers pass the containing directory's device read in the same invocation,
+# never a persisted one, so this compares two live readings and survives a
+# remount that renumbers the volume. It refuses a file that is not on that
+# directory's own filesystem, such as one bind-mounted over the name, which is
+# also what keeps same-directory rename publication atomic.
 fm_pr_private_file_valid() {
   local path=$1 mode=$2 device=$3
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
@@ -519,6 +592,8 @@ fm_pr_poll_prepare() {
   fi
 }
 
+# The caller holds the task's poll publication lock while publishing this
+# prepared generation, so no registration can name another generation's files.
 fm_pr_poll_publish_prepared() {
   [ -n "$FM_PR_POLL_DATA_TMP" ] && [ -n "$FM_PR_POLL_CHECK_TMP" ] \
     && [ -n "$FM_PR_POLL_REG_TMP" ] || return 1
@@ -578,7 +653,24 @@ fm_pr_poll_publish_prepared() {
 }
 
 fm_pr_poll_artifacts_valid() {
-  local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash data_identity check_identity
+  local state=$1 id=$2 template=$3 data_identity check_identity
+  fm_pr_poll_artifacts_content_valid "$state" "$id" "$template" || return 1
+  data_identity=$(fm_pr_file_identity "$state/$id.pr-poll") || return 1
+  check_identity=$(fm_pr_file_identity "$state/$id.check.sh") || return 1
+  # The recorded identities bind the registration to the exact sidecar and
+  # check file objects published in its own transaction, so a byte-identical
+  # replacement or a torn re-arm pairing one generation's check with another's
+  # registration is refused.
+  [ "$FM_PR_REG_DATA_IDENTITY" = "$data_identity" ] || return 1
+  [ "$FM_PR_REG_CHECK_IDENTITY" = "$check_identity" ]
+}
+
+# Everything fm_pr_poll_artifacts_valid proves except that the registration's
+# recorded file identities name the live sidecar and check. Success alone is
+# never authentication. On success FM_PR_DATA_*, FM_PR_REG_*, and FM_PR_META_*
+# hold the parsed records.
+fm_pr_poll_artifacts_content_valid() {
+  local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
@@ -595,8 +687,6 @@ fm_pr_poll_artifacts_valid() {
   fm_pr_poll_data_parse "$data" || return 1
   data_hash=$(fm_pr_sha256 "$data") || return 1
   template_hash=$(fm_pr_sha256 "$check") || return 1
-  data_identity=$(fm_pr_file_identity "$data") || return 1
-  check_identity=$(fm_pr_file_identity "$check") || return 1
   fm_pr_poll_registration_parse "$registration" || return 1
   [ "$FM_PR_REG_ID" = "$id" ] || return 1
   [ "$FM_PR_REG_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] || return 1
@@ -606,14 +696,97 @@ fm_pr_poll_artifacts_valid() {
   [ "$FM_PR_REG_NUMBER" = "$FM_PR_DATA_NUMBER" ] || return 1
   [ "$FM_PR_REG_DATA_HASH" = "$data_hash" ] || return 1
   [ "$FM_PR_REG_TEMPLATE_HASH" = "$template_hash" ] || return 1
-  [ "$FM_PR_REG_DATA_IDENTITY" = "$data_identity" ] || return 1
-  [ "$FM_PR_REG_CHECK_IDENTITY" = "$check_identity" ] || return 1
   fm_pr_metadata_identity_parse "$meta" || return 1
   [ "$FM_PR_META_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] || return 1
   [ "$FM_PR_META_URL" = "$FM_PR_DATA_URL" ] || return 1
   [ "$FM_PR_META_HOST" = "$FM_PR_DATA_HOST" ] || return 1
   [ "$FM_PR_META_PATH" = "$FM_PR_DATA_PATH" ] || return 1
   [ "$FM_PR_META_NUMBER" = "$FM_PR_DATA_NUMBER" ]
+}
+
+# A registration armed before a volume remount can name a device number the
+# kernel has since reassigned (fm_pr_file_identity). This proves that is the
+# only difference: every artifact passes fm_pr_poll_artifacts_content_valid, so
+# the check is byte-identical to the template, both hashes match, and the three
+# poll artifacts are private, single-link, and on the state directory's live
+# device; both recorded identities name one device; each recorded inode equals
+# its live inode; and that recorded device differs from the live one. A
+# replaced, altered, re-moded, relinked, or foreign-device artifact fails a proof
+# here and stays refused. A pending retirement receipt owns its artifacts, so
+# none is re-recorded while one exists. On success
+# FM_PR_POLL_REARM_DATA_IDENTITY and FM_PR_POLL_REARM_CHECK_IDENTITY hold the
+# live identities.
+fm_pr_poll_registration_device_shifted() {  # <state> <id> <template>
+  local state=$1 id=$2 template=$3 state_device recorded_device receipt data_identity check_identity
+  FM_PR_POLL_REARM_DATA_IDENTITY=
+  FM_PR_POLL_REARM_CHECK_IDENTITY=
+  fm_pr_task_id_valid "$id" || return 1
+  [ -f "$state/$id.pr-poll-registration" ] || return 1
+  receipt="$state/$id.pr-poll-retirement"
+  [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  fm_pr_poll_artifacts_content_valid "$state" "$id" "$template" || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  data_identity=$(fm_pr_file_identity "$state/$id.pr-poll") || return 1
+  check_identity=$(fm_pr_file_identity "$state/$id.check.sh") || return 1
+  recorded_device=${FM_PR_REG_DATA_IDENTITY%%:*}
+  [ "${FM_PR_REG_CHECK_IDENTITY%%:*}" = "$recorded_device" ] || return 1
+  [ "$recorded_device" != "$state_device" ] || return 1
+  [ "$data_identity" = "$state_device:${FM_PR_REG_DATA_IDENTITY#*:}" ] || return 1
+  [ "$check_identity" = "$state_device:${FM_PR_REG_CHECK_IDENTITY#*:}" ] || return 1
+  FM_PR_POLL_REARM_DATA_IDENTITY=$data_identity
+  FM_PR_POLL_REARM_CHECK_IDENTITY=$check_identity
+}
+
+# Rewrite a device-shifted registration (fm_pr_poll_registration_device_shifted)
+# so it names the live device, changing no other line. The caller holds the
+# task's control lock and poll publication lock, which serialize this with the
+# watcher's validated check and retirement, teardown, bin/fm-pr-merge.sh, and
+# direct bin/fm-pr-check.sh publication. The proof is repeated just before the
+# rename, which proceeds only while the registration is still the exact file
+# object and bytes first proven.
+# Success means the strict fm_pr_poll_artifacts_valid accepts the result.
+fm_pr_poll_registration_rerecord_device() {  # <state> <id> <template>
+  local state=$1 id=$2 template=$3 state_device registration tmp reg_hash reg_identity
+  local id_line provider url host path number data_hash template_hash data_identity check_identity
+  fm_pr_poll_registration_device_shifted "$state" "$id" "$template" || return 1
+  registration="$state/$id.pr-poll-registration"
+  id_line=$FM_PR_REG_ID
+  provider=$FM_PR_REG_PROVIDER
+  url=$FM_PR_REG_URL
+  host=$FM_PR_REG_HOST
+  path=$FM_PR_REG_PATH
+  number=$FM_PR_REG_NUMBER
+  data_hash=$FM_PR_REG_DATA_HASH
+  template_hash=$FM_PR_REG_TEMPLATE_HASH
+  data_identity=$FM_PR_POLL_REARM_DATA_IDENTITY
+  check_identity=$FM_PR_POLL_REARM_CHECK_IDENTITY
+  state_device=$(fm_pr_file_device "$state") || return 1
+  reg_hash=$(fm_pr_sha256 "$registration") || return 1
+  reg_identity=$(fm_pr_file_identity "$registration") || return 1
+  tmp=$(mktemp "$state/.fm-pr-poll-registration.XXXXXX") || return 1
+  if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+      fm-pr-poll-registration-v2 "$id_line" "$provider" "$url" "$host" "$path" "$number" \
+      "$data_hash" "$template_hash" "$data_identity" "$check_identity" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_private_file_valid "$tmp" 600 "$state_device" \
+    || ! fm_pr_poll_registration_parse "$tmp" \
+    || [ "$FM_PR_REG_ID" != "$id" ] \
+    || [ "$FM_PR_REG_URL" != "$url" ] \
+    || [ "$FM_PR_REG_DATA_HASH" != "$data_hash" ] \
+    || [ "$FM_PR_REG_TEMPLATE_HASH" != "$template_hash" ] \
+    || [ "$FM_PR_REG_DATA_IDENTITY" != "$data_identity" ] \
+    || [ "$FM_PR_REG_CHECK_IDENTITY" != "$check_identity" ] \
+    || ! fm_pr_poll_registration_device_shifted "$state" "$id" "$template" \
+    || [ "$FM_PR_POLL_REARM_DATA_IDENTITY" != "$data_identity" ] \
+    || [ "$FM_PR_POLL_REARM_CHECK_IDENTITY" != "$check_identity" ] \
+    || [ "$(fm_pr_sha256 "$registration")" != "$reg_hash" ] \
+    || [ "$(fm_pr_file_identity "$registration")" != "$reg_identity" ] \
+    || ! fm_pr_regular_destination_on_device_or_absent "$registration" "$state_device" \
+    || ! mv -f -- "$tmp" "$registration"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  fm_pr_poll_artifacts_valid "$state" "$id" "$template"
 }
 
 fm_pr_poll_snapshot_capture() {
@@ -736,6 +909,217 @@ fm_pr_poll_retirement_receipt_valid() {
   [ "$FM_PR_META_NUMBER" = "$FM_PR_RETIRE_NUMBER" ] || return 1
   FM_PR_RETIRE_RECEIPT_HASH=$(fm_pr_sha256 "$receipt") || return 1
   FM_PR_RETIRE_RECEIPT_IDENTITY=$(fm_pr_file_identity "$receipt") || return 1
+}
+
+fm_pr_github_read_record_with_gh() {  # <owner> <repo> <number>
+  local owner=$1 repo=$2 number=$3 fields line total=0 named=0
+  local state='' merged=''
+  FM_PR_RECORD_STATE=
+  FM_PR_RECORD_MERGED=
+
+  # shellcheck disable=SC2016  # GraphQL variables are literal query syntax.
+  if ! fields=$(gh api graphql \
+    -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){state merged}}}' \
+    -F "owner=$owner" -F "repo=$repo" -F "number=$number" \
+    --jq '.data.repository.pullRequest | "state=" + (.state // ""), "merged=" + (.merged | tostring)' \
+    2>/dev/null) || [ -z "$fields" ]; then
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      merged=*) merged=${line#merged=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 2 ] || [ "$total" -ne 2 ] || [ -z "$state" ] \
+    || { [ "$merged" != true ] && [ "$merged" != false ]; }; then
+    return 1
+  fi
+
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_STATE=$state
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_MERGED=$merged
+}
+
+fm_pr_github_read_record_with_gh_axi() {  # <owner> <repo> <number>
+  local owner=$1 repo=$2 number=$3 output state
+  FM_PR_RECORD_STATE=
+  FM_PR_RECORD_MERGED=
+  if ! output=$(gh-axi pr view "$number" --repo "$owner/$repo" 2>/dev/null); then
+    return 1
+  fi
+  if ! state=$(printf '%s\n' "$output" | awk '
+    $1 == "state:" { count++; value=$2 }
+    END { if (count == 1 && value != "") print value; else exit 1 }
+  '); then
+    return 1
+  fi
+  case "$state" in
+    MERGED|merged)
+      # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+      # shellcheck disable=SC2034
+      FM_PR_RECORD_STATE=MERGED
+      # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+      # shellcheck disable=SC2034
+      FM_PR_RECORD_MERGED=true
+      ;;
+    OPEN|open)
+      # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+      # shellcheck disable=SC2034
+      FM_PR_RECORD_STATE=OPEN
+      # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+      # shellcheck disable=SC2034
+      FM_PR_RECORD_MERGED=false
+      ;;
+    CLOSED|closed)
+      # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+      # shellcheck disable=SC2034
+      FM_PR_RECORD_STATE=CLOSED
+      # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+      # shellcheck disable=SC2034
+      FM_PR_RECORD_MERGED=false
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+fm_pr_github_read_record() {  # <owner> <repo> <number>
+  if command -v gh >/dev/null 2>&1 && fm_pr_github_read_record_with_gh "$@"; then
+    return 0
+  fi
+  command -v gh-axi >/dev/null 2>&1 || return 1
+  fm_pr_github_read_record_with_gh_axi "$@"
+}
+
+fm_pr_gitlab_read_record() {  # <host> <path> <number>
+  local host=$1 path=$2 number=$3 project_url json fields line
+  local total=0 named=0 state='' merged=''
+  FM_PR_RECORD_STATE=
+  FM_PR_RECORD_MERGED=
+  command -v glab >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  project_url="https://$host/$path"
+
+  if ! json=$(GITLAB_HOST="$host" glab mr view "$number" -R "$project_url" -F json 2>/dev/null) \
+    || [ -z "$json" ]; then
+    return 1
+  fi
+  if ! fields=$(printf '%s' "$json" | jq -r '
+      if type == "object" and (.state | type == "string") and .state != "" then
+        "state=" + .state,
+        "merged=" + (if .state == "merged" then "true" else "false" end)
+      else
+        error("invalid merge request state")
+      end' 2>/dev/null); then
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      merged=*) merged=${line#merged=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 2 ] || [ "$total" -ne 2 ] || [ -z "$state" ] \
+    || { [ "$merged" != true ] && [ "$merged" != false ]; }; then
+    return 1
+  fi
+
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_STATE=$state
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_MERGED=$merged
+}
+
+# gerrit-axi resolves its server from the current directory's origin remote
+# first, so the host is passed explicitly from the parsed identity and a read
+# outside a clone still reaches the right server. A change number is
+# server-global and --host pins the server, so the number alone names the
+# change and the project path is not part of the read. Prints the one record
+# whose change number is exactly <number> as compact JSON, and fails on any
+# other reading. The record's own url field is not compared against the stored
+# URL, because Gerrit composes it from gerrit.canonicalWebUrl and omits it when
+# that setting is unset, which would turn every read on such a server into a
+# permanent unknown.
+fm_pr_gerrit_read_change() {  # <host> <number>
+  local host=$1 number=$2 json
+  command -v gerrit-axi >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  case "$number" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if ! json=$(gerrit-axi show "$number" --host "$host" --json 2>/dev/null) \
+    || [ -z "$json" ]; then
+    return 1
+  fi
+  printf '%s' "$json" | jq -c --argjson change "$number" '
+    if type == "object" and .ok == true and (.changes | type) == "array" then
+      [.changes[] | select((.change | type) == "number" and .change == $change)] as $match
+      | if ($match | length) == 1 and ($match[0] | type) == "object"
+        then $match[0]
+        else error("no exact change record")
+        end
+    else
+      error("invalid gerrit record")
+    end' 2>/dev/null
+}
+
+# The status of one Gerrit change. The status is the only field read: a merged
+# change and an approved-but-unsubmitted one report the same submit,
+# submittable, and blocked_on values, so only the status separates them.
+fm_pr_gerrit_read_record() {  # <host> <number>
+  local record state merged=false
+  FM_PR_RECORD_STATE=
+  FM_PR_RECORD_MERGED=
+  record=$(fm_pr_gerrit_read_change "$1" "$2") || return 1
+  state=$(printf '%s' "$record" | jq -r '
+    if (.status | type) == "string" and .status != "" and (.status | test("\n") | not)
+    then .status
+    else error("no status")
+    end' 2>/dev/null) || return 1
+  [ -n "$state" ] || return 1
+  [ "$state" != MERGED ] || merged=true
+
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_STATE=$state
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_MERGED=$merged
+}
+
+# The current patch set revision of one Gerrit change, read from the same exact
+# record as its status above. Consumed by bin/fm-dod-lib.sh's named-head gate,
+# which accepts a published change only when this revision carries the worker
+# copy's HEAD tree. It is a live read and never a recorded pr_head: the next
+# amend replaces it.
+fm_pr_gerrit_read_revision() {  # <host> <number>
+  local record revision
+  FM_PR_RECORD_REVISION=
+  record=$(fm_pr_gerrit_read_change "$1" "$2") || return 1
+  revision=$(printf '%s' "$record" | jq -r '
+    if (.revision | type) == "string" then .revision else error("no revision") end' 2>/dev/null) \
+    || return 1
+  fm_pr_head_valid "$revision" || return 1
+  # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_change_carries_head.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_REVISION=$revision
 }
 
 fm_pr_poll_retirement_data_valid() {

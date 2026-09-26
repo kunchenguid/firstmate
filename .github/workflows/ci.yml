@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 # Per-PR supersession: a new push to the same PR replaces that PR's in-flight
-# CI instead of letting superseded heads keep 13 jobs of hosted-runner work.
+# CI instead of letting superseded heads keep the full hosted-runner fan-out.
 # The group uses the PR number for pull_request events, so every run of one PR
 # shares a group, and falls back to the unique run id for push events, so each
 # main push gets its own group and is never cancelled. Cancellation is likewise
@@ -22,13 +22,20 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Timeout policy: docs/fm-test-portable-shards.md "Timeouts" owns the three
+# tiers and their rationale; tests/fm-ci-workflow.test.sh guards this workflow.
+# Each job comment identifies the tier implemented by its executable value.
+
 jobs:
   lint:
-    name: Lint
+    name: Lint ${{ matrix.partition }}
     runs-on: ubuntu-latest
-    # Hang tripwire only: lint executions measured at 14-16 minutes in the
-    # September 12 starvation report, so this leaves deliberate margin.
-    timeout-minutes: 25
+    # Normal tier (see the timeout policy above).
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2]
     steps:
       - uses: actions/checkout@v6
       - name: Install pinned ShellCheck
@@ -45,7 +52,19 @@ jobs:
       # and GitHub workflow lint). Do not re-spell the checks here; keep CI
       # and the pre-push gate on this script so a self-broken ci.yml still
       # fails locally before merge.
-      - run: bin/fm-lint.sh
+      - name: Lint canonical partition
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/fm-lint"
+          bin/fm-lint.sh --partition "${{ matrix.partition }}of${{ strategy.job-total }}" \
+            --telemetry "$RUNNER_TEMP/fm-lint/partition-${{ matrix.partition }}.tsv"
+      - name: Upload lint telemetry
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm-lint-telemetry-${{ matrix.partition }}
+          path: ${{ runner.temp }}/fm-lint/partition-${{ matrix.partition }}.tsv
+          if-no-files-found: warn
 
   # Deterministic proof that portable parallel shards + portable serial + Herdr
   # equal the complete tests/*.test.sh inventory with no missing or duplicates,
@@ -53,7 +72,7 @@ jobs:
   test-coverage:
     name: Test coverage guard
     runs-on: ubuntu-latest
-    # Hang tripwire: the coverage guard is a seconds-long local computation.
+    # Fast tier: the coverage guard is a seconds-long local computation.
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
@@ -65,14 +84,8 @@ jobs:
   tests-portable-parallel-1:
     name: Behavior portable parallel 1
     runs-on: ubuntu-latest
-    # This cap is intended as a hang tripwire, but the previous lane 1 reached
-    # it; the former "~1 min of serial sum" estimate no longer applies.
-    # Compare it with the derived hints from fm-test-run.sh --check-coverage
-    # and completed job timings, allowing for setup and runner-speed spread.
-    # A packed hint sum is not a measured job wall time or proof of headroom.
-    # Evidence and refresh procedure: docs/fm-test-portable-shards.md.
-    # Changes to this cap or the lane count require a separate scope decision.
-    timeout-minutes: 10
+    # Normal tier (see the timeout policy above).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
         with:
@@ -115,8 +128,8 @@ jobs:
   tests-portable-parallel-2:
     name: Behavior portable parallel 2
     runs-on: ubuntu-latest
-    # Same timeout rationale as portable parallel shard 1 above.
-    timeout-minutes: 10
+    # Normal tier (see the timeout policy above).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
         with:
@@ -159,15 +172,13 @@ jobs:
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # Current runners can take ~20 min for a balanced shard. This 30-minute cap
-    # preserves the timeout as a hang tripwire while allowing runner-speed and
-    # job-setup margin; it is not the expected healthy end of the lane.
+    # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     strategy:
       # Every shard reports so one failure never hides another shard's result.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -233,10 +244,9 @@ jobs:
   tests-herdr:
     name: Behavior tests (Herdr)
     runs-on: ubuntu-latest
-    # Healthy runs finish around 7 minutes. This job cap is a last-resort hang
-    # tripwire, not the expected end of the lane. The family-run step owns the
-    # tighter bound so a wedged suite fails fast with always() cleanup and
-    # timing artifacts still uploaded (docs/fm-test-portable-shards.md).
+    # Heavy tier (see the timeout policy above): the last-resort job backstop.
+    # The family-run step below owns the hang tripwire, so a wedged suite fails
+    # there with the always() cleanup and timing upload still running.
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6
@@ -317,8 +327,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/fm-herdr"
           bin/fm-herdr-ci-cleanup.sh snapshot "$RUNNER_TEMP/fm-herdr/sessions-before.json"
       - name: Run real-Herdr family (serial, required)
-        # Comfortably above the ~7 min healthy wall and far below the 75 min
-        # job backstop. A hang must fail this step so cleanup still runs.
+        id: run-real-herdr-family
+        # Heavy tier step tripwire: above the healthy 7-10 minute wall and far
+        # below the job backstop, so a hang fails this step and cleanup runs.
         timeout-minutes: 20
         run: |
           set -eu
@@ -329,6 +340,7 @@ jobs:
             --fail-on-gate-skip 'herdr not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-herdr.json"
       - name: Cleanup job-owned Herdr lab sessions
+        id: cleanup-herdr-lab-sessions
         if: always()
         run: |
           set -eu
@@ -353,7 +365,7 @@ jobs:
   tests-timing-aggregate:
     name: Behavior timing aggregate
     runs-on: ubuntu-latest
-    # Hang tripwire: aggregation is seconds of work over lane artifacts.
+    # Fast tier: aggregation is seconds of work over lane artifacts.
     timeout-minutes: 5
     needs:
       - tests-portable-parallel-1
@@ -393,7 +405,8 @@ jobs:
   macos-stock-bash:
     name: Stock macOS Bash snapshot compatibility
     runs-on: macos-latest
-    timeout-minutes: 10
+    # Normal tier (see the timeout policy above).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - name: Run snapshot consumers with stock Bash
@@ -418,7 +431,7 @@ jobs:
           [ "$parse_fail" -eq 0 ] || { echo "::error::stock macOS Bash 3.2 parse sweep failed"; exit 1; }
 
           command -v npm >/dev/null || { echo "::error::npm is required to install tasks-axi"; exit 1; }
-          npm install -g tasks-axi@0.2.5 >/dev/null
+          npm install -g tasks-axi@0.2.6 >/dev/null
           PATH="$(npm prefix -g)/bin:$PATH"
           export PATH
           command -v tasks-axi >/dev/null || { echo "::error::tasks-axi is required for the stock Bash regressions"; exit 1; }
@@ -434,8 +447,8 @@ jobs:
           bearings_output=$(/bin/bash tests/fm-bearings-snapshot.test.sh)
           printf '%s\n' "$bearings_output"
           bearings_count=$(printf '%s\n' "$bearings_output" | grep -c '^ok - ')
-          [ "$bearings_count" -eq 59 ] || {
-            echo "::error::expected 59 Bearings tests, got $bearings_count"
+          [ "$bearings_count" -eq 60 ] || {
+            echo "::error::expected 60 Bearings tests, got $bearings_count"
             exit 1
           }
 
@@ -450,10 +463,32 @@ jobs:
             exit 1
           }
 
+          # Same shape for the watcher's churn-deferral regression: an already-
+          # marked churn window expands an empty array that only stock Bash
+          # treats as an unbound variable under set -u.
+          churn_output=$(FM_TEST_ONLY=test_turn_ended_churn_existing_marker_absorbed \
+            /bin/bash tests/fm-watch-triage.test.sh)
+          printf '%s\n' "$churn_output"
+          churn_count=$(printf '%s\n' "$churn_output" | grep -c '^ok - ')
+          [ "$churn_count" -eq 1 ] || {
+            echo "::error::expected 1 watcher churn-deferral bash 3.2 regression, got $churn_count"
+            exit 1
+          }
+
+          backend_output=$(FM_TEST_ONLY=test_backend_source_requires_adapter_file \
+            FM_TEST_BASH=/bin/bash \
+            /bin/bash tests/fm-backend.test.sh)
+          printf '%s\n' "$backend_output"
+          backend_count=$(printf '%s\n' "$backend_output" | grep -c '^ok - ')
+          [ "$backend_count" -eq 2 ] || {
+            echo "::error::expected 2 backend adapter-file bash 3.2 regressions, got $backend_count"
+            exit 1
+          }
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
-    # Hang tripwire: the invariant checks are seconds-long file comparisons.
+    # Fast tier: the invariant checks are seconds-long file comparisons.
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6

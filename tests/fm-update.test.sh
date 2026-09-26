@@ -6,8 +6,10 @@
 #   - The running firstmate repo (on its default branch) fast-forwards from
 #     origin; a leased secondmate home (detached HEAD on the default branch)
 #     fast-forwards the same way.
-#   - FAST-FORWARD ONLY: a dirty, diverged, offline, or wrong-branch target is
+#   - A dirty, offline, wrong-branch, or genuinely unique diverged target is
 #     skipped and reported, never forced or stashed, so unlanded work survives.
+#     Divergence leaves a durable reconciliation record, while a clean local
+#     result already present upstream after a squash merge heals automatically.
 #   - The update is a single-parent fast-forward (never a merge commit) and a
 #     fast-forward of one worktree never disturbs another worktree's checkout
 #     or the shared default branch.
@@ -313,7 +315,7 @@ test_dirty_secondmate_skipped() {
 
 # --- T5: diverged secondmate is skipped, its commit preserved --------------
 test_diverged_secondmate_skipped() {
-  local w out before
+  local w out before marker second_out
   w=$(new_world t5)
   add_sm "$w" sm1
   # Local commit on the secondmate's detached HEAD makes it diverge from origin.
@@ -326,10 +328,57 @@ test_diverged_secondmate_skipped() {
   out=$(run_update "$w")
 
   assert_contains "$out" "secondmate sm1: skipped: diverged from origin/main" "diverged home skipped"
+  assert_contains "$out" "reconciliation required (record:" "diverged skip is actionable"
   assert_not_contains "$out" "fm-sm1" "diverged secondmate is not nudged"
   [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$before" ] \
     || fail "diverged secondmate HEAD moved (unlanded work at risk)"
-  pass "T5 diverged secondmate skipped, local commit preserved"
+  marker="$w/home/state/.secondmate-update-reconcile/sm1.pending"
+  assert_present "$marker" "diverged secondmate did not retain a durable reconciliation record"
+  assert_grep 'schema=fm-secondmate-update-reconcile.v1' "$marker" "divergence record schema missing"
+  assert_grep "local_commit=$before" "$marker" "divergence record lost the protected local commit"
+
+  second_out=$(run_update "$w")
+  assert_contains "$second_out" "reconciliation required (record: $marker)" \
+    "a later update did not surface the durable divergence"
+  pass "T5 diverged secondmate is preserved and durably actionable"
+}
+
+test_squash_merged_divergence_reconciles() {
+  local w branch_base local_tip out marker
+  w=$(new_world t5b)
+  add_sm "$w" sm1
+  branch_base=$(git -C "$w/sm1" rev-parse HEAD)
+
+  printf 'v2\n' > "$w/sm1/AGENTS.md"
+  git -C "$w/sm1" add AGENTS.md
+  git -C "$w/sm1" commit -qm local-instructions
+  printf 'echo squash-landed\n' > "$w/sm1/bin/tool.sh"
+  git -C "$w/sm1" add bin/tool.sh
+  git -C "$w/sm1" commit -qm local-tooling
+  local_tip=$(git -C "$w/sm1" rev-parse HEAD)
+
+  bump_origin "$w" readme
+  out=$(run_update "$w")
+  marker="$w/home/state/.secondmate-update-reconcile/sm1.pending"
+  assert_contains "$out" "secondmate sm1: skipped: diverged from origin/main" \
+    "unique local work was not initially protected"
+  assert_present "$marker" "initial divergence did not leave its durable record"
+
+  git -C "$w/sm1" diff "$branch_base" "$local_tip" | git -C "$w/seed" apply
+  git -C "$w/seed" add -A
+  git -C "$w/seed" commit -qm squash-local-contribution
+  git -C "$w/seed" push -q origin main
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "secondmate sm1: reconciled redundant divergence" \
+    "the squash-merged local result did not heal"
+  [ "$(git -C "$w/sm1" rev-parse HEAD)" = "$(git -C "$w/sm1" rev-parse origin/main)" ] \
+    || fail "reconciled secondmate did not reach origin/main"
+  assert_absent "$marker" "successful reconciliation left the divergence marker behind"
+  assert_contains "$out" "restart-secondmates: fm-sm1" \
+    "the reconciled live secondmate was excluded from restart"
+  pass "T5b squash-merged divergence heals and rejoins live convergence"
 }
 
 # --- T6: the git side is idempotent; the restart set is not -----------------
@@ -515,6 +564,7 @@ test_dead_secondmate_gets_no_action
 test_legacy_remote_advance_restarts
 test_dirty_secondmate_skipped
 test_diverged_secondmate_skipped
+test_squash_merged_divergence_reconciles
 test_already_current_secondmate_still_restarts
 test_already_current_unprovable_mate_is_nudged
 test_registry_backstop_dedup_and_self_exclusion

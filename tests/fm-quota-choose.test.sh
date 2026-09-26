@@ -27,6 +27,7 @@ NO_APPLICABLE="$LAB/no-applicable.json"
 APPLICABLE_VETO="$LAB/applicable-veto.json"
 MUSE_EXHAUSTED="$LAB/muse-exhausted.json"
 MUSE_POSITIVE="$LAB/muse-positive.json"
+AGY_POSITIVE="$LAB/agy-positive.json"
 TOON="$LAB/quota.toon"
 RENDERER_TOON="$LAB/renderer-quota.toon"
 EMPTY_TOON="$LAB/empty-quota.toon"
@@ -43,6 +44,11 @@ MALFORMED_COUNTED_TOON="$LAB/malformed-counted-quota.toon"
 UNKNOWN_EXHAUSTED_TOON="$LAB/unknown-exhausted-quota.toon"
 TRAILING_EMPTY_TOON="$LAB/trailing-empty-quota.toon"
 QUOTED_TOON="$LAB/quoted-quota.toon"
+SCHEMA6="$LAB/schema6.json"
+SCHEMA5_PAIR="$LAB/schema5-pair.json"
+SCHEMA6_KEYLESS="$LAB/schema6-keyless.json"
+SCHEMA6_DUPLICATE="$LAB/schema6-duplicate.json"
+SCHEMA6_TOON="$LAB/schema6-quota.toon"
 FAKEBIN="$LAB/fakebin"
 CALLS="$LAB/calls"
 
@@ -146,7 +152,7 @@ cat > "$FAKEBIN/quota-axi" <<'SH'
 #!/usr/bin/env bash
 printf 'called\n' >> "${QUOTA_AXI_CALLS:?}"
 if [ "${1:-}" = "--version" ]; then
-  echo "quota-axi 0.1.29"
+  echo "quota-axi 0.1.51"
   exit 0
 fi
 cat "${QUOTA_AXI_FIXTURE:?}"
@@ -247,10 +253,10 @@ fi
 [ "$err" = "error: unknown harness: bogus" ] || fail "unknown harness returned: $err"
 ok "unknown harness fails closed"
 
-if err=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:default --candidate agy:default 2>&1); then
+if err=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:default --candidate rovo:default 2>&1); then
   fail "trailing unsupported harness was hidden by an earlier selection"
 fi
-[ "$err" = "error: unknown harness: agy" ] || fail "trailing unsupported harness returned: $err"
+[ "$err" = "error: unknown harness: rovo" ] || fail "trailing unsupported harness returned: $err"
 
 if err=$(call_choose --snapshot "$LAB/captured.json" --candidate claude:default --candidate 'claude:' 2>&1); then
   fail "trailing empty model was hidden by an earlier selection"
@@ -551,11 +557,13 @@ fi
 [ "$out" = "none" ] || fail "exhausted Meta quota returned: $out"
 ok "Muse uses Meta quota"
 
-if err=$(call_choose --snapshot "$LAB/captured.json" --candidate agy:default 2>&1); then
-  fail "unsupported harness unexpectedly dispatched"
+jq '.providers += [{"provider":"agy","windows":[],"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":25,"runway":{"status":"through_reset"}}]}}]' \
+  "$LAB/captured.json" > "$AGY_POSITIVE"
+if err=$(call_choose --snapshot "$AGY_POSITIVE" --candidate agy:default 2>&1); then
+  fail "legacy quota chooser unexpectedly accepted Agy"
 fi
-[ "$err" = "error: unknown harness: agy" ] || fail "unsupported harness returned: $err"
-ok "unsupported harness is rejected"
+printf '%s\n' "$err" | grep -F 'unknown harness: agy' >/dev/null || fail "legacy Agy rejection changed: $err"
+ok "Agy remains resolver-only"
 
 jq '.providers += [.providers[] | select(.provider == "claude")]' "$LAB/captured.json" > "$DUPLICATE"
 if err=$(call_choose --snapshot "$DUPLICATE" --candidate claude:default 2>&1); then
@@ -637,6 +645,89 @@ if err=$(call_choose --snapshot "$INVALID_AVAILABILITY" --candidate claude:defau
 fi
 [ "$err" = "error: invalid quota-axi provider data" ] || fail "invalid availability status returned: $err"
 ok "invalid availability status fails closed"
+
+# Schema 6: quota-axi keys every row by provider + accountKey once a provider
+# expands to several accounts. Shaped like a real expanded snapshot: two codex
+# rows with different keys and percentages plus default-keyed providers.
+cat > "$SCHEMA6" <<'JSON'
+{
+  "generatedAt": "2030-01-01T00:00:00Z",
+  "schemaVersion": 6,
+  "providers": [
+    { "provider": "claude", "accountKey": "default", "quotaSemantics": { "status": "unknown", "effectiveAvailability": [] } },
+    { "provider": "codex", "accountKey": "openai-codex", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 3, "runway": { "status": "projected_exhaustion" } } ] } },
+    { "provider": "codex", "accountKey": "openai-codex-work", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 11, "runway": { "status": "projected_exhaustion" } } ] } },
+    { "provider": "cursor", "accountKey": "default", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 24, "runway": { "status": "projected_exhaustion" } } ] } }
+  ]
+}
+JSON
+out=$(call_choose --snapshot "$SCHEMA6" --candidate codex:default --candidate cursor:default)
+[ "$out" = "cursor default" ] || fail "schema 6 snapshot returned: $out"
+ok "native Codex never infers an account from a Pi lane"
+
+SCHEMA6_NATIVE="$LAB/schema6-native.json"
+jq '
+  .providers |= map(if .provider == "codex" then
+    .quotaSemantics.effectiveAvailability |= map(.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")
+    else . end) |
+  (.providers[] | select(.accountKey == "openai-codex-work")) as $account |
+  .providers += [($account | .accountKey = "default"),
+    ($account | .accountKey = "codex-home" |
+      .quotaSemantics.effectiveAvailability |= map(.effectivePercentRemaining = 80 | .runway.status = "through_reset"))]
+' "$SCHEMA6" > "$SCHEMA6_NATIVE"
+for model in default gpt-5.6-sol; do
+  out=$(call_choose --snapshot "$SCHEMA6_NATIVE" --candidate "codex:$model" --candidate cursor:default)
+  [ "$out" = "codex $model" ] || fail "native Codex did not select codex-home for $model: $out"
+done
+jq '.providers |= reverse' "$SCHEMA6_NATIVE" > "$LAB/schema6-reversed.json"
+out=$(call_choose --snapshot "$LAB/schema6-reversed.json" --candidate codex:default --candidate cursor:default)
+[ "$out" = "codex default" ] || fail "native Codex selection depended on row order: $out"
+
+jq '.providers |= map(select(.provider != "codex" or .accountKey != "default") |
+  if .accountKey == "codex-home" then .accountKey = "default" else . end)' "$SCHEMA6_NATIVE" > "$LAB/schema6-default.json"
+out=$(call_choose --snapshot "$LAB/schema6-default.json" --candidate codex:default --candidate cursor:default)
+[ "$out" = "codex default" ] || fail "native Codex did not fall back to the default row: $out"
+ok "native Codex binds to codex-home before default, independently of model and row order"
+
+jq '.schemaVersion = 5 | .providers |= unique_by(.provider) | del(.providers[].accountKey)' "$SCHEMA6" > "$SCHEMA5_PAIR"
+out=$(call_choose --snapshot "$SCHEMA5_PAIR" --candidate codex:default --candidate cursor:default)
+[ "$out" = "codex default" ] || fail "schema 5 pair snapshot returned: $out"
+ok "the same path still selects from a schema 5 snapshot by provider alone"
+
+jq 'del(.providers[1].accountKey)' "$SCHEMA6" > "$SCHEMA6_KEYLESS"
+if err=$(call_choose --snapshot "$SCHEMA6_KEYLESS" --candidate cursor:default 2>&1); then
+  fail "schema 6 row without accountKey unexpectedly dispatched"
+fi
+[ "$err" = "error: invalid quota-axi provider data" ] || fail "keyless schema 6 row returned: $err"
+jq '.providers[2].accountKey = "openai-codex"' "$SCHEMA6" > "$SCHEMA6_DUPLICATE"
+if err=$(call_choose --snapshot "$SCHEMA6_DUPLICATE" --candidate cursor:default 2>&1); then
+  fail "duplicate provider + accountKey unexpectedly dispatched"
+fi
+[ "$err" = "error: invalid quota-axi provider data" ] || fail "duplicate schema 6 key returned: $err"
+ok "schema 6 requires accountKey on every row and uniqueness on provider + accountKey"
+
+cat > "$SCHEMA6_TOON" <<'TOON'
+bin: ~/.local/bin/quota-axi
+description: Report local agent-provider quota windows for routing-aware agents
+generatedAt: "2030-01-01T00:00:00Z"
+quota[3]{provider,accountKey,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  codex,openai-codex,all_models,3,-1.4788,projected_exhaustion,established,weekly,"2030-01-03T00:00:00Z"
+  codex,openai-codex-work,all_models,11,-5.6818,projected_exhaustion,established,weekly,"2030-01-07T00:00:00Z"
+  cursor,default,all_models,24,0.3917,projected_exhaustion,established,auto_usage,"2030-01-12T00:00:00Z"
+exhaustion[2]{provider,accountKey,scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId}:
+  codex,openai-codex,all_models,11644,"2030-01-01T03:00:00Z",weekly
+  codex,openai-codex-work,all_models,11447,"2030-01-01T03:00:00Z",weekly
+attention[1]{provider,accountKey,scope,kind,detail,remedy}:
+  claude,default,all,auth_required,keychain_prompt_required · reason keychain_access_required,quota-axi --allow-keychain-prompt
+help[1]:
+  Run `quota-axi --full` for windows, pace, reserve, and account evidence
+TOON
+out=$(call_choose --snapshot "$SCHEMA6_TOON" --candidate claude:default --candidate codex:default --candidate cursor:default)
+[ "$out" = "cursor default" ] || fail "schema 6 TOON snapshot returned: $out"
+ok "schema 6 TOON with the accountKey column is accepted"
 
 [ "$(wc -l < "$CALLS" | tr -d '[:space:]')" = 1 ] || fail "helper took an additional quota snapshot"
 ok "helper reuses the captured quota snapshot"

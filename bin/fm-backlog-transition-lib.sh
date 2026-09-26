@@ -319,28 +319,17 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
 # Run `tasks-axi` with an optional FM_TASKS_AXI_TIMEOUT bound. A caller that
 # holds a lock across the call - the spawn commit and its preservation
 # read-back run under the per-task meta lock - sets the bound, so an
-# unresponsive tasks-axi cannot hold that lock open indefinitely; a timed-out
-# call exits 124, or 137 when the kill-after had to fire (GNU timeout's own
-# status for a KILL-forced expiry), and the callers treat either as the bound
-# expiring and report the timeout as the reason through their existing error
-# plumbing. GNU timeout is used where it exists,
-# gtimeout where coreutils ships under that name, and a small perl watchdog
-# elsewhere (a stock macOS host has perl but no timeout variant; perl is
-# already a hard dependency of this library's byte validators, so the
-# fallback adds no new tool). Every bounded path forces termination: a
-# tasks-axi that ignores SIGTERM must not outlive the bound, since an
-# unbounded call under the lock is exactly the hang the bound exists to
-# prevent - so the GNU variants carry a kill-after of one further bound
-# (TERM at the bound, KILL after that grace) and the watchdog kills the
-# same way. When a bound was requested but no bounding mechanism exists at
-# all, the call fails closed instead of running unbounded. Must be the last
-# command of a subshell: the exec keeps the tasks-axi process exactly where
-# the plain call sat, and the bound kills the child, not the caller.
+# unresponsive tasks-axi cannot hold that lock open indefinitely. The bound is
+# fm_exec_timed's (bin/fm-timeout-lib.sh), with one further bound of grace
+# before KILL so a tasks-axi that ignores SIGTERM cannot outlive it either; the
+# callers treat fm_timed_out statuses as the bound expiring and report the
+# timeout as the reason through their existing error plumbing. A bound that
+# cannot be enforced on this host fails closed instead of running unbounded.
+# Must be the last command of a subshell: the exec keeps the tasks-axi process
+# exactly where the plain call sat, and the bound kills the child, not the
+# caller.
 fm_tasks_axi_timeout_expired() {  # <status>
-  case $1 in
-    124 | 137) return 0 ;;
-  esac
-  return 1
+  fm_timed_out "$1"
 }
 
 fm_tasks_axi() {
@@ -348,49 +337,7 @@ fm_tasks_axi() {
   if [ -z "$bound" ]; then
     exec tasks-axi "$@"
   fi
-  if command -v timeout >/dev/null 2>&1; then
-    exec timeout -k "$bound" "$bound" tasks-axi "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    exec gtimeout -k "$bound" "$bound" tasks-axi "$@"
-  elif command -v perl >/dev/null 2>&1; then
-    # Fork, run tasks-axi in the child, and poll waitpid(WNOHANG) until the
-    # child exits or the bound expires: the same contract as
-    # `timeout $bound tasks-axi ...`. Expiry kills the child with TERM, waits
-    # one further bound of grace, then KILL, and exits 124 so the callers'
-    # timeout plumbing reports it. Polling rather than alarm+die keeps the
-    # bound off perl's platform-dependent syscall-restart signal semantics.
-    exec perl -MPOSIX=WNOHANG -e '
-      my $bound = shift;
-      exit 127 unless defined $bound && $bound =~ /\A[0-9]+\z/;
-      my $pid = fork;
-      exit 127 unless defined $pid;
-      if ($pid == 0) { exec @ARGV; exit 127 }
-      my $step = 0.05;
-      my $elapsed = 0;
-      while (1) {
-        my $done = waitpid $pid, WNOHANG;
-        exit(($? & 127) ? 128 + ($? & 127) : $? >> 8) if $done == $pid;
-        exit 127 if $done == -1;
-        if ($elapsed >= $bound) {
-          kill "TERM", $pid;
-          my $grace = 0;
-          my $gone = waitpid $pid, WNOHANG;
-          while ($gone == 0 && $grace < $bound) {
-            select undef, undef, undef, $step;
-            $grace += $step;
-            $gone = waitpid $pid, WNOHANG;
-          }
-          kill "KILL", $pid if $gone == 0;
-          waitpid $pid, 0;
-          exit 124;
-        }
-        select undef, undef, undef, $step;
-        $elapsed += $step;
-      }
-    ' -- "$bound" tasks-axi "$@"
-  fi
-  printf 'fm_tasks_axi: cannot bound tasks-axi within %ss: none of timeout, gtimeout, or perl is available\n' "$bound" >&2
-  exit 127
+  fm_exec_timed "$bound" "$bound" tasks-axi "$@"
 }
 
 # Print one row's `tasks-axi show` output (plus stderr) from the addressing
@@ -620,13 +567,22 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
         || FM_BACKLOG_TRANSITION_ERROR="tasks-axi show $id failed with no output"
       return "$command_status"
     fi
+    # The leading quote selects a JSON-encoded bare string, which is exactly the
+    # value an older JSON::PP rejects unless allow_nonref is asked for, so the
+    # decoder below requests it rather than inheriting the local default. It then
+    # writes bytes, because printing the decoded characters to a stream with no
+    # :raw layer emits a codepoint at or below U+00FF as one latin-1 byte and
+    # silently corrupts the body this rewrites.
     body=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1 \
       | LC_ALL=C perl -MJSON::PP -e '
         local $/;
         my $shown = <STDIN>;
         $shown =~ s/\s+\z//;
         exit 0 if $shown eq "" || $shown eq "-";
-        my $value = $shown =~ /\A"/ ? decode_json($shown) : $shown;
+        my $value = $shown =~ /\A"/
+          ? JSON::PP->new->utf8->allow_nonref->decode($shown) : $shown;
+        binmode STDOUT, ":raw";
+        utf8::encode($value) if utf8::is_utf8($value);
         print $value unless $value eq "-";
       ') || {
       FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"

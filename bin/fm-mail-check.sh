@@ -126,9 +126,11 @@ fi
 # dropped, and an empty failure gets a truth-stating fallback.
 poll_summary() {
   local rc=$1 out=$2 line
-  line=$(printf '%s\n' "$out" | sed -n '/^fm-mail: woke for /d; s/^fm-mail: //p' | head -n 1)
+  # First-line selectors must still drain the stream: head/quiet grep can
+  # close a large poll's pipe early and add a Broken pipe diagnostic.
+  line=$(printf '%s\n' "$out" | sed -n '/^fm-mail: woke for /d; s/^fm-mail: //p' | sed -n '1p')
   if [ -z "$line" ]; then
-    line=$(printf '%s\n' "$out" | sed -n '/^fm-mail: woke for /d; /^$/d; p' | head -n 1)
+    line=$(printf '%s\n' "$out" | sed -n '/^fm-mail: woke for /d; /^$/d; p' | sed -n '1p')
   fi
   if [ -z "$line" ]; then
     line="poll failed (rc=$rc)"
@@ -174,8 +176,8 @@ record_write() {
 poll_has_publication_evidence() {
   local rc=${1:-0} out=$2 woken_before=$3
   [ "$rc" -eq 124 ] && return 0
-  if [ -n "$out" ] && printf '%s\n' "$out" | grep -qE \
-    '^fm-mail: woke for |the wake stays queued|could not clear retry for recovered'
+  if [ -n "$out" ] && printf '%s\n' "$out" | grep -E \
+    '^fm-mail: woke for |the wake stays queued|could not clear retry for recovered' >/dev/null
   then
     return 0
   fi
@@ -210,7 +212,7 @@ action_check() {
       line="poll did not finish within the ${BUDGET_SECS}s budget"
     elif [ "${rc:-0}" -ne 0 ]; then
       line=$(poll_summary "$rc" "$out")
-    elif printf '%s\n' "$out" | grep -q '^fm-mail: woke for '; then
+    elif printf '%s\n' "$out" | grep '^fm-mail: woke for ' >/dev/null; then
       # A successful poll can still surface new mail: the poll itself already
       # appended the durable mail wake rows, but the watcher only calls wake()
       # when THIS check's output is non-empty. Emit one line naming a surfaced

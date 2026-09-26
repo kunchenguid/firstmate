@@ -515,7 +515,7 @@ PY
   cp "$ROOT/tests/git-config-helpers.sh" "$timeout_repo/tests/"
   cat >"$timeout_repo/bin/fm-timeout-lib.sh" <<'SH'
 fm_run_timed() {
-  [ "$1" -eq 900 ] || return 99
+  [ "$1" -eq 1500 ] || return 99
   return 124
 }
 SH
@@ -1142,8 +1142,8 @@ test_portable_serial_shards_partition_the_serial_lane() {
   shard=1
   while [ "$shard" -le "$count" ]; do
     listed=$("$RUNNER" --list --lane "portable-serial-${shard}of${count}" | wc -l | tr -d ' ')
-    [ "$listed" -ge 2 ] \
-      || fail "portable-serial-${shard}of${count} holds only $listed script(s)"
+    # One expensive suite can legitimately occupy a whole runner. Non-empty
+    # coverage is asserted above; script counts are not duration weights.
     [ "$listed" -le "$cap" ] \
       || fail "portable-serial-${shard}of${count} holds $listed of $total scripts"
     shard=$((shard + 1))
@@ -1223,7 +1223,7 @@ test_jobs_requires_proven_isolated() {
   rc=$?
   set -e
   [ "$rc" -eq 2 ] || fail "--jobs with portable-serial must refuse (exit 2), got $rc"
-  grep -Fq 'not in the proven-isolated set' "$tmp/err" \
+  grep -Fq 'portable serial lanes stay serial' "$tmp/err" \
     || fail "--jobs refusal message missing: $(cat "$tmp/err")"
   set +e
   "$RUNNER" --jobs 2 tests/fm-afk-inject-e2e.test.sh >"$tmp/out2" 2>"$tmp/err2"
@@ -1237,7 +1237,7 @@ test_jobs_requires_proven_isolated() {
   rc=$?
   set -e
   [ "$rc" -eq 2 ] || fail "--jobs with a portable serial shard must refuse, got $rc"
-  grep -Fq 'not in the proven-isolated set' "$tmp/err3" \
+  grep -Fq 'portable serial lanes stay serial' "$tmp/err3" \
     || fail "shard --jobs refusal message missing: $(cat "$tmp/err3")"
   rm -rf "$tmp"
   pass "--jobs refuses non-proven / stateful selections"
@@ -1466,6 +1466,47 @@ SH
 # green but whose wall clock outgrew its caller's invocation budget. The caller
 # gets killed mid-run and retries invisibly, so an over-budget run has to be a
 # failure, not a note in the log.
+# tests/fm-watch-triage.test.sh finishes in about 434s alone and about 698s
+# under CI load, so the automatic --changed bound must leave a slow but healthy
+# watcher-wake-lock script room while still bounding a genuinely hung one
+# (upstream issue #3869). The stub records the bound the runner hands it.
+test_changed_bound_gives_slow_watcher_suites_headroom() {
+  local tmp repo script bound rc
+  tmp=$(mktemp -d)
+  repo="$tmp/repo"
+  script=tests/fm-watch-triage.test.sh
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cat >"$repo/bin/fm-timeout-lib.sh" <<'SH'
+fm_run_timed() {
+  printf '%s\n' "$1" >bound-secs
+  shift
+  "$@"
+}
+SH
+  cat >"$repo/$script" <<'SH'
+#!/usr/bin/env bash
+echo "ok - healthy but slow watcher suite"
+SH
+  chmod +x "$repo/bin/fm-test-run.sh" "$repo/$script"
+  git -C "$repo" init -q
+  git -C "$repo" add .
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
+  printf '\n' >>"$repo/$script"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh --changed --base HEAD) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "healthy changed watcher script must pass, got $rc: $(cat "$tmp/out" "$tmp/err")"
+  [ -s "$repo/bound-secs" ] || fail "changed watcher script did not run under the automatic bound: $(cat "$tmp/out")"
+  bound=$(cat "$repo/bound-secs")
+  [ "$bound" -ge 1500 ] \
+    || fail "automatic --changed bound for $script must be at least 1500s, got ${bound}s"
+  rm -rf "$tmp"
+  pass "the automatic --changed bound gives the slow watcher suite at least 1500s"
+}
+
 test_max_wall_ms_is_a_result_not_advice() {
   local tmp repo runner fast rc summary_duration budget_duration
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-budget.XXXXXX")
@@ -1771,6 +1812,7 @@ test_unmapped_new_test_never_inherits_family_concurrency
 test_changed_shared_fixture_selects_its_readers
 test_concurrent_runs_are_ordered_longest_first
 test_per_script_timeout_bounds_a_hang
+test_changed_bound_gives_slow_watcher_suites_headroom
 test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
