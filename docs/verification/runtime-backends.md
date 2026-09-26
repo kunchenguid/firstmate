@@ -220,7 +220,7 @@ Verified on 2026-09-26 with Herdr 0.8.0, TraeX 0.207.1 internal edition, and Cod
 `tests/fm-busy-transcript-live-e2e.test.sh` runs the installed default TUIs in private user, PID, and network namespaces with a local simulated Responses provider and a generated non-default Herdr session.
 Its spawn regression creates a private harmless `true` hook and observes the real `Hooks need review` screen after directory trust.
 The failed spawn preserves its original records; only the test approves that known private hook, then the recovery entrypoint and ordinary inbox doorbell execute and acknowledge the original instruction.
-The same guard restores a missing original generation for both retained transcript adapters, verifies that each real TUI reads and acknowledges one durable steering record, and checks later input, interrupt, completion, API failure, and endpoint death.
+The same guard passes each public check's unchanged JSON stdout directly to public apply, restores a missing original generation for both retained transcript adapters, verifies that each real TUI reads and acknowledges one durable steering record, and checks later input, interrupt, completion, API failure, and endpoint death.
 The procedure and refusal boundaries belong to `bin/fm-busy-event.sh recover`, with mutation mechanics in `bin/fm-busy-recover.sh` and provenance checks in `bin/fm-busy-transcript.py`.
 
 ```sh
