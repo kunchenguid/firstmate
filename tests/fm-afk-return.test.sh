@@ -18,6 +18,21 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-afk-return-tests)
+FAKEBIN=$(fm_fakebin "$TMP_ROOT")
+cat > "$FAKEBIN/sudo" <<'SH'
+#!/usr/bin/env bash
+"$@"
+SH
+chmod +x "$FAKEBIN/sudo"
+cat > "$FAKEBIN/pmset" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_TEST_PMSET_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FM_TEST_PMSET_LOG"
+fi
+exit 0
+SH
+chmod +x "$FAKEBIN/pmset"
+export PATH="$FAKEBIN:$PATH"
 
 install_runner() {  # <case-dir>
   local dir=$1
@@ -978,6 +993,134 @@ test_missing_final_archive_keeps_retained_contract_gated() {
   pass "the retained contract epoch requires its final archive on every check"
 }
 
+test_restore_sleep_on_return() {
+  local dir log subbin subbin2 before after i out rc
+
+  # 1. macOS (Darwin): return triggers disablesleep 0
+  dir="$TMP_ROOT/sleep-darwin"
+  install_runner "$dir"
+  touch "$dir/home/state/.afk"
+  : > "$dir/home/state/.fake-drain"
+  log="$dir/home/pmset.log"
+  FM_TEST_PMSET_LOG="$log" run_return "$dir" begin >/dev/null 2>&1 || fail "return begin on darwin failed"
+  i=0
+  while [ "$i" -lt 20 ] && [ ! -s "$log" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$log" ] || fail "restore-sleep: pmset was not called on darwin return"
+  assert_contains "$(cat "$log")" "-a disablesleep 0" "restore-sleep: pmset was not called with -a disablesleep 0"
+
+  # 2. Non-macOS: platform-gate no-ops
+  dir="$TMP_ROOT/sleep-linux"
+  install_runner "$dir"
+  touch "$dir/home/state/.afk"
+  : > "$dir/home/state/.fake-drain"
+  log="$dir/home/pmset.log"
+  subbin=$(fm_fakebin "$dir/linux-bin")
+  cat > "$subbin/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'Linux\n'
+SH
+  chmod +x "$subbin/uname"
+  PATH="$subbin:$PATH" FM_TEST_PMSET_LOG="$log" run_return "$dir" begin >/dev/null 2>&1 || fail "return begin on linux failed"
+  sleep 0.1
+  [ ! -s "$log" ] || fail "restore-sleep: pmset was called on non-darwin platform"
+
+  # 3. Best-effort / non-blocking: slow sudo does not block return
+  dir="$TMP_ROOT/sleep-slow"
+  install_runner "$dir"
+  touch "$dir/home/state/.afk"
+  : > "$dir/home/state/.fake-drain"
+  subbin=$(fm_fakebin "$dir/slow-bin")
+  cat > "$subbin/sudo" <<'SH'
+#!/usr/bin/env bash
+sleep 3
+exit 0
+SH
+  chmod +x "$subbin/sudo"
+  before=$(date +%s)
+  PATH="$subbin:$PATH" run_return "$dir" begin >/dev/null 2>&1 || fail "return begin with slow sudo failed"
+  after=$(date +%s)
+  [ "$((after - before))" -lt 2 ] || fail "restore-sleep: slow sudo blocked return flow ($((after - before))s >= 2s)"
+
+  # 4. Best-effort / non-blocking: failing sudo does not fail return
+  dir="$TMP_ROOT/sleep-fail"
+  install_runner "$dir"
+  touch "$dir/home/state/.afk"
+  : > "$dir/home/state/.fake-drain"
+  subbin=$(fm_fakebin "$dir/fail-bin")
+  cat > "$subbin/sudo" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$subbin/sudo"
+  PATH="$subbin:$PATH" run_return "$dir" begin >/dev/null 2>&1 || fail "return begin failed when sudo returned non-zero"
+
+  # 5. Missing pmset or sudo notes and proceeds without failure
+  dir="$TMP_ROOT/sleep-missing-pmset"
+  install_runner "$dir"
+  touch "$dir/home/state/.afk"
+  : > "$dir/home/state/.fake-drain"
+  subbin=$(fm_fakebin "$dir/missing-pmset-bin")
+  for d in /bin /usr/bin; do
+    for b in "$d"/*; do
+      [ -f "$b" ] && [ -x "$b" ] || continue
+      name=${b##*/}
+      [ "$name" != pmset ] && [ "$name" != sudo ] || continue
+      [ ! -e "$subbin/$name" ] || continue
+      ln -s "$b" "$subbin/$name" 2>/dev/null || true
+    done
+  done
+  for tool in node tasks-axi; do
+    p=$(command -v "$tool" 2>/dev/null || true)
+    [ -z "$p" ] || ln -s "$p" "$subbin/$tool" 2>/dev/null || true
+  done
+  cat > "$subbin/sudo" <<'SH'
+#!/usr/bin/env bash
+"$@"
+SH
+  chmod +x "$subbin/sudo"
+  set +e
+  out=$(PATH="$subbin" run_return "$dir" begin 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "return begin failed when pmset was missing (rc=$rc): $out"
+  assert_contains "$out" "pmset not found; sleep behavior unchanged" "return begin did not log when pmset was missing"
+
+  dir="$TMP_ROOT/sleep-missing-sudo"
+  install_runner "$dir"
+  touch "$dir/home/state/.afk"
+  : > "$dir/home/state/.fake-drain"
+  subbin2=$(fm_fakebin "$dir/missing-sudo-bin")
+  for d in /bin /usr/bin; do
+    for b in "$d"/*; do
+      [ -f "$b" ] && [ -x "$b" ] || continue
+      name=${b##*/}
+      [ "$name" != pmset ] && [ "$name" != sudo ] || continue
+      [ ! -e "$subbin2/$name" ] || continue
+      ln -s "$b" "$subbin2/$name" 2>/dev/null || true
+    done
+  done
+  for tool in node tasks-axi; do
+    p=$(command -v "$tool" 2>/dev/null || true)
+    [ -z "$p" ] || ln -s "$p" "$subbin2/$tool" 2>/dev/null || true
+  done
+  cat > "$subbin2/pmset" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$subbin2/pmset"
+  set +e
+  out=$(PATH="$subbin2" run_return "$dir" begin 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "return begin failed when sudo was missing (rc=$rc): $out"
+  assert_contains "$out" "sudo not found; sleep behavior unchanged" "return begin did not log when sudo was missing"
+
+  pass "return best-effort restores normal sleep behavior on macOS only without blocking or gating"
+}
+
 test_return_gate_owns_remediation_and_reports_catchup_to_bearings
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
@@ -1003,3 +1146,4 @@ test_return_guard_refuses_while_the_record_exists
 test_return_brief_health_leads_with_a_gap
 test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap
 test_return_brief_without_a_record_reports_the_legacy_flag
+test_restore_sleep_on_return
