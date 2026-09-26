@@ -378,7 +378,7 @@ Stage two is the branch's verdict on each handled event, reported through its `f
 
 | Verdict | Delivery |
 | --- | --- |
-| `routine` | Keeps the existing custom-message path without a follow-up turn. |
+| `routine` | A non-silent outcome uses the custom-message path; a silent outcome is stored without a rendered note. Neither opens a follow-up turn. |
 | `captain` | Appends a versioned `fm-branch-visible-outcome` custom session entry. |
 
 ### The visible captain entry
@@ -434,11 +434,7 @@ A home upgraded with outcomes already delivered treats those rows as processed o
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns event ownership for merged outcomes and main's acknowledgement duty.
 Deterministic entry delivery owns captain visibility.
 
-A task-level routine no-change outcome and a no-change heartbeat reported with `silent=true` are stored but delivered without a rendered note.
-The branch prompt's "Verdict: routine or captain" section owns when a task outcome qualifies; any action, state change, new result, or doubt stays rendered, and captain outcomes are never silent.
-
-The branch prompt's "Verdict: routine or captain" section also owns the verdict criteria, including how requested work's finished results and its mere progress updates are classified.
-Unsolicited routine outcomes remain routine, unchanged fleet reviews remain silent, and doubt escalates.
+The branch prompt's "Verdict: routine or captain" section owns the classification criteria, including task-level silence eligibility and the rule to escalate doubt.
 
 Its "PR identity: copy or abstain" section owns where a PR URL in a summary or tool argument may come from:
 
@@ -626,7 +622,7 @@ At that moment the branch reports any refusal instead of concluding there is "no
 - Requested-versus-unsolicited delivery, exact visible entry content, and no unkeyed model turn.
 - The sequence-keyed processing request and its acknowledgement.
 - Re-presentation after an empty reply and after an unrelated prior answer, the triggered-then-next-turn pacing, and session-start re-presentation.
-- Routine outcomes staying turn-free, and the processed-marker migration.
+- Routine outcomes staying turn-free, task-level no-change notes staying hidden, and the processed-marker migration.
 - Idle and busy main state, and incident-shaped compaction and unrelated-assistant context.
 - Cold-start post-lock recovery, crash-before-cursor reload recovery, and repeated-reload idempotency.
 - Mirroring.
