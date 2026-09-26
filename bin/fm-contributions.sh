@@ -396,13 +396,15 @@ poll() {
     fi
     observed=0
     observe "$url" || observed=$?
+    # Every started observation advances rotation, even when its poll-budget
+    # timeout leaves the prior records untouched.
+    mark_attempt "$url"
     # An observation the budget cut short is unmeasured, not unavailable: keep
-    # every owner's prior record so the URL is observed first next poll.
+    # every owner's prior record and end this poll.
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
     # A read that crossed its own five-second slice while budget remained is
     # slow, not an unreachable forge: keep every owner's prior record and never
     # wake for it.
-    mark_attempt "$url"
     if [ "$observed" -ne 0 ] && [ ! -e "$TMP/forge-unavailable" ] \
       && [ -e "$TMP/forge-slow" ]; then
       continue
