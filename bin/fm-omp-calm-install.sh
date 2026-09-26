@@ -9,6 +9,8 @@
 # A legacy project-local copy at <home>/.omp/extensions/fm-calm-omp.ts would load a
 # second time in home sessions (OMP de-duplicates by absolute path, not realpath), so
 # an identical legacy copy is removed and a divergent one is renamed to .bak.
+# If that backup path already exists (including a dangling symlink), installation
+# refuses without replacing either copy; resolve both paths before retrying.
 # Unload with `omp plugin disable fm-calm-omp`.
 set -u
 

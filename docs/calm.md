@@ -3,7 +3,7 @@
 Calm is Firstmate's conversation-only transcript presentation toggle.
 It is fully supported on Pi, available on OMP through a linked user-scope plugin, and available on Claude Code behind that harness's default-off early-access function-hooks flag, as the sections below describe.
 It is off by default, and the last `/calm` choice persists for the effective Firstmate home across session starts and resumes on Pi and Claude Code through the one shared preference file [`configuration.md`](configuration.md#calm-preference-configcalm) owns; on OMP the command delegates to OMP's own persisted display setting instead.
-Across both harnesses, Calm evaluates each settled assistant text block from a model step that stopped to call tools, or exhausted its token limit while carrying tool calls.
+On Pi and Claude Code, Calm evaluates each settled assistant text block from a model step that stopped to call tools, or exhausted its token limit while carrying tool calls.
 It hides a block only when its raw text contains no newline and its trimmed length is below `CALM_PRESERVE_MIN_CHARS` (240); a newline or at least 240 trimmed characters preserves the block as substantive captain-facing content, while streaming text and the genuine reply that ends a response remain visible.
 
 ## Pi
@@ -108,9 +108,9 @@ FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-mod-live-e2e.test.sh
 ## OMP
 
 Calm on OMP is the standalone `fm-calm-omp` package under `extensions/fm-calm-omp/` (including `lib/fm-calm-working-ship.ts`), installed into OMP's user plugin scope so it loads in every omp session regardless of working directory.
-`bin/fm-omp-calm-install.sh` copies that package to `~/.local/share/fm-calm-omp` (override with `FM_CALM_OMP_DIR`) and runs `omp plugin link` against the copy, so the global install does not depend on firstmate checkout path or upstream merge status. Re-run the installer after updating firstmate to refresh the copy.
-To unload it, run `omp plugin disable fm-calm-omp`. The package lives outside `.omp/extensions/` on purpose: OMP de-duplicates extension entries by absolute path rather than realpath, so a project-local copy plus a global link would load twice in sessions that run inside a firstmate checkout.
-The installer retires a legacy project-local `.omp/extensions/fm-calm-omp.ts` for the same reason, removing an identical copy and renaming a divergent one to `.bak`.
+Run [`bin/fm-omp-calm-install.sh`](../bin/fm-omp-calm-install.sh) to install or refresh the standalone copy; its header owns installation paths, overrides, unloading, and legacy-copy migration, including refusal to overwrite an existing backup.
+The standalone installation survives moving or removing the checkout, and must be refreshed after updating Firstmate.
+The package lives outside `.omp/extensions/` to avoid loading both a project copy and the global plugin in the same session.
 
 `/calm-omp` uses OMP's typed `display.hideToolActivity` setting and live settings instance, which apply persistence, tool-image visibility, and terminal-history repainting.
 While that setting hides tool activity and a run is under way, the extension draws the same two-row sailboat animation from the vendored working-ship module in `extensions/fm-calm-omp/lib/`.

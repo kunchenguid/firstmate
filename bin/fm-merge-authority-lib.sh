@@ -1,24 +1,23 @@
 #!/usr/bin/env bash
 # Durable ownership of the authority under which a task's merge was accepted.
 #
-# The task's recorded yolo posture is standing merge authority on its own and
-# resolves first, present or absent away-posture record alike; for a task
-# without it the away-posture record (state/.afk-contract) is resolved only at
-# the merge gate. After a forge accepts the merge, bin/fm-pr-merge.sh persists
-# that answer as:
+# The away-posture record (state/.afk-contract) takes precedence over the
+# task's standing yolo posture. Without that record, yolo=on resolves to yolo
+# authority and other tasks resolve to attended authority. After a forge
+# accepts the merge, bin/fm-pr-merge.sh persists that answer as:
 #   state/<task-id>.merge-authority
 #   fm-merge-authority-v1
 #   <provider>
 #   <host>
 #   <path>
 #   <number>
-#   <authority>                 away | attended
-# While the away-posture record exists every merge runs under away authority
-# (the record's presence is the whole mechanical fact; which merge the captain's
-# away words meant is the supervision session's reading); without it the merge
-# is attended. The retired values yolo and away-grant are still accepted when an
-# existing record is read, so a merge persisted before the words model landed is
-# still consumed, but they are never written again.
+#   <authority>                 away | attended | yolo
+# A valid away-posture record resolves to away authority; an unreadable or
+# invalid record refuses resolution. Which merge the captain's away words meant
+# is the supervision session's reading. bin/fm-pr-merge.sh owns the additional
+# watcher-caller restriction at its locked merge boundary.
+# The retired value away-grant is accepted when an existing record is read,
+# but is never written again.
 # The identity comes from the merge run's immutable canonical URL parse;
 # persistence revalidates the task's current pr= metadata under its metadata
 # and lifecycle locks and refuses a mismatch. The file is atomically published,

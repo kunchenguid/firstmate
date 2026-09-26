@@ -467,7 +467,7 @@ Task meta records `backend=` only for a non-default backend; an absent `backend=
 
 - A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 
-- An Orca task additionally records the composite `orca_worktree_id=<repo uuid>::<absolute worktree path>` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
+- [Orca task metadata](orca-backend.md#task-shape-and-metadata) owns its composite worktree identity and terminal fields.
 
 - A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
 
