@@ -20,6 +20,8 @@
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
 #   (d2) terminal failed run whose only failure is an orphaned ci monitor
 #       after checks read green                                   -> done
+#   (d3) cancelled green deliveries retain done, skipped rebase is allowed;
+#       other cancellations read unknown without a false fleet contradiction
 #   (e) cross-branch attribution: this branch's own run found via list lookup
 #   (e2) multiple runs: creation order preserves newer failures, replacement
 #        gates retain their run identity, and competing live runs read unknown
@@ -1687,6 +1689,138 @@ test_terminal_failed() {
   pass "terminal failed run is authoritative"
 }
 
+# Recovered delivery cases, varying only the terminal route and the optional
+# rebase step. The already-fixed passed-run case remains a control.
+test_cancelled_delivery_and_skipped_rebase() {
+  local scenario failures=0
+  for scenario in cancelled-outcome cancelled-status skipped-rebase cancelled-skipped-rebase passed; do
+    (
+      reset_fakes
+      local d out
+      d=$(new_case "delivery-$scenario")
+      make_repo_on_branch "$d/wt" fm/delivery
+      make_fakebin "$d" >/dev/null
+      fm_write_meta "$d/state/delivery.meta" "window=fm:fm-delivery" "worktree=$d/wt" "kind=ship"
+      FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/delivery)"
+      case "$scenario" in
+        cancelled*) FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS//failed/cancelled} ;;
+      esac
+      case "$scenario" in
+        *skipped-rebase) FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS/rebase,completed/rebase,skipped} ;;
+        cancelled-status) FM_FAKE_AXI_STATUS=$(printf '%s\n' "$FM_FAKE_AXI_STATUS" | sed '/^outcome:/d') ;;
+        passed) FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/delivery https://github.com/o/r/pull/203)" ;;
+      esac
+      FM_FAKE_PR_STATE=OPEN
+      FM_FAKE_PR_MERGED=false
+      FM_FAKE_PR_STATE_AXI=open
+      FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+      out=$(FM_HOME="$d" run_crew_state "$d" delivery)
+      assert_contains "$out" "state: done" "$scenario: delivered work remains done: $out"
+      assert_not_contains "$out" "PR merged" "$scenario: terminal record cannot prove a merge"
+      if [ "$scenario" != passed ]; then
+        assert_contains "$out" "https://github.com/o/r/pull/203" "$scenario: delivery identity retained"
+        assert_contains "$out" "checks green" "$scenario: retain positive CI evidence"
+        assert_contains "$out" "held for merge" "$scenario: delivery awaits merge"
+      fi
+      pass "$scenario: terminal delivery reports only observed evidence"
+    ) || failures=$((failures + 1))
+  done
+  [ "$failures" -eq 0 ] || fail "$failures cancelled delivery regressions"
+}
+
+# Cancellation carries no verdict without the positive delivery safeguard.
+# Exercise both detailed routes, selected-run attribution, and the coarse ledger.
+test_cancelled_without_delivery_has_no_verdict() {
+  local scenario failures=0
+  for scenario in outcome status selected coarse no-ci-log red-ci cancelled-test skipped-test; do
+    (
+      reset_fakes
+      local d out
+      d=$(new_case "no-verdict-$scenario")
+      make_repo_on_branch "$d/wt" fm/cancelled
+      make_fakebin "$d" >/dev/null
+      fm_write_meta "$d/state/cancelled.meta" "window=fm:fm-cancelled" "worktree=$d/wt" "kind=ship"
+      FM_FAKE_AXI_STATUS="$(run_failed fm/cancelled)"
+      FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS//failed/cancelled}
+      FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS/status: completed/status: cancelled}
+      case "$scenario" in
+        status) FM_FAKE_AXI_STATUS=$(printf '%s\n' "$FM_FAKE_AXI_STATUS" | sed '/^outcome:/d') ;;
+        selected)
+          FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+          FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  01RUN,fm/cancelled,cancelled,$FM_FAKE_RUN_HEAD,\"\""
+          ;;
+        coarse)
+          FM_FAKE_AXI_STATUS="$(run_running fm/another)"
+          FM_FAKE_RUNS_LIST="  cancelled  fm/cancelled $FM_FAKE_RUN_HEAD  2026-09-26 17:00"
+          ;;
+        no-ci-log|red-ci|cancelled-test|skipped-test)
+          FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/cancelled)"
+          FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS//failed/cancelled}
+          FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+          case "$scenario" in
+            no-ci-log) FM_FAKE_CI_LOGS= ;;
+            red-ci) FM_FAKE_CI_LOGS="$FM_FAKE_CI_LOGS
+checks failed: 1 of 2 checks red" ;;
+            cancelled-test) FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS/test,completed/test,cancelled} ;;
+            skipped-test) FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS/test,completed/test,skipped} ;;
+          esac
+          ;;
+      esac
+      out=$(FM_HOME="$d" run_crew_state "$d" cancelled)
+      assert_contains "$out" "state: unknown" "$scenario: cancellation alone has no verdict: $out"
+      assert_contains "$out" "run cancelled: no verdict" "$scenario: explicit reason"
+      assert_contains "$out" "source: run-step" "$scenario: keep attribution"
+      assert_not_contains "$out" "held for merge" "$scenario: no unsupported delivery claim"
+      pass "$scenario: cancellation without delivery carries no verdict"
+    ) || failures=$((failures + 1))
+  done
+  [ "$failures" -eq 0 ] || fail "$failures cancellation verdict regressions"
+}
+
+# The real inventory consumer must not confuse a cancellation with a failed
+# child contradicting an In flight row. Unknown remains explicitly partial.
+test_cancelled_fleet_inventory_is_unverified_not_contradictory() {
+  reset_fakes
+  local d out summary backlog_before status_before
+  d=$(new_case cancelled-inventory)
+  make_repo_on_branch "$d/wt" fm/cancelled
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/data" "$d/config" "$d/projects"
+  fm_write_meta "$d/state/cancelled.meta" "window=fm:fm-cancelled" "worktree=$d/wt" \
+    "project=sample" "harness=claude" "kind=ship" "mode=no-mistakes"
+  cat > "$d/data/backlog.md" <<'EOF'
+## In flight
+- [ ] cancelled - Validation in progress (repo: sample) (kind: ship) (since 2026-09-26)
+
+## Queued
+
+## Done
+EOF
+  printf 'failed: historical cancellation projection\n' > "$d/state/cancelled.status"
+  backlog_before=$(cat "$d/data/backlog.md")
+  status_before=$(cat "$d/state/cancelled.status")
+  FM_FAKE_AXI_STATUS="$(run_running fm/cancelled)"
+  out=$(FM_HOME="$d" run_crew_state "$d" cancelled)
+  assert_contains "$out" 'state: working' 'fixture begins with active validation'
+  # Deliberately transition the external instrument fixture to cancelled.
+  # This executes Firstmate end to end; it does not cancel a real daemon run.
+  FM_FAKE_AXI_STATUS="$(run_failed fm/cancelled)"
+  FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS//failed/cancelled}
+  FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS/status: completed/status: cancelled}
+  summary=$(PATH="$d/fakebin:$PATH" FM_HOME="$d" FM_ROOT_OVERRIDE="$d/fixture-root" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
+  printf '%s' "$summary" | jq -e '
+    .state == "unknown" and .valid == false
+    and .invalidity == {kind:"child_current_unavailable",ids:["cancelled"]}
+    and .reason == "child current state unavailable: cancelled"
+  ' >/dev/null || fail "cancellation must not report a terminal/backlog contradiction: $summary"
+  assert_equals "$backlog_before" "$(cat "$d/data/backlog.md")" 'correct backlog is unchanged'
+  assert_equals "$status_before" "$(cat "$d/state/cancelled.status")" 'historical event is unchanged'
+  pass 'cancelled run leaves fleet inventory unverified without a failure contradiction'
+}
+
 test_terminal_failed_ci_orphan_after_green_reads_done() {
   reset_fakes
   local d; d=$(new_case failed-ci-orphan)
@@ -1975,7 +2109,7 @@ test_only_terminal_rows_keep_newest_first_precedence() {
 EOF
 )"
   out=$(run_crew_state "$d" allterminal)
-  assert_contains "$out" "state: failed" "the newest terminal row still wins when no live row binds"
+  assert_contains "$out" "state: unknown" "the newest cancelled row wins without inventing a verdict"
   assert_contains "$out" "run cancelled" "the newer cancelled row, not the older completed one"
   pass "two terminal rows keep the existing newest-first precedence"
 }
@@ -5245,6 +5379,14 @@ test_captured_axi_status_shapes
 test_captured_inventory_replay
 test_captured_authority_transition
 test_captured_completed_history
+cancellation_failures=0
+for cancellation_test in test_cancelled_without_delivery_has_no_verdict \
+  test_cancelled_fleet_inventory_is_unverified_not_contradictory \
+  test_cancelled_delivery_and_skipped_rebase; do
+  ("$cancellation_test") || cancellation_failures=$((cancellation_failures + 1))
+done
+[ "$cancellation_failures" -eq 0 ] || fail "$cancellation_failures cancellation test groups failed"
+
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
