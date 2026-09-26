@@ -2931,6 +2931,36 @@ test_yolo_poll_merges_a_green_pr() {
   pass "a yolo task's still-open green PR merges through the guarded path and reports the landing"
 }
 
+test_yolo_poll_never_merges_while_an_away_record_stands() {
+  local dir state url rc
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case yolo-poll-away-record)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_poll_meta "$state" task-a "$url" yolo=on
+  write_away_record "$dir" --words 'do not merge task-a while I am away'
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
+    FM_TEST_GLAB_LOG="$dir/glab.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "away-record watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "away-record watcher did not reach the control check: $(cat "$dir/watch.out")" ;; esac
+  assert_no_grep 'pr merge' "$dir/gh.log" \
+    "the watcher attempted a forge merge while the away-posture record stood"
+  [ -f "$state/.afk-contract" ] || fail "the watcher retired the away-posture record"
+  [ -f "$state/task-a.check.sh" ] || fail "away-record poll was retired without a merge"
+  [ ! -e "$state/task-a.pr-poll-merge-notified" ] || fail "the away-record watcher recorded a merge outcome"
+  [ -z "$(merged_ledger_row "$state" task-a)" ] \
+    || fail "the away-record watcher published a merge outcome: $(merged_ledger_row "$state" task-a)"
+  ack_watcher_cycle "$state" || fail "away-record control wake acknowledgement failed"
+  pass "a yolo task's green PR is never auto-merged while a valid away record stands"
+}
+
 test_yolo_poll_reports_only_for_non_yolo_and_red() {
   local dir state url rc posture
   url=https://github.com/o/r/pull/1
@@ -3588,6 +3618,7 @@ test_self_merge_and_poll_publish_one_outcome
 test_merged_poll_row_carries_the_merge_authority
 test_merged_poll_row_names_no_authority_when_no_record_grants_one
 test_yolo_poll_merges_a_green_pr
+test_yolo_poll_never_merges_while_an_away_record_stands
 test_yolo_poll_reports_only_for_non_yolo_and_red
 test_yolo_poll_queued_merge_keeps_polling
 test_yolo_poll_keeps_a_rebound_poll_armed

@@ -8,6 +8,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 fm_live_gate default-on FM_OMP_CALM_INSTALL_TEST omp
+JQ_BIN=$(command -v jq) || fail "these tests assert omp registration with the real jq, which was not found"
 
 TMP_ROOT=$(fm_test_tmproot fm-omp-calm-install)
 trap 'fm_test_cleanup' EXIT
@@ -29,7 +30,9 @@ STANDALONE="$FAKE_HOME/.local/share/fm-calm-omp"
 assert_equals "$STANDALONE" "$(readlink "$LINK")" "link target"
 [ -f "$STANDALONE/lib/fm-calm-working-ship.ts" ] || fail "standalone lib missing"
 assert_absent "$STANDALONE/../../.pi" "standalone copy is not nested under firstmate .pi"
-assert_grep "fm-calm-omp" "$FAKE_HOME/.omp/plugins/omp-plugins.lock.json" "lockfile entry"
+"$JQ_BIN" -e '.plugins["fm-calm-omp"] != null and .plugins["fm-calm-omp"].enabled == true' \
+  "$FAKE_HOME/.omp/plugins/omp-plugins.lock.json" >/dev/null \
+  || fail "lockfile did not register fm-calm-omp as an enabled plugin"
 pass "install links package into user plugin scope"
 
 # Re-running over an existing link is idempotent.
@@ -57,8 +60,27 @@ printf '// divergent local edit\n' >"$FAKE_FM_HOME/.omp/extensions/fm-calm-omp.t
 run_install >"$TMP_ROOT/divergent.out" 2>"$TMP_ROOT/divergent.err" \
   || fail "install with divergent copy failed: $(cat "$TMP_ROOT/divergent.err")"
 assert_absent "$FAKE_FM_HOME/.omp/extensions/fm-calm-omp.ts" "divergent legacy copy moved"
-assert_grep "divergent local edit" "$FAKE_FM_HOME/.omp/extensions/fm-calm-omp.ts.bak" "divergent copy preserved"
+assert_equals "// divergent local edit" "$(cat "$FAKE_FM_HOME/.omp/extensions/fm-calm-omp.ts.bak")" "divergent copy preserved"
 pass "divergent legacy copy preserved as .bak"
+
+# An earlier preserved copy is never overwritten by a later divergent one: the
+# install aborts before linking and leaves both files for a human to resolve.
+BAK_HOME="$TMP_ROOT/bak-home"
+BAK_FM_HOME="$TMP_ROOT/bak-fm-home"
+mkdir -p "$BAK_HOME" "$BAK_FM_HOME/.omp/extensions"
+printf '// earlier divergent edit\n' >"$BAK_FM_HOME/.omp/extensions/fm-calm-omp.ts.bak"
+printf '// later divergent edit\n' >"$BAK_FM_HOME/.omp/extensions/fm-calm-omp.ts"
+HOME="$BAK_HOME" FM_HOME="$BAK_FM_HOME" \
+  "$ROOT/bin/fm-omp-calm-install.sh" >"$TMP_ROOT/bak.out" 2>"$TMP_ROOT/bak.err" \
+  && fail "install succeeded despite an existing .bak"
+assert_equals "// earlier divergent edit" \
+  "$(cat "$BAK_FM_HOME/.omp/extensions/fm-calm-omp.ts.bak")" "existing .bak preserved"
+assert_present "$BAK_FM_HOME/.omp/extensions/fm-calm-omp.ts" \
+  "later divergent copy left in place beside the .bak"
+assert_grep ".bak already exists" "$TMP_ROOT/bak.err" "existing .bak reported"
+assert_absent "$BAK_HOME/.omp/plugins/node_modules/fm-calm-omp" \
+  "no link while an existing .bak blocks legacy retirement"
+pass "an existing .bak is never overwritten"
 
 # A retirement step that cannot complete aborts the install before linking,
 # instead of reporting success and leaving the legacy copy to double-load with
@@ -89,7 +111,16 @@ assert_absent "$RETIRE_HOME/.omp/plugins/node_modules/fm-calm-omp" "no link afte
 chmod 755 "$RETIRE_FM_HOME/.omp/extensions"
 pass "failed legacy removal aborts before linking"
 
-# The linked package's manifest entry resolves to the tracked extension.
-assert_grep "fm-calm-omp.ts" "$LINK/package.json" "manifest declares extension entry"
-assert_present "$LINK/fm-calm-omp.ts" "extension resolves through link"
-pass "manifest entry resolves through link"
+# omp's own discovery reads the linked package: the registered plugin is the
+# one every omp session loads, enabled, with the tracked extension entry.
+DISCOVERED=$(HOME="$FAKE_HOME" omp plugin list --json) \
+  || fail "omp plugin list failed after install"
+ENTRY=$(printf '%s' "$DISCOVERED" | "$JQ_BIN" -c '.npm[]? | select(.name == "fm-calm-omp")')
+[ -n "$ENTRY" ] || fail "omp did not discover the linked fm-calm-omp plugin"
+printf '%s' "$ENTRY" | "$JQ_BIN" -e \
+  '.enabled == true and (.manifest.extensions == ["./fm-calm-omp.ts"])' >/dev/null \
+  || fail "discovered plugin is not enabled with the tracked extension entry: $ENTRY"
+assert_equals "$LINK" "$(printf '%s' "$ENTRY" | "$JQ_BIN" -r '.path')" "discovered plugin path"
+assert_present "$(printf '%s' "$ENTRY" | "$JQ_BIN" -r '.path')/fm-calm-omp.ts" \
+  "declared extension entry resolves"
+pass "omp discovers the linked package with the tracked extension entry"

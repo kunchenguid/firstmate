@@ -2800,7 +2800,8 @@ while :; do
           # commits with its durable outcome, which also covers a queued or
           # unconfirmed acceptance that must keep polling.
           if [ -z "$out" ] \
-            && [ "$(fm_meta_get "$STATE/$id.meta" yolo)" = on ]; then
+            && [ "$(fm_meta_get "$STATE/$id.meta" yolo)" = on ] \
+            && ! afk_record_present; then
             pr_poll_control_release || exit 1
             FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
               FM_ROOT_OVERRIDE="$FM_ROOT" \
