@@ -272,6 +272,16 @@
 #   prevents equal task ids in different Firstmate homes from sharing a file.
 #   Spawn refuses an unsafe pre-existing task temp root or launch namespace, and
 #   task teardown removes only the current home's launch namespace.
+#   The staged file's first line records that it was sourced, so its command
+#   line stays byte-identical to what the agent would otherwise receive, and the
+#   spawn waits for that record before reporting success: a pane that takes the
+#   source line without running it fails the spawn with the reason on the task's
+#   own record instead of leaving a live pane with no agent in it. The record
+#   proves the launch command ran, not that a given agent then came up, which
+#   stays with the per-harness readiness gates. FM_SPAWN_LAUNCH_CONFIRM_TIMEOUT
+#   bounds that wait in whole seconds (default 30). A landed launch drops the
+#   staged file at once rather than leaving the command, system prompt included,
+#   in a shared temp location for the task's whole life.
 # Launch environment (config/launch-env-allowlist):
 #   Absent means unchanged ambient inheritance. A present readable regular file
 #   opts every launch (ship, scout, secondmate, raw command, and relaunch) into
@@ -5098,7 +5108,25 @@ if [ -e "$LAUNCH_FILE" ] || [ -L "$LAUNCH_FILE" ]; then
   echo "error: task launch file $LAUNCH_FILE already exists; refusing to replace it" >&2
   exit 1
 fi
-if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
+# Delivery can still fail in ways no send call reports. A pane parked on a
+# fragment from an earlier partial send swallows the source line into an open
+# quote; a pane whose shell has died never runs it; a launch file removed
+# between staging and execution sources nothing. Each of those leaves a live
+# endpoint, a working status line and a current-state read that all say the
+# worker is fine, which is why this failure class was only ever caught by a
+# human reading the screen.
+#
+# Make the launch report itself. The staged file records that it was sourced,
+# on its own line ahead of the command, and the spawn refuses to report success
+# until that record appears. Keeping the record on a separate line is what lets
+# the launch command stay byte-identical to what the agent would otherwise have
+# received. The record is a filesystem fact rather than a screen read, so it
+# costs no capture, needs no per-harness readiness knowledge, and behaves the
+# same on every backend. It proves the launch command RAN; the per-harness
+# gates further below are what prove a given agent then came up.
+LAUNCH_STARTED="$LAUNCH_FILE.started"
+rm -f "$LAUNCH_STARTED" 2>/dev/null || true
+if ! (umask 077 && printf '%s\n%s\n' ": >$(shell_quote "$LAUNCH_STARTED")" "$LAUNCH" >"$LAUNCH_STAGE" &&
   chmod 0600 "$LAUNCH_STAGE" && mv -f "$LAUNCH_STAGE" "$LAUNCH_FILE"); then
   rm -f "$LAUNCH_STAGE"
   echo "error: could not stage the launch command at $LAUNCH_FILE" >&2
@@ -5113,6 +5141,42 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+
+# Confirm the staged line actually ran before anything downstream treats this
+# spawn as delivered. A healthy pane clears this in well under a second; the
+# bound only has to cover a pane shell that is still starting, measured at up to
+# about two seconds on this fleet's own hardware and given generous headroom
+# here. A pane that never runs it fails the spawn loudly and leaves the
+# endpoint, the local copy and the task record exactly as they are, because the
+# point is to stop reporting success over a pane where nothing started.
+spawn_wait_launch_started() {
+  local waited=0 limit=${FM_SPAWN_LAUNCH_CONFIRM_TIMEOUT:-30}
+  # A malformed override must not take the launch down with it: arithmetic
+  # on a non-numeric value would fail the spawn under this script's strict
+  # mode, so fall back to the default instead.
+  case "$limit" in
+    ''|*[!0-9]*) limit=30 ;;
+  esac
+  # Tenth-second polls, so a healthy launch adds no meaningful latency.
+  limit=$((limit * 10))
+  while [ "$waited" -lt "$limit" ]; do
+    [ -e "$LAUNCH_STARTED" ] && return 0
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -e "$LAUNCH_STARTED" ]
+}
+if ! spawn_wait_launch_started; then
+  printf '%s\n' "$(status_stamp_line "failed: launch command never ran in the pane")" >>"$STATE/$ID.status"
+  echo "error: task $ID's launch command reached $T but never ran there, so no agent started; the endpoint and the local copy at $WT are left as they are for inspection - read the pane before retrying, because a pane left part way through a command swallows whatever is sent next" >&2
+  exit 1
+fi
+# The staged file carries the whole launch command, including the system prompt.
+# Its command line has been read and run by the time the marker exists, so
+# nothing still needs it; drop it now rather than leaving task content in a
+# shared temp location for the task's whole life. Teardown still removes the
+# directory, which covers a spawn that failed before this point.
+rm -f "$LAUNCH_FILE" "$LAUNCH_STARTED" 2>/dev/null || true
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"

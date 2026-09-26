@@ -81,7 +81,7 @@ case "${1:-}" in
           Enter|C-m) continue ;;
           *)
             case "$a" in
-              ". '"*"'") staged=${a#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || a=$(cat "$staged") ;;
+              ". '"*"'") staged=${a#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || { [ -n "${FM_FAKE_LAUNCH_NOT_RUN:-}" ] || : > "$staged.started"; a=$(tail -n 1 "$staged"); } ;;
             esac
             printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
         esac

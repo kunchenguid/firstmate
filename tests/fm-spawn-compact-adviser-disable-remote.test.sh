@@ -51,6 +51,9 @@ CONTRARY=0
 # invocation verbatim.
 cat > "$REMOTE_ROOT/bin/tmux" <<'SH'
 #!/usr/bin/env bash
+# Stand in for a pane that really sources the staged launch file: a spawn waits
+# for the record its first line writes before it will report a worker.
+for a in "$@"; do s=$(printf '%s' "$a" | sed -n "s/^\\. '\\(.*\\)'$/\\1/p"); [ -n "$s" ] && [ -f "$s" ] && [ -z "${FM_FAKE_LAUNCH_NOT_RUN:-}" ] && : > "$s.started"; done || true
 exit 0
 SH
 chmod +x "$REMOTE_ROOT/bin/tmux"
@@ -119,13 +122,11 @@ remote_env() {
 remote_pane_payload() {  # <verb>
   sed -n "s/^pane $1 [^ ]* \\(.*\\) --session [^ ]*\$/\\1/p" "$HERDR_LOG"
 }
+# A landed launch removes its staged file, so read the command the fixture
+# captured when the pane sourced it rather than reading the file back.
 remote_launch_command() {
-  local source_line staged
-  source_line=$(remote_pane_payload send-text | grep "^\. '.*'\$" | tail -1)
-  staged=${source_line#". '"}
-  staged=${staged%"'"}
-  [ -n "$staged" ] && [ -f "$staged" ] || return 1
-  cat "$staged"
+  [ -s "$HERDR_LOG.staged" ] || return 1
+  cat "$HERDR_LOG.staged"
 }
 remote_pane_exports() {
   remote_pane_payload run | grep '^export '
@@ -139,7 +140,7 @@ FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
 
 run_remote_launch() {  # <label>
   local label=$1
-  reset_remote_herdr_fixture "$HERDR_STATE"
+  reset_remote_herdr_fixture "$HERDR_STATE" "$HERDR_LOG"
   : > "$HERDR_LOG"
   remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
     || fail "$label: the remote second-mate launch failed"

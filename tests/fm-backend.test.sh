@@ -844,6 +844,11 @@ case "\${1:-}" in
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
+  send-keys)
+    # Stand in for a pane that really sources the staged launch file: a spawn
+    # waits for the record its first line writes before it will report a worker.
+    for a in "\$@"; do s=\$(printf '%s' "\$a" | sed -n "s/^\\\\. '\\\\(.*\\\\)'\$/\\\\1/p"); [ -n "\$s" ] && [ -f "\$s" ] && [ -z "\${FM_FAKE_LAUNCH_NOT_RUN:-}" ] && : > "\$s.started"; done || true
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -916,6 +921,11 @@ case "\${1:-}" in
     ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
   list-windows) exit 0 ;;
+  send-keys)
+    # Stand in for a pane that really sources the staged launch file: a spawn
+    # waits for the record its first line writes before it will report a worker.
+    for a in "\$@"; do s=\$(printf '%s' "\$a" | sed -n "s/^\\\\. '\\\\(.*\\\\)'\$/\\\\1/p"); [ -n "\$s" ] && [ -f "\$s" ] && [ -z "\${FM_FAKE_LAUNCH_NOT_RUN:-}" ] && : > "\$s.started"; done || true
+    exit 0 ;;
 esac
 exit 0
 SH
