@@ -35,10 +35,11 @@ The only things quiet mode changes are which mode the flag declares and what exi
    Follow the `afk` skill's "What it does" steps 1-3 verbatim (terminal-
    backed vs harness-native entry, daemon-already-running refresh, never
    arming a separate `fm-watch.sh`) with one addition: set
-   `FM_AFK_MODE=quiet` on every `bin/fm-afk-launch.sh` call of this entry -
-   `enter`, then `start` (or `start-native`) - so `enter` can refuse where
-   quiet mode needs nothing and `state/.afk`'s first line reads `quiet`
-   instead of `away`.
+   `FM_AFK_MODE=quiet` on `enter`, so it can refuse where quiet mode needs
+   nothing and records the quiet mode for the daemon. `start` (or
+   `start-native`) reads that mode from the record when the variable is unset;
+   setting `FM_AFK_MODE=quiet` explicitly there also works. Either way,
+   `state/.afk`'s first line reads `quiet` instead of `away`.
    Leaving `FM_AFK_MODE` unset on a bare refresh of an already-running quiet
    daemon is also correct and does nothing wrong: `fm_afk_flag_write`
    preserves the on-disk mode when no explicit mode is given, so a plain
