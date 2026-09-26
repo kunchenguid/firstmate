@@ -89,6 +89,35 @@ secondmate_registry_line_for_id() {
   secondmate_registry_parse_line "$SECONDMATE_REGISTRY_LINE"
 }
 
+# secondmate_registry_remove_record: write <reg> to <out> without the record
+# for <id>. A record is its `- <id>` routing line plus every following indented
+# continuation line (blank lines inside the block included) up to the next
+# column-0 line, the same span a Markdown list item owns. Dropping only the
+# routing line would reattach the retired mate's indented hard rules to the
+# preceding record. A missing record copies the file unchanged; more than one
+# matching routing line refuses without writing <out>.
+secondmate_registry_remove_record() {  # <reg> <id> <out>
+  local reg=$1 id=$2 out=$3
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  awk -v id="$id" '
+    function flush() { for (i = 1; i <= held; i++) print pending[i]; held = 0 }
+    {
+      record = ($0 == "- " id || index($0, "- " id " ") == 1)
+      if (record) {
+        if (++matches > 1) exit 2
+        flush(); skipping = 1; next
+      }
+      if (skipping) {
+        if ($0 ~ /^[ \t]*$/) { pending[++held] = $0; next }
+        if ($0 ~ /^[ \t]/) { held = 0; next }
+        skipping = 0
+      }
+      flush(); print
+    }
+    END { if (matches > 1) exit 2; if (!skipping) flush() }
+  ' "$reg" > "$out"
+}
+
 secondmate_registry_field() {
   local reg=$1 id=$2 key=$3
   secondmate_registry_line_for_id "$reg" "$id" || return 1

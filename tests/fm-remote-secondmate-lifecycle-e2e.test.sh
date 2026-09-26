@@ -1482,6 +1482,11 @@ assert_grep '- ios ' "$PARENT/data/secondmates.md" "a liveness-busy retirement r
   || fail "a liveness-busy retirement removed or took the episode's lock"
 kill "$liveness_holder_pid" 2>/dev/null || true
 wait "$liveness_holder_pid" 2>/dev/null || true
+# The remote route owns an indented hard-rule block; a surviving record sits
+# directly above it so an orphaned block would read as the survivor's.
+registry_with_blocks "$PARENT/data/secondmates.md" ios "$TMP_ROOT/keeper-home" \
+  > "$TMP_ROOT/registry-before-remote-retire.md"
+cp "$TMP_ROOT/registry-before-remote-retire.md" "$PARENT/data/secondmates.md"
 handoff_lock="$PARENT/state/.backlog-handoff-ios.lock"
 FM_HOME="$PARENT" /bin/bash -c '
   . "$1"
@@ -1541,6 +1546,7 @@ assert_absent "$PARENT/state/.secondmate-relaunch-bound-ios" \
   "remote retirement left the relaunch park marker a same-id replacement would inherit"
 assert_absent "$liveness_lock" "remote retirement left its liveness lock behind"
 assert_no_grep '- ios ' "$PARENT/data/secondmates.md" "remote retirement did not remove the registry route"
+assert_registry_block_retired "$PARENT/data/secondmates.md" "$TMP_ROOT/registry-before-remote-retire.md" ios
 jq -e --arg workspace "$SIBLING_WORKSPACE" --arg pane "$SIBLING_PANE" '
   any(.workspaces[]; .workspace_id == $workspace and .label == "2ndmate-macos")
   and any(.tabs[]; .workspace_id == $workspace and .pane_id == $pane)
