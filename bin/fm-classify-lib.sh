@@ -143,21 +143,148 @@ FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 # log while a log whose tail holds no event still gets a full pass.
 FM_CLASSIFY_EVENT_WINDOW_LINES=200
 
+# The lines bin/fm-captain-hold.sh writes on a lane's log. Its hold mirror
+# declares a hold as `captain-held [key=captain-hold-<task>-<n>]` and every
+# reader that treats those lines specially derives the key from the log's
+# filename through _fm_hold_mirror_line_ere. `complete` transfers a still-open
+# decision as `captain-held [key=<k>]: tracked by <ids>`
+# (FM_HOLD_TRANSFER_ERE, capturing <k> and <ids>). Settlement retracts either
+# with `resolved [key=<key>]: captain call <how> by fm-captain-hold`
+# (FM_HOLD_RETRACTION_ERE).
+FM_HOLD_TRANSFER_ERE='^captain-held \[key=([A-Za-z0-9._-]+)\]: tracked by ([A-Za-z0-9._,-]+)$'
+FM_HOLD_RETRACTION_ERE='^resolved \[key=[A-Za-z0-9._-]+\]: captain call .+ by fm-captain-hold$'
+
+_fm_hold_mirror_line_ere() {  # <status-file> <verb-ere>
+  local task=${1##*/}
+  task=${task%.status}
+  printf '^(%s) \\[key=captain-hold-%s-[0-9]+\\]:' "$2" "${task//./\\.}"
+}
+
+# Every hold-command line on this lane's log: mirror, transfers, retractions.
+_fm_hold_line_ere() {  # <status-file>
+  printf '%s|%s|%s' "$(_fm_hold_mirror_line_ere "$1" 'captain-held|resolved')" \
+    "$FM_HOLD_TRANSFER_ERE" "$FM_HOLD_RETRACTION_ERE"
+}
+
+# Match a hold-command regex against the unstamped copy of <line>. Those
+# regexes describe the bytes before status_stamp_line inserts [at=<epoch>], so
+# every reader of them goes through this rather than matching stamped log bytes.
+# BASH_REMATCH is that of the unstamped copy.
+_fm_hold_unstamped_match() {  # <line> <ere>
+  local __fm_hold_u
+  _fm_status_unstamped "$1" __fm_hold_u
+  [[ $__fm_hold_u =~ $2 ]]
+}
+
 # Return the last recognized status event, ignoring continuation prose and blanks
 # (empty if missing/blank), and with <previous-event-var> the event before it.
 # The optional previous event is what this reader returned before the latest one
 # was appended, so a consumer can name the head it is superseding; asking for it
 # always reads the whole file, since a bounded window cannot bound two events.
 # This is an event read; status_current_line below reconciles open decisions.
+# A settled hold is read past (_fm_hold_settled_drop): its hold-command lines
+# are bookkeeping, not worker state, so a lane that was done, paused, or failed
+# before the hold, or whose transferred needs-decision was just answered, reads
+# that way to the watcher, the away-mode daemon, and the return brief again,
+# whatever the worker appends after the settlement. A hold or transfer still
+# standing is returned raw, because those readers must see it.
 last_status_line() {  # <status-file> [<previous-event-var>]
-  local f=$1 scan=''
-  [ -f "$f" ] && [ -r "$f" ] || return 0
-  if [ "$#" -gt 1 ]; then
-    scan=$(_fm_status_event_scan < "$f") || :
-  elif ! scan=$(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null | _fm_status_event_scan); then
-    scan=$(_fm_status_event_scan < "$f") || :
+  _fm_last_status_event "$(_fm_hold_line_ere "$1")" '' "$@"
+}
+
+# last_status_line read past bin/fm-captain-hold.sh's hold mirror at all
+# times. Those lines are the hold command's, not the worker's, so a reader of
+# the worker's own state (crew state, the terminal-outcome ledger) must not let
+# them displace the event the worker last wrote; a settled transfer is read
+# past exactly as last_status_line reads it. The watcher and away-mode daemon
+# read last_status_line directly, which keeps a standing hold visible to them.
+last_worker_status_line() {  # <status-file> [<previous-event-var>]
+  _fm_last_status_event "$(_fm_hold_line_ere "$1")" \
+    "$(_fm_hold_mirror_line_ere "$1" 'captain-held|resolved')" "$@"
+}
+
+# Print the status lines on stdin without a settled hold's lines. A line
+# matching <hold-line-ere> is settled when a hold-command retraction for its
+# own key appears at or after it, so every retraction goes, and so does the
+# mirror or transfer it retracts however many worker lines follow, while a hold
+# or transfer still standing stays. An empty <hold-line-ere> drops nothing.
+# Settlement is per key: a settled transfer does not drop a mirror of another
+# key, including one recorded later.
+_fm_hold_settled_drop() {  # <hold-line-ere>
+  local hold=$1 key settled=$'\n' i=0
+  local -a lines=()
+  if [ -z "$hold" ]; then
+    cat
+    return
   fi
-  [ "$#" -lt 2 ] || printf -v "$2" '%s' "${scan%%$'\n'*}"
+  while IFS= read -r 'lines[i]' || [ -n "${lines[i]}" ]; do
+    i=$((i + 1))
+  done
+  unset 'lines[i]'
+  while [ "$i" -gt 0 ]; do
+    i=$((i - 1))
+    _fm_hold_unstamped_match "${lines[i]}" "$hold" || continue
+    key=$(_fm_decision_key "${lines[i]}") || continue
+    ! _fm_hold_unstamped_match "${lines[i]}" "$FM_HOLD_RETRACTION_ERE" \
+      || settled="$settled$key"$'\n'
+    case "$settled" in *$'\n'"$key"$'\n'*) unset 'lines[i]' ;; esac
+  done
+  [ "${#lines[@]}" -eq 0 ] || printf '%s\n' "${lines[@]}"
+}
+
+# 0 when the log's latest event is a hold-command retraction - the settled
+# bookkeeping last_status_line reads through - and no worker event sits between
+# it and the declaration it retracts, so a caller can tell a lane whose only
+# lifted wait was the hold from a worker that moved on, even when the
+# retraction landed after the worker's newer line.
+status_hold_settled() {  # <status-file>
+  local hold line key='' legacy_re
+  hold=$(_fm_hold_line_ere "$1")
+  legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
+  while IFS= read -r line; do
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    _fm_status_line_is_event "$line" "$legacy_re" || continue
+    _fm_hold_unstamped_match "$line" "$hold" || return 1
+    if _fm_hold_unstamped_match "$line" "$FM_HOLD_RETRACTION_ERE"; then
+      [ -n "$key" ] || key=$(_fm_decision_key "$line") || return 1
+    elif [ -z "$key" ]; then
+      return 1
+    elif [ "$(_fm_decision_key "$line")" = "$key" ]; then
+      return 0
+    fi
+  done < <(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$1" 2>/dev/null \
+    | awk '{ l[NR] = $0 } END { for (i = NR; i > 0; i--) print l[i] }')
+  return 1
+}
+
+# status_observed_signature of the log as its worker left it: the hold
+# command's own lines at the end of the log are left out of its size, so a
+# throttle bound to the worker's declaration survives firstmate recording or
+# settling a hold on it, while any worker append still changes it.
+status_worker_signature() {  # <status-file>
+  local f=$1 size hold line
+  local LC_ALL=C
+  size=$(_fm_status_file_size "$f") || size=''
+  case "$size" in ''|*[!0-9]*) status_observed_signature "$f"; return ;; esac
+  hold=$(_fm_hold_line_ere "$f")
+  while IFS= read -r line; do
+    _fm_hold_unstamped_match "$line" "$hold" || break
+    size=$((size - ${#line} - 1))
+  done < <(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null \
+    | awk '{ l[NR] = $0 } END { for (i = NR; i > 0; i--) print l[i] }')
+  status_observed_signature "$f" "$size"
+}
+
+_fm_last_status_event() {  # <hold-line-ere> <skip-ere> <status-file> [<previous-event-var>]
+  local hold=$1 skip=$2 f=$3 scan=''
+  [ -f "$f" ] && [ -r "$f" ] || return 0
+  if [ "$#" -gt 3 ]; then
+    scan=$(_fm_hold_settled_drop "$hold" < "$f" | _fm_status_event_scan "$skip") || :
+  elif ! scan=$(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null \
+      | _fm_hold_settled_drop "$hold" | _fm_status_event_scan "$skip"); then
+    scan=$(_fm_hold_settled_drop "$hold" < "$f" | _fm_status_event_scan "$skip") || :
+  fi
+  [ "$#" -lt 4 ] || printf -v "$4" '%s' "${scan%%$'\n'*}"
   printf '%s\n' "${scan##*$'\n'}"
 }
 
@@ -227,16 +354,18 @@ status_prefix_unrecognized() {  # <status-line>
 # Print "<previous event>\n<latest event>" for the status lines on stdin, and
 # return 1 when the stream holds no event at all, so a caller reading a bounded
 # window knows to widen it. A stream without events keeps its last nonblank
-# line as the latest, matching the read this replaced.
+# line as the latest, matching the read this replaced. Lines matching
+# a non-empty <skip-ere> are not part of the stream at all.
 # Keep decision-closing events: skipping a resolved line would revive its opener.
 # A bare legacy free-text line counts as an event only when a captain token leads
 # it, so continuation prose that merely mentions one cannot hide a declaration.
 # An unrecognized status prefix is an event too, so that declaration is the
 # latest line instead of disappearing behind an earlier recognized one.
-_fm_status_event_scan() {
-  local line last='' prev='' fallback='' legacy_re
+_fm_status_event_scan() {  # [<skip-ere>]
+  local skip=${1:-} line last='' prev='' fallback='' legacy_re
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   while IFS= read -r line || [ -n "$line" ]; do
+    [ -z "$skip" ] || ! _fm_hold_unstamped_match "$line" "$skip" || continue
     case "$line" in *[![:space:]]*) fallback=$line ;; *) continue ;; esac
     _fm_status_line_is_event "$line" "$legacy_re" && { prev=$last; last=$line; }
   done
@@ -321,9 +450,11 @@ status_is_paused() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
 
-# 0 if a status line's leading verb is the verified captain-held transfer verb.
+# 0 if a status line's leading verb is the captain-held verb, in either shape the
+# hold command writes (above): its own declaration of a hold on the held lane's
+# log, or a verified transfer of a still-open decision to the backlog.
 # The same pure verb read as status_is_paused, and the discriminator a supervisor
-# needs once a declared wait has already been recognized: the two declarations get
+# needs once a declared wait has already been recognized: a pause and a hold get
 # the same bounded cadence, but they block on DIFFERENT humans, so a recheck that
 # names an external dependency for a hold points the captain away from the fact
 # that they are the one who can clear it.
@@ -334,8 +465,8 @@ status_is_captain_held() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
-# 0 if a status line declares either an external-wait pause or a verified
-# captain-held transfer.
+# 0 if a status line declares either an external-wait pause or a captain-held
+# line in either shape above.
 # Both declarations can intentionally leave a crew's endpoint idle, so both
 # supervisors give them one cadence: the away-mode daemon defers the wedge and
 # ages a pause marker instead, and the watcher applies its bounded pause cadence
@@ -353,11 +484,15 @@ status_is_paused_or_captain_held() {  # <status-line>
 # including the stated default key a keyless decision shares - does not end the
 # pause. Only a resolved line for the pause's own phase key (the keyed
 # activity fold's key, where a keyless line is its own phase) retracts it, as
-# does any other later event. A captain-held line counts only while it is the
-# latest event. Bounded like last_status_line: only a tail window made wholly of
-# resolved events widens the read to the whole file.
+# does any other later event. A hold mirror bin/fm-captain-hold.sh wrote with
+# no retraction of its own key after it holds the same way: resolved lines for
+# other keys on top of it do not end it, and any other later event does. Any
+# other captain-held line, such as a complete transfer, counts only while it is
+# the latest event. Bounded like last_status_line, and like it reads past a settled
+# hold: only a tail window made wholly of resolved events widens the read to the
+# whole file.
 status_declared_wait_line() {  # <status-file>
-  local f=$1 last verb resolve legacy_re
+  local f=$1 last verb resolve legacy_re hold mirror
   last=$(last_status_line "$f")
   if status_is_paused_or_captain_held "$last"; then
     printf '%s\n' "$last"
@@ -367,17 +502,21 @@ status_declared_wait_line() {  # <status-file>
   status_line_verb "$last" verb
   [ "$verb" = "$resolve" ] || return 0
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
-  tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null \
-    | _fm_status_declared_wait_scan "$resolve" "$legacy_re" \
-    || _fm_status_declared_wait_scan "$resolve" "$legacy_re" < "$f" || :
+  hold=$(_fm_hold_line_ere "$f")
+  mirror=$(_fm_hold_mirror_line_ere "$f" 'captain-held')
+  tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null | _fm_hold_settled_drop "$hold" \
+    | _fm_status_declared_wait_scan "$resolve" "$legacy_re" "$mirror" \
+    || _fm_hold_settled_drop "$hold" < "$f" \
+    | _fm_status_declared_wait_scan "$resolve" "$legacy_re" "$mirror" || :
 }
 
 # Walk the status lines on stdin back from the newest event past resolved lines
-# to the first other event, and print it when it is a pause none of those
-# resolved lines share a phase key with. Returns 1 when every event is a
-# resolved line, so a caller reading a bounded window knows to widen it.
-_fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re>
-  local resolve=$1 legacy_re=$2 line verb key keys=$'\n' i=0
+# to the first other event, and print it when it is a hold mirror (matching
+# <mirror-ere>) or a pause none of those resolved lines share a phase key with.
+# Returns 1 when every event is a resolved line, so a caller reading a bounded
+# window knows to widen it.
+_fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re> <mirror-ere>
+  local resolve=$1 legacy_re=$2 mirror=$3 line verb key keys=$'\n' i=0
   local -a lines=()
   while IFS= read -r line || [ -n "$line" ]; do
     lines[i]=$line
@@ -388,6 +527,10 @@ _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re>
     line=${lines[i]}
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
     _fm_status_line_is_event "$line" "$legacy_re" || continue
+    if _fm_hold_unstamped_match "$line" "$mirror"; then
+      printf '%s\n' "$line"
+      return 0
+    fi
     status_line_verb "$line" verb
     case "$verb" in
       "$resolve") ;;
@@ -898,10 +1041,10 @@ status_open_decisions() {  # <status-file> [<kind>]
 # Resolve the log's current declaration at one boundary for crew-state consumers.
 # Any decision the fold still holds open wins over unrelated events, and the
 # fold's most recently opened record supplies it; a standing declared wait, then
-# the latest recognized event, stands when nothing is open.
+# the worker's own latest event (last_worker_status_line), stands when nothing is open.
 # Actual run/pane evidence is still reconciled by fm-crew-state.sh.
 status_current_line() {  # <status-file> <kind>
-  local open key verb note current=''
+  local open key verb note current='' worker mirror
   open=$(status_open_decisions "$1" "$2")
   while IFS=$'\t' read -r key verb note; do
     case "$verb" in ?*) current="$verb [key=$key]: $note" ;; esac
@@ -909,7 +1052,15 @@ status_current_line() {  # <status-file> <kind>
 $open
 EOF
   [ -n "$current" ] || current=$(status_declared_wait_line "$1")
-  [ -n "$current" ] || current=$(last_status_line "$1")
+  if [ -n "$current" ]; then
+    mirror=$(_fm_hold_mirror_line_ere "$1" 'captain-held')
+    if status_is_captain_held "$current" \
+      && _fm_hold_unstamped_match "$current" "$mirror"; then
+      worker=$(last_worker_status_line "$1")
+      [ -z "$worker" ] || current=$worker
+    fi
+  fi
+  [ -n "$current" ] || current=$(last_worker_status_line "$1")
   printf '%s\n' "$current"
 }
 

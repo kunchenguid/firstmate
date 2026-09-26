@@ -558,6 +558,141 @@ test_declared_wait_survives_answers_past_the_event_window() {
   pass "a declared wait outlives answers for other keys beyond the event window, and its own resolved line retracts it"
 }
 
+# A settled hold mirror sits on top of a pause whose own last worker event is a
+# resolved line for a different key. The mirror must not hide that pause.
+test_declared_wait_survives_settled_hold_mirror() {
+  local dir f
+  dir=$(case_dir settled-hold-mirror)
+  f="$dir/answered.status"
+  {
+    printf 'paused: waiting on upstream\n'
+    printf 'resolved [key=api]: answered\n'
+    printf 'captain-held [key=captain-hold-answered-1]: operator review\n'
+    printf 'resolved [key=captain-hold-answered-1]: captain call released by fm-captain-hold\n'
+  } > "$f"
+  [ "$(status_declared_wait_line "$f")" = 'paused: waiting on upstream' ] \
+    || fail "a settled hold mirror hid the standing pause: '$(status_declared_wait_line "$f")'"
+  pass "a settled hold mirror does not hide a standing pause under another key's resolved line"
+}
+
+# While the hold is still standing its mirror is the declared wait: an answer
+# for another key on top of it neither hides it nor reaches the pause under it.
+test_declared_wait_keeps_standing_hold_mirror() {
+  local dir f
+  dir=$(case_dir standing-hold-mirror)
+  f="$dir/held.status"
+  printf 'paused: waiting on upstream\n' > "$f"
+  printf 'captain-held [key=captain-hold-held-1]: operator review\n' >> "$f"
+  printf 'resolved [key=api-shape]: answered\n' >> "$f"
+  [ "$(status_declared_wait_line "$f")" = 'captain-held [key=captain-hold-held-1]: operator review' ] \
+    || fail "an unrelated answer hid the standing hold mirror: '$(status_declared_wait_line "$f")'"
+  printf 'needs-decision [key=route]: choose a route\n' > "$f"
+  printf 'captain-held [key=route]: tracked by held-route\n' >> "$f"
+  printf 'resolved [key=api-shape]: answered\n' >> "$f"
+  [ -z "$(status_declared_wait_line "$f")" ] \
+    || fail "a buried complete transfer still read as the declared wait: '$(status_declared_wait_line "$f")'"
+  pass "a standing hold mirror stays the declared wait under an unrelated answer, a buried transfer does not"
+}
+
+# A settled hold stays read past after the worker or firstmate appends more:
+# neither the pause right under the pair nor one under another key's answer on
+# top of it is lost.
+test_declared_wait_survives_settled_hold_then_answer() {
+  local dir f
+  dir=$(case_dir settled-hold-then-answer)
+  f="$dir/answered.status"
+  printf 'paused: waiting on upstream\n' > "$f"
+  printf 'captain-held [key=captain-hold-answered-1]: operator review\n' >> "$f"
+  printf 'resolved [key=captain-hold-answered-1]: captain call released by fm-captain-hold\n' >> "$f"
+  [ "$(status_declared_wait_line "$f")" = 'paused: waiting on upstream' ] \
+    || fail "a settled hold pair hid the pause under it: '$(status_declared_wait_line "$f")'"
+  printf 'resolved [key=api]: answered\n' >> "$f"
+  [ "$(last_status_line "$f")" = 'resolved [key=api]: answered' ] \
+    || fail "a later answer did not become the latest event: '$(last_status_line "$f")'"
+  [ "$(status_declared_wait_line "$f")" = 'paused: waiting on upstream' ] \
+    || fail "an answer after a settled hold hid the standing pause: '$(status_declared_wait_line "$f")'"
+  pass "a settled hold stays read past after another key's answer lands on top of it"
+}
+
+# A settlement reads as the hold's own only while no worker event sits between
+# the declaration and its retraction.
+test_hold_settled_only_without_worker_event_between() {
+  local dir f
+  dir=$(case_dir hold-settled-worker-between)
+  f="$dir/held.status"
+  printf 'paused: waiting on upstream\n' > "$f"
+  printf 'captain-held [key=captain-hold-held-1]: operator review\n' >> "$f"
+  printf 'resolved [key=captain-hold-held-1]: captain call released by fm-captain-hold\n' >> "$f"
+  status_hold_settled "$f" \
+    || fail "a retraction right after its declaration did not read as the hold's own settlement"
+  {
+    printf 'paused: waiting on upstream\n'
+    printf 'captain-held [key=captain-hold-held-1]: operator review\n'
+    printf 'working: resumed\n'
+    printf 'resolved [key=captain-hold-held-1]: captain call released by fm-captain-hold\n'
+  } > "$f"
+  ! status_hold_settled "$f" \
+    || fail "a retraction over a worker's newer line read as the hold's own settlement"
+  pass "a hold settlement is the hold's own only with no worker event between"
+}
+
+# A standing hold mirror is the declared wait only under answers for other
+# keys: a worker event of any other verb after it is what the lane reports.
+test_worker_event_after_standing_hold_mirror_replaces_it() {
+  local dir f verb current
+  dir=$(case_dir worker-after-standing-mirror)
+  f="$dir/lane.status"
+  for verb in "done" failed working blocked needs-decision; do
+    printf 'working: start\n' > "$f"
+    printf 'captain-held [key=captain-hold-lane-1]: operator review\n' >> "$f"
+    printf '%s: latest worker report\n' "$verb" >> "$f"
+    [ -z "$(status_declared_wait_line "$f")" ] \
+      || fail "a standing mirror outranked a later $verb line: '$(status_declared_wait_line "$f")'"
+    current=$(status_current_line "$f" ship)
+    case "$current" in
+      "$verb"[:\ ]*"latest worker report") ;;
+      *) fail "a standing mirror displaced the lane's current $verb line: '$current'" ;;
+    esac
+  done
+  printf 'working: start\n' > "$f"
+  printf 'captain-held [key=captain-hold-lane-1]: operator review\n' >> "$f"
+  printf 'paused: waiting on upstream\n' >> "$f"
+  [ "$(status_declared_wait_line "$f")" = 'paused: waiting on upstream' ] \
+    || fail "a pause after a standing mirror was not the declared wait: '$(status_declared_wait_line "$f")'"
+  pass "a worker event after a standing hold mirror replaces it as the declared wait"
+}
+
+# A worker's own last line stays current while a later hold mirror stands,
+# and a transfer settled earlier does not hide a hold opened after it.
+test_done_past_standing_mirror_and_later_hold_after_settled_transfer() {
+  local dir f current line
+  dir=$(case_dir done-past-mirror)
+  f="$dir/lane.status"
+  for line in 'done: report ready' 'working: mid implementation' 'paused: waiting on upstream'; do
+    printf '%s\n' "$line" > "$f"
+    printf 'captain-held [key=captain-hold-lane-1]: operator review\n' >> "$f"
+    current=$(status_current_line "$f" scout)
+    [ "$current" = "$line" ] \
+      || fail "a standing mirror displaced the worker's line '$line': '$current'"
+  done
+  printf 'needs-decision [key=route]: pick\n' > "$f"
+  {
+    printf 'captain-held [key=route]: tracked by lane\n'
+    printf 'resolved [key=route]: captain call answered by fm-captain-hold\n'
+    printf 'working: continuing\n'
+    printf 'captain-held [key=captain-hold-lane-2]: operator review\n'
+  } >> "$f"
+  [ "$(status_declared_wait_line "$f")" = 'captain-held [key=captain-hold-lane-2]: operator review' ] \
+    || fail "an earlier settled transfer hid the later standing mirror: '$(status_declared_wait_line "$f")'"
+  pass "a worker done stays current under a standing mirror, and a later hold survives an earlier settled transfer"
+}
+
 test_keyless_wait_survives_stated_default_retraction
 test_declared_wait_survives_answers_past_the_event_window
+test_declared_wait_survives_settled_hold_mirror
+test_declared_wait_keeps_standing_hold_mirror
+test_declared_wait_survives_settled_hold_then_answer
+test_hold_settled_only_without_worker_event_between
+test_worker_event_after_standing_hold_mirror_replaces_it
+test_done_past_standing_mirror_and_later_hold_after_settled_transfer
 test_bare_prose_cannot_open_or_close_a_decision

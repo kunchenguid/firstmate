@@ -1268,7 +1268,7 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
   statusf="$STATE/$task.status"
   last=$(status_declared_wait_line "$statusf")
   if status_is_captain_held "$last"; then
-    wait_record 'captain-held' 'awaiting the captain - verified hold transfer' \
+    wait_record 'captain-held' 'awaiting the captain - the hold is recorded' \
       captain 'answer the held decision or release the hold' "$statusf"
     return 0
   fi
@@ -1566,14 +1566,14 @@ handle_paused_stale() {  # <window> <task> <hash>
   age=$(( now - mtime ))
   last=$(status_declared_wait_line "$statusf")
   min_age=$PAUSE_RESURFACE_SECS
-  declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
+  declaration=$(stale_wait_declaration "$task")
   if status_is_captain_held "$last"; then
     if afk_record_present; then
       triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $win"
       return 0
     fi
     detail="captain-held, awaiting the captain"
-    reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
+    reason="captain-held ${age}s, awaiting the captain - the hold is recorded, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
   elif until=$(status_paused_until "$last"); then
     if [ "$now" -lt "$until" ] && [ "$age" -lt "$PAUSE_RESURFACE_SECS" ]; then
       triage_log "absorbed stale (paused until $(( until - now ))s from now, declared time not reached): $win"
@@ -1631,22 +1631,23 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       # decoration overrides the daemon's own pause verdict for the pane: the
       # ladder then climbs on every re-arm, escalating a crew that declared the
       # wait itself once per FM_STALE_ESCALATE_SECS for as long as the wait lasts.
-      # The one-shot is keyed on the DECLARATION (the status log's signature),
-      # never on the pane hash: a busy pane's harness footer ticks on every
-      # capture, so a hash-keyed one-shot would re-fire on every poll and the
-      # daemon, which relaunches the watcher after each handled wake, would be
-      # woken in a loop for the whole declared wait. The suppressor therefore
-      # advances to the declaration rather than the hash, and the daemon is woken
-      # once per distinct declaration. The wedge timer, escalation count and
-      # write-deferral chain are cleared exactly as handle_paused_stale clears
-      # them, so an undeclared busy phase that had already started the timer does
-      # not resume its count the moment the declaration is lifted. Normal-mode
-      # pause tracking stays unwritten here, exactly as the idle away-mode handoff
-      # leaves it, because the daemon owns that bookkeeping.
+      # The one-shot is keyed on the DECLARATION (stale_wait_declaration below
+      # owns that identity), never on the pane hash: a busy pane's harness
+      # footer ticks on every capture, so a hash-keyed one-shot would re-fire on
+      # every poll and the daemon, which relaunches the watcher after each
+      # handled wake, would be woken in a loop for the whole declared wait. The
+      # suppressor therefore advances to the declaration rather than the hash,
+      # and the daemon is woken once per distinct declaration. The wedge timer,
+      # escalation count and write-deferral chain are cleared exactly as
+      # handle_paused_stale clears them, so an undeclared busy phase that had
+      # already started the timer does not resume its count the moment the
+      # declaration is lifted. Normal-mode pause tracking stays unwritten here,
+      # exactly as the idle away-mode handoff leaves it, because the daemon owns
+      # that bookkeeping.
       key=$(window_key "$win")
       rm -f "$since_file" "$escalation_file"
       clear_write_tracking "$key"
-      declared="declared:$(fm_wake_signal_sig "$statusf" || true)"
+      declared=$(stale_wait_declaration "$task")
       if captain_held_silenced "$(status_declared_wait_line "$statusf")"; then
         printf '%s' "$declared" > "$STATE/.stale-$key"
         triage_log "absorbed busy over-age pane (captain-held, never rechecked while the away-posture record exists): $win"
@@ -1751,12 +1752,15 @@ pause_state_class() {  # <window> <task>
 
 # The two records of one ordinary crew wait, and why its stale alarm reads both.
 #
-# status_is_paused_or_captain_held reads the status LINE a worker wrote, which is
+# status_is_paused_or_captain_held reads the status log's last LINE, which is
 # the only record when the worker itself is waiting. It is not the only record
-# there is: once firstmate hands work to the captain, the wait is written into the
-# BACKLOG by bin/fm-captain-hold.sh, and the worker's last line stays whatever it
-# was - routinely `done` after a PR delivery, which no line predicate can
-# read as a wait. An alarm bounded only by the line therefore re-fires for the
+# there is: once firstmate hands work to the captain, bin/fm-captain-hold.sh
+# writes the wait into the BACKLOG and mirrors it onto a lane's log as a
+# `captain-held` line, but that line stops being the last one as soon as the
+# worker writes anything newer, and a hold recorded before the mirror existed
+# never reached the log at all. Either way the last line is whatever the worker
+# wrote - routinely `done` after a PR delivery, which no line predicate can
+# read as a wait. An alarm bounded only by the line would then re-fire for the
 # captain's whole thinking time, on exactly the work they already have in hand.
 #
 # `open` is that record's own read-only predicate and owns its semantics: exit 0
@@ -1784,12 +1788,13 @@ task_captain_call_open() {  # <task>
   return 0
 }
 
-# The identity a re-surface throttle is bound to: the task's whole status-log
-# signature. Any new status event - a replacement wait, a fresh delivery, a
-# blocker - changes it and so starts its own window instead of inheriting the
-# silence of the one before it.
+# The identity a re-surface throttle is bound to: the task's status-log
+# signature as its worker left it (status_worker_signature). Any new worker
+# event - a replacement wait, a fresh delivery, a blocker - changes it and so
+# starts its own window instead of inheriting the silence of the one before it,
+# while the hold-command lines firstmate records itself do not.
 stale_wait_declaration() {  # <task>
-  printf 'declared:%s' "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
+  printf 'declared:%s' "$(status_worker_signature "$STATE/$1.status" || true)"
 }
 
 # The same scope for a captain call, carrying the CALL's own lifecycle identity
@@ -1801,7 +1806,7 @@ stale_wait_declaration() {  # <task>
 # waiting on the captain that is never surfaced is invisible, where a delivery
 # announced twice is merely noise.
 captain_call_declaration() {  # <task> <call-identity>
-  printf 'captain-hold:%s:%s' "$2" "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
+  printf 'captain-hold:%s:%s' "$2" "$(status_worker_signature "$STATE/$1.status" || true)"
 }
 
 # 0 when <declaration> has already been alarmed for this window inside the
@@ -2960,8 +2965,18 @@ EOF
     [ -z "$task" ] || inbox_steer_check "$w" "$task"
     key=$(window_key "$w")
     last=$(status_declared_wait_line "$STATE/$task.status")
+    # A lane whose declaration is gone gives up its pause bookkeeping. Which half
+    # goes depends on WHO lifted it: a worker append is new evidence about the
+    # pane, so the stale suppressor and wedge timer reset with the pause state,
+    # but a hold this home settled itself changed nothing the pane shows
+    # (docs/captain-hold-lifecycle.md), and dropping the suppressor there would
+    # re-surface the unchanged hash the watcher already alarmed on.
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
-      clear_pause_tracking "$key"
+      if status_hold_settled "$STATE/$task.status"; then
+        clear_pause_state "$key"
+      else
+        clear_pause_tracking "$key"
+      fi
     fi
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
     # the pane-stale path ONLY to serve a status-declared wait's bounded
