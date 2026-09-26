@@ -9,9 +9,9 @@
 # record's origin is the URL the parent resolved and named, so this host clones
 # from it and re-validates it through bin/fm-project-origin-lib.sh instead of
 # trusting the sender. The remote code root is cloned into a private staging
-# directory beside the absent home and installed by rename once complete, so no
-# cleanup can ever remove a live clone's destination; project origins are
-# cloned on this host, the project registry and charter are
+# directory beside the absent home and installed by rename once complete, so
+# cleanup of the public home cannot remove a live clone's destination. Project
+# origins are cloned on this host, the project registry and charter are
 # published, the durable .fm-secondmate-parent record names this home's route to its parent as
 # "remote" - read by bin/fm-teardown.sh's cleanup gate so a delegated public
 # reply promise, which the subsystem can only carry on the parent's own
@@ -178,8 +178,10 @@ if [ -e "$FM_HOME" ] || [ -L "$FM_HOME" ]; then
   fi
 else
   # Clone into a staging path this attempt owns, then publish by rename: a
-  # competing cleanup or rollback aimed at the absent public home can never
-  # remove a directory a live clone is still writing.
+  # competing cleanup or rollback aimed at the absent public home cannot
+  # remove a directory a live clone is still writing. Verify the sentinel
+  # after mv: if the destination appeared meanwhile, mv may nest our stage
+  # inside it instead of publishing, so rollback must remove only that stage.
   STAGE_HOME=$(mktemp -d "$HOME_PARENT/.fm-home-provisioning.XXXXXX") \
     || die "cannot create remote home staging directory"
   git clone --quiet -- "$FM_ROOT" "$STAGE_HOME" || die "could not clone the remote Firstmate home"
