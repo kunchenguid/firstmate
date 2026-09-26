@@ -25,6 +25,7 @@ if [ "${1:-}" = afk-email ] || [ "${1:-}" = read ]; then
 
 
 
+
   exec "$(dirname "$0")/fm-mail-real.sh" "$@"
 fi
 [ "${1:-}" = send ] || exit 2
@@ -47,6 +48,7 @@ if [ -n "${FM_TEST_SMTP_STARTED:-}" ] && [ -n "${FM_TEST_SMTP_RELEASE:-}" ]; the
     sleep 0.02
   done
 fi
+
 
 
 
@@ -135,6 +137,7 @@ wait_for_file() {  # <path>
   done
   [ -e "$path" ]
 }
+
 
 
 
@@ -697,6 +700,7 @@ messages = {
         b"Authentication-Results: mx.google.com; dkim=pass header.d=gmail.com\r\n"
         b"Content-Type: text/plain; charset=utf-8\r\n\r\nprivate forged Gmail pass body\r\n"
     ),
+
 }
 
 class FakeMailbox:
@@ -712,6 +716,7 @@ class FakeMailbox:
     def uid(self, command, uid, spec):
         if command == "search":
             return "OK", [b"1 2 3 4"]
+
         raw = messages[uid]
         with open(os.environ["FM_MAIL_TEST_FETCH_LOG"], "a", encoding="utf-8") as log:
             log.write(f"{uid.decode()}\t{spec}\n")
@@ -734,6 +739,7 @@ PY
   fetches=$(cat "$fetch_log")
   assert_contains "$fetches" $'3\t(BODY.PEEK[])' 'trusted pass above a sender copy permits the body read'
   assert_not_contains "$fetches" $'4\t(BODY.PEEK[])' 'receiver failure above a forged pass blocks the body read'
+
   assert_not_contains "$fetches" $'1\t(BODY.PEEK[])' 'spoofed sender body is never fetched while away'
   assert_not_contains "$fetches" $'2\t(BODY.PEEK[])' 'unauthenticated sender body is never fetched while away'
 
@@ -745,11 +751,13 @@ PY
   assert_not_contains "$out" 'private attacker body' 'malformed away posture still hides spoofed sender bodies'
   assert_not_contains "$out" 'private unauthenticated body' 'malformed away posture still hides unauthenticated bodies'
   assert_not_contains "$out" 'private forged Gmail pass body' 'malformed posture still rejects a sender pass below receiver failure'
+
   fetches=$(cat "$fetch_log")
   assert_contains "$fetches" $'3\t(BODY.PEEK[])' 'malformed posture still allows the authenticated owner body'
   assert_not_contains "$fetches" $'1\t(BODY.PEEK[])' 'malformed posture never fetches a spoofed sender body'
   assert_not_contains "$fetches" $'2\t(BODY.PEEK[])' 'malformed posture never fetches an unauthenticated body'
   assert_not_contains "$fetches" $'4\t(BODY.PEEK[])' 'malformed posture never fetches a forged-pass body'
+
 
   rm "$home/state/.afk-contract"
   : > "$fetch_log"
@@ -759,11 +767,13 @@ PY
   assert_contains "$out" 'private attacker body' 'attended read still shows bodies without an away record'
   assert_contains "$out" 'private unauthenticated body' 'attended read retains normal access without an away record'
   assert_contains "$out" 'private forged Gmail pass body' 'attended read still shows bodies without away authentication gating'
+
   fetches=$(cat "$fetch_log")
   assert_contains "$fetches" $'1\t(BODY.PEEK[])' 'attended read fetches the first unseen body'
   assert_contains "$fetches" $'2\t(BODY.PEEK[])' 'attended read fetches the second unseen body'
   assert_contains "$fetches" $'3\t(BODY.PEEK[])' 'attended read fetches the third unseen body'
   assert_contains "$fetches" $'4\t(BODY.PEEK[])' 'attended read fetches the fourth unseen body'
+
   pass "fm-mail read gates bodies to authenticated Gmail during away mode"
 }
 
@@ -1577,6 +1587,7 @@ test_branch_prompt_preserves_wake_after_verification_error() {
 
 
 
+
   printf '%s' "$prompt" | python3 -c '
 import sys
 steps = [line for line in sys.stdin.read().splitlines() if line.startswith("6. Acknowledge")]
@@ -1753,6 +1764,7 @@ SH
 
 
 
+
 test_destination_is_required_for_pi_entry
 test_shared_owner_source_drives_configuration_and_sender_auth
 
@@ -1781,6 +1793,7 @@ test_processed_marker_cannot_suppress_outcomes
 test_invalid_away_record_does_not_enable_email
 test_invalid_or_unreadable_posture_suppresses_mail
 test_read_gates_unauthenticated_bodies_during_away
+
 
 
 

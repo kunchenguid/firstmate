@@ -335,6 +335,7 @@ def cmd_read():
                 mi = email.message_from_bytes(header_bytes)
                 trusted_sender = (
                     from_is_configured(dec(mi.get('From')), OWNER_EMAIL)
+
                     and gmail_authentication_pass(mi)
                 )
                 if not trusted_sender:
