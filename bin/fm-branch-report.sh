@@ -19,7 +19,7 @@
 #       --summary <text> [--silent true|false] [--wake <text>]
 #
 # The verdict criteria are owned by bin/fm-branch-prompt.sh ("Verdict: routine
-# or captain"); --silent true is legal only for a routine fleet outcome.
+# or captain"); --silent true is legal only for a routine outcome.
 # --wake defaults to the wake reason the host recorded for the turn.
 #
 # Only the branch actor of a live host turn may report: FM_SUPERVISION_ACTOR
@@ -80,8 +80,8 @@ if [ -z "$TASK" ] || [ -z "$SUMMARY" ] || [ -z "$VERDICT" ]; then
   echo "invalid report: --task, --verdict (routine|captain), and --summary are required" >&2
   exit 2
 fi
-if [ "$SILENT" = true ] && { [ "$TASK" != fleet ] || [ "$VERDICT" != routine ]; }; then
-  echo "invalid report: --silent true is only for a routine fleet outcome" >&2
+if [ "$SILENT" = true ] && [ "$VERDICT" != routine ]; then
+  echo "invalid report: --silent true requires the routine verdict" >&2
   exit 2
 fi
 
@@ -123,6 +123,10 @@ printf '%s\t%s\t%s\t%s\n' "$TURN" "$SEQ" "$VERDICT" "$TASK" >> "$RECEIPTS" || {
   echo "recorded seq $SEQ, but the host receipt could not be written; the host will hand this wake to MAIN" >&2
   exit 1
 }
+if [ "$SILENT" = true ]; then
+  printf 'recorded seq %s [routine]; silent outcome remains in the outcome store\n' "$SEQ"
+  exit 0
+fi
 if [ "$(turn_field posture)" = attended ]; then
   if [ "$VERDICT" = captain ] && [ ! -f "$STATE/.afk-contract" ]; then
     printf 'recorded seq %s [captain]; MAIN processes it from its next drain\n' "$SEQ"
