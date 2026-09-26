@@ -215,6 +215,43 @@ test_resend_enqueues_new_sequence() {
   pass "fm-send inbox: a re-send is a new durable record, never a retyped payload"
 }
 
+test_queued_wake_warning_does_not_skip_delivery() {
+  local dir err drain_err ack_line ack_seq ack_generation
+  dir=$(setup_case queuedwake)
+  err="$dir/send.err"
+  drain_err="$dir/drain.out"
+  FM_STATE_OVERRIDE="$dir/home/state" bash -c '
+    . "$1"
+    fm_wake_append check queuedwake pending
+  ' _ "$ROOT/bin/fm-wake-lib.sh"
+
+  run_send "$dir" "$err" -- t1 "message A" || fail "first send failed"
+  run_send "$dir" "$err" -- t1 "message B" || fail "second send failed"
+  assert_contains "$(cat "$err")" "WARNING: queued wakes pending" \
+    "the second send should exercise the pending-wake advisory"
+  [ -f "$dir/home/state/t1.inbox/001.msg" ] && \
+    [ -f "$dir/home/state/t1.inbox/002.msg" ] ||
+    fail "a queued-wake warning must not skip the second durable delivery"
+
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" \
+    "$ROOT/bin/fm-wake-drain.sh" >"$drain_err" 2>&1 ||
+    fail "draining the queued wake should succeed: $(cat "$drain_err")"
+  ack_line=$(grep '^WAKE_ACK_REQUIRED:' "$drain_err") ||
+    fail "the drain did not return its acknowledgement token"
+  ack_seq=$(printf '%s\n' "$ack_line" | sed -E 's/.*--ack-through ([0-9]+).*/\1/')
+  ack_generation=$(printf '%s\n' "$ack_line" | sed -E 's/.*--recovery-generation ([^ ]+).*/\1/')
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/home" \
+    "$ROOT/bin/fm-wake-drain.sh" --ack-through "$ack_seq" \
+    --recovery-generation "$ack_generation" >/dev/null 2>&1 ||
+    fail "acknowledging the drained wake should succeed"
+  run_send "$dir" "$err" -- t1 "message C" || fail "send after drain failed"
+  assert_not_contains "$(cat "$err")" "WARNING: queued wakes pending" \
+    "draining between sends should clear the advisory"
+  [ -f "$dir/home/state/t1.inbox/003.msg" ] ||
+    fail "the send after queue drain was not durably recorded"
+  pass "fm-send inbox: pending-wake advisory does not skip delivery, and draining clears it"
+}
+
 test_pending_composer_skips_ring_advisorily() {
   local dir err rc
   dir=$(setup_case pendingskip)
@@ -508,6 +545,7 @@ test_text_steer_rides_inbox
 test_deep_home_doorbell_stays_short
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
+test_queued_wake_warning_does_not_skip_delivery
 test_pending_composer_skips_ring_advisorily
 test_failed_ring_is_still_sent
 test_fire_and_forget_unlanded_ring_owes_one_retry
