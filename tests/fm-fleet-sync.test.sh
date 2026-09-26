@@ -710,6 +710,7 @@ test_case_variant_local_only_clone_never_fetches() {
   home="$TMP_ROOT/local-only-case-alias"
   mkdir -p "$home/projects"
   clone=$(build_pair "$home" CaseSpelling)
+  ln -s "$clone" "$home/projects/Alias"
   variant="${clone/CaseSpelling/casespelling}"
   ancestor="$home/PROJECTS/CaseSpelling"
   if [ ! "$variant" -ef "$clone" ] || [ ! "$ancestor" -ef "$clone" ]; then
@@ -736,6 +737,28 @@ test_case_variant_local_only_clone_never_fetches() {
   [ "$(git -C "$clone" rev-parse origin/main)" = "$remote_before" ] \
     || fail "ancestor alias fetched a local-only clone"
   pass "case-only clone and ancestor aliases cannot fetch local-only projects"
+}
+
+test_ambiguous_symlink_aliases_never_fetch() {
+  local home clone out before remote_before
+  home="$TMP_ROOT/ambiguous-symlink-aliases"
+  mkdir -p "$home/projects"
+  clone=$(build_pair "$home" only-clone)
+  mv "$clone" "$home/real-clone"
+  clone="$home/real-clone"
+  ln -s "$clone" "$home/projects/AliasOne"
+  ln -s "$clone" "$home/projects/AliasTwo"
+  before=$(head_sha "$clone")
+  remote_before=$(git -C "$clone" rev-parse origin/main)
+  advance_origin "$home" only-clone C1
+
+  out=$(run_sync "$home" "$home/projects/AliasOne")
+  assert_contains "$out" "skipped: ambiguous project identity" \
+    "multiple aliases of one external clone must be refused: $out"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "ambiguous aliases fast-forwarded the clone"
+  [ "$(git -C "$clone" rev-parse origin/main)" = "$remote_before" ] \
+    || fail "ambiguous aliases fetched the clone"
+  pass "multiple symlink aliases without a physical project entry are refused"
 }
 
 test_symlinked_clone_still_syncs() {
@@ -802,4 +825,5 @@ test_non_clone_dir_never_syncs_the_enclosing_repo
 test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo
 test_case_variant_clone_root_still_syncs
 test_case_variant_local_only_clone_never_fetches
+test_ambiguous_symlink_aliases_never_fetch
 test_symlinked_clone_still_syncs

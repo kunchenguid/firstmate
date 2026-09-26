@@ -75,20 +75,26 @@ fi
 [ $# -le 1 ] || { usage; exit 1; }
 
 project_label() {
-  local entry matched=
+  local entry matched= physical= matches=0 physical_matches=0
   if [ -d "$PROJ" ]; then
     for entry in "$PROJECTS"/*; do
       [ -d "$entry" ] && [ "$entry" -ef "$PROJ" ] || continue
-      if [ "$entry" = "$PROJ" ]; then
-        basename "$entry"
-        return 0
+      matches=$((matches + 1))
+      matched=$entry
+      if [ ! -L "$entry" ]; then
+        physical_matches=$((physical_matches + 1))
+        physical=$entry
       fi
-      [ -n "$matched" ] || matched=$entry
     done
-    if [ -n "$matched" ]; then
+    if [ "$physical_matches" -eq 1 ]; then
+      basename "$physical"
+      return 0
+    fi
+    if [ "$matches" -eq 1 ]; then
       basename "$matched"
       return 0
     fi
+    [ "$matches" -eq 0 ] || return 1
   fi
   case "$PROJ" in
     "$PROJECTS"/*) basename "$PROJ" ;;
@@ -316,7 +322,10 @@ report_stuck() {
 
 sync_project() {
   PROJ=$1
-  label=$(project_label)
+  if ! label=$(project_label); then
+    echo "$PROJ: skipped: ambiguous project identity"
+    return 0
+  fi
 
   if [ ! -d "$PROJ" ]; then
     echo "$label: skipped: not a directory"
