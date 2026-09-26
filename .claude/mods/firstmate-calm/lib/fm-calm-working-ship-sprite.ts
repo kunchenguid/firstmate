@@ -10,8 +10,11 @@
 //
 // It lives inside the Claude Code plugin folder because Claude Code 2.1.272 refuses a
 // hooks-module import from outside that folder, symlinks included; the Pi extension
-// reaches it through the tracked `.pi/extensions/lib/fm-calm-working-ship-sprite.ts`
-// symlink. Nothing here imports a harness: every glyph is one terminal column under
+// reaches it through a plain re-export at
+// `.pi/extensions/lib/fm-calm-working-ship-sprite.ts` rather than a git symlink, because
+// a tracked symlink checks out as an unusable text file (the literal target path, not a
+// working link) on a filesystem/git configuration that does not materialize real
+// symlinks. Nothing here imports a harness: every glyph is one terminal column under
 // both harnesses' width rules, so widths are plain character counts.
 //
 // Cadence: one scheduler drives two linked cadences. Every tick advances the wave by
