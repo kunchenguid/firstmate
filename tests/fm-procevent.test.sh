@@ -712,6 +712,118 @@ out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh"
 assert_contains "$out" "retired: $lavish_id" "explicit adapter retirement stays supported after automatic retirement"
 pass "one Send & End yields exactly one captured result, automatic retirement, and no recurring poll"
 
+# --- end-user-aligned regression: firstmate replies in the same session -------
+# Firstmate used to receive feedback from its board but reject the reply file on
+# the non-task arm, leaving the answer visible only in main chat. Exercise the
+# full firstmate-owned round: capture feedback, hold recovery while it is open,
+# then acknowledge by re-arming with the exact response for the saved session.
+HFREPLY="$TMP_ROOT/hfreply"; new_home "$HFREPLY"
+FREPLY_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-reply-stub")
+FREPLY_COUNT="$TMP_ROOT/lavish-firstmate-reply-count"
+FREPLY_LOG="$TMP_ROOT/lavish-firstmate-replies"
+FREPLY_TRIGGER1="$TMP_ROOT/lavish-firstmate-trigger1"
+FREPLY_TRIGGER2="$TMP_ROOT/lavish-firstmate-trigger2"
+export FREPLY_COUNT FREPLY_LOG FREPLY_TRIGGER1 FREPLY_TRIGGER2
+cat > "$FREPLY_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+n=$(cat "$FREPLY_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$FREPLY_COUNT"
+reply=
+shift 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --agent-reply) reply=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'poll%s reply: %s\n' "$n" "$reply" >> "$FREPLY_LOG"
+trigger_var=FREPLY_TRIGGER$n
+trigger=${!trigger_var}
+while [ ! -e "$trigger" ]; do sleep 0.02; done
+if [ "$n" = 1 ]; then
+  printf 'session:\n  file: /firstmate-reply.html\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","","","message","please confirm"\n'
+else
+  printf 'session:\n  file: /firstmate-reply.html\n  status: ended\n  ended_by: user\n'
+fi
+SH
+chmod +x "$FREPLY_BIN/lavish-axi"
+FREPLY_ART="$TMP_ROOT/firstmate-reply.html"
+printf '<h1>reply</h1>\n' > "$FREPLY_ART"
+lavish_session "$FREPLY_ART"
+freply_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$FREPLY_ART")
+fm_test_track_procevent_home "$HFREPLY"
+printf 'stray reply\n' > "$TMP_ROOT/firstmate-stray-reply.txt"
+if PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$FREPLY_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-stray-reply.txt" \
+  >/dev/null 2>"$TMP_ROOT/firstmate-stray-reply.err"; then
+  fail "firstmate posted a Lavish reply before any feedback was captured"
+fi
+assert_contains "$(cat "$TMP_ROOT/firstmate-stray-reply.err")" "no captured round" \
+  "firstmate's stray Lavish reply refusal did not name the missing round"
+PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$FREPLY_ART" >/dev/null
+wait_for_lines "$FREPLY_LOG" 1 || fail "firstmate-owned Lavish listener did not start"
+touch "$FREPLY_TRIGGER1"
+wait_capture "$HFREPLY" "$freply_id" \
+  || fail "firstmate-owned Lavish feedback was not captured"
+assert_contains "$(wake_payloads "$HFREPLY")" "procevent lavish $freply_id 1" \
+  "firstmate-owned Lavish feedback was not announced"
+assert_grep 'kind=lavish-owned' "$HFREPLY/state/procevent/$freply_id.source" \
+  "firstmate-owned Lavish source did not retain its round-aware ownership"
+if pe "$HFREPLY" register lavish "$freply_id" -- /bin/true \
+  >"$TMP_ROOT/firstmate-replace.out" 2>"$TMP_ROOT/firstmate-replace.err"; then
+  fail "generic registration replaced firstmate's round-aware Lavish source"
+fi
+assert_contains "$(cat "$TMP_ROOT/firstmate-replace.err")" "cannot replace firstmate-owned Lavish source" \
+  "generic replacement refusal did not identify firstmate's Lavish ownership"
+PATH="$FREPLY_BIN:$PATH" pe "$HFREPLY" start "$freply_id" \
+  > "$TMP_ROOT/firstmate-start.out"
+assert_grep "round-open: $freply_id" "$TMP_ROOT/firstmate-start.out" \
+  "manual liveness repair started another listener across firstmate's open round"
+if pe "$HFREPLY" handled "$freply_id" 1 \
+  >"$TMP_ROOT/firstmate-handled.out" 2>"$TMP_ROOT/firstmate-handled.err"; then
+  fail "generic acknowledgement bypassed firstmate's same-session Lavish reply"
+fi
+assert_contains "$(cat "$TMP_ROOT/firstmate-handled.err")" "without re-arming its session" \
+  "generic acknowledgement refusal did not preserve firstmate's same-session reply"
+for _ in 1 2 3; do PATH="$FREPLY_BIN:$PATH" pe "$HFREPLY" reconcile >/dev/null; done
+[ "$(cat "$FREPLY_COUNT")" = 1 ] \
+  || fail "recovery repolled before firstmate answered the open Lavish round"
+# A board armed before this feature has the same firstmate owner and listener
+# but no round-aware kind. Re-arm must accept that live upgrade and publish the
+# durable kind without losing its already-captured feedback.
+grep -v '^kind=' "$HFREPLY/state/procevent/$freply_id.source" \
+  > "$HFREPLY/state/procevent/$freply_id.source.legacy"
+mv "$HFREPLY/state/procevent/$freply_id.source.legacy" \
+  "$HFREPLY/state/procevent/$freply_id.source"
+chmod 0600 "$HFREPLY/state/procevent/$freply_id.source"
+printf 'Confirmed in session.\n' > "$TMP_ROOT/firstmate-reply.txt"
+PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$FREPLY_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-reply.txt" >/dev/null
+wait_for_lines "$FREPLY_LOG" 2 || fail "firstmate's Lavish reply listener did not start"
+assert_grep 'kind=lavish-owned' "$HFREPLY/state/procevent/$freply_id.source" \
+  "re-arm did not upgrade the active firstmate-owned Lavish registration"
+assert_present "$HFREPLY/state/procevent-inbox/$freply_id.1.handled" \
+  "posting firstmate's Lavish reply did not acknowledge its captured round"
+assert_grep 'poll2 reply: Confirmed in session.' "$FREPLY_LOG" \
+  "firstmate's response was not posted to the active Lavish session"
+PATH="$FREPLY_BIN:$PATH" pe "$HFREPLY" reconcile >/dev/null
+[ "$(cat "$FREPLY_COUNT")" = 2 ] \
+  || fail "recovery duplicated firstmate's same-session Lavish reply"
+touch "$FREPLY_TRIGGER2"
+for _ in $(seq 1 100); do
+  [ ! -e "$HFREPLY/state/procevent/$freply_id.source" ] && break
+  sleep 0.02
+done
+assert_absent "$HFREPLY/state/procevent/$freply_id.source" \
+  "ended firstmate-owned Lavish session stayed armed"
+[ "$(grep -c '^poll[12] reply:' "$FREPLY_LOG")" = 2 ] \
+  || fail "firstmate's response was posted more than once"
+pass "firstmate-owned feedback receives one reply in the same Lavish session"
+
 # --- end-user-aligned regression: an empty board close is not news ------------
 # The captain's report: closing a review surface he had said nothing on still
 # put a wake in his chat whose entire content was that nothing happened. The

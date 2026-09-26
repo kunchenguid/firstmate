@@ -1804,7 +1804,7 @@ A long-polling external process is registered as a *source* through its adapter,
 
 **Open the Lavish artifact first**
 
-Before arming any Lavish source, open its artifact with `lavish-axi` so the saved session identifies the board's server; each poll attempt derives its host and port from that session and refuses missing or invalid session evidence before consuming a staged worker reply.
+Before arming any Lavish source, open its artifact with `lavish-axi` so the saved session identifies the board's server; each poll attempt derives its host and port from that session and refuses missing or invalid session evidence before consuming a staged reply.
 
 **Retry interrupted Lavish polls**
 
@@ -1813,6 +1813,21 @@ This start-to-start governor is a no-op after a normally blocking poll but caps 
 
 Real feedback, ended and missing sessions, any other `SERVER_ERROR`, and that same interruption still standing once the bound is spent are all captured and announced normally; `FM_LAVISH_POLL_RETRY_DELAY` is a bounded 1 to 60 second test override for the interval only, and the runner itself stays adapter-agnostic.
 An already-armed Lavish source keeps its registered listener command until it is retired and armed again, so retire the source, then arm it again to adopt this retry policy.
+
+### Firstmate-hosted Lavish review boards
+
+Firstmate arms its opened artifact once with `bin/fm-procevent-lavish.sh arm <artifact.html>`.
+That arm records a round-aware firstmate-owned source, so reconciliation never starts another listener while captured feedback remains unacknowledged.
+
+After handling a nonterminal capture, firstmate writes the exact response it will send in main chat to a private file and re-arms the same artifact with `--agent-reply-file <path>`.
+The re-arm copies that response into generation-private staging, publishes the next registration, and records the captured round handled under one source lock before starting the listener.
+A failed publish or acknowledgement restores the prior registration, retains the capture, and removes the new staged file, so retry cannot silently skip the round.
+Re-arm without a reply file acknowledges a round that needs no same-session response.
+A reply file is refused when no captured round is waiting, which prevents an unrelated response from entering the session.
+
+The listener validates its setup and saved session route before consuming the staged file, then passes its contents once to `lavish-axi poll --agent-reply`.
+Posting stays best effort: a crash after consuming the file but before making that call drops one reply rather than risking duplicate delivery.
+A terminal firstmate-owned capture follows normal terminal retirement and uses the generic handled acknowledgement because no next listener should start.
 
 ### Crew-hosted Lavish review boards
 
@@ -1901,7 +1916,7 @@ Each registered source has its own child process blocking on that source.
 On every cycle, the watcher's `reconcile`:
 
 - Republishes every captured result without a durable handled acknowledgement, regardless of earlier publication.
-- Restarts a source whose owner is gone.
+- Restarts a source whose owner is gone, except a round-aware Lavish source with an unacknowledged capture.
 - Stops this home's runner if its registration disappeared unexpectedly.
 
 In supported steady state, a home with no registered source runs nothing, generates no state, and keeps its ordinary cadence.

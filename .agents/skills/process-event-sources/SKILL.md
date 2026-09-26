@@ -28,11 +28,16 @@ Firstmate registers a source, keeps working, and is woken when that process comp
 
 Use the adapter, not the generic runner, for a real source.
 Before either Lavish arm form below, open the artifact with `lavish-axi` so its saved session can route the listener; the [operating contract](../../../docs/configuration.md#process-to-event-sources-stateprocevent) owns the prerequisite and refusal boundary.
-For a Lavish review artifact firstmate owns:
+For a Lavish review artifact firstmate owns, arm once:
 
 ```sh
 bin/fm-procevent-lavish.sh arm <artifact.html>
 ```
+
+After handling each nonterminal round, write the exact captain-facing response to a private file and re-arm the same artifact with `--agent-reply-file <path>` before sending that response in main chat.
+That re-arm stages one same-session reply and records the round handled atomically; if no response belongs in the session, re-arm without a reply file.
+Do not separately acknowledge a nonterminal firstmate-owned Lavish round with the generic `handled` command.
+A failed re-arm preserves the captured round and prior registration for retry, while recovery never starts another listener across an open Lavish round.
 
 A worker-owned board uses `bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>` and re-arms with its reply after each nonterminal round; the existing handled marker is the acknowledgement.
 Arm it once, then re-arm only when a round is actually waiting: arming again with nothing to acknowledge is refused, because it would discard the reply your listener is still holding.
@@ -108,11 +113,13 @@ Two rules the commands cannot enforce for you:
   Never acknowledge a `remote-reply` wake through the generic command, because only the adapter ingests the delta, acknowledges it, and re-arms its source.
   Use the generic path below only after fully handling a result whose adapter has no applying command.
   [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent) owns the automatic-application contract and its failure boundary.
-: A captured result with no durable handled acknowledgement stays eligible for bounded re-announcement on the existing wake queue - across any number of drains and firstmate restarts, not only the crash window right after capture - until it is explicitly acknowledged. Once you have fully handled a result, durably record it:
+: A captured result with no durable handled acknowledgement stays eligible for bounded re-announcement on the existing wake queue - across any number of drains and firstmate restarts, not only the crash window right after capture - until it is explicitly acknowledged.
+  A nonterminal firstmate-owned Lavish round uses the reply-carrying re-arm above as its acknowledgement so the response reaches that same session before main chat reports it.
+  For every other fully handled result, durably record it:
   ```sh
   bin/fm-procevent.sh handled <source-id> <sequence>
   ```
-  This call is atomically deduplicated by the exact source and sequence: it prints `handled: <id> <seq>` only the first time and `already-handled: <id> <seq>` on every repeat, so a paired effect gated on that distinction is never authorized twice. Reading the event line or the result file is not handling - only this call durably retires the wake, so call it every time, including on a repeat wake for a sequence you already acted on.
+  This call is atomically deduplicated by the exact source and sequence: it prints `handled: <id> <seq>` only the first time and `already-handled: <id> <seq>` on every repeat, so a paired effect gated on that distinction is never authorized twice. Reading the event line or the result file is not handling - only the owner-specific acknowledgement durably retires the wake, so acknowledge every result, including a repeat wake for a sequence you already acted on.
 : Ask the adapter what the result means rather than parsing it yourself.
   `bin/fm-procevent.sh classify <result-file>` routes through the immutable built-in or extension identity captured with that result; for Lavish, its existing direct command returns `feedback`, `ended`, `waiting`, `disconnected`, `missing`, or `unknown`.
   Consume a Lavish capture with `bin/fm-procevent-lavish.sh read <result-file>` rather than grepping the raw file: that command reports declared and presented item counts plus a completeness verdict, enumerates every captured queued item while retaining supplied element identity, and surfaces a `tag=message` freeform message as its own field, labeling it as session-ending only when the session ended.

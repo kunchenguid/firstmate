@@ -34,7 +34,7 @@
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
-#            transient interruption described below. A task-owned arm consumes
+#            transient interruption described below. A reply-carrying arm consumes
 #            its staged reply file once - reading and removing it before the
 #            poll - and hands the contents to the published `--agent-reply`
 #            argument; later retries poll without that reply. That post is best
@@ -221,7 +221,6 @@ cmd_arm() {
     esac
   done
   [ -n "$artifact" ] || usage
-  [ -z "$reply_file" ] || [ -n "$task" ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   poll_retry_delay >/dev/null
   id=$(cmd_source_id "$artifact") || exit 1
@@ -236,7 +235,7 @@ cmd_arm() {
     # This adapter's own listener command, which runs the plain blocking form
     # with no --timeout-ms so completion is a server event, and absorbs only
     # the exact transient interruption.
-    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" \
+    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register-lavish "$id" \
       -- "${listener[@]}" || exit 1
   fi
   # Registration is not a running listener. Readiness is the process-event

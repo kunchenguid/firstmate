@@ -360,11 +360,12 @@ fm_procevent_source_lock_release() {
   fm_lock_release "$(fm_procevent_source_lock_path "$1")"
 }
 
-fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <argv...>
-  local state=$1 adapter=$2 id=$3 reg dest tmp arg identity
-  shift 3
+fm_procevent_registration_publish_with_kind_locked() {  # <state> <adapter> <source-id> <kind> <argv...>
+  local state=$1 adapter=$2 id=$3 kind=$4 reg dest tmp arg identity
+  shift 4
   fm_procevent_adapter_valid "$adapter" || return 1
   fm_procevent_source_id_valid "$id" || return 1
+  [ -z "$kind" ] || [ "$kind" = lavish-owned ] || return 1
   [ "$#" -ge 1 ] || return 1
   for arg in "$@"; do
     case "$arg" in *$'\n'*) return 1 ;; esac
@@ -376,6 +377,7 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
   tmp=$(umask 077; mktemp "$reg/.source.XXXXXX") || return 1
   if {
     printf 'adapter=%s\n' "$adapter"
+    [ -z "$kind" ] || printf 'kind=%s\n' "$kind"
     printf 'argc=%s\n' "$#"
     printf 'argv:\n'
     printf '%s\n' "$@"
@@ -388,6 +390,18 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
   fi
   rm -f -- "$tmp"
   return 1
+}
+
+fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <argv...>
+  local state=$1 adapter=$2 id=$3
+  shift 3
+  fm_procevent_registration_publish_with_kind_locked "$state" "$adapter" "$id" '' "$@"
+}
+
+fm_procevent_lavish_registration_publish_locked() {  # <state> <adapter> <source-id> <argv...>
+  local state=$1 adapter=$2 id=$3
+  shift 3
+  fm_procevent_registration_publish_with_kind_locked "$state" "$adapter" "$id" lavish-owned "$@"
 }
 
 # Publish one task-owned registration. The single source record persists across
