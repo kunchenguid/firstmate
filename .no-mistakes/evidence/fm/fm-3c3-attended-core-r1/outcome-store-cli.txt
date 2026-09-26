@@ -1,0 +1,15 @@
+Disposable marked lab home; real outcome store CLI (no stub).
+1
+2
+First presentation:
+{"seq":1,"epoch":1790394912,"task":"task-a","wake":"","verdict":"routine","summary":"handled while captain attended","silent":false,"statusEndpoint":0,"statusIdent":"-","unread":true}
+{"seq":2,"epoch":1790394912,"task":"task-a","wake":"","verdict":"captain","summary":"decision now required","silent":false,"statusEndpoint":0,"statusIdent":"-","unread":true}
+Mark delivered rows read:
+Second presentation (only unprocessed captain should remain):
+{"seq":2,"epoch":1790394912,"task":"task-a","wake":"","verdict":"captain","summary":"decision now required","silent":false,"statusEndpoint":0,"statusIdent":"-","unread":false}
+Acknowledge captain:
+Third presentation (empty):
+Cursor:
+2
+Processed:
+2

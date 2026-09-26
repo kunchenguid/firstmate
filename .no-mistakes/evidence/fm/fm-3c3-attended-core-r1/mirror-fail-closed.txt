@@ -1,0 +1,3 @@
+Direct product wake-prompt with supplied mirror removed between host preparation and prompt:
+fm-branch-dispatch.mjs: the dialog mirror feed /var/folders/5x/4nqprlbx0518k3ybcb1sz6gr0000gn/T//fm-lab.AR0Acv/missing-feed could not be read
+exit=3
