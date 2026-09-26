@@ -80,8 +80,9 @@
 #          FM_SUPERVISOR_TARGET     supervisor pane target (override; otherwise
 #                                   auto-discovered per backend - $TMUX_PANE
 #                                   under tmux, "<session>:<pane-id>" from
-#                                   $HERDR_PANE_ID under herdr - then
-#                                   firstmate:0 fallback). Accepts either a
+#                                   $HERDR_PANE_ID under herdr; with none of
+#                                   these the daemon refuses to arm and logs
+#                                   target_source=UNAVAILABLE). Accepts either a
 #                                   tmux target or a herdr "<session>:<pane-id>"
 #                                   target; which one it's read as is decided by
 #                                   FM_SUPERVISOR_BACKEND (below), independently.
@@ -1818,9 +1819,12 @@ fm_super_main() {
   # --- auto-discover the supervisor target (the pane running firstmate) -----
   # Priority: FM_SUPERVISOR_TARGET override > $TMUX_PANE (tmux; inherited from
   # the pane that launched the daemon, normally firstmate's own) >
-  # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>") > firstmate:0
-  # fallback. Exporting the result into FM_SUPERVISOR_TARGET makes inject_msg
-  # (which reads that env var) use the discovered pane without an extra global.
+  # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>"). With none of
+  # those handles there is no verifiable operator session: refuse to arm pane
+  # escalation instead of aiming it at a constant that may name an unrelated
+  # crew or login shell (kunchenguid/firstmate#1506). Exporting the result into
+  # FM_SUPERVISOR_TARGET makes inject_msg (which reads that env var) use the
+  # discovered pane without an extra global.
   local discovered target_source
   target_source="FM_SUPERVISOR_TARGET"
   if [ -z "${FM_SUPERVISOR_TARGET:-}" ]; then
@@ -1829,13 +1833,15 @@ fm_super_main() {
     elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
       target_source="HERDR_ENV(HERDR_PANE_ID)"
     else
-      target_source="FALLBACK(firstmate:0)"
+      target_source="UNAVAILABLE"
     fi
   fi
-  if discovered=$(discover_supervisor_target); then
-    : # resolved cleanly
-  else
-    echo "warn: could not auto-discover supervisor pane (no FM_SUPERVISOR_TARGET, TMUX_PANE, or HERDR_ENV/HERDR_PANE_ID); falling back to '$discovered' — verify this is firstmate's pane" >&2
+  if ! discovered=$(discover_supervisor_target); then
+    echo "error: away-mode pane escalation unavailable: no operator pane handle (target_source=UNAVAILABLE; no FM_SUPERVISOR_TARGET, TMUX_PANE, or HERDR_ENV+HERDR_PANE_ID); refusing to arm - set FM_SUPERVISOR_TARGET and FM_SUPERVISOR_BACKEND to firstmate's own pane" >&2
+    log "startup refused: away-mode pane escalation unavailable; target_source=UNAVAILABLE; backend_source=$backend_source"
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    rm -f "$PIDFILE" 2>/dev/null || true
+    exit 1
   fi
   FM_SUPERVISOR_TARGET="$discovered"
   local TARGET="$FM_SUPERVISOR_TARGET"

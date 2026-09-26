@@ -2942,11 +2942,101 @@ test_discover_supervisor_target_herdr() {
   [ "$out" = "iso1:w1:p9" ] || fail "herdr target should use an explicit HERDR_SESSION: $out"
 
   if out=$(FM_SUPERVISOR_TARGET='' TMUX_PANE='' HERDR_ENV='' HERDR_PANE_ID='' discover_supervisor_target); then
-    fail "bare fallback should return non-zero"
+    fail "no operator pane handle should return non-zero"
   fi
-  [ "$out" = "firstmate:0" ] || fail "bare fallback should still print firstmate:0: $out"
+  [ -z "$out" ] || fail "no operator pane handle must print no target, not a constant: $out"
 
-  pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > firstmate:0 fallback"
+  pass "discover_supervisor_target: override > TMUX_PANE > herdr '<session>:<pane-id>' composition > no target"
+}
+
+# Run the real daemon executable against an isolated home with every ambient
+# pane handle removed, plus any extra env assignments, then wait (iteration
+# bounded) until it either exits on its own or logs its armed startup line.
+# A daemon still running at that point is stopped. Prints its exit status, or
+# "armed" when it had to be stopped; stderr lands in <dir>/daemon.err.
+run_daemon_startup() {  # <dir> [VAR=value...]
+  local dir=$1 pid i=0 rc=armed
+  shift
+  env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION \
+    -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+    FM_POLL=1 FM_HEARTBEAT=999999 FM_CHECK_INTERVAL=999999 FM_INJECT_FAIL_SLEEP=1 \
+    "$@" "$DAEMON" >"$dir/daemon.out" 2>"$dir/daemon.err" &
+  pid=$!
+  while [ "$i" -lt 150 ]; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid"
+      rc=$?
+      break
+    fi
+    grep -q 'daemon starting' "$dir/state/.supervise-daemon.log" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ "$rc" = armed ]; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+  printf '%s' "$rc"
+}
+
+# kunchenguid/firstmate#1506 defect A: with no explicit FM_SUPERVISOR_TARGET, no
+# $TMUX_PANE, and no herdr pane there is no verifiable operator-session handle.
+# A pane named firstmate:0 existing (here every tmux target resolves, as an
+# unrelated crew or login shell of that name would) must not turn that absence
+# into a delivery target: the daemon refuses to arm pane escalation, names the
+# unavailable target source on stderr and in its durable log, and never logs
+# the armed startup line.
+test_daemon_refuses_to_arm_without_operator_pane_handle() {
+  local dir rc err
+  dir=$(make_supercase daemon-no-pane-handle)
+  rc=$(run_daemon_startup "$dir")
+  err=$(cat "$dir/daemon.err" 2>/dev/null)
+
+  [ "$rc" != armed ] || fail "daemon armed pane escalation with no operator pane handle (log: $(cat "$dir/state/.supervise-daemon.log" 2>/dev/null))"
+  [ "$rc" != 0 ] || fail "daemon exited 0 without an operator pane handle; it must report a refusal"
+  assert_contains "$err" "target_source=UNAVAILABLE" "the refusal did not name the unavailable target source on stderr"
+  assert_not_contains "$err" "firstmate:0" "the refusal still offered the firstmate:0 constant as a target"
+  assert_contains "$(cat "$dir/state/.supervise-daemon.log" 2>/dev/null)" "target_source=UNAVAILABLE" \
+    "the durable daemon log did not record the unavailable target source"
+  assert_not_contains "$(cat "$dir/state/.supervise-daemon.log" 2>/dev/null)" "daemon starting" \
+    "the daemon logged an armed startup without an operator pane handle"
+  assert_absent "$dir/state/.supervise-daemon.pid" "the refused daemon left its pid file behind"
+  assert_absent "$dir/state/.supervise-daemon.lock" "the refused daemon left its singleton lock held"
+  pass "daemon refuses to arm pane escalation when no operator pane handle exists (#1506 defect A)"
+}
+
+# The three verifiable handles still arm the daemon exactly as before.
+test_daemon_arms_on_each_verifiable_operator_pane_handle() {
+  local dir rc log
+  dir=$(make_supercase daemon-handle-explicit)
+  rc=$(run_daemon_startup "$dir" FM_SUPERVISOR_TARGET=explicit:pane FM_SUPERVISOR_BACKEND=tmux)
+  log=$(cat "$dir/state/.supervise-daemon.log" 2>/dev/null)
+  [ "$rc" = armed ] || fail "explicit FM_SUPERVISOR_TARGET no longer arms the daemon (rc=$rc): $(cat "$dir/daemon.err")"
+  assert_contains "$log" "target=explicit:pane; target_source=FM_SUPERVISOR_TARGET; backend=tmux" \
+    "explicit override startup line changed"
+
+  dir=$(make_supercase daemon-handle-tmux)
+  rc=$(run_daemon_startup "$dir" TMUX_PANE=%42)
+  log=$(cat "$dir/state/.supervise-daemon.log" 2>/dev/null)
+  [ "$rc" = armed ] || fail "TMUX_PANE no longer arms the daemon (rc=$rc): $(cat "$dir/daemon.err")"
+  assert_contains "$log" "target=%42; target_source=TMUX_PANE; backend=tmux; backend_source=TMUX_PANE" \
+    "TMUX_PANE startup line changed"
+
+  dir=$(make_supercase daemon-handle-herdr)
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-} ${2:-} ${3:-}" = "pane get w1:p9" ] && exit 0
+exit 1
+SH
+  chmod +x "$dir/fakebin/herdr"
+  rc=$(run_daemon_startup "$dir" HERDR_ENV=1 HERDR_PANE_ID=w1:p9 HERDR_SESSION=fm-lab-daemon-handle)
+  log=$(cat "$dir/state/.supervise-daemon.log" 2>/dev/null)
+  [ "$rc" = armed ] || fail "HERDR_ENV+HERDR_PANE_ID no longer arms the daemon (rc=$rc): $(cat "$dir/daemon.err")"
+  assert_contains "$log" "target=fm-lab-daemon-handle:w1:p9; target_source=HERDR_ENV(HERDR_PANE_ID); backend=herdr; backend_source=HERDR_ENV" \
+    "herdr startup line changed"
+
+  pass "daemon still arms on an explicit target, a tmux pane, and a herdr pane"
 }
 
 test_pane_is_busy_herdr_native_busy_state() {
@@ -3240,6 +3330,8 @@ test_fm_send_exits_nonzero_on_initial_send_failure
 test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
+test_daemon_refuses_to_arm_without_operator_pane_handle
+test_daemon_arms_on_each_verifiable_operator_pane_handle
 test_pane_is_busy_herdr_native_busy_state
 test_primary_busy_guard_is_harness_scoped
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted

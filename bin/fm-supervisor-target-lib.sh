@@ -14,10 +14,12 @@
 # in bin/fm-supervise-daemon.sh, so its unit tests (tests/fm-daemon.test.sh)
 # keep exercising the same names after the daemon sources this file.
 
-# Default supervisor pane target/backend when nothing is configured or detected.
-# "firstmate:0" is a tmux session:window name, so the bare fallback (nothing
-# configured, nothing detected) assumes tmux - matching the daemon's pre-herdr
-# behavior byte-for-byte when run outside both tmux and herdr.
+# Library-mode defaults for the daemon's sourced inject/alarm helpers, which
+# read FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND with these as the unset
+# fallback. They are never a discovery result: discover_supervisor_target prints
+# nothing when no operator pane handle exists, and the executed daemon refuses
+# to arm rather than aim pane escalation at a constant (kunchenguid/firstmate#1506).
+# shellcheck disable=SC2034 # Read by fm-supervise-daemon.sh's inject/alarm helpers after sourcing, not this lib.
 FM_SUPERVISOR_TARGET_DEFAULT="firstmate:0"
 FM_SUPERVISOR_BACKEND_DEFAULT="tmux"
 
@@ -33,8 +35,10 @@ FM_SUPERVISOR_BACKEND_DEFAULT="tmux"
 #      fm_backend_herdr_session) and $HERDR_PANE_ID. Checked after $TMUX_PANE so a
 #      tmux pane nested inside herdr still resolves to tmux, matching
 #      fm_backend_detect's innermost-first rule.
-#   4. FM_SUPERVISOR_TARGET_DEFAULT - legacy tmux fallback (may not resolve if the
-#      session is named differently). Returns 1 so the caller can warn.
+#   4. Nothing: print nothing and return 1. Without one of the handles above
+#      there is no verifiable operator session, so the caller must refuse
+#      rather than guess a pane (a constant like firstmate:0 can name an
+#      unrelated crew or login shell).
 discover_supervisor_target() {
   if [ -n "${FM_SUPERVISOR_TARGET:-}" ]; then
     printf '%s' "$FM_SUPERVISOR_TARGET"
@@ -48,7 +52,6 @@ discover_supervisor_target() {
     printf '%s:%s' "${HERDR_SESSION:-default}" "$HERDR_PANE_ID"
     return 0
   fi
-  printf '%s' "$FM_SUPERVISOR_TARGET_DEFAULT"
   return 1
 }
 
@@ -59,7 +62,8 @@ discover_supervisor_target() {
 #   1. FM_SUPERVISOR_BACKEND env (explicit override).
 #   2. $TMUX_PANE set - tmux.
 #   3. $HERDR_ENV=1 (with $HERDR_PANE_ID present) - herdr.
-#   4. FM_SUPERVISOR_BACKEND_DEFAULT (tmux) - matches the target fallback. Returns 1.
+#   4. FM_SUPERVISOR_BACKEND_DEFAULT (tmux) - the transport for an explicit
+#      FM_SUPERVISOR_TARGET given without a backend. Returns 1.
 discover_supervisor_backend() {
   if [ -n "${FM_SUPERVISOR_BACKEND:-}" ]; then
     printf '%s' "$FM_SUPERVISOR_BACKEND"

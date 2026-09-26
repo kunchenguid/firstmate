@@ -214,6 +214,29 @@ unit_daemon_entry_requires_the_record() {
   rm -rf "$st"
 }
 
+# kunchenguid/firstmate#1506 defect A: with no explicit FM_SUPERVISOR_TARGET, no
+# $TMUX_PANE, and no herdr pane there is no operator pane to hand the daemon, so
+# `start` refuses by naming the unavailable target source and launches nothing.
+unit_start_refuses_without_operator_pane_handle() {
+  local st out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-no-handle.XXXXXX")
+  mkdir -p "$st/state"
+  enter_posture "$st" || fail "no handle: could not enter fixture posture"
+  out=$(env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u FM_SUPERVISOR_TARGET -u FM_SUPERVISOR_BACKEND \
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_ENTRY="$SLEEPER" "$LAUNCH" start 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F 'target_source=UNAVAILABLE' >/dev/null \
+    && ! printf '%s' "$out" | grep -F 'firstmate:0' >/dev/null \
+    && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] \
+    && [ -f "$st/state/.afk-contract" ] \
+    && grep -E '^\[[0-9T:+-]+\] startup refused: .*target_source=UNAVAILABLE' "$st/state/.supervise-daemon.log" >/dev/null 2>&1; then
+    pass "no handle: start refuses naming target_source=UNAVAILABLE on stderr and in the daemon log, launches no daemon terminal, and keeps the record"
+  else
+    fail "no handle: start did not refuse cleanly or left no durable record (rc=$rc): $out; log: $(cat "$st/state/.supervise-daemon.log" 2>/dev/null)"
+  fi
+  rm -rf "$st"
+}
+
 unit_failed_daemon_launch_preserves_the_record() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-failed-record.XXXXXX")
@@ -1386,6 +1409,7 @@ unit_pi_never_launches_the_daemon
 unit_test_harness_seam_requires_the_marker
 unit_pi_enter_stop_does_not_claim_a_daemon_terminal
 unit_daemon_entry_requires_the_record
+unit_start_refuses_without_operator_pane_handle
 unit_failed_daemon_launch_preserves_the_record
 unit_stop_archives_the_record_last
 unit_relative_paths_are_absolute_before_daemon_launch

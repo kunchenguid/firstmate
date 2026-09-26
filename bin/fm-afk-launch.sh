@@ -611,7 +611,14 @@ fm_afk_launch_start() {
   fm_afk_launch_record_require || return 1
   # Capture the captain pane FIRST, before creating anything.
   captain_target=$(discover_supervisor_target) || {
-    fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"
+    fm_afk_launch_log "away-mode pane escalation unavailable: no operator pane handle (target_source=UNAVAILABLE; no FM_SUPERVISOR_TARGET, TMUX_PANE, or HERDR_ENV+HERDR_PANE_ID); refusing to launch the daemon"
+    # Durable record in the daemon's own append-only log and line format, so a
+    # later look at the home tells this refusal apart from a launch never tried.
+    if ! { mkdir -p "$FM_AFK_LAUNCH_STATE" \
+      && printf '[%s] startup refused: away-mode pane escalation unavailable; target_source=UNAVAILABLE; refused_by=fm-afk-launch start\n' \
+        "$(date '+%Y-%m-%dT%H:%M:%S%z')" >> "$FM_AFK_LAUNCH_STATE/.supervise-daemon.log"; } 2>/dev/null; then
+      fm_afk_launch_log "could not record the refusal in $FM_AFK_LAUNCH_STATE/.supervise-daemon.log"
+    fi
     return 1; }
   captain_backend=$(discover_supervisor_backend) || {
     fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"
