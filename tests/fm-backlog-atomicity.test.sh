@@ -1595,6 +1595,25 @@ test_completion_closes_a_scout_with_its_report() {
   pass "completion closes a scout item against its report"
 }
 
+test_completion_closes_empty_outcome_without_a_report() {
+  local case_dir id out
+  id=atomic-close-empty-outcome-b8
+  case_dir=$(make_home close-empty-outcome)
+  add_item "$case_dir" "$id" scout
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" scout '' "spawn_gen=spawn-close-empty"
+
+  out=$(run_teardown "$case_dir" "$id" --empty-outcome) \
+    || fail "empty-outcome teardown failed: $out"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "empty-outcome teardown reported success with the scout item still $(row_state "$case_dir" "$id")"
+  assert_grep "produced no deliverable" "$(backlog_of "$case_dir")" \
+    "an empty-outcome close did not record why"
+  [ ! -f "$(home_of "$case_dir")/data/$id/report.md" ] \
+    || fail "empty-outcome teardown fabricated a scout report"
+  pass "completion closes an empty-outcome scout without writing a report"
+}
+
 test_completion_refuses_a_legacy_record_without_an_incarnation() {
   local case_dir id meta out rc=0
   id=atomic-close-legacy-no-incarnation-b7
@@ -3038,6 +3057,7 @@ test_dispatch_does_not_resurrect_a_row_closed_after_preflight
 test_dispatch_fails_when_its_row_vanishes_after_preflight
 test_completion_closes_a_local_only_ship_before_reporting_success
 test_completion_closes_a_scout_with_its_report
+test_completion_closes_empty_outcome_without_a_report
 test_completion_refuses_a_legacy_record_without_an_incarnation
 test_completion_refuses_ambiguous_incarnation_metadata
 test_completion_records_a_relative_report_for_relocated_data

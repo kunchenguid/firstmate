@@ -948,7 +948,12 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     0) ;;
     2)
       case "${args[0]}" in
-        --note) [ "${args[1]}" = "local%20main" ] ;;
+        --note)
+          case "${args[1]}" in
+            local%20main|produced%20no%20deliverable) true ;;
+            *) false ;;
+          esac
+          ;;
         --pr)
           arg_value=${args[1]}
           [ "${#arg_value}" -le 2048 ] \
@@ -1048,6 +1053,8 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
   for arg in "$@"; do
     if [ "$previous_arg" = --note ] && [ "$arg" = "local main" ]; then
       serialized_args+=("local%20main")
+    elif [ "$previous_arg" = --note ] && [ "$arg" = "produced no deliverable" ]; then
+      serialized_args+=("produced%20no%20deliverable")
     else
       serialized_args+=("$arg")
     fi
@@ -1123,7 +1130,10 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   [ "$mode" = close ] || mode_flags=(--retain)
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   if [ "${args[0]-}" = --note ]; then
-    args[1]="local main"
+    case "${args[1]-}" in
+      produced%20no%20deliverable) args[1]="produced no deliverable" ;;
+      *) args[1]="local main" ;;
+    esac
   fi
   meta="$state/$id.meta"
   if [ -e "$meta" ] || [ -L "$meta" ]; then

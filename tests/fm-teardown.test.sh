@@ -1414,6 +1414,270 @@ test_windowless_leftover_retries_its_retained_legacy_stamp_without_the_flag() {
   pass "a windowless leftover retries its retained legacy stamp without --legacy-record"
 }
 
+# A spawned record with spawn_gen but no worktree= line. --legacy-record does
+# not apply (the incarnation field is present), and ordinary teardown must not
+# guess a copy.
+write_spawned_meta_without_worktree() {
+  local case_dir=$1 mode=$2 kind=$3
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "project=$case_dir/project" \
+    "kind=$kind" \
+    "mode=$mode" \
+    "spawn_gen=teardown-test-task-x1"
+}
+
+test_spawned_record_without_worktree_refuses_without_empty_outcome() {
+  local case_dir rc
+  case_dir=$(make_case empty-outcome-no-wt-noflag)
+  write_spawned_meta_without_worktree "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "empty-outcome-no-wt-noflag: a spawned record with no worktree identity must refuse"
+  grep -Fq "missing, empty, or ambiguous worktree identity" "$case_dir/stderr" \
+    || fail "empty-outcome-no-wt-noflag: the refusal was not the worktree-identity refusal: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "empty-outcome-no-wt-noflag: the refusal removed the task record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "empty-outcome-no-wt-noflag: the refusal closed the backlog item anyway"
+  pass "a spawned record with no worktree identity refuses until --empty-outcome is passed"
+}
+
+test_scout_without_report_refuses_without_empty_outcome() {
+  local case_dir rc
+  case_dir=$(make_case empty-outcome-scout-noflag)
+  write_meta "$case_dir" no-mistakes scout
+  seed_backlog_in_flight "$case_dir" scout
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "empty-outcome-scout-noflag: a scout with no report must refuse"
+  grep -Fq "has no report" "$case_dir/stderr" \
+    || fail "empty-outcome-scout-noflag: the refusal was not the missing-report refusal: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "empty-outcome-scout-noflag: the refusal removed the task record"
+  [ ! -f "$case_dir/data/task-x1/report.md" ] \
+    || fail "empty-outcome-scout-noflag: the refusal fabricated a report"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "empty-outcome-scout-noflag: the refusal closed the backlog item anyway"
+  pass "a scout with no report refuses until --empty-outcome is passed"
+}
+
+test_empty_outcome_clears_spawned_record_without_worktree() {
+  local case_dir out
+  case_dir=$(make_case empty-outcome-no-wt)
+  write_spawned_meta_without_worktree "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+
+  out=$(run_teardown "$case_dir" --empty-outcome) \
+    || fail "empty-outcome-no-wt: --empty-outcome refused a spawned record with no worktree identity: $out"
+  printf '%s\n' "$out" | grep -Fq "empty outcome: produced no deliverable" \
+    || fail "empty-outcome-no-wt: the teardown line did not name the empty outcome: $out"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "empty-outcome-no-wt: teardown left the leftover record"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "empty-outcome-no-wt: teardown returned success with its backlog item still open"
+  assert_grep "produced no deliverable" "$case_dir/data/backlog.md" \
+    "empty-outcome-no-wt: the closed item did not keep a durable empty-outcome trace"
+  pass "--empty-outcome clears a spawned record with no worktree identity and records why"
+}
+
+test_empty_outcome_clears_scout_without_report() {
+  local case_dir out
+  case_dir=$(make_case empty-outcome-scout)
+  write_meta "$case_dir" no-mistakes scout
+  seed_backlog_in_flight "$case_dir" scout
+
+  out=$(run_teardown "$case_dir" --empty-outcome) \
+    || fail "empty-outcome-scout: --empty-outcome refused a scout that produced no report: $out"
+  printf '%s\n' "$out" | grep -Fq "empty outcome: produced no deliverable" \
+    || fail "empty-outcome-scout: the teardown line did not name the empty outcome: $out"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "empty-outcome-scout: teardown left the leftover record"
+  [ ! -f "$case_dir/data/task-x1/report.md" ] \
+    || fail "empty-outcome-scout: teardown fabricated a report to satisfy the scout gate"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "empty-outcome-scout: teardown returned success with its backlog item still open"
+  assert_grep "produced no deliverable" "$case_dir/data/backlog.md" \
+    "empty-outcome-scout: the closed item did not keep a durable empty-outcome trace"
+  pass "--empty-outcome clears a scout that produced no report without writing one"
+}
+
+test_empty_outcome_still_refuses_unlanded_identifiable_worktree() {
+  local case_dir rc before
+  case_dir=$(make_case empty-outcome-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+  wt_commit_file "$case_dir" feature.txt unique-empty-outcome-content "real unlanded work"
+  before=$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')
+
+  set +e
+  run_teardown "$case_dir" --empty-outcome > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "empty-outcome-unlanded: an identifiable unlanded worktree must still refuse"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "empty-outcome-unlanded: no REFUSED line for unlanded work"
+  [ "$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')" = "$before" ] \
+    || fail "empty-outcome-unlanded: the unlanded refusal modified the task record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "empty-outcome-unlanded: the unlanded refusal closed the backlog item anyway"
+  pass "--empty-outcome still refuses an identifiable worktree that holds unlanded work"
+}
+
+test_empty_outcome_still_refuses_dirty_identifiable_worktree() {
+  local case_dir rc before
+  case_dir=$(make_case empty-outcome-dirty)
+  write_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+  wt_commit "$case_dir" "landed empty-outcome work"
+  add_fork_with_pushed_branch "$case_dir"
+  printf '%s\n' "uncommitted edit" > "$case_dir/wt/scratch.txt"
+  before=$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')
+
+  set +e
+  run_teardown "$case_dir" --empty-outcome > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "empty-outcome-dirty: an identifiable dirty worktree must still refuse"
+  grep -q "uncommitted changes" "$case_dir/stderr" \
+    || fail "empty-outcome-dirty: the refusal did not cite uncommitted changes: $(cat "$case_dir/stderr")"
+  [ "$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')" = "$before" ] \
+    || fail "empty-outcome-dirty: the dirty refusal modified the task record"
+  pass "--empty-outcome still refuses an identifiable worktree with uncommitted changes"
+}
+
+test_empty_outcome_still_refuses_ambiguous_worktree() {
+  local case_dir rc
+  case_dir=$(make_case empty-outcome-ambiguous-wt)
+  write_spawned_meta_without_worktree "$case_dir" no-mistakes ship
+  printf '%s\n' "worktree=$case_dir/wt" "worktree=$case_dir/other-wt" \
+    >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" --empty-outcome > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "empty-outcome-ambiguous-wt: duplicate worktree identity must still refuse"
+  grep -Fq "missing, empty, or ambiguous worktree identity" "$case_dir/stderr" \
+    || fail "empty-outcome-ambiguous-wt: the refusal was not the worktree-identity refusal: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "empty-outcome-ambiguous-wt: the refusal removed the task record"
+  pass "--empty-outcome never guesses among ambiguous worktree identities"
+}
+
+test_empty_outcome_still_refuses_open_captain_decision() {
+  local case_dir rc
+  case_dir=$(make_case empty-outcome-open-decision)
+  write_meta "$case_dir" no-mistakes scout
+  seed_backlog_in_flight "$case_dir" scout
+  printf '%s\n' "needs-decision [key=api-shape]: pick REST or RPC" \
+    > "$case_dir/state/task-x1.status"
+
+  set +e
+  run_teardown "$case_dir" --empty-outcome > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "empty-outcome-open-decision: an open captain decision must still refuse"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "empty-outcome-open-decision: no REFUSED line for the open decision: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "empty-outcome-open-decision: the refusal removed the task record"
+  [ ! -f "$case_dir/data/task-x1/report.md" ] \
+    || fail "empty-outcome-open-decision: the refusal fabricated a report"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "empty-outcome-open-decision: the refusal closed the backlog item anyway"
+  pass "--empty-outcome still refuses a scout that holds an open captain decision"
+}
+
+# --empty-outcome must refuse a task that has a deliverable, so the closed
+# backlog item never says "produced no deliverable" over real work.
+expect_empty_outcome_deliverable_refusal() {  # <case-dir> <label> <reason>
+  local case_dir=$1 label=$2 reason=$3 rc before
+  before=$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')
+
+  set +e
+  run_teardown "$case_dir" --empty-outcome > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "$label: --empty-outcome must refuse a task with a deliverable"
+  grep -Fq "only for a task that produced no deliverable" "$case_dir/stderr" \
+    || fail "$label: the refusal did not name the deliverable: $(cat "$case_dir/stderr")"
+  grep -Fq "$reason" "$case_dir/stderr" \
+    || fail "$label: the refusal did not cite '$reason': $(cat "$case_dir/stderr")"
+  grep -Fq "without --empty-outcome" "$case_dir/stderr" \
+    || fail "$label: the refusal did not point to ordinary teardown: $(cat "$case_dir/stderr")"
+  [ "$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')" = "$before" ] \
+    || fail "$label: the refusal modified the task record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "$label: the refusal closed the backlog item anyway"
+  ! grep -Fq "produced no deliverable" "$case_dir/data/backlog.md" \
+    || fail "$label: the refusal recorded an empty outcome on the backlog"
+}
+
+test_empty_outcome_refuses_scout_with_report() {
+  local case_dir
+  case_dir=$(make_case empty-outcome-scout-report)
+  write_meta "$case_dir" no-mistakes scout
+  seed_backlog_in_flight "$case_dir" scout
+  mkdir -p "$case_dir/data/task-x1"
+  printf '%s\n' "# Findings" > "$case_dir/data/task-x1/report.md"
+
+  expect_empty_outcome_deliverable_refusal "$case_dir" empty-outcome-scout-report "its report exists"
+  assert_present "$case_dir/data/task-x1/report.md" \
+    "empty-outcome-scout-report: the refusal removed the report"
+  pass "--empty-outcome refuses a scout whose report exists"
+}
+
+test_empty_outcome_refuses_recorded_pr() {
+  local case_dir
+  case_dir=$(make_case empty-outcome-pr)
+  write_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+
+  expect_empty_outcome_deliverable_refusal "$case_dir" empty-outcome-pr \
+    "it records PR https://github.com/example/repo/pull/7"
+  pass "--empty-outcome refuses a task that records a PR"
+}
+
+test_empty_outcome_clears_local_only_task_while_local_main_is_ahead() {
+  local case_dir wt_head out
+  case_dir=$(make_case empty-outcome-local-ahead)
+  write_meta "$case_dir" local-only ship
+  seed_backlog_in_flight "$case_dir"
+  # Earlier local-only work sits on local main but not on the remote, and this
+  # task spawned from that main and committed nothing of its own.
+  wt_commit "$case_dir" "earlier task merged into local main"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+
+  out=$(run_teardown "$case_dir" --empty-outcome 2>"$case_dir/stderr") \
+    || fail "empty-outcome-local-ahead: --empty-outcome refused a local-only task whose main is ahead of the remote: $(cat "$case_dir/stderr")"
+  printf '%s\n' "$out" | grep -Fq "empty outcome: produced no deliverable" \
+    || fail "empty-outcome-local-ahead: the teardown line did not name the empty outcome: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "empty-outcome-local-ahead: teardown returned success with its backlog item still open"
+  assert_grep "produced no deliverable" "$case_dir/data/backlog.md" \
+    "empty-outcome-local-ahead: the closed item did not keep a durable empty-outcome trace"
+  pass "--empty-outcome clears a local-only task while local main is ahead of the remote"
+}
+
 test_legacy_record_teardown_completes_when_landed_and_endpoint_dead() {
   local case_dir out
   case_dir=$(make_case legacy-allow)
@@ -4107,6 +4371,17 @@ test_windowless_legacy_record_tears_down_with_the_legacy_flag
 test_windowless_legacy_record_still_refuses_unlanded_work
 test_windowless_record_outside_the_leftover_class_still_refuses
 test_windowless_leftover_retries_its_retained_legacy_stamp_without_the_flag
+test_spawned_record_without_worktree_refuses_without_empty_outcome
+test_scout_without_report_refuses_without_empty_outcome
+test_empty_outcome_clears_spawned_record_without_worktree
+test_empty_outcome_clears_scout_without_report
+test_empty_outcome_still_refuses_unlanded_identifiable_worktree
+test_empty_outcome_still_refuses_dirty_identifiable_worktree
+test_empty_outcome_still_refuses_ambiguous_worktree
+test_empty_outcome_still_refuses_open_captain_decision
+test_empty_outcome_refuses_scout_with_report
+test_empty_outcome_refuses_recorded_pr
+test_empty_outcome_clears_local_only_task_while_local_main_is_ahead
 test_legacy_record_teardown_completes_when_landed_and_endpoint_dead
 test_legacy_record_teardown_refuses_unlanded_work
 test_legacy_record_teardown_refuses_an_ambiguous_endpoint

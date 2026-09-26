@@ -73,6 +73,9 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# --empty-outcome is the supported close when that report was never produced:
+# it records why on the closed backlog item and still refuses an open captain
+# decision. It does not write a report to satisfy the gate.
 # Before destructive cleanup, teardown validates task check artifacts as
 # ordinary single-link files on the state device. It refuses and preserves
 # task state when that proof fails; otherwise it removes the task's check,
@@ -161,10 +164,22 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--empty-outcome]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+#   --empty-outcome is the supported terminal outcome for a task that ran and
+#   produced no deliverable, including a spawned record with no worktree
+#   identity. It clears the record and records `produced no deliverable` on the
+#   closed backlog item, without --force and without writing a scout report.
+#   It still refuses unlanded work, an identifiable worktree with uncommitted
+#   changes, an ambiguous worktree identity, an open captain decision, and
+#   secondmate retirement. It refuses a task that has a deliverable (a scout
+#   report or a recorded pr=); plain teardown closes those. A missing or empty worktree= line is no identity;
+#   two worktree= lines stay ambiguous and are refused. An Orca record that
+#   still names orca_worktree_id is identifiable and is refused rather than
+#   skipped. --legacy-record remains the path for records that predate
+#   spawn_gen; this flag does not replace it.
 #   --legacy-record accepts a task record that predates the spawn_gen field:
 #   teardown then proceeds only when the recorded endpoint is confirmed dead or
 #   agent-less (bin/fm-backend.sh's recovery-grade classifier), and without
@@ -365,11 +380,14 @@ fi
 ID=$1
 FORCE=
 LEGACY_RECORD_GIVEN=0
+EMPTY_OUTCOME_GIVEN=0
+EMPTY_OUTCOME_NOTE='produced no deliverable'
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --empty-outcome) EMPTY_OUTCOME_GIVEN=1 ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -521,6 +539,7 @@ TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
 TEARDOWN_WINDOWLESS=0
 TEARDOWN_WINDOWLESS_SHAPE=0
+TEARDOWN_EMPTY_WORKTREE=0
 TEARDOWN_WINDOW_COUNT=$(LC_ALL=C grep -c '^window=' "$META" 2>/dev/null || true)
 TEARDOWN_BACKEND_COUNT=$(LC_ALL=C grep -c '^backend=' "$META" 2>/dev/null || true)
 case "$TEARDOWN_WINDOW_COUNT:$(fm_meta_get "$META" window)" in
@@ -1083,17 +1102,60 @@ fi
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,
 # worktree return, registry change, or process termination can run.
+if [ "$EMPTY_OUTCOME_GIVEN" = 1 ] && [ "$TEARDOWN_META_KIND" = secondmate ]; then
+  echo "error: --empty-outcome is for ship and scout records that produced no deliverable, not secondmate retirement" >&2
+  exit 2
+fi
 # A windowless record names no endpoint: the shared validator would refuse it
 # (and must keep refusing it for control/kill callers), so teardown skips the
 # validator rather than probing or closing an ambient current window.
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
 T_ORCA=
+TEARDOWN_WORKTREE_COUNT=$(LC_ALL=C grep -c '^worktree=' "$META" 2>/dev/null || true)
+if [ "$EMPTY_OUTCOME_GIVEN" = 1 ]; then
+  case "$TEARDOWN_WORKTREE_COUNT:$WT" in
+    0:|1:)
+      TEARDOWN_EMPTY_WORKTREE=1
+      WT=
+      ;;
+  esac
+fi
 if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
   BACKEND=tmux
   T=
+elif [ "$TEARDOWN_EMPTY_WORKTREE" = 1 ]; then
+  if LC_ALL=C grep -Eq '^(backend=orca|orca_worktree_id=)' "$META" 2>/dev/null; then
+    echo "REFUSED: --empty-outcome cannot skip task $ID's recorded Orca worktree identity; preserving task state." >&2
+    echo "Inspect or restore that copy, or get explicit discard approval, then --force." >&2
+    exit 1
+  fi
+  # The shared validator must keep requiring worktree= for control/kill
+  # callers. --empty-outcome attests there is no copy to inspect, so teardown
+  # validates the recorded endpoint against a non-existent dummy path and
+  # then clears WT so no later step can return or reset a guessed copy.
+  TEARDOWN_EMPTY_SHAPE=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-teardown-empty.XXXXXX") || exit 1
+  { LC_ALL=C grep -v '^worktree=' "$META" || true
+    printf 'worktree=/nonexistent/fm-empty-outcome/%s\n' "$ID"
+  } > "$TEARDOWN_EMPTY_SHAPE"
+  if ! fm_backend_validate_task_endpoint "$TEARDOWN_EMPTY_SHAPE" "$ID"; then
+    rm -f "$TEARDOWN_EMPTY_SHAPE"
+    exit 1
+  fi
+  rm -f "$TEARDOWN_EMPTY_SHAPE"
+  BACKEND=$FM_BACKEND_VALIDATED_BACKEND
+  T=$FM_BACKEND_VALIDATED_TARGET
+  [ "$BACKEND" != orca ] || T_ORCA=$T
+  WT=
 else
-  fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
+  if ! fm_backend_validate_task_endpoint "$META" "$ID"; then
+    case "$TEARDOWN_WORKTREE_COUNT:$WT" in
+      0:|1:)
+        echo "Pass --empty-outcome when this task ran and produced no deliverable and there is no copy to inspect." >&2
+        ;;
+    esac
+    exit 1
+  fi
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   T=$FM_BACKEND_VALIDATED_TARGET
   [ "$BACKEND" != orca ] || T_ORCA=$T
@@ -1107,6 +1169,19 @@ if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
 fi
 HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+empty_outcome_deliverable_refusal() {
+  echo "REFUSED: --empty-outcome is only for a task that produced no deliverable, but task $ID has one: $1." >&2
+  echo "Tear it down without --empty-outcome (bin/fm-teardown.sh $ID) so the backlog records that deliverable." >&2
+}
+if [ "$EMPTY_OUTCOME_GIVEN" = 1 ]; then
+  if [ "$TEARDOWN_META_KIND" = scout ] && [ -f "$DATA/$ID/report.md" ]; then
+    empty_outcome_deliverable_refusal "its report exists at $DATA/$ID/report.md"
+    exit 1
+  elif [ -n "$PR_URL" ]; then
+    empty_outcome_deliverable_refusal "it records PR $PR_URL"
+    exit 1
+  fi
+fi
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
@@ -1588,6 +1663,10 @@ BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative
   BACKLOG_DONE_ARGS=()
+  if [ "$EMPTY_OUTCOME_GIVEN" = 1 ]; then
+    BACKLOG_DONE_ARGS=(--note "$EMPTY_OUTCOME_NOTE")
+    return 0
+  fi
   case "$KIND" in
     scout)
       data_relative=$(fm_backlog_data_relative "$DATA") || return 1
@@ -1849,7 +1928,13 @@ validate_worktree_teardown_safety() {
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
-    secondmate|scout) return 0 ;;
+    secondmate) return 0 ;;
+    scout)
+      # Ordinary scout teardown treats the copy as scratch. --empty-outcome
+      # attests there was no deliverable, so an identifiable copy with
+      # uncommitted or unlanded work still refuses.
+      [ "$EMPTY_OUTCOME_GIVEN" = 1 ] || return 0
+      ;;
   esac
 
   if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
@@ -3356,11 +3441,22 @@ fi
 if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
   REPORT="$DATA/$ID/report.md"
   if [ ! -f "$REPORT" ]; then
-    echo "REFUSED: scout task $ID has no report at $REPORT." >&2
-    echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2
-    exit 1
-  fi
-  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    if [ "$EMPTY_OUTCOME_GIVEN" = 1 ]; then
+      TEARDOWN_OPEN_DECISIONS=$(status_open_decisions "$STATE/$ID.status")
+      while IFS=$'\t' read -r TEARDOWN_OPEN_KEY _verb _summary; do
+        [ -n "$TEARDOWN_OPEN_KEY" ] || continue
+        echo "REFUSED: scout task $ID still has an open captain decision ($TEARDOWN_OPEN_KEY)." >&2
+        echo "--empty-outcome does not close a captain call. Inventory it through bin/fm-captain-hold.sh, or answer it, then retry." >&2
+        exit 1
+      done <<EOF
+$TEARDOWN_OPEN_DECISIONS
+EOF
+    else
+      echo "REFUSED: scout task $ID has no report at $REPORT." >&2
+      echo "The report is the work product. Have the crewmate write it, pass --empty-outcome when the task ran and produced no deliverable, or use --force after explicit discard approval." >&2
+      exit 1
+    fi
+  elif ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$ID" >/dev/null; then
     echo "REFUSED: scout task $ID has not passed the captain-call completion gate." >&2
     echo "Inventory its report and any visual review through bin/fm-captain-hold.sh before teardown." >&2
@@ -3581,7 +3677,8 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # the project. teardown_treehouse_return tolerates transient and stale git locks
   # left by a killed crew process; see the script header for retry and stale-lock proof.
   post_lock_cleanup_check=
-  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
+  if [ "$FORCE" != "--force" ] && [ "$KIND" != secondmate ] \
+      && { [ "$KIND" != scout ] || [ "$EMPTY_OUTCOME_GIVEN" = 1 ]; }; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
   teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
@@ -3790,7 +3887,9 @@ fi
 if [ -d "$STATE" ]; then
   "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 fi
-if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
+if [ "$EMPTY_OUTCOME_GIVEN" = 1 ]; then
+  echo "teardown $ID complete (window ${T:-none}, worktree ${WT:-none}, empty outcome: $EMPTY_OUTCOME_NOTE)"
+elif [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
 elif teardown_owns_worktree; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT)"
