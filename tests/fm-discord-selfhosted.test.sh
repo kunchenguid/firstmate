@@ -139,12 +139,30 @@ test_collision_exclusion_filter() {
     FM_DISCORD_FAKE_MESSAGES='[{"id":"1352000000000000100","channel_id":"1000000000000000002","guild_id":"1000000000000000000","author":{"username":"captain"},"mentions":[{"id":"9000000000000000001"}],"content":"<@9000000000000000001> allowed","attachments":[]}]' \
     FM_DISCORD_FAKE_FETCH_LOG="$home/fetch.log" PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DISCORD_BOT_TOKEN="fake-test-token" FM_DISCORD_CHANNEL_ID="1551134713727426570,1000000000000000002" \
-    FM_DISCORD_EXCLUDE_CHANNELS="1551134713727426570" "$ROOT/bin/fm-discord-poll.sh")
+    FM_DISCORD_EXCLUDE_CHANNELS="1551134713727426570" "$ROOT/bin/fm-discord-poll.sh" 2>"$home/warnings.log")
   assert_equals "x-mention discord-sh-1352000000000000100" "$wake_out" "allowed channel wake emitted"
   ! grep -Fxq "1551134713727426570" "$home/fetch.log" || fail "excluded channel was fetched"
   assert_present "$home/state/x-inbox/discord-sh-1352000000000000100.json" "allowed channel inbox exists"
+  assert_contains "$(cat "$home/warnings.log")" "channel 1551134713727426570 is allowlisted and explicitly excluded; exclusion wins" "explicit exclusion conflict is reported"
 
   pass "collision handling excludes gajae-way channel 1551134713727426570"
+}
+
+test_allowlist_overrides_default_exclusion() {
+  local home wake_out
+  home="$TMP_ROOT/default-exclusion-override"
+  mkdir -p "$home/state"
+  make_fake_discord_node "$home"
+  wake_out=$(FM_TEST_REAL_NODE=$(command -v node) \
+    FM_DISCORD_FAKE_MESSAGES='[{"id":"1352000000000000103","channel_id":"1551134713727426570","guild_id":"1000000000000000000","author":{"username":"captain"},"mentions":[{"id":"9000000000000000001"}],"content":"<@9000000000000000001> hello","attachments":[]}]' \
+    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1551134713727426570 \
+    FM_DISCORD_EXCLUDE_CHANNELS='' "$ROOT/bin/fm-discord-poll.sh" 2>"$home/warnings.log") \
+    || fail "poll with explicit channel allowlist failed"
+  assert_equals "x-mention discord-sh-1352000000000000103" "$wake_out" "explicit allowlist defeats only the built-in exclusion"
+  assert_contains "$(cat "$home/warnings.log")" "allowlisted Discord channel 1551134713727426570 overrides the built-in exclusion" "default exclusion collision is reported"
+  assert_present "$home/state/x-inbox/discord-sh-1352000000000000103.json" "allowlisted channel mention reaches inbox"
+  pass "explicit allowlist takes precedence over the default Discord collision exclusion with a warning"
 }
 
 test_bootstrap_activation() {
@@ -175,4 +193,5 @@ test_ingestion_payload_shape_and_wake
 test_default_dm_discovery
 test_reply_dry_run_routing
 test_collision_exclusion_filter
+test_allowlist_overrides_default_exclusion
 test_bootstrap_activation

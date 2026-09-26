@@ -54,6 +54,86 @@ test_no_token_is_inert() {
   assert_absent "$home/state/x-context" "missing token creates no notification record"
   pass "proactive Discord notification is inert without the self-hosted token"
 }
+test_quiet_report_posts_plain_snapshot() {
+  local home log body long_report
+  home="$TMP_ROOT/report"
+  mkdir -p "$home/state/x-context"
+  chmod 700 "$home/state" "$home/state/x-context"
+  make_fake_node "$home"
+  log="$home/posts.jsonl"
+  FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" \
+    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-token \
+    "$ROOT/bin/fm-discord-notify.sh" --report ' 1000000000000000001 ' $'현황\n진행 중: 작업 A' >/dev/null \
+    || fail "plain report post failed"
+  body=$(jq -r '.payload.content' "$log")
+  assert_equals $'현황\n진행 중: 작업 A' "$body" "report body is sent verbatim"
+  assert_equals '[]' "$(jq -c '.payload.allowed_mentions.parse' "$log")" "report disables mentions"
+  long_report="$(printf '%02000d' 0)"$'\n🙂'
+  FM_TEST_REAL_NODE=$(command -v node) FM_DISCORD_FAKE_POST_LOG="$log" \
+    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-token \
+    "$ROOT/bin/fm-discord-notify.sh" --report 1000000000000000001 "$long_report" >/dev/null \
+    || fail "long report post failed"
+  assert_equals 3 "$(wc -l < "$log" | tr -d ' ')" "long report splits into valid Discord messages"
+  assert_equals "$long_report" "$(tail -n 2 "$log" | jq -sr 'map(.payload.content) | join("")')" "long report preserves Unicode content"
+  [ "$(jq -r '.payload.content | length' "$log" | sort -nr | head -n 1)" -le 2000 ] || fail "report chunk exceeds Discord limit"
+  [ -z "$(find "$home/state/x-context" -name 'discord-notify-*.json' -print -quit)" ] || fail "plain report creates no decision binding"
+  pass "Discord report sends a bounded plain message without creating a decision record"
+}
+test_report_requires_token() {
+  local home output rc
+  home="$TMP_ROOT/report-no-token"
+  mkdir -p "$home"
+  output=$(FM_HOME="$home" FM_DISCORD_BOT_TOKEN='' \
+    "$ROOT/bin/fm-discord-notify.sh" --report 1000000000000000001 "현황" 2>&1); rc=$?
+  expect_code 1 "$rc" "report requires configured token"
+  assert_equals "fm-discord-notify: missing Discord bot token for report" "$output" "missing report token diagnostic"
+  pass "Discord report fails clearly without the self-hosted token"
+}
+test_report_helper_refuses_non_quiet_mode() {
+  local home output rc
+  home="$TMP_ROOT/report-mode-guard"
+  mkdir -p "$home/state"
+  printf 'away\n' > "$home/state/.afk"
+  output=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-discord-report.sh" 2>&1); rc=$?
+  expect_code 4 "$rc" "report helper requires quiet mode"
+  assert_equals "fm-discord-report: available only while quiet mode is active" "$output" "report mode diagnostic"
+  pass "Discord report helper refuses outside quiet mode"
+}
+test_report_helper_sends_bearings_snapshot() {
+  local home root result
+  home="$TMP_ROOT/report-helper"
+  root="$home/root"
+  mkdir -p "$root/bin" "$home/state"
+  cp "$ROOT/bin/fm-discord-report.sh" "$root/bin/fm-discord-report.sh"
+  printf 'quiet\n' > "$home/state/.afk"
+  cat > "$root/bin/fm-wake-lib.sh" <<'SH'
+fm_afk_mode() { [ "$(head -n 1 "$1/.afk" 2>/dev/null)" = quiet ] && printf quiet || printf away; }
+SH
+  cat > "$root/bin/fm-discord-lib.sh" <<'SH'
+fm_discord_load_config() { FM_DISCORD_CHANNELS=' 1000000000000000001 '; }
+fm_discord_trim() { local value=$1; value=${value#"${value%%[![:space:]]*}"}; value=${value%"${value##*[![:space:]]}"}; printf '%s' "$value"; }
+SH
+  cat > "$root/bin/fm-bearings-snapshot.sh" <<'SH'
+#!/usr/bin/env bash
+printf '현황\n진행 중: 작업 A\n'
+SH
+  cat > "$root/bin/fm-discord-notify.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s' "$2" > "$FM_HOME/channel"
+printf '%s' "$3" > "$FM_HOME/body"
+printf 'receipt-1\n'
+SH
+  chmod +x "$root/bin/fm-bearings-snapshot.sh" "$root/bin/fm-discord-notify.sh"
+  result=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$root/bin/fm-discord-report.sh") \
+    || fail "quiet report helper did not complete"
+  assert_equals "receipt-1" "$result" "helper returns notify receipt"
+  assert_equals "1000000000000000001" "$(cat "$home/channel")" "helper selects configured channel"
+  assert_equals $'현황\n진행 중: 작업 A' "$(cat "$home/body")" "helper sends snapshot body unchanged"
+  pass "quiet report helper passes the current Bearings snapshot to Discord notify"
+}
 test_notify_records_reply_binding() {
   local home log record body
   home="$TMP_ROOT/notify"
@@ -414,6 +494,10 @@ test_pr_push_names_gitlab_project() {
 }
 
 test_no_token_is_inert
+test_quiet_report_posts_plain_snapshot
+test_report_requires_token
+test_report_helper_refuses_non_quiet_mode
+test_report_helper_sends_bearings_snapshot
 test_notify_records_reply_binding
 test_failed_notification_retries_from_durable_outbox
 test_profile_failure_keeps_retryable_intent

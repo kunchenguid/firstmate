@@ -1422,9 +1422,11 @@ When enabled, bootstrap writes `state/discord-watch.check.sh` and `config/discor
 Optional configuration variables in `.env`:
 - `FM_DISCORD_CHANNEL_ID` / `FM_DISCORD_ALLOWED_CHANNELS`: comma-separated channel IDs to poll.
 - `FM_DISCORD_EXCLUDE_CHANNELS`: comma-separated channel IDs to ignore (defaults to `1551134713727426570` for collision prevention with gajae-way).
+  An explicit allowlist overrides this built-in default with a warning; an explicitly configured exclusion still wins over an allowlist and produces a warning.
 - `FM_DISCORD_ALLOW_DMS`: `true` or `false` (defaults to `true`).
 - `FM_DISCORD_AUTHORIZED_USER_IDS`: comma-separated Discord user IDs allowed to answer pushed decisions, including the captain and any trusted operators; unset or empty authorizes nobody.
 Replies and follow-ups for self-hosted Discord mentions post directly to Discord's REST API using `FM_DISCORD_BOT_TOKEN`.
+Quiet-mode status reports also use the first configured channel; the report command refuses to run during away mode.
 
 When the self-hosted connector is enabled, firstmate also posts captain decisions to the first configured channel: a newly recorded captain hold (including a genuinely escalated `nm-` ask-user gate, held with the real question in its reason per `ask-user-authority`) or a pull request ready for review when `yolo=off`.
 A raw `nm-` ask-user gate observed in a worker's status log never posts by itself - most gates are decided in-scope with no captain involvement, so only the captain-hold recorded at actual escalation time reaches Discord.

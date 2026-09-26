@@ -21,7 +21,12 @@ const channelIds = (process.env.FM_DISCORD_CHANNELS || process.env.FM_DISCORD_CH
 	.map((s) => s.trim())
 	.filter(Boolean);
 
-const excludeIds = (process.env.FM_DISCORD_EXCLUDES || process.env.FM_DISCORD_EXCLUDE_CHANNELS || "1551134713727426570")
+const excludeConfig = process.env.FM_DISCORD_EXCLUDES !== undefined
+	? process.env.FM_DISCORD_EXCLUDES
+	: process.env.FM_DISCORD_EXCLUDE_CHANNELS !== undefined
+		? process.env.FM_DISCORD_EXCLUDE_CHANNELS
+		: "1551134713727426570";
+const excludeIds = excludeConfig
 	.split(",")
 	.map((s) => s.trim())
 	.filter(Boolean);

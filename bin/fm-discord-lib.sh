@@ -29,6 +29,13 @@ fm_discord_poll_shim_content() {
     "exec $(printf '%q' "$root/bin/fm-discord-poll.sh")"
 }
 
+fm_discord_trim() {
+  local value=$1
+  value=${value#"${value%%[![:space:]]*}"}
+  value=${value%"${value##*[![:space:]]}"}
+  printf '%s' "$value"
+}
+
 # Resolve self-hosted Discord settings.
 # FM_DISCORD_BOT_TOKEN (required for active self-hosted Discord connection)
 # FM_DISCORD_CHANNEL_ID or FM_DISCORD_ALLOWED_CHANNELS (optional target channel IDs)
@@ -54,11 +61,46 @@ fm_discord_load_config() {
 
   if [ -n "${FM_DISCORD_EXCLUDE_CHANNELS+x}" ]; then
     FM_DISCORD_EXCLUDES=${FM_DISCORD_EXCLUDE_CHANNELS-}
+    FM_DISCORD_EXCLUDES_EXPLICIT=0
+    [ -n "$FM_DISCORD_EXCLUDES" ] && FM_DISCORD_EXCLUDES_EXPLICIT=1
   else
     FM_DISCORD_EXCLUDES=$(fmx_env_get FM_DISCORD_EXCLUDE_CHANNELS "$env_file")
+    FM_DISCORD_EXCLUDES_EXPLICIT=0
+    [ -n "$FM_DISCORD_EXCLUDES" ] && FM_DISCORD_EXCLUDES_EXPLICIT=1
   fi
   # Default exclusion for collision prevention with gajae-way's channel
   [ -n "$FM_DISCORD_EXCLUDES" ] || FM_DISCORD_EXCLUDES="1551134713727426570"
+
+  # An explicit allowlist opts its channel into polling despite the built-in
+  # collision exclusion. A user-configured exclusion remains authoritative.
+  if [ -n "$FM_DISCORD_CHANNELS" ]; then
+    local allowed excluded keep conflict
+    local -a allowed_ids excluded_ids
+    IFS=',' read -r -a allowed_ids <<< "$FM_DISCORD_CHANNELS"
+    IFS=',' read -r -a excluded_ids <<< "$FM_DISCORD_EXCLUDES"
+    keep=
+    for excluded in "${excluded_ids[@]}"; do
+      excluded=${excluded//[[:space:]]/}
+      [ -n "$excluded" ] || continue
+      conflict=0
+      for allowed in "${allowed_ids[@]}"; do
+        allowed=${allowed//[[:space:]]/}
+        if [ "$allowed" = "$excluded" ]; then
+          conflict=1
+          if [ "$FM_DISCORD_EXCLUDES_EXPLICIT" -eq 1 ]; then
+            printf 'fm-discord: channel %s is allowlisted and explicitly excluded; exclusion wins\n' "$excluded" >&2
+          else
+            printf 'fm-discord: allowlisted Discord channel %s overrides the built-in exclusion\n' "$excluded" >&2
+          fi
+          break
+        fi
+      done
+      if [ "$conflict" -eq 0 ] || [ "$FM_DISCORD_EXCLUDES_EXPLICIT" -eq 1 ]; then
+        keep=${keep:+$keep,}$excluded
+      fi
+    done
+    FM_DISCORD_EXCLUDES=$keep
+  fi
 
   if [ -n "${FM_DISCORD_ALLOW_DMS+x}" ]; then
     FM_DISCORD_DMS=${FM_DISCORD_ALLOW_DMS-}

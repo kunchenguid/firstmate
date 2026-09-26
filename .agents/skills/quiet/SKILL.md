@@ -19,6 +19,11 @@ Where a daemon runs, this skill is a thin wrapper.
 The `afk` skill owns the daemon's injection, busy/composer guards, and reliability properties; quiet mode uses that machinery while the captain remains present.
 For captain-held rechecks under quiet, see [architecture](../../../docs/architecture.md).
 
+When the captain explicitly asks in chat for a Discord status report while
+quiet mode is active, run `bin/fm-discord-report.sh`; it sends the current
+bounded fleet snapshot to the configured Discord channel. This reporting path
+is quiet-only because the snapshot owner refuses an active away window.
+
 ## What it does
 
 0. **First check whether quiet mode needs anything here.**

@@ -5,7 +5,8 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFile
 import { join } from "node:path";
 
 const retryPending = process.argv[2] === "--retry-pending";
-const [trigger, taskId, key, summary, channelId, statusTaskId, ...options] = process.argv.slice(retryPending ? 3 : 2);
+const reportMode = process.argv[2] === "--report";
+const [trigger, taskId, key, summary, channelId, statusTaskId, ...options] = process.argv.slice(retryPending ? 3 : reportMode ? 3 : 2);
 const token = process.env.FM_DISCORD_BOT_TOKEN;
 const home = process.env.FM_HOME || process.env.FM_ROOT || ".";
 const stateDir = process.env.FM_STATE_OVERRIDE || join(home, "state");
@@ -97,7 +98,33 @@ async function sendRecord(path, record, botId, recover) {
 }
 
 async function main() {
-	if (retryPending) {
+  if (reportMode) {
+    const [reportChannelId, reportMessage] = process.argv.slice(3);
+    if (!token || !/^\d+$/.test(reportChannelId || "") || !reportMessage) {
+      throw new Error("report requires a bot token, numeric channel id, and a non-empty message");
+    }
+    let receipt;
+    for (let offset = 0; offset < reportMessage.length;) {
+      let end = Math.min(offset + 2000, reportMessage.length);
+      if (end < reportMessage.length && /[\uD800-\uDBFF]/.test(reportMessage[end - 1])) end--;
+      const content = reportMessage.slice(offset, end);
+      const response = await fetch(`https://discord.com/api/v10/channels/${reportChannelId}/messages`, {
+        method: "POST",
+        headers: { Authorization: `Bot ${token}`, "Content-Type": "application/json", "User-Agent": "FirstmateDiscordSelfHosted/1.0" },
+        body: JSON.stringify({ content, allowed_mentions: { parse: [] } }),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!response.ok) throw new Error(`Discord API returned HTTP ${response.status}`);
+      receipt = await response.json();
+      if (typeof receipt.id !== "string" || receipt.channel_id !== reportChannelId) {
+        throw new Error("Discord API returned an invalid report receipt");
+      }
+      offset = end;
+    }
+    console.log(receipt.id);
+    return;
+  }
+  if (retryPending) {
 		if (!existsSync(contextDir)) return;
 		const pending = [];
 		for (const name of readdirSync(contextDir)) {
