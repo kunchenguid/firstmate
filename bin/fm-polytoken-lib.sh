@@ -3,9 +3,11 @@
 #
 # Sourced, never executed; defining these functions has no side effects.
 # Callers must also source bin/fm-timeout-lib.sh (fm_run_timed) and have jq.
-# Polytoken is verified for crewmate and scout work only; the evidence lives in
+# Polytoken is verified for crewmate and scout work and for the Polytoken-native
+# primary session's own identity and fleet-lock ownership; the evidence lives in
 # docs/verification/polytoken.md and the operating facts in
 # .agents/skills/harness-adapters/references/harness/polytoken.md.
+# A secondmate is refused: no verified secondmate supervision protocol.
 #
 # Worker overlay. Polytoken reads hooks only from hooks.json in the global
 # config directory and in the project's .polytoken/ directory, and has no

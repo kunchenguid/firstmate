@@ -4,8 +4,8 @@ Audience: maintainer verification.
 
 Verified 2026-09-25 and 2026-09-26 on macOS arm64 (Darwin 27.0.0) with `polytoken 0.8.14` and tmux 3.5a.
 The [adapter reference](../../.agents/skills/harness-adapters/references/harness/polytoken.md) owns operating facts; [`bin/fm-polytoken-lib.sh`](../../bin/fm-polytoken-lib.sh) and the other executable owners carry the mechanics.
-This verification covers crewmates and scouts with tmux as the exercised runtime backend.
-Primary, secondmate, Herdr, and quota-provider integration are outside this guarantee.
+This verification covers crewmates and scouts with tmux as the exercised runtime backend, plus the Polytoken-native primary session's own identity and fleet-lock ownership verified live on 2026-09-26 (below).
+Secondmate, Herdr, and quota-provider integration are outside this guarantee.
 
 ## Refresh commands
 
@@ -127,3 +127,21 @@ Both fresh data directories opened the license gate before any session work, whi
 - The composer is one blank row between two full-width rules with the cursor on it; Alt+Enter adds a row, and Ctrl+U clears one row.
 - The turn row reads `Running for <n>` while a turn runs and `Completed in`, `Canceled after`, or `Errored after` once it ends; those four strings are the binary's own.
 - tmux `#{pane_title}` did not change between idle and busy, so it carries no busy signal.
+
+## Primary-session identity and fleet lock
+
+Verified live on 2026-09-26 in a Polytoken-native primary session (macOS arm64, polytoken 0.8.14) against a fixture home, using this same session's real process tree:
+
+```text
+$ bin/fm-harness.sh          -> polytoken
+$ bin/fm-harness.sh ancestry -> comm polytoken
+$ bin/fm-lock.sh             -> lock acquired: harness pid <daemon-pid>
+```
+
+The detached daemon is the lock's anchor pid, so the anchor lives as long as the session.
+`bin/fm-session-lock-lib.sh` names `polytoken` anchored in `FM_HARNESS_RE` and in `FM_HARNESS_NAMES`; the anchored entry is what keeps ordinary firstmate paths such as `bin/fm-polytoken-lib.sh` from reading as harness processes (`tests/fm-session-lock-ancestry.test.sh`).
+`bin/fm-harness.sh` identifies the adapter at `comm` strength (`polytoken` in `harness_process_verdict`) and accepts it for the supervision-branch primary pin.
+`bin/fm-session-start.sh` ran end to end in the same session, producing the full digest, before lock ownership was proven.
+
+Still unverified on a Polytoken primary, and therefore deliberately absent: no native stop autoarm, so supervision runs on the persistent tier (a live watcher process) exactly as for any other harness without a tracked session-open; no run-tier session-start adapter (the [nudge tiers](../sessionstart-nudge.md#polytoken) own that boundary); no away-daemon launch path beyond the ordinary non-Pi default.
+A Polytoken secondmate remains refused: the same absence means a secondmate home could not arm its own supervision.

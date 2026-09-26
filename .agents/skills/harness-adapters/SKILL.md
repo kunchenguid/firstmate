@@ -35,7 +35,8 @@ For recovery and control, use the exact `harness=` in `state/<id>.meta`; never i
 Deliver lifecycle actions only through `../../../bin/fm-control.sh <task-id> interrupt|exit|relaunch`.
 Never type an interrupt key or exit command through `fm-send`, where routing-marked lifecycle text becomes chat.
 Trust handling is complete only when inspection proves the target started processing its instructions; delivery success alone is not proof.
-Muse, Gemini, AGY, Devin, and Polytoken are verified only for crewmate and scout work, never a secondmate or primary.
+Muse, Gemini, AGY, and Devin are verified only for crewmate and scout work, never a secondmate.
+Polytoken is verified for crewmate and scout work and for a Polytoken-native primary session's own identity and fleet-lock ownership, but never a secondmate (`references/harness/polytoken.md` owns the primary boundary).
 
 ## Detection
 

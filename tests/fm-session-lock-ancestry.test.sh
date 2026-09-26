@@ -52,6 +52,56 @@ lib_eval() {  # <fakebin> <expression>
   " "$LIB"
 }
 
+# --- unit layer: polytoken daemon identity ----------------------------------
+
+test_polytoken_daemon_anchors_and_owns_the_lock() {
+  local dir fakebin got
+  dir="$TMP_ROOT/polytoken-daemon"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  # The detached daemon, reparented to pid 1, is the session's anchor.
+  500:comm=) printf '%s\n' polytoken ;;
+  500:args=) printf '%s\n' 'polytoken daemon --listener-fd 3 --session-id pt1 --sessions-dir /tmp/sessions' ;;
+  500:ppid=) printf '%s\n' 1 ;;
+  # A tool shell descends from the daemon, never the TUI.
+  510:comm=) printf '%s\n' bash ;;
+  510:args=) printf '%s\n' bash ;;
+  510:ppid=) printf '%s\n' 500 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 500 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "the polytoken daemon was not found in a tool shell's ancestry"
+  [ "$got" = 500 ] || fail "ancestry resolved '$got', expected the detached daemon 500"
+
+  # Non-vacuity: ordinary firstmate paths carrying the adapter name are not
+  # harness processes, which is exactly why the entry is anchored.
+  if lib_eval "$fakebin" "fm_harness_process_matches 'fm-polytoken-lib.sh' 'bash /repo/bin/fm-polytoken-lib.sh'"; then
+    fail "an ordinary firstmate path was read as a polytoken harness process"
+  fi
+
+  printf '500\n' > "$dir/state/.lock"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "a polytoken-native session did not recognize its own daemon-anchored lock"
+  pass "session-lock: a polytoken daemon anchors the ancestry, owns the lock, and never matches ordinary paths"
+}
+
 test_version_named_session_is_identified_on_both_platforms() {
   local dir fakebin shape got
   dir="$TMP_ROOT/version-named"
@@ -1094,6 +1144,7 @@ test_verified_reclaim_keeps_new_sidecar() {
 }
 
 test_version_named_session_is_identified_on_both_platforms
+test_polytoken_daemon_anchors_and_owns_the_lock
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock

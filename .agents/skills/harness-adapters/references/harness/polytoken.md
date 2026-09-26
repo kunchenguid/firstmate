@@ -1,7 +1,7 @@
 # Polytoken
 
 Verified on 2026-09-26 with Polytoken 0.8.14.
-The router owns the crewmate/scout-only boundary; primary and secondmate integration is unsupported.
+The router owns the verified-kind boundary: crewmates, scouts, and the primary session are verified; a secondmate is still refused.
 [Verification evidence](../../../../../docs/verification/polytoken.md) and its live guard refresh the vendor facts below.
 
 ## Operating facts
@@ -46,5 +46,6 @@ Alt+Enter inserts a newline and Ctrl+U clears only the current row.
 
 ## Primary integration
 
-No primary stop guard, watcher protocol, pre-tool protection, or session-start contract was verified for Polytoken.
-Do not launch a primary or secondmate with this adapter.
+A Polytoken-native primary session identifies itself by anchored ancestry and owns the home's fleet lock with the detached daemon as the anchor pid (verified live 2026-09-26; [verification evidence](../../../../../docs/verification/polytoken.md)).
+No native stop autoarm, pre-tool protection, or run-tier session-start adapter was verified, so a Polytoken primary runs supervision on the persistent tier and takes the helm through `bin/fm-session-start.sh` by instruction.
+Do not launch a secondmate with this adapter.

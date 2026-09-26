@@ -730,7 +730,7 @@ devin is verified for crewmate and scout launches only; a secondmate is refused 
 
 Its private worker config disables Claude Code imports (including the captain's hooks) and Devin commit attribution without editing user or project config; [`fm-devin-config.sh`](../bin/fm-devin-config.sh) owns these enforced settings and [Devin verification](verification/devin.md) owns the live evidence and observed model availability.
 
-polytoken is verified for crewmate and scout launches only; a secondmate is refused because Polytoken has no verified primary supervision protocol.
+polytoken is verified for crewmate and scout launches, and a Polytoken-native primary session's own identity and fleet-lock ownership are verified ([verification evidence](verification/polytoken.md)); a secondmate is still refused because Polytoken has no verified secondmate supervision protocol.
 Its workers receive bypass permissions and busy-state hooks through a Firstmate-owned `.polytoken/` overlay in the task worktree, so a project that tracks its own `.polytoken/hooks.json` or `.polytoken/config.*` cannot run Polytoken workers until that is resolved; [`fm-polytoken-lib.sh`](../bin/fm-polytoken-lib.sh) owns the overlay, model and effort mapping, and detached-daemon guard, and [Polytoken verification](verification/polytoken.md) owns the live evidence.
 
 ### Verification and primary supervision

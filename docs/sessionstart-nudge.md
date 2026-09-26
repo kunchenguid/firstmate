@@ -43,6 +43,7 @@ Codex's interactive TUI has no tracked session-open, compaction, or re-emit chan
 | Grok | Nudge | [Grok](#grok) |
 | Cursor | Run | [Cursor](#cursor) |
 | omp | Run | [omp](#omp) |
+| Polytoken | Nudge | [Polytoken](#polytoken) |
 | Cursor compaction | Uncovered | [Cursor compaction](#cursor-compaction) |
 
 ### Why the run tier exists
@@ -354,6 +355,12 @@ So the source is derived following the Cursor precedent:
 
 A later in-process `clear` re-emits only when this lock owner completed a full startup.
 `before_agent_start` message delivery was verified to reach model context on 18.1.11.
+
+### Polytoken
+
+Polytoken is a nudge-tier harness.
+Polytoken 0.8.14 exposes no native session-open hook (`session_start` reaches hook handlers only as an event inside `.polytoken/hooks.json`, not as a session-open adapter), so the nudge tier is the floor: the agent runs `bin/fm-session-start.sh` by instruction, and the ahoy skill's step-0 helm check is the safety net when the first command is a skill.
+Both paths were verified live on 2026-09-26 in a Polytoken-native primary session, including the lock ownership that [the verification evidence](verification/polytoken.md) records.
 
 ### Cursor compaction
 

@@ -28,8 +28,11 @@ for name in polytoken polytoken-helper; do ln -s /bin/bash "$TMP_ROOT/names/$nam
 out=$(CLAUDECODE=1 "$TMP_ROOT/names/polytoken" -c '"$1"; :' _ "$HARNESS")
 [ "$out" = polytoken ] || fail "a polytoken ancestor must beat a foreign CLAUDECODE: $out"
 # shellcheck disable=SC2016
-out=$("$TMP_ROOT/names/polytoken-helper" -c '"$1" ancestry "$$"; :' _ "$HARNESS")
-[ "$out" != 'comm polytoken' ] || fail "unrelated polytoken-helper claimed the adapter"
+# The helper's own name must never claim the adapter BY NAME. A full ancestry
+# walk is the wrong vantage here: under a genuine Polytoken primary it
+# legitimately finds that real daemon, so ask the helper process itself.
+out=$("$TMP_ROOT/names/polytoken-helper" -c '. "$1" >/dev/null 2>&1; harness_process_verdict "$$"; :' _ "$HARNESS")
+[ -z "$out" ] || fail "unrelated polytoken-helper claimed the adapter by name: $out"
 [ "$(fm_agent_process_classify_name /opt/bin/polytoken)" = agent ] || fail "liveness lost the Polytoken TUI"
 [ "$(fm_agent_process_classify_name polytoken-helper)" = other ] || fail "liveness claims an unrelated executable"
 pass "Polytoken native ancestry identity; anchored liveness"
