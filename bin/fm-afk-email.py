@@ -72,11 +72,16 @@ def valid_mail_port(value):
 
 
 
+
 def mail_configuration():
     required = ["FM_MAIL_USER", "FM_MAIL_PASS", "FM_IMAP_HOST", "FM_SMTP_HOST"]
     if any(not os.environ.get(name, "").strip() for name in required):
         return None
     if os.environ.get("FM_IMAP_HOST", "").casefold() != "imap.gmail.com":
+        return None
+    if not valid_mail_port(os.environ.get("FM_IMAP_PORT", "993")) or not valid_mail_port(
+        os.environ.get("FM_SMTP_PORT", "465")
+    ):
         return None
     if not valid_mail_port(os.environ.get("FM_IMAP_PORT", "993")) or not valid_mail_port(
         os.environ.get("FM_SMTP_PORT", "465")

@@ -137,6 +137,7 @@ if [ "${1:-}" != afk-email ] || [ "${2:-}" != destination ]; then
 
 
 
+
 fi
 MAIL_MAX_WAKES="${FM_MAIL_POLL_MAX_WAKES:-20}"
 case "$MAIL_MAX_WAKES" in

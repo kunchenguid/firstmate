@@ -65,6 +65,7 @@ The poller reads a message body only when its single `From` address is the owner
 Other senders and messages without that authenticated result are silently ignored without a body read or mail wake.
 
 
+
 If an away record is present but invalid or unreadable, AFK-email polling defers all incoming mail, including authenticated replies, until the record is valid. The separate `fm-mail.sh read` path continues to apply its own authenticated-body restriction during away mode.
 Each code is accepted only for its own sent item, once, and for seven days after sending. Correctly authenticated owner messages larger than 256 KiB total, including attachments, are not processed as away-mode replies, but receive an ordinary mail wake marked that the body exceeds the limit. Replies over 8,000 characters are rejected with a notice in the durable mail wake.
 

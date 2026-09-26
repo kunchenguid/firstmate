@@ -172,6 +172,7 @@ test_invalid_mail_ports_keep_afk_on_hold() {
         || fail "$port=$value selected email reach"
       rc=0
       out=$(env FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.gmail.com \
+
         FM_SMTP_HOST=smtp.example.test FM_AFK_EMAIL_TO="$AFK_OWNER_EMAIL" \
         "$port=$value" python3 "$REPO/bin/fm-afk-email.py" configured 2>&1) || rc=$?
       [ "$rc" -ne 0 ] || fail "AFK shared configuration accepted $port=$value"
@@ -209,6 +210,7 @@ PY
     || fail "non-Gmail IMAP enabled away email"
   pass "away email requires a Gmail receiving mailbox and nonblank transport values"
 }
+
 
 test_destination_is_required_for_pi_entry() {
   local home out
@@ -2150,6 +2152,7 @@ test_shared_owner_source_drives_configuration_and_sender_auth
 # The active feature is tested with synthetic mail and a local fake SMTP command; no network or mailbox is used.
 test_invalid_mail_ports_keep_afk_on_hold
 test_away_mail_requires_gmail_and_nonblank_settings
+
 test_batched_mail_redacts_secrets_and_replies_are_item_bound
 test_unreadable_token_state_keeps_reply_retryable
 test_unmatched_reply_request_id_is_untrusted_and_ackable
