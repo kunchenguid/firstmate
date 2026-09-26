@@ -229,6 +229,69 @@ test_live_stalled_watch_lock_is_replaced_past_hard_bound() {
   pass "live watcher lock with a beacon past the hard bound is replaced, under it is still refused"
 }
 
+test_live_holder_is_not_stale_across_host_sleep() {
+  # No process runs while the host sleeps, so a healthy watcher's beacon ages by
+  # the whole sleep. Judged on wall-clock age, the first arm after wake refused
+  # it as stale (and past the hard bound would evict it). Only the awake part of
+  # the beacon age may count against the grace; a beacon that went stale while
+  # the host was awake must still be refused.
+  local dir state fakebin out err status holder identity now
+  dir=$(make_case live-holder-host-sleep)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  err="$dir/watch.err"
+  sleep 300 &
+  holder=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$holder") || fail "could not identify the fake holder"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$holder" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  now=$(date +%s)
+  # Beacon 600s old in wall-clock terms, past both the grace and the hard bound.
+  fm_touch_epoch $((now - 600)) "$state/.last-watcher-beat"
+
+  # Asleep from 10s after the last beat until 5s ago: 15s awake, healthy.
+  status=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_HOST_SLEEP_WINDOW="$((now - 590)) $((now - 5))" \
+    FM_GUARD_GRACE=300 FM_WATCHER_STALL_BOUND=500 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" 2> "$err" || status=$?
+  [ "$status" -eq 0 ] || fail "watcher refused a holder that only missed beats while the host slept: $(cat "$err")"
+  grep -F "watcher: already running pid $holder" "$out" >/dev/null || fail "watcher did not attach to the holder across host sleep: $(cat "$out" "$err")"
+  is_live_non_zombie "$holder" || fail "holder was evicted for beats missed while the host slept"
+  FM_HOME="$dir" FM_HOST_SLEEP_WINDOW="$((now - 590)) $((now - 5))" \
+    bash -c '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' _ "$LIB" "$state" "$WATCH" "$dir" \
+    || fail "healthy-watcher check read beats missed while the host slept as a stall"
+
+  # Counterfactual: the same beacon with no known host sleep is refused. Each
+  # case re-anchors the beacon to the current clock, so a real host sleep
+  # between cases cannot drift the reported age.
+  now=$(date +%s)
+  fm_touch_epoch $((now - 600)) "$state/.last-watcher-beat"
+  status=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_HOST_SLEEP_WINDOW='' \
+    FM_GUARD_GRACE=300 FM_WATCHER_STALL_BOUND=9999999999 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" 2> "$err" || status=$?
+  [ "$status" -ne 0 ] || fail "watcher accepted a 600s-stale holder with no host sleep to explain it"
+  grep -E 'heartbeat is stale for 60[0-9]s' "$err" >/dev/null || fail "no-sleep refusal did not report the wall-clock age: $(cat "$err")"
+
+  # A sleep that ended 500s ago leaves 510s of awake staleness: still refused.
+  now=$(date +%s)
+  fm_touch_epoch $((now - 600)) "$state/.last-watcher-beat"
+  status=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_HOST_SLEEP_WINDOW="$((now - 590)) $((now - 500))" \
+    FM_GUARD_GRACE=300 FM_WATCHER_STALL_BOUND=9999999999 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" 2> "$err" || status=$?
+  [ "$status" -ne 0 ] || fail "watcher accepted a holder that stalled while the host was awake"
+  grep -E 'heartbeat is stale for 51[0-9]s' "$err" >/dev/null || fail "awake-stall refusal did not report the awake age: $(cat "$err")"
+  is_live_non_zombie "$holder" || fail "under-bound awake-stale holder was signalled"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "live watcher lock is judged on awake beacon age across host sleep, and an awake stall is still refused"
+}
+
 test_guard_warnings() {
   # The guard's two operator-visible states, with resilient substrings instead of
   # four copy-coupled tests:
@@ -1539,6 +1602,7 @@ test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable
 test_live_stalled_watch_lock_is_replaced_past_hard_bound
+test_live_holder_is_not_stale_across_host_sleep
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
