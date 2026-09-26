@@ -485,6 +485,18 @@ jobs:
             exit 1
           }
 
+          # Stock Bash keeps bytes a builtin failed to write to an unwritable
+          # stdout buffered and flushes them from later forked children, so the
+          # away-return suite, whose publication-failure case writes through a
+          # read-only stdout, runs whole under real /bin/bash 3.2.
+          afk_return_output=$(/bin/bash tests/fm-afk-return.test.sh)
+          printf '%s\n' "$afk_return_output"
+          afk_return_count=$(printf '%s\n' "$afk_return_output" | grep -c '^ok - ')
+          [ "$afk_return_count" -eq 25 ] || {
+            echo "::error::expected 25 away-return tests, got $afk_return_count"
+            exit 1
+          }
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
