@@ -10,6 +10,9 @@
 #                            active, exit 4 while return catch-up is pending.
 #   fm-afk-return.sh catchup-summary  Read-only catch-up projection for a reporting surface.
 #
+# On macOS (darwin), the stop path also best-effort restores normal system sleep
+# in the background (`sudo pmset -a disablesleep 0`).
+#
 # THE RETURN BRIEF (stdout, on begin and on every check) is rendered from durable
 # records, never from conversation memory: the archived away-posture record
 # (bin/fm-afk-contract.sh), the supervision outcome store
@@ -564,6 +567,19 @@ EOF
     "$((routine + captain))" "$routine" "$captain" "$live"
 }
 
+restore_sleep_behavior() {
+  [ "$(uname -s 2>/dev/null)" = Darwin ] || return 0
+  command -v pmset >/dev/null 2>&1 || {
+    printf 'fm-afk-return: pmset not found; sleep behavior unchanged\n' >&2
+    return 0
+  }
+  command -v sudo >/dev/null 2>&1 || {
+    printf 'fm-afk-return: sudo not found; sleep behavior unchanged\n' >&2
+    return 0
+  }
+  ( sudo pmset -a disablesleep 0 </dev/null >/dev/null 2>&1 || true ) &
+}
+
 return_reconcile() {
   local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1 since contract_since superseded_record retained_record
   local archived_contract tag kind text retained_live restored_epoch
@@ -621,6 +637,7 @@ EOF
       lifecycle_ok=0
       append_evidence lifecycle 'away-mode shutdown failed; lifecycle state preserved for retry' "$evidence"
     fi
+    restore_sleep_behavior
   fi
 
   drained=$("$SCRIPT_DIR/fm-wake-drain.sh" 2> "$drain_err") || {

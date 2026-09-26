@@ -14,6 +14,21 @@ set -u
 
 CONTRACT="$ROOT/bin/fm-afk-contract.sh"
 TMP_ROOT=$(fm_test_tmproot fm-afk-contract-tests)
+FAKEBIN=$(fm_fakebin "$TMP_ROOT")
+cat > "$FAKEBIN/sudo" <<'SH'
+#!/usr/bin/env bash
+"$@"
+SH
+chmod +x "$FAKEBIN/sudo"
+cat > "$FAKEBIN/pmset" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_TEST_PMSET_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$FM_TEST_PMSET_LOG"
+fi
+exit 0
+SH
+chmod +x "$FAKEBIN/pmset"
+export PATH="$FAKEBIN:$PATH"
 
 make_home() {  # <name> -> prints the home dir
   local dir="$TMP_ROOT/$1"
@@ -560,6 +575,107 @@ test_record_changes_refuse_while_a_reader_holds_the_lock() {
   pass "enter and archive refuse while the record is locked, and proceed once it clears"
 }
 
+test_keep_awake_on_entry_mac_only() {
+  local home log subbin out rc before after i
+  home=$(make_home keep-awake)
+  log="$home/pmset.log"
+
+  # 1. macOS (Darwin): enter triggers disablesleep 1
+  FM_TEST_PMSET_LOG="$log" contract "$home" enter --words 'mac away' >/dev/null 2>&1 \
+    || fail "enter on darwin failed"
+  i=0
+  while [ "$i" -lt 20 ] && [ ! -s "$log" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$log" ] || fail "keep-awake: pmset was not called on darwin"
+  assert_contains "$(cat "$log")" "-a disablesleep 1" "keep-awake: pmset was not called with -a disablesleep 1"
+
+  # 2. Non-macOS: platform-gate no-ops
+  : > "$log"
+  subbin=$(fm_fakebin "$home/linux-bin")
+  cat > "$subbin/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'Linux\n'
+SH
+  chmod +x "$subbin/uname"
+  PATH="$subbin:$PATH" FM_TEST_PMSET_LOG="$log" contract "$home" enter --words 'linux away' >/dev/null 2>&1 \
+    || fail "enter on non-darwin failed"
+  sleep 0.1
+  [ ! -s "$log" ] || fail "keep-awake: pmset was called on non-darwin platform"
+
+  # 3. Best-effort / non-blocking: slow or hanging sudo does not block enter
+  subbin=$(fm_fakebin "$home/slow-bin")
+  cat > "$subbin/sudo" <<'SH'
+#!/usr/bin/env bash
+sleep 3
+exit 0
+SH
+  chmod +x "$subbin/sudo"
+  before=$(date +%s)
+  PATH="$subbin:$PATH" contract "$home" enter --words 'slow away' >/dev/null 2>&1 \
+    || fail "enter with slow sudo failed"
+  after=$(date +%s)
+  [ "$((after - before))" -lt 2 ] || fail "keep-awake: slow sudo blocked enter flow ($((after - before))s >= 2s)"
+
+  # 4. Best-effort / non-blocking: failing sudo does not fail enter
+  subbin=$(fm_fakebin "$home/fail-bin")
+  cat > "$subbin/sudo" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$subbin/sudo"
+  PATH="$subbin:$PATH" contract "$home" enter --words 'fail away' >/dev/null 2>&1 \
+    || fail "enter failed when sudo returned non-zero"
+
+  # 5. Missing pmset or sudo: notes and proceeds without failure
+  subbin=$(fm_fakebin "$home/missing-pmset-bin")
+  for d in /bin /usr/bin; do
+    for b in "$d"/*; do
+      [ -f "$b" ] && [ -x "$b" ] || continue
+      name=${b##*/}
+      [ "$name" != pmset ] && [ "$name" != sudo ] || continue
+      [ ! -e "$subbin/$name" ] || continue
+      ln -s "$b" "$subbin/$name" 2>/dev/null || true
+    done
+  done
+  cat > "$subbin/sudo" <<'SH'
+#!/usr/bin/env bash
+"$@"
+SH
+  chmod +x "$subbin/sudo"
+  set +e
+  out=$(PATH="$subbin" contract "$home" enter --words 'missing pmset' 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "enter failed when pmset was missing (rc=$rc): $out"
+  assert_contains "$out" "pmset not found; sleep behavior unchanged" "enter did not log when pmset was missing"
+
+  subbin2=$(fm_fakebin "$home/missing-sudo-bin")
+  for d in /bin /usr/bin; do
+    for b in "$d"/*; do
+      [ -f "$b" ] && [ -x "$b" ] || continue
+      name=${b##*/}
+      [ "$name" != pmset ] && [ "$name" != sudo ] || continue
+      [ ! -e "$subbin2/$name" ] || continue
+      ln -s "$b" "$subbin2/$name" 2>/dev/null || true
+    done
+  done
+  cat > "$subbin2/pmset" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$subbin2/pmset"
+  set +e
+  out=$(PATH="$subbin2" contract "$home" enter --words 'missing sudo' 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "enter failed when sudo was missing (rc=$rc): $out"
+  assert_contains "$out" "sudo not found; sleep behavior unchanged" "enter did not log when sudo was missing"
+
+  pass "entry best-effort disables sleep on macOS only without blocking or gating"
+}
+
 test_readback_renders_words_verbatim_with_the_record_scalars
 test_words_preserve_final_newline_shape
 test_enter_writes_a_v2_record_in_one_step_and_announces_hold_for_return
@@ -578,3 +694,4 @@ test_retired_clause_and_grant_inputs_are_usage_errors_by_name
 test_version_1_record_still_validates_reads_and_archives
 test_version_1_record_is_replaced_by_a_version_2_record
 test_record_changes_refuse_while_a_reader_holds_the_lock
+test_keep_awake_on_entry_mac_only

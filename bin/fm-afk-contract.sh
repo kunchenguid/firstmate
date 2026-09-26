@@ -17,6 +17,9 @@
 # response, because the captain who typed /afk may not look at the screen again.
 # The read-back is printed after the record exists; it is informational, never a
 # gate, and never asks for a go.
+# On macOS (darwin), `enter` also best-effort disables system sleep in the
+# background (`sudo pmset -a disablesleep 1`) so in-flight work continues if the
+# lid closes.
 #
 # THE RECORD IS THE WORDS. The captain's away words are the whole mandate: they
 # are recorded verbatim, read back as plain sentences by firstmate after entry,
@@ -434,6 +437,19 @@ fm_afk_contract_archive_target() {  # <record> [superseded-stamp]
   printf '%s\n' "$target"
 }
 
+fm_afk_contract_keep_awake() {
+  [ "$(uname -s 2>/dev/null)" = Darwin ] || return 0
+  command -v pmset >/dev/null 2>&1 || {
+    fm_afk_contract_log "pmset not found; sleep behavior unchanged"
+    return 0
+  }
+  command -v sudo >/dev/null 2>&1 || {
+    fm_afk_contract_log "sudo not found; sleep behavior unchanged"
+    return 0
+  }
+  ( sudo pmset -a disablesleep 1 </dev/null >/dev/null 2>&1 || true ) &
+}
+
 # /afk is the go: write the record in this same call, with no proposal and no
 # later confirmation step. Inputs were parsed before the lock (WORDS,
 # EXPECTED_RETURN, SPEND, FM_AFK_CONTRACT_SCALARS_GIVEN).
@@ -481,6 +497,7 @@ fm_afk_contract_cmd_enter() {
     [ -z "${archived:-}" ] || rm -f "$archived"
     return 1
   }
+  fm_afk_contract_keep_awake
   if [ -n "${archived:-}" ]; then
     fm_afk_contract_log "replaced the earlier away posture; its record is archived at $archived"
   fi
