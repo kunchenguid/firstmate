@@ -37,12 +37,15 @@ prefix="$(quote "$SCRIPT_DIR/fm-busy-event.sh") apply $(quote "$STATE") $(quote 
 suffix="--gen $(quote "$GEN") --source devin-hook"
 submit="$prefix busy $suffix --event user-prompt-submit >/dev/null 2>&1 || true"
 stop="$prefix idle $suffix --event stop >/dev/null 2>&1 && touch $(quote "$STATE/$ID.turn-ended"); true"
-end="$prefix idle $suffix --event session-end >/dev/null 2>&1 || true"
+end_cmd="$prefix idle $suffix --event session-end >/dev/null 2>&1 || true"
 if [ ! -e "$SOURCE" ] && [ ! -L "$SOURCE" ]; then SOURCE=/dev/null; fi
 umask 077
 temp=$(mktemp "$STATE/.$ID.devin-config.XXXXXX")
 trap 'rm -f "$temp"' EXIT
-jq -s --arg submit "$submit" --arg stop "$stop" --arg end "$end" '
+# $end_cmd, not $end: jq 1.6 refuses "end" as a bound variable name because it
+# collides with the "end" keyword, so a plain --arg end/$end program fails
+# outright on that jq version (still shipped by e.g. Debian bookworm).
+jq -s --arg submit "$submit" --arg stop "$stop" --arg end_cmd "$end_cmd" '
   (if length == 0 then {} elif length == 1 then .[0] else error("expected one config object") end) |
   if type != "object" then error("expected config object") else . end |
   .attribution = false |
@@ -51,6 +54,6 @@ jq -s --arg submit "$submit" --arg stop "$stop" --arg end "$end" '
   def hook($cmd): {hooks: [{type: "command", command: $cmd, timeout: 10}]};
   .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [hook($submit)]) |
   .hooks.Stop = ((.hooks.Stop // []) + [hook($stop)]) |
-  .hooks.SessionEnd = ((.hooks.SessionEnd // []) + [hook($end)])
+  .hooks.SessionEnd = ((.hooks.SessionEnd // []) + [hook($end_cmd)])
 ' "$SOURCE" > "$temp"
 mv "$temp" "$STATE/$ID.devin-config.json"
