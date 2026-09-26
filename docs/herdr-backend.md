@@ -627,6 +627,7 @@ It hands a bounded ANSI tail plus Herdr's capability facts to the fleet-wide cla
 A blocked Pi is parked on an interactive prompt, so its blank composer region is a menu's and not a free composer's.
 That state defers instead of proving emptiness.
 A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending.
+A live Pi whose last row above the pair is its fixed Codex usage-limit banner is admitted on every registered status, because Herdr learns Pi's status only from Pi's lifecycle integration and a status that never followed the failed turn would otherwise park every lifecycle verb on a provably empty composer; `bin/fm-composer-lib.sh` owns the banner and its bounds.
 Identity stays a lazy second read, consulted only when a separator pair could change the verdict.
 
 ### Placeholder and ghost text
