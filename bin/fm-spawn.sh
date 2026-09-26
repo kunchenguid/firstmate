@@ -2549,7 +2549,9 @@ muse_credential_present() {
 # exactly such a report, so the pane freezes at the previous agent's last
 # reported state. Passing the SAME session back to the replacement keeps that
 # identity, and the authority with it; no fresh spawn needs this because nothing
-# is bound yet.
+# is bound yet. A relaunch reads it from the RECORDED endpoint before a Herdr
+# crewmate's pane is replaced by one created in its worktree, since the
+# replacement carries no registration of its own to read.
 #
 # The reference is read from the endpoint's own runtime record, never guessed
 # from what looks recent, and only for an adapter with a verified resume form
@@ -3478,6 +3480,7 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
 fi
 
 W="fm-$ID"
+RESUME_ARGS=
 if [ "$RELAUNCH" -eq 1 ]; then
   # A secondmate's home already resolved WT above through the same validation a
   # fresh secondmate spawn uses; every other kind takes the recorded worktree.
@@ -3493,6 +3496,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     T=$RELAUNCH_TARGET
     WT_TARGET=$T
     SES=${T%%:*}
+    RESUME_ARGS=$(relaunch_resume_args "$HARNESS" "$BACKEND" "$T") || RESUME_ARGS=
     if [ "$BACKEND" = herdr ] && [ "$KIND" != secondmate ]; then
       # Herdr restores and resumes a pane in the directory it was CREATED in,
       # so a worker relaunched into its old pane would come back after the
@@ -5045,13 +5049,10 @@ MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
-# Relaunch session continuity. Computed here, where the adopted endpoint (T) is
-# known, and substituted only into the Pi-family template's `__PIRESUME__`
-# placeholder; an empty value leaves every other launch byte-identical.
-RESUME_ARGS=
-if [ "$RELAUNCH" -eq 1 ]; then
-  RESUME_ARGS=$(relaunch_resume_args "$HARNESS" "$BACKEND" "$T") || RESUME_ARGS=
-fi
+# Relaunch session continuity, read from the recorded endpoint where the
+# relaunch adopts it - before a Herdr crewmate's pane is replaced - and
+# substituted only into the Pi-family template's `__PIRESUME__` placeholder; an
+# empty value leaves every other launch byte-identical.
 LAUNCH=${LAUNCH//__PIRESUME__/$RESUME_ARGS}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
 if [ "$HARNESS" = rovo ]; then

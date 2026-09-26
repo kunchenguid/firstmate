@@ -1988,7 +1988,9 @@ case "${1:-} ${2:-}" in
     fi
     exit 0 ;;
   'agent get')
-    if [ -f "$D/herdr-agent-registration" ]; then
+    # A retained registration belongs to the recorded pane only; a pane a tab
+    # create minted carries none of its own.
+    if [ -f "$D/herdr-agent-registration" ] && [ "${3:-}" = "$(cat "$D/herdr-pane")" ]; then
       cat "$D/herdr-agent-registration"
     elif [ -f "$D/herdr-agent-live" ]; then
       # The agent came back with its server. Nothing here is reclaimable.
@@ -2149,9 +2151,11 @@ test_herdr_relaunch_resumes_only_the_registered_pi_session() {
     out=$(run_spawn "$dir" "resume-$registered" --relaunch --harness pi) || rc=$?
     expect_code 0 "$rc" "Herdr Pi relaunch should complete ($registered registration)"$'\n'"$out"
     command=$(cat "$dir/fake/launched-command")
+    assert_contains "$(cat "$dir/fake/herdr-log")" "pane send-text %9 " \
+      "the replacement Pi must be launched into the replacement pane"
     if [ "$registered" = pi ]; then
       assert_contains "$command" "--session '/tmp/pi-bound-session.jsonl'" \
-        "the replacement Pi must resume the session that owns Herdr status authority"
+        "the replacement Pi must resume the session the recorded pane's status authority is bound to"
     else
       assert_not_contains "$command" "--session" \
         "a Pi replacement must not resume a foreign adapter's conversation"
