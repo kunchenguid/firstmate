@@ -73,11 +73,15 @@
 #   fm-host-mirror.sh hook <harness>        a prompt-submit or turn-end hook payload on stdin
 #   fm-host-mirror.sh feed <session> new|resume
 #   fm-host-mirror.sh commit
+#   fm-host-mirror.sh check
 #   fm-host-mirror.sh verified <harness>
 # hook and commit always exit 0 and print nothing; feed exits 1 when
 # the mirror is missing, could not be read, or holds an invalid entry, or the
 # main session cannot be identified, and prints nothing when there is nothing
-# to feed; verified exits 0 or 1 and prints nothing.
+# to feed; check (bin/fm-afk-launch.sh quiet-check's mirror test) exits 1 when
+# the mirror is missing, could not be read, or holds an invalid entry, and
+# prints nothing, stages nothing, and moves no cursor; verified exits 0 or 1
+# and prints nothing.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -107,13 +111,13 @@ case "${1:-}" in
     # without the file, and a crewmate worktree with no config/, stay inert.
     [ -f "$CONFIG/supervision-host" ] || exit 0
     ;;
-  feed|commit) ;;
+  feed|commit|check) ;;
   -h|--help) sed -n '2,/^set -u/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) usage ;;
 esac
 
 if ! command -v jq >/dev/null 2>&1 || [ ! -d "$STATE" ]; then
-  [ "$1" != feed ] || exit 1
+  case "$1" in feed|check) exit 1 ;; esac
   exit 0
 fi
 
@@ -255,6 +259,15 @@ case "$1" in
     mv -f "$STAGED" "$CURSOR" 2>/dev/null || true
     fm_lock_release "$LOCK"
     exit 0
+    ;;
+  check)
+    [ "$#" -eq 1 ] || usage
+    [ -f "$MIRROR" ] || exit 1
+    fm_lock_acquire_wait "$LOCK" || exit 1
+    jq -Rs "$ENTRIES" "$MIRROR" >/dev/null 2>&1
+    rc=$?
+    fm_lock_release "$LOCK"
+    exit "$rc"
     ;;
 esac
 

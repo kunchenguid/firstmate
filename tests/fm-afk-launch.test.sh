@@ -877,8 +877,9 @@ unit_native_lifecycle() {
 }
 
 # A Claude home opted into the supervision host has the host as its away
-# session, so away mode launches no daemon there; quiet mode still does, and a
-# plain refresh of a running quiet daemon is still allowed.
+# session, so away mode launches no daemon there; quiet mode still does where
+# the attended host cannot run (this fixture has no main session or dialog
+# mirror), and a plain refresh of a running quiet daemon is still allowed.
 unit_supervision_host_claude_home_runs_no_away_daemon() {
   local st out rc
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-host.XXXXXX")
@@ -948,6 +949,134 @@ unit_supervision_host_other_harnesses_run_no_away_daemon() {
   out=$(enter_with claude '')
   printf '%s' "$out" | grep -F 'Supervision host: no engine' >/dev/null && fail "a claude home's own engine must count as an engine: $out"
   pass "supervision host: enter names a missing engine on an opted-in home and says nothing otherwise"
+  rm -rf "$st"
+}
+
+# /quiet on a home whose attended supervision host runs is a statement:
+# quiet-check says quiet mode needs nothing, or that the session is paused while
+# its broken-session latch holds, and a quiet enter writes no away record. Where
+# the home opted in but the attended host lacks something, quiet-check names it
+# and a quiet entry goes through the daemon as it does without the host.
+unit_supervision_host_quiet_check() {
+  local st engine out rc key bad good harness
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-quiet.XXXXXX")
+  mkdir -p "$st/state" "$st/config"
+  engine="$st/claude-engine"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$engine"
+  chmod +x "$engine"
+  quiet_check() {  # [<harness>]: the harness is the primary quiet-check sees
+    FM_SUPERVISION_ENGINE_CLAUDE_BIN="${QUIET_ENGINE-$engine}" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+      FM_TEST_HARNESS="${1:-claude}" "$LAUNCH" quiet-check 2>&1
+  }
+  quiet_enter() {
+    FM_SUPERVISION_ENGINE_CLAUDE_BIN="$engine" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet \
+      "$LAUNCH" enter --words "stay quiet" 2>&1
+  }
+  good='{"seq":1,"key":"k","tag":"captain","text":"watch the fleet"}'
+
+  # Without the opt-in quiet mode is the daemon's, exactly as before.
+  out=$(quiet_check); rc=$?
+  [ "$rc" -eq 1 ] && [ -z "$out" ] || fail "quiet-check on a home without config/supervision-host must exit 1 silently (rc=$rc): $out"
+  out=$(quiet_enter); rc=$?
+  [ "$rc" -eq 0 ] && [ -f "$st/state/.afk-contract" ] || fail "a quiet enter without the opt-in must write the record as before (rc=$rc): $out"
+  rm -f "$st/state/.afk-contract"
+  out=$(quiet_check pi); rc=$?
+  [ "$rc" -eq 1 ] && [ -z "$out" ] || fail "quiet-check on a pi home must exit 1 silently (rc=$rc): $out"
+
+  # Opted in with the verified engine, the main session's lock holder, and the
+  # dialog mirror its hooks keep: the attended host runs, so quiet mode needs
+  # nothing.
+  printf 'claude\n' > "$st/config/supervision-host"
+  printf '%s\n' "$$" > "$st/state/.lock"
+  printf '%s\n' "$good" > "$st/state/.host-mirror.jsonl"
+  out=$(quiet_check); rc=$?
+  if [ "$rc" -ne 0 ] || ! printf '%s' "$out" | grep -F 'Quiet mode needs nothing on this home' >/dev/null; then
+    fail "quiet-check must say quiet mode needs nothing where the attended host runs (rc=$rc): $out"
+  fi
+  out=$(quiet_check cursor); rc=$?
+  [ "$rc" -eq 0 ] || fail "quiet-check must say quiet mode needs nothing on a cursor home whose attended host runs (rc=$rc): $out"
+  out=$(quiet_enter); rc=$?
+  if [ "$rc" -ne 3 ] || [ -e "$st/state/.afk-contract" ] || [ -e "$st/state/.afk" ] \
+    || ! printf '%s' "$out" | grep -F 'quiet mode writes no away-posture record on this home' >/dev/null; then
+    fail "a quiet enter where the attended host runs must write no away record, which would park a present captain (rc=$rc): $out"
+  fi
+  [ ! -e "$st/state/.host-mirror-cursor.next" ] || fail "quiet-check must stage no mirror cursor"
+  pass "supervision host: /quiet is a statement where the attended host runs, and a quiet enter writes nothing there"
+
+  # Each missing piece of the attended host is named, and a quiet entry then
+  # goes through the daemon as it does without the host.
+  unready() {  # <reason fragment> [<harness>]
+    out=$(quiet_check "${2:-claude}"); rc=$?
+    if [ "$rc" -ne 1 ] || ! printf '%s' "$out" | grep -F "Quiet mode is not already the ordinary posture on this home, because $1" >/dev/null; then
+      fail "quiet-check must name '$1' and exit 1 (rc=$rc): $out"
+    fi
+  }
+  QUIET_ENGINE="$st/no-claude" unready 'the claude engine executable is missing'
+  printf 'codex\n' > "$st/config/supervision-host"
+  unready "no supervision engine (config/supervision-host names 'codex', which is not a verified supervision engine"
+  : > "$st/config/supervision-host"
+  unready "no supervision engine (the primary harness 'cursor' has no verified supervision engine)" cursor
+  printf 'claude\n' > "$st/config/supervision-host"
+  unready 'no verified dialog mirror for codex' codex
+  printf '999999999\n' > "$st/state/.lock"
+  unready 'the main session could not be identified'
+  printf '%s\n' "$$" > "$st/state/.lock"
+  rm -f "$st/state/.host-mirror.jsonl"
+  unready 'the dialog mirror is missing or could not be read'
+  # A mirror the attended feed would refuse: a malformed entry, a sequence
+  # number that is not a positive integer or does not rise, or an unterminated
+  # final record.
+  for bad in "$good"$'\n''{"seq":"two","tag":"captain"}'$'\n' \
+    '{"seq":0,"key":"k","tag":"captain","text":"one"}'$'\n' \
+    '{"seq":1.5,"key":"k","tag":"captain","text":"one"}'$'\n' \
+    '{"seq":2,"key":"k","tag":"captain","text":"one"}'$'\n''{"seq":2,"key":"k","tag":"main","text":"two"}'$'\n' \
+    "$good"; do
+    printf '%s' "$bad" > "$st/state/.host-mirror.jsonl"
+    unready 'the dialog mirror is missing or could not be read'
+  done
+  [ ! -e "$st/state/.host-mirror-cursor.next" ] || fail "quiet-check must stage no mirror cursor"
+  out=$(quiet_enter); rc=$?
+  [ "$rc" -eq 0 ] && [ -f "$st/state/.afk-contract" ] || fail "a quiet enter where the attended host lacks its mirror must write the record for the daemon (rc=$rc): $out"
+  printf '%s\n' "$good" > "$st/state/.host-mirror.jsonl"
+  # The entry already decided on the daemon, so its start still prepares the
+  # daemon even once the attended host could run, and never strands the record.
+  if FM_SUPERVISION_ENGINE_CLAUDE_BIN="$engine" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet \
+    "$LAUNCH" start-native >/dev/null 2>&1 && [ "$(head -n 1 "$st/state/.afk")" = quiet ]; then
+    out=$(quiet_check); rc=$?
+    [ "$rc" -eq 1 ] && [ -z "$out" ] || fail "quiet-check while a quiet daemon runs must exit 1 silently so /quiet refreshes it (rc=$rc): $out"
+  else
+    fail "a quiet start after a quiet entry must prepare the daemon"
+  fi
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 || true
+  rm -f "$st/state/.afk" "$st/state/.afk-contract" "$st/state/.afk-daemon-terminal"
+  pass "supervision host: quiet-check names what the attended host lacks, and quiet mode then enters through the daemon"
+
+  # The host's broken-session latch, as the host persists it after two engine
+  # errors, keyed by the engine library's own latch key.
+  # shellcheck disable=SC2016 # $1 and $2 expand in the inner shell.
+  key=$(FM_SUPERVISION_ENGINE_CLAUDE_BIN="$engine" bash -c '. "$1/bin/fm-wake-lib.sh" && . "$1/bin/fm-supervision-engine-lib.sh" && fm_supervision_host_config "$2/config" claude && fm_supervision_host_health_key "$2/state"' _ "$ROOT" "$st")
+  printf 'key=%s\nerrors=2\ncooldown=300\nretry_after=%s\n' "$key" "$(( $(date +%s) + 300 ))" > "$st/state/.supervision-host-health"
+  out=$(quiet_check); rc=$?
+  if [ "$rc" -ne 0 ] || printf '%s' "$out" | grep -F 'Quiet mode needs nothing' >/dev/null \
+    || ! printf '%s' "$out" | grep -F 'paused after repeated engine errors: routine wakes reach this conversation until it recovers, and its next retry is due at' >/dev/null; then
+    fail "quiet-check during the latch's cooldown must say the session is paused, not quiet (rc=$rc): $out"
+  fi
+  out=$(quiet_enter); rc=$?
+  [ "$rc" -eq 3 ] && [ ! -e "$st/state/.afk-contract" ] || fail "a quiet enter while the latch holds must write no away record (rc=$rc): $out"
+  printf 'key=%s\nerrors=2\ncooldown=300\nretry_after=%s\n' "$key" "$(( $(date +%s) - 10 ))" > "$st/state/.supervision-host-health"
+  out=$(quiet_check)
+  printf '%s' "$out" | grep -F 'paused after repeated engine errors: routine wakes reach this conversation until it recovers, and its next wake retries it' >/dev/null \
+    || fail "quiet-check after the retry time but before a successful probe must still say the session is paused: $out"
+  printf 'key=%s\nerrors=0\ncooldown=0\nretry_after=0\n' "$key" > "$st/state/.supervision-host-health"
+  out=$(quiet_check)
+  printf '%s' "$out" | grep -F 'Quiet mode needs nothing on this home' >/dev/null \
+    || fail "quiet-check after the latch clears must say quiet mode needs nothing again: $out"
+  [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] || fail "quiet-check must start nothing"
+  pass "supervision host: quiet-check says the supervision session is paused while its latch holds, and starts nothing"
+  for harness in opencode omp grok; do
+    out=$(quiet_check "$harness"); rc=$?
+    [ "$rc" -eq 1 ] || fail "$harness has no verified dialog mirror, so quiet-check must exit 1 (rc=$rc): $out"
+  done
   rm -rf "$st"
 }
 
@@ -1411,6 +1540,7 @@ unit_tmux_absence_distinguishes_probe_failure
 unit_native_lifecycle
 unit_supervision_host_claude_home_runs_no_away_daemon
 unit_supervision_host_other_harnesses_run_no_away_daemon
+unit_supervision_host_quiet_check
 unit_native_entry_preserves_prepared_state
 unit_close_failure_preserves_record
 unit_record_publication_atomic

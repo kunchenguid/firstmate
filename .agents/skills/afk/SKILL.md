@@ -34,7 +34,7 @@ Hold-for-return is the default and the only reach profile this release records: 
    - **Claude, Cursor, OpenCode, omp, Grok, or Codex with `config/supervision-host`**: nothing to launch for `/afk`; go on to the announcement.
      The supervision host (`docs/supervision-host.md`) is the away session there: it runs the branch's contract on a headless engine under the record while main is parked, and `bin/fm-afk-launch.sh start` and `start-native` refuse the away daemon on that home.
      If `enter` printed a `Supervision host: no engine ...` line, every away wake reaches this conversation instead; say so in the announcement.
-     `/quiet` is unchanged there and still launches the daemon below.
+     `/quiet` enters nothing where the attended host runs (the quiet skill's `quiet-check` decides), and otherwise still launches the daemon below.
    - **Harness WITH a native in-pane tracked-background tool** (claude's and grok's, without the supervision host): run `bin/fm-afk-launch.sh start-native`, then run `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
      This is a deliberate no-separate-terminal exception because the harness-hosted job creates no terminal or layout mutation, and a shell launcher cannot invoke a harness-native background tool.
      If the native launch fails, run `bin/fm-afk-launch.sh stop` to roll back the prepared lifecycle.

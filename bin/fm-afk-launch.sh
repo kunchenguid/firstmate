@@ -23,6 +23,20 @@
 # engine, because every away wake then reaches main. Every other harness still
 # runs the daemon for now, so `start` and `start-native` require the record
 # `enter` wrote before they launch the daemon.
+# QUIET MODE needs nothing where the attended supervision host runs
+# (docs/supervision-host.md "Postures"): the home opted in, its host primary
+# is attended-ready (fm_supervision_host_attended_ready: engine, tools, and a
+# verified dialog-mirror writer), the main session can be identified, and the
+# dialog mirror passes the feed's own validation (bin/fm-host-mirror.sh
+# check), because that host already keeps the wakes it handles off main while
+# the captain is present. While its broken-session latch holds, until a probe
+# succeeds, `quiet-check` says instead that the session is paused, that routine
+# wakes reach main until it recovers, and when it retries. Either way a quiet
+# `enter` refuses there (exit 3) before writing anything, so a quiet entry
+# never leaves an away record that would park a present captain's main. Where
+# the home opted in but one of those is missing, `quiet-check` names what is
+# missing and quiet mode enters through the daemon as it does without the
+# host. A quiet daemon already running keeps running until `/quiet off`.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/.
 #
@@ -67,6 +81,12 @@
 #                              launched a daemon reports that none was running.
 #   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
 #                              id and drop the record (recovery after a crash).
+#   fm-afk-launch.sh quiet-check
+#                              Exit 0 and print one line when quiet mode needs
+#                              nothing on this home (see QUIET MODE above).
+#                              Exit 1 when quiet mode enters through `enter` and
+#                              the daemon, printing one line naming why only
+#                              where the home opted into the supervision host.
 #
 # Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
 # non-visible-launch primitive here yet and refuse loudly.
@@ -215,12 +235,57 @@ fm_afk_launch_host_primary() {  # <harness>
   return 1
 }
 
+# True when quiet mode needs nothing on this home (the header's QUIET MODE).
+# Otherwise false, with FM_AFK_LAUNCH_QUIET_WHY naming what the attended host
+# lacks on a home that opted in, or empty where quiet mode is the daemon's as
+# it is without the host: no opt-in, another primary, or a quiet daemon that
+# already runs.
+fm_afk_launch_quiet_needs_nothing() {
+  local harness config
+  FM_AFK_LAUNCH_QUIET_WHY=
+  [ ! -e "$FM_AFK_LAUNCH_STATE/.afk" ] || return 1
+  harness=$(fm_afk_launch_primary_harness)
+  fm_afk_launch_host_primary "$harness" || return 1
+  config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
+  [ -f "$config/supervision-host" ] || return 1
+  # shellcheck source=bin/fm-supervision-engine-lib.sh
+  . "$FM_AFK_LAUNCH_DIR/fm-supervision-engine-lib.sh" || return 1
+  if ! fm_supervision_host_attended_ready "$config" "$harness"; then
+    FM_AFK_LAUNCH_QUIET_WHY="$FM_SUPERVISION_HOST_UNREADY${FM_SUPERVISION_ENGINE_PROBLEM:+ ($FM_SUPERVISION_ENGINE_PROBLEM)}"
+  elif ! fm_supervision_host_main_key "$FM_AFK_LAUNCH_STATE" >/dev/null; then
+    FM_AFK_LAUNCH_QUIET_WHY="the main session could not be identified"
+  elif ! FM_STATE_OVERRIDE="$FM_AFK_LAUNCH_STATE" "$FM_AFK_LAUNCH_DIR/fm-host-mirror.sh" check; then
+    FM_AFK_LAUNCH_QUIET_WHY="the dialog mirror is missing or could not be read"
+  fi
+  [ -z "$FM_AFK_LAUNCH_QUIET_WHY" ]
+}
+
+fm_afk_launch_quiet_check() {
+  local retry
+  if ! fm_afk_launch_quiet_needs_nothing; then
+    [ -z "$FM_AFK_LAUNCH_QUIET_WHY" ] \
+      || printf 'Quiet mode is not already the ordinary posture on this home, because %s, so every attended wake reaches this conversation; quiet mode enters through the quiet daemon instead.\n' "$FM_AFK_LAUNCH_QUIET_WHY"
+    return 1
+  fi
+  if retry=$(fm_supervision_host_paused_until "$FM_AFK_LAUNCH_STATE"); then
+    if [ "$(date +%s)" -lt "$retry" ]; then
+      retry="its next retry is due at $(fm_supervision_host_clock "$retry")"
+    else
+      retry="its next wake retries it"
+    fi
+    printf 'Quiet mode starts nothing on this home, but its supervision session is paused after repeated engine errors: routine wakes reach this conversation until it recovers, and %s.\n' "$retry"
+    return 0
+  fi
+  printf 'Quiet mode needs nothing on this home: the ordinary supervision session already handles the wakes it can while the captain is present, never opens a turn here for a routine outcome, and hands this conversation only what needs it; no daemon and no away record are used.\n'
+}
+
 # The away daemon is no longer launched on Pi, nor for away mode on a primary
 # whose home opted into the supervision host (config/supervision-host,
 # docs/supervision-host.md): the posture record is the whole entry there and
-# the ordinary supervision session runs in both postures. Quiet mode still
-# runs the daemon on that home, so a quiet entry or a refresh of a running
-# quiet daemon is allowed.
+# the ordinary supervision session runs in both postures. Quiet mode runs the
+# daemon on that home only where the attended host does not run, which a quiet
+# `enter` already decided (the header's QUIET MODE), so a quiet start after it
+# or a refresh of a running quiet daemon is allowed.
 fm_afk_launch_daemon_allowed() {
   local harness mode
   harness=$(fm_afk_launch_primary_harness)
@@ -281,6 +346,10 @@ fm_afk_launch_record_require() {
 
 fm_afk_launch_enter() {
   fm_afk_launch_catchup_pending && return 1
+  if [ "${FM_AFK_MODE:-}" = quiet ] && fm_afk_launch_quiet_needs_nothing; then
+    fm_afk_launch_log "quiet mode writes no away-posture record on this home, whose attended supervision host already is quiet mode; run bin/fm-afk-launch.sh quiet-check"
+    return 3
+  fi
   "$FM_AFK_CONTRACT_CMD" enter "$@" || return
   fm_afk_launch_host_engine_note
 }
@@ -809,6 +878,7 @@ fm_afk_launch_main() {
     start-native) fm_afk_launch_start_native ;;
     stop) fm_afk_launch_stop ;;
     reconcile) fm_afk_launch_reconcile ;;
+    quiet-check) fm_afk_launch_quiet_check ;;
     -h|--help|help) fm_afk_launch_usage ;;
     *) fm_afk_launch_usage >&2; return 2 ;;
   esac
