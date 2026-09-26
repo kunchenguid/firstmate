@@ -128,12 +128,9 @@ A captain who leaves while an attended turn runs turns its captain outcomes into
 
 ### Quiet mode
 
-`/quiet` asks `bin/fm-afk-launch.sh quiet-check` before it enters anything; that script's header owns the check and its refusals.
-Where the attended host runs - the readiness list above holds and the dialog mirror passes the feed's validation - quiet mode is a statement: no daemon, no away record, and no flag, because routine wakes already stay off main.
-While the [broken-session latch](#the-broken-session-latch) holds, until a probe succeeds, the check says instead that the session is paused, that routine wakes reach main until it recovers, and when it retries, and still nothing starts.
-In both cases a quiet entry refuses to write the away record, which would park a present captain's main.
-While an away record is live there, whatever `state/.afk` says (a quiet daemon's entry writes one too), the check and a quiet entry both refuse and name it: `/quiet` is the captain's return, so the `/afk` return and its catch-up gate run first, then the check again.
-Where the home opted in but a readiness item or the mirror is missing, the check names it and quiet mode enters through the daemon, as without the host.
+`bin/fm-afk-launch.sh` owns `/quiet` readiness, refusal, and fallback in its `quiet-check` header contract; the [quiet skill](../.agents/skills/quiet/SKILL.md) owns the captain-facing procedure.
+Where the attended host runs, quiet mode is a statement, because routine wakes already stay off main; a quiet entry must not write a record that would park the present captain's main.
+The [broken-session latch](#the-broken-session-latch) pauses that host, while an unready host uses the daemon fallback.
 
 ## The dialog mirror
 
