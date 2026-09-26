@@ -382,6 +382,8 @@ When a host stays red, the seed prints the doctor's remaining gaps and their ope
 ### Failure and rollback
 
 A known provisioning failure rolls back the new route.
+A new remote home is published only after its checkout is complete, so removing the public path during cloning cannot interrupt the clone.
+If a competing home appears before publication, provisioning fails and leaves that home intact.
 SSH exit 255 preserves the route, because remote completion is unknown and must be reconciled on the same host.
 
 ### The parent record
