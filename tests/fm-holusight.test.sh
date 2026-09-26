@@ -41,6 +41,13 @@ FM_HOME="$home" HOME="$home" FM_CONFIG_OVERRIDE="$home/config" HOLUS_EXECUTABLE=
 grep -q 'used: local evidence lookup completed' "$TMP/path.out" || fail 'home-local executable was not discovered independently of PATH'
 pass 'home-local executable fallback works without PATH discovery'
 
+FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" HOLUS_EXECUTABLE="$fake" FM_FAKE_MARKER="$TMP/bench-off.marker" \
+  "$HELPER" benchmark "$project" off >"$TMP/bench-off.out" || fail 'disabled benchmark helper failed'
+[ ! -e "$TMP/bench-off.marker" ] || fail 'disabled benchmark invoked holus'
+grep -q '"enabled":false' "$TMP/bench-off.out" || fail 'disabled benchmark reported enabled'
+grep -q '"enabled_result":"not_used"' "$TMP/bench-off.out" || fail 'disabled benchmark reported an enabled result'
+pass 'disabled benchmark honors project opt-out without invoking holus'
+
 FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" HOLUS_EXECUTABLE="$fake" FM_FAKE_MARKER="$TMP/bench.marker" \
   "$HELPER" benchmark "$project" on >"$TMP/bench.out" || fail 'benchmark helper failed'
 grep -q '"disabled_result":"not_used"' "$TMP/bench.out" || fail 'benchmark did not report disabled baseline'

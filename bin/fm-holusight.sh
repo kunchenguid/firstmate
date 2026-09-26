@@ -94,8 +94,12 @@ PY
 )
   disabled_elapsed_ms=$(( (disabled_finished_ns - disabled_started_ns) / 1000000 ))
 fi
-if [ "$enabled" != 1 ] && [ "$BENCHMARK" -eq 0 ]; then
-  disabled_result
+if [ "$enabled" != 1 ]; then
+  if [ "$BENCHMARK" -eq 1 ]; then
+    printf '{"schema":"firstmate.holusight-benchmark.v1","enabled":false,"disabled_result":"not_used","disabled_elapsed_ms":%s,"enabled_result":"not_used","token_delta":"unknown","usability":"unknown","egress":"not_allowed_by_firstmate"}\n' "$disabled_elapsed_ms"
+  else
+    disabled_result
+  fi
   exit 0
 fi
 
