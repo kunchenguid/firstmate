@@ -2354,14 +2354,14 @@ Required tools come in two parts: a universal toolchain every home needs regardl
 Every home requires:
 
 - node and git.
-- gh, with GitHub authentication through `gh auth login`.
 - no-mistakes v1.46.0 or newer.
-- Compatible gh-axi.
 - chrome-devtools-axi.
 - Compatible tasks-axi, as specified in "Backlog backend" above.
 - Compatible quota-axi.
 
-Registered GitHub projects additionally require GitHub tooling and authentication; registered GitLab projects additionally require `glab`, GitLab authentication via `glab auth login`, and compatible GitLab tooling. Local-only homes need neither forge delta.
+Registered GitHub projects additionally require `gh`, GitHub authentication, and compatible `gh-axi`.
+Registered GitLab projects additionally require `glab`, GitLab authentication via `glab auth login`, and compatible GitLab tooling.
+Local-only homes need neither forge delta.
 [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) owns the axi-family floor policy and the gh-axi and lavish-axi floors, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) and [`bin/fm-quota-axi-lib.sh`](../bin/fm-quota-axi-lib.sh) hold their own tools' floor constants.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 In that list, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
@@ -2412,6 +2412,8 @@ An absent required tool with an automated install path reports `MISSING:` with i
 - An absent `gh-axi` reports `MISSING: gh-axi (install: npm install -g gh-axi && gh-axi setup hooks)` and an outdated one reports `OUTDATED:` with its `gh-axi update` upgrade.
 - An absent or board-incompatible `lavish-axi` reports `PRESENTATION_UNAVAILABLE` with the 0.1.77 compatibility floor, install command, and explicit text fallback; compatible versions below 0.1.80 retain legacy board replies and report an upgrade recommendation for synchronous acceptance, while [`bootstrap-diagnostics`](../.agents/skills/bootstrap-diagnostics/SKILL.md) owns diagnostic handling.
 - An absent `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)` and an incompatible one reports `OUTDATED:` with its `quota-axi update` upgrade; firstmate cannot resolve a profile array without a compatible binary.
+- For a registered GitLab project, an absent `glab` reports `MISSING: glab` with the platform-specific install command.
+- An unsupported registered origin reports `FORGE_UNSUPPORTED` and is skipped by forge-dependent refreshes.
 
 **Checkout diagnostics**
 
@@ -2437,7 +2439,6 @@ The locked session-start deferred network stage runs bootstrap's best-effort pro
 
 **Stale Git lock recovery**
 
-Registered projects with unsupported origins are reported as `FORGE_UNSUPPORTED` and are skipped by fleet sync so an unclassified remote is never fetched.
 A killed refresh (or a teardown process kill) can leave an orphaned `.git/packed-refs.lock` in a clone, which makes the next refresh's fetch fail with Git's `Unable to create '...packed-refs.lock': File exists`.
 On that signature only, `fm-fleet-sync.sh` retries the fetch with a bounded wait for the lock to self-clear, then removes the lock and retries once more only when it can prove the lock stale, exactly like the `fm-teardown.sh` `index.lock` recovery.
 
