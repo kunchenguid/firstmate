@@ -117,7 +117,13 @@
 #      coarse runs-ledger fallback (no steps table, no ci log), a terminal
 #      FAILED record whose daemon an explicit probe proves down reads unknown,
 #      never failed: an instrument failure must not read as work failure
-#      (nm_daemon_probe_down).
+#      (nm_daemon_probe_down). Only in a home that opted in with
+#      config/wedge-defer-pipeline, a `working` verdict from this crew's own full
+#      run read also carries fm-classify-lib.sh's
+#      FM_CLASSIFY_PIPELINE_ACTIVE_MARKER component while the pipeline reports an
+#      active step recently producing output (nm_run_activity_is_recent); a quiet
+#      step, and any coarse verdict (whose captured output may describe another
+#      run), carry none. Without that flag this line reads exactly as before.
 #   3. Reconcile the status log through fm-classify-lib.sh's status_current_line:
 #      open decisions survive unrelated events and continuation prose cannot
 #      hide a declaration. Ship/scout terminal declarations supersede stale log
@@ -159,6 +165,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$SCRIPT_DIR/fm-tmux-lib.sh"
@@ -1200,6 +1207,15 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
+  # Gated on config/wedge-defer-pipeline FIRST, the same default-off flag that arms
+  # the watcher's deferral this marker feeds, so an unconfigured home neither
+  # spends the activity parse nor shows the component. RUN_SOURCE=full because a
+  # coarse verdict's $RUN_OUT may describe another run, whose liveness must never
+  # stand in for this crew's.
+  if [ -e "$CONFIG/wedge-defer-pipeline" ] \
+    && [ "$RUN_SOURCE" = full ] && [ "$RUN_STATE" = working ] && nm_run_activity_is_recent; then
+    RUN_DETAIL="${RUN_DETAIL:+$RUN_DETAIL${SEP}}$FM_CLASSIFY_PIPELINE_ACTIVE_MARKER"
+  fi
   [ -z "$SELECTED_RUN_ID" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $SELECTED_RUN_ID"
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi

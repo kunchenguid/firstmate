@@ -44,7 +44,10 @@
 #                          wait or a verified `captain-held` transfer its worker
 #                          declared, or, where config/wedge-defer-parked-gate
 #                          arms it, a validation gate of its own awaiting a
-#                          supervisor decision nobody has answered yet - is
+#                          supervisor decision nobody has answered yet, or,
+#                          where config/wedge-defer-pipeline arms it, a
+#                          validation step the pipeline reports still producing
+#                          output in its own separate checkout - is
 #                          deferred to that same long recheck cadence instead
 #                          (wedge_wait_evidence), and a pane whose own task
 #                          worktree was written during the quiet window is
@@ -1195,7 +1198,9 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 # fire. Two records answer it, and they are independent: the worker's own status
 # line - a declared `paused:` external wait, or a verified `captain-held`
 # transfer - and, when that line explains nothing, the crew's authoritative
-# current state.
+# current state, which each home opts into reading per kind of evidence: a gate
+# awaiting a human decision (config/wedge-defer-parked-gate) and a validation
+# step still producing output (config/wedge-defer-pipeline).
 #
 # The generated brief promises that declaring one buys the long recheck cadence
 # instead of a wedge, and the wedge timer is reachable while that declaration
@@ -1262,6 +1267,19 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 # so it is taken only behind a first fold read that finds some open
 # `needs-decision` at all, and only in the at-threshold branch - at most once per
 # window per STALE_ESCALATE_SECS, never on an ordinary poll.
+#
+# The pipeline-activity record is OFF unless the home creates
+# config/wedge-defer-pipeline, guarded before its read for the same reason and
+# with the same result as the parked-gate record: absent the flag no crew-state
+# read is spent, no wait record exists, and the ladder is unchanged. It exists for
+# the case no other liveness input can see: a validation step whose agent works in
+# the pipeline's own isolated checkout, so the crew's pane renders nothing and its
+# worktree is never touched, while a run record says `running` whether or not that
+# step is alive. Only the pipeline's own positive recency verdict for this crew's
+# run counts (crew_pipeline_activity_is_recent in fm-classify-lib.sh), so a step
+# the pipeline itself reports quiet keeps the unchanged ladder. The wait is on the
+# pipeline, not a human, so it is `external`; like the parked gate it has no
+# written record of when it began and publishes no wait age.
 wedge_wait_evidence() {  # <task> -> one wait_record on stdout
   local task=$1 last until statusf run
   [ -n "$task" ] || return 1
@@ -1280,12 +1298,18 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
       external 'confirm the wait still holds' "$statusf"
     return 0
   fi
-  [ -e "$CONFIG/wedge-defer-parked-gate" ] || return 1
-  if status_has_open_needs_decision "$statusf" \
+  if [ -e "$CONFIG/wedge-defer-parked-gate" ] \
+    && status_has_open_needs_decision "$statusf" \
     && run=$(crew_gate_awaits_human_decision "$task") \
     && status_has_open_needs_decision "$statusf" "$run"; then
     wait_record 'verified wait at a parked gate' "awaiting firstmate's ask-user decision" \
       supervisor "decide the gate's ask-user finding and relay the decision to the crewmate" ''
+    return 0
+  fi
+  [ -e "$CONFIG/wedge-defer-pipeline" ] || return 1
+  if crew_pipeline_activity_is_recent "$task"; then
+    wait_record 'validation step producing output' 'awaiting its own validation pipeline' \
+      external 'confirm the pipeline is really progressing' ''
     return 0
   fi
   return 1
@@ -1474,10 +1498,10 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # the dead-record probe (wedge_dead_record) run ONLY here, inside the
 # at-threshold branch that is about to escalate: at most one each per window per
 # STALE_ESCALATE_SECS, never on an ordinary poll. The crew-state read
-# wedge_wait_evidence may take under config/wedge-defer-parked-gate keeps that
-# same bound however long the wait lasts, because the deferral it feeds restarts
-# the idle timer like every other deferral below; an unconfigured home never
-# reaches that read at all. The wait consult runs first, because a pane that can
+# wedge_wait_evidence may take under config/wedge-defer-parked-gate or
+# config/wedge-defer-pipeline keeps that same bound however long the wait lasts,
+# because the deferral it feeds restarts the idle timer like every other deferral
+# below; an unconfigured home never reaches that read at all. The wait consult runs first, because a pane that can
 # account for its own quiet has nothing to prove through its worktree. The dead-record probe
 # runs last of the three, so the two cheaper deferrals keep the panes they
 # already own on their existing bounded cadences and only a pane that would

@@ -41,8 +41,9 @@
 # append ledger (see "home-owned status-append ledger" below) so the wake scan
 # can treat this home's own bookkeeping bytes as already owned.
 # crew_worktree_written_since reads the task's meta file and walks a bounded slice
-# of its worktree instead of a status file, so callers run it only at the moment
-# they would otherwise escalate.
+# of its worktree instead of a status file, and crew_pipeline_activity_is_recent
+# spends one more bin/fm-crew-state.sh read, so callers run either one only at the
+# moment they would otherwise escalate.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -2494,6 +2495,51 @@ crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
   [ -n "$human" ] && [ -n "$run" ] || return 1
   case "$run" in *[[:space:]]*) return 1 ;; esac
   printf '%s\n' "$run"
+}
+
+# The one spelling of the verdict component bin/fm-crew-state.sh appends to a
+# `working` run-step detail when the home opted in with config/wedge-defer-pipeline
+# and the validation pipeline's OWN recency verdict says one of its steps is
+# currently producing output. crew_pipeline_activity_is_recent below is its only
+# consumer.
+FM_CLASSIFY_PIPELINE_ACTIVE_MARKER='pipeline-activity: recent'
+
+# 0 if crew <id>'s authoritative current state is an actively running validation
+# step that the pipeline itself reports as recently active: the one liveness input
+# that can see a validation round working inside the pipeline's own isolated
+# checkout, where neither the crew's pane nor its worktree shows anything, while
+# the run step alone says `running` for a step that has silently died as well.
+#
+# Strictly positive evidence. The pipeline marks a step `quiet` once no step log or
+# native-agent lifecycle event has arrived for longer than its configured quiet
+# warning, and bin/fm-crew-state.sh publishes the marker only when no active step
+# is quiet and only from this crew's own full run read, so a stalled step or
+# another crew's run withdraws the evidence rather than a second threshold invented
+# here. Every other outcome is 1, including an unreadable verdict, a state that is
+# not `working`, a source that is not the run step, and a home that never opted in
+# (the producer publishes nothing there).
+# The source is field-parsed and the marker compared as a whole component, as
+# crew_gate_awaits_human_decision does, so no crew-authored status prose can
+# forge it into a verdict.
+# Same cost and the same caveat as crew_absorb_class: one fm-crew-state.sh read,
+# which may make a bounded no-mistakes call, so callers take it only where they
+# already accept that cost.
+crew_pipeline_activity_is_recent() {  # <id>
+  local id=$1 line state src rest part
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  [ "$state" = working ] || return 1
+  src=${line#*source: }; src=${src%% *}
+  [ "$src" = run-step ] || return 1
+  rest="$line · "
+  while [ -n "$rest" ]; do
+    part=${rest%% · *}
+    rest=${rest#* · }
+    [ "$part" = "$FM_CLASSIFY_PIPELINE_ACTIVE_MARKER" ] && return 0
+  done
+  return 1
 }
 
 # Directories excluded from the worktree write probe below, and the depth it walks.

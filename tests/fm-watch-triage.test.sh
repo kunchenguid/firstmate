@@ -3479,6 +3479,139 @@ resolved [key=nm-01RUNGATE-review]: firstmate chose the second fix' 2000)
   pass "a parked human-owed gate is deferred only while its decision is still open, so an answered-but-unrelayed gate, an unescalated one, and one holding only a blocker all keep the unchanged ladder"
 }
 
+# --- the wedge threshold reads the pipeline's own activity verdict ----------
+# Upstream kunchenguid/firstmate#4482: a validation step's agent works in the
+# pipeline's separate checkout, so a crew driving a long, quiet step shows nothing
+# in its pane or its worktree and climbs the wedge ladder while healthy. In a home
+# that opted in with config/wedge-defer-pipeline, the pipeline's own positive
+# recency verdict - published by bin/fm-crew-state.sh as a whole
+# `pipeline-activity: recent` component on a working run-step line - is one more
+# wait record, rechecked on the long cadence. Anything short of that exact
+# evidence keeps the unchanged ladder, which is what the second half pins.
+
+# Arm the opt-in pipeline-activity wait evidence for a fixture built above.
+arm_pipeline_activity() {  # <case-dir>
+  : > "$1/config/wedge-defer-pipeline"
+}
+
+test_wedge_threshold_defers_to_an_active_validation_step() {
+  local dir state fakebin out capture window key n queued verdict i=0
+  local active='state: working · source: run-step · validating (fixing) · pipeline-activity: recent · run: 01RUNPIPE'
+  # The same run once the pipeline itself reports the step quiet: no component.
+  local quiet='state: working · source: run-step · validating (fixing) · run: 01RUNPIPE'
+  # Two forgeries a substring match would accept: a status-log-sourced verdict
+  # carrying the crew's own note, and a run-step detail whose free text merely
+  # contains the words inside a larger component.
+  local forged_source='state: working · source: status-log · pipeline-activity: recent'
+  local forged_part='state: working · source: run-step · validating (pipeline-activity: recent follow-up) · run: 01RUNPIPE'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  dir=$(wedge_threshold_fixture pipeline-active 'working: validation under way' 0)
+  arm_pipeline_activity "$dir"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$active" exit \
+    || fail "an active validation step was never rechecked at the threshold: $(cat "$out")"
+  grep -F 'validation step producing output' "$out" >/dev/null \
+    || fail "the pipeline-activity recheck did not name its evidence: $(cat "$out")"
+  grep -F 'awaiting its own validation pipeline' "$out" >/dev/null \
+    || fail "the pipeline-activity recheck did not name what the wait is on: $(cat "$out")"
+  grep -F 'confirm the pipeline is really progressing' "$out" >/dev/null \
+    || fail "the pipeline-activity recheck did not name the action that clears the lane: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "an active validation step was reported as a possible wedge: $(cat "$out")"
+  # No written record says when this step began, so no wait age is published.
+  grep -E ', waiting [0-9]+s' "$out" >/dev/null \
+    && fail "the pipeline-activity recheck published a wait age it has no record for: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the pipeline-activity recheck"
+
+  # Long cadence, not a ladder: every further threshold inside the cadence is
+  # absorbed whole, with no escalation counted and nothing queued.
+  queued=$(wedge_stale_wakes "$state" "$window")
+  n=1
+  while [ "$n" -le 3 ]; do
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$active" absorb \
+      || fail "an active validation step wedge-escalated at threshold $n: $(cat "$out")"
+    n=$((n + 1))
+  done
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq "$queued" ] \
+    || fail "an active validation step queued a further wake inside its recheck cadence: $(cat "$state/.wake-queue")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "an active validation step counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
+
+  # Everything short of the pipeline's own whole component keeps the unchanged
+  # schedule, reason and demand-deep-inspection wording in an armed home.
+  for verdict in "$quiet" "$forged_source" "$forged_part"; do
+    i=$((i + 1))
+    dir=$(wedge_threshold_fixture "pipeline-no-evidence-$i" 'working: validation under way' 0)
+    arm_pipeline_activity "$dir"
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    n=1
+    while [ "$n" -le 3 ]; do
+      wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$verdict" exit \
+        || fail "'$verdict' stopped escalating at threshold $n: $(cat "$out")"
+      ack_stopped_cycle "$state" || fail "could not acknowledge escalation $n for '$verdict'"
+      grep -F "possible wedge, escalation $n" "$out" >/dev/null \
+        || fail "'$verdict' did not reach escalation $n: $(cat "$out")"
+      n=$((n + 1))
+    done
+    grep -F 'demand-deep-inspection: same pane has wedge-escalated 3 times in a row' "$out" >/dev/null \
+      || fail "'$verdict' lost the demand-deep-inspection wording: $(cat "$out")"
+    grep -F 'validation step producing output' "$out" >/dev/null \
+      && fail "'$verdict' was deferred as an active validation step: $(cat "$out")"
+  done
+  pass "an armed home rechecks a validation step its pipeline reports active on the long cadence, while a quiet step and forged evidence keep the unchanged ladder"
+}
+
+# --- an unconfigured home spends nothing on pipeline activity ----------------
+# Byte-identical to the deferred case above except for the flag, so the unchanged
+# ladder and the zero reads below are attributable to the flag alone; the armed
+# control then proves the fixture could reach the reader at all.
+test_wedge_threshold_pipeline_activity_is_off_until_armed() {
+  local dir state fakebin out capture window key n unarmed_probes armed_probes
+  local active='state: working · source: run-step · validating (fixing) · pipeline-activity: recent · run: 01RUNPIPE'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  dir=$(wedge_threshold_fixture pipeline-unarmed 'working: validation under way' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  [ ! -e "$dir/config/wedge-defer-pipeline" ] \
+    || fail "the unarmed fixture armed the flag, so it proves nothing"
+  export FM_FAKE_CREW_STATE_LOG="$dir/crew-state.calls"
+  : > "$FM_FAKE_CREW_STATE_LOG"
+  n=1
+  while [ "$n" -le 3 ]; do
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$active" exit \
+      || fail "an unarmed home stopped escalating an active validation step at threshold $n: $(cat "$out")"
+    ack_stopped_cycle "$state" || fail "could not acknowledge unarmed-pipeline escalation $n"
+    grep -F "stale: $window (idle " "$out" | tail -1 | grep -E "^stale: $window \(idle [0-9]+s, possible wedge, escalation ${n}[,)]" >/dev/null \
+      || fail "an unarmed home did not reach escalation $n with the unchanged reason: $(cat "$out")"
+    n=$((n + 1))
+  done
+  grep -F 'demand-deep-inspection: same pane has wedge-escalated 3 times in a row' "$out" >/dev/null \
+    || fail "an unarmed home lost the demand-deep-inspection wording: $(cat "$out")"
+  grep -F 'validation step producing output' "$out" >/dev/null \
+    && fail "an unarmed home deferred an active validation step: $(cat "$out")"
+  [ ! -e "$state/.waiting-resurfaced-$key" ] \
+    || fail "an unarmed home wrote the pipeline-activity recheck throttle"
+  unarmed_probes=$(wc -l < "$FM_FAKE_CREW_STATE_LOG" | tr -d ' ')
+  unset FM_FAKE_CREW_STATE_LOG
+  [ "$unarmed_probes" -eq 0 ] \
+    || fail "an unarmed home spent $unarmed_probes current-state read(s) on pipeline activity over three thresholds"
+
+  dir=$(wedge_threshold_fixture pipeline-armed-probe-count 'working: validation under way' 0)
+  arm_pipeline_activity "$dir"
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  export FM_FAKE_CREW_STATE_LOG="$dir/crew-state.calls"
+  : > "$FM_FAKE_CREW_STATE_LOG"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$active" exit \
+    || fail "the armed control was never rechecked: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the armed control recheck"
+  armed_probes=$(wc -l < "$FM_FAKE_CREW_STATE_LOG" | tr -d ' ')
+  unset FM_FAKE_CREW_STATE_LOG
+  [ "$armed_probes" -gt 0 ] \
+    || fail "the armed control spent no current-state read, so the probe count proves nothing"
+  pass "with config/wedge-defer-pipeline absent an active validation step keeps the unchanged ladder, wording and reads"
+}
+
 # --- a wait record that does not carry every field is refused ----------------
 # wait_record joins its five fields with US and wedge_defer_wait parses them with
 # `IFS=<us> read`, so consecutive delimiters yield genuinely EMPTY fields and no
@@ -6418,6 +6551,8 @@ test_wedge_threshold_recheck_names_the_captain_for_a_held_lane
 test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human
 test_wedge_threshold_parked_gate_needs_an_unanswered_decision
 test_wedge_threshold_parked_gate_is_off_until_armed
+test_wedge_threshold_defers_to_an_active_validation_step
+test_wedge_threshold_pipeline_activity_is_off_until_armed
 test_wedge_defer_refuses_a_half_filled_wait_record
 test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
