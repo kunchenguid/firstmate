@@ -134,6 +134,7 @@ In afk mode the composer guard is belt-and-suspenders (no human is typing), but 
 **Max-defer escape (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
 attempts one normal flush, which still requires an idle pane and an affirmatively empty composer.
+The one exception: a pending composer holding exactly the digest this daemon typed on an unconfirmed attempt gets Enter alone, never a retype.
 The alarm is defense in depth rather than a substitute for keeping every genuinely idle supported composer injectable.
 If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
 an ERROR in the daemon log naming the last delivery failure, a durable
@@ -210,7 +211,8 @@ The single-line format makes submission unambiguous across harnesses; the carrie
   A blank or otherwise unidentified input row carries no positive container proof and defers injection, so a modal dialog or a mid-redraw pane is never an injection target.
 - **Max-defer escape** - the daemon must never silently wedge. If anything stays
   buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one
-  normal flush, which still requires an idle pane and an affirmatively empty composer. If that
+  normal flush, which still requires an idle pane and an affirmatively empty composer,
+  except that its own unsent digest held exactly in the composer gets Enter alone. If that
   cannot confirm a submit, it raises a loud, rate-limited wedge alarm: ERROR log,
   durable `state/.subsuper-inject-wedged` marker, a tmux status-line flash when
   applicable, and a backend-independent active alert. A

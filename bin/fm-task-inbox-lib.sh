@@ -299,12 +299,12 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending)
-      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" \
+      fm_backend_composer_holds "$backend" "$target" "$line" "$label" \
         && [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)" != busy ] \
         || return 1
       fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
       sleep 0.3
-      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" || return 0
+      fm_backend_composer_holds "$backend" "$target" "$line" "$label" || return 0
       fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
       return 0
       ;;
@@ -320,15 +320,6 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   # (empty, pending, unknown, ...) is deliberately ignored, never proof.
   [ "$verdict" != send-failed ] || return 2
   return 0
-}
-
-# Whether the composer's content, ignoring line wrapping, is exactly <line>.
-fm_task_inbox_composer_holds() {  # <backend> <target> <line> [expected-label]
-  local cap held
-  fm_backend_source "$1" || return 1
-  cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${4:-}" 2>/dev/null) || return 1
-  held=$(fm_composer_extract_selected_content styled=0 "$cap") || return 1
-  [ -n "$held" ] && [ "$(printf '%s' "$held" | tr -d '[:space:]')" = "$(printf '%s' "$3" | tr -d '[:space:]')" ]
 }
 
 fm_task_inbox_is_fire_and_forget() {  # <record-path>

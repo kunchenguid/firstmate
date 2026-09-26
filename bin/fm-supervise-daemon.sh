@@ -226,6 +226,13 @@ WEDGE_ALARM_NOTIFIER_PID=
 INJECT_LAST_FAILURE=
 # 1 once the latest delivery attempt reached the submit primitive.
 INJECT_SUBMIT_ATTEMPTED=0
+# The exact text an unconfirmed submit typed, and the digest it carried, so the
+# max-defer path can press Enter on it without retyping (inject_msg).
+INJECT_PENDING_TEXT=
+INJECT_PENDING_SOURCE=
+# 1 once a max-defer attempt submitted that earlier text while a newer digest
+# stays buffered.
+INJECT_OWN_PENDING_SUBMITTED=0
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, and the status-span reader) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
@@ -840,9 +847,10 @@ escalate_full_text_save() {  # <state> <buf>
 # it may have been typed; ESCALATE_KEPT_FULL remembers it so a retry of the same
 # buffer reuses it instead of writing another copy.
 ESCALATE_KEPT_FULL=
-escalate_flush() {  # <state>
+escalate_flush() {  # <state> [own-pending]
   local state=$1 buf msg full='' fresh=0
   buf="$state/.subsuper-escalations"
+  INJECT_OWN_PENDING_SUBMITTED=0
   [ -s "$buf" ] || return 0
   if [ ! -f "$buf" ] || [ ! -r "$buf" ]; then
     INJECT_LAST_FAILURE="escalation buffer $buf is not a readable file"
@@ -866,13 +874,15 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$ESCALATE_EVENTS" "$msg")
-  if inject_msg "$msg" "$state"; then
+  if inject_msg "$msg" "$state" "${2:-}"; then
     unknown_wake_acknowledge_flushed "$state" "$buf" \
       || log "unknown-wake acknowledgement write failed; a delivered unknown wake may escalate again"
     : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
     ESCALATE_KEPT_FULL=
     return 0
   fi
+  # An earlier digest just reached main; the rest of the buffer waits from now.
+  [ "$INJECT_OWN_PENDING_SUBMITTED" != 1 ] || _now > "${buf}.since"
   if [ "$INJECT_SUBMIT_ATTEMPTED" = 1 ]; then
     [ -z "$full" ] || ESCALATE_KEPT_FULL=$full
   elif [ "$fresh" = 1 ]; then
@@ -1176,7 +1186,8 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  1) batch flush: if the escalation buffer's oldest content is older than
 #     ESCALATE_BATCH_SECS (or batching is disabled), inject one digest.
 #  1b) max-defer escape: if the buffer is STILL undelivered past MAX_DEFER_SECS,
-#     attempt one normal delivery; if it cannot confirm, raise the wedge alarm.
+#     attempt one normal delivery, which may press Enter on this daemon's own
+#     digest left in the composer; if it cannot confirm, raise the wedge alarm.
 #     Never silently defer forever.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
@@ -1202,7 +1213,8 @@ housekeeping() {  # <state>
   fi
 
   # (1b) max-defer escape. If anything is still buffered past MAX_DEFER_SECS,
-  # retry the normal delivery path. If that still cannot confirm, raise a loud
+  # retry the normal delivery path, allowing Enter on this daemon's own digest
+  # still held in the composer. If that still cannot confirm, raise a loud
   # wedge alarm while preserving the buffer.
   max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
   if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
@@ -1212,10 +1224,10 @@ housekeeping() {  # <state>
     # and waits.
     if [ "$oldest" -ge "$max_defer" ] \
        && [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge "$max_defer" ]; then
-      if escalate_flush "$state"; then
+      if escalate_flush "$state" own-pending; then
         log "inject recovered: max-defer flush succeeded after ${oldest}s undelivered"
         rm -f "$state/.subsuper-inject-wedged"
-      else
+      elif [ "$INJECT_OWN_PENDING_SUBMITTED" != 1 ]; then
         inject_wedge_alarm "$state" "$oldest"
       fi
     fi
@@ -1409,7 +1421,10 @@ window_for_task() {  # <task-key> [state]
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
-inject_msg() {  # <message> [state]
+#   - OWN PENDING TEXT: with <own-pending> (the max-defer path), a pending
+#     composer that holds exactly the text an unconfirmed attempt typed gets
+#     Enter alone (inject_submit_own_pending), never a retype.
+inject_msg() {  # <message> [state] [own-pending]
   local msg=$1 state target backend retries sleep_s verdict composer encoded bytes errf err='' body
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
@@ -1417,6 +1432,7 @@ inject_msg() {  # <message> [state]
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
   INJECT_LAST_FAILURE=
   INJECT_SUBMIT_ATTEMPTED=0
+  INJECT_OWN_PENDING_SUBMITTED=0
   afk_active "$state" || { INJECT_LAST_FAILURE="deferred: afk inactive"; log "inject $INJECT_LAST_FAILURE"; return 1; }
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
@@ -1453,6 +1469,11 @@ inject_msg() {  # <message> [state]
   #      stays buffered for the next cycle or the catch-up flush.
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
+    if [ "${3:-}" = own-pending ] && [ "$composer" = pending ] && [ -n "$INJECT_PENDING_TEXT" ] \
+       && fm_backend_composer_holds "$backend" "$target" "$INJECT_PENDING_TEXT"; then
+      inject_submit_own_pending "$1" "$backend" "$target"
+      return
+    fi
     INJECT_LAST_FAILURE="deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
     log "inject $INJECT_LAST_FAILURE"
     return 1
@@ -1490,8 +1511,11 @@ inject_msg() {  # <message> [state]
     rm -f "$errf"
   fi
   if [ "$verdict" = empty ]; then
+    INJECT_PENDING_TEXT=
     return 0  # Backend confirmed the submit.
   fi
+  INJECT_PENDING_TEXT=$msg
+  INJECT_PENDING_SOURCE=$1
   err=$(_collapse_newlines "$err")
   _utf8_prefix "$err" 512 err
   if [ "$verdict" = send-failed ]; then
@@ -1500,6 +1524,32 @@ inject_msg() {  # <message> [state]
     INJECT_LAST_FAILURE="Enter confirmation: submit unconfirmed after $retries retries (verdict=${verdict:-none}, bytes=$bytes, text may be in composer)${err:+: $err}"
   fi
   log "inject failed at $INJECT_LAST_FAILURE"
+  return 1
+}
+
+# inject_submit_own_pending: the composer still holds exactly the text an
+# earlier unconfirmed attempt typed, so submit it with Enter alone. Returns 0
+# only when that text carried <message> itself. When the digest has grown since,
+# the earlier text is submitted and <message> stays buffered for a later flush
+# (INJECT_OWN_PENDING_SUBMITTED=1), so a newer escalation is never dropped.
+inject_submit_own_pending() {  # <message> <backend> <target>
+  local backend=$2 target=$3
+  if ! fm_backend_send_key "$backend" "$target" Enter >/dev/null 2>&1; then
+    INJECT_LAST_FAILURE="Enter for this supervisor's own digest held in the composer could not be sent"
+    log "inject failed at $INJECT_LAST_FAILURE"
+    return 1
+  fi
+  sleep "${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}"
+  if fm_backend_composer_holds "$backend" "$target" "$INJECT_PENDING_TEXT"; then
+    INJECT_LAST_FAILURE="Enter for this supervisor's own digest held in the composer: the composer still holds it"
+    log "inject failed at $INJECT_LAST_FAILURE"
+    return 1
+  fi
+  log "inject recovered: Enter submitted this supervisor's own digest held in the composer (never retyped)"
+  INJECT_PENDING_TEXT=
+  [ "$1" != "$INJECT_PENDING_SOURCE" ] || return 0
+  INJECT_OWN_PENDING_SUBMITTED=1
+  INJECT_LAST_FAILURE="deferred: an earlier digest was submitted from the composer; newer escalations follow"
   return 1
 }
 

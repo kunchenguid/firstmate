@@ -5,8 +5,9 @@
 # a busy-queued Enter can keep proven pending text visible. A stub cannot prove
 # either signal. This guard launches real Claude Code in an isolated Herdr lab
 # and requires fm_backend_herdr_send_text_submit to report empty for a landed
-# idle steer. It fails naming the harness and version rather than degrading
-# quietly.
+# idle steer. Before that it requires an unsent draft whose wrapped rows start
+# with `#` to read pending and read back whole. It fails naming the harness and
+# version rather than degrading quietly.
 #
 # Run explicitly with FM_HERDR_SUBMIT_CONFIRM_LIVE=1 after a Herdr or Claude
 # upgrade, and before trusting a refreshed docs/verification/runtime-backends.md
@@ -104,6 +105,32 @@ while [ "$i" -lt 45 ]; do
   sleep 1
 done
 [ "$idle" = 1 ] || fail "Claude Code ($VERSION) on $HERDR_VER never registered an idle agent in the lab pane"
+
+# A long unsent draft wraps inside Claude's rule pair. Every wrapped row of
+# this one starts with `#`, which must still read as pending composer text with
+# its whole payload readable; a dead-shell misread leaves an away digest
+# undelivered. The draft is cleared, never submitted.
+WRAP_TEXT="fm-wrap-probe"
+i=0
+while [ "$i" -lt 80 ]; do
+  WRAP_TEXT="$WRAP_TEXT #$i"
+  i=$((i + 1))
+done
+fm_backend_herdr_send_literal "$TARGET" "$WRAP_TEXT" \
+  || fail "could not type the wrapped draft into Claude Code ($VERSION) on $HERDR_VER"
+sleep 1
+lab pane read "$PANE" --source visible 2>/dev/null | grep -Eq '^[[:space:]]+#[0-9]' \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the draft never wrapped onto a row starting with '#', so this check would prove nothing"
+verdict=$(fm_backend_herdr_composer_state "$TARGET")
+[ "$verdict" = pending ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a wrapped row starting with '#' must read pending, got '$verdict'"
+if ! content=$(fm_backend_herdr_composer_content "$TARGET" "$(fm_backend_herdr_proof_lines "$WRAP_TEXT")") \
+  || ! fm_backend_herdr_composer_payload_shown "$WRAP_TEXT" "$content"; then
+  fail "Claude Code ($VERSION) on $HERDR_VER: the wrapped draft did not read back whole"
+fi
+fm_backend_herdr_composer_clear "$TARGET" "$WRAP_TEXT" \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the wrapped draft could not be cleared unsent"
+pass "Claude Code ($VERSION) on $HERDR_VER: a wrapped row starting with '#' reads as pending composer text"
 
 TOKEN="FMHERDRPONG$$_$RANDOM"
 verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "Reply with exactly $TOKEN and nothing else." 3 0.4 0.4) \

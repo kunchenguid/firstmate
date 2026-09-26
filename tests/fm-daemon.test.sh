@@ -2302,6 +2302,97 @@ test_max_defer_pending_composer_alarms_without_typing() {
   pass "max-defer on a pending composer alarms without typing"
 }
 
+# Leave this daemon's digest typed but unsent: every Enter is swallowed, so the
+# first max-defer attempt types once and raises the wedge alarm. The alarm
+# marker is then aged so the next housekeeping pass is another max-defer pass.
+# Runs in this shell (sets OWN_CASE_DIR) so the daemon keeps what it typed.
+own_pending_digest_case() {  # <name>
+  local dir state
+  dir=$(make_bordered_case "$1")
+  OWN_CASE_DIR=$dir
+  state="$dir/state"
+  : > "$dir/sent.log"
+  touch "$dir/.swallow"
+  INJECT_PENDING_TEXT=
+  escalate_add "$state" "needs-decision: pick C"
+  echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$dir/sent.log" \
+    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 housekeeping "$state"
+  rm -f "$dir/.swallow"
+  touch -t 202001010000 "$state/.subsuper-inject-wedged"
+}
+
+test_max_defer_submits_own_pending_digest_with_enter_only() {
+  local dir state sent typed
+  own_pending_digest_case maxdefer-own-pending
+  dir=$OWN_CASE_DIR
+  state="$dir/state"; sent="$dir/sent.log"
+  [ "$(grep -c '\[ENTER\]' "$sent")" -eq 0 ] || fail "setup: the first digest must stay unsent"
+  typed=$(grep -v '\[ENTER\]' "$sent")
+  [ "$(printf '%s\n' "$typed" | grep -c .)" -eq 1 ] || fail "setup: the first digest must be typed once"
+  # A normal flush never touches the held digest; only the max-defer pass may.
+  PATH="$dir/fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" \
+    && fail "a normal flush must not deliver into a pending composer"
+  [ "$(grep -c '\[ENTER\]' "$sent")" -eq 0 ] || fail "a normal flush pressed Enter on a pending composer"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_INJECT_CONFIRM_SLEEP=0.05 FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 \
+    housekeeping "$state"
+  [ "$(grep -c '\[ENTER\]' "$sent")" -eq 1 ] || fail "max-defer must submit the held digest with one Enter"
+  [ "$(grep -v '\[ENTER\]' "$sent")" = "$typed" ] || fail "max-defer retyped the held digest"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after its own digest was submitted"
+  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "wedge marker survived the recovered delivery"
+  pass "max-defer submits this daemon's own digest held in the composer with Enter only, never retyped"
+}
+
+test_max_defer_own_pending_keeps_newer_escalations() {
+  local dir state sent typed digest
+  own_pending_digest_case maxdefer-own-pending-newer
+  dir=$OWN_CASE_DIR
+  state="$dir/state"; sent="$dir/sent.log"
+  typed=$(grep -v '\[ENTER\]' "$sent")
+  escalate_add "$state" "done: PR https://x/y/pull/9"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_INJECT_CONFIRM_SLEEP=0.05 FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 \
+    housekeeping "$state"
+  [ "$(grep -c '\[ENTER\]' "$sent")" -eq 1 ] || fail "max-defer must submit the held digest with one Enter"
+  [ "$(grep -v '\[ENTER\]' "$sent")" = "$typed" ] || fail "max-defer retyped the held digest"
+  grep -F 'pull/9' "$state/.subsuper-escalations" >/dev/null \
+    || fail "the newer escalation was dropped with the older digest"
+  [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge 60 ] \
+    || fail "a submitted earlier digest must not raise a new wedge alarm"
+  [ "$(_oldest_line_age "$state/.subsuper-escalations")" -lt 60 ] \
+    || fail "the remaining buffer must wait from the recovered delivery"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" \
+    || fail "the next flush did not deliver the remaining buffer"
+  digest=$(delivered_digest "$sent" | tail -2)
+  case "$digest" in
+    *'pick C'*'pull/9'*|*'pull/9'*'pick C'*) ;;
+    *) fail "the next digest must carry the whole current buffer, got: $digest" ;;
+  esac
+  pass "max-defer submits the held earlier digest and keeps newer escalations for the next flush"
+}
+
+test_max_defer_never_submits_own_digest_with_added_text() {
+  local dir state sent held
+  own_pending_digest_case maxdefer-own-pending-edited
+  dir=$OWN_CASE_DIR
+  state="$dir/state"; sent="$dir/sent.log"
+  held="$(grep -v '\[ENTER\]' "$sent") and a human note"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" tmux send-keys -t x -l "$held"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_INJECT_CONFIRM_SLEEP=0.05 FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 \
+    housekeeping "$state"
+  [ "$(grep -c '\[ENTER\]' "$sent")" -eq 0 ] || fail "max-defer pressed Enter on text that is not only its own"
+  grep -F 'a human note' "$dir/composer" >/dev/null || fail "the composer's text changed"
+  [ "$(_file_age "$state/.subsuper-inject-wedged")" -lt 60 ] \
+    || fail "an undeliverable pending composer must still raise the wedge alarm"
+  pass "max-defer never presses Enter on its own digest once other text joins it"
+}
+
 test_normal_flush_clears_stale_wedge_marker() {
   local dir state fakebin sent
   dir=$(make_bordered_case normal-clears-wedge)
@@ -3207,6 +3298,9 @@ test_submit_ack_reports_pending_on_persistent_swallow
 test_max_defer_empty_swallow_types_once_and_alarms
 test_max_defer_flushes_empty_idle_pane
 test_max_defer_pending_composer_alarms_without_typing
+test_max_defer_submits_own_pending_digest_with_enter_only
+test_max_defer_own_pending_keeps_newer_escalations
+test_max_defer_never_submits_own_digest_with_added_text
 test_normal_flush_clears_stale_wedge_marker
 test_oversized_digest_is_bounded_and_kept_durable
 test_digest_budget_counts_omitted_events
