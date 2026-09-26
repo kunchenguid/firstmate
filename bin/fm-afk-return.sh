@@ -449,24 +449,29 @@ scan_landed_awaiting_cleanup() {  # -> <task>\t<url> rows
 
 # Every unread outcome the return marks read, one list in store-sequence
 # order with each row's time: captain rows and the newest routine rows in
-# full, and the older routine rows in one line that counts them and names
-# their tasks, so no row the cursor covers is silent.
+# full, and each contiguous run of older routine rows in one line, in its
+# place, that counts them and names their tasks, so no row the cursor covers
+# is silent and no line spans a captain row.
 render_outcome_list() {  # <rows>
   printf '%s\n' "$1" | awk -F '\t' -v keep=5 '
-    $1 ~ /^[0-9]+$/ { n++; task[n] = $2; verdict[n] = $3; line[n] = $5; time[n] = $6; if ($3 == "routine") routine[++r] = n }
+    function flush() {
+      if (run > 0) printf "  - %d earlier routine outcome(s) not listed in full, for: %s\n", run, tasks
+      run = 0; tasks = ""; split("", seen)
+    }
+    $1 ~ /^[0-9]+$/ { n++; task[n] = $2; verdict[n] = $3; line[n] = $5; time[n] = $6; if ($3 == "routine") r++ }
     END {
-      tasks = ""
-      for (i = 1; i <= r - keep; i++) {
-        hidden[routine[i]] = 1
-        if (task[routine[i]] in seen) continue
-        seen[task[routine[i]]] = 1
-        tasks = tasks (tasks == "" ? "" : ", ") task[routine[i]]
-      }
-      if (r > keep) printf "  - %d earlier routine outcome(s) not listed in full, for: %s\n", r - keep, tasks
+      hide = r - keep
       for (i = 1; i <= n; i++) {
-        if (i in hidden) continue
+        if (verdict[i] == "routine" && hide > 0) {
+          hide--
+          run++
+          if (!(task[i] in seen)) { seen[task[i]] = 1; tasks = tasks (tasks == "" ? "" : ", ") task[i] }
+          continue
+        }
+        flush()
         printf "  - [%s] %s: %s%s\n", time[i], task[i], line[i], (verdict[i] == "captain" ? " (captain; the next drain presents it until acknowledged)" : "")
       }
+      flush()
     }'
 }
 
@@ -623,7 +628,7 @@ EOF
 # (bin/fm-wake-drain.sh).
 mark_window_presented() {
   [ "$PRESENTED_THROUGH" -gt 0 ] || return 0
-  "$SCRIPT_DIR/fm-branch-outcome.sh" mark-read --through "$PRESENTED_THROUGH" >/dev/null 2>&1 || true
+  "$SCRIPT_DIR/fm-branch-outcome.sh" mark-read --through "$PRESENTED_THROUGH" >/dev/null 2>&1
 }
 
 return_reconcile() {
@@ -771,7 +776,14 @@ EOF
     append_evidence lifecycle "status file unreadable: $STATUS_SCAN_ERROR; catch-up stays gated" "$evidence"
     lifecycle_ok=0
   fi
-  render_return_brief "$evidence" "$blockers" "$since" && mark_window_presented
+  if render_return_brief "$evidence" "$blockers" "$since"; then
+    if mark_window_presented; then
+      remove_evidence lifecycle 'outcome read cursor could not advance past the presented outcomes, catch-up stays gated' "$evidence" || lifecycle_ok=0
+    else
+      append_evidence lifecycle 'outcome read cursor could not advance past the presented outcomes, catch-up stays gated' "$evidence"
+      lifecycle_ok=0
+    fi
+  fi
   if [ "$HELD_READ_FAILED" -eq 1 ]; then
     append_evidence lifecycle "held set unreadable: $HELD_READ_PATH; catch-up stays gated" "$evidence"
     lifecycle_ok=0

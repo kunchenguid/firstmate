@@ -671,7 +671,7 @@ health_cooling() {
 }
 
 # Fold one finished turn into the latch. Sets HEALTH_NOTE to the one line main
-# is owed when the latch trips for the first time or a probe recovers it.
+# is owed when the latch trips for the first time.
 health_record() {  # <engine-error 0|1> <reports>
   local now
   now=$(date +%s)
@@ -691,10 +691,7 @@ health_record() {  # <engine-error 0|1> <reports>
       log_line "latch	errors=$HEALTH_ERRORS	cooldown=${HEALTH_COOLDOWN}s"
     fi
   elif [ "$2" -gt 0 ]; then
-    if [ "$HEALTH_COOLDOWN" -gt 0 ]; then
-      HEALTH_NOTE="supervision-host: the supervision session recovered after a successful probe, so the wakes it can take stay off this conversation again"
-      log_line "recovered	after a successful probe"
-    fi
+    [ "$HEALTH_COOLDOWN" -eq 0 ] || log_line "recovered	after a successful probe"
     HEALTH_ERRORS=0
     HEALTH_COOLDOWN=0
     HEALTH_RETRY=0
@@ -1026,10 +1023,6 @@ while :; do
       ARM_TEXT=
       exit_to_main "branch-outcome: the supervision session handled this wake and recorded captain outcomes for you (store rows $CAPTAIN_SEQS); run bin/fm-wake-drain.sh, act on its BRANCH OUTCOMES section, and acknowledge them as it prints" \
         "$HEALTH_NOTE"
-    fi
-    if [ -n "$HEALTH_NOTE" ]; then
-      ARM_TEXT=
-      exit_to_main "${HEALTH_NOTE#supervision-host: }"
     fi
   fi
 

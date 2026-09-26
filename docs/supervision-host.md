@@ -194,8 +194,8 @@ The drain's header owns the section's bounds; these rules keep it bounded and in
 - Routine outcomes never open a main turn: the next drain lists the newest of them once, for awareness and with nothing to acknowledge, and collapses the rest into a count, while silent fleet reviews never appear.
 
 The section runs only for main on an opted-in home whose primary is not Pi, and never while the away record exists.
-The return brief presents every outcome no drain presented yet, from before and during the away window, as one list in store-sequence order with each row's time: captain outcomes and the newest routine ones in full, and older routine ones in one line that counts them and names their tasks.
-The return then advances the read cursor through exactly those rows, so no row it covers is silent.
+The return brief presents every outcome no drain presented yet, from before and during the away window, as one list in store-sequence order with each row's time: captain outcomes and the newest routine ones in full, and each contiguous run of older routine ones in one line, in its place, that counts them and names their tasks.
+The return then advances the read cursor through exactly those rows, so no row it covers is silent; if that advance fails, the catch-up gate stays open with the failure as its evidence.
 The first drain after the return therefore lists only what arrived after the brief, plus each task's unacknowledged captain outcomes, one line per task.
 An unprocessed captain outcome is never adopted as processed, so a home that opts in mid-session cannot lose its first one.
 Anything main must act on while attended to move the work forward, such as a local-only branch to land or a pull request to merge, is a captain outcome on the host even when the captain asked not to hear about that work, reported once per unchanged situation (`bin/fm-branch-prompt.sh` "Verdict: routine or captain"), because a routine outcome opens no main turn.
@@ -231,7 +231,7 @@ When the captain returned during a failed turn that recorded outcomes, the handb
 The host copies the Pi branch's broken-session policy ([pi-supervision-branch.md](pi-supervision-branch.md#broken-branch-latch-and-recovery)), with an engine error in place of a provider error: a turn that exited nonzero, hit its bound, or ended without a complete successful result.
 Two consecutive engine errors latch the session: every wake reaches main for a five-minute cooldown, the attended close unchanged and the away close with a `supervision-host:` line, after which one wake probes the engine, and each probe that ends in another engine error doubles the cooldown up to one hour.
 A turn that records a report without an engine error clears the latch; a turn with a complete engine result but no report neither counts toward it nor clears it, while an engine error counts even if no report was recorded.
-The first trip adds one `supervision-host:` line to the failing turn's handback; an attended recovery exits with one line saying so, while an away recovery is only logged.
+The first trip adds one `supervision-host:` line to the failing turn's handback; a recovery is only recorded in the host ledger, so a routine probe stays off main.
 The latch belongs to one main session, engine, and model, so a new main session or another engine or model starts clean.
 
 ### Lost ownership

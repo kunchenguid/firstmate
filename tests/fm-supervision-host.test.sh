@@ -878,8 +878,8 @@ test_attended_wake_with_an_unreadable_mirror_reaches_main() {
   pass "host: an attended wake whose mirror is missing, cannot be read, or holds a malformed entry reaches main before any engine turn, and the cursor stays put"
 }
 
-test_attended_latch_keeps_closes_on_main_and_reports_recovery() {
-  local home
+test_attended_latch_keeps_closes_on_main_and_records_recovery_off_main() {
+  local home handled
   home=$(make_home attended-latch attended)
   echo fail > "$home/stub-mode"
   start_session "$home"
@@ -928,15 +928,17 @@ test_attended_latch_keeps_closes_on_main_and_reports_recovery() {
 
   end_cooldown "$home"
   echo handle > "$home/stub-mode"
+  handled=$(handled_count "$home")
   park_again "$home"
   append_status "$home" 'the probe succeeds'
-  wait_until 250 host_exited "$home" || fail "latch: the recovery did not reach main"
-  assert_re '^supervision-host: the supervision session recovered after a successful probe' "$home/host.out" \
-    "a successful probe must tell main once that the session recovered"
-  assert_no_re '^signal:' "$home/host.out" "the probe's handled close must not reach main as a wake"
+  wait_until 250 handled_at_least "$home" $((handled + 1)) \
+    || fail "latch: the successful probe was not handled: $(cat "$home/host.out"; tail -n 5 "$home/state/.supervision-host.log")"
+  assert_re '	recovered	after a successful probe$' "$home/state/.supervision-host.log" "the ledger must record the recovery"
+  ! wait_until 20 host_exited "$home" || fail "a routine probe's recovery reached main: $(cat "$home/host.out")"
+  assert_no_re '^supervision-host' "$home/host.out" "a recovery must stay off main"
   assert_grep 'cooldown=0' "$home/state/.supervision-host-health" "a successful probe must clear the latch"
   assert_grep 'errors=0' "$home/state/.supervision-host-health" "a successful probe must clear the error streak"
-  pass "host: attended, two engine errors latch the session, main keeps every close unchanged in the cooldown, a failed probe doubles it up to its cap, and a report recovers it with one line"
+  pass "host: attended, two engine errors latch the session, main keeps every close unchanged in the cooldown, a failed probe doubles it up to its cap, and a routine probe's recovery stays in the ledger, off main"
 }
 
 test_away_wake_is_handled_on_the_engine_and_never_reaches_main() {
@@ -1763,7 +1765,7 @@ test_return_during_a_failed_turn_still_hands_its_outcomes_to_main
 test_incomplete_engine_result_hands_the_wake_to_main
 test_latch_trips_after_two_engine_errors_then_probes_and_recovers
 test_latch_keeps_attended_closes_on_main_and_skips_unopted_homes
-test_attended_latch_keeps_closes_on_main_and_reports_recovery
+test_attended_latch_keeps_closes_on_main_and_records_recovery_off_main
 test_engine_turn_is_bounded_and_its_descendants_reaped
 test_restarted_host_stops_what_a_killed_predecessor_left
 test_park_boundary_ends_the_park_before_the_hook_timeout
