@@ -782,6 +782,11 @@ Those inherited values are defaults and rules only; `fm-spawn` still permits a c
 
 ### Installed hooks and launch details
 
+For Claude crewmates and scouts, `fm-spawn.sh` rewrites the worktree's untracked `.claude/settings.local.json` with Firstmate's lifecycle hooks on every launch, and teardown removes it, so a project cannot keep its own worker-only hooks there.
+A project can instead provide a pre-commit proof by convention: when its worktree contains an executable `bin/check-changed`, the same file also gains a `PreToolUse` hook on Bash that runs `"$CLAUDE_PROJECT_DIR"/bin/check-changed --hook` with a 7200-second timeout.
+The project script receives Claude's hook JSON on stdin, decides which commands it gates, and blocks one by exiting 2 with its message on stderr; without the file the settings are unchanged.
+Other harnesses do not run this hook yet.
+
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Kimi crews, `fm-spawn.sh` runs `fm-kimi-turnend-hook.sh install`, drops a per-task `.fm-kimi-turnend` pointer in the worktree, and records the matching private registry token for teardown.
 
