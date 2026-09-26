@@ -604,9 +604,9 @@ is_proven_isolated_script() {
 }
 
 # The portable serial remainder: every tests/*.test.sh that is neither
-# proven-isolated nor real-herdr-gated. Watcher, lock, AFK, real tmux, daemon,
-# secondmate lifecycle, bootstrap, the live-harness-optin family, GUI-backend,
-# and other unproven work stays here. Derived rather than enumerated so a newly added test
+# proven-isolated nor real-herdr-gated. Watcher, lock, AFK, daemon, secondmate
+# lifecycle, bootstrap, the live-harness-optin family, and other unproven work
+# stays here. Derived rather than enumerated so a newly added test
 # lands here by default instead of falling out of every lane.
 list_portable_serial() {
   local s base fam
@@ -1314,8 +1314,8 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-remote-agent.test.sh"
       ;;
     bin/fm-agent-process-lib.sh)
-      # The shared harness-process classifier feeds both the tmux and Herdr
-      # liveness verdicts, so a change to it is proven by both backends' suites.
+      # The shared harness-process classifier feeds Herdr liveness, so a change
+      # to it is proven by portable process tests and the real Herdr lane.
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
       printf '%s\n' pure-contract-unit

@@ -3,9 +3,9 @@
 # inbox and ring a constant doorbell line into its terminal, best-effort.
 # Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
-#   through this home's state/<id>.meta, or an explicit well-formed backend
-#   target. fm-send refuses unresolved guesses rather than falling back to a
-#   tmux window search, because a "successful" send to the wrong endpoint is
+#   through this home's state/<id>.meta, or an explicit well-formed Herdr
+#   target. fm-send refuses unresolved guesses rather than searching terminal
+#   labels, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
 # The text must be nonempty: an empty or whitespace-only message is refused
 # before anything is marked, recorded, or typed, because an empty marked
@@ -690,9 +690,8 @@ fm_send_feed_resolved_holds() { # <answer-text>
 # The target's BACKEND comes from selector meta, from matching an explicit target
 # back to recorded meta, or from strict explicit-target shape validation.
 # Do not add a separate passive liveness preflight here. Active send paths own
-# backend readiness: herdr, for example, must route through its session-aware
-# target_ready path before sending, while zellij verifies pane labels in its
-# send implementation. A failed backend send is still surfaced below as a hard
+# backend readiness: Herdr routes through its session-aware target_ready path
+# before sending. A failed backend send is still surfaced below as a hard
 # error with the attempted resolution attached.
 
 if [ "${1:-}" = "--key" ]; then

@@ -107,7 +107,7 @@ Pi's `/supervision-model` command pins a cheaper model and a shallower reasoning
 > alright merge it
 ```
 
-### More backends
+### Terminal setup
 
 The Herdr setup guide is linked in [Documentation](#documentation) below.
 
@@ -129,7 +129,7 @@ The Herdr setup guide is linked in [Documentation](#documentation) below.
  │crewmate│   │crewmate│      │crewmate│   one autonomous agent each
  └───┬────┘   └───┬────┘      └───┬────┘
      ▼            ▼               ▼
-  treehouse worktree, Orca worktree, or isolated secondmate home
+       Treehouse worktree or isolated secondmate home
      │
      ├─ ship: project mode ► PR/local merge ► teardown
      │

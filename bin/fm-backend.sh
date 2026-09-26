@@ -373,10 +373,9 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
 
 # --- generic per-op dispatch -------------------------------------------------
 #
-# Thin case-dispatch wrappers so a caller names an operation and a backend
-# rather than hand-writing `case "$backend" in tmux) fm_backend_tmux_x ;; esac`
-# at every call site. Each verified backend adds its own arm here, without
-# changing call sites.
+# Thin case-dispatch wrappers let callers name an operation and backend without
+# coupling themselves to Herdr function names. A future verified backend would
+# add its own arm here without changing call sites.
 
 # fm_backend_capture: bounded plain-text session capture.
 fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
@@ -440,9 +439,8 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   esac
 }
 
-# fm_backend_kill: remove the task's session endpoint (best-effort; a
-# nonexistent/already-gone target is not an error - callers already swallow
-# failures here exactly as the inline `tmux kill-window ... || true` did).
+# fm_backend_kill: remove the task's session endpoint best-effort.
+# A nonexistent or already-gone target is not an error.
 fm_backend_kill() {  # <backend> <target>
   local backend=$1
   shift
@@ -461,11 +459,10 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
   return 1
 }
 
-# fm_backend_busy_state: semantic busy/idle/unknown for backends that expose
-# native agent-state (herdr-addendum "busy state" row - the first backend
-# where this gets real semantics beyond pane-regex). Backends with no such
-# primitive (tmux) report unknown. Callers own the fallback policy: fm-watch.sh
-# uses unknown as the cue for harness-scoped pane-tail detection, while
+# fm_backend_busy_state: semantic busy/idle/unknown from Herdr's native agent
+# state. Historical and unknown backends report unknown. Callers own the
+# fallback policy: fm-watch.sh uses unknown as the cue for harness-scoped
+# pane-tail detection, while
 # fm-crew-state.sh also corroborates native idle verdicts with the recorded
 # harness's signature before treating a no-run crew as not busy.
 fm_backend_busy_state() {  # <backend> <target>

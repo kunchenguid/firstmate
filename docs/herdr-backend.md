@@ -20,11 +20,9 @@ Prerequisites:
 Herdr is dual-licensed AGPL-3.0-or-later or commercial.
 Firstmate invokes its CLI as a separate process.
 
-Select Herdr with local `config/backend` containing `herdr`, `FM_BACKEND=herdr` for one launch, or an explicit request to Firstmate.
-A remote second-mate agent is the one case with no choice: it always runs on Herdr, and [`remote-secondmates.md`](remote-secondmates.md) owns that requirement and the readiness its host must meet.
-It is also auto-detected when the primary runs natively under `HERDR_ENV=1` and is not inside tmux.
-A tmux pane nested inside Herdr resolves to tmux because the innermost multiplexer wins.
-An auto-detected Herdr spawn prints an opt-out notice.
+Herdr is selected by default; local `config/backend` containing `herdr`, `FM_BACKEND=herdr` for one launch, or an explicit request to Firstmate makes that choice explicit.
+A remote second-mate agent also always runs on Herdr, and [`remote-secondmates.md`](remote-secondmates.md) owns the readiness its host must meet.
+When the primary runs natively under `HERDR_ENV=1`, inherited Herdr identity selects its exact parent workspace and named session.
 
 Spawn stops before creating a Herdr container or acquiring a task worktree when `herdr`, `jq`, or the protocol floor is unavailable.
 No separate first-run provisioning is required.
@@ -249,7 +247,7 @@ A fully unreadable target stops retrying and reports unknown.
 A blocked pane is not treated as a queued-Enter busy signal.
 
 An unavailable native idle baseline leaves the composer fallback paired with a rendered-footer transition: the pane's verified busy footer is read once before the first Enter, and an idle-to-busy transition across that Enter confirms the submit.
-It is the same semantic signal the native path uses and the same one the tmux submit core reads.
+It is the same semantic signal the native path uses and the shared submit logic consumes.
 A pane already mid-turn cannot borrow a rendered-footer transition as proof of this delivery; after retries, only proven pending text plus native `working` can establish that its Enter was accepted and queued.
 The composer verdict itself is deliberately unchanged: a right-aligned status token on the composer row stays content for every other caller, including the away-mode pre-injection guard.
 The poll density bounds the residual possibility of an extremely fast complete turn; a missed native transition falls through to the composer verdict rather than reporting a false swallow.
@@ -293,7 +291,7 @@ This prevents closing the workspace's last tab before a replacement exists.
 
 A registration alone never proves an agent.
 Herdr keeps a Pi registration (`agent get` still reports `agent=pi` with its last status) after the Pi process has exited to a plain shell whenever a nested interactive shell sits under the pane's top shell, which is the crew shape `treehouse get` leaves behind (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
-So before a registered agent counts as live, the pane classifier reads `pane process-info` and the real process table through the shared harness-process classifier in `bin/fm-agent-process-lib.sh`, the same rule the tmux adapter proves liveness with: a harness in the foreground process group, or still a descendant of the pane shell, keeps the registration live; a foreground that is nothing but shells with no harness descendant is a `stale-agent` pane, agent-free with that explicit reason; a foreground holding anything else keeps the registration live, but only after the same bounded settle window the idle-shell proof uses, because an idle shell transiently hosts prompt helpers such as starship in its foreground group and the first agent or shell sample in that window decides; an unreadable process view makes the pane `unknown`, trusting neither the registration nor its absence.
+So before a registered agent counts as live, the pane classifier reads `pane process-info` and the real process table through the shared harness-process classifier in `bin/fm-agent-process-lib.sh`: a harness in the foreground process group, or still a descendant of the pane shell, keeps the registration live; a foreground that is nothing but shells with no harness descendant is a `stale-agent` pane, agent-free with that explicit reason; a foreground holding anything else keeps the registration live, but only after the same bounded settle window the idle-shell proof uses, because an idle shell transiently hosts prompt helpers such as starship in its foreground group and the first agent or shell sample in that window decides; an unreadable process view makes the pane `unknown`, trusting neither the registration nor its absence.
 No registered status outranks the process view, because an agent killed mid-turn leaves `working` behind just as a quit one leaves `idle`, and the native busy verdict is verified the same way so a shell-only pane never reads busy.
 The `pane process-info` subcommand that this process-level proof depends on is present in every supported release client from the 0.7.1 floor upward (measured 2026-09-10 on the pinned 0.7.1, 0.7.3, 0.7.4, and 0.7.5 release clients - [verification](verification/runtime-backends.md) "Stale agent registration").
 The response shape the adapter parses (`result.type` of `pane_process_info`, `process_info.shell_pid`, and `foreground_processes` entries carrying `name`, `argv0`, `argv`, and `cmdline`) is verified live only on Herdr 0.9.0, with the idle-shell proof's narrower parse previously verified on 0.7.5.
@@ -303,7 +301,7 @@ An unreadable or unparseable process view reads `unknown`, which refuses lifecyc
 The generic Herdr agent-liveness probe reuses that pane classifier, then applies one recovery-only exception.
 A structurally gone pane or a pane read from a session positively reported as having no running server becomes `missing`, a restored agent-less shell and a stale registration over a shell-only pane both become `dead`, a registered agent with a live process becomes `alive`, and every other unexpected read becomes `unreadable`.
 Neither the stopped-server exception nor the stale-registration verdict widens husk detection or any close authority; those paths still refuse an unreadable pane, and a `stale-agent` pane is reused by recovery, never closed as a husk, because the shell it holds may be a nested worktree shell.
-Native registration still identifies Pi by name where tmux would see a generic interpreter; the process-level proof only decides whether that registration is backed by a running process.
+Native registration identifies Pi by name; the process-level proof only decides whether that registration is backed by a running process.
 `tests/fm-backend-herdr-agent-exit-shell-e2e.test.sh` pins the live-Pi versus leftover-shell distinction; [`verification/runtime-backends.md`](verification/runtime-backends.md#agent-lifecycle-control) owns the versioned evidence.
 
 The session-start sweep uses this probe.
@@ -325,7 +323,7 @@ There is still one watcher process; the event reader is a bounded child of that 
 ## Away-mode supervisor support
 
 The away daemon supports Herdr supervisor panes only.
-It refuses Zellij, Orca, and cmux as supervisor backends rather than applying the wrong transport.
+It refuses every retired or unknown supervisor backend rather than applying the wrong transport.
 For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
 

@@ -25,7 +25,7 @@ This feature parents no SDK span by itself.
 Because the injected carrier and the recorded carrier are the same string, an observer that reads the metadata reconstructs exactly the identity the child received.
 The unconditional pre-launch export covers Pi and Codex workers and secondmates, plus Herdr-only TraeX workers and scouts.
 This is the same coverage `GOTMPDIR` already has and requires no trace-specific `launch_template()` behavior.
-Ship and scout spawns reach that site on every spawn backend (`tmux`, `herdr`, `zellij`, `orca`, `cmux`); a Secondmate reaches it on every backend that accepts a Secondmate spawn (`tmux`, `herdr`, `zellij`), because `bin/fm-spawn.sh` rejects a Secondmate on `orca` and `cmux`.
+Every retained ship, scout, and Secondmate spawn reaches that site through the sole supported backend, Herdr.
 
 ### Remote Secondmate routes
 

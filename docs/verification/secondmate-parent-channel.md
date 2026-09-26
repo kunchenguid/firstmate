@@ -1,7 +1,7 @@
 # Secondmate parent channel: live verification
 
-Maintainer-verification record for the guarantee in [`secondmate-parent-channel.md`](../secondmate-parent-channel.md): a captain-facing outcome recorded inside a secondmate home reaches the parent channel without the mate model writing it.
-Refresh it by rerunning the fixture below after changing any publisher named in `bin/fm-parent-channel-lib.sh`.
+Historical maintainer-verification record for the guarantee in [`secondmate-parent-channel.md`](../secondmate-parent-channel.md): a captain-facing outcome recorded inside a secondmate home reaches the parent channel without the mate model writing it.
+The fixture used the subsequently retired tmux backend and is not a current refresh command; the owner document lists the maintained transport-independent regressions.
 
 ## What was run
 

@@ -1904,10 +1904,9 @@ BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
-# Every backend's own current-path read (tmux's pane_current_path, herdr's
-# foreground_cwd, zellij/cmux's active pwd probe against the live shell) can
-# report the OS-level, physically-resolved cwd, so comparing it against a
-# still-symlinked PROJ_ABS can misfire both ways: false-negative (the poll
+# Herdr's foreground_cwd read can report the OS-level, physically-resolved cwd,
+# so comparing it against a still-symlinked PROJ_ABS can misfire both ways:
+# false-negative (the poll
 # below never notices the pane left the project) or false-positive (the
 # isolation guard refuses a spawn that never actually tangled). Canonicalize
 # once here so every downstream comparison uses the same physical form
@@ -1923,14 +1922,12 @@ real_path_or_raw() { # <path>
   fi
 }
 
-# Session-provider container-ensure + task creation. tmux stays exactly as P1
-# left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
-# a herdr spawn goes through the version-gated, workspace-per-HOME,
-# tab-per-task sequence in bin/backends/herdr.sh instead (D4/D5 as refined by
+# Session-provider container-ensure + task creation. A Herdr spawn goes through
+# the version-gated, workspace-per-HOME, tab-per-task sequence in
+# bin/backends/herdr.sh (D4/D5 as refined by
 # docs/herdr-backend.md's "workspace-per-home" pass, AGENTS.md task
-# herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
-# that every downstream operation (send/capture/kill) already treats as opaque
-# per-backend routing (fm_backend_resolve_selector).
+# herdr-sm-spaces-k4). Downstream operations treat the resulting $T ("target")
+# string as opaque routing resolved by fm_backend_resolve_selector.
 
 # True when <path> is an isolated worktree of the spawning project: a real
 # directory that is its own worktree root, is not the spawning project itself,
@@ -2493,9 +2490,9 @@ elif [ "$KIND" != secondmate ]; then
   # the very first poll, before the pane has actually moved.
   #
   # A single read that already looks isolated is not proof the pane settled
-  # there: on some tmux/WSL setups a brand-new window's pane_current_path
-  # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
+  # there: terminal cwd reporting can transiently show an unrelated stale path
+  # (seen live as another real git checkout entirely) before the shell catches
+  # up with treehouse get's cd. That
   # stale path passes spawn_worktree_isolated too (it resolves to a real,
   # distinct worktree top-level), so accepting it on one read alone silently
   # records the wrong worktree= in state/<id>.meta. Require two consecutive

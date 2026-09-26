@@ -81,13 +81,13 @@
 #      `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
-#      than trusting a stale status log. On tmux and herdr, which own a
+#      than trusting a stale status log. On Herdr, which owns the retained
 #      recovery-grade classifier, only its positive death evidence reads as gone
 #      (the endpoint is authoritatively absent, or its pane holds no agent); an
 #      endpoint that merely failed to answer reports unknown · none as
 #      unreachable, and an alive endpoint whose scrollback read failed is still
-#      classified by step 4. Backends with no classifier keep reading a failed
-#      capture as gone. The fallback's own comment owns the per-verdict rules.
+#      classified by step 4. Historical backends are refused before this
+#      fallback. The fallback's own comment owns the per-verdict rules.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
@@ -235,9 +235,9 @@ fi
 # pane_readable is consulted ONLY in the no-run fallback below. The run-step path
 # stays authoritative regardless of pane liveness - judge by the run-step, not the
 # shell - so a finished crew whose endpoint has closed still reports its run-step
-# state (e.g. done) instead of being masked as unknown. Backend-aware
-# (fm_backend_of_meta defaults absent backend= to tmux, the P1 contract): a
-# herdr task is read through fm_backend_capture instead of a bare tmux probe.
+# state (e.g. done) instead of being masked as unknown. Backend-aware parsing
+# preserves an absent backend= as a historical tmux identity, which is refused;
+# a Herdr task is read through fm_backend_capture.
 TASK_BACKEND=$(fm_backend_of_meta "$META")
 if ! fm_backend_is_known "$TASK_BACKEND"; then
   emit unknown unsupported-backend "unsupported historical backend: $TASK_BACKEND; record preserved"
@@ -774,38 +774,27 @@ fi
 # The run-step path above already handled any crew with a run, regardless of pane
 # liveness, so a finished-but-pane-closed crew never reaches here. Down here there
 # is no run to consult, so only positive evidence that the target is gone may
-# read as death - a backend that failed to answer is unknown, never death, for
-# both classifier-backed backends (tmux and herdr) - and every death-class
-# verdict reports unknown rather than trusting a possibly-stale status log as
-# the current state.
+# read as death - a Herdr endpoint that failed to answer is unknown, never death
+# - and every death-class verdict reports unknown rather than trusting a
+# possibly-stale status log as the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 if ! pane_readable "$BACKEND_TARGET"; then
-  # A failed probe is not itself evidence the pane is gone: the herdr CLI can
-  # error or stall under load, and tmux can fail to be executed at all (a
-  # trimmed PATH) or answer non-definitively, while the pane is alive - a busy
-  # box would otherwise score dozens of live claims dead. Both backends own a
-  # recovery-grade classifier (fm_backend_agent_state), which separates the
-  # outcomes:
-  #   missing - the endpoint is authoritatively absent: herdr's pane get
-  #             answered pane_not_found; tmux's successful window inventory
-  #             omitted the exact recorded window, or tmux gave one of its
-  #             definitive no-session/no-server/no-socket responses (which
-  #             fm_backend_tmux_agent_state owns as death, since fm-bootstrap
-  #             and fm-session-start depend on it to license a respawn after a
-  #             genuine server death - a socket-connection failure is NOT
-  #             covered by the unknown-never-death rule above).
-  #   dead    - the endpoint exists but confidently has no agent (herdr's agent
+  # A failed probe is not itself evidence the pane is gone: the Herdr CLI can
+  # error or stall under load while the pane is alive, which would otherwise
+  # score dozens of live claims dead. Its recovery-grade classifier
+  # (fm_backend_agent_state) separates the outcomes:
+  #   missing - the endpoint is authoritatively absent: Herdr's pane get answered
+  #             pane_not_found or the named server is positively stopped.
+  #   dead    - the endpoint exists but confidently has no agent (Herdr's agent
   #             get answered agent_not_found, or its registration lingers over a
-  #             pane whose processes are nothing but shells - issue #4115;
-  #             tmux's readable foreground process group is nothing but
-  #             shells), still positive death evidence.
+  #             pane whose processes are nothing but shells - issue #4115),
+  #             still positive death evidence.
   #   alive   - the endpoint and its agent answered and only the heavy
   #             scrollback read failed, so the live state is classified by the
   #             normal flow below instead of being discarded.
   #   anything else - the cheap probes themselves failed to answer or
   #             contradicted themselves, which is unknown, never death.
-  # Backends with no classifier (orca, zellij, and cmux all report unverified)
-  # keep their historical capture-failure-means-gone reading.
+  # Historical backends never reach this classifier path.
   case "$TASK_BACKEND" in
     herdr) AGENT_STATE=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET") ;;
     *) AGENT_STATE=none ;;

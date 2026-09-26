@@ -676,12 +676,11 @@ report_relaunch() {  # <id> <cause> <where>
 
 secondmate_liveness_sweep() {
   # Idempotent secondmate liveness guarantee - SESSION START ONLY. The detailed
-  # state machine and its only recovery-authorizing states are owned by
-  # fm_backend_agent_state. A missing tmux pane is not enough: tmux must prove
-  # the window or session absent. This preserves duplicate prevention for
-  # existing ambiguous processes and every transiently unreadable target while
-  # adding the missing-session path the original bare-shell and Herdr-husk sweep
-  # lacked.
+# state machine and its only recovery-authorizing states are owned by
+  # fm_backend_agent_state. A failed Herdr read is not enough: the classifier
+  # must prove the pane or named server absent. This preserves duplicate
+  # prevention for existing ambiguous processes and every transiently unreadable
+  # target while retaining the explicit missing-session recovery path.
   # A meta with no window remains owned by secondmate-provisioning recovery.
   # Secondmate homes never contain kind=secondmate meta, so this is naturally a
   # primary-only no-op there. Mid-session liveness remains explicitly out of
