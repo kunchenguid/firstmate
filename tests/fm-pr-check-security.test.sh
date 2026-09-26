@@ -152,6 +152,7 @@ case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
       *statusCheckRollup*)
+        [ -z "${FM_TEST_GH_VIEW_HOOK:-}" ] || "$FM_TEST_GH_VIEW_HOOK"
         [ -z "${FM_TEST_GH_VIEW_STALL:-}" ] || sleep "$FM_TEST_GH_VIEW_STALL"
         if [ -n "${FM_TEST_GH_VIEW_JSON:-}" ]; then
           cat "$FM_TEST_GH_VIEW_JSON"
@@ -2961,6 +2962,43 @@ test_yolo_poll_never_merges_while_an_away_record_stands() {
   pass "a yolo task's green PR is never auto-merged while a valid away record stands"
 }
 
+test_yolo_merge_refuses_an_away_record_published_during_verification() {
+  local dir state url rc
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case yolo-poll-away-record-race)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_poll_meta "$state" task-a "$url" yolo=on
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+  cat > "$dir/enter-away.sh" <<SH
+#!/usr/bin/env bash
+FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-afk-contract.sh" enter --words 'do not merge task-a while I am away' >/dev/null 2>&1
+SH
+  chmod +x "$dir/enter-away.sh"
+
+  set +e
+  FM_TEST_GH_STATE=OPEN FM_TEST_GH_VIEW_HOOK="$dir/enter-away.sh" \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
+    FM_TEST_GLAB_LOG="$dir/glab.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "away-race watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "away-race watcher did not reach the control check: $(cat "$dir/watch.out")" ;; esac
+  [ -f "$state/.afk-contract" ] || fail "verification hook did not publish an away record"
+  assert_no_grep 'pr merge' "$dir/gh.log" \
+    "an automatic merge ran despite an away record published during verification"
+  assert_grep 'automatic merge refused' "$state/.watch-triage.log" \
+    "the refused automatic merge left no triage record"
+  [ -f "$state/task-a.check.sh" ] || fail "away-race poll was retired without a merge"
+  [ ! -e "$state/task-a.pr-poll-merge-notified" ] || fail "the away-race watcher recorded a merge outcome"
+  [ -z "$(merged_ledger_row "$state" task-a)" ] \
+    || fail "the away-race watcher published a merge outcome: $(merged_ledger_row "$state" task-a)"
+  ack_watcher_cycle "$state" || fail "away-race control wake acknowledgement failed"
+  pass "an away record published during merge verification refuses the automatic merge"
+}
+
 test_yolo_poll_reports_only_for_non_yolo_and_red() {
   local dir state url rc posture
   url=https://github.com/o/r/pull/1
@@ -3619,6 +3657,7 @@ test_merged_poll_row_carries_the_merge_authority
 test_merged_poll_row_names_no_authority_when_no_record_grants_one
 test_yolo_poll_merges_a_green_pr
 test_yolo_poll_never_merges_while_an_away_record_stands
+test_yolo_merge_refuses_an_away_record_published_during_verification
 test_yolo_poll_reports_only_for_non_yolo_and_red
 test_yolo_poll_queued_merge_keeps_polling
 test_yolo_poll_keeps_a_rebound_poll_armed

@@ -2804,7 +2804,7 @@ while :; do
             && ! afk_record_present; then
             pr_poll_control_release || exit 1
             FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-              FM_ROOT_OVERRIDE="$FM_ROOT" \
+              FM_ROOT_OVERRIDE="$FM_ROOT" FM_PR_MERGE_AUTOMATIC=1 \
               run_merge_attempt_capture "$SCRIPT_DIR/fm-pr-merge.sh" "$id" "$url" || exit 1
             merge_attempt_rc=$FM_MERGE_ATTEMPT_STATUS
             merge_attempt_out=$FM_CHECK_RESULT

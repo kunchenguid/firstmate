@@ -1120,6 +1120,10 @@ require_current_away_authority() {
   fi
   fm_lease_forbid_branch "PR merge (fm-pr-merge)" --away-relocated
   resolve_merge_authority || return 1
+  if [ "${FM_PR_MERGE_AUTOMATIC:-0}" = 1 ] && [ "$FM_PR_AWAY_POSTURE" = true ]; then
+    echo "error: automatic merge refused - the away-posture record exists at merge time; nothing was merged" >&2
+    return 2
+  fi
   if [ "$FM_PR_AWAY_POSTURE" = true ] && [ "${#ALLOW_RED[@]}" -gt 0 ]; then
     echo "error: --allow-red is attended-only; while the away-posture record exists the green check is absolute" >&2
     return 2
