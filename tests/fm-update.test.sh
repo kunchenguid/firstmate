@@ -689,12 +689,57 @@ test_jj_parked_outside_skipped() {
   pass "JJ6 working copy parked outside the target is skipped, commit preserved"
 }
 
+# --- JJ7: current bookmark with a stale parked working copy advances ---------
+test_jj_stale_parked_wc_advances() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out
+  w=$(new_jj_world jj7)
+  bump_origin "$w" instr
+  jj -R "$w/main" bookmark set main -r main@origin >/dev/null 2>&1
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "stale working copy advanced"
+  assert_contains "$out" "(instructions changed: AGENTS.md, bin, .agents/skills)" \
+    "the working-copy file movement turns the reread gate on"
+  assert_contains "$out" "reread-firstmate: yes" "stale working-copy advance triggers reread"
+  [ "$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)" = \
+    "$(jj -R "$w/main" log -r main@origin --no-graph -T 'commit_id' 2>/dev/null)" ] \
+    || fail "jj default bookmark moved off the base"
+  [ "$(jj -R "$w/main" log -r '@' --no-graph -T 'empty' 2>/dev/null)" = "true" ] \
+    || fail "jj working copy not clean after advance"
+  grep -q 'v2' "$w/main/AGENTS.md" || fail "jj files not at target content"
+  pass "JJ7 a stale working copy under a current bookmark advances and rereads"
+}
+
+# --- JJ8: current bookmark with a side-commit working copy is skipped --------
+test_jj_side_commit_wc_skipped() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out parked
+  w=$(new_jj_world jj8)
+  printf 'side work\n' >> "$w/main/AGENTS.md"
+  jj -R "$w/main" commit -m side >/dev/null 2>&1
+  parked=$(jj -R "$w/main" log -r '@-' --no-graph -T 'commit_id' 2>/dev/null)
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: working copy parked outside main@origin" \
+    "side-commit working copy skipped"
+  [ "$(jj -R "$w/main" log -r '@-' --no-graph -T 'commit_id' 2>/dev/null)" = "$parked" ] \
+    || fail "side commit was left behind"
+  grep -q 'side work' "$w/main/AGENTS.md" || fail "side work discarded"
+  assert_contains "$out" "reread-firstmate: no" "skipped jj home does not reread"
+  pass "JJ8 a side-commit working copy under a current bookmark is skipped"
+}
+
 test_jj_colocated_advances
 test_jj_dirty_skipped
 test_jj_diverged_skipped
 test_jj_already_current
 test_jj_described_skipped
 test_jj_parked_outside_skipped
+test_jj_stale_parked_wc_advances
+test_jj_side_commit_wc_skipped
 
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
