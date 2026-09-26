@@ -100,7 +100,9 @@
 # captain's away words meant is the supervision session's reading
 # (bin/fm-branch-prompt.sh "Postures"). An unreadable record refuses rather
 # than being skipped, neither posture releases a captain hold, and away
-# authority lapses when the record is archived.
+# authority lapses when the record is archived. Watcher-driven automatic merges
+# (FM_PR_MERGE_AUTOMATIC=1) are refused while the record exists; their admission
+# and authority decision share the locked boundary below.
 # The authority read and synchronous forge command share the away record's
 # cross-subsystem lock, which bin/fm-afk-contract.sh owns, closing the common
 # live-owner TOCTOU; failure to take it refuses before the forge call. Async and
@@ -1313,9 +1315,13 @@ gitlab_confirm_merged() {
 # Record before either forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
-away_status=0
-require_current_away_authority || away_status=$?
-[ "$away_status" -eq 0 ] || exit "$away_status"
+# Watcher admission is decided only at the locked authority boundary below,
+# after verification, so a concurrent away-record writer cannot be bypassed.
+if [ "${FM_PR_MERGE_AUTOMATIC:-0}" != 1 ]; then
+  away_status=0
+  require_current_away_authority || away_status=$?
+  [ "$away_status" -eq 0 ] || exit "$away_status"
+fi
 require_recorded_pr_identity || exit 1
 record_pr_metadata || exit 1
 require_released_captain_hold || exit 1

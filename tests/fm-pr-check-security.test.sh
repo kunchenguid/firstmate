@@ -2962,6 +2962,37 @@ test_yolo_poll_never_merges_while_an_away_record_stands() {
   pass "a yolo task's green PR is never auto-merged while a valid away record stands"
 }
 
+test_yolo_admission_waits_for_the_away_record_lock() {
+  local dir state url rc
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case yolo-admission-away-lock)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  write_poll_meta "$state" task-a "$url" yolo=on
+  write_away_record "$dir" --words 'do not merge task-a while I am away'
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+
+  # A record writer owns this lock until its publication is complete.
+  # Automatic admission must wait for that writer, even if a record is visible.
+  . "$ROOT/bin/fm-afk-contract.sh"
+  fm_afk_contract_lock_hold "$state" || fail "could not lock the away record"
+  rc=0
+  FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT=1 FM_TEST_GH_STATE=OPEN \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
+    FM_TEST_GLAB_LOG="$dir/glab.log" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+  fm_afk_contract_lock_release || fail "could not release the away record"
+
+  [ "$rc" -eq 0 ] || fail "locked admission watcher failed: $(cat "$dir/watch.err")"
+  assert_grep 'away-posture record could not be locked' "$state/.watch-triage.log" \
+    "automatic admission bypassed the away-record lock"
+  assert_no_grep 'pr merge' "$dir/gh.log" "automatic admission merged around the record writer"
+  [ -f "$state/task-a.check.sh" ] || fail "locked admission retired the poll"
+  ack_watcher_cycle "$state" || fail "locked admission wake acknowledgement failed"
+  pass "automatic admission uses the merge authority boundary's away-record lock"
+}
+
 test_yolo_merge_refuses_an_away_record_published_during_verification() {
   local dir state url rc
   url=https://github.com/o/r/pull/1
@@ -3657,6 +3688,7 @@ test_merged_poll_row_carries_the_merge_authority
 test_merged_poll_row_names_no_authority_when_no_record_grants_one
 test_yolo_poll_merges_a_green_pr
 test_yolo_poll_never_merges_while_an_away_record_stands
+test_yolo_admission_waits_for_the_away_record_lock
 test_yolo_merge_refuses_an_away_record_published_during_verification
 test_yolo_poll_reports_only_for_non_yolo_and_red
 test_yolo_poll_queued_merge_keeps_polling

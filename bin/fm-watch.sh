@@ -2799,9 +2799,10 @@ while :; do
           # landing is recognized by the merge-notified marker the merge path
           # commits with its durable outcome, which also covers a queued or
           # unconfirmed acceptance that must keep polling.
+          # Automatic admission belongs to fm-pr-merge's locked away-record
+          # authority check, not a separate presence read in this watcher.
           if [ -z "$out" ] \
-            && [ "$(fm_meta_get "$STATE/$id.meta" yolo)" = on ] \
-            && ! afk_record_present; then
+            && [ "$(fm_meta_get "$STATE/$id.meta" yolo)" = on ]; then
             pr_poll_control_release || exit 1
             FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
               FM_ROOT_OVERRIDE="$FM_ROOT" FM_PR_MERGE_AUTOMATIC=1 \
