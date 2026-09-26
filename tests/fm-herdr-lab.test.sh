@@ -572,7 +572,11 @@ PY
   PATH="$bin:$PATH" python3 "$launcher" fm-lab-capture "$TMP_ROOT/capture.pid" "$capture" >/dev/null 2>&1 || status=$?
   expect_code 0 "$status" "the capturing launcher did not run its client to completion"
   assert_grep "geometry 40 120 1200 800 args --session fm-lab-capture" "$capture"
-  mode=$(stat -f '%Lp' "$capture" 2>/dev/null || stat -c '%a' "$capture")
+  if [ "$(uname)" = Darwin ]; then
+    mode=$(stat -f '%Lp' "$capture")
+  else
+    mode=$(stat -c '%a' "$capture")
+  fi
   [ "$mode" = 600 ] || fail "the capture file is not private to its owner (mode $mode)"
   status=0
   PATH="$bin:$PATH" python3 "$launcher" fm-lab-capture "$TMP_ROOT/capture-again.pid" "$capture" >/dev/null 2>&1 || status=$?
