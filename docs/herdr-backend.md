@@ -603,6 +603,8 @@ A missed native transition falls through to the composer verdict rather than rep
 `pane read --lines N` can return empty output when N is below the viewport height.
 The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.
 This generous floor is required for small composer and peek reads.
+Alternative-screen harnesses, including Claude Code, expose no scrollback history to Herdr at all.
+Any capture of such a pane is therefore bounded to the visible window regardless of the requested `--lines`.
 
 ### Native idle state
 
