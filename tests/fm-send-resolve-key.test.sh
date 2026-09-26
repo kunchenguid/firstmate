@@ -30,6 +30,8 @@
 #      (the operator path the OPEN DECISIONS hint names), while an unrelated
 #      writer's answered: note still cannot hijack or clear that key. A reserved
 #      key this send cannot close refuses before anything is sent.
+#   9. --defer-until accepts only a future-dated captain-held key and records
+#      the answer without closing its held task.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -113,6 +115,20 @@ setup_home() {  # <name> -> echoes a fresh home dir with an empty state/
   printf '%s\n' "$home"
 }
 
+setup_captain_home() {  # <home>
+  mkdir -p "$1/data" "$1/config" "$1/projects"
+  cp "$ROOT/.tasks.toml" "$1/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$1/data/backlog.md"
+}
+
+run_captain_hold() {  # <home> <command args...>
+  local home=$1
+  shift
+  FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" "$@"
+}
+
 drain_out() {  # <home>
   FM_STATE_OVERRIDE="$1/state" "$DRAIN" 2>/dev/null
 }
@@ -150,6 +166,48 @@ test_answer_send_closes_open_decision() {
     fail "the answered decision still lists as open: $out"
   fi
   pass "fm-send --resolve-key: the answer send itself closes the open decision"
+}
+
+# A keyed --defer-until records the captain's answer on a held task without
+# closing it.
+test_defer_flag_answers_captain_held_key() {
+  local dir fb log home rc show FM_CAPTAIN_HOLD_NOW=2026-09-20T12:00:00Z
+  command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; return 0; }
+  dir="$TMP_ROOT/defer-held-key"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home defer-held-key)
+  setup_captain_home "$home"
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'needs-decision [key=status-choice]: choose the sample route\n' > "$home/state/t1.status"
+  export FM_CAPTAIN_HOLD_NOW
+  run_captain_hold "$home" hold captain-call --title "Choose the sample route" \
+    --reason "waiting for the sample release" --repo sample >/dev/null \
+    || fail "could not create the held captain call"
+
+  run_send "$fb" "$home" "$log" t1 --defer-until 2026-12-01 "revisit later"; rc=$?
+  expect_code 1 "$rc" "--defer-until without --resolve-key should be refused"
+  [ ! -s "$log" ] || fail "a deferral without a key was sent"
+
+  run_send "$fb" "$home" "$log" t1 --resolve-key status-choice \
+    --defer-until 2026-12-01 "revisit later"; rc=$?
+  expect_code 1 "$rc" "a status-log decision cannot be deferred as a captain-held task"
+  [ ! -s "$log" ] || fail "a status-log deferral was sent"
+
+  run_send "$fb" "$home" "$log" t1 --resolve-key captain-call \
+    --defer-until 2026-09-20 "revisit later"; rc=$?
+  expect_code 1 "$rc" "a same-day keyed deferral should be refused"
+  [ ! -s "$log" ] || fail "a same-day deferral was sent"
+
+  run_send "$fb" "$home" "$log" t1 --resolve-key captain-call \
+    --defer-until 2026-12-01 "revisit later"; rc=$?
+  expect_code 0 "$rc" "a keyed captain-held task should accept --defer-until"
+  assert_contains "$(cat "$home/state/t1.inbox/001.msg")" "revisit later" \
+    "the deferred answer did not reach the worker inbox"
+  show=$(cd "$home" && FM_HOME="$home" tasks-axi show captain-call --full)
+  assert_contains "$show" "state: queued" "the deferred task was closed"
+  assert_contains "$show" "hold_until: 2026-12-01" "the keyed send lost its deferral date"
+  assert_contains "$show" "Resolution mode: deferred" "the keyed send did not record a deferred answer"
+  pass "fm-send --defer-until records a keyed captain deferral after delivering the answer"
 }
 
 # The answerer's close is this home's own bookkeeping: it must not re-wake the
@@ -906,6 +964,7 @@ test_decision_answer_partition_relocates_under_the_record() {
 }
 
 test_answer_send_closes_open_decision
+test_defer_flag_answers_captain_held_key
 test_answer_close_is_self_announced
 test_separate_resolve_key_answers_do_not_rewake
 test_colon_first_key_position_is_answerable
