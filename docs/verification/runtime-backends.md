@@ -1191,6 +1191,8 @@ ok - real herdr: a server restart restores and resumes every worker in its workt
 ok - real herdr: a relaunch replaces the pane in the same workspace, created in the worktree
 ok - real herdr: after a relaunch a restart resumes the replacement's conversation in the worktree
 ok - real herdr: a spawn that aborts after taking its lease and pane returns the lease and closes the pane
+ok - real herdr: an aborted spawn whose slot holds uncommitted work keeps it leased and names the manual release
+ok - real herdr: a spawn rolled back after publication, before launch, returns the lease and closes the pane
 ```
 
 On the same version, a pane restored with a resumed agent ignored later `herdr pane report-agent` and `report-agent-session` calls (`agent_not_found`), so its saved session stayed on the restored conversation after a newer one was reported.
