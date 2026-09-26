@@ -15,7 +15,15 @@
 # and escalate once if the recovery turn also completes without a correlated
 # report. Never loop, never repeatedly inject, never silently expire unresolved
 # records, and never treat wrong-home or structured-home heuristics as
-# acknowledgement. A same-basename restatement-copy of the mate home's
+# acknowledgement. An escalated record that is still unresolved is reminded
+# once per later live session by bin/fm-pending-reply-remind.sh: one check
+# wake, no second recovery, and no second status injection. Bearings lists
+# that record until it resolves.
+# Only the operator's keyed close of the escalation (fm-send --resolve-key
+# pending-reply-<corr>) ends the reminder and the Bearings row early.
+# The same-session escalation wake is the first surface, so the reminder
+# waits for a different session token. A poll with the same token does not
+# wake again. A same-basename restatement-copy of the mate home's
 # state/<task_id>.status onto the parent channel is a repair of the
 # FM_HOME-relative mixup, not acknowledgement of an arbitrary mate-home file.
 #
@@ -54,6 +62,13 @@
 #   recovery_turn_seen_busy=
 #   recovery_turn_completed_epoch=
 #   escalated_epoch=
+#   surfaced_session=       live session token that last surfaced this
+#                           escalation; empty until then
+#   escalation_dismissed_epoch=
+#                           when a later session found the operator's keyed
+#                           close of this escalation; once set, the record is
+#                           neither reminded nor rescanned. Cleared when the
+#                           record escalates
 #   escalation_closed_epoch=
 #                           when the durable status decision opened by that
 #                           escalation was closed again (see the escalation
@@ -350,6 +365,8 @@ recovery_delivery_outcome=
 recovery_turn_seen_busy=0
 recovery_turn_completed_epoch=
 escalated_epoch=
+surfaced_session=
+escalation_dismissed_epoch=
 resolved_epoch=
 resolved_via=
 wrong_home_hits=0
@@ -1149,6 +1166,28 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
   return "$rc"
 }
 
+# 0 when the operator dismissed this record's escalation: the parent channel
+# holds the resolved [key=pending-reply-<corr>] close fm-send --resolve-key
+# writes, after the escalation opened under that key. Nothing else dismisses,
+# so a legacy unkeyed escalation, any other resolved line, or a terminal line
+# that clears the whole fold leaves it unresolved and visible.
+fm_pending_reply_escalation_dismissed() {  # <record-path>
+  local rec=$1 parent_status key line untimed seen=''
+  [ -z "$(fm_pending_reply_get "$rec" escalation_dismissed_epoch)" ] || return 0
+  parent_status=$(fm_pending_reply_get "$rec" parent_status)
+  [ -n "$parent_status" ] && [ -f "$parent_status" ] || return 1
+  key=$(fm_pending_reply_escalation_key "$(fm_pending_reply_get "$rec" corr_id)")
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *"[key=$key]"*) ;; *) continue ;; esac
+    _fm_status_untimed "$line" untimed
+    case "$untimed" in
+      "blocked [key=$key]: "*) seen=open ;;
+      "resolved [key=$key]: pending-reply-resolved: "*) [ -z "$seen" ] || seen=dismissed ;;
+    esac
+  done < "$parent_status"
+  [ "$seen" = dismissed ]
+}
+
 _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 rec escalated closed parent_status escalation key note
   local open_line open_key open_note now close_line close_rc _task _via
@@ -1278,6 +1317,10 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1
   fm_pending_reply_set "$rec" phase escalated || return 1
+  fm_pending_reply_set "$rec" escalation_dismissed_epoch '' || return 1
+  # This session already receives the status wake. A later session reminds.
+  fm_pending_reply_set "$rec" surfaced_session \
+    "$("$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-remind.sh" --token "$state")" || return 1
   return 0
 }
 
@@ -1372,6 +1415,30 @@ fm_pending_reply_restatement_copy_same_basename() {  # <state-dir> <corr_id> <se
   fm_parent_channel_append_once "$parent_status" "$line"
 }
 
+# JSON array of unresolved escalated records for bearings decisions_open.
+# Prints [] when none are escalated. Does not wake or mutate.
+fm_pending_reply_escalated_decisions_json() {  # <state-dir>
+  local state=$1 dir rec corr task summary key item out=''
+  dir=$(fm_pending_reply_dir "$state")
+  [ -d "$dir" ] || { printf '[]'; return 0; }
+  for rec in "$dir"/*; do
+    [ -f "$rec" ] || continue
+    case "$(basename "$rec")" in .*) continue ;; esac
+    [ "$(fm_pending_reply_get "$rec" phase)" = escalated ] || continue
+    fm_pending_reply_escalation_dismissed "$rec" && continue
+    corr=$(fm_pending_reply_get "$rec" corr_id)
+    task=$(fm_pending_reply_get "$rec" task_id)
+    summary=$(fm_pending_reply_get "$rec" request_summary)
+    [ -n "$corr" ] && [ -n "$task" ] || continue
+    key=$(fm_pending_reply_escalation_key "$corr")
+    item=$(jq -nc --arg id "$task" --arg key "$key" \
+      --arg summary "pending-reply escalated: task=$task pending-reply-id=$corr request=$summary" \
+      '{id:$id,key:$key,verb:"blocked",summary:$summary,owner:"(main)"}') || return 1
+    if [ -n "$out" ]; then out="$out,$item"; else out=$item; fi
+  done
+  printf '[%s]' "$out"
+}
+
 # One reconciliation tick for a single record: resolve, observe, recover, escalate.
 # busy_state is busy|idle|unknown for the secondmate endpoint.
 # secondmate_home may be empty when unknown.
@@ -1451,7 +1518,7 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 fm_pending_reply_tick() {  # <state-dir>
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
   local observation observation_task found i
-  local -a observation_tasks=() observation_values=()
+  local -a observation_tasks=() observation_values=() live=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
@@ -1469,6 +1536,7 @@ fm_pending_reply_tick() {  # <state-dir>
       fm_pending_reply_close_escalation "$state" "$corr" || true
       continue
     fi
+    live+=("$rec")
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true
     phase=$(fm_pending_reply_get "$rec" phase)
     delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
@@ -1557,6 +1625,12 @@ fm_pending_reply_tick() {  # <state-dir>
       fi
     fi
     fm_pending_reply_tick_one "$state" "$corr" "$busy" "$sm_home" || true
+  done
+  for rec in ${live[@]+"${live[@]}"}; do
+    [ "$(fm_pending_reply_get "$rec" phase)" = escalated ] || continue
+    [ -z "$(fm_pending_reply_get "$rec" escalation_dismissed_epoch)" ] || continue
+    "$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-remind.sh" "$state" || true
+    break
   done
   return 0
 }

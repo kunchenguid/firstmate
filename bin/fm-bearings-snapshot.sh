@@ -43,6 +43,10 @@
 # floored age), and are counted in omitted[].
 # --all-decisions reveals every captain hold available within the bounded snapshot
 # and drops its gate, so a hold is never in both Captain's Call and Charted Next.
+# decisions_open also leads with every unresolved, undismissed escalated
+# pending reply (verb blocked, key pending-reply-<corr>, owner "(main)"); it is
+# not a captain hold, takes no bucket, and is listed with or without
+# --all-decisions.
 # Aging is a projection safety net only; the durable
 # deferral remains re-holding with --until.
 #
@@ -351,8 +355,19 @@ case "$BEARINGS_TODAY" in
   [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
   *) BEARINGS_TODAY=$(date -u +%Y-%m-%d) ;;
 esac
+# Unresolved escalated pending replies stay in decisions until they resolve.
+# Failure to read them leaves the rest of the projection intact.
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
+BEARINGS_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+ESCALATED_REPLIES=$(bash -c '. "$1"; fm_pending_reply_escalated_decisions_json "$2"' _ \
+  "$SCRIPT_DIR/fm-pending-reply-lib.sh" "$BEARINGS_STATE" 2>/dev/null) || ESCALATED_REPLIES='[]'
+case "$ESCALATED_REPLIES" in
+  \[*\]) ;;
+  *) ESCALATED_REPLIES='[]' ;;
+esac
 MODEL=$(printf '%s' "$SNAP" | jq \
   --arg home "$HOME_LABEL" \
+  --argjson escalated_replies "$ESCALATED_REPLIES" \
   --arg now "$NOW" \
   --arg today "$BEARINGS_TODAY" \
   --arg prs "$PR_STATUS" \
@@ -522,7 +537,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                   | (if (($name | type) == "string" and ($name | test("[^[:space:]]")))
                      then $name else ($m.id + "/" + .id) end) | trunc(70)),
             doing:((.doing // .state) | trunc(90))} ]) as $in_flight_all
-  | ([ .backlog.records[]
+  | ($escalated_replies + ([ .backlog.records[]
          | . as $record
          | select(.structured and .hold_bucket != null)
          | select(($all_decisions == 1) or live_captain_call)
@@ -544,7 +559,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                          | index($id) | not)
                 | {id:($m.id + "/" + .id),key:.id,verb:"captain-hold",
                    summary:hold_summary((.title // .id);
-                                        (.hold_reason // "captain decision pending")),owner:$m.id} ])[] ]) as $decisions_all
+                                        (.hold_reason // "captain decision pending")),owner:$m.id} ])[] ])) as $decisions_all
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and projected_deferred_hold) ]
