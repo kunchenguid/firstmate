@@ -49,6 +49,13 @@ fake_screen() {
     ready)
       printf 'Welcome to Kimi Code!\ncontext: 0%% (0/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n'
       ;;
+    ready-v2)
+      # Kimi 2.0.1 visible viewport: banner scrolled off, /help hint visible
+      printf '│  Send /help for help information.      │\n│  Directory: %s │\n│  Version:   2.0.1                      │\n╰────────────────────────────────────────╯\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\nNever Ask  K2.8 Preview\n                 context: 0%% (0/1M)\n' "$FM_FAKE_PANE_PATH"
+      ;;
+    delivered-v2)
+      printf '✨ Read the brief at %s and follow it exactly.\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\nNever Ask  K2.8 Preview\n                 context: 3%% (21k/1M)\n' "$FM_FAKE_BRIEF_REAL"
+      ;;
     trust)
       printf '╭─ Trust this folder? ─╮\n│ ↑↓ navigate · Enter select · Esc exit │\n│ %s │\n│ ❯ Trust this folder │\n│   Don'"'"'t trust │\n╰──────────────────────────────╯\n' "$FM_FAKE_PANE_PATH"
       ;;
@@ -89,7 +96,7 @@ fake_history() {
 fake_cursor_y() {
   case "$state" in
     pointer-typed) printf '3\n' ;;
-    ready|delivered) printf '3\n' ;;
+    ready|delivered|ready-v2|delivered-v2) printf '3\n' ;;
     *) printf '1\n' ;;
   esac
 }
@@ -139,7 +146,12 @@ case "${1:-}" in
                 late) printf 'booting\n' > "$FM_FAKE_KIMI_STATE" ;;
                 blink) printf 'banner-first\n' > "$FM_FAKE_KIMI_STATE" ;;
                 wrapped) printf 'trust-wrapped\n' > "$FM_FAKE_KIMI_STATE" ;;
-                *) printf 'ready\n' > "$FM_FAKE_KIMI_STATE" ;;
+                *)
+                  case "${FM_FAKE_KIMI_READY_VERSION:-v1}" in
+                    v2) printf 'ready-v2\n' > "$FM_FAKE_KIMI_STATE" ;;
+                    *) printf 'ready\n' > "$FM_FAKE_KIMI_STATE" ;;
+                  esac
+                  ;;
               esac
             fi
             ;;
@@ -153,7 +165,7 @@ case "${1:-}" in
                 ;;
             esac
             ;;
-          ready|delivered)
+          ready|delivered|ready-v2|delivered-v2)
             printf 'enter\n' >> "$FM_FAKE_KIMI_STRAY_ENTER_LOG"
             ;;
           pointer-typed)
@@ -162,10 +174,16 @@ case "${1:-}" in
                  && [ ! -f "$FM_FAKE_KIMI_SWALLOWED" ]; then
                 : > "$FM_FAKE_KIMI_SWALLOWED"
               else
-                printf 'delivered\n' > "$FM_FAKE_KIMI_STATE"
+                case "${FM_FAKE_KIMI_READY_VERSION:-v1}" in
+                  v2) printf 'delivered-v2\n' > "$FM_FAKE_KIMI_STATE" ;;
+                  *) printf 'delivered\n' > "$FM_FAKE_KIMI_STATE" ;;
+                esac
               fi
             else
-              printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+              case "${FM_FAKE_KIMI_READY_VERSION:-v1}" in
+                v2) printf 'ready-v2\n' > "$FM_FAKE_KIMI_STATE" ;;
+                *) printf 'ready\n' > "$FM_FAKE_KIMI_STATE" ;;
+              esac
             fi
             ;;
         esac
@@ -268,6 +286,7 @@ run_spawn() {
     FM_FAKE_TMUX_VISIBLE_FAILS="${FM_FAKE_TMUX_VISIBLE_FAILS:-no}" \
     FM_FAKE_KIMI_SWALLOWED="$case_dir/kimi.swallowed" \
     FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
+    FM_FAKE_KIMI_READY_VERSION="${FM_FAKE_KIMI_READY_VERSION:-v1}" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
     FM_KIMI_READY_POLLS="${FM_KIMI_READY_POLLS:-2}" FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
@@ -1121,6 +1140,23 @@ test_kimi_bordered_prompt_needs_no_override() {
   pass "composer classifier: kimi's existing bordered > shape is already safe without an override"
 }
 
+test_kimi_2_0_1_ready_signal_without_visible_banner() {
+  local id rec out rc
+  id=kimi-v2-ready-z2
+  rec=$(make_spawn_case v2-ready "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_READY_VERSION=v2 run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "kimi 2.0.1 should reach ready via the /help hint when the banner scrolls off"
+  assert_contains "$out" "spawned $id harness=kimi" \
+    "kimi 2.0.1 spawn did not proceed to delivery"
+  assert_grep "Read the brief at " "$CASE_DIR/pointer.log" \
+    "kimi 2.0.1 brief pointer was not delivered after readiness verification"
+  pass "fm-spawn: kimi 2.0.1 reaches ready when the banner scrolls off the visible viewport"
+}
+
+test_kimi_2_0_1_ready_signal_without_visible_banner
 test_kimi_hook_install_is_surgical_idempotent_and_removable
 test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config

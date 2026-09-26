@@ -1,0 +1,23 @@
+│  ▐█████▌  Send /help for help information.      │
+ │                                                 │
+ │  Directory: /Users/justinlobaito                │
+ │  Session:                                       │
+ │  Model:     K2.8 Preview                        │
+ │  Version:   2.0.1                               │
+ │                                                 │
+ ╰─────────────────────────────────────────────────╯
+
+ ✦ Kimi Code Desktop is here — Everything you love
+                             about Kimi Code, now on
+                             desktop
+   Run /desktop or visit https://www.kimi.com/code
+   to install
+
+   No session yet — one will be created on your
+ first message.
+
+ ╭─────────────────────────────────────────────────╮
+ │ >                                               │
+ ╰─────────────────────────────────────────────────╯
+ Never Ask  K2.8 Preview thinking: max  ~
+                                  context: 0% (0/1M)

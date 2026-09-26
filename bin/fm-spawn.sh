@@ -3819,7 +3819,11 @@ kimi_trust_marker_is_present() { # <plain-pane-capture>
 # A successful key send is not evidence that Kimi accepted trust. Only the
 # ordinary readiness signals in a later capture prove advancement.
 kimi_ready_signal_is_present() { # <plain-pane-capture>
+  # ponytail: two independent banner tokens so no single line is load-bearing;
+  # 2.0.1's taller startup box pushes 'Welcome to Kimi Code!' off a 24-row
+  # visible viewport while the /help hint stays visible one line below it.
   case "$1" in *'Welcome to Kimi Code!'*) return 0 ;; esac
+  case "$1" in *'Send /help for help information.'*) return 0 ;; esac
   kimi_composer_is_empty
 }
 
