@@ -1017,6 +1017,150 @@ test_own_and_absent_slot_claims_still_tear_down() {
   pass "fm-teardown: a task's own slot claim, and an unclaimed slot, both still tear down"
 }
 
+# The two-record reuse collision: the finished task's pool slot was handed to a
+# second task that is still running, and BOTH records are still readable. On the
+# records alone there is no way to tell which half is stale, so the record scan
+# refuses both directions and neither record can ever be cleaned up - observed
+# 2026-09-26, when two merged ship tasks both recorded
+# worktree=/home/pikos/.treehouse/icms-df8afa/4/icms. The slot's own claim
+# resolves it, and this is the shape that resolution exists for: the claim names
+# the second task, so the first task's own cleanup runs and every slot step stays
+# skipped, and the surviving record then tears down normally and returns the slot
+# (asserted at the end, so a fix that only moved the deadlock cannot pass).
+write_two_record_reuse_pair() {  # <case> <stale-id> <current-id>
+  local dir=$1 id=$2 other=$3
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+}
+
+test_claimed_reassignment_resolves_a_two_record_slot_collision() {
+  local dir id=stale-task other=current-task worker rc
+
+  dir=$(make_case slot-two-record-claimed)
+  write_two_record_reuse_pair "$dir" "$id" "$other"
+  # The claim names the other task, which is the current holder of the slot.
+  claim_pool_slot "$dir" "$other"
+  # A clean copy plus a live worker in it: the real incident's shape, where
+  # nothing is unlanded and the refusal could not be blamed on either.
+  rm -f "$dir/worktree/sentinel"
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] \
+    || fail "teardown of the stranded half of a claimed two-record slot collision refused: $(cat "$dir/stderr")"
+  kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker in a claimed slot another record also names"
+  assert_reassigned_slot_left_alone "$dir" "$id" "$other" "claimed two-record slot collision"
+  assert_contains "$(cat "$dir/stderr")" "reassigned" \
+    "the two-record bypass should name the reassignment as the cause"
+  # The current owner's endpoint is read but never killed: only this task's own
+  # window is closed.
+  ! grep -Fq "kill-window -t =firstmate:=fm-$other" "$dir/runtime.log" \
+    || fail "teardown killed the current owner's endpoint: $(cat "$dir/runtime.log")"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# two-record claimed slot collision\n'
+    printf '$ FM_HOME=%s bin/fm-teardown.sh %s\n' "$dir/home" "$id"
+    printf 'stderr:\n'; cat "$dir/stderr"
+    printf 'exit=%s\nruntime calls:\n' "$rc"; cat "$dir/runtime.log"
+    printf 'stale metadata=%s current metadata=%s claim=%s\n' \
+      "$([ -e "$dir/home/state/$id.meta" ] && printf present || printf removed)" \
+      "$([ -e "$dir/home/state/$other.meta" ] && printf present || printf removed)" \
+      "$([ -e "$dir/pool/1/.fm-slot-owner" ] && printf present || printf removed)"
+  fi
+
+  # The record that IS current tears down normally afterwards and returns the
+  # slot, so resolving the pair in one direction did not strand the other.
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+  run_case "$dir" "$other" > "$dir/stdout2" 2> "$dir/stderr2" \
+    || fail "teardown of the current owner after the stranded half was cleaned up failed: $(cat "$dir/stderr2")"
+  assert_absent "$dir/home/state/$other.meta" "the current owner's teardown left the task record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "the current owner's teardown left its spent slot claim behind"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "the current owner's teardown did not return the pool slot: $(cat "$dir/runtime.log")"
+
+  pass "fm-teardown: a claim naming the other record resolves a two-record slot collision in both directions"
+}
+
+# Every weaker claim keeps the two-record refusal. A bypass keyed on "some claim
+# exists" rather than on "this claim names this other record" would hand a live
+# task's slot back to the pool, so each of these must still refuse before any
+# mutation or runtime call.
+noop() { :; }
+claim_unreadable() { printf 'not-a-claim\n' > "$1/pool/1/.fm-slot-owner"; }
+claim_empty() { : > "$1/pool/1/.fm-slot-owner"; }
+claim_own() { printf 'task=%s\nhome=%s/home\n' "$2" "$1" > "$1/pool/1/.fm-slot-owner"; }
+# A claim naming a third task says the slot moved on AGAIN. It resolves nothing
+# about this pair, so the refusal stands.
+claim_third() { printf 'task=third-task\nhome=%s/home\n' "$1" > "$1/pool/1/.fm-slot-owner"; }
+# Two colliding records and one claim: the claim can name only one of them, so
+# the record it does not name stays contested and the pair is still refused. The
+# refusal must name THAT record, not the claim-covered one: a bypass that
+# accepted the whole slot on the first claim match would let the uncovered record
+# through with the slot.
+claim_second_of_three() {
+  fm_write_meta "$1/home/state/third-task.meta" \
+    "window=firstmate:fm-third-task" "endpoint_task_id=third-task" \
+    "worktree=$1/worktree" "project=$1/project" "kind=ship"
+  printf 'task=current-task\nhome=%s/home\n' "$1" > "$1/pool/1/.fm-slot-owner"
+}
+
+assert_two_record_collision_still_refuses() {  # <case-name> <claim-setup-fn> [named-id]
+  local case=$1 setup=$2 named=${3:-current-task}
+  local dir worker
+  local id=stale-task other=current-task rc
+  dir=$(make_case "$case")
+  write_two_record_reuse_pair "$dir" "$id" "$other"
+  "$setup" "$dir" "$id" "$other"
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] \
+    || fail "$case: teardown returned a pool slot named by a second task record"
+  assert_present "$dir/home/state/$id.meta" "$case: teardown removed the stale task's record"
+  assert_present "$dir/home/state/$other.meta" "$case: teardown removed the other task's record"
+  assert_present "$dir/worktree/sentinel" "$case: teardown reset the contested pool slot"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "$case: teardown reached the runtime: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$named" \
+    "$case: the refusal should name the task still holding the slot"
+  kill -0 "$worker" 2>/dev/null || fail "$case: teardown killed the worker in the contested slot"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+}
+
+test_weak_claims_keep_the_two_record_slot_collision_refused() {
+  # No claim at all: a slot taken before claims existed, or already returned.
+  assert_two_record_collision_still_refuses two-record-no-claim noop
+  assert_two_record_collision_still_refuses two-record-unreadable-claim claim_unreadable
+  assert_two_record_collision_still_refuses two-record-empty-claim claim_empty
+  # A claim naming the tearing-down task itself is the OPPOSITE of proof that the
+  # slot moved on: it claims this very record still holds the slot, so the second
+  # record is the unexplained one and the refusal stands.
+  assert_two_record_collision_still_refuses two-record-own-claim claim_own
+  assert_two_record_collision_still_refuses two-record-third-claim claim_third
+  assert_two_record_collision_still_refuses two-record-partly-covered-claim \
+    claim_second_of_three third-task
+
+  pass "fm-teardown: a missing, unreadable, empty, own-task, third-task, or partly-covering claim keeps the two-record refusal"
+}
+
 # The tmux shim used by the endpoint-close tests below: every subcommand
 # reaches the real isolated server, so presence is always read from real tmux.
 # When FM_TEST_BLOCK_KILL is set, `kill-window` alone fails without forwarding,
@@ -1404,6 +1548,8 @@ test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_own_and_absent_slot_claims_still_tear_down
+test_claimed_reassignment_resolves_a_two_record_slot_collision
+test_weak_claims_keep_the_two_record_slot_collision_refused
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot
