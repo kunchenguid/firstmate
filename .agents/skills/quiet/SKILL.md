@@ -3,7 +3,7 @@ name: quiet
 description: >-
   Enter quiet supervision mode when the captain invokes /quiet or asks for quiet mode, quiet-while-present, or fewer routine wake turns while they stay in the session.
   On Pi or a home whose attended supervision host runs, it enters nothing: the attended posture already is quiet mode.
-  Elsewhere it sets the same durable away/quiet-mode flag as /afk, in `quiet` mode, so the sub-supervisor daemon self-handles routine wakes and escalates captain-relevant events exactly as away mode does, but ordinary captain chat does NOT exit it - only an explicit `/quiet off` does.
+  Elsewhere it sets the same durable away/quiet-mode flag as /afk, in `quiet` mode, so the sub-supervisor daemon self-handles routine wakes and escalates captain-relevant events exactly as away mode does, but ordinary captain chat does NOT exit it - `/quiet off` exits it, and on an opted-in host home `/quiet` under a live away record returns first.
 user-invocable: true
 metadata:
   internal: true
@@ -30,16 +30,11 @@ The only things quiet mode changes are which mode the flag declares and what exi
    When it exits 1, continue with step 1; if it printed a line, first tell the captain plainly what keeps supervision from already being quiet here.
    When it exits 2, its line names this home's live away record: follow the return rule above, then run `quiet-check` again and follow its result.
 
-1. **Enter the lifecycle through `bin/fm-afk-launch.sh`, exactly as `/afk`
-   does, with `FM_AFK_MODE=quiet` set first.**
-   Follow the `afk` skill's "What it does" steps 1-3 verbatim (terminal-
-   backed vs harness-native entry, daemon-already-running refresh, never
-   arming a separate `fm-watch.sh`) with one addition: set
-   `FM_AFK_MODE=quiet` on `enter`, so it can refuse where quiet mode needs
-   nothing and records the quiet mode for the daemon. `start` (or
-   `start-native`) reads that mode from the record when the variable is unset;
-   setting `FM_AFK_MODE=quiet` explicitly there also works. Either way,
-   `state/.afk`'s first line reads `quiet` instead of `away`.
+1. **Enter the daemon lifecycle through `bin/fm-afk-launch.sh`, with `FM_AFK_MODE=quiet` set on `enter`.**
+   Use the `afk` skill's daemon launch path for this harness, even on an opted-in host home when `quiet-check` returned 1; its no-daemon rule applies to `/afk`, not this fallback.
+   Set `FM_AFK_MODE=quiet` on `enter` so it records quiet mode for the daemon; `start` (or `start-native`) reads that mode from the record when the variable is unset, and an explicit `FM_AFK_MODE=quiet` there also works.
+   `state/.afk`'s first line then reads `quiet` instead of `away`.
+   Do not arm a separate `fm-watch.sh` where the daemon runs; acknowledge quiet mode as in step 2 below rather than giving the `/afk` away announcement.
    Leaving `FM_AFK_MODE` unset on a bare refresh of an already-running quiet
    daemon is also correct and does nothing wrong: `fm_afk_flag_write`
    preserves the on-disk mode when no explicit mode is given, so a plain
@@ -56,14 +51,9 @@ The only things quiet mode changes are which mode the flag declares and what exi
 Unlike `/afk`, ordinary chat is never the exit signal - that is the entire
 point of this mode (AGENTS.md section 8's away-mode stub, quiet branch).
 
-- Only an explicit `/quiet off` (or the captain plainly asking to leave quiet
-  mode / resume normal supervision) exits it: run `bin/fm-afk-return.sh`
-  unchanged, exactly the procedure `/afk`'s "How to exit afk" section
-  documents for its own return path (correct-ordered daemon shutdown,
-  durable wake presentation and acknowledgement, escalation/wedge evidence,
-  and the return-catch-up gate).
-  That script does not read or care about the flag's mode, so it needs no
-  quiet-specific variant.
+- An explicit `/quiet off` (or the captain plainly asking to leave quiet mode / resume normal supervision) exits daemon-backed quiet mode: run `bin/fm-afk-return.sh` unchanged, exactly the procedure `/afk`'s "How to exit afk" section documents for its own return path (correct-ordered daemon shutdown, durable wake presentation and acknowledgement, escalation/wedge evidence, and the return-catch-up gate).
+  On an opted-in host home, `/quiet` under a live record also runs that return before rechecking quiet mode, as in step 0.
+  The return script does not read or care about the flag's mode, so it needs no quiet-specific variant.
 - A marked daemon escalation, or a message beginning `/quiet` while already
   in quiet mode (refresh, not exit) -> stay in quiet mode and process it, the
   same two carve-outs `/afk` documents for away mode.
