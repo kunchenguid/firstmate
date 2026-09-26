@@ -19,22 +19,24 @@ In this document, an arm is one run of `bin/fm-watch-arm.sh`, which starts a wat
 
 ## Ownership
 
-On Pi, omp, OpenCode, Cursor, and Claude primaries, one component owns re-arming the watcher.
+On Pi, omp, Hermes, OpenCode, Cursor, and Claude primaries, one component owns re-arming the watcher.
 Codex and Grok keep their own protocols; see [Manual recovery and other harnesses](#manual-recovery-and-other-harnesses).
 
 | Harness | Re-arm owner |
 | --- | --- |
 | Pi | `.pi/extensions/fm-primary-pi-watch.ts` |
 | omp | `.omp/extensions/fm-primary-omp-watch.ts` |
+| Hermes | `.hermes/firstmate/fm_hermes_watch.py` (the Firstmate Hermes plugin) |
 | OpenCode | `.opencode/plugins/fm-primary-watch-arm.js` |
 | Cursor | `.cursor/hooks.json` `stop` hook (`bin/fm-turnend-guard-cursor.sh`) |
 | Claude | `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) |
 
 On a non-Pi primary, a home opted into the supervision host also changes what the owner runs; see [Supervision host](#supervision-host).
 
-### Pi, omp, and OpenCode adapters
+### Pi, omp, Hermes, and OpenCode adapters
 
-Pi's `.pi/extensions/fm-primary-pi-watch.ts`, omp's `.omp/extensions/fm-primary-omp-watch.ts`, and OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` own continuous re-arm after an actionable child close.
+Pi's `.pi/extensions/fm-primary-pi-watch.ts`, omp's `.omp/extensions/fm-primary-omp-watch.ts`, Hermes's `.hermes/firstmate/fm_hermes_watch.py`, and OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` own continuous re-arm after an actionable child close.
+The Hermes owner delivers each wake only while the session is idle, because a classic-CLI plugin injection during a running turn interrupts it, and persists an undelivered actionable close for the next owning Hermes process.
 Each adapter:
 
 - Starts the next arm before delivering the wake prompt.

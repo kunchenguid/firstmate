@@ -20,6 +20,13 @@
 # decision, so this file delegates to it rather than widening the name match.
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
+# Hermes Agent is likewise not a command name: its live process is a bare
+# Python interpreter running an inline bootstrap, and this checkout is often
+# cloned under a hermes-named directory, so a name or substring rule would both
+# miss the real process and claim unrelated firstmate helpers.
+# bin/fm-hermes-lib.sh owns that structural rule.
+# shellcheck source=bin/fm-hermes-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-hermes-lib.sh"
 
 # Known harness command names; extend when a new adapter is verified. omp is
 # anchored exactly like pi: its process name is the bare word `omp` (verified,
@@ -64,6 +71,7 @@ fm_harness_path_name() {  # <path>
 #      is identified by its install path on macOS and by argv[0] on Linux.
 #   3. a bare interpreter (node, python) running a harness script path.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
+#   Hermes's structural identity (bin/fm-hermes-lib.sh) is tested before 3.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
@@ -78,6 +86,14 @@ fm_harness_process_matches() {  # <comm> <args>
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
+  # Hermes before the generic interpreter grep: its argv carries the whole
+  # launch prompt, and a brief mentioning claude would otherwise both match and
+  # set FM_HARNESS_IS_CLAUDE, extending the contiguous run past the session.
+  case "$comm" in
+    *python*|*Python*|*/hermes|hermes)
+      fm_hermes_args_are_hermes "$args" && return 0
+      ;;
+  esac
   # Bare interpreter (e.g. node): match the harness name in its script path.
   case "$comm" in
     *node*|*python*)

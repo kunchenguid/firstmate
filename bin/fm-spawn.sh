@@ -167,7 +167,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|hermes)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -359,6 +359,10 @@
 #     __DEVINBIN__ resolved Devin executable
 #     __DEVINCONFIG__ private per-task Devin config with lifecycle hooks
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
+#     __HERMESBIN__ resolved Hermes Agent executable for a hermes launch
+#     __HERMESENV__ the Firstmate Hermes plugin's launch environment: worker role,
+#                   code root, state dir, task id, busy gen, and turn-ended marker
+#                   for a crewmate or scout; FM_HERMES_ROOT=<home> for a secondmate
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -923,7 +927,7 @@ spawn_remote_secondmate() {
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
   fi
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor) ;;
+  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | hermes) ;;
   *)
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1815,7 +1819,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | hermes)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -2029,7 +2033,7 @@ launch_template() {
   # naming them with -e as well loads each twice (verified), doubling every
   # session_stop continuation.
   omp)
-    printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 __OMPBIN__ --config __OMPWORKERCFG__ --auto-approve --cwd __WORKTREE__'
+    printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u HERMES_AGENT FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 __OMPBIN__ --config __OMPWORKERCFG__ --auto-approve --cwd __WORKTREE__'
     if [ "$kind" = secondmate ]; then
       printf '%s' ' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
@@ -2080,7 +2084,7 @@ launch_template() {
   # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
   # only reads the environment. Cursor exposes no effort flag, so the shared
   # effort axis is deliberately omitted and stays in task metadata only.
-  cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_INVOKED_AS -u HERMES_AGENT __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # gemini (Google Gemini CLI): a positional query starts the supervised
   # interactive session and auto-submits it, so the brief rides the launch
   # command exactly as it does for claude and grok (verified: a multi-line
@@ -2120,6 +2124,25 @@ launch_template() {
   # appends native worker lifecycle hooks. Clear NO_COLOR so the shared
   # composer guard can distinguish the dim placeholder from a real draft.
   devin) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR __DEVINBIN__ --permission-mode dangerous --respect-workspace-trust false --config __DEVINCONFIG__ __MODELFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # Hermes Agent (Nous Research). `chat -q` on a real TTY seeds an INTERACTIVE
+  # session with the brief submitted literally as its first turn (hermes-agent
+  # v0.21.5 --help; a literal first turn is why a /skill cannot ride -q, and
+  # the typed U+2063 operational marker was verified to survive submission).
+  # --cli pins the classic prompt_toolkit REPL: the captain's config may select
+  # the Ink TUI (display.interface), whose composer, key handling, and
+  # --reasoning passthrough differ, and every worker fact in
+  # references/harness/hermes.md is verified on the classic CLI. --yolo sets
+  # HERMES_YOLO_MODE so no command approval can park an unattended worker; it
+  # deliberately does NOT cover Hermes's paid-model confirmation, which stays a
+  # captain decision (bin/fm-busy-lib.sh fm_busy_hermes_launch_prompt_tail).
+  # Hermes has no workspace-trust dialog and no turn-end or busy flag of its
+  # own: both ride the Firstmate plugin, reached through the loader
+  # bin/fm-hermes-plugin.sh installs, in worker role for crewmates and scouts
+  # and primary role (FM_HERMES_ROOT = the secondmate home) for a secondmate,
+  # via __HERMESENV__. Foreign primary markers are cleared, as for cursor, and
+  # Hermes's own inherited identity (HERMES_AGENT, HERMES_SESSION_ID) is
+  # cleared too so the worker publishes its own rather than its launcher's.
+  hermes) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u AI_AGENT -u HERMES_AGENT -u HERMES_SESSION_ID __HERMESENV__ __HERMESBIN__ chat --cli --yolo __MODELFLAG____EFFORTFLAG__-q "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Kimi Code rejects a positional prompt, so it launches bare and receives
   # only an absolute brief pointer after the TUI readiness gate below.
   # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -2309,6 +2332,28 @@ agy)
     echo "error: agy executable not found on PATH; install Antigravity CLI or select a different verified harness" >&2
     exit 1
   }
+  ;;
+hermes)
+  HERMES_BIN=$(resolve_pi_executable hermes) || {
+    echo "error: hermes executable not found on PATH; install Hermes Agent or select a different verified harness" >&2
+    exit 1
+  }
+  # Without the loader a Hermes worker has no busy state and no turn-end
+  # signal, and a Hermes secondmate has no session start, watcher, or guard, so
+  # the spawn refuses rather than launching an unsupervisable agent. Installing
+  # writes the captain's Hermes home and stays an explicit captain action.
+  # `unregistered` only concerns a hand-started primary in this home; every
+  # launch below names its root through FM_HERMES_ROOT.
+  if [ "$RAW_LAUNCH" -eq 0 ]; then
+    HERMES_PLUGIN_STATUS=$(FM_HERMES_BIN="$HERMES_BIN" "$SCRIPT_DIR/fm-hermes-plugin.sh" status --root "$FM_ROOT" 2>/dev/null || true)
+    case "$HERMES_PLUGIN_STATUS" in
+    ok | unregistered) ;;
+    *)
+      echo "error: the Firstmate Hermes plugin is not usable (status: ${HERMES_PLUGIN_STATUS:-unknown}); ask the captain to run bin/fm-hermes-plugin.sh install, which copies the loader into the Hermes home and enables it" >&2
+      exit 1
+      ;;
+    esac
+  fi
   ;;
 esac
 
@@ -2530,7 +2575,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | hermes)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
@@ -2582,6 +2627,15 @@ effort_flag_for_harness() {
       printf -- '--codex-effort %s ' "$(shell_quote ultra)"
       ;;
     low | medium | high | xhigh | max) printf -- '--thinking %s ' "$(shell_quote "$effort")" ;;
+    esac
+    ;;
+  hermes)
+    # hermes-agent v0.21.5 `chat --reasoning` accepts none|minimal|low|medium|
+    # high|xhigh|max|ultra, a superset of the shared vocabulary, so every shared
+    # level maps straight across. The flag is honoured by the classic CLI the
+    # launch forces with --cli; Hermes does not forward it into the Ink TUI.
+    case "$effort" in
+    low | medium | high | xhigh | max) printf -- '--reasoning %s ' "$(shell_quote "$effort")" ;;
     esac
     ;;
   omp)
@@ -4332,8 +4386,8 @@ if [ "$KIND" != secondmate ]; then
     }
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
     ;;
-  gemini | devin)
-    if [ "$RAW_LAUNCH" -eq 0 ]; then
+  gemini | devin | hermes)
+    if [ "$RAW_LAUNCH" -eq 0 ] && { [ "$HARNESS" != hermes ] || [ "$KIND" != secondmate ]; }; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -4933,6 +4987,17 @@ if [ "$HARNESS" = rovo ]; then
   }
   LAUNCH=${LAUNCH//__ROVOCONFIGOVERRIDE__/$ROVOCONFIGOVERRIDE}
 fi
+if [ "$HARNESS" = hermes ]; then
+  # The Firstmate plugin's role and wiring, carried as launch environment
+  # because Hermes offers no per-task plugin or hook file outside the project's
+  # own .hermes/ (fm_hermes_worker.py and .hermes/plugins/firstmate/__init__.py
+  # own the variables). A secondmate is a primary in its own home.
+  if [ "$KIND" = secondmate ]; then
+    HERMES_LAUNCH_ENV="FM_HERMES_ROOT=$(shell_quote "$PROJ_ABS")"
+  else
+    HERMES_LAUNCH_ENV="FM_HERMES_ROLE=worker FM_HERMES_ROOT=$(shell_quote "$FM_ROOT") FM_HERMES_STATE=$(shell_quote "$STATE_REAL") FM_HERMES_TASK=$(shell_quote "$ID") FM_HERMES_BUSY_GEN=$(shell_quote "$BUSY_GEN") FM_HERMES_TURNEND=$sq_turnend"
+  fi
+fi
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
@@ -4946,6 +5011,10 @@ pi | pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
 cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
 omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
+hermes)
+  LAUNCH=${LAUNCH//__HERMESBIN__/"$(shell_quote "$HERMES_BIN")"}
+  LAUNCH=${LAUNCH//__HERMESENV__/$HERMES_LAUNCH_ENV}
+  ;;
 devin)
   LAUNCH=${LAUNCH//__DEVINBIN__/"$(shell_quote "$DEVIN_BIN")"}
   LAUNCH=${LAUNCH//__DEVINCONFIG__/"$(shell_quote "$STATE_REAL/$ID.devin-config.json")"}
@@ -4970,7 +5039,10 @@ case "$LAUNCH" in
 esac
 case "$HARNESS" in
 claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin)
-  LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
+  # HERMES_AGENT is Hermes's own identity marker and Hermes only setdefaults it,
+  # so a value inherited from a Hermes primary would otherwise survive into this
+  # worker (bin/fm-harness.sh harness_marker tests it before CLAUDECODE).
+  LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u HERMES_AGENT $LAUNCH"
   ;;
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
@@ -5010,7 +5082,7 @@ if [ "$KIND" = secondmate ]; then
   # guard tolerates the extension hand-off exactly as a Pi primary does.
   case "$HARNESS" in
   claude | cursor) supervision_model=autoarm ;;
-  pi | pi-signed | omp) supervision_model=extension ;;
+  pi | pi-signed | omp | hermes) supervision_model=extension ;;
   *) supervision_model=persistent ;;
   esac
   # Deliver the primary's EFFECTIVE trace-context decision as a normalized on/off

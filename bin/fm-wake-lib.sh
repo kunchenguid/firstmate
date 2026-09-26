@@ -196,8 +196,10 @@ fm_watcher_healthy() {
 #               watcher process is healthy, and a stale beacon is still healthy
 #               while a Claude auto-arm generation explains the gap
 #               (fm_autoarm_midturn_healthy).
-#   extension   Pi (and pi-signed): .pi/extensions/fm-primary-pi-watch.ts owns
-#               continuity. It tears the watcher down on every actionable wake and
+#   extension   Pi (and pi-signed), omp, and Hermes: the primary's own extension
+#               or plugin (.pi/extensions/fm-primary-pi-watch.ts,
+#               .omp/extensions/fm-primary-omp-watch.ts,
+#               .hermes/firstmate/fm_hermes_watch.py) owns continuity. It tears the watcher down on every actionable wake and
 #               spawns the replacement itself, so a genuinely unheld singleton lock
 #               is healthy during that hand-off only with extension ownership and a
 #               fresh beacon. Any held but unhealthy lock remains down.
@@ -215,7 +217,7 @@ fm_supervision_model() {
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
     claude|cursor) printf 'autoarm\n' ;;
-    pi|pi-signed|omp) printf 'extension\n' ;;
+    pi|pi-signed|omp|hermes) printf 'extension\n' ;;
     *) printf 'persistent\n' ;;
   esac
 }
@@ -296,12 +298,26 @@ fm_omp_extension_owns_supervision() {
     "fm-primary-turnend-guard.ts:.omp-turnend-extension-loaded"
 }
 
+# fm_hermes_extension_owns_supervision <state> <root>
+# The Hermes primary's proof, keyed on the two tracked plugin modules that own
+# watcher continuity and the turn-end backstop (.hermes/firstmate/) and their
+# own state markers. The Hermes plugin runs inside the Hermes process, which is
+# exactly the pid bin/fm-lock.sh records (bin/fm-hermes-lib.sh identifies it),
+# so the markers bind to state/.lock like the Pi and omp pairs and a session on
+# another harness can never vouch for a Hermes home or the reverse.
+fm_hermes_extension_owns_supervision() {
+  fm_extension_pair_owns_supervision "$1" "$2/.hermes/firstmate" \
+    "fm_hermes_watch.py:.hermes-watch-plugin-loaded" \
+    "fm_hermes_guard.py:.hermes-turnend-plugin-loaded"
+}
+
 # fm_extension_owns_supervision <state> <root>
 # The extension-model proof the verdict below consults: whichever extension
 # family's markers the lock-owning session recorded. Exactly one family can
-# match because both bind to the same lock pid.
+# match because every family binds to the same lock pid.
 fm_extension_owns_supervision() {
-  fm_pi_extension_owns_supervision "$1" "$2" || fm_omp_extension_owns_supervision "$1" "$2"
+  fm_pi_extension_owns_supervision "$1" "$2" || fm_omp_extension_owns_supervision "$1" "$2" \
+    || fm_hermes_extension_owns_supervision "$1" "$2"
 }
 
 fm_extension_pair_owns_supervision() {  # <state> <extension-dir> <source:marker[:phase]>...

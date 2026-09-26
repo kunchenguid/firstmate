@@ -303,7 +303,7 @@ Both choices are local to each Firstmate home and are not part of secondmate inh
 The optional local, gitignored `config/supervision-host` enables a supervision host for this home.
 The host runs the supervision branch's contract on a headless engine session beside a non-Pi primary.
 [docs/supervision-host.md](supervision-host.md) defines its design, current scope, and verified engines.
-A Claude, Cursor, OpenCode, omp, Grok, or Codex primary can run the host.
+A Claude, Cursor, OpenCode, omp, Hermes, Grok, or Codex primary can run the host.
 With the file present, the primary's arm owner runs the host in place of the watcher arm.
 The host handles wakes on the engine while `state/.afk-contract` exists, and also while attended on a Claude or Cursor primary, whose dialog mirror is verified ([supervision-host.md](supervision-host.md#postures)).
 On that home, `/afk` launches no away daemon; `/quiet` still does.
@@ -319,7 +319,7 @@ The file may be empty, or hold one line `<engine> [<model>]`:
 - empty or `default` selects the primary harness's own engine at that engine's default model (`sonnet` for the Claude engine);
 - `<engine> [<model>]` names a verified engine, currently only `claude`, and optionally the engine's own model name or alias; `default <model>` selects the primary harness's engine with that model.
 
-Only Claude has a verified engine of its own, so a Cursor, OpenCode, omp, Grok, or Codex home names `claude` in the file.
+Only Claude has a verified engine of its own, so a Cursor, OpenCode, omp, Hermes, Grok, or Codex home names `claude` in the file.
 
 ### Failures and when changes apply
 
@@ -709,7 +709,7 @@ A local standalone-clone home cannot receive a primary-local commit through that
 
 ## Harness support
 
-claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and omp are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
+claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, omp, and hermes are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
 
 ### Harness restrictions and credentials
 
@@ -746,7 +746,7 @@ Enabled primary-session turn-end guard integrations are tracked as repo-level ho
 Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
 
-Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Cursor's stop hook parks on the watcher, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked primary extensions, omp uses its own two tracked `.omp/extensions/` files with a blocking `session_stop` turn-end hook, and OpenCode uses its TUI plugin.
+Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Cursor's stop hook parks on the watcher, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked primary extensions, omp uses its own two tracked `.omp/extensions/` files with a blocking `session_stop` turn-end hook, Hermes uses the Firstmate Hermes plugin (see [Hermes plugin](#hermes-plugin)), and OpenCode uses its TUI plugin.
 
 ### Choose the worker harness
 
@@ -792,6 +792,21 @@ Its `remove` action excises only the marker-delimited Firstmate region and remov
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 
 For omp secondmate launches, `fm-spawn.sh` passes no `-e` at all: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch instead carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns.
+
+### Hermes plugin
+
+Hermes Agent carries every Firstmate integration, primary and worker alike, in one plugin, and Hermes loads a plugin only when it is discovered and listed in its `plugins.enabled` config.
+A worker runs in a project worktree whose `.hermes/` belongs to the project, so the Firstmate loader lives in the Hermes home instead: [`bin/fm-hermes-plugin.sh`](../bin/fm-hermes-plugin.sh) owns that install surface and its states.
+
+- `bin/fm-hermes-plugin.sh install` copies the tracked loader from `.hermes/plugins/firstmate/` to `$HERMES_HOME/plugins/firstmate/` (default `~/.hermes`), registers this checkout in the loader's `roots` file, runs `hermes plugins enable firstmate`, and sets `plugins.entries.firstmate.allow_gateway_injection` so the Ink TUI accepts plugin-delivered wakes.
+- `bin/fm-hermes-plugin.sh status` prints `ok`, `missing`, `stale`, `disabled`, `unregistered`, `no-hermes`, or `unknown`.
+- The loader holds no behaviour: it imports the resolved checkout's tracked `.hermes/firstmate/plugin.py`, so an update of this checkout changes behaviour at the next Hermes start and only a changed loader reads `stale`.
+- It resolves its root from its own project location, then `FM_HERMES_ROOT` (which `fm-spawn.sh` sets for every Hermes worker and secondmate), then an exact match of Hermes's working directory against `roots`; anywhere else it is inert.
+
+Installing writes the captain's Hermes home, so bootstrap only detects a Hermes primary or crew harness without a usable loader and reports `MISSING: hermes-plugin` through the ordinary consent flow, and `fm-spawn.sh` refuses a Hermes launch unless the status is `ok` or `unregistered`.
+As an alternative for the primary only, `HERMES_ENABLE_PROJECT_PLUGINS=1 hermes` started in this checkout discovers the tracked loader as a project plugin, once `firstmate` is enabled.
+Hermes workers launch with `--cli --yolo`, and their busy state and turn end ride the plugin's worker role; no per-task file is written, so relaunch and teardown clear nothing Hermes-specific.
+[The Hermes adapter reference](../.agents/skills/harness-adapters/references/harness/hermes.md) owns the verified launch, control, and primary facts.
 
 ## Claude permission mode (config/claude-permission-mode)
 

@@ -26,7 +26,7 @@ The tier is a property of the harness surface, not of the home.
 
 | Tier | What the adapter does | Used by |
 | --- | --- | --- |
-| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, omp, Cursor |
+| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, omp, Cursor, Hermes |
 | Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, and run-tier sources routed to the nudge |
 
 Codex's interactive TUI has no tracked session-open, compaction, or re-emit channel and is not covered by either tier.
@@ -43,6 +43,7 @@ Codex's interactive TUI has no tracked session-open, compaction, or re-emit chan
 | Grok | Nudge | [Grok](#grok) |
 | Cursor | Run | [Cursor](#cursor) |
 | omp | Run | [omp](#omp) |
+| Hermes | Run | [Hermes](#hermes) |
 | Cursor compaction | Uncovered | [Cursor compaction](#cursor-compaction) |
 
 ### Why the run tier exists
@@ -355,6 +356,33 @@ So the source is derived following the Cursor precedent:
 A later in-process `clear` re-emits only when this lock owner completed a full startup.
 `before_agent_start` message delivery was verified to reach model context on 18.1.11.
 
+### Hermes
+
+Hermes is a run-tier harness.
+The transport is the Firstmate Hermes plugin, `.hermes/firstmate/fm_hermes_sessionstart.py`, reached through the loader Hermes discovers (`.hermes/plugins/firstmate/`, installed into the Hermes home by `bin/fm-hermes-plugin.sh`).
+Hermes fires `on_session_start` lazily on the first turn and never for a resumed session, so the plugin starts the wrapper when it loads, which is process start, before the captain can type.
+The first `pre_llm_call` of each session awaits that result and returns it as `{"context": ...}`, which Hermes appends to that turn's user message before the first provider call.
+The source is derived:
+
+| Hermes session open | Source |
+| --- | --- |
+| Plugin load at process start | `startup` |
+| Plugin load when the launch line carried `--resume`/`-r` or `--continue`/`-c` | `resume` |
+| `/new` (`on_session_reset`) | `clear` |
+| A later turn of a session that received the digest here, whose conversation no longer contains it | `compact` |
+
+Hermes has no compaction hook, so compaction is detected rather than signalled: the delivered digest carries its `session-start` operational header, and the first `pre_llm_call` of every later turn checks the conversation it is handed for that header.
+In-place compaction keeps the session id, so the check is scoped to sessions that received the digest in this process.
+
+Hermes abandons a `pre_llm_call` callback after `plugins.hook_callback_timeout` (default 30s), so the wait stays five seconds under that bound (`FM_HERMES_SESSIONSTART_WAIT_SECS` narrows it).
+A digest still running when the wait expires leaves one operational notice telling the agent not to run session start itself; the finished digest is then injected as soon as the session is idle, or rides the next turn's context.
+The plugin's own subprocess is a direct child of the Hermes process, so `bin/fm-lock.sh` records the Hermes process as the lock owner through `bin/fm-hermes-lib.sh`.
+
+Context over `hooks.output_spill.max_chars` (default 10000) is spilled to a file with a head and tail preview.
+The digest's operational header survives in the preview, and AGENTS.md section 3 already directs the agent to read a persisted digest file in full before acting.
+
+Verified live on hermes-agent v0.21.5: the model answered from the injected digest that its supervision block names `hermes`, with no manual session-start command.
+
 ### Cursor compaction
 
 Cursor compaction is uncovered and has no tracked transport.
@@ -448,6 +476,10 @@ Cursor uses the separate primary live guard named in [Cursor tests](#cursor-test
 ### Guard, monitoring, and away-mode tests
 
 `tests/fm-turnend-guard.test.sh`, `tests/fm-pi-watch-extension.test.sh`, and `tests/fm-daemon.test.sh` cover marked guard, monitoring, and away-mode delivery.
+
+### Hermes tests
+
+`tests/fm-hermes-plugin.test.sh` drives the real plugin through a fake Hermes plugin context and proves startup delivery on the first turn, no re-delivery while the digest survives in context, `compact` re-emit once it does not, `clear` delivery after `/new`, and idle delivery of a digest that outlives the bounded wait.
 
 ### Transport evidence
 

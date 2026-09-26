@@ -205,6 +205,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/hermes.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/kimi.md",
       "audience": "agent-runtime"
     },
@@ -429,6 +433,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/supervision-protocols/hermes.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/supervision-protocols/omp.md",
       "audience": "agent-runtime"
     },
@@ -474,6 +482,10 @@
     },
     {
       "path": "docs/verification/dispatch-auth.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/hermes.md",
       "audience": "maintainer-verification"
     },
     {

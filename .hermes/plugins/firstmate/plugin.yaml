@@ -1,0 +1,18 @@
+name: firstmate
+version: 1.0.0
+description: >-
+  Firstmate fleet supervision for Hermes Agent. In a registered Firstmate home it
+  runs the session-start digest, owns the watcher and its wakes, guards every turn
+  end, and denies unsafe watcher, cd, and delegation tool calls; in a Firstmate
+  task worker it reports semantic busy state and turn ends. Inert everywhere else.
+author: Firstmate
+hooks:
+  - on_session_start
+  - on_session_reset
+  - on_session_finalize
+  - on_session_end
+  - pre_llm_call
+  - pre_tool_call
+  - post_tool_call
+  - pre_verify
+  - agent_loop_stopped

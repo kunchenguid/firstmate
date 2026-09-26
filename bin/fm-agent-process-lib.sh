@@ -17,6 +17,8 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-gemini-lib.sh"
+# shellcheck source=bin/fm-hermes-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-hermes-lib.sh"
 
 # fm_agent_process_classify_name: the single owner of the process-name
 # vocabulary shared by every liveness signal - `agent` for a verified harness,
@@ -48,6 +50,9 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # way (verified, devin 3000.11.1: comm=devin), so a `*devin*` glob never
     # claims an unrelated command.
     agy|devin) printf 'agent' ;;
+    # A natively-named Hermes launcher only; the installed Python CLI is
+    # identified from its arguments in fm_agent_process_classify below.
+    hermes) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
@@ -81,8 +86,9 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
 #            on Linux the exec name, on macOS argv[0] truncated to 16 bytes.
 #   <argv0>  argv[0] as the process reports it - a bare name or an install
 #            path, whichever the launcher used (empty when unknown).
-#   <args>   the flattened command line, read only for the node-bundle
-#            harnesses whose identity sits in argv[1] (bin/fm-gemini-lib.sh).
+#   <args>   the flattened command line, read only for the interpreter-hosted
+#            harnesses whose identity sits in their arguments
+#            (bin/fm-gemini-lib.sh, bin/fm-hermes-lib.sh).
 #   [pid]    when given, lets the Gemini rule read argv boundaries from the
 #            live process instead of the flattened line.
 fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|other
@@ -102,6 +108,16 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
     return 0
   fi
   if [ -n "$args" ] && fm_gemini_args_are_gemini "$args"; then
+    printf 'agent'
+    return 0
+  fi
+  # Hermes is a Python program whose live process is the bare interpreter
+  # (bin/fm-hermes-lib.sh), so only its arguments carry the identity.
+  if [ -n "$pid" ] && fm_hermes_pid_is_hermes "$pid"; then
+    printf 'agent'
+    return 0
+  fi
+  if [ -n "$args" ] && fm_hermes_args_are_hermes "$args"; then
     printf 'agent'
     return 0
   fi

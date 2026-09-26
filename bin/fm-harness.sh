@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|hermes|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -76,6 +76,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
+# shellcheck source=bin/fm-hermes-lib.sh
+. "$SCRIPT_DIR/fm-hermes-lib.sh"
 
 # Print the harness named by a verified environment marker, or nothing when no
 # marker is present. Markers only report what the environment CLAIMS; detect_own
@@ -112,6 +114,18 @@ harness_marker() {
   # additionally clears foreign markers at rovo's launch boundary as defense in depth.
   [ "${ATLASSIAN_AGENT_TYPE:-}" = "rovo" ] && { echo rovo; return; }
   [ "${ROVODEV_CLI:-}" = "1" ] && { echo rovo; return; }
+  # Hermes Agent sets HERMES_AGENT=true on its own process (os.environ.setdefault
+  # in hermes_cli/main.py) and re-exports it on every tool subprocess, and it does
+  # NOT clear an inherited CLAUDECODE (verified live, hermes-agent v0.21.5: a
+  # terminal-tool child of a Hermes session started from a Claude pane carried
+  # HERMES_AGENT=true AND CLAUDECODE=1), so it is tested BEFORE the CLAUDECODE
+  # line for cursor's and gemini's reason above. There is no HERMES_CLI marker.
+  # AI_AGENT is deliberately NOT used: Hermes only setdefaults it, so the same
+  # child carried the Claude launcher's inherited value. HERMES_AGENT is itself
+  # setdefault, so a stale inherited value can survive into a non-Hermes child;
+  # bin/fm-spawn.sh clears it at every non-Hermes launch boundary and a
+  # structural (comm) ancestor of another harness still outranks it below.
+  [ "${HERMES_AGENT:-}" = "true" ] && { echo hermes; return; }
   # omp (Oh My Pi) publishes NO harness-identity marker of its own: verified on
   # omp 18.1.11 that PI_CODING_AGENT is absent from the binary and that the
   # default profile sets neither PI_CODING_AGENT_DIR nor OMP_PROFILE in the
@@ -189,6 +203,13 @@ harness_process_verdict() {  # <pid>
     echo "comm gemini"
     return
   fi
+  # Hermes runs as a bare interpreter (bin/fm-hermes-lib.sh), including a macOS
+  # framework build whose executable is capitalized `Python`, which the
+  # interpreter arm below does not reach; its identity is proven from argv.
+  if fm_hermes_is_python_name "$comm" && fm_hermes_pid_is_hermes "$pid"; then
+    echo "args hermes"
+    return
+  fi
   case "$(basename -- "$comm")" in
     # gemini precedes claude here for the same precedence reason as the
     # marker layer above, so a gemini worker under a claude primary is never
@@ -239,11 +260,24 @@ harness_process_verdict() {  # <pid>
     # detected by ancestry alone.
     agy) echo "comm agy"; return ;;
     devin) echo "comm devin"; return ;;
+    # A natively-named Hermes launcher. The installed CLI is a Python program
+    # whose live process is the bare interpreter (bin/fm-hermes-lib.sh), so the
+    # interpreter arm below is the load-bearing ancestry path; this arm only
+    # covers a future native binary. Anchored, never *hermes*: this repository
+    # itself is often cloned under a hermes-named directory.
+    hermes) echo "comm hermes"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
       args=$(ps -o args= -p "$pid" 2>/dev/null)
       if fm_gemini_args_are_gemini "$args"; then
         echo "args gemini"
+        return
+      fi
+      # Hermes is tested before the substring globs below because its argv
+      # carries the whole launch prompt (`chat -q <brief>`), and a brief that
+      # merely mentions claude or codex must not rename a Hermes worker.
+      if fm_hermes_pid_is_hermes "$pid" || fm_hermes_args_are_hermes "$args"; then
+        echo "args hermes"
         return
       fi
       case "$args" in
@@ -397,7 +431,7 @@ supervision_primary_pin() {
   local pin=${FM_SUPERVISION_PRIMARY_HARNESS:-}
   [ "${FM_SUPERVISION_ACTOR:-}" = branch ] && [ -n "$pin" ] || return 0
   case "$pin" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|hermes)
       printf '%s\n' "$pin"
       ;;
     *)

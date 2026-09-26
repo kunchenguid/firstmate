@@ -186,6 +186,7 @@ Applicability turns on one question: does the harness expose built-in delegation
 | omp | present, per bundled material | Not wired and unverified. omp ships a built-in task delegation tool: its bundled docs list `tools/task.md` and the captain-level `task.maxConcurrency` setting governs it. No Firstmate delegation seatbelt is wired for it yet, and its status stays unverified until a live tool enumeration is recorded the way the Codex row was. |
 | OpenCode | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | Pi | none reported | Not wired pending live verification. See below. |
+| Hermes | `delegate_task` (subagents) and `cronjob_manage` (schedules), per the hermes-agent v0.21.5 tool schemas | Wired: `.hermes/firstmate/fm_hermes_guard.py` passes every tool name to this script with `--tool` from Hermes's `pre_tool_call` and returns `{"action": "block", "message"}` on exit 2; each verdict is cached per tool name for the process, and `tests/fm-hermes-plugin.test.sh` pins the block. |
 
 ### Codex, verified not applicable
 
