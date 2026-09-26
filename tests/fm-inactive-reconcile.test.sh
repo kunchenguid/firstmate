@@ -7,8 +7,10 @@ set -u
 
 RECON="$ROOT/bin/fm-inactive-reconcile.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+GRANT="$ROOT/bin/fm-wake-grant.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
 TMP_ROOT=$(fm_test_tmproot fm-inactive-reconcile)
+fm_git_identity fmtest fmtest@example.invalid
 
 set_mtime() { # <epoch> <path>
   local epoch=$1 path=$2 stamp
@@ -80,11 +82,17 @@ EOF
 }
 
 write_child() { # <home> <id> <status> [spawn-gen]
-  local home=$1 id=$2 status=$3 spawn_gen=${4:-s${BASHPID:-$$}.$RANDOM}
+  local home=$1 id=$2 status=$3 spawn_gen=${4:-s${BASHPID:-$$}.$RANDOM} sha
+  mkdir -p "$home/projects/$id"
+  git -C "$home/projects/$id" init -q
+  git -C "$home/projects/$id" commit -q --allow-empty -m init
+  sha=$(git -C "$home/projects/$id" rev-parse HEAD)
+  git -C "$home/projects/$id" update-ref refs/remotes/origin/main "$sha"
   fm_write_meta "$home/state/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=alpha" \
+    "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=$home/projects/$id" \
     'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
-    "spawn_gen=$spawn_gen" 'pr=https://example.test/owner/repo/pull/1'
+    "spawn_gen=$spawn_gen" 'pr=https://example.test/owner/repo/pull/1' \
+    "pr_head=$sha"
   printf '%s\n' "$status" > "$home/state/$id.status"
   : > "$home/state/$id.turn-ended"
   age "$home/state/$id.meta" "$home/state/$id.status" "$home/state/$id.turn-ended"
@@ -162,6 +170,92 @@ test_main_direct_terminal_presentation_receipt() {
   FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation"
   [ "$(outcome_count "$MAIN" presented)" = 1 ] || fail "acknowledged presentation did not receive its own receipt"
   pass "main direct terminal presentation has a durable receipt"
+}
+
+# Away-posture regression: a branch-actor drain that consumes an
+# inactive-outcome check row must retire its terminal-outcome receipt exactly
+# like a main ack does. The 2026-09-25 away window on the supervision host
+# consumed the queue row but left the .pending receipt, so every later cadence
+# scan republished the same fingerprint - the 1,734-escalation flood.
+test_branch_ack_retires_inactive_outcome_receipt() {
+  local err seq generation
+  make_world branch-ack
+  write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "scan did not queue the terminal presentation"
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "scan did not retain a presentation receipt"
+
+  # The same grant the branch dispatch publishes for this row in the away
+  # posture (check rows become branch-eligible), with this test's own live
+  # process as the recorded grant owner.
+  seq=$(awk -F '\t' '$4 ~ /^inactive-outcome:/ { print $2 }' "$MAIN/state/.wake-queue" | tail -1)
+  case "$seq" in ''|*[!0-9]*) fail "the queued inactive-outcome row had no sequence" ;; esac
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$GRANT" activate "$$" branch-ack \
+    || fail "branch owner activation failed"
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$GRANT" publish branch-ack "$seq" \
+    || fail "branch grant publication failed"
+
+  err="$WORLD/branch-drain.err"
+  FM_SUPERVISION_ACTOR=branch FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" \
+    FM_CONFIG_OVERRIDE="$MAIN/config" "$DRAIN" >/dev/null 2> "$err"
+  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$seq" ] && [ -n "$generation" ] \
+    || { cat "$err"; fail "branch presentation did not require durable acknowledgement"; }
+  FM_SUPERVISION_ACTOR=branch FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" \
+    FM_CONFIG_OVERRIDE="$MAIN/config" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation" \
+    || fail "branch acknowledgement failed"
+
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] || fail "branch acknowledgement left its check row queued"
+  [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "branch acknowledgement left the terminal-outcome receipt pending"
+  [ "$(outcome_count "$MAIN" presented)" = 1 ] || fail "branch acknowledgement never recorded the presentation receipt"
+
+  # The flood's shape: with the receipt retired, later cadence scans must not
+  # republish the same unchanged fingerprint.
+  local cycle
+  for cycle in 1 2 3; do
+    age "$MAIN/state/.inactive-outcome-reconcile"
+    FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN"
+    [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] \
+      || fail "unchanged inactive outcome re-queued on cadence scan $cycle after its branch acknowledgement"
+  done
+  pass "a branch-actor acknowledgement retires the inactive-outcome receipt and later scans stay quiet"
+}
+
+# An unpushed CI-ready ship done: is not a parent-facing ready signal. The
+# ledger pass reads the child's line before any PR is recorded for it, so the
+# gate tests the worker copy's HEAD.
+test_unpushed_ci_ready_done_is_not_published() {
+  make_world unpushed-ready; bind_secondmate local
+  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green, risk low'
+  git -C "$MATE/projects/child" commit -q --allow-empty -m 'only in the copy'
+  grep -v '^pr=\|^pr_head=' "$MATE/state/child.meta" > "$MATE/state/child.meta.tmp"
+  mv "$MATE/state/child.meta.tmp" "$MATE/state/child.meta"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ ! -s "$MAIN/state/mate.status" ] || fail "unpushed CI-ready done: was published upstream"
+  [ "$(outcome_count "$MATE" reported)" = 0 ] || fail "unpushed CI-ready done: left a delivery receipt"
+  pass "unpushed CI-ready ship done: is not published upstream"
+}
+
+# The ledger pass runs on every poll, so a ship done: already delivered does
+# not pay for the git reachability check again.
+test_delivered_ledger_done_skips_git_gate() {
+  local real_git
+  make_world gate-once; bind_secondmate local
+  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/2 checks green'
+  real_git=$(command -v git)
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> %q\nexec %q "$@"\n' \
+    "$WORLD/git.log" "$real_git" > "$WORLD/fakebin/git"
+  chmod +x "$WORLD/fakebin/git"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "pushed CI-ready done: was not delivered"
+  [ -s "$WORLD/git.log" ] || fail "first delivery did not test the named head"
+  : > "$WORLD/git.log"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ ! -s "$WORLD/git.log" ] || fail "a poll after delivery re-ran the git gate: $(cat "$WORLD/git.log")"
+  [ "$(grep -c 'child-outcome-child-done' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "the delivered done: was published again"
+  pass "a delivered ship done: skips the git gate on later polls"
 }
 
 # A secondmate delivers a child's terminal ledger line to the parent on the
@@ -247,6 +341,29 @@ test_secondmate_unterminated_prose_reports_run_outcome() {
   [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 1 ] \
     || fail "the proven failure was reported twice"
   pass "an unterminated continuation line does not withhold a proven child outcome"
+}
+
+# A persistent child that keeps appending routine prose after one terminal
+# outcome does not mint a fresh parent event per sentence: the inactive receipt
+# identity binds the incarnation, task, terminal state, and PR only, never the
+# child's last status line.
+test_inactive_receipt_ignores_later_status_prose() {
+  make_world prose-after-outcome; bind_secondmate local
+  write_child "$MATE" child 'working: quiet since'
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
+  [ "$(grep -c 'inactive-outcome-mate-child-failed' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "inactive fallback did not publish exactly once"
+  printf 'working: tidying up after the run\n' >> "$MATE/state/child.status"
+  age "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
+  printf 'working: still tidying\n' >> "$MATE/state/child.status"
+  age "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
+  [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 1 ] \
+    || fail "changed status prose minted a duplicate parent event: $(cat "$MAIN/state/mate.status")"
+  [ "$(outcome_count "$MATE" reported)" = 1 ] \
+    || fail "changed status prose created a second terminal receipt"
+  pass "later status prose does not change the inactive terminal receipt identity"
 }
 
 # A busy child cannot keep later ledger outcomes from being visited, and is
@@ -466,6 +583,26 @@ test_secondmate_remote_route_ledger_delivery() {
   [ "$(grep -c 'child-outcome-child-done' "$MATE/state/parent-replies.status")" = 1 ] \
     || fail "remote ledger delivery was not once-only: $(cat "$MATE/state/parent-replies.status" 2>/dev/null)"
   pass "the remote route carries a child's ledger line once"
+}
+
+# A ship done: the gate accepted stays owed while its parent write is pending.
+# Teardown removes the worktree before `report`, so the retry delivers that
+# line instead of re-testing a copy that no longer exists.
+test_pending_ledger_done_is_delivered_after_worktree_removal() {
+  local key
+  make_world pending-retry; bind_secondmate local
+  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/2 checks green'
+  cp "$MATE/.fm-secondmate-parent" "$WORLD/parent-binding"
+  printf 'schema=fm-secondmate-parent.v1\nroute=invalid\n' > "$MATE/.fm-secondmate-parent"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ "$(outcome_count "$MATE" pending)" = 1 ] || fail "failed parent write did not leave a pending delivery"
+  rm -rf "$MATE/projects/child"
+  cp "$WORLD/parent-binding" "$MATE/.fm-secondmate-parent"
+  run_report "$MATE" child || fail "report refused the pending delivery"
+  key=$(reported_outcome_key "$MATE" child 'done') || fail "pending delivery was dropped instead of reported"
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fq "done [key=$key]: child child done: PR https://example.test/owner/repo/pull/2 checks green" \
+    || fail "report did not deliver the pending done after the worktree was removed"
+  pass "a pending ship done: is delivered by report after teardown removed the worktree"
 }
 
 # `report <child>` is the teardown-side delivery: it delivers or says nothing
@@ -902,9 +1039,13 @@ SH
 }
 
 test_main_direct_terminal_presentation_receipt
+test_branch_ack_retires_inactive_outcome_receipt
+test_unpushed_ci_ready_done_is_not_published
+test_delivered_ledger_done_skips_git_gate
 test_local_secondmate_delivers_terminal_ledger_line
 test_secondmate_multiline_terminal_outcome_is_delivered_once
 test_secondmate_unterminated_prose_reports_run_outcome
+test_inactive_receipt_ignores_later_status_prose
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_pr_field_requires_recorded_pr_or_ready_signal_line
@@ -915,6 +1056,7 @@ test_long_terminal_lines_have_distinct_receipts
 test_secondmate_partial_ledger_line_waits_for_newline
 test_secondmate_remote_route_ledger_delivery
 test_report_subcommand_delivers_and_refuses
+test_pending_ledger_done_is_delivered_after_worktree_removal
 test_report_avoids_scan_meta_lock_inversion
 test_local_secondmate_rejects_relative_parent_home
 test_invalid_secondmate_marker_blocks_routing

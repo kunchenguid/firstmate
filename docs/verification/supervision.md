@@ -2,7 +2,7 @@
 
 Audience: maintainer verification.
 
-This record supports current session-start, turn-end, watcher-continuity, and wedge-alarm guarantees.
+This record supports current session-start, turn-end, watcher-continuity, supervision-host, and wedge-alarm guarantees.
 Operator behavior and active limits remain in the linked current guides.
 Task-specific chronology, temporary paths, run identifiers, and delivery transcripts remain in private reports or PR evidence.
 
@@ -240,11 +240,11 @@ tests/fm-crew-state.test.sh
 
 ## Turn-end guard
 
-The blocking and bounded-follow-up mechanisms were validated across seven harnesses on 2026-07-08 through 2026-09-05, with Claude's replacement Stop-owned path revalidated on 2026-07-24, Cursor's stop-hook park validated on 2026-08-13, and omp's blocking `session_stop` hook validated on 2026-09-05.
+The blocking and bounded-follow-up mechanisms were validated across seven harnesses on 2026-07-08 through 2026-09-21, with Claude's replacement Stop-owned path revalidated on 2026-09-21, Cursor's stop-hook park validated on 2026-08-13, and omp's blocking `session_stop` hook validated on 2026-09-05.
 
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |
-| Claude | 2.1.219 | Cooperative blocking `Stop` guard plus `asyncRewake` auto-arm | A fresh unsupervised session ran session start first, reclaimed a stale dead-owner lock, completed two tokenless rewake cycles with no model arm command or guard continuation, and left a competing live owner unchanged. |
+| Claude | 2.1.278 | Cooperative blocking `Stop` guard plus `asyncRewake` auto-arm | A fresh unsupervised session received the full session-start digest through the tracked `SessionStart` hook, reclaimed a stale dead-owner lock, completed two tokenless rewake cycles with no model arm command or guard continuation, and left a competing live owner unchanged. |
 | Codex | 0.142.1 | Blocking `Stop` hook | Hook process root stayed anchored to the trusted checkout and one continuation ran. |
 | OpenCode | 1.17.6 | Passive `session.idle` callback | Throwing could not block, while `promptAsync` scheduled one TUI follow-up; headless remained fail-open. |
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
@@ -290,7 +290,7 @@ ok - cursor primary: an away-mode escalation is delivered, confirmed, and proces
 The live run proved that session start acquires the fleet lock through Cursor's structural process identity in `bin/fm-cursor-lib.sh`; `tests/fm-session-lock-ancestry.test.sh` pins the same ancestry path portably.
 It also proved that Cursor's `autoarm` supervision model lets the mid-turn pull guard accept a fresh beacon after the between-turn watcher closes; `tests/fm-guard-stale-banner.test.sh` pins that model-aware verdict.
 The baton is claimed only by the next `stop`, so an actionable close before that claim can still produce one real follow-up from the sole existing park; durable wake handling is idempotent, and any older park still running after the claim stands down.
-Cursor's `beforeSubmitPrompt` step could close that exact window because it fires once on a real captain message and not on hook-driven follow-ups, but registering it is deliberately deferred alongside `preCompact`.
+The step is now registered for the dialog mirror, but still does not invalidate the park baton; [turnend-guard.md](../turnend-guard.md) owns the remaining pre-claim window and deferred fix.
 
 Away-mode delivery needed no daemon change once the composer reader was correct for Cursor; [`runtime-backends.md`](runtime-backends.md#composer) owns that evidence.
 
@@ -355,7 +355,8 @@ No live unattended Claude background session ran on the verifying machine: that 
 The same suite ingests a keyed remote-secondmate parent reply through the real adapter, establishes the incremental OPEN DECISIONS cursor, interrupts supervision, and proves re-arm replays every unacknowledged queue row plus the still-open decision through the ordinary drain path.
 It also covers decision-only recovery, interrupted handling, handling-window generation reuse, non-fatal moved-generation acknowledgement with sequence-bounded consumption, and a persistent successor remaining live after recovery is acknowledged.
 
-The Claude product live path ran with Claude Code 2.1.219 on 2026-07-24:
+The Claude product live path ran with Claude Code 2.1.278 on 2026-09-21.
+The same guard also passed once under Claude Code 2.1.236 and 2.1.219 during this verification.
 
 ```sh
 claude --version
@@ -365,8 +366,8 @@ FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh
 Observed output:
 
 ```text
-2.1.219 (Claude Code)
-ok - Claude 2.1.219 (Claude Code) live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary
+2.1.278 (Claude Code)
+ok - Claude 2.1.278 (Claude Code) live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary
 ```
 
 Current entry points:
@@ -470,13 +471,31 @@ Observed output:
 fm-claude-stop-autoarm: ok
 ```
 
+### Claude drops the exit 2 of a hook it timed out, 2026-09-23
+
+This supports the `bin/fm-claude-stop-autoarm.sh` header statement that a park outliving the hook timeout ends without a rewake.
+It was first measured on Claude Code 2.1.278 and re-measured on 2.1.281 on macOS arm64, in a scratch git project on a private tmux socket with no Firstmate hooks loaded.
+Each arm registered one one-shot async `Stop` hook through `--settings`, with `asyncRewake: true` and `timeout: 30`, in an interactive `claude --model haiku --tools ''` session given one short prompt.
+
+```json
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"<probe>/hook-timeout.sh","asyncRewake":true,"timeout":30}]}]}}
+```
+
+The control hook slept 10 seconds, printed a reply request to stderr, and exited 2 on its own.
+The timeout hook trapped `TERM`, backgrounded `sleep 300`, waited, and on `TERM` printed a reply request to stderr and exited 2.
+
+| Arm | Hook log (seconds after the prompt) | Pane afterwards |
+| --- | --- | --- |
+| Control, exit 2 before the timeout | started +2, exited 2 at +12 | `Stop hook feedback` followed by the requested reply |
+| Timeout, exit 2 from the `TERM` handler | started +2, `TERM` and exit 2 at +32 | no `Stop hook feedback` and no reply, still idle at +111 |
+
 ## Watcher continuity
 
-The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24, all against isolated project and home state.
+The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-09-21, all against isolated project and home state.
 No credential material was copied into a fixture.
 
 ```text
-Claude Code 2.1.219
+Claude Code 2.1.278
 codex-cli 0.144.4
 OpenCode 1.17.18
 Pi 0.80.10
@@ -485,14 +504,28 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 
 | Harness | Exact opt-in command | Observed guarantee |
 | --- | --- | --- |
-| Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | Session start reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
+| Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | The tracked `SessionStart` hook reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
 | Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
-| Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
+| Pi | `FM_PI_LIVE_E2E=1 FM_PI_LIVE_WATCH_ONLY=1 tests/fm-pi-primary-live-e2e.test.sh` | Three consecutive actionable closes each produced a ledger-linked successor, and an intentional stopped-chain failure still raised the outage alarm. |
 | omp | `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` | One initial `fm_watch_arm_omp` invocation (the openai-codex model reaches extension tools through omp's `xd://` virtual-file bridge, a `write` to `xd://fm_watch_arm_omp`, counted as the same invocation) started a live watcher; an actionable close spawned a ledger-linked successor and woke main exactly once; the lab is reaped by path, and omp 18.1.11 did not exit within 30s of its rpc stdin closing, recorded as a note. omp 18.1.11, 2026-09-05. |
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
+
+Pi 0.86.1 repeated the isolated watcher-only live check on 2026-09-22:
+
+```sh
+FM_PI_LIVE_E2E=1 FM_PI_LIVE_WATCH_ONLY=1 tests/fm-pi-primary-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - Pi 0.86.1 live E2E covered repeated successor handoffs and a genuine stopped-chain alarm
+```
+
+The test observed three consecutive actionable notifications, each with a ledger-linked successor before model handling, then replaced the isolated lab's arm command with an intentional failure, stopped that lab's live arm chain, and confirmed the guard still emitted `WATCHER DOWN - SUPERVISION IS OFF` after the bounded grace period.
 
 Pi same-process session-transition ownership was verified on 2026-09-01 against the tracked extension with provider-free public lifecycle events, retained and fresh extension-module rebinds, and real arm children:
 
@@ -507,6 +540,8 @@ A fresh module rebind also received exactly once the actionable close whose firs
 Stale prior-generation tool callbacks could not mutate the active child, repeated transitions kept exactly one live arm cycle, and terminal `quit` still refused late rearm.
 The strict no-emit check used the installed Pi SDK declarations to hold the lifecycle event contract.
 Plain Pi and pi-signed share the same tracked `.pi/extensions/fm-primary-pi-watch.ts` path, so both inherit the generation owner; other primary harnesses are not applicable because they do not use this Pi extension lifecycle.
+
+On 2026-09-22 the deterministic transition suite additionally proved that replacement shutdown leaves the established predecessor running under a `handoff` generation marker until a distinct `active` successor generation commits, an actionable reason observed before process close cannot reuse its predecessor as the successor, and a handoff marker from an absent replacement extension cannot suppress session-start or turn-end outage diagnostics.
 
 On 2026-09-02 the same suite, the strict typecheck, and the credential-free real-SDK guard were rerun against `@earendil-works/pi-coding-agent` 0.84.4 after the extension stopped waiting for `before_agent_start` before settling a main delivery; [`runtime-backends.md`](runtime-backends.md#2026-09-02-streaming-time-watcher-delivery) owns the exact commands and output.
 Observed guarantee: a wake delivered while main was streaming was followed by a verified successor and by delivery of the next actionable close, a replacement replayed only the follow-up Pi had not consumed, an exhausted restoration delivered its typed failure without launching an arm past the retry bound, and a verified successor that failed while a branch settlement still held its wake took the ordinary bounded retry once that delivery settled.
@@ -538,6 +573,142 @@ tests/fm-wake-queue.test.sh
 tests/fm-subagent-pretool-check.test.sh
 tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
+```
+
+## Supervision host
+
+This supports [supervision-host.md](../supervision-host.md): the Claude engine, the away-wake path, its failure direction, and the unchanged behavior of homes without `config/supervision-host`.
+It was measured on 2026-09-23 on macOS 26.6.2 arm64 with Claude Code 2.1.281 as both primary and engine (model `sonnet`), Pi 0.87.0 workers on `openai-codex/gpt-5.6-sol`, and Herdr 0.9.0, in disposable lab homes on private tmux sockets and named Herdr lab sessions.
+
+The opt-in live guard refreshes the engine evidence:
+
+```text
+$ FM_SUPERVISION_HOST_LIVE_E2E=1 tests/fm-supervision-host-live-e2e.test.sh
+# first turn: handled	turn=host-66707-1790213279.1	rc=0	reports=1
+# second turn: handled	turn=host-66707-1790213279.2	rc=0	reports=1
+ok - supervision host live (2.1.281 (Claude Code)): a real engine handles and resumes away wakes under the branch contract without waking main
+```
+
+A real Claude primary with the host on supervised real Pi workers on a disposable repository through attended work and three away windows:
+
+| Case | Observed |
+| --- | --- |
+| Attended close | reached main unchanged; main landed and cleaned up the work |
+| Away decision the words pre-answered | the engine answered it with the captain's answer and reported it as `per your away instructions:`; main stayed parked |
+| Away steer the words named | the engine steered the worker, which acknowledged it |
+| Worker stopped mid-task, words asking to recover it | the engine told it to continue and confirmed it busy again before reporting |
+| Host `SIGKILL` while parked | the auto-arm restarted the host at once; the new host stopped the killed host's arm and watcher by recorded identity, one watcher remained, and the next wake resumed the same engine conversation |
+| Main steer while the engine held that task's lease | `fm-send.sh` exited 6 with `task ... is leased to the branch supervision actor ... retry after that actor releases it`; the lease released when the turn ended 22 seconds later |
+| Captain return during an engine turn | the host handed the finished turn's outcome to main as `supervision-host: outcome 10 for fmhc-notes-stats [captain]: ...` |
+
+Claude's `--output-format json` reports `total_cost_usd` as the resumed conversation's running total, including across a host restart, while its usage fields are per turn.
+Five consecutive turns of one conversation, a host restart between the second and third, reported totals of 0.2093, 0.3441, 0.4234, 0.4870, and 0.5408 with per-turn `cache_read_input_tokens` of 423687, 359255, 245302, 174613, and 185598.
+Each handled away wake cost between $0.05 and $0.21 on `sonnet`.
+
+Without `config/supervision-host`, the same live sessions and guards ran on the tree before the host (`ac2ed3b2`) and with it, with identical results:
+
+| Check | Before | After |
+| --- | --- | --- |
+| Claude primary: dispatch, worker done, Stop-hook rewake, landing, cleanup | ok | ok |
+| Pi primary in a Herdr lab, attended: branch outcome, main lands | ok | ok |
+| Pi primary in a Herdr lab, away: branch handles the finish, main parked, return brief | ok | ok |
+| `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | ok | ok |
+| `FM_PI_BRANCH_LIVE_E2E=1 tests/fm-pi-branch-live-e2e.test.sh` | 5 of 5 ok | 5 of 5 ok |
+| `tests/fm-pi-branch-responsiveness-live-e2e.test.sh` | ok | ok |
+| `FM_AFK_PI_HERDR_E2E=1 tests/fm-afk-pi-herdr-return-e2e.test.sh` | 4 of 4 ok | 4 of 4 ok |
+
+The Herdr return guard needs the operator's login shell: under `SHELL=/bin/bash` its lab pane's login profile drops `pi` from `PATH` and the guard reports that the primary never became idle, in both trees.
+
+Deterministic entry points:
+
+```sh
+tests/fm-supervision-host.test.sh
+tests/fm-claude-stop-autoarm.test.sh
+tests/fm-afk-launch.test.sh
+tests/fm-supervision-instructions.test.sh
+tests/fm-watch-arm.test.sh
+```
+
+
+### Non-Pi primaries
+
+This supports the per-primary routing in [supervision-host.md](../supervision-host.md): with `config/supervision-host`, the Cursor, OpenCode, Grok, and Codex arm owners run the host with the Claude engine, and without it nothing changes.
+It was measured on 2026-09-24 on macOS 26.6.2 arm64 with Claude Code 2.1.281 as the engine (`sonnet`), codex-cli 0.155.1, cursor-agent 2026.09.23-86fc751, OpenCode 1.18.32, grok 1.0.41, and Claude Code 2.1.281 as primaries, and Pi 0.87.0 workers on `openai-codex/gpt-5.6-sol`, in disposable lab homes on private tmux sockets.
+omp is not installed on the measuring machine, so its routing rests on `tests/fm-omp-harness.test.sh` alone.
+OpenCode's OpenAI login on that machine rejects `gpt-5.6-sol` and has exhausted its `gpt-5.5` usage, so the OpenCode primary ran on OpenCode's free `opencode/big-pickle`.
+
+Each primary supervised the same session: an attended worker it landed itself, three gated workers, and an away window whose words pre-answered a keyed decision, named a steer, asked for a stopped worker to be told to continue, and ordered a queued item dispatched once another finished.
+The lab opened the gates, interrupted a worker mid-turn, tried a main-actor steer on a task the engine held, let the park reach its boundary under shortened bounds, and returned while an engine turn was in flight.
+
+| Case | Observed |
+| --- | --- |
+| Away entry | every primary wrote the away record and started no daemon; Codex's checkpoint reported its raised bound under `FM_CODEX_WATCH_CHECKPOINT_AWAY=900` (bound 900, limit 2130) |
+| Decision the words pre-answered | the engine answered it on all five primaries and reported `per your away instructions:`; main stayed parked |
+| Steer the words named | the engine delivered it on all five, and the finished work carries it |
+| Worker stopped mid-task | the engine told it to continue and confirmed it working again (Codex, Cursor, Grok, OpenCode) |
+| Main steer during an engine turn | `fm-send.sh` exited 6 with `task ... is leased to the branch supervision actor ... retry after that actor releases it` on all five |
+| Dispatch the words ordered with no override | the worker launched on the primary's own runtime (`codex`, `cursor`, `grok`, `claude`); on OpenCode the home's saved default dispatch profile (Pi) took precedence, as configured |
+| Boundary | main drained, acknowledged, and re-parked on every primary |
+| Return during an engine turn | the finished turn's outcome reached main: Codex and Grok through the host's hand-back line, Cursor through the queued `check: supervision-host outcome <n> ... was recorded after the captain returned` wake after the captain's message superseded the park, Claude through both, and OpenCode in the return brief |
+| Malformed engine result (Claude) | handed back as Stop-hook feedback that kept the `supervision-host:` line and named itself not a return |
+| A wake that lands between main's drain and its acknowledgement | main's acknowledgement claims only rows at or below its cutoff, so the away session can still take a later row; `tests/fm-wake-queue.test.sh` pins this, and no live run reached that window after the change |
+
+Engine turns cost $0.06 to $0.79 each; whole away windows cost $0.66 (Claude), $1.21 (Cursor), $1.64 (OpenCode), $2.51 (Grok), and $3.76 (Codex, two windows).
+An engine-dispatched Grok 1.0.41 worker stops on Grok's workspace-trust prompt for a project under `/private/tmp`; the engine held it for the captain rather than answering it.
+
+Without `config/supervision-host`, attended and away sessions on Codex, Cursor, and Grok primaries ran identically on the tree before this change (`9284978f`) and with it: the attended worker landed and was cleaned up, `/afk` started the daemon, the away finish was delivered, the return brief rendered, and nothing landed.
+The OpenCode pair could not run, because every primary turn hit the model rejection or usage limit above in both trees.
+The live guards gave the same results in both trees:
+
+| Guard | Before | After |
+| --- | --- | --- |
+| `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | ok | ok |
+| `FM_SUPERVISION_HOST_LIVE_E2E=1 tests/fm-supervision-host-live-e2e.test.sh` | ok | ok |
+| `FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh` | 7 of 7 ok | 7 of 7 ok |
+| `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | ok | ok |
+| `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | ok | ok |
+| `FM_GROK_STOP_LIVE_E2E=1 tests/fm-grok-stop-live-e2e.test.sh` (native 1.0.41, legacy 0.2.102) | `not ok - native path expected two Stop payloads, got 3` | same |
+| `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | `not ok - ... "The usage limit has been reached","statusCode":429` | same |
+
+The Grok stop guard was last verified on 0.2.112 and has drifted from Grok 1.0.41 in both trees.
+
+Deterministic entry points:
+
+```sh
+tests/fm-supervision-host.test.sh
+tests/fm-wake-queue.test.sh
+tests/fm-cursor-primary.test.sh
+tests/fm-pi-watch-extension.test.sh
+tests/fm-omp-harness.test.sh
+tests/fm-watch-checkpoint.test.sh
+tests/fm-supervision-instructions.test.sh
+tests/fm-afk-launch.test.sh
+```
+
+### Dialog mirror writers
+
+This supports [The dialog mirror](../supervision-host.md#the-dialog-mirror): the tracked Claude and Cursor registrations record the captain's prompt and main's reply, and Claude's Stop-hook rewake is not recorded as the captain's words.
+It was measured on 2026-09-25 on macOS 26.5.2 arm64 with Claude Code 2.1.282 (`haiku`) and cursor-agent 2026.09.23-86fc751, each in a disposable lab primary on a private tmux socket.
+
+```text
+$ FM_HOST_MIRROR_LIVE_E2E=1 tests/fm-host-mirror-live-e2e.test.sh
+ok - claude 2.1.282 (Claude Code): a turn the harness started itself was not mirrored as the captain's words
+ok - claude 2.1.282 (Claude Code): the tracked registrations mirrored the captain prompt and main reply
+ok - cursor 2026.09.23-86fc751: the tracked registrations mirrored the captain prompt and main reply
+ok - host mirror live: 2 harness(es) proved their writers
+```
+
+The run above exercised these payload fields:
+
+| Primary | Captain text | Main text |
+| --- | --- | --- |
+| Claude | `UserPromptSubmit` `.prompt` | `Stop` `.last_assistant_message` |
+| Cursor | `beforeSubmitPrompt` `.prompt` | `afterAgentResponse` `.text` |
+
+Deterministic entry point:
+
+```sh
+tests/fm-host-mirror.test.sh
 ```
 
 ## Wedge-alarm channels

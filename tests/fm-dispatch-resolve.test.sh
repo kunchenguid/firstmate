@@ -236,7 +236,7 @@ assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "the API 
 body=$(cat "$LOG/body")
 assert_equals 'jev-latest' "$(jq -r .model <<<"$body")" "default model is jev-latest"
 assert_equals 'pager' "$(jq -r .state.task.project <<<"$body")" "project rides in the state"
-assert_contains "$(jq -r .state.task.brief <<<"$body")" 'off-by-one in the pager' "the whole brief rides in the state"
+assert_contains "$(jq -r .state.task.brief <<<"$body")" 'off-by-one in the pager' "a brief without task headings rides whole in the state"
 assert_equals '["rule"]' "$(jq -c '.questions | keys' <<<"$body")" "only the rule Choice is asked"
 assert_equals '["default","rule_1","rule_2","rule_3","rule_4"]' "$(jq -c '.questions.rule.criteria | keys' <<<"$body")" "one option per rule plus default"
 assert_equals 'No listed rule applies to this task.' "$(jq -r '.questions.rule.criteria.default' <<<"$body")" "the fixed generic none criterion is the default option"
@@ -341,6 +341,148 @@ assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_mod
 assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "ambiguous preserves eligible unranked candidate evidence"
 assert_not_contains "$out" '  profile:' "ambiguous emits no profile line"
 pass "ambiguous: confidence below the fixed floor hands the decision back"
+
+# --- per-rule confidence floor ------------------------------------------------
+write_floor_response() {  # <path> <choice> <confidence> <rule_1> <rule_2> <rule_3> <rule_4> <default>
+  cat > "$1" <<JSON
+{ "model": "jev-1.13.0",
+  "answers": { "rule": { "type": "choice", "choice": "$2", "confidence": $3,
+    "probabilities": { "rule_1": $4, "rule_2": $5, "rule_3": $6, "rule_4": $7, "default": $8 } } },
+  "usage": { "input_tokens": 812, "output_tokens": 60 } }
+JSON
+}
+FLOOR_RULES="$TMP_ROOT/floor-rules.json"
+jq '.rules[1].min_confidence = 0.9 | .rules[3].min_confidence = 0.1' "$BASE_RULES" > "$FLOOR_RULES"
+cp "$FLOOR_RULES" "$RULES"
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.76 0.02 0.76 0.02 0.18 0.02
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a top rule below its own floor falls to a runner-up that clears its floor"
+assert_contains "$out" '  rule: rule_2 (The task generates images.)   confidence: 0.76' "the model's own pick stays visible"
+assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 0.18 clears its floor 0.1; rule_2 probability 0.76 is below its floor 0.9' "the fallback names both floors"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the runner-up rule's profiles are resolved"
+assert_not_contains "$(cat "$LOG/body")" 'min_confidence' "the model never sees confidence floors"
+
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.76 0.02 0.76 0.02 0.08 0.12
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "no runner-up clearing its own floor is ambiguous"
+assert_contains "$out" '  reason: rule_2 probability 0.76 below its floor 0.9; no other option clears its own floor' "the undeclared default keeps the global floor as a runner-up"
+assert_not_contains "$out" '  fallback:' "no fallback is reported when none is taken"
+assert_not_contains "$out" '  profile:' "ambiguous per-rule floor emits no profile"
+
+jq '.rules[0].min_confidence = 0.1' "$FLOOR_RULES" > "$RULES"
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.76 0.12 0.76 0.0 0.12 0.0
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "equally probable runner-ups never break by option order"
+assert_contains "$out" '  reason: rule_2 probability 0.76 below its floor 0.9; runner-up tie' "a runner-up tie is named"
+
+cp "$FLOOR_RULES" "$RULES"
+reset_log
+write_floor_response "$RESPONSE" rule_4 0.45 0.01 0.01 0.01 0.45 0.52
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "a declared floor below the global floor lets the picked rule resolve"
+
+# A declared floor needs the same support from a rule as the pick or as a runner-up
+jq '.rules[3].min_confidence = 0.3' "$FLOOR_RULES" > "$RULES"
+reset_log
+write_floor_response "$RESPONSE" rule_4 0.25 0.25 0.05 0.05 0.35 0.30
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a picked rule clears its declared floor on its own probability, not the answer confidence"
+assert_not_contains "$out" '  fallback:' "a picked rule that clears its own floor takes no fallback"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the picked rule resolves at probability 0.35 over floor 0.3"
+
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.95 0.05 0.55 0.05 0.30 0.05
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a high answer confidence does not lift a picked rule over its own floor"
+assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 0.30 clears its floor 0.3; rule_2 probability 0.55 is below its floor 0.9' "the runner-up clears the same floor it would need as the pick"
+
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.55 0.05 0.55 0.05 0.25 0.10
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "a runner-up below its own floor is not taken"
+assert_contains "$out" '  reason: rule_2 probability 0.55 below its floor 0.9; no other option clears its own floor' "the missed runner-up floor is named"
+cp "$BASE_RULES" "$RULES"
+
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.55 0.01 0.55 0.01 0.42 0.01
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "without declared floors a low pick stays ambiguous"
+assert_contains "$out" '  reason: confidence 0.55 below floor 0.6' "without declared floors the global floor reason is unchanged"
+assert_not_contains "$out" '  fallback:' "without declared floors no runner-up is taken"
+pass "per-rule confidence floors fall to the most probable runner-up that clears its own floor"
+
+# --- the model sees only the task-specific brief sections ----------------------
+SCAFFOLD_BRIEF="$TMP_ROOT/scaffold-brief.md"
+cat > "$SCAFFOLD_BRIEF" <<'MD'
+# Task
+## Captain's intent
+Add a flag to the pager.
+
+## Firstmate spec
+Touch pager.sh only.
+```sh
+# Not a heading inside a fence
+## Setup
+```
+### Out of scope
+Anything else.
+
+# Setup
+BOILERPLATE-SETUP never push to the default branch.
+
+## Captain intent authorized for --intent
+BOILERPLATE-DUPLICATE
+MD
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$SCAFFOLD_BRIEF"
+sent=$(jq -r .state.task.brief "$LOG/body")
+assert_contains "$sent" $'## Captain\'s intent\nAdd a flag to the pager.' "the captain's intent section is sent"
+assert_contains "$sent" $'## Firstmate spec\nTouch pager.sh only.' "the Firstmate spec section is sent"
+assert_contains "$sent" $'# Not a heading inside a fence\n## Setup\n```\n### Out of scope\nAnything else.' "fenced lines and subheadings stay inside the section"
+assert_not_contains "$sent" 'BOILERPLATE' "scaffold boilerplate after the task sections is not sent"
+assert_not_contains "$sent" '# Task' "the enclosing Task heading is not sent"
+assert_not_contains "$sent" 'Brief kind:' "a brief without a scout contract line gets no kind line"
+
+SPEC_ONLY_BRIEF="$TMP_ROOT/spec-only-brief.md"
+printf '%s\n' '# Task' '## Firstmate spec' 'Spec text.' '## Rules' 'RULES-TEXT' > "$SPEC_ONLY_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$SPEC_ONLY_BRIEF"
+assert_equals $'## Firstmate spec\nSpec text.' "$(jq -r .state.task.brief "$LOG/body")" "one recognized section is enough"
+
+printf '%s\n' '# Task' '## Firstmate spec   ' 'Spec text.' '## Rules' 'RULES-TEXT' > "$SPEC_ONLY_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$SPEC_ONLY_BRIEF"
+assert_equals "$(cat "$SPEC_ONLY_BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a heading with trailing blanks is not a section, matching spawn validation"
+
+printf '%s\n' 'Preamble.' '## Firstmate spec' 'Spec text.' > "$SPEC_ONLY_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$SPEC_ONLY_BRIEF"
+assert_equals "$(cat "$SPEC_ONLY_BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a section outside the Task heading is not a task section"
+
+KIND_BRIEF="$TMP_ROOT/kind-brief.md"
+{ cat "$SCAFFOLD_BRIEF"; printf '%s\n' '# Definition of done' 'Delivery contract: mode=no-mistakes' 'Delivery contract: mode=direct-PR'; } > "$KIND_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$KIND_BRIEF"
+sent=$(jq -r .state.task.brief "$LOG/body")
+assert_contains "$sent" $'## Captain\'s intent\nAdd a flag to the pager.' "a ship brief still sends its task sections"
+assert_not_contains "$sent" 'Brief kind:' "a ship brief gets no kind line"
+assert_not_contains "$sent" 'mode=' "a ship brief's delivery mode is not sent"
+
+{ cat "$SCAFFOLD_BRIEF"; printf '%s\n' 'This is a SCOUT task: the deliverable is a written report, not a PR.'; } > "$KIND_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$KIND_BRIEF"
+sent=$(jq -r .state.task.brief "$LOG/body")
+assert_contains "$sent" $'Brief kind: scout (report only)\n\n## Captain\'s intent' "a scout brief's contract line names its kind"
+assert_not_contains "$sent" 'This is a SCOUT task' "the scout contract line itself is not sent"
+
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_equals "$(cat "$BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a brief with neither heading is sent whole"
+pass "only the brief's task sections and scout tag reach the model, with a whole-brief fallback"
 
 # --- escalate: captain approval ------------------------------------------------
 reset_log
@@ -503,6 +645,133 @@ assert_contains "$out" '  reason: no rankable eligible candidate' "no-candidate 
 assert_contains "$out" '-> not eligible: runway exhausted_now' "exhausted candidates keep their reason"
 pass "no rankable candidate: the tool escalates instead of guessing"
 
+# --- schema 6: rows keyed by provider + accountKey bind per account ----------------
+# quota-axi emits schema 6 once a provider expands to several accounts; every
+# row then carries accountKey and one provider id may appear on several rows.
+# Native Codex and Pi lanes bind to their own account rows, with no row
+# chosen by position or summed across accounts.
+LANE_RULES="$TMP_ROOT/lane-rules.json"
+SCHEMA6="$TMP_ROOT/schema6.json"
+SCHEMA5_PAIR="$TMP_ROOT/schema5-pair.json"
+cat > "$LANE_RULES" <<'JSON'
+{
+  "rules": [
+    {
+      "when": "Codex work.",
+      "use": [
+        { "harness": "pi", "model": "openai-codex-work/gpt-5.6-terra", "provider": "codex" },
+        { "harness": "pi", "model": "openai-codex/gpt-5.6-sol", "provider": "codex" },
+        { "harness": "codex", "model": "gpt-5.6-sol" }
+      ]
+    }
+  ]
+}
+JSON
+cat > "$SCHEMA6" <<'JSON'
+{
+  "generatedAt": "2030-01-01T00:00:00Z",
+  "schemaVersion": 6,
+  "providers": [
+    { "provider": "claude", "accountKey": "default", "quotaSemantics": { "status": "unknown", "effectiveAvailability": [] } },
+    { "provider": "codex", "accountKey": "openai-codex", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 0, "runway": { "status": "exhausted_now" }, "selection": { "spendPriority": -1.4788 } } ] } },
+    { "provider": "codex", "accountKey": "openai-codex-work", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 11, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": -5.6819 } } ] } },
+    { "provider": "cursor", "accountKey": "default", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 24, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": 0.3917 } } ] } }
+  ]
+}
+JSON
+cat > "$RESPONSE" <<'JSON'
+{ "model": "jev-1.13.0",
+  "answers": { "rule": { "type": "choice", "choice": "rule_1", "confidence": 0.9,
+    "probabilities": { "rule_1": 0.97, "default": 0.03 } } },
+  "usage": { "input_tokens": 812, "output_tokens": 60 } }
+JSON
+cp "$LANE_RULES" "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6" run code out err "$BRIEF"
+expect_code 0 "$code" "schema 6 snapshot exits 0"
+assert_contains "$out" '  status: clear' "schema 6 snapshot resolves"
+assert_contains "$out" 'candidate: pi:openai-codex-work/gpt-5.6-terra  provider=codex  scope=all_models  remaining=11%  spendPriority=-5.6819  runway=projected_exhaustion  -> eligible' "a Pi lane binds to its own account row"
+assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' "the sibling lane reads its own exhausted row"
+assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  -> eligible, unranked: provider codex has no quota row for account codex-home: disclosed uncertainty' "native Codex never infers an account from a Pi lane"
+assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex-work/gpt-5.6-terra'" "the lane with headroom is chosen"
+assert_equals '--json' "$(cat "$LOG/quota-axi.calls")" "schema 6 needs one quota-axi --json read"
+
+SCHEMA6_NATIVE="$TMP_ROOT/schema6-native.json"
+jq '
+  .providers |= map(if .provider == "codex" then
+    .quotaSemantics.effectiveAvailability |= map(.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")
+    else . end) |
+  (.providers[] | select(.accountKey == "openai-codex-work")) as $account |
+  .providers += [($account | .accountKey = "default"),
+    ($account | .accountKey = "codex-home" |
+      .quotaSemantics.effectiveAvailability |= map(
+        .effectivePercentRemaining = 80 | .runway.status = "through_reset" | .selection.spendPriority = 0.8))]
+' "$SCHEMA6" > "$SCHEMA6_NATIVE"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_NATIVE" run code out err "$BRIEF"
+expect_code 0 "$code" "native Codex schema 6 snapshot exits 0"
+assert_contains "$out" '  status: clear' "native Codex headroom resolves despite exhausted Pi and default rows"
+assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=80%  spendPriority=0.8  runway=through_reset  -> eligible' "native Codex reads codex-home"
+assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-sol'" "native Codex headroom is chosen"
+
+jq '.providers |= reverse' "$SCHEMA6_NATIVE" > "$TMP_ROOT/schema6-reversed.json"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-reversed.json" run code out err "$BRIEF"
+assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-sol'" "native Codex selection ignores row order"
+
+jq '.providers |= map(select(.provider != "codex" or .accountKey != "default") |
+  if .accountKey == "codex-home" then .accountKey = "default" else . end)' "$SCHEMA6_NATIVE" > "$TMP_ROOT/schema6-default.json"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-default.json" run code out err "$BRIEF"
+assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-sol'" "native Codex falls back to the default row when codex-home is absent"
+pass "native Codex binds to codex-home before default, independently of Pi accounts and row order"
+
+jq '.schemaVersion = 5 | .providers |= map(select(.accountKey != "openai-codex")) | del(.providers[].accountKey)' "$SCHEMA6" > "$SCHEMA5_PAIR"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA5_PAIR" run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "schema 5 keeps joining by provider alone"
+assert_contains "$out" '  reason: genuine spendPriority tie' "every codex profile reads the one schema 5 codex row"
+assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=11%  spendPriority=-5.6819  runway=projected_exhaustion  -> eligible' "a schema 5 row never needs accountKey"
+
+SCHEMA6_PI_NATIVE="$TMP_ROOT/schema6-pi-native.json"
+jq '.providers |= map(select(.provider != "codex" or .accountKey != "default"))' "$SCHEMA6_NATIVE" > "$SCHEMA6_PI_NATIVE"
+for harness in pi pi-signed; do
+  jq --arg harness "$harness" '.rules[0].use |= map(if .harness == "codex" then
+    {harness: $harness, model: "codex-native/gpt-6-astra", provider: "codex", effort: "ultra"}
+    else . end)' "$LANE_RULES" > "$RULES"
+  reset_log
+  TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_PI_NATIVE" run code out err "$BRIEF"
+  expect_code 0 "$code" "$harness native adapter schema 6 exits 0"
+  assert_contains "$out" '  status: clear' "$harness native adapter resolves with codex-home and no default row"
+  assert_contains "$out" "candidate: $harness:codex-native/gpt-6-astra  provider=codex  scope=all_models  remaining=80%  spendPriority=0.8  runway=through_reset  -> eligible" "$harness native adapter reads codex-home"
+  assert_contains "$out" "  profile: --harness '$harness' --model 'codex-native/gpt-6-astra' --effort 'ultra'" "$harness native adapter is chosen over exhausted Pi accounts"
+
+  reset_log
+  TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-default.json" run code out err "$BRIEF"
+  assert_contains "$out" "  profile: --harness '$harness' --model 'codex-native/gpt-6-astra' --effort 'ultra'" "$harness native adapter falls back to default"
+
+  reset_log
+  TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6" run code out err "$BRIEF"
+  assert_contains "$out" "candidate: $harness:codex-native/gpt-6-astra  provider=codex  -> eligible, unranked: provider codex has no quota row for account codex-home: disclosed uncertainty" "$harness native adapter never borrows a Pi account"
+
+  reset_log
+  TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA5_PAIR" run code out err "$BRIEF"
+  assert_contains "$out" "candidate: $harness:codex-native/gpt-6-astra  provider=codex  scope=all_models  remaining=11%  spendPriority=-5.6819  runway=projected_exhaustion  -> eligible" "$harness native adapter still joins schema 5 by provider alone"
+done
+cp "$LANE_RULES" "$RULES"
+pass "Pi native adapters bind to codex-home with existing fallbacks and schema 5 compatibility"
+
+jq 'del(.providers[1].accountKey)' "$SCHEMA6" > "$TMP_ROOT/schema6-keyless.json"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-keyless.json" run code out err "$BRIEF"
+assert_contains "$out" '  status: error' "a schema 6 row without accountKey is an error outcome"
+assert_contains "$out" '  reason: quota-axi --json returned an invalid snapshot' "keyless schema 6 row is named as an invalid snapshot"
+cp "$BASE_RULES" "$RULES"
+pass "schema 6: each candidate binds to its account row; schema 5 is unchanged"
+
 # --- quota-axi is read exactly once --------------------------------------------
 reset_log
 write_response "$RESPONSE" rule_4 0.9
@@ -603,6 +872,8 @@ assert_contains "$err" 'not JSON' "non-JSON rules is named"
 for bad in \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"approval":"firstmate"}]}|approval must be "captain" when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"select":"mystery"}]}|unknown select: mystery' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"min_confidence":"high"}]}|min_confidence must be a number from 0 through 1 when present' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"min_confidence":1.5}]}|min_confidence must be a number from 0 through 1 when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\z' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20,"provider":"CLAUDE"}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\z' \
   '{"rules":[{"when":"x","use":{"harness":"claude","provider":""}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
