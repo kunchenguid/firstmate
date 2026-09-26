@@ -1133,13 +1133,17 @@ EOF
 
 ## Done
 EOF
+  # A genuinely terminal no-mistakes ship has its PR recorded (pr=); without one a
+  # no-mistakes ship's done reads as still working, so the fixture would not be
+  # terminal and this control case would not exercise terminal_in_flight.
   fm_write_meta "$home/state/terminal-ship.meta" \
     "window=firstmate:fm-terminal-ship" \
     "worktree=$home/projects/terminal" \
     "project=alpha" \
     "harness=claude" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=no-mistakes" \
+    "pr=https://github.com/o/r/pull/1"
   record_claude_idle "$home/state" terminal-ship
   printf 'done: complete\n' > "$home/state/terminal-ship.status"
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)

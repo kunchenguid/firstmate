@@ -19,9 +19,10 @@
 # published only when bin/fm-dod-lib.sh accepts the named head, so an
 # unpushed copy is not reported upstream as ready. The cadence path uses
 # fm-crew-state.sh, which applies the same gate: a no-mistakes
-# pre-validation `done: {summary}` still reads done (the pipeline handoff),
-# while a CI-ready or direct-PR/local-only done whose head lives only in the
-# disposable copy reads blocked and is not a terminal inactive outcome.
+# pre-validation `done: {summary}` (no shipment claim, no recorded PR) reads
+# working - a committed-only handoff still owing validation, not a terminal
+# outcome - while a CI-ready or direct-PR/local-only done whose head lives only
+# in the disposable copy reads blocked and is not a terminal inactive outcome.
 # A line still being appended (no trailing newline yet)
 # is left for the next poll. This is what keeps a mate's PR-ready, finding,
 # and failure outcomes from depending on the mate model appending them

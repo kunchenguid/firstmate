@@ -912,9 +912,12 @@ EOF
 
 ## Done
 EOF
+  # A genuinely terminal no-mistakes ship has its PR recorded (pr=); without one a
+  # no-mistakes ship's done reads as still working. `failed` needs no pr= because
+  # the failed verb is terminal regardless of delivery mode.
   fm_write_meta "$mate/state/done.meta" \
     "window=firstmate:fm-done" "worktree=$mate/projects/done" "project=sample" \
-    "harness=claude" "kind=ship" "mode=no-mistakes"
+    "harness=claude" "kind=ship" "mode=no-mistakes" "pr=https://github.com/o/r/pull/1"
   fm_write_meta "$mate/state/failed.meta" \
     "window=firstmate:fm-failed" "worktree=$mate/projects/failed" "project=sample" \
     "harness=claude" "kind=ship" "mode=no-mistakes"

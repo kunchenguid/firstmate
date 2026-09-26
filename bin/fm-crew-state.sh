@@ -11,7 +11,9 @@
 # no-mistakes run-step attributed under bin/fm-nm-run-lib.sh's contract, else
 # the pane busy-signature) and reconciles the possibly-stale log against it.
 # A ship `done:` is current-state done only when bin/fm-dod-lib.sh accepts the
-# named head as reachable outside the worker's disposable copy; otherwise blocked.
+# named head as reachable outside the worker's disposable copy; a no-mistakes
+# committed-only handoff (no shipment claim, no recorded PR) reads working, and
+# any other refusal is blocked.
 #
 # The determinism lives entirely here - run-step / pane / log reads, fixed
 # mapping logic, and terminal passed-run PR detail from bounded evidence only,
@@ -234,9 +236,15 @@ fi
 # and its reason rather than a wedge-suspect idle.
 # A ship `done:` is not current-state done while bin/fm-dod-lib.sh refuses the
 # named-head reachability gate: that claim is blocked so a disposable copy is
-# not treated as finished-and-safe.
+# not treated as finished-and-safe. A no-mistakes ship that has only committed and
+# owes validation is the distinct exception: it makes no shipment claim and has no
+# recorded PR, so nothing is owed by anyone and it reads working (mid-pipeline),
+# never blocked - otherwise every paused-at-commit ship would raise an escalation.
 emit_ship_status_done() {  # [extra-detail]
   local extra=${1:-} reason
+  if fm_dod_ship_committed_only "$KIND" "$(meta_value mode)" "$LOG_LINE" "$META"; then
+    emit working status-log "$(status_line_note "$LOG_LINE")${SEP}committed only: no PR recorded, no-mistakes validation owed"
+  fi
   if reason=$(fm_dod_accept_ship_done "$KIND" "$(meta_value mode)" "$WT" "$(meta_value project)" "$LOG_LINE" "$STATE" "$ID" "$META"); then
     emit "done" status-log "$(status_line_note "$LOG_LINE")${extra:+${SEP}$extra}"
   fi
