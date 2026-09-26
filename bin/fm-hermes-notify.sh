@@ -104,6 +104,23 @@
 # reply note - the same shape as `bin/fm-x-link.sh` running as a separate step
 # after `bin/fm-spawn.sh`. It never modifies fm-captain-hold.sh, fm-inbox.sh,
 # or the VPS-local Hermes plugin.
+#
+# INBOUND RECEIPT ACKNOWLEDGMENT: an ordinary message (neither a presence
+# command nor a literal status request) that reaches the end of `inbound`
+# gets one short Telegram acknowledgment - "Received and routed to the
+# inbox." - whenever Captain presence is AWAY, or unconditionally when the
+# message's own text asks to have receipt acknowledged/confirmed
+# (`is_ack_request_text`), so an explicit ask for a receipt is never left
+# unanswered by the HOME/AWAY gate. It reuses the same durable, digest-keyed
+# send/dedup mechanism `route` uses (`send_route_message`, under an internal
+# "receipt" class not exposed through the `route` CLI), keyed on the inbound
+# chat id and text so a retried or duplicate capture of the same message
+# never sends twice. A delivery failure prints `acknowledgement:failed`,
+# durably leaves `status=failed` under `state/hermes-notify/routes/`, and
+# exits 3 exactly like a failed presence-mode confirmation - it is never
+# retried automatically; a later, independent `inbound` call for the same
+# message (a genuine retried capture) will attempt again because a failed
+# record never matches the duplicate check.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -256,8 +273,59 @@ route_lock_path() {  # <class> <key>
   printf '%s/routes/.lock--%s--%s\n' "$NOTIFY_DIR" "$1" "$2"
 }
 
+# Durable, digest-keyed send used by both the public `route` CLI (which gates
+# on Captain presence before calling this) and the inbound receipt
+# acknowledgment (which, for an explicit ack-request, must send regardless of
+# presence). Never gates on presence itself - callers decide that. Prints
+# `duplicate: ...`, `skipped: ...`, or `sent: ...` and returns 0 on every
+# non-delivery-failure outcome; prints nothing on stdout and returns 1 on a
+# `hermes send` failure, leaving the durable record at status=failed.
+send_route_message() {  # <class> <key> <message>
+  local class=$1 key=$2 message=$3 digest record tmp chat_id lock rc=0
+  message=$(truncate_to_max_bytes "$message")
+  digest=$(sha256_text "$message")
+  record=$(route_record_path "$class" "$key")
+  mkdir -p "$NOTIFY_DIR/routes"
+  lock=$(route_lock_path "$class" "$key")
+  fm_lock_acquire_wait "$lock"
+  if [ -f "$record" ] && [ "$(record_field "$record" digest)" = "$digest" ] \
+      && [ "$(record_field "$record" status)" = sent ]; then
+    printf 'duplicate: %s/%s already sent\n' "$class" "$key"
+    fm_lock_release "$lock"
+    return 0
+  fi
+  chat_id=$(resolve_telegram_chat_id) || { fm_lock_release "$lock"; return 1; }
+  if [ -z "$chat_id" ]; then
+    printf 'skipped: hermes/telegram not configured on this home\n'
+    fm_lock_release "$lock"
+    return 0
+  fi
+  tmp=$(mktemp "$NOTIFY_DIR/routes/.staging-XXXXXX") || { fm_lock_release "$lock"; return 1; }
+  {
+    printf 'class=%s\nkey=%s\ndigest=%s\nstatus=pending\nchat_id=%s\n' "$class" "$key" "$digest" "$chat_id"
+  } >"$tmp"
+  mv "$tmp" "$record"
+  if hermes send --to "telegram:$chat_id" "$message" >/dev/null 2>&1; then
+    tmp=$(mktemp "$NOTIFY_DIR/routes/.staging-XXXXXX") || { fm_lock_release "$lock"; return 1; }
+    {
+      printf 'class=%s\nkey=%s\ndigest=%s\nstatus=sent\nchat_id=%s\nsent_at=%s\n' \
+        "$class" "$key" "$digest" "$chat_id" "$(date +%s)"
+    } >"$tmp"
+    mv "$tmp" "$record"
+    printf 'sent: %s/%s -> telegram:%s\n' "$class" "$key" "$chat_id"
+    rc=0
+  else
+    sed 's/^status=pending$/status=failed/' "$record" >"$tmp" 2>/dev/null || true
+    [ -n "${tmp:-}" ] && [ -f "$tmp" ] && mv "$tmp" "$record"
+    printf 'fm-hermes-notify: hermes send failed for %s/%s\n' "$class" "$key" >&2
+    rc=1
+  fi
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
 cmd_route() {
-  local class=${1:-} message_file='' key='' message digest record tmp chat_id
+  local class=${1:-} message_file='' key='' message
   [ -n "$class" ] || { usage; exit 2; }
   shift
   case "$class" in
@@ -280,43 +348,8 @@ cmd_route() {
   fi
   message=$(cat "$message_file")
   [ -n "${message//[[:space:]]/}" ] || { printf 'fm-hermes-notify: refusing an empty message\n' >&2; exit 2; }
-  message=$(truncate_to_max_bytes "$message")
-  digest=$(sha256_text "$message")
-  record=$(route_record_path "$class" "$key")
-  mkdir -p "$NOTIFY_DIR/routes"
-  local lock
-  lock=$(route_lock_path "$class" "$key")
-  fm_lock_acquire_wait "$lock"
-  trap 'fm_lock_release "'"$lock"'"' EXIT
-  if [ -f "$record" ] && [ "$(record_field "$record" digest)" = "$digest" ] \
-      && [ "$(record_field "$record" status)" = sent ]; then
-    printf 'duplicate: %s/%s already sent\n' "$class" "$key"
-    exit 0
-  fi
-  chat_id=$(resolve_telegram_chat_id) || exit 1
-  if [ -z "$chat_id" ]; then
-    printf 'skipped: hermes/telegram not configured on this home\n'
-    exit 0
-  fi
-  tmp=$(mktemp "$NOTIFY_DIR/routes/.staging-XXXXXX") || exit 1
-  {
-    printf 'class=%s\nkey=%s\ndigest=%s\nstatus=pending\nchat_id=%s\n' "$class" "$key" "$digest" "$chat_id"
-  } >"$tmp"
-  mv "$tmp" "$record"
-  if hermes send --to "telegram:$chat_id" "$message" >/dev/null 2>&1; then
-    tmp=$(mktemp "$NOTIFY_DIR/routes/.staging-XXXXXX") || exit 1
-    {
-      printf 'class=%s\nkey=%s\ndigest=%s\nstatus=sent\nchat_id=%s\nsent_at=%s\n' \
-        "$class" "$key" "$digest" "$chat_id" "$(date +%s)"
-    } >"$tmp"
-    mv "$tmp" "$record"
-    printf 'sent: %s/%s -> telegram:%s\n' "$class" "$key" "$chat_id"
-  else
-    sed 's/^status=pending$/status=failed/' "$record" >"$tmp" 2>/dev/null || true
-    [ -n "${tmp:-}" ] && [ -f "$tmp" ] && mv "$tmp" "$record"
-    printf 'fm-hermes-notify: hermes send failed for %s/%s\n' "$class" "$key" >&2
-    exit 1
-  fi
+  send_route_message "$class" "$key" "$message"
+  exit $?
 }
 
 sha256_text() {  # <text>
@@ -613,6 +646,18 @@ presence_text_class() {  # <normalized-text>
   return 1
 }
 
+# Deliberately narrow, non-NLP phrase match for "please acknowledge/confirm
+# receipt of this message" - the one case the inbound receipt acknowledgment
+# must send regardless of Captain presence.
+is_ack_request_text() {  # <normalized-text>
+  case " $1 " in
+    *' acknowledge receipt '*|*' acknowledge the receipt '*|*' confirm receipt '*|*' confirm the receipt '*|*' please acknowledge '*|*' please confirm you received '*|*' can you acknowledge '*|*' did you receive this '*|*' did you get this '*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 cmd_resolve_reply() {
   local note=${1:-}
   [ -n "$note" ] && [ -f "$note" ] || { usage; exit 2; }
@@ -665,6 +710,7 @@ cmd_resolve_reply() {
 
 cmd_inbound() {
   local note=${1:-} parsed chat_id text normalized presence_class acknowledgement correlated rc=0
+  local ack_key ack_text exit_code=0
   [ -n "$note" ] && [ -f "$note" ] || { usage; exit 2; }
   parsed=$(parse_telegram_note "$note") || {
     printf 'fm-hermes-notify: %s does not match the Hermes/Telegram inbound convention\n' "$note" >&2
@@ -712,12 +758,25 @@ cmd_inbound() {
       ;;
   esac
 
+  if is_ack_request_text "$normalized" || [ "$(presence_mode)" = AWAY ]; then
+    ack_key=$(sha256_text "receipt-ack:${chat_id}:${text}")
+    ack_text='Received and routed to the inbox.'
+    if send_route_message receipt "$ack_key" "$ack_text" >/dev/null; then
+      printf 'acknowledgement:sent\n'
+    else
+      printf 'fm-hermes-notify: the receipt acknowledgment for chat %s failed to send on Telegram; recorded as failed under state/hermes-notify/routes and not retried automatically\n' "$chat_id" >&2
+      printf 'acknowledgement:failed\n'
+      exit_code=3
+    fi
+  fi
+
   correlated=$("$0" resolve-reply "$note" 2>/dev/null) || rc=$?
   if [ "$rc" -eq 0 ]; then
     printf 'answer:%s\n' "$correlated"
   else
     printf 'command:%s\n' "$text"
   fi
+  return "$exit_code"
 }
 
 cmd_confirm_retry() {

@@ -727,6 +727,97 @@ test_mode_commands_do_not_answer_or_release_holds() {
   pass "presence commands change routing only and never answer or release a hold"
 }
 
+test_inbound_sends_exactly_one_receipt_acknowledgment_when_away() {
+  local home note out calls
+  home=$(make_home inbound-ack-away)
+  configure_hermes "$home" 'telegram:Rajiv [8629896233]'
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] Please redeploy the staging environment."
+  note=$(latest_note "$home")
+  out=$(run_notify "$home" inbound "$note") || fail "ordinary away-mode message failed"
+  assert_contains "$out" "acknowledgement:sent" "an ordinary away-mode message did not trigger a receipt acknowledgment"
+  assert_contains "$out" "command:Please redeploy the staging environment." "the ordinary message's own classification was lost"
+  calls=$(wc -l < "$home/hermes-send.log" | tr -d '[:space:]')
+  assert_equals 1 "$calls" "an ordinary away-mode message sent $calls Telegram messages instead of exactly one acknowledgment"
+  assert_grep "Received and routed to the inbox." "$home/hermes-send.log" \
+    "the receipt acknowledgment text was not sent to Telegram"
+  pass "an ordinary Captain-authored Telegram message while away triggers exactly one receipt acknowledgment"
+}
+
+test_inbound_explicit_ack_request_is_answered_even_at_home() {
+  local home note out calls
+  home=$(make_home inbound-ack-request-home)
+  configure_hermes "$home" 'telegram:Rajiv [8629896233]'
+  run_notify "$home" presence home >/dev/null || fail "could not put the test home into HOME mode"
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] Please acknowledge receipt of this message."
+  note=$(latest_note "$home")
+  out=$(run_notify "$home" inbound "$note") || fail "an explicit ack-request at HOME failed"
+  assert_contains "$out" "acknowledgement:sent" "an explicit acknowledge-receipt request was not answered while Captain presence is HOME"
+  calls=$(wc -l < "$home/hermes-send.log" | tr -d '[:space:]')
+  assert_equals 1 "$calls" "an explicit ack-request sent $calls Telegram messages instead of exactly one"
+  assert_equals HOME "$(run_notify "$home" presence status)" \
+    "an explicit ack-request unexpectedly changed Captain presence"
+  pass "an explicit receipt-acknowledgment request is always answered, even while Captain presence is HOME"
+}
+
+test_inbound_does_not_change_home_mode_behavior_for_ordinary_messages() {
+  local home note out calls
+  home=$(make_home inbound-ack-home-ordinary)
+  configure_hermes "$home" 'telegram:Rajiv [8629896233]'
+  run_notify "$home" presence home >/dev/null || fail "could not put the test home into HOME mode"
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] Please redeploy the staging environment."
+  note=$(latest_note "$home")
+  out=$(run_notify "$home" inbound "$note") || fail "an ordinary HOME-mode message failed"
+  assert_contains "$out" "command:Please redeploy the staging environment." "the ordinary message's classification was lost"
+  calls=$(wc -l < "$home/hermes-send.log" | tr -d '[:space:]')
+  assert_equals 0 "$calls" "an ordinary message with no ack-request wording sent $calls Telegram messages while Captain presence is HOME"
+  pass "an ordinary message with no explicit ack-request stays quiet at HOME, exactly like before this change"
+}
+
+test_inbound_does_not_double_send_a_retried_capture() {
+  local home note out calls
+  home=$(make_home inbound-ack-dedup)
+  configure_hermes "$home" 'telegram:Rajiv [8629896233]'
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] Please deploy build 42."
+  note=$(latest_note "$home")
+  out=$(run_notify "$home" inbound "$note") || fail "the first capture failed"
+  assert_contains "$out" "acknowledgement:sent" "the first capture did not send an acknowledgment"
+  rm -f "$home/state/inbox"/*.note
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] Please deploy build 42."
+  note=$(latest_note "$home")
+  out=$(run_notify "$home" inbound "$note") || fail "the retried capture failed"
+  assert_contains "$out" "acknowledgement:sent" "a retried capture was not reported as acknowledged"
+  calls=$(wc -l < "$home/hermes-send.log" | tr -d '[:space:]')
+  assert_equals 1 "$calls" "a duplicate/retried capture of the same message sent $calls Telegram messages instead of exactly one"
+  pass "a duplicate or retried capture of the same message never sends a second Telegram acknowledgment"
+}
+
+test_inbound_records_a_failed_acknowledgment_durably_without_looping() {
+  local home note out rc record f
+  home=$(make_home inbound-ack-failure)
+  configure_hermes "$home" 'telegram:Rajiv [8629896233]'
+  : > "$home/hermes-fail-once"
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] Please redeploy the staging environment."
+  note=$(latest_note "$home")
+  set +e
+  out=$(run_notify "$home" inbound "$note")
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] \
+    || fail "a failed acknowledgment send was not reported with the distinct partial-success exit code (got $rc)"
+  assert_contains "$out" "acknowledgement:failed" "a failed acknowledgment send was not reported on stdout"
+  assert_contains "$out" "command:Please redeploy the staging environment." \
+    "a failed acknowledgment must not suppress the message's own classification"
+  [ -s "$home/hermes-send.log" ] && fail "a failed send was logged as if it had reached Telegram"
+  record=''
+  for f in "$home"/state/hermes-notify/routes/receipt--*.record; do
+    [ -e "$f" ] && record=$f
+    break
+  done
+  [ -n "$record" ] || fail "the failed acknowledgment left no durable record under state/hermes-notify/routes"
+  assert_grep "status=failed" "$record" "the failed acknowledgment was not durably recorded as failed"
+  pass "a failed acknowledgment send is durably recorded as failed, reported plainly, and never silently dropped or retried"
+}
+
 test_register_sends_and_records
 test_register_refuses_when_not_an_active_hold
 test_register_is_idempotent_within_same_lifecycle
@@ -752,3 +843,8 @@ test_confirm_retry_resends_a_failed_confirmation
 test_confirm_retry_serializes_against_a_concurrent_mode_change
 test_inbound_reports_confirmation_sent_on_the_ordinary_success_path
 test_mode_commands_do_not_answer_or_release_holds
+test_inbound_sends_exactly_one_receipt_acknowledgment_when_away
+test_inbound_explicit_ack_request_is_answered_even_at_home
+test_inbound_does_not_change_home_mode_behavior_for_ordinary_messages
+test_inbound_does_not_double_send_a_retried_capture
+test_inbound_records_a_failed_acknowledgment_durably_without_looping
