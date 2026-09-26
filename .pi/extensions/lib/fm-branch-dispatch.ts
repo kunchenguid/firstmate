@@ -275,7 +275,7 @@ function hasOpenNeedsDecision(
   return [...open.values()].includes("needs-decision");
 }
 
-export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = false): UnreadWakeScope {
+export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = false, attendedHost = false): UnreadWakeScope {
   let queue = "";
   try {
     queue = readFileSync(`${state}/.wake-queue`, "utf8");
@@ -370,49 +370,51 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
     } else if (kind === "stale") {
       task = taskByKey.get(key) ?? taskByKey.get(key.replace(/^fm-/, "")) ?? "";
       project = metadata.get(key) ?? metadata.get(key.replace(/^fm-/, "")) ?? "";
-      if (task) {
-        const statusPath = `${state}/${task}.status`;
-        if (!staleDecisionOwnership.has(statusPath)) {
-          let version: string | null;
-          try {
-            version = statusFileVersion(statusPath);
-          } catch {
-            return UNSAFE_SCOPE;
-          }
-          let decisionOwned = false;
-          if (version) {
-            const cached = staleDecisionCache.get(statusPath);
-            if (cached?.version === version && cached.config === decisionConfig) {
-              decisionOwned = cached.decisionOwned;
-            } else {
-              let statusLines: string[];
-              try {
-                statusLines = readFileSync(statusPath, "utf8").split(/\r?\n/).filter((line) => /\S/.test(line));
-                if (statusFileVersion(statusPath) !== version) return UNSAFE_SCOPE;
-              } catch {
-                return UNSAFE_SCOPE;
-              }
-              decisionOwned = hasOpenNeedsDecision(statusLines, resolveVerb, heldVerb, reservedPrefixes) ||
-                statusLineVerb(statusLines.at(-1) ?? "") === heldVerb;
-              staleDecisionCache.set(statusPath, { version, config: decisionConfig, decisionOwned });
-              if (staleDecisionCache.size > 512) {
-                staleDecisionCache.delete(staleDecisionCache.keys().next().value!);
-              }
-            }
-          } else {
-            staleDecisionCache.delete(statusPath);
-          }
-          staleDecisionOwnership.set(statusPath, decisionOwned);
-        }
-        if (staleDecisionOwnership.get(statusPath)) {
-          needsDecisionKeys.push(key);
-          if (!afk) continue;
-        }
-      }
     } else {
       // A kind fm_wake_append never emits: structural corruption, not an
       // ordinary main-only row.
       return UNSAFE_SCOPE;
+    }
+    // An attended host can have accepted a routine signal before its task
+    // gained a main-owned decision. Pi retains its existing per-row scan.
+    if (task && (kind === "stale" || (attendedHost && kind === "signal"))) {
+      const statusPath = `${state}/${task}.status`;
+      if (!staleDecisionOwnership.has(statusPath)) {
+        let version: string | null;
+        try {
+          version = statusFileVersion(statusPath);
+        } catch {
+          return UNSAFE_SCOPE;
+        }
+        let decisionOwned = false;
+        if (version) {
+          const cached = staleDecisionCache.get(statusPath);
+          if (cached?.version === version && cached.config === decisionConfig) {
+            decisionOwned = cached.decisionOwned;
+          } else {
+            let statusLines: string[];
+            try {
+              statusLines = readFileSync(statusPath, "utf8").split(/\r?\n/).filter((line) => /\S/.test(line));
+              if (statusFileVersion(statusPath) !== version) return UNSAFE_SCOPE;
+            } catch {
+              return UNSAFE_SCOPE;
+            }
+            decisionOwned = hasOpenNeedsDecision(statusLines, resolveVerb, heldVerb, reservedPrefixes) ||
+              statusLineVerb(statusLines.at(-1) ?? "") === heldVerb;
+            staleDecisionCache.set(statusPath, { version, config: decisionConfig, decisionOwned });
+            if (staleDecisionCache.size > 512) {
+              staleDecisionCache.delete(staleDecisionCache.keys().next().value!);
+            }
+          }
+        } else {
+          staleDecisionCache.delete(statusPath);
+        }
+        staleDecisionOwnership.set(statusPath, decisionOwned);
+      }
+      if (staleDecisionOwnership.get(statusPath)) {
+        needsDecisionKeys.push(key);
+        if (!afk) continue;
+      }
     }
     if (!project || !task) return UNSAFE_SCOPE;
     projects.add(project);
@@ -476,10 +478,10 @@ export interface BranchOfferVerdict {
 // The away posture collapses that partition: every actionable row is
 // branch-eligible and the trigger class no longer forces anything to main
 // (scopeForUnreadWake owns the per-row rule).
-export function branchOfferForWake(state: string, message: string, afk: boolean): BranchOfferVerdict {
+export function branchOfferForWake(state: string, message: string, afk: boolean, attendedHost = false): BranchOfferVerdict {
   const heartbeat = /^heartbeat($|:)/.test(message);
   const isCheckTrigger = /^check:/.test(message);
-  const scope = scopeForUnreadWake(state, heartbeat, afk);
+  const scope = scopeForUnreadWake(state, heartbeat, afk, attendedHost && !afk);
   const triggerKeys = /^signal:/.test(message)
     ? message
       .slice("signal:".length)

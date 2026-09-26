@@ -98,7 +98,7 @@ if (command === "scope") {
     else usage();
   }
   const message = readFileSync(0, "utf8").split(/\r?\n/)[0] ?? "";
-  const verdict = dispatch.branchOfferForWake(stateDir(), message, afk);
+  const verdict = dispatch.branchOfferForWake(stateDir(), message, afk, true);
   process.stdout.write(`eligible=${verdict.eligible ? 1 : 0}\n${scopeLines(verdict.scope, verdict.heartbeat)}`);
 } else if (command === "wake-prompt") {
   let report = "";

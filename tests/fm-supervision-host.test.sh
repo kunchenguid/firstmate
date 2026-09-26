@@ -747,20 +747,26 @@ test_attended_close_with_unidentified_main_session_passes_to_main() {
 # rule again, so the close reaches main exactly as the arm printed it and no
 # engine turn runs on the stale offer.
 test_attended_close_that_turns_main_only_before_its_turn_passes_to_main() {
-  local home real_mktemp
+  local home real_node
   home=$(make_home attended-turns-main-only attended)
-  real_mktemp=$(command -v mktemp)
-  cat > "$home/fakebin/mktemp" <<SH
+  real_node=$(command -v node)
+  # Change the task immediately before the second offer computation, rather
+  # than racing the successor startup. The first offer accepts the close; the
+  # turn-boundary offer must see the new main-owned decision.
+  cat > "$home/fakebin/node" <<SH
 #!/usr/bin/env bash
 case "\$*" in
-  *.supervision-host-arm.*)
-    ! grep -q 'step one' "\$FM_HOME/state/demo.status" 2>/dev/null \
-      || grep -q 'which export format?' "\$FM_HOME/state/demo.status" \
-      || printf 'needs-decision [at=%s]: which export format?\n' "\$(date +%s)" >> "\$FM_HOME/state/demo.status" ;;
+  *fm-branch-dispatch.mjs\ offer*)
+    count=\$(cat "\$FM_HOME/offer-count" 2>/dev/null || echo 0)
+    count=\$((count + 1))
+    printf '%s\n' "\$count" > "\$FM_HOME/offer-count"
+    if [ "\$count" -eq 2 ]; then
+      printf 'needs-decision [at=%s]: which export format?\n' "\$(date +%s)" >> "\$FM_HOME/state/demo.status"
+    fi ;;
 esac
-exec "$real_mktemp" "\$@"
+exec "$real_node" "\$@"
 SH
-  chmod +x "$home/fakebin/mktemp"
+  chmod +x "$home/fakebin/node"
   start_host "$home"
   wait_until 150 watcher_live "$home" || fail "turns-main-only: the host never started a watcher cycle"
   append_status "$home" 'step one'
@@ -771,6 +777,12 @@ SH
   assert_no_re '^supervision-host' "$home/host.out" "the close must reach main exactly as the arm printed it"
   [ "$(engine_calls "$home")" -eq 0 ] || fail "turns-main-only: the engine ran on a stale offer"
   assert_grep 'demo.status' "$home/state/.wake-queue" "the wake must stay queued for main"
+  local pi_offer
+  pi_offer=$(node --input-type=module -e '
+    const dispatch = await import(process.argv[1]);
+    console.log(dispatch.branchOfferForWake(process.argv[2], process.argv[3], false).eligible);
+  ' "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$home/state" "signal: $home/state/demo.status")
+  [ "$pi_offer" = true ] || fail "the host-only transition veto changed Pi's existing offer rule"
   assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "the ledger must record why the close went to main"
   watcher_live "$home" && fail "the pass-through left the successor watcher running"
   pass "host: an attended close whose task turns main-only before its turn still reaches main unchanged"
