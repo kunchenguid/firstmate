@@ -245,6 +245,14 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
+      # The jj colocated-home fast-forward tests need the real pinned jj binary,
+      # not a floating package-manager latest. Same pin/checksum discipline as
+      # the Herdr and Treehouse installers.
+      - name: Install pinned jj
+        run: |
+          set -eu
+          bin/fm-install-jj.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       # Runtime-facing Pi extension probes need the installed public package
       # to avoid capability skips. tests/fm-pi-primary-types.test.sh owns its
       # separate compiler dependencies.
