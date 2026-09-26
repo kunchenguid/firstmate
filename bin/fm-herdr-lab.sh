@@ -7,7 +7,7 @@
 #   fm-herdr-lab.sh prepare <session>
 #   fm-herdr-lab.sh provision <session>
 #   fm-herdr-lab.sh run <session> <herdr arguments...>
-#   fm-herdr-lab.sh viewer start <session>
+#   fm-herdr-lab.sh viewer start <session> [--capture <file>]
 #   fm-herdr-lab.sh viewer stop <session>
 #   fm-herdr-lab.sh stop <session>
 #   fm-herdr-lab.sh teardown <session>
@@ -30,6 +30,9 @@
 # The viewer command attaches or detaches one real foreground Herdr client on
 # an owned lab session over a fixed 40-row by 120-column pty;
 # bin/fm-herdr-lab-viewer.py owns the pty mechanics.
+# With --capture, that viewer also reports a pixel cell size, so Herdr streams
+# pane graphics to it, and records everything Herdr writes to it in <file>, an
+# absolute path that must not exist yet.
 # Start succeeds only when that session reports a foreground client and the
 # recorded viewer process still matches its launch identity.
 # Stop signals only identity-matched recorded processes and retains its
@@ -272,9 +275,19 @@ fm_herdr_lab_viewer_session_stopped_or_absent() { # <session>
   [ "$running" = false ] || [ "$running" = absent ]
 }
 
-fm_herdr_lab_viewer_start() { # <session>
-  local name=$1 record log launcher launcher_pid waited attempt reason pid interrupt_traps=0 timeout=$fm_herdr_lab_viewer_timeout_seconds
+fm_herdr_lab_viewer_start() { # <session> [capture-file]
+  local name=$1 capture=${2:-} record log launcher launcher_pid waited attempt reason pid interrupt_traps=0 timeout=$fm_herdr_lab_viewer_timeout_seconds
   fm_herdr_lab_validate_name "$name" || return 1
+  if [ -n "$capture" ]; then
+    case "$capture" in
+      /*) ;;
+      *) fm_herdr_lab_error "viewer capture file must be an absolute path: $capture"; return 1 ;;
+    esac
+    if [ -e "$capture" ] || [ -L "$capture" ]; then
+      fm_herdr_lab_error "viewer capture file already exists; refusing to overwrite it: $capture"
+      return 1
+    fi
+  fi
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
   command -v python3 >/dev/null 2>&1 || { fm_herdr_lab_error "python3 is required for the lab viewer"; return 1; }
@@ -302,7 +315,7 @@ fm_herdr_lab_viewer_start() { # <session>
     trap 'trap - INT TERM; [ -z "${launcher_pid:-}" ] || fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"; exit 130' INT
     trap 'trap - INT TERM; [ -z "${launcher_pid:-}" ] || fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"; exit 143' TERM
   fi
-  nohup python3 "$launcher" "$name" "$record" >"$log" 2>&1 &
+  nohup python3 "$launcher" "$name" "$record" ${capture:+"$capture"} >"$log" 2>&1 &
   launcher_pid=$!
 
   waited=0
@@ -366,12 +379,16 @@ fm_herdr_lab_viewer_stop() { # <session>
   return 1
 }
 
-fm_herdr_lab_viewer() { # <start|stop> <session>
-  case "${1:-}" in
-    start) fm_herdr_lab_viewer_start "$2" ;;
-    stop) fm_herdr_lab_viewer_stop "$2" ;;
+fm_herdr_lab_viewer() { # <start|stop> <session> [--capture <file>]
+  case "${1:-}:$#" in
+    start:2) fm_herdr_lab_viewer_start "$2" ;;
+    start:4)
+      [ "$3" = --capture ] || { fm_herdr_lab_error "viewer start accepts only --capture <file>"; return 2; }
+      fm_herdr_lab_viewer_start "$2" "$4"
+      ;;
+    stop:2) fm_herdr_lab_viewer_stop "$2" ;;
     *)
-      fm_herdr_lab_error "viewer takes 'start' or 'stop'"
+      fm_herdr_lab_error "viewer takes 'start <session> [--capture <file>]' or 'stop <session>'"
       return 2
       ;;
   esac
@@ -566,8 +583,9 @@ fm_herdr_lab_main() {
       fm_herdr_lab_cli "$@"
       ;;
     viewer)
-      [ "$#" -eq 3 ] || { fm_herdr_lab_usage >&2; return 2; }
-      fm_herdr_lab_viewer "$2" "$3"
+      [ "$#" -eq 3 ] || [ "$#" -eq 5 ] || { fm_herdr_lab_usage >&2; return 2; }
+      shift
+      fm_herdr_lab_viewer "$@"
       ;;
     stop)
       [ "$#" -eq 2 ] || { fm_herdr_lab_usage >&2; return 2; }

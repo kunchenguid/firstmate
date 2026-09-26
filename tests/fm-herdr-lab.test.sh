@@ -534,6 +534,57 @@ test_viewer_launcher_refuses_unsafe_arguments() {
   pass "fm-herdr-lab: the viewer launcher refuses unsafe sessions and pidfiles"
 }
 
+test_viewer_capture_requires_a_new_absolute_file() {
+  local name="fm-lab-viewer-capture-$$" out status=0 existing="$TMP_ROOT/existing-capture.bin"
+  : > "$FAKE_LOG"
+  out=$(run_with_fake fm_herdr_lab_viewer_start "$name" relative-capture.bin 2>&1) || status=$?
+  expect_code 1 "$status" "a relative capture file must be refused"
+  assert_contains "$out" "absolute path" "the relative capture refusal was unclear"
+  : > "$existing"
+  status=0
+  out=$(run_with_fake fm_herdr_lab_viewer_start "$name" "$existing" 2>&1) || status=$?
+  expect_code 1 "$status" "an existing capture file must not be overwritten"
+  assert_contains "$out" "already exists" "the existing capture refusal was unclear"
+  status=0
+  out=$(run_with_fake bash "$ROOT/bin/fm-herdr-lab.sh" viewer start "$name" --record "$TMP_ROOT/other.bin" 2>&1) || status=$?
+  expect_code 2 "$status" "an unknown viewer option must be refused"
+  assert_contains "$out" "accepts only --capture" "the unknown viewer option refusal was unclear"
+  [ ! -s "$FAKE_LOG" ] || fail "a refused capture request reached Herdr"
+  pass "fm-herdr-lab: viewer capture requires a new absolute file and no other options"
+}
+
+# A capturing launcher must report a pixel cell size before the fork, because
+# Herdr streams pane graphics only to a client whose cell size is known, and
+# must record what the client writes. A stand-in client prints the window size
+# it sees, so both halves are observable without a real Herdr.
+test_viewer_launcher_captures_with_pixel_geometry() {
+  local launcher="$ROOT/bin/fm-herdr-lab-viewer.py" bin="$TMP_ROOT/capture-bin"
+  local capture="$TMP_ROOT/viewer-capture.bin" status=0 mode
+  command -v python3 >/dev/null 2>&1 || { pass "fm-herdr-lab: viewer capture geometry (skipped, no python3)"; return; }
+  mkdir -p "$bin"
+  cat > "$bin/herdr" <<'PY'
+#!/usr/bin/env python3
+import fcntl, struct, sys, termios
+rows, cols, xpixel, ypixel = struct.unpack("HHHH", fcntl.ioctl(1, termios.TIOCGWINSZ, bytes(8)))
+print("geometry %d %d %d %d args %s" % (rows, cols, xpixel, ypixel, " ".join(sys.argv[1:])))
+PY
+  chmod +x "$bin/herdr"
+  PATH="$bin:$PATH" python3 "$launcher" fm-lab-capture "$TMP_ROOT/capture.pid" "$capture" >/dev/null 2>&1 || status=$?
+  expect_code 0 "$status" "the capturing launcher did not run its client to completion"
+  assert_grep "geometry 40 120 1200 800 args --session fm-lab-capture" "$capture"
+  mode=$(stat -f '%Lp' "$capture" 2>/dev/null || stat -c '%a' "$capture")
+  [ "$mode" = 600 ] || fail "the capture file is not private to its owner (mode $mode)"
+  status=0
+  PATH="$bin:$PATH" python3 "$launcher" fm-lab-capture "$TMP_ROOT/capture-again.pid" "$capture" >/dev/null 2>&1 || status=$?
+  expect_code 2 "$status" "the launcher must refuse an existing capture file"
+  assert_absent "$TMP_ROOT/capture-again.pid" "a refused capture still launched a viewer"
+  status=0
+  PATH="$bin:$PATH" python3 "$launcher" fm-lab-capture "$TMP_ROOT/capture-relative.pid" relative.bin >/dev/null 2>&1 || status=$?
+  expect_code 2 "$status" "the launcher must refuse a relative capture file"
+  assert_absent "$TMP_ROOT/capture-relative.pid" "a refused relative capture still launched a viewer"
+  pass "fm-herdr-lab: a capturing viewer reports pixel geometry and records its client's output"
+}
+
 test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
 test_run_scopes_session_before_double_dash
@@ -552,3 +603,5 @@ test_interrupted_viewer_start_cancels_launcher
 test_teardown_refuses_while_viewer_attached
 test_viewer_stop_retains_record_when_detach_is_unreadable
 test_viewer_launcher_refuses_unsafe_arguments
+test_viewer_capture_requires_a_new_absolute_file
+test_viewer_launcher_captures_with_pixel_geometry

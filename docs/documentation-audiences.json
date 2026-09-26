@@ -87,6 +87,10 @@
       "target": "docs/verification/runtime-backends.md"
     },
     {
+      "source": "docs/inline-images.md",
+      "target": "docs/verification/runtime-backends.md"
+    },
+    {
       "source": "docs/zellij-backend.md",
       "target": "docs/verification/runtime-backends.md"
     },
@@ -382,6 +386,10 @@
     },
     {
       "path": "docs/herdr-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/inline-images.md",
       "audience": "operator-current"
     },
     {

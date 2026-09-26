@@ -604,6 +604,10 @@ A missed native transition falls through to the composer verdict rather than rep
 The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.
 This generous floor is required for small composer and peek reads.
 
+### Pane images
+
+Herdr 0.9.0 and newer relays a pane's Kitty graphics to each attached terminal whose cell size it knows; [`inline-images.md`](inline-images.md) owns how Firstmate's Pi session uses that to show images.
+
 ### Native idle state
 
 Herdr's native agent state can read idle while a harness waits on its own long foreground tool.

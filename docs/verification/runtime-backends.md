@@ -1379,6 +1379,81 @@ not ok - could not attach a real foreground Herdr viewer over a sized pty
 Re-run this guard after every Herdr upgrade.
 A release that changed the foreground-client contract, the window-grid requirement, or the nested-viewer refusal would fail here first, and the detached regressions would keep passing while saying nothing about it.
 
+### Inline Kitty images
+
+Pi's inline images reach the outer terminal through Herdr only by Herdr's own relay.
+Herdr consumes the Kitty graphics command inside the pane, then re-sends the decoded pixels to each attached client whose cell size it knows, and it re-places every visible image as the last command of each synchronized frame.
+`bin/fm-herdr-lab.sh viewer start <session> --capture <file>` records exactly those bytes; it reports a 10-by-20-pixel cell because Herdr sends no graphics to a client whose cell size is unknown.
+
+Measured on 2026-09-25 against Herdr 0.9.1, Pi 0.87.1 through `pi-signed`, and WezTerm 20240203-110809-5046fc22 on macOS 26.5.2:
+
+```sh
+tests/fm-pi-image-herdr-live-e2e.test.sh
+```
+
+```text
+ok - real pi 0.87.1 restores an fm_show_image result through the extension's own renderer
+ok - real herdr 0.9.1 + pi 0.87.1: /image shows its path line and pane reads stay free of graphics bytes
+ok - real pi 0.87.1 draws both images with Kitty transmit-and-display commands in a WezTerm-identified Herdr pane
+ok - real herdr 0.9.1 relays the 240x160 pane image to an attached client as an upload and a placement
+```
+
+The relay check is not vacuous: with pane graphics turned off in the lab server's configuration, the same guard still shows both path lines and fails only the relay check.
+
+```sh
+printf '[terminal]\nkitty_graphics = false\n' > "$TMPDIR/no-graphics.toml"
+HERDR_CONFIG_PATH="$TMPDIR/no-graphics.toml" tests/fm-pi-image-herdr-live-e2e.test.sh
+```
+
+```text
+ok - real pi 0.87.1 restores an fm_show_image result through the extension's own renderer
+ok - real herdr 0.9.1 + pi 0.87.1: /image shows its path line and pane reads stay free of graphics bytes
+ok - real pi 0.87.1 draws both images with Kitty transmit-and-display commands in a WezTerm-identified Herdr pane
+not ok - Herdr did not relay the pane image to its attached client as an upload plus a placement [herdr 0.9.1, pi 0.87.1]
+```
+
+Pi drew the image with `a=T,f=100,q=2,C=1,c=60,r=20`.
+The captured relay was an upload carrying `a=t,t=d,f=32,s=240,v=160` in 50 chunks, then placements carrying `a=p` with `c=60,r=20,z=0,C=1,w=240,h=160`, each followed only by `ESC 8` and the synchronized-output end.
+WezTerm attaches a Kitty image to the cells it covers, so that ordering is what keeps an image visible after Herdr repaints the text beneath it.
+
+WezTerm's side was measured without opening a window, by running this raw-mode probe under `wezterm-mux-server` with the operator's configuration and trace logging:
+
+```python
+import os, select, sys, time, tty
+tty.setraw(0)
+os.write(1, open(sys.argv[1], "rb").read() + b"\x1b[c")
+reply, end = b"", time.time() + 4
+while time.time() < end and not reply.endswith(b"c"):
+    if select.select([0], [], [], 0.1)[0]:
+        reply += os.read(0, 4096)
+open(sys.argv[2], "w").write(repr(reply) + "\n")
+```
+
+```sh
+env -i HOME=. PATH=/usr/bin:/bin TERM=xterm-256color WEZTERM_LOG=trace \
+  /Applications/WezTerm.app/Contents/MacOS/wezterm-mux-server --config-file "$HOME/.wezterm.lua" -- \
+  python3 probe.py <input.bin> <input.reply>
+```
+
+A relative `HOME` keeps the mux server's socket path under the Unix-socket length limit.
+With `query.bin` holding the support query `ESC _Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA ESC \`, the reply was:
+
+```text
+b'\x1b_Gi=31;OK\x1b\\\x1b[?65;4;6;18;22c'
+```
+
+With `herdr-relay.bin` holding the first captured upload through its final chunk and the first captured placement, the trace log recorded the placement and no error:
+
+```text
+record placement for 125271 (image_number None) Some(789155)
+```
+
+WezTerm 20240203 enables `enable_kitty_graphics` by default, and the same support query was answered `OK` under `--skip-config`.
+
+Under tmux 3.7c the same Pi build, started with the same WezTerm identity inside a private `tmux -L` server, drew only the path line for `/image`, and its `PI_TUI_WRITE_LOG` contained no Kitty or iTerm2 image command, because Pi turns inline images off whenever `TMUX` is set.
+
+Re-run the guard after every Herdr or Pi upgrade, and re-run the WezTerm probe after a WezTerm upgrade.
+
 ### Presentation version floor
 
 Default-on presentation projection is floored at Herdr 0.8.0.

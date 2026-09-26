@@ -18,11 +18,19 @@ The child also drops the inherited ``HERDR_*`` variables listed in
 ``SCRUBBED_ENV`` below. Herdr refuses to launch a nested viewer inside one of
 its own panes, and this helper normally runs from exactly there.
 
-Usage: fm-herdr-lab-viewer.py <session> <pidfile>
+An optional capture file turns the viewer into a recording outer terminal.
+Herdr streams pane graphics only to a client whose cell size in pixels is
+known, so a capturing viewer also reports a fixed pixel geometry on the same
+pre-fork window size, and every byte Herdr writes to the viewer is appended to
+that file, up to ``CAPTURE_LIMIT_BYTES``. The file must be an absolute path
+that does not exist yet; it is created private to the caller and never
+followed through a symbolic link.
+
+Usage: fm-herdr-lab-viewer.py <session> <pidfile> [<capture-file>]
 
 Exit status:
   0  the viewer ran and exited;
-  2  the session or pidfile was invalid;
+  2  the session, pidfile, or capture file was invalid;
   3  the pty or the viewer process could not be created.
 """
 
@@ -54,6 +62,9 @@ TERMINATE_GRACE_SECONDS = 5.0
 READ_CHUNK = 65536
 ROWS = 40
 COLS = 120
+CELL_WIDTH_PX = 10
+CELL_HEIGHT_PX = 20
+CAPTURE_LIMIT_BYTES = 64 * 1024 * 1024
 TERMINATION_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 
 
@@ -104,28 +115,53 @@ def _write_pidfile(path, launcher_pid, viewer_pid):
     os.rename(temporary, path)
 
 
-def _drain(master):
+def _drain(master, capture):
+    captured = 0
     while True:
         try:
-            if not os.read(master, READ_CHUNK):
-                return
+            chunk = os.read(master, READ_CHUNK)
         except OSError as error:
             if error.errno == errno.EINTR:
                 continue
             return
+        if not chunk:
+            return
+        if capture is not None and captured < CAPTURE_LIMIT_BYTES:
+            kept = chunk[: CAPTURE_LIMIT_BYTES - captured]
+            try:
+                os.write(capture, kept)
+                captured += len(kept)
+            except OSError:
+                captured = CAPTURE_LIMIT_BYTES
+
+
+def _open_capture(path):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    return os.open(path, flags, 0o600)
 
 
 def main(argv):
-    if len(argv) != 3:
-        sys.stderr.write("fm-herdr-lab-viewer: usage: <session> <pidfile>\n")
+    if len(argv) not in (3, 4):
+        sys.stderr.write("fm-herdr-lab-viewer: usage: <session> <pidfile> [<capture-file>]\n")
         return 2
-    session, pidfile = argv[1:]
+    session, pidfile = argv[1:3]
+    capture_path = argv[3] if len(argv) == 4 else None
     if session == "default" or not SESSION_PATTERN.match(session):
         sys.stderr.write("fm-herdr-lab-viewer: refusing session %r\n" % session)
         return 2
     if not os.path.isabs(pidfile):
         sys.stderr.write("fm-herdr-lab-viewer: pidfile must be an absolute path\n")
         return 2
+    capture = None
+    if capture_path is not None:
+        if not os.path.isabs(capture_path):
+            sys.stderr.write("fm-herdr-lab-viewer: capture file must be an absolute path\n")
+            return 2
+        try:
+            capture = _open_capture(capture_path)
+        except OSError as error:
+            sys.stderr.write("fm-herdr-lab-viewer: refusing capture file %r: %s\n" % (capture_path, error))
+            return 2
 
     try:
         master, slave = os.openpty()
@@ -133,7 +169,8 @@ def main(argv):
         sys.stderr.write("fm-herdr-lab-viewer: could not create a pty: %s\n" % error)
         return 3
     # Before the fork, so the TUI's first grid read already sees a real size.
-    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
+    pixels = (COLS * CELL_WIDTH_PX, ROWS * CELL_HEIGHT_PX) if capture is not None else (0, 0)
+    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, *pixels))
 
     signal.pthread_sigmask(signal.SIG_BLOCK, TERMINATION_SIGNALS)
     try:
@@ -189,7 +226,7 @@ def main(argv):
     signal.signal(signal.SIGHUP, _terminate)
     signal.signal(signal.SIGALRM, lambda _s, _f: _signal_viewer(signal.SIGKILL))
 
-    _drain(master)
+    _drain(master, capture)
     _terminate(None, None)
     signal.setitimer(signal.ITIMER_REAL, TERMINATE_GRACE_SECONDS)
     try:
