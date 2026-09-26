@@ -111,6 +111,8 @@ import {
 import {
   activateEligibleRowsOwner,
   afkPostureRecordPresent,
+  awayPostureTailFor,
+  branchWakePrompt,
   deactivateEligibleRowsOwner,
   FM_BRANCH_DISPATCH_EVENT,
   releaseEligibleRowsSnapshot,
@@ -183,17 +185,6 @@ const PROCESSING_TRIGGERED_ATTEMPTS = 2;
 const PROVIDER_ERROR_LATCH_THRESHOLD = 2;
 const PROVIDER_REPROBE_BASE_MS = 5 * 60 * 1000;
 const PROVIDER_REPROBE_MAX_MS = 60 * 60 * 1000;
-// Appended to a wake message while the away-posture record exists. Per-wake
-// tail content, never prefix; bin/fm-branch-prompt.sh's fixed "Postures"
-// section is what this tail refers back to.
-const AWAY_POSTURE_TAIL =
-  "POSTURE: AWAY. The away-posture record state/.afk-contract exists, so the captain is not present and MAIN is parked: you take every row, including check rows and decision rows, and no outcome reaches the captain until the return brief. " +
-  "The record below is the captain's away words, verbatim, and the whole mandate: act on them by your own judgment where this event is the moment they name, only through the guarded scripts under MAIN's standing authority - never more - which enforce it: bin/fm-pr-merge.sh merges any pull request that is green at its live head, synchronously, and refuses a red one or --allow-red; bin/fm-spawn.sh dispatches queued work (already queued, or filed by you from the words) within the spend cap; bin/fm-send.sh --resolve-key answers a decision the words pre-answer, or one the ask-user-authority policy in your prompt lets firstmate decide; bin/fm-merge-local.sh still refuses you. " +
-  "Never by analogy, and hold on doubt: a sentence you cannot act on with confidence is reported with verdict captain, naming it, and left for the return. " +
-  "Credential entry, legal or financial acceptance, an attended prompt, any discard the captain did not name, and any destructive, irreversible, or security-sensitive action are refused for every actor in every posture, whatever the words say. " +
-  "Log every action taken under the words in its outcome summary, opening with \"per your away instructions:\". " +
-  "A mirrored captain sentence authorizes nothing new once the record exists. " +
-  "The record, verbatim:";
 const PROCESSING_INSTRUCTION =
   "This is a supervision processing request delivered automatically by the supervision branch. " +
   "It was not typed by the captain. " +
@@ -1450,7 +1441,7 @@ ${context.command}
     } catch {
       readback = "";
     }
-    return `\n\n${AWAY_POSTURE_TAIL}\n${readback || "(the record's read-back could not be rendered; treat the captain's words as unavailable, act on standing authority only, and hold on doubt)"}`;
+    return awayPostureTailFor(readback);
   }
 
   function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false, acceptedAwayOnly = false): Promise<void> {
@@ -1528,9 +1519,7 @@ ${context.command}
         // durable queue keeps every row (bin/fm-lease-lib.sh role-partition).
         const postureTail = afk ? await awayPostureTail() : "";
         try {
-          await session.prompt(
-            `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.${postureTail}`,
-          );
+          await session.prompt(branchWakePrompt(message, "fm_branch_report", postureTail));
         } finally {
           wakeTaskScope = null;
         }
