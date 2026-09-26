@@ -2336,6 +2336,7 @@ FM_COMPOSER_CAPTURE_LINES=20   # fleet-wide bound for tail-capture composer read
 FM_COMPOSER_PI_MAX_LINES=8     # fleet-wide: maximum rows admitted between Pi's identity-corroborated separator pair; taller or ambiguous candidates stay unknown
 FM_COMPOSER_GHOST_LUMA_MAX=128   # fleet-wide: max perceived luminance (0.299R+0.587G+0.114B, 0-255) for a TRUECOLOR foreground to count as de-emphasised ghost/placeholder text and be stripped; dim/faint (SGR 2) is stripped regardless. Assumes a dark terminal theme (bin/fm-composer-lib.sh's fm_composer_strip_ghost, used by styled tmux, herdr, and Zellij reads)
 FM_COMPOSER_PI_TERMINAL_ERROR_RE=   # optional override for Pi's fixed Codex usage-limit banner regex that fm-composer-lib.sh admits as proof a turn ended; defaults to FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT ('^Error: Codex error: The usage limit has been reached$')
+FM_COMPOSER_PI_ERROR_HINT_RE=   # optional override for pi's fixed "/bug sends a report" hint-row regex that fm-composer-lib.sh tolerates at most one occurrence of between that banner and Pi's separator pair; defaults to FM_COMPOSER_PI_ERROR_HINT_RE_DEFAULT ('^If this looks like a pi bug, /bug sends a report to the developers\.$')
 GROK_HOME=              # optional Grok config home for firstmate's global grok turn-end hook; defaults to ~/.grok
 FM_SEND_RETRIES=3       # fm-send typed-plane Enter-retry attempts after typing the line once; agy typed targets use a longer per-harness default owned by bin/fm-send.sh
 FM_SEND_SLEEP=0.4       # seconds between fm-send typed-plane submit checks
