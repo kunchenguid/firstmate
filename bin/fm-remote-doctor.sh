@@ -433,9 +433,13 @@ check_remote_job_supervision() {
   local duplicates count
   duplicates=$("$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" --duplicates --dry-run 2>/dev/null || true)
   count=$(printf '%s' "$duplicates" | grep -c '^would reap duplicate' || true)
-  if [ "${count:-0}" -gt 0 ]; then
+  if [ "${count:-0}" -gt 0 ] && remote_job_existing_state &&
+    fm_remote_job_lock_owner_status "$(fm_remote_job_canonical_existing_dir "${HOME:-/nonexistent}")" 2>/dev/null; then
     record remote-job-supervisors "fixable: $count duplicate remote job workers serve this account's queue beside the one that owns its worker lock" \
       "rerun this command with --fix to collapse them to one worker"
+  elif [ "${count:-0}" -gt 0 ]; then
+    record remote-job-supervisors "fixable: $count remote job workers serve this account's queue and none verifiably owns its worker lock" \
+      "rerun this command with --fix to stop them all and start exactly one worker"
   else
     record remote-job-supervisors "ok: no duplicate remote job workers serve this account's queue"
   fi

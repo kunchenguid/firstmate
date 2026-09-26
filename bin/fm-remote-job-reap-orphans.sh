@@ -30,10 +30,14 @@
 # touches. Its candidates are the top-level workers - restart supervisors, and
 # serving children whose supervisor is gone - bound to this account's queue
 # (FM_REMOTE_JOB_STATE_ROOT, else ~/.firstmate/remote-job), whatever code root
-# launched them. A worker is bound to a queue by the file its standard output
-# goes to: every Linux start path appends a worker tree's output to its own
-# queue's logs/dev.firstmate.remote-job.log, read through /proc/<pid>/fd/1 or
-# lsof, so another queue's workers and a launchd-run worker are never
+# launched them. On Linux a worker is bound to a queue by the
+# FM_REMOTE_JOB_STATE_ROOT in its own environment, read through
+# /proc/<pid>/environ: every Linux start path, older builds included, sets it
+# explicitly, and it holds whatever becomes of the worker log. Where that is
+# unreadable, the worker is bound by the file its standard output goes to, read
+# through lsof: every start path appends a worker tree's output to its own
+# queue's logs/dev.firstmate.remote-job.log, and a log that was since removed
+# still counts. Another queue's workers and a launchd-run worker are never
 # candidates. The sweep keeps only the process that verifiably owns the queue's
 # worker lock, with the supervisor directly above it, and stops every other
 # candidate, so a host holding hundreds of supervisors is left with exactly one.
@@ -183,9 +187,7 @@ reap_state_root() {
   printf '%s\n' "$root"
 }
 
-# The file a process writes its standard output to. Every Linux start path
-# sends a worker tree's output to its own queue's worker log, so this is what
-# binds a worker process to one account queue on either platform.
+# The file a process writes its standard output to.
 reap_process_stdout() { # <pid>
   local lsof_bin
   if [ -e "/proc/$1/fd/1" ] || [ -L "/proc/$1/fd/1" ]; then
@@ -196,6 +198,20 @@ reap_process_stdout() { # <pid>
   "$lsof_bin" -a -p "$1" -d 1 -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
 }
 
+# True when <pid> serves the queue at <state-root>, whose worker log is <log>.
+reap_bound_to_queue() { # <pid> <state-root> <log>
+  local environ value
+  if environ=$(tr '\0' '\n' 2>/dev/null < "/proc/$1/environ"); then
+    value=$(printf '%s\n' "$environ" | sed -n 's/^FM_REMOTE_JOB_STATE_ROOT=//p' | head -n 1)
+    [ -n "$value" ] || return 1
+    value=$(fm_remote_job_canonical_existing_dir "$value" 2>/dev/null) || return 1
+    [ "$value" = "$2" ]
+    return
+  fi
+  value=$(reap_process_stdout "$1" 2>/dev/null) || return 1
+  [ "$value" = "$3" ] || [ "$value" = "$3 (deleted)" ]
+}
+
 reap_duplicates() { # <scan>
   local state_root log owner='' owner_parent='' pid root command ppid i count
   local -a pids=() commands=() ppids=() tops=()
@@ -203,7 +219,7 @@ reap_duplicates() { # <scan>
   log="$state_root/logs/$FM_REMOTE_JOB_LABEL.log"
   while IFS=$'\t' read -r pid root command; do
     [ -n "$pid" ] || continue
-    [ "$(reap_process_stdout "$pid" 2>/dev/null || true)" = "$log" ] || continue
+    reap_bound_to_queue "$pid" "$state_root" "$log" || continue
     ppid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d '[:space:]')
     pids+=("$pid")
     commands+=("$command")

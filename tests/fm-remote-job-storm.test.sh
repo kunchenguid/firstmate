@@ -108,6 +108,20 @@ use_state adopt
   fail "the doctor-shaped start failed"
 wait_for_supervisors 1 5 || fail "the first ensure did not leave exactly one supervisor"
 FIRST_WORKER=$(cat "$STATE/worker.pid")
+OWNER_START=$(cat "$STATE/worker.lock/start")
+if [ -r "/proc/$$/stat" ]; then
+  case "$OWNER_START" in proc-starttime:*) ;; *) fail "a /proc host recorded a non-kernel owner identity: $OWNER_START" ;; esac
+  START_TICKS=${OWNER_START#proc-starttime:}
+  START_TICKS=${START_TICKS%%:*}
+  STAT_LINE=$(cat "/proc/$FIRST_WORKER/stat")
+  read -r -a STAT_FIELDS <<< "${STAT_LINE##*)}"
+  [ "$START_TICKS" = "${STAT_FIELDS[19]}" ] ||
+    fail "the recorded start ticks $START_TICKS are not the worker's /proc starttime ${STAT_FIELDS[19]}"
+  echo "identity path: proc-starttime"
+else
+  case "$OWNER_START" in lstart-utc:*) ;; *) fail "a host without /proc recorded an unpinned owner identity: $OWNER_START" ;; esac
+  echo "identity path: lstart-utc"
+fi
 [ "$(TZ=UTC0 /bin/ps -p "$FIRST_WORKER" -o lstart=)" != "$(TZ=XYZ-9 /bin/ps -p "$FIRST_WORKER" -o lstart=)" ] ||
   fail "the fixture's two time zones render the same start time, so this case would prove nothing"
 for call in 1 2; do
@@ -249,6 +263,20 @@ run_probe_job
 AGAIN=$(TZ=XYZ-9 HOME="$ACCOUNT_HOME" "$ROOT/bin/fm-remote-job-reap-orphans.sh" --duplicates)
 [ -z "$AGAIN" ] || fail "a second collapse found more to stop: $AGAIN"
 pass "the duplicate sweep collapses supervisors to the lock owner's and is idempotent"
+
+# An operator may remove the storm's oversized worker log before recovering.
+for call in 1 2; do
+  (export TZ=UTC0; fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME") ||
+    fail "a duplicate-producing ensure failed: $FM_REMOTE_JOB_ERROR"
+done
+[ "$(supervisor_count)" -eq 3 ] || fail "the removed-log fixture expected three supervisors, found $(supervisor_count)"
+rm -f "$STATE/logs/$FM_REMOTE_JOB_LABEL.log"
+REMOVED_LOG=$(TZ=XYZ-9 HOME="$ACCOUNT_HOME" "$ROOT/bin/fm-remote-job-reap-orphans.sh" --duplicates)
+[ "$(printf '%s\n' "$REMOVED_LOG" | grep -c '^reaped duplicate')" -eq 2 ] ||
+  fail "the collapse did not stop exactly two duplicates once the worker log was removed: $REMOVED_LOG"
+wait_for_supervisors 1 5 || fail "the removed-log collapse left $(supervisor_count) supervisors"
+kill -0 "$OWNER_WORKER" 2>/dev/null || fail "the removed-log collapse stopped the worker that owns the lock"
+pass "the duplicate sweep still collapses supervisors after their worker log is removed"
 
 # A worker bound to another queue is never a duplicate of this one.
 OTHER_STATE="$TMP_ROOT/state-other-queue"
