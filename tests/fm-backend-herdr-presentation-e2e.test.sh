@@ -457,12 +457,14 @@ finish_concurrent_teardown() {  # <id> <status> <stdout> <stderr>
 }
 
 normalize_meta() {  # <meta>
+  # Independent launches intentionally have distinct worker capabilities
   sed -E \
     -e 's|^window=.*$|window=<herdr-container-id>|' \
     -e 's|^herdr_workspace_id=.*$|herdr_workspace_id=<herdr-container-id>|' \
     -e 's|^herdr_tab_id=.*$|herdr_tab_id=<herdr-container-id>|' \
     -e 's|^herdr_pane_id=.*$|herdr_pane_id=<herdr-container-id>|' \
     -e 's|^spawn_gen=.*$|spawn_gen=<spawn-incarnation>|' \
+    -e 's|^worker_capability_hash=.*$|worker_capability_hash=<worker-incarnation>|' \
     "$1"
 }
 
