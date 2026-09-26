@@ -110,11 +110,12 @@ fm_path_age() {
 }
 
 # fm_poll_derived_grace [poll-seconds]
-# Default guard-grace derivation: max(300, poll + 60). A watcher touches its
-# liveness beacon once per poll cycle, so a fixed 300s grace stops correctly
-# bounding staleness once the poll cadence reaches or exceeds it; growing the
-# default with the cadence while keeping the historical 300s floor for the
-# common short-poll case fixes that without a caller-specific constant.
+# Default guard-grace derivation: max(300, poll + 60). A watcher's longest gap
+# between beacon touches is its longest single step, which on a home with few
+# registered checks is its terminal poll wait, so a fixed 300s grace stops
+# correctly bounding staleness once the poll cadence reaches or exceeds it;
+# growing the default with the cadence while keeping the historical 300s floor
+# for the common short-poll case fixes that without a caller-specific constant.
 # Defaults to $FM_POLL (fm-watch.sh's own poll env var) when no argument is
 # given, so a caller with no independent notion of the poll cadence still
 # derives the same default fm-watch.sh itself would use.
@@ -863,12 +864,20 @@ _fm_recovery_marker_arm_check() {
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 }
 
-# A non-successor watcher start after an announced-but-unacked episode is a new
-# down stretch: mint a fresh pending generation so a still-open decision or
-# buried note can be presented once more. Handling successors must not call
-# this, because Option B re-arm is not a new down stretch.
+# A non-successor watcher start after an announced-but-unacknowledged episode is
+# a new down stretch: return it to pending so a still-open decision or buried
+# note can be presented once more. Handling successors must not call this,
+# because Option B re-arm is not a new down stretch.
+#
+# It reopens the SAME generation rather than minting a fresh one. A harness that
+# re-arms only between turns reaches this on every turn boundary, so minting here
+# invalidated the acknowledgement the handling turn had already been given: that
+# acknowledgement then reported a newer episode and asked for a re-drain, whose
+# own acknowledgement the next turn boundary invalidated again - one firstmate
+# turn per round, indefinitely, with no watcher alive between rounds. Keeping the
+# generation lets the outstanding acknowledgement land and retire the episode.
 _fm_recovery_marker_reopen_announced() {
-  local marker=$1 lock
+  local marker=$1 lock generation
   lock="${marker}.lock"
   fm_lock_acquire_wait "$lock" || return 1
   if ! fm_recovery_marker_read "$marker"; then
@@ -877,7 +886,8 @@ _fm_recovery_marker_reopen_announced() {
   fi
   case "$FM_RECOVERY_MARKER_TOKEN" in
     announced:*)
-      if ! _fm_recovery_marker_write_locked "$marker" downtime ""; then
+      generation=${FM_RECOVERY_MARKER_TOKEN##*:}
+      if ! _fm_recovery_marker_write_locked "$marker" downtime "$generation"; then
         fm_lock_release "$lock"
         return 1
       fi
@@ -1625,9 +1635,10 @@ fm_autoarm_claim_open() {  # <state-dir> [grace]
 #
 # Healthy means outcome=rewake with no exhausted-failure marker, bound to the
 # current session-lock pid and current watcher recovery generation. The rewake
-# ledger must also be at least as new as the last watcher beacon: a later beacon
-# proves another between-turns watcher cycle has begun, so the rewake belongs to
-# an earlier handling turn.
+# ledger must also be at least as new as the last watcher beacon. The beacon
+# advances many times within one cycle, so a later beacon proves the watcher
+# cycle already running when the epoch was written has made progress since, and
+# this rewake no longer describes the current mid-turn state.
 #
 # A missing generation, a failed or exhausted episode, an open arming claim, a
 # changed or dead session lock, a moved recovery generation, or an absent/later

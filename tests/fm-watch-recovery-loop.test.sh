@@ -222,5 +222,107 @@ test_handling_successor_does_not_go_blind() {
   pass "a resurfacing handling successor stays alive and supervises instead of going blind"
 }
 
+# T3: the shape a harness that re-arms only BETWEEN turns hits. A turn boundary
+# that fell between a drain's presentation and its acknowledgement used to mint a
+# fresh generation, so the acknowledgement the handling turn had been given
+# reported a newer episode and asked for a re-drain, whose own acknowledgement
+# the next turn boundary invalidated again - one firstmate turn per round with no
+# watcher alive in between, indefinitely, and an episode nothing could retire
+# while the fleet stayed busy. Drives the real watcher and the real drain.
+test_presented_acknowledgement_survives_a_turn_boundary_rearm() {
+  local dir home state fakebin out err child now sequence generation marker ack_err
+  dir=$(make_case rearm-during-handling)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  : > "$state/crew.meta"
+  printf 'pending:downtime:handling.1.aaa\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  append_wake "$state" check seed "check: seed recovery" \
+    || fail "T3 could not seed the durable queue"
+
+  # Round one: the watcher announces the recovery episode and closes on it.
+  out="$dir/watch1.out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" 2>&1
+  grep -Fq 'check: rearm-resurface' "$out" \
+    || fail "T3 first cycle did not announce the recovery episode: $(cat "$out")"
+
+  # The handling turn: the drain presents the row and its acknowledgement.
+  err="$dir/drain.err"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2> "$err" \
+    || fail "T3 drain failed: $(cat "$err")"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$sequence" ] && [ -n "$generation" ] \
+    || fail "T3 drain printed no acknowledgement command: $(cat "$err")"
+
+  # The turn boundary re-arms before that acknowledgement runs. Re-announcing the
+  # episode here is allowed; moving its generation is not.
+  out="$dir/watch2.out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" 2>&1
+  marker=$(cat "$state/.watcher-down")
+  [ "${marker##*:}" = "$generation" ] \
+    || fail "T3 turn-boundary re-arm moved the recovery generation to $marker (presented $generation)"
+
+  # A row appended during handling must not stop the presented acknowledgement
+  # from retiring the episode it names.
+  append_wake "$state" signal late "signal: row appended during handling" \
+    || fail "T3 could not append the late row"
+  ack_err="$dir/ack.err"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" \
+    --ack-through "$sequence" --recovery-generation "$generation" \
+    >/dev/null 2> "$ack_err" \
+    || fail "T3 presented acknowledgement failed: $(cat "$ack_err")"
+  ! grep -Fq 'newer recovery episode' "$ack_err" \
+    || fail "T3 presented acknowledgement was orphaned: $(cat "$ack_err")"
+  marker=$(cat "$state/.watcher-down")
+  case "$marker" in
+    acked:*) ;;
+    *) fail "T3 episode was not retired by its own acknowledgement: $marker" ;;
+  esac
+
+  # The late row is still queued and still resurfaces, and once it too is
+  # acknowledged a re-arm supervises instead of announcing recovery again.
+  err="$dir/drain2.err"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2> "$err" \
+    || fail "T3 second drain failed: $(cat "$err")"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ "$sequence" = 2 ] \
+    || fail "T3 late row was not presented as row 2: $(cat "$err")"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" \
+    --ack-through "$sequence" --recovery-generation "$generation" >/dev/null 2>&1 \
+    || fail "T3 late-row acknowledgement failed"
+  out="$dir/watch3.out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" 2>&1 &
+  child=$!
+  now=0
+  while [ "$now" -lt 40 ]; do
+    [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$child" ] && break
+    sleep 0.1
+    now=$((now + 1))
+  done
+  sleep 2
+  kill -0 "$child" 2>/dev/null \
+    || fail "T3 re-arm after a settled episode exited instead of supervising: $(cat "$out")"
+  ! grep -Fq 'check: rearm-resurface' "$out" \
+    || { kill -TERM "$child" 2>/dev/null || true
+         fail "T3 re-arm re-announced a settled episode: $(cat "$out")"; }
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf 'T3_GENERATION=%s\nT3_MARKER=%s\n' "$generation" "$(cat "$state/.watcher-down")"
+  fi
+  kill -TERM "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  pass "a presented acknowledgement survives a turn-boundary re-arm and settles its episode"
+}
+
 test_handling_successor_does_not_go_blind
 test_unacknowledged_recovery_is_announced_once_per_generation
+test_presented_acknowledgement_survives_a_turn_boundary_rearm

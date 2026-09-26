@@ -210,10 +210,14 @@ It is retired only by the generation-bound acknowledgement the drain prints as `
 
 ### Announcement
 
-An unacknowledged downtime generation is announced at most once.
-The first recovery marks that generation announced, and later arms wait until a new down stretch mints a new generation.
-A non-successor watcher start after an announced-but-unacked episode is a new down stretch.
-It mints a fresh generation so buried decisions still resurface once.
+An announced downtime generation is announced at most once while it stays announced.
+The first recovery marks it announced, and later arms wait until a new down stretch reopens it.
+A non-successor watcher start after an announced-but-unacknowledged episode is that new down stretch.
+It returns the episode to pending so buried decisions still resurface.
+
+The reopen keeps the episode's own generation rather than minting a fresh one.
+A harness that re-arms only between turns reaches that reopen at every turn boundary, so minting there invalidated the acknowledgement the handling turn had already been given.
+That acknowledgement then reported a newer episode and asked for a re-drain whose own acknowledgement the next boundary invalidated again - one firstmate turn per round, indefinitely, with no watcher alive in between.
 
 ### Generation reuse
 
@@ -231,9 +235,18 @@ An acknowledgement carries two separable facts:
 A generation mismatch therefore does not block consumption of rows through that sequence.
 It is a non-fatal result that names its own remedy: re-drain, then acknowledge the newer episode.
 
-The acknowledgement retires the marker only when no rows remain after sequence-bound consumption.
-A concurrently appended wake has a higher sequence, remains queued, and keeps the episode pending for presentation.
-Consequently, an empty-queue downtime publication during handling can be retired by the outstanding acknowledgement without a dedicated recovery turn.
+The acknowledgement retires the marker whenever it settled what was presented.
+It settled what was presented when it consumed rows of its own, or when it had none to consume and no presented row waits above its cutoff.
+
+Consuming any row at all is enough, so the rule reaches wider than a wake appended after presentation.
+A partial acknowledgement that consumes rows 1 to 3 of 5 presented retires the episode, and so does a branch actor's acknowledgement that consumes its own eligible rows while main-only rows remain queued.
+Whatever is left stays queued and resurfaces through its own wake, or through the next cycle's recovery check on a non-empty queue, which mints a fresh announced episode for it rather than holding the current one open.
+That costs one extra cycle before the leftover rows resurface.
+Holding the episode open for them instead is what left a busy home with an episode no acknowledgement could ever retire, so every later start re-announced recovery instead of supervising.
+
+A stale acknowledgement settles nothing, because it consumed none of its own rows while a presented row still waits above its cutoff.
+It therefore leaves the episode open, and the remedy names that episode's live generation.
+An empty-queue downtime publication during handling is likewise retired by the outstanding acknowledgement without a dedicated recovery turn.
 An acknowledged episode does not freeze the generation, because the next downtime after it opens an episode of its own.
 
 ## Per-actor acknowledgement
@@ -390,6 +403,17 @@ Once per poll the watcher checks that its home, its state directory, and its own
 The watcher uses bash's native fatal handling for HUP and TERM, including during a blocked poll, so both run its EXIT cleanup.
 `watcher_stop_signals` in `bin/fm-watch.sh` owns the signal-handling rationale.
 
+The watcher beats at each proven-progress point inside a cycle rather than once per cycle - between side-band reconciliation steps, before each registered check, at each scan phase, and before each scanned window.
+A cycle's work scales with the fleet while the grace does not, because a check sweep spends up to `FM_CHECK_TIMEOUT` per check and the pane scan captures every recorded window, so a large home's ordinary cycle outruns the grace.
+Beacon age therefore bounds how long the watcher has gone without making progress, not how long since a cycle turned over, so a healthy watcher in a large fleet is no longer read as wedged because its cycle work outran the grace.
+`bin/fm-watch-arm.sh` and `bin/fm-guard.sh` still take a bare 300-second default rather than deriving it from the poll interval, so a healthy watcher idle-waiting on a home with `FM_POLL` at 300 can still reach that age however often it beats.
+
+`state/.last-cycle-turnover` marks cycle turnover for test synchronization, touched exactly once per cycle immediately before the terminal wait and at no progress point.
+No production code reads it today; its only reader is the test suite's cycle-wait helper.
+It exists because the liveness beacon deliberately no longer implies a completed cycle, so a test that must wait out a whole cycle has nothing else to synchronize on.
+If supervision should ever depend on cycle turnover, that is a new decision and must not be inferred from this file's presence.
+Nothing may infer turnover from the beacon either, which fires many times per cycle.
+
 ## Regression coverage
 
 ### Pi and OpenCode watch extension
@@ -438,6 +462,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 
 - The once-per-generation announcement bound with the real Pi extension against a refused handling handshake.
 - A handling successor that must surface a real crew event instead of going blind.
+- A turn-boundary re-arm between a drain's presentation and its acknowledgement, which must leave that acknowledgement able to retire its own episode and must supervise once the episode is settled.
 
 `tests/fm-watch-triage.test.sh` proves TERM stops a watcher blocked inside a poll's pane capture and still releases its lock and records an acknowledgeable stop.
 It also checks that a newly appended keyed decision is classified without rereading earlier status bytes, so signal handling can return to the watcher's beacon refresh even when the status history is long.
@@ -449,6 +474,7 @@ It also checks that a newly appended keyed decision is classified without reread
 - The typed self-eviction failure.
 - Bounded and successor-linked lifecycle rows.
 - A SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+- A check sweep longer than the stale grace whose beacon must stay fresh throughout. The case asserts the sweep really outlasted the grace, so it cannot pass vacuously.
 
 ### Claude auto-arm and turn-end guard
 

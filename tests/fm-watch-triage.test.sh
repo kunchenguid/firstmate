@@ -70,26 +70,32 @@ wait_live() {
 # machine a short fixed budget can reap a round before the cycle it asserts on
 # ever ran - and then every "no wake, no marker" assertion passes vacuously
 # while every "marker written" assertion fails spuriously.
-# The liveness beacon is touched at the TOP of every poll, so this drops any
-# beacon left by an earlier round, waits for THIS watcher to write a fresh one
-# (some poll's top), then waits for that one to advance (the next poll's top) -
-# and the whole cycle in between is what the caller's assertions describe.
+# This synchronizes on the cycle-turnover marker, not on the liveness beacon.
+# The beacon is touched at every proven-progress point inside a cycle, so two
+# distinct beacon mtimes prove only that some work advanced, and a reader that
+# treats them as a completed cycle returns in the first fraction of one - before
+# the signal scan every caller here asserts on has run.
+# The marker is touched exactly once per cycle, immediately before the terminal
+# wait, so this drops any marker left by an earlier round, waits for THIS watcher
+# to write a fresh one (some cycle's end), then waits for that one to advance
+# (the next cycle's end) - and the whole cycle in between is what the caller's
+# assertions describe.
 # 0 if the watcher is still alive after a completed cycle, 1 if it exited.
 wait_poll_cycle() {  # <state> <pid> [limit-ticks]
-  local state=$1 pid=$2 limit=${3:-300} beat first now i=0
-  beat="$state/.last-watcher-beat"
-  rm -f "$beat"
+  local state=$1 pid=$2 limit=${3:-300} turnover first now i=0
+  turnover="$state/.last-cycle-turnover"
+  rm -f "$turnover"
   first=""
   while [ "$i" -lt "$limit" ]; do
     kill -0 "$pid" 2>/dev/null || return 1
-    first=$(file_mtime "$beat")
+    first=$(file_mtime "$turnover")
     [ -n "$first" ] && break
     sleep 0.1
     i=$((i + 1))
   done
   while [ "$i" -lt "$limit" ]; do
     kill -0 "$pid" 2>/dev/null || return 1
-    now=$(file_mtime "$beat")
+    now=$(file_mtime "$turnover")
     if [ -n "$now" ] && [ "$now" != "$first" ]; then
       return 0
     fi
@@ -6012,6 +6018,109 @@ test_beacon_stays_fresh_while_absorbing() {
   pass "the liveness beacon stays fresh while the watcher absorbs benign wakes (fm-guard never false-alarms)"
 }
 
+# The turnover marker is what wait_poll_cycle above synchronizes on, so it is
+# only usable while it means "a cycle ended" and nothing else. Touching it at a
+# progress point too would make it a second beacon and silently return every one
+# of this file's ~50 cycle waits early, which is the regression this pins.
+# Cycles are counted independently of the marker: the terminal wait is the only
+# `sleep POLL` in the watcher, so with a distinctive POLL the count of those
+# sleeps is the count of completed cycles.
+test_cycle_turnover_marker_is_touched_once_per_cycle() {
+  local dir state fakebin out pid touch_log sleep_log touch_sample
+  local cycles turnovers beats sampled i
+  dir=$(make_case cycle-turnover-once); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  touch_log="$dir/touch.log"
+  sleep_log="$dir/sleep.log"
+  touch_sample="$dir/touch.sample"
+  : > "$touch_log"
+  : > "$sleep_log"
+
+  # Log every touched path, then delegate to the real touch. Absolute candidates
+  # rather than PATH games, because fakebin is deliberately first on PATH.
+  cat > "$fakebin/touch" <<'SH'
+#!/usr/bin/env bash
+set -u
+for _a in "$@"; do
+  case "$_a" in
+    -*) ;;
+    *) printf '%s\n' "$_a" >> "$FM_FAKE_TOUCH_LOG" ;;
+  esac
+done
+for _c in /usr/bin/touch /bin/touch; do
+  [ -x "$_c" ] && exec "$_c" "$@"
+done
+exit 127
+SH
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "${1:-}" >> "$FM_FAKE_SLEEP_LOG"
+for _c in /bin/sleep /usr/bin/sleep; do
+  [ -x "$_c" ] && exec "$_c" "$@"
+done
+exit 127
+SH
+  chmod +x "$fakebin/touch" "$fakebin/sleep"
+
+  # No status file, so nothing is actionable and the watcher just cycles. POLL 3
+  # is distinct from the grace (1) and from the internal 0.01 waits, so counting
+  # `sleep 3` counts terminal waits. Launched inline rather than through
+  # watch_bg because that helper hardcodes FM_POLL=1.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_SECONDMATE_LIVENESS_SECS=99999999 \
+    FM_FAKE_TOUCH_LOG="$touch_log" FM_FAKE_SLEEP_LOG="$sleep_log" \
+    "$WATCH" > "$out" &
+  pid=$!
+  # Sample while the watcher is alive and parked in a terminal wait, never around
+  # the reap: a TERM landing between the turnover touch and the `sleep 3` that
+  # follows it would leave a turnover with no matching cycle and fail a correct
+  # watcher. A logged `sleep 3` proves its own cycle's turnover already happened,
+  # so counting turnovers a moment into that wait pins both counts to the same set
+  # of cycles with most of a POLL as margin. The sample is accepted only if the
+  # sleep count is still unmoved a moment AFTER the copy, because a cycle touches
+  # the marker tens of milliseconds before its own sleep is logged: a copy landing
+  # inside that gap would hold one turnover more than the cycles it is compared
+  # against, and the later recheck is what rejects exactly that window.
+  # Deliberately not wait_poll_cycle: that helper reads the marker this case is
+  # bounding, so using it here would let the bug hide its own symptom and report
+  # a vacuity failure instead of the real one.
+  cycles=""
+  for i in $(seq 1 120); do
+    kill -0 "$pid" 2>/dev/null || fail "watcher exited during the sampling window: $(cat "$out")"
+    sampled=$(grep -cx '3' "$sleep_log" || true)
+    if [ "$sampled" -lt 3 ]; then
+      sleep 0.2
+      continue
+    fi
+    sleep 0.3
+    cp "$touch_log" "$touch_sample"
+    sleep 0.3
+    [ "$(grep -cx '3' "$sleep_log" || true)" = "$sampled" ] || continue
+    cycles=$sampled
+    break
+  done
+  kill -0 "$pid" 2>/dev/null || fail "watcher exited during the sampling window: $(cat "$out")"
+  reap "$pid"
+  [ -n "$cycles" ] || fail "never caught the watcher parked in a terminal wait long enough to sample"
+
+  turnovers=$(grep -cxF "$state/.last-cycle-turnover" "$touch_sample" || true)
+  beats=$(grep -cxF "$state/.last-watcher-beat" "$touch_sample" || true)
+
+  # Non-vacuity first: without at least two observed cycles and more beats than
+  # turnovers, the equality below could hold while proving nothing.
+  [ "$cycles" -ge 2 ] \
+    || fail "counted only $cycles completed cycles, too few to bound the marker"
+  [ "$beats" -gt "$turnovers" ] \
+    || fail "the beacon was touched $beats times against $turnovers turnovers, so the two signals are not distinct"
+  [ "$turnovers" -eq "$cycles" ] \
+    || fail "the turnover marker was touched $turnovers times across $cycles cycles; it must be touched exactly once per cycle"
+  pass "the cycle-turnover marker is touched exactly once per cycle and stays distinct from the liveness beacon ($turnovers turnovers, $beats beats, $cycles cycles)"
+}
+
 # --- afk coherence: the daemon owns triage; the watcher does not double-triage ---
 
 test_afk_signal_records_heartbeat_endpoint() {
@@ -6449,6 +6558,7 @@ test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
 test_beacon_stays_fresh_while_absorbing
+test_cycle_turnover_marker_is_touched_once_per_cycle
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale

@@ -1340,6 +1340,93 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   pass "SIGSTOP distinguishes live PID from stale beacon and termination records the exit class"
 }
 
+# A cycle's work scales with the fleet: the check sweep spends up to
+# CHECK_TIMEOUT per registered check and the pane scan captures every recorded
+# window, so in a large home one cycle outruns the stale grace. Beating once per
+# cycle made a healthy, working watcher read as wedged - every later arm refused
+# to attach to a live pid with a stale beacon, and the guard reported
+# supervision as hung. The beacon must advance at each proven-progress point.
+test_beacon_stays_fresh_through_a_long_check_sweep() {
+  local dir state fakebin checks grace child i age worst span sweeps
+  local unhealthy_age=
+  dir=$(make_case beacon-through-sweep)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  checks="$dir/checks.log"
+  # Ten two-second checks put a ~20s sweep against a 12s grace: the pre-fix
+  # per-cycle beat goes quiet for the whole sweep, while a per-step beat stays
+  # well inside the grace even on a heavily loaded host.
+  grace=12
+  : > "$state/crew.meta"
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    {
+      printf '#!/usr/bin/env bash\n'
+      # shellcheck disable=SC2016 # The generated check must expand date at run time.
+      printf 'date +%%s >> %s\n' "$checks"
+      printf 'sleep 2\nexit 0\n'
+    } > "$state/sweep$i.check.sh"
+    chmod 700 "$state/sweep$i.check.sh"
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "sweep$i" \
+      >/dev/null || fail "could not register sweep check $i"
+  done
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=1 FM_HEARTBEAT=999999 \
+    FM_CHECK_TIMEOUT=30 FM_WATCHER_STALE_GRACE="$grace" "$WATCH" > "$dir/watch.out" 2>&1 &
+  child=$!
+  worst=0
+  i=0
+  # Long enough for several sweeps, so the span assertion below is not decided by
+  # one sweep landing just under the grace on a loaded host.
+  while [ "$i" -lt 100 ]; do
+    sleep 0.5
+    i=$((i + 1))
+    kill -0 "$child" 2>/dev/null || break
+    # Sample only once the watcher has published its first beat; an absent
+    # beacon during startup is not the starvation this case measures.
+    [ -e "$state/.last-watcher-beat" ] || continue
+    age=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_path_age "$2"' _ "$LIB" \
+      "$state/.last-watcher-beat")
+    case "$age" in ''|*[!0-9]*) age=0 ;; esac
+    [ "$age" -gt "$worst" ] && worst=$age
+    # The verdict that actually decides the watcher's fate: this is the predicate
+    # bin/fm-watch-arm.sh uses before attaching and bin/fm-guard.sh uses before
+    # crying supervision-off. A watcher that is still working must never fail it.
+    if ! FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c \
+      '. "$1"; fm_watcher_healthy "$2" "$3" "$4" "$5"' _ "$LIB" \
+      "$state" "$WATCH" "$grace" "$dir"; then
+      # Recorded, not fatal here: sampling must run to the end so the
+      # sweep-outlives-grace guard below still has the evidence it needs.
+      [ -n "$unhealthy_age" ] || unhealthy_age=$age
+    fi
+  done
+  kill -TERM "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  # One sweep is ten consecutive log entries, because the watcher's check loop is
+  # a single pass over every registered check and each one appends its start time
+  # once. Measuring head-to-tail instead would span every sweep plus the gaps
+  # between them, clearing the grace no matter how long any single sweep took -
+  # and that is the vacuity this guard exists to reject. Take the longest aligned
+  # group of ten, and ignore a trailing partial group from the sweep TERM cut off.
+  sweeps=$(awk 'NR % 10 == 1 { start = $1 } NR % 10 == 0 { complete++ } END { print complete + 0 }' "$checks")
+  span=$(awk '
+    NR % 10 == 1 { start = $1 }
+    NR % 10 == 0 { d = $1 - start; if (d > max) max = d }
+    END { print max + 0 }' "$checks")
+  [ "$sweeps" -ge 1 ] || fail "no complete ten-check sweep ran during the sampling window"
+  [ "$span" -ge "$grace" ] \
+    || fail "the longest of $sweeps sweeps spanned only ${span}s, shorter than the ${grace}s grace one sweep must outlive"
+  [ "$worst" -lt "$grace" ] \
+    || fail "beacon went quiet for ${worst}s while the ${span}s sweep was still running (grace ${grace}s)"
+  [ -z "$unhealthy_age" ] \
+    || fail "a watcher still running its ${span}s sweep was classified unhealthy at beacon age ${unhealthy_age}s (grace ${grace}s)"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf 'SWEEP_SPAN=%ss WORST_BEACON_AGE=%ss GRACE=%ss CHECK_RUNS=%s HEALTHY_THROUGHOUT=%s\n' \
+      "$span" "$worst" "$grace" "$(wc -l < "$checks" | tr -d '[:space:]')" \
+      "$([ -z "$unhealthy_age" ] && printf yes || printf no)"
+  fi
+  pass "a watcher stays beacon-fresh and healthy throughout a sweep longer than the stale grace"
+}
+
 test_pid_identity_is_locale_invariant() {
   # The portable fallback records its process identity under one locale, then
   # arm/guard/turn-end re-read it under the machine's ambient locale. ps's lstart
@@ -1568,3 +1655,4 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
+test_beacon_stays_fresh_through_a_long_check_sweep
