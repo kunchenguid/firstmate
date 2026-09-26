@@ -510,6 +510,58 @@ test_return_brief_points_at_the_drain_on_a_host_home_only() {
   pass "the return brief points at the drain for branch outcomes on a host home and leaves the read cursor to it, and a Pi home's brief is unchanged"
 }
 
+# The drain is the only presenter of branch outcomes and owner of their read
+# cursor, so a drain that presented them but could not record the presentation
+# fails, and the return keeps catch-up gated until a check drains again and
+# records it; otherwise a clear return would be followed by a replay.
+test_return_keeps_catchup_gated_when_the_drain_cannot_record_outcomes() {
+  local dir fakebin out rc gate f
+  dir="$TMP_ROOT/drain-cursor-stuck"
+  install_runner "$dir"
+  rm -f "$dir/bin/fm-wake-drain.sh"
+  for f in "$ROOT"/bin/*; do
+    [ -e "$dir/bin/${f##*/}" ] || cp -R "$f" "$dir/bin/"
+  done
+  gate="$dir/home/state/.afk-return-catchup"
+  : > "$dir/home/config/supervision-host"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  ln -s /bin/bash "$fakebin/claude"
+  contract_in "$dir" enter --words 'watch the fleet' >/dev/null 2>&1 || fail "could not record the away posture"
+  outcome_in "$dir" append --task demo --verdict routine --summary 'rebased while away' >/dev/null || fail "could not seed the routine row"
+  outcome_in "$dir" append --task demo --verdict captain --summary 'PR ready for review' >/dev/null || fail "could not seed the captain row"
+  mv "$dir/bin/fm-branch-outcome.sh" "$dir/bin/fm-branch-outcome.real.sh"
+  cat > "$dir/bin/fm-branch-outcome.sh" <<'EOF'
+#!/usr/bin/env bash
+[ "${1:-}" != mark-read ] || [ ! -e "$FM_HOME/cursor-stuck" ] || exit 1
+exec "$(dirname "$0")/fm-branch-outcome.real.sh" "$@"
+EOF
+  chmod +x "$dir/bin/fm-branch-outcome.sh"
+  : > "$dir/home/cursor-stuck"
+  touch "$dir/home/state/.last-watcher-beat"
+  set +e
+  # shellcheck disable=SC2016 # the single-quoted script expands in the harness shell
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
+    "$fakebin/claude" -c '"$0" begin 2>&1' "$dir/bin/fm-afk-return.sh")
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "a drain that could not record its outcomes should keep catch-up gated (rc=$rc): $out"
+  [ -f "$gate" ] || fail "a drain that could not record its outcomes did not retain the return gate"
+  assert_contains "$out" 'BRANCH OUTCOMES: the store could not record this presentation' "the return did not surface the drain's failure"
+  assert_contains "$out" 'durable wake drain failed; retry catch-up before ordinary work' "the gate did not name the drain failure"
+  [ ! -e "$dir/home/state/.branch-outcomes-cursor" ] || fail "the stuck cursor moved"
+  rm -f "$dir/home/cursor-stuck"
+  # shellcheck disable=SC2016 # the single-quoted script expands in the harness shell
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
+    "$fakebin/claude" -c '"$0" check 2>&1' "$dir/bin/fm-afk-return.sh") || fail "catch-up did not clear once the drain recorded its outcomes: $out"
+  assert_contains "$out" 'catch-up clear' "the recorded presentation did not clear catch-up"
+  assert_contains "$out" 'demo: PR ready for review' "the clearing check did not present the captain outcome through the drain"
+  assert_not_contains "$out" 'durable wake drain failed' "the cleared gate retained stale drain evidence"
+  [ "$(cat "$dir/home/state/.branch-outcomes-cursor")" = 2 ] || fail "the drain did not record its presentation once it could"
+  [ ! -e "$gate" ] || fail "the recorded presentation left the return gate behind"
+  pass "a drain that cannot record its branch-outcome presentation keeps the return's catch-up gated until a check records it"
+}
+
 test_return_brief_lists_landed_work_awaiting_cleanup() {
   local dir out landed_line failed_line handled_line
   dir="$TMP_ROOT/brief-landed"
@@ -932,6 +984,7 @@ test_missing_final_archive_keeps_retained_contract_gated
 test_return_brief_composes_from_record_store_and_held_set
 test_return_brief_lists_landed_work_awaiting_cleanup
 test_return_brief_points_at_the_drain_on_a_host_home_only
+test_return_keeps_catchup_gated_when_the_drain_cannot_record_outcomes
 test_return_brief_keeps_refresh_history
 test_malformed_posture_record_keeps_catchup_gated
 test_missing_epoch_record_stays_required_after_disappearing
