@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Firstmate console</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="brand"><span class="mark">F</span><div><strong>Firstmate</strong><small>Operator console</small></div></div>
+    <div class="live"><span class="pulse" aria-hidden="true"></span><span id="readiness">Checking readiness</span></div>
+  </header>
+  <main>
+    <section class="intro">
+      <p class="eyebrow">Your base of operations</p>
+      <h1>Work in view.<br><em>Orders in hand.</em></h1>
+      <p class="sub">A quiet view of the fleet, with a direct line to Firstmate.</p>
+    </section>
+    <nav class="lanes" aria-label="Console lane">
+      <button class="lane selected" data-lane="fleet" aria-pressed="true"><span>01</span> Fleet</button>
+      <button class="lane" data-lane="ask" aria-pressed="false"><span>02</span> Quick ask <b>Unavailable</b></button>
+      <button class="lane" data-lane="work" aria-pressed="false"><span>03</span> Do work</button>
+    </nav>
+    <section id="fleet" class="panel">
+      <div class="section-heading"><div><p class="eyebrow">Current picture</p><h2>Fleet</h2></div><span id="observation" class="observation">Awaiting observation</span></div>
+      <div id="fleet-alert" class="notice" hidden></div>
+      <div class="grid"><section class="card"><h3>In flight <span id="flight-count">0</span></h3><div id="in-flight" class="item-list"></div></section><section class="card"><h3>Needs a decision <span id="decision-count">0</span></h3><div id="decisions" class="item-list"></div></section></div>
+      <div class="grid lower"><section class="card"><h3>Next gates <span id="gate-count">0</span></h3><div id="gates" class="item-list"></div></section><section class="card"><h3>Recently landed <span id="landed-count">0</span></h3><div id="landed" class="item-list"></div></section></div>
+      <section class="card wide"><h3>Other homes <span id="mate-count">0</span></h3><div id="secondmates" class="item-list"></div></section>
+      <section id="omissions" class="disclosures" hidden><h3>Limits and uncertain evidence</h3><ul id="omission-list"></ul></section>
+    </section>
+    <section id="ask" class="panel" hidden>
+      <div class="section-heading"><div><p class="eyebrow">Explicit lane</p><h2>Quick ask</h2></div><span class="chip">Disabled</span></div>
+      <div class="card ask-card"><h3>Cost ceiling unresolved</h3><p>Measured single questions used 6,147 input tokens through Codex Luna and 12,957 through Grok, above the 2,000-token target. This lane stays disabled while its ceiling is decided.</p><p>No question is sent from this lane.</p></div>
+    </section>
+    <section id="work" class="panel" hidden>
+      <div class="section-heading"><div><p class="eyebrow">Direct to Firstmate</p><h2>Do work</h2></div><span class="chip">Durable orders</span></div>
+      <div id="order-readiness" class="notice">Checking whether the primary can receive work.</div>
+      <form id="order-form" class="card composer"><label for="draft">Your order</label><textarea id="draft" rows="7" maxlength="16000" placeholder="Describe the work, context, and desired result."></textarea><div class="form-bottom"><span>Multiline text is preserved. A saved order can remain pending.</span><button type="submit" id="send-order">Send order <span aria-hidden="true">↗</span></button></div></form>
+      <div id="order-result" class="notice" role="status" hidden></div>
+      <div class="section-heading history-heading"><div><p class="eyebrow">Durable record</p><h2>Orders &amp; answers</h2></div><span id="receipt-observation" class="observation"></span></div>
+      <div id="conversation" class="conversation"></div>
+      <section id="receipt-omissions" class="disclosures" hidden><h3>Record limits</h3><ul id="receipt-omission-list"></ul></section>
+    </section>
+  </main>
+  <footer>Firstmate console <span>·</span> Local operator view</footer>
+</body>
+</html>

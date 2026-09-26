@@ -2167,6 +2167,31 @@ The runner proves exactly one durability boundary: output that reached the runne
 
 `docs/verification/process-event-sources.md` holds the measurements and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
+## Loopback operator console (config/console-operator-secret)
+
+`bin/fm-console.py` serves the static operator page and reads one explicit `FM_HOME`.
+It binds only to `127.0.0.1`; it does not configure a proxy, a service manager, or network exposure.
+Create a private secret file before starting it:
+
+```sh
+export FM_HOME=/path/to/operational-home
+umask 077
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > "$FM_HOME/config/console-operator-secret"
+FM_HOME="$FM_HOME" bin/fm-console.py --port 8765
+```
+
+The file must contain at least 32 characters on one line and have no group or world permissions.
+The service refuses to start without it.
+Open `http://127.0.0.1:8765/` and enter `operator` as the HTTP Basic username with that secret as the password.
+The page, assets, and every API route require the credential.
+Order writes also require a same-origin request and a CSRF token obtained by the authenticated page.
+The page polls only while visible; its fleet observation is shared across clients and refreshes no faster than every 15 seconds.
+It shows the original Bearings observation time and any collection error so an old view is not presented as fresh.
+Fleet state comes from `fm-bearings-snapshot.sh --json`; orders, receipts, replies, and readiness come from `fm-inbox.sh`.
+Do work orders remain pending when the primary cannot be confirmed as ready.
+Quick ask is visible but disabled until its model-token ceiling is settled.
+This local service does not provide HTTPS; any later remote access needs a separately reviewed private exposure and authentication arrangement.
+
 ## Spoken interface and captain inbox (config/voice-*, config/inbox-*)
 
 The spoken interface in [`docs/voice-relay.md`](voice-relay.md) and the model-backed subcommands of `bin/fm-inbox.sh` reach a paid API in a named account, so no region, model id or AWS profile is shipped as a tracked default.
