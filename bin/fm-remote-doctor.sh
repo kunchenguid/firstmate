@@ -569,8 +569,8 @@ check_herdr() {
       fm_backend_herdr_client_select "$HERDR_SESSION_NAME" force
       case "${FM_BACKEND_HERDR_CLIENT_VERDICT:-default}" in
         incompatible)
-          record herdr "human: $resolved and every other herdr client on the remote runtime PATH are refused by the running session $HERDR_SESSION_NAME server as incompatible" \
-            "upgrade the herdr client at $resolved to the running server's version, or put a matching client first on that account's PATH; until then every pane read and doorbell fails with protocol_mismatch"
+          record herdr "human: $resolved is a protocol mismatch with the running session $HERDR_SESSION_NAME server and no other herdr client on the remote runtime PATH proved compatible" \
+            "run 'herdr status --json --session $HERDR_SESSION_NAME' on that account to see which side is stale, then either restart the session $HERDR_SESSION_NAME server on the build its clients speak or install a client whose protocol matches the running server; until then every pane read and doorbell fails with protocol_mismatch"
           return 0
           ;;
         selected)

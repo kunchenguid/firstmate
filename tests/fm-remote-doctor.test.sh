@@ -429,16 +429,27 @@ pass "a missing herdr CLI is a human gap that --fix never claims to close"
 # operational command with protocol_mismatch, so a PATH that offers no client
 # the server accepts leaves the host unable to read or ring any pane.
 
+assert_client_probed() {  # <client-log> <client-path>
+  local probes=0
+  [ ! -e "$1" ] || probes=$(grep -c "^status --json --session fm-remote" "$1")
+  [ "$probes" -ge 1 ] \
+    || fail "the doctor never asked the herdr client at $2 for its compatibility with session fm-remote"
+}
+
 new_case Linux no-herdr no-gui
 PAIR="$CASE_DIR/client-pair"; make_herdr_client_pair "$PAIR"
 mkdir -p "$CASE_HOME/.local/bin"
 cp "$PAIR/stale/herdr" "$CASE_HOME/.local/bin/herdr"
-export FM_HERDR_PAIR_DIR="$PAIR"
 doctor
 expect_code 1 "$DOCTOR_RC" "a host whose only herdr client the running server refuses was reported ready"
 assert_contains "$DOCTOR_OUT" "check herdr=human: $CASE_HOME/.local/bin/herdr" \
   "a lone incompatible herdr client was not tagged as a human gap naming it"
 assert_contains "$DOCTOR_OUT" 'action: herdr:' "a lone incompatible herdr client came with no operator action"
+assert_contains "$DOCTOR_OUT" "herdr status --json --session fm-remote" \
+  "the operator action did not point at the raw session status read that shows which side is stale"
+assert_contains "$DOCTOR_OUT" "restart the session fm-remote server" \
+  "the operator action did not offer a server restart, which is the repair when the server is the stale side"
+assert_client_probed "$PAIR/stale.log" "$CASE_HOME/.local/bin/herdr"
 pass "a lone herdr client the running server refuses is a human gap"
 
 new_case Linux no-herdr no-gui
@@ -447,13 +458,12 @@ OLDER="$CASE_DIR/older-pair"; make_herdr_client_pair "$OLDER" 0.8.1 19 0.9.0 22
 mkdir -p "$CASE_HOME/.local/bin"
 cp "$PAIR/stale/herdr" "$CASE_HOME/.local/bin/herdr"
 cp "$OLDER/stale/herdr" "$CASE_BIN/herdr"
-export FM_HERDR_PAIR_DIR="$PAIR"
 doctor
 expect_code 1 "$DOCTOR_RC" "a host with no herdr client the running server accepts was reported ready"
 assert_contains "$DOCTOR_OUT" 'check herdr=human:' "several incompatible herdr clients were not tagged as a human gap"
 assert_not_contains "$DOCTOR_OUT" 'check herdr=ok:' "several incompatible herdr clients were reported healthy"
-[ "$(grep -c '^status --json' "$PAIR/stale.log")" -ge 2 ] \
-  || fail "the doctor did not ask every herdr client on PATH for its compatibility: $(cat "$PAIR/stale.log")"
+assert_client_probed "$PAIR/stale.log" "$CASE_HOME/.local/bin/herdr"
+assert_client_probed "$OLDER/stale.log" "$CASE_BIN/herdr"
 pass "several herdr clients the running server all refuse are a human gap"
 
 # Control: a compatible client behind the stale one is still selected and healthy.
@@ -462,11 +472,9 @@ PAIR="$CASE_DIR/client-pair"; make_herdr_client_pair "$PAIR"
 mkdir -p "$CASE_HOME/.local/bin"
 cp "$PAIR/stale/herdr" "$CASE_HOME/.local/bin/herdr"
 cp "$PAIR/current/herdr" "$CASE_BIN/herdr"
-export FM_HERDR_PAIR_DIR="$PAIR"
 doctor
 assert_contains "$DOCTOR_OUT" "check herdr=ok: $CASE_BIN/herdr (bypassing $CASE_HOME/.local/bin/herdr)" \
   "a compatible herdr client behind a stale one was not selected"
-unset FM_HERDR_PAIR_DIR
 pass "a compatible herdr client behind a stale one is selected and healthy"
 
 # --- an absent launch agent is a fixable gap that --fix installs -------------
