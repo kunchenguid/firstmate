@@ -105,6 +105,12 @@
 #   FM_PENDING_REPLY_SEND_HOOK    optional command template for recovery delivery
 #                                 (tests); receives task_id and full message as args
 #   FM_PENDING_REPLY_NOW          optional fixed epoch for deterministic tests
+#
+# Resolved records remain in pending-replies for at least 30 days after
+# resolved_epoch, then eligible records move to pending-replies/archive/.
+# Unresolved records and records with an open escalation are never archived.
+
+FM_PENDING_REPLY_ARCHIVE_RETENTION_SECS=2592000
 
 # shellcheck source=bin/fm-marker-lib.sh
 _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_PENDING_REPLY_LIB_DIR="."
@@ -410,6 +416,7 @@ fm_pending_reply_confirm_delivery() {  # <state-dir> <corr_id>
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
+  # shellcheck disable=SC1091
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$lock" || return 1
   _fm_pending_reply_confirm_delivery_locked "$@" || rc=$?
@@ -491,6 +498,7 @@ fm_pending_reply_reconcile_delivery() {  # <state-dir> <corr_id>
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
+  # shellcheck disable=SC1091
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$lock" || return 1
   _fm_pending_reply_reconcile_delivery_locked "$@" || rc=$?
@@ -522,6 +530,7 @@ fm_pending_reply_reset_known_undelivered() {  # <state-dir> <corr_id>
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
   lock="$state/.pending-reply-$corr.lock"
+  # shellcheck disable=SC1091
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$lock" || return 1
   _fm_pending_reply_reset_known_undelivered_locked "$@" || rc=$?
@@ -1128,14 +1137,89 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
   # subshell that would make every later use of them read as a lost write.
   # The lock is released explicitly rather than from an EXIT trap, because a trap
   # in a plain function would clobber the caller's own.
-  local state=$1 corr=$2 lock rc=0
+  local state=$1 corr=$2 lock rc=0 rec phase escalated closed fields
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   STATE=$state
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  fields=$(awk -F= '
+    $1 == "phase" { phase=$2 }
+    $1 == "escalated_epoch" { escalated=$2 }
+    $1 == "escalation_closed_epoch" { closed=$2 }
+    END { printf "%s|%s|%s", phase, escalated, closed }
+  ' "$rec")
+  IFS='|' read -r phase escalated closed <<EOF
+$fields
+EOF
+  [ "$phase" = resolved ] || return 0
+  [ -n "$escalated" ] || return 0
+  [ -z "$closed" ] || return 0
   lock="$state/.pending-reply-$corr.lock"
   # shellcheck source=bin/fm-wake-lib.sh
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$lock" || return 1
   _fm_pending_reply_close_escalation_locked "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+# Archive an old resolved record only after its escalation is settled. The
+# record lock serializes the move against all other correlation mutations.
+fm_pending_reply_archive_resolved() {  # <state-dir> <corr_id> <now>
+  local state=$1 corr=$2 now=$3 rec phase escalated closed resolved lock archive_dir rc=0 fields
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 0
+  fields=$(awk -F= '
+    $1 == "phase" { phase=$2 }
+    $1 == "escalated_epoch" { escalated=$2 }
+    $1 == "escalation_closed_epoch" { closed=$2 }
+    $1 == "resolved_epoch" { resolved=$2 }
+    END { printf "%s|%s|%s|%s", phase, escalated, closed, resolved }
+  ' "$rec")
+  IFS='|' read -r phase escalated closed resolved <<EOF
+$fields
+EOF
+  [ "$phase" = resolved ] || return 0
+  case "$resolved" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$now" -ge "$resolved" ] 2>/dev/null || return 0
+  [ $((now - resolved)) -ge "$FM_PENDING_REPLY_ARCHIVE_RETENTION_SECS" ] || return 0
+  [ -z "$escalated" ] || [ -n "$closed" ] || return 0
+  lock="$state/.pending-reply-$corr.lock"
+  archive_dir="$(fm_pending_reply_dir "$state")/archive"
+  STATE=$state
+  # shellcheck disable=SC1091
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$lock" || return 1
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  if [ -f "$rec" ]; then
+    fields=$(awk -F= '
+      $1 == "phase" { phase=$2 }
+      $1 == "escalated_epoch" { escalated=$2 }
+      $1 == "escalation_closed_epoch" { closed=$2 }
+      $1 == "resolved_epoch" { resolved=$2 }
+      END { printf "%s|%s|%s|%s", phase, escalated, closed, resolved }
+    ' "$rec")
+    IFS='|' read -r phase escalated closed resolved <<EOF
+$fields
+EOF
+    if [ "$phase" = resolved ]; then
+      case "$resolved" in ''|*[!0-9]*) ;; *)
+        if [ -z "$escalated" ] || [ -n "$closed" ]; then
+          if [ "$now" -ge "$resolved" ] 2>/dev/null \
+            && [ $((now - resolved)) -ge "$FM_PENDING_REPLY_ARCHIVE_RETENTION_SECS" ]; then
+            if mkdir -p "$archive_dir" && chmod 700 "$archive_dir" 2>/dev/null \
+              && [ ! -e "$archive_dir/$corr" ] && mv "$rec" "$archive_dir/$corr"; then
+              :
+            else
+              rc=1
+            fi
+          fi
+        fi
+        ;;
+      esac
+    fi
+  fi
   fm_lock_release "$lock"
   return "$rc"
 }
@@ -1436,23 +1520,40 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # state, and optional secondmate-home wrong-home path checks.
 fm_pending_reply_tick() {  # <state-dir>
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
-  local observation observation_task found i
+  local observation observation_task found i now escalated closed resolved_epoch fields
   local -a observation_tasks=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
+  now=$(fm_pending_reply_now)
   for rec in "$dir"/*; do
     [ -f "$rec" ] || continue
     case "$(basename "$rec")" in
       .*) continue ;;
     esac
-    corr=$(fm_pending_reply_get "$rec" corr_id)
+    fields=$(awk -F= '
+      $1 == "corr_id" { corr=$2 }
+      $1 == "task_id" { task_id=$2 }
+      $1 == "phase" { phase=$2 }
+      $1 == "escalated_epoch" { escalated=$2 }
+      $1 == "escalation_closed_epoch" { closed=$2 }
+      $1 == "resolved_epoch" { resolved_epoch=$2 }
+      END { printf "%s|%s|%s|%s|%s|%s", corr, task_id, phase, escalated, closed, resolved_epoch }
+    ' "$rec")
+    IFS='|' read -r corr task_id phase escalated closed resolved_epoch <<EOF
+$fields
+EOF
     [ -n "$corr" ] || corr=$(basename "$rec")
-    task_id=$(fm_pending_reply_get "$rec" task_id)
-    phase=$(fm_pending_reply_get "$rec" phase)
     if [ "$phase" = resolved ]; then
       # Cheap no-op unless an escalation for this record is still open; this is
       # the retry that makes the close converge after a transient write failure.
-      fm_pending_reply_close_escalation "$state" "$corr" || true
+      if [ -n "$escalated" ] && [ -z "$closed" ]; then
+        fm_pending_reply_close_escalation "$state" "$corr" || true
+      fi
+      case "$resolved_epoch" in ''|*[!0-9]*) continue ;; esac
+      if [ "$now" -ge "$resolved_epoch" ] 2>/dev/null \
+        && [ $((now - resolved_epoch)) -ge "$FM_PENDING_REPLY_ARCHIVE_RETENTION_SECS" ]; then
+        fm_pending_reply_archive_resolved "$state" "$corr" "$now" || true
+      fi
       continue
     fi
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true

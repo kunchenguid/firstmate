@@ -209,12 +209,12 @@ fi
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
-# The liveness beacon is touched once per cycle, immediately before the
-# terminal wait below (event_wait_or_sleep) as well as at the top of the next
-# one, so a healthy cycle's beacon can legitimately age up to POLL seconds
-# between touches. fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced
-# transitively above) is the single owner of the max(300, poll+60)
-# derivation - see docs/turnend-guard.md "Guard grace and the poll cadence".
+# The liveness beacon is touched at cycle start and once before the terminal
+# wait. This keeps the guard's existing bound on a slow or hung cycle. The poll
+# interval still bounds the normal idle gap between the final beat and the next
+# cycle. fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced transitively
+# above) owns the max(300, poll+60) derivation - see docs/turnend-guard.md
+# "Guard grace and the poll cadence".
 # This recomputes the library default above now that the real configured
 # POLL is known.
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace "$POLL")}}
@@ -1485,6 +1485,11 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
   echo $(( now - m ))
 }
 
+# Publish liveness at the terminal wait boundary after a complete cycle.
+watcher_beat() {
+  touch "$STATE/.last-watcher-beat"
+}
+
 # Layer 2 + 3 signal scan: status files and turn-end markers.
 # Each file is compared against its persisted reported signature in .seen-* rather
 # than mtime-vs-a-startup-touch, so signals that land while no watcher is running
@@ -2649,5 +2654,6 @@ EOF
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
   # else the blind poll sleep. See event_wait_or_sleep.
+  watcher_beat
   event_wait_or_sleep
 done

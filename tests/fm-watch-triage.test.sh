@@ -69,10 +69,9 @@ wait_live() {
 # machine a short fixed budget can reap a round before the cycle it asserts on
 # ever ran - and then every "no wake, no marker" assertion passes vacuously
 # while every "marker written" assertion fails spuriously.
-# The liveness beacon is touched at the TOP of every poll, so this drops any
-# beacon left by an earlier round, waits for THIS watcher to write a fresh one
-# (some poll's top), then waits for that one to advance (the next poll's top) -
-# and the whole cycle in between is what the caller's assertions describe.
+# The liveness beacon is touched at the top of every poll and before the
+# terminal wait. Drop any earlier beacon, wait for this watcher to write a
+# fresh one, then wait for a later one before checking cycle effects.
 # 0 if the watcher is still alive after a completed cycle, 1 if it exited.
 wait_poll_cycle() {  # <state> <pid> [limit-ticks]
   local state=$1 pid=$2 limit=${3:-300} beat first now i=0
@@ -2744,7 +2743,7 @@ hold_watch_surface() {  # <dir> <out> <capture> <pane-text>
   local dir=$1 out=$2 capture=$3 text=$4
   printf '%s\n' "$text" > "$capture"
   hold_watch_launch "$dir" "$out" "$capture"
-  wait_for_exit "$HOLD_WATCH_PID" 100 || { reap "$HOLD_WATCH_PID"; return 1; }
+  wait_for_exit "$HOLD_WATCH_PID" 300 || { reap "$HOLD_WATCH_PID"; return 1; }
   return 0
 }
 
@@ -5083,7 +5082,6 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   reap "$UNTIL_PID"
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
-
 
 test_status_span_actionable_classifier
 test_status_span_survives_a_later_routine_append

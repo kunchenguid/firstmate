@@ -711,7 +711,7 @@ remote_teardown_locks_release() {
 # basename; pin the realpath so later cleanup cannot follow a swapped link
 # target or a crafted confirmation path.
 pending_replies_recovery_validate() {
-  local mode=${1:-initial} pending_dir real rec base corr
+  local mode=${1:-initial} pending_dir real rec base corr archive_rec archive_base archive_corr
   pending_dir="$STATE/pending-replies"
   if [ -e "$pending_dir" ] || [ -L "$pending_dir" ]; then
     [ -d "$pending_dir" ] && [ ! -L "$pending_dir" ] \
@@ -726,6 +726,26 @@ pending_replies_recovery_validate() {
     fi
     for rec in "$pending_dir"/*; do
       [ -e "$rec" ] || [ -L "$rec" ] || continue
+      if [ "$(basename "$rec")" = archive ]; then
+        [ -d "$rec" ] && [ ! -L "$rec" ] \
+          || { echo "REFUSED: pending-replies archive is unsafe" >&2; return 1; }
+        for archive_rec in "$rec"/*; do
+          [ -e "$archive_rec" ] || [ -L "$archive_rec" ] || continue
+          [ -f "$archive_rec" ] && [ ! -L "$archive_rec" ] \
+            || { echo "REFUSED: pending-replies archive contains an unsafe entry" >&2; return 1; }
+          archive_base=$(basename "$archive_rec")
+          printf '%s' "$archive_base" | grep -Eq '^[a-f0-9]{16}$' \
+            || { echo "REFUSED: pending-replies archive contains an unsafe entry" >&2; return 1; }
+          archive_corr=$(fm_meta_get "$archive_rec" corr_id)
+          if [ -n "$archive_corr" ]; then
+            printf '%s' "$archive_corr" | grep -Eq '^[a-f0-9]{16}$' \
+              || { echo "REFUSED: pending-replies archive contains an unsafe entry" >&2; return 1; }
+            [ "$archive_corr" = "$archive_base" ] \
+              || { echo "REFUSED: pending-replies archive contains an unsafe entry" >&2; return 1; }
+          fi
+        done
+        continue
+      fi
       [ -f "$rec" ] && [ ! -L "$rec" ] \
         || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
       base=$(basename "$rec")
@@ -793,6 +813,10 @@ pending_replies_cleanup_for_task() {
     fi
     for rec in ./*; do
       [ -e "$rec" ] || [ -L "$rec" ] || continue
+      if [ "$rec" = ./archive ]; then
+        [ -d "$rec" ] && [ ! -L "$rec" ] || exit 1
+        continue
+      fi
       [ -f "$rec" ] && [ ! -L "$rec" ] || exit 1
       task_id=$(fm_meta_get "$rec" task_id)
       [ "$task_id" = "$ID" ] || continue
