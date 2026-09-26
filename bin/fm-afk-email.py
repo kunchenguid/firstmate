@@ -65,6 +65,7 @@ def valid_mail_port(value):
 
 
 
+
 def mail_configuration():
     required = ["FM_MAIL_USER", "FM_MAIL_PASS", "FM_IMAP_HOST", "FM_SMTP_HOST"]
     if any(not os.environ.get(name) for name in required):

@@ -134,6 +134,7 @@ if [ "${1:-}" != afk-email ] || [ "${2:-}" != destination ]; then
   validate_mail_port FM_IMAP_PORT "$IMAP_PORT" || exit 1
   validate_mail_port FM_SMTP_PORT "$SMTP_PORT" || exit 1
 
+
 fi
 MAIL_MAX_WAKES="${FM_MAIL_POLL_MAX_WAKES:-20}"
 case "$MAIL_MAX_WAKES" in
