@@ -1547,8 +1547,8 @@ busy_turn_over_age() {  # <task>
 # above, throttled by this window's own .paused-resurfaced-<key> marker. Advances
 # the stale suppressor to <hash> and flags the key paused.
 #
-# The recheck names WHICH human the declared wait is on, because that is the whole
-# point of a recheck the captain reads: an external dependency for paused:, and the
+# The recheck distinguishes the declared dependency from a captain decision:
+# the legacy external-wait wording for paused: (bin/fm-classify-lib.sh), and the
 # captain themself for a verified hold. Only the captain-held verb takes the second
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
