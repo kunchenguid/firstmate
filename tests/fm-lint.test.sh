@@ -350,10 +350,10 @@ fm_lint_bounds_supported() {
 # bounded-execution tests can mix a hang, a memory-limit death, and clean
 # roots in one run. A *blocker* root spawns a tracked child (pid written to
 # FM_TEST_CHILD_PID), records its own pid on FM_TEST_STUB_PID, and then blocks;
-# a *hoarder* root runs a perl allocator that grows past any address-space
-# limit, translating whatever way perl reports the refused allocation into a
-# deterministic out-of-memory exit; anything else records its path on
-# FM_TEST_STUB_LOG and exits cleanly.
+# a *hoarder* root runs a perl allocator that grows to 512 MiB and fails only
+# when perl itself reports that the allocation was refused, forwarding perl's
+# own error; an allocation that succeeds falls through like any other root.
+# Anything else records its path on FM_TEST_STUB_LOG and exits cleanly.
 fm_lint_stub_reactive_shellcheck() {
   local fakebin=$1
   cat > "$fakebin/shellcheck" <<'SH'
@@ -371,9 +371,16 @@ case "$target" in
     exec sleep "${FM_TEST_BLOCK_SECS:-300}"
     ;;
   *hoarder*)
-    perl -e 'my $s = ""; for (1..1024) { $s .= "x" x 1048576 }' 2>&1
-    printf 'shellcheck: out of memory\n' >&2
-    exit 2
+    alloc_rc=0
+    alloc_err=$(perl -e 'my $s = ""; for (1..512) { $s .= "x" x 1048576 }' 2>&1 >/dev/null) \
+      || alloc_rc=$?
+    if [ "$alloc_rc" -ne 0 ]; then
+      printf '%s\n' "$alloc_err" >&2
+      case "$alloc_err" in
+        *"Out of memory"*) exit 2 ;;
+      esac
+      exit "$alloc_rc"
+    fi
     ;;
 esac
 printf '%s\n' "$target" >> "${FM_TEST_STUB_LOG:-/dev/null}"
@@ -1419,7 +1426,7 @@ test_root_deadline_names_the_root_and_reaps_the_tree() {
   sleep 300 &
   sentinel_pid=$!
   rc=0
-  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_PROGRESS=1 \
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 \
     FM_LINT_REQUIRE_BOUNDS=1 \
     FM_LINT_ROOT_SECONDS=1 FM_LINT_ROOT_GRACE=1 \
     FM_TEST_STUB_LOG="$stub_log" FM_TEST_CHILD_PID="$child_pid_file" \
@@ -1472,12 +1479,24 @@ test_root_memory_limit_reports_a_named_death() {
   printf '#!/usr/bin/env bash\nexit 0\n' > "$hoarder"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$ok"
 
-  # The hoarder stub allocates a full GiB; under a 256 MiB address-space limit
+  # Control: with no memory limit the same allocator succeeds, so a memory
+  # death below can only come from the enforced cap.
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 \
+    FM_TEST_STUB_LOG="$stub_log" \
+    "$LINT" --telemetry "$tmp/control.tsv" "$ok" "$hoarder" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the allocator failed without any memory limit"$'\n'"$out"
+  grep -q $'^meta\tbounds_enforced\t0$' "$tmp/control.roots.tsv" \
+    || fail "the control run was not unbounded"
+  awk -F '\t' '$1 == "end" && $3 ~ /hoarder\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
+    "$tmp/control.roots.tsv" || fail "the uncapped allocator root did not complete ok"
+
+  # The hoarder stub allocates 512 MiB; under a 256 MiB address-space limit
   # the allocator is refused and the run must name the root, not survive.
   sleep 300 &
   sentinel_pid=$!
   rc=0
-  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_PROGRESS=1 \
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 \
     FM_LINT_REQUIRE_BOUNDS=1 FM_LINT_ROOT_MEMORY_KIB=262144 \
     FM_TEST_STUB_LOG="$stub_log" \
     "$LINT" --telemetry "$telemetry" "$ok" "$hoarder" 2>&1) || rc=$?
@@ -1573,16 +1592,18 @@ test_pinned_shellcheck_memory_limit() {
   awk -F '\t' '$1 == "end" && $3 ~ /small\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
     "$roots_log" || fail "the pinned root did not complete ok under the memory limit"
 
-  # A far-too-small limit must bind the same pinned binary: the root is
-  # refused or killed and named, never silently uncapped.
+  # A limit below the pinned binary's own mapped size must bind the same
+  # pinned root: it is refused or killed and named, never silently uncapped.
+  # GHC shrinks its heap reservation to fit a larger cap, so a small file can
+  # still lint under a few hundred MiB; only a cap under the binary itself
+  # binds on every Linux architecture.
   rc=0
-  out=$(FM_LINT_REQUIRE_BOUNDS=1 FM_LINT_ROOT_MEMORY_KIB=262144 \
-    FM_LINT_PROGRESS=1 "$LINT" --telemetry "$tmp/tiny.tsv" "$fixture" 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "pinned ShellCheck ignored a 256 MiB address-space limit"
+  out=$(FM_LINT_REQUIRE_BOUNDS=1 FM_LINT_ROOT_MEMORY_KIB=8192 \
+    "$LINT" --telemetry "$tmp/tiny.tsv" "$fixture" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "pinned ShellCheck ignored an 8 MiB address-space limit"
   assert_contains "$out" "small.sh" "the memory-bound pinned root was not named"
-  if printf '%s\n' "$out" | grep -q 'reason=\(ok\|findings\)'; then
-    fail "the over-limit pinned root was misclassified as a lint result"$'\n'"$out"
-  fi
+  awk -F '\t' '$1 == "end" && $3 ~ /small\.sh$/ && $10 != "ok" && $10 != "findings" { found=1 } END { exit !found }' \
+    "$tmp/tiny.roots.tsv" || fail "the over-limit pinned root was not recorded as an abnormal end"$'\n'"$out"
   pass "the pinned ShellCheck both respects and survives under the memory envelope"
 }
 

@@ -73,9 +73,9 @@
 # record and names the root in flight as begun-but-unfinished. With --telemetry
 # the log is retained at <telemetry>.roots.tsv; otherwise it lives only in the
 # run's scratch dir. Reason values are ok, findings, timeout, memory,
-# signal:<sig>, limit-unavailable, or error:<rc>. In partition mode (or with
-# FM_LINT_PROGRESS=1) begin/end lines also stream to stderr, and an abnormal
-# root end is always reported there.
+# signal:<sig>, limit-unavailable, or error:<rc>. In partition mode begin/end
+# lines also stream to stderr, and an abnormal root end is always reported
+# there.
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
@@ -213,11 +213,13 @@ fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
     # workers use), so the owner's TERM-then-KILL group sweep cannot kill it
     # before it has forwarded the signal to the root's own group. If the worker
     # dies before its trap can signal the watchdog, the watchdog's parent-death
-    # check still starts the same terminate-then-kill escalation.
-    ( exec "${FM_LINT_PERL_BIN:-perl}" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
+    # check still starts the same terminate-then-kill escalation; the worker
+    # names itself as that owner before the launch, so a worker that dies while
+    # the watchdog is still starting is detected too.
+    ( FM_EXEC_TIMED_OWNER_PID=$$ exec "${FM_LINT_PERL_BIN:-perl}" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
         "${BASH:-bash}" "$SELF" --internal-timed \
         "$FM_LINT_INTERNAL_ROOT_SECS" "$FM_LINT_INTERNAL_GRACE" \
-        "${BASH:-bash}" "$SELF" --internal-root "$rss_file" "${FM_LINT_INTERNAL_MEMORY_KIB:--}" \
+        "${BASH:-bash}" "$SELF" --internal-root "$rss_file" "$FM_LINT_INTERNAL_MEMORY_KIB" \
         "$FM_LINT_SHELLCHECK" "${FM_LINT_WORKER_ARGS[@]}" -- "$path" ) > "$root_out" 2>&1 &
     FM_LINT_WORKER_RUN_PID=$!
     wait "$FM_LINT_WORKER_RUN_PID" || invocation_rc=$?
@@ -300,7 +302,7 @@ if [ "${1:-}" = "--internal-worker" ]; then
 fi
 
 # Private per-root payload mode used only by the bounded runner above: apply
-# the per-process address-space limit (KiB, or - for none), then exec
+# the per-process address-space limit (a positive KiB count), then exec
 # /usr/bin/time for the per-root peak-RSS record when it is available, else the
 # tool itself. A limit the host cannot apply exits 97 so the parent reports
 # limit-unavailable instead of running uncapped.
@@ -313,14 +315,19 @@ if [ "${1:-}" = "--internal-root" ]; then
   internal_rss_file=$2
   internal_memory_kib=$3
   shift 3
-  if [ "$internal_memory_kib" != - ]; then
-    ulimit -v "$internal_memory_kib" 2>/dev/null || {
-      printf 'fm-lint.sh: per-root memory limit %s KiB is not enforceable on this host\n' \
+  case "$internal_memory_kib" in
+    ''|0*|*[!0-9]*)
+      printf 'fm-lint.sh: --internal-root memory limit must be a positive KiB count, got %s\n' \
         "$internal_memory_kib" >&2
-      exit 97
-    }
-  fi
-  if [ "$internal_rss_file" != - ] && [ -x /usr/bin/time ]; then
+      exit 2
+      ;;
+  esac
+  ulimit -v "$internal_memory_kib" 2>/dev/null || {
+    printf 'fm-lint.sh: per-root memory limit %s KiB is not enforceable on this host\n' \
+      "$internal_memory_kib" >&2
+    exit 97
+  }
+  if [ -x /usr/bin/time ]; then
     if [ "$(uname)" = Darwin ]; then
       exec /usr/bin/time -l -o "$internal_rss_file" "$@"
     fi
@@ -862,7 +869,7 @@ for bound_pair in \
   "FM_LINT_ROOT_GRACE=$ROOT_GRACE" \
   "FM_LINT_ROOT_MEMORY_KIB=$ROOT_MEMORY_KIB"; do
   case "${bound_pair#*=}" in
-    ''|0|*[!0-9]*)
+    ''|0*|*[!0-9]*)
       printf 'fm-lint.sh: %s must be a positive integer, got %s.\n' \
         "${bound_pair%%=*}" "${bound_pair#*=}" >&2
       exit 2
@@ -910,7 +917,7 @@ if [ "${FM_LINT_REQUIRE_BOUNDS:-0}" = 1 ]; then
 fi
 
 PROGRESS=0
-if [ "${FM_LINT_PROGRESS:-0}" = 1 ] || [ -n "$PARTITION" ]; then
+if [ -n "$PARTITION" ]; then
   PROGRESS=1
 fi
 

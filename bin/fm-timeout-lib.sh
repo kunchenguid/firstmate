@@ -25,7 +25,10 @@
 #       forwarded to the group and starts the same grace, and the watchdog also
 #       starts that escalation when its own parent dies before it could be
 #       signalled (an owner torn down by an outer group-kill cannot leave the
-#       bounded subtree orphaned behind it). Exit status is the
+#       bounded subtree orphaned behind it). The owner is the watchdog's parent
+#       at startup, or FM_EXEC_TIMED_OWNER_PID when the caller names it before
+#       launching the watchdog, so an owner that dies during watchdog startup
+#       is still detected. Exit status is the
 #       command's own, except 124 (the bound was hit) or 137 (GNU timeout's
 #       status when its KILL had to fire); fm_timed_out accepts both. Both
 #       values must be positive integers (125 otherwise). The perl watchdog is
@@ -200,12 +203,12 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
   if command -v perl >/dev/null 2>&1; then
     exec perl -MPOSIX=WNOHANG,setpgid -MTime::HiRes=time -e '
       my ($bound, $grace) = (shift, shift);
+      my $owner = delete $ENV{FM_EXEC_TIMED_OWNER_PID} || getppid();
       my $pid = fork;
       exit 127 unless defined $pid;
       if ($pid == 0) { setpgid(0, 0); exec @ARGV; exit 127 }
       setpgid($pid, $pid);
       my $deadline = time + $bound;
-      my $owner = getppid();
       my ($kill_at, $timed_out) = (0, 0);
       for my $sig (qw(TERM INT HUP)) {
         $SIG{$sig} = sub { kill $sig, -$pid; $kill_at ||= time + $grace };
