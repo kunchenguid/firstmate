@@ -43,6 +43,7 @@
 #   spend_max_concurrent_workers: <n>
 #   confirmed: <UTC ISO 8601>       when this mandate was recorded; /afk itself
 #   confirmed_epoch: <seconds>        is the go, so no later human step stamps it
+#   mode: quiet                    only on a quiet daemon entry; absent means away
 #   words: | or |-                 the captain's words, verbatim, never edited,
 #     <line>                       one record line per input line (or `words: -`
 #     ...                          when /afk carried no words); `|` retains a
@@ -220,6 +221,7 @@ fm_afk_contract_render_record() {  # <entered-iso> <entered-epoch> <confirmed-is
   printf 'spend_max_concurrent_workers: %s\n' "${SPEND:-$FM_AFK_CONTRACT_SPEND_DEFAULT}"
   printf 'confirmed: %s\n' "$confirmed"
   printf 'confirmed_epoch: %s\n' "$confirmed_epoch"
+  [ "${FM_AFK_MODE:-}" != quiet ] || printf 'mode: quiet\n'
   if [ -n "$WORDS" ]; then
     local words_body=$WORDS words_indicator='|-'
     case "$words_body" in
@@ -315,6 +317,10 @@ fm_afk_contract_validate() {  # <path>
   [ -n "$announced" ] || { fm_afk_contract_log "record $path has no reach announcement"; return 1; }
   spend=$(fm_afk_contract_read_field "$path" spend_max_concurrent_workers)
   case "$spend" in ''|*[!0-9]*|0) fm_afk_contract_log "record $path has no valid spend cap"; return 1 ;; esac
+  case "$(fm_afk_contract_read_field "$path" mode)" in
+    ''|quiet) ;;
+    *) fm_afk_contract_log "record $path has an invalid mode"; return 1 ;;
+  esac
   words_header=$(sed -n '/^words: /{p;q;}' "$path")
   case "$words_header" in 'words: -'|'words: |'|'words: |-') ;; *) fm_afk_contract_log "record $path has no valid words field"; return 1 ;; esac
   fm_afk_contract_read_words "$path" >/dev/null || return 1
