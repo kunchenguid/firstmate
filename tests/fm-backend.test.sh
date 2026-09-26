@@ -116,8 +116,15 @@ resolve_base_ref() {
   done
   return 1
 }
-BASE_REF=$(resolve_base_ref) \
-  || fail "fm-backend baseline requires local main or origin/main; fetch the default branch before running this test"
+BASE_REF=
+
+backend_base_ref() {
+  if [ -z "${BASE_REF:-}" ]; then
+    BASE_REF=$(resolve_base_ref) \
+      || fail "fm-backend baseline requires local main or origin/main; fetch the default branch before running this test"
+  fi
+  printf '%s\n' "$BASE_REF"
+}
 
 # Newest first-parent revision whose bin/backends/tmux.sh still uses the
 # pre-exact permissive kill-window target. Content-addressed from history so the
@@ -157,14 +164,15 @@ resolve_permissive_tmux_kill_ref() {
 # after this complete baseline has been materialized.
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
-  local name=$1 root archive
+  local name=$1 root archive base_ref
   root="$TMP_ROOT/$name"
   archive="$root/bin.tar"
   mkdir -p "$root"
-  git -C "$ROOT" archive --format=tar "$BASE_REF" bin > "$archive" \
-    || fail "old-bin shim: could not archive bin/ from $BASE_REF"
+  base_ref=$(backend_base_ref)
+  git -C "$ROOT" archive --format=tar "$base_ref" bin > "$archive" \
+    || fail "old-bin shim: could not archive bin/ from $base_ref"
   tar -xf "$archive" -C "$root" \
-    || fail "old-bin shim: could not extract bin/ from $BASE_REF"
+    || fail "old-bin shim: could not extract bin/ from $base_ref"
   rm -f "$archive"
   printf '%s\n' "$root"
 }
@@ -400,9 +408,9 @@ test_backend_name_cmux_fallback_notice() {
 
 # fm_backend_name's auto-detect step: fires only when FM_BACKEND/config/backend
 # are both absent, selects between the three markers exactly as
-# fm_backend_detect does, and is loud only when it selects herdr or cmux -
-# never when it selects tmux (today's default-path behavior must stay
-# byte-for-byte silent).
+# fm_backend_detect does, and is loud only when it selects experimental cmux -
+# never when it selects verified herdr or tmux (today's default-path behavior
+# must stay byte-for-byte silent).
 test_backend_name_autodetect_notice() {
   local dir cfg out errfile
 
@@ -417,10 +425,7 @@ test_backend_name_autodetect_notice() {
   : > "$errfile"
   out=$(unset TMUX CMUX_WORKSPACE_ID; HERDR_ENV=1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
   [ "$out" = herdr ] || fail "fm_backend_name should auto-detect herdr from HERDR_ENV=1, got '$out'"
-  assert_contains "$(cat "$errfile")" "EXPERIMENTAL herdr backend" \
-    "fm_backend_name did not print a loud notice when auto-detecting herdr"
-  assert_contains "$(cat "$errfile")" "config/backend" \
-    "fm_backend_name's auto-detect notice did not name the opt-out"
+  [ ! -s "$errfile" ] || fail "fm_backend_name must keep verified Herdr auto-detection silent"$'\n'"$(cat "$errfile")"
 
   : > "$errfile"
   out=$(unset HERDR_ENV CMUX_WORKSPACE_ID; TMUX='fake,1,0' FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
@@ -447,7 +452,7 @@ test_backend_name_autodetect_notice() {
   [ "$out" = tmux ] || fail "nested tmux-in-cmux should auto-detect tmux (innermost first), got '$out'"
   [ -s "$errfile" ] && fail "nested tmux-in-cmux auto-detect (result tmux) must stay silent"$'\n'"$(cat "$errfile")"
 
-  pass "fm_backend_name: auto-detect selects herdr or cmux (loud notice) or tmux (silent, including nested tmux-in-herdr/tmux-in-cmux)"
+  pass "fm_backend_name: verified Herdr and tmux stay silent while experimental cmux remains loud"
 }
 
 # Explicit configuration (FM_BACKEND env or config/backend) always wins over
@@ -519,6 +524,42 @@ test_backend_source_shell_portable() {
   assert_contains "$out" "unknown backend 'bogus'" \
     "bash: fm_backend_source did not reject bogus with the expected error"
   pass "bash: fm_backend_source recognizes known backends and rejects unknown ones"
+}
+
+test_backend_source_requires_adapter_file() {
+  local dir adapter exit_status continuation out rc condition test_bash
+  dir="$TMP_ROOT/adapter-precheck"
+  adapter="$dir/backends/tmux.sh"
+  test_bash=${FM_TEST_BASH:-${BASH:-bash}}
+  mkdir -p "$dir/backends"
+
+  for condition in missing unreadable; do
+    if [ "$condition" = unreadable ]; then
+      printf ':\n' > "$adapter"
+      chmod 000 "$adapter"
+      if [ -r "$adapter" ]; then
+        pass "fm_backend_source: unreadable adapter case skipped (this user can read mode-000 files)"
+        continue
+      fi
+    fi
+    exit_status="$dir/$condition.exit"
+    continuation="$dir/$condition.continued"
+    # shellcheck disable=SC2016 # The child Bash expands $1..$4 and $? at runtime.
+    out=$("$test_bash" -c '
+      . "$1"
+      FM_BACKEND_LIB_DIR=$2
+      trap '\''printf "%s\n" "$?" > "$3"'\'' EXIT
+      set -e
+      fm_backend_source tmux
+      : > "$4"
+    ' _ "$ROOT/bin/fm-backend.sh" "$dir" "$exit_status" "$continuation" 2>&1)
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "fm_backend_source returned success for a $condition adapter: $out"
+    [ -f "$exit_status" ] || fail "fm_backend_source did not record the $condition adapter exit status"
+    [ "$(cat "$exit_status")" -ne 0 ] || fail "fm_backend_source lost the $condition adapter failure at EXIT"
+    [ ! -e "$continuation" ] || fail "fm_backend_source continued the lifecycle after a $condition adapter"
+    pass "fm_backend_source: $condition adapter fails before lifecycle continuation"
+  done
 }
 
 test_backend_validate_spawn_accepts_orca() {
@@ -812,10 +853,12 @@ SH
 }
 
 run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> -- <spawn args...>
-  local bin=$1 fb=$2 log=$3 state=$4 data=$5 config=$6 proj=$7; shift 7
+  local bin=$1 fb=$2 log=$3 state=$4 data=$5 config=$6 proj=$7 home; shift 7
   [ "${1:-}" = -- ] && shift
+  home="$TMP_ROOT/spawn-home"
+  mkdir -p "$home/state"
   : > "$log"
-  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$bin" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$bin" FM_HOME="$home" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_TMUX_LOG="$log" \
@@ -941,7 +984,18 @@ set -u
 { printf 'treehouse'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
 exit 0
 SH
-  chmod +x "$fb/tmux" "$fb/treehouse"
+  cat > "$fb/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  --version) printf '0.2.6\n'; exit 0 ;;
+  hold) [ "${2:-}" = --help ] && { printf '%s\n' 'usage: tasks-axi hold <id> --reason <text> --kind captain'; exit 0; } ;;
+  update) [ "${2:-}" = --help ] && { printf '%s\n' 'usage: tasks-axi update <id> --body-file <path> --archive-body'; exit 0; } ;;
+  mv) [ "${2:-}" = --help ] && { printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'; exit 0; } ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux" "$fb/treehouse" "$fb/tasks-axi"
   printf '%s\n' "$fb"
 }
 
@@ -1135,6 +1189,13 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
 }
 
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
+backend_base_ref >/dev/null
+
 test_backend_name_precedence
 test_backend_detect_precedence
 test_backend_detect_cmux_fallback_bundle_id
@@ -1148,6 +1209,7 @@ test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
+test_backend_source_requires_adapter_file
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms

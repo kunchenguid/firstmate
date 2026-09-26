@@ -10,7 +10,7 @@ The universal harness and toolchain requirements are in [`configuration.md`](con
 
 tmux is the hard default when no explicit setting or runtime auto-detection selects another backend.
 Select it explicitly with local `config/backend` containing `tmux`, with `FM_BACKEND=tmux` for one launch, or by asking Firstmate to use tmux.
-An explicit selection is also the opt-out from Herdr or cmux runtime auto-detection.
+Explicit tmux selection via `config/backend` or `--backend tmux` overrides runtime auto-detection.
 
 No provisioning is required before the first task.
 
@@ -62,7 +62,7 @@ The same scoping covers multi-process launchers without a special case, so the P
 Direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly, and similar or prefixed process names are not accepted through those exact Pi-family entries.
 Muse is likewise anchored to the exact `muse` launcher identity or the installed `muse-bin-<version>` prefix, so unrelated names such as `musescore` and `amuse` remain ambiguous.
 omp is anchored to the exact `omp` identity for the same reason, so `ompd` and `comp` remain ambiguous.
-AGY is anchored to the exact `agy` identity for the same reason, so unrelated names containing that fragment remain ambiguous.
+AGY and Devin are anchored to the exact `agy` and `devin` identities for the same reason, so unrelated names containing either fragment remain ambiguous.
 Cursor is identified from its exact `cursor-agent` identity or versioned install tree in the foreground process path or structured argv[0]; a bare `node` or unrelated `agent` remains ambiguous.
 
 The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
@@ -80,7 +80,7 @@ A bare shell prompt is `unknown`, so away-mode escalation is never injected into
 
 Busy state is not read from rendered text on this backend.
 A task's busy, idle, unknown, or dead verdict comes from the semantic busy-state contract owned by `bin/fm-busy-lib.sh`; [architecture](architecture.md#busy-state-is-semantic-per-adapter) owns its boundaries.
-The one remaining rendered-tail reader is Grok's isolated fallback inside that contract, which can only classify a Grok task.
+The isolated rendered-tail busy fallbacks that remain are harness-scoped, so one adapter's output can never classify another's task.
 The submit acknowledgement and away-mode supervisor-pane busy guard below still consult rendered output, but only to decide whether input can be delivered, never to decide recorded task state.
 The supervisor guard selects only the detected primary harness's signature rather than a global union of vendor patterns.
 

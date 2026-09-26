@@ -25,21 +25,23 @@ HERDR_STATE="$TMP_ROOT/remote-herdr.state"
 HERDR_LOG="$TMP_ROOT/remote-herdr.log"
 TMUX_LOG="$TMP_ROOT/remote-tmux.log"
 TMUX_STATE="$TMP_ROOT/remote-tmux.state"
+# One fixture value names the remote route's steering-inbox surface, so the
+# charter render assertions and the delivery checks below cannot drift apart.
+PARENT_ROUTE_INBOX="$REMOTE_HOME/state/parent-route/ios.inbox"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
 cleanup() {
-  local worker_pid='' wait_attempt=0
+  local worker_pid=''
   touch "$TMP_ROOT/provision.release" "$TMP_ROOT/seed.release" "$TMP_ROOT/handoff.release" \
     "$TMP_ROOT/inherit.release" "$TMP_ROOT/launch.release" 2>/dev/null || true
   FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" \
     "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
   if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
     worker_pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
-    kill "$worker_pid" 2>/dev/null || true
-    while kill -0 "$worker_pid" 2>/dev/null && [ "$wait_attempt" -lt 100 ]; do
-      wait_attempt=$((wait_attempt + 1))
-      sleep 0.05
-    done
+    # The published pid is the serving child; killing it alone lets its
+    # detached supervisor restart it while the fixture root is being removed.
+    . "$ROOT/bin/fm-remote-job-lib.sh"
+    fm_remote_job_stop_worker_tree "$worker_pid" || true
   fi
   rm -rf -- "$TMP_ROOT"
 }
@@ -290,7 +292,7 @@ sha256_file() {
 # the corr a reply must echo is read from the record body, never from typed
 # pane bytes.
 newest_remote_inbox_corr() {
-  grep -Eoh 'corr=[a-f0-9]{16}' "$REMOTE_HOME"/state/parent-route/ios.inbox/*.msg 2>/dev/null \
+  grep -Eoh 'corr=[a-f0-9]{16}' "$PARENT_ROUTE_INBOX"/*.msg 2>/dev/null \
     | tail -1 | cut -d= -f2-
 }
 
@@ -659,6 +661,9 @@ assert_present "$REMOTE_HOME/.fm-secondmate-home" "remote provisioning did not p
 assert_present "$REMOTE_HOME/projects/alpha/.git" "remote provisioning did not clone the project on that host"
 assert_grep "$REMOTE_HOME/state/parent-replies.status" "$REMOTE_HOME/data/charter.md" "remote charter did not use its append-only reply log"
 assert_no_grep "$PARENT/state/ios.status" "$REMOTE_HOME/data/charter.md" "remote charter retained the inaccessible local status path"
+assert_grep "$PARENT_ROUTE_INBOX" "$REMOTE_HOME/data/charter.md" "remote charter did not name its host-local steering inbox"
+assert_no_grep "$PARENT/state/ios.inbox" "$REMOTE_HOME/data/charter.md" "remote charter retained the inaccessible local steering inbox path"
+assert_grep "$PARENT_ROUTE_INBOX'/NNN.msg '$PARENT_ROUTE_INBOX'/handled/" "$REMOTE_HOME/data/charter.md" "remote charter did not render the inbox acknowledgement move host-local"
 if FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
   FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
   remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$TMP_ROOT/other-home" alpha \
@@ -876,7 +881,7 @@ pass "remote spawn serializes inheritance through launch publication"
 # resend command, and the expectation resolves only after the correlated remote log
 # delta is ingested.
 ssh_before_send=$(cat "$SSH_COUNT")
-records_before_send=$(find "$REMOTE_HOME/state/parent-route/ios.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
+records_before_send=$(find "$PARENT_ROUTE_INBOX" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
 set +e
 FM_FAKE_SSH_MODE=ambiguous remote_env "$ROOT/bin/fm-send.sh" fm-ios \
   'report the build result' > "$TMP_ROOT/send.out" 2> "$TMP_ROOT/send.err"
@@ -888,7 +893,7 @@ assert_no_grep 'do not resend' "$TMP_ROOT/send.err" "ambiguous remote send kept 
 ssh_after_send=$(cat "$SSH_COUNT")
 [ "$ssh_after_send" -eq $((ssh_before_send + 2)) ] \
   || fail "ambiguous remote send was not retried exactly once (ssh calls: $((ssh_after_send - ssh_before_send)))"
-records_after_send=$(find "$REMOTE_HOME/state/parent-route/ios.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
+records_after_send=$(find "$PARENT_ROUTE_INBOX" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
 [ "$records_after_send" -eq $((records_before_send + 1)) ] \
   || fail "the retried remote steer did not dedup onto one new record, went $records_before_send -> $records_after_send"
 assert_no_grep 'report the build result' "$HERDR_LOG" "the steer payload was typed into the remote pane"
@@ -983,18 +988,18 @@ printf 'codex\n' > "$PARENT/config/crew-harness"
 # A failed reread nudge now means the durable remote inbox RECORD could not be
 # written (a swallowed doorbell alone no longer fails a recorded steer), so
 # the failure is induced by making the remote steering inbox unwritable.
-chmod 555 "$REMOTE_HOME/state/parent-route/ios.inbox"
+chmod 555 "$PARENT_ROUTE_INBOX"
 if remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/config-push-fail.out" 2>&1; then
-  chmod 755 "$REMOTE_HOME/state/parent-route/ios.inbox"
+  chmod 755 "$PARENT_ROUTE_INBOX"
   fail "remote config push claimed success after its reread record could not be written"
 fi
 if [ ! -f "$NUDGE_MARKER" ]; then
-  chmod 755 "$REMOTE_HOME/state/parent-route/ios.inbox"
+  chmod 755 "$PARENT_ROUTE_INBOX"
   printf 'config push failure output:\n%s\n' "$(cat "$TMP_ROOT/config-push-fail.out")" >&2
   fail "failed remote config reread did not retain a retry marker"
 fi
 assert_grep 'remote=1' "$NUDGE_MARKER" "remote config reread marker lost its placement"
-chmod 755 "$REMOTE_HOME/state/parent-route/ios.inbox"
+chmod 755 "$PARENT_ROUTE_INBOX"
 remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/config-push-retry.out" \
   || fail "unchanged remote config push did not retry its pending reread"
 assert_absent "$NUDGE_MARKER" "successful remote config reread left its retry marker"
@@ -1106,6 +1111,109 @@ launches_after_repair=$(grep -c '^tab create' "$HERDR_LOG" || true)
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
   || fail "the endpoint was not probed successfully after readiness repair"
 pass "startup repairs remote readiness before probing without relaunching"
+
+# --- ordinary-supervision recovery of a dead remote endpoint -----------------
+# The watcher's cadence-gated liveness tick (bin/fm-watch.sh
+# secondmate_liveness_tick) drives the same shared probe+relaunch library the
+# startup sweep used above: a positively dead remote endpoint relaunches
+# through the guarded remote spawn and emits exactly one check wake, while an
+# unreachable host is preserved untouched. The tick runs against a dedicated
+# state dir holding only this mate's endpoint meta so no other supervision
+# source can fire first.
+
+remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
+WATCH_STATE="$TMP_ROOT/watch-liveness-state"
+mkdir -p "$WATCH_STATE"
+cp "$PARENT/state/ios.meta" "$WATCH_STATE/ios.meta"
+# The remote spawn path mints its inheritance generation from a counter that
+# lives beside the task record, so the dedicated watch state needs the real
+# one; otherwise the pushed payload reads as superseded on the remote home.
+cp "$PARENT/state/.remote-inherit-ios.generation" "$WATCH_STATE/" 2>/dev/null || true
+touch "$WATCH_STATE/home-summary.json"
+
+# A graceful agent exit leaves the pane with no registered agent - the exact
+# incident this tick exists for.
+ios_pane=$(sed -n 's/^herdr_pane_id=//p' "$remote_route_meta")
+[ -n "$ios_pane" ] || fail "the remote route meta did not record its Herdr pane"
+jq --arg p "$ios_pane" \
+  '.typed |= with_entries(select(.key != $p)) | .working |= with_entries(select(.key != $p))' \
+  "$HERDR_STATE" > "$TMP_ROOT/herdr-dead.json" && mv "$TMP_ROOT/herdr-dead.json" "$HERDR_STATE"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = dead ] \
+  || fail "the agent-free remote pane did not classify dead"
+
+tabs_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
+FM_STATE_OVERRIDE="$WATCH_STATE" FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 \
+  FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+  remote_env "$ROOT/bin/fm-watch.sh" \
+  > "$TMP_ROOT/watch-liveness.out" 2> "$TMP_ROOT/watch-liveness.err" &
+watch_pid=$!
+watch_wait=0
+while kill -0 "$watch_pid" 2>/dev/null && [ "$watch_wait" -lt 1500 ]; do
+  sleep 0.02
+  watch_wait=$((watch_wait + 1))
+done
+if kill -0 "$watch_pid" 2>/dev/null; then
+  kill "$watch_pid" 2>/dev/null || true
+  fail "the watcher did not exit on its auto-relaunch wake within the bound"
+fi
+wait "$watch_pid" \
+  || fail "the liveness watcher leg exited non-zero: $(cat "$TMP_ROOT/watch-liveness.err")"
+grep -F 'check: secondmate ios auto-relaunched after remote endpoint dead on its configured host (host=remote-mac)' \
+  "$TMP_ROOT/watch-liveness.out" >/dev/null \
+  || fail "the dead remote secondmate was not auto-relaunched: $(cat "$TMP_ROOT/watch-liveness.out")"
+[ "$(grep -c 'check: secondmate ios auto-relaunched' "$TMP_ROOT/watch-liveness.out")" -eq 1 ] \
+  || fail "the remote auto-relaunch did not produce exactly one captain-facing line"
+grep -F $'\tcheck\tsecondmate-relaunch-ios-' "$WATCH_STATE/.wake-queue" >/dev/null \
+  || fail "the durable auto-relaunch wake row was not queued: $(cat "$WATCH_STATE/.wake-queue" 2>/dev/null)"
+grep -F 'relaunched' "$WATCH_STATE/.secondmate-relaunch-ios" >/dev/null \
+  || fail "the durable per-mate ledger did not record the relaunch"
+tabs_after=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$tabs_after" -gt "$tabs_before" ] \
+  || fail "the remote relaunch did not create a fresh remote endpoint ($tabs_before -> $tabs_after)"
+assert_grep 'remote_host=remote-mac' "$WATCH_STATE/ios.meta" \
+  "the watcher relaunch dropped the remote host route"
+assert_grep 'herdr_session=fm-remote' "$remote_route_meta" \
+  "the watcher relaunch did not re-record the pinned remote Herdr session"
+assert_grep '- ios ' "$PARENT/data/secondmates.md" \
+  "the watcher relaunch changed the registry route"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "the auto-relaunched remote endpoint did not read alive"
+# Production relaunch updates the parent route meta and inheritance generation
+# in place; the dedicated watch state above kept the rest of this suite's
+# parent state out of scope, so fold both records back now.
+cp "$WATCH_STATE/ios.meta" "$PARENT/state/ios.meta"
+cp "$WATCH_STATE/.remote-inherit-ios.generation" "$PARENT/state/" 2>/dev/null || true
+pass "watch liveness: a dead remote secondmate is auto-relaunched on its own host with one wake"
+
+# Host loss mid-supervision is never evidence of death: the same tick on an
+# unreachable route probes, preserves, and stays silent.
+WATCH_STATE_UNREACHABLE="$TMP_ROOT/watch-liveness-unreachable"
+mkdir -p "$WATCH_STATE_UNREACHABLE"
+cp "$WATCH_STATE/ios.meta" "$WATCH_STATE_UNREACHABLE/ios.meta"
+touch "$WATCH_STATE_UNREACHABLE/home-summary.json"
+ssh_before=$(cat "$SSH_COUNT" 2>/dev/null || printf '0')
+FM_FAKE_SSH_MODE=unreachable FM_STATE_OVERRIDE="$WATCH_STATE_UNREACHABLE" \
+  FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+  FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+  remote_env "$ROOT/bin/fm-watch.sh" \
+  > "$TMP_ROOT/watch-unreachable.out" 2> "$TMP_ROOT/watch-unreachable.err" &
+watch_pid=$!
+sleep 4
+kill -0 "$watch_pid" 2>/dev/null \
+  || fail "the watcher exited against an unreachable remote secondmate: $(cat "$TMP_ROOT/watch-unreachable.out" "$TMP_ROOT/watch-unreachable.err")"
+kill "$watch_pid" 2>/dev/null || true
+wait "$watch_pid" 2>/dev/null || true
+ssh_after=$(cat "$SSH_COUNT" 2>/dev/null || printf '0')
+[ "$ssh_after" -gt "$ssh_before" ] || fail "the unreachable remote endpoint was never probed"
+[ ! -s "$WATCH_STATE_UNREACHABLE/.wake-queue" ] \
+  || fail "an unreachable remote probe queued a wake: $(cat "$WATCH_STATE_UNREACHABLE/.wake-queue")"
+assert_absent "$WATCH_STATE_UNREACHABLE/.secondmate-relaunch-ios" \
+  "an unreachable remote probe ledgered a relaunch attempt"
+assert_grep 'remote_host=remote-mac' "$WATCH_STATE_UNREACHABLE/ios.meta" \
+  "an unreachable remote probe changed the route metadata"
+assert_grep '- ios ' "$PARENT/data/secondmates.md" \
+  "an unreachable remote probe changed the registry route"
+pass "watch liveness: an unreachable remote secondmate is probed, preserved, and never failed over"
 
 # --- a stale herdr client shadowing the one the server accepts --------------
 # The remote host's job PATH can resolve an older self-updated herdr ahead of
@@ -1246,6 +1354,36 @@ FM_HOME="$PARENT" bash -c '
 ' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$retired_wake_rec" \
   || fail "could not settle remote receiver wake retirement state"
 printf 'confirmed:%s\n' "$retired_wake_corr" > "$PARENT/state/.backlog-handoff-ios.wake-pending"
+printf '%s\tattempt\n' "$(date +%s)" > "$PARENT/state/.secondmate-relaunch-ios"
+printf '%s\tdead\n' "$(date +%s)" > "$PARENT/state/.secondmate-relaunch-bound-ios"
+liveness_lock="$PARENT/state/.secondmate-liveness-ios.lock"
+# The link is published before the claim finishes; signal only after acquire.
+# shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+( STATE="$PARENT/state" exec bash -c '. "$1" && fm_lock_acquire_wait "$2" && touch "$3" && exec sleep 120' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$liveness_lock" "$TMP_ROOT/liveness.entered" ) &
+liveness_holder_pid=$!
+liveness_wait=0
+while [ ! -f "$TMP_ROOT/liveness.entered" ]; do
+  kill -0 "$liveness_holder_pid" 2>/dev/null || fail "liveness lock holder exited before acquiring the lock"
+  liveness_wait=$((liveness_wait + 1))
+  [ "$liveness_wait" -le 250 ] || fail "liveness lock holder never acquired the lock"
+  sleep 0.02
+done
+liveness_owner=$liveness_holder_pid
+[ "$(cat "$liveness_lock/pid" 2>/dev/null)" = "$liveness_owner" ] \
+  || fail "liveness lock holder did not own its acquired lock"
+if remote_env "$ROOT/bin/fm-teardown.sh" ios > "$TMP_ROOT/teardown-liveness-busy.out" 2>&1; then
+  fail "remote retirement proceeded under an active liveness episode"
+fi
+assert_grep 'liveness check is in progress for ios' "$TMP_ROOT/teardown-liveness-busy.out" \
+  "a liveness-busy retirement did not ask for a retry"
+assert_present "$REMOTE_HOME" "a liveness-busy retirement removed the remote home"
+assert_present "$PARENT/state/ios.meta" "a liveness-busy retirement removed parent metadata"
+assert_grep '- ios ' "$PARENT/data/secondmates.md" "a liveness-busy retirement removed the registry route"
+[ "$(cat "$liveness_lock/pid" 2>/dev/null)" = "$liveness_owner" ] \
+  || fail "a liveness-busy retirement removed or took the episode's lock"
+kill "$liveness_holder_pid" 2>/dev/null || true
+wait "$liveness_holder_pid" 2>/dev/null || true
 handoff_lock="$PARENT/state/.backlog-handoff-ios.lock"
 FM_HOME="$PARENT" /bin/bash -c '
   . "$1"
@@ -1299,6 +1437,11 @@ assert_absent "$PARENT/state/ios.meta" "remote retirement did not remove parent 
 assert_absent "$PARENT/state/.backlog-handoff-ios.wake-pending" \
   "remote retirement left receiver wake state that could poison a replacement route"
 assert_absent "$retired_wake_rec" "remote retirement left the retired receiver wake correlation"
+assert_absent "$PARENT/state/.secondmate-relaunch-ios" \
+  "remote retirement left the relaunch ledger a same-id replacement would inherit"
+assert_absent "$PARENT/state/.secondmate-relaunch-bound-ios" \
+  "remote retirement left the relaunch park marker a same-id replacement would inherit"
+assert_absent "$liveness_lock" "remote retirement left its liveness lock behind"
 assert_no_grep '- ios ' "$PARENT/data/secondmates.md" "remote retirement did not remove the registry route"
 jq -e --arg workspace "$SIBLING_WORKSPACE" --arg pane "$SIBLING_PANE" '
   any(.workspaces[]; .workspace_id == $workspace and .label == "2ndmate-macos")

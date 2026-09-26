@@ -189,6 +189,140 @@ test_matrix_claude_bare_nbsp_row() {
   pass "matrix: claude's ❯+NBSP row reads empty on every profile in both locales (#1988)"
 }
 
+test_matrix_claude_arrow_statusline_footer() {
+  # Real claude 2.x on herdr (captured live 2026-09-20, herdr 0.8.0): the
+  # composer is a bare `❯`+U+00A0 row between two solid rules, and the harness
+  # draws a user statusLine plus its permission-mode hint directly BELOW the
+  # closing rule. That statusLine opened with `→`, which is Cursor's own agent
+  # prompt glyph, so the bottom-most-candidate rule selected the statusLine as
+  # a bare composer, swallowed the hint row beneath it as wrapped input, and
+  # every steer to a claude worker was refused with a `pending` verdict on a
+  # visibly empty composer. A pair that closed over a bare agent-glyph row is
+  # a proven composer container, so its contiguous non-blank footer rows are
+  # furniture and cannot outrank the composer they sit under.
+  local pair footer screen typed residue claude_idle
+  claude_idle=$(printf 'claude\tidle')
+  pair=$'transcript line\n────────────────────────\n❯'"$NBSP"$'\n────────────────────────'
+  footer=$'\n  → repo git:(fm/branch)× | Opus 5 | ctx 15%\n  ⏵⏵ bypass permissions on (shift+tab to cycle)'
+  screen="$pair$footer"
+  assert_screen "claude idle under an arrow statusline on herdr" empty "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  assert_screen "claude idle under an arrow statusline on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "claude idle under an arrow statusline on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  # The protection this must NOT remove: real unsubmitted text in that same
+  # composer, under that same statusline, still refuses.
+  typed=$'transcript line\n────────────────────────\n❯ fix the login bug\n────────────────────────'"$footer"
+  assert_screen "claude typed under an arrow statusline" pending "$CAPS_STYLED" "$typed" '' "$claude_idle"
+  # The live second defect: a stray SGR mouse report left in the composer by
+  # a click in the pane is real pending content, not furniture.
+  residue=$'transcript line\n────────────────────────\n❯ <65;77;27M\n────────────────────────'"$footer"
+  assert_screen "stray mouse report in the composer" pending "$CAPS_STYLED" "$residue" '' "$claude_idle"
+  pass "matrix: claude's arrow statusline is footer furniture, not a composer holding text"
+}
+
+test_composer_footer_demotion_needs_a_proven_pair() {
+  # The demotion is bounded in three directions, and each bound is a case
+  # where a lower glyph row IS the live composer.
+  local screen out claude_idle pi_idle
+  claude_idle=$(printf 'claude\tidle'); pi_idle=$(printf 'pi\tidle')
+  # 1. Contiguity: a blank row ends the footer zone, so a composer redrawn
+  #    below an old rule pair still wins.
+  screen=$'────────────────────────\n❯ old draft\n────────────────────────\n  → repo git:(main)\n\n→'
+  assert_screen "blank row reopens lower candidates" empty "$CAPS_STYLED_NOID" "$screen"
+  # 2. Proof: a pair that closed over NO agent-glyph row proves no composer,
+  #    so nothing below it is demoted. pi's own blank pair is exactly that.
+  screen=$'────────────────────────\n\n────────────────────────\n→'
+  assert_screen "an unproven pair demotes nothing" empty "$CAPS_STYLED_NOID" "$screen"
+  # 3. No pair at all: Cursor draws its `→` composer between half-block rules,
+  #    which are not separator rules, so its footer rows change nothing.
+  screen=$' ▄▄▄▄▄▄▄▄\n  →\n ▀▀▀▀▀▀▀▀\n  Cursor Grok 4.5 High · 6.7%   Run Everything\n  ~/wt · 64cdd3a'
+  assert_screen "cursor keeps its own bare composer" empty "$CAPS_STYLED_NOID" "$screen"
+  # A later pair WITHOUT a glyph row must reopen candidates the earlier proven
+  # pair had closed, so the zone cannot leak down a screen.
+  screen=$'────────────────────────\n❯'"$NBSP"$'\n────────────────────────\n  → repo git:(main)\n────────────────────────\n────────────────────────\n→'
+  assert_screen "a later unproven pair reopens candidates" empty "$CAPS_STYLED_NOID" "$screen"
+  # And the strict posture is untouched: a footer row alone proves nothing.
+  out=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" $'transcript\n  → repo git:(main) | Opus 5')
+  [ "$out" != empty ] \
+    || fail "an unanchored statusline row must never prove an empty composer, got '$out'"
+  pass "fm_composer_classify_screen: footer demotion needs a contiguous, glyph-proven pair"
+}
+
+test_composer_footer_zone_is_shape_independent() {
+  # The same captain-facing failure on the BORDERED composer: claude 2.x
+  # renders its composer inside a rounded box on a wide pane, and this home's
+  # statusLine (opening with `→`, Cursor's prompt glyph) plus the permission
+  # hint still land on the two contiguous rows below the closing border. The
+  # footer-zone invariant is a property of an envelope proven by a glyph row
+  # inside it, not of the pi separator pair, so it must hold here too.
+  local box footer screen out claude_idle
+  claude_idle=$(printf 'claude\tidle')
+  box=$'transcript line\n╭───────────────────────────╮\n│ ❯'"$NBSP"$'                        │\n╰───────────────────────────╯'
+  footer=$'\n → repo git:(fm/branch)× | Opus 5 | ctx 15%\n ⏵⏵ bypass permissions on'
+  screen="$box$footer"
+  assert_screen "boxed claude idle under an arrow statusline on herdr" empty "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  assert_screen "boxed claude idle under an arrow statusline on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "boxed claude idle under an arrow statusline on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  case "$out" in
+    *'repo git:'*|*'bypass permissions'*)
+      fail "the statusline footer must never be extracted as composer content, got '$out'" ;;
+  esac
+  # The protection this must NOT remove: real unsubmitted text inside that same
+  # bordered composer, under that same footer, still refuses.
+  screen=$'transcript line\n╭───────────────────────────╮\n│ ❯ half-typed draft        │\n╰───────────────────────────╯'"$footer"
+  assert_screen "boxed claude typed under an arrow statusline" pending "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  # The deliberate counterexample, pinned as such: codex's startup banner has
+  # no glyph row inside it, so it proves no composer, opens no footer zone, and
+  # the live bare row contiguously below it keeps winning.
+  screen=$'╭────────────────────────╮\n│ permissions: YOLO mode │\n╰────────────────────────╯\n❯'"$NBSP"
+  assert_screen "unproven banner still yields to the bare row below it" empty "$CAPS_PLAIN" "$screen"
+  pass "fm_composer_classify_screen: the footer zone holds for boxes, not only separator pairs"
+}
+
+test_composer_footer_zone_refuses_rather_than_allows() {
+  # The footer-zone demotion is ASYMMETRIC: `empty` is the only verdict that
+  # authorizes fm-send to type into the pane, so the rule may move a verdict
+  # toward refusing but never toward `empty`. Every screen below classified
+  # `pending` before the footer zone existed and must never read `empty`.
+  local screen out
+  # 1. Draft loss. A row leading with the SAME glyph the envelope was proven by
+  #    is a live composer, not furniture, and must keep winning - otherwise the
+  #    doorbell types over a draft the worker can see.
+  screen=$'────────────────────────\n❯'"$NBSP"$'\n────────────────────────\n❯ my typed draft'
+  assert_screen "separated: a live draft below the pair keeps winning" pending "$CAPS_STYLED_NOID" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = 'my typed draft' ] \
+    || fail "the live draft must be the extracted composer content, got '$out'"
+  screen=$'╭────────────────────────╮\n│ ❯'"$NBSP"$'                     │\n╰────────────────────────╯\n❯ my typed draft'
+  assert_screen "boxed: a live draft below the box keeps winning" pending "$CAPS_STYLED_NOID" "$screen"
+  # 2. Working agent. Unclaimed activity below a proven envelope is not
+  #    furniture in EITHER row order, even when one of the rows leads with a
+  #    foreign agent glyph, so the envelope above it stays stale.
+  for screen in \
+    $'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯\nWorking on request...\n→ ran npm test (3 failures)' \
+    $'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯\n→ ran npm test (3 failures)\nWorking on request...' \
+    $'────────────────────────\n❯'"$NBSP"$'\n────────────────────────\nWorking on request...\n→ ran npm test (3 failures)' \
+    $'────────────────────────\n❯'"$NBSP"$'\n────────────────────────\n→ ran npm test (3 failures)\nWorking on request...'
+  do
+    out=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" "$screen")
+    [ "$out" != empty ] \
+      || fail "a working agent below a proven envelope must never read empty, got '$out'"
+    out=$(LC_ALL=C fm_composer_classify_screen "$CAPS_STYLED_NOID" "$screen")
+    [ "$out" != empty ] \
+      || fail "a working agent below a proven envelope must never read empty under LC_ALL=C, got '$out'"
+  done
+  # 3. The other direction, which the demotion must not invert either: a pair
+  #    holding a QUOTED prompt in the transcript above a live, visibly empty
+  #    composer row reads empty, and the quoted text is never composer content.
+  screen=$'────────────────────────\ntranscript one\ntranscript two\n❯ some quoted prompt in the transcript\n────────────────────────\n❯'"$NBSP"
+  assert_screen "a quoted prompt above a live empty row stays empty" empty "$CAPS_STYLED_NOID" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  case "$out" in
+    *'some quoted prompt'*) fail "a quoted transcript prompt must never be composer content, got '$out'" ;;
+  esac
+  pass "fm_composer_classify_screen: the footer zone only ever refuses, never allows"
+}
+
 test_matrix_codex_dim_hint_row() {
   # Real idle codex: bold `›`, reset, then an SGR-2 dim hint. Styled captures
   # strip the ghost and prove empty; plain captures must defer as unknown -
@@ -483,6 +617,57 @@ test_matrix_pi_separated_needs_identity() {
   assert_screen "lone glyph on plain backend" empty "$CAPS_PLAIN" "$typed"
   assert_screen "lone glyph with non-pi identity" empty "$CAPS_STYLED" "$typed" '' "$none"
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
+}
+
+test_matrix_pi_dollar_status_footer_is_empty() {
+  # Pi's status row `$0.000 (sub) 5.4%/272k (auto)` at column 0 used to read
+  # as a dead-shell prompt, so an idle separated composer classified unknown.
+  # A counters-first footer never took that path. A real `$` or `$ ls` prompt,
+  # and the same cost string typed between the separators, still refuse.
+  local dollar typed dead_shell dead_cmd spaced footer_only inside wrap dollar_status
+  local pi_idle pi_working none out
+  pi_idle=$(printf 'pi\tidle'); pi_working=$(printf 'pi\tworking'); none=$(printf 'zsh\t')
+  dollar_status=$'$0.000 (sub) 5.4%/272k (auto)'
+  dollar=$'transcript\n────────────────────────\n\n────────────────────────\n'"$dollar_status"
+
+  assert_screen "pi dollar-first status on herdr" empty "$CAPS_STYLED" "$dollar" '' "$pi_idle"
+  assert_screen "pi dollar-first status on tmux" empty "$CAPS_TMUX" "$dollar" 2 "$pi_idle"
+
+  [ "$(fm_composer_classify_screen "$CAPS_STYLED" "$dollar")" = need-identity ] \
+    || fail "a dollar-first Pi footer must still request the lazy identity probe"
+  assert_screen "dollar-first status without identity capability" unknown "$CAPS_PLAIN" "$dollar"
+  assert_screen "working pi with dollar-first status defers" unknown \
+    "$CAPS_STYLED" "$dollar" '' "$pi_working"
+  assert_screen "non-pi identity with dollar-first status defers" unknown \
+    "$CAPS_STYLED" "$dollar" '' "$none"
+
+  typed=$'────────────────────────\nfix the flaky test\n────────────────────────\n'"$dollar_status"
+  assert_screen "pi typed text above dollar-first status" pending \
+    "$CAPS_STYLED" "$typed" '' "$pi_idle"
+  inside=$'────────────────────────\n'"$dollar_status"$'\n────────────────────────'
+  assert_screen "dollar-first string typed into the pi composer" pending \
+    "$CAPS_STYLED" "$inside" '' "$pi_idle"
+
+  dead_shell=$'transcript\n────────────────────────\n\n────────────────────────\n$'
+  dead_cmd=$'transcript\n────────────────────────\n\n────────────────────────\n$ ls -la'
+  spaced=$'transcript\n────────────────────────\n\n────────────────────────\n$ 0.000 (sub)'
+  assert_screen "real dead shell below a pi pair" unknown "$CAPS_STYLED" "$dead_shell" '' "$pi_idle"
+  assert_screen "dead-shell command below a pi pair" unknown "$CAPS_STYLED" "$dead_cmd" '' "$pi_idle"
+  assert_screen "spaced dollar below a pi pair" unknown "$CAPS_STYLED" "$spaced" '' "$pi_idle"
+
+  footer_only=$'transcript\n'"$dollar_status"
+  assert_screen "dollar-first status with no pi pair" unknown \
+    "$CAPS_STYLED" "$footer_only" '' "$pi_idle"
+
+  wrap=$'❯\n$ ls -la'
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$wrap")
+  [ "$out" = unknown ] \
+    || fail "a real dead shell below a bare glyph must still invalidate cursorless selection, got '$out'"
+  wrap=$'❯\n$ '
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$wrap")
+  [ "$out" = unknown ] \
+    || fail "a bare dollar prompt below a glyph must still invalidate cursorless selection, got '$out'"
+  pass "matrix: a dollar-first pi status footer reads empty; dead shells still refuse"
 }
 
 test_matrix_opencode_leftbar_signals() {
@@ -783,6 +968,10 @@ test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
+test_matrix_claude_arrow_statusline_footer
+test_composer_footer_demotion_needs_a_proven_pair
+test_composer_footer_zone_is_shape_independent
+test_composer_footer_zone_refuses_rather_than_allows
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
@@ -790,6 +979,7 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
+test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box

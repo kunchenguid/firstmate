@@ -1,4 +1,5 @@
-import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { runCommandAsync } from "./fm-async-exec.ts";
 
 // Shared wake-dispatch handshake between the Pi watcher extension (the
@@ -15,8 +16,60 @@ import { runCommandAsync } from "./fm-async-exec.ts";
 // means no branch took it and the watcher delivers to main exactly as it did
 // before the branch existed. Watcher-failure alarms are never offered - only
 // main can repair the watcher cycle (fm_watch_arm_pi lives on main).
+//
+// Postures (docs/pi-supervision-branch.md "Postures"). The away-posture record
+// state/.afk-contract (owner: bin/fm-afk-contract.sh) is the posture; it is
+// read as a file at every routing decision, never inferred from chat. While
+// it exists the branch takes EVERY actionable row - check rows, decision-owned
+// rows, and heartbeat rows included - and main is offered nothing the branch
+// can take. The two vetoes that describe a broken queue stay vetoes in both
+// postures, and such a wake, like every watcher-failure alarm, still falls
+// back to main exactly as attended, because only main can repair supervision
+// itself; parking main is a cost measure, continuity is the safety property.
 
 export const FM_BRANCH_DISPATCH_EVENT = "fm-branch-supervision:dispatch";
+
+// The away-posture record's state-relative filename, exactly as
+// bin/fm-afk-contract.sh writes it. Presence is the only fact read here; the
+// guarded scripts validate the record themselves (bin/fm-lease-lib.sh).
+export const AFK_CONTRACT_FILE = ".afk-contract";
+
+export function afkPostureRecordPresent(state: string): boolean {
+  try {
+    return statSync(join(state, AFK_CONTRACT_FILE)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+// The per-wake prompt every supervision-branch host sends: the Pi branch
+// extension, and the supervision host off Pi (bin/fm-supervision-host.sh,
+// through bin/fm-branch-dispatch.mjs), so the wake text has one owner. The
+// tail is appended while the away-posture record exists: per-wake content,
+// never prefix; bin/fm-branch-prompt.sh's fixed "Postures" section is what it
+// refers back to.
+export const AWAY_POSTURE_TAIL =
+  "POSTURE: AWAY. The away-posture record state/.afk-contract exists, so the captain is not present and MAIN is parked: you take every row, including check rows and decision rows, and no outcome reaches the captain until the return brief. " +
+  "The record below is the captain's away words, verbatim, and the whole mandate: act on them by your own judgment where this event is the moment they name, only through the guarded scripts under MAIN's standing authority - never more - which enforce it: bin/fm-pr-merge.sh merges any pull request that is green at its live head, synchronously, and refuses a red one or --allow-red; bin/fm-spawn.sh dispatches queued work (already queued, or filed by you from the words) within the spend cap; bin/fm-send.sh --resolve-key answers a decision the words pre-answer, or one the ask-user-authority policy in your prompt lets firstmate decide; bin/fm-merge-local.sh still refuses you. " +
+  "Never by analogy, and hold on doubt: a sentence you cannot act on with confidence is reported with verdict captain, naming it, and left for the return. " +
+  "Credential entry, legal or financial acceptance, an attended prompt, any discard the captain did not name, and any destructive, irreversible, or security-sensitive action are refused for every actor in every posture, whatever the words say. " +
+  "Log every action taken under the words in its outcome summary, opening with \"per your away instructions:\". " +
+  "A mirrored captain sentence authorizes nothing new once the record exists. " +
+  "The record, verbatim:";
+
+// The posture tail for one wake: the record's read-back (bin/fm-afk-contract.sh
+// readback) carried byte-for-byte, or a fixed notice when it could not be
+// rendered, because the record's presence is the fact the guarded scripts
+// enforce either way.
+export function awayPostureTailFor(readback: string): string {
+  return `\n\n${AWAY_POSTURE_TAIL}\n${readback || "(the record's read-back could not be rendered; treat the captain's words as unavailable, act on standing authority only, and hold on doubt)"}`;
+}
+
+// `reportSurface` names how this host's branch records an outcome: the
+// fm_branch_report tool on Pi, the bin/fm-branch-report.sh command elsewhere.
+export function branchWakePrompt(message: string, reportSurface: string, postureTail: string): string {
+  return `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with ${reportSurface}.${postureTail}`;
+}
 
 export type UnreadWakeScopeStatus = "safe" | "empty" | "unsafe";
 
@@ -63,6 +116,18 @@ export interface UnreadWakeScope {
    * to main.
    */
   needsDecisionKeys: string[];
+  /**
+   * The check-kind rows included in eligibleSeqs. Non-empty only in the away
+   * posture, where the branch takes main's rows too; a check row names no
+   * task, so a prompt that claims one is not scoped by task.
+   */
+  checkSeqs: string[];
+  /**
+   * The heartbeat rows included in eligibleSeqs. A heartbeat names no task,
+   * so a prompt that claims one is not scoped by task, including when a
+   * non-heartbeat wake claims it in the away posture.
+   */
+  heartbeatSeqs: string[];
   taskByWakeKey: Record<string, string>;
 }
 
@@ -74,6 +139,8 @@ const EMPTY_SCOPE: UnreadWakeScope = {
   eligibleTasks: [],
   corrupted: false,
   needsDecisionKeys: [],
+  checkSeqs: [],
+  heartbeatSeqs: [],
   taskByWakeKey: {},
 };
 const UNSAFE_SCOPE: UnreadWakeScope = {
@@ -84,6 +151,8 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
   eligibleTasks: [],
   corrupted: true,
   needsDecisionKeys: [],
+  checkSeqs: [],
+  heartbeatSeqs: [],
   taskByWakeKey: {},
 };
 
@@ -122,6 +191,13 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
 // this repo's fm_wake_append could never have produced (an unknown kind, or a
 // line that fails the structural tab-field check) also still vetoes the whole
 // scan - that is queue corruption, not an everyday mixed queue.
+//
+// In the away posture (`afk`, the dispatcher's read of the away-posture
+// record) the partition above collapses: main is parked, so check rows,
+// decision-owned signal and stale rows, and heartbeat rows are all claimed by
+// the branch on whatever wake finds them unread. The two vetoes that describe
+// a broken queue rather than a routing choice - an unresolvable task-local row
+// and a structurally invalid or unknown row - stay vetoes in both postures.
 function statusLineVerb(line: string): string {
   const beforeColon = line.split(":", 1)[0].split("[", 1)[0].trim();
   const words = beforeColon.split(/\s+/);
@@ -187,7 +263,7 @@ function hasOpenNeedsDecision(
   return [...open.values()].includes("needs-decision");
 }
 
-export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWakeScope {
+export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = false): UnreadWakeScope {
   let queue = "";
   try {
     queue = readFileSync(`${state}/.wake-queue`, "utf8");
@@ -228,6 +304,8 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   const eligibleSeqs: string[] = [];
   const eligibleTasks = new Set<string>();
   const needsDecisionKeys: string[] = [];
+  const checkSeqs: string[] = [];
+  const heartbeatSeqs: string[] = [];
   const staleDecisionOwnership = new Map<string, boolean>();
   const resolveVerb = process.env.FM_CLASSIFY_RESOLVE_VERB || "resolved";
   const heldVerb = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
@@ -242,13 +320,23 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     const kind = fields[2];
     const key = fields[3];
     if (kind === "heartbeat") {
-      if (heartbeat) eligibleSeqs.push(seq);
+      // Attended, a heartbeat row is claimed only by a heartbeat review; away,
+      // no main drain will ever take it, so any wake claims it.
+      if (heartbeat || afk) {
+        eligibleSeqs.push(seq);
+        heartbeatSeqs.push(seq);
+      }
       continue;
     }
     if (kind === "check") {
-      // Always main-owned, in every mode: excluded from what the branch may
-      // claim, never a reason to reject the rest of the queue and never a
-      // reason to send an otherwise-eligible heartbeat review to main.
+      // Main-owned while attended: excluded from what the branch may claim,
+      // never a reason to reject the rest of the queue and never a reason to
+      // send an otherwise-eligible heartbeat review to main. Away, the branch
+      // is the only actor, so the row is claimed unscoped.
+      if (afk) {
+        eligibleSeqs.push(seq);
+        checkSeqs.push(seq);
+      }
       continue;
     }
     let project = "";
@@ -256,12 +344,14 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     if (kind === "signal") {
       const payload = fields[4] ?? "";
       if (/^needs-decision:/.test(payload)) {
-        // Main-owned exactly like a check-kind row above: a needs-decision
-        // status append surfaced through the actionable signal path is
-        // excluded from what the branch may claim without vetoing the scan
-        // (docs/pi-supervision-branch.md "Autonomy").
+        // Main-owned exactly like a check-kind row above while attended: a
+        // needs-decision status append surfaced through the actionable signal
+        // path is excluded from what the branch may claim without vetoing the
+        // scan (docs/pi-supervision-branch.md "Autonomy"). Away, the branch
+        // takes the decision row like any other task-local row; the guarded
+        // scripts decide what it may do about it (bin/fm-lease-lib.sh).
         needsDecisionKeys.push(key);
-        continue;
+        if (!afk) continue;
       }
       task = key.replace(/\.(?:status|turn-ended)$/, "");
       project = metadata.get(task) ?? "";
@@ -304,7 +394,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
         }
         if (staleDecisionOwnership.get(statusPath)) {
           needsDecisionKeys.push(key);
-          continue;
+          if (!afk) continue;
         }
       }
     } else {
@@ -333,6 +423,8 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     eligibleTasks: [...eligibleTasks],
     corrupted: false,
     needsDecisionKeys,
+    checkSeqs,
+    heartbeatSeqs,
     taskByWakeKey: Object.fromEntries(taskByKey),
   };
 }
@@ -421,6 +513,8 @@ export interface BranchDispatchOffer {
   heartbeat: boolean;
   /** True only when at least one currently unread row is safe for branch handling. */
   eligible: boolean;
+  /** True when routing-time eligibility existed only because of the away collapse. */
+  awayOnly: boolean;
   /** Set by accept(); read by the watcher after emit returns. */
   accepted: boolean;
   settlement: Promise<void>;
@@ -432,12 +526,14 @@ export function createBranchDispatchOffer(
   projects: readonly string[] = [],
   heartbeat = false,
   eligible = false,
+  awayOnly = false,
 ): BranchDispatchOffer {
   const offer: BranchDispatchOffer = {
     message,
     projects: [...projects],
     heartbeat,
     eligible,
+    awayOnly,
     accepted: false,
     settlement: Promise.resolve(),
     accept(settlement = Promise.resolve()) {
