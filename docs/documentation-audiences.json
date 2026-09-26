@@ -358,6 +358,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/short-agents.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/pi-supervision-branch.md",
       "audience": "maintainer-architecture"
     },

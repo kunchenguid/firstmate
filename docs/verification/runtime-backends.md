@@ -1362,3 +1362,12 @@ Its native App Server peer and watcher-close process are deterministic fixtures;
 That run observed TraeX reporting native `agent_status=unknown` while its `traex` foreground process remained alive.
 The busy reader uses the existing structural process probe in that case; exact `traex` and `traecli` names are recognized, with real-process decoy coverage in `tests/fm-tmux-agent-liveness.test.sh`.
 Structural liveness permits the task-bound transcript read but does not itself infer busy or idle.
+
+## Pi headless read-only short tasks
+
+On 2026-09-26, Pi 0.87.1 and Node v22.22.2 passed the isolated SDK guard with a discovered, authenticated `openai-codex/gpt-6-luna` model.
+Refresh with `FM_SHORT_AGENT_LIVE_E2E=1 FM_SHORT_LIVE_PROVIDER=openai-codex FM_SHORT_LIVE_MODEL=gpt-6-luna bin/fm-test-run.sh tests/fm-short-agent-live-e2e.test.sh`, selecting an available pair when the installed catalog differs.
+Observed output included `"submitMs":6`, `"runnerStartedAfterReturnMs":29`, `"parentReplyMs":1438`, `"requests":2`, `"toolCalls":1`, and `ok - real Pi short task stays independent while the parent accepts another prompt`.
+The parent reply preceded child completion; the child read the fixture and excluded the parent-only sentinel.
+This checks SDK conversation responsiveness, not terminal repaint latency.
+The portable permission and lifecycle companion is `tests/fm-short-agent.test.sh`; [the operator guide](../short-agents.md) owns current use and limits.
