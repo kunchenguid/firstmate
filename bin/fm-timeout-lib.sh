@@ -212,15 +212,25 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
     exec perl -MPOSIX=WNOHANG,setpgid -MTime::HiRes=time -e '
       my ($bound, $grace, $owner) = (shift, shift, shift);
       my $parent = getppid();
-      my $pid = fork;
-      exit 127 unless defined $pid;
-      if ($pid == 0) { setpgid(0, 0); exec @ARGV; exit 127 }
-      setpgid($pid, $pid);
-      my $deadline = time + $bound;
-      my ($kill_at, $timed_out) = (0, 0);
+      my ($pid, $pending, $kill_at, $timed_out) = (0, "", 0, 0);
       for my $sig (qw(TERM INT HUP)) {
-        $SIG{$sig} = sub { kill $sig, -$pid; $kill_at ||= time + $grace };
+        $SIG{$sig} = sub {
+          if ($pid) { kill $sig, -$pid } else { $pending = $sig }
+          $kill_at ||= time + $grace;
+        };
       }
+      my $child = fork;
+      exit 127 unless defined $child;
+      if ($child == 0) {
+        $SIG{$_} = "DEFAULT" for qw(TERM INT HUP);
+        setpgid(0, 0);
+        exec @ARGV;
+        exit 127;
+      }
+      setpgid($child, $child);
+      $pid = $child;
+      kill $pending, -$pid if $pending;
+      my $deadline = time + $bound;
       sub finish {
         my $status = shift;
         kill "KILL", -$pid if $kill_at;
