@@ -20,7 +20,8 @@
 #      leaks into a worker whose ancestry holds no omp.
 #   3. Every omp launch clears foreign markers, carries the tracked posture
 #      overlay, --auto-approve, --cwd, and (for a crewmate) one -e pointing at
-#      state/<id>.omp-ext.ts; a secondmate launch names no -e at all.
+#      state/<id>.omp-ext.ts; a secondmate launch names that same busy -e and
+#      nothing else, leaving its primary extensions to auto-discovery.
 #   4. A <provider>/<id> model is validated only when `omp models --json` lists
 #      that provider; an unlisted provider passes through with a notice.
 #   5. Busy state: agent_start is busy, agent_end with willContinue stays busy,
@@ -210,9 +211,9 @@ test_spawn_model_validation_scoped_to_listed_providers() {
 
 test_secondmate_launch_relies_on_discovery() {
   # A seeded secondmate home, launched for real through fm-spawn on omp: the
-  # launch must carry the posture overlay and pin --cwd to the home, and must
-  # name NO -e, because omp auto-discovers the home's tracked .omp/extensions
-  # and a file named both ways loads twice.
+  # launch must carry the posture overlay and pin --cwd to the home. Its only
+  # -e is the state-resident busy extension: omp auto-discovers the home's
+  # tracked .omp/extensions, and a file named both ways loads twice.
   local world home fakebin launchlog out status launch
   world="$TMP_ROOT/secondmate"
   home="$world/sm"
@@ -238,14 +239,14 @@ test_secondmate_launch_relies_on_discovery() {
   expect_code 0 "$status" "omp secondmate spawn should succeed: $out"
   assert_grep "harness=omp" "$world/home/state/sm.meta" "secondmate meta missing harness=omp"
   launch=$(cat "$launchlog")
-  case "$launch" in
-    *" -e "*) fail "an omp secondmate launch must name no -e: omp auto-discovers .omp/extensions and a file named both ways loads twice: $launch" ;;
-  esac
+  [ "$(printf '%s\n' "$launch" | grep -o ' -e ' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "an omp secondmate launch must name exactly one -e: omp auto-discovers .omp/extensions and a file named both ways loads twice: $launch"
+  assert_contains "$launch" "-e '$world/home/state/sm.omp-ext.ts'" "an omp secondmate launch must load the parent-home busy extension: $launch"
   assert_contains "$launch" "--config '$ROOT/.omp/fm-worker-overlay.yml' --auto-approve --cwd '$home'" "secondmate launch lost the posture overlay or the pinned home directory: $launch"
   assert_contains "$launch" "FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 '$fakebin/omp'" "secondmate launch lost the omp marker or executable"
   assert_contains "$launch" "FM_SUPERVISION_MODEL=extension" "an omp secondmate must run the extension supervision model"
-  assert_absent "$world/home/state/sm.omp-ext.ts" "a secondmate must not receive a per-task worker extension"
-  pass "fm-spawn: a real omp secondmate launch relies on auto-discovery while crewmates load one -e"
+  assert_present "$world/home/state/sm.omp-ext.ts" "a secondmate must receive the per-task busy extension"
+  pass "fm-spawn: a real omp secondmate launch loads only the busy -e and auto-discovers its primary extensions"
 }
 
 test_secondmate_config_pinned_model_is_validated() {
