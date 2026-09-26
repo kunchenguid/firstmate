@@ -481,6 +481,18 @@ Any of these preserves the candidate and lets session startup continue with at m
 [`verification/runtime-backends.md`](verification/runtime-backends.md#workspace-removal-focus-safety) owns the active versioned evidence for the focus-flash test.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#attached-foreground-viewer) owns the active versioned evidence and the re-run trigger for the attached-viewer test.
 
+## Plugin panes in task tabs
+
+A Herdr plugin can add its own pane to every new tab from a `workspace.created` or `tab.created` hook; the `herdr-sidebar` plugin on Herdr 0.9.1 splits a left-docked Explorer pane into each new workspace's seeded tab and each new task tab.
+Such a pane is never the task's endpoint, so Firstmate never adopts, sends to, or captures it.
+Firstmate removes it only through `herdr plugin pane close`, which checks Herdr's own plugin-pane registration in the same request and refuses any pane no plugin opened; labels, titles, and pane tokens are never identity.
+The flat task-tab create, the seeded-tab prune, the projected-workspace convergence, the projected restart reclaim's replacement tab, the focus-preserving projection close, and the task kill each prune registered plugin panes from their one exact tab before judging its shape or closing the task pane, so flat and projected task tabs alike hold exactly one task pane and no task leaves a plugin-only tab or workspace behind.
+Because a hook can dock its pane asynchronously, the flat create, the projected convergence, and the projected restart reclaim's replacement tab (`fm_backend_herdr_tab_settle_plugin_panes`) accept the task tab's one-pane shape only after it holds on one more bounded prune-and-read round; a flat spawn whose tab keeps an unregistered pane still succeeds and leaves that pane alone.
+A pane beside the task pane that Herdr does not register to a plugin, such as a captain's split, is never closed: a projection with one stays unconverged and quarantined, and a flat task close leaves that tab in place.
+A plugin can also dock its pane again whenever a task tab becomes active, long after create (verified: herdr-sidebar 0.13.0 on Herdr 0.9.1), so resolving a tab's one pane for restart husk replacement, label-based recovery discovery, or a bare selector first prunes registered plugin panes from that exact tab and reads it again.
+A tab still holding more than one pane never resolves to a single endpoint by position, because a left-docked pane lists first; those paths therefore treat such a tab as ambiguous.
+`bin/backends/herdr.sh` owns the mechanics in `fm_backend_herdr_tab_prune_plugin_panes`, and `tests/fm-backend-herdr.test.sh` pins the docked, flat and projected late-docked, and unregistered-split shapes, plus flat recovery, husk respawn, and projected restart reclaim past a docking or re-docking plugin, against its stateful fake.
+
 ## Default-tab prune safety
 
 `herdr workspace create` seeds one default tab.
@@ -827,6 +839,8 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.
 - Only tmux and Herdr can host the away-mode supervisor terminal.
+- A plugin hook that focuses the pane it docks beside moves the captain's view to the new task tab after Firstmate's own focus checks finish; `herdr-sidebar` 0.13.0 does this even for `--no-focus` creates, and Firstmate cannot prevent that asynchronous focus change.
+- A restored task tab holding a pane no plugin registered beside its husk is ambiguous, so respawning into it refuses until the tab is closed by hand.
 
 ## Regression entry points
 

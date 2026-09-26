@@ -1347,6 +1347,45 @@ Part C is the case the suite could not reach before: a doomed pane whose shell h
 On 0.7.5 that fallback exposed a bounded four-sample wrong-focus window and restored the anchor exactly; on 0.8.0 the same fallback exposed none, which is why default-on projection is floored at 0.8.0 rather than mitigated further below it.
 The suite also cross-checks its own Part A measurement against the floor classifier on whatever release it runs, so a drifted protocol-to-release mapping fails there rather than silently gating on the wrong thing.
 
+### Plugin-docked panes
+
+Verified on 2026-09-23 on Linux x86_64 against Herdr 0.9.1 protocol 22 with the third-party `herdr-sidebar` 0.13.0 plugin enabled, in guarded named labs (`LAB` below).
+In a headless lab, a `--no-focus` tab create was followed by the plugin's `tab.created` hook docking an Explorer pane into the new tab ahead of the task pane in `pane list` order, with the task pane keeping its id through the plugin's split and swap:
+
+```sh
+bin/fm-herdr-lab.sh run "$LAB" tab create --workspace w2 --cwd /tmp --label fm-x --no-focus \
+  | jq -c '.result | {tab:.tab.tab_id, pane:.root_pane.pane_id}'
+bin/fm-herdr-lab.sh run "$LAB" pane list --workspace w2 | jq -c '.result.panes[]'
+```
+
+```text
+{"tab":"w2:t2","pane":"w2:p3"}
+{"agent_status":"unknown","cwd":"/tmp","focused":false,"foreground_cwd":"/tmp","label":"Explorer","pane_id":"w2:p2",...,"tab_id":"w2:t1",...,"tokens":{"herdr-sidebar-explorer":"1790205991"},"workspace_id":"w2"}
+{"agent_status":"unknown","cwd":"/tmp","focused":false,"foreground_cwd":"/tmp","pane_id":"w2:p1",...,"tab_id":"w2:t1",...,"workspace_id":"w2"}
+{"agent_status":"unknown","cwd":"/tmp","focused":false,"foreground_cwd":"/tmp","label":"Explorer","pane_id":"w2:p4",...,"tab_id":"w2:t2",...,"tokens":{"herdr-sidebar-explorer":"1790205994"},"workspace_id":"w2"}
+{"agent_status":"unknown","cwd":"/tmp","focused":true,"foreground_cwd":"/tmp","pane_id":"w2:p3",...,"tab_id":"w2:t2",...,"workspace_id":"w2"}
+```
+
+In a second lab with one attached viewer (`bin/fm-herdr-lab.sh viewer start`), the same create moved the active workspace and tab to the new task tab, and `plugin pane close` refused the task pane with exit status 1 while closing the docked plugin pane:
+
+```sh
+bin/fm-herdr-lab.sh run "$LAB" plugin pane close w2:p3
+bin/fm-herdr-lab.sh run "$LAB" plugin pane close w2:p4
+```
+
+```text
+{"error":{"code":"plugin_pane_not_found","message":"plugin pane not found"},"id":"cli:plugin"}
+{"id":"cli:plugin","result":{"pane_id":"w2:p4","type":"plugin_pane_closed"}}
+```
+
+Three seconds after that close the plugin had not re-added its pane and the active workspace and tab were unchanged.
+Herdr 0.9.1 keeps the plugin-pane registration server-side (`plugin_panes` in its `v0.9.1` source) and exposes no read-only field for it, so the refusing close is the identity check.
+With the plugin later disabled, a third lab ran the adapter's projected create, projected kill, flat create, label discovery, and flat kill through the helper; the projection converged to one task pane, both workspaces were removed, and the default-session tripwire held.
+The flat-path plugin prune has no live evidence: flat create, label discovery, bare-selector resolution, husk respawn, and kill with a plugin pane docked were never run against a real Herdr with the plugin enabled.
+Herdr keeps plugin installation and enabled state global to the user across every session, and the only relocation, `XDG_CONFIG_HOME`, also moves the default session that the lab helper's tripwire must observe, so a plugin cannot be enabled for one lab without changing the operator's live configuration.
+Those flat shapes, the late-dock settle on the flat and projected creates, and the projected restart reclaim past a docked plugin pane are pinned only by the stateful-fake regressions.
+`tests/fm-backend-herdr.test.sh` pins the docked-plugin and unregistered-split shapes.
+
 ### Attached foreground viewer
 
 A pseudo-terminal registers as a Herdr foreground client only when its window grid is non-zero.
