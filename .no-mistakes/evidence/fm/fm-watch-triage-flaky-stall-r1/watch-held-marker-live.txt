@@ -1,0 +1,9 @@
+Scenario: real watcher receives exactly one TERM while a live foreign process holds the downtime marker lock
+watcher_exited_within_10s=yes
+singleton_pid=85556 expected=85556
+marker_before_release=absent
+holder_alive=yes
+watcher output:
+watcher: recovery state could not be persisted; retaining stale lock evidence
+singleton_after_clear=absent
+marker_after_clear=present
