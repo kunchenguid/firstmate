@@ -710,12 +710,19 @@ test_matrix_grok_titled_bottom_border() {
   # content rows. This is the idle capture from issue #3436; Herdr has no
   # cursor anchor, so the geometry mismatch used to make the proven box
   # ambiguous and the verdict unknown, stranding away-mode injection.
-  local titled plain_border typed malformed placeholder_draft
+  local titled suffix_titled plain_border typed malformed placeholder_draft lead
   titled=$'  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯                                                                        │\n  ╰────────────────────────────────────────────────────────── Grok 4.6 (xhigh) ─╯\n\n  Shift+Tab:mode  │  Ctrl+x:shortcuts'
+  lead=$(printf '%*s' 42 '')
+  lead=${lead// /─}
+  suffix_titled=$'  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯                                                                        │\n  ╰'"$lead"$' Grok 4.6 (high) · always-approve ─╯'
   plain_border=$'  ╭──────────────────────────────────────╮\n  │ ❯                                    │\n  ╰──────────────────────────────────────╯'
   assert_screen "grok titled on tmux" empty "$CAPS_TMUX" "$titled" 1
   assert_screen "grok titled on tmux bottom-border cursor" empty "$CAPS_TMUX" "$titled" 2
   assert_screen "issue #3436 idle grok 1.0.5 on herdr" empty "$CAPS_STYLED" "$titled"
+  # The always-approve footer suffix must be ignored after the effort is
+  # parsed, while the U+00B7 separator still counts as whitespace geometry.
+  assert_screen "grok always-approve suffix on tmux" empty "$CAPS_TMUX" "$suffix_titled" 1
+  assert_screen "grok always-approve suffix on herdr" empty "$CAPS_STYLED" "$suffix_titled"
   placeholder_draft=$'  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯ Type a message...                                                      │\n  ╰────────────────────────────────────────────────────────── Grok 4.6 (xhigh) ─╯'
   assert_screen "grok bright placeholder-like draft on tmux" pending "$CAPS_TMUX" "$placeholder_draft" 1
   assert_screen "grok placeholder on plain backends" empty "$CAPS_PLAIN" "$placeholder_draft"
