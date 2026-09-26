@@ -712,6 +712,15 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+### 2026-09-24 grok 1.0.41 always-approve titled bottom through Herdr
+
+Verified on 2026-09-24 against grok 1.0.41 (4220f3b224a6) in an isolated Herdr 0.9.1 lab session, launched with `--always-approve --no-alt-screen --reasoning-effort low` (Firstmate's grok spawn shape).
+The titled bottom is the same width as the top and content rows and carries `Grok 4.7 (low) · always-approve`, with U+00B7 MIDDLE DOT between the effort and the mode suffix.
+Before the matcher mapped that middle dot like the rest of the title text, the complete box was ambiguous: a visibly empty composer classified `unknown` (blocking `bin/fm-control.sh exit`) and typed text classified `pending-unproven`.
+Byte captures are in `tests/fixtures/grok-composer/`.
+`tests/fm-composer-lib.test.sh` watched the new assertions fail on the unmatched title (`expected empty, got 'unknown'`), then pass after `_fm_composer_titled_bottom_ok` mapped the middle dot on the same-width titled-bottom path.
+Idle and post-turn empty composers classify `empty`; typed `deploy the fix now` classifies `pending`; an oversized bottom whose title is not the Grok model/effort shape remains `unknown`.
+
 ### 2026-09-20 claude 2.1.236 statusLine footer through Herdr
 
 Verified on 2026-09-20 on macOS arm64 (Darwin 25.6.0) against Claude Code 2.1.236 running as Firstmate workers in Herdr 0.8.0 panes, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).

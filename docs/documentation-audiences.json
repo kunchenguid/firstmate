@@ -543,6 +543,10 @@
     {
       "path": "tests/captures/no-mistakes-v1.70.1/README.md",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/grok-composer/README.md",
+      "audience": "maintainer-verification"
     }
   ]
 }

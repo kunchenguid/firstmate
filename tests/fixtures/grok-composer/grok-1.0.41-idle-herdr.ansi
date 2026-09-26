@@ -1,0 +1,42 @@
+env GROK_HOME=/tmp/fm-grok-composer-scratch.rZ0Xbn/grok-home /home/bemsas/.local/share/mise/installs/node/26.8.1/bin/gro
+k --always-approve --no-alt-screen --reasoning-effort low
+
+[0m[1m[38;5;6mproj[0m [0m[3m[38;5;6mmaster[0m [0m[1m[38;5;6m❯[0m env GROK_HOME=/tmp/fm-grok-composer-scratch.rZ0Xbn/grok-home /home/bemsas/.local/share/mise/installs/node/
+26.8.1/bin/grok --always-approve --no-alt-screen --reasoning-effort low
+
+  [0m[2m master [0m/t/fm-grok-composer-scratch.rZ0Xbn/proj
+
+
+
+
+
+   ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+   │                                                                                                                │
+   │  ⠀⠀⠀⠀⠀⠀⣀⣀⡀⠀⠀⠀⢀⠄   [0m[1mGrok Build  [0m1.0.41                                                                           │
+   │  ⠀⠀⠀⣠⣾⠿⠛⠛⠛⠛⢀⡴⠁⠀                                                                                                │
+   │  ⠀⠀⣼⡟⠁⠀⠀⠀⢀⡴⠻⣿⡀⠀   [0m[1mGrok 4.7 is here!                                                                            [0m│
+   │  ⠀⠀⣿⡇⠀⠀⠀⠔⠁⠀⠀⣿⡇⠀   Select 'Grok 4.7' under /model.                                                              │
+   │  ⠀⠀⢹⣷⠀⠀⠀⠀⠀⢀⣴⡿⠀⠀                                                                                                │
+   │  ⠀⢀⠞⠁⠠⢶⣶⣶⣶⠿⠋⠀⠀⠀   [0m[1mNew worktree                                                                         [0mctrl+w  │
+   │  ⠐⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀   [0m[1mResume session                                                                       [0mctrl+r  │
+   │                   [0m[1mChangelog                                                                                    [0m│
+   │                   [0m[1mQuit                                                                                 [0mctrl+q  │
+   │                                                                                                                │
+   ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+
+   [0m[1mTip: [0mUse @! for hidden or ignored files: @!.github/workflows.
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                                                │
+  ╰──────────────────────────────────────────────────────────────────────────────── [0m[2mGrok 4.7 (low) [0m· [0m[2malways-approve [0m─╯

@@ -144,7 +144,8 @@ test_real_text_is_pending() {
 # + SGR-2 dim hint), codex 0.154.0 (the same `›` amid a braille starfield over
 # a status footer, captured through Herdr on 2026-09-15), muse (truecolor `⟩`, 38;2;90;160;255), pi (blank row
 # between solid `─` rules), opencode 1.14.46 (left-bar `┃` rows), and grok
-# 1.0.0 (bordered box with a TITLED bottom border), plus claude captured
+# 1.0.0 / 1.0.5 / 1.0.41 (bordered box with a TITLED bottom border, including
+# Grok 1.0.41's same-width ` · always-approve` suffix), plus claude captured
 # inside zellij through `dump-screen --ansi` (`ESC[m` `❯` U+00A0).
 #
 # Capability profiles mirror the real adapters' descriptors: tmux
@@ -731,6 +732,34 @@ test_matrix_grok_titled_bottom_border() {
   pass "matrix: grok's real oversized titled bottom is empty while typed and unproved panes stay safe"
 }
 
+test_matrix_grok_always_approve_titled_bottom() {
+  # Grok 1.0.41 launched with --always-approve (Firstmate's spawn shape) draws a
+  # same-width titled bottom `Grok 4.7 (low) · always-approve`. U+00B7 MIDDLE DOT
+  # is not ASCII, so titled-bottom recognition used to reject the complete box
+  # and classify a visibly empty composer unknown, blocking control-plane exit.
+  # Captures: tests/fixtures/grok-composer/, herdr 0.9.1, 2026-09-24.
+  local fixtures middot idle_box typed_box overhang_bad screen
+  fixtures="$ROOT/tests/fixtures/grok-composer"
+  middot=$(printf '\302\267')
+  idle_box=$'  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n  │ ❯                                                                                                                │\n  ╰──────────────────────────────────────────────────────────────────────────────── Grok 4.7 (low) '"$middot"$' always-approve ─╯'
+  typed_box=$'  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n  │ ❯ deploy the fix now                                                                                             │\n  ╰──────────────────────────────────────────────────────────────────────────────── Grok 4.7 (low) '"$middot"$' always-approve ─╯'
+  assert_screen "grok 1.0.41 always-approve idle box on herdr" empty "$CAPS_STYLED" "$idle_box"
+  assert_screen "grok 1.0.41 always-approve idle box on tmux" empty "$CAPS_TMUX" "$idle_box" 1
+  assert_screen "grok 1.0.41 always-approve idle box on zellij" empty "$CAPS_STYLED_NOID" "$idle_box"
+  assert_screen "grok 1.0.41 always-approve idle box on plain backends" empty "$CAPS_PLAIN" "$idle_box"
+  assert_screen "grok 1.0.41 always-approve typed box on herdr" pending "$CAPS_STYLED" "$typed_box"
+  overhang_bad=$'  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯                                                                        │\n  ╰────────────────────────────────────────────────────────── unknown '"$middot"$' surface ─╯'
+  assert_screen "grok oversized middot unknown title on herdr" unknown "$CAPS_STYLED" "$overhang_bad"
+
+  screen=$(cat "$fixtures/grok-1.0.41-idle-herdr.ansi")
+  assert_screen "captured grok 1.0.41 idle herdr ansi" empty "$CAPS_STYLED" "$screen"
+  screen=$(cat "$fixtures/grok-1.0.41-postturn-herdr-visible.ansi")
+  assert_screen "captured grok 1.0.41 post-turn empty herdr ansi" empty "$CAPS_STYLED" "$screen"
+  screen=$(cat "$fixtures/grok-1.0.41-typed-herdr-visible.ansi")
+  assert_screen "captured grok 1.0.41 typed herdr ansi" pending "$CAPS_STYLED" "$screen"
+  pass "matrix: grok 1.0.41 always-approve titled bottom is empty while typed and unproved panes stay safe"
+}
+
 test_matrix_kimi_bordered_shell_glyph_box() {
   # Kimi's bordered `│ > │` composer - the shape fm-spawn.sh's retired
   # spawn-local regex used to own. Now the shared owner proves it everywhere,
@@ -982,6 +1011,7 @@ test_matrix_pi_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
+test_matrix_grok_always_approve_titled_bottom
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence
