@@ -757,7 +757,8 @@ FREPLY_COUNT="$TMP_ROOT/lavish-firstmate-reply-count"
 FREPLY_LOG="$TMP_ROOT/lavish-firstmate-replies"
 FREPLY_TRIGGER1="$TMP_ROOT/lavish-firstmate-trigger1"
 FREPLY_TRIGGER2="$TMP_ROOT/lavish-firstmate-trigger2"
-export FREPLY_COUNT FREPLY_LOG FREPLY_TRIGGER1 FREPLY_TRIGGER2
+FREPLY_TRIGGER3="$TMP_ROOT/lavish-firstmate-trigger3"
+export FREPLY_COUNT FREPLY_LOG FREPLY_TRIGGER1 FREPLY_TRIGGER2 FREPLY_TRIGGER3
 cat > "$FREPLY_BIN/lavish-axi" <<'SH'
 #!/usr/bin/env bash
 n=$(cat "$FREPLY_COUNT" 2>/dev/null || echo 0)
@@ -878,16 +879,30 @@ assert_grep 'poll2 reply: Confirmed in session.' "$FREPLY_LOG" \
 PATH="$FREPLY_BIN:$PATH" pe "$HFREPLY" reconcile >/dev/null
 [ "$(cat "$FREPLY_COUNT")" = 2 ] \
   || fail "recovery duplicated firstmate's same-session Lavish reply"
-touch "$FREPLY_TRIGGER2"
+printf 'Second FIFO response.\n' > "$TMP_ROOT/firstmate-reply-2.txt"
+PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$FREPLY_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-reply-2.txt" \
+  > "$TMP_ROOT/firstmate-reply-2-arm.out"
+assert_contains "$(cat "$TMP_ROOT/firstmate-reply-2-arm.out")" "armed: $freply_id" \
+  "second FIFO reply did not confirm its own listener"
+assert_not_contains "$(cat "$TMP_ROOT/firstmate-reply-2-arm.out")" "still-listening" \
+  "second FIFO reply reported the superseded listener as successful"
+wait_for_lines "$FREPLY_LOG" 3 || fail "second FIFO reply listener did not start"
+assert_present "$HFREPLY/state/procevent-inbox/$freply_id.2.handled" \
+  "second FIFO reply did not acknowledge its capture"
+assert_grep 'poll3 reply: Second FIFO response.' "$FREPLY_LOG" \
+  "second FIFO response was not posted to the active Lavish session"
+touch "$FREPLY_TRIGGER3"
 for _ in $(seq 1 100); do
   [ ! -e "$HFREPLY/state/procevent/$freply_id.source" ] && break
   sleep 0.02
 done
 assert_absent "$HFREPLY/state/procevent/$freply_id.source" \
   "ended firstmate-owned Lavish session stayed armed"
-[ "$(grep -c '^poll[12] reply:' "$FREPLY_LOG")" = 2 ] \
-  || fail "firstmate's response was posted more than once"
-pass "firstmate-owned feedback receives one reply in the same Lavish session"
+[ "$(grep -c '^poll[123] reply:' "$FREPLY_LOG")" = 3 ] \
+  || fail "firstmate's FIFO responses were posted more than once"
+pass "firstmate-owned feedback receives FIFO replies in the same Lavish session"
 
 HFLEGACY="$TMP_ROOT/hflegacy"; new_home "$HFLEGACY"
 LEGACY_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-live-legacy-stub")
@@ -1006,11 +1021,19 @@ cp "$HFNOREPLY/state/procevent-inbox/$noreply_id.1.result" \
   "$HFNOREPLY/state/procevent-inbox/$noreply_id.2.result"
 cp "$HFNOREPLY/state/procevent-inbox/$noreply_id.1.adapter" \
   "$HFNOREPLY/state/procevent-inbox/$noreply_id.2.adapter"
-PATH="$NOREPLY_BIN:$PATH" FM_HOME="$HFNOREPLY" \
-  "$ROOT/bin/fm-procevent-lavish.sh" arm "$NOREPLY_ART" >/dev/null
-wait_for_lines "$NOREPLY_LOG" 2 || fail "firstmate no-reply re-arm did not start"
+if PATH="$NOREPLY_BIN:$PATH" FM_HOME="$HFNOREPLY" FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=invalid \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$NOREPLY_ART" \
+  > "$TMP_ROOT/firstmate-no-reply-fail.out" 2> "$TMP_ROOT/firstmate-no-reply-fail.err"; then
+  fail "firstmate no-reply re-arm accepted an invalid launch floor"
+fi
+assert_absent "$HFNOREPLY/state/procevent-inbox/$noreply_id.1.handled" \
+  "failed no-reply listener startup acknowledged its pending capture"
+assert_present "$HFNOREPLY/state/procevent/$noreply_id.source" \
+  "failed no-reply listener startup discarded its round registration"
+PATH="$NOREPLY_BIN:$PATH" pe "$HFNOREPLY" reconcile >/dev/null
+wait_for_lines "$NOREPLY_LOG" 2 || fail "recovery did not start the preserved no-reply re-arm"
 assert_present "$HFNOREPLY/state/procevent-inbox/$noreply_id.1.handled" \
-  "firstmate no-reply re-arm did not acknowledge the oldest capture"
+  "recovered firstmate no-reply re-arm did not acknowledge the oldest capture"
 assert_absent "$HFNOREPLY/state/procevent-inbox/$noreply_id.2.handled" \
   "firstmate no-reply re-arm acknowledged more than the oldest capture"
 [ "$(tail -n 1 "$NOREPLY_LOG")" = 'poll2 reply: ' ] \

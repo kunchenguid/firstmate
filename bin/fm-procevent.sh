@@ -583,7 +583,7 @@ cmd_register_lavish_owner() {
   local adapter=${1-} id=${2-} task=${3-} sep=${4-} result pending pending_adapter
   local reply_source='' reply_dest='' stale arg i adopting=0 pending_owner prior_record='' current_kind
   local pending_rounds=0 firstmate_owner=0 reply_requested=0 first_pending='' reply_round='' expected_id
-  local legacy=0 claim_state stop_state legacy_reg_identity owner pid token identity
+  local claim_state stop_state registration_identity owner pid token identity
   local -a argv=()
   shift 4 2>/dev/null || usage
   [ "$adapter" = lavish ] || die "round-aware registration is reserved for the Lavish adapter"
@@ -642,7 +642,6 @@ cmd_register_lavish_owner() {
           fm_procevent_source_lock_release "$id"
           die "cannot adopt source $id: it is not the exact built-in legacy Lavish poll for this artifact"
         fi
-        legacy=1
       fi
     else
       if [ "$(source_kind "$id" 2>/dev/null || true)" != task-owned ]; then
@@ -687,17 +686,17 @@ cmd_register_lavish_owner() {
     fm_procevent_source_lock_release "$id"
     die "cannot re-arm source $id: task $task already holds this board and no captured round is waiting to be acknowledged"
   fi
-  if [ "$legacy" -eq 1 ]; then
+  if [ "$firstmate_owner" -eq 1 ] && [ "$adopting" -eq 0 ] && [ "$pending_rounds" -gt 0 ]; then
     fm_procevent_claim_state_locked "$id"
     claim_state=$?
     case "$claim_state" in
       0)
-        legacy_reg_identity=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null || true)
-        if [ -z "$legacy_reg_identity" ] \
-          || [ "$FM_PROCEVENT_CLAIM_REG_IDENTITY" != "$legacy_reg_identity" ] \
+        registration_identity=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null || true)
+        if [ -z "$registration_identity" ] \
+          || [ "$FM_PROCEVENT_CLAIM_REG_IDENTITY" != "$registration_identity" ] \
           || ! fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME"; then
           fm_procevent_source_lock_release "$id"
-          die "cannot safely hand off the live legacy Lavish listener: $id"
+          die "cannot safely hand off the live firstmate-owned Lavish listener: $id"
         fi
         owner=$FM_PROCEVENT_CLAIM_HOME
         pid=$FM_PROCEVENT_CLAIM_PID
@@ -708,7 +707,7 @@ cmd_register_lavish_owner() {
         if [ "$stop_state" -eq 2 ] \
           || ! fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token"; then
           fm_procevent_source_lock_release "$id"
-          die "cannot safely hand off the live legacy Lavish listener: $id"
+          die "cannot safely hand off the live firstmate-owned Lavish listener: $id"
         fi
         rm -f -- "$(staging_file "$id" "$token")" "$(runner_file "$id")"
         ;;
@@ -716,21 +715,21 @@ cmd_register_lavish_owner() {
         if [ -e "$(fm_procevent_claim_path "$id")" ]; then
           if fm_procevent_claim_undisplaceable_locked "$id"; then
             fm_procevent_source_lock_release "$id"
-            die "cannot safely hand off the legacy Lavish listener: $id"
+            die "cannot safely hand off the firstmate-owned Lavish listener: $id"
           fi
           owner=$FM_PROCEVENT_CLAIM_HOME
           pid=$FM_PROCEVENT_CLAIM_PID
           token=$FM_PROCEVENT_CLAIM_TOKEN
           if ! fm_procevent_claim_reclaim_locked "$id" "$owner" "$pid" "$token"; then
             fm_procevent_source_lock_release "$id"
-            die "cannot safely hand off the legacy Lavish listener: $id"
+            die "cannot safely hand off the firstmate-owned Lavish listener: $id"
           fi
           rm -f -- "$(staging_file "$id" "$token")" "$(runner_file "$id")"
         fi
         ;;
       *)
         fm_procevent_source_lock_release "$id"
-        die "cannot safely hand off the legacy Lavish listener: $id"
+        die "cannot safely hand off the firstmate-owned Lavish listener: $id"
         ;;
     esac
   fi
@@ -1115,7 +1114,7 @@ cmd_start_public() {
 }
 
 cmd_start() {
-  local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0 task_owner='' task_pending kind reply_round='' pending_round
+  local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0 task_owner='' task_pending kind reply_round='' pending_round staged_reply=0 launch_floor
   local extension_owner=0 extension_load_state extension_sequence='' extension_request_id=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   require_runner_group
@@ -1143,6 +1142,7 @@ cmd_start() {
     fi
   elif [ "$kind" = lavish-owned ]; then
     reply_round=$(lavish_rearm_round_locked "$id" 2>/dev/null || true)
+    lavish_rearm_round_locked "$id" staged >/dev/null 2>&1 && staged_reply=1
     task_pending=$(source_pending "$id" | head -1)
     if [ -n "$task_pending" ] && { [ -z "$reply_round" ] \
       || { fm_procevent_is_handled "$STATE" "$id" "$reply_round" \
@@ -1198,13 +1198,23 @@ cmd_start() {
       die "extension registration owner is unreadable: $id"
       ;;
   esac
+  launch_floor=$(fm_procevent_launch_floor_seconds) || {
+    fm_procevent_source_lock_release "$id"
+    die "FM_PROCEVENT_LAUNCH_FLOOR_SECONDS must be whole seconds from $FM_PROCEVENT_LAUNCH_FLOOR_MIN_SECONDS to $FM_PROCEVENT_LAUNCH_FLOOR_MAX_SECONDS"
+  }
+  case "$MAX_OUTPUT_BYTES" in
+    ''|*[!0-9]*)
+      fm_procevent_source_lock_release "$id"
+      die "FM_PROCEVENT_MAX_OUTPUT_BYTES must be a nonnegative integer"
+      ;;
+  esac
   exec 7<"$(source_file "$id")" || {
     fm_procevent_source_lock_release "$id"
     die "cannot retain registration identity: $id"
   }
   fm_procevent_claim_acquire_locked "$id" "$FM_HOME" "$$" "$(source_file "$id")" "$STATE"
   claimed=$?
-  if [ "$claimed" -eq 0 ] && [ -n "$reply_round" ] \
+  if [ "$claimed" -eq 0 ] && [ -n "$reply_round" ] && [ "$staged_reply" -eq 1 ] \
     && ! fm_procevent_is_handled "$STATE" "$id" "$reply_round" \
     && ! fm_procevent_mark_handled "$STATE" "$id" "$reply_round" >/dev/null 2>&1; then
     fm_procevent_claim_release_locked "$id" "$FM_HOME" "$$" "$FM_PROCEVENT_CLAIM_TOKEN" 2>/dev/null || true
@@ -1250,9 +1260,7 @@ cmd_start() {
   # it is outside this confused-agent-grade boundary.
   export FM_PROCEVENT_IN_RUNNER=1
   start_owner_guard "$id" || die "cannot start the runner's owner guard: $id"
-  local launch_floor runner inbox reservation_dir staging launch_ready launch_reply launch_pid
-  launch_floor=$(fm_procevent_launch_floor_seconds) \
-    || die "FM_PROCEVENT_LAUNCH_FLOOR_SECONDS must be whole seconds from $FM_PROCEVENT_LAUNCH_FLOOR_MIN_SECONDS to $FM_PROCEVENT_LAUNCH_FLOOR_MAX_SECONDS"
+  local runner inbox reservation_dir staging launch_ready launch_reply launch_pid
   if [ "$extension_owner" -eq 1 ]; then
     staging=$(fm_procevent_extension_staging_prepare "$STATE") \
       || die "cannot safely prepare the external registry staging boundary"
@@ -1278,7 +1286,6 @@ cmd_start() {
     runner=$(runner_file "$id")
   fi
 
-  case "$MAX_OUTPUT_BYTES" in ''|*[!0-9]*) die "FM_PROCEVENT_MAX_OUTPUT_BYTES must be a nonnegative integer" ;; esac
   if [ "$extension_owner" -eq 1 ]; then
     out=".$id.$CLAIM_TOKEN.output"
   else
@@ -1367,6 +1374,14 @@ EOF
       fm_procevent_source_lock_release "$id"
       die "cannot retain the source output boundary: $id"
     }
+    if [ -n "$reply_round" ] && [ "$staged_reply" -eq 0 ] \
+      && ! fm_procevent_is_handled "$STATE" "$id" "$reply_round" \
+      && ! fm_procevent_mark_handled "$STATE" "$id" "$reply_round" >/dev/null 2>&1; then
+      exec 5>&- 4<&-
+      rm -f -- "$launch_ready"
+      fm_procevent_source_lock_release "$id"
+      die "cannot acknowledge captured Lavish round: $id $reply_round"
+    fi
     "${ARGV[@]}" >&5 5>&- 4<&- 2>/dev/null &
     launch_pid=$!
     exec 5>&-
