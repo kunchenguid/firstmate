@@ -4624,10 +4624,11 @@ test_term_stops_a_watcher_blocked_inside_a_poll() {
 # Start a watcher, hold its .watcher-down.lock from a live foreign subshell,
 # and send exactly one TERM. Without <release-ticks> the lock stays held until
 # the watcher exits. With it, the watcher runs as a handling successor, whose
-# poll loop never takes the marker lock, and the holder arms a FIFO as its pid
-# record before the TERM, so the first read - by the TERM'd watcher's cleanup -
-# marks real contention in $dir/marker-lock-contended; the holder then frees
-# the lock <release-ticks> tenths of a second later. The caller's environment
+# poll loop never takes the marker lock, and the holder arms FIFOs as its pid
+# record before the TERM. Only the TERM'd watcher's cleanup reads them, and a
+# second read comes only from a retry after a completed failed acquire, so that
+# read marks real contention in $dir/marker-lock-contended; the holder then
+# frees the lock <release-ticks> tenths of a second later. The caller's environment
 # reaches the watcher; its wait_for_exit code lands in HELD_MARKER_LOCK_RC.
 term_watcher_with_held_marker_lock() {  # <dir> [release-ticks]
   local dir=$1 release_ticks=${2:-} successor=0 state fakebin out capture_file window sig pid holder i
@@ -4652,8 +4653,12 @@ term_watcher_with_held_marker_lock() {  # <dir> [release-ticks]
     fm_lock_try_acquire "$lock" || exit 1
     if [ -n "$release_ticks" ]; then
       record="$(fm_lock_link_owner "$lock")/pid"
-      mkfifo "$record.fifo" && mv -f "$record.fifo" "$record" || exit 1
+      mkfifo "$record.fifo" "$record.retry" && mv -f "$record.fifo" "$record" || exit 1
       (
+        exec 3> "$record"
+        mv -f "$record.retry" "$record"
+        printf "%s\n" "$$" >&3
+        exec 3>&-
         exec 3> "$record"
         printf "%s\n" "$$" > "$record.next" && mv -f "$record.next" "$record"
         printf "%s\n" "$$" >&3
@@ -4670,7 +4675,9 @@ term_watcher_with_held_marker_lock() {  # <dir> [release-ticks]
       if [ -e "$contended" ]; then
         wait "$writer"
       else
-        cat "$record" > /dev/null
+        while kill -0 "$writer" 2>/dev/null; do
+          cat "$record" > /dev/null
+        done
         wait "$writer"
         rm -f "$contended"
       fi
@@ -4733,9 +4740,9 @@ test_term_stops_a_watcher_whose_cleanup_marker_lock_is_held() {
 
 # The cleanup bound is decimal seconds: a zero spelled with leading zeros falls
 # back to the 2s default instead of giving up at its first contended attempt,
-# and a leading-zero value such as 08 is an 8s bound rather than an invalid
-# octal literal or the 2s default, so it still outwaits a marker lock freed 3s
-# after the cleanup first contends on it.
+# so it retries after that failed attempt, and a leading-zero value such as 08
+# is an 8s bound rather than an invalid octal literal or the 2s default, so it
+# still outwaits a marker lock freed 3s after the cleanup's contended retry.
 test_cleanup_marker_lock_bound_is_decimal_with_zero_default() {
   local bound ticks dir state
   for bound in 00:0 08:30; do
