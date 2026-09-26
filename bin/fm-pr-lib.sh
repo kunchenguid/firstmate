@@ -4,13 +4,15 @@
 # URLs before constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub, an
-# arbitrarily nested group/subgroup/project namespace on GitLab, and an
-# arbitrarily nested project name on Gerrit, where "number" is the change
-# number. A GitLab or Gerrit project can sit at any depth, so no
-# owner/repository pair can address one and the sidecar carries the whole path
-# instead. Both also run on self-hosted instances, and Gerrit runs nowhere else,
-# so the host is part of that identity rather than a constant. Every consumer re-derives the identity
+# "path" is the full project path, which is owner/repository on GitHub,
+# workspace/repository-slug on Bitbucket Cloud, an arbitrarily nested
+# group/subgroup/project namespace on GitLab, and an arbitrarily nested project
+# name on Gerrit, where "number" is the change number. A GitLab or Gerrit
+# project can sit at any depth, so no owner/repository pair can address one and
+# the sidecar carries the whole path instead. Both also run on self-hosted
+# instances, and Gerrit runs nowhere else, so the host is part of that identity
+# rather than a constant. Bitbucket Cloud, like GitHub, is hosted at one fixed
+# address, so its host is a constant too. Every consumer re-derives the identity
 # from the stored URL and refuses any record whose parts do not reconstruct that
 # exact URL.
 #
@@ -162,6 +164,30 @@ fm_pr_gitlab_path_valid() {
   done
 }
 
+# Bitbucket Cloud is hosted only at bitbucket.org, so the host is fixed like
+# GitHub's rather than carried per-record the way GitLab's and Gerrit's
+# self-hosted instances are. A workspace holds its repositories directly with
+# no nested namespace, so the path is always exactly workspace/repository-slug
+# at a fixed depth of two, unlike GitLab's arbitrarily nested
+# group/subgroup/project path.
+fm_pr_bitbucket_path_valid() {
+  local path=${1-} segment
+  local LC_ALL=C
+  local -a segments
+  [ "${#path}" -ge 3 ] && [ "${#path}" -le 512 ] || return 1
+  case "$path" in
+    /*|*/|*//*) return 1 ;;
+  esac
+  IFS=/ read -ra segments <<< "$path"
+  [ "${#segments[@]}" -eq 2 ] || return 1
+  for segment in "${segments[@]}"; do
+    [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 62 ] || return 1
+    case "$segment" in
+      .|..|-*|*.git|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+  done
+}
+
 # A Gerrit project name is itself a path at no fixed depth, and it needs no
 # enclosing group, so a single segment is canonical here where GitLab needs at
 # least two. Gerrit reserves no route segment inside the name, so nothing
@@ -222,6 +248,20 @@ fm_pr_url_parse() {
     # shellcheck disable=SC2034
     FM_PR_REPO=${BASH_REMATCH[2]}
     FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  # Bitbucket Cloud pull request URLs are always at bitbucket.org, so the host
+  # is a literal rather than a captured group the way GitLab's and Gerrit's
+  # self-hosted instances are.
+  pattern='^https://bitbucket\.org/([A-Za-z0-9._/-]+)/pull-requests/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    path=${BASH_REMATCH[1]}
+    fm_pr_bitbucket_path_valid "$path" || return 1
+    FM_PR_PROVIDER=bitbucket
+    FM_PR_URL=$raw
+    FM_PR_HOST=bitbucket.org
+    FM_PR_PATH=$path
+    FM_PR_NUMBER=${BASH_REMATCH[2]}
     return 0
   fi
   # The path class contains "/" and "-", so this match is greedy to the last
@@ -1020,6 +1060,56 @@ fm_pr_gitlab_read_record() {  # <host> <path> <number>
         "merged=" + (if .state == "merged" then "true" else "false" end)
       else
         error("invalid merge request state")
+      end' 2>/dev/null); then
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      merged=*) merged=${line#merged=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 2 ] || [ "$total" -ne 2 ] || [ -z "$state" ] \
+    || { [ "$merged" != true ] && [ "$merged" != false ]; }; then
+    return 1
+  fi
+
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_STATE=$state
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_MERGED=$merged
+}
+
+# twg shells out to Bitbucket Cloud on the operator's own saved Atlassian
+# credentials, the same way gh owns GitHub's authentication and glab owns
+# GitLab's, so firstmate never holds or manages a Bitbucket API token itself.
+fm_pr_bitbucket_read_record() {  # <workspace> <repo> <number>
+  local workspace=$1 repo=$2 number=$3 json fields line
+  local total=0 named=0 state='' merged=''
+  FM_PR_RECORD_STATE=
+  FM_PR_RECORD_MERGED=
+  command -v twg >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+
+  if ! json=$(twg bb pull-requests get "$number" -w "$workspace" -r "$repo" -o json 2>/dev/null) \
+    || [ -z "$json" ]; then
+    return 1
+  fi
+  # Bitbucket Cloud's own pull request state vocabulary: OPEN, MERGED,
+  # DECLINED, or SUPERSEDED, uppercase.
+  if ! fields=$(printf '%s' "$json" | jq -r '
+      if type == "object" and (.state | type == "string") and .state != "" then
+        "state=" + .state,
+        "merged=" + (if .state == "MERGED" then "true" else "false" end)
+      else
+        error("invalid pull request state")
       end' 2>/dev/null); then
     return 1
   fi

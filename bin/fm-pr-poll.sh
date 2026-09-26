@@ -6,9 +6,10 @@
 # a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
 # Each provider is read through its own standard CLI, gh for GitHub, glab for
-# GitLab, and gerrit-axi for Gerrit, so an upstream checkout needs no extra
-# tooling to follow the first two. The Gerrit branch additionally needs jq,
-# which bin/fm-pr-check.sh refuses to arm a Gerrit watch without.
+# GitLab, twg for Bitbucket Cloud, and gerrit-axi for Gerrit, so an upstream
+# checkout needs no extra tooling to follow the first two. The Bitbucket and
+# Gerrit branches additionally need jq, which bin/fm-pr-check.sh refuses to arm
+# either watch without.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -107,6 +108,40 @@ case "$provider" in
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
     [ "$state" = merged ] && printf '%s\n' merged
+    ;;
+  bitbucket)
+    [ "$host" = bitbucket.org ] || exit 0
+    [ "${#path}" -ge 3 ] && [ "${#path}" -le 512 ] || exit 0
+    case "$path" in
+      /*|*/|*//*) exit 0 ;;
+    esac
+    # A Bitbucket Cloud workspace holds its repositories directly with no
+    # nested namespace, so the path is always exactly two segments.
+    workspace=${path%%/*}
+    repo=${path#*/}
+    case "$workspace" in
+      */*) exit 0 ;;
+    esac
+    [ "${#workspace}" -ge 1 ] && [ "${#workspace}" -le 62 ] || exit 0
+    case "$workspace" in
+      .|..|-*|*.git|*[!A-Za-z0-9._-]*) exit 0 ;;
+    esac
+    [ "${#repo}" -ge 1 ] && [ "${#repo}" -le 62 ] || exit 0
+    case "$repo" in
+      .|..|-*|*.git|*[!A-Za-z0-9._-]*) exit 0 ;;
+    esac
+    [ "$url" = "https://bitbucket.org/$workspace/$repo/pull-requests/$number" ] || exit 0
+    # twg carries the operator's own saved Atlassian credentials, the same way
+    # gh owns GitHub's authentication and glab owns GitLab's, so this poll
+    # never holds or manages a Bitbucket API token itself. Only an exact
+    # "MERGED" state wakes, so a changed format or an unreadable pull request
+    # stays silent instead of reporting a merge.
+    json=$(twg bb pull-requests get "$number" -w "$workspace" -r "$repo" -o json 2>/dev/null) || exit 0
+    [ -n "$json" ] || exit 0
+    state=$(printf '%s' "$json" | jq -r '
+      if type == "object" and (.state | type) == "string" then .state else error("invalid pull request state") end
+      ' 2>/dev/null) || exit 0
+    [ "$state" = MERGED ] && printf '%s\n' merged
     ;;
   gerrit)
     [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
