@@ -717,6 +717,40 @@ pass "one Send & End yields exactly one captured result, automatic retirement, a
 # the non-task arm, leaving the answer visible only in main chat. Exercise the
 # full firstmate-owned round: capture feedback, hold recovery while it is open,
 # then acknowledge by re-arming with the exact response for the saved session.
+HFORPHAN="$TMP_ROOT/hforphan"; new_home "$HFORPHAN"
+ORPHAN_BIN=$(fm_fakebin "$TMP_ROOT/lavish-orphan-stub")
+cat > "$ORPHAN_BIN/lavish-axi" <<'SH'
+#!/bin/sh
+printf 'session:\n  status: ended\n'
+SH
+chmod +x "$ORPHAN_BIN/lavish-axi"
+ORPHAN_ART="$TMP_ROOT/firstmate-orphan.html"
+printf '<h1>orphan</h1>\n' > "$ORPHAN_ART"
+lavish_session "$ORPHAN_ART"
+orph_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$ORPHAN_ART")
+ORPHAN_SOURCE="$TMP_ROOT/firstmate-orphan-source.sh"
+cat > "$ORPHAN_SOURCE" <<'SH'
+#!/bin/sh
+printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","","","message","foreign"\n'
+SH
+chmod +x "$ORPHAN_SOURCE"
+fm_test_track_procevent_home "$HFORPHAN"
+pe "$HFORPHAN" register lavish "$orph_id" -- "$ORPHAN_SOURCE" >/dev/null
+PATH="$ORPHAN_BIN:$PATH" pe "$HFORPHAN" start "$orph_id" >/dev/null
+wait_capture "$HFORPHAN" "$orph_id" || fail "foreign owner fixture did not capture its result"
+pe "$HFORPHAN" retire "$orph_id" >/dev/null
+if PATH="$ORPHAN_BIN:$PATH" FM_HOME="$HFORPHAN" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$ORPHAN_ART" \
+  >"$TMP_ROOT/firstmate-orphan.out" 2>"$TMP_ROOT/firstmate-orphan.err"; then
+  fail "firstmate adopted an ownerless capture from an unrelated source"
+fi
+assert_contains "$(cat "$TMP_ROOT/firstmate-orphan.err")" "cannot adopt ownerless pending captures" \
+  "firstmate's orphan refusal did not identify the unproved capture ownership"
+assert_absent "$HFORPHAN/state/procevent-inbox/$orph_id.1.handled" \
+  "firstmate acknowledged an ownerless capture from an unrelated source"
+assert_absent "$HFORPHAN/state/procevent/$orph_id.source" \
+  "firstmate claimed an ownerless capture from an unrelated source"
+
 HFREPLY="$TMP_ROOT/hfreply"; new_home "$HFREPLY"
 FREPLY_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-reply-stub")
 FREPLY_COUNT="$TMP_ROOT/lavish-firstmate-reply-count"
@@ -854,6 +888,69 @@ assert_absent "$HFREPLY/state/procevent/$freply_id.source" \
 [ "$(grep -c '^poll[12] reply:' "$FREPLY_LOG")" = 2 ] \
   || fail "firstmate's response was posted more than once"
 pass "firstmate-owned feedback receives one reply in the same Lavish session"
+
+HFNOREPLY="$TMP_ROOT/hfnoreply"; new_home "$HFNOREPLY"
+NOREPLY_BIN=$(fm_fakebin "$TMP_ROOT/lavish-firstmate-no-reply-stub")
+NOREPLY_COUNT="$TMP_ROOT/lavish-firstmate-no-reply-count"
+NOREPLY_LOG="$TMP_ROOT/lavish-firstmate-no-reply-log"
+NOREPLY_TRIGGER1="$TMP_ROOT/lavish-firstmate-no-reply-trigger1"
+NOREPLY_TRIGGER2="$TMP_ROOT/lavish-firstmate-no-reply-trigger2"
+export NOREPLY_COUNT NOREPLY_LOG NOREPLY_TRIGGER1 NOREPLY_TRIGGER2
+cat > "$NOREPLY_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+n=$(cat "$NOREPLY_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$NOREPLY_COUNT"
+reply=
+shift 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --agent-reply) reply=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf 'poll%s reply: %s\n' "$n" "$reply" >> "$NOREPLY_LOG"
+trigger_var=NOREPLY_TRIGGER$n
+trigger=${!trigger_var}
+while [ ! -e "$trigger" ]; do sleep 0.02; done
+if [ "$n" = 1 ]; then
+  printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","","","message","noted"\n'
+else
+  printf 'session:\n  status: ended\n  ended_by: user\n'
+fi
+SH
+chmod +x "$NOREPLY_BIN/lavish-axi"
+NOREPLY_ART="$TMP_ROOT/firstmate-no-reply.html"
+printf '<h1>no reply</h1>\n' > "$NOREPLY_ART"
+lavish_session "$NOREPLY_ART"
+noreply_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$NOREPLY_ART")
+fm_test_track_procevent_home "$HFNOREPLY"
+PATH="$NOREPLY_BIN:$PATH" FM_HOME="$HFNOREPLY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$NOREPLY_ART" >/dev/null
+wait_for_lines "$NOREPLY_LOG" 1 || fail "firstmate no-reply fixture did not start"
+touch "$NOREPLY_TRIGGER1"
+wait_capture "$HFNOREPLY" "$noreply_id" || fail "firstmate no-reply fixture did not capture feedback"
+cp "$HFNOREPLY/state/procevent-inbox/$noreply_id.1.result" \
+  "$HFNOREPLY/state/procevent-inbox/$noreply_id.2.result"
+cp "$HFNOREPLY/state/procevent-inbox/$noreply_id.1.adapter" \
+  "$HFNOREPLY/state/procevent-inbox/$noreply_id.2.adapter"
+PATH="$NOREPLY_BIN:$PATH" FM_HOME="$HFNOREPLY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$NOREPLY_ART" >/dev/null
+wait_for_lines "$NOREPLY_LOG" 2 || fail "firstmate no-reply re-arm did not start"
+assert_present "$HFNOREPLY/state/procevent-inbox/$noreply_id.1.handled" \
+  "firstmate no-reply re-arm did not acknowledge the oldest capture"
+assert_absent "$HFNOREPLY/state/procevent-inbox/$noreply_id.2.handled" \
+  "firstmate no-reply re-arm acknowledged more than the oldest capture"
+[ "$(tail -n 1 "$NOREPLY_LOG")" = 'poll2 reply: ' ] \
+  || fail "firstmate no-reply re-arm posted an unexpected session reply"
+touch "$NOREPLY_TRIGGER2"
+for _ in $(seq 1 100); do
+  [ ! -e "$HFNOREPLY/state/procevent/$noreply_id.source" ] && break
+  sleep 0.02
+done
+assert_absent "$HFNOREPLY/state/procevent/$noreply_id.source" \
+  "ended firstmate no-reply session stayed armed"
+pass "firstmate no-reply re-arm acknowledges only the oldest capture"
 
 # --- end-user-aligned regression: an empty board close is not news ------------
 # The captain's report: closing a review surface he had said nothing on still

@@ -409,18 +409,23 @@ source_owner_task() { source_field "$1" owner_task; }
 source_pending() {  # <source-id>
   fm_procevent_pending "$STATE" | awk -v id="$1" 'index($0, "/" id ".") { print }'
 }
-lavish_staged_reply_round_locked() {  # <source-id>
-  local id=$1 round reply
+lavish_rearm_round_locked() {  # <source-id> [staged]
+  local id=$1 mode=${2-} round reply
   [ "$(source_kind "$id" 2>/dev/null || true)" = lavish-owned ] || return 1
   round=$(source_field "$id" reply_round 2>/dev/null || true)
   case "$round" in ''|*[!0-9]*) return 1 ;; esac
   read_argv "$id" || return 1
-  [ "${#ARGV[@]}" -eq 5 ] || return 1
+  case "${#ARGV[@]}" in
+    3) [ -z "$mode" ] || return 1 ;;
+    5)
+      [ "${ARGV[3]}" = --agent-reply-file ] || return 1
+      reply=${ARGV[4]}
+      [ -f "$reply" ] && [ ! -L "$reply" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
   [ "${ARGV[0]}" = "$SCRIPT_DIR/fm-procevent-lavish.sh" ] || return 1
   [ "${ARGV[1]}" = poll ] || return 1
-  [ "${ARGV[3]}" = --agent-reply-file ] || return 1
-  reply=${ARGV[4]}
-  [ -f "$reply" ] && [ ! -L "$reply" ] || return 1
   printf '%s\n' "$round"
 }
 
@@ -434,7 +439,14 @@ source_retirement_blocked_locked() {  # <source-id>
     [ -n "$(source_pending "$id" | head -1)" ]
     return
   fi
-  [ "$kind" = lavish-owned ] && lavish_staged_reply_round_locked "$id" >/dev/null
+  if [ "$kind" = lavish-owned ]; then
+    local round
+    round=$(lavish_rearm_round_locked "$id" 2>/dev/null) || return 1
+    ! fm_procevent_is_handled "$STATE" "$id" "$round" \
+      || lavish_rearm_round_locked "$id" staged >/dev/null
+    return
+  fi
+  return 1
 }
 runner_file()  { printf '%s/%s.runner\n' "$REG" "$1"; }
 staging_file() { printf '%s/.%s.%s.output\n' "$REG" "$1" "$2"; }
@@ -660,13 +672,13 @@ cmd_register_lavish_owner() {
     fi
   done < <(source_pending "$id")
   if [ "$firstmate_owner" -eq 1 ]; then
+    if [ "$adopting" -eq 1 ] && [ "$pending_rounds" -gt 0 ]; then
+      fm_procevent_source_lock_release "$id"
+      die "cannot adopt ownerless pending captures as a firstmate-owned Lavish source: $id"
+    fi
     if [ "$pending_rounds" -eq 0 ] && { [ "$adopting" -eq 0 ] || [ "$reply_requested" -eq 1 ]; }; then
       fm_procevent_source_lock_release "$id"
-      die "cannot re-arm firstmate-owned Lavish source $id: no captured round is waiting for a reply"
-    fi
-    if [ "$pending_rounds" -gt 0 ] && [ "$reply_requested" -eq 0 ]; then
-      fm_procevent_source_lock_release "$id"
-      die "cannot acknowledge firstmate-owned Lavish source $id without a same-session reply"
+      die "cannot re-arm firstmate-owned Lavish source $id: no captured round is waiting to be acknowledged"
     fi
     [ -z "$first_pending" ] || reply_round=$(fm_procevent_result_sequence "$first_pending")
   elif [ "$adopting" -eq 0 ] && [ "$pending_rounds" -eq 0 ]; then
@@ -1081,9 +1093,11 @@ cmd_start() {
       exit 0
     fi
   elif [ "$kind" = lavish-owned ]; then
-    reply_round=$(lavish_staged_reply_round_locked "$id" 2>/dev/null || true)
+    reply_round=$(lavish_rearm_round_locked "$id" 2>/dev/null || true)
     task_pending=$(source_pending "$id" | head -1)
-    if [ -n "$task_pending" ] && [ -z "$reply_round" ]; then
+    if [ -n "$task_pending" ] && { [ -z "$reply_round" ] \
+      || { fm_procevent_is_handled "$STATE" "$id" "$reply_round" \
+        && ! lavish_rearm_round_locked "$id" staged >/dev/null; }; }; then
       fm_procevent_source_lock_release "$id"
       printf 'round-open: %s\n' "$id"
       exit 0
@@ -1758,9 +1772,11 @@ cmd_reconcile() {
           continue
         fi
         if [ "$kind" = lavish-owned ] && [ -n "$task_pending" ]; then
-          lavish_reply_round=$(lavish_staged_reply_round_locked "$id" 2>/dev/null || true)
+          lavish_reply_round=$(lavish_rearm_round_locked "$id" 2>/dev/null || true)
           pending_round=$(fm_procevent_result_sequence "$task_pending" 2>/dev/null || true)
           if [ -z "$lavish_reply_round" ] \
+            || { fm_procevent_is_handled "$STATE" "$id" "$lavish_reply_round" \
+              && ! lavish_rearm_round_locked "$id" staged >/dev/null; } \
             || { ! fm_procevent_is_handled "$STATE" "$id" "$lavish_reply_round" \
               && [ "$pending_round" != "$lavish_reply_round" ]; }; then
             fm_procevent_source_lock_release "$id"
