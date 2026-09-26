@@ -1574,6 +1574,36 @@ handle_paused_stale() {  # <window> <task> <hash>
     fi
     detail="captain-held, awaiting the captain"
     reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
+  elif task_captain_call_open "$task"; then
+    # A `paused:` last line can sit on work the captain ALREADY holds: firstmate
+    # records the hold in the BACKLOG (bin/fm-captain-hold.sh) and the worker's
+    # own line stays whatever it wrote. The backlog hold is the authoritative
+    # record, and it must bound this pane exactly as it already bounds a
+    # captain-relevant line - otherwise the declared-pause branch below re-reads
+    # the status age on every churn and re-alarms the captain for work already in
+    # hand, far inside PAUSE_RESURFACE_SECS. The bound uses the call's own
+    # declaration identity through the shared throttle, so a released-then-reheld
+    # call still gets its first sight.
+    # While the away-posture record exists the bound is absolute, exactly as it is
+    # for a captain-held line: nobody is there to answer and the return brief lists
+    # it, so this sighting is absorbed outright.
+    if afk_record_present; then
+      triage_log "absorbed stale (paused line under an open captain call, never rechecked while the away-posture record exists): $win"
+      return 0
+    fi
+    detail="paused, awaiting the captain"
+    reason="paused ${age}s, awaiting the captain - open captain call already surfaced for this status, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
+    declaration=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
+    # A fresh throttle already equals this call's declaration: the bound has
+    # absorbed its one sighting for the window, so the pane simply takes no new
+    # wake. A different or absent throttle means this is the call's first sight
+    # (or a new call) and it must reach the captain. min_age 0 because the
+    # throttle, not the status age, is what decides the call's cadence.
+    min_age=0
+    if stale_wait_throttled "$key" "$declaration"; then
+      triage_log "absorbed stale ($detail, age ${age}s): $win"
+      return 0
+    fi
   elif until=$(status_paused_until "$last"); then
     if [ "$now" -lt "$until" ] && [ "$age" -lt "$PAUSE_RESURFACE_SECS" ]; then
       triage_log "absorbed stale (paused until $(( until - now ))s from now, declared time not reached): $win"
