@@ -1171,6 +1171,9 @@ SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_FRESH_COMMIT_PENDING=0
+SPAWN_DEFER_CMUX_PI_PUBLISH=0
+SPAWN_CMUX_PI_START_CONFIRMED=0
+SPAWN_CMUX_PI_RECOVERY_ARMED=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
@@ -1214,8 +1217,64 @@ parse_orca_worktree_result() {
   fi
 }
 
+cmux_pi_spawn_fail() {  # <detail>
+  local detail=$1 recovery="$STATE/$ID.cmux-launch-recovery" stage='' recovery_note='' copy=${WT:-} closure=unverified source='' confirmed_stage=''
+  SPAWN_CMUX_PI_RECOVERY_ARMED=0
+  stage=$(mktemp "$STATE/.$ID.cmux-launch-recovery.XXXXXX" 2>/dev/null) || stage=
+  if [ -n "$stage" ]; then
+    if ! printf 'task_id=%s\nendpoint=%s\nworktree=%s\nproject=%s\nharness=%s\npi_start_confirmed=%s\nclosure=unverified\n' \
+      "$ID" "$T" "$copy" "$PROJ_ABS" "$HARNESS" "$SPAWN_CMUX_PI_START_CONFIRMED" >"$stage"; then
+      echo "error: could not write cmux launch recovery at $stage" >&2
+      rm -f "$stage" 2>/dev/null || true
+    elif ! fm_backlog_atomic_transition publish "$stage" "$recovery" "cmux launch recovery" "$STATE"; then
+      echo "error: could not publish cmux launch recovery at $recovery" >&2
+      recovery_note="staged recovery record: $stage"
+    else
+      recovery_note="recovery record: $recovery"
+    fi
+  else
+    echo "error: could not stage cmux launch recovery at $recovery" >&2
+  fi
+  if fm_backend_cmux_kill "$T" 2>/dev/null; then
+    closure=confirmed
+    if [ -f "$recovery" ]; then
+      source=$recovery
+    elif [ -n "$stage" ] && [ -f "$stage" ]; then
+      source=$stage
+    fi
+    if [ -n "$source" ]; then
+      confirmed_stage=$(mktemp "$STATE/.$ID.cmux-launch-recovery.XXXXXX" 2>/dev/null) || confirmed_stage=
+      if [ -n "$confirmed_stage" ] &&
+        sed 's/^closure=unverified$/closure=confirmed/' "$source" >"$confirmed_stage"; then
+        if fm_backlog_atomic_transition publish "$confirmed_stage" "$recovery" "cmux launch recovery" "$STATE"; then
+          recovery_note="recovery record: $recovery"
+          [ "$source" = "$recovery" ] || rm -f "$source" 2>/dev/null || true
+        else
+          recovery_note="staged confirmed recovery record: $confirmed_stage"
+        fi
+      else
+        [ -z "$confirmed_stage" ] || rm -f "$confirmed_stage" 2>/dev/null || true
+        echo "error: could not stage confirmed cmux closure at $recovery" >&2
+        recovery_note="confirmed closure could not be saved in $recovery"
+      fi
+    fi
+  fi
+  [ -n "$recovery_note" ] || recovery_note="recovery record could not be published"
+  if [ -n "$copy" ]; then
+    detail="$detail; exact cmux endpoint $T closure is $closure, and the isolated project copy is preserved at $copy; $recovery_note"
+  else
+    detail="$detail; exact cmux endpoint $T closure is $closure, and any isolated project copy remains in place but its path was not verified; $recovery_note"
+  fi
+  printf '%s\n' "$(status_stamp_line "failed: $detail")" >>"$STATE/$ID.status"
+  echo "error: $detail" >&2
+}
+
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$SPAWN_CMUX_PI_RECOVERY_ARMED" = 1 ]; then
+    cmux_pi_spawn_fail "spawn aborted before its cmux Pi worker was committed" || true
+    status=1
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -1646,6 +1705,10 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+if [ -e "$STATE/$ID.cmux-launch-recovery" ] || [ -L "$STATE/$ID.cmux-launch-recovery" ]; then
+  echo "error: task $ID has an unresolved cmux launch recovery at $STATE/$ID.cmux-launch-recovery; inspect its recorded closure and preserved project copy before retrying" >&2
+  exit 1
+fi
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -3641,6 +3704,9 @@ EOF
       exit 1
     fi
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
+    case "$HARNESS" in
+      pi|pi-signed) SPAWN_CMUX_PI_RECOVERY_ARMED=1 ;;
+    esac
     ;;
   orca)
     set +e
@@ -3714,6 +3780,28 @@ spawn_send_key() { # <target> <key>
   orca) fm_backend_orca_send_key "$1" "$2" ;;
   cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
+}
+
+# A cmux workspace and surface prove only that an endpoint exists.
+# Pi's extension-reported agent-start event proves the launched process consumed
+# the launch brief and began processing its instructions.
+# Accept idle as well as busy because a short first turn can settle between
+# polls while retaining pi-ext as the semantic source.
+cmux_pi_wait_for_processing() {
+  local record busy_state busy_source
+  local i=0
+  while [ "$i" -lt 60 ]; do
+    record=$(fm_busy_record_read "$STATE_REAL" "$ID" 2>/dev/null) || record=
+    if [ -n "$record" ]; then
+      IFS=' ' read -r busy_state busy_source _ <<< "$record"
+      if [ "$busy_source" = pi-ext ]; then
+        case "$busy_state" in busy|idle) return 0 ;; esac
+      fi
+    fi
+    i=$((i + 1))
+    [ "$i" -ge 60 ] || sleep 0.5
+  done
+  return 1
 }
 
 kimi_capture() {
@@ -4229,8 +4317,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
 fi
 if [ "$KIND" != secondmate ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
-  # adapter with a verified semantic source. The launch brief sent below IS a
-  # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
+  # adapter with a verified semantic source. The minted gen is
   # embedded into each adapter's wiring so an event from a superseded
   # incarnation is rejected as stale. Grok and rovo stay on their isolated
   # rendered-tail fallbacks and standalone Kimi stays unknown until
@@ -4248,7 +4335,11 @@ if [ "$KIND" != secondmate ]; then
   esac
   case "$HARNESS" in
   claude* | opencode* | pi | pi-signed | omp)
-    BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
+    BUSY_SEED_STATE=busy
+    case "$BACKEND:$HARNESS" in
+      cmux:pi|cmux:pi-signed) BUSY_SEED_STATE=unknown ;;
+    esac
+    BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID" --state "$BUSY_SEED_STATE") || {
       echo "error: failed to arm the busy-state contract for $ID" >&2
       exit 1
     }
@@ -4670,6 +4761,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
 else
   SPAWN_META_TMP="$STATE/.$ID.meta.spawn.${BASHPID:-$$}"
   SPAWN_FRESH_COMMIT_PENDING=1
+  case "$BACKEND:$HARNESS" in
+    cmux:pi|cmux:pi-signed) SPAWN_DEFER_CMUX_PI_PUBLISH=1 ;;
+  esac
 fi
 SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
@@ -4738,7 +4832,7 @@ preserve_relaunch_meta() {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
   exit 1
 }
-if [ "$RELAUNCH" -eq 0 ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_DEFER_CMUX_PI_PUBLISH" != 1 ]; then
   if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
     echo "error: task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
@@ -4810,18 +4904,20 @@ fi
 # still being delivered, cannot observe or complete a fresh provisional record
 # between its state check and `tasks-axi start`, and a delivery failure cannot
 # follow a committed In-flight transition.
-if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ] && [ "$SPAWN_DEFER_CMUX_PI_PUBLISH" != 1 ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
   fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK"
 fi
-if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
+if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ] && [ "$SPAWN_DEFER_CMUX_PI_PUBLISH" != 1 ]; then
   # The record is published, so this task is now part of the set a teardown
   # enumerates and locks per task. The set lock is only needed across that
   # publication.
   SPAWN_TASK_SET_LOCK_HELD=0
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
-"$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+if [ "$SPAWN_DEFER_CMUX_PI_PUBLISH" != 1 ]; then
+  "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
@@ -4964,6 +5060,10 @@ fi
 
 spawn_record_traceparent() {
   local meta="$STATE/$ID.meta" status=0 acquired=0
+  if [ "$SPAWN_DEFER_CMUX_PI_PUBLISH" = 1 ]; then
+    printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >>"$SPAWN_META_TMP"
+    return
+  fi
   # Fresh publication still owns the lock. Relaunch deliberately uses a short
   # independent critical section so other metadata interfaces can serialize.
   if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
@@ -5106,13 +5206,55 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
 fi
 sleep 0.3
 SPAWN_LAUNCH_SENT=1
-spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
+if spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"; then
+  :
+else
+  SPAWN_LAUNCH_SEND_STATUS=$?
+  if [ "$SPAWN_DEFER_CMUX_PI_PUBLISH" = 1 ]; then
+    cmux_pi_spawn_fail "cmux could not submit Pi's staged launch command, so the workspace may contain only an idle shell and no live worker record will be published"
+  fi
+  exit "$SPAWN_LAUNCH_SEND_STATUS"
+fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
+if spawn_send_key "$T" Enter; then
+  :
+else
+  SPAWN_LAUNCH_SEND_STATUS=$?
+  if [ "$SPAWN_DEFER_CMUX_PI_PUBLISH" = 1 ]; then
+    cmux_pi_spawn_fail "cmux could not submit Pi's staged launch command, so the workspace may contain only an idle shell and no live worker record will be published"
+  fi
+  exit "$SPAWN_LAUNCH_SEND_STATUS"
+fi
+case "$BACKEND:$HARNESS" in
+  cmux:pi|cmux:pi-signed)
+    if ! cmux_pi_wait_for_processing; then
+      cmux_pi_spawn_fail "cmux created the endpoint but Pi did not report processing its launch brief, so the workspace may contain only an idle shell and no live worker record will be published"
+      exit 1
+    fi
+    SPAWN_CMUX_PI_START_CONFIRMED=1
+    if [ "$SPAWN_DEFER_CMUX_PI_PUBLISH" = 1 ]; then
+      if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
+        cmux_pi_spawn_fail "Pi began processing but its task record could not be published ($FM_BACKLOG_TRANSITION_ERROR)"
+        exit 1
+      fi
+      SPAWN_META_TMP=
+      SPAWN_DEFER_CMUX_PI_PUBLISH=0
+      if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+        SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
+        fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK"
+      fi
+      if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
+        SPAWN_TASK_SET_LOCK_HELD=0
+        fm_lock_release "$SPAWN_TASK_SET_LOCK"
+      fi
+      "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+    fi
+    ;;
+esac
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"
@@ -5208,19 +5350,34 @@ SPAWN_BACKLOG_COMMIT_STATUS=0
 FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-30}
 if spawn_commit_backlog_transition; then
   SPAWN_FRESH_COMMIT_PENDING=0
+  SPAWN_CMUX_PI_RECOVERY_ARMED=0
 else
   SPAWN_BACKLOG_COMMIT_STATUS=$?
   if spawn_commit_backlog_transition; then
     SPAWN_BACKLOG_COMMIT_STATUS=0
     SPAWN_FRESH_COMMIT_PENDING=0
+    SPAWN_CMUX_PI_RECOVERY_ARMED=0
   fi
 fi
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   if [ "$RELAUNCH" -eq 0 ]; then
+    SPAWN_CMUX_PI_DISPATCH_RECOVERY=0
+    case "$BACKEND:$HARNESS" in
+      cmux:pi|cmux:pi-signed)
+        SPAWN_CMUX_PI_DISPATCH_RECOVERY=1
+        cmux_pi_spawn_fail "Pi began processing but its backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR)"
+        ;;
+    esac
     if spawn_fresh_commit_rollback; then
-      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
+      if [ "$SPAWN_CMUX_PI_DISPATCH_RECOVERY" = 0 ]; then
+        echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
+      fi
     else
-      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR), and failed-dispatch cleanup is incomplete; the provisional record may remain at $STATE/$ID.meta - close out endpoint $T and local copy $WT by hand, then remove the record and busy state before retrying" >&2
+      if [ "$SPAWN_CMUX_PI_DISPATCH_RECOVERY" = 1 ]; then
+        echo "error: failed-dispatch rollback is incomplete ($FM_BACKLOG_TRANSITION_ERROR); the task record may remain at $STATE/$ID.meta alongside $STATE/$ID.cmux-launch-recovery - preserve $WT and resolve exact endpoint $T before retrying" >&2
+      else
+        echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR), and failed-dispatch cleanup is incomplete; the provisional record may remain at $STATE/$ID.meta - close out endpoint $T and local copy $WT by hand, then remove the record and busy state before retrying" >&2
+      fi
     fi
   else
     echo "error: task $ID was republished but its backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); fix the backlog and re-run the relaunch" >&2

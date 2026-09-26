@@ -46,7 +46,8 @@ The adapter may launch the app with `open -a cmux` only when the socket is down;
 Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` without bringing the cmux window forward.
 Task workspace and surface creation use `focus=false`.
 
-Verify setup by spawning a small task and confirming metadata contains `backend=cmux`, `cmux_workspace_id=`, and `cmux_surface_id=`.
+Verify setup by spawning a small task and confirming the worker begins processing its instructions before spawn reports success and leaves committed metadata with `backend=cmux`, `cmux_workspace_id=`, and `cmux_surface_id=`.
+Pi's launch confirmation and failure recovery are described under [Current operation and safety](#current-operation-and-safety).
 
 ## Runtime detection
 
@@ -68,7 +69,9 @@ The spawn refusal explains how to finish cmux setup or opt back into tmux.
 Each task owns one cmux workspace with one surface.
 The caller-facing label remains `fm-<id>`, while the visible workspace title is `fm-<home-label>-<id>`.
 The home label is `firstmate` or `2ndmate-<id>` plus a stable short hash of the resolved Firstmate root.
-cmux does not enforce title uniqueness, so create, recovery, list, and cleanup paths all validate this scoped title.
+cmux does not enforce title uniqueness, so the pre-create duplicate check, list, and cleanup paths validate this scoped title.
+Creation takes the exact workspace and surface UUIDs from the canonical `workspace create --json --id-format uuids` response rather than trying to rediscover them through the current-window title projection.
+A visible conflicting title is refused during later target checks, while an absent title is not treated as contradictory when the exact UUID pair remains structurally live.
 Relocating the Firstmate installation changes the hash and leaves old titles unmatched, consistent with recorded worktree paths also becoming stale.
 
 ```text
@@ -79,13 +82,24 @@ cmux_surface_id=<surface-uuid>
 ```
 
 The UUID pair is the active endpoint authority within one app run.
-Workspace UUIDs are not stable across an app relaunch, so recovery searches by the scoped title and then resolves the current surface id.
+Workspace UUIDs are not stable across an app relaunch.
+A stale recorded workspace or surface UUID refuses target operations; scoped-title discovery can still identify an orphan workspace for inspection but cannot redirect operations to it.
 
 ## Current operation and safety
 
 A genuinely fresh surface returns an internal error from `read-screen` until something has been written.
 Target readiness therefore uses the structural `list-panes` response instead of a content read.
 Capture remains bounded and locally trimmed after `read-screen` becomes available.
+
+For Pi and pi-signed, structural readiness is necessary but not sufficient.
+Spawn seeds the task's busy state as unknown and waits a bounded interval for the generation-bound Pi extension's `agent-start` event, accepting either the resulting busy state or a later settled idle state from the same `pi-ext` source.
+A fresh worker record is published only after that confirmation.
+Recovery is armed as soon as the exact endpoint exists, covering every abort before commit, including worktree discovery, launch staging or submission, missing Pi confirmation, metadata publication, and final backlog dispatch failure.
+On failure, spawn attempts exact endpoint cleanup and preserves any isolated project copy, rolling back task and busy records when possible without switching to tmux.
+It writes `state/<id>.cmux-launch-recovery` with the endpoint, project, verified copy path when known, and Pi start confirmation; if worktree discovery failed, the copy path remains empty rather than claiming a verified location.
+Closure starts as `unverified` and is updated to `confirmed` only when cleanup proves the workspace is gone.
+Recovery write or publication failures are reported, including a retained staging path when available.
+A recovery record blocks a same-id retry even after confirmed closure, until the preserved project copy and endpoint have been reconciled and the record resolved.
 
 `current_directory` follows a top-level shell `cd` but not the foreground subshell opened by `treehouse get`.
 Spawn-time worktree discovery sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
@@ -103,11 +117,14 @@ A task workspace's last surface cannot be closed directly.
 Cleanup owns the whole workspace and uses `close-workspace`.
 cmux also refuses to remove the only workspace in a macOS window while returning a misleading success response.
 When the task is last in its window, Firstmate creates one unfocused unnamed sibling workspace in that same window, closes the task workspace, and leaves the window with cmux's fresh default workspace.
-The sibling never carries an `fm-` title and is ignored by recovery.
+The sibling never carries an `fm-` title and is ignored by scoped-title discovery.
 
 The exact window membership is re-read before this operation.
 A selected workspace that is not last closes normally; selection itself is not the trigger.
 Firstmate does not attempt to close the macOS window because cmux's socket cannot close a window holding a live terminal.
+Cleanup succeeds only when an exact-workspace `list-panes` probe returns the typed workspace-not-found response, including when the workspace was already gone.
+A successful close acknowledgement, a missing title, or an inconclusive probe does not prove closure.
+Teardown prepares any backlog transition before closing the endpoint, then requires confirmed closure before returning the project copy or removing task records; `--force` does not override this refusal.
 
 Real tests share the captain's running app rather than creating an isolated cmux session.
 `tests/cmux-test-safety.sh` permits cleanup only for an exact currently listed `fm-test-` workspace and never enumerates and closes unrelated workspaces or relaunches the app.
@@ -120,14 +137,16 @@ Real tests share the captain's running app rather than creating an isolated cmux
 - There is no native busy or push-event signal.
 - A target can disappear after structural readiness and before the operation.
 - The only-workspace cleanup path leaves a fresh default workspace and cannot close the window.
-- Label lookup and recovery are currently scoped to the current cmux window, so a task moved to a non-current window is a known recovery blind spot.
-- Workspace ids do not survive app relaunch and are never recovery authority.
+- Label lookup and orphan discovery are currently scoped to the current cmux window.
+- Workspace ids do not survive app relaunch, so stale task targets are refused.
 
 ## Regression entry points
 
 ```sh
 tests/fm-backend-cmux.test.sh
+tests/fm-cmux-pi-launch.test.sh
 tests/fm-backend-cmux-smoke.test.sh
+FM_CMUX_PI_LAUNCH_LIVE=1 tests/fm-cmux-pi-launch-live-e2e.test.sh
 ```
 
 [`verification/runtime-backends.md`](verification/runtime-backends.md#cmux) records the active source and live evidence, including socket modes and last-in-window cleanup.

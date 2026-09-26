@@ -19,7 +19,7 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
+fail() { printf 'not ok - %s\n' "$1" >&2; trap - EXIT; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the cmux adapter)"; exit 0; }
@@ -38,9 +38,29 @@ PING_STATE=$(fm_backend_cmux_ping_state)
 
 WS1=""
 WS2=""
+SF1=""
+_SF2=""
 cleanup_all() {
-  [ -z "$WS1" ] || cmux_safe_close_workspace "$WS1" "fm-test-smoke1"
-  [ -z "$WS2" ] || cmux_safe_close_workspace "$WS2" "fm-test-smoke2"
+  local result=0
+  if [ -n "$WS1" ] && [ -n "$SF1" ]; then
+    if cmux_safe_close_workspace "$WS1:$SF1" "fm-test-smoke1"; then
+      WS1=""
+      SF1=""
+    else
+      printf 'cmux smoke cleanup could not confirm closure of %s:%s\n' "$WS1" "$SF1" >&2
+      result=1
+    fi
+  fi
+  if [ -n "$WS2" ] && [ -n "$_SF2" ]; then
+    if cmux_safe_close_workspace "$WS2:$_SF2" "fm-test-smoke2"; then
+      WS2=""
+      _SF2=""
+    else
+      printf 'cmux smoke cleanup could not confirm closure of %s:%s\n' "$WS2" "$_SF2" >&2
+      result=1
+    fi
+  fi
+  return "$result"
 }
 trap cleanup_all EXIT
 
@@ -161,14 +181,12 @@ pass "real cmux: window_of_workspace locates a task workspace's window and count
 
 # --- kill: whole-workspace close ----------------------------------------------
 
-fm_backend_cmux_kill "$TARGET"
+fm_backend_cmux_kill "$TARGET" || fail "kill could not confirm closure of the exact workspace"
 sleep 0.5
 STILL_LIVE=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null | jq -r --arg id "$WS1" '.workspaces[]? | select(.id == $id) | .id' 2>/dev/null)
 [ -z "$STILL_LIVE" ] || fail "kill did not remove the whole task workspace"
 WS1=""
-# Best-effort contract: killing an already-gone target must not error.
-fm_backend_cmux_kill "$TARGET" || fail "kill on an already-dead target must stay best-effort (never fail)"
-pass "real cmux: kill removes the whole workspace and is idempotent/best-effort"
+pass "real cmux: kill removes the whole workspace"
 
 # --- list_live (title-based recovery discovery) ------------------------------
 
@@ -177,12 +195,15 @@ TASK_IDS2=$(fm_backend_cmux_create_task "$LABEL2" /tmp) || fail "second create_t
 read -r WS2 _SF2 <<EOF
 $TASK_IDS2
 EOF
+[ -n "$WS2" ] && [ -n "$_SF2" ] || fail "second create_task did not return workspace/surface ids"
 live=$(fm_backend_cmux_list_live)
 case "$live" in
   *"$LABEL2"*) : ;;
   *) fail "list_live did not report the freshly created task workspace by title"$'\n'"--- got ---"$'\n'"$live" ;;
 esac
-pass "real cmux: list_live discovers a live task workspace by fm-<id> title"
-
-cleanup_all
+if ! cleanup_all; then
+  trap - EXIT
+  exit 1
+fi
 trap - EXIT
+pass "real cmux: list_live discovers a live task workspace by fm-<id> title"

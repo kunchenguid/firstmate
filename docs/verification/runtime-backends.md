@@ -335,7 +335,7 @@ Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that 
 
 A reported close failure costs teardown every durable record of the task, so what each backend's close actually returns was measured before that status was given any authority.
 Verified on 2026-09-14 with tmux 3.7c by driving `fm_backend_kill` against real tmux endpoints, and the Orca arm by driving `fm_backend_orca_kill` under a search path with no `orca` on it.
-Zellij and cmux were not driven with their CLIs absent; the table below states what those arms report today rather than claiming a measurement.
+Zellij and cmux were not driven with their CLIs absent in that pass; the table distinguishes the remaining unmeasured behavior from cmux's current contract.
 
 ```sh
 tests/fm-teardown-endpoint-safety.test.sh
@@ -360,10 +360,10 @@ The refusal is reached only through a close that could not do its job, and each 
 | tmux | 0, silent | 1, resolved by re-reading the window's exact recorded identity; a read that itself could not run refuses rather than passing for absence |
 | orca | 0, silent | 1 when a missing CLI means no close was attempted; 0 for a close command that failed after the CLI accepted it |
 | zellij | 0, silent | 0, not yet distinguishable |
-| cmux | 0, silent | 0, not yet distinguishable |
+| cmux | See [cmux cleanup](../cmux-backend.md#current-operation-and-safety) | See the same owner; regression coverage is listed [below](#cmux) |
 | herdr | 0, silent | 0 from this arm; `bin/fm-teardown.sh` gates every Herdr record removal on `fm_backend_herdr_endpoint_confirmed_gone` instead |
 
-The three arms that still report 0 need a presence re-read taken after their own close, and the close-then-read timing that re-read depends on cannot be established without the real Zellij, Orca, and cmux binaries.
+The Zellij and Orca arms that still report 0 after a failed close need a presence re-read taken after their own close, and the close-then-read timing that re-read depends on cannot be established without their real binaries.
 Guessing it is what a refusal must never rest on: a gate that refused an already-exited session would break ordinary cleanup on every task, which is a worse failure than the stranded endpoint it would be trying to prevent.
 tmux's re-read is deliberately exact - `=session` plus a whole-line window-name match - because a prefix match would read a neighboring window as this window's survivor, which is the same exactness the cleanup identity boundary above already requires.
 It is also deliberately conservative about the read itself, sharing `fm_backend_tmux_window_inventory` with `fm_backend_tmux_agent_state` so both mean the same thing by an absent session: only a definitive missing-session, missing-server, or connect-error response proves the window gone.
@@ -371,7 +371,7 @@ Any other read failure - a momentarily unresponsive server, or a teardown PATH w
 
 Two bounds of the refusal are known and deliberately not closed here.
 
-`--force` overrides it at exactly one site, the generic non-Herdr/non-Orca close.
+`--force` overrides it at exactly one site, the generic non-Herdr/non-Orca/non-cmux close.
 That is the only close where continuing is actually reachable: the worktree is already returned by then and nothing after it needs the backend that could not close, so `--force` - the operator's existing authority to discard a task's records - can mean something there.
 A forced run still prints the full diagnosis naming the backend, the target, and that the close failed, so what may survive is never silent.
 It states what `--force` authorizes rather than what will have happened, because a later refusal in the same run - the Herdr confirmed-gone gate, or the inactive-reconcile delivery gate - can still stop it with every record retained.
@@ -1770,7 +1770,7 @@ Current active CLI findings:
 
 | Guarantee | Command shape | Result |
 | --- | --- | --- |
-| Create | `new-workspace --name <title> --cwd <dir> --focus false --id-format uuids` | Created one workspace with one surface without focusing it. |
+| Create | `workspace create --name <title> --cwd <dir> --focus false --json --id-format uuids` | Returns the exact workspace and initial surface UUIDs without focusing the workspace. |
 | Fresh readiness | `list-panes --workspace <id> --json --id-format uuids` | Found a brand-new surface before content existed. |
 | Fresh read counterexample | `read-screen` before any write | Returned `internal_error: Failed to read terminal text`. |
 | Literal send | `send --workspace <id> --surface <id> -- <text>` | Left text unsubmitted. |
@@ -1779,17 +1779,35 @@ Current active CLI findings:
 | Last surface | `close-surface` on the only surface | Refused with `invalid_state: Cannot close the last surface`. |
 | Last workspace | `close-workspace` on the only workspace in a window | Printed success but left the workspace present. |
 
+Source inspection at the verified 0.64.17 floor confirmed that canonical `workspace create` honors `--json`, and the `workspace.create` response contains `workspace_id` and `surface_id`.
+The deprecated `new-workspace` path deliberately ignored JSON output at that version, so parsing its text was not an equivalent fix.
+The cmux upstream create test also consumes the returned workspace handle immediately.
+[The operator guide](../cmux-backend.md#task-shape-and-metadata) owns endpoint authority, launch recovery, and cleanup behavior.
+
+The portable `tests/fm-cmux-pi-launch.test.sh` drives `fm-spawn.sh` through a fake cmux whose current-window title projection remains empty.
+Its success arm applies a generation-bound `pi-ext` event through the real busy-event writer; this is simulated launch evidence, not a live Pi result.
+Failure cases cover an idle shell, send and Enter failures, worktree discovery, metadata publication, and final backlog dispatch, checking preserved copies and recovery records with both closure states.
+`tests/fm-backend-cmux.test.sh` covers incomplete create responses, stale workspace and surface identities, changed titles, incomplete window scans, delayed closure, typed absence, and cleanup refusal.
+The live Pi guard listed below requires both a completed probe report and confirmed guarded cleanup before reporting success, and retains its isolated lab for inspection even after success.
+The live smoke likewise propagates cleanup refusal instead of reporting successful completion with an unconfirmed close.
+
+A real refresh attempt on 2026-09-25 used cmux 0.64.25 build 106 and Pi 0.87.1.
+The worker process was outside cmux ancestry under the app's default `cmuxOnly` control mode, so `cmux ping` returned `Access denied - only processes started inside cmux can connect` before any workspace could safely be created.
+Changing the shared app setting was outside the test's authority.
+That attempt provides socket-denial evidence only; the live guard below refreshes launch evidence from an Automation-mode or otherwise authorized cmux process.
+
 The last-workspace workaround was reverified on 2026-07-10 in Automation mode.
 After creating one unfocused unnamed sibling in the same window, `close-workspace` removed the exact task workspace and left only cmux's default sibling.
 A selected non-last workspace closed directly, proving that window cardinality rather than selection is the trigger.
 
 Source inspection confirmed each workspace constructor creates a new UUID with no restored-id input.
-Recovery therefore remains title-based.
 The bundled Claude wrapper was observed stripping `CMUX_*` variables on its failed socket-probe path while retaining the app bundle id, supporting the macOS-only bundle-id and ancestry fallbacks.
 
 ```sh
 tests/fm-backend-cmux.test.sh
+tests/fm-cmux-pi-launch.test.sh
 tests/fm-backend-cmux-smoke.test.sh
+FM_CMUX_PI_LAUNCH_LIVE=1 tests/fm-cmux-pi-launch-live-e2e.test.sh
 ```
 
 The real smoke proves socket access, fresh readiness, current-path probing, send and keys, bounded capture, title identity, and guarded exact cleanup.
