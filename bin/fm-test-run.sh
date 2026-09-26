@@ -71,7 +71,7 @@
 #   --per-script-timeout-secs N
 #                   terminate a script that runs longer than N seconds and
 #                   record it as exit 124 (0 disables, the default). The
-#                   --changed applies 900s automatically: no real script
+#                   --changed applies 1500s automatically: no measured script
 #                   approaches it, so it only converts a HUNG
 #                   script into a bounded failure. --max-wall-ms is checked
 #                   after the run and so cannot catch a hang on its own.
@@ -183,14 +183,17 @@ MAX_WALL_MS=
 PER_SCRIPT_TIMEOUT_SECS=0
 # Bound applied automatically on the automatic --changed path, derived from
 # measured healthy runtimes with margin rather than picked: the slowest measured
-# behavior test is the 341s Herdr presentation E2E, and the slowest script in a
-# runner-file changed selection is tests/fm-calm-pi-extension.test.sh at 77s
-# once its Chrome reap terminates. 900s leaves roughly 2.6x headroom over the
-# slowest real script, so this can only ever fire on a script that is genuinely
-# stuck. It is a guard, not a speed control: a HUNG script becomes a bounded
-# failure instead of an unbounded suite, which is the shape that silently
-# outruns a caller's invocation budget.
-CHANGED_DEFAULT_TIMEOUT_SECS=900
+# script is tests/fm-watch-triage.test.sh in the watcher-wake-lock family, at
+# about 434s alone and about 698s under CI load (the hint table below records
+# that loaded figure), and the slowest script in a runner-file changed selection
+# is tests/fm-calm-pi-extension.test.sh at 77s once its Chrome reap terminates.
+# 1500s keeps every measured script under the bound with roughly 2.1x headroom
+# over the slowest loaded measurement, and it stays under the 30-minute normal
+# CI tier so a wedged script fails here, with its output, before the job cap
+# cancels the lane. It is a guard, not a speed control: a HUNG script becomes a
+# bounded failure instead of an unbounded suite, which is the shape that
+# silently outruns a caller's invocation budget.
+CHANGED_DEFAULT_TIMEOUT_SECS=1500
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
