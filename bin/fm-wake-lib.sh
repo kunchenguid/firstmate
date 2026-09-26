@@ -45,12 +45,42 @@ fm_current_pid() {  # [output-variable]
   fi
 }
 
+# A zombie process (exited but not yet reaped by its parent) keeps its PID
+# slot reserved, so plain `kill -0` still reports it alive: the kernel only
+# releases the slot once the parent calls wait(). A dead lock/lease "owner"
+# stuck in that state never releases anything, wedging the lock forever. Read
+# the real process state (proc stat field 3, or lstart's `ps` STAT column when
+# /proc is unavailable) and treat Z as not-alive, using the same
+# ${FM_PROC_ROOT_OVERRIDE:-/proc} portability discipline as fm_pid_identity
+# below. This is deliberately liveness-only: a recycled PID whose new occupant
+# happens to share the same identity string is fm_pid_identity's job, not
+# this function's.
 fm_pid_alive() {
-  local pid=$1
+  local pid=$1 proc_root stat_line state
+  local -a stat_fields
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  kill -0 "$pid" 2>/dev/null
+  kill -0 "$pid" 2>/dev/null || return 1
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ]; then
+    # After the final comm delimiter (comm can itself contain spaces/parens),
+    # array index 0 is proc stat field 3 (state).
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 0
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    state=${stat_fields[0]:-}
+  else
+    # No Linux-compatible /proc (e.g. macOS): fall back to `ps`'s STAT
+    # column, the same field the test suite's own is_live_non_zombie helper
+    # reads. A `ps` that cannot report state at all is treated as alive,
+    # matching kill -0's verdict, rather than failing a live process closed
+    # on a portability gap.
+    state=$(ps -p "$pid" -o stat= 2>/dev/null | tr -d '[:space:]')
+  fi
+  case "$state" in
+    Z*) return 1 ;;
+  esac
+  return 0
 }
 
 fm_pid_identity() {
