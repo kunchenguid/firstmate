@@ -66,6 +66,18 @@ test_supervision_host_protocol_on_every_arm_owner() {
     [ "$(printf '%s\n' "$body" | grep -c '^3\. ')" -eq 1 ] || fail "$harness: the protocol must say once how the park boundary arrives: $body"
     [ "$(printf '%s\n' "$body" | grep -c '^6\. ./afk. writes only the record here')" -eq 1 ] \
       || fail "$harness: the protocol must say once what /afk does here: $body"
+    [ "$(printf '%s\n' "$body" | grep -c "while ./quiet. runs the quiet skill, whose .bin/fm-afk-launch.sh quiet-check. decides")" -eq 1 ] \
+      || fail "$harness: the protocol must route /quiet through quiet-check once: $body"
+    case "$harness" in
+      claude|cursor)
+        assert_contains "$body" "it enters nothing where the attended host runs and otherwise launches the quiet daemon" \
+          "$harness: the protocol must say /quiet enters nothing where the attended host runs" ;;
+      *)
+        assert_contains "$body" "with no verified dialog mirror here it launches the quiet daemon" \
+          "$harness: the protocol must say /quiet still launches the quiet daemon without a verified mirror"
+        assert_not_contains "$body" "enters nothing where the attended host runs" \
+          "$harness: the protocol must not promise the attended quiet statement without a verified mirror" ;;
+    esac
   done
   rm -f "$config/supervision-host"
   plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness grok)
