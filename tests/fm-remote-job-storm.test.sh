@@ -356,4 +356,47 @@ kill -0 "$OTHER_WORKER" 2>/dev/null || fail "the collapse stopped a worker bound
 wait_for_supervisors 1 5 || fail "the collapse left $(supervisor_count) supervisors instead of only the other queue's"
 pass "the duplicate sweep stops every worker of its queue when none owns the lock, and no other queue's"
 
+# A bash command or process substitution fork keeps its worker's command line
+# and environment. The serving loop orders queued work through
+# < <(printf ... | sort), so a sort that stalls holds that fork of the owner open
+# for as long as the sweep needs to see it.
+use_state forks
+STALL_BIN="$TMP_ROOT/stall-bin"
+STALL_FLAG="$TMP_ROOT/stall-sort"
+mkdir -p "$STALL_BIN"
+cat > "$STALL_BIN/sort" <<SH
+#!/bin/bash
+while [ -e "$STALL_FLAG" ]; do sleep 0.1; done
+exec /usr/bin/sort "\$@"
+SH
+chmod +x "$STALL_BIN/sort"
+: > "$STALL_FLAG"
+(export PATH="$STALL_BIN:$PATH"; fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME") ||
+  fail "the fork fixture did not start"
+wait_for_supervisors 1 5 || fail "the fork fixture did not leave exactly one supervisor"
+FORK_OWNER=$(cat "$STATE/worker.pid")
+FORK_SUPERVISOR=$(ps -p "$FORK_OWNER" -o ppid= | tr -d '[:space:]')
+FORK_JOB=$(fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-probe-job.sh < /dev/null) ||
+  fail "cannot stage the fork fixture's job: $FM_REMOTE_JOB_ERROR"
+OWNER_FORK=
+deadline=$(( $(date +%s) + 10 ))
+while [ -z "$OWNER_FORK" ] && [ "$(date +%s)" -lt "$deadline" ]; do
+  for pid in $(pgrep -P "$FORK_OWNER" 2>/dev/null || true); do
+    [ "$(ps -p "$pid" -o command= 2>/dev/null)" = "/bin/bash $WORKER --serve" ] && OWNER_FORK=$pid
+  done
+  [ -n "$OWNER_FORK" ] || sleep 0.1
+done
+[ -n "$OWNER_FORK" ] || fail "the serving loop never held a fork of the owner open"
+FORK_DRY=$(HOME="$ACCOUNT_HOME" "$ROOT/bin/fm-remote-job-reap-orphans.sh" --duplicates --dry-run)
+[ -z "$FORK_DRY" ] || fail "the dry run counted a fork of the healthy owner as a duplicate: $FORK_DRY"
+FORK_SWEEP=$(HOME="$ACCOUNT_HOME" "$ROOT/bin/fm-remote-job-reap-orphans.sh" --duplicates)
+[ -z "$FORK_SWEEP" ] || fail "the sweep stopped a fork of the healthy owner: $FORK_SWEEP"
+kill -0 "$OWNER_FORK" 2>/dev/null || fail "the sweep stopped the owner's fork"
+kill -0 "$FORK_OWNER" 2>/dev/null || fail "the sweep stopped the verified owner"
+kill -0 "$FORK_SUPERVISOR" 2>/dev/null || fail "the sweep stopped the owner's supervisor"
+rm -f "$STALL_FLAG"
+fm_remote_job_wait "$ACCOUNT_HOME" "$FORK_JOB" || fail "the fork fixture's job was not served: $FM_REMOTE_JOB_ERROR"
+fm_remote_job_reap "$ACCOUNT_HOME" "$FORK_JOB" || true
+pass "the duplicate sweep never counts or stops a bash fork of a healthy worker"
+
 echo "ALL TESTS PASSED"

@@ -38,7 +38,12 @@
 # through lsof: every start path appends a worker tree's output to its own
 # queue's logs/dev.firstmate.remote-job.log, and a log that was since removed
 # still counts. Another queue's workers and a launchd-run worker are never
-# candidates. The sweep keeps only the process that verifiably owns the queue's
+# candidates. A process whose parent is itself one of this queue's workers is
+# never a candidate or a top-level worker: it is a serving child still under its
+# supervisor, or a bash command or process substitution fork of a worker, which
+# keeps the worker's command line and environment and goes with that worker's
+# tree. A genuine duplicate supervisor's parent is its ensure caller or init,
+# never a worker. The sweep keeps only the process that verifiably owns the queue's
 # worker lock, with the supervisor directly above it, and stops every other
 # candidate, so a host holding hundreds of supervisors is left with exactly one.
 # When no process verifiably owns the lock, nothing is healthy and every
@@ -224,9 +229,16 @@ reap_duplicates() { # <scan>
     pids+=("$pid")
     commands+=("$command")
     ppids+=("$ppid")
-    case "$command" in *" --serve") ;; *) tops+=("$pid") ;; esac
   done <<< "$1"
   [ "${#pids[@]}" -gt 0 ] || return 0
+  i=0
+  count=${#pids[@]}
+  while [ "$i" -lt "$count" ]; do
+    case " ${pids[*]} " in *" ${ppids[$i]} "*) ;; *)
+      case "${commands[$i]}" in *" --serve") ;; *) tops+=("${pids[$i]}") ;; esac ;;
+    esac
+    i=$((i + 1))
+  done
   if fm_remote_job_lock_owner_status "$(fm_remote_job_canonical_existing_dir "${HOME:-/nonexistent}")" 2>/dev/null; then
     owner=$FM_REMOTE_JOB_OWNER_PID
     ppid=$(ps -p "$owner" -o ppid= 2>/dev/null | tr -d '[:space:]')
@@ -240,11 +252,9 @@ reap_duplicates() { # <scan>
     ppid=${ppids[$i]}
     i=$((i + 1))
     [ "$pid" != "$owner" ] && [ "$pid" != "$owner_parent" ] || continue
-    # A serving child still under a supervisor goes with that supervisor's
-    # tree, so only a child whose supervisor is gone is a candidate itself.
-    case "$command" in
-      *" --serve") case " ${tops[*]:-} " in *" $ppid "*) continue ;; esac ;;
-    esac
+    # A serving child or a bash fork still under a worker goes with that
+    # worker's tree, so only a process whose parent is no worker is a candidate.
+    case " ${pids[*]} " in *" $ppid "*) continue ;; esac
     reap_still_running "$pid" "$command" || continue
     reap_stop "$pid" "duplicate remote job worker" "queue $state_root"
   done
