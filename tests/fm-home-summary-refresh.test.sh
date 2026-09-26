@@ -1076,3 +1076,19 @@ case "$report_out" in
     ;;
 esac
 pass "repeated publication failure is reported at session start until it clears"
+
+MALFORMED_ROOT_HOME="$TMP_ROOT/malformed-root-home"
+mkdir -p "$MALFORMED_ROOT_HOME/state" "$MALFORMED_ROOT_HOME/data" \
+  "$MALFORMED_ROOT_HOME/config" "$MALFORMED_ROOT_HOME/projects"
+printf '# Seeded Firstmate home\n' > "$MALFORMED_ROOT_HOME/AGENTS.md"
+printf 'malformed\n' > "$MALFORMED_ROOT_HOME/.fm-secondmate-home"
+printf 'a\nb\n' > "$MALFORMED_ROOT_HOME/config/projects-root"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$MALFORMED_ROOT_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$WRITER" --best-effort \
+  || fail "a malformed projects-root stopped the home-summary refresh"
+jq -e --arg now "$NOW_ONE" '
+  .schema == "fm-secondmate-home-summary.v1" and .generated == $now
+' "$MALFORMED_ROOT_HOME/state/home-summary.json" >/dev/null \
+  || fail "a malformed projects-root kept the home summary from publishing"
+pass "a malformed projects-root does not block home-summary publication"

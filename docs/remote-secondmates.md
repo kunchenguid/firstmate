@@ -337,7 +337,8 @@ Resolve the concrete origin from any of these sources rather than imposing one U
 - An explicit paste.
 
 Seeding a project this machine has never cloned needs no clone under `projects/`, no `no-mistakes` initialization here, and no fleet sync first.
-A bare `<project>` is still accepted when this machine happens to have `projects/<project>`.
+A bare `<project>` is still accepted when this home's own registry resolves that name to a clone here.
+That can be a `projects/<project>` directory, a `config/projects-root` sibling, or a `data/project-paths.json` alias.
 That clone's configured origin is then read instead of being retyped.
 
 ### Origin validation

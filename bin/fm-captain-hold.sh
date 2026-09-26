@@ -863,9 +863,14 @@ command_hold() {
     [ -n "$title" ] || fail "--title is required to create task $id"
     validate_one_line title "$title"
     if [ -z "$repo" ] && [ -n "$origin" ] && [ -f "$STATE/$origin.meta" ]; then
-      repo=$(meta_value "$STATE/$origin.meta" project)
-      repo=${repo%/}
-      repo=${repo##*/}
+      # project_name= is the stable registered alias recorded at spawn; the
+      # basename of project= is the legacy fallback for older records.
+      repo=$(meta_value "$STATE/$origin.meta" project_name)
+      if [ -z "$repo" ]; then
+        repo=$(meta_value "$STATE/$origin.meta" project)
+        repo=${repo%/}
+        repo=${repo##*/}
+      fi
     fi
     [ -n "$repo" ] || repo=firstmate
     validate_one_line repo "$repo"

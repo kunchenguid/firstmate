@@ -779,6 +779,7 @@ tests/fm-pr-state.test.sh 531
 tests/fm-procevent-quota.test.sh 1900
 tests/fm-procevent-when.test.sh 23805
 tests/fm-procevent.test.sh 221745
+tests/fm-project-local.test.sh 11403
 tests/fm-project-origin.test.sh 136
 tests/fm-public-followup.test.sh 153508
 tests/fm-quota-array-dispatch-live-e2e.test.sh 71
@@ -845,6 +846,7 @@ tests/fm-turnend-foreign-owner-arm-fix.test.sh 2397
 tests/fm-turnend-guard.test.sh 33450
 tests/fm-update.test.sh 11572
 tests/fm-vendor-auth-probe.test.sh 45255
+tests/fm-view.test.sh 13335
 tests/fm-voice-relay.test.sh 32486
 tests/fm-wake-daemon-lifecycle-e2e.test.sh 7477
 tests/fm-wake-drain-open-decisions-cursor.test.sh 38506
