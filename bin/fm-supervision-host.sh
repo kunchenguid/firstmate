@@ -801,12 +801,15 @@ handle_wake() {  # <reason-lines> <accepted-posture>
     set -- "$@" --mirror-file "$mirror"
   fi
   rm -f "$WAKE_FILE"
-  if ! printf '%s\n' "$reason" \
-    | (umask 077; exec node "$SCRIPT_DIR/fm-branch-dispatch.mjs" wake-prompt "$@" > "$WAKE_FILE" 2>/dev/null); then
+  rc=0
+  printf '%s\n' "$reason" \
+    | (umask 077; exec node "$SCRIPT_DIR/fm-branch-dispatch.mjs" wake-prompt "$@" > "$WAKE_FILE" 2>/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ]; then
     [ -z "$readback" ] || rm -f "$readback"
     rm -f "$TURN_FILE" "$mirror"
     "$SCRIPT_DIR/fm-wake-grant.sh" release "$GEN" >/dev/null 2>&1 || true
     HANDLE_WHY="the wake prompt could not be rendered"
+    [ "$rc" -ne 3 ] || HANDLE_WHY="the dialog mirror could not be read"
     return 1
   fi
   [ -z "$readback" ] || rm -f "$readback"

@@ -303,7 +303,7 @@ test_report_after_the_return_is_queued_for_main() {
 # --- dispatch entry -----------------------------------------------------------
 
 test_dispatch_entry_scopes_rows_and_renders_the_away_tail() {
-  local home state out
+  local home state out rc
   home="$TMP_ROOT/dispatch"
   state="$home/state"
   mkdir -p "$state"
@@ -337,6 +337,11 @@ test_dispatch_entry_scopes_rows_and_renders_the_away_tail() {
   : > "$home/mirror"
   out=$(printf 'signal: demo.status\n' | FM_HOME="$home" node "$DISPATCH" wake-prompt --report 'the bin/fm-branch-report.sh command' --mirror-file "$home/mirror")
   assert_not_contains "$out" "MAIN DIALOG MIRROR" "an empty feed must add nothing"
+  rm -f "$home/mirror"
+  rc=0
+  out=$(printf 'signal: demo.status\n' | FM_HOME="$home" node "$DISPATCH" wake-prompt --report 'the bin/fm-branch-report.sh command' --mirror-file "$home/mirror" 2>/dev/null) || rc=$?
+  [ "$rc" -eq 3 ] || fail "a supplied mirror feed that cannot be read must exit 3, got $rc"
+  [ -z "$out" ] || fail "a supplied mirror feed that cannot be read must render no prompt: $out"
 
   printf 'Away posture (recorded):\n  your words (verbatim):\n    merge nothing\n' > "$home/readback"
   out=$(printf 'signal: demo.status\n' | FM_HOME="$home" node "$DISPATCH" wake-prompt --report 'the bin/fm-branch-report.sh command' --away --readback-file "$home/readback")
@@ -560,6 +565,38 @@ test_branch_outcomes_stay_unread_when_a_projection_fails() {
   assert_contains "$drained" "[seq 1] demo: merged the docs fix" "a routine outcome behind a failed projection must follow on the next drain"
   assert_contains "$drained" "[seq 2] cap: needs your merge call" "a captain outcome behind a failed projection must follow on the next drain"
   pass "drain: branch outcomes stay unread when a projection of the store fails"
+}
+
+# Without jq the drain cannot present the store, so it marks nothing read and
+# exits nonzero for the return's gate.
+test_branch_outcomes_stay_unread_without_jq() {
+  local home drained rc dir entry path=''
+  home="$TMP_ROOT/drain-no-jq"
+  mkdir -p "$home/state" "$home/config"
+  : > "$home/config/supervision-host"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task demo --verdict routine --summary 'merged the docs fix' >/dev/null \
+    || fail "fixture: could not record the routine outcome"
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    if [ -e "$dir/jq" ]; then
+      mkdir -p "$home/no-jq$dir"
+      for entry in "$dir"/*; do
+        [ "${entry##*/}" = jq ] || ln -s "$entry" "$home/no-jq$dir/" 2>/dev/null || true
+      done
+      dir="$home/no-jq$dir"
+    fi
+    path="${path:+$path:}$dir"
+  done <<DIRS
+$(printf '%s\n' "$PATH" | tr ':' '\n')
+DIRS
+  PATH="$path" command -v jq >/dev/null 2>&1 && fail "fixture: jq is still reachable"
+  rc=0
+  drained=$(PATH="$path" FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a drain without jq over a non-empty store must exit nonzero: $drained"
+  assert_contains "$drained" "BRANCH OUTCOMES SKIPPED: jq is not installed" "a drain without jq must say it could not present the store"
+  drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  assert_contains "$drained" "[seq 1] demo: merged the docs fix" "an outcome a drain without jq could not present must follow on the next drain"
+  pass "drain: branch outcomes stay unread and the drain fails when jq is missing"
 }
 
 # A drain that cannot print the section, because its output is already
@@ -967,6 +1004,19 @@ test_attended_wake_with_an_unreadable_mirror_reaches_main() {
   [ ! -e "$home/state/.host-mirror-cursor.next" ] || fail "an unreadable mirror staged a cursor"
   main_drain_and_ack "$home"
 
+  printf '#!/usr/bin/env bash\nprev=\nfor a in "$@"; do [ "$prev" != --mirror-file ] || chmod 000 "$a"; prev=$a; done\nexec %q "$@"\n' \
+    "$(command -v node)" > "$home/fakebin/node"
+  chmod +x "$home/fakebin/node"
+  park_again "$home"
+  append_status "$home" 'mirror lost before the prompt'
+  wait_until 250 host_exited "$home" || fail "bad mirror: a feed lost before the prompt did not hand the wake to main"
+  rm -f "$home/fakebin/node"
+  assert_re '^supervision-host: the supervision session could not take this wake: the dialog mirror could not be read; this wake is yours$' \
+    "$home/host.out" "a feed lost before the prompt must hand the wake to main with its reason"
+  [ "$(engine_calls "$home")" -eq 1 ] || fail "bad mirror: the engine ran without the feed it was promised"
+  [ "$(cat "$home/state/.host-mirror-cursor")" = "$cursor" ] || fail "a feed lost before the prompt moved the cursor"
+  main_drain_and_ack "$home"
+
   printf '{"seq":' >> "$mirror"
   printf '\n' >> "$mirror"
   park_again "$home"
@@ -977,7 +1027,7 @@ test_attended_wake_with_an_unreadable_mirror_reaches_main() {
   [ "$(engine_calls "$home")" -eq 1 ] || fail "bad mirror: the engine ran past a malformed mirror entry"
   [ "$(cat "$home/state/.host-mirror-cursor")" = "$cursor" ] || fail "a malformed mirror entry moved the cursor"
   [ ! -e "$home/state/.host-mirror-cursor.next" ] || fail "a malformed mirror entry staged a cursor past it"
-  pass "host: an attended wake whose mirror is missing, cannot be read, or holds a malformed entry reaches main before any engine turn, and the cursor stays put"
+  pass "host: an attended wake whose mirror is missing, cannot be read (at the feed or at the prompt), or holds a malformed entry reaches main before any engine turn, and the cursor stays put"
 }
 
 test_attended_latch_keeps_closes_on_main_and_records_recovery_off_main() {
@@ -1848,6 +1898,7 @@ test_branch_outcomes_collapse_repeated_captain_outcomes_per_task
 test_branch_outcomes_present_a_long_away_window_once
 test_branch_outcomes_budgets_count_bytes
 test_branch_outcomes_stay_unread_when_a_projection_fails
+test_branch_outcomes_stay_unread_without_jq
 test_branch_outcomes_stay_unread_when_the_drain_cannot_print
 test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main
 test_attended_captain_outcome_reaches_main_through_branch_outcomes

@@ -581,8 +581,8 @@ EOF
 # Once the section is printed, the store's read cursor advances through every
 # presented row, which is what lets mark-processed accept main's
 # acknowledgement and keeps a routine row from repeating; a drain stopped
-# before it prints leaves every row unread. The budgets count bytes. When the
-# store cannot be read or projected, the section cannot be printed, or its read
+# before it prints leaves every row unread. The budgets count bytes. When jq is
+# missing, the store cannot be read or projected, the section cannot be printed, or its read
 # cursor cannot advance, the section says so on stderr and fails, and the drain exits
 # nonzero after the rest of its presentation, so a caller such as the return
 # (bin/fm-afk-return.sh) keeps its catch-up gated instead of clearing over
@@ -597,7 +597,10 @@ print_branch_outcomes_section() {
   fm_supervision_host_outcomes_drained "$config" || return 0
   [ -s "$STATE/branch-outcomes.jsonl" ] || return 0
   [ ! -f "$STATE/.afk-contract" ] || return 0
-  command -v jq >/dev/null 2>&1 || return 0
+  if ! command -v jq >/dev/null 2>&1; then
+    printf 'BRANCH OUTCOMES SKIPPED: jq is not installed, so the outcome store cannot be presented; nothing was marked read, and these outcomes are presented once jq is back.\n' >&2
+    return 1
+  fi
   if ! rows=$("$SCRIPT_DIR/fm-branch-outcome.sh" present 2>/dev/null); then
     printf 'BRANCH OUTCOMES SKIPPED: the outcome store could not be read safely; repair it before relying on this section.\n' >&2
     return 1

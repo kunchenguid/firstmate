@@ -30,13 +30,15 @@
 //   fm-branch-dispatch.mjs wake-prompt --report <surface> [--mirror-file <path>] [--away [--readback-file <path>]]
 //     Read the watcher's wake reason from stdin and print the branch wake
 //     prompt naming <surface> as the report surface. --mirror-file puts the
-//     host's dialog-mirror feed (bin/fm-host-mirror.sh) at its head; a missing
-//     or empty feed adds nothing. --away appends the away tail with the
+//     host's dialog-mirror feed (bin/fm-host-mirror.sh) at its head; an empty
+//     feed adds nothing, and a feed that cannot be read exits 3 with no
+//     prompt, so the host hands the wake to main. --away appends the away tail with the
 //     record read-back from <path>; a missing or empty read-back prints the
 //     tail's fixed unavailable notice instead.
 //
 // The state directory is FM_STATE_OVERRIDE, else $FM_HOME/state, else the
-// repository's own state/. Exit 0 on success, 2 on invalid use.
+// repository's own state/. Exit 0 on success, 2 on invalid use, 3 when a
+// wake-prompt --mirror-file cannot be read.
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -113,8 +115,17 @@ if (command === "scope") {
   }
   if (!report) usage();
   const message = readFileSync(0, "utf8").replace(/\n+$/, "");
+  let mirror = "";
+  if (mirrorFile) {
+    try {
+      mirror = readFileSync(mirrorFile, "utf8");
+    } catch {
+      process.stderr.write(`fm-branch-dispatch.mjs: the dialog mirror feed ${mirrorFile} could not be read\n`);
+      process.exit(3);
+    }
+  }
   const tail = away ? dispatch.awayPostureTailFor(readOptional(readbackFile)) : "";
-  process.stdout.write(`${dispatch.branchWakePrompt(message, report, tail, readOptional(mirrorFile))}\n`);
+  process.stdout.write(`${dispatch.branchWakePrompt(message, report, tail, mirror)}\n`);
 } else {
   usage();
 }
