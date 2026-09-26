@@ -260,8 +260,10 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
-    "explicit no-mistakes brief did not render the pipeline definition of done"
+  assert_grep "After committing, immediately invoke" "$brief" \
+    "explicit no-mistakes brief must start the pipeline immediately after commit"
+  assert_grep "The task is complete only at the CI-green return point below" "$brief" \
+    "explicit no-mistakes brief must not treat commit as task completion"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
@@ -361,6 +363,10 @@ test_no_mistakes_dod_wording() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
+  assert_grep "After a compaction or context reset, recover the current task stage" "$brief" \
+    "generated inbox contract must direct workers to resume after compaction"
+  assert_grep "An empty inbox is not a completion or stopping condition" "$brief" \
+    "generated inbox contract must not allow an empty inbox to end the task"
   for spelling in 'Captain:' "Captain's words:" "Captain's ask:" "Captain's intent:" 'Captain,'; do
     assert_no_grep "$spelling" "$brief" "rendered intent contract still teaches operator-address labels"
   done
