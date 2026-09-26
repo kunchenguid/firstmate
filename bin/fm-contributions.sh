@@ -11,6 +11,11 @@
 #
 # snapshot is read-only and never contacts a forge. Its input is the canonical
 # fleet snapshot's backlog/tasks pair; --all adds rows for supervisor inspection.
+# snapshot and internally fetched input require exactly one JSON object with a
+# backlog object and tasks array; missing, unreadable, empty or invalid input,
+# or a failed producer, exits nonzero before projection rather than reporting zero.
+# Input failures print an fm-contributions: diagnostic to stderr; poll also prints
+# a contributions: diagnostic to stdout so the authenticated check surfaces it.
 # Every URL explicitly linked by a structured backlog row or a task's pr= is
 # owned. Previously observed URLs remain in data/<task>/contributions.json after
 # endpoint teardown. Repository-wide PR discovery never establishes ownership.
@@ -48,7 +53,7 @@
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
 # never re-read, stays fresh, and a stale error beside it is cleared once.
-# A genuine failure prints its unavailable line only when it starts an episode
+# A genuine forge failure prints its unavailable line only when it starts an episode
 # (no prior owner has an error); a successful read ends the episode.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
@@ -57,7 +62,7 @@
 # New maintainer comments/reviews (OWNER, MEMBER, COLLABORATOR, excluding the
 # contribution author) and issue transitions to ready-for-pr persist as pending
 # before any wake. poll appends ordinary durable check wakes through fm-wake-lib
-# and emits only newly durable signals for the authenticated check to surface.
+# and emits newly durable signals alongside diagnostics for the authenticated check.
 # ack removes
 # only the named pending token. A crash after enqueue can duplicate a wake but
 # cannot consume the pending signal. Source bodies are data, never commands.
@@ -80,7 +85,14 @@ export FM_HOME FM_STATE_OVERRIDE="$STATE"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
+COMMAND=${1:-}
 fail() { printf 'fm-contributions: %s\n' "$*" >&2; exit 1; }
+input_fail() {
+  if [ "$COMMAND" = poll ]; then
+    printf 'contributions: %s\n' "$*"
+  fi
+  fail "$*"
+}
 usage() { sed -n '2,/^set -eu$/s/^# \{0,1\}//p' "$0"; }
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
 command -v jq >/dev/null 2>&1 || fail 'jq is required to measure contribution coverage'
@@ -130,8 +142,19 @@ read_saved() {
   jq -s . "$TMP/saved.jsonl" > "$TMP/saved.json"
 }
 
+validate_input() {
+  [ -f "$1" ] && [ -r "$1" ] || input_fail 'contribution snapshot unavailable'
+  [ -s "$1" ] || input_fail 'contribution snapshot was empty'
+  jq -e -s 'length == 1 and (.[0] | type == "object" and (.backlog | type == "object") and (.tasks | type == "array"))' \
+    "$1" >/dev/null \
+    || input_fail 'contribution snapshot was invalid'
+}
+
 get_input() {
-  "$SCRIPT_DIR/fm-fleet-snapshot.sh" --contribution-input > "$TMP/input.json"
+  if ! "$SCRIPT_DIR/fm-fleet-snapshot.sh" --contribution-input > "$TMP/input.json"; then
+    input_fail 'contribution snapshot unavailable'
+  fi
+  validate_input "$TMP/input.json"
 }
 
 project() {
@@ -415,6 +438,7 @@ arm() {
 case "${1:-}" in
   snapshot)
     [ "$#" -ge 2 ] && [ "$#" -le 3 ] || fail 'snapshot needs canonical input'
+    validate_input "$2"
     read_saved
     project "$2" "${3:-}"
     ;;
