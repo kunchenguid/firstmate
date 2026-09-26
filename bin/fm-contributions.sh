@@ -32,7 +32,8 @@
 #
 # poll consumes fm-fleet-snapshot.sh --contribution-input, a local-only read,
 # and spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
-# 1..25). Every read is capped at five seconds. A pull observation has three
+# 1..25). Every read is capped at five seconds, and either that local cap or
+# the poll deadline leaves the observation unmeasured. A pull observation has three
 # dependent waves: core, six independent reads, then the closing head read;
 # an issue has two waves. Parallelizing each independent wave bounds either
 # observation to 3 * 5 = 15 seconds. poll reserves min(the configured budget,
@@ -182,15 +183,15 @@ write_record() { # task record-json-file
 }
 
 forge() {
-  local remaining bounded=0 rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
+  local remaining rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
   remaining=$((DEADLINE - $(date +%s)))
   # The budget, not the forge, refused this read.
   [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
-  if [ "$remaining" -le 5 ]; then bounded=1; else remaining=5; fi
+  if [ "$remaining" -gt 5 ]; then remaining=5; fi
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
-  # A read killed at the budget's own deadline is budget exhaustion too.
-  if [ "$rc" -eq 124 ] && [ "$bounded" -eq 1 ]; then
+  # A locally imposed cap cannot establish forge availability either.
+  if [ "$rc" -eq 124 ]; then
     BUDGET_EXHAUSTED=1
     : > "$TMP/budget-exhausted"
   elif [ "$rc" -ne 0 ]; then
@@ -381,7 +382,7 @@ poll() {
             pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
       else
         error='forge observation unavailable or changed during read'
-        jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
+        jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error | .observation=null' "$old" > "$TMP/row.json"
       fi
       write_record "$task" "$TMP/row.json"
       publish_pending "$task" "$url" "$TMP/row.json"
