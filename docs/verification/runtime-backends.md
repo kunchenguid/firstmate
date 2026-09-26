@@ -161,7 +161,7 @@ The global `--root` flag is the capability this rests on, and it is a floor rath
 
 `bin/fm-wake-lib.sh`'s `fm_treehouse_home_root` owns the root derivation and the reason only acquisition carries it.
 `tests/fm-treehouse-pool-isolation-live-e2e.test.sh` is the guard that refreshes this record; it fails loudly naming the installed version if a release stops colliding under a shared root, so the isolated case can never pass for the wrong reason.
-`tests/fm-treehouse-home-root.test.sh` pins the firstmate half - the derivation, the real spawn's acquisition command, the real seed's lease, and the bootstrap capability gate - with no provider installed.
+`tests/fm-treehouse-home-root.test.sh` pins the firstmate half - the derivation, the real spawn's acquisition command, and the real seed's lease - with no provider installed; `tests/fm-bootstrap.test.sh` owns the bootstrap capability gate alongside every other tool gate.
 
 ## tmux
 
