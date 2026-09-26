@@ -25,10 +25,12 @@
 #       forwarded to the group and starts the same grace, and the watchdog also
 #       starts that escalation when its own parent dies before it could be
 #       signalled (an owner torn down by an outer group-kill cannot leave the
-#       bounded subtree orphaned behind it). The owner is the watchdog's parent
-#       at startup, or FM_EXEC_TIMED_OWNER_PID when the caller names it before
-#       launching the watchdog, so an owner that dies during watchdog startup
-#       is still detected. Exit status is the
+#       bounded subtree orphaned behind it). The owner is captured before the
+#       watchdog starts: FM_EXEC_TIMED_OWNER_PID when the caller names it, else
+#       the calling script ($$) when fm_exec_timed runs in a subshell, else the
+#       shell's parent. The escalation starts once that owner is gone or the
+#       watchdog's parent changes, so an owner that dies while the watchdog is
+#       still starting is detected too. Exit status is the
 #       command's own, except 124 (the bound was hit) or 137 (GNU timeout's
 #       status when its KILL had to fire); fm_timed_out accepts both. Both
 #       values must be positive integers (125 otherwise). The perl watchdog is
@@ -186,7 +188,7 @@ fm_timed_out() {  # <status>
 # which keeps the bound off perl's platform-dependent syscall-restart signal
 # semantics and off the drift of counting sleep intervals.
 fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
-  local seconds=${1:-} grace=${2:-} value
+  local seconds=${1:-} grace=${2:-} value owner
   for value in "$seconds" "$grace"; do
     case "$value" in
       '' | 0* | *[!0-9]*)
@@ -200,10 +202,13 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
     echo "fm_exec_timed: usage: fm_exec_timed <positive-seconds> <positive-grace-seconds> <command> [args...]" >&2
     exit 125
   fi
+  owner=${FM_EXEC_TIMED_OWNER_PID:-$$}
+  [ "$owner" != "$BASHPID" ] || owner=$PPID
+  unset FM_EXEC_TIMED_OWNER_PID
   if command -v perl >/dev/null 2>&1; then
     exec perl -MPOSIX=WNOHANG,setpgid -MTime::HiRes=time -e '
-      my ($bound, $grace) = (shift, shift);
-      my $owner = delete $ENV{FM_EXEC_TIMED_OWNER_PID} || getppid();
+      my ($bound, $grace, $owner) = (shift, shift, shift);
+      my $parent = getppid();
       my $pid = fork;
       exit 127 unless defined $pid;
       if ($pid == 0) { setpgid(0, 0); exec @ARGV; exit 127 }
@@ -233,13 +238,13 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
           $timed_out = 1;
           $kill_at = time + $grace;
           kill "TERM", -$pid;
-        } elsif (getppid() != $owner) {
+        } elsif (getppid() != $parent || !kill(0, $owner)) {
           $kill_at = time + $grace;
           kill "TERM", -$pid;
         }
         select undef, undef, undef, 0.05;
       }
-    ' -- "$seconds" "$grace" "$@"
+    ' -- "$seconds" "$grace" "$owner" "$@"
   elif command -v timeout >/dev/null 2>&1; then
     exec timeout -k "$grace" "$seconds" "$@"
   elif command -v gtimeout >/dev/null 2>&1; then
