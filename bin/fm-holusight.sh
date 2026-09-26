@@ -75,6 +75,10 @@ enabled=$(printf '%s\n' "$settings" | sed -n 's/^enabled=//p' | head -n1)
 question=$(printf '%s\n' "$settings" | sed -n 's/^question=//p' | head -n1)
 timeout=$(printf '%s\n' "$settings" | sed -n 's/^timeout=//p' | head -n1)
 
+disabled_result() {
+  printf '%s\n' '### Holusight startup evidence' 'not-used: disabled for this project; no application-repository writes'
+}
+
 disabled_elapsed_ms=
 if [ "$BENCHMARK" -eq 1 ]; then
   disabled_started_ns=$(python3 - <<'PY'
@@ -82,7 +86,7 @@ import time
 print(time.monotonic_ns())
 PY
 )
-  :
+  disabled_result >/dev/null
   disabled_finished_ns=$(python3 - <<'PY'
 import time
 print(time.monotonic_ns())
@@ -91,7 +95,7 @@ PY
   disabled_elapsed_ms=$(( (disabled_finished_ns - disabled_started_ns) / 1000000 ))
 fi
 if [ "$enabled" != 1 ] && [ "$BENCHMARK" -eq 0 ]; then
-  printf '%s\n' '### Holusight startup evidence' 'not-used: disabled for this project; no application-repository writes'
+  disabled_result
   exit 0
 fi
 
@@ -114,6 +118,22 @@ if [ -z "$HOLUS" ]; then
   exit 0
 fi
 
+# Current Holusight bootstraps its consistency cache before honoring the exact
+# provider, so contain that implementation detail to this read-only lookup.
+HOLUSIGHT_DIR="$PROJECT_ROOT/.holusight"
+HOLUSIGHT_DB="$HOLUSIGHT_DIR/consistency.db"
+had_holusight_dir=0
+had_holusight_db=0
+[ -d "$HOLUSIGHT_DIR" ] && had_holusight_dir=1
+[ -e "$HOLUSIGHT_DB" ] && had_holusight_db=1
+cleanup_holusight_cache() {
+  [ "$had_holusight_db" -eq 1 ] || rm -f "$HOLUSIGHT_DB"
+  if [ "$had_holusight_dir" -eq 0 ]; then
+    rmdir "$HOLUSIGHT_DIR" 2>/dev/null || true
+  fi
+}
+trap cleanup_holusight_cache EXIT
+
 started_ns=$(python3 - <<'PY'
 import time
 print(time.monotonic_ns())
@@ -127,7 +147,7 @@ import sys
 
 try:
     result = subprocess.run(
-        [sys.argv[1], "evidence", sys.argv[2], "--mode", "auto", "--fields",
+        [sys.argv[1], "evidence", sys.argv[2], "--mode", "exact", "--fields",
          "evidence.source,evidence.location,coverage,providers_checked,egress",
          "--format", "toon"],
         capture_output=True, text=True, timeout=float(sys.argv[3]), cwd=sys.argv[4], check=False,
