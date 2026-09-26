@@ -1437,6 +1437,45 @@ test_legacy_record_teardown_completes_when_landed_and_endpoint_dead() {
   pass "a landed legacy record with a dead endpoint tears down and logs its accepted incarnation"
 }
 
+# The legacy incarnation stamp lands at the END of the live record, so on a
+# record carrying a recorded pr= it lands after it. This teardown then reads that
+# same record back through its own poll-artifact removal, which authenticates the
+# pending retirement receipt against the PR identity, so a stamp the identity
+# parser refuses fails the teardown after the worktree and pane are already gone.
+test_legacy_record_teardown_keeps_a_pending_poll_receipt_valid() {
+  local case_dir out url
+  case_dir=$(make_case legacy-poll-receipt)
+  write_legacy_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+  wt_commit "$case_dir" "landed legacy work"
+  add_fork_with_pushed_branch "$case_dir"
+  url=https://github.com/example/repository/pull/17
+  {
+    printf 'pr=%s\n' "$url"
+    printf 'pr_head=%s\n' 0123456789abcdef0123456789abcdef01234567
+  } >> "$case_dir/state/task-x1.meta"
+  bash -c '
+    . "$1/bin/fm-pr-lib.sh"
+    fm_pr_poll_prepare "$2" task-x1 github "$3" github.com example/repository 17 "$1/bin/fm-pr-poll.sh" \
+      && fm_pr_poll_publish_prepared \
+      && fm_pr_poll_snapshot_capture "$2" task-x1 "$1/bin/fm-pr-poll.sh" \
+      && fm_pr_poll_retirement_publish "$2" task-x1 "$1/bin/fm-pr-poll.sh" merged
+  ' _ "$ROOT" "$case_dir/state" "$url" \
+    || fail "legacy-poll-receipt: could not arm the merge poll and its pending retirement receipt"
+
+  out=$(run_teardown "$case_dir" --legacy-record 2>&1) \
+    || fail "legacy-poll-receipt: the legacy stamp invalidated the pending PR-poll retirement receipt: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "legacy-poll-receipt: teardown returned success with its backlog item still open"
+  assert_absent "$case_dir/state/task-x1.pr-poll-retirement" \
+    "legacy-poll-receipt: teardown left the retirement receipt behind"
+  assert_absent "$case_dir/state/task-x1.pr-poll" \
+    "legacy-poll-receipt: teardown left the poll sidecar behind"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "legacy-poll-receipt: teardown left the task record behind"
+  pass "a legacy stamp on a record carrying a recorded PR keeps its pending poll receipt authenticated"
+}
+
 test_legacy_record_teardown_refuses_unlanded_work() {
   local case_dir rc before
   case_dir=$(make_case legacy-unlanded)
@@ -4108,6 +4147,7 @@ test_windowless_legacy_record_still_refuses_unlanded_work
 test_windowless_record_outside_the_leftover_class_still_refuses
 test_windowless_leftover_retries_its_retained_legacy_stamp_without_the_flag
 test_legacy_record_teardown_completes_when_landed_and_endpoint_dead
+test_legacy_record_teardown_keeps_a_pending_poll_receipt_valid
 test_legacy_record_teardown_refuses_unlanded_work
 test_legacy_record_teardown_refuses_an_ambiguous_endpoint
 test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails

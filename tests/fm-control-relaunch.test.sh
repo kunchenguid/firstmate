@@ -489,6 +489,59 @@ test_relaunch_preserves_durable_task_metadata() {
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 
+# The record rewrite emits the preserved pr= block and only then appends
+# control_relaunch_tx=; a trace-enabled home appends traceparent= after that
+# again, from a second rewrite of the already-published record. Both orders are
+# what the PR-identity authenticator has to accept, so the trace-off and
+# trace-on homes are both driven here. The line-order assertions keep each case
+# from going vacuous if a later edit moves either key ahead of the block.
+test_relaunch_keeps_an_armed_merge_poll_authenticated() {
+  local dir out rc url head trace id meta pr_line tx_line trace_line
+  for trace in off on; do
+    id=rl45
+    [ "$trace" = off ] || id=rl46
+    dir=$(new_case "armed-poll-trace-$trace" "$id")
+    add_ship_task "$dir" "$id" claude
+    meta="$dir/home/state/$id.meta"
+    url=https://github.com/example/repo/pull/45
+    head=0123456789abcdef0123456789abcdef01234567
+    {
+      printf 'pr=%s\n' "$url"
+      printf 'pr_head=%s\n' "$head"
+    } >> "$meta"
+    if [ "$trace" = on ]; then
+      printf '%s\n' "$$" > "$dir/home/state/.lock"
+      printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
+    fi
+    bash -c '
+      . "$1/bin/fm-pr-lib.sh"
+      fm_pr_poll_prepare "$2" "$4" github "$3" github.com example/repo 45 "$1/bin/fm-pr-poll.sh" \
+        && fm_pr_poll_publish_prepared
+    ' _ "$ROOT" "$dir/home/state" "$url" "$id" \
+      || fail "could not arm the task's merge poll with trace $trace"
+
+    out=$(run_control "$dir" "$id" relaunch --note "keep the armed merge poll authenticated"); rc=$?
+    expect_code 0 "$rc" "a relaunch with an armed merge poll should succeed with trace $trace"$'\n'"$out"
+    pr_line=$(grep -n '^pr=' "$meta" | cut -d: -f1)
+    tx_line=$(grep -n '^control_relaunch_tx=' "$meta" | cut -d: -f1)
+    [ -n "$pr_line" ] && [ -n "$tx_line" ] && [ "$tx_line" -gt "$pr_line" ] \
+      || fail "the relaunch transaction should land after the preserved pr= block, got pr='$pr_line' tx='$tx_line'"
+    trace_line=$(grep -n '^traceparent=' "$meta" | cut -d: -f1)
+    if [ "$trace" = on ]; then
+      [ -n "$trace_line" ] && [ "$trace_line" -gt "$pr_line" ] \
+        || fail "a trace-enabled relaunch should stamp its carrier after the preserved pr= block, got pr='$pr_line' traceparent='$trace_line'"
+    else
+      [ -z "$trace_line" ] || fail "a trace-disabled relaunch should stamp no carrier"
+    fi
+    bash -c '
+      . "$1/bin/fm-pr-lib.sh"
+      fm_pr_poll_artifacts_valid "$2" "$3" "$1/bin/fm-pr-poll.sh"
+    ' _ "$ROOT" "$dir/home/state" "$id" \
+      || fail "the republished record broke authentication of the armed merge poll with trace $trace"
+  done
+  pass "fm-control relaunch: an armed merge poll stays authenticated across the record rewrite, with and without a trace carrier"
+}
+
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
   local dir control_pid link_pid rc i=0 traceparent prepare launch_release waiting ready release
   dir=$(new_case metadata-race rl28)
@@ -2390,6 +2443,7 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_an_armed_merge_poll_authenticated
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
