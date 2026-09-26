@@ -1283,12 +1283,14 @@ fm_firstmate_root_home() {
 
 # The one lock serializing Treehouse slot allocation and return for a project.
 #
-# It is anchored in the local root home's state directory so that every home on
-# this machine that can reach the same pool - the root, and each secondmate home
-# below it, including a remote-seeded home and its own local descendants -
-# derives the identical path. Its identity is the project's resolved origin, so
-# separate clones of one origin share a single lock; an origin-less local-only
-# project falls back to its own worktree top instead of failing to resolve.
+# It is anchored in the local root home's state directory; every home on this
+# machine that chains to the same root home derives the identical path.
+# Its identity is the project's resolved origin, so separate clones of one
+# origin share a single lock (each home now has its own per-home pool, so this
+# lock serializes across homes that no longer share pool state - harmless but
+# not required for correctness after the per-home pool change).
+# An origin-less local-only project falls back to its own worktree top instead
+# of failing to resolve.
 fm_treehouse_project_lock_path() {  # <project-dir>
   local project=$1 root origin identity hash top
   [ -d "$project" ] || return 1

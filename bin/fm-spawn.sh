@@ -4092,7 +4092,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  spawn_send_text_line "$WT_TARGET" "treehouse --root $(shell_quote "$FM_HOME/state/treehouse") get"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -4775,6 +4775,9 @@ preserve_relaunch_meta() {
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
+  fi
+  if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ "$RELAUNCH" -eq 0 ]; then
+    echo "treehouse_pool_root=$FM_HOME/state/treehouse"
   fi
   if [ "$RELAUNCH" -eq 1 ]; then
     preserve_relaunch_meta
