@@ -360,6 +360,8 @@ Delivery contract: mode=no-mistakes
 After committing, immediately invoke \`/no-mistakes\` yourself and continue through its gates; do not append \`done\` or stop merely because you committed.
 The task is complete only at the CI-green return point below, after \`/no-mistakes\` reports CI green.
 
+During the test stage, when \`herdr\` is absent from \`PATH\` and this repository's \`.github/workflows/ci.yml\` defines a \`Behavior tests (Herdr)\` lane, record that Herdr live validation is unavailable locally and covered by that CI lane. Continue with the remaining validation without asking firstmate or the captain solely because Herdr is unavailable, and do not claim local Herdr validation passed.
+
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection body, not its heading, plus any later words the captain actually said.

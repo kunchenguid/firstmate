@@ -264,6 +264,10 @@ test_ship_mode_is_explicit_not_registry() {
     "explicit no-mistakes brief must start the pipeline immediately after commit"
   assert_grep "The task is complete only at the CI-green return point below" "$brief" \
     "explicit no-mistakes brief must not treat commit as task completion"
+  assert_grep "when \`herdr\` is absent from \`PATH\` and this repository's \`.github/workflows/ci.yml\` defines a \`Behavior tests (Herdr)\` lane" "$brief" \
+    "no-mistakes brief must recognize the CI-covered local Herdr limitation"
+  assert_grep "Continue with the remaining validation without asking firstmate or the captain solely because Herdr is unavailable" "$brief" \
+    "no-mistakes brief must not escalate the CI-covered Herdr limitation"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
