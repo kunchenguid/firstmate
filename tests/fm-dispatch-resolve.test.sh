@@ -307,6 +307,18 @@ reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
 expect_withheld "a rule-criterion match" "brief text matches $NEVER_SEND line 1" 'stated root cause'
 
+SECOND_HOME="$TMP_ROOT/secondmate-home"
+mkdir -p "$SECOND_HOME/config"
+printf '%s\n' 'acme-ledger' > "$NEVER_SEND"
+( . "$ROOT/bin/fm-config-inherit-lib.sh" && propagate_inheritable_config "$HOME_DIR/config" "$SECOND_HOME/config" ) \
+  || fail "inheritance into the secondmate home failed"
+PRIMARY_HOME=$HOME_DIR
+HOME_DIR=$SECOND_HOME
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+expect_withheld "an inherited list in a secondmate home" "brief text matches $SECOND_HOME/config/dispatch-never-send line 1" 'acme-ledger' 'Acme-Ledger'
+HOME_DIR=$PRIMARY_HOME
+
 rm -f "$NEVER_SEND"
 mkdir "$NEVER_SEND"
 reset_log

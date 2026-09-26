@@ -1113,7 +1113,7 @@ The scaffold's standard setup, rules, and definition-of-done text is the same in
 
 The optional local, gitignored `config/dispatch-never-send` keeps values you name from ever leaving the machine in a resolver request.
 It has no default entries, and an absent file changes nothing.
-The file is local to each home and is not inherited into secondmate homes.
+Like `config/crew-dispatch.json`, it is inherited into secondmate homes, so a secondmate's resolver withholds the same values.
 
 Each non-blank line not beginning with `#` is one literal value, matched case-insensitively.
 Every entry is trimmed of surrounding whitespace, and any run of whitespace, in the entry or in the checked text, counts as one space, so a value the brief wraps across lines still matches.
