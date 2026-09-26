@@ -869,8 +869,25 @@ assert_absent "$HFREPLY/state/procevent-inbox/$freply_id.2.handled" \
   || fail "failed listener startup did not preserve exactly one staged reply"
 assert_grep 'kind=lavish-owned' "$HFREPLY/state/procevent/$freply_id.source" \
   "re-arm failure did not preserve the upgraded firstmate-owned registration"
+mv "$LAVISH_AXI_STATE_DIR/state.json" "$LAVISH_AXI_STATE_DIR/state.json.preflight"
+preflight_rc=0
+PATH="$FREPLY_BIN:$PATH" FM_HOME="$HFREPLY" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$FREPLY_ART" \
+  --agent-reply-file "$TMP_ROOT/firstmate-reply.txt" \
+  > "$TMP_ROOT/firstmate-preflight-fail.out" 2> "$TMP_ROOT/firstmate-preflight-fail.err" \
+  || preflight_rc=$?
+mv "$LAVISH_AXI_STATE_DIR/state.json.preflight" "$LAVISH_AXI_STATE_DIR/state.json"
+[ "$preflight_rc" -ne 0 ] || fail "firstmate's Lavish re-arm reported ready before adapter preflight"
+assert_absent "$HFREPLY/state/procevent-inbox/$freply_id.1.handled" \
+  "failed adapter preflight acknowledged firstmate's pending capture"
+[ "$(find "$HFREPLY/state/procevent" -maxdepth 1 -type f -name ".$freply_id.reply.*" | wc -l | tr -d ' ')" = 1 ] \
+  || fail "failed adapter preflight did not preserve exactly one staged reply"
 PATH="$FREPLY_BIN:$PATH" pe "$HFREPLY" reconcile >/dev/null
 wait_for_lines "$FREPLY_LOG" 2 || fail "recovery did not start firstmate's staged Lavish reply listener"
+for _ in $(seq 1 100); do
+  [ -f "$HFREPLY/state/procevent-inbox/$freply_id.1.handled" ] && break
+  sleep 0.02
+done
 assert_present "$HFREPLY/state/procevent-inbox/$freply_id.1.handled" \
   "posting firstmate's Lavish reply did not acknowledge its FIFO captured round"
 assert_absent "$HFREPLY/state/procevent-inbox/$freply_id.2.handled" \
@@ -1033,6 +1050,10 @@ assert_present "$HFNOREPLY/state/procevent/$noreply_id.source" \
   "failed no-reply listener startup discarded its round registration"
 PATH="$NOREPLY_BIN:$PATH" pe "$HFNOREPLY" reconcile >/dev/null
 wait_for_lines "$NOREPLY_LOG" 2 || fail "recovery did not start the preserved no-reply re-arm"
+for _ in $(seq 1 100); do
+  [ -f "$HFNOREPLY/state/procevent-inbox/$noreply_id.1.handled" ] && break
+  sleep 0.02
+done
 assert_present "$HFNOREPLY/state/procevent-inbox/$noreply_id.1.handled" \
   "recovered firstmate no-reply re-arm did not acknowledge the oldest capture"
 assert_absent "$HFNOREPLY/state/procevent-inbox/$noreply_id.2.handled" \

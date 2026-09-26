@@ -362,8 +362,8 @@ poll_iteration_floor_wait() {
 }
 
 cmd_poll() {
-  local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc iteration_started
-  local pipeline_status reply_file=''
+  local artifact=${1-} delay attempt=0 response status_file cleanup_command rc filter_rc iteration_started
+  local pipeline_status pipeline_pid reply_file='' ready_fd=${FM_PROCEVENT_ADAPTER_READY_FD-}
   local reply_text='' reply_pending=0
   [ -n "$artifact" ] || usage
   if [ "$#" -eq 3 ] && [ "${2-}" = --agent-reply-file ]; then
@@ -374,7 +374,11 @@ cmd_poll() {
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   delay=$(poll_retry_delay) || exit 1
   response=$(mktemp "${TMPDIR:-/tmp}/fm-lavish-poll.XXXXXX") || die "cannot stage the poll response"
-  printf -v cleanup_command 'rm -f -- %q' "$response"
+  status_file=$(mktemp "${TMPDIR:-/tmp}/fm-lavish-status.XXXXXX") || {
+    rm -f -- "$response"
+    die "cannot stage the poll status"
+  }
+  printf -v cleanup_command 'rm -f -- %q %q' "$response" "$status_file"
   # shellcheck disable=SC2064 # $cleanup_command must expand now, while the staged path is still set.
   trap "$cleanup_command" EXIT
   # Retirement stops this listener by signalling its process group, and bash runs
@@ -405,15 +409,36 @@ cmd_poll() {
       rm -f -- "$reply_file" || die "cannot consume agent reply file: $reply_file"
       reply_pending=1
     fi
-    if [ "$reply_pending" -eq 1 ]; then
-      lavish-axi poll "$artifact" --agent-reply "$reply_text" | poll_response_filter "$response"
+    if [ -n "$ready_fd" ]; then
+      [ "$ready_fd" = 3 ] || die "invalid process-event adapter readiness boundary"
+      : > "$status_file" || die "cannot stage the poll status"
+      exec 6> "$status_file" || die "cannot retain the poll status"
+      if [ "$reply_pending" -eq 1 ]; then
+        { lavish-axi poll "$artifact" --agent-reply "$reply_text"; printf '%s\n' "$?" >&6; } \
+          | poll_response_filter "$response" &
+      else
+        { lavish-axi poll "$artifact"; printf '%s\n' "$?" >&6; } \
+          | poll_response_filter "$response" &
+      fi
+      pipeline_pid=$!
+      printf 'ready\n' >&3 || die "cannot confirm adapter readiness"
+      exec 3>&-
+      ready_fd=
+      wait "$pipeline_pid"
+      filter_rc=$?
+      exec 6>&-
+      IFS= read -r rc < "$status_file" || die "cannot read the poll status"
     else
-      lavish-axi poll "$artifact" | poll_response_filter "$response"
+      if [ "$reply_pending" -eq 1 ]; then
+        lavish-axi poll "$artifact" --agent-reply "$reply_text" | poll_response_filter "$response"
+      else
+        lavish-axi poll "$artifact" | poll_response_filter "$response"
+      fi
+      pipeline_status=("${PIPESTATUS[@]}")
+      rc=${pipeline_status[0]}
+      filter_rc=${pipeline_status[1]}
     fi
-    pipeline_status=("${PIPESTATUS[@]}")
     reply_pending=0
-    rc=${pipeline_status[0]}
-    filter_rc=${pipeline_status[1]}
     case "$filter_rc" in
       0) break ;;
       10)

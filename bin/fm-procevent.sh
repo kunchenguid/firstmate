@@ -1252,7 +1252,7 @@ cmd_start() {
   # it is outside this confused-agent-grade boundary.
   export FM_PROCEVENT_IN_RUNNER=1
   start_owner_guard "$id" || die "cannot start the runner's owner guard: $id"
-  local runner inbox reservation_dir staging launch_ready launch_reply launch_pid
+  local runner inbox reservation_dir staging launch_ready launch_reply launch_pid adapter_ready='' adapter_ready_pipe=''
   if [ "$extension_owner" -eq 1 ]; then
     staging=$(fm_procevent_extension_staging_prepare "$STATE") \
       || die "cannot safely prepare the external registry staging boundary"
@@ -1366,16 +1366,43 @@ EOF
       fm_procevent_source_lock_release "$id"
       die "cannot retain the source output boundary: $id"
     }
-    if [ -n "$reply_round" ] \
-      && ! fm_procevent_is_handled "$STATE" "$id" "$reply_round" \
-      && ! fm_procevent_mark_handled "$STATE" "$id" "$reply_round" >/dev/null 2>&1; then
-      exec 5>&- 4<&-
-      rm -f -- "$launch_ready"
-      fm_procevent_source_lock_release "$id"
-      die "cannot acknowledge captured Lavish round: $id $reply_round"
+    if [ -n "$reply_round" ]; then
+      adapter_ready_pipe="$REG/.$id.$CLAIM_TOKEN.adapter-ready"
+      (umask 077; : > "$adapter_ready_pipe") || {
+        exec 5>&- 4<&-
+        rm -f -- "$launch_ready"
+        fm_procevent_source_lock_release "$id"
+        die "cannot prepare the adapter readiness boundary: $id"
+      }
+      exec 3>> "$adapter_ready_pipe" || {
+        exec 5>&- 4<&-
+        rm -f -- "$launch_ready" "$adapter_ready_pipe"
+        fm_procevent_source_lock_release "$id"
+        die "cannot retain the adapter readiness boundary: $id"
+      }
+      FM_PROCEVENT_ADAPTER_READY_FD=3 "${ARGV[@]}" >&5 5>&- 4<&- 2>/dev/null &
+    else
+      "${ARGV[@]}" >&5 5>&- 4<&- 2>/dev/null &
     fi
-    "${ARGV[@]}" >&5 5>&- 4<&- 2>/dev/null &
     launch_pid=$!
+    if [ -n "$reply_round" ]; then
+      while [ ! -s "$adapter_ready_pipe" ] && kill -0 "$launch_pid" 2>/dev/null; do
+        sleep 0.01
+      done
+      exec 3>&-
+      IFS= read -r adapter_ready < "$adapter_ready_pipe" || adapter_ready=
+      rm -f -- "$adapter_ready_pipe"
+      if [ "$adapter_ready" = ready ] \
+        && ! fm_procevent_is_handled "$STATE" "$id" "$reply_round" \
+        && ! fm_procevent_mark_handled "$STATE" "$id" "$reply_round" >/dev/null 2>&1; then
+        kill "$launch_pid" 2>/dev/null || true
+        wait "$launch_pid" 2>/dev/null || true
+        exec 5>&- 4<&-
+        rm -f -- "$launch_ready"
+        fm_procevent_source_lock_release "$id"
+        die "cannot acknowledge captured Lavish round: $id $reply_round"
+      fi
+    fi
     exec 5>&-
     rm -f -- "$launch_ready"
     fm_procevent_source_lock_release "$id" \
@@ -2038,7 +2065,7 @@ generation_can_launch() {  # <source-id>
 # launch stamp advancing. Returns as soon as either appears. A fixed sleep is
 # not success.
 cmd_ensure_listening() {
-  local id=${1-} identity before mark stamp deadline window started_once=0 listening round_aware=0
+  local id=${1-} identity before mark stamp deadline window started_once=0 listening round_aware=0 reply_round=''
   [ "$#" -eq 1 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   window=$(fm_procevent_launch_confirm_seconds) \
@@ -2047,7 +2074,10 @@ cmd_ensure_listening() {
     || die "source is not registered: $id"
   identity=$(fm_pr_file_identity "$(source_file "$id")" 2>/dev/null) \
     || die "cannot identify the registration: $id"
-  lavish_rearm_round_locked "$id" >/dev/null 2>&1 && round_aware=1
+  if [ "$(source_kind "$id" 2>/dev/null || true)" = lavish-owned ]; then
+    reply_round=$(source_field "$id" reply_round 2>/dev/null || true)
+    case "$reply_round" in ''|*[!0-9]*) ;; *) round_aware=1 ;; esac
+  fi
   before=
   if [ "$round_aware" -eq 0 ] \
     && stamp=$(fm_procevent_launch_floor_stamp_path "$STATE" "$id" "$identity"); then
@@ -2057,14 +2087,17 @@ cmd_ensure_listening() {
   while :; do
     listening=0
     generation_is_listening "$id" "$identity" || listening=$?
-    if [ "$round_aware" -eq 0 ] && [ "$listening" -eq 0 ]; then
+    if [ "$round_aware" -eq 1 ]; then
+      fm_procevent_is_handled "$STATE" "$id" "$reply_round" && return 0
+    elif [ "$listening" -eq 0 ]; then
       return 0
     fi
     mark=
-    if stamp=$(fm_procevent_launch_floor_stamp_path "$STATE" "$id" "$identity"); then
+    if [ "$round_aware" -eq 0 ] \
+      && stamp=$(fm_procevent_launch_floor_stamp_path "$STATE" "$id" "$identity"); then
       mark=$(cat -- "$stamp" 2>/dev/null || true)
     fi
-    if [ -n "$mark" ] && [ "$mark" != "$before" ]; then
+    if [ "$round_aware" -eq 0 ] && [ -n "$mark" ] && [ "$mark" != "$before" ]; then
       return 0
     fi
     if [ "$started_once" -eq 0 ] && generation_can_launch "$id"; then
