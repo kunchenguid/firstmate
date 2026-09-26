@@ -92,6 +92,9 @@
 #     the nested acquire so drain's bounded lock wait remains the deadline.
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
+#   fm-branch-outcome.sh lookup --seqs <n,...>
+#     Print the requested records in sequence order only when every sequence
+#     exists; validate the full store while holding its lock.
 #   fm-branch-outcome.sh startup-replay
 #     Session-start recovery: print the leading routine unread records under a
 #     labeled header into the locked startup digest, skip rows whose `silent`
@@ -118,7 +121,7 @@ OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay" >&2
   exit 2
 }
 
@@ -646,6 +649,38 @@ case "$CMD" in
     fi
     if [ -s "$STORE" ]; then
       tail -n "$RECENT" "$STORE"
+    fi
+    fm_lock_release "$LOCK"
+    ;;
+  lookup)
+    [ "$#" -eq 2 ] && [ "$1" = --seqs ] || usage
+    SEQS=$2
+    case "$SEQS" in ''|,*|*,|*,,*) usage ;; esac
+    IFS=, read -r -a REQUESTED <<< "$SEQS"
+    [ "${#REQUESTED[@]}" -gt 0 ] || usage
+    WANT='['
+    SEP=
+    for SEQ in "${REQUESTED[@]}"; do
+      bounded_uint "$SEQ" || usage
+      WANT="${WANT}${SEP}${SEQ}"
+      SEP=,
+    done
+    WANT="${WANT}]"
+    printf '%s\n' "$WANT" | jq -e 'length == (unique | length)' >/dev/null || usage
+    fm_lock_acquire_wait "$LOCK"
+    if ! last_seq >/dev/null; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing lookup because the outcome store is malformed or non-sequential" >&2
+      exit 1
+    fi
+    if ! jq -cs --argjson wanted "$WANT" '
+      . as $rows
+      | [ $wanted[] as $seq | $rows[] | select(.seq == $seq) ]
+      | if length == ($wanted | length) then .[] else error("requested outcome sequence is missing") end
+    ' "$STORE" 2>/dev/null; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing lookup because one or more requested outcome sequences are missing" >&2
+      exit 1
     fi
     fm_lock_release "$LOCK"
     ;;

@@ -317,6 +317,31 @@ test_outcome_sequence_conflicts_fail_closed() {
   pass "middle sequence conflicts fail closed for every store read and append"
 }
 
+test_outcome_lookup_returns_exact_sequences_and_refuses_missing_rows() {
+  local home out status selected
+  home="$TMP_ROOT/store-exact-lookup-home"
+  mkdir -p "$home/state"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary first >/dev/null || fail "lookup fixture append 1 failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict routine --summary second --silent true >/dev/null || fail "lookup fixture append 2 failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-3 --verdict captain --summary third >/dev/null || fail "lookup fixture append 3 failed"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" lookup --seqs 3,1) \
+    || fail "lookup refused existing sequences 3 and 1"
+  selected=$(printf '%s\n' "$out" | jq -sr '[.[].seq] | join(",")')
+  [ "$selected" = "3,1" ] || fail "lookup changed requested sequence order: $selected"
+  assert_contains "$out" '"task":"task-1"' "lookup omitted the first requested row"
+  assert_contains "$out" '"task":"task-3"' "lookup omitted the second requested row"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" lookup --seqs 1,4 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "lookup accepted a missing sequence"
+  assert_contains "$out" "requested outcome sequences are missing" "missing-row lookup lost its diagnostic"
+  pass "outcome lookup returns exact sequence rows and distinguishes missing receipts"
+}
+
 test_outcome_non_jsonl_layout_fails_closed() {
   local home store snapshot out status
   home="$TMP_ROOT/store-physical-layout-home"
@@ -1319,6 +1344,7 @@ test_outcome_startup_replay_stops_at_captain_barrier
 test_outcome_cursor_corruption_fails_closed
 test_cursor_advancement_refuses_ahead_processed_marker
 test_outcome_sequence_conflicts_fail_closed
+test_outcome_lookup_returns_exact_sequences_and_refuses_missing_rows
 test_outcome_non_jsonl_layout_fails_closed
 test_outcome_processed_marker_is_sequence_bound
 test_outcome_present_reads_without_advancing

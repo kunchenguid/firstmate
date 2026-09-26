@@ -41,6 +41,9 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #   return-silent the same, but the routine outcome is silent
 #   return-fail the same, then exit nonzero without a result
 #   return-fail-silent the same, but the routine outcome is silent
+#   return-many handle, then seed more than 1,000 same-turn receipts after an
+#               early visible outcome
+#   return-lookup-fail handle, then corrupt the store before the return lookup
 #   return-first the captain returns first, then handle, then block until the
 #               host is stopped (an owner killing its host at the turn's end)
 #   noack       the same as handle, but skip the acknowledgement
@@ -87,7 +90,7 @@ verdict=routine
 [ "$mode" != go-away ] || verdict=captain
 case "$mode" in
   fail) exit 3 ;;
-  handle|captain|held|hold-lease|return|return-silent|return-fail|return-fail-silent|return-first|noack|chain|emptyresult|go-away)
+  handle|captain|held|hold-lease|return|return-silent|return-fail|return-fail-silent|return-many|return-lookup-fail|return-first|noack|chain|emptyresult|go-away)
     [ "$mode" != held ] || read -r _ < "$FM_HOME/stub-release"
     [ "$mode" != return-first ] || "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1
     [ "$mode" != go-away ] || "$FM_REPO/bin/fm-afk-contract.sh" enter --words 'gone mid-turn' >> "$FM_HOME/engine-return.log" 2>&1
@@ -105,11 +108,22 @@ case "$mode" in
       esac
       "$FM_REPO/bin/fm-branch-report.sh" "${report_args[@]}" >> "$FM_HOME/engine-report.log" 2>&1
     fi
+    if [ "$mode" = return-many ]; then
+      awk -v task="$task" 'BEGIN { for (seq = 2; seq <= 1001; seq++)
+        printf "{\"seq\":%d,\"epoch\":1,\"task\":\"%s\",\"wake\":\"host test\",\"verdict\":\"routine\",\"summary\":\"bulk silent fixture\",\"silent\":true}\n", seq, task
+      }' >> "$STATE/branch-outcomes.jsonl"
+      awk -v turn="$FM_BRANCH_REPORT_TURN" -v task="$task" 'BEGIN { for (seq = 2; seq <= 1001; seq++)
+        printf "%s\t%d\troutine\t%s\n", turn, seq, task
+      }' >> "$STATE/.supervision-host-receipts"
+    fi
+    if [ "$mode" = return-lookup-fail ]; then
+      printf 'not-json\n' >> "$STATE/branch-outcomes.jsonl"
+    fi
     # shellcheck disable=SC2086 # the printed acknowledgement arguments
     [ -z "$ack" ] || [ "$mode" = noack ] || "$FM_REPO/bin/fm-wake-drain.sh" $ack >> "$FM_HOME/engine-ack.log" 2>&1
     [ "$mode" = hold-lease ] || "$FM_REPO/bin/fm-lease.sh" release "$task" >> "$FM_HOME/engine-lease.log" 2>&1
     case "$mode" in
-      return|return-silent|return-fail|return-fail-silent) "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1 ;;
+      return|return-silent|return-fail|return-fail-silent|return-many|return-lookup-fail) "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1 ;;
       chain) printf 'working [at=%s]: chained %s\n' "$(date +%s)" "$n" >> "$STATE/demo.status" ;;
     esac
     case "$mode" in return-fail|return-fail-silent) exit 3 ;; esac
@@ -1270,14 +1284,14 @@ test_silent_outcomes_are_not_relayed_when_the_captain_returns() {
     append_status "$home" 'no-change result during a captain return'
 
     if [ "$mode" = return-silent ]; then
-      wait_until 250 handled_at_least "$home" 1 || fail "$mode: the wake was not handled"
+      wait_until 250 handled_at_least "$home" 1 || fail "$mode: the wake was not handled: host=$(cat "$home/host.out" 2>/dev/null) log=$(tail -n 8 "$home/state/.supervision-host.log" 2>/dev/null) report=$(cat "$home/engine-report.log" 2>/dev/null)"
       [ ! -s "$home/host.rc" ] || fail "$mode: a silent-only outcome forced a captain handoff: $(cat "$home/host.out")"
       watcher_live "$home" || fail "$mode: the host did not park on its successor"
       host=$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")
       kill -TERM "$host"
       wait_until 200 host_exited "$home" || fail "$mode: the host did not stop on TERM"
     else
-      wait_until 250 host_exited "$home" || fail "$mode: the failed turn did not hand the wake to main"
+      wait_until 250 host_exited "$home" || fail "$mode: the failed turn did not hand the wake to main: $(cat "$home/host.out" 2>/dev/null) $(tail -n 8 "$home/state/.supervision-host.log" 2>/dev/null)"
       assert_re '^supervision-host: the away session could not take this wake: the engine turn failed \(exit 3\); this wake is yours$' \
         "$home/host.out" "$mode: the failed turn must still hand its wake to main"
     fi
@@ -1287,6 +1301,39 @@ test_silent_outcomes_are_not_relayed_when_the_captain_returns() {
     assert_absent "$home/state/.afk-contract" "$mode: the captain return was not archived"
   done
   pass "host: silent outcomes are excluded from both captain-return handoff paths"
+}
+
+test_large_turn_relays_an_early_visible_outcome() {
+  local home count
+  home=$(make_home away-many-receipts away)
+  echo return-many > "$home/stub-mode"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "many receipts: the host never started a watcher cycle"
+  append_status "$home" 'large turn with a visible first outcome'
+  wait_until 2000 host_exited "$home" || fail "many receipts: the captain-return handoff did not finish: host=$(cat "$home/host.out" 2>/dev/null) log=$(tail -n 8 "$home/state/.supervision-host.log" 2>/dev/null) report=$(tail -n 5 "$home/engine-report.log" 2>/dev/null) rows=$(wc -l < "$home/state/branch-outcomes.jsonl" 2>/dev/null)"
+  count=$(grep -c '^supervision-host: outcome ' "$home/host.out")
+  [ "$count" -eq 1 ] || fail "many receipts: expected one visible outcome, got $count: $(tail -n 5 "$home/host.out")"
+  [ "$(wc -l < "$home/state/branch-outcomes.jsonl" | tr -d ' ')" -eq 1001 ] \
+    || fail "many receipts: the fixture did not exceed the old 1,000-row window: rows=$(wc -l < "$home/state/branch-outcomes.jsonl") host=$(cat "$home/host.out") report=$(cat "$home/engine-report.log") tail=$(tail -c 300 "$home/state/branch-outcomes.jsonl")"
+  assert_re '^supervision-host: outcome 1 for demo \[routine\]: stub handled demo$' "$home/host.out" \
+    "many receipts: the early visible outcome was lost behind later silent rows"
+  assert_no_grep 'bulk silent fixture' "$home/host.out" "many receipts: silent outcomes were relayed"
+  pass "host: an early visible outcome survives more than 1,000 same-turn receipts"
+}
+
+test_outcome_lookup_failure_is_not_treated_as_silence() {
+  local home
+  home=$(make_home away-lookup-failure away)
+  echo return-lookup-fail > "$home/stub-mode"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "lookup failure: the host never started a watcher cycle"
+  append_status "$home" 'outcome lookup failure after a captain return'
+  wait_until 2000 host_exited "$home" || fail "lookup failure: the host treated an unreadable store as a silent outcome"
+  assert_re '^supervision-host: the captain returned while the away session was handling this wake, but the recorded outcomes could not be verified; main must review them$' \
+    "$home/host.out" "lookup failure: the main handoff did not explain the lookup failure"
+  assert_re '^supervision-host: outcome lookup failed for turn receipt rows 1; visible outcomes may require manual review$' \
+    "$home/host.out" "lookup failure: the missing outcome warning was not emitted"
+  pass "host: an outcome lookup failure forces a visible main handoff"
 }
 
 # The live failure this guards: a Cursor park superseded by the captain's
@@ -2012,6 +2059,8 @@ test_away_wake_is_handled_on_the_engine_and_never_reaches_main
 test_away_turn_without_a_report_hands_the_wake_to_main
 test_return_during_an_engine_turn_hands_its_outcomes_to_main
 test_silent_outcomes_are_not_relayed_when_the_captain_returns
+test_large_turn_relays_an_early_visible_outcome
+test_outcome_lookup_failure_is_not_treated_as_silence
 test_outcome_after_the_return_survives_a_host_killed_at_the_turn_end
 test_next_host_clears_a_turn_its_killed_predecessor_left
 test_report_without_acknowledgement_hands_the_wake_to_main
