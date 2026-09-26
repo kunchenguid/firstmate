@@ -3208,11 +3208,13 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # (Enter only, never retyped) until native agent-state, a cleared composer, or
 # fm_composer_queued_enter_verdict confirms delivery. When native identity is
 # Claude, text is typed only into an empty composer and Enter is sent only
-# after the composer shows the payload (fm_backend_herdr_composer_payload_shown).
-# A missing read, a shorter suffix, or a paste placeholder followed by a
-# literal remainder does not press Enter: the composer is cleared back to
-# empty and the verdict is send-failed, or unknown when the clear cannot be
-# verified. Other harnesses skip this proof. Verified hazard
+# after the composer shows the payload (fm_backend_herdr_payload_proof), in its
+# styled or plain reading. A payload still being drawn earns a bounded number
+# of re-reads first. A missing read, a shorter suffix, or a paste placeholder
+# followed by a literal remainder does not press Enter: the composer is
+# cleared back to empty and the verdict is send-failed, or unknown when the
+# clear cannot be verified, with the refused reading on stderr. Other
+# harnesses skip this proof. Verified hazard
 # (herdr-verification-p2.md "slash/$ autocomplete popup"): a `/`- or
 # `$`-prefixed send opens a completion popup within ~0.1s, exactly like tmux's
 # claude/codex popups, so the caller's <settle> before the first Enter matters
@@ -3336,6 +3338,17 @@ fm_backend_herdr_composer_content() {  # <target> [lines]
   fm_composer_extract_selected_content "$caps" "$cap"
 }
 
+# fm_backend_herdr_proof_normalize_var: the one comparison form of the payload
+# proof - Unicode spaces mapped, then every whitespace byte and U+2063 removed.
+fm_backend_herdr_proof_normalize_var() {  # <varname>
+  local _fm_proof_v
+  fm_composer_normalize_spaces_var "$1"
+  _fm_proof_v=${!1}
+  _fm_proof_v=${_fm_proof_v//[$' \t\r\n\v\f']/}
+  _fm_proof_v=${_fm_proof_v//$'\xE2\x81\xA3'/}
+  printf -v "$1" '%s' "$_fm_proof_v"
+}
+
 # fm_backend_herdr_composer_payload_shown: 0 when <after>, read from a
 # composer that was empty before the send, shows <text>.
 # Literal equality ignores whitespace, the same comparison zellij uses, so a
@@ -3350,12 +3363,8 @@ fm_backend_herdr_composer_content() {  # <target> [lines]
 # remainder, is the head-truncation shape and is not proof.
 fm_backend_herdr_composer_payload_shown() {  # <text> <after>
   local text=$1 after=$2 literal
-  fm_composer_normalize_spaces_var text
-  fm_composer_normalize_spaces_var after
-  text=${text//[$' \t\r\n\v\f']/}
-  text=${text//$'\xE2\x81\xA3'/}
-  after=${after//[$' \t\r\n\v\f']/}
-  after=${after//$'\xE2\x81\xA3'/}
+  fm_backend_herdr_proof_normalize_var text
+  fm_backend_herdr_proof_normalize_var after
   [ -n "$text" ] && [ -n "$after" ] || return 1
   [ "$after" = "$text" ] && return 0
   literal=$after
@@ -3363,6 +3372,102 @@ fm_backend_herdr_composer_payload_shown() {  # <text> <after>
     literal=${literal/"${BASH_REMATCH[0]}"/}
   done
   [ -z "$literal" ]
+}
+
+# fm_backend_herdr_proof_read: one post-type composer capture, read two ways.
+# Sets FM_BACKEND_HERDR_PROOF_READ (selected|unselected|unreadable), the
+# ghost-stripped reading FM_BACKEND_HERDR_PROOF_STYLED, the same capture with
+# only escape sequences removed as FM_BACKEND_HERDR_PROOF_PLAIN, and the last
+# non-blank captured row as FM_BACKEND_HERDR_PROOF_TAIL for diagnostics.
+# The plain reading exists because ghost stripping assumes a dark theme:
+# Claude's light theme draws a typed slash command dark enough to be stripped
+# as placeholder text, while a head-truncated payload is just as short in
+# plain text as in styled text. When only the plain capture format answers,
+# both readings are that plain capture.
+fm_backend_herdr_proof_read() {  # <target> <lines>
+  local target=$1 lines=$2 cap styled_caps plain_caps
+  FM_BACKEND_HERDR_PROOF_READ=unreadable
+  FM_BACKEND_HERDR_PROOF_STYLED=
+  FM_BACKEND_HERDR_PROOF_PLAIN=
+  FM_BACKEND_HERDR_PROOF_TAIL=
+  plain_caps=$(printf 'styled=0\ncursor=0\nidentity=0\nrows=%s' "$lines")
+  if cap=$(fm_backend_herdr_capture_ansi "$target" "$lines" 2>/dev/null) && [ -n "$cap" ]; then
+    styled_caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$lines")
+  elif cap=$(fm_backend_herdr_capture "$target" "$lines") && [ -n "$cap" ]; then
+    styled_caps=$plain_caps
+  else
+    return 0
+  fi
+  FM_BACKEND_HERDR_PROOF_TAIL=$(printf '%s\n' "$cap" | fm_composer_strip_ansi | grep -v '^[[:space:]]*$' | tail -1)
+  FM_BACKEND_HERDR_PROOF_READ=unselected
+  FM_BACKEND_HERDR_PROOF_STYLED=$(fm_composer_extract_selected_content "$styled_caps" "$cap") || return 0
+  FM_BACKEND_HERDR_PROOF_PLAIN=$(fm_composer_extract_selected_content "$plain_caps" "$cap") || return 0
+  FM_BACKEND_HERDR_PROOF_READ=selected
+}
+
+# fm_backend_herdr_payload_arriving: 0 when <after> may be <text> still being
+# drawn - empty, or a strict prefix of it - so another read could still prove
+# it. A suffix, or anything else, is a finished wrong shape and never waits.
+fm_backend_herdr_payload_arriving() {  # <text> <after>
+  local text=$1 after=$2
+  fm_backend_herdr_proof_normalize_var text
+  fm_backend_herdr_proof_normalize_var after
+  [ -z "$after" ] && return 0
+  [ "${#after}" -lt "${#text}" ] && [ "${text:0:${#after}}" = "$after" ]
+}
+
+# fm_backend_herdr_payload_proof: the bounded post-type proof. Reads the
+# composer up to 3 times, <settle> apart, and returns 0 as soon as either
+# reading shows <text>. Only a read that could
+# still be the payload arriving - unreadable, no composer selected, or
+# an empty or strict-prefix reading - earns another read; a finished wrong
+# shape refuses at once. A refusal prints one diagnostic line on stderr naming
+# the target and what the last read showed, escaped, so the caller's
+# send-failed is never blind.
+fm_backend_herdr_payload_proof() {  # <target> <text> <lines> <settle>
+  local target=$1 text=$2 lines=$3 settle=$4 reads=0 max=3
+  while :; do
+    fm_backend_herdr_proof_read "$target" "$lines"
+    reads=$((reads + 1))
+    if [ "$FM_BACKEND_HERDR_PROOF_READ" = selected ] \
+      && { fm_backend_herdr_composer_payload_shown "$text" "$FM_BACKEND_HERDR_PROOF_STYLED" \
+        || fm_backend_herdr_composer_payload_shown "$text" "$FM_BACKEND_HERDR_PROOF_PLAIN"; }; then
+      return 0
+    fi
+    [ "$reads" -lt "$max" ] || break
+    if [ "$FM_BACKEND_HERDR_PROOF_READ" = selected ] \
+      && ! fm_backend_herdr_payload_arriving "$text" "$FM_BACKEND_HERDR_PROOF_STYLED" \
+      && ! fm_backend_herdr_payload_arriving "$text" "$FM_BACKEND_HERDR_PROOF_PLAIN"; then
+      break
+    fi
+    sleep "$settle"
+  done
+  printf "herdr: composer on %s did not show the typed payload after %s read(s); read=%s styled='%s' plain='%s' tail='%s' payload='%s'\n" \
+    "$target" "$reads" "$FM_BACKEND_HERDR_PROOF_READ" \
+    "$(fm_backend_herdr_proof_escape "$FM_BACKEND_HERDR_PROOF_STYLED" 160)" \
+    "$(fm_backend_herdr_proof_escape "$FM_BACKEND_HERDR_PROOF_PLAIN" 160)" \
+    "$(fm_backend_herdr_proof_escape "$FM_BACKEND_HERDR_PROOF_TAIL" 160)" \
+    "$(fm_backend_herdr_proof_escape "$text" 80)" >&2
+  return 1
+}
+
+# fm_backend_herdr_proof_escape: the first <max> bytes of <text> as one
+# printable ASCII line: every other byte (escape sequences, UTF-8, controls)
+# and the quote are written as \xNN and a backslash is doubled, so a refused
+# read-back can be compared byte for byte whatever locale the caller runs under.
+fm_backend_herdr_proof_escape() {  # <text> <max>
+  local LC_ALL=C s=$1 out='' c i n
+  s=${s:0:$2}
+  for ((i = 0; i < ${#s}; i++)); do
+    c=${s:i:1}
+    case "$c" in
+      "\\") out+="\\\\" ;;
+      "'") out+='\x27' ;;
+      [[:print:]]) out+=$c ;;
+      *) printf -v n '%d' "'$c"; printf -v c '\\x%02X' $((n & 255)); out+=$c ;;
+    esac
+  done
+  printf '%s' "$out"
 }
 
 # fm_backend_herdr_composer_clear: after a refused proof, press Ctrl+U until
@@ -3401,16 +3506,14 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   fi
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  if [ "$proof" = 1 ]; then
-    if ! content=$(fm_backend_herdr_composer_content "$target" "$proof_lines") \
-      || ! fm_backend_herdr_composer_payload_shown "$text" "$content"; then
-      if fm_backend_herdr_composer_clear "$target" "$text"; then
-        printf 'send-failed'
-      else
-        printf 'unknown'
-      fi
-      return 0
+  if [ "$proof" = 1 ] \
+    && ! fm_backend_herdr_payload_proof "$target" "$text" "$proof_lines" "$settle"; then
+    if fm_backend_herdr_composer_clear "$target" "$text"; then
+      printf 'send-failed'
+    else
+      printf 'unknown'
     fi
+    return 0
   fi
   raw_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   baseline=$(fm_backend_herdr_classify_submit_agent_status "$raw_status")
