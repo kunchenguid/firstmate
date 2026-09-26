@@ -130,6 +130,7 @@ had_holusight_dir=0
 had_holusight_db=0
 [ -d "$HOLUSIGHT_DIR" ] && had_holusight_dir=1
 [ -e "$HOLUSIGHT_DB" ] && had_holusight_db=1
+# shellcheck disable=SC2329 # Registered by the EXIT trap below.
 cleanup_holusight_cache() {
   [ "$had_holusight_db" -eq 1 ] || rm -f "$HOLUSIGHT_DB"
   if [ "$had_holusight_dir" -eq 0 ]; then
