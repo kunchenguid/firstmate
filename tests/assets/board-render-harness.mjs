@@ -4,8 +4,9 @@
 //
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
-//   { stats:[{n,label}], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], empty, more, error }
+//   { stats:[{n,label}], calls:[{text,href,title,target,rel}],
+//     underway:[{title,sub,badges}], charted:[{title,sub,badges,pickable}],
+//     empty, more, error }
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -26,6 +27,16 @@ class Node {
     this.checked = false;
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
+      remove: (c) => {
+        this.className = this.className.split(/\s+/).filter((name) => name && name !== c).join(" ");
+      },
+      toggle: (c, force) => {
+        const present = this.className.split(/\s+/).includes(c);
+        const enabled = force === undefined ? !present : Boolean(force);
+        if (enabled && !present) this.classList.add(c);
+        if (!enabled && present) this.classList.remove(c);
+        return enabled;
+      },
       contains: (c) => this.className.split(/\s+/).includes(c),
     };
   }
@@ -95,6 +106,29 @@ const stats = strip.children.map((t) => ({
   label: t.children.find((c) => c.className.includes("bb-stat__label"))?.textContent,
 }));
 
+const descendantsOf = (root) => {
+  const out = [];
+  const walk = (n) => {
+    for (const child of n.children) {
+      out.push(child);
+      walk(child);
+    }
+  };
+  walk(root);
+  return out;
+};
+
+const deck = byId.get("bb-call") || new Node("div");
+const calls = descendantsOf(deck)
+  .filter((n) => n.className.split(/\s+/).includes("bb-decision__link"))
+  .map((link) => ({
+    text: link.textContent,
+    href: link.href ?? "",
+    title: link.title ?? "",
+    target: link.target ?? "",
+    rel: link.rel ?? "",
+  }));
+
 const rowsOf = (container) =>
   container.children
     .filter((r) => r.className.split(/\s+/).includes("bb-row"))
@@ -123,4 +157,4 @@ const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, calls, underway, charted, empty, more, error: errorText }) + "\n");
