@@ -38,6 +38,7 @@ TOKEN_RE = re.compile(r"^FM-AFK-[A-Za-z0-9_-]{16}$")
 class AfkContractLockError(RuntimeError):
     pass
 
+
 NOTE_ID_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9._-]+$")
 REPLY_LINE_RE = re.compile(r"^FM-AFK-REPLY (FM-AFK-[A-Za-z0-9_-]{16})$")
 QUOTED_HEADER_RE = re.compile(r"^(?:From|Sent|To|Subject):", re.IGNORECASE)
@@ -144,6 +145,7 @@ def afk_contract_lock():
             process.stdin.close()
             process.wait()
         process.stdout.close()
+
 
 
 
@@ -325,6 +327,7 @@ def flush():
 
 
 def flush_while_contract_locked():
+
 
     posture, config = live_mail_context()
     if posture is None:
@@ -773,6 +776,7 @@ def receive_batch():
 
 
 def receive_batch_while_contract_locked():
+
 
     posture, config = live_mail_context()
     if posture is None:

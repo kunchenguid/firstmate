@@ -21,6 +21,7 @@ cat > "$REPO/bin/fm-mail.sh" <<'SH'
 set -euo pipefail
 if [ "${1:-}" = afk-email ] || [ "${1:-}" = read ]; then
 
+
   exec "$(dirname "$0")/fm-mail-real.sh" "$@"
 fi
 [ "${1:-}" = send ] || exit 2
@@ -41,6 +42,7 @@ if [ -n "${FM_TEST_SMTP_STARTED:-}" ] && [ -n "${FM_TEST_SMTP_RELEASE:-}" ]; the
     sleep 0.02
   done
 fi
+
 
 printf 'fake SMTP accepted\n' >&2
 SH
@@ -120,6 +122,7 @@ wait_for_file() {  # <path>
   done
   [ -e "$path" ]
 }
+
 
 
 # Pi entry requires the fixed owner destination; other harnesses keep hold-for-return.
@@ -1242,6 +1245,7 @@ test_branch_prompt_preserves_wake_after_verification_error() {
   prompt=$("$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generation failed"
   # shellcheck disable=SC2016
 
+
   printf '%s' "$prompt" | python3 -c '
 import sys
 steps = [line for line in sys.stdin.read().splitlines() if line.startswith("6. Acknowledge")]
@@ -1413,6 +1417,7 @@ SH
 }
 
 
+
 test_destination_is_required_for_pi_entry
 # The active feature is tested with synthetic mail and a local fake SMTP command; no network or mailbox is used.
 test_batched_mail_redacts_secrets_and_replies_are_item_bound
@@ -1431,6 +1436,7 @@ test_processed_marker_cannot_suppress_outcomes
 test_invalid_away_record_does_not_enable_email
 test_invalid_or_unreadable_posture_suppresses_mail
 test_read_gates_unauthenticated_bodies_during_away
+
 
 test_voice_inbox_note_remains_ordinary_during_away_mode
 test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit
