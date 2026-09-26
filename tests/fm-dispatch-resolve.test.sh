@@ -764,6 +764,40 @@ done
 cp "$LANE_RULES" "$RULES"
 pass "Pi native adapters bind to codex-home with existing fallbacks and schema 5 compatibility"
 
+# Native claude launches go through the claude-pool proxy, which fails over
+# between accounts, so with per-account claude rows and no default row the
+# candidate binds to the best viable account row, never a sum.
+SCHEMA6_CLAUDE="$TMP_ROOT/schema6-claude.json"
+cat > "$SCHEMA6_CLAUDE" <<'JSON'
+{
+  "generatedAt": "2030-01-01T00:00:00Z",
+  "schemaVersion": 6,
+  "providers": [
+    { "provider": "claude", "accountKey": "cabeza", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 15, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": 0.1093 } },
+      { "scope": "model:fable", "status": "known", "effectivePercentRemaining": 15, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": 0.2497 } } ] } },
+    { "provider": "claude", "accountKey": "claude", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 0, "runway": { "status": "exhausted_now" }, "selection": { "spendPriority": -0.8919 } },
+      { "scope": "model:fable", "status": "known", "effectivePercentRemaining": 0, "runway": { "status": "exhausted_now" }, "selection": { "spendPriority": 0.191 } } ] } },
+    { "provider": "cursor", "accountKey": "default", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 24, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": -0.5 } } ] } }
+  ]
+}
+JSON
+printf '%s\n' '{"rules":[{"when":"Claude work.","use":[{"harness":"claude","model":"fable"},{"harness":"cursor","model":"cursor-grok-4.6-high"}]}]}' > "$RULES"
+for snapshot in "$SCHEMA6_CLAUDE" "$TMP_ROOT/schema6-claude-reversed.json"; do
+  [ -e "$snapshot" ] || jq '.providers |= reverse' "$SCHEMA6_CLAUDE" > "$snapshot"
+  reset_log
+  TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$snapshot" run code out err "$BRIEF"
+  expect_code 0 "$code" "native claude per-account snapshot exits 0"
+  assert_contains "$out" '  status: clear' "native claude per-account snapshot resolves"
+  assert_contains "$out" 'candidate: claude:fable  provider=claude  scope=all_models  remaining=15%  spendPriority=0.1093  runway=projected_exhaustion' "native claude reads the viable account row"
+  assert_not_contains "$out" 'no quota row for account' "native claude is measured, not unranked"
+  assert_contains "$out" "  profile: --harness 'claude' --model 'fable'" "the viable claude account ranks against other providers"
+done
+cp "$LANE_RULES" "$RULES"
+pass "native claude binds to the best viable account row when no default claude row exists"
+
 jq 'del(.providers[1].accountKey)' "$SCHEMA6" > "$TMP_ROOT/schema6-keyless.json"
 reset_log
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-keyless.json" run code out err "$BRIEF"
