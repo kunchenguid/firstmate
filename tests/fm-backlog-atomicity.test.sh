@@ -23,8 +23,8 @@
 # deliberately not asserted here.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 # An exported TASKS_AXI_BACKEND would outrank each case's .tasks.toml fixture
 # in fm_tasks_axi_backend, so the backend cases must start from a clean slate.
@@ -88,13 +88,7 @@ Delivery contract: mode=no-mistakes
 EOF
   done
 
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-case "$*" in *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;; esac
-case "${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  fm_test_fake_herdr_spawn "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse gh gh-axi no-mistakes
 
   fm_git_init_commit "$case_dir/project"
@@ -440,31 +434,31 @@ SH
 
 break_launch_delivery() {  # <case-dir>
   local case_dir=$1
-  cat > "$case_dir/fakebin/tmux" <<'SH'
+  mv "$case_dir/fakebin/herdr" "$case_dir/fakebin/herdr-live"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
-case "$*" in *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;; esac
-case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-  send-keys) exit 1 ;;
-esac
-exit 0
+case "$1 ${2:-}" in 'pane run'|'pane send-text') exit 1 ;; esac
+exec "$(dirname "$0")/herdr-live" "$@"
 SH
-  chmod +x "$case_dir/fakebin/tmux"
+  chmod +x "$case_dir/fakebin/herdr"
 }
 
 track_teardown_resource_actions() {  # <case-dir>
   local case_dir=$1
-  cat > "$case_dir/fakebin/tmux" <<SH
+  mv "$case_dir/fakebin/herdr" "$case_dir/fakebin/herdr-live"
+  cat > "$case_dir/fakebin/herdr" <<SH
 #!/usr/bin/env bash
-: > "$case_dir/backend-resource-action"
-exit 0
+case "\$1 \${2:-}" in
+  'pane close'|'workspace create'|'tab create'|'pane run') : > "$case_dir/backend-resource-action" ;;
+esac
+exec "\$(dirname "\$0")/herdr-live" "\$@"
 SH
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
 : > "$case_dir/local-copy-resource-action"
 exit 0
 SH
-  chmod +x "$case_dir/fakebin/tmux" "$case_dir/fakebin/treehouse"
+  chmod +x "$case_dir/fakebin/herdr" "$case_dir/fakebin/treehouse"
 }
 
 interrupt_teardown_during_treehouse_return() {  # <case-dir>
@@ -546,10 +540,24 @@ SH
   chmod +x "$case_dir/fakebin/mv"
 }
 
+record_dispatch_resources() {
+  local case_dir=$1
+  mv "$case_dir/fakebin/herdr" "$case_dir/fakebin/herdr-live"
+  cat > "$case_dir/fakebin/herdr" <<SH
+#!/usr/bin/env bash
+case "\$1 \${2:-}" in
+  'workspace create'|'tab create') : > "$case_dir/task-endpoint-created" ;;
+  'pane run') case "\${4:-}" in *treehouse*) : > "$case_dir/local-copy-requested" ;; esac ;;
+esac
+exec "\$(dirname "\$0")/herdr-live" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+}
+
 write_task_meta() {  # <case-dir> <id> <kind> <mode> [extra-line...]
   local case_dir=$1 id=$2 kind=$3 mode=$4
   shift 4
-  fm_write_meta "$(home_of "$case_dir")/state/$id.meta" \
+  fm_test_write_herdr_meta "$(home_of "$case_dir")/state/$id.meta" \
     "window=firstmate:fm-$id" \
     "endpoint_task_id=$id" \
     "worktree=$case_dir/absent-worktree" \
@@ -567,7 +575,7 @@ run_spawn() {  # <case-dir> <args...>
   # Keep any harness discovery or subprocess configuration in a throwaway HOME.
   mkdir -p "$case_dir/user-home"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" HOME="$case_dir/user-home" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" FM_BACKEND=herdr HERDR_SESSION=fixture \
     CLAUDE_CONFIG_DIR='' \
     PATH="$case_dir/fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
@@ -875,17 +883,7 @@ test_dispatch_refuses_a_pending_authoritative_close() {
   marker="$(home_of "$case_dir")/state/$id.backlog-close"
   printf 'id=%s\ndata=%s\nspawn_gen=spawn-closing\narg=--pr\narg=https://github.com/example/repo/pull/12\n' \
     "$id" "$(home_of "$case_dir")/data" > "$marker"
-  cat > "$case_dir/fakebin/tmux" <<SH
-#!/usr/bin/env bash
-case "\$*" in
-  *new-window*) : > "$case_dir/task-endpoint-created" ;;
-  *treehouse\\ get*) : > "$case_dir/local-copy-requested" ;;
-  *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
-case "\${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
-exit 0
-SH
-  chmod +x "$case_dir/fakebin/tmux"
+  record_dispatch_resources "$case_dir"
 
   out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "spawn accepted work with an authoritative close still pending"
@@ -910,17 +908,7 @@ test_dispatch_refuses_a_held_row_before_creating_resources() {
   add_item "$case_dir" "$id"
   tasks-axi hold "$id" --reason "captain decision pending" --kind captain \
     --file "$(backlog_of "$case_dir")" >/dev/null
-  cat > "$case_dir/fakebin/tmux" <<SH
-#!/usr/bin/env bash
-case "\$*" in
-  *new-window*) : > "$case_dir/task-endpoint-created" ;;
-  *treehouse\\ get*) : > "$case_dir/local-copy-requested" ;;
-  *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
-case "\${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
-exit 0
-SH
-  chmod +x "$case_dir/fakebin/tmux"
+  record_dispatch_resources "$case_dir"
 
   out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "spawn accepted a held backlog row"
@@ -945,17 +933,7 @@ test_dispatch_refuses_a_blocked_row_before_creating_resources() {
   add_item "$case_dir" "$blocker"
   tasks-axi add "$id" "item for $id" --kind ship --blocked-by "$blocker" \
     --file "$(backlog_of "$case_dir")" >/dev/null
-  cat > "$case_dir/fakebin/tmux" <<SH
-#!/usr/bin/env bash
-case "\$*" in
-  *new-window*) : > "$case_dir/task-endpoint-created" ;;
-  *treehouse\\ get*) : > "$case_dir/local-copy-requested" ;;
-  *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
-case "\${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
-exit 0
-SH
-  chmod +x "$case_dir/fakebin/tmux"
+  record_dispatch_resources "$case_dir"
 
   out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "spawn accepted a dependency-blocked backlog row"
@@ -980,17 +958,7 @@ test_dispatch_refuses_a_held_in_flight_row_before_relaunch() {
   start_item "$case_dir" "$id"
   tasks-axi hold "$id" --reason "captain decision pending" --kind captain \
     --file "$(backlog_of "$case_dir")" >/dev/null
-  cat > "$case_dir/fakebin/tmux" <<SH
-#!/usr/bin/env bash
-case "\$*" in
-  *new-window*) : > "$case_dir/task-endpoint-created" ;;
-  *treehouse\\ get*) : > "$case_dir/local-copy-requested" ;;
-  *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
-case "\${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
-exit 0
-SH
-  chmod +x "$case_dir/fakebin/tmux"
+  record_dispatch_resources "$case_dir"
 
   out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "spawn accepted a held In-flight backlog row"
@@ -1449,7 +1417,7 @@ test_deferred_signal_verification_outlives_an_unresponsive_tasks_axi() {
   mkdir -p "$case_dir/user-home"
   out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" \
     HOME="$case_dir/user-home" FM_SPAWN_NO_GUARD=1 \
-    FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" CLAUDE_CONFIG_DIR='' \
+    FM_FAKE_PANE_PATH="$case_dir/wt" FM_BACKEND=herdr HERDR_SESSION=fixture CLAUDE_CONFIG_DIR='' \
     FM_TASKS_AXI_TIMEOUT=3 PATH="$case_dir/fakebin:$PATH" \
     timeout -k 5 30 "$SPAWN" "$id" "$case_dir/project" \
     --mode no-mistakes --yolo off 2>&1) || rc=$?
@@ -2607,7 +2575,7 @@ test_lifecycle_refuses_ancestor_symlinks_outside_home_roots() {
   foreign="$worker_case/foreign-home"
   mkdir -p "$foreign/state"
   add_item "$worker_case" "$id"
-  fm_write_meta "$foreign/state/$id.meta" "kind=ship" "spawn_gen=foreign-worker"
+  fm_test_write_herdr_meta "$foreign/state/$id.meta" "kind=ship" "spawn_gen=foreign-worker"
   ln -s "$foreign" "$home/foreign-link"
   rc=0
   out=$(FM_STATE_OVERRIDE="$home/foreign-link/state" run_bootstrap "$worker_case") || rc=$?
@@ -2753,7 +2721,7 @@ test_no_backlog_teardown_refuses_a_symlinked_task_record_at_entry() {
   target_dir="$home/state-foreign"
   target="$target_dir/$id.meta"
   mkdir -p "$target_dir"
-  fm_write_meta "$target" \
+  fm_test_write_herdr_meta "$target" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$foreign_worktree" "project=$case_dir/foreign-project" \
     "harness=pi" "kind=ship" "mode=local-only" "yolo=off"
@@ -2783,7 +2751,7 @@ test_teardown_rechecks_record_parent_after_lock_acquisition() {
   foreign_state="$case_dir/foreign-state"
   foreign_worktree="$case_dir/foreign-worktree"
   mkdir -p "$foreign_state" "$foreign_worktree"
-  fm_write_meta "$foreign_state/$id.meta" \
+  fm_test_write_herdr_meta "$foreign_state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$foreign_worktree" "project=$case_dir/foreign-project" \
     "harness=pi" "kind=ship" "mode=local-only" "yolo=off"
@@ -2824,7 +2792,7 @@ test_teardown_refuses_a_symlinked_state_directory_at_entry() {
   home=$(home_of "$case_dir")
   external_state="$case_dir/external-state"
   mv "$home/state" "$external_state"
-  fm_write_meta "$external_state/$id.meta" \
+  fm_test_write_herdr_meta "$external_state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$case_dir/foreign-worktree" "project=$case_dir/foreign-project" \
     "harness=pi" "kind=ship" "mode=local-only" "yolo=off"
@@ -2878,7 +2846,7 @@ test_spawn_refuses_a_special_file_tasks_config() {
   mkfifo "$home/.tasks.toml"
 
   out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" FM_BACKEND=herdr HERDR_SESSION=fixture \
     CLAUDE_CONFIG_DIR='' \
     PATH="$case_dir/fakebin:$PATH" \
     timeout 60 "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off 2>&1) || rc=$?

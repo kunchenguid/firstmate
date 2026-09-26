@@ -1,17 +1,10 @@
 #!/usr/bin/env bash
 # Backend-neutral harness-process identity.
-# Sourced by bin/backends/tmux.sh and bin/backends/herdr.sh. This file is
-# sourced by scripts and has no side effects on source.
-#
-# Why one owner: every runtime backend that proves an agent is alive does it by
-# attributing operating-system processes - the pane's foreground process group
-# on tmux, Herdr's `pane process-info` view plus the pane shell's descendants
-# on Herdr - and the two must agree on what a given process name means, or a
-# harness one backend recognizes silently reads as a dead pane on the other.
-# The classifier moved here verbatim from the tmux adapter, where it was born;
-# docs/tmux-backend.md "Agent liveness probe" owns the empirical basis for the
-# names below, and tests/fm-tmux-agent-liveness.test.sh plus
-# tests/fm-harness-liveness-drift-live-e2e.test.sh keep them honest.
+# Herdr passes independent kernel-name and argv0 evidence to this classifier.
+# A surviving positive agent identity prevents duplicate launch; disagreement
+# that proves no agent is never guessed from a registration or a pane title.
+# tests/fm-agent-process.test.sh proves real process-name divergence without a
+# terminal; tests/fm-agent-process-live-e2e.test.sh proves Herdr integration.
 
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-session-lock-lib.sh"

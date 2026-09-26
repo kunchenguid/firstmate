@@ -3,17 +3,17 @@
 # inbox and ring a constant doorbell line into its terminal, best-effort.
 # Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
-#   through this home's state/<id>.meta, or an explicit well-formed backend
-#   target. fm-send refuses unresolved guesses rather than falling back to a
-#   tmux window search, because a "successful" send to the wrong endpoint is
+#   through this home's state/<id>.meta, or an explicit well-formed Herdr
+#   target. fm-send refuses unresolved guesses rather than searching terminal
+#   labels, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
 # The text must be nonempty: an empty or whitespace-only message is refused
 # before anything is marked, recorded, or typed, because an empty marked
 # secondmate request delivers only marker and correlation bytes and leaves the
 # parent waiting on a reply to nothing.
 # Special keys instead of text: fm-send.sh <target> --key Enter
-# Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
-# Orca currently supports Enter and C-c only, and rejects Escape.
+# The retained Herdr backend supports Escape, Enter, and C-c.
+# Retired backend identities refuse key delivery.
 #
 # Two data planes:
 #
@@ -73,8 +73,7 @@
 # pending-reply expectation stays armed because this outcome is not a proven
 # failure); any other nonzero = the send failed and nothing may be assumed
 # delivered. Submission dispatches through the target's recorded backend; the
-# tmux adapter shares its composer/submit core with the away-mode daemon via
-# bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4). Slash
+# Herdr shares the composer policy with the away-mode daemon. Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4). Slash
 # commands, and codex `$...` skill invocations resolved through harness meta,
 # get a longer pre-Enter settle so completion popups do not swallow Enter.
 # A remote secondmate target has no typed text plane at all:
@@ -393,7 +392,8 @@ fm_send_resolve_target() { # <raw-target>
     if [ "$colons" -ge 2 ]; then
       assumed=herdr
     else
-      assumed=tmux
+      echo "error: legacy target '$raw' has no recorded Herdr identity; refusing to reinterpret it" >&2
+      return 1
     fi
     if ! fm_backend_target_exists "$assumed" "$raw"; then
       echo "error: explicit target '$raw' is not a live $assumed endpoint (tried meta=$STATE/$raw.meta; metadata window/terminal lookup; backend=$assumed). Use fm-<id> for a recorded task/lane, or pass a target whose backend endpoint can be verified." >&2
@@ -690,9 +690,8 @@ fm_send_feed_resolved_holds() { # <answer-text>
 # The target's BACKEND comes from selector meta, from matching an explicit target
 # back to recorded meta, or from strict explicit-target shape validation.
 # Do not add a separate passive liveness preflight here. Active send paths own
-# backend readiness: herdr, for example, must route through its session-aware
-# target_ready path before sending, while zellij verifies pane labels in its
-# send implementation. A failed backend send is still surfaced below as a hard
+# backend readiness: Herdr routes through its session-aware target_ready path
+# before sending. A failed backend send is still surfaced below as a hard
 # error with the attempted resolution attached.
 
 if [ "${1:-}" = "--key" ]; then

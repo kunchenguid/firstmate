@@ -4,7 +4,10 @@ This record owns concurrent isolation evidence for the portable parallel candida
 `bin/fm-test-isolation-proof.sh` is the authoritative harness and `docs/fm-test-isolation-proof.json` is the portable pool's machine-readable result.
 `bin/fm-test-run.sh` owns production lane partitioning and family concurrency admission.
 
-## Verification
+The 2026-08-20 record below is historical; it includes subsequently retired tests and is not the current candidate inventory.
+Use `bin/fm-test-isolation-proof.sh --list` for the maintained set; removed scripts retain their original measurements here rather than attributing them to replacement tests.
+
+## Historical verification
 
 - Date: 2026-08-20
 - Command: `bin/fm-test-isolation-proof.sh --jobs 4 --json /tmp/fm-isolation-proof.json`
@@ -20,7 +23,7 @@ This record owns concurrent isolation evidence for the portable parallel candida
 | failed | 0 |
 | wall duration | 113278 ms |
 
-## Candidate set
+## Historical candidate set
 
 - `tests/fm-arm-pretool-check.test.sh`
 - `tests/fm-backend-herdr.test.sh`

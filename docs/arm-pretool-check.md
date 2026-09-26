@@ -73,7 +73,7 @@ This covers statically-visible literal words in command position; opaque dynamic
 `bin/fm-watch.sh` is protected but is not a blessed entry point.
 A direct `bin/fm-watch.sh` execution - relative, `<code-root>`-anchored, `$VAR`-prefixed, or `~`-prefixed - always denies with `watcher-direct`, whose reason points the caller at `bin/fm-watch-arm.sh` and `bin/fm-watch-checkpoint.sh`.
 
-The same bytes in an argument, comment, assertion, documentation query, Python string, `printf`, or `tmux send-keys` payload are data and do not make the outer command relevant.
+The same bytes in an argument, comment, assertion, documentation query, Python string, `printf`, or `herdr pane send-text` payload are data and do not make the outer command relevant.
 
 Literal `sh`, `bash`, or `zsh` `-c` payloads and literal `eval` payloads are recursively classified.
 A literal nested payload that only runs a data-bearing command is allowed.

@@ -150,7 +150,7 @@ jobs:
           path: ${{ runner.temp }}/fm-test/fm-test-timing-portable-parallel-2.json
           if-no-files-found: warn
 
-  # Required portable serial remainder: watcher, lock, AFK, tmux, daemon,
+  # Required portable serial remainder: watcher, lock, AFK, daemon,
   # ambiguous, and other stateful tests. Real Herdr stays in tests-herdr.
   # Split across separate runners so no two of these stateful scripts ever share
   # a machine: each shard is still strictly serial in itself. Shard membership
@@ -182,14 +182,6 @@ jobs:
           set -eu
           bin/fm-install-actionlint.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: Require tmux for e2e tests
-        run: |
-          set -eu
-          command -v tmux >/dev/null || {
-            echo "::error::tmux is required for real afk injection e2e coverage"
-            exit 1
-          }
-          tmux -V
       - name: Install tasks-axi for backlog-handoff delegation
         run: |
           set -eu

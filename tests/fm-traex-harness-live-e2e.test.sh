@@ -68,14 +68,17 @@ git -C "$REPO" config user.email 'traex-thin@example.invalid'
 printf '%s\n' '# disposable TraeX thin smoke' > "$REPO/README.md"
 git -C "$REPO" add README.md
 git -C "$REPO" commit -q -m init || fail 'could not commit disposable project'
-cat > "$PROBE/home/data/traex-live/brief.md" <<'EOF'
+FIRST_ACTED="$PROBE/first-acted"
+SECOND_ACTED="$PROBE/second-acted"
+AFTER_ACTED="$PROBE/after-interrupt-acted"
+cat > "$PROBE/home/data/traex-live/brief.md" <<EOF
 # Task
 
 ## Captain's intent
 
 This is a disposable Firstmate TraeX smoke in an isolated Git task copy.
-Run `sleep 2`, then reply with exactly TRAEX_THIN_FIRST_OK and wait.
-Do not edit any file.
+Run sleep 2, then touch $FIRST_ACTED, then reply with exactly TRAEX_THIN_FIRST_OK and wait.
+Do not edit project files. The named external marker files are the only permitted test writes.
 
 ## Firstmate spec
 
@@ -184,7 +187,18 @@ send_key() {
     || fail "real TraeX key '$key' failed: $out"
 }
 
-wait_capture TRAEX_THIN_FIRST_OK || fail 'TraeX did not process initial instructions'
+wait_acted() {
+  local file=$1 i=0 polls=${FM_TRAEX_LIVE_WAIT_POLLS:-720}
+  while [ "$i" -lt "$polls" ]; do
+    [ ! -f "$file" ] || return 0
+    sleep 0.5
+    i=$((i + 1))
+  done
+  "$HELPER" run "$LAB" pane read "$PANE" --source recent --lines 80 | tail -40 >&2 || true
+  return 1
+}
+wait_acted "$FIRST_ACTED" || fail 'TraeX did not execute the initial marker command'
+
 INITIAL_STATUS=$(wait_nonworking_status) || fail 'initial TraeX turn never left native working'
 case "$INITIAL_STATUS" in
   idle) ;;
@@ -194,26 +208,45 @@ esac
 pass 'real TraeX processed the benign initial instruction after guarded trust acceptance'
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
-if [ "$INITIAL_STATUS" = idle ]; then
-  [ "$(fm_backend_busy_state herdr "$TARGET")" = idle ] || fail 'generic Herdr idle observation failed'
-  send_text "Run \`sleep 2\`, then reply with exactly TRAEX_THIN_SECOND_OK."
-  [ "$(fm_backend_busy_state herdr "$TARGET")" = busy ] || fail 'generic Herdr busy observation failed'
-  wait_status idle || fail 'steered TraeX turn never settled'
-  capture_has TRAEX_THIN_SECOND_OK || fail 'TraeX did not process generic steer'
-  pass 'real TraeX steering and current state use generic Herdr owners'
+# Native status can remain unknown after a completed turn. Exercise the
+# production transcript binding instead of skipping steering on that host.
+. "$ROOT/bin/fm-busy-lib.sh"
+fm_backend_source herdr || fail 'could not load the retained Herdr adapter'
+wait_semantic() {
+  local want=$1 i=0 verdict
+  while [ "$i" -lt 240 ]; do
+    verdict=$(fm_busy_classify_meta "$META" traex-live "$PROBE/home/state")
+    case "$verdict" in "$want "*) return 0 ;; esac
+    sleep 0.5
+    i=$((i + 1))
+  done
+  printf 'last semantic state: %s\n' "$verdict" >&2
+  return 1
+}
+wait_semantic idle || fail 'completed TraeX turn has no verified semantic idle state'
+send_text "Run sleep 5, then touch '$SECOND_ACTED', then reply with exactly TRAEX_THIN_SECOND_OK."
+wait_semantic busy || fail 'steered TraeX turn never became semantically busy'
+wait_acted "$SECOND_ACTED" || fail 'TraeX did not process durable generic steer'
+wait_semantic idle || fail 'steered TraeX turn never settled'
+pass 'real TraeX durable steering and current state use the verified transcript binding'
 
-  send_text "Run \`sleep 20\`, then reply TRAEX_THIN_SHOULD_NOT_COMPLETE."
-  send_key Escape
-  wait_status idle || fail 'TraeX interrupt did not return native idle'
-  [ "$(fm_backend_composer_state herdr "$TARGET")" = empty ] \
-    || fail 'TraeX interrupt left restored input in the composer'
-  send_text 'Reply with exactly TRAEX_THIN_AFTER_INTERRUPT_OK.'
-  wait_status idle || fail 'post-interrupt TraeX turn never settled'
-  capture_has TRAEX_THIN_AFTER_INTERRUPT_OK || fail 'post-interrupt steer was corrupted'
-  pass 'real TraeX interrupt clearing stays on generic key and send paths'
-else
-  pass 'native unknown remains unclassified after completion rather than being treated as idle'
-fi
+send_text 'Run sleep 20, then reply TRAEX_THIN_SHOULD_NOT_COMPLETE.'
+wait_semantic busy || fail 'interrupt probe never reached a live TraeX turn'
+send_key Escape
+wait_semantic idle || fail 'TraeX interrupt did not return semantic idle'
+. "$ROOT/bin/fm-control-lib.sh"
+send_key "$(fm_control_interrupt_clear_key traex)"
+composer=
+for _ in $(seq 1 50); do
+  composer=$(fm_backend_composer_state herdr "$TARGET")
+  [ "$composer" != empty ] || break
+  sleep 0.1
+done
+[ "$composer" = empty ] || fail "TraeX interrupt composer did not settle empty (state=$composer)"
+send_text "Run touch '$AFTER_ACTED', then reply with exactly TRAEX_THIN_AFTER_INTERRUPT_OK."
+wait_acted "$AFTER_ACTED" || fail 'post-interrupt steer was corrupted'
+wait_semantic idle || fail 'post-interrupt TraeX turn never settled'
+pass 'real TraeX interrupt clearing stays on generic key and send paths'
 
 [ -z "$(git -C "$WT" status --porcelain)" ] || fail 'smoke dirtied the isolated task copy'
 fm_backend_kill herdr "$TARGET"

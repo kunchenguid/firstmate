@@ -45,27 +45,23 @@ new_world() {
   w="$TMP_ROOT/$name"
   mkdir -p "$w/home/state" "$w/home/data" "$w/fakebin" "$w/fake"
   : > "$w/fake/windows"
-  cat > "$w/fakebin/tmux" <<'SH'
+  cat > "$w/fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "${1:-}" in
-  list-windows) cat "$FM_FAKE_DIR/windows" ;;
-  display-message)
-    target=
-    for arg in "$@"; do
-      case "$arg" in main:fm-*) target=$arg ;; esac
-    done
-    case "${*: -1}" in
-      *pane_current_command*)
-        id=${target##*fm-}
-        if [ -e "$FM_FAKE_DIR/dead-$id" ]; then printf 'zsh\n'; else printf 'pi\n'; fi
-        ;;
-      *) printf '\n' ;;
-    esac
-    ;;
+case "$1 ${2:-}" in
+  'pane get') jq -n --arg p "$3" '{result:{pane:{pane_id:$p}}}' ;;
+  'agent get')
+    id=${3##*:p-}
+    if [ -e "$FM_FAKE_DIR/dead-$id" ]; then echo '{"error":{"code":"agent_not_found"}}'; else echo '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}'; fi ;;
+  'pane process-info')
+    id=${4##*:p-}
+    if [ -e "$FM_FAKE_DIR/dead-$id" ]; then echo '{"result":{"process_info":{"foreground_processes":[]}}}'
+    else jq -n --arg p "$4" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:101,foreground_processes:[{pid:102,name:"pi",argv0:"pi"}]}}}'; fi ;;
+  'pane read') printf '❯\n' ;;
+  *) exit 1 ;;
 esac
 SH
-  chmod +x "$w/fakebin/tmux"
+  chmod +x "$w/fakebin/herdr"
   # Fresh watcher beacon keeps fm-guard quiet.
   touch "$w/home/state/.last-watcher-beat"
 
@@ -93,14 +89,14 @@ SH
 # Add a secondmate home as a DETACHED worktree of the firstmate repo (matching
 # how treehouse leases a secondmate home), plus its state meta. Args: world id.
 # The recorded runtime matters to the action split, so it is part of the fixture:
-# harness defaults to a control-verified adapter on the default (tmux) backend,
+# harness defaults to a control-verified adapter on the Herdr backend,
 # which is what makes a restart provable. Pass a backend to model one that cannot
 # prove an agent stopped.
 add_sm() {
-  local w=$1 id=$2 harness=${3:-pi} backend=${4:-}
+  local w=$1 id=$2 harness=${3:-pi} backend=${4:-herdr}
   git -C "$w/main" worktree add -q --detach "$w/$id" main
   {
-    printf 'window=main:fm-%s\n' "$id"
+    printf 'window=fixture:w1:p-%s\nherdr_session=fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t1\nherdr_pane_id=w1:p-%s\n' "$id" "$id"
     printf 'endpoint_task_id=%s\n' "$id"
     printf 'worktree=%s/%s\n' "$w" "$id"
     printf 'project=%s/%s\n' "$w" "$id"

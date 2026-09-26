@@ -20,7 +20,7 @@
 # magnitude worse than the floor, which is the regression this guard catches.
 #
 # Nothing global is touched: a scratch FM_HOME, a scratch project holding a
-# copy of the tracked extension, a private tmux socket, a scratch session
+# copy of the tracked extension, a guarded named Herdr lab, a scratch session
 # directory, --approve (trust for this run only), and --offline. Pi reads the
 # operator's own agent directory because a Pi with no model renders a setup
 # screen instead of a usable TUI, but nothing there is written and NO model
@@ -31,12 +31,15 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-fm_live_gate default-on FM_PI_BRANCH_RESPONSIVENESS_E2E pi tmux node
+fm_live_gate default-on FM_PI_BRANCH_RESPONSIVENESS_E2E pi herdr node
 
 PI_VERSION=$(pi --version 2>/dev/null || printf 'unknown')
-TMUX=$(command -v tmux)
-SOCKET="fm-pi-branch-responsiveness-$$"
-SESSION=pi-branch-responsiveness
+. "$ROOT/tests/herdr-test-safety.sh"
+herdr_forget_inherited_pane
+HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+CLEAN_PATH=$PATH
+LAB_SESSION=$("$HELPER" name "${FM_HERDR_LAB_TASK:-pi-branch-responsiveness}") || exit 1
+PANE=
 TMP_ROOT=$(fm_test_tmproot fm-pi-branch-responsiveness)
 LAB="$TMP_ROOT/lab"
 PROJECT="$LAB/project"
@@ -45,9 +48,13 @@ SESSION_DIR="$LAB/sessions"
 mkdir -p "$PROJECT/.pi/extensions/lib" "$HOME_DIR/state" "$HOME_DIR/config" "$SESSION_DIR"
 
 cleanup() {
-  "$TMUX" -L "$SOCKET" kill-server 2>/dev/null || true
+  PATH="$CLEAN_PATH" "$HELPER" teardown "$LAB_SESSION" || exit 1
+  fm_test_cleanup
 }
 trap cleanup EXIT
+"$HELPER" provision "$LAB_SESSION" || fail 'Herdr lab provision failed'
+herdr_test_guard_cli "$LAB_SESSION" "$LAB/guard" "$HELPER" || fail 'Herdr lab guard failed'
+export PATH="$LAB/guard:$PATH" HERDR_SESSION="$LAB_SESSION"
 
 cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$PROJECT/.pi/extensions/fm-branch-supervision.ts"
 for lib in fm-async-exec fm-branch-dispatch fm-branch-model-picker fm-calm-visibility fm-feishu-native-channel fm-native-contract fm-operational-input; do
@@ -88,18 +95,18 @@ cat > "$LAB/probe.mjs" <<'JS'
 // never a fast verdict.
 import { execFileSync } from "node:child_process";
 
-const [tmux, socket, session, trigger, expect] = process.argv.slice(2);
+const [helper, lab, pane, trigger, expect] = process.argv.slice(2);
 const MARKER_TAIL = 20;
 const MARKER_CAP = 140;
 const capture = () => {
   try {
-    return execFileSync(tmux, ["-L", socket, "capture-pane", "-p", "-t", session], { encoding: "utf8" });
+    return execFileSync(helper, ["run", lab, "pane", "read", pane, "--format", "text"], { encoding: "utf8" });
   } catch {
     return "";
   }
 };
-const key = (name) => execFileSync(tmux, ["-L", socket, "send-keys", "-t", session, name]);
-const send = (literal) => execFileSync(tmux, ["-L", socket, "send-keys", "-t", session, "-l", literal]);
+const key = (name) => execFileSync(helper, ["run", lab, "pane", "send-keys", pane, name === "C-u" ? "ctrl+u" : name]);
+const send = (literal) => execFileSync(helper, ["run", lab, "pane", "send-text", pane, literal]);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Two characters per marker, so no marker can be spelled by two neighbours
@@ -159,7 +166,7 @@ JS
 wait_for_pane_text() {
   local expected=$1 attempts=${2:-120} i=0
   while [ "$i" -lt "$attempts" ]; do
-    if "$TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION" 2>/dev/null | grep -Fq "$expected"; then
+    if "$HELPER" run "$LAB_SESSION" pane read "$PANE" --format text 2>/dev/null | grep -Fq "$expected"; then
       return 0
     fi
     sleep 0.25
@@ -172,7 +179,7 @@ wait_for_pane_text() {
 # trigger will deliver, then measure. Prints the probe's own key=value lines.
 run_arm() {
   local label=$1 load_extension=$2 seed_rows=$3 expect=$4 out=""
-  "$TMUX" -L "$SOCKET" kill-session -t "$SESSION" 2>/dev/null || true
+  local result command
   rm -f "$HOME_DIR/state/.lock"
   local -a pi_args
   pi_args=(pi -ns -np -nc --no-themes --offline --approve --session-dir "$SESSION_DIR")
@@ -181,13 +188,16 @@ run_arm() {
   else
     pi_args+=(-ne)
   fi
-  "$TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -x 200 -y 50 \
-    "FM_HOME='$HOME_DIR' FM_STATE_OVERRIDE='$HOME_DIR/state' FM_CONFIG_OVERRIDE='$HOME_DIR/config' \
-     FM_ROOT_OVERRIDE='$ROOT' LAB_PROJECT='$PROJECT' '$LAB/launch.sh' ${pi_args[*]@Q}"
+  result=$("$HELPER" run "$LAB_SESSION" workspace create --cwd "$PROJECT" --label "responsive-$label" --no-focus) || fail 'lab workspace creation failed'
+  PANE=$(printf '%s' "$result" | jq -er '.result.root_pane.pane_id') || fail 'lab pane identity missing'
+  printf -v command '%q ' env "FM_HOME=$HOME_DIR" "FM_STATE_OVERRIDE=$HOME_DIR/state" "FM_CONFIG_OVERRIDE=$HOME_DIR/config" \
+    "FM_ROOT_OVERRIDE=$ROOT" "LAB_PROJECT=$PROJECT" "$LAB/launch.sh" "${pi_args[@]}"
+  "$HELPER" run "$LAB_SESSION" pane run "$PANE" "$command" >/dev/null || fail 'Pi launch failed'
+
   # The lab project path in Pi's own status line is the readiness signal: it
   # appears only once the TUI has drawn, unlike any prompt character.
   wait_for_pane_text "$PROJECT" 240 \
-    || { "$TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION" >&2; fail "Pi $PI_VERSION never drew its TUI in the $label arm"; }
+    || { "$HELPER" run "$LAB_SESSION" pane read "$PANE" --format text >&2; fail "Pi $PI_VERSION never drew its TUI in the $label arm"; }
   sleep 2
 
   if [ "$seed_rows" -gt 0 ]; then
@@ -198,8 +208,9 @@ run_arm() {
     done
   fi
 
-  out=$(node "$LAB/probe.mjs" "$TMUX" "$SOCKET" "$SESSION" "/new" "$expect" 2>&1) \
-    || { printf '%s\n' "$out" >&2; "$TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION" -S -200 >&2; fail "the keystroke probe failed in the $label arm against Pi $PI_VERSION"; }
+  out=$(node "$LAB/probe.mjs" "$HELPER" "$LAB_SESSION" "$PANE" "/new" "$expect" 2>&1) \
+    || { printf '%s\n' "$out" >&2; "$HELPER" run "$LAB_SESSION" pane read "$PANE" --format text >&2; fail "the keystroke probe failed in the $label arm against Pi $PI_VERSION"; }
+  "$HELPER" run "$LAB_SESSION" pane close "$PANE" >/dev/null || fail 'lab pane close failed'
   printf '%s\n' "$out"
 }
 

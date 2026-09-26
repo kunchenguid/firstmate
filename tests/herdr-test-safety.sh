@@ -43,3 +43,29 @@ herdr_refuse_if_default() { # <session>
 herdr_safe_stop_and_delete() { # <session>
   fm_herdr_lab_teardown "$1"
 }
+
+# Route a test's indirect CLI calls through the existing guarded lab owner.
+# Caller installs its teardown trap and provisions the exact session first.
+# The wrapper never grants lifecycle authority; those verbs remain helper-only.
+herdr_test_guard_cli() { # <lab-session> <wrapper-dir> [helper]
+  local session=$1 wrapper=$2 helper=${3:-$HERDR_TEST_SAFETY_DIR/bin/fm-herdr-lab.sh} real
+  fm_herdr_lab_validate_name "$session" || return 1
+  real=$(command -v herdr) || return 1
+  mkdir -p "$wrapper" || return 1
+  cat > "$wrapper/herdr" <<EOF
+#!/usr/bin/env bash
+set -eu
+real=$(printf '%q' "$real")
+helper=$(printf '%q' "$helper")
+lab=$(printf '%q' "$session")
+if [ "\${FM_HERDR_TEST_HELPER_CALL:-}" = 1 ]; then exec "\$real" "\$@"; fi
+args=("\$@")
+n=\${#args[@]}
+if [ "\$n" -ge 2 ] && [ "\${args[\$((n-2))]}" = --session ]; then
+  [ "\${args[\$((n-1))]}" = "\$lab" ] || { echo 'refused foreign test session' >&2; exit 97; }
+  unset 'args[n-1]' 'args[n-2]'
+fi
+FM_HERDR_TEST_HELPER_CALL=1 exec "\$helper" run "\$lab" "\${args[@]}"
+EOF
+  chmod +x "$wrapper/herdr"
+}

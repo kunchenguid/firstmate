@@ -486,7 +486,6 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `ask-user-authority` - load before deciding any ask-user finding.
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi default TOON.
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-- `firstmate-orca` - load before switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.
 - `project-management` - load before adding, creating, removing, or initializing a project.
   Cloning or registering a project is add intake and uses the same trigger.
 - `stuck-crewmate-recovery` - load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer, and whenever a live worker reports its no-mistakes pipeline dead, unreachable, or timed out.
@@ -501,7 +500,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `bits-development` - load before beginning delivery for deployable ByteDance-internal BITS/PPE code, creating, reusing, or updating a BITS Dev Task, attaching projects, binding MRs or Change Cards, or triggering or monitoring BITS PPE, E2E, self-test, or quick-run pipelines.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
 - `readable-documents` - load before creating or materially revising a substantial reader-facing technical document, including a design, solution study, explanation, guide, tutorial, reference, or report, and when repairing one that is hard to understand, too abstract, poorly structured, or missing clear examples or visuals.
-- `magibook-pyspark` - load before creating, reusing, checking, initializing, waiting on, or running a MagiBook PySpark analysis, writing a MagiBook init or query Cell, or orchestrating query Cells; it owns the inspect-ensure-wait-query lifecycle, the single-SparkContext safety model, and bounded query fan-out, while region defaults and cluster identifiers stay with the captain-preference owner.
+- `magibook-pyspark` - compatibility pointer only when an old brief names the retired workflow; it authorizes no new query, fallback, retry or cancellation.
 
 ## 14. Relay
 

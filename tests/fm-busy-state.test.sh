@@ -34,7 +34,7 @@ test_arm_seeds_busy_spawn() {
   gen=$("$EV" arm "$state" t1) || fail "arm failed"
   [ -f "$state/t1.busy-gen" ] || fail "arm did not write the gen sidecar"
   [ "$(cat "$state/t1.busy-gen")" = "$gen" ] || fail "sidecar gen does not match printed gen"
-  out=$(fm_busy_classify tmux w1 pi t1 "$state")
+  out=$(fm_busy_classify herdr w1 pi t1 "$state")
   [ "$out" = "busy fm-spawn" ] || fail "seed should classify 'busy fm-spawn', got '$out'"
   pass "arm mints a gen sidecar and seeds busy fm-spawn at seq=1"
 }
@@ -45,11 +45,11 @@ test_apply_advances_seq_and_source() {
   gen=$("$EV" arm "$state" t1)
   "$EV" apply "$state" t1 idle --gen "$gen" --source pi-ext --event stop \
     || fail "apply idle failed"
-  out=$(fm_busy_classify tmux w1 pi t1 "$state")
+  out=$(fm_busy_classify herdr w1 pi t1 "$state")
   [ "$out" = "idle pi-ext" ] || fail "expected 'idle pi-ext', got '$out'"
   "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event user-prompt-submit \
     || fail "apply busy failed"
-  out=$(fm_busy_classify tmux w1 pi t1 "$state")
+  out=$(fm_busy_classify herdr w1 pi t1 "$state")
   [ "$out" = "busy pi-ext" ] || fail "expected 'busy pi-ext', got '$out'"
   seq=$(fm_busy_record_read "$state" t1 | awk '{print $4}')
   [ "$seq" = 3 ] || fail "expected seq 3 after seed + two applies, got '$seq'"
@@ -62,11 +62,11 @@ test_apply_current_gen_reset() {
   "$EV" arm "$state" t1 >/dev/null
   "$EV" apply "$state" t1 idle --current-gen --source fm-recovery --event interrupt \
     || fail "apply --current-gen failed"
-  out=$(fm_busy_classify tmux w1 pi t1 "$state")
+  out=$(fm_busy_classify herdr w1 pi t1 "$state")
   [ "$out" = "idle fm-recovery" ] || fail "expected 'idle fm-recovery', got '$out'"
   "$EV" apply "$state" t1 unknown --current-gen --source fm-recovery --event relaunch \
     || fail "apply unknown failed"
-  out=$(fm_busy_classify tmux w1 pi t1 "$state")
+  out=$(fm_busy_classify herdr w1 pi t1 "$state")
   [ "$out" = "unknown fm-recovery" ] || fail "expected 'unknown fm-recovery', got '$out'"
   pass "firstmate-owned interrupt and recovery events bind to the current gen"
 }
@@ -101,7 +101,7 @@ test_retire_serializes_and_rejects_stale_gen() {
   if "$EV" retire "$state" t1 --gen "$old_gen" 2>/dev/null; then
     fail "retire accepted a superseded incarnation"
   fi
-  out=$(fm_busy_classify tmux w1 pi t1 "$state")
+  out=$(fm_busy_classify herdr w1 pi t1 "$state")
   [ "$out" = "busy fm-spawn" ] || fail "stale retirement changed the new incarnation, got '$out'"
   [ "$(cat "$state/t1.busy-gen")" = "$new_gen" ] || fail "stale retirement changed the new gen"
   pass "retire waits for the writer lock and cannot remove a new incarnation"
@@ -196,7 +196,7 @@ test_stale_gen_event_rejected() {
   if "$EV" apply "$state" t1 idle --gen "$old_gen" --source pi-ext --event stop 2>/dev/null; then
     fail "an event carrying a stale gen must be rejected"
   fi
-  out=$(fm_busy_classify tmux w1 pi t1 "$state")
+  out=$(fm_busy_classify herdr w1 pi t1 "$state")
   [ "$out" = "busy fm-spawn" ] || fail "stale event must not change the record, got '$out'"
   pass "a late event from a previous incarnation is rejected, record unchanged"
 }
@@ -208,7 +208,7 @@ test_stale_gen_record_unknown() {
   # Simulate a record left behind by a superseded incarnation.
   printf 'g-superseded.1.1\n' > "$state/t1.busy-gen.new"
   mv "$state/t1.busy-gen.new" "$state/t1.busy-gen"
-  out=$(fm_busy_classify tmux w1 pi t1 "$state")
+  out=$(fm_busy_classify herdr w1 pi t1 "$state")
   [ "$out" = "unknown gen-mismatch" ] || fail "stale record must classify 'unknown gen-mismatch', got '$out'"
   pass "a record from a stale incarnation classifies unknown, never idle"
 }
@@ -219,10 +219,10 @@ test_missing_record_unknown_not_idle() {
   local state out h
   state=$(new_state_dir missing)
   for h in pi traex; do
-    out=$(fm_busy_classify tmux w1 "$h" t1 "$state")
+    out=$(fm_busy_classify herdr w1 "$h" t1 "$state")
     [ "$out" = "unknown missing" ] || fail "$h with no record must be 'unknown missing', got '$out'"
   done
-  out=$(fm_busy_classify tmux w1 codex t1 "$state")
+  out=$(fm_busy_classify herdr w1 codex t1 "$state")
   [ "$out" = "unknown codex-unverified" ] || fail "codex with no verified source must be 'unknown codex-unverified', got '$out'"
   pass "a converted adapter with no record classifies unknown, never idle"
 }
@@ -239,11 +239,11 @@ test_malformed_record_unknown() {
     "v1 gen=$gen seq=1 state=busy source=bad source event=x ts=1" \
     "v1 gen=$gen seq=1 state=busy source=pi-ext event=x ts=1 rogue=1"; do
     printf '%s\n' "$bad" > "$state/t1.busy-state"
-    out=$(fm_busy_classify tmux w1 pi t1 "$state")
+    out=$(fm_busy_classify herdr w1 pi t1 "$state")
     [ "$out" = "unknown malformed" ] || fail "malformed record '$bad' must be 'unknown malformed', got '$out'"
   done
   printf 'v1 gen=%s seq=1 state=busy source=pi-ext event=x ts=1\nsecond line\n' "$gen" > "$state/t1.busy-state"
-  out=$(fm_busy_classify tmux w1 pi t1 "$state")
+  out=$(fm_busy_classify herdr w1 pi t1 "$state")
   [ "$out" = "unknown malformed" ] || fail "multi-line record must be 'unknown malformed', got '$out'"
   pass "malformed records classify unknown malformed, never busy or idle"
 }
@@ -252,7 +252,7 @@ test_record_without_sidecar_unknown() {
   local state out
   state=$(new_state_dir orphan-record)
   printf 'v1 gen=g1.1.1 seq=1 state=busy source=pi-ext event=x ts=1\n' > "$state/t1.busy-state"
-  out=$(fm_busy_classify tmux w1 pi t1 "$state")
+  out=$(fm_busy_classify herdr w1 pi t1 "$state")
   [ "$out" = "unknown malformed" ] || fail "record without an armed gen must be unknown, got '$out'"
   pass "a record with no armed gen sidecar classifies unknown"
 }
@@ -264,12 +264,12 @@ test_source_mismatch_cross_adapter() {
   state=$(new_state_dir cross-adapter)
   gen=$("$EV" arm "$state" t1)
   "$EV" apply "$state" t1 busy --gen "$gen" --source foreign-source --event agent-start
-  out=$(fm_busy_classify tmux w1 pi t1 "$state")
+  out=$(fm_busy_classify herdr w1 pi t1 "$state")
   [ "$out" = "unknown source-mismatch" ] || fail "foreign record trusted by Pi: $out"
   "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
-  out=$(fm_busy_classify tmux w1 pi t1 "$state")
+  out=$(fm_busy_classify herdr w1 pi t1 "$state")
   [ "$out" = "busy pi-ext" ] || fail "Pi record was not trusted: $out"
-  out=$(fm_busy_classify tmux w1 traex t1 "$state")
+  out=$(fm_busy_classify herdr w1 traex t1 "$state")
   [ "$out" = "unknown traex-transcript" ] || fail "Pi record trusted by TraeX: $out"
   pass "semantic records are trusted only by their adapter"
 }
@@ -282,10 +282,10 @@ test_converted_adapters_ignore_footer_text() {
 Working...
 Ctrl+c:cancel'
   for h in pi traex; do
-    out=$(fm_busy_classify tmux w1 "$h" t1 "$state" "$tail")
+    out=$(fm_busy_classify herdr w1 "$h" t1 "$state" "$tail")
     [ "$out" = "unknown missing" ] || fail "$h must never classify from footer text, got '$out'"
   done
-  out=$(fm_busy_classify tmux w1 codex t1 "$state" "$tail")
+  out=$(fm_busy_classify herdr w1 codex t1 "$state" "$tail")
   [ "$out" = "unknown codex-unverified" ] || fail "codex must never classify from footer text, got '$out'"
   pass "converted adapters never classify busy from rendered footer text"
 }
@@ -295,7 +295,7 @@ test_codex_unverified_gate() {
   state=$(new_state_dir codex-gate)
   gen=$("$EV" arm "$state" t1)
   "$EV" apply "$state" t1 busy --gen "$gen" --source codex-hook --event user-prompt-submit
-  out=$(fm_busy_classify tmux w1 codex t1 "$state")
+  out=$(fm_busy_classify herdr w1 codex t1 "$state")
   [ "$out" = "unknown codex-transcript" ] || fail "unverified codex must classify unknown, got '$out'"
   [ -z "$(fm_busy_sources_for_harness codex)" ] \
     || fail "codex must trust no semantic source until one is verified"
@@ -308,13 +308,13 @@ test_dead_endpoint_overrides() {
   gen=$("$EV" arm "$state" t1)
   # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
   fm_backend_target_exists() { return 1; }
-  out=$(fm_busy_classify_live tmux w1 pi t1 "$state")
+  out=$(fm_busy_classify_live herdr w1 pi t1 "$state")
   [ "$out" = "dead endpoint-gone" ] || fail "gone endpoint must classify dead, got '$out'"
   # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
   fm_backend_target_exists() { return 0; }
-  out=$(fm_busy_classify_live tmux w1 pi t1 "$state")
+  out=$(fm_busy_classify_live herdr w1 pi t1 "$state")
   [ "$out" = "busy fm-spawn" ] || fail "live endpoint must fall through to the record, got '$out'"
-  out=$(fm_busy_classify_live tmux '' pi t1 "$state")
+  out=$(fm_busy_classify_live herdr '' pi t1 "$state")
   [ "$out" = "unknown no-target" ] || fail "empty target must classify unknown, got '$out'"
   unset -f fm_backend_target_exists
   pass "endpoint death is the only process-level override and yields dead, never busy"
@@ -363,7 +363,7 @@ test_record_read_leaves_caller_shell_intact() {
   # A glob-shaped field must survive parsing literally rather than expanding.
   printf 'v1 gen=%s seq=1 state=busy source=* event=x ts=1\n' "$(cat "$state/t1.busy-gen")" \
     > "$state/t1.busy-state"
-  out=$(fm_busy_classify tmux w1 pi t1 "$state")
+  out=$(fm_busy_classify herdr w1 pi t1 "$state")
   [ "$out" = "unknown malformed" ] || fail "a glob-shaped source must be rejected, not expanded, got '$out'"
   pass "record parsing never clobbers the caller's positional parameters, glob setting, or fields"
 }
@@ -372,13 +372,13 @@ test_boolean_view_never_promotes_unknown() {
   local state gen
   state=$(new_state_dir boolean)
   gen=$("$EV" arm "$state" t1)
-  fm_busy_is_busy tmux w1 pi t1 "$state" || fail "busy record must read busy"
+  fm_busy_is_busy herdr w1 pi t1 "$state" || fail "busy record must read busy"
   "$EV" apply "$state" t1 idle --gen "$gen" --source pi-ext --event stop
-  if fm_busy_is_busy tmux w1 pi t1 "$state"; then
+  if fm_busy_is_busy herdr w1 pi t1 "$state"; then
     fail "idle record must not read busy"
   fi
   printf 'garbage\n' > "$state/t1.busy-state"
-  if fm_busy_is_busy tmux w1 pi t1 "$state"; then
+  if fm_busy_is_busy herdr w1 pi t1 "$state"; then
     fail "malformed record must not read busy"
   fi
   pass "the boolean view reports busy only on an exact busy verdict"
@@ -442,9 +442,9 @@ for harness, version in [('codex', '0.156.1'), ('traex', '0.207.1')]:
     sessions = home/'sessions'; logs = sessions/'2026/09/25'; logs.mkdir(parents=True)
     log = logs/'rollout-main.jsonl'
     gen = run(root/'bin/fm-busy-event.sh', 'arm', state, 'worker', '--state', 'unknown')
-    meta = f'harness={harness}\nworktree={cwd}\nwindow=lab:w\nbusy_gen={gen}\n'
+    meta = f'backend=herdr\nharness={harness}\nworktree={cwd}\nwindow=lab:w1:p1\nbusy_gen={gen}\n'
     (state/'worker.meta').write_text(meta)
-    run('python3', reader, 'init', state, 'worker', harness, cwd, sessions, 'tmux', 'lab:w')
+    run('python3', reader, 'init', state, 'worker', harness, cwd, sessions, 'herdr', 'lab:w1:p1')
     run('python3', reader, 'activate', state, 'worker')
     binding = (state/'worker.busy-session').read_text()
     records = [
@@ -468,7 +468,7 @@ for harness, version in [('codex', '0.156.1'), ('traex', '0.207.1')]:
         (state/'worker.busy-gen').write_text(gen+'\n')
         write(records)
     def expect(verdict, label):
-        actual = run('python3', reader, 'read', state, 'worker', harness, 'tmux', 'lab:w')
+        actual = run('python3', reader, 'read', state, 'worker', harness, 'herdr', 'lab:w1:p1')
         assert actual == verdict+' '+harness+'-transcript', (harness,label,actual)
         print('ok - '+harness+' '+label)
     reset(); expect('busy','active turn')
@@ -479,8 +479,8 @@ for harness, version in [('codex', '0.156.1'), ('traex', '0.207.1')]:
     # before a mocked transport failure. No implementation text is inspected.
     script = '''source "$1/bin/fm-backend.sh"
 fm_backend_source() { :; }
-fm_backend_tmux_send_text_submit() { return 9; }
-fm_backend_send_text_submit tmux lab:w next 1 .01 .01
+fm_backend_herdr_send_text_submit() { return 9; }
+fm_backend_send_text_submit herdr lab:w1:p1 next 1 .01 .01
 '''
     result = subprocess.run(['bash','-c',script,'_',str(root)], env=dict(os.environ,FM_HOME=str(home)))
     assert result.returncode == 9
@@ -518,13 +518,13 @@ fm_backend_send_text_submit tmux lab:w next 1 .01 .01
     reset(); (state/'worker.busy-session').unlink();expect('unknown','missing binding')
     reset(); (state/'worker.busy-gen').unlink();expect('unknown','missing generation sidecar')
     reset(); append(dict(complete,payload={'type':'task_complete','turn_id':'old-turn'}));expect('unknown','mismatched terminal turn')
-    reset(); append(complete);run('python3',reader,'fence-target',state,'tmux','lab:w')
-    run('python3',reader,'fence-target',state,'tmux','lab:w')
+    reset(); append(complete);run('python3',reader,'fence-target',state,'herdr','lab:w1:p1')
+    run('python3',reader,'fence-target',state,'herdr','lab:w1:p1')
     append({'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-2','root_turn_id':'turn-2'}})
     append({'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-2'}})
     expect('unknown','two pending submissions need two observed starts')
     reset();append(complete);expect('idle','bind before unreadable submission');log.unlink()
-    run('python3',reader,'fence-target',state,'tmux','lab:w');write(records+[complete])
+    run('python3',reader,'fence-target',state,'herdr','lab:w1:p1');write(records+[complete])
     expect('unknown','lost watermark cannot later resurrect old idle')
     reset()
     # The classifier's liveness input is backed by a real short-lived process.
@@ -533,7 +533,7 @@ fm_backend_send_text_submit tmux lab:w next 1 .01 .01
         code='''source "$1/bin/fm-busy-lib.sh"
 probe_pid=$5
 fm_backend_agent_state() { if kill -0 "$probe_pid" 2>/dev/null; then printf alive; else printf dead; fi; }
-fm_busy_classify tmux lab:w "$2" worker "$3"
+fm_busy_classify herdr lab:w1:p1 "$2" worker "$3"
 '''
         return run('bash','-c',code,'_',root,harness,state,'unused',process.pid)
     assert classify() == 'busy '+harness+'-transcript'

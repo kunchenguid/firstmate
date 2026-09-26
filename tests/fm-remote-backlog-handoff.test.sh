@@ -326,7 +326,7 @@ FM_FAKE_SSH_MODE=unreachable handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios p
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "offline handoff claimed success"
-bootstrap_out=$(FM_HOME="$PARENT" FM_ROOT_OVERRIDE="$ROOT" FM_BACKEND=tmux \
+bootstrap_out=$(FM_HOME="$PARENT" FM_ROOT_OVERRIDE="$ROOT" FM_BACKEND=herdr \
   FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh" 2>&1)
 assert_contains "$bootstrap_out" 'SECONDMATE_HANDOFF: secondmate ios: pending delivery: 1 item(s)' \
   "bootstrap did not surface the pending outbox count"
@@ -684,7 +684,7 @@ pass "route classification serializes with retirement before staging"
 FRESH="$TMP_ROOT/fresh"
 mkdir -p "$FRESH/data" "$FRESH/state"
 : > "$SSH_COUNT"
-fresh_out=$(FM_HOME="$FRESH" FM_ROOT_OVERRIDE="$ROOT" FM_BACKEND=tmux \
+fresh_out=$(FM_HOME="$FRESH" FM_ROOT_OVERRIDE="$ROOT" FM_BACKEND=herdr \
   FM_BOOTSTRAP_DETECT_ONLY=1 "$ROOT/bin/fm-bootstrap.sh" 2>&1)
 assert_not_contains "$fresh_out" 'SECONDMATE_HANDOFF:' "unconfigured bootstrap emitted a remote handoff diagnostic"
 [ ! -s "$SSH_COUNT" ] || fail "unconfigured bootstrap touched SSH"

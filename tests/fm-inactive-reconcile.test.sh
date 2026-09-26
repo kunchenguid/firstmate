@@ -4,6 +4,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$ROOT/tests/fixtures.sh"
 
 RECON="$ROOT/bin/fm-inactive-reconcile.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
@@ -34,13 +36,7 @@ make_tools() { # <world>
 #!/usr/bin/env bash
 printf 'state: %s · source: fake\n' "${FM_FAKE_CREW_STATE:-unknown}"
 SH
-  cat > "$fake/tmux" <<'SH'
-#!/usr/bin/env bash
-case "${1:-}" in
-  display-message) printf '%%1\n' ;;
-  capture-pane) printf 'idle\n> \n' ;;
-esac
-SH
+  fm_test_fake_herdr_send "$fake"
   local tool
   for tool in gh gh-axi curl; do
     cat > "$fake/$tool" <<'SH'
@@ -81,7 +77,7 @@ EOF
 
 write_child() { # <home> <id> <status> [spawn-gen]
   local home=$1 id=$2 status=$3 spawn_gen=${4:-s${BASHPID:-$$}.$RANDOM}
-  fm_write_meta "$home/state/$id.meta" \
+  fm_test_write_herdr_meta "$home/state/$id.meta" \
     "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=alpha" \
     'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
     "spawn_gen=$spawn_gen" 'pr=https://example.test/owner/repo/pull/1'

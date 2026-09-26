@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # tests/fm-trace-context-spawn.test.sh - spawn-path integration regressions for
-# native W3C trace context using fake tmux panes and real isolated git worktrees.
+# native W3C trace context using fake Herdr panes and real isolated git worktrees.
 # See docs/verification/trace-context.md for the maintained coverage inventory.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
 
@@ -23,72 +23,28 @@ Verify the spawned process receives the expected trace context.
 EOF
 }
 
-# Fake tmux: answers the pane-path query and logs every literal `send-keys -l`
-# argument (the GOTMPDIR export, the TRACEPARENT export, and the launch command)
+# Fake Herdr: answers the pane-path query and logs every `pane run` payload
+# (the GOTMPDIR export, the TRACEPARENT export, and the launch command)
 # one per line, in send order, so ordering is observable.
 make_spawn_fakebin() {
   local dir=$1 fakebin
-  fakebin=$(fm_fakebin "$dir")
-  cat > "$fakebin/tmux" <<'SH'
+  fakebin=$(fm_test_make_spawn_fakebin "$dir")
+  mv "$fakebin/herdr" "$fakebin/herdr-fixture"
+  cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
-case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows)
-    [ -z "${FM_FAKE_DUPLICATE_WINDOW:-}" ] || printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
-    exit 0
-    ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys)
-    if [ "${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" = 1 ]; then
-      for a in "$@"; do
-        case "$a" in
-          "export TRACEPARENT="*) exit 1 ;;
-        esac
-      done
-    fi
-    if [ "${FM_FAKE_TRACEPARENT_SEND_UNSAFE:-0}" = 1 ]; then
-      for a in "$@"; do
-        case "$a" in
-          "export TRACEPARENT="*) exit 2 ;;
-        esac
-      done
-    fi
-    if [ "${FM_FAKE_TRACE_METADATA_APPEND_FAIL:-0}" = 1 ]; then
-      for a in "$@"; do
-        case "$a" in
-          "export TRACEPARENT="*)
-            chmod a-w "$FM_FAKE_META_PATH"
-            ;;
-        esac
-      done
-    fi
-    # Capture the text payload of both send forms: the literal launch
-    # (`send-keys -t <target> -l <text>`) and a text line
-    # (`send-keys -t <target> <text> Enter`). Skip the flags, the target, and
-    # the trailing key so only the payload is logged, one per line, in order.
-    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-      shift
-      skip_next=
-      for a in "$@"; do
-        if [ -n "$skip_next" ]; then skip_next=; continue; fi
-        case "$a" in
-          -t) skip_next=1; continue ;;
-          -l) continue ;;
-          Enter|C-m) continue ;;
-          *) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
-        esac
-      done
-    fi
-    exit 0
-    ;;
-esac
-exit 0
+if [ "$1 ${2:-}" = 'pane run' ]; then
+  case "${4:-}" in
+    'export TRACEPARENT='*)
+      [ "${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" != 1 ] || exit 1
+      [ "${FM_FAKE_TRACEPARENT_SEND_UNSAFE:-0}" != 1 ] || exit 2
+      [ "${FM_FAKE_TRACE_METADATA_APPEND_FAIL:-0}" != 1 ] || chmod a-w "$FM_FAKE_META_PATH" ;;
+  esac
+  [ -z "${FM_FAKE_LAUNCH_LOG:-}" ] || printf '%s\n' "${4:-}" >> "$FM_FAKE_LAUNCH_LOG"
+fi
+exec "$(dirname "$0")/herdr-fixture" "$@"
 SH
-  chmod +x "$fakebin/tmux"
+  chmod +x "$fakebin/herdr"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }
@@ -128,7 +84,7 @@ run_spawn() {
     FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$home/user-home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_BACKEND=herdr HERDR_ENV='' HERDR_PANE_ID='' HERDR_SESSION=fixture \
     FM_FAKE_TRACEPARENT_SEND_FAIL="${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" \
     FM_FAKE_TRACEPARENT_SEND_UNSAFE="${FM_FAKE_TRACEPARENT_SEND_UNSAFE:-0}" \
     FM_FAKE_TRACE_METADATA_APPEND_FAIL="${FM_FAKE_TRACE_METADATA_APPEND_FAIL:-0}" \
@@ -150,7 +106,7 @@ run_spawn_tc() {
     FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$home/user-home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_BACKEND=herdr HERDR_ENV='' HERDR_PANE_ID='' HERDR_SESSION=fixture \
     FM_FAKE_LAUNCH_LOG="$launchlog" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" --mode no-mistakes --yolo off 2>&1
 }
@@ -220,7 +176,7 @@ run_two_level() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" HOME="$base/user-home" \
     FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
     FM_PROJECTS_OVERRIDE="$prim/projects" FM_CONFIG_OVERRIDE="$prim/config" \
-    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_BACKEND=herdr HERDR_ENV='' HERDR_PANE_ID='' HERDR_SESSION=fixture \
     FM_FAKE_LAUNCH_LOG="$smlog" PATH="$smfake:$PATH" \
     "$SPAWN" "$sm_id" "$sm" --secondmate --harness codex >/dev/null 2>&1 || true
 
@@ -247,7 +203,7 @@ run_two_level() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$sm" HOME="$sm/user-home" \
     FM_STATE_OVERRIDE="$sm/state" FM_DATA_OVERRIDE="$sm/data" \
     FM_PROJECTS_OVERRIDE="$sm/projects" FM_CONFIG_OVERRIDE="$sm/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wwt" TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wwt" FM_BACKEND=herdr HERDR_ENV='' HERDR_PANE_ID='' HERDR_SESSION=fixture \
     FM_FAKE_LAUNCH_LOG="$wlog" PATH="$wfake:$PATH" \
     "$SPAWN" "$worker_id" "$wproj" --mode no-mistakes --yolo off >/dev/null 2>&1 || true
 
@@ -388,6 +344,10 @@ test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
   printf '%s\n' "$id" > "$sm/.fm-secondmate-home"
   printf 'charter\n' > "$sm/data/charter.md"
   fake=$(make_spawn_fakebin "$base/fake")
+  # A real historical identity with a live structured Herdr endpoint is the
+  # duplicate, rather than an unowned window name discovered in another tool.
+  printf 'backend=herdr\nwindow=fixture:w1:p2\nendpoint_task_id=%s\nkind=secondmate\nharness=codex\nworktree=%s\nproject=%s\nherdr_session=fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t2\nherdr_pane_id=w1:p2\n' "$id" "$sm" "$sm" > "$prim/state/$id.meta"
+  printf '{"next":3,"workspaces":[{"workspace_id":"w1","label":"existing"}],"tabs":[{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2","label":"fm-%s"}],"agent_status":{"w1:p2":"working"}}\n' "$id" > "$base/fake/state.json"
 
   # Keep secondmate launches isolated from the invoking user home.
   mkdir -p "$base/user-home"
@@ -395,13 +355,13 @@ test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" HOME="$base/user-home" \
     FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
     FM_PROJECTS_OVERRIDE="$prim/projects" FM_CONFIG_OVERRIDE="$prim/config" \
-    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_BACKEND=herdr HERDR_ENV='' HERDR_PANE_ID='' HERDR_SESSION=fixture \
     FM_FAKE_DUPLICATE_WINDOW="fm-$id" FM_FAKE_LAUNCH_LOG="$log" \
     PATH="$fake:$PATH" "$SPAWN" "$id" "$sm" --secondmate --harness codex 2>&1)
   status=$?
 
-  [ "$status" -ne 0 ] || fail "duplicate secondmate spawn should be refused"
-  assert_contains "$out" "already exists" "duplicate secondmate spawn should report the existing endpoint"
+  [ "$status" -ne 0 ] || fail "duplicate secondmate spawn should be refused: $out"
+  assert_contains "$out" "refusing duplicate launch" "duplicate secondmate spawn should report the existing endpoint"
   [ ! -e "$sm/config/trace-context" ] \
     || fail "duplicate preflight must not converge trace-context into the secondmate home"
   pass "duplicate secondmate preflight leaves trace-context unchanged"

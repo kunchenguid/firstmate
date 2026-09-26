@@ -31,7 +31,7 @@ pi -p -e .pi/extensions/fm-primary-turnend-guard.ts \
 
 Observed result: `PI_SMOKE_DONE`, with one session-start execution.
 That cold positional-prompt check established eventual custom-message delivery, but it did not submit immediately after `/new` while native digest generation was still running, so its earlier race-free inference is superseded by the provider-prerequisite evidence below.
-[`runtime-backends.md`](runtime-backends.md#tmux) owns the shared-ancestry evidence and authoritative selection-marker boundary.
+[`runtime-backends.md`](runtime-backends.md#harness-detection-precedence) owns the shared-ancestry evidence and authoritative selection-marker boundary.
 
 ### Run-tier source vocabulary and context-reset injection
 
@@ -92,22 +92,14 @@ The portable public-event regression in `tests/fm-sessionstart-nudge.test.sh` se
 
 ### Post-start instruction refresh
 
-The isolated real-Pi instruction-refresh regression ran on 2026-08-11 with Pi 0.84.0.
-It used a scratch `FM_HOME`, a private tmux socket, and a disposable Firstmate checkout.
-The historical `origin/main` implementation first reproduced the stale original marker after a real compaction.
-The current implementation then recorded `source=startup`, changed and committed the lab's `AGENTS.md`, compacted the same real Pi session, and answered with the replacement marker.
-The fixed run also proved that the true-start baseline remained different from the updated file after compaction.
+The current real-Pi instruction-refresh guard uses a scratch `FM_HOME`, a named Herdr lab, and a disposable Firstmate checkout.
+It reads completed native assistant messages rather than prompt echoes before compacting, so the tested long answer has actually left the model context.
+On 2026-09-25 both the pruning candidate and its unchanged baseline received the updated instruction before the post-compaction question but answered with the old marker.
+There is therefore no current passing claim that Pi refreshes a changed `AGENTS.md` after compaction; the equal baseline and candidate result also gives no evidence that this pruning caused the limitation.
 
 ```sh
 FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E=1 \
-FM_SESSIONSTART_INSTRUCTION_REFRESH_REF=origin/main \
-FM_SESSIONSTART_INSTRUCTION_REFRESH_EXPECT=stale \
 tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
-# ok - Pi 0.84.0 reproduces stale AGENTS.md after a real compact
-
-FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E=1 \
-tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
-# ok - Pi 0.84.0 re-injects updated AGENTS.md after a real compact in an isolated session
 ```
 
 This is live coverage only for Pi compaction.

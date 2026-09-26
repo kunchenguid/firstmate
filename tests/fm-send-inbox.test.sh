@@ -4,7 +4,7 @@
 # An ordinary text steer to a task recorded in this home no longer types its
 # payload: fm-send appends a durable sequenced record to state/<id>.inbox/ and
 # rings one constant self-describing doorbell line, best-effort. These tests
-# drive the real fm-send executable over a stubbed tmux and pin:
+# drive the real fm-send executable over a stubbed Herdr CLI and pin:
 #   1. The payload is durably recorded and never typed; only the doorbell
 #      crosses the terminal, and the send exits 0 at enqueue.
 #   2. Multi-line steers are legal and round-trip byte-exact.
@@ -30,8 +30,8 @@
 # shellcheck disable=SC2016
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-marker-lib.sh"
 
@@ -40,46 +40,13 @@ SEND="$ROOT/bin/fm-send.sh"
 TMP_ROOT=$(fm_test_tmproot fm-send-inbox)
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 
-# Stub tmux: logs literal typed text to FM_SEND_LOG and lets the submit and
-# composer paths reach clean verdicts. FM_FAKE_TMUX_COMPOSER=pending renders a
-# composer visibly holding text; FM_FAKE_TMUX_SEND_FAIL=1 fails send-keys.
+# Stub Herdr CLI: logs literal typed text to FM_SEND_LOG and lets the submit and
+# composer paths reach clean verdicts. FM_FAKE_HERDR_COMPOSER=pending renders a
+# composer visibly holding text; FM_FAKE_HERDR_SEND_FAIL=1 fails pane sends.
 make_stubs() { # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
-  cat >"$fb/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "${1:-}" in
-  send-keys)
-    [ "${FM_FAKE_TMUX_SEND_FAIL:-0}" = 1 ] && exit 1
-    shift
-    literal=0
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        -t) shift 2 ;;
-        -l) literal=1; shift ;;
-        *) break ;;
-      esac
-    done
-    if [ "$literal" = 1 ]; then
-      printf '%s\n' "${1:-}" >> "$FM_SEND_LOG"
-    fi
-    exit 0 ;;
-  display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
-    printf 'fakepane\n'; exit 0 ;;
-  capture-pane)
-    if [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
-      printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'
-    else
-      printf '╭────╮\n│    │\n╰────╯\n'
-    fi
-    exit 0 ;;
-  list-windows) printf 'fm-t1\n'; exit 0 ;;
-esac
-exit 0
-SH
-  chmod +x "$fb/tmux"
+  fm_test_fake_herdr_send "$fb"
   cat >"$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -93,7 +60,7 @@ setup_case() { # <name> [harness] -> echoes case dir with home/state + t1 meta
   dir="$TMP_ROOT/$name"
   mkdir -p "$dir/home/state"
   make_stubs "$dir" >/dev/null
-  fm_write_meta "$dir/home/state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=$harness"
+  fm_write_meta "$dir/home/state/t1.meta" "window=sess:w1:p-t1" "backend=herdr" "kind=ship" "harness=$harness"
   printf '%s\n' "$dir"
 }
 
@@ -176,7 +143,7 @@ test_pending_composer_skips_ring_advisorily() {
   local dir err rc
   dir=$(setup_case pendingskip)
   err="$dir/send.err"
-  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=pending -- t1 "steer past a stuck composer"
+  run_send "$dir" "$err" FM_FAKE_HERDR_COMPOSER=pending -- t1 "steer past a stuck composer"
   rc=$?
   expect_code 0 "$rc" "a skipped ring is still a sent steer"
   [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "the steer was not recorded"
@@ -190,7 +157,7 @@ test_failed_ring_is_still_sent() {
   local dir err rc
   dir=$(setup_case ringfail)
   err="$dir/send.err"
-  run_send "$dir" "$err" FM_FAKE_TMUX_SEND_FAIL=1 -- t1 "steer into a dead pane"
+  run_send "$dir" "$err" FM_FAKE_HERDR_SEND_FAIL=1 -- t1 "steer into a dead pane"
   rc=$?
   expect_code 0 "$rc" "a failed doorbell must not fail the send"
   [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "the steer was not recorded"
@@ -229,7 +196,7 @@ test_explicit_target_stays_typed() {
   local dir err
   dir=$(setup_case explicit)
   err="$dir/send.err"
-  run_send "$dir" "$err" -- sess:win "hello there" || fail "an explicit-target send should succeed"
+  run_send "$dir" "$err" -- sess:w1:p-win "hello there" || fail "an explicit-target send should succeed"
   assert_contains "$(cat "$dir/send.log")" "hello there" \
     "an explicit backend target should receive the literal text"
   [ -z "$(find "$dir/home/state" -maxdepth 1 -name '*.inbox' -print 2>/dev/null)" ] ||
@@ -250,7 +217,8 @@ test_secondmate_marker_and_enqueue_delivery() {
   local dir err body corr pr_rec delivered
   dir=$(setup_case secondmate)
   err="$dir/send.err"
-  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-domain"
+  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:w1:p-domain"
+  printf 'backend=herdr\n' >> "$dir/home/state/domain.meta"
   run_send "$dir" "$err" -- fm-domain "please summarize fleet health" ||
     fail "a secondmate steer should succeed"
   body=$(record_body _ "$dir/home/state/domain.inbox/001.msg")
@@ -274,7 +242,8 @@ test_post_enqueue_bookkeeping_failure_is_not_retryable() {
   local dir err rc rec body
   dir=$(setup_case bookkeeping-failure)
   err="$dir/send.err"
-  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-domain"
+  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:w1:p-domain"
+  printf 'backend=herdr\n' >> "$dir/home/state/domain.meta"
   cat >"$dir/fakebin/mv" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -353,7 +322,8 @@ test_unwritable_inbox_fails_loudly() {
   local dir err rc
   dir=$(setup_case unwritable)
   err="$dir/send.err"
-  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-domain"
+  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:w1:p-domain"
+  printf 'backend=herdr\n' >> "$dir/home/state/domain.meta"
   : >"$dir/home/state/domain.inbox" # a FILE where the inbox dir must go
   run_send "$dir" "$err" -- fm-domain "this cannot be recorded"
   rc=$?
@@ -373,7 +343,8 @@ test_empty_message_refused() {
   # parent could never see resolved.
   dir=$(setup_case empty-marked)
   err="$dir/send.err"
-  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-domain"
+  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:w1:p-domain"
+  printf 'backend=herdr\n' >> "$dir/home/state/domain.meta"
   run_send "$dir" "$err" -- fm-domain
   rc=$?
   [ "$rc" -ne 0 ] || fail "an empty secondmate steer should refuse"

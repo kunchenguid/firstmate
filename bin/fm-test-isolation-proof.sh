@@ -8,9 +8,9 @@
 # by bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
 #
 # It does NOT compose production CI shard membership; fm-test-run.sh owns that
-# partition. The default portable pool excludes real Herdr, real default-server
-# tmux, watcher lock races, AFK, live harnesses, and GUI backends. A named family
-# pool instead runs that family's exact membership and inherits its prerequisites.
+# partition. The default portable pool excludes real Herdr, watcher lock races,
+# AFK, live harnesses, and other stateful surfaces. A named family pool instead
+# runs that family's exact membership and inherits its prerequisites.
 #
 # Usage:
 #   fm-test-isolation-proof.sh [--pool <name>] [--jobs N] [--json path] [--list]
@@ -100,9 +100,6 @@ exclusion_reason() {
     fm-test-isolation-proof.test.sh)
       printf '%s\n' 'isolation-proof harness contract itself; must not re-enter concurrent matrix'
       ;;
-    fm-backend-tmux-smoke.test.sh)
-      printf '%s\n' 'real tmux on a private socket; keep exclusive of default-server contention class'
-      ;;
     fm-backend.test.sh)
       printf '%s\n' 'old-vs-new main checkout diff fixture; gray-zone concurrent git/worktree cost'
       ;;
@@ -142,9 +139,6 @@ exclusion_reason() {
     fm-backend-herdr-workspace-per-home-e2e.test.sh|fm-herdr-session-cleanup-e2e.test.sh)
       printf '%s\n' 'real Herdr-gated; Herdr lane is a later phase'
       ;;
-    fm-backend-cmux.test.sh|fm-backend-cmux-smoke.test.sh)
-      printf '%s\n' 'cmux GUI backend; never parallel with another cmux mutator'
-      ;;
     fm-backend-zellij.test.sh|fm-backend-zellij-smoke.test.sh)
       printf '%s\n' 'zellij optional backend; keep out of pure parallel pool'
       ;;
@@ -181,7 +175,6 @@ tests/fm-send-strict.test.sh
 tests/fm-spawn-batch.test.sh
 tests/fm-supervision-instructions.test.sh
 tests/fm-test-run.test.sh
-tests/fm-tmux-submit-busy.test.sh
 tests/fm-transition-lib.test.sh
 tests/fm-x-mode.test.sh
 EOF
@@ -197,7 +190,6 @@ list_exclusions_for_report() {
     fi
   done <<'EOF'
 fm-test-isolation-proof.test.sh
-fm-backend-tmux-smoke.test.sh
 fm-backend.test.sh
 fm-spawn-dispatch-profile.test.sh
 fm-spawn-worktree-settle.test.sh
@@ -208,7 +200,6 @@ fm-watcher-lock.test.sh
 fm-wake-queue.test.sh
 fm-afk-inject-e2e.test.sh
 fm-backend-herdr-smoke.test.sh
-fm-backend-cmux-smoke.test.sh
 fm-pi-primary-live-e2e.test.sh
 fm-quota-array-dispatch-live-e2e.test.sh
 EOF

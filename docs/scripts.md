@@ -63,14 +63,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-cloud-research-aime.sh` | Probe, dispatch, adopt, reconcile, interrupt, retire, or explicitly sandbox-verify an AIME research task |
 | `fm-aime-cloud-lib.sh`   | Shared AIME configuration, legacy-compatible task state, metadata, artifact, and error-classification primitives |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
-| `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer shapes, capability-aware screen classification, and verdicts |
-| `fm-agent-process-lib.sh` | Backend-neutral harness-process name classifier shared by the tmux and herdr adapters |
-| `backends/tmux.sh`       | Verified tmux session-provider adapter                                               |
+| `fm-agent-process-lib.sh` | Backend-neutral harness-process name classifier used by the Herdr adapter |
 | `backends/herdr.sh`      | Herdr session-provider adapter with its own required CI lane                         |
-| `backends/zellij.sh`     | Experimental zellij session-provider adapter                                         |
-| `backends/orca.sh`       | Experimental Orca backend adapter owning both worktree and terminal                  |
-| `backends/cmux.sh`       | Experimental cmux session-provider adapter                                           |
 | `fm-config-push.sh`      | Push declared inherited local material to live local or remote secondmates and send the placement-specific config reread when changed |
 | `fm-project-mode.sh`     | Resolve a project's registered delivery posture from `data/projects.md` for fleet sync and home seeding |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` project's local default branch after approval            |
@@ -130,7 +125,6 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-busy-event.sh`       | Public writer and recovery entrypoint for semantic busy state; arms, applies, retires, and restores only a provenance-verified original generation |
 | `fm-busy-recover.sh`     | Lifecycle-locked reconciliation behind `fm-busy-event.sh recover`; never invoke it as a separate recovery interface |
 | `fm-busy-transcript.py`  | Bind and classify an eligible non-secondmate Codex or TraeX transcript, and verify live-process provenance for bounded recovery |
-| `fm-tmux-lib.sh`         | Shared tmux pane primitives for composer capture, verified submit, and the submit-time busy check |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
 | `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
 | `fm-check-unregister.sh` | Retire a custom watcher check and its trust binding by validated task id            |
@@ -159,11 +153,4 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-public-followup.sh`  | Reconcile and deliver typed public commitments, then rechain or explicitly retire their retained loops |
 | `fm-public-followup-emit.sh` | Report one typed terminal work result into the home that owes the public reply, or stage it when that home is on another machine |
 | `fm-public-followup-collect.sh` | Read and retire the typed terminal results a remote work home staged for the home that owes the public reply |
-| `fm-inbox.sh`            | The captain's out-of-band capture surface: queue a note, dictate one, read status, ask a side question |
-| `fm-mail.sh`             | General-purpose mail plane: read unseen IMAP mail, send one SMTP message, or surface new mail as a `check` wake via `poll` (configuration in the home's gitignored `.env`) |
-| `fm-mail.py`             | The IMAP/SMTP engine behind `fm-mail.sh` |
-| `fm-mail-check.sh`       | Standing received-mail poll: `arm` registers a watcher check that runs `fm-mail.sh poll` on the watcher cadence (new mail still wakes via the poll; the check's own line also wakes unless the poll is a proven no-op), `disarm` removes it |
-| `fm-voice-relay.py`      | Hold the spoken conversation on this host, answer from the records, and hand real work to `fm-inbox.sh` ([voice-relay.md](voice-relay.md)) |
-| `fm-voice-client.py`     | The laptop end of the spoken interface: capture, playback, and turn timing over SSH; audio devices unverified |
-| `fm_voice_frame.py`      | The wire format both machines share, copied to the laptop beside the client          |
-| `fm_voice_records.py`    | What a spoken answer may read, and the handover that queues real work                |
+| `fm-inbox.sh`            | The captain's out-of-band text surface: queue a note, read status, ask a side question |

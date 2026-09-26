@@ -4483,6 +4483,47 @@ test_send_text_submit_unknown_on_composer_capture_failure() {
   pass "fm_backend_herdr_send_text_submit: an unreadable composer stops Enter retries after native status stays idle"
 }
 
+# Retained safety cases from the retired terminal submit suite. These drive
+# the real Herdr submit API with malformed, uncertain and wrapped captures.
+test_send_text_submit_uncertain_capture_never_becomes_delivery() {
+  local scenario dir log resp fb out expected enter_count
+  for scenario in unbounded failed-baseline ambiguous wrapped placeholder; do
+    dir="$TMP_ROOT/submit-migrated-$scenario"; mkdir -p "$dir/responses"
+    log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+    printf 'ready\n' > "$resp/3.out"
+    expected=unknown
+    case "$scenario" in
+      unbounded|failed-baseline)
+        printf '│ > unbounded\nthinking... esc to interrupt\n' > "$resp/5.out"
+        [ "$scenario" != failed-baseline ] || printf '1\n' > "$resp/3.exit" ;;
+      ambiguous)
+        printf '╭────────────╮\n│ > fix  │\n╰────────────╯\n' > "$resp/5.out"
+        cp "$resp/5.out" "$resp/7.out"
+        printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/8.out"
+        expected=pending-unproven ;;
+      wrapped)
+        printf '╭──────────────╮\n│ >            │\n│ second line  │\n╰──────────────╯\n' > "$resp/5.out"
+        printf '╭────╮\n│    │\n╰────╯\n' > "$resp/7.out"
+        expected=empty ;;
+      placeholder)
+        printf '  ❯ /compact [instructions]\n' > "$resp/5.out"
+        printf '  ❯\n' > "$resp/7.out"
+        expected=empty ;;
+    esac
+    fb=$(make_herdr_fakebin "$dir")
+    out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 fix 2 0.01 0.01' "$ROOT")
+    [ "$out" = "$expected" ] || fail "$scenario must preserve its proof boundary: expected $expected, got $out"
+    enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+    case "$scenario" in
+      unbounded|failed-baseline) [ "$enter_count" = 1 ] || fail 'unknown capture retried Enter' ;;
+      *) [ "$enter_count" = 2 ] || fail "$scenario failed to exercise the retry" ;;
+    esac
+  done
+  pass 'Herdr submit keeps unknown/unproven captures unconfirmed and retries wrapped/placeholder text'
+}
+
 # --- fm-backend.sh dispatch wiring -------------------------------------------
 
 test_dispatch_routes_herdr_backend() {
@@ -4495,7 +4536,7 @@ test_dispatch_busy_state_unknown_for_tmux() {
   . "$ROOT/bin/fm-backend.sh"
   [ "$(fm_backend_busy_state tmux 'sess:win')" = unknown ] \
     || fail "fm_backend_busy_state should report unknown for tmux (no native agent-state primitive; watcher falls back to regex)"
-  pass "fm_backend_busy_state: tmux (no native primitive) always reports unknown, preserving the P1 regex-only path"
+  pass "fm_backend_busy_state: tmux (no native primitive) always reports unknown, preserving uncertainty for retired identities"
 }
 
 test_dispatch_composer_state_routes_by_backend() {
@@ -4510,18 +4551,9 @@ test_dispatch_composer_state_routes_by_backend() {
   (
     # shellcheck source=bin/fm-backend.sh
     . "$ROOT/bin/fm-backend.sh"
-    _FM_BACKEND_TMUX_SOURCED=1
     _FM_BACKEND_HERDR_SOURCED=1
-    _FM_BACKEND_ORCA_SOURCED=1
-    _FM_BACKEND_ZELLIJ_SOURCED=1
-    fm_tmux_composer_state() { [ "$1" = "sess:win" ] || fail "tmux composer_state got wrong target: $1"; printf 'pending'; }
     fm_backend_herdr_composer_state() { [ "$1" = "default:w1:p2" ] || fail "herdr composer_state got wrong target: $1"; printf 'empty'; }
-    fm_backend_orca_composer_state() { [ "$1" = "term-1" ] || fail "orca composer_state got wrong target: $1"; printf 'empty'; }
-    fm_backend_zellij_composer_state() { [ "$1" = "sess:7" ] || fail "zellij composer_state got wrong target: $1"; printf 'empty'; }
-    [ "$(fm_backend_composer_state tmux sess:win)" = pending ] || fail "composer_state did not dispatch to the tmux classifier"
     [ "$(fm_backend_composer_state herdr default:w1:p2)" = empty ] || fail "composer_state did not dispatch to the herdr classifier"
-    [ "$(fm_backend_composer_state orca term-1)" = empty ] || fail "composer_state did not dispatch to the orca classifier"
-    [ "$(fm_backend_composer_state zellij sess:7)" = empty ] || fail "composer_state did not dispatch to the zellij classifier"
     [ "$(fm_backend_composer_state bogus x)" = unknown ] || fail "composer_state should report unknown for an unrecognized backend"
   ) || fail "composer_state dispatch subshell failed"
   pass "fm_backend_composer_state dispatches every backend to its named thin classifier, unknown for unrecognized backends"
@@ -5267,6 +5299,7 @@ test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure
 test_send_text_submit_unknown_on_composer_capture_failure
+test_send_text_submit_uncertain_capture_never_becomes_delivery
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend

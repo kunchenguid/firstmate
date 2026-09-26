@@ -35,7 +35,7 @@ if mode.name == "duplicate":
     data["surfaces"].append(dict(data["surfaces"][0]))
 elif mode.name == "bad-setup-audience":
     for entry in data["surfaces"]:
-        if entry["path"] == "docs/tmux-backend.md":
+        if entry["path"] == "docs/herdr-backend.md":
             entry["audience"] = "maintainer-verification"
             break
 elif mode.name == "missing-owner-pointer":
@@ -70,7 +70,7 @@ test_duplicate_and_setup_classification_fail() {
   mutate_inventory "$INVENTORY" "$shrink_scope" shrink-scope
   run_expect_failure "surfaces classified more than once" \
     "$CHECK" --inventory "$duplicate"
-  run_expect_failure "README setup target docs/tmux-backend.md has disallowed audience" \
+  run_expect_failure "README setup target docs/herdr-backend.md has disallowed audience" \
     "$CHECK" --inventory "$bad_setup"
   run_expect_failure "scope.trackedPatterns must match the fixed maintained-prose scope" \
     "$CHECK" --inventory "$shrink_scope"

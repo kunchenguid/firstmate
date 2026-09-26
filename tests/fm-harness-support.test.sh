@@ -12,7 +12,7 @@ for tool in herdr tmux treehouse; do
   printf '#!/bin/sh\nexit 99\n' > "$TMP_ROOT/fakebin/$tool"
   chmod +x "$TMP_ROOT/fakebin/$tool"
 done
-export PATH="$TMP_ROOT/fakebin:$PATH" FM_BACKEND=tmux
+export PATH="$TMP_ROOT/fakebin:$PATH" FM_BACKEND=herdr
 HARNESS="$ROOT/bin/fm-harness.sh"
 REMOVED='claude opencode grok kimi cursor gemini muse rovo omp agy pi-signed'
 for harness in pi codex traex; do
@@ -48,7 +48,7 @@ pass 'ordinary shell wrapping cannot re-enable an excluded harness'
 
 rm -f "$TMP_ROOT/home/config/crew-harness" "$TMP_ROOT/home/config/secondmate-harness"
 for harness in $REMOVED; do
-  printf 'harness=%s\nkind=ship\nworktree=%s\nwindow=isolated:fm-history\nendpoint_task_id=history\n' "$harness" "$TMP_ROOT/project" > "$TMP_ROOT/home/state/history.meta"
+  printf 'backend=herdr\nharness=%s\nkind=ship\nworktree=%s\nwindow=isolated:w1:p-history\nendpoint_task_id=history\n' "$harness" "$TMP_ROOT/project" > "$TMP_ROOT/home/state/history.meta"
   printf 'uncommitted historical work\n' > "$TMP_ROOT/project/work.txt"
   cp "$TMP_ROOT/home/state/history.meta" "$TMP_ROOT/before.meta"
   out=$(FM_HOME="$TMP_ROOT/home" "$ROOT/bin/fm-crew-state.sh" history 2>&1); rc=$?

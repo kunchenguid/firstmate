@@ -29,18 +29,23 @@ test_git_config_isolation() (
   cp "$ROOT/tests/git-config-helpers.sh" "$dir/runner/tests/"
   fakebin=$(fm_fakebin "$dir/standalone")
   fm_fake_exit0 "$fakebin" pi
-  cat > "$fakebin/tmux" <<'SH'
+  fm_fake_exit0 "$fakebin" herdr
+  cat > "$fakebin/lab-helper" <<'SH'
 #!/usr/bin/env bash
-set -eu
+case "$1" in
+  name) printf 'fm-lab-fixture-git-isolation\n'; exit ;;
+  provision|teardown) exit ;;
+esac
 while [ "$#" -gt 0 ]; do
-  if [ "$1" = -c ]; then
+  if [ "$1" = --cwd ]; then
     git -C "$2" log -1 --format=%s > "${FM_TEST_STANDALONE_COMMIT:?}"
     exit 1
   fi
   shift
 done
+exit 1
 SH
-  chmod +x "$fakebin/tmux"
+  chmod +x "$fakebin/lab-helper"
   cat > "$dir/runner/tests/fm-test-run.test.sh" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -132,12 +137,12 @@ SH
   rc=0
   FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E=1 FM_SESSIONSTART_INSTRUCTION_REFRESH_REF=HEAD \
     FM_SESSIONSTART_INSTRUCTION_REFRESH_EXPECT=updated \
-    FM_TEST_STANDALONE_COMMIT="$dir/global-standalone-commit" PATH="$fakebin:$PATH" \
+    HERDR_LAB_HELPER="$fakebin/lab-helper" FM_TEST_STANDALONE_COMMIT="$dir/global-standalone-commit" PATH="$fakebin:$PATH" \
     bash "$ROOT/tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh" \
     > "$dir/standalone.log" 2>&1 || rc=$?
-  [ "$rc" = 1 ] || fail "standalone fixture did not stop at the tmux launch"
+  [ "$rc" = 1 ] || fail "standalone fixture did not stop at the Herdr launch"
   assert_grep 'could not start isolated Pi session' "$dir/standalone.log" \
-    "standalone fixture failed before the tmux launch: $(cat "$dir/standalone.log")"
+    "standalone fixture failed before the Herdr launch: $(cat "$dir/standalone.log")"
   [ "$(cat "$dir/global-standalone-commit")" = 'test: initial instruction contract' ] \
     || fail "standalone fixture did not create its initial commit"
   bash "$ROOT/tests/fm-gitignore-config.test.sh" > "$dir/gitignore.log" 2>&1 \
@@ -225,24 +230,22 @@ test_fake_gh_and_gh_axi() {
   pass "fake gh authenticates and fake gh-axi reports the shared version"
 }
 
-test_spawn_tmux_and_fakebin() {
-  local fakebin out log
+test_spawn_herdr_and_fakebin() {
+  local fakebin out log pane
   fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn" gh-axi)
   log="$TMP_ROOT/spawn/launch.log"
-  : > "$log"
-  out=$(FM_FAKE_PANE_PATH=/tmp/wt "$fakebin/tmux" display-message -p '#{pane_current_path}')
-  [ "$out" = /tmp/wt ] || fail "spawn tmux pane path should be FM_FAKE_PANE_PATH, got '$out'"
-  out=$(unset FM_FAKE_PANE_PATH; "$fakebin/tmux" display-message -p '#{pane_current_path}')
-  [ -z "$out" ] || fail "spawn tmux pane path should default to empty, got '$out'"
-  out=$("$fakebin/tmux" display-message -p '#S')
-  [ "$out" = firstmate ] || fail "spawn tmux session name should be firstmate, got '$out'"
-  FM_FAKE_LAUNCH_LOG="$log" "$fakebin/tmux" send-keys -t @w -l 'codex --yolo'
-  assert_grep 'codex --yolo' "$log" "send-keys -l payload was not logged"
-  [ -x "$fakebin/treehouse" ] || fail "spawn fakebin should include treehouse"
-  [ -x "$fakebin/gh-axi" ] || fail "extra exit-0 tools should land in the spawn fakebin"
+  out=$("$fakebin/herdr" workspace create --label test --cwd /tmp/wt)
+  pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')
+  out=$(FM_FAKE_PANE_PATH=/tmp/wt "$fakebin/herdr" pane get "$pane" | jq -r '.result.pane.foreground_cwd')
+  [ "$out" = /tmp/wt ] || fail 'spawn fixture did not report its configured cwd'
+  out=$(unset FM_FAKE_PANE_PATH; "$fakebin/herdr" pane get "$pane" | jq -r '.result.pane.foreground_cwd')
+  [ -z "$out" ] || fail 'spawn fixture cwd must default to empty'
+  FM_FAKE_LAUNCH_LOG="$log" "$fakebin/herdr" pane send-text "$pane" 'codex --yolo'
+  assert_grep 'codex --yolo' "$log" 'literal payload was not logged'
+  [ -x "$fakebin/treehouse" ] && [ -x "$fakebin/gh-axi" ] || fail 'extra spawn tools missing'
   "$fakebin/treehouse" get
-  expect_code 0 $? "fake treehouse should exit 0"
-  pass "spawn fakebin answers pane path, logs -l payloads, and installs extra tools"
+  expect_code 0 $? 'fake treehouse should exit 0'
+  pass 'Herdr spawn fixture reports structured identity/cwd and logs typed bytes'
 }
 
 test_send_stubs_and_ssh() {
@@ -252,14 +255,12 @@ test_send_stubs_and_ssh() {
   ssh_log="$TMP_ROOT/send/ssh.log"
   : > "$log"
   fm_test_fake_ssh "$fakebin"
-  FM_SEND_LOG="$log" "$fakebin/tmux" send-keys -t sess:w -l 'hello steer'
+  FM_SEND_LOG="$log" "$fakebin/herdr" pane send-text w1:p1 'hello steer'
   assert_grep 'hello steer' "$log" "send stubs did not log the -l payload"
-  out=$("$fakebin/tmux" display-message -p '#{cursor_y}')
-  [ "$out" = 1 ] || fail "send tmux cursor_y should be 1, got '$out'"
-  out=$("$fakebin/tmux" capture-pane -p)
+  out=$("$fakebin/herdr" pane read w1:p1)
   case "$out" in
     *'╭────╮'*) ;;
-    *) fail "send tmux capture-pane should render an empty composer, got '$out'" ;;
+    *) fail "Herdr pane read should render an empty composer, got '$out'" ;;
   esac
   printf 'ignored\n' | FM_SSH_LOG="$ssh_log" "$fakebin/fake-ssh" host -- cmd
   assert_grep 'host -- cmd' "$ssh_log" "fake ssh did not record argv"
@@ -284,6 +285,6 @@ test_touch_epoch_preserves_repeated_dst_hour
 test_no_mistakes_version_constant
 test_no_mistakes_init_doctor_markers
 test_fake_gh_and_gh_axi
-test_spawn_tmux_and_fakebin
+test_spawn_herdr_and_fakebin
 test_send_stubs_and_ssh
 test_spawn_home_layout

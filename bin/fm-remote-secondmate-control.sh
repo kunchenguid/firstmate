@@ -84,9 +84,15 @@ validate_home() { # <id> [allow-absent]
 meta_path() { printf '%s/%s.meta\n' "$CONTROL_STATE" "$1"; }
 
 remote_endpoint_load() {
-  local id=$1 herdr_session
+  local id=$1 herdr_session recorded_backend
   REMOTE_ENDPOINT_ERROR=
   REMOTE_ENDPOINT_META=$(meta_path "$id")
+  recorded_backend=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" backend 2>/dev/null || true)
+  case "$recorded_backend" in
+    tmux|cmux|zellij|orca)
+      REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint is recorded on backend '$recorded_backend', expected 'herdr'; refusing access until it is explicitly migrated"
+      return 1 ;;
+  esac
   if ! fm_backend_validate_task_endpoint "$REMOTE_ENDPOINT_META" "$id" 2>/dev/null; then
     REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint metadata is invalid; refusing access until it is explicitly migrated"
     return 1

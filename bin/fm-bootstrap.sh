@@ -676,12 +676,11 @@ report_relaunch() {  # <id> <cause> <where>
 
 secondmate_liveness_sweep() {
   # Idempotent secondmate liveness guarantee - SESSION START ONLY. The detailed
-  # state machine and its only recovery-authorizing states are owned by
-  # fm_backend_agent_state. A missing tmux pane is not enough: tmux must prove
-  # the window or session absent. This preserves duplicate prevention for
-  # existing ambiguous processes and every transiently unreadable target while
-  # adding the missing-session path the original bare-shell and Herdr-husk sweep
-  # lacked.
+# state machine and its only recovery-authorizing states are owned by
+  # fm_backend_agent_state. A failed Herdr read is not enough: the classifier
+  # must prove the pane or named server absent. This preserves duplicate
+  # prevention for existing ambiguous processes and every transiently unreadable
+  # target while retaining the explicit missing-session recovery path.
   # A meta with no window remains owned by secondmate-provisioning recovery.
   # Secondmate homes never contain kind=secondmate meta, so this is naturally a
   # primary-only no-op there. Mid-session liveness remains explicitly out of
@@ -865,8 +864,7 @@ secondmate_handoff_detect() {
 
 install_cmd() {
   case "$1" in
-    tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
-    cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
+    node|git|gh|curl|jq) echo "brew install $1  # or the platform's package manager" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
@@ -893,8 +891,8 @@ missing_tool_diagnostic() {
 
 # Required-tool detection follows the RESOLVED backend, not a one-size default:
 # a universal toolchain every home needs plus the backend-specific delta owned by
-# fm_backend_required_tools (bin/fm-backend.sh). So a herdr/zellij/cmux home is
-# never told tmux is missing, and only orca drops treehouse. A backend value with
+# fm_backend_required_tools (bin/fm-backend.sh). Retired configuration refuses
+# instead of installing an old terminal. A backend value with
 # no verified dependency set is reported before the universal checks continue.
 COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi tasks-axi quota-axi"
 BACKEND=$(fm_backend_name)
@@ -1443,8 +1441,7 @@ detect_local_tools() {
     command -v "$t" >/dev/null || missing_tool_diagnostic "$t"
   done
   # The treehouse lease-support upgrade check is only relevant when the resolved
-  # backend actually requires treehouse (every backend except orca, which owns its
-  # own worktrees); an orca home must not be told to upgrade a provider it never uses.
+  # backend requires Treehouse; retired selectors must refuse before setup.
   if fm_backend_list_contains "$TOOLS" treehouse \
     && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
     echo "MISSING: treehouse (install: $(install_cmd treehouse))"

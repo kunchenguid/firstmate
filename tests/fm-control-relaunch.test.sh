@@ -47,82 +47,63 @@ relaunch_cleanup() {
 }
 trap relaunch_cleanup EXIT
 
-# The same lifecycle-modelling tmux stub as tests/fm-control.test.sh: the
+# The same lifecycle-modelling Herdr stub as tests/fm-control.test.sh: the
 # harness's exit command stops the agent, and a launch-brief literal starts the
 # harness named in `becomes`.
-make_tmux_stub() {  # <dir>
+make_herdr_stub() {  # <dir>
   local fb="$1/fakebin"
   mkdir -p "$fb"
-  cat > "$fb/tmux" <<'SH'
+  cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
 D=$FM_FAKE_DIR
-case "${1:-}" in
-  send-keys)
-    shift
-    literal=0
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        -t) shift 2 ;;
-        -l) literal=1; shift ;;
-        *) break ;;
-      esac
-    done
-    payload=${1:-}
-    if [ "$literal" = 1 ]; then
-      printf '%s\n' "$payload" >> "$D/literal"
-      case "$payload" in
-        /exit|/quit)
-          printf 'zsh' > "$D/command"
-          [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
-          ;;
-        *'encode launch-brief'*)
-          cat "$D/becomes" > "$D/command"
-          [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
-          ;;
-      esac
-    else
-      printf '%s\n' "$payload" >> "$D/keys"
-      case "$payload" in
-        'export GOTMPDIR='*)
-          if [ -n "${FM_FAKE_TRACE_PREPARE:-}" ]; then
-            : > "$FM_FAKE_TRACE_PREPARE"
-            while [ ! -e "$FM_FAKE_TRACE_RELEASE" ]; do /bin/sleep 0.01; done
-          fi
-          ;;
-        'export TRACEPARENT='*)
-          [ -z "${FM_FAKE_TRACE_EXPORTED:-}" ] || : > "$FM_FAKE_TRACE_EXPORTED"
-          ;;
-      esac
+case "$1 ${2:-}" in
+  'status --json') echo '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
+  'pane send-text'|'pane run')
+    payload=${4:-}
+    printf '%s\n' "$payload" >> "$D/literal"
+    if [ -z "${FM_FAKE_NEVER_DIES:-}" ] && { [ "$payload" = /exit ] || [ "$payload" = /quit ]; }; then
+      printf zsh > "$D/command"
+      [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
     fi
-    exit 0 ;;
-  display-message)
-    for a in "$@"; do
-      case "$a" in
-        *cursor_y*) printf '1\n'; exit 0 ;;
-        *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
-        *pane_current_path*)
-          if [ -n "${FM_FAKE_CWD_RACE_READY:-}" ]; then
-            : > "$FM_FAKE_CWD_RACE_READY"
-            /bin/sleep 1
-          fi
-          cat "$D/cwd"; printf '\n'; exit 0 ;;
-      esac
-    done
-    printf 'fakepane\n'; exit 0 ;;
-  capture-pane)
+    case "$payload" in
+      *'encode launch-brief'*) cat "$D/becomes" > "$D/command"; [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1 ;;
+      'export GOTMPDIR='*)
+        if [ -n "${FM_FAKE_TRACE_PREPARE:-}" ]; then
+          : > "$FM_FAKE_TRACE_PREPARE"
+          while [ ! -e "$FM_FAKE_TRACE_RELEASE" ]; do /bin/sleep 0.01; done
+        fi ;;
+      'export TRACEPARENT='*) [ -z "${FM_FAKE_TRACE_EXPORTED:-}" ] || : > "$FM_FAKE_TRACE_EXPORTED" ;;
+    esac ;;
+  'pane send-keys')
+    payload=${4:-}
+    case "$payload" in esc|escape) payload=Escape ;; enter) payload=Enter ;; ctrl+c) payload=C-c ;; ctrl+u) payload=C-u ;; esac
+    printf '%s\n' "$payload" >> "$D/keys"
+    if [ -n "${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" ] && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
+      printf zsh > "$D/command"
+    fi ;;
+  'pane get')
+    if [ -n "${FM_FAKE_CWD_RACE_READY:-}" ]; then
+      : > "$FM_FAKE_CWD_RACE_READY"; /bin/sleep 1
+    fi
+    if [ ! -s "$D/windows" ]; then echo '{"error":{"code":"pane_not_found"}}';
+    else jq -n --arg p "$3" --arg cwd "$(cat "$D/cwd")" '{result:{pane:{pane_id:$p,foreground_cwd:$cwd}}}'; fi ;;
+  'agent get')
+    case "$(cat "$D/command")" in
+      zsh|bash) echo '{"error":{"code":"agent_not_found"}}' ;;
+      some-unrelated-process) echo '{}' ;;
+      *) echo '{"result":{"agent":{"agent_status":"idle"}}}' ;;
+    esac ;;
+  'pane process-info')
+    jq -n --arg p "$4" --arg cmd "$(cat "$D/command")" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:999999,foreground_processes:[{pid:999998,name:$cmd}]}}}' ;;
+  'pane read')
     [ -z "${FM_FAKE_COMPOSER_READ_FAIL:-}" ] || exit 1
-    if [ -s "$D/composer" ]; then
-      printf '╭────╮\n│ %s  │\n╰────╯\n' "$(cat "$D/composer")"
-    else
-      printf '╭────╮\n│    │\n╰────╯\n'
-    fi
-    exit 0 ;;
-  list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+    if [ -s "$D/composer" ]; then printf '╭────╮\n│ %s  │\n╰────╯\n' "$(cat "$D/composer")";
+    else printf '╭────╮\n│    │\n╰────╯\n'; fi ;;
+  *) echo '{}' ;;
 esac
-exit 0
 SH
-  chmod +x "$fb/tmux"
+  chmod +x "$fb/herdr"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_FAKE_LOCK_WAITING:-}" ] || : > "$FM_FAKE_LOCK_WAITING"
@@ -140,7 +121,7 @@ new_case() {
   printf 'pi' > "$dir/fake/command"
   printf 'pi' > "$dir/fake/becomes"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
-  make_tmux_stub "$dir"
+  make_herdr_stub "$dir"
   printf '%s\n' "$dir"
 }
 
@@ -159,7 +140,12 @@ Exercise relaunch behavior for $id.
 Preserve the task while replacing its agent process.
 EOF
   {
-    echo "window=fmses:fm-$id"
+    echo "window=fmses:w1:p-$id"
+    echo backend=herdr
+    echo herdr_session=fmses
+    echo herdr_workspace_id=w1
+    echo "herdr_tab_id=w1:t-$id"
+    echo "herdr_pane_id=w1:p-$id"
     echo "endpoint_task_id=$id"
     echo "worktree=$wt"
     echo "project=$proj"
@@ -312,7 +298,7 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   out=$(run_control "$dir" rl1 relaunch --note "stopped mid-refactor"); rc=$?
   expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
   assert_contains "$out" "relaunched rl1 harness=pi from=pi" "the outcome should name the transition"
-  [ "$(meta_field "$dir" rl1 window)" = "fmses:fm-rl1" ] \
+  [ "$(meta_field "$dir" rl1 window)" = "fmses:w1:p-rl1" ] \
     || fail "the endpoint must be reused, not recreated"
   [ "$(meta_field "$dir" rl1 worktree)" = "$dir/wt" ] \
     || fail "the worktree must be reused, not reallocated"
@@ -701,7 +687,12 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   printf 'sm3\n' > "$dir/smhome/.fm-secondmate-home"
   printf '# agents\n' > "$dir/smhome/AGENTS.md"
   {
-    echo "window=fmses:fm-sm3"
+    echo "window=fmses:w1:p-sm3"
+    echo backend=herdr
+    echo herdr_session=fmses
+    echo herdr_workspace_id=w1
+    echo "herdr_tab_id=w1:t-sm3"
+    echo "herdr_pane_id=w1:p-sm3"
     echo "endpoint_task_id=sm3"
     echo "worktree=$dir/smhome"
     echo "project=$dir/smhome"
@@ -740,7 +731,12 @@ test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
   printf 'sm6\n' > "$dir/smhome/.fm-secondmate-home"
   printf '# agents\n' > "$dir/smhome/AGENTS.md"
   {
-    echo "window=fmses:fm-sm6"
+    echo "window=fmses:w1:p-sm6"
+    echo backend=herdr
+    echo herdr_session=fmses
+    echo herdr_workspace_id=w1
+    echo "herdr_tab_id=w1:t-sm6"
+    echo "herdr_pane_id=w1:p-sm6"
     echo "endpoint_task_id=sm6"
     echo "worktree=$dir/smhome"
     echo "project=$dir/smhome"
@@ -781,7 +777,12 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop() {
   printf 'sm7\n' > "$dir/smhome/.fm-secondmate-home"
   printf '# agents\n' > "$dir/smhome/AGENTS.md"
   {
-    echo "window=fmses:fm-sm7"
+    echo "window=fmses:w1:p-sm7"
+    echo backend=herdr
+    echo herdr_session=fmses
+    echo herdr_workspace_id=w1
+    echo "herdr_tab_id=w1:t-sm7"
+    echo "herdr_pane_id=w1:p-sm7"
     echo "endpoint_task_id=sm7"
     echo "worktree=$dir/smhome"
     echo "project=$dir/smhome"
@@ -819,7 +820,12 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes() {
   printf 'sm4\n' > "$dir/smhome/.fm-secondmate-home"
   printf '# agents\n' > "$dir/smhome/AGENTS.md"
   {
-    echo "window=fmses:fm-sm4"
+    echo "window=fmses:w1:p-sm4"
+    echo backend=herdr
+    echo herdr_session=fmses
+    echo herdr_workspace_id=w1
+    echo "herdr_tab_id=w1:t-sm4"
+    echo "herdr_pane_id=w1:p-sm4"
     echo "endpoint_task_id=sm4"
     echo "worktree=$dir/smhome"
     echo "project=$dir/smhome"
@@ -885,7 +891,12 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
       "$brief" > "$brief.filled"
     mv "$brief.filled" "$brief"
     {
-      echo "window=fmses:fm-$id"
+      echo "window=fmses:w1:p-$id"
+    echo backend=herdr
+    echo herdr_session=fmses
+    echo herdr_workspace_id=w1
+    echo "herdr_tab_id=w1:t-$id"
+    echo "herdr_pane_id=w1:p-$id"
       echo "endpoint_task_id=$id"
       echo "worktree=$dir/wt"
       echo "project=$dir/proj"
@@ -1172,7 +1183,12 @@ test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter() {
   printf 'window=x:fm-c1\n' > "$dir/smhome/state/c1.meta"
   printf 'window=x:fm-c2\n' > "$dir/smhome/state/c2.meta"
   {
-    echo "window=fmses:fm-sm1"
+    echo "window=fmses:w1:p-sm1"
+    echo backend=herdr
+    echo herdr_session=fmses
+    echo herdr_workspace_id=w1
+    echo "herdr_tab_id=w1:t-sm1"
+    echo "herdr_pane_id=w1:p-sm1"
     echo "endpoint_task_id=sm1"
     echo "worktree=$dir/smhome"
     echo "project=$dir/smhome"
@@ -1211,7 +1227,12 @@ test_secondmate_relaunch_refuses_an_unmarked_home() {
   mkdir -p "$dir/smhome/state"
   printf 'someone-else\n' > "$dir/smhome/.fm-secondmate-home"
   {
-    echo "window=fmses:fm-sm2"
+    echo "window=fmses:w1:p-sm2"
+    echo backend=herdr
+    echo herdr_session=fmses
+    echo herdr_workspace_id=w1
+    echo "herdr_tab_id=w1:t-sm2"
+    echo "herdr_pane_id=w1:p-sm2"
     echo "endpoint_task_id=sm2"
     echo "worktree=$dir/smhome"
     echo "project=$dir/smhome"
@@ -1239,7 +1260,12 @@ test_secondmate_checkpoint_refuses_unreadable_child_state() {
   mkdir -p "$dir/smhome/state/bad.meta"
   printf 'sm5\n' > "$dir/smhome/.fm-secondmate-home"
   {
-    echo "window=fmses:fm-sm5"
+    echo "window=fmses:w1:p-sm5"
+    echo backend=herdr
+    echo herdr_session=fmses
+    echo herdr_workspace_id=w1
+    echo "herdr_tab_id=w1:t-sm5"
+    echo "herdr_pane_id=w1:p-sm5"
     echo "endpoint_task_id=sm5"
     echo "worktree=$dir/smhome"
     echo "project=$dir/smhome"
@@ -1377,13 +1403,13 @@ test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection() {
   target="$dir/foreign-task-record"
   mv "$meta" "$target"
   ln -s "$target" "$meta"
-  mv "$dir/fakebin/tmux" "$dir/fakebin/tmux-real"
-  cat > "$dir/fakebin/tmux" <<SH
+  mv "$dir/fakebin/herdr" "$dir/fakebin/herdr-real"
+  cat > "$dir/fakebin/herdr" <<SH
 #!/usr/bin/env bash
 : > "$dir/relaunch-endpoint-inspected"
-exec "$dir/fakebin/tmux-real" "\$@"
+exec "$dir/fakebin/herdr-real" "\$@"
 SH
-  chmod +x "$dir/fakebin/tmux"
+  chmod +x "$dir/fakebin/herdr"
 
   out=$(run_spawn "$dir" rl37 --relaunch --harness pi); rc=$?
   expect_code 1 "$rc" "relaunching from symlinked metadata should refuse"
@@ -1402,8 +1428,8 @@ test_spawn_relaunch_keeps_its_early_meta_lock_continuous() {
   add_ship_task "$dir" rl38 pi
   printf 'zsh' > "$dir/fake/command"
   lock="$dir/home/state/.meta-rl38.lock"
-  mv "$dir/fakebin/tmux" "$dir/fakebin/tmux-real"
-  cat > "$dir/fakebin/tmux" <<SH
+  mv "$dir/fakebin/herdr" "$dir/fakebin/herdr-real"
+  cat > "$dir/fakebin/herdr" <<SH
 #!/usr/bin/env bash
 if [ -d "$lock" ]; then
   if [ ! -e "$dir/lock-observation-started" ]; then
@@ -1413,9 +1439,9 @@ if [ -d "$lock" ]; then
     : > "$dir/meta-lock-was-recreated"
   fi
 fi
-exec "$dir/fakebin/tmux-real" "\$@"
+exec "$dir/fakebin/herdr-real" "\$@"
 SH
-  chmod +x "$dir/fakebin/tmux"
+  chmod +x "$dir/fakebin/herdr"
 
   out=$(run_spawn "$dir" rl38 --relaunch --harness pi); rc=$?
   expect_code 0 "$rc" "relaunch with one continuous meta lock should succeed"$'\n'"$out"
@@ -1487,8 +1513,9 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   printf '%s' "$dir/proj" > "$dir/fake/cwd"
   out=$(run_spawn "$dir" rl18 --relaunch --harness pi); rc=$?
   expect_code 1 "$rc" "a pane outside the worktree should refuse"
-  assert_contains "$out" "not its recorded worktree" "the refusal should name the wrong location"
-  [ ! -s "$dir/fake/keys" ] || fail "a refused tmux relaunch must send nothing to the pane"
+  assert_contains "$out" "did not return to its recorded worktree" "the refusal should name the failed restoration"
+  grep -Fq 'cd -- ' "$dir/fake/literal" || fail 'Herdr did not attempt the exact recorded cwd restoration'
+  ! grep -Fq 'encode launch-brief' "$dir/fake/literal" || fail 'failed restoration launched a replacement'
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding its work"
 }
 

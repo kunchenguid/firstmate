@@ -29,6 +29,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$ROOT/tests/fixtures.sh"
 # shellcheck source=tests/remote-herdr-fixture.sh
 . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
 
@@ -142,7 +144,7 @@ git -C "$PARENT/projects/alpha" push -q -u origin main
 git --git-dir="$TMP_ROOT/alpha.git" symbolic-ref HEAD refs/heads/main
 printf -- '- alpha [direct-PR] - alpha project (added 2026-08-04)\n' > "$PARENT/data/projects.md"
 printf 'codex\n' > "$PARENT/config/secondmate-harness"
-printf 'tmux\n' > "$PARENT/config/backend"
+printf 'herdr\n' > "$PARENT/config/backend"
 
 # The primary home is the X-mode / relay home: the captain's real activation.
 printf 'FMX_PAIRING_TOKEN=repro-token\n' > "$PARENT/.env"
@@ -236,16 +238,18 @@ mkdir -p "$REMOTE_HOME/state"
 # fused automatic close is correctly exempt without requiring a tasks-axi mock.
 printf '%s\n' manual > "$REMOTE_HOME/config/backlog-backend"
 write_child_meta() {
-  fm_write_meta "$REMOTE_HOME/state/work-child.meta" \
+  fm_test_write_herdr_meta "$REMOTE_HOME/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
     "worktree=$CHILD_WT" "project=$CHILD_WT" "harness=codex" "kind=ship" \
     "mode=local-only" "yolo=off"
 }
 mkdir -p "$TMP_ROOT/childfake"
-for t in tmux treehouse no-mistakes gh gh-axi tasks-axi; do
+for t in treehouse no-mistakes gh gh-axi tasks-axi; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP_ROOT/childfake/$t"
   chmod +x "$TMP_ROOT/childfake/$t"
 done
+
+fm_test_fake_herdr_gone "$TMP_ROOT/childfake"
 
 run_child_teardown() { # <extra env assignments...>
   local out rc=0
