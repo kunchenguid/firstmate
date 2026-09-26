@@ -45,16 +45,19 @@
 # FM_TOOL_UPDATE_INTERVAL (default 900, 0 disables the gate, otherwise 60..86400)
 # and stays silent in between. Each probe is bounded by
 # FM_TOOL_UPDATE_PROBE_SECS (default 5, valid 1..30) and a whole sweep by
-# FM_TOOL_UPDATE_BUDGET_SECS (default 20, valid 1..120).
+# FM_TOOL_UPDATE_BUDGET_SECS (valid 1..120), which defaults to the documented 20
+# seconds or one probe bound per watched tool, whichever is larger, so a tool
+# late in a long sweep is not left with a bound it cannot meet.
 #
 # The sweep has to finish inside the watcher's own per check bound, because a run
 # the watcher kills prints nothing and writes no record, so it would repeat that
 # silence on every poll. That coupling is enforced rather than assumed: a budget
 # larger than FM_CHECK_TIMEOUT (default 30, read from this check's own
 # environment because the watcher runs it as a direct child) allows is cut down
-# to what fits, and the cut is reported in the report line so the operator sees
-# it. A budget that cannot be read as a whole number from 1 to 120 is still
-# refused outright.
+# to what fits; an explicit cut is reported in the report line so the operator
+# sees it, while a derived default is clamped silently so a current home still
+# prints nothing. A budget that cannot be read as a whole number from 1 to 120 is
+# still refused outright.
 #
 # The report record state/.tool-updates is written only when a sweep runs to its
 # end, and it carries the whole finding set the last report was made from,
@@ -134,16 +137,53 @@ if [ "$PROBE_SECS" -gt 30 ]; then
   exit 2
 fi
 
-BUDGET_SECS=${FM_TOOL_UPDATE_BUDGET_SECS:-20}
-case "$BUDGET_SECS" in
-  ''|*[!0-9]*|0)
+# How many tools the sweep is about to probe, so a fair sweep budget can be
+# derived from it. The registry is only read for its length here, not validated:
+# the sweep still has to bound itself before config_validate reports a bad
+# registry. An absent or unreadable registry leaves the count at zero, and that
+# path is either silent or reports the registry problem, so its budget is unused.
+watched_tool_count() {
+  local count
+  if ! command -v jq >/dev/null 2>&1 || [ ! -f "$CONFIG" ]; then
+    printf '0\n'
+    return 0
+  fi
+  count=$(jq -r 'if (.tools | type) == "array" then (.tools | length) else 0 end' "$CONFIG" 2>/dev/null) || count=0
+  case "$count" in
+    ''|*[!0-9]*) count=0 ;;
+  esac
+  printf '%s\n' "$count"
+}
+
+# A tool can cost one slow probe (its update announcement, or a git remote read),
+# so one probe bound per watched tool is a fair default sweep budget. Deriving it
+# from the tool count is what stops a healthy but loaded probe late in the sweep
+# from being cut down to whatever budget the earlier probes left. It is never
+# below the documented default of 20, so a home with few watched tools keeps its
+# old headroom rather than having the default shrink under it.
+BUDGET_DEFAULT=20
+TOOL_COUNT=$(watched_tool_count)
+if [ "$TOOL_COUNT" -gt 0 ]; then
+  BUDGET_DEFAULT=$((PROBE_SECS * TOOL_COUNT))
+  [ "$BUDGET_DEFAULT" -ge 20 ] || BUDGET_DEFAULT=20
+fi
+
+BUDGET_EXPLICIT=0
+if [ -n "${FM_TOOL_UPDATE_BUDGET_SECS:-}" ]; then
+  BUDGET_EXPLICIT=1
+  BUDGET_SECS=$FM_TOOL_UPDATE_BUDGET_SECS
+  case "$BUDGET_SECS" in
+    ''|*[!0-9]*|0)
+      printf 'fm-tool-update-check: FM_TOOL_UPDATE_BUDGET_SECS must be a whole number from 1 to 120\n' >&2
+      exit 2
+      ;;
+  esac
+  if [ "$BUDGET_SECS" -gt 120 ]; then
     printf 'fm-tool-update-check: FM_TOOL_UPDATE_BUDGET_SECS must be a whole number from 1 to 120\n' >&2
     exit 2
-    ;;
-esac
-if [ "$BUDGET_SECS" -gt 120 ]; then
-  printf 'fm-tool-update-check: FM_TOOL_UPDATE_BUDGET_SECS must be a whole number from 1 to 120\n' >&2
-  exit 2
+  fi
+else
+  BUDGET_SECS=$BUDGET_DEFAULT
 fi
 
 # The smallest bound a probe can be given, because fm_run_timed treats a
@@ -173,7 +213,9 @@ BUDGET_MAX=$((CHECK_TIMEOUT - PROBE_MIN_SECS - CLOCK_ROUNDING_SECS - KILL_GRACE_
 # silent is worse than a check that reports something awkward.
 BUDGET_CUT_FROM=
 if [ "$BUDGET_SECS" -gt "$BUDGET_MAX" ]; then
-  BUDGET_CUT_FROM=$BUDGET_SECS
+  if [ "$BUDGET_EXPLICIT" -eq 1 ]; then
+    BUDGET_CUT_FROM=$BUDGET_SECS
+  fi
   BUDGET_SECS=$BUDGET_MAX
 fi
 
@@ -401,6 +443,24 @@ probe_output() {
   fm_run_timed "$(probe_bound)" "$path" "$@" 2>&1
 }
 
+# A probe that hits its bound gets one more attempt while the sweep still has
+# budget. A healthy tool under load can answer just past a short bound, and one
+# slow answer is not the same as a tool that cannot answer: the retry keeps the
+# honest "did not answer" signal for a tool that never answers without turning a
+# loaded host into an unavailability wake.
+probe_output_bounded() {
+  local path=$1 status out
+  shift
+  out=$(probe_output "$path" "$@")
+  status=$?
+  if [ "$status" -eq 124 ] && ! budget_exhausted; then
+    out=$(probe_output "$path" "$@")
+    status=$?
+  fi
+  printf '%s\n' "$out"
+  return "$status"
+}
+
 command_findings() {
   local name=$1 command_name=$2 args_joined=$3 announce=$4 announce_args=$5
   local hit out version matched announce_out status
@@ -427,7 +487,7 @@ command_findings() {
       break
     fi
     # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
-    out=$(probe_output "$hit" $args_joined)
+    out=$(probe_output_bounded "$hit" $args_joined)
     version=$(parse_version "$out")
     if [ -z "$resolved_path" ]; then
       resolved_path=$hit
@@ -460,7 +520,7 @@ EOF
         announce_out=
       else
         # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
-        announce_out=$(probe_output "$resolved_path" $announce_args)
+        announce_out=$(probe_output_bounded "$resolved_path" $announce_args)
         status=$?
         if [ "$status" -eq 124 ]; then
           # A source that was asked and never answered is not a source that had
@@ -511,12 +571,21 @@ GIT_PROBE_NOT_ISSUED=3
 # One bounded read-only git probe. The budget check lives here rather than in the
 # callers, so no probe can be issued past the sweep deadline whatever a caller
 # does, and the budget only has to leave room for the one probe that was already
-# running when the deadline passed.
+# running when the deadline passed. A probe that hits its bound gets one more
+# attempt while the sweep still has budget, so a loaded host is not reported as
+# an unreachable remote.
 git_probe() {
-  local repo=$1
+  local repo=$1 status out
   shift
   budget_exhausted && return "$GIT_PROBE_NOT_ISSUED"
-  fm_run_timed "$(probe_bound)" git -C "$repo" "$@"
+  out=$(fm_run_timed "$(probe_bound)" git -C "$repo" "$@")
+  status=$?
+  if [ "$status" -eq 124 ] && ! budget_exhausted; then
+    out=$(fm_run_timed "$(probe_bound)" git -C "$repo" "$@")
+    status=$?
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out"
+  return "$status"
 }
 
 # The single place that reads a probe status as no answer at all, so every probe

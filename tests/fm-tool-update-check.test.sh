@@ -81,6 +81,35 @@ SH
   chmod 0755 "$dir/$command_name"
 }
 
+# make_announce_tool <dir> <command> <seconds> <text>: a copy that answers
+# --version at once and its separate announcement command after a delay, printing
+# text as the announcement. A blank text models a source that announces nothing.
+make_announce_tool() {
+  local dir=$1 command_name=$2 seconds=$3 text=$4
+  mkdir -p "$dir"
+  cat > "$dir/$command_name" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then
+  printf '${command_name} 1.0.0\n'
+  exit 0
+fi
+sleep $seconds
+printf '%s\n' '$text'
+SH
+  chmod 0755 "$dir/$command_name"
+}
+
+# five_announce_config: a registry of five tools whose update announcement is
+# asked with a second command, matching a home with several network-backed tools.
+five_announce_config() {
+  local i json=
+  for i in 1 2 3 4 5; do
+    [ -z "$json" ] || json="$json,"
+    json="$json{\"name\":\"t$i\",\"command\":\"tool$i\",\"announce_args\":[\"update\",\"--check\"],\"announce_pattern\":\"available: true\"}"
+  done
+  printf '{"tools":[%s]}\n' "$json"
+}
+
 write_config() {
   local home=$1
   shift
@@ -373,6 +402,61 @@ SH
   report=$(cat "$out")
   assert_contains "$report" "no-mistakes check failed: $dir/no-mistakes-fixture did not answer when asked for its update announcement" "an announcement probe that never answered was read as a clean sweep"
   pass "an announcement probe that does not answer is reported, not read as current"
+}
+
+test_a_transiently_slow_probe_is_retried_not_read_as_unavailable() {
+  local home dir marker out
+  # A healthy tool on a loaded host can answer just past its bound once and be
+  # fast on the next try. One slow answer is not a tool that cannot answer, so a
+  # probe that hits its bound gets one more attempt while the sweep still has
+  # budget instead of being reported as unavailable.
+  home=$(make_home retry)
+  dir="$TMP_ROOT/retry/bin"
+  marker="$TMP_ROOT/retry/slow-once"
+  mkdir -p "$dir"
+  cat > "$dir/no-mistakes-fixture" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then
+  printf '1.0.0\n'
+  exit 0
+fi
+if [ ! -e '$marker' ]; then
+  : > '$marker'
+  sleep 5
+fi
+printf 'nothing to announce\n'
+SH
+  chmod 0755 "$dir/no-mistakes-fixture"
+  write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","announce_args":["--help"],"announce_pattern":"A new version of no-mistakes is available: [^ ]+ -> [^ ]+"}]}'
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  [ ! -s "$out" ] || fail "a transiently slow probe was reported instead of retried: $(cat "$out")"
+  pass "a transiently slow probe is retried within the budget, not read as unavailable"
+}
+
+test_a_slow_tail_probe_in_a_full_sweep_is_not_read_as_unavailable() {
+  local home dir out report i
+  # Five watched tools, each with an announcement probe inside its own bound. The
+  # first four take almost a full bound each. On a fixed 20 second sweep budget
+  # that left the fifth only the few seconds they did not spend, so a healthy
+  # 3.1 second answer was reported as a tool that did not answer and re-reported
+  # the other four updates bundled with it. A budget that gives every watched
+  # tool a full slice keeps the fifth inside its bound and the line unchanged.
+  home=$(make_home slow-tail)
+  dir="$TMP_ROOT/slow-tail/bin"
+  for i in 1 2 3 4; do
+    make_announce_tool "$dir" "tool$i" 4.5 'available: true'
+  done
+  make_announce_tool "$dir" tool5 3.1 'available: true'
+  write_config "$home" "$(five_announce_config)"
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  report=$(cat "$out")
+  for i in 1 2 3 4 5; do
+    assert_contains "$report" "t$i update available" "the healthy tool t$i was not reported as available"
+  done
+  assert_not_contains "$report" "did not answer" "a slow but in-bound tail probe was reported as a tool that did not answer"
+  pass "a slow but in-bound tail probe is not read as a tool that did not answer"
 }
 
 test_quiet_tool_with_announce_pattern_is_silent() {
@@ -810,6 +894,65 @@ test_an_oversized_budget_is_cut_to_fit_and_reported() {
   pass "a budget that cannot fit the watcher bound is cut and reported, and the sweep keeps working"
 }
 
+test_a_derived_default_budget_is_clamped_silently_on_a_current_home() {
+  local home dir out i tools_json=
+  # Six watched tools derive a 30 second default budget, larger than the 27
+  # seconds the default watcher bound leaves. The home is fully current, so the
+  # silent clamp must leave the check silent: emitting the clamp as a finding
+  # would wake the home on the first sweep, and again whenever a later real
+  # finding cleared and the line fell back to the clamp alone.
+  home=$(make_home budget-derived-silent)
+  dir="$TMP_ROOT/budget-derived-silent/bin"
+  for i in 1 2 3 4 5 6; do
+    make_copy "$dir" "tool$i" "tool$i 1.0.0"
+    [ -z "$tools_json" ] || tools_json="$tools_json,"
+    tools_json="$tools_json{\"name\":\"t$i\",\"command\":\"tool$i\"}"
+  done
+  write_config "$home" "{\"tools\":[$tools_json]}"
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  [ ! -s "$out" ] || fail "a current home with a clamped derived budget spoke: $(cat "$out")"
+  pass "a derived default budget cut is silent on a fully current home"
+}
+
+test_a_transiently_slow_git_probe_is_retried_not_read_as_unavailable() {
+  local home work dir marker out report
+  # A git remote read on a loaded host can exceed its bound once and answer on
+  # the next try. This clone is ahead of its remote, which is silent when the
+  # probes answer, so any "did not answer" line here is the false unavailability
+  # the retry exists to remove.
+  home=$(make_home git-retry)
+  work=$(git_fixture git-retry-repo)
+  printf 'local only\n' > "$work/f4"
+  git -C "$work" add f4
+  git -C "$work" commit -qm four
+
+  dir="$TMP_ROOT/git-retry/bin"
+  marker="$TMP_ROOT/git-retry/slowed"
+  mkdir -p "$dir"
+  cat > "$dir/git" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\$arg" = cat-file ]; then
+    if [ ! -e '$marker' ]; then
+      : > '$marker'
+      sleep 30
+    fi
+    break
+  fi
+done
+exec $(command -v git) "\$@"
+SH
+  chmod 0755 "$dir/git"
+
+  write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\",\"remote\":\"origin\",\"branch\":\"main\"}}]}"
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
+  report=$(cat "$out")
+  [ ! -s "$out" ] || fail "a git probe that answered on retry still reported: $report"
+  pass "a transiently slow git probe is retried within the budget, not read as unavailable"
+}
+
 test_invalid_environment_and_action_refuse() {
   local home status
   home=$(make_home refuse)
@@ -1017,6 +1160,8 @@ test_unusable_announce_pattern_is_reported_not_read_as_silence
 test_one_broken_pattern_does_not_blind_the_rest_of_the_sweep
 test_an_unchecked_announcement_source_is_not_read_as_current
 test_an_announcement_probe_that_does_not_answer_is_reported
+test_a_transiently_slow_probe_is_retried_not_read_as_unavailable
+test_a_slow_tail_probe_in_a_full_sweep_is_not_read_as_unavailable
 test_quiet_tool_with_announce_pattern_is_silent
 test_commits_behind_origin_are_reported
 test_default_branch_is_detected_when_branch_is_omitted
@@ -1028,6 +1173,7 @@ test_missing_branch_on_a_readable_remote_is_still_reported
 test_git_probes_stop_when_the_sweep_budget_is_gone
 test_a_git_probe_that_does_not_answer_is_not_an_update
 test_a_stalled_repository_probe_is_not_reported_as_not_a_repository
+test_a_transiently_slow_git_probe_is_retried_not_read_as_unavailable
 test_absent_registry_is_silent
 test_malformed_registry_is_reported_not_ignored
 test_findings_are_reported_once_until_they_change
@@ -1035,6 +1181,7 @@ test_an_overlong_report_says_it_was_cut
 test_a_finding_past_the_cut_is_still_reported
 test_probes_are_skipped_between_intervals
 test_an_oversized_budget_is_cut_to_fit_and_reported
+test_a_derived_default_budget_is_clamped_silently_on_a_current_home
 test_invalid_environment_and_action_refuse
 test_arm_registers_the_check_and_disarm_removes_it
 test_arm_refuses_a_symlink_at_the_shim_path
