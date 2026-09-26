@@ -687,5 +687,7 @@ Other tests remain where they were:
 `FM_PI_BRANCH_RESPONSIVENESS_E2E=1 tests/fm-pi-branch-responsiveness-live-e2e.test.sh` answers the question only a real TUI can.
 It types into an isolated Pi pane while outcomes are delivered and fails if keystroke echo leaves the class of the same machine's extension-free floor.
 
+How the outcome read actually renders is Pi's own verdict, so it has its own pair: `tests/fm-calm-branch-outcomes.test.sh` pins the collapse decision with real store records and no harness, and `FM_CALM_BRANCH_OUTCOMES_LIVE_E2E=1 tests/fm-calm-branch-outcomes-live-e2e.test.sh` proves the rendered row against the real `pi` binary in a real terminal.
+
 Record dated current results in [docs/verification/runtime-backends.md](verification/runtime-backends.md).
 The strict typecheck in `tests/fm-pi-primary-types.test.sh` pins the extension against the installed Pi package.
