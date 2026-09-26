@@ -37,9 +37,9 @@
 #     one residual is a recorded pid recycled onto the next session-lock holder
 #     itself; the host that owns a branch conversation releases that actor's
 #     leases when it activates a new one (the Pi branch extension's
-#     generation-activation cleanup; the supervision host also releases them
-#     after every engine turn), which also recovers a lease held by the live
-#     session but an abandoned branch conversation.
+#     generation-activation and settled-turn cleanup; the supervision host
+#     also releases them after every engine turn), which also recovers a lease
+#     held by the live session but an abandoned branch conversation.
 #
 # THREAT MODEL (deliberate, captain-decided): these guards are
 # CONFUSED-AGENT-GRADE, the same grade bin/fm-gate-refuse-lib.sh documents

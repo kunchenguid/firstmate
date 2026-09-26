@@ -170,7 +170,8 @@ The watcher retains delivery ownership and routes the wake to main as a follow-u
 A broken branch declines later offers, so they take that path directly.
 
 After wake rows are claimed, a branch prompt counts as handled only when `fm_branch_report` appends a durable outcome before that prompt settles.
-A settled provider error, or a settled prompt with no report, releases the grant and rejects delivery ownership back to the watcher.
+Every settled branch turn also releases its per-task leases through `bin/fm-lease.sh release-actor`, including a turn that stops on a provider error.
+A settled provider error, or a settled prompt with no report, releases the wake grant and rejects delivery ownership back to the watcher.
 
 #### Report scoping
 
@@ -638,7 +639,7 @@ At that moment the branch reports any refusal instead of concluding there is "no
 
 - Prompt stability, including the landed-work cleanup instruction.
 - Store append-only behavior, the captain cursor barrier, and the processed marker's sequence bounds.
-- Leases, guards, and non-branch-home invariance.
+- Leases, guards, and non-branch-home invariance, including settled-turn release and main reclaim after no-report and provider-error settlements.
 - The away relocation: only under a valid live record, never for local-only landing, queued-only branch dispatch rather than orphaned in-flight recovery, the spend cap for both actors and its lock-held recheck, and the attended guarded-action behavior restored by archive or an invalid record.
 
 `tests/fm-afk-return.test.sh` covers the ordered cleanup-due section, its durable merge-marker requirement, and exclusion of both a done task without durable merge evidence and a persistent secondmate carrying that evidence.

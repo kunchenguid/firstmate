@@ -2383,6 +2383,13 @@ const { spawnSync } = await import("node:child_process");
 const { existsSync } = await import("node:fs");
 
 await fire("session_start", {});
+globalThis.__fmOnBranchPrompt = () => {
+  const claim = spawnSync("bash", [`${realRoot}/bin/fm-lease.sh`, "claim", "settled-turn-task", "--actor", "branch"], {
+    encoding: "utf8",
+    env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state`, FM_SUPERVISION_ACTOR: "branch", FM_LEASE_HOLDER_PID: String(process.pid) },
+  });
+  if (claim.status !== 0) throw new Error(`branch lease claim failed: ${claim.stderr}`);
+};
 const offer = dispatch("signal: unacknowledged branch wake");
 if (!offer.accepted) throw new Error("eligible wake was not accepted");
 for (let i = 0; i < 250 && (globalThis.__fmPrompts ?? []).length === 0; i += 1) {
@@ -2403,6 +2410,14 @@ for (let i = 0; i < 250 && existsSync(`${home}/state/.branch-eligible-rows`); i 
 if (existsSync(`${home}/state/.branch-eligible-rows`)) {
   throw new Error("settled prompt left its unacknowledged grant active");
 }
+if (existsSync(`${home}/state/.lease-settled-turn-task`)) {
+  throw new Error("settled prompt stranded its branch task lease");
+}
+const reclaim = spawnSync("bash", [`${realRoot}/bin/fm-lease.sh`, "claim", "settled-turn-task", "--actor", "main"], {
+  encoding: "utf8",
+  env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state`, FM_SUPERVISION_ACTOR: "main", FM_LEASE_HOLDER_PID: String(process.pid) },
+});
+if (reclaim.status !== 0) throw new Error(`main could not reclaim the settled prompt's task lease: ${reclaim.stderr}`);
 const drain = spawnSync("bash", [`${realRoot}/bin/fm-wake-drain.sh`], {
   encoding: "utf8",
   env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state`, FM_ROOT_OVERRIDE: realRoot },
@@ -2416,7 +2431,7 @@ EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "settled branch turns must release residual grants for main replay: $out"
-  pass "a settled branch turn without a durable outcome falls back and releases its grant for main replay"
+  pass "a settled branch turn without a durable outcome releases its grant and lease for main replay"
 }
 
 test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldown() {
@@ -2428,8 +2443,9 @@ test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldow
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain }; })()`);
-const { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { pi, makeOffer, dispatch, fire, settle, home, realRoot, mainUserMessages, sentToMain }; })()`);
+const { pi, makeOffer, dispatch, fire, settle, home, realRoot, mainUserMessages, sentToMain } = globalThis.__t;
+import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 
 let now = 1_000_000;
@@ -2450,6 +2466,20 @@ let attempt = 0;
 let releaseFailedProbe;
 globalThis.__fmOnBranchPrompt = async ({ session }) => {
   attempt += 1;
+  if (attempt === 1) {
+    const claim = spawnSync("bash", [`${realRoot}/bin/fm-lease.sh`, "claim", "provider-error-task", "--actor", "branch"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        FM_HOME: home,
+        FM_STATE_OVERRIDE: `${home}/state`,
+        FM_SUPERVISION_ACTOR: "branch",
+        FM_LEASE_HOLDER_PID: String(process.pid),
+        PI_CODING_AGENT: "true",
+      },
+    });
+    if (claim.status !== 0) throw new Error(`branch lease claim failed: ${claim.stderr}`);
+  }
   if (attempt === 1) {
     session.messages = [
       { role: "assistant", content: "compaction summary", stopReason: "stop" },
@@ -2506,6 +2536,21 @@ if (mainUserMessages.length !== 0) throw new Error("branch bypassed watcher-owne
 if (existsSync(`${home}/state/.branch-eligible-rows`)) {
   throw new Error("provider-error fallback left the claimed row grant active");
 }
+if (existsSync(`${home}/state/.lease-provider-error-task`)) {
+  throw new Error("provider-error settlement stranded the branch task lease");
+}
+const reclaim = spawnSync("bash", [`${realRoot}/bin/fm-lease.sh`, "claim", "provider-error-task"], {
+  encoding: "utf8",
+  env: {
+    ...process.env,
+    FM_HOME: home,
+    FM_STATE_OVERRIDE: `${home}/state`,
+    FM_SUPERVISION_ACTOR: "main",
+    FM_LEASE_HOLDER_PID: String(process.pid),
+    PI_CODING_AGENT: "true",
+  },
+});
+if (reclaim.status !== 0) throw new Error(`main could not reclaim the released task lease: ${reclaim.stderr}`);
 
 const healthy = dispatch("signal: healthy branch turn");
 if (!healthy.accepted) throw new Error("one provider error latched the branch prematurely");
