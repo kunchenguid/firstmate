@@ -79,8 +79,9 @@
 # <telemetry-without-.tsv>.roots.tsv (or <telemetry>.roots.tsv if there is no
 # .tsv suffix); otherwise it lives only in the
 # run's scratch dir. Reason values are ok, findings, timeout, memory,
-# signal:<sig>, limit-unavailable, or error:<rc>; OOM is classified as memory
-# only when the root output contains explicit evidence. In partition mode begin/end
+# signal:<sig>, limit-unavailable, or error:<rc>. Memory requires process-level
+# evidence (a GHC exhaustion status or runtime error on stderr), not an echoed
+# source excerpt or an OOM phrase in a filename. In partition mode begin/end
 # lines also stream to stderr, and an abnormal root end is always reported
 # there.
 #
