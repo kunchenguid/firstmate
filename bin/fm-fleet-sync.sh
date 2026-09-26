@@ -26,6 +26,8 @@
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
 # fetch_with_packed_refs_lock_guard and the FM_FLEET_SYNC_PACKED_REFS_LOCK_* knobs.
+# Syncing the running Firstmate code root refreshes authenticated merge polls
+# via bin/fm-pr-poll-refresh.sh, scoped to this home's operational state.
 # Usage: fm-fleet-sync.sh [<project-dir-or-name>]
 # The single-project form accepts either a path (absolute, or relative to the
 # caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
@@ -432,6 +434,15 @@ sync_project() {
     fi
     echo "$label: skipped: $reason"
     return 0
+  fi
+  # Only a sync of this running Firstmate code root may refresh this home's
+  # watches. Ordinary project clones never get to execute an update hook.
+  if [ "$proj_abs" = "$(cd "$FM_ROOT" && pwd -P)" ] \
+    && [ -x "$SCRIPT_DIR/fm-pr-poll-refresh.sh" ]; then
+    poll_state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+    FM_ROOT_OVERRIDE="$PROJ" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$poll_state" \
+      "$SCRIPT_DIR/fm-pr-poll-refresh.sh" "$local_rev" \
+      || echo "$label: merge watch refresh incomplete; see pr-poll-refresh diagnostics" >&2
   fi
   after=$(git -C "$PROJ" rev-parse --short "$DEFAULT") || {
     echo "$label: skipped: fast-forward completed but cannot read local $DEFAULT"
