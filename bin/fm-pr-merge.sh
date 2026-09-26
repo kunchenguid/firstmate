@@ -83,7 +83,17 @@
 # live at merge time rather than taken from recorded metadata: the merge request
 # is open, detailed_merge_status is mergeable, has_conflicts is false,
 # blocking_discussions_resolved is true, and the head pipeline succeeded at the
-# exact current head commit. Every failing condition is reported, not just the
+# exact current head commit, or succeeded as a merged-results pipeline whose
+# merge commit still proves this merge. On a project that runs merged-results
+# pipelines, GitLab runs head_pipeline on refs/merge-requests/<iid>/merge and
+# its sha is the merge-ref commit, never the MR head, so a successful pipeline
+# whose sha is not the MR head is accepted only when its ref is
+# refs/merge-requests/<iid>/merge and the GitLab API shows its merge commit's
+# second parent is the live MR head; the current target-branch head is
+# deliberately not verified, because GitLab re-checks mergeability at merge
+# time and a merge train retests on the train ref, so merged-results pipelines
+# follow the same rule as head-sha pipelines. Any other pipeline sha still
+# refuses, reported as before. Every failing condition is reported, not just the
 # first. The verified head is then passed to glab as --sha, so a push that lands
 # between that read and the merge fails the merge instead of landing commits
 # nothing verified. A recorded pr_head that disagrees with the live head is
@@ -442,11 +452,51 @@ fi
 # returns non-zero after reporting every condition that failed.
 FM_PR_MERGE_HEAD=
 FM_PR_GITLAB_ASYNC_CONFIGURED=false
+
+# A successful head pipeline whose sha is not the MR head is accepted only as a
+# merged-results pipeline that still proves this merge: its ref must be
+# refs/merge-requests/<iid>/merge and its merge commit's second parent must be
+# the live MR head, read from the GitLab API. GitLab re-checks mergeability at
+# merge time and a merge train retests on the train ref, so the current
+# target-branch head is deliberately not verified here: merged-results
+# pipelines follow the same rule as head-sha pipelines. Prints one refusal
+# line and returns 1 otherwise; an unreadable API answer refuses rather than
+# passing.
+gitlab_merged_results_refusal() {
+  local p_sha=$1 p_ref=$2 p_target_project=$3 p_head=$4
+  local commit_json='' parents='' parent_count=0 parent_head=''
+  if [ "$p_ref" != "refs/merge-requests/$PR_NUMBER/merge" ]; then
+    printf 'the head pipeline ran at "%s", not at the current head %s, and its ref "%s" is not a merged-results pipeline ref\n' \
+      "$p_sha" "$p_head" "$p_ref"
+    return 1
+  fi
+  if ! commit_json=$(GITLAB_HOST="$FM_PR_HOST" glab api "projects/$p_target_project/repository/commits/$p_sha" 2>/dev/null); then
+    printf 'the merged-results pipeline could not be verified: reading its merge commit from the GitLab API failed\n'
+    return 1
+  fi
+  parents=$(printf '%s' "$commit_json" | jq -r 'if type == "object" and (.parent_ids | type) == "array" then .parent_ids | map(tostring) | join(" ") else error("commit payload is not an object with parent_ids") end' 2>/dev/null) || parents=''
+  parent_count=$(printf '%s' "$parents" | wc -w | tr -d ' ')
+  if [ "$parent_count" -ne 2 ]; then
+    printf 'the merged-results pipeline merge commit at %s has %s parents, not exactly the target-branch head and the merge request head\n' \
+      "$p_sha" "$parent_count"
+    return 1
+  fi
+  parent_head=${parents#* }
+  if [ "$parent_head" != "$p_head" ]; then
+    printf 'the merged-results pipeline merge commit at %s was built from MR head %s, not the current head %s\n' \
+      "$p_sha" "$parent_head" "$p_head"
+    return 1
+  fi
+  return 0
+}
+
 gitlab_verify_mergeable() {
   local json fields line
   local total=0 named=0 refusals=''
   local state='' detail='' conflicts='' discussions=''
   local live_head='' pipeline_sha='' pipeline_status='' async_configured=''
+  local pipeline_ref='' target_project_id=''
+  local pipeline_refusal=''
 
   # GITLAB_HOST is set to the same host the project URL already carries, so the
   # instance is taken from the parsed URL by both signals and never from the
@@ -469,6 +519,8 @@ gitlab_verify_mergeable() {
         "head=" + ((.sha // "") | tostring),
         "pipeline_sha=" + ((.head_pipeline.sha // "") | tostring),
         "pipeline_status=" + ((.head_pipeline.status // "") | tostring),
+        "pipeline_ref=" + ((.head_pipeline.ref // "") | tostring),
+        "target_project_id=" + ((.target_project_id // "") | tostring),
         "async_configured=" + (if .merge_when_pipeline_succeeds == true or (.merge_after != null) then "true" else "false" end)
       else
         error("merge request payload is not an object")
@@ -486,6 +538,8 @@ gitlab_verify_mergeable() {
       head=*) live_head=${line#head=} ;;
       pipeline_sha=*) pipeline_sha=${line#pipeline_sha=} ;;
       pipeline_status=*) pipeline_status=${line#pipeline_status=} ;;
+      pipeline_ref=*) pipeline_ref=${line#pipeline_ref=} ;;
+      target_project_id=*) target_project_id=${line#target_project_id=} ;;
       async_configured=*) async_configured=${line#async_configured=} ;;
       *) continue ;;
     esac
@@ -496,7 +550,7 @@ FIELDS
   # Every field named exactly once and no unnamed line: a value carrying a
   # newline would split into a line no name matches, so it is refused here
   # rather than silently truncated into a value a check could accept.
-  if [ "$named" -ne 8 ] || [ "$total" -ne 8 ]; then
+  if [ "$named" -ne 10 ] || [ "$total" -ne 10 ]; then
     echo "error: could not read the GitLab merge request state before merging" >&2
     return 1
   fi
@@ -527,17 +581,34 @@ FIELDS
   [ "$pipeline_status" = success ] \
     || refusals="$refusals  - the head pipeline status is \"${pipeline_status:-none}\", not success
 "
-  [ "$pipeline_sha" = "$live_head" ] \
-    || refusals="$refusals  - the head pipeline ran at \"${pipeline_sha:-none}\", not at the current head $live_head
+  # The head pipeline must have succeeded at the exact current head, or be a
+  # merged-results pipeline whose merge commit still proves this merge. The
+  # merged-results check runs only when the status is already green, so its
+  # refusals do not mask the simpler failure and the API is not read for an MR
+  # refused for other reasons.
+  if [ "$pipeline_status" = success ] && [ "$pipeline_sha" != "$live_head" ]; then
+    pipeline_refusal=$(gitlab_merged_results_refusal \
+      "$pipeline_sha" "$pipeline_ref" "$target_project_id" "$live_head") || true
+    [ -z "$pipeline_refusal" ] \
+      || refusals="$refusals  - $pipeline_refusal
 "
+  elif [ "$pipeline_sha" != "$live_head" ]; then
+    refusals="$refusals  - the head pipeline ran at \"${pipeline_sha:-none}\", not at the current head $live_head
+"
+  fi
 
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s\n' "$URL" >&2
     printf '%s' "$refusals" >&2
     return 1
   fi
-  printf 'verified: %s is open and mergeable, with a successful pipeline at head %s\n' \
-    "$URL" "$live_head" >&2
+  if [ "$pipeline_sha" = "$live_head" ]; then
+    printf 'verified: %s is open and mergeable, with a successful pipeline at head %s\n' \
+      "$URL" "$live_head" >&2
+  else
+    printf 'verified: %s is open and mergeable, with a successful merged-results pipeline at %s proving head %s\n' \
+      "$URL" "$pipeline_sha" "$live_head" >&2
+  fi
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITLAB_ASYNC_CONFIGURED=$async_configured
 }

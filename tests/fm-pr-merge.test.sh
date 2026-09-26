@@ -25,6 +25,14 @@ MR_PROJECT_URL="https://$MR_HOST/$MR_PATH"
 MR_URL="$MR_PROJECT_URL/-/merge_requests/7"
 MR_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 MR_STALE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+# Merged-results pipeline fixtures: the merge-ref commit GitLab builds on
+# refs/merge-requests/7/merge, the current target-branch head, the target head
+# the stale case's pipeline was built against, and an MR head that is not the
+# live one.
+MR_MERGE_SHA=dddddddddddddddddddddddddddddddddddddddd
+MR_TARGET_HEAD=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+MR_OLD_TARGET_HEAD=ffffffffffffffffffffffffffffffffffffffff
+MR_WRONG_HEAD=1111111111111111111111111111111111111111
 
 JQ_BIN=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll publish"
@@ -346,6 +354,18 @@ case "${1:-} ${2:-}" in
     : > "$case_dir/glab-merge-called"
     exit 0
     ;;
+  "api "*)
+    [ ! -e "$case_dir/glab-api-fails" ] || { echo "error: api call failed" >&2 ; exit 1 ; }
+    case "$2" in
+      */repository/commits/*)
+        [ ! -e "$case_dir/glab-commit.json" ] || cat "$case_dir/glab-commit.json"
+        ;;
+      */repository/branches/*)
+        [ ! -e "$case_dir/glab-branch.json" ] || cat "$case_dir/glab-branch.json"
+        ;;
+    esac
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -361,6 +381,7 @@ write_mr_json() {
   local file=$1 kv key value
   local state=opened detail=mergeable conflicts=false discussions=true
   local head=$MR_HEAD pipeline_sha=$MR_HEAD pipeline_status=success pipeline=present
+  local pipeline_ref='' target_project_id=42 target_branch=main
   local merge_when_pipeline_succeeds=false merge_after=null
   shift
   for kv in "$@"; do
@@ -375,20 +396,23 @@ write_mr_json() {
       pipeline_sha) pipeline_sha=$value ;;
       pipeline_status) pipeline_status=$value ;;
       pipeline) pipeline=$value ;;
+      pipeline_ref) pipeline_ref=$value ;;
+      target_project_id) target_project_id=$value ;;
+      target_branch) target_branch=$value ;;
       merge_when_pipeline_succeeds) merge_when_pipeline_succeeds=$value ;;
       merge_after) merge_after=$value ;;
       *) fail "write_mr_json: unknown field '$key'" ;;
     esac
   done
   if [ "$pipeline" = present ]; then
-    pipeline=$(printf '{"sha":"%s","status":"%s"}' "$pipeline_sha" "$pipeline_status")
+    pipeline=$(printf '{"sha":"%s","status":"%s","ref":"%s"}' "$pipeline_sha" "$pipeline_status" "$pipeline_ref")
   fi
   printf '{"iid":7,"state":"%s","detailed_merge_status":"%s","has_conflicts":%s,' \
     "$state" "$detail" "$conflicts" > "$file"
   printf '"blocking_discussions_resolved":%s,"sha":"%s","head_pipeline":%s,' \
     "$discussions" "$head" "$pipeline" >> "$file"
-  printf '"merge_when_pipeline_succeeds":%s,"merge_after":%s}\n' \
-    "$merge_when_pipeline_succeeds" "$merge_after" >> "$file"
+  printf '"target_project_id":%s,"target_branch":"%s","merge_when_pipeline_succeeds":%s,"merge_after":%s}\n' \
+    "$target_project_id" "$target_branch" "$merge_when_pipeline_succeeds" "$merge_after" >> "$file"
 }
 
 # make_gitlab_case <name> [<field>=<value> ...]: a case dir with both forge
@@ -1767,6 +1791,125 @@ test_gitlab_reports_every_failing_condition() {
   pass "fm-pr-merge reports every failing GitLab condition, not only the first"
 }
 
+# Merged-results pipeline fixtures: the merge-ref commit's parent ids, as the
+# GitLab API reports them. Args: case_dir <parent-target-head> <parent-mr-head>
+write_merged_results_fixtures() {
+  local case_dir=$1
+  shift
+  printf '{"parent_ids":["%s","%s"]}\n' "$1" "$2" > "$case_dir/glab-commit.json"
+}
+
+test_gitlab_merged_results_pipeline_merges() {
+  local case_dir rc merge_line
+  case_dir=$(make_gitlab_case gitlab-merged-results-merges \
+    "pipeline_sha=$MR_MERGE_SHA" "pipeline_ref=refs/merge-requests/7/merge")
+  write_merged_results_fixtures "$case_dir" "$MR_TARGET_HEAD" "$MR_HEAD"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gitlab-merged-results-merges: a merged-results pipeline whose second parent is the MR head should merge"
+  merge_line=$(glab_merge_line "$case_dir/glab.log")
+  case "$merge_line" in
+    *"--sha $MR_HEAD"*) : ;;
+    *) fail "gitlab-merged-results-merges: the merge was not bound to the MR head: '$merge_line'" ;;
+  esac
+  assert_grep "GITLAB_HOST=$MR_HOST api projects/42/repository/commits/$MR_MERGE_SHA" \
+    "$case_dir/glab.log" "gitlab-merged-results-merges: the merge commit was not read from the URL's instance"
+  assert_grep "merged-results pipeline at $MR_MERGE_SHA proving head $MR_HEAD" \
+    "$case_dir/stderr" "gitlab-merged-results-merges: the merged-results acceptance was not reported"
+  pass "fm-pr-merge accepts a merged-results pipeline whose second parent is the MR head"
+}
+
+test_gitlab_merged_results_stale_target_merges() {
+  local case_dir rc merge_line
+  case_dir=$(make_gitlab_case gitlab-merged-results-stale-target \
+    "pipeline_sha=$MR_MERGE_SHA" "pipeline_ref=refs/merge-requests/7/merge")
+  # The pipeline was built against a target head that has since moved. The
+  # target-branch head is deliberately not verified, so this still merges:
+  # GitLab re-checks mergeability at merge time and a train retests.
+  write_merged_results_fixtures "$case_dir" "$MR_OLD_TARGET_HEAD" "$MR_HEAD"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "gitlab-merged-results-stale-target: a moved target parent should not refuse the merge"
+  merge_line=$(glab_merge_line "$case_dir/glab.log")
+  case "$merge_line" in
+    *"--sha $MR_HEAD"*) : ;;
+    *) fail "gitlab-merged-results-stale-target: the merge was not bound to the MR head: '$merge_line'" ;;
+  esac
+  assert_no_grep 'no longer proves the current merge result' "$case_dir/stderr" \
+    "gitlab-merged-results-stale-target: a stale-target refusal is still reported"
+  pass "fm-pr-merge merges a merged-results pipeline whose target parent no longer matches the target branch"
+}
+
+test_gitlab_merged_results_wrong_mr_parent_refuses() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-merged-results-wrong-parent \
+    "pipeline_sha=$MR_MERGE_SHA" "pipeline_ref=refs/merge-requests/7/merge")
+  write_merged_results_fixtures "$case_dir" "$MR_TARGET_HEAD" "$MR_WRONG_HEAD"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-merged-results-wrong-parent: a merged-results pipeline built from another MR head should refuse"
+  assert_grep "was built from MR head $MR_WRONG_HEAD, not the current head $MR_HEAD" \
+    "$case_dir/stderr" "gitlab-merged-results-wrong-parent: refusal did not name the wrong MR parent"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-merged-results-wrong-parent: a merge was attempted despite the wrong MR parent"
+  pass "fm-pr-merge refuses a merged-results pipeline whose second parent is not the MR head"
+}
+
+test_gitlab_merged_results_api_failure_refuses() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-merged-results-api-fails \
+    "pipeline_sha=$MR_MERGE_SHA" "pipeline_ref=refs/merge-requests/7/merge")
+  write_merged_results_fixtures "$case_dir" "$MR_TARGET_HEAD" "$MR_HEAD"
+  : > "$case_dir/glab-api-fails"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-merged-results-api-fails: an unreadable merge commit should refuse"
+  assert_grep 'reading its merge commit from the GitLab API failed' \
+    "$case_dir/stderr" "gitlab-merged-results-api-fails: refusal did not name the failed API read"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-merged-results-api-fails: a merge was attempted on an unreadable merge commit"
+  pass "fm-pr-merge refuses a merged-results pipeline whose merge commit cannot be read"
+}
+
+test_gitlab_non_merge_ref_pipeline_refuses() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-foreign-pipeline-ref \
+    "pipeline_sha=$MR_MERGE_SHA" "pipeline_ref=refs/heads/main")
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-foreign-pipeline-ref: a pipeline outside the merge ref should refuse"
+  assert_grep "is not a merged-results pipeline ref" \
+    "$case_dir/stderr" "gitlab-foreign-pipeline-ref: refusal did not name the non-merge ref"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-foreign-pipeline-ref: a merge was attempted despite the foreign ref"
+  pass "fm-pr-merge still refuses a successful pipeline whose ref is not the merge ref"
+}
+
 test_gitlab_stale_recorded_head_is_reported() {
   local case_dir rc merge_line
   case_dir=$(make_gitlab_case gitlab-stale-head)
@@ -2264,6 +2407,11 @@ test_gitlab_merge_failure_propagates
 test_gitlab_each_condition_refuses_independently
 test_gitlab_reports_every_failing_condition
 test_gitlab_stale_recorded_head_is_reported
+test_gitlab_merged_results_pipeline_merges
+test_gitlab_merged_results_stale_target_merges
+test_gitlab_merged_results_wrong_mr_parent_refuses
+test_gitlab_merged_results_api_failure_refuses
+test_gitlab_non_merge_ref_pipeline_refuses
 test_gitlab_unreadable_state_refuses
 test_gitlab_invalid_head_refuses
 test_gitlab_missing_tool_refuses_before_recording
