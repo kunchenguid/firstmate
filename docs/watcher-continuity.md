@@ -48,7 +48,7 @@ A live initial queue-lock holder produces one PID-naming advisory and skips the 
 Acknowledgement invocations and every other mutation-critical queue-lock acquire retain blocking semantics, so acknowledgement atomicity is unchanged.
 Main records its presented set in `state/.main-eligible-rows`.
 A branch grant is published through `bin/fm-wake-grant.sh` under that same lock in `state/.branch-eligible-rows`, bound to the live branch process and extension generation recorded in `state/.branch-eligible-owner`, and publication is refused if main already claimed any requested row.
-The branch publishes that exact grant before synchronously accepting the watcher offer, and it accepts no further offer while a prompt or mirror operation is unsettled, so acceptance proves current ownership and capacity rather than eventual serialized capacity.
+Synchronous acceptance transfers delivery into the branch settlement while carrying the watcher's exact sequence-to-task admission snapshot. Before publishing the grant after asynchronous queueing, the branch rechecks generation, selection revision, lock ownership, trigger disposition, every admitted sequence, and each resolved task identity; a changed or retired identity rejects settlement to watcher fallback without prompting. Acceptance therefore proves immediate branch eligibility and capacity to own the settlement, while the later grant proves the exact rows are still safe to execute.
 A busy branch instead reports an offered wake whose eligible rows its live grant already covers as already owned, and the watcher suppresses that main delivery because the in-flight turn's drain will present those rows; rows outside the live grant keep the single main fallback.
 A main drain validates that owner evidence under the queue lock and reclaims the grant when its process is gone or its identity no longer matches.
 A main drain claims every currently unclaimed row and excludes an active branch grant from both presentation and acknowledgement.
@@ -71,6 +71,9 @@ Because branch claims contain no check-kind rows, a branch acknowledgement skips
 `tests/fm-wake-queue.test.sh`'s mixed-queue actor, stale-acknowledgement remedy, and presentation-deadline tests drive the real scripts: branch acknowledgement cannot swallow a main row, a concurrent main turn cannot present or acknowledge an active branch grant, a no-op stale acknowledgement names the current presented wake's exact command, live-holder presentation contention stays bounded and retriable, and acknowledgement locking remains blocking.
 The same suite pins the counted-equals-presentable invariant against `bin/fm-guard.sh` and `bin/fm-wake-drain.sh` together: a branch-held row raises the held advisory rather than the ordinary queued-wake warning for main, and is presented with its acknowledgement command - with the ordinary warning restored - as soon as the grant clears, and structurally unusable rows are retired by main alone while every remaining row stays presentable and acknowledgeable.
 `tests/fm-pi-branch-extension.test.sh` pins extension-side classification, claim publication and release, and the pre-drain recheck.
+`tests/fm-pi-watch-extension.test.sh` drives the retained old-task plus live-task counterexample through the real watcher classifier: the old row reaches main, the unrelated live row is offered once with its exact identity snapshot, and both durable rows remain unchanged until their owning actor drains them.
+
+The watcher and branch also write a bounded, privacy-safe causal trace to `state/.supervision-routing.jsonl`; [Pi supervision branch](pi-supervision-branch.md#routing-diagnostics) owns its fields, retention, redaction, and explicitly non-authoritative role.
 
 ## Arm-layer cycle contract
 

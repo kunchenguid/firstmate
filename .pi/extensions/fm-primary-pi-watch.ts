@@ -31,7 +31,9 @@ import { Box, Container, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { registerFirstmateTool } from "./lib/fm-native-contract.ts";
 import {
+  appendBranchRoutingTrace,
   createBranchDispatchOffer,
+  dispositionForWakeTrigger,
   FM_BRANCH_DISPATCH_EVENT,
   scopeForUnreadWake,
 } from "./lib/fm-branch-dispatch.ts";
@@ -594,41 +596,92 @@ export default function (pi: ExtensionAPI) {
     return confirmHandlingDelivery(snapshot());
   }
 
-  function offerWakeToBranch(message: string): Promise<void> | null {
+  function offerWakeToBranch(message: string, pending: PendingActionableClose): Promise<void> | null {
+    const offeredAt = Date.now();
     const heartbeat = /^heartbeat($|:)/.test(message);
     // A check-kind close stays on main except for the exact task-scoped iDA
     // result payload whose captured identity scopeForUnreadWake validated.
     // That narrow exception does not let any other check trigger slip past
     // main merely because another currently unread row is eligible.
-    const isCheckTrigger = /^check:/.test(message);
     const scope = scopeForUnreadWake(state, heartbeat);
-    const idaResultRows = isCheckTrigger
+    const idaResultRows = /^check:/.test(message)
       ? scope.eligibleIdaResults.filter((result) => result.trigger === message).map((result) => result.row)
       : [];
-    const isIdaResultTrigger = idaResultRows.length > 0;
     // A signal close containing a needs-decision status file, or a stale close
     // for a captain-held task, gets the identical main-only treatment as a
     // check-kind trigger. The cross-reference deliberately includes every
     // unread decision row: until that row is read, a later signal or stale
     // trigger for the same task stays on main. Other tasks and heartbeat
     // handling remain independent.
-    const triggerKeys = /^signal:/.test(message)
-      ? message
-        .slice("signal:".length)
-        .split(/\s+/)
-        .filter(Boolean)
-        .map((path) => path.split("/").pop() ?? path)
-      : /^stale:/.test(message)
-        ? [message.slice("stale:".length).trim().split(/\s+/, 1)[0]].filter(Boolean)
-        : [];
-    const taskIdentity = (key: string): string =>
-      scope.taskByWakeKey[key] ?? scope.taskByWakeKey[key.replace(/^fm-/, "")] ?? key;
-    const needsDecisionTasks = new Set(scope.needsDecisionKeys.map(taskIdentity));
-    const isNeedsDecisionTrigger = triggerKeys.some((key) => needsDecisionTasks.has(taskIdentity(key)));
-    const eligible = (!isCheckTrigger || isIdaResultTrigger) && !isNeedsDecisionTrigger && scope.eligible;
-    const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible, idaResultRows);
+    const disposition = dispositionForWakeTrigger(message, scope);
+    const offer = createBranchDispatchOffer(
+      message,
+      scope.projects,
+      heartbeat,
+      disposition.eligible,
+      idaResultRows,
+      pending.token,
+      scope.eligibleSeqs,
+      scope.eligibleTasks,
+      scope.taskBySeq,
+    );
+    appendBranchRoutingTrace(state, {
+      token: pending.token,
+      actor: "watcher",
+      stage: "classify",
+      reason: disposition.reason,
+      trigger: message.split(":", 1)[0],
+      seqs: scope.eligibleSeqs,
+      excluded: [
+        ...scope.unresolvedRows.map((row) => ({ seq: row.seq, reason: "unresolved-task" as const })),
+      ],
+      generation: activeGeneration?.id,
+    });
     pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
-    return offer.accepted ? offer.settlement : null;
+    appendBranchRoutingTrace(state, {
+      token: pending.token,
+      actor: "watcher",
+      stage: offer.accepted ? "accepted" : "declined",
+      reason: offer.accepted ? "branch-accepted" : offer.declineReason,
+      generation: activeGeneration?.id,
+      elapsedMs: Date.now() - offeredAt,
+    });
+    if (!offer.accepted) return null;
+    return offer.settlement.then(
+      () => {
+        appendBranchRoutingTrace(state, {
+          token: pending.token,
+          actor: "watcher",
+          stage: "settled",
+          reason: "branch-complete",
+          generation: activeGeneration?.id,
+          elapsedMs: Date.now() - offeredAt,
+        });
+      },
+      (error) => {
+        appendBranchRoutingTrace(state, {
+          token: pending.token,
+          actor: "watcher",
+          stage: "fallback",
+          reason: routeFailureKind(error),
+          generation: activeGeneration?.id,
+          elapsedMs: Date.now() - offeredAt,
+        });
+        throw error;
+      },
+    );
+  }
+
+  function routeFailureKind(error: unknown): string {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (detail.includes("reconcile unread supervision outcomes")) return "reconcile-failed";
+    if (detail.includes("replaced") || detail.includes("generation")) return "generation-changed";
+    if (detail.includes("fleet lock") || detail.includes("claimed by main")) return "ownership-lost";
+    if (detail.includes("queue could not be read safely")) return "corrupt-queue";
+    if (detail.includes("scope changed")) return "scope-changed";
+    if (detail.includes("provider failed")) return "provider-failed";
+    if (detail.includes("no durable outcome")) return "no-durable-report";
+    return "branch-settlement-failed";
   }
 
   async function deliverActionableWake(
@@ -650,7 +703,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
     if (!repairFailed) {
-      const branchDelivery = offerWakeToBranch(message);
+      const branchDelivery = offerWakeToBranch(message, pending);
       if (branchDelivery) {
         try {
           await branchDelivery;
@@ -658,7 +711,15 @@ export default function (pi: ExtensionAPI) {
         } catch {}
       }
     }
-    return await sendWake(owner, message, pending);
+    const delivered = await sendWake(owner, message, pending);
+    appendBranchRoutingTrace(state, {
+      token: pending.token,
+      actor: "watcher",
+      stage: "main-delivery",
+      reason: delivered ? "main-accepted" : "main-delivery-failed",
+      generation: owner.id,
+    });
+    return delivered;
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {

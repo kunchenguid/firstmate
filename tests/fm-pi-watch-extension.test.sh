@@ -537,6 +537,135 @@ EOF
   pass "Pi dispatcher branch offer owns accepted wakes and falls back to main"
 }
 
+test_pi_retired_row_does_not_veto_an_unrelated_live_wake() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-retired-row-local-root"
+  home="$TMP_ROOT/pi-retired-row-local-home"
+  log="$TMP_ROOT/pi-retired-row-local.log"
+  stop="$TMP_ROOT/pi-retired-row-local.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+case "$count" in
+  1)
+    printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+    printf 'signal: retired-task.turn-ended\n'
+    ;;
+  2)
+    printf 'watcher: started pid=%s (beacon fresh) recovery-generation=retired-row-generation\n' "$$"
+    printf 'stale: default:wDT:p2\n'
+    ;;
+  *)
+    printf 'watcher: started pid=%s (beacon fresh) recovery-generation=retired-row-generation\n' "$$"
+    trap 'exit 0' TERM INT
+    while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+    ;;
+esac
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+    node --input-type=module 2>&1 <<'EOF'
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const offers = [];
+const mainPrompts = [];
+let tool = null;
+const handlers = new Map();
+const bus = {
+  on(channel, handler) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of handlers.get(channel) ?? []) handler(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  offers.push({
+    message: offer.message,
+    eligible: offer.eligible,
+    seqs: [...offer.eligibleSeqs],
+    taskBySeq: { ...offer.taskBySeq },
+  });
+  if (offer.eligible) offer.accept();
+});
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    mainPrompts.push(message);
+  },
+};
+const state = `${process.env.FM_HOME}/state`;
+writeFileSync(`${state}/.lock`, `${process.pid}\n`);
+writeFileSync(
+  `${state}/live-task.meta`,
+  `project=${process.env.FM_HOME}/projects/approved\nwindow=default:wDT:p2\n`,
+);
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t21903\tsignal\tretired-task.turn-ended\tsignal: retired-task.turn-ended",
+    "1\t21914\tstale\tdefault:wDT:p2\tstale: default:wDT:p2",
+  ].join("\n") + "\n",
+);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-retired-row-local", {}, undefined, undefined, {});
+for (let i = 0; i < 500 && (offers.length < 2 || mainPrompts.length < 1); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (offers.length !== 2) throw new Error(`expected the two real watcher closes, got ${JSON.stringify(offers)}`);
+const retired = offers.find((offer) => offer.message === "signal: retired-task.turn-ended");
+const live = offers.find((offer) => offer.message === "stale: default:wDT:p2");
+if (!retired || retired.eligible) throw new Error(`retired row escaped MAIN-only routing: ${JSON.stringify(offers)}`);
+if (!live || !live.eligible || live.seqs.join(",") !== "21914" || live.taskBySeq["21914"] !== "live-task") {
+  throw new Error(`unrelated live row was not admitted with its exact identity: ${JSON.stringify(offers)}`);
+}
+if (mainPrompts.length !== 1 || !mainPrompts[0].includes("FIRSTMATE WATCHER WAKE: signal: retired-task.turn-ended")) {
+  throw new Error(`MAIN received the wrong trigger set: ${JSON.stringify(mainPrompts)}`);
+}
+if (mainPrompts[0].includes("stale: default:wDT:p2")) {
+  throw new Error(`the accepted live trigger also fell back to MAIN: ${mainPrompts[0]}`);
+}
+const trace = readFileSync(`${state}/.supervision-routing.jsonl`, "utf8")
+  .trim().split("\n").map((line) => JSON.parse(line));
+if (!trace.some((row) => row.actor === "watcher" && row.stage === "classify" && row.reason === "unresolved-task") ||
+    !trace.some((row) => row.actor === "watcher" && row.stage === "main-delivery" && row.reason === "main-accepted") ||
+    !trace.some((row) => row.actor === "watcher" && row.stage === "accepted" && row.reason === "branch-accepted")) {
+  throw new Error(`routing trace cannot explain both outcomes: ${JSON.stringify(trace)}`);
+}
+if (JSON.stringify(trace).includes("retired-task") || JSON.stringify(trace).includes("default:wDT:p2")) {
+  throw new Error(`routing trace leaked task or endpoint identity: ${JSON.stringify(trace)}`);
+}
+const queue = readFileSync(`${state}/.wake-queue`, "utf8");
+if (!queue.includes("\t21903\tsignal\tretired-task.turn-ended\t") ||
+    !queue.includes("\t21914\tstale\tdefault:wDT:p2\t")) {
+  throw new Error(`classification mutated durable rows: ${queue}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "a retired task row must stay MAIN-only without vetoing an unrelated live watcher close: $out"
+  [ -z "$out" ] || fail "Pi retired-row-local watcher test printed output: $out"
+  pass "a retired task row stays MAIN-only while an unrelated live watcher close is accepted exactly once"
+}
+
 test_pi_branch_offer_flags_heartbeat() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-branch-heartbeat-root"
@@ -3117,6 +3246,7 @@ test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
 test_pi_branch_offer_owns_actionable_wake
+test_pi_retired_row_does_not_veto_an_unrelated_live_wake
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
 test_pi_main_only_check_classes_stay_on_main
