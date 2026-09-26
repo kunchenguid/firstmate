@@ -11,6 +11,8 @@
 # fm_watcher_supervision_verdict (also in bin/fm-wake-lib.sh), which owns what a
 # live watcher process means per supervision model. The status fields here retain
 # the beacon-age details used in their messages.
+# The beacon age is fm_beacon_age from bin/fm-wake-lib.sh, so callers source
+# that library before calling fm_supervision_status.
 
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {
@@ -83,7 +85,7 @@ fm_supervision_status() {
   if [ -e "$beat" ]; then
     m=$(fm_sup_stat_mtime "$beat")
     if [ -n "$m" ]; then
-      age=$(( $(date +%s) - m ))
+      age=$(fm_beacon_age "$beat")
       FM_SUP_BEACON_DESC="${age}s ago"
       [ "$age" -lt "$grace" ] && FM_SUP_WATCHER_FRESH=true
     else

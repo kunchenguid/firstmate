@@ -1632,7 +1632,7 @@ fm_autoarm_ledger_read() {  # <state-dir>
 # True while the CURRENT ledger claim is open and healthy - the defer predicate
 # both Stop participants use. Open means: outcome "arming", a live owner whose
 # mandatory recorded identity recomputes and matches its pid, and not stuck
-# (the contract comment above owns the stuck proof). fm_path_age reports an
+# (the contract comment above owns the stuck proof). fm_beacon_age reports an
 # absent beacon as ancient, which is exactly right: arming for a full grace
 # window without producing a first beat is the same hang. An identityless
 # entry is never open: real generation claims always record identity, a legacy
@@ -1652,7 +1652,7 @@ fm_autoarm_claim_open() {  # <state-dir> [grace]
   [ -n "$current" ] || return 1
   [ "$current" = "$FM_AUTOARM_IDENTITY" ] || return 1
   if [ "$(fm_path_age "$epoch")" -ge "$grace" ] \
-    && [ "$(fm_path_age "$state/.last-watcher-beat")" -ge "$grace" ]; then
+    && [ "$(fm_beacon_age "$state/.last-watcher-beat")" -ge "$grace" ]; then
     return 1
   fi
   return 0
@@ -1846,7 +1846,7 @@ fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
     '') return 1 ;;
     arming)
       [ "$(fm_path_age "$epoch")" -ge "$grace" ] || return 1
-      [ "$(fm_path_age "$state/.last-watcher-beat")" -ge "$grace" ] || return 1
+      [ "$(fm_beacon_age "$state/.last-watcher-beat")" -ge "$grace" ] || return 1
       return 0
       ;;
   esac

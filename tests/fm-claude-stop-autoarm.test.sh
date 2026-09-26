@@ -1143,6 +1143,30 @@ test_stuck_live_legacy_owner_is_retired_and_reclaimed() {
   pass "auto-arm: a stuck live legacy owner is retired via TERM and its lock reclaimed"
 }
 
+# The legacy shim's stuck proof counts awake beacon age too: a live legacy owner
+# whose beacon missed beats only while the host slept keeps deferring.
+test_live_legacy_owner_across_host_sleep_is_not_reclaimed() {
+  local dir out status pid now
+  dir=$(make_primary_dir "$TMP_ROOT/legacy-host-sleep")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  sleep 60 &
+  pid=$!
+  record_autoarm_owner "$dir" "$pid"
+  record_autoarm_owner_identity "$dir" "$pid" || fail "could not record a claim pid-identity"
+  record_autoarm_epoch "$dir" 464 "$pid" arming
+  now=$(date +%s)
+  fm_touch_epoch $((now - 600)) "$dir/state/.claude-autoarm-epoch" "$dir/state/.last-watcher-beat"
+  out=$(FM_HOST_SLEEP_WINDOW="$((now - 590)) $((now - 5))" run_autoarm "$dir" 2>/dev/null); status=$?
+  kill -0 "$pid" 2>/dev/null || fail "a legacy owner paused by host sleep was retired as stuck"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a live legacy owner whose beacon missed beats only while the host slept must defer"
+  assert_absent "$dir/state/arm-ran" "a legacy owner paused by host sleep was reclaimed and double-armed"
+  assert_present "$dir/state/.claude-autoarm.lock" "a legacy owner paused by host sleep lost its lock"
+  pass "auto-arm: a live legacy owner is judged on awake beacon age across host sleep"
+}
+
 # The SIGSTOP counterfactual: a stopped legacy owner survives the bounded
 # retirement wait with TERM queued, and the reclaim must proceed anyway - a
 # pending TERM on the verified owner is retirement-safe because delivery
@@ -1240,6 +1264,38 @@ test_stuck_generation_claim_is_superseded_and_rearms() {
   [ "$(epoch_field "$dir" owner_pid)" != "$pid" ] || fail "superseding claim left the stuck owner on the ledger"
   assert_absent "$dir/state/.claude-autoarm.lock" "the generation claim left a lock held after finishing"
   pass "auto-arm: a hung generation owner with no watcher beat is superseded so re-arming self-heals"
+}
+
+# A live claim whose watcher beacon went stale only because the host slept is
+# not stuck: no process runs during sleep, so the beacon age that proves a hang
+# counts awake time only. The same claim whose beacon went stale while the host
+# was awake is still superseded.
+test_generation_claim_across_host_sleep_is_judged_on_awake_age() {
+  local dir out status pid now
+  dir=$(make_primary_dir "$TMP_ROOT/v2-claim-host-sleep")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  sleep 60 &
+  pid=$!
+  record_autoarm_v2_claim "$dir" 464 "$pid" arming "$pid" || fail "could not record a v2 claim"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  now=$(date +%s)
+  fm_touch_epoch $((now - 600)) "$dir/state/.last-watcher-beat"
+  out=$(FM_HOST_SLEEP_WINDOW="$((now - 590)) $((now - 5))" run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "a live claim whose beacon missed beats only while the host slept must defer"
+  [ -z "$out" ] || fail "deferring to a claim paused by host sleep produced output: $out"
+  assert_absent "$dir/state/arm-ran" "a claim paused by host sleep was read as abandoned and superseded"
+  [ "$(epoch_field "$dir" epoch)" = 464 ] || fail "deferred firing rewrote the claim paused by host sleep"
+
+  now=$(date +%s)
+  fm_touch_epoch $((now - 600)) "$dir/state/.last-watcher-beat"
+  out=$(FM_HOST_SLEEP_WINDOW="$((now - 590)) $((now - 500))" run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a claim whose beacon went stale while the host was awake must still be superseded"
+  [ -e "$dir/state/arm-ran" ] || fail "an awake-stale claim left the home unarmed with work in flight"
+  [ "$(epoch_field "$dir" epoch)" -gt 464 ] || fail "superseding an awake-stale claim did not advance the ledger: $(epoch_field "$dir" epoch)"
+  pass "auto-arm: a generation claim is judged on awake beacon age across host sleep"
 }
 
 # Identity is mandatory at read time: a bare identityless one-line arming
@@ -1584,9 +1640,11 @@ test_pid_reused_claim_with_no_ledger_is_reclaimed_and_rearms
 test_identity_matched_arming_claim_is_never_reclaimed
 test_terminal_check_claim_is_never_reclaimed
 test_stuck_live_legacy_owner_is_retired_and_reclaimed
+test_live_legacy_owner_across_host_sleep_is_not_reclaimed
 test_stopped_legacy_owner_is_reclaimed_with_term_pending
 test_open_generation_claim_defers_without_any_lock
 test_stuck_generation_claim_is_superseded_and_rearms
+test_generation_claim_across_host_sleep_is_judged_on_awake_age
 test_identityless_ledger_never_defers
 test_superseded_owner_never_reinvokes_the_arm
 test_superseded_owner_goes_silent_and_never_double_translates
