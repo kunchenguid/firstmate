@@ -1637,7 +1637,14 @@ ${context.command}
   // tool can await this serialized reconciliation before reporting success.
   // Repeating the repair is idempotent: sequence-keyed visible entries and the
   // processing state's pending flag prevent duplicate captain presentation.
-  pi.events?.on?.(FM_SUPERVISION_RECONCILE_EVENT, (request: SupervisionReconcileRequest) => {
+  pi.events?.on?.(FM_SUPERVISION_RECONCILE_EVENT, (data: unknown) => {
+    if (!data || typeof data !== "object") return;
+    const request = data as Partial<SupervisionReconcileRequest>;
+    if (
+      typeof request.accepted !== "boolean" ||
+      !(request.settlement instanceof Promise) ||
+      typeof request.accept !== "function"
+    ) return;
     const repairGeneration = generation;
     if (!generationOwnsLockSync(repairGeneration)) return;
     request.accept(enqueueDelivery(async () => {

@@ -1252,6 +1252,8 @@ await eval(`(async () => { ${prelude}; globalThis.__t = { fire, sentToMain, main
 const { fire, sentToMain, mainEntries, outcomeScript, defaultSessionCtx, bus } = globalThis.__t;
 
 await fire("session_start", {}, defaultSessionCtx);
+bus.emit("fm-branch-supervision:reconcile", null);
+bus.emit("fm-branch-supervision:reconcile", { accepted: false, settlement: Promise.resolve() });
 const summary = "completed while the ordinary notification path was unavailable";
 const seq = Number(outcomeScript(["append", "--task", "repair-case", "--verdict", "captain", "--summary", summary]));
 const repair = async () => {

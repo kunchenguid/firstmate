@@ -100,9 +100,21 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 let tool = null;
+let reconciliationRequests = 0;
+let reconciliationSettlements = 0;
 const prompts = [];
 const pi = {
   on() {},
+  events: {
+    emit(channel, request) {
+      if (channel !== "fm-branch-supervision:reconcile") return;
+      reconciliationRequests += 1;
+      request.accept(new Promise((resolve) => setTimeout(() => {
+        reconciliationSettlements += 1;
+        resolve();
+      }, 25)));
+    },
+  },
   registerCommand() {},
   registerTool(candidate) {
     if (candidate.name === "fm_watch_arm_pi") tool = candidate;
@@ -116,6 +128,9 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 if (!tool) throw new Error("Pi watch tool was not registered");
 await tool.execute("tool-call-t1", {}, undefined, undefined, {});
+if (reconciliationRequests !== 1 || reconciliationSettlements !== 1) {
+  throw new Error(`explicit repair did not await reconciliation: requests=${reconciliationRequests} settlements=${reconciliationSettlements}`);
+}
 const deadline = Date.now() + 75000;
 let firstAt = 0;
 while (Date.now() < deadline) {
