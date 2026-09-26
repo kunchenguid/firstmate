@@ -564,8 +564,13 @@ case "$fault:$*" in
     printf 'HTTP 502\n' >&2; exit 1 ;;
   fail:'api repos/o/r/pulls/8/reviews?'*) printf 'HTTP 502\n' >&2; exit 1 ;;
   down:*) printf 'HTTP 502\n' >&2; exit 1 ;;
+  secret:'api repos/o/r/pulls/8/reviews?'*)
+    printf 'HTTP 401: Bad credentials\x01 ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345 Authorization: Bearer abc.def\n' >&2; exit 1 ;;
+  badjson:'api repos/o/r/issues/8/comments?'*) printf '{"not":"pages"}\n'; exit 0 ;;
+  slow:'api repos/o/r/commits/'*'/statuses?'*) sleep 7 ;;
   hang:'api repos/o/r/pulls/8') sleep 4 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
+  malformed-head:'pr view '*) printf '{"headRefOid":"not-a-sha"}\n'; exit 0 ;;
 esac
 exec "$(dirname "$0")/gh-fixture" "$@"
 SH
@@ -593,8 +598,11 @@ test_budget_exhaustion_keeps_prior_record() { # exhaust|hang
   [ -z "$out" ] || fail "budget exhaustion ($mode) printed a wake line: $out"
   grep -F 'api repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
     || fail "budget exhaustion ($mode) never started the observation"
-  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
-    || fail "budget exhaustion ($mode) rewrote the prior record: $(cat "$home/data/delivery/contributions.json")"
+  jq -e --slurpfile prior "$home/prior.json" '
+    .records[0].last_failure.class == "aggregate-budget"
+    and (.records[0].last_failure.failures | any(.class == "aggregate-budget"))
+    and (del(.records[0].last_failure) == $prior[0])' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail "budget exhaustion ($mode) changed prior state or lost its diagnostic"
   [ ! -s "$home/state/.wake-queue" ] || fail "budget exhaustion ($mode) enqueued a wake"
   pass "budget exhausted mid-observation ($mode) keeps the prior record and stays silent"
 }
@@ -828,8 +836,69 @@ test_late_owner_keeps_failure_episode_suppressed() {
   pass 'a late owner does not restart a shared forge failure episode'
 }
 
+failure_poll() { # home fault -> last_failure JSON after one failing poll
+  local home=$1 out
+  printf '%s\n' "$2" > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail "poll failed ($2)"
+  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
+    || fail "a $2 failure changed its unavailable wake: $out"
+  jq -c '.records[0] | select(.error == "forge observation unavailable or changed during read") | .last_failure' \
+    "$home/data/delivery/contributions.json"
+}
+
+test_failed_observation_keeps_classified_diagnostic() {
+  local home diag
+  home=$(new_home diag-wave)
+  forge_home "$home"
+  wrap_forge "$home"
+  diag=$(failure_poll "$home" secret)
+  printf '%s' "$diag" | jq -e --arg now "$NOW" '.at == $now and .class == "forge-failure"
+    and (.failures | length) == 1 and .failures[0].stage == "reviews" and .failures[0].exit == 1
+    and (.failures[0].endpoint | contains("repos/o/r/pulls/8/reviews"))
+    and (.failures[0].stderr | startswith("HTTP 401: Bad credentials"))
+    and (.failures[0].stderr | test("ghp_|abc[.]def|\\u0001") | not)' >/dev/null \
+    || fail "a middle-wave failure lost its stage, exit code, or sanitized stderr: $diag"
+  : > "$home/forge/fault"
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:00:00Z "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'recovery poll failed'
+  jq -e --argjson diag "$diag" '.records[0] | .error == null and .last_failure == $diag' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'a successful read discarded the last failure diagnostic'
+
+  home=$(new_home diag-head)
+  forge_home "$home"
+  wrap_forge "$home"
+  diag=$(failure_poll "$home" head)
+  printf '%s' "$diag" | jq -e --arg a "$HEAD_A" '.class == "head-mismatch" and .failures[0].stage == "head-mismatch"
+    and .failures[0].before_head == $a and .failures[0].after_head == ($a | gsub("a"; "b"))' >/dev/null \
+    || fail "a head change did not record both heads: $diag"
+
+  home=$(new_home diag-malformed-head)
+  forge_home "$home"
+  wrap_forge "$home"
+  diag=$(failure_poll "$home" malformed-head)
+  printf '%s' "$diag" | jq -e '.class == "jq-validation" and .failures[0].stage == "closing-head"' >/dev/null \
+    || fail "a malformed closing head was misclassified: $diag"
+
+  home=$(new_home diag-jq)
+  forge_home "$home"
+  wrap_forge "$home"
+  diag=$(failure_poll "$home" badjson)
+  printf '%s' "$diag" | jq -e '.class == "jq-validation" and .failures[0].stage == "comments-shape"
+    and .failures[0].exit == 1' >/dev/null \
+    || fail "a response that failed validation after a successful call was not classified: $diag"
+
+  home=$(new_home diag-bound)
+  forge_home "$home"
+  wrap_forge "$home"
+  diag=$(failure_poll "$home" slow)
+  printf '%s' "$diag" | jq -e '.class == "per-call-bound" and .failures[0].stage == "statuses"
+    and .failures[0].exit == 124' >/dev/null \
+    || fail "a read killed at the per-call bound was not classified: $diag"
+  pass 'a failed observation keeps its stage, endpoint, exit code, sanitized stderr, and classification'
+}
+
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_failed_observation_keeps_classified_diagnostic; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
