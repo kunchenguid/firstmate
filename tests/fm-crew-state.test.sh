@@ -215,7 +215,10 @@ case "${1:-}" in
     ;;
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
-    printf '%%1\n' ;;
+    case "${*: -1}" in
+      *window_activity*) printf '%s\n' "${FM_FAKE_TMUX_WINDOW_ACTIVITY:-0}" ;;
+      *) printf '%%1\n' ;;
+    esac ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"
@@ -327,6 +330,7 @@ reset_fakes() {
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
   FM_FAKE_TMUX_UNREADABLE=0
+  FM_FAKE_TMUX_WINDOW_ACTIVITY=0
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_READ_FAIL=0
@@ -352,7 +356,7 @@ reset_fakes() {
   FM_FAKE_GERRIT_READ_FAIL=0
   FM_FAKE_GERRIT_READ_LOG=
   unset FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
-  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
+  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE FM_FAKE_TMUX_WINDOW_ACTIVITY
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
   export FM_FAKE_DAEMON_DOWN FM_FAKE_DAEMON_TIMEOUT FM_FAKE_DAEMON_PROBE_LOG FM_FAKE_AXI_HOME
   export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
@@ -2770,6 +2774,63 @@ test_no_run_idle_pane_uses_log() {
   assert_contains "$out" "state: parked" "needs-decision log -> parked"
   assert_contains "$out" "source: status-log" "idle pane -> status-log source"
   pass "no run + idle pane uses the status-log verb"
+}
+
+test_codex_unverified_reports_only_conservative_idle_suspect() {
+  local d out
+  reset_fakes
+  d=$(new_case codex-idle-suspect)
+  make_repo_on_branch "$d/wt" fm/codex-idle-suspect
+  make_fakebin "$d" >/dev/null
+  printf 'old source\n' > "$d/wt/source.txt"
+  touch -t 202001010000 "$d/wt/source.txt"
+  mkdir -p "$d/wt/removed-file"
+  printf 'old file\n' > "$d/wt/removed-file/old.txt"
+  touch -t 202001010000 "$d/wt/removed-file/old.txt"
+  find "$d/wt" -type d -exec touch -t 202001010000 {} +
+  fm_write_meta "$d/state/codex-idle.meta" "window=fm:fm-codex-idle" \
+    "worktree=$d/wt" "kind=ship" "harness=codex"
+  FM_FAKE_TMUX_WINDOW_ACTIVITY=1000000000
+  export FM_FAKE_TMUX_WINDOW_ACTIVITY
+  out=$(run_crew_state "$d" codex-idle)
+  assert_contains "$out" 'state: unknown' 'Codex remains unknown'
+  assert_contains "$out" 'unknown codex-unverified' 'Codex semantic source remains unverified'
+  assert_contains "$out" 'idle-suspect: tmux activity and worktree paths unchanged for at least 300s' \
+    'old pane activity and old worktree file mtimes expose only an advisory suspect'
+
+  FM_FAKE_TMUX_WINDOW_ACTIVITY=$(date +%s)
+  export FM_FAKE_TMUX_WINDOW_ACTIVITY
+  out=$(run_crew_state "$d" codex-idle)
+  assert_not_contains "$out" 'idle-suspect:' 'recent pane activity suppresses the advisory'
+
+  FM_FAKE_TMUX_WINDOW_ACTIVITY=1000000000
+  export FM_FAKE_TMUX_WINDOW_ACTIVITY
+  rm "$d/wt/removed-file/old.txt"
+  out=$(run_crew_state "$d" codex-idle)
+  assert_not_contains "$out" 'idle-suspect:' 'recent directory activity from file deletion suppresses the advisory'
+
+  find "$d/wt" -type d -exec touch -t 202001010000 {} +
+  mkdir -p "$d/wt/node_modules/a/b/c/d/e/f/g"
+  printf 'recent deep file\n' > "$d/wt/node_modules/a/b/c/d/e/f/g/recent.txt"
+  find "$d/wt" -type d -exec touch -t 202001010000 {} +
+  out=$(run_crew_state "$d" codex-idle)
+  assert_not_contains "$out" 'idle-suspect:' 'recent deep dependency-tree activity suppresses the advisory'
+  rm -rf "$d/wt/node_modules"
+  find "$d/wt" -type d -exec touch -t 202001010000 {} +
+
+  cat > "$d/fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$d/fakebin/stat"
+  out=$(run_crew_state "$d" codex-idle)
+  assert_not_contains "$out" 'idle-suspect:' 'failed worktree scan suppresses the advisory'
+  rm "$d/fakebin/stat"
+
+  touch "$d/wt/source.txt"
+  out=$(run_crew_state "$d" codex-idle)
+  assert_not_contains "$out" 'idle-suspect:' 'recent worktree file activity suppresses the advisory'
+  pass 'Codex unverified remains unknown with a conservative idle-suspect advisory'
 }
 
 test_no_run_idle_pane_uses_keyed_log() {
@@ -5416,6 +5477,7 @@ test_no_run_herdr_husk_dead_still_reads_gone
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
 test_no_run_idle_pane_uses_log
+test_codex_unverified_reports_only_conservative_idle_suspect
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb

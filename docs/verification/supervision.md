@@ -247,6 +247,21 @@ In this 2026-07-28 Codex 0.145.0 semantic-busy probe, Firstmate-written lifecycl
 Codex also exposes no `StopFailure` hook, so an API-error turn end would need separate coverage even after hook discovery works.
 The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
 
+### Codex inactivity advisory fallback, 2026-09-27
+
+Codex semantic busy sources remain unverified.
+For a Codex task using tmux that still classifies `unknown codex-unverified`, `bin/fm-crew-state.sh` may append `idle-suspect` when tmux `window_activity` and the newest file or directory mtime outside `.git` are both at least 300 seconds old. The worktree probe streams paths without a temporary file and checks all files and directories up to 4,096 entries; if it reaches that limit or any part of the scan fails, it suppresses the advisory.
+This is an advisory based on inactivity clocks, not proof that the model is idle; a recent, malformed, or unreadable probe leaves the original unknown result without the advisory.
+The window clock is intentionally conservative for split windows: activity in another pane can suppress the advisory.
+The portable regression is `tests/fm-crew-state.test.sh`, which exercises stale clocks and confirms recent tmux activity suppresses the advisory.
+This fallback does not verify or enable Codex app-server or lifecycle-hook sources.
+
+```text
+$ tests/fm-crew-state.test.sh
+ok - Codex unverified remains unknown with a conservative idle-suspect advisory
+all fm-crew-state tests passed
+```
+
 Deterministic entry points:
 
 ```sh

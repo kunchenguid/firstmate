@@ -340,6 +340,42 @@ crew_busy_verdict() {  # <target>
   fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
 }
 
+# codex_idle_suspect: an advisory only, never a semantic busy-state verdict.
+# Both independent activity clocks must be at least five minutes old; any
+# unreadable or malformed probe suppresses the signal.
+codex_idle_suspect() {  # <target>
+  local target=$1 window_activity now latest='' scan_pid scan_fd path mtime scan_os scan_count=0 scan_failed=0
+  [ "$HARNESS" = codex ] && [ "$TASK_BACKEND" = tmux ] || return 1
+  window_activity=$(tmux display-message -p -t "$target" '#{window_activity}' 2>/dev/null) || return 1
+  case "$window_activity" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(date +%s 2>/dev/null) || return 1
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$now" -ge "$window_activity" ] 2>/dev/null || return 1
+  [ "$((now - window_activity))" -ge 300 ] || return 1
+
+  scan_os=$(uname -s 2>/dev/null) || return 1
+  exec {scan_fd}< <(find "$WT" -path "$WT/.git" -prune -o \( -type f -o -type d \) -print0 2>/dev/null)
+  scan_pid=$!
+  while IFS= read -r -d '' path; do
+    scan_count=$((scan_count + 1))
+    if [ "$scan_count" -gt 4096 ]; then scan_failed=1; break; fi
+    case "$scan_os" in
+      Darwin) mtime=$(stat -f '%m' "$path" 2>/dev/null) || { scan_failed=1; break; } ;;
+      *) mtime=$(stat -c '%Y' "$path" 2>/dev/null) || { scan_failed=1; break; } ;;
+    esac
+    case "$mtime" in ''|*[!0-9]*) scan_failed=1; break ;; esac
+    [ -n "$latest" ] || latest=$mtime
+    [ "$mtime" -le "$latest" ] || latest=$mtime
+  done <&"$scan_fd"
+  exec {scan_fd}<&-
+  wait "$scan_pid" 2>/dev/null || scan_failed=1
+  [ "$scan_failed" = 0 ] || return 1
+  case "$latest" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$now" -ge "$latest" ] 2>/dev/null || return 1
+  [ "$((now - latest))" -ge 300 ] || return 1
+  printf 'idle-suspect: tmux activity and worktree paths unchanged for at least 300s'
+}
+
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
 # trim, strip_quotes, the bounded nm_run call, nm_field's TOON parse, and the
 # attribution helpers below are thin wrappers over the ONE owner in
@@ -1293,7 +1329,13 @@ if [ "$KIND" != secondmate ]; then
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;
-    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+    *)
+      detail="harness state unavailable ($BUSY_VERDICT)"
+      if IDLE_NOTE=$(codex_idle_suspect "$BACKEND_TARGET"); then
+        detail="$detail${SEP}$IDLE_NOTE"
+      fi
+      emit unknown pane "$detail"
+      ;;
   esac
 fi
 
