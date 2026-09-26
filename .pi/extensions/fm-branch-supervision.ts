@@ -1904,6 +1904,15 @@ ${context.command}
     }
   });
 
+  // A headless short task only announces durable rows; this existing owner
+  // retains lock checks, session generation, delivery and acknowledgement.
+  pi.events.on("firstmate:outcomes-ready", () => {
+    const expected = generation;
+    void enqueueDelivery(async () => {
+      if (await actingAsOwner(expected)) await reconcileUnreadOutcomes(expected);
+    });
+  });
+
   pi.on?.("session_compact", () => {
     loadedOutcomeSequences.clear();
   });

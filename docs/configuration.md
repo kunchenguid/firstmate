@@ -26,6 +26,11 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Headless read-only short tasks
+
+`FM_SHORT_AGENT_ENABLED=1` enables the Pi-primary short-task tools; [the current-use guide](short-agents.md) owns setup, examples, limits, and recovery.
+`state/short-agents/` holds their runner-owned records, whose exact format is owned by `bin/fm-short-agent.mjs`.
+
 ## Feishu current-Pi channel
 
 The optional `config/feishu.env` file is local, gitignored, and parsed strictly as data by [`bin/fm-feishu-config.mjs`](../bin/fm-feishu-config.mjs).

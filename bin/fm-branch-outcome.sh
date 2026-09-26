@@ -62,8 +62,10 @@
 #
 # Usage:
 #   fm-branch-outcome.sh append --task <id> --verdict routine|captain \
-#       --summary <text> [--wake <text>] [--silent true|false]
+#       --summary <text> [--wake <text>] [--silent true|false] [--once-task]
 #     Append one outcome record; prints the assigned seq.
+#     --once-task returns the existing row for an identical task/summary/verdict/
+#     wake, refusing conflicting reuse. This is a terminal-producer retry key.
 #   fm-branch-outcome.sh unread
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-read --through <seq>
@@ -110,7 +112,7 @@ OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] [--once-task] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
   exit 2
 }
 
@@ -430,8 +432,10 @@ case "$CMD" in
     SUMMARY=''
     WAKE=''
     SILENT=false
+    ONCE_TASK=false
     while [ "$#" -gt 0 ]; do
       case "$1" in
+        --once-task) ONCE_TASK=true; shift ;;
         --task) TASK=${2:-}; shift 2 || usage ;;
         --verdict) VERDICT=${2:-}; shift 2 || usage ;;
         --summary) SUMMARY=${2:-}; shift 2 || usage ;;
@@ -459,6 +463,21 @@ case "$CMD" in
       fm_lock_release "$LOCK"
       echo "error: refusing append because the outcome cursor is invalid or ahead of the store" >&2
       exit 1
+    fi
+    if [ "$ONCE_TASK" = true ] && [ -s "$STORE" ]; then
+      EXISTING=$(jq -c --arg task "$TASK" 'select(.task == $task)' "$STORE")
+      if [ -n "$EXISTING" ]; then
+        if ! SEQ=$(printf '%s\n' "$EXISTING" | jq -ser --arg summary "$SUMMARY" --arg verdict "$VERDICT" --arg wake "$WAKE" --argjson silent "$SILENT" '
+          if length == 1 and .[0].summary == $summary and .[0].verdict == $verdict and .[0].wake == $wake and .[0].silent == $silent
+          then .[0].seq else error("conflicting terminal task outcome") end'); then
+          fm_lock_release "$LOCK"
+          echo "error: conflicting once-task outcome" >&2
+          exit 1
+        fi
+        fm_lock_release "$LOCK"
+        printf '%s\n' "$SEQ"
+        exit 0
+      fi
     fi
     SEQ=$(( LAST_SEQ + 1 ))
     capture_status_position "$TASK"
