@@ -1415,6 +1415,73 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
   fi
 }
 
+# Retired slot records. Taking a slot proves every OTHER record in the same home
+# that still names it in worktree= is stale: Treehouse hands a slot on only once
+# it is idle, unleased, clean, and merged into its reset target, so nothing of
+# the previous task's remains in it. bin/fm-spawn.sh therefore retires those
+# records under the same project lock that wrote the new claim, by appending
+# worktree_reassigned_to=<claiming-task> to each. The record keeps its
+# worktree= line (endpoint validation requires one) and every other field, such
+# as pr= and pr_head=, so its own later cleanup still runs and still verifies
+# what it can. A retired record no longer claims the slot: bin/fm-teardown.sh
+# skips it in its record scan and treats its own slot as reassigned,
+# bin/fm-crew-state.sh reports it as reassigned instead of reading another
+# task's copy, and bin/fm-spawn.sh refuses to relaunch it into that copy.
+fm_slot_reassigned_to() {  # <meta-file>
+  local meta=$1 line value=''
+  [ -f "$meta" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      worktree_reassigned_to=*) value=${line#worktree_reassigned_to=} ;;
+    esac
+  done < "$meta" 2>/dev/null || true
+  printf '%s' "$value"
+}
+
+# Retire every other ordinary task record in <state-dir> whose worktree= names
+# <worktree>, now that <task-id> has claimed it. Each record is rewritten under
+# its own meta lock, taken without waiting: the caller already holds the project
+# lock, so waiting could deadlock against a teardown of that record, and a
+# record whose lock is busy is left as it was (its teardown then reads the new
+# claim and skips the slot anyway). Secondmate and remote records are never
+# retired: a leased home is never handed out, so a match there is a genuine
+# collision that teardown must keep refusing.
+fm_treehouse_slot_retire_stale_records() {  # <state-dir> <worktree> <task-id>
+  local state=$1 worktree=$2 id=$3 slot meta other_id other_path other_slot lock tmp line
+  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 0
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    other_id=$(basename "$meta" .meta)
+    [ "$other_id" != "$id" ] || continue
+    [ -z "$(fm_slot_reassigned_to "$meta")" ] || continue
+    other_path=''
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        worktree=*) other_path=${line#worktree=} ;;
+        kind=secondmate|remote_host=*) other_path=''; break ;;
+      esac
+    done < "$meta" 2>/dev/null || continue
+    [ -n "$other_path" ] || continue
+    other_slot=$(CDPATH='' cd -- "$other_path" 2>/dev/null && pwd -P) || continue
+    [ "$other_slot" = "$slot" ] || continue
+    lock=$(fm_meta_lock_path "$meta") || continue
+    if ! fm_lock_try_acquire "$lock"; then
+      echo "warning: task $other_id's record still names pool slot $slot, now claimed by task $id, but its record is locked; left unchanged" >&2
+      continue
+    fi
+    tmp="$meta.reassigned.${BASHPID:-$$}"
+    if [ -f "$meta" ] && [ ! -L "$meta" ] && cp -p "$meta" "$tmp" 2>/dev/null \
+      && printf 'worktree_reassigned_to=%s\n' "$id" >> "$tmp" \
+      && mv -f "$tmp" "$meta" 2>/dev/null; then
+      echo "note: task $other_id's record named pool slot $slot, which task $id has now claimed; marked it reassigned so it no longer claims that slot" >&2
+    else
+      rm -f "$tmp"
+      echo "warning: task $other_id's record still names pool slot $slot, now claimed by task $id, and could not be marked reassigned" >&2
+    fi
+    fm_lock_release "$lock"
+  done
+}
+
 # Drop a task's own claim once its slot is back in the pool. Never removes
 # another task's claim, so a misdirected release cannot strip the evidence that
 # protects the slot's real owner.

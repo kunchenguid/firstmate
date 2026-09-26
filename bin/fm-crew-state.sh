@@ -141,7 +141,8 @@
 #      backend's pane busy state, then the resolved status declaration
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
-#   5. Missing meta or torn-down worktree: report unknown · none. If no run is
+#   5. Missing meta, torn-down worktree, or a worktree reassigned to another
+#      task: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
 #      recovery-grade classifier, only its positive death evidence reads as gone
@@ -217,6 +218,12 @@ KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
 [ -n "$KIND" ] || KIND=ship
+
+# A record whose pool slot was handed to another task no longer owns that copy,
+# so reading it would report the other task's state (bin/fm-wake-lib.sh owns
+# the worktree_reassigned_to retirement).
+REASSIGNED_TO=$(meta_value worktree_reassigned_to)
+[ -z "$REASSIGNED_TO" ] || emit unknown none "worktree reassigned to task $REASSIGNED_TO"
 
 # A torn-down (or never-created) worktree has no current state to read. A
 # remote secondmate's recorded worktree is a path on ITS host, so the local

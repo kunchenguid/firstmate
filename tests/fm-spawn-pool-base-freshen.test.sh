@@ -743,8 +743,83 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+# The slot-reuse collision: an older task's worker exited while its record still
+# named its pool slot, and the pool then handed that slot to a new task. Taking
+# the slot retires the older record, so the new task's teardown is no longer
+# refused as a duplicate, and the older record keeps what its own later cleanup
+# needs and still completes without touching the slot.
+test_reused_slot_retires_the_older_record() {
+  local rec id old='pool-slot-old-r1' out status meta_old old_pr old_head
+
+  id='pool-slot-new-r1'
+  rec=$(make_case slot-reuse-retire "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  meta_old="$HOME_DIR/state/$old.meta"
+  old_pr='https://github.com/example/project/pull/7'
+  old_head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  fm_write_meta "$meta_old" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" \
+    "worktree=$POOL_DIR" "project=$PROJECT_DIR" "kind=ship" \
+    "mode=no-mistakes" "yolo=off" "pr=$old_pr" "pr_head=$old_head"
+  printf 'task=%s\nhome=%s\n' "$old" "$HOME_DIR" > "$SLOT_CLAIM"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "spawn onto a slot an older record still names should launch"$'\n'"$out"
+  grep -Fxq -- "task=$id" "$SLOT_CLAIM" \
+    || fail "the reused slot's claim does not name the new task: $(cat "$SLOT_CLAIM")"
+  grep -Fxq -- "worktree_reassigned_to=$id" "$meta_old" \
+    || fail "the older record was not retired from the reused slot: $(cat "$meta_old")"
+  grep -Fxq -- "worktree=$POOL_DIR" "$meta_old" \
+    || fail "retiring the older record dropped its worktree line: $(cat "$meta_old")"
+  grep -Fxq -- "pr=$old_pr" "$meta_old" \
+    || fail "retiring the older record lost its PR: $(cat "$meta_old")"
+  grep -Fxq -- "pr_head=$old_head" "$meta_old" \
+    || fail "retiring the older record lost its PR head: $(cat "$meta_old")"
+  if grep -Fq "worktree_reassigned_to" "$HOME_DIR/state/$id.meta"; then
+    fail "the new task's own record was marked reassigned: $(cat "$HOME_DIR/state/$id.meta")"
+  fi
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-crew-state.sh" "$old" 2>&1)
+  assert_contains "$out" "reassigned to task $id" \
+    "crew-state read the new task's copy as the older task's"
+
+  out=$(fm_test_run_spawn "$HOME_DIR" "$POOL_DIR" "$FAKEBIN_DIR" "$old" --relaunch)
+  status=$?
+  [ "$status" -ne 0 ] || fail "the retired older record was relaunched into the new task's copy"
+  assert_contains "$out" "reassigned to task $id" \
+    "the relaunch refusal did not name the task the slot went to"
+
+  # --force only waives this scout's report gate; the duplicate-record refusal
+  # under test holds even with --force.
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1)
+  status=$?
+  expect_code 0 "$status" "the new task's teardown was refused by the retired record"$'\n'"$out"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the new task's teardown left its record"
+  [ ! -e "$SLOT_CLAIM" ] || fail "the new task's teardown left its slot claim: $(cat "$SLOT_CLAIM")"
+  [ -f "$meta_old" ] || fail "the new task's teardown removed the older task's record"
+
+  printf 'task=%s\nhome=%s\n' "later-task" "$HOME_DIR" > "$SLOT_CLAIM"
+  : > "$POOL_DIR/later-task-work"
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-teardown.sh" "$old" 2>&1)
+  status=$?
+  expect_code 0 "$status" "the retired older record could not be cleaned up"$'\n'"$out"
+  assert_contains "$out" "reassigned to task $id" \
+    "the older record's cleanup did not name the task its slot went to"
+  [ ! -e "$meta_old" ] || fail "the older record's cleanup left its record"
+  [ -e "$POOL_DIR/later-task-work" ] || fail "the older record's cleanup reset a slot it no longer owns"
+  grep -Fxq -- "task=later-task" "$SLOT_CLAIM" \
+    || fail "the older record's cleanup touched another task's slot claim"
+  pass "a reused Treehouse slot retires the older record, so both tasks tear down without touching another's copy"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
+test_reused_slot_retires_the_older_record
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
