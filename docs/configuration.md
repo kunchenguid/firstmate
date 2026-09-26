@@ -660,6 +660,22 @@ Only the file's presence is read, so its contents are ignored; remove it to retu
 
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
 
+## Self-update source (config/self-update-source)
+
+The optional local, gitignored `config/self-update-source` changes where `/updatefirstmate` takes the running firstmate from, and nothing else.
+It suits a home that runs its own fixes before upstream merges them, by following a branch that holds upstream's default branch plus those fixes, for example a `carry` branch on a fork.
+It holds one line, `<remote> <branch>`, for example `fork carry`, naming a remote that already exists in this repository and a branch on that remote.
+When the file is absent, `/updatefirstmate` fast-forwards from `origin` exactly as before.
+
+When it is present, [`bin/fm-update.sh`](../bin/fm-update.sh) fetches only that branch and fast-forwards the primary to it under the same guards as the origin path: a dirty, off-default, or diverged primary is skipped and left untouched, so the named branch must only ever move forward.
+Local secondmate homes then advance to the primary's resulting default-branch commit, the same commit the startup secondmate sync follows, and a standalone-clone home that lacks that commit imports it from the primary first.
+A remote secondmate's host runs its own update against its own code root, so a remote home follows the named branch only when that code root has the same file; otherwise it keeps following its own origin.
+Worker spawns, review diffs, the cleanup landed-work test, lint, and default-branch detection keep using `origin`, so work started in this home still branches from, and is judged against, upstream.
+An unreadable or malformed file, an unknown remote, or an invalid branch name stops the whole update before anything moves and names the file; it never falls back to `origin`.
+The file is per home and is not inherited by secondmate homes.
+To stop following the branch, remove the file; a primary already ahead of `origin` is then reported as diverged until it is brought back by hand.
+The script's header owns the exact parsing and the per-home outcome lines.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
@@ -705,7 +721,7 @@ The tracked root `.gitignore` ignores both markers, so validation can read them 
 This does not relax protection for any other untracked file.
 An existing linked-worktree home that predates this rule advances through its marker-only state during its next bootstrap or spawn local sync, after which Git ignores the marker normally.
 
-A local standalone-clone home cannot receive a primary-local commit through that no-fetch sync, so it receives the rule through `/updatefirstmate`'s origin refresh instead.
+A local standalone-clone home cannot receive a primary-local commit through that no-fetch sync, so it receives the rule through `/updatefirstmate` instead.
 
 ## Harness support
 
