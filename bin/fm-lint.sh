@@ -862,13 +862,15 @@ ROOT_GRACE=${FM_LINT_ROOT_GRACE:-5}
 # address space, not resident memory, and ShellCheck's GHC runtime keeps
 # roughly a third of that space as reservation, so a 6 GiB cap yields about
 # a 4 GiB working heap budget per root. Measured on Linux during this
-# change: eleven real canonical roots ran out of memory under a 4 GiB cap
-# while the largest passing root peaked near 2.8 GiB resident. Address-space
-# caps do not bound aggregate resident use, but two 6 GiB caps plus the
-# runner's own footprint keep the 16 GiB job honest: a root that exceeds
-# the cap fails by name instead of growing until the runner dies, and the
-# roots sidecar records each root's peak RSS so roots approaching the
-# budget stay visible as reduction candidates.
+# change: a 4 GiB cap left only about 2.7 GiB of working memory and eleven
+# real canonical roots ran out of memory under it, while the largest
+# passing root peaked near 2.8 GiB resident. Address-space caps do not
+# bound aggregate resident use, but two 6 GiB caps plus the runner's own
+# footprint keep the 16 GiB job honest: a root that exceeds the cap fails
+# by name instead of growing until the runner dies. The roots sidecar
+# records each root's peak RSS; roots peaking above about 3 GiB resident
+# are reduction candidates, bin/fm-pending-reply-lib.sh first (its
+# separate dedup fix is PR 5753).
 ROOT_MEMORY_KIB=${FM_LINT_ROOT_MEMORY_KIB:-6291456}
 for bound_pair in \
   "FM_LINT_ROOT_SECONDS=$ROOT_SECONDS" \
