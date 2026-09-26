@@ -24,7 +24,11 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
+. "$ROOT/bin/fm-backend.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-marker-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-busy-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SEND="$ROOT/bin/fm-send.sh"
@@ -854,10 +858,14 @@ test_idle_agent_is_not_interrupted() {
 }
 
 test_interrupt_without_acknowledgement_preserves_busy_state() {
+  # codex (not claude): its busy source is not hook-based, so
+  # fm_busy_record_manual_interrupt is a no-op for it and this stays a clean
+  # probe of the adapter-acknowledgement claim alone. Claude's own interrupt
+  # busy-state correction is covered separately below.
   local dir gen before after out rc
   dir=$(new_case unconfirmed)
-  add_task "$dir" t1 claude
-  alive_as "$dir" claude
+  add_task "$dir" t1 codex
+  alive_as "$dir" codex
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
   printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
   before=$(cat "$dir/home/state/t1.busy-state")
@@ -869,7 +877,80 @@ test_interrupt_without_acknowledgement_preserves_busy_state() {
     "the result should distinguish delivery proof from unconfirmed cancellation"
   assert_not_contains "$out" "cancel=confirmed" \
     "an adapter without acknowledgement must not report cancellation"
-  pass "fm-control interrupt: unconfirmed delivery preserves observed busy state"
+  pass "fm-control interrupt: unconfirmed delivery preserves observed busy state (non-hook-based busy source)"
+}
+
+# Claude's busy contract is a UserPromptSubmit/Stop hook bracket
+# (harness-adapters skill), and a manual interrupt key emits neither hook. A
+# worker parked inside a blocking tool prompt (a trust dialog, or a tool like
+# AskUserQuestion) that fm-control interrupt safely dismisses would otherwise
+# be left reading busy forever: bin/fm-watch.sh's steering-inbox ladder gates
+# its whole delivery attempt on busy state, so an already-queued steer would
+# never be re-attempted even after the obstruction is gone (fix-worker-ask-
+# inbox-deadlock). This pins the fix: fm-control's interrupt verb must apply
+# the same idle/fm-interrupt correction bin/fm-send.sh's --key Escape path
+# already applies (tests/fm-send-settle.test.sh
+# test_claude_escape_records_interrupt_idle), so the two interrupt entry
+# points cannot drift apart on what a manual interrupt does to busy state.
+test_claude_interrupt_records_interrupt_idle() {
+  local dir gen out rc after
+  dir=$(new_case claude-interrupt)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "a Claude interrupt should succeed"$'\n'"$out"
+  after=$(fm_busy_classify tmux "fmses:fm-t1" claude t1 "$dir/home/state")
+  [ "$after" = "idle fm-interrupt" ] \
+    || fail "a Claude interrupt must classify idle/fm-interrupt, got '$after'"
+  pass "fm-control interrupt: a Claude interrupt records the same interrupt lifecycle edge fm-send's --key Escape does"
+}
+
+test_interrupt_correction_yields_to_a_newer_turn() {
+  local dir gen seq after
+  dir=$(new_case newer-turn)
+  add_task "$dir" t1 claude
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  seq=$(fm_busy_record_snapshot "$dir/home/state" t1)
+  "$ROOT/bin/fm-busy-event.sh" apply "$dir/home/state" t1 busy \
+    --gen "$gen" --source claude-hook --event UserPromptSubmit
+  fm_busy_record_manual_interrupt "$ROOT" "$dir/home/state" t1 claude "$seq" \
+    || fail "a superseded interrupt correction must not error"
+  after=$(fm_busy_record_read "$dir/home/state" t1)
+  [ "${after%% *}" = busy ] \
+    || fail "an interrupt correction must not overwrite a newer turn, got '$after'"
+  pass "fm-control interrupt: the busy correction yields to a turn that began after the key"
+}
+
+test_interrupt_correction_yields_to_a_relaunched_incarnation() {
+  local dir gen1 gen2 snap after
+  dir=$(new_case relaunch)
+  add_task "$dir" t1 claude
+  gen1=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  snap=$(fm_busy_record_snapshot "$dir/home/state" t1)
+  gen2=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  [ "$gen1" != "$gen2" ] || fail "a relaunch must arm a new generation"
+  "$ROOT/bin/fm-busy-event.sh" apply "$dir/home/state" t1 busy \
+    --gen "$gen2" --source claude-hook --event UserPromptSubmit
+  fm_busy_record_manual_interrupt "$ROOT" "$dir/home/state" t1 claude "$snap" \
+    || fail "a correction for a replaced incarnation must not error"
+  after=$(fm_busy_record_read "$dir/home/state" t1)
+  [ "${after%% *}" = busy ] \
+    || fail "an interrupt correction must not idle a relaunched incarnation, got '$after'"
+  pass "fm-control interrupt: the busy correction yields to a relaunched incarnation"
+}
+
+test_interrupt_snapshot_ignores_a_malformed_record() {
+  local dir gen snap
+  dir=$(new_case malformed-snapshot)
+  add_task "$dir" t1 claude
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'v0 gen=%s seq=1 state=busy source=claude-hook event=x ts=1\n' "$gen" > "$dir/home/state/t1.busy-state"
+  snap=$(fm_busy_record_snapshot "$dir/home/state" t1)
+  [ -z "$snap" ] || fail "a malformed record must yield an empty snapshot, got '$snap'"
+  pass "fm-control interrupt: a malformed busy record is never corrected"
 }
 
 test_muse_interrupt_confirms_adapter_acknowledgement() {
@@ -955,6 +1036,8 @@ test_agent_that_does_not_stop_fails_closed() {
     || fail "a stubborn busy agent should receive its interrupt sequence"
   [ "$(literals "$dir")" = /exit ] \
     || fail "a stubborn busy agent should receive its exit command"
+  [ "$(fm_busy_classify tmux "fmses:fm-t1" claude t1 "$dir/home/state")" = "idle fm-interrupt" ] \
+    || fail "a surviving agent's canceled turn must not stay recorded busy after exit's interrupt"
   pass "fm-control exit: a stubborn agent reports delivered input and an unconfirmed exit"
 }
 
@@ -1101,6 +1184,10 @@ test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command
 test_idle_agent_is_not_interrupted
 test_interrupt_without_acknowledgement_preserves_busy_state
+test_claude_interrupt_records_interrupt_idle
+test_interrupt_correction_yields_to_a_newer_turn
+test_interrupt_correction_yields_to_a_relaunched_incarnation
+test_interrupt_snapshot_ignores_a_malformed_record
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
 test_exit_accepts_agent_stopped_by_busy_interrupt

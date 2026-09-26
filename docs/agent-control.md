@@ -37,12 +37,17 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | `relaunch` | Replace the running agent with a new one in the same worktree - and the same endpoint whenever that endpoint still exists - on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint the task's record now names, and that record names the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
-Interrupt never rewrites busy state as proof of its own success.
-Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
+Interrupt never rewrites busy state as proof of its own success; cancellation confidence still comes only from an adapter-owned acknowledgement.
+Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed`.
+Claude's busy state comes from lifecycle hooks (see the [harness-adapters](../.agents/skills/harness-adapters/SKILL.md) skill), and a manual interrupt key triggers none of them; left alone this would leave Claude's busy ledger claiming busy forever, including across a blocking tool prompt the interrupt key just safely dismissed.
+When `interrupt` or a busy `exit` delivers that key and the agent remains alive, the control plane separately attempts to correct the interrupted ledger record to `idle`/`fm-interrupt` through `fm_busy_record_manual_interrupt` in `bin/fm-busy-lib.sh`.
+The correction requires a valid busy record snapshot captured before key delivery and remains bound to that record's generation and sequence, so a missing or malformed record stays untouched and a lifecycle event from a newer turn wins instead of being overwritten as idle.
+`bin/fm-send.sh`'s `--key Escape` path calls the same shared helper rather than keeping a second correction path.
 Devin emits no lifecycle hook for cancellation either, so after an armed interrupt the control plane invalidates the interrupted turn's busy record to `unknown` with `cancel=unconfirmed`; that invalidation is a conservative loss of knowledge, never a fabricated idle.
 Devin's double Escape also opens its `/revert` picker on an idle agent, where Enter reverts file changes, so its second press is sent only after the first renders a running turn's armed hint and never sooner than the adapter's press gap.
 An interrupt whose first press shows no running turn stops there and reports `cancel=not-running`, leaving busy state untouched; a picker a mistimed press opened is closed with one Escape and reported as `revert-picker=dismissed`, and `exit` refuses to type into an open picker.
 [`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh) owns the arm signal, press gap, and picker signal.
+No synthetic correction is applied to any adapter besides Claude and Devin, so every other adapter's busy verdict remains as observed.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
 
 An interrupt is not complete until the composer is empty.

@@ -14,14 +14,16 @@
 #       the old gen are rejected as stale from then on.
 #
 #   apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen)
-#         --source S --event E
+#         --source S --event E [--if-seq N]
 #       Append one lifecycle event: validate the gen against the armed
 #       sidecar, advance seq under the lock, atomically replace the record.
 #       Adapter wiring passes the exact --gen embedded at arm time, so a
-#       hook that outlives its incarnation fails closed here. The legacy
-#       Claude fm-send --key Escape path (fm-interrupt) and firstmate recovery
+#       hook that outlives its incarnation fails closed here. The Claude
+#       manual-interrupt paths (fm-interrupt) and firstmate recovery
 #       paths (fm-recovery) may pass --current-gen to bind to the incarnation
-#       armed right now.
+#       armed right now. --if-seq N applies the event only while the record
+#       is still at seq N (0 for no record); a newer event wins and the
+#       apply exits 0 without writing.
 #
 #   progress <state-dir> <id> --gen G
 #       Refresh state/<id>.progress for observed native-harness activity under
@@ -44,7 +46,7 @@ usage() {
   cat >&2 <<'EOF'
 usage:
   fm-busy-event.sh arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E]
-  fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E
+  fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E [--if-seq N]
   fm-busy-event.sh progress <state-dir> <id> --gen G
   fm-busy-event.sh retire <state-dir> <id> (--gen G | --current-gen)
 See the header comment for the full contract.
@@ -74,6 +76,7 @@ GEN=
 USE_CURRENT_GEN=0
 SOURCE=
 EVENT=
+IF_SEQ=
 if [ "$CMD" = apply ]; then
   NEW_STATE=${1:-}
   case "$NEW_STATE" in busy|idle|unknown) shift ;; *) usage ;; esac
@@ -89,6 +92,7 @@ while [ $# -gt 0 ]; do
     --current-gen) USE_CURRENT_GEN=1; shift ;;
     --source) SOURCE=${2:-}; shift 2 || usage ;;
     --event) EVENT=${2:-}; shift 2 || usage ;;
+    --if-seq) IF_SEQ=${2:-}; shift 2 || usage ;;
     *) usage ;;
   esac
 done
@@ -97,6 +101,8 @@ if [ "$CMD" = apply ] || [ "$CMD" = arm ]; then
   fm_busy_token_valid "$SOURCE" || { echo "error: invalid --source" >&2; exit 1; }
   fm_busy_token_valid "$EVENT" || { echo "error: invalid --event" >&2; exit 1; }
 fi
+case "$IF_SEQ" in *[!0-9]*) echo "error: invalid --if-seq" >&2; exit 1 ;; esac
+[ -z "$IF_SEQ" ] || [ "$CMD" = apply ] || usage
 
 [ "$CMD" != progress ] || [ "$USE_CURRENT_GEN" = 0 ] || usage
 
@@ -204,6 +210,7 @@ fi
 if [ "$GEN" != "$CURRENT" ]; then
   lock_release
   umask "$old_umask"
+  [ -z "$IF_SEQ" ] || exit 0
   echo "error: stale busy-state gen for $ID (event rejected)" >&2
   exit 1
 fi
@@ -237,6 +244,11 @@ if [ -f "$REC" ]; then
       esac
       ;;
   esac
+fi
+if [ -n "$IF_SEQ" ] && [ "$OLD_SEQ" != "$IF_SEQ" ]; then
+  lock_release
+  umask "$old_umask"
+  exit 0
 fi
 write_record "$GEN" $((OLD_SEQ + 1)) || {
   lock_release
