@@ -231,14 +231,16 @@ fetch_once() {
   return 1
 }
 
+# The watched instruction surface: the files a running agent actually reads or
+# runs - its instructions (AGENTS.md, which CLAUDE.md imports via @AGENTS.md),
+# its agent-loaded skills (.agents/skills/), and its tooling (bin/). Public
+# skills/ is installer-facing and intentionally not part of this surface.
+WATCHED_INSTR_PATHS=(AGENTS.md bin .agents/skills)
+
 # Which watched instruction paths changed between HEAD and BASE (comma list).
-# These are the files a running agent actually reads or runs: its instructions
-# (AGENTS.md, which CLAUDE.md imports via @AGENTS.md), its agent-loaded skills
-# (.agents/skills/), and its tooling (bin/). Public skills/ is installer-facing
-# and intentionally not part of this watched instruction surface.
 changed_instr() {
   local dir=$1 base=$2 p out=""
-  for p in AGENTS.md bin .agents/skills; do
+  for p in "${WATCHED_INSTR_PATHS[@]}"; do
     if ! git -C "$dir" diff --quiet HEAD "$base" -- "$p" 2>/dev/null; then
       out="$out${out:+, }$p"
     fi
@@ -392,7 +394,7 @@ jj_default_branch() {
 # never moves the caller's cwd) while the non-path revsets stay -R-relative.
 jj_changed_instr() {
   local dir=$1 from=$2 to=$3 p out=""
-  for p in AGENTS.md bin .agents/skills; do
+  for p in "${WATCHED_INSTR_PATHS[@]}"; do
     if [ -n "$(cd "$dir" && jj diff --from "$from" --to "$to" --git -- "$p" 2>/dev/null)" ]; then
       out="$out${out:+, }$p"
     fi
@@ -449,6 +451,11 @@ ff_target_jj() {
     return 0
   fi
 
+  if [ -n "$(jj -R "$dir" log -r '@' --no-graph -T 'description' 2>/dev/null)" ]; then
+    echo "$label: skipped: described working copy commit"
+    return 0
+  fi
+
   if [ "$cur_rev" = "$base_rev" ]; then
     FF_STATUS="current"
     echo "$label: already current"
@@ -458,6 +465,11 @@ ff_target_jj() {
   # Fast-forward only: the default bookmark must be an ancestor of the base.
   if [ -z "$(jj -R "$dir" log -r "$default & ::$base" --no-graph -T 'commit_id' 2>/dev/null)" ]; then
     echo "$label: skipped: diverged from $base"
+    return 0
+  fi
+
+  if [ -n "$(jj -R "$dir" log -r "parents(@) & ~::$base" --no-graph -T 'commit_id' 2>/dev/null)" ]; then
+    echo "$label: skipped: working copy parked outside $base"
     return 0
   fi
 
