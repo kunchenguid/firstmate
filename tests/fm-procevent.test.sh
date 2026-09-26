@@ -237,7 +237,7 @@ assert_contains "$out" "published=0 started=0" "reconcile is a no-op with nothin
 pass "no configured source means no generated state and no process"
 
 sup=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
-  '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$IDLE/state")
+  'STATE=$2; . "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$IDLE/state")
 assert_contains "$sup" no "an unconfigured home does not need supervision"
 
 # --- a blocking source completes into exactly one normalized event ----------
@@ -247,7 +247,7 @@ out=$(pe_register "$H1" lavish src-one -- "$BLOCKER" "$TRIG" "payload one")
 assert_contains "$out" "registered: src-one" "register records a source"
 
 sup=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
-  '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$H1/state")
+  'STATE=$2; . "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$H1/state")
 assert_contains "$sup" yes "a registered source needs supervision with no task metadata"
 
 pe "$H1" reconcile >/dev/null
@@ -2658,7 +2658,7 @@ pass "home sweep refuses safely until runner identity is readable"
 HV="$TMP_ROOT/hv"; new_home "$HV"
 mkdir -p "$HV/state/procevent-inbox"
 printf 'already captured\n' > "$HV/state/procevent-inbox/result-only.1.result"
-sup=$(bash -c '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$HV/state")
+sup=$(bash -c 'STATE=$2; . "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$HV/state")
 assert_contains "$sup" no "registration-free results do not broaden continuous supervision"
 out=$(pe "$HV" sweep-home)
 assert_contains "$out" "swept: attempted=0" "result-only homes need no process cleanup"

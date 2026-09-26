@@ -17,6 +17,8 @@ set -u
 . "$ROOT/bin/fm-supervision-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
+# shellcheck source=/dev/null
+FM_STATE_OVERRIDE="$TMP_ROOT/predicate-lib-state" . "$ROOT/bin/fm-wake-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 REQUIRED_REASON='watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn'

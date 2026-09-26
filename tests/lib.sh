@@ -68,6 +68,13 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# Pin the host sleep probe to "no sleep" (bin/fm-wake-lib.sh fm_host_sleep_window).
+# Fixtures backdate the watcher beacon to exact wall-clock ages, and a real
+# macOS sleep or DarkWake inside that window would be subtracted from the
+# beacon age, turning a stale fixture fresh. A case that verifies sleep
+# accounting sets FM_HOST_SLEEP_WINDOW itself.
+export FM_HOST_SLEEP_WINDOW=''
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
