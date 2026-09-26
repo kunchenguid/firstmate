@@ -36,6 +36,10 @@
 #                    cancellation emits no Stop, so control invalidates to unknown.
 #   gemini-hook      Gemini agent hooks (BeforeAgent opens; AfterAgent and
 #                    SessionEnd close)
+#   hermes-plugin    Hermes Agent Firstmate plugin in worker role
+#                    (.hermes/firstmate/fm_hermes_worker.py): pre_llm_call opens;
+#                    on_session_end, which fires at the end of EVERY turn
+#                    including an interrupted one, and agent_loop_stopped close
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -232,6 +236,7 @@ fm_busy_sources_for_harness() {  # <harness>
     opencode*) adapter=opencode-plugin ;;
     gemini*) adapter=gemini-hook ;;
     devin) adapter=devin-hook ;;
+    hermes) adapter=hermes-plugin ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
     kimi*)
@@ -992,10 +997,33 @@ fm_busy_gemini_launch_prompt_tail() {
   printf '%s' "$buf" | grep -qiE "${FM_BUSY_GEMINI_APIKEY_PROMPT_REGEX:-Enter Gemini API Key}"
 }
 
+# fm_busy_hermes_launch_prompt_tail: Hermes Agent's two startup y/N prompts,
+# both read from hermes-agent v0.21.5 source (hermes_cli/main.py
+# _confirm_startup_expensive_model_override and agent/shell_hooks.py
+# _prompt_and_record). Hermes has no workspace-trust dialog; these are the only
+# prompts that park an interactive launch before the first turn:
+#   - the expensive-model / data-policy guard for an explicit -m, which Hermes
+#     deliberately keeps independent of --yolo because it guards paid spend.
+#     Firstmate never answers it: an unattended spawn must not approve spend,
+#     so the parked launch surfaces as launch-prompt for the captain;
+#   - consent for a shell hook in the captain's own config.yaml that Hermes
+#     has not seen approved yet (answerable once by the captain, or skipped
+#     with hooks_auto_accept in config.yaml).
+# Each question is paired with a line only its own prompt renders.
+fm_busy_hermes_launch_prompt_tail() {
+  local buf
+  buf=$(cat)
+  if printf '%s' "$buf" | grep -qiE "${FM_BUSY_HERMES_COST_PROMPT_REGEX:-Use this model for this invocation\? \[y/N\]}"; then
+    return 0
+  fi
+  printf '%s' "$buf" | grep -qiE "${FM_BUSY_HERMES_HOOK_PROMPT_REGEX:-Allow this hook to run\? \[y/N\]}" \
+    && printf '%s' "$buf" | grep -qiE 'register a shell hook'
+}
+
 # fm_busy_launch_prompt_parked: dispatch to the signature above for <harness>,
 # or fail when this harness has none. Consumes the tail on stdin. Scoped to
 # exactly the harnesses fm-spawn.sh arms with the fm-spawn busy source
-# (claude*, opencode*, pi, pi-signed, omp, gemini) since only those can ever
+# (claude*, opencode*, pi, pi-signed, omp, gemini, hermes) since only those can ever
 # read a pinned "busy fm-spawn" record; codex and standalone Kimi already
 # classify unknown before a record is ever consulted, and opencode ships no
 # trust dialog at all.
@@ -1004,6 +1032,7 @@ fm_busy_launch_prompt_parked() {  # <harness>
     claude*) fm_busy_claude_launch_prompt_tail ;;
     pi | pi-signed | omp) fm_busy_pi_launch_prompt_tail ;;
     gemini) fm_busy_gemini_launch_prompt_tail ;;
+    hermes) fm_busy_hermes_launch_prompt_tail ;;
     *) return 1 ;;
   esac
 }

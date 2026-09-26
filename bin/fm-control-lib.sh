@@ -64,7 +64,7 @@ fm_control_verb_allowed() {  # <verb>
 # section 4's verified-adapter list; an unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harnesses() {
-  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin
+  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin hermes
 }
 
 fm_control_harness_supported() {  # <harness>
@@ -82,7 +82,8 @@ fm_control_harness_supported() {  # <harness>
 # and friends. This is the one place that prefix rule is stated. `pi` and
 # `pi-signed` are exact because a `pi*` prefix would swallow the signed adapter,
 # `omp` is exact because an `omp*` prefix would claim unrelated commands, `agy`
-# is exact for the same reason on an even shorter name, and an
+# is exact for the same reason on an even shorter name, `hermes` is exact
+# because this checkout itself is often cloned under a hermes-named path, and an
 # unrecognized value returns nonzero rather than being guessed into a family.
 fm_control_harness_family() {  # <recorded-harness>
   case "${1-}" in
@@ -91,6 +92,7 @@ fm_control_harness_family() {  # <recorded-harness>
     omp) printf 'omp' ;;
     agy) printf 'agy' ;;
     devin) printf 'devin' ;;
+    hermes) printf 'hermes' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -128,11 +130,13 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 # with an idle composer and no repollution (verified live, agy 1.2.0 through
 # Herdr). omp (Oh My Pi) shares Pi's single Escape, empty composer
 # afterwards, and /quit exit (verified omp 18.1.2 in a PTY, re-verified 18.1.11
-# through Herdr).
+# through Herdr). hermes (classic CLI) interrupts a running turn on Ctrl+C and
+# has no Escape interrupt; a second Ctrl+C within two seconds force-exits, which
+# the single press never reaches (hermes_cli/cli_tui_mixin.py, v0.21.5).
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
     claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin) printf 'Escape' ;;
-    grok) printf 'C-c' ;;
+    grok|hermes) printf 'C-c' ;;
     *) return 1 ;;
   esac
 }
@@ -142,7 +146,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode|devin) printf '2' ;;
-    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) printf '1' ;;
+    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|hermes) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -161,7 +165,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_arm_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'esc again to interrupt' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|hermes) ;;
     *) return 1 ;;
   esac
 }
@@ -172,7 +176,7 @@ fm_control_interrupt_arm_signal() {  # <harness>
 fm_control_interrupt_press_gap() {  # <harness>
   case "${1-}" in
     devin) printf '0.5' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) printf '0.2' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|hermes) printf '0.2' ;;
     *) return 1 ;;
   esac
 }
@@ -185,7 +189,7 @@ fm_control_interrupt_press_gap() {  # <harness>
 fm_control_interrupt_hazard_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'Revert to step:|↵ revert' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|hermes) ;;
     *) return 1 ;;
   esac
 }
@@ -206,9 +210,23 @@ fm_control_interrupt_hazard_signal() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|hermes) ;;
     *) return 1 ;;
   esac
+}
+
+# Whether the interrupt key STOPS the agent when it lands on an idle agent with
+# an empty composer. Hermes's classic CLI treats an idle Ctrl+C as "clear the
+# draft, or exit when it is already empty" (cli_tui_mixin.py _tui_clear_or_exit,
+# v0.21.5), so a press that arrives after the turn already ended would exit the
+# worker instead of cancelling anything. For such an adapter the control plane
+# presses only while the adapter-owned busy record says a turn is running, and
+# reports not-running otherwise. Every other adapter's idle press is harmless.
+fm_control_interrupt_exits_idle() {  # <harness>
+  case "${1-}" in
+    hermes) return 0 ;;
+  esac
+  return 1
 }
 
 fm_control_interrupt_ack_source() {  # <harness>
@@ -221,7 +239,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # rovo's TUI prints "Agent cancelled" on Escape, but for parity with
     # claude/cursor this stays 'none': the ack is a rendered string, not a
     # recorded state source, and rovo has no busy wiring to confirm against.
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|hermes) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -230,7 +248,7 @@ fm_control_interrupt_ack_source() {  # <harness>
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
     claude|opencode|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
-    codex|pi|pi-signed|omp|gemini|agy|devin) printf '/quit' ;;
+    codex|pi|pi-signed|omp|gemini|agy|devin|hermes) printf '/quit' ;;
     *) return 1 ;;
   esac
 }
@@ -404,6 +422,10 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     # the project, and nothing global is installed.
     gemini) printf '%s\n' "$state/$id.gemini-settings.json" ;;
     devin) printf '%s\n' "$state/$id.devin-config.json" ;;
+    # hermes carries its whole wiring (plugin role, busy gen, turn-ended
+    # marker) in the launch environment, so a retired incarnation leaves no
+    # file behind; a relaunch mints a new gen that the old process never saw.
+    hermes) ;;
   esac
 }
 

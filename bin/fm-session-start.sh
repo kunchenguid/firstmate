@@ -787,6 +787,21 @@ if [ "$PRIMARY_HARNESS" = omp ]; then
     printf 'OMP_WATCH_EXTENSION: not loaded - restart omp with this home as its working directory so %s and %s auto-load from .omp/extensions/ for turn-end guard and background wake coverage; pass -e %s -e %s only when omp must start from another directory, never together with auto-discovery (omp loads a file named both ways twice)\n' "$OMP_TURNEND_EXT" "$OMP_EXT" "$OMP_TURNEND_EXT" "$OMP_EXT"
   fi
 fi
+# Hermes loads the Firstmate plugin only when its loader is installed and enabled
+# (bin/fm-hermes-plugin.sh), and the plugin runs this digest itself before the
+# first provider call. A Hermes primary that reached this point without the two
+# plugin markers naming the lock owner at the current tracked builds therefore
+# ran session start by hand, with no plugin-owned watcher, turn-end guard, or
+# seatbelts; say so loudly instead of letting supervision look covered.
+if [ "$PRIMARY_HARNESS" = hermes ]; then
+  HERMES_PLUGIN_DIR="$FM_ROOT/.hermes/firstmate"
+  HERMES_WATCH_VERSION=$(fm_pi_extension_version "$HERMES_PLUGIN_DIR/fm_hermes_watch.py" || printf '')
+  HERMES_TURNEND_VERSION=$(fm_pi_extension_version "$HERMES_PLUGIN_DIR/fm_hermes_guard.py" || printf '')
+  if ! fm_pi_extension_loaded "$STATE/.hermes-watch-plugin-loaded" "$HERMES_WATCH_VERSION" "$STATE/.lock" \
+    || ! fm_pi_extension_loaded "$STATE/.hermes-turnend-plugin-loaded" "$HERMES_TURNEND_VERSION" "$STATE/.lock"; then
+    printf 'HERMES_PLUGIN: not loaded - run bin/fm-hermes-plugin.sh status; when it is not ok, run bin/fm-hermes-plugin.sh install (it copies the loader into the Hermes home, registers this root, and enables it), then restart Hermes with this home as its working directory so the plugin at %s owns session start, the watcher, the turn-end guard, and the seatbelts\n' "$HERMES_PLUGIN_DIR"
+  fi
+fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \
   --harness "$PRIMARY_HARNESS" \
   --read-only "$READ_ONLY" \

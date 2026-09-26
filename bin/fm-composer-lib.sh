@@ -377,7 +377,7 @@ fm_composer_strip_ghost() {
 # tmux agy endpoint reaches the submit core with no recorded harness, and its
 # bare `>` composer verdict is `unknown`, so the busy footer is the only
 # turn-started acknowledgement that path can read.
-FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel|esc twice to interrupt|^[[:space:]]*❭ Guide Devin while it works$'
+FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel|esc twice to interrupt|^[[:space:]]*❭ Guide Devin while it works$|msg=interrupt · /queue|Ctrl\+C cancel$'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 # Devin 3000.11.1: the working composer and interrupt hint are independent
 # delivery signals. Neither is used as semantic worker-state evidence.
@@ -419,6 +419,14 @@ FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
 # acknowledgement. Delivery guard only; recorded worker state comes from the
 # agy-regex fold in bin/fm-busy-lib.sh.
 FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT='esc[[:space:]]+to[[:space:]]+cancel'
+# Hermes Agent's classic CLI replaces its composer placeholder for the whole
+# running turn with `☤ ❯ msg=interrupt · /queue · /bg · /steer · Ctrl+C cancel`
+# and restores a rotating idle placeholder the instant the turn ends (verified
+# live, hermes-agent v0.21.5 in a real pty). The hint row is matched, never the
+# kaomoji spinner line above it (`(⊙_⊙) processing...`), whose face and verb
+# rotate every turn. Delivery guard only; recorded worker state comes from the
+# hermes-plugin busy writer in bin/fm-busy-lib.sh.
+FM_DELIVERY_HERMES_BUSY_REGEX_DEFAULT='msg=interrupt · /queue|Ctrl\+C cancel$'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]
@@ -438,6 +446,7 @@ fm_busy_lines_match() {  # [harness]
       agy) regex=$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
       cursor) regex=$FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT ;;
+      hermes) regex=$FM_DELIVERY_HERMES_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_DELIVERY_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.
@@ -467,9 +476,14 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # `Add a follow-up` once a turn has completed (verified live on cursor-agent
 # 2026.08.11-e8db854). Devin renders the anchored `Ask Devin to build features,
 # fix bugs, or work on your code` as dim text after its `❭` glyph (verified
-# live, devin 3000.11.1). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
-# matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$'
+# live, devin 3000.11.1). Hermes Agent's classic CLI renders one of eleven
+# rotating example prompts after its `❯` glyph in dim truecolor (#545e6b, which
+# the styled ghost rule already drops); they are listed anchored here so a
+# plain capture reads that composer empty too (hermes_cli/tips.py
+# COMPOSER_PLACEHOLDERS, hermes-agent v0.21.5). FM_COMPOSER_IDLE_RE overrides
+# for an unverified harness; matching is case-insensitive.
+FM_COMPOSER_HERMES_IDLE_RE="^Ask anything, or type / for commands…$|^Summarize what's in this folder$|^Draft a reply to the last email in my inbox$|^Plan a feature, then build it step by step$|^Find and fix a failing test$|^Research this topic and write me a brief$|^What changed in this repo recently\\?$|^Turn these notes into a to-do list$|^Explain this error and how to fix it$|^Set a reminder or schedule a recurring task$|^Type / to browse commands, or Ctrl\\+P for the palette$"
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|'"$FM_COMPOSER_HERMES_IDLE_RE"
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed

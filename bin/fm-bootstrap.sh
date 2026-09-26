@@ -791,6 +791,27 @@ secondmate_handoff_detect() {
   done
 }
 
+# Hermes Agent, as the primary or the configured crew harness, needs the
+# Firstmate plugin loader installed and enabled in the Hermes home
+# (bin/fm-hermes-plugin.sh owns the states). Detect only: installing writes the
+# captain's Hermes home, so it goes through the ordinary MISSING consent flow.
+# `unregistered` matters only to a hand-started primary in this home.
+hermes_plugin_detect() {  # <crew-harness-override>
+  local crew=${1:-} own status
+  own=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
+  [ "$own" = hermes ] || [ "$crew" = hermes ] || return 0
+  if ! command -v "${FM_HERMES_BIN:-hermes}" >/dev/null 2>&1; then
+    echo "MISSING_MANUAL: hermes (instructions: $(manual_install_url hermes))"
+    return 0
+  fi
+  status=$("$SCRIPT_DIR/fm-hermes-plugin.sh" status 2>/dev/null || true)
+  case "$status" in
+    ok) return 0 ;;
+    unregistered) [ "$own" = hermes ] || return 0 ;;
+  esac
+  echo "MISSING: hermes-plugin (install: $(install_cmd hermes-plugin)) - status ${status:-unknown}"
+}
+
 install_cmd() {
   case "$1" in
     tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
@@ -799,6 +820,9 @@ install_cmd() {
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
+    # Not a package: the Firstmate plugin loader for Hermes Agent, copied into
+    # the Hermes home and enabled only when the captain approves this install.
+    hermes-plugin) echo "bin/fm-hermes-plugin.sh install" ;;
     *) return 1 ;;
   esac
 }
@@ -807,6 +831,7 @@ manual_install_url() {
   case "$1" in
     herdr) echo "https://herdr.dev" ;;
     cursor-agent) echo "https://cursor.com/cli" ;;
+    hermes) echo "https://hermes-agent.nousresearch.com" ;;
     *) return 1 ;;
   esac
 }
@@ -1046,7 +1071,7 @@ crew_dispatch_validate() {
   if $typed_active; then
     verified_harnesses=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
   else
-    verified_harnesses='["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp","devin"]'
+    verified_harnesses='["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp","devin","hermes"]'
   fi
   err=$(jq -r --argjson typed "$typed_active" --argjson verified_harnesses "$verified_harnesses" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     def verified($h): $verified_harnesses | index($h);
@@ -1061,6 +1086,7 @@ crew_dispatch_validate() {
       elif $h == "agy" then (["low","medium","high"] | index($e))
       elif $h == "pi" or $h == "pi-signed" or $h == "omp" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "muse" then (["low","medium","high","xhigh","max"] | index($e))
+      elif $h == "hermes" then (["low","medium","high","xhigh","max"] | index($e))
       elif $h == "rovo" then (["low","medium","high","max"] | index($e))
       elif $h == "opencode" or $h == "kimi" or $h == "cursor" then false
       else true
@@ -1439,6 +1465,7 @@ detect_local_config() {
   if [ "$crew" = cursor ] && ! fm_cursor_resolve_binary >/dev/null 2>&1; then
     echo "MISSING_MANUAL: cursor-agent (instructions: $(manual_install_url cursor-agent))"
   fi
+  hermes_plugin_detect "$crew"
   crew_dispatch_validate
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then

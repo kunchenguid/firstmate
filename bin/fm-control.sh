@@ -220,7 +220,7 @@ shift 2
 if ! fm_control_verb_allowed "$VERB"; then
   {
     if [ "$VERB" = resume ]; then
-      echo "error: 'resume' is not a control verb: resuming an exited agent is not deterministic across the verified adapters (codex and grok need a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, and kimi have no verified pane-resume contract). Use 'relaunch', which carries the brief plus a progress note into a fresh agent on any adapter."
+      echo "error: 'resume' is not a control verb: resuming an exited agent is not deterministic across the verified adapters (codex, grok, and hermes need a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, and kimi have no verified pane-resume contract). Use 'relaunch', which carries the brief plus a progress note into a fresh agent on any adapter."
     else
       echo "error: '$VERB' is not a control verb"
     fi
@@ -511,6 +511,18 @@ deliver_interrupt() {
     devin_gen=$(fm_busy_current_gen "$STATE" "$ID" 2>/dev/null || true)
   fi
   prepare_interrupt_ack
+  # An adapter whose idle interrupt key exits the agent (Hermes) is pressed only
+  # while its semantic busy record proves a running turn; a turn that already
+  # ended leaves nothing to cancel, and pressing then would stop the worker.
+  if fm_control_interrupt_exits_idle "$HARNESS"; then
+    case "$(busy_verdict)" in
+      busy*) ;;
+      *)
+        printf 'not-running'
+        return 0
+        ;;
+    esac
+  fi
   send_interrupt_keys
   if [ "$INTERRUPT_ARMED" = no ]; then
     cancel=not-running
