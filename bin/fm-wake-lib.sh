@@ -13,6 +13,28 @@ FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
 _FM_UNAME=$(uname 2>/dev/null || echo unknown)
+
+# Windows/MSYS only: make `ln -s` produce a REAL symlink.
+#
+# Every lock below proves ownership structurally - fm_lock_try_create links the
+# lock at an owner directory with `ln -s`, then fm_lock_points_to_owner confirms
+# the result with `[ -L ]` and readlink. MSYS's default symlink mode does not
+# create a link at all: it silently copies the target. `[ -L ]` is then false for
+# a link that was just created successfully, ownership can never be confirmed,
+# fm_lock_try_create reports failure, and fm_lock_acquire_wait spins forever on a
+# lock that nothing actually holds. That is a hard hang rather than a refusal,
+# and it takes out the session lock, the wake queue, and the watcher with it.
+#
+# Native symlinks require Windows Developer Mode (or an elevated shell). The
+# `nativestrict` mode is deliberate: on a host without that permission `ln -s`
+# fails outright and leaves evidence, instead of quietly reinstating the copy
+# behaviour that causes the hang. An operator who already set MSYS themselves is
+# left alone.
+case "$_FM_UNAME" in
+  MINGW*|MSYS*)
+    [ -n "${MSYS:-}" ] || export MSYS=winsymlinks:nativestrict
+    ;;
+esac
 mkdir -p "$STATE"
 
 # Most wake-library consumers need only queue and lock primitives, including
