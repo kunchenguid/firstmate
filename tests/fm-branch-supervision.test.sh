@@ -356,6 +356,31 @@ test_outcome_non_jsonl_layout_fails_closed() {
   pass "outcome stores require terminated single-line JSON records"
 }
 
+# A supervision-host drain presents off Pi: every unread row and every
+# unprocessed captain row, moving nothing, so the drain marks them read only
+# once it has shown them; a routine row is presented once and a captain row
+# until it is acknowledged.
+test_outcome_present_reads_without_advancing() {
+  local home out
+  home="$TMP_ROOT/store-present-home"
+  mkdir -p "$home/state"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary 'routine first' >/dev/null || fail "routine append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-2 --verdict captain --summary 'captain second' >/dev/null || fail "captain append failed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" present) || fail "present failed"
+  [ "$(printf '%s\n' "$out" | jq -r '"\(.seq):\(.unread)"' | tr '\n' ' ')" = "1:true 2:true " ] \
+    || fail "present did not print both unread rows: $out"
+  assert_absent "$home/state/.branch-outcomes-cursor" "present must not move the read cursor"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 2 || fail "the presented rows could not be marked read"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" present) || fail "second present failed"
+  [ "$(printf '%s\n' "$out" | jq -r '"\(.seq):\(.unread)"' | tr '\n' ' ')" = "2:false " ] \
+    || fail "a second present must repeat only the unprocessed captain row: $out"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 2 || fail "the presented captain row could not be acknowledged"
+  [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" present)" ] || fail "an acknowledged store still presented rows"
+  pass "outcome store: present shows each routine row once and each captain row until it is acknowledged"
+}
+
 test_outcome_processed_marker_is_sequence_bound() {
   local home marker out status
   home="$TMP_ROOT/store-processed-home"
@@ -1292,6 +1317,7 @@ test_cursor_advancement_refuses_ahead_processed_marker
 test_outcome_sequence_conflicts_fail_closed
 test_outcome_non_jsonl_layout_fails_closed
 test_outcome_processed_marker_is_sequence_bound
+test_outcome_present_reads_without_advancing
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor

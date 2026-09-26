@@ -564,6 +564,24 @@ EOF
     "$((routine + captain))" "$routine" "$captain" "$live"
 }
 
+# The brief just presented the window's outcomes. Where main processes them
+# through the drain's BRANCH OUTCOMES section (the supervision host off Pi,
+# fm_supervision_host_outcomes_drained), advance the store's read cursor
+# through the window's rows, so the first drain after the return lists only
+# what arrived after the brief instead of replaying the window; every
+# unprocessed captain row still waits there for main's acknowledgement
+# (bin/fm-wake-drain.sh). On Pi the branch extension owns the cursor.
+mark_window_presented() {
+  local through
+  [ -n "$STORE_ROWS" ] || return 0
+  # shellcheck source=bin/fm-supervision-engine-lib.sh
+  . "$SCRIPT_DIR/fm-supervision-engine-lib.sh" || return 0
+  fm_supervision_host_outcomes_drained "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" || return 0
+  through=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$1 ~ /^[0-9]+$/ && $1 + 0 > max { max = $1 + 0 } END { print max + 0 }')
+  [ "$through" -gt 0 ] || return 0
+  "$SCRIPT_DIR/fm-branch-outcome.sh" mark-read --through "$through" >/dev/null 2>&1 || true
+}
+
 return_reconcile() {
   local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1 since contract_since superseded_record retained_record
   local archived_contract tag kind text retained_live restored_epoch
@@ -709,7 +727,7 @@ EOF
     append_evidence lifecycle "status file unreadable: $STATUS_SCAN_ERROR; catch-up stays gated" "$evidence"
     lifecycle_ok=0
   fi
-  render_return_brief "$evidence" "$blockers" "$since"
+  render_return_brief "$evidence" "$blockers" "$since" && mark_window_presented
   if [ "$HELD_READ_FAILED" -eq 1 ]; then
     append_evidence lifecycle "held set unreadable: $HELD_READ_PATH; catch-up stays gated" "$evidence"
     lifecycle_ok=0

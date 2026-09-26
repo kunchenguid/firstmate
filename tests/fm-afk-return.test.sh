@@ -467,6 +467,46 @@ test_return_brief_composes_from_record_store_and_held_set() {
   pass "the return brief renders health, the words with the session account, waiting, could-not-fix, handled, and cost from durable records, and the gate shrinks to what the away session could not fix"
 }
 
+# On a supervision-host home off Pi the drain's BRANCH OUTCOMES section is
+# where main reads outcomes, and the brief just presented the away window's,
+# so the return advances the store's read cursor through the window's rows:
+# the first drain after it lists only newer outcomes instead of replaying the
+# window, while an unprocessed captain row still waits for main's
+# acknowledgement. On Pi the branch extension owns that cursor, so it stays.
+test_return_marks_the_window_read_on_a_host_home_only() {
+  local dir harness fakebin out n cursor
+  for harness in claude pi; do
+    dir="$TMP_ROOT/window-read-$harness"
+    install_runner "$dir"
+    for f in fm-supervision-engine-lib.sh fm-harness.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
+      cp "$ROOT/bin/$f" "$dir/bin/"
+    done
+    : > "$dir/home/config/supervision-host"
+    fakebin="$dir/fakebin"
+    mkdir -p "$fakebin"
+    ln -s /bin/bash "$fakebin/$harness"
+    contract_in "$dir" enter --words 'watch the fleet' >/dev/null 2>&1 || fail "could not record the away posture"
+    for n in 1 2 3 4 5 6 7 8 9 10; do
+      outcome_in "$dir" append --task demo --verdict routine --summary "routine $n" >/dev/null || fail "could not seed routine $n"
+    done
+    outcome_in "$dir" append --task demo --verdict captain --summary 'PR ready for review' >/dev/null || fail "could not seed the captain row"
+    touch "$dir/home/state/.last-watcher-beat"
+    : > "$dir/home/state/.fake-drain"
+    # shellcheck disable=SC2016 # the single-quoted script expands in the harness shell
+    out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
+      "$fakebin/$harness" -c '"$0" begin 2>&1' "$dir/bin/fm-afk-return.sh") || fail "$harness: the return did not clear: $out"
+    assert_contains "$out" 'demo: PR ready for review' "$harness: the brief did not present the window's captain outcome"
+    cursor=$(cat "$dir/home/state/.branch-outcomes-cursor" 2>/dev/null || true)
+    if [ "$harness" = claude ]; then
+      [ "$cursor" = 11 ] || fail "a host home's return must mark the window read through its last row, got '${cursor:-none}'"
+      [ -n "$(outcome_in "$dir" unprocessed)" ] || fail "the return must leave the window's captain outcome unprocessed for main"
+    else
+      [ -z "$cursor" ] || fail "a Pi home's return must leave the store's read cursor to the branch extension, got '$cursor'"
+    fi
+  done
+  pass "the return marks the away window read where the drain presents outcomes off Pi, and leaves Pi's cursor alone"
+}
+
 test_return_brief_lists_landed_work_awaiting_cleanup() {
   local dir out landed_line failed_line handled_line
   dir="$TMP_ROOT/brief-landed"
@@ -888,6 +928,7 @@ test_unreadable_superseded_archive_keeps_return_gated
 test_missing_final_archive_keeps_retained_contract_gated
 test_return_brief_composes_from_record_store_and_held_set
 test_return_brief_lists_landed_work_awaiting_cleanup
+test_return_marks_the_window_read_on_a_host_home_only
 test_return_brief_keeps_refresh_history
 test_malformed_posture_record_keeps_catchup_gated
 test_missing_epoch_record_stays_required_after_disappearing

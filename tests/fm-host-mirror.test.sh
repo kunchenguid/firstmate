@@ -415,8 +415,25 @@ test_recreated_mirror_continues_past_both_cursors() {
   pass "mirror: a recreated mirror continues past the committed and staged cursors, so a resumed conversation still gets new dialog"
 }
 
+# The host runs the attended posture only beside a primary whose writers were
+# proven to record the session's dialog from its first captain prompt.
+test_only_proven_writers_are_verified() {
+  local harness
+  for harness in claude cursor; do
+    "$MIRROR" verified "$harness" || fail "$harness has proven writers but is not verified"
+  done
+  for harness in codex grok opencode omp pi kimi unknown; do
+    if "$MIRROR" verified "$harness"; then
+      fail "$harness has no proven writer but is verified"
+    fi
+  done
+  expect_code 2 "$("$MIRROR" verified >/dev/null 2>&1; echo $?)" "verified without a harness must be a usage error"
+  pass "only Claude and Cursor, the primaries with proven writers, have a verified dialog mirror"
+}
+
 test_every_harness_registration_writes_the_mirror
 test_writers_are_inert_without_the_opt_in
+test_only_proven_writers_are_verified
 test_home_without_the_flag_is_untouched
 test_operational_foreign_and_unowned_input_is_dropped
 test_internal_whitespace_is_recorded_verbatim
