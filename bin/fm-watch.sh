@@ -115,6 +115,19 @@
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
+#   check: secondmate inbox backlog: mate=<id> count=<n> oldest_age=<seconds>s newest_ids=<ids>
+#                          a secondmate steering inbox crossed the count or age
+#                          threshold (local state/<id>.inbox, or remote via
+#                          inbox-health on state/parent-route/<id>.inbox); the
+#                          records remain untouched
+#   check: secondmate inbox backlog unavailable: mate=<id> [remote=<host>]
+#                          the same inbox could not be measured safely; one
+#                          durable check covers that unreadability episode
+#   check: secondmate model melt: home=<id> old=<harness/model> new=<harness/model|none> why=<reason>
+#                          the recorded commander pin was quota/API-dead; a live
+#                          endpoint was replaced explicitly, no safe replacement
+#                          was available, or an unreachable/unreadable endpoint
+#                          refused automatic relaunch after publishing the check
 #   check: secondmate wake-loop stalled: mate=<id> row=<seq> idle=<seconds>s
 #                          an actionable row in an endpoint-recorded local
 #                          secondmate home's durable wake queue did not advance
@@ -223,6 +236,13 @@ WATCH_HOME_EXISTED=0
 # (inbox_steer_check below).
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# Secondmate health has two narrow owners: model melt decisions and steering
+# backlog measurement. This watcher owns only their cadence, transport, and
+# durable wake/lifecycle handoff.
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/fm-secondmate-melt-lib.sh"
+# shellcheck source=bin/fm-secondmate-inbox-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-inbox-lib.sh"
 # The away-posture record (state/.afk-contract) is the posture in both the
 # attended and the afk session; bin/fm-afk-contract.sh owns its schema and this
 # watcher reads only its presence (afk_record_present below).
@@ -357,6 +377,11 @@ SECONDMATE_LIVENESS_MAX_ATTEMPTS=${FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS:-}
 case "$SECONDMATE_LIVENESS_MAX_ATTEMPTS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_MAX_ATTEMPTS=3 ;; esac
 SECONDMATE_LIVENESS_WINDOW_SECS=${FM_SECONDMATE_LIVENESS_WINDOW_SECS:-}
 case "$SECONDMATE_LIVENESS_WINDOW_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_WINDOW_SECS=3600 ;; esac
+# Secondmate health is sampled once per minute by default. The interval survives
+# watcher restarts through this home's durable mtime marker, so a dead commander
+# or a remote inbox backlog cannot hide behind a newly started watcher.
+SECONDMATE_HEALTH_INTERVAL_SECS=${FM_SECONDMATE_HEALTH_INTERVAL_SECS:-60}
+case "$SECONDMATE_HEALTH_INTERVAL_SECS" in ''|*[!0-9]*|0) SECONDMATE_HEALTH_INTERVAL_SECS=60 ;; esac
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -1099,6 +1124,262 @@ secondmate_liveness_tick() {
   done
   [ -z "$first_reason" ] || wake "$first_reason"
   [ "$failed" -eq 0 ]
+}
+
+# Rewrite only the profile fields in a parent-owned secondmate record after a
+# remote relaunch. Local control already publishes the same fields, but doing
+# this for both placements keeps the parent record authoritative and makes a
+# remote replacement visible to the next health sample.
+secondmate_health_update_profile_meta() {  # <meta> <harness> <model> <effort> [provider]
+  local meta=$1 harness=$2 model=$3 effort=$4 provider=${5:-} state_dir lock tmp status=0
+  state_dir=${meta%/*}
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ ! -f "$meta" ] || [ -L "$meta" ]; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  tmp=$(mktemp "$state_dir/.secondmate-meta-health.XXXXXX") || status=1
+  if [ "$status" -eq 0 ] && ! awk -v harness="$harness" -v model="$model" -v effort="$effort" -v provider="$provider" '
+    BEGIN { seen_h=seen_m=seen_e=seen_p=0 }
+    /^harness=/ { print "harness=" harness; seen_h=1; next }
+    /^model=/ { print "model=" model; seen_m=1; next }
+    /^effort=/ { print "effort=" effort; seen_e=1; next }
+    /^provider=/ {
+      if (provider != "") { print "provider=" provider; seen_p=1; next }
+      print
+      seen_p=1
+      next
+    }
+    { print }
+    END {
+      if (!seen_h) print "harness=" harness
+      if (!seen_m) print "model=" model
+      if (!seen_e) print "effort=" effort
+      if (provider != "" && !seen_p) print "provider=" provider
+    }
+  ' "$meta" > "$tmp"; then
+    status=1
+  fi
+  if [ "$status" -eq 0 ] && ! mv -f "$tmp" "$meta"; then
+    status=1
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  fm_lock_release "$lock" || status=1
+  return "$status"
+}
+
+secondmate_health_inbox_alarm() {  # <id> <meta>
+  local id=$1 meta=$2 remote_host summary count_field age_field sample_field
+  local count age sample reason marker unknown_marker valid=1
+  remote_host=$(fm_meta_get "$meta" remote_host)
+  if [ -n "$remote_host" ]; then
+    summary=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh inbox-health "$id" < /dev/null 2>/dev/null) || summary=
+  else
+    summary=$(fm_secondmate_inbox_health "$STATE/$id.inbox" 2>/dev/null || true)
+  fi
+  count_field=${summary%%$'\t'*}
+  summary=${summary#*$'\t'}
+  age_field=${summary%%$'\t'*}
+  sample_field=${summary#*$'\t'}
+  count=${count_field#count=}
+  age=${age_field#oldest_age=}
+  sample=${sample_field#newest_ids=}
+  marker="$STATE/.secondmate-inbox-alarm-$id"
+  unknown_marker="$STATE/.secondmate-inbox-unreadable-$id"
+  case "$count" in ''|*[!0-9]*) valid=0 ;; esac
+  case "$age" in ''|*[!0-9]*) valid=0 ;; esac
+  if [ "$valid" -eq 0 ]; then
+    if [ ! -e "$unknown_marker" ]; then
+      reason="check: secondmate inbox backlog unavailable: mate=$id"
+      [ -z "$remote_host" ] || reason="$reason remote=$remote_host"
+      fm_wake_append check "secondmate-inbox-unavailable-$id" "$reason" || return 1
+      : > "$unknown_marker" || return 1
+      wake "$reason"
+    fi
+    return 0
+  fi
+  rm -f "$unknown_marker"
+  if fm_secondmate_inbox_breached "$count" "$age"; then
+    [ ! -e "$marker" ] || return 0
+    reason="check: secondmate inbox backlog: mate=$id count=$count oldest_age=${age}s newest_ids=$sample"
+    [ -z "$remote_host" ] || reason="$reason remote=$remote_host"
+    fm_wake_append check "secondmate-inbox-backlog-$id" "$reason" || return 1
+    printf '%s\n' "$count:$age" > "$marker" || return 1
+    wake "$reason"
+  else
+    rm -f "$marker"
+  fi
+}
+
+secondmate_health_capture() {  # <id> <meta>
+  # Exit 0 only after the endpoint is proven alive. Pane text is best-effort:
+  # an empty capture still lets quota-dead melt run against a live commander.
+  # Exit 2 means the endpoint is not alive; exit 1 means transport/target
+  # state could not be established safely for relaunch.
+  local id=$1 meta=$2 remote_host backend target state_out state capture=
+  remote_host=$(fm_meta_get "$meta" remote_host)
+  if [ -n "$remote_host" ]; then
+    state_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null) || return 1
+    state=$(printf '%s\n' "$state_out" | tail -1)
+    [ "$state" = alive ] || return 2
+    capture=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh capture "$id" 80 < /dev/null 2>/dev/null) || capture=
+  else
+    backend=$(fm_backend_of_meta "$meta")
+    target=$(fm_backend_target_of_meta "$meta")
+    [ -n "$target" ] || return 1
+    state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
+    [ "$state" = alive ] || return 2
+    capture=$(fm_backend_capture "$backend" "$target" 80 "fm-$id" 2>/dev/null) || capture=
+  fi
+  printf '%s' "$capture"
+  return 0
+}
+
+secondmate_health_quota_snapshot() {
+  local snapshot=
+  if [ -n "${FM_SECONDMATE_QUOTA_SNAPSHOT:-}" ] \
+    && [ -f "$FM_SECONDMATE_QUOTA_SNAPSHOT" ] \
+    && [ ! -L "$FM_SECONDMATE_QUOTA_SNAPSHOT" ]; then
+    snapshot=$(cat "$FM_SECONDMATE_QUOTA_SNAPSHOT" 2>/dev/null || true)
+  elif fm_quota_axi_compatible >/dev/null 2>&1; then
+    snapshot=$(quota-axi --json 2>/dev/null </dev/null || true)
+  fi
+  if [ -n "$snapshot" ] && printf '%s\n' "$snapshot" | fm_quota_json_valid; then
+    printf '%s' "$snapshot"
+  fi
+}
+
+secondmate_health_live_pin_quota_dead() {  # <meta> <snapshot>
+  local meta=$1 snapshot=$2 harness model provider status
+  [ -n "$snapshot" ] || return 1
+  harness=$(fm_meta_get "$meta" harness)
+  model=$(fm_meta_get "$meta" model)
+  [ -n "$harness" ] && [ -n "$model" ] || return 1
+  provider=$(fm_meta_get "$meta" provider)
+  status=$(fm_secondmate_melt_quota_status "$snapshot" "$harness" "$model" "$provider")
+  [ "$status" = dead ]
+}
+
+# Quota proves the recorded pin is dead, but the endpoint is not a safe
+# relaunch target (not alive, or state unreadable). Publish one durable check
+# and cool the still-recorded dead pin instead of attempting lifecycle control.
+secondmate_health_quota_dead_unreachable() {  # <id> <meta> <snapshot> <endpoint_note>
+  local id=$1 meta=$2 snapshot=$3 endpoint_note=$4
+  local harness model reason
+  harness=$(fm_meta_get "$meta" harness)
+  model=$(fm_meta_get "$meta" model)
+  [ -n "$harness" ] && [ -n "$model" ] || return 0
+  secondmate_health_live_pin_quota_dead "$meta" "$snapshot" || return 0
+  fm_secondmate_melt_cooldown_active "$STATE" "$id" "$harness" "$model" && return 0
+  reason="check: secondmate model melt: home=$id old=$harness/$model new=none why=quota-axi marks the current provider/model exhausted; endpoint $endpoint_note so automatic relaunch was refused"
+  fm_wake_append check "secondmate-model-melt-$id" "$reason" || return 1
+  fm_secondmate_melt_cooldown_write "$STATE" "$id" "$harness" "$model" || return 1
+  wake "$reason"
+  return 0
+}
+
+secondmate_health_model_melt() {  # <id> <meta> <snapshot> <capture>
+  local id=$1 meta=$2 snapshot=$3 capture=$4 harness model effort provider status evidence_count
+  local profile new_harness new_model new_effort new_provider source out rc old_description new_description reason
+  [ -n "$snapshot" ] || snapshot=
+  harness=$(fm_meta_get "$meta" harness)
+  model=$(fm_meta_get "$meta" model)
+  [ -n "$harness" ] || return 0
+  [ -n "$model" ] || return 0
+  fm_secondmate_melt_cooldown_active "$STATE" "$id" "$harness" "$model" && return 0
+  reason=
+  if [ -n "$snapshot" ]; then
+    provider=$(fm_meta_get "$meta" provider)
+    status=$(fm_secondmate_melt_quota_status "$snapshot" "$harness" "$model" "$provider")
+    [ "$status" = dead ] && reason="quota-axi marks the current provider/model exhausted"
+  fi
+  if [ -z "$reason" ]; then
+    if evidence_count=$(fm_secondmate_melt_record_evidence "$STATE" "$id" "$model" "$capture"); then
+      reason="repeated pane evidence shows 429 or out-of-quota for the pinned model (${evidence_count} observations)"
+    else
+      return 0
+    fi
+  fi
+  profile=$(fm_secondmate_melt_choose_profile "$snapshot" "$CONFIG" "$SCRIPT_DIR" "$harness" "$model" 2>/dev/null || true)
+  old_description="$harness/$model"
+  if [ -z "$profile" ]; then
+    reason="check: secondmate model melt: home=$id old=$old_description new=none why=$reason; no quota-verified replacement profile is available"
+    fm_wake_append check "secondmate-model-melt-$id" "$reason" || return 1
+    fm_secondmate_melt_cooldown_write "$STATE" "$id" "$harness" "$model" || return 1
+    wake "$reason"
+    return 0
+  fi
+  IFS=$'\t' read -r new_harness new_model new_effort source <<EOF
+$profile
+EOF
+  [ -n "$new_effort" ] || new_effort=default
+  new_description="$new_harness/$new_model"
+  if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
+    out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$id" \
+      fm-remote-secondmate-control.sh relaunch "$id" "$new_harness" "$new_model" "$new_effort" \
+      < /dev/null 2>&1)
+    rc=$?
+  else
+    out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-control.sh" "$id" relaunch --harness "$new_harness" \
+      --model "$new_model" --effort "$new_effort" 2>&1)
+    rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    reason="check: secondmate model melt: home=$id old=$old_description new=$new_description why=$reason; relaunch failed: $(printf '%s\n' "$out" | sed -n '/./{s/[[:space:]]\{1,\}/ /g;p;q;}')"
+    fm_wake_append check "secondmate-model-melt-$id" "$reason" || return 1
+    fm_secondmate_melt_cooldown_write "$STATE" "$id" "$harness" "$model" || return 1
+    wake "$reason"
+    return 0
+  fi
+  new_provider=$(fm_secondmate_melt_profile_provider "$new_harness" "$new_model" 2>/dev/null || true)
+  if ! secondmate_health_update_profile_meta "$meta" "$new_harness" "$new_model" "$new_effort" "$new_provider"; then
+    reason="check: secondmate model melt: home=$id old=$old_description new=$new_description why=$reason; relaunch succeeded but the parent's profile record could not be updated"
+    fm_wake_append check "secondmate-model-melt-$id" "$reason" || return 1
+    # Detection still reads the old meta pin; cool that pair so the next tick
+    # does not relaunch on every health interval while the record stays stale.
+    fm_secondmate_melt_cooldown_write "$STATE" "$id" "$harness" "$model" || return 1
+    wake "$reason"
+    return 0
+  fi
+  reason="check: secondmate model melt: home=$id old=$old_description new=$new_description why=$reason source=$source"
+  fm_wake_append check "secondmate-model-melt-$id" "$reason" || return 1
+  # Successful replacement with an updated profile must not suppress a later
+  # quota-dead detection on the new pin.
+  rm -f "$STATE/.secondmate-melt-cooldown-$id" \
+    "$STATE/.secondmate-melt-evidence-$id"
+  wake "$reason"
+  return 0
+}
+
+secondmate_health_tick() {
+  local last="$STATE/.secondmate-health-last" snapshot meta id kind capture capture_rc endpoint_note
+  [ "$(age_of "$last")" -ge "$SECONDMATE_HEALTH_INTERVAL_SECS" ] || return 0
+  touch "$last" || return 1
+  snapshot=$(secondmate_health_quota_snapshot)
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    kind=$(fm_meta_get "$meta" kind)
+    [ "$kind" = secondmate ] || continue
+    id=${meta##*/}
+    id=${id%.meta}
+    secondmate_health_inbox_alarm "$id" "$meta" || return 1
+    capture=
+    capture_rc=0
+    capture=$(secondmate_health_capture "$id" "$meta") || capture_rc=$?
+    if [ "$capture_rc" -eq 0 ]; then
+      secondmate_health_model_melt "$id" "$meta" "$snapshot" "$capture" || return 1
+      continue
+    fi
+    # Alive-only melt path failed. If quota already proves the recorded pin is
+    # dead, publish a durable outcome rather than silently skipping the gate.
+    case "$capture_rc" in
+      2) endpoint_note="is not alive" ;;
+      *) endpoint_note="state is unreadable" ;;
+    esac
+    secondmate_health_quota_dead_unreachable "$id" "$meta" "$snapshot" "$endpoint_note" || return 1
+  done
 }
 
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
@@ -2648,6 +2929,14 @@ while :; do
   # any relaunch and the restarted watcher will not re-probe early.
   secondmate_liveness_tick || {
     echo "watcher: secondmate liveness check failed" >&2
+    exit 1
+  }
+
+  # Secondmate health is checked before the foreign wake-loop backstop. It may
+  # relaunch a quota-dead commander or publish a steering-backlog alarm, and
+  # both outcomes must leave this cycle through the ordinary durable wake path.
+  secondmate_health_tick || {
+    echo "watcher: secondmate health observation failed" >&2
     exit 1
   }
 

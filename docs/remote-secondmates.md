@@ -581,6 +581,19 @@ Semantic callers preserve the route or pending request:
 
 An unavailable remote home is projected as unknown and is never replaced by a local second mate.
 
+The primary watcher also owns two health gates for every recorded second mate, local or remote.
+The commander-model gate samples quota-axi and repeated live-pane evidence, then uses an explicit relaunch profile: a quota-usable parent `config/secondmate-harness` pin first, otherwise the quota-usable `crew-dispatch.json` default profiles.
+It never selects a model named Sol or a quota-dead model, unknown or unmeasured quota never licenses a replacement, and the replacement model is always passed explicitly so the old pin cannot stick.
+The gate requires two distinct quota-error pane snapshots and ignores repeated sampling of one stale screen; quota-axi exhaustion can trigger immediately against a live endpoint even when pane text is empty.
+When the endpoint is not alive or its state is unreadable, a quota-dead pin still publishes one durable parent check and cools the recorded pair rather than attempting an unsafe relaunch.
+Cooldown is written only for unsuccessful attempts on the still-recorded dead profile (no replacement, relaunch failure, or successful relaunch whose parent profile record could not be updated), so a successful replacement with an updated profile does not suppress later quota-dead detection while the same failed pin cannot thrash every health interval.
+When no quota-verified replacement is available, the gate still publishes one parent check and cools the dead pin rather than leaving the home silently stalled.
+The steering-backlog gate counts unhandled `*.msg` records in the local `state/<id>.inbox` or this remote route's `state/parent-route/<id>.inbox`.
+More than 20 records or an oldest record older than two hours creates one durable parent check for that backlog episode, including the count, oldest age, and newest-record sample.
+When the inbox path is unreadable or measurement fails, the gate publishes one durable unavailable check for that mate rather than treating the backlog as empty.
+`bin/fm-secondmate-melt-lib.sh` owns model-dead/profile decisions, `bin/fm-secondmate-inbox-lib.sh` owns measurement and thresholds, and `bin/fm-watch.sh` owns transport, relaunch, cooldown publication, and parent wakes.
+The alarm never moves or auto-handles steering records.
+
 ## Backlog handoff
 
 Move already-judged queued work with the normal command:
@@ -685,6 +698,8 @@ bin/fm-test-run.sh tests/fm-remote-doctor.test.sh
 bin/fm-test-run.sh tests/fm-remote-herdr-guard.test.sh
 bin/fm-test-run.sh tests/fm-project-origin.test.sh
 bin/fm-test-run.sh tests/fm-secondmate-sync.test.sh
+bin/fm-test-run.sh tests/fm-secondmate-melt.test.sh
+bin/fm-test-run.sh tests/fm-secondmate-inbox.test.sh
 bin/fm-test-run.sh tests/fm-remote-reply.test.sh
 bin/fm-test-run.sh tests/fm-remote-backlog-handoff.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-lifecycle-e2e.test.sh
