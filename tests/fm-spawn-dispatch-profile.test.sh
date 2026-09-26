@@ -1498,8 +1498,12 @@ SH
 # config/claude-permission-mode (bin/fm-spawn.sh header): absent and `bypass`
 # must both produce today's launch byte-for-byte, `auto` swaps only the
 # permission flag, and any other token refuses before endpoint or metadata.
+# The launch opens with three statements before the claude command: the
+# compact-adviser export, the AI-trailer GIT_CONFIG export, and its pane-start
+# config-env eval.
 claude_launch_brief_arg() {  # <launch>
   local command=${1#*; }
+  command=${command#*; }
   (
     eval "set -- ${command#*; }"
     eval "printf '%s' \"\${$#}\""

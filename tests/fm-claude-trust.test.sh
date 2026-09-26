@@ -624,9 +624,11 @@ test_refused_spawn_leaves_no_task_state() {
 }
 
 # Resolve the final prompt argument using the same shell argument splitting the
-# pane sees after the two leading export statements.
+# pane sees after the three leading statements: the compact-adviser export, the
+# AI-trailer GIT_CONFIG export, and its pane-start config-env eval.
 claude_launch_doorbell() {  # <launch command>
   local command=${1#*; }
+  command=${command#*; }
   (
     eval "set -- ${command#*; }"
     printf '%s' "${!#}"
