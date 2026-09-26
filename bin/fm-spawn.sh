@@ -1374,15 +1374,13 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_WT_LEASED" = 1 ] && [ -n "${WT:-}" ]; then
     SPAWN_WT_LEASED=0
     if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
-      (cd "$PROJ_ABS" && treehouse return --if-lease-holder "$ID" "$WT") </dev/null >/dev/null 2>&1 ||
-        echo "warning: could not return task $ID's leased Treehouse slot $WT after the aborted spawn; release it with: treehouse return --if-lease-holder $ID $WT" >&2
+      spawn_return_lease
     elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
       [ "$SPAWN_LAUNCH_SENT" = 1 ] || [ -z "$HERDR_FLAT_ABORT_TARGET" ] ||
         fm_backend_herdr_kill "$HERDR_FLAT_ABORT_TARGET" 2>/dev/null || true
       if fm_backend_herdr_endpoint_confirmed_gone "${T:-}" &&
         fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
-        (cd "$PROJ_ABS" && treehouse return --if-lease-holder "$ID" "$WT") </dev/null >/dev/null 2>&1 ||
-          echo "warning: could not return task $ID's leased Treehouse slot $WT after the aborted spawn; release it with: treehouse return --if-lease-holder $ID $WT" >&2
+        spawn_return_lease
         fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK" || true
       else
         echo "warning: task $ID's aborted spawn left Treehouse slot $WT leased with no task record to return it, because its pane ${T:-} is not confirmed gone or the Treehouse project lock is busy; once no agent runs there, release it with: treehouse return --if-lease-holder $ID $WT" >&2
@@ -3246,6 +3244,19 @@ spawn_lease_worktree() {
   WT=$leased
   SPAWN_WT_LEASED=1
   validate_spawn_worktree "treehouse get --lease" "$PROJ_ABS"
+}
+
+# Hand an aborted spawn's lease back without discarding anything in the slot.
+# A slot with uncommitted changes declines an unforced return yet exits 0, so
+# the lease counts as returned only once Treehouse no longer names this task as
+# its holder; otherwise the slot and its manual release are named.
+spawn_return_lease() {
+  local held
+  (cd "$PROJ_ABS" && treehouse return --if-lease-holder "$ID" "$WT") </dev/null >/dev/null 2>&1 || true
+  held=$( (cd "$PROJ_ABS" && treehouse status --json) </dev/null 2>/dev/null |
+    jq -r --arg id "$ID" --arg wt "$WT" '[.[] | select(.path == $wt and .lease_holder == $id)] | length' 2>/dev/null) || held=
+  [ "$held" = 0 ] ||
+    echo "warning: could not return task $ID's leased Treehouse slot $WT after the aborted spawn; release it with: treehouse return --if-lease-holder $ID $WT" >&2
 }
 
 # A pooled slot whose only deviation is a submodule gitlink is stale, not dirty:

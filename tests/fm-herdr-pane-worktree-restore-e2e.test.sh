@@ -18,7 +18,8 @@
 #      replacement's conversation, not the previous one.
 #   4. A spawn that aborts after taking its lease and pane leaves neither,
 #      both before its record is published and after that record is rolled
-#      back.
+#      back, and one whose slot holds uncommitted work keeps that work leased
+#      and names the manual release rather than claiming a return.
 #
 # No real harness runs and no model tokens are spent. A stub named `claude` on
 # the lab server's PATH records the directory and arguments it was started
@@ -59,6 +60,7 @@ HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-herdr-pane-wt) || {
 export HERDR_SESSION="$HERDR_LAB_SESSION"
 ABORT_ID="pwabort$$"
 LATE_ABORT_ID="pwlate$$"
+DIRTY_ID="pwdirty$$"
 FLAT_ID="pwflat$$"
 PRES_ID="pwpres$$"
 PROJ="$TMP_ROOT/proj"
@@ -90,7 +92,7 @@ cleanup_all() {
     [ -z "$wt" ] || (cd "$PROJ" && treehouse return --force "$wt") >/dev/null 2>&1
   done < <(sed -n 's/^worktree=//p' "$TMP_ROOT"/*/state/*.meta 2>/dev/null)
   "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || status=$?
-  rm -rf "/tmp/fm-$ABORT_ID" "/tmp/fm-$LATE_ABORT_ID" "/tmp/fm-$FLAT_ID" "/tmp/fm-$PRES_ID"
+  rm -rf "/tmp/fm-$ABORT_ID" "/tmp/fm-$LATE_ABORT_ID" "/tmp/fm-$DIRTY_ID" "/tmp/fm-$FLAT_ID" "/tmp/fm-$PRES_ID"
   rm -f "${LATE_LAUNCH_DIR:-}"
   find "$TMP_ROOT" -type d -exec chmod u+rwx {} + 2>/dev/null
   rm -rf "$TMP_ROOT"
@@ -305,6 +307,34 @@ pool_status | grep -Fq "held by $ABORT_ID" \
 [ -z "$(lab tab list 2>/dev/null | jq -r --arg l "fm-$ABORT_ID" '.result.tabs[]? | select(.label == $l) | .tab_id')" ] \
   || fail "the aborted spawn left its pane open"
 pass "real herdr: a spawn that aborts after taking its lease and pane returns the lease and closes the pane"
+
+# A Treehouse that leaves uncommitted work in the slot it leases makes the
+# spawn refuse the slot before its record is published. An unforced return
+# declines a dirty slot yet exits 0, so the lease must be seen to stay held.
+DIRTYBIN="$TMP_ROOT/dirtybin"
+mkdir -p "$DIRTYBIN"
+cat > "$DIRTYBIN/treehouse" <<EOF
+#!/usr/bin/env bash
+out=\$('$(command -v treehouse)' "\$@") || exit \$?
+[ -z "\$out" ] || printf '%s\n' "\$out"
+if [ "\${1:-} \${2:-}" = "get --lease" ]; then
+  printf 'uncommitted\n' > "\$out/fm-dirty"
+fi
+EOF
+chmod +x "$DIRTYBIN/treehouse"
+if PATH="$DIRTYBIN:$PATH" spawn_task "$FLAT_HOME" "$DIRTY_ID"; then
+  fail "the spawn given a dirty slot should have aborted"
+fi
+grep -Fq "is not clean" "$TMP_ROOT/$DIRTY_ID.err" \
+  || fail "the dirty-slot spawn aborted for an unexpected reason: $(cat "$TMP_ROOT/$DIRTY_ID.err")"
+dirty_wt=$( (cd "$PROJ" && treehouse status --json) 2>/dev/null \
+  | jq -r --arg id "$DIRTY_ID" '.[] | select(.lease_holder == $id) | .path')
+[ -n "$dirty_wt" ] && [ -f "$dirty_wt/fm-dirty" ] \
+  || fail "the dirty slot's uncommitted work was not kept under its lease: $(pool_status)"
+grep -Fq "release it with: treehouse return --if-lease-holder $DIRTY_ID $dirty_wt" "$TMP_ROOT/$DIRTY_ID.err" \
+  || fail "the aborted spawn did not name the dirty slot it could not return: $(cat "$TMP_ROOT/$DIRTY_ID.err")"
+(cd "$PROJ" && treehouse return --force "$dirty_wt") >/dev/null 2>&1 || fail "could not return the dirty slot"
+pass "real herdr: an aborted spawn whose slot holds uncommitted work keeps it leased and names the manual release"
 
 # The staged launch directory (/tmp/fm-<id>+<sha256 of the home>, the launch
 # delivery contract in bin/fm-spawn.sh's header) is refused when it is not a
