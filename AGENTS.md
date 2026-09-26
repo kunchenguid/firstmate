@@ -407,7 +407,7 @@ Handle actionable wakes as follows:
 3. For `check:`, act on the named poll result, including merges, contribution signals, Relay events, process-to-event source results, and captain inbox notes; a handled inbox note is also acknowledged with `bin/fm-inbox.sh drain --ack <id>`, or it stays counted as still waiting for firstmate.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and run `bin/fm-autostart-proposal.sh` to surface quota-aware ready-work suggestions and enforce low-quota session steering; never report an unchanged fleet as progress.
 
-Handling any wake is also a chance to sweep the rest of the fleet, not only the task named in it: treat an ordinary ship or scout task whose next firstmate action is already well-defined - start validation after a `done:` commit, expect a new run or head after a rebase or retry steer, respond after a decision lands - and unactioned for 15 minutes as needing that action now rather than a passive wait, and take it without waiting for the captain to ask.
+Handling any wake is also a chance to sweep the rest of the fleet, not only the task named in it: treat an ordinary ship or scout task whose next firstmate action is already well-defined - start validation after a `done:` commit, expect a new run or head after a rebase or retry steer, respond after a decision lands - and unactioned for 5 minutes as needing that action now rather than a passive wait, and take it without waiting for the captain to ask.
 
 Load `bearings` on a contributions check wake or when filing work linked to an upstream issue; its contribution-follow-up section owns triage and exact signal acknowledgement.
 
