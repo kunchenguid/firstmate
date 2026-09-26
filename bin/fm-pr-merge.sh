@@ -1425,6 +1425,7 @@ require_released_captain_hold || exit 1
 # oversight: if this lock-owning shell dies while its forge child lives,
 # stale-owner recovery can release the record for archive or replacement and
 # the orphaned forge child can still merge on the lapsed away authority.
+FM_PR_MERGE_OUTCOME_ORIGIN=self
 case "$PROVIDER" in
   github)
     merge_output=
@@ -1525,6 +1526,12 @@ case "$PROVIDER" in
         codebase_confirm_rc=0
         codebase_confirm_merged || codebase_confirm_rc=$?
         [ "$codebase_confirm_rc" -eq 0 ] || exit 1
+        FM_PR_MERGE_OUTCOME_ORIGIN=poll
+        if ! fm_merge_authority_read "$STATE" "$ID" \
+            "$PROVIDER" "$PR_HOST" "$PR_PATH" "$PR_NUMBER"; then
+          : # The authority reader sets external when no matching record exists.
+        fi
+        FM_PR_MERGE_AUTHORITY=$FM_MERGE_AUTHORITY
         printf 'verified: %s was already merged at source head %s as merge commit %s\n' \
           "$URL" "$FM_PR_MERGE_HEAD" "$FM_PR_CODEBASE_MERGE_COMMIT"
         ;;
@@ -1579,7 +1586,7 @@ esac
 # refused or failed merge above, and a queued forge merge exits without an
 # outcome while its existing poll remains armed.
 outcome_rc=0
-fm_merge_outcome_report "$FM_HOME" "$STATE" "$ID" "$URL" self \
+fm_merge_outcome_report "$FM_HOME" "$STATE" "$ID" "$URL" "$FM_PR_MERGE_OUTCOME_ORIGIN" \
   "${FM_PR_MERGE_HEAD:-}" "${FM_PR_MERGE_AUTHORITY:-}" || outcome_rc=$?
 case "$outcome_rc" in
   0) ;;

@@ -1958,6 +1958,22 @@ test_codebase_green_merge_and_repeat_are_verified() {
   pass "fm-pr-merge verifies a green Codebase landing and handles an exact repeat without another write"
 }
 
+test_codebase_premerged_without_persisted_authority_is_external() {
+  local case_dir
+  case_dir=$(make_codebase_case codebase-premerged-external)
+  write_codebase_status_json "$case_dir/codebase-status.json" merged
+
+  run_pr_merge "$case_dir" task-x1 "$CB_URL" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr" \
+    || fail "codebase-premerged-external: confirmed existing landing failed"
+
+  assert_no_grep '--json codebase mr merge ' "$case_dir/bytedcli.log" \
+    "codebase-premerged-external: an already merged MR issued another merge"
+  assert_grep "check: merge landed: task-x1 $CB_URL external" "$case_dir/state/.wake-queue" \
+    "codebase-premerged-external: an external landing inherited this invocation's authority"
+  pass "fm-pr-merge attributes an already merged Codebase MR to persisted authority or external observation"
+}
+
 test_codebase_no_checks_is_a_confirmed_green_state() {
   local case_dir
   case_dir=$(make_codebase_case codebase-no-checks)
@@ -2506,6 +2522,7 @@ test_gitlab_unreadable_state_refuses
 test_gitlab_invalid_head_refuses
 test_gitlab_missing_tool_refuses_before_recording
 test_codebase_green_merge_and_repeat_are_verified
+test_codebase_premerged_without_persisted_authority_is_external
 test_codebase_no_checks_is_a_confirmed_green_state
 test_codebase_failed_or_unknown_gates_refuse
 test_codebase_identity_and_argument_overrides_refuse
