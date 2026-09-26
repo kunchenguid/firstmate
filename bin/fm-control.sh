@@ -40,17 +40,13 @@
 #              `missing` is put through the control plane's per-backend absence
 #              proof (fm_control_endpoint_absence_verdict) before anything is
 #              claimed about it, because `missing` also covers an endpoint that
-#              is merely unreachable from this seat. That proof exists only on
-#              HERDR, whose reads are scoped to the session the record names:
-#              proven gone reports `endpoint-gone` rather than
-#              `already-stopped`, because the endpoint this verb normally
-#              preserves did not survive; a pane that turns out to be there and
-#              idle is the ordinary `already-stopped`; one whose agent is back
-#              takes the ordinary interrupt-then-exit path. A tmux `missing`
-#              always REFUSES: a task record carries no socket identity for its
-#              endpoint, so this verb cannot tell a destroyed window from one on
-#              a tmux server it cannot address, and it will not claim a stop it
-#              cannot see.
+#              is merely unreachable from this seat. Herdr proves absence by
+#              reading the session that the record names. Tmux proves absence
+#              only from a live seat in that recorded session. The adapter
+#              verifies the seat's server process and pane before it reads the
+#              exact window. A proven absence reports `endpoint-gone`.
+#              A surviving idle endpoint reports `already-stopped`.
+#              A surviving live agent follows the ordinary stop path.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME worktree - and the same endpoint whenever that endpoint
 #              still exists - on the same or a newly chosen
@@ -59,11 +55,10 @@
 #              a Herdr pane or workspace destroyed in churn - the launch owner
 #              re-creates one in that worktree, in the herdr session the record
 #              names, and the task's record rebinds to it; that is how a task
-#              whose terminal was destroyed is reclaimed by the home that owns
-#              it, rather than being stranded with a parked approval nobody can
-#              answer. Reclaim is HERDR-ONLY for the reason `exit` gives above:
-#              a tmux `missing` cannot be proven absent from a task record, so
-#              it refuses.
+#              whose terminal was destroyed is reclaimed by the owning home.
+#              Tmux recreates only the exact recorded session and window.
+#              It keeps the endpoint binding unchanged.
+#              Every unbound or cross-session tmux request refuses.
 #              An explicit `default` model or effort clears that
 #              axis for the replacement. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness

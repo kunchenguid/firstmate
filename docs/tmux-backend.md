@@ -68,6 +68,23 @@ Cursor is identified from its exact `cursor-agent` identity or versioned install
 The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
 Run the real-harness guard after any harness upgrade and before trusting refreshed evidence.
 
+### Missing-window recovery
+
+A task can retain its record and worktree after its tmux window disappears.
+Use `bin/fm-control.sh <task-id> relaunch --note '<progress>'` from the owning firstmate seat.
+The recovery verifies the seat before it creates a window.
+It compares the ambient tmux server process and pane with their live values.
+The live pane must belong to the recorded session.
+The exact recorded window must be absent from that session.
+
+A successful recovery creates only the recorded window in the recorded session.
+It starts the window in the preserved worktree.
+It keeps the task id, branch, commits, dirty files, and backlog ownership.
+An unbound shell, stale seat, different session, missing session, or dead server refuses.
+Do not use a new spawn after a refusal.
+The existing worker can still own the worktree when absence is not proven.
+[`agent-control.md`](agent-control.md#reclaiming-a-task-whose-endpoint-is-gone) owns the complete transaction and rollback contract.
+
 ### Composer, busy state, and delivery
 
 Agent liveness and composer safety are separate checks.
