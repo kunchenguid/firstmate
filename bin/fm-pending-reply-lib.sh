@@ -205,9 +205,12 @@ fm_pending_reply_summarize() {  # <text>
 }
 
 fm_pending_reply_get() {  # <record-path> <key>
-  local rec=$1 key=$2
+  local rec=$1 key=$2 line value='' found=0
   [ -f "$rec" ] || return 0
-  grep "^${key}=" "$rec" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in "$key="*) value=${line#*=}; found=1 ;; esac
+  done 2>/dev/null < "$rec" || true
+  [ "$found" = 0 ] || printf '%s\n' "$value"
 }
 
 fm_pending_reply_sighting_encode() {  # <path> <line-number>
@@ -1464,9 +1467,13 @@ fm_pending_reply_tick() {  # <state-dir>
     task_id=$(fm_pending_reply_get "$rec" task_id)
     phase=$(fm_pending_reply_get "$rec" phase)
     if [ "$phase" = resolved ]; then
-      # Cheap no-op unless an escalation for this record is still open; this is
-      # the retry that makes the close converge after a transient write failure.
-      fm_pending_reply_close_escalation "$state" "$corr" || true
+      # Terminal records cannot acquire a new escalation. Avoid taking a lock
+      # for already-settled history; the close owner still rechecks under its
+      # lock when a previously escalated record needs its closing receipt.
+      if [ -n "$(fm_pending_reply_get "$rec" escalated_epoch)" ] \
+        && [ -z "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ]; then
+        fm_pending_reply_close_escalation "$state" "$corr" || true
+      fi
       continue
     fi
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true

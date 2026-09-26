@@ -42,8 +42,12 @@
 #     cache of the latest outcome's status provenance. The authoritative copy
 #     is in the append-only row. $STATE/.branch-outcome-index-ready is removed
 #     before append and published only after the cache update; processed-init
-#     rebuilds every cache before publishing it, so interruption or upgrade
-#     fails closed without making each drain scan lifetime history.
+#     rebuilds caches for non-fleet task ids matching [A-Za-z0-9._-]+ before
+#     publishing it, so interruption or upgrade fails closed without making
+#     each drain scan lifetime history. Historical labels outside that syntax
+#     remain valid, deliverable history but never become cache or status paths;
+#     new appends still require that task-id syntax. The regression lives in
+#     tests/fm-branch-supervision.test.sh (legacy-label index migration).
 #     bin/fm-teardown.sh removes a retired task's cache with its other records,
 #     and append skips the cache for a task that has neither a live meta nor a
 #     status log (the outcome itself is still stored), so the branch's report
@@ -268,7 +272,9 @@ rebuild_outcome_indexes() {
   rm -f -- "$OUTCOME_INDEX_READY" || return 1
   [ -s "$STORE" ] || { publish_outcome_index_ready 0; return; }
   rows=$(jq -r -s '
-    map(select(.task != "fleet"))
+    # Legacy outcomes allowed arbitrary task labels. Keep those rows in the
+    # authoritative history, but never interpret non-task labels as paths.
+    map(select(.task != "fleet" and (.task | test("\\A[A-Za-z0-9._-]+\\z"))))
     | group_by(.task)
     | map(.[-1])[]
     | [.task, (.seq | tostring), (.epoch | tostring),

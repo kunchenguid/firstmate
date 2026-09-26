@@ -1054,12 +1054,12 @@ test_tick_skips_terminal_and_reuses_target_observation() {
     fm_backend_capture() { fail "native busy observations should not capture"; }
     # shellcheck disable=SC2329
     fm_pending_reply_find_resolve_line() {
-      local status_file=$1 corr=$2 line
+      local status_file=$1 corr=$2 scanned_line
       printf '%s\t%s\n' "$status_file" "$corr" >> "$scan_log"
       [ -f "$status_file" ] || return 0
-      while IFS= read -r line || [ -n "$line" ]; do
-        fm_pending_reply_line_resolves "$line" "$corr" || continue
-        printf '%s' "$line"
+      while IFS= read -r scanned_line || [ -n "$scanned_line" ]; do
+        fm_pending_reply_line_resolves "$scanned_line" "$corr" || continue
+        printf '%s' "$scanned_line"
         return 0
       done < "$status_file"
       return 0
@@ -1600,8 +1600,62 @@ test_escalated_undelivered_correlation_stays_retryable() {
   pass "an escalated correlation stays retryable only while undelivered"
 }
 
+test_record_reader_preserves_last_literal_value() {
+  local home rec out
+  home=$(setup_parent record-reader)
+  rec="$home/record"
+  printf 'other=x\nfield=first\nfield= spaces = \\literal\nfield=last=\\value' > "$rec"
+  [ "$(fm_pending_reply_get "$rec" field)" = 'last=\value' ] \
+    || fail "record reader changed the final unterminated literal value"
+  [ -z "$(fm_pending_reply_get "$rec" absent)" ] \
+    || fail "record reader invented a missing field"
+  printf '\nfield=\n' >> "$rec"
+  [ -z "$(fm_pending_reply_get "$rec" field)" ] \
+    || fail "record reader did not preserve an empty last value"
+  chmod 000 "$rec"
+  if [ ! -r "$rec" ]; then
+    # shellcheck disable=SC2016 # Exercise the reader in a fresh errexit shell.
+    out=$(bash -c 'set -e; . "$1"; fm_pending_reply_get "$2" field; printf reader-survived' \
+      _ "$ROOT/bin/fm-pending-reply-lib.sh" "$rec" 2>&1) \
+      || fail "an unreadable record aborted an errexit caller"
+    [ "$out" = reader-survived ] || fail "unreadable record handling was not silent: $out"
+  else
+    printf 'skip - privileged user can still read the mode-000 record\n'
+  fi
+  chmod 600 "$rec"
+  pass "record reader preserves literal values and silent read failure"
+}
+
+test_settled_history_does_not_wait_for_correlation_locks() (
+  local home state corr lock
+  home=$(setup_parent settled-history)
+  state="$home/state"
+  export FM_HOME="$home" FM_STATE_OVERRIDE="$state"
+  . "$ROOT/bin/fm-wake-lib.sh"
+  . "$ROOT/bin/fm-timeout-lib.sh"
+  mkdir -p "$state/pending-replies"
+  for corr in 0000000000000001 0000000000000002; do
+    printf 'corr_id=%s\ntask_id=mate\nphase=resolved\n' "$corr" > "$state/pending-replies/$corr"
+    if [ "$corr" = 0000000000000002 ]; then
+      printf 'escalated_epoch=1\nescalation_closed_epoch=2\n' >> "$state/pending-replies/$corr"
+    fi
+    lock="$state/.pending-reply-$corr.lock"
+    fm_lock_acquire_wait "$lock" || fail "could not hold fixture lock"
+  done
+  # shellcheck disable=SC2016 # The child expands its positional arguments.
+  fm_run_timed 5 bash -c '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_tick "$2"' \
+    _ "$ROOT" "$state" || fail "settled history waited for an unnecessary correlation lock"
+  for corr in 0000000000000001 0000000000000002; do
+    fm_lock_release "$state/.pending-reply-$corr.lock"
+    [ -f "$state/pending-replies/$corr" ] || fail "tick discarded settled history"
+  done
+  pass "settled records do not block notification scanning on correlation locks"
+)
+
 # --- run --------------------------------------------------------------------
 
+test_record_reader_preserves_last_literal_value
+test_settled_history_does_not_wait_for_correlation_locks
 test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
 test_recovery_attempt_is_never_reinjected

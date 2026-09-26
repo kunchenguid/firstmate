@@ -204,6 +204,38 @@ test_outcome_startup_replay_stops_at_captain_barrier() {
   pass "startup replay cannot advance the cursor across an unrendered captain outcome"
 }
 
+test_legacy_labels_do_not_poison_index_migration() {
+  local home store before
+  home="$TMP_ROOT/store-legacy-label-home"
+  mkdir -p "$home/state"
+  store="$home/state/branch-outcomes.jsonl"
+  printf '%s\n' \
+    '{"seq":1,"epoch":1,"task":"task-1","wake":"","verdict":"routine","summary":"first","silent":false}' \
+    '{"seq":2,"epoch":2,"task":"old task label","wake":"","verdict":"captain","summary":"retain this decision","silent":false}' \
+    '{"seq":3,"epoch":3,"task":"../escape","wake":"","verdict":"routine","summary":"legacy non-task label","silent":false}' \
+    '{"seq":4,"epoch":4,"task":"task-2","wake":"","verdict":"routine","summary":"last task","silent":false}' \
+    '{"seq":5,"epoch":5,"task":"trailing-newline\n","wake":"","verdict":"routine","summary":"legacy newline label","silent":false}' > "$store"
+  printf '2\n' > "$home/state/.branch-outcomes-cursor"
+  printf '1\n' > "$home/state/.branch-outcomes-processed"
+  before=$(cat "$store")
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" processed-init \
+    || fail "valid legacy task labels poisoned the index migration"
+  [ "$(cat "$store")" = "$before" ] || fail "migration rewrote authoritative history"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 2 ] || fail "migration advanced the read cursor"
+  [ "$(cat "$home/state/.branch-outcomes-processed")" = 1 ] || fail "migration consumed a decision"
+  [ "$(cat "$home/state/.branch-outcome-index-ready")" = 5 ] || fail "migration did not publish the complete index generation"
+  [ -f "$home/state/.task-1.branch-outcome-index" ] && [ -f "$home/state/.task-2.branch-outcome-index" ] \
+    || fail "migration omitted valid task indexes"
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unprocessed)" \
+    'retain this decision' "legacy captain outcome disappeared from unprocessed delivery"
+  if FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task 'new invalid label' --verdict routine --summary refused >/dev/null 2>&1; then
+    fail "new writes accepted a non-task label"
+  fi
+  [ "$(cat "$store")" = "$before" ] || fail "refused append changed history"
+  pass "legacy non-task labels remain deliverable without poisoning or escaping indexes"
+}
+
 test_outcome_cursor_corruption_fails_closed() {
   local home store snapshot out status
   home="$TMP_ROOT/store-corrupt-cursor-home"
@@ -1312,6 +1344,7 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
 test_outcome_startup_replay_stops_at_captain_barrier
+test_legacy_labels_do_not_poison_index_migration
 test_outcome_cursor_corruption_fails_closed
 test_cursor_advancement_refuses_ahead_processed_marker
 test_outcome_sequence_conflicts_fail_closed
