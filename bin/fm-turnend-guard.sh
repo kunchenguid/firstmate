@@ -182,23 +182,38 @@ OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
-budget_reset() {
+# Close a failure episode: the bounded block budget, the last-resort notice's
+# deduplication marker, and the consumed attended fail-open share one lifetime
+# by construction, so they are dropped together and the next failure becomes a
+# NEW episode with its own notice and its own budget
+# (fm_failure_episode_reset in bin/fm-wake-lib.sh owns that set). Only Claude
+# mode owns those records; every other harness leaves them untouched.
+close_failure_episode() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
-  fm_lock_try_acquire "$BUDGET_LOCK" || return 0
-  rm -f "$BUDGET_FILE" 2>/dev/null || true
-  fm_lock_release "$BUDGET_LOCK"
+  fm_failure_episode_reset "$STATE"
 }
 
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
-  [ -e "$FAILURE_NOTICE" ] || budget_reset
+  # Nothing left to supervise is a STRONGER proof of health than a live
+  # watcher, so the condition an episode describes - supervision broken while
+  # it was needed - is definitively over here. Close the episode instead of
+  # reading its own deduplication marker as a reason to keep it open: that
+  # gating latched the episode for the life of the home, muting the next
+  # last-resort notice and leaving the budget permanently unreset.
+  # Best-effort by design: the absent need already decides this stop, so a
+  # contended close must not block the turn's end the way it does in
+  # allow_supervised_stop below, where supervision IS still needed.
+  close_failure_episode || true
   exit 0
 fi
 # One owner of the "supervision is on, let this turn end" exit contract, shared
 # by every proof of supervision below.
 allow_supervised_stop() {
   [ "$CLAUDE_MODE" -eq 1 ] || exit 0
-  fm_failure_episode_reset "$STATE" && exit 0
+  # Supervision IS needed here, so an unproven close must block rather than let
+  # the turn end over episode records this guard could not verify it cleared.
+  close_failure_episode && exit 0
   exit 2
 }
 

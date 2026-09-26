@@ -99,7 +99,10 @@
 # epoch. The failure marker
 # state/.claude-autoarm-failure-notified deduplicates the last-resort notice,
 # and state/.claude-autoarm-failure-alarmed bounds the attended fail-open and
-# suppresses any later automatic continuation in that unresolved episode.
+# suppresses any later automatic continuation in that unresolved episode. Both
+# belong to one episode and are dropped together when it closes;
+# fm_failure_episode_reset in bin/fm-wake-lib.sh owns that record set and the
+# conditions that close an episode.
 #
 # This hook never blocks the Stop decision itself and never prints to stdout:
 # exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
@@ -443,8 +446,18 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
 done
 
 # The need may have vanished mid-cycle (fleet torn down, X opted out): nothing
-# left to supervise, so close quietly instead of waking the model.
+# left to supervise, so close quietly instead of waking the model. That also
+# ends any failure episode, on the same reasoning as a verified healthy
+# watcher and more strongly: there is no longer anything the mechanism could
+# be failing to supervise, so the episode's notice marker and consumed
+# attended fail-open must not survive to mute the next one. Best-effort and
+# ownership-checked - a refused or superseded reset changes nothing about this
+# quiet close. The earlier pre-claim `need_supervision || exit 0` deliberately
+# does NOT close the episode, because this hook holds no generation there and
+# must not mutate shared auto-arm state unowned; the synchronous guard
+# (bin/fm-turnend-guard.sh) owns that close.
 if ! need_supervision; then
+  fm_autoarm_reset_owned "$STATE" "$MY_GEN" || true
   autoarm_record clean
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0

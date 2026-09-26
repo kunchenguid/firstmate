@@ -131,6 +131,15 @@ printf 'watcher: FAILED - cycle ended without an actionable reason\n'
 exit 1
 SH
       ;;
+    need-vanishes)
+      # The fleet is torn down while the cycle runs, so the hook reaches its
+      # post-loop "nothing left to supervise" close with the generation held.
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
+rm -f "$FM_HOME"/state/task*.meta
+printf 'watcher: FAILED - no live watcher with a fresh beacon\n'
+exit 1
+SH
+      ;;
     actionable-many)
       cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
@@ -872,6 +881,38 @@ epoch_field() {
     "$dir/state/.claude-autoarm-epoch" 2>/dev/null || true
 }
 
+# A failure episode describes "supervision is broken while it is needed". When
+# the need disappears mid-cycle there is nothing left for the mechanism to be
+# failing at, so the owning generation closes the episode: its notice marker and
+# its consumed attended fail-open must not survive to mute the NEXT episode's
+# one last-resort notice.
+test_vanished_need_closes_the_failure_episode() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/vanished-need-episode-close")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" need-vanishes
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
+  printf 'session=sess-autoarm\ncount=3\nepoch=9\n' > "$dir/state/.turnend-claude-blocks"
+
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "a cycle whose supervision need vanished must close quietly"
+  [ -z "$out" ] || fail "the vanished-need close produced output: $out"
+  [ -e "$dir/state/arm-ran" ] || fail "the cycle never armed, so it never reached the vanished-need close"
+  [ "$(epoch_outcome "$dir")" = clean ] || fail "the vanished-need close did not record a clean outcome: $(epoch_outcome "$dir")"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "the vanished supervision need left the failure notice marker"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "the vanished supervision need left the attended alarm marker"
+  assert_absent "$dir/state/.turnend-claude-blocks" "the vanished supervision need left the bounded block budget"
+
+  # The point: with the episode closed, a fresh failure notifies again.
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" failed
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a failure after the closed episode must hand back an automatic retry"
+  assert_contains "$out" "automatic supervision mechanism is broken" "the new episode's last-resort notice was muted by the closed episode's marker"
+  pass "auto-arm: a vanished supervision need closes the failure episode so the next one notifies again"
+}
+
 test_abandoned_owner_claim_is_reclaimed_and_rearms() {
   local dir out status pid
   dir=$(make_primary_dir "$TMP_ROOT/abandoned-claim")
@@ -1574,6 +1615,7 @@ test_arms_for_x_mode_poll_need_without_inflight
 test_arms_for_registered_custom_check_without_inflight
 test_single_flight_admits_exactly_one_owner
 test_term_mid_arm_commits_failure_and_rewakes
+test_vanished_need_closes_the_failure_episode
 test_abandoned_owner_claim_is_reclaimed_and_rearms
 test_abandoned_claim_reclaim_reaps_dead_steal_without_nesting
 test_arming_claim_with_fresh_beacon_is_never_reclaimed

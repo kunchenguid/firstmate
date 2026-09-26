@@ -1426,6 +1426,27 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
   rm -f "$marker" 2>/dev/null || true
 }
 
+# Close a Claude auto-arm failure EPISODE by dropping its whole record set:
+# the bounded turn-end block budget, state/.claude-autoarm-failure-notified
+# (which deduplicates the one last-resort notice per episode), and
+# state/.claude-autoarm-failure-alarmed (which records that the episode's one
+# attended fail-open was consumed and suppresses later automatic
+# continuation). All three describe the SAME episode, so they share one
+# lifetime and one closer: this function. Removing them together is what makes
+# the next failure a new episode with its own notice and its own budget - a
+# marker left behind outlives the condition it describes and mutes the
+# last-resort notice permanently.
+#
+# An episode closes exactly when supervision is proven healthy again: a live
+# identity-matched watcher with a fresh beacon is verified, or supervision is
+# no longer needed at all (the stronger proof - there is nothing left for the
+# mechanism to be failing at). bin/fm-turnend-guard.sh and
+# bin/fm-claude-stop-autoarm.sh own those call sites.
+#
+# Modes: "acquire" takes the budget lock itself; "held" requires the caller to
+# already hold it. Returns nonzero on contention or when any record is a
+# directory in the way, so a caller that needs the close proven can refuse
+# rather than assume it happened.
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"

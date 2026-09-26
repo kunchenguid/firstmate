@@ -462,7 +462,7 @@ It also checks that a newly appended keyed decision is classified without reread
 - Single-flight.
 - Bounded failure retries.
 - Benign live-watcher cycle ends.
-- One-notice failure episodes.
+- One-notice failure episodes, and the episode close a vanished supervision need performs so the next failure notifies again.
 - Exit-2 translation.
 - The handling successor an ended attached cycle starts with the closed arm as its predecessor and that outlives the rewake.
 - An unconfirmed successor reported in the banner without withholding the wake.
