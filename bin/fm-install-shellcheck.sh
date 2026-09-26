@@ -71,12 +71,13 @@ while ! curl -fsSL "$URL" -o "$TMP/$ARCHIVE"; do
 done
 
 if command -v sha256sum >/dev/null 2>&1; then
-  ACTUAL_SHA256=$(sha256sum "$TMP/$ARCHIVE" | awk '{print $1}')
+  HASH_COMMAND=(sha256sum)
 elif command -v shasum >/dev/null 2>&1; then
-  ACTUAL_SHA256=$(shasum -a 256 "$TMP/$ARCHIVE" | awk '{print $1}')
+  HASH_COMMAND=(shasum -a 256)
 else
   die "need sha256sum or shasum to verify the ShellCheck archive"
 fi
+ACTUAL_SHA256=$("${HASH_COMMAND[@]}" "$TMP/$ARCHIVE" | awk '{print $1}')
 [ "$ACTUAL_SHA256" = "$SHA256" ] || {
   printf 'fm-install-shellcheck.sh: checksum mismatch for %s (expected %s, got %s)\n' \
     "$ARCHIVE" "$SHA256" "$ACTUAL_SHA256" >&2
@@ -90,8 +91,8 @@ install -m 0755 "$TMP/shellcheck-v${VERSION}/shellcheck" "$DESTINATION/shellchec
 "$DESTINATION/shellcheck" --version
 
 if [ "${FM_SUPERVISION_ACTOR:-}" = short ]; then
-  installed_hash=$(sha256sum "$DESTINATION/shellcheck" | awk '{print $1}')
-  source_hash=$(sha256sum "$TMP/shellcheck-v${VERSION}/shellcheck" | awk '{print $1}')
+  installed_hash=$("${HASH_COMMAND[@]}" "$DESTINATION/shellcheck" | awk '{print $1}')
+  source_hash=$("${HASH_COMMAND[@]}" "$TMP/shellcheck-v${VERSION}/shellcheck" | awk '{print $1}')
   [ "$installed_hash" = "$source_hash" ] || die "installed artifact differs from verified source"
   fm_short_owner_receipt "{\"sha256\":\"$installed_hash\",\"version\":\"$VERSION\"}"
 fi

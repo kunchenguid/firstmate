@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import path from 'node:path';
-import {execFileSync} from 'node:child_process';
+import {execFile,execFileSync} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
 const [root,tmp]=process.argv.slice(2);
 const {ShortAgents,validate}=await import(pathToFileURL(path.join(root,'bin/fm-short-agent.mjs')));
-const {resource}=await import(pathToFileURL(path.join(root,'bin/fm-short-operations.mjs')));
+const {resource,processIdentity}=await import(pathToFileURL(path.join(root,'bin/fm-short-operations.mjs')));
 const home=path.join(tmp,'home'),pkg=path.join(tmp,'sdk');
 fs.mkdirSync(path.join(home,'state'),{recursive:true});
 fs.writeFileSync(path.join(home,'state/.lock'),String(process.pid));
@@ -170,6 +170,29 @@ const marker=resource(home,uncertainRequest.operations.steps[0]).file;fs.writeFi
 assert.equal(new ShortAgents(home,root).submit(uncertainRequest).state,'interrupted');await service.reconcile();assert.ok(fs.existsSync(marker));assert.ok(!fs.existsSync(path.join(uncertainDir,'started.json')));
 // Test-only cleanup: no executor was launched in this constructed crash state.
 fs.unlinkSync(marker);
+// Reconstruct the durable protocol at the two no-effect crash windows.
+const deadIdentity=JSON.parse(execFileSync(process.execPath,['--input-type=module','-e',`import {processIdentity} from ${JSON.stringify(pathToFileURL(path.join(root,'bin/fm-short-operations.mjs')).href)};console.log(JSON.stringify(processIdentity(process.pid)))`],{encoding:'utf8'}));
+for(const window of ['before-intent','refused']) {
+  const submitted=service.submit(req('crash-'+window),false),dir=service.dir(submitted.id);
+  const stored=JSON.parse(fs.readFileSync(path.join(dir,'request.json')));
+  const held={home,id:stored.id,nonce:stored.nonce,index:0,target:resource(home,stored.input.operations.steps[0]).target};
+  const startedFile=path.join(dir,'started.json');
+  fs.writeFileSync(startedFile,JSON.stringify({pid:process.pid,identity:processIdentity(process.pid),nonce:stored.nonce}));
+  fs.writeFileSync(marker,JSON.stringify(held));
+  if(window==='refused') {
+    fs.writeFileSync(path.join(dir,'operation-0.intent.json'),JSON.stringify({nonce:stored.nonce,index:0,step:stored.input.operations.steps[0]}));
+    fs.writeFileSync(path.join(dir,'operation-0.receipt.json'),JSON.stringify({id:stored.id,nonce:stored.nonce,index:0,action:'sync',state:'refused',evidence:{reason:'owner refused before a guarded effect'}}));
+  }
+  await service.reconcile();assert.ok(fs.existsSync(marker),'live runner retains reservation');
+  fs.writeFileSync(startedFile,JSON.stringify({pid:deadIdentity.pid,identity:deadIdentity,nonce:stored.nonce}));
+  const effectFile=path.join(dir,'operation-0.effect.json');fs.writeFileSync(effectFile,JSON.stringify({id:stored.id,nonce:stored.nonce,index:0,owner:deadIdentity}));
+  await service.reconcile();assert.ok(fs.existsSync(marker),'effect without authoritative completion remains reserved');fs.unlinkSync(effectFile);
+  const reconcile=()=>new Promise((resolve,reject)=>execFile(process.execPath,['--input-type=module','-e',`import {reconcileOperationReceipts} from ${JSON.stringify(pathToFileURL(path.join(root,'bin/fm-short-operations.mjs')).href)};reconcileOperationReceipts(${JSON.stringify(home)},${JSON.stringify(stored)})`],error=>error?reject(error):resolve()));
+  await Promise.all([reconcile(),reconcile()]);assert.ok(!fs.existsSync(marker),window+' reservation is released after runner death');
+  fs.writeFileSync(marker,JSON.stringify({...held,nonce:'another-generation'}));
+  await service.reconcile();assert.equal(JSON.parse(fs.readFileSync(marker)).nonce,'another-generation');
+  fs.unlinkSync(marker);
+}
 // Concurrent jobs contend only for the canonical resource, not for the home.
 const realGit=execFileSync('which',['git'],{encoding:'utf8'}).trim();process.env.FM_SHORT_REAL_GIT=realGit;
 const fetchLog=path.join(tmp,'fetch-events');process.env.FM_SHORT_FETCH_LOG=fetchLog;
@@ -278,11 +301,25 @@ if(process.env.FM_SHORT_CLEANUP_TARGET) {
   console.log(JSON.stringify({landedCleanupEvidence:path.join(tmp,'landed-cleanup-evidence.json'),returned,unrelatedPreserved:true,result:landedResult}));
 }
 if(process.env.FM_SHORT_INSTALL_LIVE==='1') {
+  const originalPath=process.env.PATH,hashPath=path.join(tmp,'shasum-only');fs.mkdirSync(hashPath);
+  for(const name of fs.readdirSync('/usr/bin')) {
+    if(name==='sha256sum'||name==='shasum'||name==='node')continue;
+    const source=path.join('/usr/bin',name);
+    try {if(fs.statSync(source).isFile())fs.symlinkSync(source,path.join(hashPath,name));} catch(error) {if(error.code!=='ENOENT')throw error;}
+  }
+  fs.symlinkSync(process.execPath,path.join(hashPath,'node'));
+  const realShasum=execFileSync('which',['shasum'],{encoding:'utf8'}).trim(),hashLog=path.join(tmp,'hash-calls');
+  fs.writeFileSync(path.join(hashPath,'shasum'),`#!/bin/bash\nprintf '%s\\n' "$*" >> "$FM_SHORT_HASH_LOG"\nexec "$FM_SHORT_REAL_SHASUM" "$@"\n`,{mode:0o755});
+  process.env.PATH=hashPath;process.env.FM_SHORT_HASH_LOG=hashLog;process.env.FM_SHORT_REAL_SHASUM=realShasum;
+  assert.equal(execFileSync('bash',['-c','command -v sha256sum || true'],{encoding:'utf8'}),'');
   const destination=path.join(tmp,'installed');fs.mkdirSync(destination);
   const installRequest=req('install',[{action:'install-shellcheck',destination}],'repeat');installRequest.budget.timeMs=300000;installRequest.operations.expiresAt=Date.now()+300000;
   const install=service.submit(installRequest),result=await terminal(install.id);
   assert.equal(result.state,'completed',JSON.stringify(result));
   assert.match(execFileSync(path.join(destination,'shellcheck'),['--version'],{encoding:'utf8'}),/version: 0.11.0/);
+  const hashes=fs.readFileSync(hashLog,'utf8').trim().split('\n');assert.equal(hashes.length,3,'archive and both post-install hashes use the fallback exactly once');
+  assert.ok(hashes.some(line=>line===`-a 256 ${destination}/shellcheck`));
+  process.env.PATH=originalPath;
   console.log(JSON.stringify({installEvidence:service.dir(install.id),result}));
 }
 console.log(JSON.stringify({kind:'fixture',submitMs:a.submitMs,mainExecutionCalls:0,coordinationCallMetric:'not measured; fixture observer polls are not a parent model workflow',childToolCalls:done.toolCalls,childRequests:done.requests,ownerPid:receipt.executor.pid,parentPid:process.pid,head:expected,receiptBytes:Buffer.byteLength(JSON.stringify(receipt)),cases:['sync effect','duplicate submit','restart result','typed arguments','expiry','cancellation','dirty refusal','bounded detached recovery','actor spoof refusal']}));

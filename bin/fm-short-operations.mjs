@@ -9,8 +9,8 @@
 // process identity before mutation; receipt follows authoritative readback.
 // Resource markers are atomic reservations; existing owner locks and leases
 // arbitrate effects with MAIN/BRANCH. A missing receipt after an effect remains
-// reserved across restart, never replayed. Reconcile releases only verified
-// completed reservations after both recorded processes have stopped.
+// reserved across restart, never replayed. Reconcile releases verified completed
+// reservations and proven no-effect reservations after their processes stop.
 // Internal CLI verify/effect/receipt is called only by fm-short-owner-lib.sh;
 // it checks the immutable grant, kernel process ancestry and exact owner args.
 // This is a tool/owner boundary, not isolation against same-user arbitrary code.
@@ -213,14 +213,40 @@ function sameLiveProcess(identity) {
 export function reconcileOperationReceipts(home,request) {
   if(!request.input.operations) return;
   const dir=path.join(home,'state/short-agents',request.id);
+  operationReceipts(dir);
   const startedFile=path.join(dir,'started.json');
-  if(exists(startedFile) && sameLiveProcess(read(startedFile).identity)) return;
-  for(const receipt of operationReceipts(dir)) {
-    if(receipt.state!=='completed' || sameLiveProcess(receipt.executor)) continue;
-    for(const {file} of resources(home,request.input.operations.steps[receipt.index])) {
+  if(!exists(startedFile) || sameLiveProcess(read(startedFile).identity)) return;
+  if(!request.input.operations.steps.some(step=>resources(home,step).some(({file})=>exists(file)&&read(file).id===request.id))) return;
+  const script=fileURLToPath(import.meta.url);
+  execFileSync('bash',['-c',
+    '. "$1"; fm_lock_acquire_wait_bounded "$2" 5 || exit; trap \'fm_lock_release "$2"\' EXIT; "$3" "$4" reconcile "$5"',
+    'short-reconcile',path.join(path.dirname(script),'fm-wake-lib.sh'),path.join(dir,'reconcile.lock'),process.execPath,script,home],
+  {input:JSON.stringify(request),encoding:'utf8',env:{...process.env,FM_HOME:home,FM_ROOT_OVERRIDE:path.dirname(path.dirname(script)),FM_STATE_OVERRIDE:path.join(home,'state')}});
+}
+function reconcileLocked(home,request) {
+  const dir=path.join(home,'state/short-agents',request.id),startedFile=path.join(dir,'started.json');
+  if(!equal(read(path.join(dir,'request.json')),request)) fail('short task request/generation changed');
+  const started=read(startedFile);
+  if(started.nonce!==request.nonce || started.pid!==started.identity?.pid) fail('short runner identity changed');
+  if(sameLiveProcess(started.identity)) return;
+  const receipts=operationReceipts(dir);
+  for(const [index,step] of request.input.operations.steps.entries()) {
+    const receipt=receipts.find(r=>r.index===index),intentFile=path.join(dir,`operation-${index}.intent.json`);
+    if(receipt?.state==='completed') {
+      if(sameLiveProcess(receipt.executor)) continue;
+    } else {
+      if(exists(path.join(dir,`operation-${index}.effect.json`))) continue;
+      if(exists(intentFile)) {
+        const intent=read(intentFile);
+        if(receipt?.state!=='refused' || intent.nonce!==request.nonce || intent.index!==index || !equal(intent.step,step)) continue;
+      }
+    }
+    for(const {file,target} of resources(home,step)) {
       if(!exists(file)) continue;
       const marker=read(file);
-      if(marker.id===request.id && marker.nonce===request.nonce && marker.index===receipt.index && marker.home===home) fs.unlinkSync(file);
+      if(marker.id!==request.id || marker.nonce!==request.nonce || marker.index!==index || marker.home!==home || marker.target!==target) continue;
+      if(!equal(read(path.join(dir,'request.json')),request) || !equal(read(startedFile),started)) fail('short task recovery identity changed');
+      fs.unlinkSync(file);
     }
   }
 }
@@ -320,7 +346,8 @@ export async function executeOperations(service,request,check) {
 if(process.argv[1] && fs.realpathSync(process.argv[1])===fs.realpathSync(fileURLToPath(import.meta.url))) {
   try {
     const [command,action,...args]=process.argv.slice(2);
-    if(command==='verify') verifyOwner(action,args);
+    if(command==='reconcile') reconcileLocked(action,JSON.parse(fs.readFileSync(0,'utf8')));
+    else if(command==='verify') verifyOwner(action,args);
     else if(command==='effect') {
       const v=verifyOwner(action,args);
       publish(path.join(v.dir,`operation-${v.index}.effect.json`),{id:v.request.id,nonce:v.request.nonce,index:v.index,owner:processIdentity(process.ppid),at:Date.now()});
