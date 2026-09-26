@@ -1225,6 +1225,7 @@ test_polytoken_overlay_retirement_spares_project_owned_files() {
   local dir
   dir=$(new_case polytokenwiring rl36)
   add_ship_task "$dir" rl36 polytoken
+  # shellcheck disable=SC2016 # $1 expands in the generated fake polytoken.
   printf '#!/bin/sh\n[ "$1" = sessions ] && printf "[]\\n"\n' > "$dir/fakebin/polytoken"
   chmod +x "$dir/fakebin/polytoken"
   mkdir -p "$dir/wt/.polytoken"
