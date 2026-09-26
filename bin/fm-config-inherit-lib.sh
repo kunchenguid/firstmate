@@ -220,14 +220,18 @@ warn_inheritable_config_error() {
   echo "fm-config-inherit: error: $reason $item at $dest" >&2
 }
 
+# Prints nothing and returns 0 when the header carries every required phrase.
+# Otherwise prints the first required phrase it did not find on stdout and
+# returns 1, so a caller can name the concrete gap instead of a generic
+# rejection. The accept set itself is unchanged.
 shared_captain_header_valid() {
   local src=$1 head
   head=$(sed -n '1,12p' "$src" 2>/dev/null) || return 1
-  case "$head" in *main-authoritative*) ;; *) return 1 ;; esac
-  case "$head" in *"read-only in secondmate homes"*) ;; *) return 1 ;; esac
-  case "$head" in *"must not be edited there"*) ;; *) return 1 ;; esac
-  case "$head" in *"main firstmate"*) ;; *) return 1 ;; esac
-  case "$head" in *"marked status"*|*"document pointer"*) ;; *) return 1 ;; esac
+  case "$head" in *main-authoritative*) ;; *) printf '%s' "main-authoritative"; return 1 ;; esac
+  case "$head" in *"read-only in secondmate homes"*) ;; *) printf '%s' "read-only in secondmate homes"; return 1 ;; esac
+  case "$head" in *"must not be edited there"*) ;; *) printf '%s' "must not be edited there"; return 1 ;; esac
+  case "$head" in *"main firstmate"*) ;; *) printf '%s' "main firstmate"; return 1 ;; esac
+  case "$head" in *"marked status"*|*"document pointer"*) ;; *) printf '%s' "marked status\" or \"document pointer"; return 1 ;; esac
 }
 
 shared_captain_dir_safe() {
@@ -326,7 +330,7 @@ copy_shared_captain_file() {
 }
 
 propagate_shared_captain_preferences() {
-  local src_data=$1 dest_data=$2 src dest src_hash dest_hash dest_parent dest_home quarantine reason rc
+  local src_data=$1 dest_data=$2 src dest src_hash dest_hash dest_parent dest_home quarantine reason rc missing
   [ -n "$src_data" ] || return 1
   [ -n "$dest_data" ] || return 1
   src="$src_data/$FM_SHARED_CAPTAIN_FILE"
@@ -342,8 +346,9 @@ propagate_shared_captain_preferences() {
       record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
       return 1
     fi
-    if ! shared_captain_header_valid "$src"; then
+    if ! missing=$(shared_captain_header_valid "$src"); then
       reason="primary source header missing required main-authoritative warning"
+      [ -z "$missing" ] || reason="$reason: missing \"$missing\""
       warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$src" "$reason"
       record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
       return 1

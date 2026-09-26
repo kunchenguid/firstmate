@@ -138,6 +138,13 @@ STATE_VERBS = ("working", "needs-decision", "blocked", "paused", "done",
                "failed", "resolved", "captain-held")
 NOTE_VERB = "note"
 
+# A status EVENT's prefix is a single lowercase word: letters and internal
+# hyphens only. Free prose a worker appends after its own status line - a note
+# to itself, or context for a human reader - never matches this shape, so the
+# scan in _last_event below can tell an event line from trailing prose without
+# caring whether the verb is one this module recognises.
+_VERB_SHAPE = re.compile(r"^[a-z]+(?:-[a-z]+)*$")
+
 # Enough tail to hold the last line of a status log. These logs are append-only
 # and grow for the life of a task, while every spoken question reads one per
 # worker, so the read is bounded and seeks rather than scanning from the top.
@@ -301,15 +308,22 @@ def _parse_backlog(path):
 
 
 def _last_event(state_dir, task_id):
-    """Return (verb, line) from the last status event, or (None, None).
+    """Return (verb, line) from the newest status event in the tail, or (None, None).
 
     bin/fm-classify-lib.sh remains the owner of status-verb normalization.
-    This security-bounded projection accepts the prefix before the first ':'
-    and the first '[', whichever comes first, only when it is in STATE_VERBS.
-    The bracket matters: status metadata sits between the verb and the colon,
-    as in "done [token]: shipped it" and "needs-decision [key=api-shape]: which
-    shape". A line carrying no colon is not a status line, and any unrecognized
-    prefix is reported as a note rather than spoken aloud as a state.
+    A worker may append plain prose after its own status line - a note to
+    itself, or context for a human reader - so this scans back through the
+    tail for the newest EVENT rather than trusting whatever line happens to
+    be last. A line qualifies as an event when it carries a ':' and its
+    prefix before the first ':' and the first '[', whichever comes first,
+    matches _VERB_SHAPE; a recognized STATE_VERBS prefix is reported as
+    itself, and an unrecognized verb-shaped prefix is still reported as a
+    note rather than letting an earlier recognized line answer for it. Free
+    text with no colon, or a prefix that is not verb-shaped, is skipped over
+    as prose rather than treated as the event. The bracket matters: status
+    metadata sits between the verb and the colon, as in "done [token]:
+    shipped it" and "needs-decision [key=api-shape]: which shape". When the
+    tail holds no event at all, the last line is reported exactly as before.
 
     Only the tail of the log is read; see STATUS_TAIL_BYTES.
     """
@@ -326,10 +340,19 @@ def _last_event(state_dir, task_id):
              window.decode("utf-8", errors="replace").splitlines() if text.strip()]
     if not lines:
         return None, None
+
+    def prefix(text):
+        return text.split(":", 1)[0].split("[", 1)[0].strip()
+
     line = lines[-1]
+    for candidate in reversed(lines):
+        if ":" in candidate and _VERB_SHAPE.match(prefix(candidate)):
+            line = candidate
+            break
+
     verb = NOTE_VERB
     if ":" in line:
-        verb = line.split(":", 1)[0].split("[", 1)[0].strip().lower()
+        verb = prefix(line).lower()
     if verb not in STATE_VERBS:
         verb = NOTE_VERB
     return verb, line

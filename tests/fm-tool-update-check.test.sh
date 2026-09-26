@@ -236,6 +236,56 @@ SH
   pass "a tool's own update announcement is read from its output"
 }
 
+test_announced_update_already_installed_is_not_double_reported() {
+  local home first second out report
+  # One completed install: the newer copy sits on PATH behind the older
+  # self-installing copy, so PATH skew is already reported. The older copy
+  # keeps announcing the very release it has already been superseded by, and
+  # that announcement must not also be read as a still-available update.
+  home=$(make_home announce-installed)
+  first="$TMP_ROOT/announce-installed/old/bin"
+  second="$TMP_ROOT/announce-installed/new/bin"
+  mkdir -p "$first" "$second"
+  cat > "$first/no-mistakes-fixture" <<'SH'
+#!/usr/bin/env bash
+printf '1.46.0\n'
+printf 'A new version of no-mistakes is available: v1.46.0 -> v1.47.0\n' >&2
+SH
+  chmod 0755 "$first/no-mistakes-fixture"
+  make_copy "$second" "no-mistakes-fixture" '1.47.0'
+  write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","announce_pattern":"A new version of no-mistakes is available: [^ ]+ -> [^ ]+"}]}'
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$first:$second")" "$out"
+  report=$(cat "$out")
+  assert_contains "$report" "no-mistakes update not in effect" "the already-installed newer copy was not reported as PATH skew"
+  assert_not_contains "$report" "update available" "an announcement naming an already-installed version was also reported as a still-available update"
+  pass "an announcement naming an already-installed version is not also reported as an available update"
+}
+
+test_announced_update_newer_than_installed_is_still_reported() {
+  local home first second out report
+  # Control: the announced version is genuinely newer than every installed
+  # copy, so it must still be reported as available alongside the skew.
+  home=$(make_home announce-not-installed)
+  first="$TMP_ROOT/announce-not-installed/old/bin"
+  second="$TMP_ROOT/announce-not-installed/new/bin"
+  mkdir -p "$first" "$second"
+  cat > "$first/no-mistakes-fixture" <<'SH'
+#!/usr/bin/env bash
+printf '1.46.0\n'
+printf 'A new version of no-mistakes is available: v1.46.0 -> v1.47.0\n' >&2
+SH
+  chmod 0755 "$first/no-mistakes-fixture"
+  make_copy "$second" "no-mistakes-fixture" '1.46.5'
+  write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","announce_pattern":"A new version of no-mistakes is available: [^ ]+ -> [^ ]+"}]}'
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$first:$second")" "$out"
+  report=$(cat "$out")
+  assert_contains "$report" "no-mistakes update available: A new version of no-mistakes is available: v1.46.0 -> v1.47.0" "an announcement naming a version newer than every installed copy was not reported"
+  assert_contains "$report" "no-mistakes update not in effect" "the installed newer-than-resolved copy was not reported as PATH skew"
+  pass "an announcement naming a version newer than every installed copy is still reported as available"
+}
+
 test_announcement_is_read_from_a_second_command() {
   local home dir out report quiet_home
   # The real no-mistakes prints its version for --version but announces a new
@@ -1012,6 +1062,8 @@ test_one_copy_reached_twice_is_probed_once
 test_unreadable_version_is_a_failure_not_a_pass
 test_missing_command_is_reported
 test_announced_update_is_reported_from_the_tool_itself
+test_announced_update_already_installed_is_not_double_reported
+test_announced_update_newer_than_installed_is_still_reported
 test_announcement_is_read_from_a_second_command
 test_unusable_announce_pattern_is_reported_not_read_as_silence
 test_one_broken_pattern_does_not_blind_the_rest_of_the_sweep
