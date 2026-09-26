@@ -16,11 +16,13 @@
 #     Written atomically (temp + ln for claim, temp + mv for a same-actor
 #     refresh), with inspection and mutation serialized by the home-local
 #     lease-command lock; leases never coordinate across firstmate homes.
-#   - Actors: exactly "main" and "branch". The current actor is
+#   - Stored lease actors remain "main" and "branch". A bound short-operation
+#     executor can enter guards only through fm-short-owner-lib.sh and cannot
+#     claim a lease; it refuses any live MAIN/BRANCH lease. The current actor is
 #     $FM_SUPERVISION_ACTOR when set, else "main". The branch's shell gets
 #     FM_SUPERVISION_ACTOR=branch injected deterministically by the Pi branch
 #     extension's bash tool, not by agent memory. Any other value is refused
-#     loudly - an unknown actor is a wiring bug, not a third role.
+#     loudly. The short executor is not a supervisor role.
 #   - Staleness: the recorded pid is the long-lived supervising process (the
 #     session-lock holder, or FM_LEASE_HOLDER_PID - see bin/fm-lease.sh), and
 #     both actors live inside that one pi process, so a dead recorded pid
@@ -46,7 +48,7 @@
 #   - Guard semantics (fm_lease_guard): no lease, a same-actor lease, or a
 #     provably stale lease passes; a live lease held by the OTHER actor
 #     refuses with exit FM_LEASE_REFUSE_EXIT. In a Pi supervision context the
-#     guard retains the lease-command lock until fm_lease_guard_release, so the
+#     guard retains its task lock until fm_lease_guard_release, so the
 #     other actor cannot claim between the check and the guarded mutation. A
 #     home without the current Pi session lock cannot have a live lease, so
 #     the guard is a no-op there - non-Pi behavior is unchanged by construction.
@@ -85,6 +87,13 @@ fm_lease_lock_helpers() {
 fm_lease_actor() {
   local actor=${FM_SUPERVISION_ACTOR:-main}
   case "$actor" in
+    short)
+      if ! declare -F fm_short_owner_check >/dev/null 2>&1 || ! fm_short_owner_check; then
+        echo "error: short actor lacks a current bound operation" >&2
+        return 1
+      fi
+      printf '%s\n' short
+      ;;
     main|branch) printf '%s\n' "$actor" ;;
     *)
       echo "error: unknown FM_SUPERVISION_ACTOR '$actor' (expected main or branch)" >&2
@@ -138,7 +147,7 @@ fm_lease_read() {
 fm_lease_live() {
   local lock_pid
   case "${PI_CODING_AGENT:-}:${FM_SUPERVISION_ACTOR:-}" in
-    true:*|*:main|*:branch) ;;
+    true:*|*:main|*:branch|*:short) ;;
     *) return 1 ;;
   esac
   fm_lease_read "$1" || return 1
@@ -162,7 +171,7 @@ fm_lease_clear_stale() {
 
 # fm_lease_guard <task> <action-label>: refuse (exit FM_LEASE_REFUSE_EXIT) when
 # a live lease held by the OTHER actor exists for <task>. In a Pi supervision
-# context, a successful guard retains the command lock across the caller's
+# context, a successful guard retains the task lock across the caller's
 # mutation; the caller must invoke fm_lease_guard_release from its EXIT cleanup.
 # This closes the check/use race with a concurrent claim. Outside Pi, stale
 # records are still cleaned but the lock is released before returning.
@@ -170,17 +179,26 @@ fm_lease_guard() {
   local task=$1 action=$2 actor lock lease_actor active=0
   fm_lease_valid_id "$task" || return 0
   actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
+  if [ "$actor" != short ] && [ -e "$STATE/.short-operation-$task.json" ]; then
+    echo "error: $action refused - task '$task' has a pending short-operation receipt" >&2
+    exit "$FM_LEASE_REFUSE_EXIT"
+  fi
   case "${PI_CODING_AGENT:-}:${FM_SUPERVISION_ACTOR:-}" in
-    true:*|*:main|*:branch) active=1 ;;
+    true:*|*:main|*:branch|*:short) active=1 ;;
   esac
   [ "$active" = 1 ] || [ -e "$(fm_lease_path "$task")" ] || return 0
   fm_lease_lock_helpers
-  lock="$STATE/.fm-lease-command.lock"
+  lock="$STATE/.fm-lease-task-$task.lock"
   # A caller with more than one guarded phase already excludes claims until
   # its shared cleanup; do not recursively acquire the non-reentrant lock.
   if [ "$FM_LEASE_GUARD_LOCK" != "$lock" ]; then
     fm_lock_acquire_wait "$lock"
     FM_LEASE_GUARD_LOCK=$lock
+  fi
+  if [ "$actor" != short ] && [ -e "$STATE/.short-operation-$task.json" ]; then
+    fm_lease_guard_release
+    echo "error: $action refused - task '$task' acquired a pending short-operation receipt while waiting" >&2
+    exit "$FM_LEASE_REFUSE_EXIT"
   fi
   if ! fm_lease_live "$task"; then
     fm_lease_clear_stale "$task" || { fm_lease_guard_release; return 1; }
@@ -212,6 +230,10 @@ fm_lease_guard_release() {
 fm_lease_forbid_branch() {
   local action=$1 actor
   actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
+  if [ "$actor" = short ] && [ "$action" != "PR merge (fm-pr-merge)" ]; then
+    echo "error: short actor is not authorized for $action" >&2
+    exit "$FM_LEASE_REFUSE_EXIT"
+  fi
   [ "$actor" = branch ] || return 0
   echo "error: $action refused - the supervision branch never performs this action; report the outcome and leave it to main (role partition: docs/pi-supervision-branch.md)" >&2
   exit "$FM_LEASE_REFUSE_EXIT"

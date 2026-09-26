@@ -44,7 +44,9 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
 FM_LOCK_LOG_PREFIX=fleet-sync
-"$FM_ROOT/bin/fm-guard.sh" || true
+if [ "${FM_SUPERVISION_ACTOR:-}" != short ]; then
+  "$FM_ROOT/bin/fm-guard.sh" || true
+fi
 
 # Bounded recovery for an orphaned .git/packed-refs.lock. A git ref rewrite
 # (fetch --prune, branch -D, pack-refs) killed after creating the lock but before
@@ -297,6 +299,10 @@ report_stuck() {
   echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention"
 }
 
+# shellcheck source=bin/fm-short-owner-lib.sh
+. "$SCRIPT_DIR/fm-short-owner-lib.sh"
+trap fm_short_owner_release EXIT
+
 sync_project() {
   PROJ=$1
   label=$(project_label)
@@ -324,6 +330,7 @@ sync_project() {
     echo "$label: skipped: not a clone root (git would act on $proj_top)"
     return 0
   fi
+  fm_short_owner_enter sync "$proj_abs" || return 1
   mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off")
   mode=${mode_line%% *}
   if [ "$mode" = "local-only" ]; then
@@ -335,6 +342,7 @@ sync_project() {
     return 0
   fi
 
+  fm_short_owner_effect || return 1
   if ! fetch_with_packed_refs_lock_guard; then
     reason="fetch failed"
     if [ -n "$FETCH_OUTPUT" ]; then
@@ -374,6 +382,7 @@ sync_project() {
         && git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null \
         && ! default_checked_out_elsewhere \
         && local_default_safe_for_recovery; then
+      fm_short_owner_effect || return 1
       if ! git -C "$PROJ" checkout --quiet "$DEFAULT" 2>/dev/null; then
         report_stuck "$(stuck_state)"
         return 0
@@ -420,6 +429,7 @@ sync_project() {
     echo "$label: skipped: cannot read local $DEFAULT"
     return 0
   }
+  fm_short_owner_effect || return 1
   if ! merge_output=$(git -C "$PROJ" merge --ff-only "$BASE" 2>&1); then
     reason="fast-forward failed"
     if [ -n "$merge_output" ]; then
@@ -442,6 +452,14 @@ sync_project() {
 
 if [ $# -eq 1 ]; then
   sync_project "$(resolve_project_arg "$1")"
+  if [ "${FM_SUPERVISION_ACTOR:-}" = short ]; then
+    [ -n "${DEFAULT:-}" ] && [ -n "${BASE:-}" ] || exit 1
+    current_head=$(git -C "$PROJ" rev-parse HEAD)
+    [ "$current_head" = "$(git -C "$PROJ" rev-parse "$BASE")" ] || exit 1
+    [ "$(git -C "$PROJ" symbolic-ref --short HEAD)" = "$DEFAULT" ] || exit 1
+    [ -z "$(git -C "$PROJ" status --porcelain)" ] || exit 1
+    fm_short_owner_receipt "{\"head\":\"$current_head\"}"
+  fi
   exit 0
 fi
 

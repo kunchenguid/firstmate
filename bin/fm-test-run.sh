@@ -285,7 +285,7 @@ family_for_basename() {
     fm-traex-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-harness-precedence.test.sh|fm-harness-support.test.sh|\
     fm-lint-workflows.test.sh|\
-    fm-short-agent.test.sh|fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
+    fm-short-agent.test.sh|fm-short-operations.test.sh|fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
     fm-harness-adapter-references.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
@@ -334,7 +334,7 @@ family_for_basename() {
     fm-traex-harness-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-herdr-pi-stale-registration-live-e2e.test.sh|\
-    fm-short-agent-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
+    fm-short-agent-live-e2e.test.sh|fm-short-operations-herdr.test.sh|fm-pi-branch-live-e2e.test.sh|\
     fm-calm-pi-herdr-live-e2e.test.sh|fm-pi-branch-responsiveness-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|fm-pi-codex-native.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
@@ -613,6 +613,8 @@ list_portable_serial() {
 # multiple artifacts use the slowest green run. These are balance hints only: the shard
 # partition stays complete and disjoint whatever they say, so a stale hint costs
 # balance rather than coverage. That doc owns the refresh procedure.
+# The two new short-operation guards carry provisional 2026-09-26 Linux-local
+# measurements until CI supplies their weights; these do not establish CI headroom.
 portable_serial_weight_hints() {
   cat <<'EOF'
 tests/fm-agent-process.test.sh 296
@@ -684,6 +686,8 @@ tests/fm-session-start.test.sh 156952
 tests/fm-sessionstart-hook-live-e2e.test.sh 20
 tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh 22
 tests/fm-sessionstart-nudge.test.sh 66194
+tests/fm-short-operations-herdr.test.sh 32219
+tests/fm-short-operations.test.sh 24065
 tests/fm-spawn-dispatch-profile.test.sh 63996
 tests/fm-spawn-pool-base-freshen.test.sh 34920
 tests/fm-spawn-worktree-settle.test.sh 5687

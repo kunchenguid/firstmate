@@ -23,6 +23,10 @@ die() {
 
 DESTINATION=${1:?usage: fm-install-shellcheck.sh <destination-directory>}
 
+# shellcheck source=bin/fm-short-owner-lib.sh
+. "$ROOT/bin/fm-short-owner-lib.sh"
+trap fm_short_owner_release EXIT
+
 os=$(uname -s)
 arch=$(uname -m)
 # SHA-256 pins are the GitHub release asset digests for shellcheck v0.11.0
@@ -52,7 +56,7 @@ esac
 
 URL="https://github.com/koalaman/shellcheck/releases/download/v${VERSION}/${ARCHIVE}"
 TMP=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fm-shellcheck.XXXXXX")
-trap 'rm -rf "$TMP"' EXIT
+trap 'fm_short_owner_release; rm -rf "$TMP"' EXIT
 
 DOWNLOAD_ATTEMPTS=6
 download_attempt=1
@@ -80,5 +84,14 @@ fi
 }
 tar -xJf "$TMP/$ARCHIVE" -C "$TMP"
 mkdir -p "$DESTINATION"
+fm_short_owner_enter install-shellcheck "$DESTINATION"
+fm_short_owner_effect
 install -m 0755 "$TMP/shellcheck-v${VERSION}/shellcheck" "$DESTINATION/shellcheck"
 "$DESTINATION/shellcheck" --version
+
+if [ "${FM_SUPERVISION_ACTOR:-}" = short ]; then
+  installed_hash=$(sha256sum "$DESTINATION/shellcheck" | awk '{print $1}')
+  source_hash=$(sha256sum "$TMP/shellcheck-v${VERSION}/shellcheck" | awk '{print $1}')
+  [ "$installed_hash" = "$source_hash" ] || die "installed artifact differs from verified source"
+  fm_short_owner_receipt "{\"sha256\":\"$installed_hash\",\"version\":\"$VERSION\"}"
+fi

@@ -290,6 +290,14 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 # leases).
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# shellcheck source=bin/fm-short-owner-lib.sh
+. "$SCRIPT_DIR/fm-short-owner-lib.sh"
+trap fm_short_owner_release EXIT
+fm_short_owner_enter cleanup "$ID" || exit 1
+if [ "${FM_SUPERVISION_ACTOR:-}" = short ] && { [ -n "$FORCE" ] || [ "${LEGACY_RECORD_GIVEN:-0}" != 0 ]; }; then
+  echo "error: short cleanup cannot discard or manufacture legacy identity" >&2
+  exit 1
+fi
 # Role partition: forced teardown discards work, and the supervision branch
 # never discards anything - only an ordinary landed-work teardown is branch
 # territory (contract: bin/fm-lease-lib.sh).
@@ -333,6 +341,7 @@ META_LOCK=
 META_LOCK_HELD=0
 teardown_release_locks() {
   local status=$?
+  fm_short_owner_release || true
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
     teardown_release_herdr_locks || true
   fi
@@ -461,7 +470,7 @@ BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
-if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
+if [ "${FM_SUPERVISION_ACTOR:-}" != short ] && [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
   "$FM_ROOT/bin/fm-guard.sh" || true
 fi
 PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -1491,6 +1500,10 @@ require_owned_task_worktree_slot() {
   case "$rc" in
     0) return 0 ;;
     "$TEARDOWN_SLOT_REASSIGNED_RC")
+      if [ "${FM_SUPERVISION_ACTOR:-}" = short ]; then
+        echo "REFUSED: short cleanup target was reassigned; explicit reconciliation is required" >&2
+        return 1
+      fi
       TEARDOWN_SLOT_REASSIGNED=1
       TEARDOWN_SLOT_REASSIGNED_TO=$FM_TREEHOUSE_SLOT_OWNER_ID
       TEARDOWN_SLOT_REASSIGNED_HOME=$FM_TREEHOUSE_SLOT_OWNER_HOME
@@ -1777,6 +1790,7 @@ fi
 # them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
 # --force, and before ANY destructive step below - a still-parked run or a
 # leaked process can own live work in this exact worktree.
+fm_short_owner_effect || exit 1
 if teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
@@ -1784,6 +1798,7 @@ else
   reap_task_worktree_processes tasktmp "$TASK_TMP"
 fi
 
+fm_short_owner_effect || exit 1
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if ! teardown_owns_worktree; then
   :
@@ -1803,6 +1818,7 @@ elif [ -d "$WT" ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
+  fm_short_owner_effect || exit 1
   teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
@@ -1814,6 +1830,7 @@ elif [ -d "$WT" ]; then
   fm_treehouse_slot_owner_release "$WT" "$ID"
 fi
 
+fm_short_owner_effect || exit 1
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=
@@ -1886,6 +1903,7 @@ if [ "$BACKEND" = herdr ]; then
     exit 1
   fi
 fi
+fm_short_owner_effect || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
@@ -1908,6 +1926,7 @@ rm -rf "$STATE/$ID.inbox"
 # racing the same id stays serialized exactly as it was before. A captain-held
 # row takes the retain transition here instead of the close: same record, same
 # ordering, the row returns to Queued with its deliverable recorded.
+fm_short_owner_effect || exit 1
 if [ "$BACKLOG_CLOSED" = 1 ]; then
   BACKLOG_CLOSE_MARKER=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
   if ! fm_backlog_atomic_transition "$BACKLOG_TRANSITION" "$STATE/$ID.meta" "$BACKLOG_CLOSE_MARKER" \
@@ -1931,7 +1950,7 @@ else
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
-if [ "$KIND" != scout ] && [ "$MODE" != local-only ]; then
+if [ "${FM_SUPERVISION_ACTOR:-}" != short ] && [ "$KIND" != scout ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
@@ -1942,3 +1961,5 @@ else
   echo "teardown $ID complete (window $T; pool slot $WT left to task $TEARDOWN_SLOT_REASSIGNED_TO${TEARDOWN_SLOT_REASSIGNED_HOME:+ (home $TEARDOWN_SLOT_REASSIGNED_HOME)}, which it was reassigned to)"
 fi
 backlog_refresh_reminder
+
+fm_short_owner_receipt '{"taskRecordRemoved":true,"endpointConfirmedGone":true,"copyDisposition":"returned-or-already-absent","bookkeepingComplete":true}'
