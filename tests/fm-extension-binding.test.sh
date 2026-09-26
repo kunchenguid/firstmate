@@ -1096,6 +1096,37 @@ assert_absent "$H_FLOW/config/extensions.d/org.example.flow.json" "exact local b
 assert_present "$H_FLOW/data/extensions/retired-bindings/org.example.flow/${flow_binding_digest#sha256:}.json" "local binding retirement was not reversible"
 expect_failure "no home-local extension binding" env FM_HOME="$H_FLOW" "$HOST" resolve-process-event ext-flow
 pass "local binding retirement requires its exact identity and disables invocation"
+
+# A publish interrupted after its rename but before the destination root is
+# re-tightened leaves the store entry owner-writable; the next bind of that
+# exact digest must complete the publish instead of wedging the store.
+P_INTERRUPT="$PACKAGES/interrupted-publish"
+make_package "$P_INTERRUPT" org.example.interrupt ext-interrupt
+H_INTERRUPT="$HOMES/interrupted-publish"; new_home "$H_INTERRUPT"
+interrupt_bind=$(bind_package "$H_INTERRUPT" "$P_INTERRUPT" ext-interrupt)
+interrupt_binding_digest=$(printf '%s\n' "$interrupt_bind" | sed -n 's/^binding-digest: //p')
+interrupt_root=$(binding_value "$H_INTERRUPT" org.example.interrupt package_root)
+FM_HOME="$H_INTERRUPT" "$HOST" retire-binding org.example.interrupt --if-binding-digest "$interrupt_binding_digest" >/dev/null \
+  || fail "retiring the interrupted-publish fixture binding failed"
+chmod 0700 "$interrupt_root"
+bind_package "$H_INTERRUPT" "$P_INTERRUPT" ext-interrupt >/dev/null \
+  || fail "rebinding a digest left owner-writable by an interrupted publish failed"
+assert_contains "$(FM_HOME="$H_INTERRUPT" "$HOST" verify org.example.interrupt)" "verified: org.example.interrupt@1.2.3" \
+  "a completed interrupted publish did not satisfy installed-tree validation"
+P_MUTANT="$PACKAGES/interrupted-mutant"
+make_package "$P_MUTANT" org.example.interrupt-mutant ext-interrupt-mutant
+H_MUTANT="$HOMES/interrupted-mutant"; new_home "$H_MUTANT"
+mutant_bind=$(bind_package "$H_MUTANT" "$P_MUTANT" ext-interrupt-mutant)
+mutant_binding_digest=$(printf '%s\n' "$mutant_bind" | sed -n 's/^binding-digest: //p')
+mutant_root=$(binding_value "$H_MUTANT" org.example.interrupt-mutant package_root)
+FM_HOME="$H_MUTANT" "$HOST" retire-binding org.example.interrupt-mutant --if-binding-digest "$mutant_binding_digest" >/dev/null \
+  || fail "retiring the mutated-store fixture binding failed"
+chmod 0700 "$mutant_root"
+chmod 0644 "$mutant_root/helper.txt"
+printf 'mutated helper\n' > "$mutant_root/helper.txt"
+chmod 0444 "$mutant_root/helper.txt"
+expect_failure "package root mode is unsafe" bind_package "$H_MUTANT" "$P_MUTANT" ext-interrupt-mutant
+pass "an interrupted publish is re-tightened by the next bind unless its bytes changed"
 fi
 
 # --- registration and retirement serialization plus lock recovery -------------
