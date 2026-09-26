@@ -36,6 +36,15 @@
 # fast-forward advances HEAD only and never moves the shared default branch or
 # any other worktree's checkout. A standalone remote home may instead advance
 # its checked-out default branch under the same guard.
+# A jj colocated home (.jj/ plus a usable jj on PATH) is advanced through jj
+# itself, never raw git: the colocated export leaves git HEAD detached on the
+# working-copy commit, so the git guards below cannot even read a jj home.
+# ff_target routes a jj home to ff_target_jj, which moves the default bookmark
+# (main/master) to the base and leaves the working-copy commit an empty child
+# of it - jj's clean state - under the same never-force/merge/stash guards and
+# the same status vocabulary. A diverged jj home is skipped and reported rather
+# than reconciled: the content-equivalent divergence proof is git-index-specific
+# and deliberately not extended to jj.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -362,6 +371,117 @@ live_secondmate_meta_records() {
   done
 }
 
+# The default bookmark of a jj home: main or master, whichever local bookmark
+# exists. Mirrors default_branch's main/master fallback without reading git refs,
+# since a jj home's own view of its bookmarks is jj's, not the colocated export's.
+jj_default_branch() {
+  local dir=$1 b
+  for b in main master; do
+    if [ -n "$(jj -R "$dir" log -r "$b" --no-graph -T 'commit_id' 2>/dev/null)" ]; then
+      echo "$b"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Which watched instruction paths changed between two jj revisions (comma list),
+# the jj equivalent of changed_instr. Diff direction is irrelevant to "changed".
+# jj resolves fileset paths against the process cwd, not the -R repo, so the
+# diff runs from inside the repo (in a command-substitution subshell, which
+# never moves the caller's cwd) while the non-path revsets stay -R-relative.
+jj_changed_instr() {
+  local dir=$1 from=$2 to=$3 p out=""
+  for p in AGENTS.md bin .agents/skills; do
+    if [ -n "$(cd "$dir" && jj diff --from "$from" --to "$to" --git -- "$p" 2>/dev/null)" ]; then
+      out="$out${out:+, }$p"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# Fast-forward one jj colocated home to a base, mirroring ff_target's git path.
+# The advance moves the default bookmark (main/master) to the base and leaves the
+# working-copy commit an empty child of it, which is jj's clean state. Divergence
+# is always skipped here: the content-equivalent reconciliation is
+# git-index-specific and out of scope for jj homes.
+ff_target_jj() {
+  local dir=$1 label=$2 base_mode=$3
+  local default base cur_rev base_rev before after instr
+  FF_STATUS="skipped"
+  FF_INSTR=""
+
+  default=$(jj_default_branch "$dir") || {
+    echo "$label: skipped: cannot determine default branch"
+    return 0
+  }
+
+  if [ "$base_mode" = origin ]; then
+    if ! jj -R "$dir" git remote list 2>/dev/null | grep -q '^origin[[:space:]]'; then
+      echo "$label: skipped: no origin remote"
+      return 0
+    fi
+    if ! jj -R "$dir" git fetch --remote origin --quiet 2>/dev/null; then
+      echo "$label: skipped: fetch failed"
+      return 0
+    fi
+    base="$default@origin"
+  else
+    base="$base_mode"
+  fi
+
+  if [ -z "$(jj -R "$dir" log -r "$base" --no-graph -T 'commit_id' 2>/dev/null)" ]; then
+    echo "$label: skipped: $base does not exist"
+    return 0
+  fi
+
+  cur_rev=$(jj -R "$dir" log -r "$default" --no-graph -T 'commit_id' 2>/dev/null) || true
+  if [ -z "$cur_rev" ]; then
+    echo "$label: skipped: cannot determine current commit"
+    return 0
+  fi
+  base_rev=$(jj -R "$dir" log -r "$base" --no-graph -T 'commit_id' 2>/dev/null) || true
+
+  # A jj working copy with any content change is a non-empty commit; unlanded
+  # work is exactly that, so skip it rather than squash or discard it.
+  if [ "$(jj -R "$dir" log -r '@' --no-graph -T 'empty' 2>/dev/null)" != true ]; then
+    echo "$label: skipped: dirty working tree"
+    return 0
+  fi
+
+  if [ "$cur_rev" = "$base_rev" ]; then
+    FF_STATUS="current"
+    echo "$label: already current"
+    return 0
+  fi
+
+  # Fast-forward only: the default bookmark must be an ancestor of the base.
+  if [ -z "$(jj -R "$dir" log -r "$default & ::$base" --no-graph -T 'commit_id' 2>/dev/null)" ]; then
+    echo "$label: skipped: diverged from $base"
+    return 0
+  fi
+
+  instr=$(jj_changed_instr "$dir" "$default" "$base")
+  before=$(jj -R "$dir" log -r "$default" --no-graph -T 'commit_id.short(7)' 2>/dev/null)
+  if ! jj -R "$dir" new "$base" >/dev/null 2>&1; then
+    echo "$label: skipped: could not move working copy to $base"
+    return 0
+  fi
+  if ! jj -R "$dir" bookmark set "$default" -r "$base" >/dev/null 2>&1; then
+    echo "$label: skipped: could not advance $default to $base"
+    return 0
+  fi
+  after=$(jj -R "$dir" log -r "$default" --no-graph -T 'commit_id.short(7)' 2>/dev/null)
+  FF_STATUS="updated"
+  FF_INSTR="$instr"
+  if [ -n "$instr" ]; then
+    echo "$label: updated $before..$after (instructions changed: $instr)"
+  else
+    echo "$label: updated $before..$after"
+  fi
+  return 0
+}
+
 # Fast-forward one target to a base. Prints its status line. Sets globals for the
 # caller:
 #   FF_STATUS = updated|current|skipped
@@ -389,6 +509,14 @@ ff_target() {
 
   if [ ! -d "$dir" ]; then
     echo "$label: skipped: not a directory"
+    return 0
+  fi
+  if [ -d "$dir/.jj" ]; then
+    if ! command -v jj >/dev/null 2>&1; then
+      echo "$label: skipped: jj-managed home but jj is not on PATH"
+      return 0
+    fi
+    ff_target_jj "$dir" "$label" "$base_mode"
     return 0
   fi
   if ! git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then

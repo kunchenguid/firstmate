@@ -140,6 +140,24 @@ run_update() {
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
 }
 
+# The jj colocated fixtures need the real jj binary; a host without it skips
+# these functions rather than failing, matching the optional-tool skip
+# convention. Returns nonzero when jj is absent.
+jj_available() {
+  command -v jj >/dev/null 2>&1
+}
+
+# Build a jj colocated firstmate home: the same world as new_world, then jj
+# manages the main checkout (git.colocate=true), which is the shape
+# /updatefirstmate could not advance before the jj path existed. Echoes the
+# world dir.
+new_jj_world() {
+  local name=$1 w
+  w=$(new_world "$name")
+  ( cd "$w/main" && jj git init --colocate >/dev/null 2>&1 )
+  printf '%s\n' "$w"
+}
+
 # --- T1: main + secondmate behind, instruction change; FF, not a merge ------
 # Combines the former T1 (fast-forward + reread + nudge signalling) and T2
 # (the advance is a single-parent fast-forward, never a merge commit) into one
@@ -555,6 +573,83 @@ test_primary_update_rebinds_local_watch() {
     || fail "the watch's trust binding was not refreshed to match the updated action bytes"
   pass "T12 a self-update rebinds a locally armed watch on the primary"
 }
+
+# --- JJ1: clean jj colocated home behind its remote advances ----------------
+test_jj_colocated_advances() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out
+  w=$(new_jj_world jj1)
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "jj home fast-forwarded"
+  assert_contains "$out" "reread-firstmate: yes" "instruction change triggers reread"
+  [ "$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)" = \
+    "$(jj -R "$w/main" log -r main@origin --no-graph -T 'commit_id' 2>/dev/null)" ] \
+    || fail "jj default bookmark not at origin tip"
+  [ "$(jj -R "$w/main" log -r '@' --no-graph -T 'empty' 2>/dev/null)" = "true" ] \
+    || fail "jj working copy not clean after advance"
+  grep -q 'v2' "$w/main/AGENTS.md" || fail "jj files not at target content"
+  pass "JJ1 clean jj home behind remote advances and reports updated"
+}
+
+# --- JJ2: a jj home with unlanded working-copy changes is skipped -----------
+test_jj_dirty_skipped() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out before
+  w=$(new_jj_world jj2)
+  bump_origin "$w" instr
+  printf 'uncommitted local edit\n' >> "$w/main/AGENTS.md"
+  before=$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: dirty working tree" "dirty jj home skipped"
+  [ "$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)" = "$before" ] \
+    || fail "dirty jj home advanced"
+  grep -q 'uncommitted local edit' "$w/main/AGENTS.md" || fail "unlanded jj work discarded"
+  pass "JJ2 dirty jj home skipped, work preserved"
+}
+
+# --- JJ3: a jj home carrying a local commit the target lacks is skipped -----
+test_jj_diverged_skipped() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out before
+  w=$(new_jj_world jj3)
+  # A local commit on main that origin does not contain, with a clean working copy.
+  printf 'fork work\n' > "$w/main/AGENTS.md"
+  jj -R "$w/main" commit -m local-work >/dev/null 2>&1
+  jj -R "$w/main" bookmark set main -r @- >/dev/null 2>&1
+  before=$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: diverged from main@origin" "diverged jj home skipped"
+  [ "$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)" = "$before" ] \
+    || fail "diverged jj home advanced"
+  grep -q 'fork work' "$w/main/AGENTS.md" || fail "diverged jj work discarded"
+  pass "JJ3 diverged jj home skipped, local commit preserved"
+}
+
+# --- JJ4: an already-current jj home reports already current -----------------
+test_jj_already_current() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out
+  w=$(new_jj_world jj4)
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: already current" "jj home already current"
+  assert_contains "$out" "reread-firstmate: no" "no reread when jj home is current"
+  pass "JJ4 already-current jj home reports already current"
+}
+
+test_jj_colocated_advances
+test_jj_dirty_skipped
+test_jj_diverged_skipped
+test_jj_already_current
 
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
