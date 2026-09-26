@@ -96,18 +96,18 @@
 # staleness probe resumes past the zone.
 #
 # THE ASYMMETRY that bounds it: `empty` is the one verdict that authorizes
-# fm-send to type into a pane, so this rule may move a verdict only toward
-# REFUSING, never toward `empty`. A false refusal costs one undelivered
-# message; a false `empty` overwrites a visible draft or types into a working
-# agent. So the zone counts only when EVERY row in it is demonstrably furniture
-# (_fm_composer_row_is_composer_furniture): one unclaimed activity row
+# fm-send to type into a pane. A false refusal costs one undelivered message;
+# a false `empty` overwrites a visible draft or types into a working agent.
+# So the zone counts only when EVERY row in it is demonstrably furniture:
+# one unclaimed activity row
 # (`Working on request...`) makes the whole run activity and the envelope above
 # it stale, and a row leading with the SAME glyph the envelope was proven by
 # (`❯ my typed draft`) is a live composer that keeps winning. Where a shape
 # cannot demonstrate which it is, the refusal is the answer. The zone is
 # bounded further by a blank row, and an envelope that closed over no glyph row
 # (codex's `permissions: YOLO mode` startup banner) proves nothing and demotes
-# nothing.
+# nothing. Kimi's bordered `>` composer is the shell-glyph exception: its
+# status and context rows must form a complete ordered pair in that same zone.
 #
 # COVERAGE: this is exercised for the bordered box and the pi separator pair,
 # the two shapes claude 2.x renders. The opencode left bar is wired in for the
@@ -482,6 +482,11 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 # is deliberately not matched - and the marker is quantifier-free so the same
 # bytes match under LC_ALL=C as under a UTF-8 locale.
 FM_COMPOSER_MODE_HINT_RE_DEFAULT='^[[:space:]]*(⏵|⏸)'
+# Kimi draws these two rows immediately below its bordered `>` composer.
+# Match the observed permission tier, effort labels, and context cell shape;
+# the footer-zone walk below also requires the pair in order.
+FM_COMPOSER_KIMI_STATUS_RE_DEFAULT='^Never Ask[[:space:]]+[^[:space:]]+([[:space:]]+[^[:space:]]+)?[[:space:]]+thinking:[[:space:]]+(low|high|max)([[:space:]]|$)'
+FM_COMPOSER_KIMI_CONTEXT_RE_DEFAULT='^context:[[:space:]]+[0-9]+%[[:space:]]+\([0-9]+([.][0-9]+)?[kKmM]?/[0-9]+[kKmM]\)$'
 # omp (Oh My Pi) draws a one-row status line directly BELOW its borderless
 # composer: an identity or spinner cell, then middle-dot separated model, path,
 # git, and context cells. Verified live through Herdr on omp 18.1.11:
@@ -787,8 +792,8 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
   # The glyph PROOF of each envelope: the first row strictly inside it whose
-  # content leads with an agent prompt glyph once its side borders are
-  # stripped, and that glyph. This is what tells a composer container from a
+  # content leads with an agent prompt glyph, or Kimi's bordered `>` glyph,
+  # once its side borders are stripped. This tells a composer container from a
   # decorative banner; it is recorded here, on the one pass that already walks
   # and trims every row, so the footer zone never re-reads the screen.
   FM_COMPOSER_SCAN_BOX_GLYPH_ROW=-1
@@ -999,6 +1004,16 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
           if [ "$box_glyph_row" -lt 0 ] && [ "$row_glyph_row" -ge 0 ]; then
             box_glyph_row=$row_glyph_row
             box_glyph=$row_glyph
+          fi
+          if [ "$box_glyph_row" -lt 0 ] && [ "$side_family" = single ]; then
+            probe=${trimmed#│}
+            probe=${probe%│}
+            fm_composer_normalize_trim_var probe
+            if fm_composer_leading_prompt_glyph_var glyph "$probe" \
+               && [ "$glyph" = '>' ]; then
+              box_glyph_row=$row
+              box_glyph=$glyph
+            fi
           fi
           [ "$indent" = "$current_indent" ] || geometry_ambiguous=1
           if [ "$geometry_check" = 1 ]; then
@@ -1351,7 +1366,8 @@ _fm_composer_leftbar_floor_row() {  # <trimmed-row>
 # Everything else - unclaimed activity (`Working on request...`), and above all
 # a row leading with the SAME glyph the envelope was proven by (`❯ my typed
 # draft`, which is a live composer) - is NOT furniture, so the envelope above
-# it stays stale and the verdict stays a refusal.
+# it stays stale and the verdict stays a refusal. Kimi's status/context pair is
+# checked separately below because its two rows must appear together in order.
 _fm_composer_row_is_composer_furniture() {  # <trimmed-row> <proof-glyph>
   local row=$1 proof=$2 glyph=''
   [ -n "$row" ] || return 1
@@ -1373,13 +1389,13 @@ _fm_composer_row_is_composer_furniture() {  # <trimmed-row> <proof-glyph>
 #
 # The zone is furniture only if EVERY row in it is: one non-furniture row makes
 # the whole run unclaimed activity, the envelope above it stale, and this
-# function return 1. That is the asymmetry this rule is held to - it may only
-# ever move a verdict toward refusing, never toward `empty`, because `empty` is
-# the one verdict that authorizes fm-send to type into the pane. Returns 1 too
-# when no envelope is glyph-proven, when a blank row sits directly beneath it,
-# or when the run holds no bare candidate at all (nothing to demote).
+# function return 1. Only a fully proven zone can retain the empty verdict
+# that authorizes fm-send to type into the pane. Returns 1 too when no envelope
+# is glyph-proven or a blank row sits directly beneath it. Ordinary footer
+# zones need a bare candidate to demote; Kimi's bordered `>` composer instead
+# needs its complete status/context pair.
 _fm_composer_locate_footer_zone() {  # <plain>
-  local plain=$1 close next trimmed proof=''
+  local plain=$1 close next trimmed proof='' kimi_box=0 kimi_rows=0
   FM_COMPOSER_FOOTER_AFTER=-1
   FM_COMPOSER_FOOTER_GLYPH=-1
   FM_COMPOSER_FOOTER_LAST=-1
@@ -1410,19 +1426,44 @@ _fm_composer_locate_footer_zone() {  # <plain>
     proof=$FM_COMPOSER_SCAN_PI_GLYPH
   fi
   [ "$FM_COMPOSER_FOOTER_AFTER" -ge 0 ] || return 1
+  if [ "$FM_COMPOSER_FOOTER_AFTER" = "$FM_COMPOSER_SCAN_BOX_BOTTOM" ] \
+     && [ "$proof" = '>' ]; then
+    kimi_box=1
+  fi
   # Nothing below the envelope can be demoted unless a bare candidate sits
-  # there, so settle that from the scan's own record before walking any rows.
-  [ "$FM_COMPOSER_SCAN_BARE_ROW" -gt "$FM_COMPOSER_FOOTER_AFTER" ] || return 1
+  # there. Kimi's status/context pair has no bare glyph, but its bordered `>`
+  # box proves the harness shape independently of a lower bare candidate.
+  if [ "$FM_COMPOSER_SCAN_BARE_ROW" -le "$FM_COMPOSER_FOOTER_AFTER" ] \
+     && [ "$kimi_box" = 0 ]; then return 1; fi
   FM_COMPOSER_FOOTER_LAST=$FM_COMPOSER_FOOTER_AFTER
   next=$((FM_COMPOSER_FOOTER_AFTER + 1))
   while :; do
     trimmed=$(_fm_composer_screen_row "$next" "$plain")
     fm_composer_normalize_trim_var trimmed
     [ -n "$trimmed" ] || break
-    _fm_composer_row_is_composer_furniture "$trimmed" "$proof" || return 1
+    if [ "$kimi_box" = 1 ]; then
+      case "$kimi_rows" in
+        0)
+          fm_composer_idle_matches "$trimmed" \
+            "${FM_COMPOSER_KIMI_STATUS_RE:-$FM_COMPOSER_KIMI_STATUS_RE_DEFAULT}" sensitive \
+            || return 1
+          kimi_rows=1
+          ;;
+        1)
+          fm_composer_idle_matches "$trimmed" \
+            "${FM_COMPOSER_KIMI_CONTEXT_RE:-$FM_COMPOSER_KIMI_CONTEXT_RE_DEFAULT}" sensitive \
+            || return 1
+          kimi_rows=2
+          ;;
+        *) _fm_composer_row_is_composer_furniture "$trimmed" "$proof" || return 1 ;;
+      esac
+    else
+      _fm_composer_row_is_composer_furniture "$trimmed" "$proof" || return 1
+    fi
     FM_COMPOSER_FOOTER_LAST=$next
     next=$((next + 1))
   done
+  if [ "$kimi_box" = 1 ]; then [ "$kimi_rows" = 2 ]; return; fi
   [ "$FM_COMPOSER_SCAN_BARE_ROW" -gt "$FM_COMPOSER_FOOTER_AFTER" ] \
     && [ "$FM_COMPOSER_SCAN_BARE_ROW" -le "$FM_COMPOSER_FOOTER_LAST" ]
 }

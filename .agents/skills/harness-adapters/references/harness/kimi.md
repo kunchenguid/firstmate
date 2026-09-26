@@ -17,7 +17,7 @@ Verified on 2026-09-17 with Kimi Code CLI 2.0.0.
 | Trust dialog | A fresh worktree shows `Trust this folder?` with `Trust this folder` pre-selected; spawn reads the visible pane, recognizes the complete dialog (its title, both navigation-hint tokens `↑↓ navigate` and `Enter select` - matched separately so a hint wrapped in a narrow pane still counts - the selected `❯ Trust this folder`, and `Don't trust`), sends Enter on every poll the complete dialog is still there, verifies that a later visible-pane capture no longer contains it, and then continues the ordinary readiness gate. Trust is never pre-registered in `config.toml`; the dialog is answered live. |
 | Slash submission | One Enter submits, with no popup swallow or settle hazard. |
 | Environment marker | None; identity comes from process ancestry command name `kimi`, which `../../../bin/fm-harness.sh` keeps a retained foreign marker from overriding. |
-| Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
+| Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text; the shared classifier treats the adjacent `Never Ask` status and `context` rows as footer furniture only when both match the known Kimi shapes and every contiguous lower row is recognized. |
 | Effort | `kimi provider list --json` exposes per-model `supportEfforts` values `low`, `high`, and `max` plus a `defaultEffort`; the launch flag and mapping remain unverified, so spawn records and omits requested effort per `references/common/model-and-effort.md`. |
 
 ## Readiness-gated start
@@ -31,7 +31,7 @@ The path must be absolute because the instructions live outside the task worktre
 Sending before readiness was reproduced as a silent drop with zero exit status, an empty composer, `context: 0%`, no echoed user message, and a healthy-looking idle pane.
 The startup input-readiness window is the established cause; the banner is not.
 An early Enter can expand the composer to multiple content rows, leaving pointer text on the first row and the cursor on an empty later row.
-The shared tmux reader therefore locates the complete bordered composer and treats real text on any content row as positive evidence that submission remains pending.
+The shared composer classifier therefore locates the complete bordered composer and treats real text on any content row as positive evidence that submission remains pending.
 No rendering signal proves Kimi will accept input during this window, so delivery retries Enter through the shared submit core and retains the postcondition verification rather than relaxing readiness.
 
 Observed spinner captures had optional leading whitespace, a moon-phase glyph, whitespace around `·`, and rotating tip text, including during tool execution.

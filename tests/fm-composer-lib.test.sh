@@ -731,6 +731,35 @@ test_matrix_grok_titled_bottom_border() {
   pass "matrix: grok's real oversized titled bottom is empty while typed and unproved panes stay safe"
 }
 
+test_matrix_kimi_footer_zone() {
+  # Captured Kimi Herdr status rows sit immediately below the bordered box.
+  local herdr live tmux typed status_only context_only activity resumed altered same_glyph unboxed
+  herdr=$' ╭────────────────────────────────────────────────────────────────────────────╮\n │ >                                                                          │\n ╰────────────────────────────────────────────────────────────────────────────╯\n Never Ask  K3-256k thinking: high  …/scratchpad/lab/wt  master\n                                                                context: 0% (0/256k)'
+  live=${herdr/K3-256k thinking: high/K2.8 Preview thinking: max}
+  live=${live/0\/256k/0\/1M}
+  tmux=$herdr
+  typed=$'╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\nNever Ask  K3-256k thinking: high  …/worktree  master    ctrl+o expand\ncontext: 0% (0/256k)'
+  status_only=${herdr%$'\n'*}
+  context_only=$'╭────────────────────────╮\n│ >                      │\n╰────────────────────────╯\ncontext: 0% (0/256k)'
+  activity=$status_only$'\nWorking on request...'
+  resumed=$herdr$'\nWorking on request...'
+  altered=${herdr/Never Ask/Unknown Tier}
+  same_glyph=$herdr$'\n> new input'
+  unboxed=$' >\nNever Ask  K3-256k thinking: high  …/worktree  master\ncontext: 0% (0/256k)'
+  assert_screen "kimi idle from Herdr pane read" empty "$CAPS_STYLED" "$herdr"
+  assert_screen "kimi 2.0.2 multiword model idle from Herdr pane read" empty "$CAPS_STYLED" "$live"
+  assert_screen "kimi idle with tmux cursor" empty "$CAPS_TMUX" "$tmux" 1
+  assert_screen "kimi typed text with status footer" pending "$CAPS_STYLED" "$typed"
+  assert_screen "kimi missing context row" unknown "$CAPS_STYLED" "$status_only"
+  assert_screen "kimi missing status row" unknown "$CAPS_STYLED" "$context_only"
+  assert_screen "kimi status followed by activity" unknown "$CAPS_STYLED" "$activity"
+  assert_screen "kimi footer followed by activity" unknown "$CAPS_STYLED" "$resumed"
+  assert_screen "kimi unknown permission label" unknown "$CAPS_STYLED" "$altered"
+  assert_screen "kimi same glyph new input" unknown "$CAPS_STYLED" "$same_glyph"
+  assert_screen "kimi unboxed shell glyph" unknown "$CAPS_STYLED" "$unboxed"
+  pass "matrix: Kimi footer pair is scoped to a proven box and every lower row is checked"
+}
+
 test_matrix_kimi_bordered_shell_glyph_box() {
   # Kimi's bordered `│ > │` composer - the shape fm-spawn.sh's retired
   # spawn-local regex used to own. Now the shared owner proves it everywhere,
@@ -982,6 +1011,7 @@ test_matrix_pi_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
+test_matrix_kimi_footer_zone
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence
