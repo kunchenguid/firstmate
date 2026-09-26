@@ -39,7 +39,10 @@ FM_QUOTA_ROW_JQ='
     ([$snapshot.providers[]? | select(.provider == $provider)]) as $rows |
     if $snapshot.schemaVersion == 6 then
       (([$rows[] | select(.accountKey == $lane)] | first) //
-       ([$rows[] | select(.accountKey == "default")] | first) // null)
+       (if $lane == "openai-codex"
+        then ([$rows[] | select(.accountKey == "codex-home")] | first)
+        else ([$rows[] | select(.accountKey == "default")] | first)
+        end) // null)
     else ($rows | first) // null
     end;
 '
