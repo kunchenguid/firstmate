@@ -983,6 +983,122 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
 }
 
+# Three surviving records name one pool slot because the slot was handed on
+# twice while the earlier records stayed open, and the slot's claim names the
+# last taker. The claim proves the two earlier records are not the slot's owner,
+# so each retires on its own record without any step on that slot - no kill,
+# inspection, reset, return, or claim change - and without closing any other
+# task's endpoint. The owner still needs an exclusive record before its
+# destructive return, and a claim that cannot prove non-ownership still refuses.
+write_shared_slot_record() {  # <case> <id> <kind>
+  fm_write_meta "$1/home/state/$2.meta" \
+    "window=firstmate:fm-$2" "endpoint_task_id=$2" \
+    "worktree=$1/worktree" "project=$1/project" "kind=$3"
+}
+
+assert_shared_slot_untouched() {  # <case> <owner> <worker> <description>
+  local dir=$1 owner=$2 worker=$3 description=$4
+  kill -0 "$worker" 2>/dev/null || fail "$description: the owner's worker in the shared slot was killed"
+  assert_present "$dir/worktree/sentinel" "$description: the shared slot's copy was reset"
+  assert_present "$dir/pool/1/project/.git" "$description: the shared slot's checkout was removed"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner" 2>/dev/null)" "task=$owner" \
+    "$description: the owner's slot claim was changed or removed"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "$description: the shared slot was returned to the pool: $(cat "$dir/runtime.log")"
+}
+
+test_reassigned_records_sharing_a_slot_retire_before_the_owner() {
+  local dir first=first-task second=second-task owner=owner-task worker rc
+
+  dir=$(make_case slot-three-records)
+  mark_case_as_treehouse_pool "$dir"
+  write_shared_slot_record "$dir" "$first" ship
+  write_shared_slot_record "$dir" "$second" ship
+  write_shared_slot_record "$dir" "$owner" ship
+  claim_pool_slot "$dir" "$owner"
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  # The owner cannot return the slot while the other records still name it.
+  set +e
+  run_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the slot owner returned a slot two other records still name"
+  assert_present "$dir/home/state/$owner.meta" "the owner's refused teardown removed its record"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "the owner's refused teardown reached the runtime: $(cat "$dir/runtime.log")"
+  assert_shared_slot_untouched "$dir" "$owner" "$worker" "owner refused while records remain"
+
+  # Each non-owner retires only its own record and endpoint, without --force.
+  for id in "$first" "$second"; do
+    : > "$dir/runtime.log"
+    set +e
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+      "$TEARDOWN" "$id" > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || fail "non-owner $id could not retire its record on a slot claimed by $owner: $(cat "$dir/stderr")"
+    assert_absent "$dir/home/state/$id.meta" "non-owner $id's record was not retired"
+    assert_present "$dir/home/state/$owner.meta" "retiring $id removed the owner's record"
+    assert_contains "$(cat "$dir/stderr")" "reassigned" "retiring $id should name the reassignment"
+    assert_shared_slot_untouched "$dir" "$owner" "$worker" "retiring non-owner $id"
+    # Only this record's own endpoint is closed; a later read-only summary of
+    # the surviving panes is not a close.
+    grep -F "kill" "$dir/runtime.log" | grep -Fqv "fm-$id>" \
+      && fail "retiring $id closed another task's endpoint: $(cat "$dir/runtime.log")"
+    grep -F "kill" "$dir/runtime.log" | grep -Fq "fm-$id>" \
+      || fail "retiring $id did not close its own endpoint: $(cat "$dir/runtime.log")"
+  done
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  # With its record now exclusive, the owner returns the slot and its claim.
+  : > "$dir/runtime.log"
+  run_case "$dir" "$owner" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "the slot owner could not tear down once its record was exclusive: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$owner.meta" "the owner's teardown left its record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "the owner's teardown left its spent slot claim"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "the owner's teardown did not return its slot: $(cat "$dir/runtime.log")"
+
+  # A claim that cannot prove non-ownership keeps the record-scan refusal:
+  # absent, unreadable, and conflicting claims all stop before any change.
+  for claim in absent unreadable conflicting empty-task-first empty-home-first; do
+    dir=$(make_case "slot-three-records-$claim")
+    mark_case_as_treehouse_pool "$dir"
+    write_shared_slot_record "$dir" "$first" scout
+    write_shared_slot_record "$dir" "$second" scout
+    write_shared_slot_record "$dir" "$owner" scout
+    case "$claim" in
+      unreadable) printf 'not-a-claim\n' > "$dir/pool/1/.fm-slot-owner" ;;
+      conflicting) printf 'task=%s\ntask=%s\nhome=%s\n' "$first" "$owner" "$dir/home" \
+        > "$dir/pool/1/.fm-slot-owner" ;;
+      empty-task-first) printf 'task=\ntask=%s\nhome=%s\n' "$owner" "$dir/home" \
+        > "$dir/pool/1/.fm-slot-owner" ;;
+      empty-home-first) printf 'task=%s\nhome=\nhome=%s\n' "$owner" "$dir/home" \
+        > "$dir/pool/1/.fm-slot-owner" ;;
+    esac
+    for id in "$first" "$owner"; do
+      set +e
+      FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+        "$TEARDOWN" "$id" > "$dir/stdout" 2> "$dir/stderr"
+      rc=$?
+      set -e
+      [ "$rc" -ne 0 ] || fail "$claim slot claim, three records: teardown of $id unexpectedly succeeded"
+      assert_present "$dir/home/state/$id.meta" "$claim slot claim: teardown of $id removed its record"
+      assert_present "$dir/worktree/sentinel" "$claim slot claim: teardown of $id changed the shared slot"
+      [ ! -s "$dir/runtime.log" ] \
+        || fail "$claim slot claim: teardown of $id reached the runtime: $(cat "$dir/runtime.log")"
+      assert_present "$dir/home/state/$second.meta" "$claim slot claim: teardown of $id removed $second's record"
+    done
+  done
+
+  pass "fm-teardown: records a slot claim proves are not the owner retire without touching the shared slot"
+}
+
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
@@ -1403,6 +1519,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
+test_reassigned_records_sharing_a_slot_retire_before_the_owner
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts

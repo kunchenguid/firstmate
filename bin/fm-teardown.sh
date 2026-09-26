@@ -82,11 +82,12 @@
 # reused across tasks, so a stale, duplicated, or drifted worktree= record can
 # name a slot a DIFFERENT live task now holds. Cleanup kills every process under
 # that path and hard-resets it before returning it, so releasing a slot that is
-# not genuinely this task's destroys another worker's live work. Before the first
-# cleanup step, teardown verifies record exclusivity: no OTHER task record in
-# this home or any locally registered Firstmate home may name the same live path
-# in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale.
+# not genuinely this task's destroys another worker's live work. Before any
+# cleanup step that touches the slot, teardown verifies record exclusivity: no
+# OTHER task record in this home or any locally registered Firstmate home may
+# name the same live path in its worktree= or home=. One live path with two task
+# records is the reuse collision itself, whichever record is stale. Forced
+# secondmate teardown also requires this exclusivity for every descendant slot.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -102,8 +103,13 @@
 # inspection of it, no branch or hook removal in it, no Treehouse return, and
 # never the other task's claim. Skipping the inspection discards nothing of this
 # task's: whatever unlanded work it had in that slot was already destroyed when
-# the pool handed the slot on. Refusing instead would strand the record, because
-# bin/fm-backend.sh's endpoint validation refuses an empty or missing worktree=
+# the pool handed the slot on. Because that path takes no slot step, the claim is
+# read before the record scan, and the scan guards only a teardown the claim
+# does not prove reassigned: when a slot was handed on while earlier records
+# stayed open, each record the claim names as a non-owner retires first, and the
+# owner's destructive return still needs its record to be the only one left.
+# Refusing instead would strand the record, because bin/fm-backend.sh's
+# endpoint validation refuses an empty or missing worktree=
 # unconditionally, so there is no line an operator could clear to get past it.
 # A claim that cannot be read proves nothing either way and refuses; inspect or
 # repair the claim file at the printed path and re-run - never remove it, since
@@ -2960,7 +2966,8 @@ preflight_descendant_treehouse_slots() {
     owner_rc=0
     require_owned_worktree_slot_record "$task_id" "$worktree" || owner_rc=$?
     case "$owner_rc" in
-      0|"$TEARDOWN_SLOT_REASSIGNED_RC") ;;
+      0) ;;
+      "$TEARDOWN_SLOT_REASSIGNED_RC") ;;
       *) return 1 ;;
     esac
   done
@@ -3305,8 +3312,12 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
+# Ownership first: a claim proving the slot was reassigned means no slot step
+# runs, so other records naming the slot cannot be harmed by this teardown.
 require_owned_task_worktree_slot || exit 1
+if teardown_owns_worktree; then
+  require_exclusive_task_worktree_slot || exit 1
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 

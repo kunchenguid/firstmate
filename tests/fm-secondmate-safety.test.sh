@@ -2010,6 +2010,7 @@ mode=no-mistakes
 yolo=off
 EOF
   done
+  printf 'task=live-child\nhome=%s\n' "$subhome" > "$(dirname "$childwt")/.fm-slot-owner"
   fakebin=$(make_fake_tmux "$TMP_ROOT/force-duplicate-slot-fake")
   log="$TMP_ROOT/force-duplicate-slot-fake/tmux.log"
 

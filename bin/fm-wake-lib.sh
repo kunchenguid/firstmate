@@ -1382,12 +1382,13 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
 #   mine   - the claim names this task
 #   other  - the claim names a different task, so the slot was reassigned
 #   absent - no claim: the slot was taken before claims existed, or returned since
-#   unsafe - a claim file exists but cannot be read as a claim
+#   unsafe - a claim file exists but cannot be read as one claim: unreadable,
+#            no task=, or repeated task= or home= lines that disagree
 # FM_TREEHOUSE_SLOT_OWNER_ID and FM_TREEHOUSE_SLOT_OWNER_HOME carry the recorded
 # claimant as evidence. The home is reported, never matched: a home that moved
 # must not turn a task's own slot into a refusal.
 fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
-  local worktree=$1 id=$2 marker line owner_id='' owner_home=''
+  local worktree=$1 id=$2 marker line owner_id='' owner_home='' task_seen=0 home_seen=0
   FM_TREEHOUSE_SLOT_OWNER=unsafe
   FM_TREEHOUSE_SLOT_OWNER_ID=
   FM_TREEHOUSE_SLOT_OWNER_HOME=
@@ -1399,8 +1400,16 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      task=*) owner_id=${line#task=} ;;
-      home=*) owner_home=${line#home=} ;;
+      task=*)
+        [ "$task_seen" -eq 0 ] || [ "$owner_id" = "${line#task=}" ] || return 0
+        owner_id=${line#task=}
+        task_seen=1
+        ;;
+      home=*)
+        [ "$home_seen" -eq 0 ] || [ "$owner_home" = "${line#home=}" ] || return 0
+        owner_home=${line#home=}
+        home_seen=1
+        ;;
     esac
   done < "$marker" || return 0
   [ -n "$owner_id" ] || return 0
