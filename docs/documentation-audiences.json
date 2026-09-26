@@ -543,6 +543,34 @@
     {
       "path": "tests/captures/no-mistakes-v1.70.1/README.md",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": ".agents/skills/api-contract-evidence/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/mobile-tablet-ui/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/ui-quality-evidence/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/mobile-tablet-ui/references/device-checks.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/mobile-tablet-ui/references/provenance.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/ui-quality-evidence/references/matrix.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/api-contract-evidence/references/paths.md",
+      "audience": "agent-runtime"
     }
   ]
 }

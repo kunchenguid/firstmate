@@ -2327,3 +2327,74 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+
+## Portable quality skills - 2026-09-26
+
+The canonical lot is `.agents/skills/mobile-tablet-ui/`, `.agents/skills/ui-quality-evidence/` and `.agents/skills/api-contract-evidence/`.
+Claude Code reaches the same files through the existing `.claude/skills -> ../.agents/skills` link; Pi and Codex discover `.agents/skills` directly.
+Mobile and UI references link to each other, so preserve the lot's sibling directories when relocating it.
+The contributor load triggers live in [CONTRIBUTING.md](../../CONTRIBUTING.md#development).
+
+Refresh static packaging and live loading with these exact commands from the repository root:
+
+```sh
+bin/fm-portable-quality-skills-check.sh
+bin/fm-test-run.sh tests/fm-portable-quality-skills.test.sh
+FM_PORTABLE_QUALITY_SKILLS_LIVE=1 bash tests/fm-portable-quality-skills-live-e2e.test.sh
+FM_PORTABLE_QUALITY_SKILLS_LIVE=1 bash tests/fm-portable-quality-skills-live-e2e.test.sh --verify-only
+```
+
+The live guard creates a bounded fixture under `.no-mistakes/portable-skills/live/fixture` whose discovery directories link to the canonical lot, without changing installed runtime configuration.
+Each subprocess has a 180-second bound, and its JSON output plus exact argv, working directory, version and exit code remain in `.no-mistakes/portable-skills/live/<runtime>-<skill>.log` and `.command.json` for local inspection.
+Codex's token-free `debug prompt-input` output additionally records its actual skill catalogue and resolves the catalogue's aliased roots to the canonical entrypoint.
+The guard pairs successful reference reads with their tool requests and resolves their exact canonical paths.
+Claude's successful native slash expansion establishes entrypoint loading without requiring a redundant `Read` event.
+Pi's native `<skill>` expansion and successful reads establish loading; Codex's catalogue and completed `cat` reads establish discovery and loading.
+The receipts were rechecked with `--verify-only` after strengthening the successful-result and discovery checks, preserving the recorded versions.
+
+Installed versions and successful command shapes were:
+
+```text
+claude --version
+2.1.283 (Claude Code)
+pi --version
+0.87.1
+codex --version
+codex-cli 0.157.0
+```
+
+```sh
+claude -p --output-format stream-json --verbose --no-session-persistence --setting-sources project --settings '{"disableAllHooks":true}' --strict-mcp-config --mcp-config '{"mcpServers":{}}' --tools Read,Skill --allowedTools Read,Skill --max-turns 5 '/<skill> <bounded scenario>'
+pi -p --mode json --no-session --no-extensions --no-context-files --no-prompt-templates --no-themes --offline --approve --tools read '/skill:<skill> <bounded scenario>'
+codex exec --json --ephemeral --ignore-user-config --disable hooks --enable shell_tool --enable unified_exec --skip-git-repo-check -s read-only -m gpt-6-sol -c 'model_reasoning_effort="high"' '$<skill> <bounded scenario>'
+codex debug prompt-input -c features.hooks=false '$<skill>'
+```
+
+Here `<skill>` and `<bounded scenario>` denote the three exact scenario prompts owned by the executable live guard, rather than shell syntax to run literally.
+The guard removes inherited `CLAUDECODE`, sets `PI_TELEMETRY=0`, and supplies closed stdin to the model processes.
+Claude requires the project settings source for native project-skill discovery, even though manually reading a file succeeds without it.
+Codex's invocation explicitly enables its shell features and permits read-only file commands so the reference-loading observation can occur.
+These are invocation-local test settings, not installation requirements or skill dependencies.
+
+Exact replay output on 2026-09-26:
+
+```text
+PASS claude 2.1.283 (Claude Code) mobile-tablet-ui: exit=0, discovered=True, skill-loaded=True, reference-read=True
+PASS claude 2.1.283 (Claude Code) ui-quality-evidence: exit=0, discovered=True, skill-loaded=True, reference-read=True
+PASS claude 2.1.283 (Claude Code) api-contract-evidence: exit=0, discovered=True, skill-loaded=True, reference-read=True
+PASS pi 0.87.1 mobile-tablet-ui: exit=0, discovered=True, skill-loaded=True, reference-read=True
+PASS pi 0.87.1 ui-quality-evidence: exit=0, discovered=True, skill-loaded=True, reference-read=True
+PASS pi 0.87.1 api-contract-evidence: exit=0, discovered=True, skill-loaded=True, reference-read=True
+PASS codex codex-cli 0.157.0 mobile-tablet-ui: exit=0, discovered=True, skill-loaded=True, reference-read=True
+PASS codex codex-cli 0.157.0 ui-quality-evidence: exit=0, discovered=True, skill-loaded=True, reference-read=True
+PASS codex codex-cli 0.157.0 api-contract-evidence: exit=0, discovered=True, skill-loaded=True, reference-read=True
+```
+
+The fictional mobile scenario concerns a form whose submit action is obscured by the software keyboard and unavailable tablet split-view/physical devices.
+The UI scenario concerns template density mismatch despite passing clicks, loaded/empty states, FR/EN and light/dark coverage, and unavailable hardware-keyboard evidence.
+The API scenario concerns a refused request that may enqueue a write, an ownership boundary, replay semantics and unspecified partial-failure policy.
+Parent inspection confirmed that responses retained contract precedence, separated template parity from functional evidence, checked queued effects after refusal and reported unverified coverage.
+These are skill-loading and procedure exercises, not actual application, API, browser-emulation, accessibility-conformance or physical-device tests.
+All those application/device axes remain unverified by this record, and native-app platform coverage is outside the responsive-web skill's scope.
+Other runtime versions and other harnesses have no live compatibility claim from this check.
