@@ -5641,7 +5641,7 @@ test_procevent_unacknowledged_result_redrains_until_handled() {
 
   before=$(awk 'END { print NR + 0 }' "$state/.wake-queue" 2>/dev/null || echo 0)
   : > "$out"
-  procevent_watch_bg "$dir" "$out"
+  FM_WATCH_HANDLING_SUCCESSOR=1 procevent_watch_bg "$dir" "$out"
   pid=$!
   if ! wait_poll_cycle "$state" "$pid"; then
     fail "a handled process-event result woke the watcher: $(cat "$out")"
