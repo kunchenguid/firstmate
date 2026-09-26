@@ -163,8 +163,8 @@ test_spawn_launch_line_and_worker_wiring() {
   assert_grep "effort=medium" "$state/$id.meta" "meta missing the pinned effort"
   assert_present "$state/$id.omp-ext.ts" "omp spawn did not write the per-task extension"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 '$FAKEBIN_DIR/omp'" \
-    "omp launch did not clear foreign markers and establish its own at the launch boundary"
+  assert_contains "$launch" "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 '$FAKEBIN_DIR/omp' --config" \
+    "omp launch did not clear foreign markers and establish its own at the launch boundary, or leaked an unset OMP_PROFILE as --profile"
   assert_contains "$launch" "--config '$ROOT/.omp/fm-worker-overlay.yml' --auto-approve --cwd '$WT_DIR'" \
     "omp launch did not carry the tracked posture overlay, --auto-approve, and the pinned working directory"
   assert_contains "$launch" "--model 'openai-codex/gpt-6-astra' --thinking 'medium' -e '$state/$id.omp-ext.ts'" \
@@ -177,6 +177,22 @@ test_spawn_launch_line_and_worker_wiring() {
   [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "busy fm-spawn" ] \
     || fail "omp spawn must seed the busy-state contract"
   pass "fm-spawn: the omp launch line clears markers, pins posture, and wires the state-resident extension"
+}
+
+test_spawn_forwards_firstmates_omp_profile() {
+  # OMP_PROFILE unset (the fixture default) carries no --profile at all; set,
+  # it is forwarded immediately after the resolved binary, ahead of --config,
+  # mirroring the claude launch's CLAUDE_CONFIG_DIR forwarding.
+  local rec id=omp-profile-q5 out status launch
+  rec=$(make_spawn_case profile omp "$id")
+  read_case_record "$rec"
+  out=$(FM_TEST_OMP_PROFILE=ingrid run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness omp)
+  status=$?
+  expect_code 0 "$status" "omp scout spawn with a set OMP_PROFILE should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "OMP_SKIP_SETUP=1 '$FAKEBIN_DIR/omp' --profile 'ingrid' --config" \
+    "a set firstmate OMP_PROFILE was not forwarded as --profile right after the omp binary: $launch"
+  pass "fm-spawn: a set firstmate OMP_PROFILE is forwarded onto the omp launch as --profile"
 }
 
 test_spawn_model_validation_scoped_to_listed_providers() {
@@ -796,6 +812,7 @@ EOF
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
+test_spawn_forwards_firstmates_omp_profile
 test_spawn_model_validation_scoped_to_listed_providers
 test_secondmate_launch_relies_on_discovery
 test_secondmate_config_pinned_model_is_validated
