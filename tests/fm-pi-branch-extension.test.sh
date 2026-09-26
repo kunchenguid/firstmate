@@ -5946,8 +5946,8 @@ test_continuation_survives_ack_compaction_and_unrelated_input() {
   set +e
   out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'JS'
-await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.test = {fire, outcomeScript, mainTools, defaultSessionCtx, sentToMain, home, piHandlers}; })()`);
-const {fire, outcomeScript, mainTools, defaultSessionCtx, sentToMain, home, piHandlers} = globalThis.test;
+await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.test = {fire, outcomeScript, mainTools, defaultSessionCtx, sentToMain, home, piHandlers, bus}; })()`);
+const {fire, outcomeScript, mainTools, defaultSessionCtx, sentToMain, home, piHandlers, bus} = globalThis.test;
 const {mkdirSync, writeFileSync, readFileSync} = await import('node:fs');
 const {spawnSync} = await import('node:child_process');
 await fire('session_start', {}, defaultSessionCtx);
@@ -5969,31 +5969,53 @@ let clock=Date.now();const originalNow=Date.now;Date.now=()=>clock;
 async function beforeSettle() {
   const results=[];
   for(const handler of piHandlers.get('agent_before_settle')||[]) results.push(await handler({},defaultSessionCtx));
-  return results.filter(Boolean).flatMap(r=>r.entries||[]).map(e=>e.content).join('\n');
+  return {continued:results.some(r=>r?.continue===true),content:results.filter(Boolean).flatMap(r=>r.entries||[]).map(e=>e.content).join('\n')};
 }
 const first=await beforeSettle();
-if(!first.includes('prerequisite: pending')) throw Error(`missing continuation: ${first}`);
-if(await beforeSettle()) throw Error('unchanged evidence retriggered without backoff');
+if(!first.continued || !first.content.includes('prerequisite: pending')) throw Error(`missing continuation: ${JSON.stringify(first)}`);
+const ignored=await beforeSettle();
+if(!ignored.continued || !ignored.content.includes('prerequisite: pending')) throw Error('notification backoff allowed an ignored obligation to settle');
+const continuationMessages=()=>sentToMain.filter(sent=>sent.message.customType==='fm-task-continuation');
+async function waitForMessages(count) {
+  for(let i=0;i<250 && continuationMessages().length<count;i+=1) await new Promise(resolve=>setTimeout(resolve,10));
+  if(continuationMessages().length<count) throw Error(`missing continuation notification ${count}: ${JSON.stringify(continuationMessages())}`);
+}
+await fire('agent_settled',{},defaultSessionCtx);
+bus.emit('firstmate:heartbeat-tick');
+await waitForMessages(1);
+bus.emit('firstmate:heartbeat-tick');
+await new Promise(resolve=>setTimeout(resolve,30));
+if(continuationMessages().length!==1) throw Error('notification backoff replayed an unchanged reminder');
+clock+=31_000;
+bus.emit('firstmate:heartbeat-tick');
+await waitForMessages(2);
+clock+=61_000;
+bus.emit('firstmate:heartbeat-tick');
+await waitForMessages(3);
+if(continuationMessages()[2].options.deliverAs!=='nextTurn' || continuationMessages()[2].options.triggerTurn) throw Error('exhausted notification did not defer once to the next turn');
+await fire('agent_start',{},defaultSessionCtx);
+const exhausted=await beforeSettle();
+if(!exhausted.continued || !exhausted.content.includes('prerequisite: pending')) throw Error('notification exhaustion allowed a pending obligation to settle');
+await fire('agent_start',{},defaultSessionCtx);
+const subsequent=await beforeSettle();
+if(!subsequent.continued || !subsequent.content.includes('prerequisite: pending')) throw Error('a subsequent turn lost mandatory settlement enforcement');
 await fire('session_compact',{},defaultSessionCtx);
 await fire('before_agent_start',{prompt:'Separate request B: explain configuration.'},defaultSessionCtx);
-clock+=31_000;
 const next=await beforeSettle();
-if(!next.includes('prerequisite: pending') || !next.includes('Separate request B')) throw Error('later input or compaction dropped earlier obligation');
+if(!next.continued || !next.content.includes('prerequisite: pending') || !next.content.includes('Separate request B')) throw Error('later input or compaction dropped earlier obligation');
 const tool=mainTools.find(t=>t.name==='fm_task_continuation');
 const listing=JSON.parse((await tool.execute('list',{action:'list'})).content[0].text);
 const input=listing.inputs.find(i=>i.text.includes('Separate request B'));
 const answer=await tool.execute('answer',{action:'answer',input:input.id,answer:'Configuration uses the documented per-home file.'});
 if(answer.isError) throw Error(JSON.stringify(answer));
-clock+=61_000;
-if(await beforeSettle()) throw Error('unchanged exhausted obligation spammed');
 if(JSON.parse(readFileSync(path)).disposition!=='open') throw Error('retry budget exhaustion closed goal');
 // A material observation changes the fingerprint and earns one fresh check.
 const r=JSON.parse(readFileSync(path));r.assessment.remaining_gap='Apply now-authorized prerequisite, then validate.';
 writeFileSync(`${home}/data/proposal.json`,JSON.stringify(r),{mode:0o600});
 const cmd=spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`,['reconcile','prerequisite','--expected-revision',String(r.revision),'--record',`${home}/data/proposal.json`],{env:{...process.env,FM_SUPERVISION_ACTOR:'main'},encoding:'utf8'});
 if(cmd.status!==0) throw Error(cmd.stderr);
-if(!(await beforeSettle()).includes('prerequisite: pending')) throw Error('new actionable evidence suppressed');
-if(await beforeSettle()) throw Error('duplicate notification replayed new evidence');
+if(!(await beforeSettle()).content.includes('prerequisite: pending')) throw Error('new actionable evidence suppressed');
+if(!(await beforeSettle()).continued) throw Error('unchanged pending evidence escaped settlement enforcement');
 // A real bound dependency stays silent; its release triggers one exact check.
 const {createHash}=await import('node:crypto');
 const sha=(p)=>createHash('sha256').update(readFileSync(p)).digest('hex');
@@ -6007,10 +6029,21 @@ writeFileSync(`${home}/data/proposal.json`,JSON.stringify(blocked));
 const block=spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`,['reconcile','prerequisite','--expected-revision',String(blocked.revision),'--record',`${home}/data/proposal.json`],{env:{...process.env,FM_SUPERVISION_ACTOR:'main'},encoding:'utf8'});
 if(block.status!==0) throw Error(block.stderr);
 clock+=120_000;
-if(await beforeSettle()) throw Error('genuine unchanged blocker resumed');
+if((await beforeSettle()).continued) throw Error('genuine unchanged blocker resumed');
 writeFileSync(`${home}/data/release`,'exact authorization recorded');
-if(!(await beforeSettle()).includes('dependency evidence changed')) throw Error('dependency release lost continuation');
-if(await beforeSettle()) throw Error('duplicate release notification replayed continuation');
+if(!(await beforeSettle()).content.includes('dependency evidence changed')) throw Error('dependency release lost continuation');
+if(!(await beforeSettle()).continued) throw Error('unchanged released blocker escaped settlement enforcement');
+writeFileSync(`${home}/data/release`,'awaiting exact authorization');
+writeFileSync(`${home}/data/acceptance`,'Requested prerequisite and acceptance checks verified by main.');
+const acceptedReceipt=spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`,['action','prerequisite','--action-id',blocked.next_action.id,'--phase','refused','--receipt-ref','data/acceptance','--receipt-sha256',sha(`${home}/data/acceptance`)],{env:{...process.env,FM_SUPERVISION_ACTOR:'main'},encoding:'utf8'});
+if(acceptedReceipt.status!==0) throw Error(acceptedReceipt.stderr);
+const accepted=JSON.parse(readFileSync(path));
+accepted.disposition='accepted';accepted.assessment.remaining_gap='';accepted.assessment.outcome='Requested prerequisite verified';
+accepted.assessment.evidence.push({ref:'data/acceptance',sha256:sha(`${home}/data/acceptance`)});
+writeFileSync(`${home}/data/proposal.json`,JSON.stringify(accepted));
+const accept=spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`,['reconcile','prerequisite','--expected-revision',String(accepted.revision),'--record',`${home}/data/proposal.json`],{env:{...process.env,FM_SUPERVISION_ACTOR:'main'},encoding:'utf8'});
+if(accept.status!==0) throw Error(accept.stderr);
+if((await beforeSettle()).continued) throw Error('semantic acceptance remained settlement-blocked');
 Date.now=originalNow;
 await fire('session_shutdown',{},defaultSessionCtx);
 console.log('continuation survived ack, compaction and later input; changed evidence rechecks once, unchanged waits stay quiet');

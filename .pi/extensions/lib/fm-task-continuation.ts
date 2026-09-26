@@ -28,11 +28,11 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
   // unchanged report, marker acknowledgement or session compaction resets it.
   const pacing = new Map<string, { key: string; attempts: number; after: number; queued: boolean }>();
   let generation = 0;
-  let busy = false;
+  let settlementBusy = false;
+  let notificationBusy = false;
   let streaming = false;
   let cursor = 0;
   let inputCursor = 0;
-  let deferred: string[] = [];
 
   async function command(args: string[]) {
     const epoch = generation;
@@ -87,8 +87,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       "bound release evidence, deadline and recovery trigger. Do not revive archived work or bypass authority.";
   }
 
-  async function collect(): Promise<string[]> {
-    deferred = [];
+  async function collect(notification: boolean): Promise<{ obligations: string[]; notifications: string[]; deferred: string[] }> {
     const observations: Observation[] = [];
     const unrouted = [...inputs.values()].filter((value) => !value.task && !value.answer);
     for (let i = 0; i < Math.min(BATCH, unrouted.length); i++) {
@@ -110,12 +109,17 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       }
     }
     cursor = ids.length ? (cursor + BATCH) % ids.length : 0;
-    const lines: string[] = [];
+    const obligations: string[] = [];
+    const notifications: string[] = [];
+    const deferred: string[] = [];
     for (const item of observations) {
       if (["accepted", "archived", "running", "blocked"].includes(item.state)) {
         // Keep the fingerprint budget across transient healthy observations.
         continue;
       }
+      const line = `${item.task_id}: ${item.state}: ${item.reason}`;
+      obligations.push(line);
+      if (!notification) continue;
       let pace = pacing.get(item.task_id);
       if (!pace || pace.key !== item.key) {
         pace = { key: item.key, attempts: 0, after: 0, queued: false };
@@ -131,30 +135,39 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       }
       pace.attempts++;
       pace.after = Date.now() + INTERVAL_MS * 2 ** (pace.attempts - 1);
-      lines.push(`${item.task_id}: ${item.state}: ${item.reason}` +
+      notifications.push(line +
         (pace.attempts === ATTEMPTS ? " [bounded continuation attempts exhausted for unchanged evidence; resolve or escalate the concrete gap]" : ""));
     }
-    return lines;
+    return { obligations, notifications, deferred };
   }
 
-  async function check(): Promise<string | undefined> {
-    if (busy || !owns()) return;
-    busy = true;
+  async function check(settlement = false): Promise<string | undefined> {
+    if (!owns() || (settlement ? settlementBusy : notificationBusy)) return;
+    if (settlement) settlementBusy = true;
+    else notificationBusy = true;
     const epoch = generation;
     const prior = new Map([...pacing].map(([id, pace]) => [id, { ...pace }]));
-    const restore = () => { pacing.clear(); for (const [id, pace] of prior) pacing.set(id, pace); };
+    const restore = () => {
+      if (settlement) return;
+      pacing.clear();
+      for (const [id, pace] of prior) pacing.set(id, pace);
+    };
     try {
-      const lines = await collect();
+      const { obligations, notifications, deferred } = await collect(!settlement);
       if (epoch !== generation || !owns()) { restore(); return; }
-      if (!lines.length && !deferred.length) return;
-      const content = await encodeFirstmateOperationalInputWith(runCommandAsync, "branch-outcome", instruction([...lines, ...deferred]));
+      const lines = settlement ? obligations : [...notifications, ...deferred];
+      if (!lines.length) return;
+      const content = await encodeFirstmateOperationalInputWith(runCommandAsync, "branch-outcome", instruction(lines));
       if (epoch !== generation || !owns()) { restore(); return; }
-      if (lines.length) return content;
+      if (settlement || notifications.length) return content;
       // One context reminder survives into the next ordinary turn after the
       // automatic budget. It does not reopen presentation or spin a new run.
       pi.sendMessage({ customType: MESSAGE, content, display: false }, { deliverAs: "nextTurn" });
     } catch (error) { restore(); throw error; }
-    finally { busy = false; }
+    finally {
+      if (settlement) settlementBusy = false;
+      else notificationBusy = false;
+    }
   }
 
   // The existing periodic coordinator is the sole clock, even while its
@@ -187,7 +200,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
   });
   pi.on("agent_settled", () => { streaming = false; });
   pi.on("agent_before_settle", async () => {
-    const content = await check();
+    const content = await check(true);
     if (content) return { entries: [{ type: "custom_message" as const, customType: MESSAGE,
       content, display: false }], continue: true };
   });
