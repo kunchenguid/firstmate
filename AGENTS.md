@@ -40,6 +40,10 @@ Hard rules, in priority order:
    Treat direct captain intervention in a crewmate window as authoritative and reconcile it at the next supervision review.
 5. **Report outcomes faithfully.**
    If work failed, say so plainly with the evidence.
+   Before claiming a captain-facing outcome, read in this turn the evidence that establishes it, such as the current review result, test output, commit, or PR on the forge.
+   Until then, report a worker instruction only as sent or instructed, and label unverified facts as unverified in the same sentence.
+   Correct inaccurate claims plainly and briefly.
+   Before reporting a GitHub PR ready, running, merged, or closed, or asking whether to merge, run `bin/fm-pr-state.sh --audit <id>` in the same turn and use its live evidence and verdict; the verdict does not grant merge authority.
 
 You may maintain this repo's private operational state directly.
 Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and public `skills/`.

@@ -28,16 +28,18 @@ set -o pipefail
 head=c2eac54c17a1ddc2633ad51b83e21e5fe888142e
 serve() {
   case "$*" in
-    "pr view "*" --json state,mergedAt,isDraft,headRefOid,author,mergeable,reviewDecision --jq "*)
-      jq -n --arg head "$head" --arg state "${FM_TEST_STATE-OPEN}" \
+    "pr view "*" --json state,mergedAt,isDraft,headRefOid,author,mergeable,reviewDecision,closingIssuesReferences,milestone --jq "*)
+      jq -n --arg head "${FM_TEST_HEAD-$head}" --arg state "${FM_TEST_STATE-OPEN}" \
         --arg merged "${FM_TEST_MERGED_AT-}" --arg draft "${FM_TEST_DRAFT-false}" \
         --arg mergeable "${FM_TEST_VIEW_MERGEABLE-MERGEABLE}" \
         --arg decision "${FM_TEST_VIEW_REVIEW_DECISION-APPROVED}" \
+        --arg issues "${FM_TEST_CLOSING_ISSUES-[]}" --arg milestone "${FM_TEST_MILESTONE-}" \
         '{state: $state, mergedAt: (if $merged == "" then null else $merged end),
           isDraft: ($draft == "true"), headRefOid: $head,
           author: {login: "prauthor", is_bot: false},
           mergeable: (if $mergeable == "null" then null else $mergeable end),
-          reviewDecision: $decision}'
+          reviewDecision: $decision, closingIssuesReferences: ($issues | fromjson),
+          milestone: (if $milestone == "" then null else {title: $milestone} end)}'
       ;;
     "api /repos/o/r/pulls/7/reviews?per_page=100 --paginate --jq "*)
       printf '%s\n' "${FM_TEST_REVIEWS:-[]}"
@@ -66,8 +68,34 @@ serve "$@" | jq -r "$prog"
 SH
 chmod +x "$FAKEBIN/gh"
 
+AUDIT_ROOT="$TMP_ROOT/audit-root"
+AUDIT_STATE="$AUDIT_ROOT/state"
+mkdir -p "$AUDIT_ROOT/bin" "$AUDIT_STATE"
+cat > "$AUDIT_ROOT/bin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: %s · source: run-step · fixture\n' "${FM_TEST_WORKER_STATE-done}"
+SH
+chmod +x "$AUDIT_ROOT/bin/fm-crew-state.sh"
+printf 'mode=no-mistakes\nbackend=cmux\nwindow=fixture\npr=https://github.com/o/r/pull/7\npr_head=%s\n' \
+  "$HEAD" > "$AUDIT_STATE/audit-ready.meta"
+printf 'mode=direct-PR\nbackend=cmux\nwindow=fixture\npr=https://github.com/o/r/pull/7\npr_head=%s\n' \
+  "$HEAD" > "$AUDIT_STATE/audit-direct.meta"
+printf 'mode=no-mistakes\npr=https://github.com/o/r/pull/7\npr_head=%s\n' \
+  "$HEAD" > "$AUDIT_STATE/audit-no-endpoint.meta"
+printf 'mode=no-mistakes\nbackend=cmux\nwindow=fixture\npr=https://gitlab.example.com/group/project/-/merge_requests/7\npr_head=%s\n' \
+  "$HEAD" > "$AUDIT_STATE/audit-gitlab.meta"
+printf 'mode=no-mistakes\nbackend=cmux\nwindow=fixture\npr=https://gerrit.example.com/c/project/+/7\npr_head=%s\n' \
+  "$HEAD" > "$AUDIT_STATE/audit-gerrit.meta"
+chmod 600 "$AUDIT_STATE/audit-ready.meta" "$AUDIT_STATE/audit-direct.meta" \
+  "$AUDIT_STATE/audit-no-endpoint.meta" "$AUDIT_STATE/audit-gitlab.meta" "$AUDIT_STATE/audit-gerrit.meta"
+
 run_state() {
   PATH="$FAKEBIN:$PATH" "$SCRIPT" https://github.com/o/r/pull/7
+}
+
+run_audit() {
+  FM_ROOT_OVERRIDE="$AUDIT_ROOT" FM_HOME="$AUDIT_ROOT" FM_STATE_OVERRIDE="$AUDIT_STATE" \
+    PATH="$FAKEBIN:$PATH" "$SCRIPT" --audit "${1:-audit-ready}"
 }
 
 # reviews "<login> <state> <commit> <submitted_at>"... prints the JSON array
@@ -224,15 +252,149 @@ test_no_reported_checks_is_unverified() {
   pass "given gh's sentence, a head with no reported checks is unverified rather than ready"
 }
 
+test_audit_reports_live_pr_worker_and_decision_evidence() {
+  local out
+  out=$(FM_TEST_CLOSING_ISSUES='[{"url":"https://github.com/o/r/issues/5689"}]' \
+    FM_TEST_MILESTONE='Decision audit' run_audit) || fail "ready audit fixture was refused"
+  assert_contains "$out" 'HEAD MATCH: yes' "the audit compares the live PR head with recorded pr_head"
+  assert_contains "$out" 'DRAFT: false' "the audit reports the live draft state"
+  assert_contains "$out" 'CLOSING ISSUE REFERENCES: https://github.com/o/r/issues/5689' \
+    "the audit reports GitHub closing issue references"
+  assert_contains "$out" 'MILESTONE: Decision audit' "the audit reports the live milestone"
+  assert_contains "$out" 'CHECK STATUS: lint (SUCCESS; pass)' "the audit reports required-check status"
+  assert_contains "$out" 'CHECK STATUS: reported required check results are non-blocking, but completeness is unverified; unreported required checks cannot be enumerated' \
+    "passing reported checks do not prove the full required-check set"
+  assert_contains "$out" 'WORKER ENDPOINT: unverified' "unsupported endpoint classifiers stay explicit"
+  assert_contains "$out" 'WORKER STATE: state: done' "the audit reads the worker's current state"
+  assert_contains "$out" 'VERDICT: UNVERIFIED (required check status is unverified)' \
+    "a matching no-mistakes PR cannot be ready without complete required-check evidence"
+  assert_contains "$out" 'MERGE VERDICT: UNVERIFIED (required check status is unverified)' \
+    "reported passing checks do not establish merge readiness"
+  pass "audit reports current PR, check, issue, milestone, and worker evidence"
+}
+
+test_audit_blocks_stale_head_draft_and_incomplete_worker() {
+  local out
+  out=$(FM_TEST_HEAD=ffffffffffffffffffffffffffffffffffffffff run_audit) \
+    || fail "stale-head audit fixture was refused"
+  assert_contains "$out" 'HEAD MATCH: no' "the audit exposes a stale recorded head"
+  assert_contains "$out" 'VERDICT: NOT READY FOR REVIEW' "a stale head blocks a ready claim"
+
+  out=$(FM_TEST_DRAFT=true run_audit) || fail "draft audit fixture was refused"
+  assert_contains "$out" 'VERDICT: NOT READY FOR REVIEW (draft' "a draft blocks a ready claim"
+
+  out=$(FM_TEST_WORKER_STATE=working run_audit) || fail "working audit fixture was refused"
+  assert_contains "$out" 'VERDICT: NOT READY FOR REVIEW (worker is not currently done)' \
+    "an active worker is not reported as ready"
+  assert_contains "$out" 'MERGE VERDICT: NOT READY (worker is not currently done)' \
+    "an active worker cannot be represented as merge-ready"
+  pass "audit blocks stale heads, drafts, and workers that have not completed"
+}
+
+test_audit_without_endpoint_reports_unverified_instead_of_refusing() {
+  local out
+  out=$(run_audit audit-no-endpoint) \
+    || fail "an audit without a current endpoint was refused"
+  assert_contains "$out" 'WORKER ENDPOINT: unverified' \
+    "a missing backend target is explicit rather than fatal"
+  assert_contains "$out" 'WORKER STATE: state: done' \
+    "the worker state is still reported when the endpoint is unavailable"
+  assert_contains "$out" 'VERDICT: UNVERIFIED (required check status is unverified)' \
+    "missing endpoint evidence cannot produce a positive readiness verdict"
+  pass "an audit without an endpoint reports unverified evidence and a guarded verdict"
+}
+
+test_audit_requires_approval_for_merge() {
+  local out
+  out=$(FM_TEST_VIEW_REVIEW_DECISION=REVIEW_REQUIRED run_audit audit-direct) \
+    || fail "review-required audit fixture was refused"
+  assert_contains "$out" 'VERDICT: UNVERIFIED (required check status is unverified)' \
+    "review readiness remains unverified until required-check completeness is proven"
+  assert_contains "$out" 'MERGE VERDICT: NOT READY (required review is outstanding)' \
+    "an outstanding required review blocks merge readiness"
+  pass "review-required decisions block merge readiness while incomplete checks withhold review readiness"
+}
+
+test_audit_respects_delivery_mode_and_check_status() {
+  local out
+  out=$(FM_TEST_CHECKS_ERROR="no required checks reported on the 'fm/fixture' branch" run_audit) \
+    || fail "unreported-check audit fixture was refused"
+  assert_contains "$out" 'CHECK STATUS: no required check has reported; readiness unconfirmed' \
+    "unreported required checks remain unconfirmed"
+  assert_contains "$out" 'VERDICT: UNVERIFIED (required check status is unverified)' \
+    "unreported checks cannot be treated as a failed check or proof of readiness"
+
+  out=$(FM_TEST_REQUIRED_CHECKS='[{"name":"CI","state":"ACTION_REQUIRED","bucket":"pending"}]' run_audit) \
+    || fail "pending-check audit fixture was refused"
+  assert_contains "$out" 'CHECK STATUS: CI (ACTION_REQUIRED; pending)' \
+    "a pending required check is shown in the audit"
+  assert_contains "$out" 'VERDICT: NOT READY FOR REVIEW' \
+    "a pending required check prevents no-mistakes readiness"
+
+  out=$(FM_TEST_CHECKS_ERROR="no required checks reported on the 'fm/fixture' branch" \
+    run_audit audit-direct) || fail "direct-PR audit fixture was refused"
+  assert_contains "$out" 'VERDICT: UNVERIFIED (required check status is unverified)' \
+    "direct-PR review readiness is withheld when check completeness is unknown"
+  assert_contains "$out" 'MERGE VERDICT: UNVERIFIED (required check status is unverified)' \
+    "an unreported check cannot support a merge-readiness claim"
+
+  out=$(FM_TEST_REQUIRED_CHECKS='[{"name":"CI","state":"FAILURE","bucket":"fail"}]' \
+    run_audit audit-direct) || fail "direct-PR failing-check audit fixture was refused"
+  assert_contains "$out" 'VERDICT: NOT READY FOR REVIEW (required checks are not all passing)' \
+    "a failing required check blocks direct-PR review readiness"
+  assert_contains "$out" 'MERGE VERDICT: NOT READY (required checks are not all passing)' \
+    "a failing required check blocks direct-PR merge readiness"
+  pass "all delivery modes withhold readiness for incomplete or failing checks"
+}
+
+test_audit_reports_non_github_forges_as_unverified() {
+  local out expected
+  out=$(run_audit audit-gitlab) || fail "GitLab audit fixture was refused"
+  expected=$(printf '%s\n' \
+    'PR: https://gitlab.example.com/group/project/-/merge_requests/7' \
+    'VERDICT: UNVERIFIED (live audit supports GitHub pull requests only)' \
+    'MERGE VERDICT: UNVERIFIED (live audit supports GitHub pull requests only)')
+  [ "$out" = "$expected" ] \
+    || fail "a GitLab PR must be reported unverified, got: $out"
+
+  out=$(run_audit audit-gerrit) || fail "Gerrit audit fixture was refused"
+  expected=$(printf '%s\n' \
+    'PR: https://gerrit.example.com/c/project/+/7' \
+    'VERDICT: UNVERIFIED (live audit supports GitHub pull requests only)' \
+    'MERGE VERDICT: UNVERIFIED (live audit supports GitHub pull requests only)')
+  [ "$out" = "$expected" ] \
+    || fail "a Gerrit PR must be reported unverified, got: $out"
+  pass "audits for unsupported GitLab and Gerrit PRs return only unverified verdicts"
+}
+
+test_audit_reports_terminal_states_with_all_requested_fields() {
+  local out
+  out=$(FM_TEST_STATE=MERGED FM_TEST_MERGED_AT=2026-09-12T12:00:00Z run_audit) \
+    || fail "merged audit fixture was refused"
+  assert_contains "$out" 'PR STATE: merged' "the live merged state is included"
+  assert_contains "$out" 'LIVE HEAD:' "terminal reports still include the live head"
+  assert_contains "$out" 'CLOSING ISSUE REFERENCES: none' "terminal reports include closing issue references"
+  assert_contains "$out" 'MILESTONE: none' "terminal reports include milestone state"
+  assert_contains "$out" 'VERDICT: MERGED at 2026-09-12T12:00:00Z' "merged state is the verdict"
+
+  out=$(FM_TEST_STATE=CLOSED run_audit) || fail "closed audit fixture was refused"
+  assert_contains "$out" 'VERDICT: CLOSED' "closed state is the verdict"
+  pass "terminal audits still read the full decision evidence"
+}
+
 test_help_states_what_silence_means_and_what_is_out_of_scope() {
   local out
   out=$("$SCRIPT" --help) || fail "help was refused"
-  assert_contains "$out" 'it does not mean the pull request is ready to merge' \
+  assert_contains "$out" 'does not mean the pull request is ready to merge' \
     "help must not let empty output read as a verdict that the pull request can merge"
-  assert_contains "$out" 'is absent from what this command reads' \
+  assert_contains "$out" 'Unreported' \
     "help must name the limit: a required context that never reported is absent from what is read"
-  assert_contains "$out" "Unresolved review-thread state is out of this command's scope" \
+  assert_contains "$out" 'cannot be enumerated' \
+    "help must state that never-reported required contexts are unavailable"
+  assert_contains "$out" 'Unresolved review-thread state' \
     "help must state the thread-resolution boundary without inventing a reason for it"
+  assert_contains "$out" 'fm-pr-state.sh --audit <task-id>' \
+    "help must document the live decision-audit mode"
   pass "help states what empty output means and what is out of scope"
 }
 
@@ -271,6 +433,13 @@ test_refusals_exit_nonzero() {
 
 test_clean_pr_is_silent_and_ignores_skipped_checks
 test_terminal_state_is_the_whole_report
+test_audit_reports_live_pr_worker_and_decision_evidence
+test_audit_blocks_stale_head_draft_and_incomplete_worker
+test_audit_without_endpoint_reports_unverified_instead_of_refusing
+test_audit_respects_delivery_mode_and_check_status
+test_audit_requires_approval_for_merge
+test_audit_reports_non_github_forges_as_unverified
+test_audit_reports_terminal_states_with_all_requested_fields
 test_draft_is_a_blocker
 test_stale_blocking_reviews_explain_a_blocking_decision
 test_approved_pr_with_only_stale_changes_requested_is_silent
