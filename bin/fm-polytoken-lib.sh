@@ -24,8 +24,8 @@
 # A project that already owns either file, or any other .polytoken/config.*
 # (Polytoken refuses a directory holding two config files), is refused rather
 # than overwritten; only files carrying this overlay's own marker are replaced.
-# bin/fm-control-lib.sh lists the same two paths for relaunch retirement, and
-# bin/fm-teardown.sh removes them at cleanup only while they carry the marker.
+# Relaunch retirement (bin/fm-spawn.sh) and cleanup (bin/fm-teardown.sh) both
+# remove them through fm_polytoken_remove_overlay, only while they carry the marker.
 #
 # Model and effort. `polytoken new --model` accepts only a fully qualified
 # <provider>/<model> or one of its listed `<model>(<variant>)` selectors, and
@@ -47,7 +47,7 @@ FM_POLYTOKEN_HOOK_OPEN=firstmate-busy-open
 FM_POLYTOKEN_HOOK_CLOSE=firstmate-busy-close
 
 # The two overlay paths, relative to the worktree. The one list both the writer
-# below and the control-plane retirement table agree with.
+# below and fm_polytoken_remove_overlay agree with.
 fm_polytoken_overlay_relpaths() {
   printf '%s\n' .polytoken/hooks.json .polytoken/config.yaml
 }

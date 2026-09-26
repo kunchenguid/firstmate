@@ -1221,6 +1221,26 @@ test_cursor_session_binding_is_retired_on_a_harness_switch() {
   pass "fm-spawn --relaunch: switching away from cursor retires its session binding"
 }
 
+test_polytoken_overlay_retirement_spares_project_owned_files() {
+  local dir
+  dir=$(new_case polytokenwiring rl36)
+  add_ship_task "$dir" rl36 polytoken
+  printf '#!/bin/sh\n[ "$1" = sessions ] && printf "[]\\n"\n' > "$dir/fakebin/polytoken"
+  chmod +x "$dir/fakebin/polytoken"
+  mkdir -p "$dir/wt/.polytoken"
+  printf '# Firstmate Polytoken worker overlay\ndefault_permission_matcher: bypass\n' \
+    > "$dir/wt/.polytoken/config.yaml"
+  printf '[{"name":"project-hook","event":"stop","handler":{"bash":"true"}}]\n' \
+    > "$dir/wt/.polytoken/hooks.json"
+  printf 'zsh' > "$dir/fake/command"
+  run_spawn "$dir" rl36 --relaunch --harness claude >/dev/null
+  [ ! -e "$dir/wt/.polytoken/config.yaml" ] \
+    || fail "the retired polytoken incarnation's own overlay must not outlive it"
+  [ -f "$dir/wt/.polytoken/hooks.json" ] \
+    || fail "relaunch retirement must not delete the project's own .polytoken/hooks.json"
+  pass "fm-spawn --relaunch: switching away from polytoken retires only its own overlay"
+}
+
 # --- 3 and 4. refusals before the agent is touched ---------------------------
 
 test_missing_worktree_refuses_before_stopping_anything() {
@@ -2366,6 +2386,7 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
+test_polytoken_overlay_retirement_spares_project_owned_files
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical

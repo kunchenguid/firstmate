@@ -80,7 +80,12 @@ gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" worker)
 fm_polytoken_write_overlay "$wt" "$state" worker "$gen" "$state/worker.turn-ended" "$ROOT" || fail 'overlay writer failed'
 jq -e 'length == 2 and ([.[].event] | sort) == ["pre_user_prompt", "stop"]' "$wt/.polytoken/hooks.json" >/dev/null \
   || fail 'hooks.json does not carry exactly the open and close hooks'
-grep -qx 'default_permission_matcher: bypass' "$wt/.polytoken/config.yaml" || fail 'worker would stop on approvals'
+config_body=$(grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$wt/.polytoken/config.yaml")
+[ "$(printf '%s\n' "$config_body" | wc -l | tr -d ' ')" = 1 ] || fail 'config.yaml must hold exactly one setting'
+[ "${config_body%%:*}" = default_permission_matcher ] || fail 'config.yaml sets a key other than default_permission_matcher'
+config_value=${config_body#*:}
+config_value=${config_value#"${config_value%%[![:space:]]*}"}
+[ "$config_value" = bypass ] || fail 'worker would stop on approvals'
 run_hook() {  # <event> -> runs its handler as Polytoken does, and fails on any stdout
   local cmd hook_out
   cmd=$(jq -r --arg e "$1" '.[] | select(.event == $e) | .handler.bash' "$wt/.polytoken/hooks.json")
@@ -104,8 +109,6 @@ assert_absent "$state/worker.turn-ended" 'a stale stop woke the replacement'
   || fail 'a launch parked on the license gate read busy'
 [ "$(fm_busy_classify tmux fake:w polytoken worker "$state" "$(printf 'I read the License Agreement section.\n')")" = 'busy fm-spawn' ] \
   || fail 'prose naming the license gate read as the gate'
-[ "$(fm_control_harness_wiring_paths polytoken "$wt" "$state" worker)" = "$(printf '%s\n%s' "$wt/.polytoken/hooks.json" "$wt/.polytoken/config.yaml")" ] \
-  || fail 'relaunch retirement does not name both overlay files'
 pass "hook overlay opens and closes turns silently; stale generations and the license gate never read idle or busy"
 
 fm_polytoken_write_overlay "$wt" "$state" worker "$gen" "$state/worker.turn-ended" "$ROOT" || fail 'an owned overlay was not replaced'

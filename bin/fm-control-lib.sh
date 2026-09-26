@@ -405,13 +405,9 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     # the project, and nothing global is installed.
     gemini) printf '%s\n' "$state/$id.gemini-settings.json" ;;
     devin) printf '%s\n' "$state/$id.devin-config.json" ;;
-    # polytoken reads hooks and permissions only from the global layer and
-    # the project's .polytoken/ directory, so its overlay lives in the
-    # worktree (bin/fm-polytoken-lib.sh owns both paths and the writer).
-    polytoken)
-      printf '%s\n' "$wt/.polytoken/hooks.json"
-      printf '%s\n' "$wt/.polytoken/config.yaml"
-      ;;
+    # polytoken's overlay lives in the worktree beside any project-owned
+    # .polytoken/ files, so it is retired only through the marker-checked
+    # fm_polytoken_remove_overlay (bin/fm-polytoken-lib.sh), never listed here.
   esac
 }
 
