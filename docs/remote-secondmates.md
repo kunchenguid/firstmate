@@ -111,7 +111,7 @@ As a result, retries never convoy behind abandoned work.
 
 A worker stops itself once its configured code root stops being a Firstmate checkout, so a worker started from a worktree cannot outlive that worktree.
 `bin/fm-remote-job-reap-orphans.sh` clears any worker already left behind that way.
-It never touches a worker whose checkout still exists.
+Its default sweep never touches a worker whose checkout still exists.
 
 Worker restarts are bounded per account rather than per restart supervisor, so a worker that keeps failing cannot multiply supervisors across a host.
 Only a worker that exits with a failure is counted; a redundant start that finds a verified worker already serving exits cleanly and is not.
