@@ -27,6 +27,8 @@ set -u
 . "$ROOT/bin/fm-trace-context-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -487,6 +489,78 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+test_relaunch_reorders_control_relaunch_tx_before_a_preserved_pr_identity() {
+  local dir out rc meta tx_line pr_line
+  dir=$(new_case pr-armed-relaunch rl78)
+  add_ship_task "$dir" rl78 claude
+  meta="$dir/home/state/rl78.meta"
+  # Mirrors fm-pr-check.sh's PR identity at the end of the task record.
+  {
+    printf '%s\n' 'x_request=request-78'
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/78'
+    printf '%s\n' 'pr_head=0123456789abcdef0123456789abcdef01234567'
+  } >> "$meta"
+
+  fm_pr_poll_prepare "$dir/home/state" rl78 github \
+    https://github.com/example/repo/pull/78 github.com example/repo 78 \
+    "$ROOT/bin/fm-pr-poll.sh" || fail "could not prepare the armed PR poll fixture"
+  fm_pr_poll_publish_prepared || fail "could not publish the armed PR poll fixture"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl78 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the PR poll fixture did not authenticate before relaunch"
+
+  out=$(run_control "$dir" rl78 relaunch --note "continue after the PR was armed"); rc=$?
+  expect_code 0 "$rc" "a relaunch of a PR-armed task should succeed"$'\n'"$out"
+
+  [ -n "$(meta_field "$dir" rl78 control_relaunch_tx)" ] \
+    || fail "the relaunch should have recorded its own control transaction id"
+  tx_line=$(grep -n '^control_relaunch_tx=' "$meta" | tail -1 | cut -d: -f1)
+  pr_line=$(grep -n '^pr=' "$meta" | head -1 | cut -d: -f1)
+  [ -n "$tx_line" ] && [ -n "$pr_line" ] \
+    || fail "expected both a control_relaunch_tx and a preserved pr line in the relaunched record"
+  [ "$tx_line" -lt "$pr_line" ] \
+    || fail "control_relaunch_tx (line $tx_line) landed after the preserved pr= block (line $pr_line); the merge poll's identity parser rejects any non-allowlisted line after pr="
+
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl78 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the armed merge poll no longer authenticates after relaunch"
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "the relaunched record no longer validates as a PR identity"
+  [ "$FM_PR_META_URL" = "https://github.com/example/repo/pull/78" ] \
+    || fail "the parsed identity should still name the armed pull request, got '$FM_PR_META_URL'"
+  pass "fm-control relaunch: a preserved PR identity and its armed merge poll still authenticate"
+}
+
+test_relaunch_does_not_launder_an_already_malformed_pr_record() {
+  local dir out rc meta pr_line stray_line
+  dir=$(new_case pr-already-malformed rl79)
+  add_ship_task "$dir" rl79 claude
+  meta="$dir/home/state/rl79.meta"
+  # This record is ALREADY invalid before the relaunch runs - a field the
+  # identity parser does not allowlist trails pr=, unrelated to
+  # control_relaunch_tx. The reorder must only move the line fm-spawn.sh owns;
+  # it must never launder a record that was already broken by widening what
+  # preserve_relaunch_meta carries forward unattended.
+  {
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/79'
+    printf '%s\n' 'stray_unallowlisted_field=leftover'
+  } >> "$meta"
+
+  out=$(run_control "$dir" rl79 relaunch --note "continue despite a pre-existing bad record"); rc=$?
+  expect_code 0 "$rc" "a relaunch should not refuse merely because an unrelated prior field was malformed"$'\n'"$out"
+
+  # Pin exactly why the parse must still fail, so a future change that quietly
+  # dropped the stray field (instead of preserving it) could not flip this
+  # test green while laundering the record.
+  pr_line=$(grep -n '^pr=' "$meta" | head -1 | cut -d: -f1)
+  stray_line=$(grep -n '^stray_unallowlisted_field=' "$meta" | head -1 | cut -d: -f1)
+  [ -n "$pr_line" ] && [ -n "$stray_line" ] \
+    || fail "expected both the preserved pr= line and the stray field to survive the relaunch"
+  [ "$stray_line" -gt "$pr_line" ] \
+    || fail "the stray field no longer trails pr= (line $stray_line vs $pr_line); this test would no longer exercise the rejection it claims to"
+  ! fm_pr_metadata_identity_parse "$meta" \
+    || fail "a record invalid before the relaunch parsed as valid afterward; the reorder must not launder pre-existing corruption"
+  pass "fm-control relaunch: a genuinely malformed pre-existing record is still rejected after relaunch"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -2390,6 +2464,8 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_reorders_control_relaunch_tx_before_a_preserved_pr_identity
+test_relaunch_does_not_launder_an_already_malformed_pr_record
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
