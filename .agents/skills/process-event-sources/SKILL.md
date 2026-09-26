@@ -5,8 +5,8 @@ description: >-
   Use before arming a long-polling source firstmate owns, before registering a
   deterministic condition->action watch, on any
   `procevent <adapter> <source-id> <sequence>` check wake, and on any
-  `process-event source stranded` or `process-event source failed to start`
-  check wake.
+  `process-event source stranded`, `process-event source failed to start`, or
+  `process-event source runner died` check wake.
   Owns the arming commands, the condition->action eligibility boundary, the
   durable result read, which wakes must be routed to their adapter instead of
   acknowledged generically, the handled acknowledgement contract, the one-owner
@@ -19,7 +19,7 @@ metadata:
 
 # process-event-sources
 
-Load this before arming a long-polling source, before registering a deterministic condition->action watch, whenever a `check:` wake carries `procevent <adapter> <source-id> <sequence>`, and whenever the watcher headlines a `process-event source stranded` or `process-event source failed to start` wake.
+Load this before arming a long-polling source, before registering a deterministic condition->action watch, whenever a `check:` wake carries `procevent <adapter> <source-id> <sequence>`, and whenever the watcher headlines a `process-event source stranded`, `process-event source failed to start`, or `process-event source runner died` wake.
 
 The runner exists so a blocking external process never holds firstmate's conversational turn.
 Firstmate registers a source, keeps working, and is woken when that process completes.
@@ -137,6 +137,10 @@ The crew-hosted recovery ordering and arm-and-acknowledge rule are owned by the 
 `process-event source stranded` or `process-event source failed to start` (queue keys `procevent:<source-id>:stranded:<claim-token>` and `procevent:<source-id>:launch-failed:<registration-identity>-<episode-nonce>`)
 : Nothing was captured: the source named in the payload is registered but nothing is confirmed to be collecting from it. There is no result file to read and no `handled` call to make; the ordinary drain acknowledgement consumes the row.
 : The payload says which shape it is and what clears it. Follow it exactly as the arming section above describes - a `start` is named only for the reused-pid strand, a leaderless group is a human check and reclaims itself once its group is empty, and a launch that never proved its claim closes its own episode if a later cycle finds the source owned.
+
+`process-event source runner died` (queue key `procevent:<source-id>:runner-died:<runner-pid>-<nonce>`)
+: One round was lost: a runner that had claimed the source died inside its source command, so that round captured nothing. There is no result file to read and no `handled` call to make; the ordinary drain acknowledgement consumes the row.
+: Recovery is automatic and needs nothing from you - the source stays registered and the next `reconcile` starts a replacement. What the wake is for is the pattern: one death is a lost round, while a source that keeps producing this is a source that is not collecting, and the payload names what to check.
 
 ## What the runner guarantees, exactly
 

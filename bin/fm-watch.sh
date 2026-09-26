@@ -95,6 +95,13 @@
 #                          for it (bin/fm-procevent.sh reconcile queues it
 #                          once per stranded claim generation); the queued
 #                          payload names what clears it
+#   check: process-event source runner died: <keys>
+#                          a runner that had claimed a registered
+#                          process-to-event source died inside its source
+#                          command, so that round captured nothing; the owner
+#                          guard queues it within half its check interval and
+#                          reconcile queues it as a backstop, once per death
+#                          either way
 #   check: process-event source failed to start: <keys>
 #                          a registered process-to-event source was launched by
 #                          reconcile and did not prove it took the claim within
@@ -2003,7 +2010,7 @@ procevent_surface_after_output() {
 }
 
 procevent_surface_queued() {
-  local key reason captured="" stranded="" unstarted=""
+  local key reason captured="" stranded="" unstarted="" died=""
   PROCEVENT_SURFACED=
   [ -s "$FM_WAKE_QUEUE" ] || return 0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
@@ -2011,13 +2018,14 @@ procevent_surface_queued() {
     case "$key" in procevent:*) ;; *) continue ;; esac
     [ -e "$(procevent_surfaced_marker "$key")" ] && continue
     PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
-    # A stranded source or one whose launch never proved itself is the opposite
-    # of a captured result: nothing is collecting for it. Headlining either as
-    # a capture would present it as healthy, which is the shape of defect
-    # these wakes exist to surface.
+    # A stranded source, one whose launch never proved itself, and one whose
+    # runner died mid-round are each the opposite of a captured result: nothing
+    # collected. Headlining any of them as a capture would present it as
+    # healthy, which is the shape of defect these wakes exist to surface.
     case "$key" in
       procevent:*:stranded:*) stranded="$stranded $key" ;;
       procevent:*:launch-failed:*) unstarted="$unstarted $key" ;;
+      procevent:*:runner-died:*) died="$died $key" ;;
       *) captured="$captured $key" ;;
     esac
   done < <(fm_wake_queued_keys_locked check)
@@ -2034,6 +2042,10 @@ procevent_surface_queued() {
   if [ -n "$unstarted" ]; then
     [ "$reason" = "check:" ] || reason="$reason;"
     reason="$reason process-event source failed to start:$unstarted"
+  fi
+  if [ -n "$died" ]; then
+    [ "$reason" = "check:" ] || reason="$reason;"
+    reason="$reason process-event source runner died:$died"
   fi
   # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
   FM_WAKE_POST_OUTPUT_ACTION=procevent_surface_after_output

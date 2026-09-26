@@ -2021,6 +2021,21 @@ Recovery there is a human verifying whether the dead runner's polling child is s
 
 Nothing automatic signals that group, and whether it may ever be signalled remains an open decision; the repaired guard does not close this gap.
 
+**Report a runner that died mid-round**
+
+A runner that had claimed its source and died inside its source command captured nothing for that round, and until it is reported the source has simply stopped collecting with nothing saying so.
+The runner marker is what already distinguishes that from an ordinary end of a round: the runner writes it after claiming and removes it on every ordinary way out, so a marker outliving its runner is the record of a lost round.
+
+- The runner's own owner guard reads that marker when the pid it watches is gone and its group is empty, which is the soonest anything can know, and publishes one durable `check` wake naming the source.
+- `reconcile` reads the same marker as the backstop for a death the guard did not outlive, before it launches the replacement.
+- The marker is removed only once the wake lands, so exactly one reader announces each death, a failed announcement is retried by the next reader, and the orphan that would otherwise fail this home's `sweep-home` preflight is cleared with it.
+- A stop the owner guard makes on purpose, after its lease reads fail, is not a death: once that stop succeeds the guard removes the marker if it still names the stopped pid, taking the source lock without waiting, so a later `reconcile` does not announce the fleet's own lease backstop as a lost round.
+- Nothing about recovery changes: the source stays registered and the next `reconcile` starts a replacement.
+- A leaderless group is not reported this way, because it is the ambiguous crash shape the stranded wake below already announces with its own recovery.
+
+KNOWN LIMIT: this covers built-in sources.
+An extension-owned round keeps its runner marker inside the pinned capture inbox rather than the registry, so its deaths remain visible only to the stranded and launch-failure reports.
+
 **Report stranded claims**
 
 The first `reconcile` that strands either kind of claim generation publishes a durable `check` wake.
@@ -2074,13 +2089,22 @@ The lease is therefore the backstop for a home that is GONE - the torn-down test
 
 KNOWN LIMIT: while any activity continues in a home whose original owning session has ended, that activity refreshes the lease and a runner of that home keeps running until its source is retired or the home goes away.
 
+**Isolate a runner into its own session**
+
+A runner is started as the leader of a fresh SESSION, not merely of a fresh process group, and so is the guard beside it.
+A process that leads its own group but stays in the session of the agent that armed it is still reachable by every hangup delivered to that session, which kills the poll mid-call: no result is captured, and the window is ordinary operation rather than an edge, because it lasts exactly as long as the launching agent lives.
+Such a runner also reparents to init and so LOOKS detached while it is not; it survives a session sweep only when its session leader happens to have exited first, because POSIX then shields the orphaned group from terminal hangup, which is accident rather than isolation.
+
+Isolation is proved before the runner's command is executed - the new session id and an independent read of the new process group must both be the isolated process's own pid - and a launch that cannot prove it fails rather than proceeding, because a runner that half-escaped its session presents as armed while a hangup can still reach it.
+Every group-leadership property the stop, group-liveness, and guard paths rely on is preserved, because a new session leaves the process leading a new group of its own too.
+
 **Keep and guard the lease**
 
-Detaching a runner into its own process group is what lets a persistent source outlive the turn that armed it, and on its own it is also what lets a runner outlive its whole home: reparented to init, it keeps its blocking child - and every process that child spawns - running with nothing left to reap it.
+Detaching a runner into its own session is what lets a persistent source outlive the turn that armed it, and on its own it is also what lets a runner outlive its whole home: reparented to init, it keeps its blocking child - and every process that child spawns - running with nothing left to reap it.
 
 - So a home's process-event state carries a lease that registration, attached start, reconciliation, acknowledgement, and listing refresh, and the watcher's reconcile cycle is what keeps it fresh in a live home.
 - An attached public `start` continues refreshing the lease while its caller remains attached.
-- Each runner fails closed unless a small guard starts successfully beside it in a separate process group.
+- Each runner fails closed unless a small guard starts successfully beside it in a separate session of its own, which is also what lets the guard keep watching after whatever ended the runner's.
 - That guard accepts the lease only while the state root retains the device/inode identity recorded by the runner's claim, and initiates the verified stop after two consecutive reads cannot prove that identity and lease freshness, so one unreadable read cannot kill a live runner.
 - Those two reads are spaced half a check interval apart, so the pair the debounce requires completes inside one check interval instead of costing two of them.
 

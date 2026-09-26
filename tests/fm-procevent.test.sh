@@ -3816,6 +3816,14 @@ after=$(wc -l < "$TMP_ROOT/orphan-dead.ticks" | tr -d ' ')
   || fail "the reaped listener's descendant kept spawning processes ($before then $after)"
 pass "reaping the listener stops the process churn under it"
 
+orphan_pe "$HORPHAN" reconcile >/dev/null 2>&1 || true
+orphan_pe "$HORPHAN" retire orphan-src >/dev/null 2>&1 || true
+orphan_died=$(awk -F '\t' '$3 == "check" && index($4, "procevent:orphan-src:runner-died:") == 1' \
+  "$HORPHAN/state/.wake-queue" 2>/dev/null | grep -c . || true)
+[ "$orphan_died" = 0 ] \
+  || fail "the owner guard's own lease stop was later announced as a runner death"
+pass "a lease stop by the owner guard is not announced as a runner death"
+
 keep_owner_present
 kill -0 -"$KEEP_PID" 2>/dev/null \
   || fail "an identical listener in a home whose session is still there was reaped too"
@@ -3949,11 +3957,12 @@ for proof_state in absent zombie; do
     PROOF_RELEASE="$HPROOF/reap"
     FM_HOME="$HPROOF" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proof-proc" \
       perl - "$PROOF_RELEASE" "$ROOT/bin/fm-procevent.sh" _start proof-src >"$HPROOF/start.log" 2>&1 <<'PL' &
+use POSIX ();
 my $release = shift @ARGV;
 defined(my $pid = fork) or exit 125;
 if ($pid == 0) {
-  setpgrp(0, 0) or exit 125;
-  $ENV{FM_PROCEVENT_RUNNER_GROUP} = $$;
+  POSIX::setsid() == $$ or exit 125;
+  $ENV{FM_PROCEVENT_RUNNER_SESSION} = $$;
   exec @ARGV;
   exit 125;
 }
@@ -4696,5 +4705,212 @@ touch "$READY_RELEASE"
 PATH="$UNDISP/bin:$PATH" FM_HOME="$UNDISP/home" \
   "$ROOT/bin/fm-procevent-lavish.sh" retire "$undisp_art" >/dev/null 2>&1 || true
 pass "arm does not launch beside a stale claim whose process group is alive"
+
+# --- a runner outlives a hangup delivered to the session that launched it ----
+#
+# A runner that leads its own process group but stays in the SESSION of the
+# agent that armed it is reachable by every hangup delivered to that session. It
+# dies mid-poll, so no result is ever captured, and the window is the ordinary
+# case rather than an edge: the launching agent still alive. Own-group and
+# reparented to init is exactly what makes such a runner look detached when it
+# is not.
+#
+# Both halves below are the test. The session identity is the kernel fact the
+# isolation is made of, and the hangup is the consequence that fact controls;
+# asserting only the identity would pass on a kernel that ignored it, and
+# asserting only survival could pass vacuously if the hangup reached nothing,
+# which is why the launching leader is required to have died of it.
+session_members() { ps -eo pid=,sess= 2>/dev/null; }
+session_of() {  # <pid>
+  ps -o sess= -p "$1" 2>/dev/null | tr -d '[:space:]'
+}
+
+HUP_STUB="$TMP_ROOT/hangup-stub.sh"
+cat > "$HUP_STUB" <<'SH'
+#!/usr/bin/env bash
+# Records the polling child's own pid, then blocks on its trigger exactly as a
+# real long poll blocks on its source.
+printf '%s\n' "$$" > "$1.child"
+while [ ! -e "$1.trigger" ]; do
+  [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ] || exit 75
+  sleep 0.1
+done
+printf 'survived the hangup\n'
+SH
+chmod +x "$HUP_STUB"
+
+HUP_HOME="$TMP_ROOT/session-hangup"; new_home "$HUP_HOME"
+HUP_MARK="$HUP_HOME/poll"
+pe_register "$HUP_HOME" lavish hangup-src -- "$HUP_STUB" "$HUP_MARK" >/dev/null
+
+# The launcher is a session of its own, so "the session that armed it" is a
+# nameable thing this test can hang up without touching the suite's own session.
+# It stays alive after arming, because a launching agent that has already exited
+# leaves an orphaned process group that POSIX shields from a terminal hangup -
+# the accident that hides this defect in the field.
+perl -MPOSIX -e '
+  defined(my $pid = fork) or die "fork: $!";
+  if ($pid == 0) {
+    POSIX::setsid() == $$ or die "setsid: $!";
+    exec @ARGV;
+    die "exec: $!";
+  }
+  exit 0;
+' bash -c '
+  export FM_HOME="$2"
+  printf "%s\n" "$$" > "$2/leader"
+  "$1" reconcile > "$2/reconcile.out" 2>&1
+  printf "launched\n" > "$2/launched"
+  while [ ! -e "$2/release" ]; do
+    [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ] || exit 75
+    sleep 0.1
+  done
+' _ "$ROOT/bin/fm-procevent.sh" "$HUP_HOME" >/dev/null 2>&1
+wait_for "$HUP_HOME/leader" || fail "the hangup fixture never recorded its session leader"
+wait_for "$HUP_HOME/launched" || fail "the hangup fixture never armed its source"
+wait_for "$HUP_HOME/state/procevent/hangup-src.runner" \
+  || fail "the hangup fixture's runner never recorded itself"
+wait_for "$HUP_MARK.child" || fail "the hangup fixture's poll never started"
+hup_leader=$(cat "$HUP_HOME/leader")
+hup_runner=$(cat "$HUP_HOME/state/procevent/hangup-src.runner")
+hup_child=$(cat "$HUP_MARK.child")
+hup_session=$(session_of "$hup_leader")
+[ -n "$hup_session" ] || fail "cannot read the session this test hangs up"
+if [ "$(session_of "$hup_runner")" = "$hup_session" ]; then
+  fail "the runner is still in the session that launched it, so a hangup to that session reaches it mid-poll"
+fi
+if [ "$(session_of "$hup_child")" = "$hup_session" ]; then
+  fail "the polling child is still in the session that launched it"
+fi
+
+# The hangup itself: every member of that one session, which is what a
+# session-wide sweep delivers and what a shell hangs its own jobs up with.
+while read -r hup_pid hup_sess; do
+  [ "$hup_sess" = "$hup_session" ] || continue
+  kill -HUP "$hup_pid" 2>/dev/null || true
+done < <(session_members)
+hup_settled=0
+for _ in $(seq 1 100); do
+  if ! kill -0 "$hup_leader" 2>/dev/null; then
+    hup_settled=1
+    break
+  fi
+  sleep 0.1
+done
+[ "$hup_settled" = 1 ] \
+  || fail "the hangup never reached the launching session, so this test proves nothing"
+# A shell defers a hangup until the foreground child it is waiting on returns,
+# so a runner still inside its poll can read as alive for a moment after the
+# signal that will end it. Let the delivery settle before believing either.
+sleep 1
+kill -0 "$hup_runner" 2>/dev/null \
+  || fail "a hangup to the launching session killed the runner"
+kill -0 "$hup_child" 2>/dev/null \
+  || fail "a hangup to the launching session killed the polling child"
+
+# Isolation that breaks collection is not isolation, so the surviving runner has
+# to finish the round it was in the middle of.
+: > "$HUP_MARK.trigger"
+wait_capture "$HUP_HOME" hangup-src || fail "the surviving runner never captured its result"
+assert_grep 'survived the hangup' "$(first_result "$HUP_HOME" hangup-src)" \
+  "the surviving runner captured something other than its source's output"
+: > "$HUP_HOME/release"
+pass "a runner and its poll survive a hangup delivered to the session that launched them"
+
+# --- a runner that dies inside its source command is not silent --------------
+#
+# The other half of the same defect: the poll died mid-call, so no result was
+# ever captured and nothing said so. The runner marker already means "a runner
+# is inside its source command", and the runner clears it on every ordinary way
+# out, so a marker that outlives its runner is the record of a lost round. The
+# owner guard is watching that exact pid and is the soonest anything can read
+# it; reconcile reads it as the backstop for a death the guard did not outlive.
+runner_died_wake_keys() {  # <home> <source-id>
+  [ -e "$1/state/.wake-queue" ] || return 0
+  awk -F '\t' -v id="$2" \
+    '$3 == "check" && index($4, "procevent:" id ":runner-died:") == 1 { print $4 }' \
+    "$1/state/.wake-queue"
+}
+runner_died_wake_count() {  # <home> <source-id>
+  runner_died_wake_keys "$1" "$2" | grep -c . || true
+}
+runner_died_wake_payloads() {  # <home> <source-id>
+  [ -e "$1/state/.wake-queue" ] || return 0
+  awk -F '\t' -v id="$2" \
+    '$3 == "check" && index($4, "procevent:" id ":runner-died:") == 1 { print $5 }' \
+    "$1/state/.wake-queue"
+}
+
+for death_reader in guard reconcile; do
+  DEAD="$TMP_ROOT/runner-death-$death_reader"; new_home "$DEAD"
+  DEAD_MARK="$DEAD/poll"
+  pe_register "$DEAD" lavish dead-src -- "$HUP_STUB" "$DEAD_MARK" >/dev/null
+  FM_PROCEVENT_OWNER_CHECK_SECONDS=1 FM_PROCEVENT_OWNER_LEASE_SECONDS=300 \
+    pe "$DEAD" reconcile >/dev/null 2>&1 || true
+  wait_for "$DEAD/state/procevent/dead-src.runner" \
+    || fail "the death fixture's runner never recorded itself ($death_reader)"
+  wait_for "$DEAD_MARK.child" || fail "the death fixture's poll never started ($death_reader)"
+  dead_runner=$(cat "$DEAD/state/procevent/dead-src.runner")
+  # The reconcile variant ends this runner's own guard first, so the reader
+  # under test is the only thing left that can notice the death. The guard is
+  # matched by the exact runner it was started for, never by script name, which
+  # would reach into another home's guards.
+  if [ "$death_reader" = reconcile ]; then
+    dead_guard=$(ps -eo pid=,args= 2>/dev/null \
+      | awk -v r="$dead_runner" '$0 ~ ("_owner-watchdog dead-src " r " ") { print $1; exit }')
+    [ -n "$dead_guard" ] || fail "the death fixture never started an owner guard"
+    kill -KILL "$dead_guard" 2>/dev/null || true
+  fi
+  # Killing the runner's whole process group is the shape a sweep leaves: no
+  # exit trap runs, nothing is captured, and the polling child goes with it.
+  kill -KILL -"$dead_runner" 2>/dev/null || true
+  for _ in $(seq 1 100); do
+    kill -0 "$dead_runner" 2>/dev/null || break
+    sleep 0.1
+  done
+  if [ "$death_reader" = guard ]; then
+    for _ in $(seq 1 100); do
+      if [ "$(runner_died_wake_count "$DEAD" dead-src)" -gt 0 ]; then
+        break
+      fi
+      sleep 0.1
+    done
+    [ "$(runner_died_wake_count "$DEAD" dead-src)" = 1 ] \
+      || fail "the owner guard did not report the runner it was watching dying inside its source command"
+    # The marker is cleared only after the wake lands, so the wake appearing is
+    # not yet the clearing; nothing else here can remove it.
+    for _ in $(seq 1 100); do
+      if [ ! -e "$DEAD/state/procevent/dead-src.runner" ]; then
+        break
+      fi
+      sleep 0.1
+    done
+    [ ! -e "$DEAD/state/procevent/dead-src.runner" ] \
+      || fail "the announced death left its runner marker behind, which fails this home's sweep preflight"
+  else
+    sleep 1
+    [ "$(runner_died_wake_count "$DEAD" dead-src)" = 0 ] \
+      || fail "a death with no guard left was reported by something other than reconcile"
+    pe "$DEAD" reconcile >/dev/null 2>&1 || true
+    [ "$(runner_died_wake_count "$DEAD" dead-src)" = 1 ] \
+      || fail "reconcile did not report a runner death its guard did not outlive"
+  fi
+  dead_wake=$(runner_died_wake_payloads "$DEAD" dead-src)
+  assert_contains "$dead_wake" "dead-src" \
+    "the runner-death wake does not name the source it is about: $dead_wake"
+  assert_contains "$dead_wake" "captured nothing" \
+    "the runner-death wake does not say the round collected nothing: $dead_wake"
+  # One death, one announcement, however many readers look afterwards, and
+  # recovery is unchanged: the source stays registered and is relaunched.
+  pe "$DEAD" reconcile >/dev/null 2>&1 || true
+  [ "$(runner_died_wake_count "$DEAD" dead-src)" = 1 ] \
+    || fail "the same runner death was announced more than once ($death_reader)"
+  assert_present "$DEAD/state/procevent/dead-src.source" \
+    "announcing a runner death retired the source ($death_reader)"
+  wait_for "$DEAD/state/procevent/dead-src.runner" \
+    || fail "no replacement runner was started after the death ($death_reader)"
+  pe "$DEAD" retire dead-src >/dev/null 2>&1 || true
+done
+pass "a runner that dies inside its source command leaves a durable record that it stopped collecting"
 
 printf '\nall procevent tests passed\n'
