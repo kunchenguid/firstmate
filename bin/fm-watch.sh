@@ -3150,15 +3150,19 @@ EOF
       if ! afk_present && status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
-          # Inconclusive, but the declared wait itself still stands, so only the
-          # per-hash bookkeeping resets. The re-surface throttle bounds the
-          # DECLARATION, not the pane hash: an idle parked pane whose display
-          # ticks (a clock, a token counter) changes hash without changing what
-          # is being waited on, and clearing the throttle here would hand that
-          # same wait a fresh window on every tick - the first sight of each new
-          # hash reaches surface_nonterminal_stale below, so the whole declared
-          # wait would re-alarm far inside PAUSE_RESURFACE_SECS.
-          none)   clear_stale_hash_tracking "$key" ;;
+          # Inconclusive, but the declared wait itself still stands. A pane whose
+          # display ticks (a clock, a token counter, a recap/timer line) changes
+          # hash on EVERY poll never stabilizes long enough to reach the n>=2
+          # detection above, so this branch - not the one below - is the only
+          # place a perpetually churning live-agent wait is ever seen. Routing it
+          # through the same surface_nonterminal_stale a newly-distinct hash
+          # reaches below keeps one behavior for one verdict: the first sighting
+          # of this declaration still surfaces (an inconclusive live pane is not
+          # silently swallowed), and its own declaration-scoped throttle then
+          # absorbs every further poll of the same still-standing wait for the
+          # rest of PAUSE_RESURFACE_SECS - never a bare re-surface on every tick,
+          # and never permanent silence for a pane that never stabilizes.
+          none)   surface_nonterminal_stale "$w" "$h" ;;
           *)      clear_pause_tracking "$key" ;;
         esac
       elif [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then
