@@ -430,19 +430,17 @@ test_lock_live_steal_mutex_is_not_reclaimed() {
 # A process that dies mid-steal (for example on a full disk) abandons the steal
 # mutex itself. Stealing it recursed through `.steal.steal`, `.steal.steal.steal`
 # and so on, leaving one more abandoned level per failed attempt. Reclaim must
-# stop at the fixed `.steal.steal` guard while several contenders race: exactly
-# one wins and still holds the lock after the others finish, no third level is
-# ever created, and an aged leftover chain from an older build does not block.
-# A PATH shim records every symlink and owner directory the contenders create,
-# so a transient deeper level is caught even though a release removes it.
+# stop at the fixed `.steal.steal` guard: no third level is ever created, and an
+# aged leftover chain from an older build does not block acquisition. A PATH
+# shim records every symlink and owner directory the acquirer creates, so a
+# transient deeper level is caught even though a release removes it.
 test_lock_dead_steal_mutex_reclaim_stops_at_two_levels() {
-  local dir state lockdir dead shim trace marker legacy level i pids pid wins
+  local dir state lockdir dead shim trace out legacy level
   dir=$(make_case lock-dead-steal-mutex)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   shim="$dir/shim"
   trace="$dir/created"
-  marker="$dir/wins"
   dead=$(dead_pid)
   mkdir "$shim"
   for tool in ln mktemp; do
@@ -456,7 +454,6 @@ EOF
   for legacy in "" .steal.steal; do
     rm -rf "$lockdir" "$lockdir.steal" "$lockdir.steal.steal" "$lockdir.steal.steal.steal"
     : > "$trace"
-    : > "$marker"
     mkdir "$lockdir" "$lockdir.steal"
     printf '%s\n' "$dead" > "$lockdir/pid"
     printf '%s\n' "$dead" > "$lockdir.steal/pid"
@@ -466,30 +463,18 @@ EOF
       printf '%s\n' "$dead" > "$lockdir.steal.steal.steal/pid"
       touch -t 200001010000 "$lockdir.steal.steal" "$lockdir.steal.steal.steal"
     fi
-    pids=
-    i=1
-    while [ "$i" -le 12 ]; do
-      PATH="$shim:$PATH" FM_STATE_OVERRIDE="$state" bash -c '
-        . "$1"
-        if fm_lock_try_acquire "$2"; then
-          sleep 3
-          if [ "$(cat "$2/pid" 2>/dev/null || true)" = "${BASHPID:-$$}" ]; then
-            printf "held\n" >> "$3"
-          else
-            printf "lost\n" >> "$3"
-          fi
-          fm_lock_release "$2"
-        fi
-      ' _ "$LIB" "$lockdir" "$marker" &
-      pids="$pids $!"
-      i=$((i + 1))
-    done
-    for pid in $pids; do
-      wait "$pid" 2>/dev/null || true
-    done
-    wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
-    [ "$wins" -eq 1 ] || fail "expected exactly one winner behind a dead steal mutex (legacy='$legacy'), got $wins: $(cat "$marker")"
-    grep -qx held "$marker" || fail "winner lost the lock while holding it (legacy='$legacy')"
+    out=$(PATH="$shim:$PATH" FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+      printf "rc=%s pid=%s \n" "$rc" "$(cat "$2/pid" 2>/dev/null || true)"
+    ' _ "$LIB" "$lockdir")
+    case "$out" in
+      *"rc=0"*) ;;
+      *) fail "dead primary lock behind a dead steal mutex was not reclaimed (legacy='$legacy'): $out" ;;
+    esac
+    case "$out" in
+      *"pid=$dead "*) fail "reclaimed lock still names the dead owner: $out" ;;
+    esac
     [ -s "$trace" ] || fail "PATH shim recorded nothing; the no-deeper-level assertion is vacuous"
     if grep -q '\.steal\.steal\.steal' "$trace"; then
       fail "reclaim created a steal level deeper than two (legacy='$legacy'): $(cat "$trace")"
@@ -499,7 +484,79 @@ EOF
         && fail "reclaim left $level behind (legacy='$legacy')"
     done
   done
-  pass "dead steal mutex reclaim stops at the fixed two-level guard with one winner"
+  pass "dead steal mutex reclaim stops at the fixed two-level guard"
+}
+
+# Two contenders both pass the stale recheck of the same dead, aged
+# `.steal.steal` guard. Contender a reclaims it and pauses holding the new
+# guard just before it replaces the dead steal mutex; only then does b act on
+# its now-stale check. Injected through function wrappers so the interleaving is
+# exact, not timed: b must lose without touching a's guard, and a must end up
+# the only holder of `.steal`.
+test_lock_dead_guard_reclaim_has_one_winner_after_shared_recheck() {
+  local dir state lockdir dead sync pa pb wins
+  dir=$(make_case lock-dead-guard-interleave)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  sync="$dir/sync"
+  dead=$(dead_pid)
+  mkdir "$sync" "$lockdir.steal" "$lockdir.steal.steal"
+  printf '%s\n' "$dead" > "$lockdir.steal/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal.steal/pid"
+  touch -t 200001010000 "$lockdir.steal.steal"
+  contender() {  # <role>
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      role=$2 lock=$3 sync=$4
+      await() {
+        local i=0
+        while [ ! -e "$1" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+      }
+      eval "_real_recheck() $(declare -f fm_lock_recheck_stale_owner | tail -n +2)"
+      fm_lock_recheck_stale_owner() {
+        _real_recheck "$@" || return 1
+        case "$1" in
+          *.steal.steal)
+            : > "$sync/$role-past-recheck"
+            if [ "$role" = a ]; then await "$sync/b-past-recheck"; else await "$sync/a-ready"; fi
+            ;;
+        esac
+      }
+      eval "_real_remove() $(declare -f fm_lock_remove_path | tail -n +2)"
+      fm_lock_remove_path() {
+        if [ "$role" = a ] && [ "$1" = "$lock.steal" ]; then
+          : > "$sync/a-ready"
+          await "$sync/b-done"
+        fi
+        _real_remove "$@"
+      }
+      if fm_lock_try_acquire "$lock.steal"; then
+        printf "%s\n" "$role" >> "$sync/wins"
+      fi
+      : > "$sync/$role-done"
+      await "$sync/a-done"
+      await "$sync/b-done"
+      if grep -qx "$role" "$sync/wins" 2>/dev/null \
+        && [ "$(cat "$lock.steal/pid" 2>/dev/null || true)" != "${BASHPID:-$$}" ]; then
+        printf "%s\n" "$role" >> "$sync/lost"
+      fi
+      fm_lock_release "$lock.steal"
+    ' _ "$LIB" "$1" "$lockdir" "$sync"
+  }
+  contender a &
+  pa=$!
+  contender b &
+  pb=$!
+  wait "$pa" 2>/dev/null || true
+  wait "$pb" 2>/dev/null || true
+  [ -e "$sync/a-past-recheck" ] && [ -e "$sync/b-past-recheck" ] \
+    || fail "interleaving not injected: both contenders must pass the guard recheck"
+  wins=$(awk 'NF { c++ } END { print c + 0 }' "$sync/wins" 2>/dev/null)
+  [ "$wins" -eq 1 ] || fail "expected exactly one steal-mutex winner after a shared guard recheck, got $wins: $(cat "$sync/wins" 2>/dev/null)"
+  [ ! -s "$sync/lost" ] || fail "a winner lost its steal mutex to another contender: $(cat "$sync/lost")"
+  [ -e "$lockdir.steal.steal.steal" ] || [ -L "$lockdir.steal.steal.steal" ] \
+    && fail "guard reclaim created a third steal level"
+  pass "dead guard reclaim yields exactly one winner when contenders share a recheck"
 }
 
 test_lock_does_not_steal_live_lock() {
@@ -1339,6 +1396,7 @@ test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_dead_steal_mutex_reclaim_stops_at_two_levels
+test_lock_dead_guard_reclaim_has_one_winner_after_shared_recheck
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate

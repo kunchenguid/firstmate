@@ -945,9 +945,9 @@ fm_recovery_marker_reopen_announced() {
 # `<lock>.steal.steal`, which is taken only by plain creation and never stolen
 # through a deeper level, so a process dying mid-steal (for example on a full
 # disk) can never grow the chain past two levels. A guard left by another
-# process is reclaimed only once it has aged past the guard grace and while it
-# still names that same dead owner; one this process abandoned in an
-# interrupted frame is reclaimed at once, as fm_lock_try_acquire does.
+# process is reclaimed only once it has aged past the guard grace; one this
+# process abandoned in an interrupted frame is reclaimed at once, as
+# fm_lock_try_acquire does. Either way the reclaim is fm_lock_claim_level.
 fm_lock_try_acquire_steal_guard() {
   local guard=$1 pid owner current
   fm_lock_try_create "$guard" && return 0
@@ -961,8 +961,46 @@ fm_lock_try_acquire_steal_guard() {
     [ "$(fm_path_age "$guard")" -ge "${FM_GUARD_GRACE:-300}" ] || return 1
     fm_lock_recheck_stale_owner "$guard" "$owner" "$pid" || return 1
   fi
-  fm_lock_remove_path "$guard" || true
+  fm_lock_claim_level "$guard" "$owner" "$pid" || return 1
   fm_lock_try_create "$guard"
+}
+
+# Reclaim a lock level checked as held by <owner>/<pid> with one atomic rename
+# into a fresh tombstone, so of any number of contenders acting on the same
+# check exactly one takes the lock object away. The tombstone is deleted only
+# when it still names that checked owner (the same owner link, or the same
+# plain directory recording the same pid). Anything else - a lock published
+# after the check - is put back only while the path is still absent (an owner
+# link through a no-clobber `ln -s`), and otherwise left in the tombstone; the
+# caller did not win either way.
+fm_lock_claim_level() {  # <lockdir> <owner> <pid>
+  local lockdir=$1 owner=$2 pid=$3 lock_abs tomb target same
+  lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
+  tomb=$(mktemp -d "${lock_abs}.tomb.XXXXXX" 2>/dev/null) || return 1
+  if ! mv "$lockdir" "$tomb/lock" 2>/dev/null; then
+    rmdir "$tomb" 2>/dev/null || true
+    return 1
+  fi
+  same=false
+  if [ -n "$owner" ]; then
+    fm_lock_points_to_owner "$tomb/lock" "$owner" && same=true
+  elif [ -d "$tomb/lock" ] && [ ! -L "$tomb/lock" ]; then
+    same=true
+  fi
+  if [ "$same" = true ] && [ "$(cat "$tomb/lock/pid" 2>/dev/null || true)" = "$pid" ]; then
+    fm_lock_remove_path "$tomb/lock" || true
+    rmdir "$tomb" 2>/dev/null || true
+    return 0
+  fi
+  if [ -L "$tomb/lock" ]; then
+    target=$(readlink "$tomb/lock" 2>/dev/null) \
+      && ln -s "$target" "$lockdir" 2>/dev/null \
+      && rm -f "$tomb/lock"
+  elif [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    mv "$tomb/lock" "$lockdir" 2>/dev/null
+  fi
+  rmdir "$tomb" 2>/dev/null || true
+  return 1
 }
 
 fm_lock_try_acquire() {
