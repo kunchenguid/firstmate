@@ -146,7 +146,7 @@ On a Pi primary, supervision is default-on: the watcher extension can hand eligi
 The branch handles those rows, stores the outcome durably, and merges it back into main.
 A captain-facing outcome persists as one exact, sequence-keyed visible transcript entry and then opens one sequence-keyed processing turn on main, which only main's sequence-bound acknowledgement closes.
 [docs/pi-supervision-branch.md](pi-supervision-branch.md) owns row eligibility, dispatch architecture, deterministic outcome delivery, and processing re-presentation, while the generated [Pi supervision protocol](supervision-protocols/pi.md) owns MAIN's merged-event handling and acknowledgement duty.
-For the opt-in away-posture exception to the non-Pi harnesses' wake-to-main path, see [supervision-host.md](supervision-host.md).
+For the opt-in supervision host that runs the same branch contract beside a non-Pi primary, away and on Claude and Cursor also attended, see [supervision-host.md](supervision-host.md).
 
 ### Registered secondmate current state
 

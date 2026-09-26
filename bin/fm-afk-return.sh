@@ -430,10 +430,25 @@ scan_landed_awaiting_cleanup() {  # -> <task>\t<url> rows
   done
 }
 
-render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
-  local evidence=$1 blockers=$2 since=$3 now record superseded superseded_at archive_dir stamp
-  local tag task key summary count routine captain live held_err last verb rows status url
+render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch> <drain-ok>
+  local evidence=$1 blockers=$2 since=$3 drain_ok=$4 now record superseded superseded_at archive_dir stamp
+  local tag task key summary count routine captain live held_err last verb rows status url drained=0 pointer
   now=$(date +%s)
+  # Where main processes outcomes through the drain's BRANCH OUTCOMES section
+  # (the supervision host off Pi, docs/supervision-host.md "Captain outcomes"),
+  # the drain alone presents the window's outcomes and owns their read cursor,
+  # so the brief counts them and points there instead of listing them, or says
+  # they await a successful drain when this return's drain failed.
+  # shellcheck source=bin/fm-supervision-engine-lib.sh
+  if . "$SCRIPT_DIR/fm-supervision-engine-lib.sh" \
+    && fm_supervision_host_outcomes_drained "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"; then
+    drained=1
+  fi
+  if [ "$drain_ok" -eq 1 ]; then
+    pointer="presented in the drain's BRANCH OUTCOMES section"
+  else
+    pointer="awaiting a successful drain: this return's drain failed before its BRANCH OUTCOMES section recorded them, and bin/fm-afk-return.sh check drains again"
+  fi
   printf '=== Return brief'
   if [ -n "$since" ]; then
     printf ' (away %s -> %s, %s)' "$(epoch_to_iso "$since")" "$(epoch_to_iso "$now")" "$(format_duration $((now - since)))"
@@ -500,7 +515,11 @@ $(status_open_decisions "$status")
 EOF
   done
   rows=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "captain" { printf "  - %s: %s\n", $2, $5 }')
-  if [ -n "$rows" ]; then
+  if [ -n "$rows" ] && [ "$drained" -eq 1 ]; then
+    count=$((count + 1))
+    printf '  %s captain outcome(s) escalated by the away session, %s\n' \
+      "$(printf '%s\n' "$rows" | wc -l | tr -d ' ')" "$pointer"
+  elif [ -n "$rows" ]; then
     count=$((count + 1))
     printf '  escalated by the away session:\n'
     printf '%s\n' "$rows" | sed 's/^/  /'
@@ -550,7 +569,11 @@ EOF
   routine=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { n++ } END { print n + 0 }')
   captain=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "captain" { n++ } END { print n + 0 }')
   printf '  %s outcome(s) handled by the away session (%s routine, %s escalated above)\n' "$((routine + captain))" "$routine" "$captain"
-  if [ "$routine" -gt 0 ]; then
+  if [ "$drained" -eq 1 ] && [ "$((routine + captain))" -gt 0 ] && [ "$drain_ok" -eq 1 ]; then
+    printf '  the drain'"'"'s BRANCH OUTCOMES section presents them: each task'"'"'s captain outcomes on one line until you acknowledge them, routine ones once, past its limit as a count\n'
+  elif [ "$drained" -eq 1 ] && [ "$((routine + captain))" -gt 0 ]; then
+    printf '  all %s\n' "$pointer"
+  elif [ "$routine" -gt 0 ]; then
     printf '  %s routine outcome(s) recorded; the latest:\n' "$routine"
     printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { printf "    - %s: %s\n", $2, $5 }' | tail -5
   else
@@ -565,7 +588,7 @@ EOF
 }
 
 return_reconcile() {
-  local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1 since contract_since superseded_record retained_record
+  local evidence blockers drain_err drained drain_ok=1 wake_ack_line wake_ack_through wake_ack_generation wedge escalations lifecycle_ok=1 since contract_since superseded_record retained_record
   local archived_contract tag kind text retained_live restored_epoch
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
@@ -623,11 +646,14 @@ EOF
     fi
   fi
 
-  drained=$("$SCRIPT_DIR/fm-wake-drain.sh" 2> "$drain_err") || {
+  if drained=$("$SCRIPT_DIR/fm-wake-drain.sh" 2> "$drain_err"); then
+    remove_evidence lifecycle 'durable wake drain failed; retry catch-up before ordinary work' "$evidence" || lifecycle_ok=0
+  else
     append_evidence lifecycle 'durable wake drain failed; retry catch-up before ordinary work' "$evidence"
     lifecycle_ok=0
+    drain_ok=0
     drained=""
-  }
+  fi
   grep -v '^WAKE_ACK_REQUIRED:' "$drain_err" >&2 || true
   wake_ack_line=$(grep '^WAKE_ACK_REQUIRED:' "$drain_err" | tail -1)
   wake_ack_through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err" | tail -1)
@@ -709,7 +735,7 @@ EOF
     append_evidence lifecycle "status file unreadable: $STATUS_SCAN_ERROR; catch-up stays gated" "$evidence"
     lifecycle_ok=0
   fi
-  render_return_brief "$evidence" "$blockers" "$since"
+  render_return_brief "$evidence" "$blockers" "$since" "$drain_ok"
   if [ "$HELD_READ_FAILED" -eq 1 ]; then
     append_evidence lifecycle "held set unreadable: $HELD_READ_PATH; catch-up stays gated" "$evidence"
     lifecycle_ok=0
