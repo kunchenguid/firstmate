@@ -1109,6 +1109,29 @@ A ship brief's delivery mode is deliberately not sent, because in live runs nami
 
 The scaffold's standard setup, rules, and definition-of-done text is the same in every brief, so leaving it out keeps its safety language from reading as a signal about the task.
 
+**Never-send list (config/dispatch-never-send)**
+
+The optional local, gitignored `config/dispatch-never-send` keeps values you name from ever leaving the machine in a resolver request.
+It has no default entries, and an absent file changes nothing.
+The file is local to each home and is not inherited into secondmate homes.
+
+Each line is one entry:
+
+- A plain line is a literal value, matched case-insensitively.
+- A line beginning `re:` is a POSIX extended regular expression, matched as written.
+- Blank lines and lines beginning with `#` are ignored, and every entry is trimmed of surrounding whitespace; write a value that begins with `#` or `re:` as a regular expression.
+
+```text
+# Client names
+Example Client Ltd
+re:[A-Z]{2}-[0-9]{6}
+```
+
+Before the request is sent, every string in it is checked: the project name, the task text, each rule's `when`, and the fixed question text.
+A match stops the request: the resolver behaves exactly as when it is off, printing one `dispatch-resolve: off (...; nothing sent)` line on stderr and nothing on stdout, making no network or quota call, and exiting 0, so firstmate dispatches through its existing intake.
+A list that is present but not a readable regular file, or that holds an empty or invalid regular expression, also stops the request the same way rather than sending unchecked text.
+That one diagnostic names the list line number at most and never prints the listed value or the matching text.
+
 **Missing or invalid rules**
 
 An absent rules file, a default-only file, or `rules: []` returns the non-clear reason `no rules to match` without a model or quota request, leaving firstmate's existing routing in control; an existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.

@@ -246,6 +246,88 @@ assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
 
+# --- never-send list: a match or a bad list withholds the request -------------
+NEVER_SEND="$HOME_DIR/config/dispatch-never-send"
+PRIVATE_BRIEF="$TMP_ROOT/private-brief.md"
+cat > "$PRIVATE_BRIEF" <<'MD'
+# Task
+## Captain's intent
+Fix the pager for the Acme-Ledger account 4417-2290.
+
+## Firstmate spec
+- Keep the change small.
+MD
+expect_withheld() {  # <label> <stderr fragment> [<value that must not print>...]
+  local label=$1 fragment=$2
+  shift 2
+  expect_code 0 "$code" "$label exits 0"
+  assert_equals '' "$out" "$label prints nothing on stdout, so firstmate uses its existing intake"
+  assert_contains "$err" "dispatch-resolve: off ($fragment" "$label names why on stderr"
+  assert_contains "$err" 'nothing sent)' "$label says nothing was sent"
+  assert_equals '1' "$(grep -c . <<<"$err")" "$label prints one diagnostic line"
+  assert_absent "$LOG/argv" "$label never calls curl"
+  assert_absent "$LOG/quota-axi.calls" "$label never reads quota"
+  local value
+  for value in "$@"; do
+    assert_not_contains "$err" "$value" "$label never prints the listed value"
+  done
+}
+
+printf '%s\n' '# private values' '' '   ' 'Unlisted-Value' 're:never-[0-9]{9}' > "$NEVER_SEND"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+assert_contains "$out" '  status: clear' "a list with no match leaves resolution unchanged"
+assert_contains "$(jq -r .state.task.brief "$LOG/body")" 'Acme-Ledger' "a list with no match sends the task text"
+
+printf '%s\n' '# private values' '' '  acme-ledger  ' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+expect_withheld "a case-insensitive literal match" "brief text matches $NEVER_SEND line 3" 'acme-ledger' 'Acme-Ledger'
+
+printf '%s\n' 're:[0-9]{4}-[0-9]{4}' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+expect_withheld "a regex match" "brief text matches $NEVER_SEND line 1" '4417-2290' '[0-9]{4}'
+
+printf '%s\n' 'orion-private' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project orion-private
+expect_withheld "a project-name match" "brief text matches $NEVER_SEND line 1" 'orion-private'
+
+printf '%s\n' 'stated root cause' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_withheld "a rule-criterion match" "brief text matches $NEVER_SEND line 1" 'stated root cause'
+
+printf '%s\n' 're:acme-(' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+expect_withheld "an invalid regex" "$NEVER_SEND line 1 is not a valid pattern" 'acme-('
+
+printf '%s\n' 're:  ' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+expect_withheld "an empty regex" "$NEVER_SEND line 1 is an empty pattern"
+
+rm -f "$NEVER_SEND"
+mkdir "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+expect_withheld "a directory at the list path" "$NEVER_SEND is not a readable regular file"
+rmdir "$NEVER_SEND"
+ln -s "$TMP_ROOT/missing-never-send" "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+expect_withheld "a broken symlink at the list path" "$NEVER_SEND is not a readable regular file"
+rm -f "$NEVER_SEND"
+
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
+assert_contains "$out" '  status: clear' "no list resolves exactly as before"
+assert_contains "$(jq -r .state.task.brief "$LOG/body")" 'Acme-Ledger' "no list sends the task text as before"
+pass "never-send list withholds the request on a match or a bad list, and never prints the value"
+
 # --- rules are snapshotted and line output is injection-safe -------------------
 MUTATED_RULES="$TMP_ROOT/mutated-rules.json"
 jq '.rules[3].use = {"harness":"claude","model":"opus"}' "$BASE_RULES" > "$MUTATED_RULES"
