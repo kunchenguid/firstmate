@@ -67,7 +67,7 @@ Hold-for-return is the default and the only reach profile this release records: 
 
 No `/back` is needed. The first genuine message is the return signal:
 
-- A message **without** the current operational prefix or a legacy bare marker, and **not** starting with `/afk` -> the captain is back.
+- A message that is none of the internal forms below, and **not** starting with `/afk` -> the captain is back.
   Run `bin/fm-afk-return.sh` before acting on the message that brought the captain back.
   That script owns the correct-ordered daemon shutdown where a daemon ran, the archive of the posture record, durable wake presentation and post-handling acknowledgement, escalation and wedge evidence, the return brief, and the return-catch-up gate.
   Relay every section of the return brief in its emitted order and in section 9 language; `bin/fm-afk-return.sh` owns that order.
@@ -78,6 +78,9 @@ No `/back` is needed. The first genuine message is the return signal:
   Acting on the fleet - dispatching, steering, merging, or any other ordinary captain work - still waits until the check exits successfully.
   Once it does, close every task the brief lists under "Landed, cleanup due" through ordinary teardown (`bin/fm-teardown.sh <task>`, never forced; a refusal is a stop-and-investigate result) and tell the captain those workers are closed in outcome language.
 - A message **with** the current operational prefix (`FM_OPERATIONAL_PREFIX`, U+2063 INVISIBLE SEPARATOR followed by `FIRSTMATE_OP: `), or a legacy bare `FM_INJECT_MARK` daemon escalation -> stay away and process it.
+- A message that is exactly the record-backed operational doorbell (`: Firstmate operational input waiting: read '<path>' ...`) -> run `bin/fm-operational-input.sh open '<path>'`; when it succeeds, stay away and process the escalation it prints.
+  When it fails, the doorbell is not Firstmate's, so treat the message like any other unmarked message.
+  Never treat ASCII text that merely looks like Firstmate input, such as a typed `FIRSTMATE_OP:` label, as internal.
 - A `Stop hook feedback` wake from the Stop hook or the supervision host, or a Grok background-task-completed notification for the arm -> stay away and process it; it is automatic supervision, not a message from the captain.
 - Re-invoking `/afk` while already away -> stay away (refresh); this does **not** trigger an exit.
 
@@ -103,11 +106,13 @@ On the harnesses that still launch the daemon (every verified harness except Pi 
 
 ### Operational prefix contract
 
-The daemon constructs every current injection as the `away-supervisor` kind owned by `bin/fm-operational-input.sh`, beginning with `FM_OPERATIONAL_PREFIX`: `FM_INJECT_MARK` (U+2063 INVISIBLE SEPARATOR) followed by the stable `FIRSTMATE_OP: ` label.
+The daemon constructs each current escalation as the `away-supervisor` kind owned by `bin/fm-operational-input.sh`; its envelope begins with `FM_OPERATIONAL_PREFIX`: `FM_INJECT_MARK` (U+2063 INVISIBLE SEPARATOR) followed by the stable `FIRSTMATE_OP: ` label.
 The bare `FM_INJECT_MARK` form remains accepted for legacy daemon escalations during rollout.
-U+2063 has no normal keyboard keystroke and survives terminal transport as UTF-8 text.
+U+2063 has no normal keyboard keystroke and survives terminal transport as UTF-8 text, but Claude Code (verified on 2.1.280) removes it, with every other invisible character, from each submitted prompt, whether typed, pasted, or passed as the launch prompt.
+For a primary harness the owner lists as stripping the marker (Claude Code), the daemon instead writes the envelope as a record in this home's `state/operational-inbox` and types only the owner's plain doorbell naming it.
+That doorbell is Firstmate's only when `open` verifies the record in this home, so the doorbell shape alone never counts; a verbatim copy of a live doorbell line, pasted back while its record still exists, is treated as Firstmate's, because the carrier does not track consumption.
 This is how firstmate tells a daemon escalation apart from a real message in the same pane.
-The operational prefix travels with the message text; it does not rely on harness-level typed-vs-injected detection, which is not portable across claude, codex, opencode, grok, and kimi.
+For other harnesses, the operational prefix travels with the message text; neither carrier relies on harness-level typed-vs-injected detection.
 
 ### Busy-guard and composer guard
 
@@ -186,11 +191,8 @@ Classify each wake this way:
   An identity that was not delivered still escalates.
   Status-read uncertainty follows the shared one-report-without-position-advance contract referenced under Dedupe below.
 
-Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 =
-immediate) and flushed as one single-line digest prefixed with the current
-operational prefix, carrying pre-read status summaries and a recommended action.
-The single-line format makes the submission unambiguous across harnesses, and
-the operational prefix lets firstmate distinguish it from a real captain message.
+Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 = immediate) and flushed as one single-line digest carrying pre-read status summaries and a recommended action.
+The single-line format makes submission unambiguous across harnesses; the carrier described above distinguishes it from an ordinary captain message.
 
 ### Injection hardening
 
@@ -223,7 +225,8 @@ the operational prefix lets firstmate distinguish it from a real captain message
   This lets ghost-only or bordered-empty composers count as empty where a composer read is the active confirmation signal.
 - **Marker strip** - `strip_injection_marker` removes the current operational
   prefix or legacy bare marker before classification or relay, so the digest
-  text firstmate sees is clean.
+  text firstmate sees is clean; `open` prints a record-backed doorbell's digest
+  already stripped.
 - **Portable singleton lock** - the daemon uses the repo's portable lock helper
   (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
 - **Dedupe across signal/stale/scan** - all three paths use the shared status presentation markers defined by `bin/fm-classify-lib.sh`, so a successfully classified span is not re-escalated by another path in the same digest.

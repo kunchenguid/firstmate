@@ -187,9 +187,9 @@ Only `genuine-user-prompt`, `genuine-agent-response`, and `working-status` are p
 Every other audited class is policy-hidden when Pi exposes a supported presentation boundary, but semantic input is never transformed to enforce that preference.
 The home-local persistence schema is owned by [`docs/configuration.md`](configuration.md#calm-preference-configcalm).
 
-Current session-start, watcher, turn-end guard, away supervisor, and launch-brief inputs retain their versioned U+2063 static envelopes.
+On Pi, current session-start, watcher, turn-end guard, away supervisor, and launch-brief inputs use their versioned U+2063 static envelopes.
 The established leading `[fm-from-firstmate]` plus U+2063 routing carrier remains current so running secondmate charters remain compatible.
-An exact current static envelope remains sufficient provenance without nonce, source-authentication, replay-prevention, secondary-token, blocking, redaction, or private-retrieval machinery.
+Claude-bound typed away escalations and launch briefs instead use the record-backed carrier owned by `bin/fm-operational-input.sh`; its replay limit is described in [`calm.md`](calm.md#claude-code).
 Calm classifies only at Pi's transcript-presentation owner through the canonical parser and never replaces, reorders, or weakens those messages.
 
 The session-start nudge already originates as a non-displayed custom message, so it remains on that existing path while retaining model context and session persistence.
@@ -796,4 +796,48 @@ The flag-off session's settled screen, with the preference `on` on disk, drew Cl
 ⏺ The three words are alpha, beta, and gamma.
 
 ✻ Sautéed for 8s · done 11:07 AM
+```
+
+## 2026-09-25 Claude Code 2.1.280 verification and the record-backed operational doorbell
+
+Claude Code 2.1.280 removes invisible characters, U+2063 included, from every submitted prompt, whether typed, pasted, or passed as the launch prompt.
+A typed operational envelope first shows `Removed 1 invisible character · review and press Enter to send`, and the next Enter stores it as plain `FIRSTMATE_OP: ...` text that no consumer can tell apart from a human message.
+No setting or environment variable turns the removal off.
+For the current delivery and presentation contracts, see [`fm-operational-input.sh`](../bin/fm-operational-input.sh) and [`calm.md`](calm.md#claude-code).
+
+2.1.280 also logs the module load as `hooks module firstmate-calm@<source> loaded` (`@skills-dir` for the project auto-load path), so the live guard matches either form.
+
+Observed on 2.1.280 with the flag on, beyond the live guard:
+
+```text
+$ claude --version
+2.1.280 (Claude Code)
+
+$ bash tests/fm-calm-claude-mod.test.sh
+ok - the mod's operational-input classifier agrees with bin/fm-operational-input.sh on all 77 corpus cases: every current kind the owner encodes, every legacy shape, and every near miss
+ok - the mod's doorbell port agrees with bin/fm-operational-input.sh doorbell-kind on all 28 cases: every record the owner writes and every unbacked or malformed near miss
+
+$ bash tests/fm-calm-claude-mod-plugin.test.sh
+ok - Claude Code 2.1.280 (Claude Code) validates the Calm mod strictly at its folder and its auto-load path, hooking exactly the working row, tool, user, and assistant drawings and /calm
+ok - Claude Code 2.1.280 (Claude Code) runs the Calm mod's plugin test suites clean: persisted toggle, hidden rows, working notes, and the clock-driven working ship
+```
+
+The live guard in its current form is recorded on 2.1.282 in the next section.
+
+## 2026-09-25 Claude Code 2.1.282 reproduction on the installed build
+
+The failure was reproduced end to end on the installed Claude Code 2.1.282 in a disposable lab home and project on a private tmux socket, never touching the default tmux server or any real home.
+
+- Typed path: `tmux send-keys -l` of `⁣FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate <test events>`, then Enter, left the composer showing `Removed 1 invisible character · review and press Enter to send`; a second Enter submitted it, and the stored session transcript held `FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate ...` with no U+2063 byte.
+- Launch-prompt path: launching `claude` with the encoded launch-brief envelope as the prompt argument printed `Removed 1 invisible character from the launch prompt before sending it`; the stored transcript row kept the brief text but no U+2063.
+- With the record-backed doorbell: the away-mode daemon's `inject_msg` delivered the doorbell to the real Claude pane as a composer-visible ASCII line only, and the live guard passed.
+
+```text
+$ claude --version
+2.1.282 (Claude Code)
+
+$ FM_CLAUDE_CALM_LIVE_E2E=1 bash tests/fm-calm-claude-mod-live-e2e.test.sh
+ok - Claude Code 2.1.282 (Claude Code) with the flag unset: no hooks module, no /calm, stock working row, stock tool rows, preference on ignored
+ok - Claude Code 2.1.282 (Claude Code) with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, tool rows and the record-backed operational doorbell draw at zero height, /calm restores and re-hides them while persisting the shared preference
+ok - Claude Code 2.1.282 (Claude Code) resumes the transcript with Calm's hidden rows still hidden and the preference intact
 ```

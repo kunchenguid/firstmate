@@ -739,6 +739,45 @@ unit_herdr_run_failure_preserves_unconfirmed_record() {
   rm -rf "$st"
 }
 
+# The daemon terminal is outside the captain's process tree, so it cannot detect
+# the captain's harness itself; each backend's launch must hand it over.
+unit_daemon_terminal_receives_the_primary_harness() {
+  local st entry backend got
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-daemon-harness.XXXXXX")
+  entry="$st/entry"
+  # shellcheck disable=SC2016 # expands in the entry script.
+  printf '#!/usr/bin/env bash\nprintf "%%s" "${FM_DAEMON_PRIMARY_HARNESS-unset}" > "$FM_HOME/daemon-harness"\n' > "$entry"
+  chmod +x "$entry"
+  # shellcheck disable=SC2016 # positional params expand in the child shell.
+  for backend in herdr tmux; do
+    rm -f "$st/daemon-harness"
+    env -u FM_DAEMON_PRIMARY_HARNESS FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_LAUNCH_ENTRY="$entry" \
+      FM_TEST_HARNESS=claude bash -c '
+      . "$1"
+      fm_backend_source() { return 0; }
+      fm_backend_herdr_server_ensure() { return 0; }
+      fm_backend_herdr_cli() {
+        if [ "$2 $3" = "workspace create" ]; then
+          printf %s '\''{"result":{"workspace":{"workspace_id":"ws-exact"},"root_pane":{"pane_id":"pane-exact"}}}'\''
+        elif [ "$2 $3" = "pane run" ]; then
+          bash -c "$5"
+        fi
+      }
+      tmux() { [ "$1" = new-session ] && bash -c "$5"; }
+      fm_afk_launch_record_write() { return 0; }
+      fm_afk_launch_commit_terminal() { return 0; }
+      fm_afk_launch_create_"$2" lab:captain "$2"
+    ' _ "$LAUNCH" "$backend" >/dev/null 2>&1
+    got=$(cat "$st/daemon-harness" 2>/dev/null || true)
+    if [ "$got" = claude ]; then
+      pass "$backend daemon terminal: runs with the captain's primary harness"
+    else
+      fail "$backend daemon terminal: primary harness not handed over (got '${got:-nothing}')"
+    fi
+  done
+  rm -rf "$st"
+}
+
 unit_record_failure_closes_terminal() {
   local st closed
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-record-fail.XXXXXX")
@@ -1364,6 +1403,7 @@ unit_signal_exits_with_lock_cleanup
 unit_herdr_partial_create_recovery
 unit_herdr_error_with_exact_ids_closes_exact
 unit_herdr_run_failure_preserves_unconfirmed_record
+unit_daemon_terminal_receives_the_primary_harness
 unit_record_failure_closes_terminal
 unit_readiness_failure_rolls_back_terminal
 unit_readiness_failure_preserves_unconfirmed_record
