@@ -1275,8 +1275,8 @@ spawn_abort_cleanup() {
   # shell.
   if [ -n "$HERDR_FLAT_ABORT_TARGET" ] && [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
     fm_backend_herdr_kill "$HERDR_FLAT_ABORT_TARGET" 2>/dev/null || true
+    HERDR_FLAT_ABORT_TARGET=
   fi
-  HERDR_FLAT_ABORT_TARGET=
   # A relaunch's replacement pane that never reached the published record is
   # closed while it is still the agent-free shell it was created as, leaving
   # the recorded pane exactly as the previous agent left it.
@@ -1361,17 +1361,30 @@ spawn_abort_cleanup() {
   # project lock is still held: the record that would own the slot is not
   # published yet, so nothing was launched in it. Treehouse returns it only if
   # it still names this task as the holder. After publication the record owns
-  # the lease and teardown returns it; a record rolled back since then leaves
-  # the lease with nothing to return it, so that case is named instead.
+  # the lease and teardown returns it. A record rolled back since then leaves
+  # nothing else to return it, so it is returned here too, under the retaken
+  # project lock, once the task's pane is confirmed gone - a flat pane nothing
+  # was launched into is closed first - the same gate teardown applies before
+  # its return. A pane that may still hold an agent keeps the lease, named.
   if [ "$SPAWN_WT_LEASED" = 1 ] && [ -n "${WT:-}" ]; then
     SPAWN_WT_LEASED=0
     if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
       (cd "$PROJ_ABS" && treehouse return --if-lease-holder "$ID" "$WT") </dev/null >/dev/null 2>&1 ||
         echo "warning: could not return task $ID's leased Treehouse slot $WT after the aborted spawn; release it with: treehouse return --if-lease-holder $ID $WT" >&2
     elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
-      echo "warning: task $ID's aborted spawn left Treehouse slot $WT leased with no task record to return it; release it with: treehouse return --if-lease-holder $ID $WT" >&2
+      [ "$SPAWN_LAUNCH_SENT" = 1 ] || [ -z "$HERDR_FLAT_ABORT_TARGET" ] ||
+        fm_backend_herdr_kill "$HERDR_FLAT_ABORT_TARGET" 2>/dev/null || true
+      if fm_backend_herdr_endpoint_confirmed_gone "${T:-}" &&
+        fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
+        (cd "$PROJ_ABS" && treehouse return --if-lease-holder "$ID" "$WT") </dev/null >/dev/null 2>&1 ||
+          echo "warning: could not return task $ID's leased Treehouse slot $WT after the aborted spawn; release it with: treehouse return --if-lease-holder $ID $WT" >&2
+        fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK" || true
+      else
+        echo "warning: task $ID's aborted spawn left Treehouse slot $WT leased with no task record to return it, because its pane ${T:-} is not confirmed gone or the Treehouse project lock is busy; once no agent runs there, release it with: treehouse return --if-lease-holder $ID $WT" >&2
+      fi
     fi
   fi
+  HERDR_FLAT_ABORT_TARGET=
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
     SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
     fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK" || true

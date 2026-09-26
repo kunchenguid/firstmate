@@ -16,7 +16,9 @@
 #   3. A relaunch replaces the pane with a fresh one in the worktree, so the
 #      saved cwd stays the worktree and the next restart resumes the
 #      replacement's conversation, not the previous one.
-#   4. A spawn that aborts after taking its lease and pane leaves neither.
+#   4. A spawn that aborts after taking its lease and pane leaves neither,
+#      both before its record is published and after that record is rolled
+#      back.
 #
 # No real harness runs and no model tokens are spent. A stub named `claude` on
 # the lab server's PATH records the directory and arguments it was started
@@ -56,6 +58,7 @@ HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-herdr-pane-wt) || {
 }
 export HERDR_SESSION="$HERDR_LAB_SESSION"
 ABORT_ID="pwabort$$"
+LATE_ABORT_ID="pwlate$$"
 FLAT_ID="pwflat$$"
 PRES_ID="pwpres$$"
 PROJ="$TMP_ROOT/proj"
@@ -87,7 +90,8 @@ cleanup_all() {
     [ -z "$wt" ] || (cd "$PROJ" && treehouse return --force "$wt") >/dev/null 2>&1
   done < <(sed -n 's/^worktree=//p' "$TMP_ROOT"/*/state/*.meta 2>/dev/null)
   "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || status=$?
-  rm -rf "/tmp/fm-$ABORT_ID" "/tmp/fm-$FLAT_ID" "/tmp/fm-$PRES_ID"
+  rm -rf "/tmp/fm-$ABORT_ID" "/tmp/fm-$LATE_ABORT_ID" "/tmp/fm-$FLAT_ID" "/tmp/fm-$PRES_ID"
+  rm -f "${LATE_LAUNCH_DIR:-}"
   find "$TMP_ROOT" -type d -exec chmod u+rwx {} + 2>/dev/null
   rm -rf "$TMP_ROOT"
   return "$status"
@@ -301,3 +305,22 @@ pool_status | grep -Fq "held by $ABORT_ID" \
 [ -z "$(lab tab list 2>/dev/null | jq -r --arg l "fm-$ABORT_ID" '.result.tabs[]? | select(.label == $l) | .tab_id')" ] \
   || fail "the aborted spawn left its pane open"
 pass "real herdr: a spawn that aborts after taking its lease and pane returns the lease and closes the pane"
+
+# The staged launch directory (/tmp/fm-<id>+<sha256 of the home>, the launch
+# delivery contract in bin/fm-spawn.sh's header) is refused when it is not a
+# private directory, which aborts the spawn after its record is published and
+# before anything is launched, so the record is rolled back.
+LATE_LAUNCH_DIR="/tmp/fm-$LATE_ABORT_ID+$(printf '%s' "$(cd "$FLAT_HOME" && pwd -P)" | sha256sum | awk '{print $1}')"
+: > "$LATE_LAUNCH_DIR"
+if spawn_task "$FLAT_HOME" "$LATE_ABORT_ID"; then
+  fail "the spawn with an unusable launch directory should have aborted"
+fi
+rm -f "$LATE_LAUNCH_DIR"
+grep -Fq "task launch directory" "$TMP_ROOT/$LATE_ABORT_ID.err" \
+  || fail "the late spawn aborted for an unexpected reason: $(cat "$TMP_ROOT/$LATE_ABORT_ID.err")"
+[ ! -e "$FLAT_HOME/state/$LATE_ABORT_ID.meta" ] || fail "the late-aborted spawn left its task record"
+pool_status | grep -Fq "held by $LATE_ABORT_ID" \
+  && fail "the late-aborted spawn left its worktree leased: $(pool_status)"
+[ -z "$(lab tab list 2>/dev/null | jq -r --arg l "fm-$LATE_ABORT_ID" '.result.tabs[]? | select(.label == $l) | .tab_id')" ] \
+  || fail "the late-aborted spawn left its pane open"
+pass "real herdr: a spawn rolled back after publication, before launch, returns the lease and closes the pane"
