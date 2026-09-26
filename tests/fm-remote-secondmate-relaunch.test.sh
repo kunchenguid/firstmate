@@ -25,7 +25,7 @@ command -v perl >/dev/null 2>&1 || { echo "skip: perl not found"; exit 0; }
 TMP=$(fm_test_tmproot fm-remote-secondmate-relaunch)
 HOME_DIR="$TMP/home"
 FAKEBIN=$(fm_fakebin "$TMP/fake")
-mkdir -p "$HOME_DIR/data" "$HOME_DIR/state" "$HOME_DIR/config" "$HOME_DIR/fakebin"
+mkdir -p "$HOME_DIR/data" "$HOME_DIR/state" "$HOME_DIR/config"
 
 printf -- '- ios - iOS delivery (host: remote-mac; root: /srv/fm; home: /srv/fm-home; scope: iOS; projects: alpha; added 2026-08-01)\n' \
   > "$HOME_DIR/data/secondmates.md"
@@ -94,8 +94,6 @@ printf 'model=%s\n' "$model"
 printf 'effort=%s\n' "$effort"
 SH
 chmod +x "$FAKEBIN/fake-ssh"
-printf '#!/usr/bin/env bash\nexit 1\n' > "$HOME_DIR/fakebin/gh"
-chmod +x "$HOME_DIR/fakebin/gh"
 
 run_relaunch() {  # <args...>
   env FM_HOME="$HOME_DIR" FM_SSH_BIN="$FAKEBIN/fake-ssh" \
@@ -162,5 +160,33 @@ OUT=$(run_relaunch local1 claude - -); RC=$?
 assert_contains "$OUT" "not a remotely placed secondmate" \
   "the refusal should explain the tool this task needs instead"
 pass "a local secondmate is refused by the remote relaunch tool"
+
+# --- a relaunch keeps an already-armed PR poll authenticating ---------------
+# fm-pr-check.sh now refuses to arm a poll on a kind=secondmate record, but a
+# record armed before that refusal can still carry the block until the
+# watcher retires it. fm-pr-check.sh wrote pr= (and, when a forge head was
+# readable, pr_head=) as the LAST lines of the record, and
+# fm_pr_metadata_identity_parse treats any other key appearing after pr= as
+# invalid, so this wrapper must not append its harness=/model=/effort= lines
+# after that identity block. The fixture is seeded the way such a record was
+# really written: pr= appended last to the meta, then the poll artifacts
+# published through the same fm_pr_poll_prepare/fm_pr_poll_publish_prepared
+# pair fm-pr-check.sh uses, since the refused entry point cannot arm it.
+reset_meta
+printf 'pr=https://github.com/example/repo/pull/1\n' >> "$HOME_DIR/state/ios.meta" \
+  || fail "could not write the pr= identity for the relaunch-ordering test"
+fm_pr_poll_prepare "$HOME_DIR/state" ios github \
+  https://github.com/example/repo/pull/1 github.com example/repo 1 \
+  "$ROOT/bin/fm-pr-poll.sh" \
+  || fail "could not prepare the PR poll fixture for the relaunch-ordering test"
+fm_pr_poll_publish_prepared \
+  || fail "could not publish the PR poll fixture for the relaunch-ordering test"
+fm_pr_poll_artifacts_valid "$HOME_DIR/state" ios "$ROOT/bin/fm-pr-poll.sh" \
+  || fail "PR poll fixture did not authenticate before the relaunch"
+OUT=$(run_relaunch ios claude claude-opus-5-5 medium); RC=$?
+expect_code 0 "$RC" "a confirmed remote relaunch should succeed with an armed PR poll"$'\n'"$OUT"
+fm_pr_poll_artifacts_valid "$HOME_DIR/state" ios "$ROOT/bin/fm-pr-poll.sh" \
+  || fail "a remote relaunch broke PR poll authentication by writing harness/model/effort after pr="
+pass "a remote relaunch keeps an already-armed PR poll authenticating"
 
 echo "ALL TESTS PASSED"
