@@ -47,29 +47,64 @@ chmod +x "$LAB/shim/tmux"
 PATH="$LAB/shim:$PATH"
 export PATH
 
-# Stand-in "harness" binaries. These are SYMLINKS to a real long-running system
-# binary, never copies: a copied platform binary fails code-signing validation
-# and is killed on macOS arm64. The symlink name is what the kernel records as
-# the executable identity, which is exactly the signal under test.
-ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
-ln -s "$SLEEP_BIN" "$LAB/bin/pi"
-ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
+# Stand-in "harness" binaries. Each is a SYMLINK whose name is the harness name
+# and whose target is a real long-running native process, never a copy: a copied
+# platform binary fails code-signing validation and is killed on macOS arm64.
+# The symlink name is what the kernel records as the executable identity, which
+# is exactly the signal under test.
+#
+# The target must not dispatch on its own argv[0]. The host's `sleep` used to be
+# a single-purpose binary, but a multicall coreutils binary (uutils or busybox)
+# resolves the applet from argv[0]: invoked through a symlink named after a
+# harness it runs the wrong applet and exits immediately, so no foreground
+# process exists and every positive case reads as not-alive. Build a dedicated
+# spinner the same way the version-string case below builds its executable, and
+# fall back to the host's `sleep` only when it demonstrably survives the rename.
+standin_alive() {  # <path>
+  local pid
+  "$1" 60 >/dev/null 2>&1 &
+  pid=$!
+  sleep 0.2
+  kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null; return 1; }
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+STANDIN_BIN=
+CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
+if [ -n "$CC_BIN" ] &&
+  printf '%s\n' '#include <unistd.h>' 'int main(void){int i;for(i=0;i<600;i++)sleep(1);return 0;}' > "$LAB/standin.c" &&
+  "$CC_BIN" -o "$LAB/bin/standin" "$LAB/standin.c" 2>/dev/null &&
+  standin_alive "$LAB/bin/standin"; then
+  STANDIN_BIN="$LAB/bin/standin"
+else
+  rm -f "$LAB/bin/standin"
+  ln -s "$SLEEP_BIN" "$LAB/bin/standin" 2>/dev/null || true
+  standin_alive "$LAB/bin/standin" && STANDIN_BIN="$LAB/bin/standin"
+fi
+if [ -z "$STANDIN_BIN" ]; then
+  echo "skip: no long-running stand-in binary survives a rename (multicall coreutils, no C compiler)"
+  exit 0
+fi
+ln -s "$STANDIN_BIN" "$LAB/bin/claude-link"
+ln -s "$STANDIN_BIN" "$LAB/bin/pi"
+ln -s "$STANDIN_BIN" "$LAB/bin/notaharness"
 # omp (Oh My Pi) is a single binary whose live process name is the bare word
 # `omp`; the two decoys are the substrings an unanchored glob would misread.
-ln -s "$SLEEP_BIN" "$LAB/bin/omp"
-ln -s "$SLEEP_BIN" "$LAB/bin/ompd"
-ln -s "$SLEEP_BIN" "$LAB/bin/comp"
+ln -s "$STANDIN_BIN" "$LAB/bin/omp"
+ln -s "$STANDIN_BIN" "$LAB/bin/ompd"
+ln -s "$STANDIN_BIN" "$LAB/bin/comp"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall
 # back on (~/.local/bin/muse-bin-<version>), so the executable name is the ONLY
 # signal, and `muse` alone is a common English fragment that must not widen into
 # a substring match. The last two names are the decoys that would be misread.
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-bin-0.1.0-R708.1"
-ln -s "$SLEEP_BIN" "$LAB/bin/musescore"
-ln -s "$SLEEP_BIN" "$LAB/bin/amuse"
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-binary"
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-bind"
+ln -s "$STANDIN_BIN" "$LAB/bin/muse-bin-0.1.0-R708.1"
+ln -s "$STANDIN_BIN" "$LAB/bin/musescore"
+ln -s "$STANDIN_BIN" "$LAB/bin/amuse"
+ln -s "$STANDIN_BIN" "$LAB/bin/muse-binary"
+ln -s "$STANDIN_BIN" "$LAB/bin/muse-bind"
 
 # A launcher whose own process identity is a bare shell, running the harness as
 # a child in the same foreground process group - the shape the real Pi Launcher
@@ -209,7 +244,6 @@ pass "tmux liveness: unrelated omp-containing command names stay ambiguous"
 # real executable file rather than a symlink, because macOS takes the title
 # from the resolved target's name, so it is skipped where no C compiler exists.
 
-CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
 if [ -n "$CC_BIN" ] &&
   printf '%s\n' '#include <unistd.h>' 'int main(void){for(;;)sleep(60);return 0;}' > "$LAB/spin.c" &&
   "$CC_BIN" -o "$LAB/bin/claude/2.1.220" "$LAB/spin.c" 2>/dev/null &&
@@ -298,8 +332,8 @@ pass "tmux liveness: an absent window classifies missing rather than inheriting 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$ROOT/bin/fm-tmux-lib.sh"
 
-ln -s "$SLEEP_BIN" "$LAB/bin/cursor-agent"
-ln -s "$SLEEP_BIN" "$LAB/bin/notcursor"
+ln -s "$STANDIN_BIN" "$LAB/bin/cursor-agent"
+ln -s "$STANDIN_BIN" "$LAB/bin/notcursor"
 
 # Cursor's real screen shape: a BARE composer row carrying its U+2192 glyph, two
 # footer rows below it, and the terminal cursor left on a blank row past the

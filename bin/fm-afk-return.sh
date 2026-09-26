@@ -257,7 +257,8 @@ clear_delivery_artifacts() {
   rm -f \
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
-    "$STATE/.subsuper-inject-wedged"
+    "$STATE/.subsuper-inject-wedged" \
+    "$STATE/.subsuper-unknown-acked"
 }
 
 # The lifecycle retention reasons the gate kept, one per line, empty when the
@@ -418,6 +419,9 @@ scan_landed_awaiting_cleanup() {  # -> <task>\t<url> rows
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     task=$(basename "$meta"); task=${task%.meta}
+    # A secondmate is a persistent worker, never landed work: its teardown is
+    # retirement, which is never an ordinary cleanup this section may offer.
+    [ "$(grep '^kind=' "$meta" | tail -1 | cut -d= -f2- || true)" = secondmate ] && continue
     fm_pr_metadata_identity_parse "$meta" || continue
     fm_pr_poll_merge_already_notified "$STATE" "$task" \
       "$FM_PR_META_PROVIDER" "$FM_PR_META_HOST" "$FM_PR_META_PATH" "$FM_PR_META_NUMBER" \
@@ -538,8 +542,9 @@ EOF
   [ "$count" -gt 0 ] || printf '  (nothing)\n'
 
   # 6. handled while away. Every outcome the away session recorded in the
-  # store during the window counts as handled. On Pi the supervision branch
-  # took every safe actionable wake it could while main was parked; wakes it
+  # store during the window counts as handled. On Pi the supervision branch,
+  # and on an opted-in home the supervision host (docs/supervision-host.md), took
+  # every safe actionable wake it could while main was parked; wakes it
   # declined still fell back to main. The captain rows are listed above.
   printf 'Handled while away:\n'
   routine=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { n++ } END { print n + 0 }')

@@ -25,7 +25,13 @@
 #              still exists, and the agent is still alive where the backend can
 #              classify that. Cancellation is confirmed only from an adapter-
 #              owned acknowledgement and otherwise reported unconfirmed. Busy
-#              state is never rewritten as proof of the action.
+#              state is never rewritten as proof of the action. Devin
+#              cancellation invalidates it to unknown because its native hooks
+#              emit no cancellation close; this is not a success claim.
+#              An adapter whose repeated interrupt key does something else on
+#              an idle agent (Devin's revert picker) sends its later presses
+#              only after the first press rendered a running turn, and
+#              otherwise reports `cancel=not-running` having sent one press.
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
@@ -66,6 +72,10 @@
 #              already recorded for it.
 #              A prefixed raw-command basename cannot reconstruct its launch
 #              command, so relaunch requires an explicit --harness for it.
+#              A replacement Claude or Pi profile must also pass this home's
+#              worker account pin (bin/fm-worker-account-lib.sh) here, so a pin
+#              that no longer resolves or is signed out refuses before the old
+#              agent stops.
 #              --note is required for a ship or scout, whose replacement
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
@@ -114,6 +124,8 @@
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
 #   FM_CONTROL_SETTLE_WAIT       adapter acknowledgement wait after interrupt (5)
+#   FM_CONTROL_ARM_WAIT          wait for an armed interrupt's rendered proof
+#                                after the press gap (1.5)
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
@@ -162,9 +174,12 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-worker-account-lib.sh
+. "$SCRIPT_DIR/fm-worker-account-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
+ARM_WAIT=${FM_CONTROL_ARM_WAIT:-1.5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
@@ -375,26 +390,79 @@ require_state_verified_backend() {  # <verb>
   die "task $ID runs on the $BACKEND backend, which has no recovery-grade agent-state classifier, so '$1' cannot prove the agent actually stopped; refusing rather than reporting an unproven transition as done"
 }
 
+# rendered_matches <ere>: whether any row of the visible viewport matches.
+# An unreadable viewport is a no, so every caller treats it as missing proof.
+rendered_matches() {  # <ere>
+  local screen
+  screen=$(fm_backend_visible_capture "$BACKEND" "$T" "$LABEL" 2>/dev/null) || return 1
+  printf '%s\n' "$screen" | grep -Eq -- "$1"
+}
+
+# wait_rendered <ere> <timeout>: poll the viewport until a row matches.
+wait_rendered() {  # <ere> <timeout>
+  local elapsed=0 step
+  step=$(awk -v p="$POLL" 'BEGIN{printf "%s", (p < 0.1 ? p : 0.1)}')
+  while :; do
+    rendered_matches "$1" && return 0
+    awk -v e="$elapsed" -v t="$2" 'BEGIN{exit !(e < t)}' || return 1
+    sleep "$step"
+    elapsed=$(awk -v e="$elapsed" -v p="$step" 'BEGIN{printf "%.3f", e + p}')
+  done
+}
+
+# dismiss_interrupt_hazard <key> <ere>: after the presses, close a surface a
+# mistimed press opened (Devin's revert picker) with one more key, before
+# anything else can be typed into it. Sets INTERRUPT_HAZARD.
+dismiss_interrupt_hazard() {  # <key> <ere>
+  local key=$1 hazard=$2 gap
+  gap=$(fm_control_interrupt_press_gap "$HARNESS")
+  sleep "$gap"
+  rendered_matches "$hazard" || return 0
+  fm_backend_send_key "$BACKEND" "$T" "$key" "$LABEL" \
+    || die "task $ID shows the $HARNESS revert picker after its interrupt, and the $key that closes it was not delivered; nothing else was typed. Close it with $key, never Enter, before any other action"
+  sleep "$gap"
+  ! rendered_matches "$hazard" \
+    || die "task $ID still shows the $HARNESS revert picker after one $key; nothing else was typed. Close it with $key, never Enter, before any other action"
+  INTERRUPT_HAZARD=dismissed
+}
+
 # send_interrupt_keys: deliver the harness's interrupt key the verified number
 # of times, then the composer-clear key when the adapter needs one. Refuses
 # before sending anything when the backend cannot deliver either key, because
 # an interrupt that cancels the turn but leaves the restored prompt in the
-# composer would make the next submitted line concatenate onto it.
+# composer would make the next submitted line concatenate onto it. An adapter
+# with an arm signal (fm_control_interrupt_arm_signal) gets each later press
+# only after the viewport proves the first one armed a running turn, and never
+# sooner than its press gap; without that proof INTERRUPT_ARMED=no and no
+# further press is sent. Its hazard surface is then closed before returning.
 send_interrupt_keys() {
-  local key repeat clear i=0
+  local key repeat clear arm hazard gap i=0
   key=$(fm_control_interrupt_key "$HARNESS")
   repeat=$(fm_control_interrupt_repeat "$HARNESS")
   clear=$(fm_control_interrupt_clear_key "$HARNESS")
+  arm=$(fm_control_interrupt_arm_signal "$HARNESS")
+  hazard=$(fm_control_interrupt_hazard_signal "$HARNESS")
+  gap=$(fm_control_interrupt_press_gap "$HARNESS")
   fm_control_backend_supports_key "$BACKEND" "$key" \
     || die "harness $HARNESS interrupts with $key, which the $BACKEND backend cannot deliver; refusing to send a different key"
   [ -z "$clear" ] || fm_control_backend_supports_key "$BACKEND" "$clear" \
     || die "harness $HARNESS needs $clear to clear its composer after an interrupt, which the $BACKEND backend cannot deliver; refusing to leave the cancelled prompt where the next submitted line would concatenate onto it"
+  [ -z "$arm$hazard" ] || fm_backend_visible_capture_supported "$BACKEND" \
+    || die "harness $HARNESS must see its screen between interrupt presses, because a repeated $key on an idle agent opens its revert picker, and the $BACKEND backend has no verified viewport read; refusing to press blind"
+  INTERRUPT_ARMED=yes
+  INTERRUPT_HAZARD=none
   while [ "$i" -lt "$repeat" ]; do
     fm_backend_send_key "$BACKEND" "$T" "$key" "$LABEL" \
       || die "interrupt key $key was not delivered to task $ID on $BACKEND"
     i=$((i + 1))
-    [ "$i" -ge "$repeat" ] || sleep 0.2
+    [ "$i" -lt "$repeat" ] || break
+    sleep "$gap"
+    if [ -n "$arm" ] && ! wait_rendered "$arm" "$ARM_WAIT"; then
+      INTERRUPT_ARMED=no
+      break
+    fi
   done
+  [ -z "$hazard" ] || dismiss_interrupt_hazard "$key" "$hazard"
   [ -z "$clear" ] || fm_backend_send_key "$BACKEND" "$T" "$clear" "$LABEL" \
     || die "interrupt key $key reached task $ID, but $clear did not, so its composer still holds the cancelled prompt; clear it before the next lifecycle action"
 }
@@ -432,12 +500,28 @@ interrupt_cancel_claim() {
 }
 
 # deliver_interrupt: deliver and observe the strongest adapter-owned
-# cancellation claim available after delivery.
+# cancellation claim available after delivery. `not-running` means an armed
+# adapter's first press rendered no running turn, so nothing was cancelled; a
+# dismissed revert picker is reported beside the claim.
 deliver_interrupt() {
-  local cancel
+  local cancel devin_gen=
+  # Devin does not emit Stop for cancellation. Capture this incarnation before
+  # keys, then invalidate its state conservatively rather than claiming idle.
+  if [ "$HARNESS" = devin ]; then
+    devin_gen=$(fm_busy_current_gen "$STATE" "$ID" 2>/dev/null || true)
+  fi
   prepare_interrupt_ack
   send_interrupt_keys
-  cancel=$(interrupt_cancel_claim)
+  if [ "$INTERRUPT_ARMED" = no ]; then
+    cancel=not-running
+  else
+    cancel=$(interrupt_cancel_claim)
+    if [ "$HARNESS" = devin ] && [ -n "$devin_gen" ]; then
+      "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" unknown \
+        --gen "$devin_gen" --source fm-interrupt --event interrupt >/dev/null 2>&1 || true
+    fi
+  fi
+  [ "$INTERRUPT_HAZARD" = none ] || cancel="$cancel revert-picker=$INTERRUPT_HAZARD"
   printf '%s' "$cancel"
 }
 
@@ -473,7 +557,7 @@ retire_busy_incarnation() {
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
-  local state cmd verdict composer_state cancel absence interrupt_result=not-needed
+  local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -536,6 +620,10 @@ do_exit() {
       ;;
   esac
   cmd=$(fm_control_exit_command "$HARNESS")
+  hazard=$(fm_control_interrupt_hazard_signal "$HARNESS")
+  if [ -n "$hazard" ] && rendered_matches "$hazard"; then
+    die "task $ID shows the $HARNESS revert picker, where typed text becomes a search and Enter reverts file changes; refusing to type the $cmd exit command. Close it with $(fm_control_interrupt_key "$HARNESS"), never Enter, then retry '$VERB'"
+  fi
   composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
     || composer_state=unknown
   case "$composer_state" in
@@ -763,6 +851,13 @@ resolve_relaunch_profile() {
   if [ "$TARGET_EFFORT" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
   fi
+  # The launch owner applies this home's worker account pin too, but only after
+  # the old agent has been stopped, so a pin that no longer resolves or is
+  # signed out must refuse here, while nothing has changed yet.
+  local account_model=$TARGET_MODEL
+  [ "$account_model" != default ] || account_model=
+  fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
+    "$account_model" "$TARGET_HARNESS" >/dev/null || return 1
 }
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch
