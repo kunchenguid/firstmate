@@ -3015,12 +3015,11 @@ EOF
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             elif captain_call_stale_bound "$key" "$task"; then
               # The line is captain-relevant and stays so, but the backlog says
-              # the captain already holds this work: further NEW pane hashes with
-              # the same status-log state have nothing to add while they are
-              # deciding. Only that new-hash repetition is bounded - the first
-              # sight already alarmed, a new hash inside the window is absorbed,
-              # and a new hash after it alarms again. A stable hash stays as inert
-              # here as it already was after a first terminal alarm.
+              # the captain already holds this work: every stale/wedge sighting
+              # while that hold stays open is absorbed, with no periodic
+              # re-surface - the captain already has everything a repeat alarm
+              # would say. Releasing the hold falls through to ordinary
+              # supervision on the very next check.
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               clear_write_tracking "$key"
