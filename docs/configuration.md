@@ -972,6 +972,29 @@ Every fleet launch, Claude included, also receives a pane-scoped `GIT_CONFIG` `c
 That directory is read-only, so a hook manager run inside a fleet pane (lefthook's npm postinstall, `pre-commit install`) fails instead of displacing the strip; install a project's hooks from outside the pane, where the wrappers chain them.
 Per-machine Cursor `cli-config.json` attribution-off is not this contract: it does not travel with Firstmate, defaults back to on when unset, and only feeds the CLI's request to the server, so it suppresses the trailer rather than preventing it.
 
+## Worker memory cap (config/worker-memory-max)
+
+The optional local, gitignored `config/worker-memory-max` caps the memory of each ship and scout lane so one runaway tool inside a lane cannot push the whole host into out-of-memory.
+With no file, every launch is unchanged.
+It requires Linux with a reachable systemd user manager, because each capped lane runs inside a transient `systemd-run --user --scope` unit with `MemoryMax` and `MemorySwapMax` set to the cap.
+The scope holds the agent and every process it starts, so the kernel's cgroup OOM killer acts inside that lane only; systemd then stops the whole scope and Firstmate appends a `failed [at=<epoch>]:` status line naming the cap, so supervision sees a lane failure rather than a host event.
+
+Write one rule per line as `<harness|*> <project> <MiB>`, where the harness is the resolved worker harness, the project is the basename of the project clone (not `*`), and the cap is a positive whole number of mebibytes; `#` comments and blank lines are allowed.
+The first matching rule wins, so put specific rules above general ones, and a lane no rule matches runs uncapped.
+Size each cap from the lane's measured working set plus headroom for the agent itself, for example:
+
+```text
+# <harness|*> <project> <MiB>
+* example-large-project 5120
+* example-small-project 2560
+```
+
+A malformed file, or a matched cap on a host that fails the scope probe, refuses the spawn or relaunch before any endpoint, worktree, or task record exists, rather than launching the lane uncapped.
+If the scope fails to start after the probe, Firstmate records a lane failure in the task status log.
+The capped launch runs under noninteractive POSIX `sh`, so raw launch commands must use compatible syntax.
+Secondmates are never capped, and the file is not inherited into secondmate homes.
+[`bin/fm-worker-memory-cap.sh`](../bin/fm-worker-memory-cap.sh) owns the rule format, the host probe, and the outcome record, with regression coverage in [`tests/fm-worker-memory-cap.test.sh`](../tests/fm-worker-memory-cap.test.sh).
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
