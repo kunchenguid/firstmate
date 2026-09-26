@@ -1428,19 +1428,23 @@ const done = await processed.execute("ack-final", { through: seqF }, undefined, 
 if (done.isError || unprocessedSeqs().length !== 0) throw new Error("the final acknowledgement did not close the newer sequence");
 
 // A fresh captain prompt must not consume the only delivery opportunity for
-// an already queued processing request. Simulate Pi first consuming the
-// hidden request's queue slot, then let the captain prompt start the next run.
+// an already queued processing request. Leave Pi's queue marker in place to
+// cover the dropped or replaced hidden-message path.
 const overlapReport = await report2.execute("captain-overlap", { task: "task-overlap", verdict: "captain", summary: "worker completed while captain was typing" }, undefined, undefined, {});
 if (overlapReport.isError) throw new Error(`overlap captain report failed: ${JSON.stringify(overlapReport)}`);
+await fire("agent_settled", {}, defaultSessionCtx);
+await fire("agent_settled", {}, defaultSessionCtx);
 const overlapRequest = requests().at(-1);
-if (!overlapRequest || overlapRequest.options.triggerTurn !== true) throw new Error("overlap fixture did not open a processing request");
-await fire("before_agent_start", { prompt: overlapRequest.message.content }, defaultSessionCtx);
-await fire("agent_start", {}, defaultSessionCtx);
+if (!overlapRequest || overlapRequest.options.deliverAs !== "nextTurn") throw new Error("overlap fixture did not open a queued successor request");
 const beforeCaptainOverlapReplay = requests().length;
 await fire("before_agent_start", { prompt: "captain typed a new request before processing" }, defaultSessionCtx);
 await fire("agent_start", {}, defaultSessionCtx);
-if (requests().length !== beforeCaptainOverlapReplay + 1 || requests().at(-1).options.deliverAs !== "nextTurn") {
-  throw new Error("a captain prompt stranded the pending processing obligation instead of queuing its successor");
+if (
+  requests().length !== beforeCaptainOverlapReplay + 1 ||
+  requests().at(-1).options.deliverAs !== "nextTurn" ||
+  requests().at(-1).message.content !== overlapRequest.message.content
+) {
+  throw new Error("a captain prompt stranded the pending processing obligation instead of queuing its exact successor");
 }
 const overlapAck = await processed.execute("ack-overlap", { through: Number(overlapRequest.message.content.match(/through=(\d+)/)?.[1]) }, undefined, undefined, {});
 if (overlapAck.isError || unprocessedSeqs().length !== 0) throw new Error("the replayed processing request did not preserve duplicate-safe acknowledgement");
