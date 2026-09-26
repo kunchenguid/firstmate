@@ -159,6 +159,7 @@ test_help_reports_the_complete_interface() {
   assert_contains "$help" "--list-files" "fm-lint.sh --help omitted --list-files"
   assert_contains "$help" "--help" "fm-lint.sh --help omitted --help"
   assert_contains "$help" "--fast" "fm-lint.sh --help omitted --fast"
+  assert_contains "$help" "FM_LINT_MEMORY_MB" "fm-lint.sh --help omitted the memory budget knob"
   assert_contains "$help" "SC1091" "fm-lint.sh --help omitted the local SC1091 exclusion"
   assert_contains "$help" "SC2034" "fm-lint.sh --help omitted the local SC2034 exclusion"
   assert_contains "$help" "SC2153" "fm-lint.sh --help omitted the local SC2153 exclusion"
@@ -1339,6 +1340,253 @@ SH
   pass "jobs=1 and jobs=2 stop complete worker trees with and without telemetry"
 }
 
+# A root that outgrows the memory budget must stop with a named cause instead
+# of growing until the host kills the lint with a bare 143. The generated root
+# needs far more than 64 MB under full dataflow analysis, so the ceiling trips
+# wherever the host enforces address-space limits.
+test_memory_overrun_names_the_root() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): memory overrun check"
+    return
+  fi
+  if ! (ulimit -v 1048576) 2>/dev/null; then
+    pass "SKIP (address-space limits unavailable): memory overrun check"
+    return
+  fi
+  local tmp heavy good out rc i
+  tmp=$(fm_test_tmproot fm-lint-memory)
+  mkdir -p "$tmp"
+  heavy="$tmp/heavy.sh"
+  good="$tmp/good.sh"
+  cat > "$good" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+  {
+    printf '#!/usr/bin/env bash\n'
+    i=1
+    while [ "$i" -le 400 ]; do
+      cat <<SH
+fixture_fn_$i() {
+  local value_$i="\${1:-}" count=0
+  if [ -n "\$value_$i" ]; then
+    count=\$((count + $i))
+  fi
+  printf '%s %s\n' "\$value_$i" "\$count"
+}
+SH
+      i=$((i + 1))
+    done
+    i=1
+    while [ "$i" -le 400 ]; do
+      printf 'fixture_fn_%s "%s"\n' "$i" "$i"
+      i=$((i + 1))
+    done
+  } > "$heavy"
+
+  rc=0
+  out=$(FM_LINT_MEMORY_MB=64 FM_LINT_JOBS=2 "$LINT" "$good" "$heavy" 2>&1) || rc=$?
+  [ "$rc" -eq 251 ] || fail "a memory overrun exited $rc instead of ShellCheck's 251"$'\n'"$out"
+  assert_contains "$out" "fm-lint.sh: ShellCheck exceeded 64 MB on $heavy" \
+    "the overrun did not name its budget and root"
+  assert_not_contains "$out" "MB on $good" "a root inside the budget was blamed for the overrun"
+
+  rc=0
+  out=$(FM_LINT_MEMORY_MB=4096 "$LINT" "$good" "$heavy" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the same roots failed inside a sufficient budget"$'\n'"$out"
+
+  rc=0
+  FM_LINT_MEMORY_MB=63 "$LINT" "$good" > "$tmp/refused" 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "an unusable memory budget was accepted"
+  pass "a root that outgrows the memory budget fails with a named cause"
+}
+
+# fm_lint_stub_scheduling_shellcheck <fakebin> <run-dir>: a ShellCheck stand-in
+# that records, for each root, its address-space limit and every other root
+# already running when it started, so overlapping runs are always visible from
+# the later side. FM_TEST_STUB_NEED_ROOT and FM_TEST_STUB_NEED_KIB make that
+# one root report an out-of-memory exit under any smaller limit.
+fm_lint_stub_scheduling_shellcheck() {
+  local fakebin=$1 run_dir=$2
+  mkdir -p "$run_dir"
+  : > "$run_dir/log"
+  cat > "$fakebin/shellcheck" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+while [ "\$#" -gt 0 ] && [ "\$1" != -- ]; do
+  shift
+done
+[ "\$#" -eq 0 ] || shift
+run_dir='$run_dir'
+limit=\$(ulimit -v)
+own=' '
+for root in "\$@"; do
+  marker=running.\$(printf '%s' "\$root" | tr '/' '_')
+  : > "\$run_dir/\$marker"
+  own="\$own\$marker "
+done
+others=
+for marker in "\$run_dir"/running.*; do
+  marker=\${marker##*/}
+  case "\$own" in
+    *" \$marker "*|*'running.*'*) ;;
+    *) others="\$others \${marker#running.}" ;;
+  esac
+done
+for root in "\$@"; do
+  printf '%s\t%s\t%s\n' "\$(printf '%s' "\$root" | tr '/' '_')" "\$limit" "\$others" >> "\$run_dir/log"
+done
+sleep "\${FM_TEST_STUB_SECONDS:-0.2}"
+rc=0
+for root in "\$@"; do
+  rm -f "\$run_dir/running.\$(printf '%s' "\$root" | tr '/' '_')"
+  if [ "\$root" = "\${FM_TEST_STUB_NEED_ROOT:-}" ] && [ "\$limit" != unlimited ] \\
+    && [ "\$limit" -lt "\${FM_TEST_STUB_NEED_KIB:-0}" ]; then
+    printf 'shellcheck: out of memory\n' >&2
+    rc=251
+  fi
+done
+exit "\$rc"
+SH
+  chmod +x "$fakebin/shellcheck"
+}
+
+# fm_lint_overlaps <run-log> <marker>: print every root that ran at the same
+# time as <marker>, seen from either side.
+fm_lint_overlaps() {
+  awk -F '\t' -v root="$2" '
+    $1 == root { n = split($3, seen, " "); for (i = 1; i <= n; i++) print seen[i] }
+    $1 != root { n = split($3, seen, " "); for (i = 1; i <= n; i++) if (seen[i] == root) print $1 }
+  ' "$1" | LC_ALL=C sort -u
+}
+
+# The two heaviest roots by expanded source weight must never share the host
+# with another ShellCheck, while lighter roots still run two at a time. The
+# heavy fixtures are small files that source a large library, so a schedule
+# weighed by direct bytes alone would wrongly let them share.
+test_heavy_roots_run_alone() {
+  local tmp fakebin run_dir lib heavy_a heavy_b wide light telemetry out rc marker i
+  local light_overlap=0
+  tmp=$(fm_test_tmproot fm-lint-schedule)
+  mkdir -p "$tmp"
+  fakebin=$(fm_fakebin "$tmp")
+  run_dir="$tmp/run"
+  fm_lint_stub_scheduling_shellcheck "$fakebin" "$run_dir"
+  lib="$tmp/lib.sh"
+  {
+    printf '#!/usr/bin/env bash\n'
+    i=1
+    while [ "$i" -le 400 ]; do
+      printf '# library padding line %s keeps the sourced tree heavy\n' "$i"
+      i=$((i + 1))
+    done
+  } > "$lib"
+  heavy_a="$tmp/heavy-a.sh"
+  heavy_b="$tmp/heavy-b.sh"
+  for light in "$heavy_a" "$heavy_b"; do
+    {
+      printf '#!/usr/bin/env bash\n'
+      printf '# shellcheck source=%s\n. "%s"\n' "$lib" "$lib" "$lib" "$lib"
+    } > "$light"
+  done
+  printf '# shellcheck source=%s\n. "%s"\n' "$lib" "$lib" >> "$heavy_b"
+  wide="$tmp/wide.sh"
+  {
+    printf '#!/usr/bin/env bash\n'
+    i=1
+    while [ "$i" -le 60 ]; do
+      printf '# a wide light root has more direct bytes than either heavy root\n'
+      i=$((i + 1))
+    done
+  } > "$wide"
+  set -- "$heavy_a" "$heavy_b" "$wide"
+  for i in 1 2 3 4; do
+    light="$tmp/light-$i.sh"
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" %s\n' "$i" > "$light"
+    set -- "$@" "$light"
+  done
+  [ "$(wc -c < "$wide")" -gt "$(wc -c < "$heavy_b")" ] || fail "the wide fixture must outweigh the heavy fixtures in direct bytes"
+
+  telemetry="$tmp/telemetry.tsv"
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=2 FM_LINT_MEMORY_MB=4096 FM_LINT_TELEMETRY="$telemetry" \
+    "$LINT" "$@" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "scheduling fixture lint failed"$'\n'"$out"
+  [ "$(cut -f1 "$run_dir/log" | LC_ALL=C sort -u | wc -l | tr -d '[:space:]')" -eq "$#" ] \
+    || fail "scheduling fixture did not analyze every root"$'\n'"$(cat "$run_dir/log")"
+  for marker in "$heavy_a" "$heavy_b"; do
+    marker=$(printf '%s' "$marker" | tr '/' '_')
+    [ -z "$(fm_lint_overlaps "$run_dir/log" "$marker")" ] \
+      || fail "heavy root $marker shared the host with: $(fm_lint_overlaps "$run_dir/log" "$marker")"
+  done
+  for marker in "$wide" "$tmp"/light-*.sh; do
+    [ -z "$(fm_lint_overlaps "$run_dir/log" "$(printf '%s' "$marker" | tr '/' '_')")" ] || light_overlap=1
+  done
+  [ "$light_overlap" -eq 1 ] || fail "light roots no longer run two at a time"$'\n'"$(cat "$run_dir/log")"
+  assert_grep "heaviest_root"$'\t'"$heavy_b" "$telemetry" "telemetry did not name the heaviest root"
+  assert_grep "alone_root_count"$'\t'"2" "$telemetry" "telemetry did not count the roots that ran alone"
+  assert_grep "memory_budget_mb"$'\t'"4096" "$telemetry" "telemetry did not record the memory budget"
+
+  # A light root that overruns its half of the budget reruns alone with all of
+  # it before the lint reports anything.
+  light="$tmp/light-1.sh"
+  marker=$(printf '%s' "$light" | tr '/' '_')
+  : > "$run_dir/log"
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=2 FM_LINT_MEMORY_MB=300 FM_LINT_TELEMETRY="$telemetry" \
+    FM_TEST_STUB_SECONDS=0 FM_TEST_STUB_NEED_ROOT="$light" FM_TEST_STUB_NEED_KIB=300000 \
+    "$LINT" "$@" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a light root was not retried alone with the whole budget"$'\n'"$out"
+  assert_not_contains "$out" "exceeded" "a retried root that fit its full budget was reported"
+  [ "$(awk -F '\t' -v root="$marker" '$1 == root {printf "%s ", $2}' "$run_dir/log")" = "230400 460800 " ] \
+    || fail "the retry did not rerun the root with the whole budget"$'\n'"$(cat "$run_dir/log")"
+  assert_grep "memory_retry_count"$'\t'"1" "$telemetry" "telemetry did not count the retried root"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=2 FM_LINT_MEMORY_MB=300 FM_TEST_STUB_SECONDS=0 \
+    FM_TEST_STUB_NEED_ROOT="$light" FM_TEST_STUB_NEED_KIB=500000 "$LINT" "$@" 2>&1) || rc=$?
+  [ "$rc" -eq 251 ] || fail "a root over the whole budget exited $rc instead of 251"$'\n'"$out"
+  assert_contains "$out" "fm-lint.sh: ShellCheck exceeded 300 MB on $light" \
+    "a root over the whole budget was not named"
+  pass "the two heaviest roots run alone, lighter roots share two workers, and a half-budget overrun retries alone"
+}
+
+# Each canonical CI partition runs its heaviest root alone. The recorded weight
+# exceeds that root's own bytes, so the schedule saw its followed sources.
+test_partitions_run_their_heaviest_root_alone() {
+  local tmp fakebin part run_dir telemetry out heaviest weight marker alone solo
+  tmp=$(fm_test_tmproot fm-lint-partition-schedule)
+  mkdir -p "$tmp"
+  fakebin=$(fm_fakebin "$tmp")
+  for part in 1of2 2of2; do
+    run_dir="$tmp/run-$part"
+    telemetry="$tmp/$part.tsv"
+    fm_lint_stub_scheduling_shellcheck "$fakebin" "$run_dir"
+    out=$(PATH="$fakebin:$PATH" FM_TEST_STUB_SECONDS=0.02 FM_LINT_TELEMETRY="$telemetry" \
+      "$LINT" --partition "$part" 2>&1) || fail "partition $part failed under the scheduling stub"$'\n'"$out"
+    heaviest=$(awk -F '\t' '$1 == "heaviest_root" {print $2}' "$telemetry")
+    weight=$(awk -F '\t' '$1 == "heaviest_root_weight_bytes" {print $2}' "$telemetry")
+    alone=$(awk -F '\t' '$1 == "alone_root_count" {print $2}' "$telemetry")
+    [ -n "$heaviest" ] && [ -f "$ROOT/$heaviest" ] || fail "partition $part did not name its heaviest root"
+    [ "$weight" -gt "$(wc -c < "$ROOT/$heaviest")" ] \
+      || fail "partition $part weighed $heaviest without its followed sources"
+    marker=$(printf '%s' "$heaviest" | tr '/' '_')
+    [ -z "$(fm_lint_overlaps "$run_dir/log" "$marker")" ] \
+      || fail "partition $part ran $heaviest beside: $(fm_lint_overlaps "$run_dir/log" "$marker")"
+    solo=0
+    while IFS= read -r marker; do
+      [ -n "$(fm_lint_overlaps "$run_dir/log" "$marker")" ] || solo=$((solo + 1))
+    done < <(cut -f1 "$run_dir/log")
+    [ "$alone" -ge 2 ] && [ "$solo" -ge "$alone" ] \
+      || fail "partition $part ran $solo roots alone, expected at least its $alone heavy roots"
+    [ "$solo" -lt "$(wc -l < "$run_dir/log")" ] || fail "partition $part no longer shares light roots"
+  done
+  pass "each canonical partition runs its heaviest roots alone"
+}
+
 test_seeded_module_boundary_parity() {
   if ! pinned_ready; then
     pass "SKIP (ShellCheck $REQUIRED not resolved): seeded source-boundary parity check"
@@ -1433,6 +1681,9 @@ test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
 test_jobs_are_deterministic_and_complete
 test_worker_trees_stop_on_signal
+test_memory_overrun_names_the_root
+test_heavy_roots_run_alone
+test_partitions_run_their_heaviest_root_alone
 test_seeded_module_boundary_parity
 test_changed_mode_lints_only_the_changed_file
 test_ci_forces_full_lint_even_with_empty_diff
