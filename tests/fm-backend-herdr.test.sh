@@ -16,6 +16,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-test-safety.sh"
 # shellcheck source=tests/herdr-client-pair-fixture.sh
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-client-pair-fixture.sh"
+# shellcheck source=bin/fm-dir-perms-lib.sh
+. "$ROOT/bin/fm-dir-perms-lib.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
@@ -24,7 +26,10 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the her
 # fake never models. The launcher cases below set HERDR_PANE_ID themselves.
 herdr_forget_inherited_pane
 
-TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
+fixture_parent=$(fm_dir_namespace_parent "${TMPDIR:-/tmp}" fm-backend-herdr-tests \
+  || fm_dir_namespace_parent /tmp fm-backend-herdr-tests) \
+  || fail "no stable parent for herdr fixtures"
+TMP_ROOT=$(TMPDIR="$fixture_parent" fm_test_tmproot fm-backend-herdr-tests)
 # Pin the ambient-home default to a marker-free fixture: FM_HOME resolves to
 # the suite's own root when unset, and a secondmate-marked checkout (any
 # treehouse crew home carries .fm-secondmate-home) would flip the default
@@ -3425,6 +3430,48 @@ test_presentation_session_lock_path_rejects_malformed_socket() {
   pass "herdr presentation lock: null and missing socket paths fail closed"
 }
 
+test_presentation_session_lock_namespace_normalizes_setgid() {
+  local parent namespace lock
+  parent="$TMP_ROOT/presentation-setgid"; mkdir -p "$parent"
+  chmod 3777 "$parent"
+  namespace="$parent/namespace"; mkdir "$namespace"
+  if ! chmod 2700 "$namespace" 2>/dev/null || [ "$(fm_dir_perms_mode "$namespace")" != 2700 ]; then
+    pass "herdr presentation lock: setgid fixture unavailable on this host"
+    return 0
+  fi
+  lock=$(NS="$namespace" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_presentation_lock_namespace() { printf "%s" "$NS"; }
+    fm_backend_herdr_presentation_session_socket_path() { printf "%s" "/run/fmtest.sock"; }
+    fm_backend_herdr_presentation_session_lock_path fmtest
+  ' "$ROOT") || fail "session lock path refused a private setgid namespace"
+  case "$lock" in
+    "$namespace"/order-*.lock) ;;
+    *) fail "setgid lock namespace resolved an unexpected path: $lock" ;;
+  esac
+  [ "$(fm_dir_perms_mode "$namespace")" = 700 ] \
+    || fail "setgid lock namespace was not normalized to 0700"
+  pass "herdr presentation lock: a private setgid namespace is accepted and normalized"
+}
+
+test_presentation_session_lock_namespace_refuses_replaceable_parent() {
+  local parent namespace out status
+  parent="$TMP_ROOT/presentation-unsticky"; mkdir -p "$parent"
+  chmod 2777 "$parent"
+  namespace="$parent/namespace"
+  status=0
+  out=$(NS="$namespace" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_presentation_lock_namespace() { printf "%s" "$NS"; }
+    fm_backend_herdr_presentation_session_socket_path() { printf "%s" "/run/fmtest.sock"; }
+    fm_backend_herdr_presentation_session_lock_path fmtest
+  ' "$ROOT" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "session lock path accepted a replaceable namespace parent"
+  [ ! -e "$namespace" ] || fail "session lock path created a directory under the replaceable parent"
+  assert_contains "$out" "replaceable by another user" "unsafe parent refusal lacked a diagnostic"
+  pass "herdr presentation lock: a replaceable namespace parent is refused"
+}
+
 test_projection_order_rejects_malformed_socket() {
   local dir log resp fb mover out status
   dir="$TMP_ROOT/projection-order-malformed-socket"; mkdir -p "$dir/responses"
@@ -5801,6 +5848,8 @@ test_projection_order_foreign_new_child_before_parent_is_read_only
 test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
 test_presentation_session_lock_path_rejects_malformed_socket
+test_presentation_session_lock_namespace_normalizes_setgid
+test_presentation_session_lock_namespace_refuses_replaceable_parent
 test_projection_order_rejects_malformed_socket
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
