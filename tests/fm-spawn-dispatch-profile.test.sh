@@ -569,7 +569,7 @@ test_launch_environment_allowlist() {
     cat > "$probe" <<'SH'
 #!/bin/sh
 printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "${FM_TEST_ALLOWED-unset}" \
-  "${FM_TEST_EMPTY-unset}" "${FM_TEST_UNSET-unset}" "$HOME" "$PATH" "$TERM" "$TMUX" "$GOTMPDIR"
+  "${FM_TEST_EMPTY-unset}" "${FM_TEST_UNSET-unset}" "$HOME" "$PATH" "$TERM" "$HERDR_PANE_ID" "$GOTMPDIR"
 SH
     out=$(FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated \
       run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
@@ -580,11 +580,11 @@ SH
     for pane_shell in /bin/sh /bin/bash /bin/zsh; do
       [ -x "$pane_shell" ] || continue
       pane_path=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
-        TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp \
+        HERDR_PANE_ID=synthetic-pane GOTMPDIR=/synthetic/gotmp \
         "$pane_shell" -c "printf %s \"\$PATH\"") \
         || fail "could not read $pane_shell startup PATH"
       result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
-      TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp \
+      HERDR_PANE_ID=synthetic-pane GOTMPDIR=/synthetic/gotmp \
       FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED="$value" FM_TEST_EMPTY='' \
       "$pane_shell" -c "$launch") || fail "allowlist=$setting emitted launch failed in $pane_shell"
       case "$setting" in
@@ -639,7 +639,7 @@ test_launch_environment_inaccessible_config_refuses() {
       fi
       chmod 600 "$blocked" || fail "could not remove configuration search permission"
       out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-        "$id" "$PROJ_DIR" --harness codex --backend tmux)
+        "$id" "$PROJ_DIR" --harness codex --backend herdr)
       status=$?
       chmod 700 "$blocked" || fail "could not restore configuration search permission"
       expect_code 1 "$status" "inaccessible $setting with $presence allowlist must refuse spawn: $out"

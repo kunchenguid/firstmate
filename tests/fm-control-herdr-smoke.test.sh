@@ -2,12 +2,9 @@
 # tests/fm-control-herdr-smoke.test.sh - real-herdr smoke test for the agent
 # lifecycle control plane (bin/fm-control.sh).
 #
-# tmux is the control plane's reference backend and is covered hermetically in
-# tests/fm-control.test.sh. herdr is the OTHER backend whose recovery-grade
-# agent-state classifier the control plane is allowed to trust, so its
-# behavior is pinned here against the REAL binary rather than a stub: whether
-# an agent is running, and therefore whether a lifecycle verb may act at all,
-# comes from herdr's own agent registry.
+# Herdr is the retained control backend. The portable control suite uses
+# native fixtures; this suite verifies its actual agent registry and process
+# identity boundary in a named lab.
 #
 # No real harness is launched. herdr's `pane report-agent` is the same registry
 # the adapter reads, and a symlink named like a harness is the same process
@@ -208,7 +205,7 @@ pass "real herdr: interrupt refuses when herdr's own agent registry reports no a
 # verifies the pane's processes through the real `pane process-info` view. So
 # the registered agent is backed by a real agent-named foreground process - a
 # symlink to a long-running system binary named `pi`, the same construction
-# tests/fm-tmux-agent-liveness.test.sh uses (a copied platform binary fails code
+# tests/fm-agent-process-live-e2e.test.sh uses (a copied platform binary fails code
 # signing on macOS arm64; the symlink name is what the kernel records as argv[0]).
 AGENT_BIN="$SCRATCH/agentbin"
 mkdir -p "$AGENT_BIN"

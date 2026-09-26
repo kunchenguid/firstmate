@@ -15,15 +15,9 @@
 #     A captain-relevant status must deliver exactly ONE sentinel-prefixed,
 #     single-line digest with no duplicate or spurious user submission.
 #
-# Isolation: all test tmux runs on a dedicated socket (tmux -L afk-e2e-<pid>).
-# A tmux shim first on PATH redirects the daemon's bare `tmux` calls to the
-# private socket. The daemon points at a throwaway state dir (FM_STATE_OVERRIDE)
-# and the test pane (FM_SUPERVISOR_TARGET). Nothing touches the live fleet.
-# FM_SUPERVISOR_BACKEND=tmux is passed explicitly (not left to auto-detection):
-# this test's own process may itself be running inside herdr (HERDR_ENV=1 is
-# inherited by every process herdr manages a pane for), which would otherwise
-# leak into the spawned daemon subprocess and misdetect backend=herdr against
-# what is actually a tmux pane on the private socket.
+# Isolation: all direct and indirect terminal commands use the guarded named
+# Herdr lab; the daemon sees only a throwaway state dir and exact test pane.
+# The test shim can swallow one Enter while forwarding through the lab owner.
 #
 # Assert on submitted CONTENT (logged verbatim by the supervisor pane), not pane
 # appearance - terminal line-wrapping looks like newlines but isn't.
@@ -32,13 +26,14 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 
-# Skip gracefully if tmux is not installed.
-command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
-
-REAL_TMUX=$(command -v tmux)
-SOCKET="afk-e2e-$$"
+. "$ROOT/tests/herdr-test-safety.sh"
+command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
+herdr_forget_inherited_pane
+HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+CLEAN_PATH=$PATH
+SESSION=$("$HELPER" name "${FM_HERDR_LAB_TASK:-afk-inject}") || exit 1
 STATE_DIR=
-TMUX_SHIM_DIR=
+HERDR_SHIM_DIR=
 LOG_FILE=
 DAEMON_PID=
 SUPERVISOR_PANE=
@@ -53,10 +48,8 @@ cleanup_all() {
     kill "$DAEMON_PID" 2>/dev/null || true
     wait "$DAEMON_PID" 2>/dev/null || true
   fi
-  if [ -n "${SOCKET:-}" ] && [ -n "${REAL_TMUX:-}" ]; then
-    "$REAL_TMUX" -L "$SOCKET" kill-server 2>/dev/null || true
-  fi
-  rm -rf "${TMUX_SHIM_DIR:-}" 2>/dev/null || true
+  PATH="$CLEAN_PATH" "$HELPER" teardown "$SESSION" || exit 1
+  rm -rf "${HERDR_SHIM_DIR:-}" 2>/dev/null || true
   rm -rf "${STATE_DIR:-}" 2>/dev/null || true
 }
 trap cleanup_all EXIT
@@ -72,14 +65,20 @@ LOG_FILE="$STATE_DIR/submitted.log"
 # shellcheck source=/dev/null
 . "$DAEMON"
 
-# Private tmux server with a supervisor session.
-"$REAL_TMUX" -L "$SOCKET" new-session -d -s supervisor -x 200 -y 50
-SUPERVISOR_PANE=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t supervisor '#{pane_id}')
+"$HELPER" provision "$SESSION" || fail 'lab provision failed'
+herdr_test_guard_cli "$SESSION" "$STATE_DIR/guard" "$HELPER" || fail 'lab guard failed'
+export PATH="$STATE_DIR/guard:$PATH" HERDR_SESSION="$SESSION"
+fm_backend_source herdr
+container_raw=$(fm_backend_herdr_container_ensure "$STATE_DIR") || fail 'container failed'
+container=${container_raw%%$'\t'*}
+ids=$(fm_backend_herdr_create_task "$container" afk-supervisor "$STATE_DIR") || fail 'pane failed'
+read -r _ PANE <<< "$ids"
+SUPERVISOR_PANE="$SESSION:$PANE"
 
 # Supervisor pane loop: a small deterministic composer that logs each submitted
 # line verbatim (hex + text + classification). It draws the in-progress input
 # itself instead of relying on the terminal driver's canonical-mode echo, because
-# tmux cursor placement for that echo varies across CI environments.
+# terminal cursor placement for that echo varies across CI environments.
 LOOP_SCRIPT="$STATE_DIR/supervisor-loop.sh"
 cat > "$LOOP_SCRIPT" <<'LOOP'
 #!/usr/bin/env bash
@@ -132,41 +131,26 @@ done
 LOOP
 chmod +x "$LOOP_SCRIPT"
 
-# Start the loop in the supervisor pane.
-"$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" \
-  "bash '$LOOP_SCRIPT' '$LOG_FILE'" Enter
-sleep 1  # let the loop start and settle
-
-# tmux shim: redirects bare `tmux` to the private socket. Optionally swallows
-# the first Enter (file-based flag) for Scenario B.
-TMUX_SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-shim.XXXXXX")
-cat > "$TMUX_SHIM_DIR/tmux" <<SHIM
+# Start the deterministic composer in the isolated pane.
+fm_backend_herdr_send_text_line "$SUPERVISOR_PANE" "bash '$LOOP_SCRIPT' '$LOG_FILE'" || fail 'composer launch failed'
+sleep 1
+HERDR_SHIM_DIR="$STATE_DIR/shim"
+mkdir -p "$HERDR_SHIM_DIR"
+cat > "$HERDR_SHIM_DIR/herdr" <<SHIM
 #!/usr/bin/env bash
-if [ "\${1:-}" = "send-keys" ] && [ -f "$STATE_DIR/.swallow-enter" ]; then
-  shift
-  _args=()
-  for _arg in "\$@"; do
-    if [ "\$_arg" = "Enter" ] && [ -f "$STATE_DIR/.swallow-enter" ]; then
-      rm -f "$STATE_DIR/.swallow-enter"
-      continue
-    fi
-    _args+=("\$_arg")
-  done
-  exec "$REAL_TMUX" -L "$SOCKET" send-keys "\${_args[@]}"
+if [ "\${1:-} \${2:-}" = 'pane send-keys' ] && [ "\${4:-}" = Enter ] && [ -f "$STATE_DIR/.swallow-enter" ]; then
+  rm -f "$STATE_DIR/.swallow-enter"
+  exit 0
 fi
-exec "$REAL_TMUX" -L "$SOCKET" "\$@"
+exec "$STATE_DIR/guard/herdr" "\$@"
 SHIM
-chmod +x "$TMUX_SHIM_DIR/tmux"
-
-# Create a fake crewmate window (the watcher lists fm-* windows for stale
-# detection). The pane is an inert shell - it just needs to exist.
-"$REAL_TMUX" -L "$SOCKET" new-window -d -n fm-fake-c1 -t supervisor
+chmod +x "$HERDR_SHIM_DIR/herdr"
 
 start_daemon() {
-  PATH="$TMUX_SHIM_DIR:$PATH" \
+  PATH="$HERDR_SHIM_DIR:$PATH" \
   FM_STATE_OVERRIDE="$STATE_DIR" \
   FM_SUPERVISOR_TARGET="$SUPERVISOR_PANE" \
-  FM_SUPERVISOR_BACKEND=tmux \
+  FM_SUPERVISOR_BACKEND=herdr \
   FM_ESCALATE_BATCH_SECS=0 \
   FM_HOUSEKEEPING_TICK=1 \
   FM_POLL=1 \
@@ -219,36 +203,30 @@ reset_state() {
 }
 
 # --- pane_input_pending environment self-check ------------------------------
-# Verify that pane_input_pending (which uses cursor_y + capture-pane) can detect
-# typed text in this tmux environment. If it can't, the e2e cannot prove the
+# Verify that pane_input_pending (which uses the shared composer classifier) can detect
+# typed text in this Herdr environment. If it can't, the e2e cannot prove the
 # operator-visible injection contracts it owns.
 
 selfcheck_pane_input_pending() {
   local check_text="selfcheck-marker-12345"
-  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" -l "$check_text"
+  "$HELPER" run "$SESSION" pane send-text "$PANE" "$check_text"
   if wait_for_pane_input_pending; then
     # Detected - clean up the text and proceed.
-    "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" Enter
+    "$HELPER" run "$SESSION" pane send-keys "$PANE" Enter
     sleep 0.3
     return 0
   fi
   # Not detected - print diagnostics and fail.
-  echo "pane_input_pending cannot detect typed text in this tmux environment" >&2
-  local _cy _line
-  _cy=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$SUPERVISOR_PANE" '#{cursor_y}' 2>/dev/null)
-  echo "  cursor_y=$_cy" >&2
-  echo "  pane capture (first 10 lines):" >&2
-  "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SUPERVISOR_PANE" 2>/dev/null | head -10 | sed 's/^/    /' >&2
-  _line=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SUPERVISOR_PANE" 2>/dev/null | sed -n "$((_cy + 1))p")
-  echo "  cursor line: '$_line'" >&2
-  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" Enter
+  echo "pane_input_pending cannot detect typed text in this Herdr environment" >&2
+  "$HELPER" run "$SESSION" pane read "$PANE" --source recent --lines 20 >&2
+  "$HELPER" run "$SESSION" pane send-keys "$PANE" Enter
   fail "pane_input_pending self-check failed"
 }
 
 wait_for_pane_input_pending() {
   local i=0
   while [ "$i" -lt 30 ]; do
-    if PATH="$TMUX_SHIM_DIR:$PATH" pane_input_pending "$SUPERVISOR_PANE"; then
+    if PATH="$HERDR_SHIM_DIR:$PATH" pane_input_pending "$SUPERVISOR_PANE"; then
       return 0
     fi
     sleep 0.1
@@ -268,7 +246,7 @@ test_scenario_a() {
 
   # Type partial text into the supervisor pane with NO Enter. This simulates the
   # captain returning and starting to type before afk has been cleared.
-  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" -l "human draft text"
+  "$HELPER" run "$SESSION" pane send-text "$PANE" "human draft text"
   wait_for_pane_input_pending \
     || fail "Scenario A: human draft text did not become detectable as pending input"
 
@@ -291,7 +269,7 @@ test_scenario_a() {
   fi
 
   # Now submit the human's text (Enter). The pane goes idle.
-  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" Enter
+  "$HELPER" run "$SESSION" pane send-keys "$PANE" Enter
   sleep 0.5
 
   # Wait for the daemon to retry injection (housekeeping tick = 1s).

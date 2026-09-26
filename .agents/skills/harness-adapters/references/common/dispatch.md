@@ -26,7 +26,7 @@ Tool references record empirical knowledge for those executable owners.
 ## Adapter verification
 
 For an approved new adapter check, use the spawn owner's raw-launch escape hatch only for a trivial supervised task.
-Verify detection in `../../../bin/fm-harness.sh`, launch in `../../../bin/fm-spawn.sh`, busy state in `../../../bin/fm-busy-lib.sh`, shared composer behavior in `../../../bin/fm-composer-lib.sh`, lifecycle in `../../../bin/fm-control-lib.sh`, and tmux liveness in `../../../bin/backends/tmux.sh` when secondmate use is supported.
+Verify detection in `../../../bin/fm-harness.sh`, launch in `../../../bin/fm-spawn.sh`, busy state in `../../../bin/fm-busy-lib.sh`, shared composer behavior in `../../../bin/fm-composer-lib.sh`, lifecycle in `../../../bin/fm-control-lib.sh`, and Herdr liveness in `../../../bin/backends/herdr.sh` when secondmate use is supported.
 Also verify primary integration through `references/common/primary-hooks.md`, model discovery through `references/common/model-and-effort.md`, and one tool record.
 A value remains unreachable until its executable owner, portable regression, applicable credentialed live guard, and verification record land together.
 `../firstmate-coding-guidelines/SKILL.md` owns harness-dependent proof.

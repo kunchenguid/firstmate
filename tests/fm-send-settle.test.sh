@@ -7,7 +7,7 @@
 # would see the stale idle pane. fm-send therefore pauses FM_SEND_SETTLE seconds
 # (default 1, 0 disables) after a successful typed submit, so the receiving turn
 # has time to visibly start. These tests use an explicit backend target to stay on
-# that plane and pin the behavior hermetically (stubbed tmux + sleep, no real
+# that plane and pin the behavior hermetically (stubbed Herdr + sleep, no real
 # agent):
 #   1. A successful typed text send pauses for the FM_SEND_SETTLE value (default 1).
 #   2. FM_SEND_SETTLE=0 produces no pause at all (sleep is never invoked for it).
@@ -17,6 +17,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$ROOT/tests/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
 
@@ -33,20 +35,7 @@ TMP_ROOT=$(fm_test_tmproot fm-send-settle)
 make_stubs() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
-  cat > "$fb/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "${1:-}" in
-  send-keys) exit 0 ;;
-  display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
-    printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-esac
-exit 0
-SH
-  chmod +x "$fb/tmux"
+  fm_test_fake_herdr_send "$fb"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "${1:-}" >> "$FM_SLEEP_LOG"
@@ -67,7 +56,7 @@ run_send() {
   : > "$log"
   env "$@" PATH="$fb:$PATH" \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SLEEP_LOG="$log" \
-    "$SEND" "sess:win" "hello captain" 2>/dev/null
+    "$SEND" "sess:w1:p1" "hello captain" 2>/dev/null
 }
 
 test_default_send_pauses_one_second() {
@@ -113,7 +102,7 @@ test_key_path_never_pauses() {
   home="$dir/home"; mkdir -p "$home/state"
   : > "$log"
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SLEEP_LOG="$log" \
-    "$SEND" "sess:win" --key Escape 2>/dev/null; rc=$?
+    "$SEND" "sess:w1:p1" --key Escape 2>/dev/null; rc=$?
   expect_code 0 "$rc" "--key send should succeed"
   [ ! -s "$log" ] || fail "--key path paused but must not"$'\n'"--- sleeps ---"$'\n'"$(cat "$log")"
   pass "fm-send: the --key path never pauses (settle scoped to text submit)"

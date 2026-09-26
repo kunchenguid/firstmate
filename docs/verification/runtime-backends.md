@@ -23,80 +23,32 @@ The tests distinguish inherited markers from owning Pi and Codex processes, refu
 Historical live lock owners continue excluding a competing writer without becoming supported session identities.
 The real installed-harness refresh command remains `tests/fm-harness-liveness-drift-live-e2e.test.sh`.
 
-## tmux
+## Herdr-only fork boundary (2026-09-25)
 
-Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
+This fork supports Herdr as its terminal provider.
+Pi and Codex retain primary and worker roles; TraeX remains worker-only.
+Historical records that omit `backend=` still mean tmux and are refused without migration or cleanup.
 
-```sh
-tmux new-session -d -s fmtest -n testwin
-tmux display-message -p -t fmtest:testwin '#{pane_current_command}'
-tmux send-keys -t fmtest:testwin 'sleep 30' Enter
-tmux display-message -p -t fmtest:testwin '#{pane_current_command}'
-tmux send-keys -t fmtest:testwin C-c
-tmux display-message -p -t fmtest:testwin '#{pane_current_command}'
-```
+Linux candidate checks on 2026-09-25 used Pi 0.87.1, Codex 0.156.1, traecli 0.207.1 and Herdr 0.8.0.
+Real Pi/Codex secondmate launches processed a synthetic charter, acted on a durable marked message, acknowledged its record, and exited through `fm-control.sh`.
+The fixture used an empty synthetic startup digest, so this is role and control evidence, not a full startup-content proof.
+The exact commands and private home-independent receipts are retained with the feature-pruning task evidence.
 
-Observed output:
-
-```text
-zsh
-sleep
-zsh
-```
-
-A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
-Pi 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
-
-### Agent liveness name sources
-
-The tmux adapter combines its current-command name with foreground process identities.
-A renamed process title must not defeat the remaining structural source.
-`tests/fm-tmux-agent-liveness.test.sh` drives those sources apart with real processes on a private tmux socket and checks the disagreement explicitly.
-
-The retained observations from the 2026-08-03 tmux 3.6a macOS arm64 run were:
-
-| Harness | Version | Current command | Foreground identity | Verdict |
-| --- | --- | --- | --- | --- |
-| Codex | 0.146.0 | `codex` | `codex` | alive |
-| Pi | 0.82.0 | `pi-launcher` | `pi` engine below an authentication wrapper | alive |
-
-Pi's authentication wrapper is not a separate supported selection.
-The runtime guide owns current process and historical-recovery boundaries.
-
-### Harness-adapter instruction routing
-
-The machine-readable router in the harness-adapters skill selects Pi, Codex, or TraeX.
-TraeX retains its Herdr worker/scout restriction.
-`tests/fm-harness-support.test.sh` exercises selection and historical refusal; `tests/fm-traex-harness.test.sh` exercises TraeX's role and backend boundary.
-
-### Cleanup endpoint identity
-
-The cleanup identity boundary was validated on 2026-07-28 with tmux 3.6a and metadata fixtures for every supported backend.
+The token-free Calm and branch responsiveness guards passed through named Herdr labs:
 
 ```sh
-tests/fm-teardown-endpoint-safety.test.sh
-tests/fm-teardown.test.sh
-tests/fm-backend-herdr.test.sh
-tests/fm-backend-zellij.test.sh
-tests/fm-backend-orca.test.sh
-tests/fm-backend-cmux.test.sh
+FM_CALM_PI_E2E=1 tests/fm-calm-pi-herdr-live-e2e.test.sh
+FM_PI_BRANCH_RESPONSIVENESS_E2E=1 tests/fm-pi-branch-responsiveness-live-e2e.test.sh
 ```
 
-Bounded output from the incident regression:
-
-```text
-ok - fm-teardown: missing, empty, malformed, ambiguous, and task-mismatched endpoints refuse before every mutation or runtime call
-ok - cleanup identity: valid tmux, Herdr, Zellij, Orca, and cmux records validate while every empty backend target refuses
-ok - tmux backend: direct empty target returns nonzero without invoking tmux
-ok - process cleanup: creation-time PID identity removes only the exact child and preserves the control child
-ok - fm-teardown: dedicated-socket invalid cleanup preserves target/control and valid cleanup removes only the exact target
-```
-
-The dedicated tmux cell removed ambient tmux variables, required a socket-bound wrapper, kept one target and one independent control window, and proved the wrapper was not called for invalid metadata or a direct empty target.
-Valid cleanup removed only the exact task-bound target and left the control window live.
-The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
-Pi, Codex, and TraeX share the backend cleanup boundary.
-Pi's extension wiring and managed non-secondmate Codex or TraeX transcript bindings are retired after that shared cleanup.
+The full credentialed Pi primary guard passed on the candidate in a bounded baseline/candidate comparison.
+The unchanged baseline both passed once and failed an Ahoy ASCII near-miss case once; earlier candidate near-miss failures therefore have no demonstrated causal link to this pruning.
+The separate compact-refresh guard failed on both versions: after a completed long answer and real compaction, the updated instruction arrived before the question, but the completed answer still used the old marker.
+The refresh guard reads completed native assistant messages, so a prompt echo cannot prematurely permit compaction.
+The TraeX guard independently verified initial execution and durable steering through file receipts on both versions, but both failed to prove an empty composer after Escape and Ctrl+U (`state=unknown`).
+Native unknown remains unknown; the full interrupt sequence has no current passing claim.
+Baseline failures document retained limitations; they do not by themselves waive acceptance or establish a complete root cause.
+Historical observations below remain dated evidence, not restored backend support or current installation instructions.
 
 ## Composer classification matrix
 
@@ -139,14 +91,14 @@ After the fix, braille-only rows bound the wrap region (the status footer sits b
 A second read-only capture of the same pane, taken during the fix with a bright starfield cell drawn between the `›` and the placeholder, read `pending` before and `empty` after as well.
 `test_matrix_codex_idle_starfield_furniture` in `tests/fm-composer-lib.test.sh` carries both samples byte-for-byte, the divergence (the same screen with letters in place of the starfield reads `pending`), and the over-stripping negatives (wrapped typed input, braille mixed with text, a typed row with a middle dot, and the footer or a starfield row alone).
 
-The live guard that refreshes this entry launches the installed codex idle in an isolated tmux server and asserts `empty` through both the cursor-anchored tmux read and the cursorless styled read Herdr and Zellij use, naming codex and `codex --version` on failure; it is default-on wherever codex and tmux are installed and spends no tokens:
+The current live guard launches installed Codex in a named Herdr lab and checks the retained styled composer capture; it spends no model tokens:
 
 ```sh
 tests/fm-composer-codex-idle-live-e2e.test.sh
 ```
 
 The verification machine runs its fleet on Herdr and has no tmux installed, so on 2026-09-15 that guard reported `skip: live: tmux absent` there, and the Herdr capture above is this entry's live evidence.
-The guard also notes whether the starfield and the placeholder were actually drawn during its read, because codex need not animate them under every model or mode; a refresh on a tmux host should record that note beside the verdict rather than assume the starfield was exercised.
+The current guard reports the actual rendered surface rather than assuming every Codex session draws the historical starfield.
 
 ## Steering-inbox doorbell
 
@@ -791,7 +743,7 @@ ok - real herdr: a drifted agent-free shell returns to its worktree and reuses t
 
 `tests/fm-backend-herdr.test.sh` pins the logic portably by driving the two signals apart - the same failed pane read yields `missing` under a stopped server and `unreadable` under a running one - and asserts that the husk classifier still refuses on that identical read.
 `tests/fm-control-herdr-smoke.test.sh` proves the Herdr-only drift recovery against a real binary in an isolated lab session.
-`tests/fm-control-relaunch.test.sh` drives a tmux stub and proves that tmux retains its prior refusal without sending `cd` or any other input to the pane.
+`tests/fm-control-relaunch.test.sh` uses a Herdr fixture; `tests/fm-retired-backends.test.sh` proves retired endpoint refusals without terminal input or record loss.
 The Herdr refusal when a shell accepts the command but does not move is not exercised in this change.
 
 ### Stale agent registration
@@ -892,118 +844,6 @@ Observed guarantees: `fm-afk-launch.sh start` refused on the Pi primary and `con
 The current catch-up reporting boundary is pinned by `tests/fm-afk-return.test.sh` and the same live entry point: Bearings continues through a pending return catch-up, projects its posture as an action-free warning outside Captain's Call, and drops that warning after the gate clears, while an active away window still refuses.
 The fixture captures submitted input through Pi's `input` extension hook, so the lab agent directory needs no provider credentials.
 The daemon injection transport into a live composer keeps its coverage in `tests/fm-afk-inject-herdr-e2e.test.sh` for the harnesses that still run the daemon, and the dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
-
-## Zellij
-
-The current compatibility floor and latest verification are Zellij 0.44.0 with `jq` on macOS aarch64.
-All real tests use a uniquely named session and `tests/zellij-test-safety.sh`; they never touch a session named `firstmate` or call all-session deletion.
-
-| Guarantee | Command shape | Result |
-| --- | --- | --- |
-| Headless session | `zellij attach -b <name>` without a TTY | Created a persistent background session and returned. |
-| Session list | `zellij list-sessions --short --no-formatting` | Returned one plain name per line without starting a session. |
-| Create tab | `zellij action new-tab --cwd <dir> --name <title>` | Returned a numeric tab id and focused the new tab when a client was attached. |
-| Pane discovery | `zellij action list-panes --json` | Included terminal pane id, tab id, plugin flag, and top-level `pane_cwd`. |
-| Literal send | `zellij action paste --pane-id <id> -- <text>` | Left text unsubmitted. |
-| Keys | `send-keys --pane-id <id> Enter`, `Esc`, and one argument `Ctrl c` | All three shared operations worked. |
-| Capture | `dump-screen --pane-id <id>` or `--full` | Worked with no attached client; no line-bound flag exists. |
-| Styled capture | `dump-screen --pane-id <id> --ansi` | Preserved ANSI styling ("Composer classification matrix" above); feeds the zellij composer classifier. |
-| Close | `close-tab-by-id <id>` | Removed the live task pane and tab together. |
-| Failure exit | actions against missing targets | Returned exit 0, requiring structural preflight and output-shape validation. |
-
-`pane_cwd` stayed frozen when a foreground subshell changed directory.
-The marker-delimited `pwd` probe returned the live nested cwd and is covered by the real smoke.
-The focus mitigation restored the previously active tab after `new-tab`, with the unavoidable narrow race documented in the operator guide.
-
-```sh
-tests/fm-backend-zellij.test.sh
-tests/fm-backend-zellij-smoke.test.sh
-```
-
-The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discovery, send, capture, unlanded-work refusal, approved local landing, exact tab cleanup, and session cleanup without retaining task-specific ids or branch names here.
-
-## Orca
-
-Real readiness was verified against `/usr/local/bin/orca` with `/Applications/Orca.app` bundle version 1.4.116.
-
-```sh
-orca status --json
-```
-
-Observed fields:
-
-```text
-result.runtime.reachable=true
-result.runtime.state=ready
-```
-
-`orca terminal create --json` returned `result.terminal.handle`.
-`orca worktree create` returned `result.worktree.id` and `result.worktree.path`.
-Speculative bare ids and nested terminal fields were deliberately rejected.
-
-```sh
-tests/fm-backend-orca.test.sh
-tests/fm-backend.test.sh
-tests/fm-bootstrap.test.sh
-```
-
-The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
-
-## cmux
-
-The current compatibility floor is cmux 0.64, and the active live evidence uses 0.64.17 build 97 on macOS aarch64.
-Real tests use only exact `fm-test-` workspaces guarded by `tests/cmux-test-safety.sh` and never quit or relaunch the captain's app.
-
-```sh
-cmux version
-cmux ping
-```
-
-Observed version:
-
-```text
-cmux 0.64.17 (97) [9ed29d81a]
-```
-
-Source and live checks established the five control modes:
-
-- `off` starts no listener.
-- `cmuxOnly` rejects an external Firstmate process by ancestry.
-- `automation` uses an owner-only 0600 socket with no handshake.
-- `password` uses the same 0600 socket plus `auth <password>`.
-- `allowAll` uses a 0666 socket with no authentication.
-
-The live default rejection was `Access denied - only processes started inside cmux can connect`.
-The live password challenge was `Authentication required - send auth <password> first`.
-The app configuration writer did not retain a hand-added socket password, which is why the operator guide requires Settings and a local Firstmate password source.
-
-Current active CLI findings:
-
-| Guarantee | Command shape | Result |
-| --- | --- | --- |
-| Create | `new-workspace --name <title> --cwd <dir> --focus false --id-format uuids` | Created one workspace with one surface without focusing it. |
-| Fresh readiness | `list-panes --workspace <id> --json --id-format uuids` | Found a brand-new surface before content existed. |
-| Fresh read counterexample | `read-screen` before any write | Returned `internal_error: Failed to read terminal text`. |
-| Literal send | `send --workspace <id> --surface <id> -- <text>` | Left text unsubmitted. |
-| Keys | `send-key ... enter|escape|ctrl-c` | All shared key operations worked. |
-| Nested cwd | `current_directory` plus foreground subshell | Structured cwd froze; the marker-delimited `pwd` probe found the live cwd. |
-| Last surface | `close-surface` on the only surface | Refused with `invalid_state: Cannot close the last surface`. |
-| Last workspace | `close-workspace` on the only workspace in a window | Printed success but left the workspace present. |
-
-The last-workspace workaround was reverified on 2026-07-10 in Automation mode.
-After creating one unfocused unnamed sibling in the same window, `close-workspace` removed the exact task workspace and left only cmux's default sibling.
-A selected non-last workspace closed directly, proving that window cardinality rather than selection is the trigger.
-
-Source inspection confirmed each workspace constructor creates a new UUID with no restored-id input.
-Recovery therefore remains title-based.
-The bundled Claude wrapper was observed stripping `CMUX_*` variables on its failed socket-probe path while retaining the app bundle id, supporting the macOS-only bundle-id and ancestry fallbacks.
-
-```sh
-tests/fm-backend-cmux.test.sh
-tests/fm-backend-cmux-smoke.test.sh
-```
-
-The real smoke proves socket access, fresh readiness, current-path probing, send and keys, bounded capture, title identity, and guarded exact cleanup.
 
 ## Codex App host tools
 
@@ -1362,7 +1202,7 @@ Its native App Server peer and watcher-close process are deterministic fixtures;
 
 [Semantic busy state](supervision.md#semantic-busy-state) owns the default-TUI lifecycle guard, versions, output, source coverage, and limits.
 That run observed TraeX reporting native `agent_status=unknown` while its `traex` foreground process remained alive.
-The busy reader uses the existing structural process probe in that case; exact `traex` and `traecli` names are recognized, with real-process decoy coverage in `tests/fm-tmux-agent-liveness.test.sh`.
+The busy reader uses the existing structural process probe in that case; exact `traex` and `traecli` names are recognized, with real-process decoy coverage in `tests/fm-agent-process-live-e2e.test.sh`.
 Structural liveness permits the task-bound transcript read but does not itself infer busy or idle.
 
 ## Pi headless read-only short tasks

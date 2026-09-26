@@ -12,11 +12,47 @@
 # tasks-axi owns the obligation state machine and stubbing it would test nothing.
 set -u
 
-# shellcheck source=tests/lib.sh
+# shellcheck source=tests/fixtures.sh
 # shellcheck disable=SC1091
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
+
+# Only endpoint-bearing cleanup records use the supported provider. Bare
+# transport/remote records below deliberately retain their original shapes.
+write_followup_meta() {
+  local file=$1 id arg has_endpoint=0 has_binding=0
+  shift
+  id=$(basename "$file" .meta)
+  local args=()
+  for arg in "$@"; do
+    case "$arg" in
+      window=firstmate:fm-*)
+        args+=("window=followup:w1:p-$id"); has_endpoint=1 ;;
+      endpoint_task_id=*) has_binding=1; args+=("$arg") ;;
+      *) args+=("$arg") ;;
+    esac
+  done
+  if [ "$has_endpoint" = 1 ]; then
+    [ "$has_binding" = 1 ] || args+=("endpoint_task_id=$id")
+    args+=("backend=herdr" "herdr_session=followup" "herdr_workspace_id=w1" "herdr_tab_id=w1:t-$id" "herdr_pane_id=w1:p-$id")
+  fi
+  fm_write_meta "$file" "${args[@]}"
+}
+
+make_followup_terminal() {
+  local fb=$1
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+case "$1 ${2:-}" in
+  'session list') jq -n --arg socket "$(dirname "$0")/fixture.sock" '{sessions:[{name:"followup",running:true,socket_path:$socket}]}' ;;
+  'status --json') echo '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
+  'pane get') echo '{"error":{"code":"pane_not_found"}}' ;;
+  *) echo '{}' ;;
+esac
+SH
+  chmod +x "$fb/herdr"
+}
 
 PF="$ROOT/bin/fm-public-followup.sh"
 EMIT="$ROOT/bin/fm-public-followup-emit.sh"
@@ -125,7 +161,8 @@ make_home() {  # <name> [relay-on|relay-off]
 EOF
   [ "$relay" = relay-off ] || printf 'FMX_PAIRING_TOKEN=test-token\n' > "$home/.env"
   make_fake_curl "$home" >/dev/null
-  fm_fake_exit0 "$home/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$home/fakebin" treehouse no-mistakes gh gh-axi
+  make_followup_terminal "$home/fakebin"
   printf '%s\n' "$home"
 }
 
@@ -369,9 +406,9 @@ test_restart_e2e_delivers_exactly_once() {
   child=$(make_home restart-child relay-off)
   log="$home/curl.log"; : > "$log"
   printf '%s\n' fmdev > "$child/.fm-secondmate-home"
-  fm_write_meta "$home/state/fmdev.meta" "kind=secondmate" "home=$child"
+  write_followup_meta "$home/state/fmdev.meta" "kind=secondmate" "home=$child"
   seed_commitment "$home" pf-restart req-restart discord secondmate:fmdev work-code-q1
-  fm_write_meta "$child/state/work-code-q1.meta" \
+  write_followup_meta "$child/state/work-code-q1.meta" \
     "x_request=req-restart" "x_request_ts=1700000000" "x_followups=1"
 
   # The reported failure, reproduced: with the work bound but no reconciled
@@ -578,7 +615,7 @@ test_late_receipt_closes_the_exact_attempt_without_reposting() {
   home=$(make_home late-receipt)
   log="$home/curl.log"; : > "$log"
   seed_commitment "$home" pf-late req-late x main work-late
-  fm_write_meta "$home/state/work-late.meta" \
+  write_followup_meta "$home/state/work-late.meta" \
     "x_request=req-late" "x_request_ts=1700000000" "x_followups=1"
   emit_terminal "$home" "$home" pf-late main work-late >/dev/null || fail "emit failed"
   FAKE_CURL_LOG="$log" run_pf "$home" consume >/dev/null || fail "consume failed"
@@ -662,9 +699,9 @@ test_outward_delivery_stays_with_the_owning_home() {
   child=$(make_home child relay-off)
   log="$owner/curl.log"; : > "$log"
   printf '%s\n' child > "$child/.fm-secondmate-home"
-  fm_write_meta "$owner/state/child.meta" "kind=secondmate" "home=$child"
+  write_followup_meta "$owner/state/child.meta" "kind=secondmate" "home=$child"
   seed_commitment "$owner" pf-own req-own discord secondmate:child work-child
-  fm_write_meta "$child/state/work-child.meta" \
+  write_followup_meta "$child/state/work-child.meta" \
     "x_request=req-own" "x_request_ts=1700000000" "x_followups=1"
 
   FAKE_CURL_LOG="$log" emit_terminal "$owner" "$owner" pf-own secondmate:child work-child >/dev/null \
@@ -694,7 +731,7 @@ test_delivery_requires_registration_before_posting() {
   home=$(make_home missing-registration)
   log="$home/curl.log"; : > "$log"
   seed_commitment "$home" pf-missing req-missing x main work-missing
-  fm_write_meta "$home/state/work-missing.meta" \
+  write_followup_meta "$home/state/work-missing.meta" \
     "x_request=req-missing" "x_request_ts=1700000000" "x_followups=1"
   emit_terminal "$home" "$home" pf-missing main work-missing >/dev/null || fail "emit failed"
   run_pf "$home" consume >/dev/null || fail "consume failed"
@@ -718,8 +755,8 @@ test_secondmate_teardown_requires_parent_binding() {
   child=$(make_home teardown-child)
   printf '%s\n' mate > "$child/.fm-secondmate-home"
   seed_commitment "$parent" pf-teardown req-teardown x secondmate:mate work-child
-  fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
-  fm_write_meta "$child/state/work-child.meta" \
+  write_followup_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
+  write_followup_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
     "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
@@ -742,8 +779,8 @@ test_secondmate_teardown_requires_parent_binding() {
   registry_before=$(cat "$parent/data/secondmates.md")
   marker_before=$(cat "$child/.fm-secondmate-home")
   seed_commitment "$parent" pf-teardown-valid req-teardown-valid x secondmate:mate work-child
-  fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
-  fm_write_meta "$child/state/work-child.meta" \
+  write_followup_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
+  write_followup_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
     "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
   assert_absent "$child/.fm-secondmate-parent" \
@@ -846,13 +883,14 @@ test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost() {
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$child/fakebin" treehouse no-mistakes gh gh-axi
+  make_followup_terminal "$child/fakebin"
 
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
 
   seed_commitment "$parent" pf-durable req-durable x secondmate:mate work-child
-  fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
-  fm_write_meta "$child/state/work-child.meta" \
+  write_followup_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
+  write_followup_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
     "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
@@ -883,9 +921,10 @@ test_secondmate_teardown_durable_record_missing_parent_registration_still_refuse
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$child/fakebin" treehouse no-mistakes gh gh-axi
+  make_followup_terminal "$child/fakebin"
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
-  fm_write_meta "$child/state/work-child.meta" \
+  write_followup_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
     "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
   # No parent/state/mate.meta at all: the parent never recorded this secondmate's
@@ -914,15 +953,16 @@ test_secondmate_teardown_durable_record_with_unknown_field_succeeds() {
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$child/fakebin" treehouse no-mistakes gh gh-axi
+  make_followup_terminal "$child/fakebin"
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   printf 'some_future_field=value\n' >> "$child/.fm-secondmate-parent"
   parent_alias="$TMP_ROOT/teardown-durable-clean-parent-alias"
   ln -s "$parent" "$parent_alias"
-  fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
+  write_followup_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_git_init_commit "$child/projects/worktree"
   printf 'manual\n' > "$child/config/backlog-backend"
-  fm_write_meta "$child/state/work-clean.meta" \
+  write_followup_meta "$child/state/work-clean.meta" \
     "window=firstmate:fm-work-clean" "endpoint_task_id=work-clean" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
     "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
@@ -949,12 +989,13 @@ test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings() 
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$durable_parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$child/fakebin" treehouse no-mistakes gh gh-axi
+  make_followup_terminal "$child/fakebin"
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
-  fm_write_meta "$durable_parent/state/mate.meta" "kind=secondmate" "home=$child"
+  write_followup_meta "$durable_parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_git_init_commit "$child/projects/worktree"
   printf 'manual\n' > "$child/config/backlog-backend"
-  fm_write_meta "$child/state/work-conflict.meta" \
+  write_followup_meta "$child/state/work-conflict.meta" \
     "window=firstmate:fm-work-conflict" "endpoint_task_id=work-conflict" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
     "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
@@ -981,8 +1022,9 @@ test_secondmate_teardown_rejects_unsafe_durable_parent_records() {
       || fail "real secondmate seeding failed for $case_name"
     child=$(cd "$child" && pwd -P)
     make_fake_curl "$child" >/dev/null
-    fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
-    fm_write_meta "$child/state/work-child.meta" \
+    fm_fake_exit0 "$child/fakebin" treehouse no-mistakes gh gh-axi
+  make_followup_terminal "$child/fakebin"
+    write_followup_meta "$child/state/work-child.meta" \
       "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
       "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
     parent_record="$child/.fm-secondmate-parent"
@@ -1043,12 +1085,13 @@ test_secondmate_teardown_rejects_nul_bearing_durable_parent_record() {
   child=$(cd "$child" && pwd -P)
   parent_resolved=$(cd "$parent" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$child/fakebin" treehouse no-mistakes gh gh-axi
+  make_followup_terminal "$child/fakebin"
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
-  fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
+  write_followup_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_git_init_commit "$child/projects/worktree"
   printf 'manual\n' > "$child/config/backlog-backend"
-  fm_write_meta "$child/state/work-child.meta" \
+  write_followup_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
     "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
@@ -1086,7 +1129,7 @@ echo "$*" >> "$FAKE_TASKS_AXI_LOG"
 exit 99
 SH
   chmod +x "$home/fakebin/tasks-axi"
-  fm_write_meta "$home/state/work-disabled.meta" \
+  write_followup_meta "$home/state/work-disabled.meta" \
     "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
     "worktree=$home/projects/worktree" "project=$home/projects/worktree" \
     "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
@@ -1113,7 +1156,7 @@ test_relay_disabled_parent_allows_marked_child_teardown() {
   printf '%s\n' disabled-mate > "$child/.fm-secondmate-home"
   printf -- '- disabled-mate - synthetic (home: %s; scope: synthetic; projects: ; added 2026-07-30)\n' \
     "$child" > "$parent/data/secondmates.md"
-  fm_write_meta "$parent/state/disabled-mate.meta" "kind=secondmate" "home=$child"
+  write_followup_meta "$parent/state/disabled-mate.meta" "kind=secondmate" "home=$child"
   tasks_log="$child/tasks-axi.log"; : > "$tasks_log"
   printf 'manual\n' > "$child/config/backlog-backend"
   cat > "$child/fakebin/tasks-axi" <<'SH'
@@ -1122,7 +1165,7 @@ echo "$*" >> "$FAKE_TASKS_AXI_LOG"
 exit 99
 SH
   chmod +x "$child/fakebin/tasks-axi"
-  fm_write_meta "$child/state/work-disabled.meta" \
+  write_followup_meta "$child/state/work-disabled.meta" \
     "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
     "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
@@ -1150,8 +1193,8 @@ test_secondmate_parent_binding_matches_literal_id() {
   printf -- '- mateXid - synthetic (home: %s; scope: synthetic; projects: ; added 2026-07-30)\n' \
     "$child" > "$parent/data/secondmates.md"
   seed_commitment "$parent" pf-teardown-literal req-teardown-literal x secondmate:mate.id work-literal
-  fm_write_meta "$parent/state/mate.id.meta" "kind=secondmate" "home=$child"
-  fm_write_meta "$child/state/work-literal.meta" \
+  write_followup_meta "$parent/state/mate.id.meta" "kind=secondmate" "home=$child"
+  write_followup_meta "$child/state/work-literal.meta" \
     "window=firstmate:fm-work-literal" "endpoint_task_id=work-literal" \
     "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
@@ -1242,7 +1285,7 @@ test_cleanup_refuses_while_a_public_reply_is_owed() {
     || fail "could not add the guarded ship to its home's backlog"
   tasks_in "$home" start ship-task >/dev/null \
     || fail "could not mark the guarded ship In flight"
-  fm_write_meta "$home/state/ship-task.meta" \
+  write_followup_meta "$home/state/ship-task.meta" \
     "window=firstmate:fm-ship-task" \
     "worktree=$home/projects/gone" \
     "project=$home/projects/sample" \
@@ -1474,12 +1517,13 @@ test_dropped_baton_now_surfaces_open_loop() {
     "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects >/dev/null || fail "seed failed"
   child=$(cd "$child" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$child/fakebin" treehouse no-mistakes gh gh-axi
+  make_followup_terminal "$child/fakebin"
   log="$TMP_ROOT/curl.log"; : > "$log"
 
   seed_repro_commitment "$parent" public-final-pi-rearm-repro req-pirearm \
     secondmate:mate pi-rearm-loop-repro-s1
-  fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
+  write_followup_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
 
   "$EMIT" --home "$parent" --obligation public-final-pi-rearm-repro --relation rel-code \
     --source-home secondmate:mate --work-id pi-rearm-loop-repro-s1 --generation 1 \
@@ -1492,7 +1536,7 @@ test_dropped_baton_now_surfaces_open_loop() {
   assert_present "$parent/state/public-followup/registry/public-final-pi-rearm-repro" \
     "delivery must retain the registration"
 
-  fm_write_meta "$child/state/pi-rearm-loop-fix-r1.meta" \
+  write_followup_meta "$child/state/pi-rearm-loop-fix-r1.meta" \
     "window=firstmate:fm-pi-rearm-loop-fix-r1" "endpoint_task_id=pi-rearm-loop-fix-r1" \
     "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
 
@@ -1524,11 +1568,12 @@ test_control_registered_followon_is_guarded() {
     "$ROOT/bin/fm-home-seed.sh" mate "$child" --no-projects >/dev/null || fail "seed failed"
   child=$(cd "$child" && pwd -P)
   make_fake_curl "$child" >/dev/null
-  fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_fake_exit0 "$child/fakebin" treehouse no-mistakes gh gh-axi
+  make_followup_terminal "$child/fakebin"
   seed_repro_commitment "$parent" public-final-pi-rearm-ship req-pirearm2 \
     secondmate:mate pi-rearm-loop-fix-r1
-  fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
-  fm_write_meta "$child/state/pi-rearm-loop-fix-r1.meta" \
+  write_followup_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
+  write_followup_meta "$child/state/pi-rearm-loop-fix-r1.meta" \
     "window=firstmate:fm-pi-rearm-loop-fix-r1" "endpoint_task_id=pi-rearm-loop-fix-r1" \
     "worktree=$child" "project=$child" "kind=ship" "mode=local-only" "spawn_gen=public-followup-fixture"
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
@@ -1864,7 +1909,7 @@ test_retire_after_secondmate_home_removal() {
   child="$home/removed-mate"
   mkdir -p "$child/state"
   printf 'mate\n' > "$child/.fm-secondmate-home"
-  fm_write_meta "$home/state/mate.meta" "kind=secondmate" "home=$child"
+  write_followup_meta "$home/state/mate.meta" "kind=secondmate" "home=$child"
   log="$home/curl.log"; : > "$log"
   seed_repro_commitment "$home" pf-removed-mate req-removed-mate secondmate:mate scout-removed
   "$EMIT" --home "$home" --obligation pf-removed-mate --relation rel-code \
@@ -1894,7 +1939,7 @@ test_retire_refuses_unbound_existing_secondmate() {
   mkdir -p "$child/state"
   child=$(cd "$child" && pwd -P)
   printf 'mate\n' > "$child/.fm-secondmate-home"
-  fm_write_meta "$home/state/mate.meta" "kind=secondmate" "home=$child"
+  write_followup_meta "$home/state/mate.meta" "kind=secondmate" "home=$child"
   log="$home/curl.log"; : > "$log"
   seed_repro_commitment "$home" pf-unbound-mate req-unbound-mate secondmate:mate scout-unbound
   "$EMIT" --home "$home" --obligation pf-unbound-mate --relation rel-code \
@@ -1903,7 +1948,7 @@ test_retire_refuses_unbound_existing_secondmate() {
     --outcome-text 'The unbound child completed its investigation.' >/dev/null || fail "emit failed"
   run_pf "$home" consume >/dev/null || fail "consume failed"
   FAKE_CURL_LOG="$log" run_pf "$home" deliver pf-unbound-mate >/dev/null || fail "deliver failed"
-  fm_write_meta "$child/state/scout-unbound.meta" "status=working" "x_request=req-unbound-mate"
+  write_followup_meta "$child/state/scout-unbound.meta" "status=working" "x_request=req-unbound-mate"
   assert_grep "work_home_path=$child" \
     "$home/state/public-followup/registry/pf-unbound-mate" \
     "registration must retain the canonical secondmate path"
@@ -1929,7 +1974,7 @@ test_retire_refuses_reassigned_secondmate_home() {
   replacement="$home/replacement-mate"
   mkdir -p "$original/state"
   printf 'mate\n' > "$original/.fm-secondmate-home"
-  fm_write_meta "$home/state/mate.meta" "kind=secondmate" "home=$original"
+  write_followup_meta "$home/state/mate.meta" "kind=secondmate" "home=$original"
   log="$home/curl.log"; : > "$log"
   seed_repro_commitment "$home" pf-reassigned-mate req-reassigned-mate secondmate:mate scout-reassigned
   "$EMIT" --home "$home" --obligation pf-reassigned-mate --relation rel-code \
@@ -1943,9 +1988,9 @@ test_retire_refuses_reassigned_secondmate_home() {
   mkdir -p "$replacement/state"
   replacement=$(cd "$replacement" && pwd -P)
   printf 'mate\n' > "$replacement/.fm-secondmate-home"
-  fm_write_meta "$replacement/state/scout-reassigned.meta" \
+  write_followup_meta "$replacement/state/scout-reassigned.meta" \
     "status=working" "x_request=req-unrelated-replacement"
-  fm_write_meta "$home/state/mate.meta" "kind=secondmate" "home=$replacement"
+  write_followup_meta "$home/state/mate.meta" "kind=secondmate" "home=$replacement"
 
   expect_failure "retire must not clear a reassigned secondmate home" \
     run_pf "$home" retire pf-reassigned-mate --reason "original child was removed"
@@ -2114,7 +2159,7 @@ test_retention_creates_no_false_teardown_refusal() {
     || fail "could not add the retained-registration ship to its home's backlog"
   tasks_in "$home" start ship-retain >/dev/null \
     || fail "could not mark the retained-registration ship In flight"
-  fm_write_meta "$home/state/ship-retain.meta" \
+  write_followup_meta "$home/state/ship-retain.meta" \
     "window=firstmate:fm-ship-retain" \
     "worktree=$home/projects/gone" \
     "project=$home/projects/sample" \
@@ -2274,7 +2319,7 @@ test_x_request_teardown_warns_when_final_unposted() {
     || fail "could not add the legacy-link ship to its home's backlog"
   tasks_in "$home" start linked-task >/dev/null \
     || fail "could not mark the legacy-link ship In flight"
-  fm_write_meta "$home/state/linked-task.meta" \
+  write_followup_meta "$home/state/linked-task.meta" \
     "window=firstmate:fm-linked-task" \
     "worktree=$home/projects/gone" \
     "project=$home/projects/sample" \
@@ -2305,7 +2350,7 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
     "$stale" > "$child/.fm-secondmate-parent"
   printf -- '- mate - synthetic (home: %s; scope: synthetic; projects: ; added 2026-08-21)\n' \
     "$child" > "$parent/data/secondmates.md"
-  fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
+  write_followup_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   mkdir -p "$parent/state/public-followup/registry" "$stale/state/public-followup/registry"
   printf 'obligation_id=pf-valid\nwork_home=secondmate:mate\nwork_id=promote-legacy\nstate=delivered\n' \
     > "$parent/state/public-followup/registry/pf-valid"
@@ -2314,7 +2359,7 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
   chmod 600 "$parent/state/public-followup/registry/pf-valid" \
     "$stale/state/public-followup/registry/pf-stale"
 
-  fm_write_meta "$child/state/promote-conflict.meta" \
+  write_followup_meta "$child/state/promote-conflict.meta" \
     "window=firstmate:fm-promote-conflict" "kind=scout"
   write_promotion_brief "$child" promote-conflict
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
@@ -2329,7 +2374,7 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
     "a stale durable parent must not produce a rechain hint"
 
   rm -f "$child/.fm-secondmate-parent"
-  fm_write_meta "$child/state/promote-legacy.meta" \
+  write_followup_meta "$child/state/promote-legacy.meta" \
     "window=firstmate:fm-promote-legacy" "kind=scout"
   write_promotion_brief "$child" promote-legacy
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
@@ -2346,7 +2391,7 @@ test_secondmate_promotion_uses_teardown_parent_resolution() {
   printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=remote.example\n' \
     > "$remote_child/.fm-secondmate-parent"
   printf 'FMX_PAIRING_TOKEN=child-local-token\n' > "$remote_child/.env"
-  fm_write_meta "$remote_child/state/promote-remote.meta" \
+  write_followup_meta "$remote_child/state/promote-remote.meta" \
     "window=firstmate:fm-promote-remote" "kind=scout"
   write_promotion_brief "$remote_child" promote-remote
   out=$(PATH="$remote_child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$remote_child" \
@@ -2438,7 +2483,7 @@ make_remote_route() {  # <home> <secondmate-id>
   cat > "$home/data/secondmates.md" <<EOF
 - $id - remote lane (host: remote-mac; root: $REMOTE_FIXTURE_ROOT; home: $remote_home; scope: relay work; projects: firstmate; added 2026-08-02)
 EOF
-  fm_write_meta "$home/state/$id.meta" "kind=secondmate" "home=$remote_home" \
+  write_followup_meta "$home/state/$id.meta" "kind=secondmate" "home=$remote_home" \
     "remote_host=remote-mac" "remote_root=$REMOTE_FIXTURE_ROOT"
   printf '%s\n' "$remote_home"
 }
@@ -2486,7 +2531,7 @@ test_remote_secondmate_loop_delivers_and_retires() {
   remote=$(make_remote_route "$home" mini-default)
   log="$home/curl.log"; : > "$log"
   seed_repro_commitment "$home" pf-remote-close req-remote-close secondmate:mini-default work-remote
-  fm_write_meta "$remote/state/work-remote.meta" \
+  write_followup_meta "$remote/state/work-remote.meta" \
     "x_request=req-remote-close" "x_request_ts=1700000000" "x_followups=1"
 
   # The trap condition, pinned so this case can never go vacuous: a remote route
@@ -2524,7 +2569,7 @@ test_delivered_remote_registration_skips_offline_route() {
   remote=$(make_remote_route "$home" mini-default)
   log="$home/curl.log"; : > "$log"
   seed_repro_commitment "$home" pf-remote-delivered req-remote-delivered secondmate:mini-default work-delivered
-  fm_write_meta "$remote/state/work-delivered.meta" \
+  write_followup_meta "$remote/state/work-delivered.meta" \
     "x_request=req-remote-delivered" "x_request_ts=1700000000" "x_followups=1"
 
   "$EMIT" --home "$home" --obligation pf-remote-delivered --relation rel-code \
@@ -2558,9 +2603,9 @@ test_remote_retire_force_semantics_unchanged() {
   remote=$(make_remote_route "$home" mini-default)
   seed_repro_commitment "$home" pf-remote-open req-remote-open secondmate:mini-default work-open
   seed_repro_commitment "$home" pf-remote-forced req-remote-forced secondmate:mini-default work-forced
-  fm_write_meta "$remote/state/work-open.meta" \
+  write_followup_meta "$remote/state/work-open.meta" \
     "x_request=req-remote-open" "x_request_ts=1700000000" "x_followups=1"
-  fm_write_meta "$remote/state/work-forced.meta" \
+  write_followup_meta "$remote/state/work-forced.meta" \
     "x_request=req-remote-forced" "x_request_ts=1700000000" "x_followups=1"
 
   expect_failure "an unresolved remote loop must still refuse a plain retire" \
@@ -2588,7 +2633,7 @@ test_remote_retire_refuses_reassigned_route() {
   original=$(make_remote_route "$home" mate)
   log="$home/curl.log"; : > "$log"
   seed_repro_commitment "$home" pf-remote-reassigned req-remote-original secondmate:mate work-reused
-  fm_write_meta "$original/state/work-reused.meta" \
+  write_followup_meta "$original/state/work-reused.meta" \
     "x_request=req-remote-original" "x_request_ts=1700000000" "x_followups=1"
   "$EMIT" --home "$home" --obligation pf-remote-reassigned --relation rel-code \
     --source-home secondmate:mate --work-id work-reused --generation 1 \
@@ -2604,9 +2649,9 @@ test_remote_retire_refuses_reassigned_route() {
   cat > "$home/data/secondmates.md" <<EOF
 - mate - replacement lane (host: remote-mac; root: $REMOTE_FIXTURE_ROOT; home: $replacement; scope: relay work; projects: firstmate; added 2026-08-03)
 EOF
-  fm_write_meta "$home/state/mate.meta" "kind=secondmate" "home=$replacement" \
+  write_followup_meta "$home/state/mate.meta" "kind=secondmate" "home=$replacement" \
     "remote_host=remote-mac" "remote_root=$REMOTE_FIXTURE_ROOT"
-  fm_write_meta "$replacement/state/work-reused.meta" \
+  write_followup_meta "$replacement/state/work-reused.meta" \
     "status=working" "x_request=req-remote-replacement" "x_request_ts=1700000000" "x_followups=1"
 
   expect_failure "retire must not clear a reassigned remote route" \
@@ -2629,7 +2674,7 @@ test_remote_retire_refuses_unreadable_state() {
   remote=$(make_remote_route "$home" mate)
   seed_repro_commitment "$home" pf-remote-unreadable req-remote-unreadable secondmate:mate work-unreadable
   meta="$remote/state/work-unreadable.meta"
-  fm_write_meta "$meta" \
+  write_followup_meta "$meta" \
     "status=working" "x_request=req-remote-unreadable" "x_request_ts=1700000000" "x_followups=1"
   chmod 700 "$remote/state"
   chmod 000 "$remote/state"
@@ -2656,7 +2701,7 @@ test_remote_retire_refuses_nonwritable_state() {
   remote=$(make_remote_route "$home" mate)
   seed_repro_commitment "$home" pf-remote-nonwritable req-remote-nonwritable secondmate:mate work-nonwritable
   meta="$remote/state/work-nonwritable.meta"
-  fm_write_meta "$meta" \
+  write_followup_meta "$meta" \
     "status=working" "x_request=req-remote-nonwritable" "x_request_ts=1700000000" "x_followups=1"
   chmod 500 "$remote/state"
 
@@ -2681,7 +2726,7 @@ test_remote_retire_accepts_nonwritable_absence() {
   home=$(make_home remote-no-link)
   remote=$(make_remote_route "$home" mate)
   seed_repro_commitment "$home" pf-remote-no-link req-remote-no-link secondmate:mate work-no-link
-  fm_write_meta "$remote/state/work-no-link.meta" "status=done"
+  write_followup_meta "$remote/state/work-no-link.meta" "status=done"
   chmod 555 "$remote/state"
 
   rc=0
@@ -2714,7 +2759,7 @@ test_remote_retire_refuses_unacquirable_lock_without_hanging() {
   remote=$(make_remote_route "$home" mate)
   seed_repro_commitment "$home" pf-remote-lock req-remote-lock secondmate:mate work-lock
   meta="$remote/state/work-lock.meta"
-  fm_write_meta "$meta" \
+  write_followup_meta "$meta" \
     "status=working" "x_request=req-remote-lock" "x_request_ts=1700000000" "x_followups=1"
 
   # A lock held by a genuinely live process: it cannot be reclaimed as stale, so
@@ -2763,7 +2808,7 @@ test_remote_unconfirmed_clear_is_unknown_completion() {
   home=$(make_home remote-unknown)
   remote=$(make_remote_route "$home" mini-default)
   seed_repro_commitment "$home" pf-remote-unknown req-remote-unknown secondmate:mini-default work-unknown
-  fm_write_meta "$remote/state/work-unknown.meta" \
+  write_followup_meta "$remote/state/work-unknown.meta" \
     "x_request=req-remote-unknown" "x_request_ts=1700000000" "x_followups=1"
 
   FM_FAKE_SSH_MODE=unreachable \

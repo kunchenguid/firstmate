@@ -44,24 +44,28 @@ trap 'rm -rf -- "$TMP_ROOT"' EXIT
 make_stub() {  # <case-dir>
   local fb="$1/fakebin"
   mkdir -p "$fb"
-  cat > "$fb/tmux" <<'SH'
+  cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
 D=$FM_FAKE_DIR
-case "${1:-}" in
-  send-keys)
-    shift
-    literal=0
-    target=
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        -t) target=$2; shift 2 ;;
-        -l) literal=1; shift ;;
-        *) break ;;
-      esac
-    done
-    payload=${1:-}
-    if [ "$literal" = 1 ]; then
+pane=${3:-}
+[ "$1 ${2:-}" != 'pane process-info' ] || pane=${4:-}
+id=${pane##*:p-}
+target="fmses:fm-$id"
+command=$(cat "$D/command.$target" 2>/dev/null || cat "$D/command")
+case "$1 ${2:-}" in
+  'status --json') printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' ;;
+  'pane get') jq -n --arg p "$pane" --arg cwd "$(cat "$D/cwd")" '{result:{pane:{pane_id:$p,foreground_cwd:$cwd}}}' ;;
+  'pane process-info')
+    if [ "$command" = zsh ]; then processes='[]'
+    else processes=$(jq -n --arg c "$command" '[{pid:102,name:$c,argv0:$c}]'); fi
+    jq -n --arg p "$pane" --argjson ps "$processes" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:101,foreground_processes:$ps}}}' ;;
+  'agent get')
+    if [ "$command" = zsh ]; then printf '{"error":{"code":"agent_not_found"}}\n'
+    else printf '{"result":{"agent":{"agent_status":"idle"}}}\n'; fi ;;
+  'pane read') printf '╭────╮\n│    │\n╰────╯\n' ;;
+  'pane send-text'|'pane run')
+    payload=${4:-}
       printf '%s\n' "$payload" >> "$D/literal"
       case "$payload" in
         /exit|/quit)
@@ -90,31 +94,12 @@ case "${1:-}" in
           fi
           ;;
       esac
-    else
-      printf '%s\n' "$payload" >> "$D/keys"
-    fi
-    exit 0 ;;
-  display-message)
-    target=
-    prev=
-    for a in "$@"; do
-      if [ "$prev" = -t ]; then target=$a; fi
-      case "$a" in
-        *cursor_y*) printf '1\n'; exit 0 ;;
-        *pane_current_command*)
-          if [ -f "$D/command.$target" ]; then cat "$D/command.$target"; else cat "$D/command"; fi
-          printf '\n'; exit 0 ;;
-        *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
-      esac
-      prev=$a
-    done
-    printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+    ;;
+  'pane send-keys') printf '%s\n' "${4:-}" >> "$D/keys" ;;
+  *) printf '{}\n' ;;
 esac
-exit 0
 SH
-  chmod +x "$fb/tmux"
+  chmod +x "$fb/herdr"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
@@ -144,7 +129,7 @@ new_case() {
 # A live LOCAL second mate: a real git worktree for its home, plus the durable
 # record this home keeps for it.
 add_local_mate() {
-  local dir=$1 id=$2 harness=${3:-pi} backend=${4:-}
+  local dir=$1 id=$2 harness=${3:-pi} backend=${4:-herdr}
   local home="$dir/home" smhome="$dir/$id-home"
   fm_git_worktree "$dir/$id-repo" "$smhome" "sm-$id"
   mkdir -p "$smhome/state" "$smhome/data" "$smhome/bin" "$home/data/$id"
@@ -152,7 +137,11 @@ add_local_mate() {
   printf '# agents\n' > "$smhome/AGENTS.md"
   printf '# charter\n' > "$home/data/$id/brief.md"
   {
-    echo "window=fmses:fm-$id"
+    echo "window=fmses:w1:p-$id"
+    echo "herdr_session=fmses"
+    echo "herdr_workspace_id=w1"
+    echo "herdr_tab_id=w1:t-$id"
+    echo "herdr_pane_id=w1:p-$id"
     echo "endpoint_task_id=$id"
     echo "worktree=$smhome"
     echo "project=$smhome"
@@ -175,7 +164,7 @@ add_local_mate() {
 # mate's home as a DETACHED worktree of that repo already sitting on origin's tip.
 # That "already current" home is the shape the old classifier skipped entirely.
 add_repo_backed_mate() {  # <case-dir> <id> [harness] [backend]
-  local dir=$1 id=$2 harness=${3:-pi} backend=${4:-}
+  local dir=$1 id=$2 harness=${3:-pi} backend=${4:-herdr}
   local home="$dir/home" repo="$dir/fmrepo" smhome="$dir/$id-home"
   if [ ! -d "$repo" ]; then
     git init -q --bare "$dir/origin.git"
@@ -201,7 +190,11 @@ add_repo_backed_mate() {  # <case-dir> <id> [harness] [backend]
   printf '%s\n' "$id" > "$smhome/.fm-secondmate-home"
   printf '# charter\n' > "$home/data/$id/brief.md"
   {
-    echo "window=fmses:fm-$id"
+    echo "window=fmses:w1:p-$id"
+    echo "herdr_session=fmses"
+    echo "herdr_workspace_id=w1"
+    echo "herdr_tab_id=w1:t-$id"
+    echo "herdr_pane_id=w1:p-$id"
     echo "endpoint_task_id=$id"
     echo "worktree=$smhome"
     echo "project=$smhome"
@@ -364,16 +357,14 @@ test_unprovable_runtime_falls_back() {
   out=$(run_restart "$dir" sm1); rc=$?
 
   expect_code 3 "$rc" "an unprovable runtime must not report a reload"$'\n'"$out"
-  assert_contains "$out" "nudged: sm1:" "an unprovable runtime must fall back to the re-read message"
+  assert_contains "$out" "unreached: sm1:" "a retired runtime must refuse both restart and terminal delivery"
+  assert_not_contains "$out" "nudged: sm1:" "a retired runtime must not claim a delivered nudge"
   assert_contains "$out" "cannot prove an agent stopped" "the fallback must name the runtime limit"
   assert_not_contains "$out" "restarted: sm1" "an unprovable runtime must not be reported as restarted"
-  # It is never even asked to spend a turn persisting, because it could not be
-  # restarted afterwards either way; the only thing it was handed is the nudge.
-  assert_no_grep 'Open-record persistence' "$dir/home/state/sm1.inbox/001.msg" \
-    "a mate that cannot be restarted should not be asked to persist first"
-  assert_grep 're-read your AGENTS.md' "$dir/home/state/sm1.inbox/001.msg" \
-    "the fallback should hand the mate the ordinary re-read message"
-  pass "T3 a runtime that cannot prove a restart falls back to the re-read message"
+  assert_absent "$dir/home/state/sm1.inbox" "retired runtime must not receive a new steering record"
+  [ ! -s "$dir/fake/literal" ] || fail "retired runtime received terminal input"
+  pass "T3 a retired runtime refuses restart and nudge without changing its endpoint"
+
 }
 
 # --- T4: a mate with no durable record in this home --------------------------
@@ -823,7 +814,8 @@ test_already_current_unprovable_mate_stays_on_the_nudge_path() {
   out=$(run_restart "$dir" sm1); rc=$?
 
   expect_code 3 "$rc" "an unprovable restart must not report success"$'\n'"$out"
-  assert_contains "$out" "nudged: sm1:" "the fallback must be reported as a nudge"
+  assert_contains "$out" "unreached: sm1:" "the retired backend must stay inaccessible"
+  assert_not_contains "$out" "nudged: sm1:" "a retired backend must not claim a delivered nudge"
   assert_not_contains "$out" "restarted: sm1" "an unprovable mate must never be reported as reloaded"
   [ "$(cat "$dir/fake/command")" = "$before" ] \
     || fail "the unprovable mate's agent was stopped anyway"

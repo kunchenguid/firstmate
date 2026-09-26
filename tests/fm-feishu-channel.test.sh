@@ -1177,7 +1177,7 @@ JS
 
 BOOTSTRAP_INERT_HOME="$TMP_ROOT/bootstrap-inert-home"
 mkdir -p "$BOOTSTRAP_INERT_HOME/data" "$BOOTSTRAP_INERT_HOME/state"
-DISABLED_BOOTSTRAP=$(FM_HOME="$BOOTSTRAP_INERT_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_BACKEND=tmux FM_BOOTSTRAP_NETWORK=skip FM_BOOTSTRAP_DETECT_ONLY=1 bash bin/fm-bootstrap.sh)
+DISABLED_BOOTSTRAP=$(FM_HOME="$BOOTSTRAP_INERT_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_BACKEND=herdr FM_BOOTSTRAP_NETWORK=skip FM_BOOTSTRAP_DETECT_ONLY=1 bash bin/fm-bootstrap.sh)
 printf '%s\n' "$DISABLED_BOOTSTRAP" | grep -q '^FEISHU:' \
   && fail "unconfigured Feishu channel changed bootstrap behavior"
 [ ! -e "$BOOTSTRAP_INERT_HOME/data/feishu" ] && [ ! -e "$BOOTSTRAP_INERT_HOME/state/feishu" ] \
@@ -2463,7 +2463,7 @@ const result = registerAssistantOutbound(home, {
 if (result.status !== "registered") throw new Error(JSON.stringify(result));
 JS
 
-BOOTSTRAP_OUT=$(FM_HOME="$TRANSPORT_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_BACKEND=tmux FM_BOOTSTRAP_NETWORK=skip FM_BOOTSTRAP_DETECT_ONLY=1 \
+BOOTSTRAP_OUT=$(FM_HOME="$TRANSPORT_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_BACKEND=herdr FM_BOOTSTRAP_NETWORK=skip FM_BOOTSTRAP_DETECT_ONLY=1 \
   FM_FEISHU_SDK_MODULE="$MOCK_SDK" bash bin/fm-bootstrap.sh)
 printf '%s\n' "$BOOTSTRAP_OUT" | grep -q '^FEISHU:' \
   && fail "healthy configured Feishu startup emitted success chatter"

@@ -7,6 +7,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/secondmate-helpers.sh
+. "$ROOT/tests/secondmate-helpers.sh"
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CASCADE="$ROOT/bin/fm-stow-cascade.sh"
@@ -52,21 +54,8 @@ chmod +x "$FAKEBIN/fake-ssh"
 
 # A tmux whose pane reports a running agent, so the local endpoint probe has a
 # real backend read to classify rather than a stubbed verdict.
-cat > "$FAKEBIN/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "$*" in
-  *list-windows*) printf '%s\n' "${FM_FAKE_TMUX_WINDOW:-}" ;;
-  *list-panes*) printf '%s\n' "${FM_FAKE_TMUX_PANE:-}" ;;
-  *display-message*'#{pane_current_command}'*) printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-codex}" ;;
-  *display-message*'#{pane_pid}'*) printf '%s\n' "$$" ;;
-  *display-message*'#{pane_id}'*) printf '%s\n' '%1' ;;
-  *display-message*'#{cursor_y}'*) printf '%s\n' 0 ;;
-  *capture-pane*) printf '❯\n' ;;
-esac
-exit 0
-SH
-chmod +x "$FAKEBIN/tmux"
+fm_test_fake_herdr_send "$FAKEBIN"
+chmod +x "$FAKEBIN/herdr"
 
 # new_home <name> [budget] -> path to a seeded local secondmate home.
 new_home() {
@@ -173,8 +162,8 @@ test_every_registered_home_is_enumerated_exactly_once() {
   } > "$primary/data/secondmates.md"
   # Two live endpoint records naming the same home must not multiply its stanza:
   # the registry, not the endpoint inventory, is the enumeration source.
-  fm_write_secondmate_meta "$primary/state/enum-a.meta" "$a"
-  fm_write_secondmate_meta "$primary/state/enum-a-stale.meta" "$a"
+  fm_write_herdr_secondmate_meta "$primary/state/enum-a.meta" "$a"
+  fm_write_herdr_secondmate_meta "$primary/state/enum-a-stale.meta" "$a"
 
   set +e
   out=$(run_cascade "$primary")
@@ -212,8 +201,8 @@ test_transport_routes_by_placement_and_liveness() {
     local_record idle-local "$idle"
     remote_record remote-live remote-mac "$TMP_ROOT/remote-root" "$remote"
   } > "$primary/data/secondmates.md"
-  fm_write_secondmate_meta "$primary/state/live-local.meta" "$live" 'firstmate:fm-live-local' alpha codex
-  fm_write_secondmate_meta "$primary/state/remote-live.meta" "$remote" 'fm-remote:fm-remote-live' alpha codex
+  fm_write_herdr_secondmate_meta "$primary/state/live-local.meta" "$live" 'firstmate:fm-live-local' alpha codex
+  fm_write_herdr_secondmate_meta "$primary/state/remote-live.meta" "$remote" 'fm-remote:fm-remote-live' alpha codex
   printf 'role=secondmate\neffective_budget_tokens=7500\ntotal_estimated_tokens=100\nbudget_status=within-budget\n' \
     > "$TMP_ROOT/remote-budget.txt"
 
@@ -299,7 +288,7 @@ test_a_slow_remote_is_bounded_and_the_rest_still_report() {
     remote_record bounded-remote remote-mac "$TMP_ROOT/remote-root" "$remote"
     local_record bounded-local "$home"
   } > "$primary/data/secondmates.md"
-  fm_write_secondmate_meta "$primary/state/bounded-remote.meta" "$remote" 'fm-remote:fm-bounded-remote'
+  fm_write_herdr_secondmate_meta "$primary/state/bounded-remote.meta" "$remote" 'fm-remote:fm-bounded-remote'
   printf 'role=secondmate\n' > "$TMP_ROOT/remote-budget.txt"
 
   started=$(date +%s)

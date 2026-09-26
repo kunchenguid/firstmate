@@ -48,7 +48,7 @@ EOF
 }
 
 classify() {  # <harness> <id> <state-dir>
-  fm_busy_classify tmux fake:w "$1" "$2" "$3"
+  fm_busy_classify herdr fake:w "$1" "$2" "$3"
 }
 
 # drive_pi_ext <ext-path> <mode>: load the generated Pi extension in a plain
@@ -188,7 +188,7 @@ PY
   assert_contains "$out" 'spawned '"$id"' harness=codex' "codex spawn did not complete normally"
   out=$(classify codex "$id" "$state")
   [ "$out" = "unknown codex-transcript" ] || fail "codex must classify 'unknown codex-transcript', got '$out'"
-  out=$(fm_busy_classify tmux fake:w codex "$id" "$state" '• Working (6s • esc to interrupt)')
+  out=$(fm_busy_classify herdr fake:w codex "$id" "$state" '• Working (6s • esc to interrupt)')
   [ "$out" = "unknown codex-transcript" ] || fail "codex must not fall back to footer text, got '$out'"
   pass "codex binds its transcript but remains unknown without task lifecycle evidence"
 }

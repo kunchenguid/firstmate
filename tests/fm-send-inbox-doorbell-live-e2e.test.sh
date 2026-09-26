@@ -8,7 +8,7 @@
 # only confirm the assumption already
 # written into the stub, so per .agents/skills/firstmate-coding-guidelines
 # this is proven against every INSTALLED verified harness: each is launched
-# idle in an isolated tmux server, steered through the REAL fm-send (durable
+# idle in an isolated Herdr lab, steered through the REAL fm-send (durable
 # record + doorbell), and must both ACT on the instruction (create a named
 # file) and ACKNOWLEDGE it (the mv into handled/), failing loudly with the
 # harness name and version.
@@ -33,44 +33,37 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-fm_live_gate opt-in FM_SEND_INBOX_LIVE_E2E tmux
+fm_live_gate opt-in FM_SEND_INBOX_LIVE_E2E herdr jq
 
 unset NO_MISTAKES_GATE
 
-SOCKET="fm-inbox-live-$$"
-SESSION="inboxlive"
+# shellcheck source=tests/herdr-test-safety.sh
+. "$(dirname "${BASH_SOURCE[0]}")/herdr-test-safety.sh"
+herdr_forget_inherited_pane
+HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+CLEAN_PATH=$PATH
+SESSION=$("$HELPER" name "${FM_HERDR_LAB_TASK:-inbox-doorbell}") || exit 1
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-inbox-live.XXXXXX")
-LAB=$(cd "$LAB" && pwd)
 TIMEOUT=${FM_SEND_INBOX_LIVE_TIMEOUT:-240}
 CHECKED=0
 FAILED=0
-
 pass() { printf 'ok - %s\n' "$1"; }
 note() { printf '# %s\n' "$1"; }
-
 cleanup() {
-  tmux -L "$SOCKET" kill-server 2>/dev/null || true
+  PATH="$CLEAN_PATH" "$HELPER" teardown "$SESSION" || exit 1
   rm -rf "$LAB"
 }
 trap cleanup EXIT
-
-# fm-send and the composer readiness read both reach tmux through bare `tmux`
-# calls, so a PATH shim pins them to the private socket.
-SHIM_DIR="$LAB/shim"
-mkdir -p "$SHIM_DIR"
-REAL_TMUX=$(command -v tmux)
-cat > "$SHIM_DIR/tmux" <<SH
-#!/usr/bin/env bash
-exec "$REAL_TMUX" -L "$SOCKET" "\$@"
-SH
-chmod +x "$SHIM_DIR/tmux"
-PATH="$SHIM_DIR:$PATH"
-# shellcheck source=/dev/null
-. "$ROOT/bin/fm-tmux-lib.sh"
-# shellcheck source=/dev/null
+"$HELPER" provision "$SESSION" || exit 1
+herdr_test_guard_cli "$SESSION" "$LAB/shim" "$HELPER" || exit 1
+export PATH="$LAB/shim:$PATH" HERDR_SESSION="$SESSION"
+# shellcheck source=bin/fm-backend.sh
+. "$ROOT/bin/fm-backend.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
 . "$ROOT/bin/fm-task-inbox-lib.sh"
-
-tmux -L "$SOCKET" new-session -d -s "$SESSION" -x 220 -y 50 -c "$ROOT"
+fm_backend_source herdr || fail 'could not load Herdr'
+CONTAINER_RAW=$(fm_backend_herdr_container_ensure "$ROOT") || fail 'lab container failed'
+CONTAINER=${CONTAINER_RAW%%$'\t'*}
 
 harness_version() {  # <binary>
   "$1" --version 2>/dev/null | head -1 || printf 'version-unknown'
@@ -97,15 +90,15 @@ launch_cmd() {  # <name>
 wait_ready() {  # <window>
   local win=$1 i=0 budget=60 verdict dismissed=0 screen
   while [ "$i" -lt "$budget" ]; do
-    verdict=$(fm_tmux_composer_state "$SESSION:$win")
+    verdict=$(fm_backend_composer_state herdr "$SESSION:$win")
     [ "$verdict" = empty ] && return 0
     i=$((i + 1))
     # Dismiss one non-trust startup modal (update prompts), as the composer
     # matrix guard does; never Enter, which could accept an upgrade.
     if [ "$dismissed" -eq 0 ] && [ "$i" -ge $((budget / 3)) ]; then
-      screen=$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null || true)
+      screen=$(fm_backend_capture herdr "$SESSION:$win" 2>/dev/null || true)
       if ! printf '%s\n' "$screen" | grep -qi 'trust'; then
-        tmux -L "$SOCKET" send-keys -t "$SESSION:$win" Escape 2>/dev/null || true
+        fm_backend_send_key herdr "$SESSION:$win" Escape 2>/dev/null || true
       fi
       dismissed=1
     fi
@@ -118,32 +111,35 @@ wait_ready() {  # <window>
 }
 
 check_harness_doorbell() {  # <name>
-  local name=$1 version cmd win="hx-$1" home task acted rec handled i ready_rc
+  local name=$1 version cmd win home task acted rec handled i ready_rc ids tab workspace
   version=$(harness_version "$name")
   cmd=$(launch_cmd "$name") || { note "no launch recipe for $name"; return 0; }
   home="$LAB/$name-home"
   mkdir -p "$home/state"
   task="live-$name"
   acted="$LAB/acted-$name"
-  tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$ROOT" \
-    -- bash -lc "$cmd" \
-    || { FAILED=1; printf 'not ok - %s (%s): could not launch in the isolated tmux server\n' "$name" "$version" >&2; return 0; }
+  ids=$(fm_backend_herdr_create_task "$CONTAINER" "fm-$task" "$ROOT") || { FAILED=1; return 0; }
+  read -r tab win <<< "$ids"
+  workspace=${win%%:*}
+  fm_backend_herdr_send_text_line "$SESSION:$win" "exec $cmd" \
+    || { FAILED=1; printf 'not ok - %s (%s): launch failed\n' "$name" "$version" >&2; return 0; }
   wait_ready "$win"; ready_rc=$?
   if [ "$ready_rc" -eq 1 ]; then
     FAILED=1
     printf 'not ok - %s (%s): composer stayed visibly pending; the pane is not steerable\n' "$name" "$version" >&2
-    tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null | grep '[^[:space:]]' | tail -6 | sed 's/^/#   /' >&2
-    tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+    fm_backend_capture herdr "$SESSION:$win" 2>/dev/null | grep '[^[:space:]]' | tail -6 | sed 's/^/#   /' >&2
+    fm_backend_kill herdr "$SESSION:$win" 2>/dev/null || true
     return 0
   fi
   [ "$ready_rc" -eq 0 ] || note "$name ($version): idle composer never classified empty; proceeding as production does (advisory check skips only on pending)"
-  printf 'window=%s:%s\nkind=ship\nharness=%s\n' "$SESSION" "$win" "$name" > "$home/state/$task.meta"
+  printf 'window=%s:%s\nkind=ship\nharness=%s\nbackend=herdr\nendpoint_task_id=%s\nherdr_session=%s\nherdr_workspace_id=%s\nherdr_tab_id=%s\nherdr_pane_id=%s\nworktree=%s\nproject=%s\n' \
+    "$SESSION" "$win" "$name" "$task" "$SESSION" "$workspace" "$tab" "$win" "$ROOT" "$ROOT" > "$home/state/$task.meta"
   if ! FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-send.sh" "$task" \
     "Firstmate live check: run exactly this shell command now: touch $acted - then follow the mv instruction you were given for this message. Reply with one short line." \
     >/dev/null 2>&1; then
     FAILED=1
     printf 'not ok - %s (%s): fm-send refused the live steer\n' "$name" "$version" >&2
-    tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+    fm_backend_kill herdr "$SESSION:$win" 2>/dev/null || true
     return 0
   fi
   rec="$home/state/$task.inbox/001.msg"
@@ -151,7 +147,7 @@ check_harness_doorbell() {  # <name>
   [ -f "$rec" ] || {
     FAILED=1
     printf 'not ok - %s (%s): fm-send left no durable inbox record\n' "$name" "$version" >&2
-    tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+    fm_backend_kill herdr "$SESSION:$win" 2>/dev/null || true
     return 0
   }
   i=0
@@ -161,7 +157,7 @@ check_harness_doorbell() {  # <name>
     # message so a doorbell swallowed by a startup or update modal recovers
     # exactly as the production re-ring ladder recovers it.
     if [ "$i" -eq $((TIMEOUT / 2)) ] && [ -f "$rec" ]; then
-      fm_task_inbox_ring tmux "$SESSION:$win" "$rec" || true
+      fm_task_inbox_ring herdr "$SESSION:$win" "$rec" || true
       note "$name ($version): re-rang the doorbell once (watcher's role) at ${i}s"
     fi
     sleep 1
@@ -175,9 +171,9 @@ check_harness_doorbell() {  # <name>
     printf 'not ok - %s (%s): doorbell not honored within %ss (acted=%s acked=%s)\n' \
       "$name" "$version" "$TIMEOUT" "$([ -e "$acted" ] && echo yes || echo no)" \
       "$([ -f "$handled" ] && echo yes || echo no)" >&2
-    tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null | grep '[^[:space:]]' | tail -10 | sed 's/^/#   /' >&2
+    fm_backend_capture herdr "$SESSION:$win" 2>/dev/null | grep '[^[:space:]]' | tail -10 | sed 's/^/#   /' >&2
   fi
-  tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+  fm_backend_kill herdr "$SESSION:$win" 2>/dev/null || true
 }
 
 HARNESSES=${FM_SEND_INBOX_LIVE_HARNESSES:-'pi codex'}

@@ -15,8 +15,10 @@ WATCH_EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 OPERATIONAL_INPUT="$ROOT/bin/fm-operational-input.sh"
 PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
-TMUX_SOCKET="fm-calm-$$"
-TMUX_SESSION="fm-calm-e2e"
+CALM_LAB_SESSION=
+CALM_LAB_PANE=
+CALM_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+CALM_CLEAN_PATH=$PATH
 # Verified against Pi 0.81.1 and 0.82.0 (docs/calm-mode-feasibility.md). This is
 # known-good evidence, not a support ceiling: the fixtures below run against whatever
 # Pi is actually installed, and record_pi_version_evidence never rejects a newer
@@ -29,12 +31,54 @@ record_pi_version_evidence() {
 }
 
 cleanup() {
-  if command -v tmux >/dev/null 2>&1; then
-    tmux -L "$TMUX_SOCKET" kill-server 2>/dev/null || true
+  if [ -n "$CALM_LAB_SESSION" ]; then
+    PATH="$CALM_CLEAN_PATH" "$CALM_LAB_HELPER" teardown "$CALM_LAB_SESSION" || exit 1
   fi
   fm_test_cleanup
 }
 trap cleanup EXIT
+
+# Lazily provision only for installed-Pi live arms. The portable rendering
+# cases never need a terminal. Each controller resizes this exact lab pane and
+# detaches on stdin EOF; it neither takes over a live user client nor survives.
+calm_lab_start() { # <cols> <rows> <quoted-command>
+  local result
+  if [ -z "$CALM_LAB_SESSION" ]; then
+    . "$ROOT/tests/herdr-test-safety.sh"
+    herdr_forget_inherited_pane
+    CALM_LAB_SESSION=$("$CALM_LAB_HELPER" name "${FM_HERDR_LAB_TASK:-calm-pi-extension}") || fail 'lab name failed'
+    "$CALM_LAB_HELPER" provision "$CALM_LAB_SESSION" || fail 'lab provision failed'
+    herdr_test_guard_cli "$CALM_LAB_SESSION" "$TMP_ROOT/guard" "$CALM_LAB_HELPER" || fail 'lab guard failed'
+    export PATH="$TMP_ROOT/guard:$PATH" HERDR_SESSION="$CALM_LAB_SESSION"
+  fi
+  result=$("$CALM_LAB_HELPER" run "$CALM_LAB_SESSION" workspace create --cwd "$TMP_ROOT" --label calm-test --no-focus) || fail 'workspace creation failed'
+  CALM_LAB_PANE=$(printf '%s' "$result" | jq -er '.result.root_pane.pane_id') || fail 'pane identity missing'
+  calm_lab_resize "$1" "$2"
+  "$CALM_LAB_HELPER" run "$CALM_LAB_SESSION" pane run "$CALM_LAB_PANE" "$3" >/dev/null || fail 'Pi launch failed'
+}
+calm_lab_resize() {
+  "$CALM_LAB_HELPER" run "$CALM_LAB_SESSION" terminal session control "$CALM_LAB_PANE" --cols "$1" --rows "$2" </dev/null >/dev/null || fail 'terminal resize failed'
+}
+calm_lab_close() {
+  [ -n "$CALM_LAB_PANE" ] || return 0
+  "$CALM_LAB_HELPER" run "$CALM_LAB_SESSION" pane close "$CALM_LAB_PANE" >/dev/null || fail 'pane close failed'
+  CALM_LAB_PANE=
+}
+calm_lab_capture() { # <visible|recent> [text|ansi]
+  local -a bounds=()
+  # Herdr defaults recent reads to 80 lines; restored-session expansion may
+  # place the startup header above that bound while it remains in scrollback.
+  [ "$1" != recent ] || bounds=(--lines 2000)
+  "$CALM_LAB_HELPER" run "$CALM_LAB_SESSION" pane read "$CALM_LAB_PANE" --source "$1" --format "${2:-text}" ${bounds[@]+"${bounds[@]}"}
+}
+calm_lab_send() {
+  "$CALM_LAB_HELPER" run "$CALM_LAB_SESSION" pane send-text "$CALM_LAB_PANE" "$1" >/dev/null
+}
+calm_lab_key() {
+  local key=$1
+  case "$key" in C-o) key=ctrl+o ;; C-t) key=ctrl+t ;; M-s) key=alt+s ;; BSpace) key=Backspace ;; esac
+  "$CALM_LAB_HELPER" run "$CALM_LAB_SESSION" pane send-keys "$CALM_LAB_PANE" "$key" >/dev/null
+}
 
 wait_for_text() {
   local file=$1 text=$2 i=0 limit=${3:-120}
@@ -42,7 +86,7 @@ wait_for_text() {
     # Include recent scrollback: expanding a long restored transcript can move
     # the asserted tool output above the current viewport while the footer and
     # editor remain visible.
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$file" 2>/dev/null || true
+    calm_lab_capture recent >"$file" 2>/dev/null || true
     grep -Fq "$text" "$file" 2>/dev/null && return 0
     sleep 0.05
     i=$((i + 1))
@@ -1711,8 +1755,8 @@ JS
 
 test_operational_followup_turn_e2e() {
   local project home config sessions version label case_name calm_state expected_notifications session_file pane i captain_line handled_line geometry_gap exact_session
-  if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
-    echo "skip: pi or tmux not found for Pi operational follow-up E2E"
+  if ! command -v pi >/dev/null 2>&1 || ! command -v herdr >/dev/null 2>&1; then
+    echo "skip: pi or herdr not found for Pi operational follow-up E2E"
     return 0
   fi
   version=$(pi --version 2>/dev/null || true)
@@ -1864,7 +1908,7 @@ TS
     local shape=${6:-single}
     local extensions
 
-    tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    calm_lab_close
     if [ "$calm_state" = absent ]; then
       rm -f "$home/config/calm"
       extensions='-e ./followup-e2e.ts'
@@ -1882,30 +1926,43 @@ TS
       session_arg="--session '$session_arg'"
     fi
 
-    tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 160 -y 36 \
+    calm_lab_start 160 36 \
       "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions $extensions $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
     i=0
     while [ "$i" -lt 120 ]; do
-      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
-      printf '%s\n' "$pane" | grep -Fq 'followup-e2e.ts' && break
+      pane=$(calm_lab_capture recent 2>/dev/null || true)
+      # The launch command itself names the extension before Pi owns input.
+      # Require the actual model footer as well before typing the command.
+      if printf '%s\n' "$pane" | grep -Fq 'followup-e2e.ts' \
+        && printf '%s\n' "$pane" | grep -Eq '\(auto\).*deterministic'; then break; fi
       sleep 0.05
       i=$((i + 1))
     done
     printf '%s\n' "$pane" | grep -Fq 'followup-e2e.ts' \
       || fail "Pi follow-up $case_name case ($label) did not reach the ready composer"
 
-    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/followup-e2e $label $shape"
-    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+    calm_lab_send "/followup-e2e $label $shape"
+    calm_lab_key Enter
     i=0
     while [ "$i" -lt 240 ]; do
       session_file=$(find "$sessions" -type f -name '*.jsonl' -exec grep -l "CAPTAIN_PROMPT_$label" {} + 2>/dev/null | head -1 || true)
       if [ -n "$session_file" ] && grep -Fq "MONITOR_HANDLED_${label}_ONE" "$session_file"; then
         break
       fi
+      # Pi can render its footer before startup allows command submission.
+      # Retry only Enter on the still-visible command after that explicit refusal.
+      if [ -z "$session_file" ] && [ "$((i % 10))" -eq 0 ]; then
+        pane=$(calm_lab_capture visible)
+        if printf '%s\n' "$pane" | grep -Fq 'Startup is still in progress' \
+          && printf '%s\n' "$pane" | tail -6 | grep -Fq "/followup-e2e $label $shape"; then
+          calm_lab_key Enter
+        fi
+      fi
       sleep 0.05
       i=$((i + 1))
     done
     if [ -z "$session_file" ] || ! grep -Fq "MONITOR_HANDLED_${label}_ONE" "$session_file"; then
+      calm_lab_capture recent >&2
       fail "Pi follow-up $label case did not process the monitoring notification"
     fi
 
@@ -1913,7 +1970,7 @@ TS
     # rendered rows themselves instead of capturing the pane right away.
     i=0
     while [ "$i" -lt 240 ]; do
-      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+      pane=$(calm_lab_capture recent 2>/dev/null || true)
       if printf '%s\n' "$pane" | grep -Fq "CAPTAIN_ANSWER_$label" &&
         printf '%s\n' "$pane" | grep -Fq "MONITOR_HANDLED_${label}_ONE"; then
         break
@@ -2012,20 +2069,20 @@ JS
       [ ! -e "$home/config/calm" ] \
         || fail "Pi follow-up $label case persisted a default Calm choice without a toggle"
     fi
-    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/quit'
-    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+    calm_lab_send '/quit'
+    calm_lab_key Enter
     sleep 0.2
-    tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    calm_lab_close
   }
 
   replay_exact_case() {
-    tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    calm_lab_close
     printf '%s\n' on >"$home/config/calm"
-    tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 160 -y 36 \
+    calm_lab_start 160 36 \
       "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./followup-e2e.ts --session '$exact_session'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
     i=0
     while [ "$i" -lt 120 ]; do
-      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+      pane=$(calm_lab_capture recent 2>/dev/null || true)
       printf '%s\n' "$pane" | grep -Fq 'MONITOR_HANDLED_exact_watcher_ONE' && break
       sleep 0.05
       i=$((i + 1))
@@ -2052,10 +2109,10 @@ if (users.length !== 1 || responses.length !== 1) {
   throw new Error(`restart changed exactly-once entries: users=${users.length} responses=${responses.length}`);
 }
 JS
-    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/quit'
-    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+    calm_lab_send '/quit'
+    calm_lab_key Enter
     sleep 0.2
-    tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    calm_lab_close
   }
 
   run_followup_case loaded-on on loaded_on 1
@@ -2076,8 +2133,8 @@ JS
 test_hidden_block_geometry_e2e() {
   local project home config sessions session_file snapshot expanded_snapshot calm_off_snapshot restarted_snapshot
   local version skill_line final_line gap i
-  if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
-    echo "skip: pi or tmux not found for Pi Calm hidden-block geometry E2E"
+  if ! command -v pi >/dev/null 2>&1 || ! command -v herdr >/dev/null 2>&1; then
+    echo "skip: pi or herdr not found for Pi Calm hidden-block geometry E2E"
     return 0
   fi
   version=$(pi --version 2>/dev/null || true)
@@ -2171,6 +2228,7 @@ export default function (pi: ExtensionAPI): void {
       if (!model || !(await pi.setModel(model))) {
         throw new Error("Calm hidden-block geometry model unavailable");
       }
+      ctx.ui.notify("CALM_GEOMETRY_MODEL_READY", "info");
     },
   });
 }
@@ -2178,14 +2236,14 @@ TS
 
   start_geometry_pi() {
     local session_arg=$1
-    tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-    tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 100 -y 44 \
-      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --no-context-files --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./geometry-provider.ts $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
+    calm_lab_close
+    calm_lab_start 100 44 \
+      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --skill .agents/skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./geometry-provider.ts $session_arg; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
   }
 
   capture_geometry_viewport() {
     local file=$1
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$file" 2>/dev/null
+    calm_lab_capture visible >"$file" 2>/dev/null
   }
 
   wait_for_geometry_text() {
@@ -2226,13 +2284,30 @@ TS
   }
 
   start_geometry_pi "--session-dir '$sessions'"
-  wait_for_geometry_text "$snapshot" "geometry-provider.ts" \
-    || fail "Pi Calm hidden-block geometry E2E did not reach the ready composer"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm-geometry-e2e'
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
-  sleep 0.1
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/skill:ahoy'
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  i=0
+  while [ "$i" -lt 120 ]; do
+    capture_geometry_viewport "$snapshot"
+    grep -Eq '\(auto\).*deterministic' "$snapshot" && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  grep -Eq '\(auto\).*deterministic' "$snapshot" \
+    || fail "Pi Calm hidden-block geometry E2E did not reach the model footer"
+  calm_lab_send '/calm-geometry-e2e'
+  calm_lab_key Enter
+  i=0
+  while [ "$i" -lt 120 ]; do
+    capture_geometry_viewport "$snapshot"
+    grep -Fq CALM_GEOMETRY_MODEL_READY "$snapshot" && break
+    if grep -Fq 'Startup is still in progress' "$snapshot" \
+      && tail -6 "$snapshot" | grep -Fq /calm-geometry-e2e; then calm_lab_key Enter; fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  grep -Fq CALM_GEOMETRY_MODEL_READY "$snapshot" \
+    || { cat "$snapshot" >&2; fail 'geometry provider setup command was not acknowledged'; }
+  calm_lab_send '/skill:ahoy'
+  calm_lab_key Enter
   wait_for_geometry_text "$snapshot" "visible row two" \
     || fail "Pi Calm hidden-block geometry E2E did not complete the /skill:ahoy turn"
   i=0
@@ -2258,8 +2333,8 @@ TS
   grep -Fq 'tool result one' "$session_file" \
     || fail "Calm removed hidden tool results from persisted history"
 
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/reload'
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  calm_lab_send '/reload'
+  calm_lab_key Enter
   wait_for_geometry_transition \
     "$snapshot" \
     "Reloading keybindings, extensions, skills, prompts, themes, and context files..." \
@@ -2267,11 +2342,11 @@ TS
     || fail "Pi Calm hidden-block geometry E2E did not complete the /reload viewport transition"
   assert_geometry_gap "$snapshot" "reloaded native Calm transcript"
 
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
+  calm_lab_key C-t
   wait_for_geometry_text "$expanded_snapshot" "CALM_GEOMETRY_THINKING_ONE" \
     || fail "thinking expansion did not restore Calm-hidden reasoning"
   assert_not_contains "$(cat "$expanded_snapshot")" "probe-one.txt" "thinking expansion restored Calm-hidden tool rows"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-t
+  calm_lab_key C-t
   i=0
   while [ "$i" -lt 120 ]; do
     capture_geometry_viewport "$snapshot"
@@ -2282,13 +2357,13 @@ TS
   assert_not_contains "$(cat "$snapshot")" "CALM_GEOMETRY_THINKING_ONE" "collapsing thinking restored hidden-row output"
   assert_geometry_gap "$snapshot" "re-collapsed native Calm transcript"
 
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm'
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  calm_lab_send '/calm'
+  calm_lab_key Enter
   wait_for_geometry_text "$calm_off_snapshot" "probe-one.txt" \
     || fail "turning Calm off did not restore the tool-call row"
   assert_contains "$(cat "$calm_off_snapshot")" "Thinking..." "turning Calm off did not restore collapsed thinking labels"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/calm'
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  calm_lab_send '/calm'
+  calm_lab_key Enter
   i=0
   while [ "$i" -lt 120 ]; do
     capture_geometry_viewport "$snapshot"
@@ -2300,20 +2375,20 @@ TS
   done
   assert_geometry_gap "$snapshot" "Calm redraw of existing transcript"
 
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/quit'
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  calm_lab_send '/quit'
+  calm_lab_key Enter
   sleep 0.2
-  tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+  calm_lab_close
   start_geometry_pi "--session '$session_file'"
   wait_for_geometry_text "$restarted_snapshot" "visible row two" \
     || fail "Pi did not restore the Calm hidden-block geometry session"
   assert_not_contains "$(cat "$restarted_snapshot")" "Thinking..." "restart restored a collapsed thinking label under Calm"
   assert_not_contains "$(cat "$restarted_snapshot")" "probe-one.txt" "restart restored a tool-call row under Calm"
   assert_geometry_gap "$restarted_snapshot" "restarted native Calm transcript"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l '/quit'
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  calm_lab_send '/quit'
+  calm_lab_key Enter
   sleep 0.2
-  tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+  calm_lab_close
   pass "Pi Calm native /skill:ahoy geometry keeps every collapsed thinking and tool block at zero height while preserving expansion, history, restart, and Calm-off rendering"
 }
 
@@ -3314,8 +3389,8 @@ SH
 test_interactive_terminal_e2e() {
   local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot export_settled_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait chrome_reap_wait active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_color_sail_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_narrow_sails boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
   local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot export_settled_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_report active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
-  if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
-    echo "skip: pi or tmux not found for Pi calm interactive E2E"
+  if ! command -v pi >/dev/null 2>&1 || ! command -v herdr >/dev/null 2>&1; then
+    echo "skip: pi or herdr not found for Pi calm interactive E2E"
     return 0
   fi
   version=$(pi --version 2>/dev/null || true)
@@ -3556,7 +3631,7 @@ TS
 {"type":"message","id":"a0000016","parentId":"a0000015","timestamp":"$now","message":{"role":"assistant","content":[{"type":"text","text":"The deterministic tool example is complete."}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":16}}
 JSON
 
-  tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 180 -y 44 \
+  calm_lab_start 180 44 \
     "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-skills --no-prompt-templates --no-context-files --session '$session_file'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 30"
   wait_for_text "$default_snapshot" "The deterministic tool example is complete." \
     || fail "Pi calm E2E did not reach the restored session transcript"
@@ -3568,23 +3643,23 @@ JSON
   # shellcheck disable=SC2016 # Backticks are literal prompt markup.
   assert_not_contains "$(cat "$default_snapshot")" 'Run `bin/fm-session-start.sh` now' \
     "native session-start context unexpectedly rendered while Calm was off"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-o
+  calm_lab_key C-o
   wait_for_text "$expanded_snapshot" "escape to interrupt" \
-    || fail "Ctrl+O did not retain Pi's ordinary startup and tool expansion behavior"
+    || { calm_lab_capture recent >&2; fail "Ctrl+O did not retain Pi's ordinary startup and tool expansion behavior"; }
   # The expansion redraw lands a frame or two after the footer hint, so wait for the
   # tool output this block actually asserts instead of assuming one implies the other.
   wait_for_text "$expanded_snapshot" "CALM_E2E_OUTPUT" \
     || fail "ordinary Ctrl+O expansion hid tool activity while calm mode was off"
   assert_contains "$(cat "$expanded_snapshot")" "CALM_E2E_OUTPUT" "ordinary Ctrl+O expansion hid tool activity while calm mode was off"
 
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  calm_lab_send "/calm"
+  calm_lab_key M-s
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 120 ]; do
     # Include scrollback: the built-in tool rows this documented bound keeps visible
     # (see below) lengthen the transcript enough to push earlier genuine content, such
     # as the original user prompt, above the plain viewport.
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$hidden_snapshot"
+    calm_lab_capture recent >"$hidden_snapshot"
     # Wait for the redraw this block actually asserts: the collapsed-thinking adapter
     # (unconditional, unaffected by the built-in tool gate below) hides, and the
     # retained genuine rows are back on screen. Built-in tool rows from before this
@@ -3636,11 +3711,11 @@ JSON
   assert_not_contains "$(cat "$hidden_snapshot")" "I will run one command." "/calm left a mid-turn assistant working note in the transcript"
   assert_contains "$(cat "$hidden_snapshot")" "The deterministic tool example is complete." "/calm removed assistant conversation after a tool"
 
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-diagnostic-e2e"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  calm_lab_send "/calm-diagnostic-e2e"
+  calm_lab_key M-s
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 120 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$active_before_snapshot"
+    calm_lab_capture visible >"$active_before_snapshot"
     if grep -Fq "Warning: CALM_TRANSIENT_DIAGNOSTIC" "$active_before_snapshot" &&
       ! grep -Fq "/calm-diagnostic-e2e" "$active_before_snapshot"; then
       break
@@ -3660,8 +3735,8 @@ JSON
   do
     kind=${fixture%%|*}
     needle=${fixture#*|}
-    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-inject-e2e $kind"
-    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+    calm_lab_send "/calm-inject-e2e $kind"
+    calm_lab_key M-s
     active_wait=0
     while ! grep -F '"role":"user"' "$session_file" 2>/dev/null |
       grep -Fq "$needle" && [ "$active_wait" -lt 120 ]; do
@@ -3716,7 +3791,7 @@ for (const [needle, kind] of expected) {
 JS
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 120 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$active_hidden_snapshot"
+    calm_lab_capture visible >"$active_hidden_snapshot"
     if grep -Fq " Error:" "$active_hidden_snapshot" &&
       ! grep -Fq "/calm-inject-e2e" "$active_hidden_snapshot"; then
       break
@@ -3741,8 +3816,8 @@ JS
   assert_contains "$(cat "$active_hidden_snapshot")" " Error:" "operational delivery did not produce a transient provider diagnostic"
   hash_before=$(shasum -a 256 "$session_file" | awk '{print $1}')
 
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/export $export_file"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  calm_lab_send "/export $export_file"
+  calm_lab_key M-s
   if ! wait_for_text "$export_snapshot" "Session exported to: $export_file" 300 && [ ! -s "$export_file" ]; then
     fail "/export did not complete while calm mode was on"
   fi
@@ -3784,7 +3859,7 @@ JS
   # confirmation, so it must not overwrite it: the captain has to keep seeing where
   # their export landed. The export-data assertions above take seconds of real time,
   # so this snapshot is taken well after that repaint has settled rather than racing it.
-  tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$export_settled_snapshot"
+  calm_lab_capture recent >"$export_settled_snapshot"
   assert_contains "$(cat "$export_settled_snapshot")" "Session exported to: $export_file" \
     "Calm's post-export repaint overwrote Pi's export confirmation"
   assert_not_contains "$(cat "$export_settled_snapshot")" "fm_watch_arm_pi" \
@@ -3812,8 +3887,8 @@ JS
   assert_contains "$(cat "$export_settled_snapshot")" "The deterministic tool example is complete." \
     "/export removed genuine assistant conversation from the Calm transcript"
 
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  calm_lab_send "/calm"
+  calm_lab_key M-s
   wait_for_text "$restored_snapshot" "CALM_E2E_OUTPUT" \
     || fail "second /calm did not restore tool result output"
   wait_for_text "$restored_snapshot" "/tmp/active-probe.status" \
@@ -3839,14 +3914,14 @@ JS
   hash_after=$(shasum -a 256 "$session_file" | awk '{print $1}')
   [ "$hash_before" = "$hash_after" ] || fail "/calm changed the persisted session or context data"
 
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  calm_lab_send "/calm"
+  calm_lab_key M-s
   active_screen_wait=0
   # CALM_E2E_OUTPUT is not a useful redraw signal here: it is the pre-activation
   # bash row covered by the documented bound above, so it never leaves the screen
   # again this session regardless of this toggle.
   while [ "$active_screen_wait" -lt 120 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$working_snapshot"
+    calm_lab_capture visible >"$working_snapshot"
     if ! grep -Fq "/calm" "$working_snapshot" &&
       [ "$(cat "$home/config/calm")" = on ]; then
       break
@@ -3857,11 +3932,11 @@ JS
   [ "$(cat "$home/config/calm")" = on ] || fail "third /calm did not persist the active choice"
 
   # Calm on plus a genuinely active run replaces Pi's stock working row with the boat.
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-boat-e2e"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  calm_lab_send "/calm-boat-e2e"
+  calm_lab_key M-s
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$working_snapshot"
+    calm_lab_capture visible >"$working_snapshot"
     if grep -Fq '╲▁▁▁╱' "$working_snapshot"; then
       break
     fi
@@ -3884,11 +3959,16 @@ JS
     || fail "the working ship rendered no low waveform"
   # Standard ANSI colors: blue troughs, cyan crests, yellow hull/left sail, red
   # right sail, and no RGB/256 escapes.
-  tmux -L "$TMUX_SOCKET" capture-pane -p -e -t "$TMUX_SESSION" >"$boat_color_snapshot"
+  calm_lab_capture visible ansi >"$boat_color_snapshot"
   boat_color_line=$(grep -F '╲' "$boat_color_snapshot" | head -1)
   boat_sail_line=$(grep -F '◿' "$boat_color_snapshot" | head -1)
   [ -n "$boat_color_line" ] || fail "could not capture a colored working-ship row"
   [ -n "$boat_sail_line" ] || fail "could not capture a colored working-ship sail"
+  # Herdr serializes the base eight colors as 38;5;0..7. Normalize only those
+  # equivalent palette slots; bright, extended-palette and RGB colors still fail.
+  # The portable renderer guard separately verifies the application's emitted SGR.
+  boat_color_line=$(printf '%s' "$boat_color_line" | sed -E 's/\[38;5;([0-7])m/[3\1m/g')
+  boat_sail_line=$(printf '%s' "$boat_sail_line" | sed -E 's/\[38;5;([0-7])m/[3\1m/g')
   case "$boat_color_line" in
     *'[34m'*) : ;;
     *) fail "the trough was not rendered with standard ANSI blue" ;;
@@ -3916,7 +3996,7 @@ JS
   boat_water_first=$(grep -F '╲▁▁▁╱' "$boat_frame_one" | head -1)
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 60 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_water_snapshot"
+    calm_lab_capture visible >"$boat_water_snapshot"
     boat_water_line=$(grep -F '╲▁▁▁╱' "$boat_water_snapshot" | head -1)
     boat_column_two=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_water_snapshot")
     if [ -n "$boat_water_line" ] && [ "$boat_column_two" = "$boat_column_one" ] &&
@@ -3934,7 +4014,7 @@ JS
   boat_column_two=""
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_frame_two"
+    calm_lab_capture visible >"$boat_frame_two"
     boat_column_two=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_frame_two")
     if [ -n "$boat_column_two" ] && [ "$boat_column_two" != "$boat_column_one" ]; then
       break
@@ -3947,11 +4027,10 @@ JS
     || fail "the working ship never moved horizontally (stuck at column $boat_column_one)"
 
   # The widget owns its own geometry, so resizing the same running TUI must reflow it.
-  tmux -L "$TMUX_SOCKET" set-option -t "$TMUX_SESSION" window-size manual
-  tmux -L "$TMUX_SOCKET" resize-window -t "$TMUX_SESSION" -x 100 -y 30
+  calm_lab_resize 100 30
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_resized_snapshot"
+    calm_lab_capture visible >"$boat_resized_snapshot"
     boat_hull_line=$(grep -F '╲▁▁▁╱' "$boat_resized_snapshot" | head -1)
     if [ -n "$boat_hull_line" ] && [ "${#boat_hull_line}" -eq 100 ]; then
       break
@@ -3978,7 +4057,7 @@ JS
   boat_column_two=""
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_resized_snapshot"
+    calm_lab_capture visible >"$boat_resized_snapshot"
     boat_column_two=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_resized_snapshot")
     if [ -n "$boat_column_two" ] && [ "$boat_column_two" != "$boat_column_one" ]; then
       break
@@ -3992,13 +4071,13 @@ JS
     || fail "the working ship moved offscreen after the resize"
 
   # A narrow terminal shortens the track enough to observe both bounce directions.
-  tmux -L "$TMUX_SOCKET" resize-window -t "$TMUX_SESSION" -x 12 -y 20
+  calm_lab_resize 12 20
   boat_narrow_previous=""
   boat_narrow_direction=0
   boat_narrow_reversed=0
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 400 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_narrow_snapshot"
+    calm_lab_capture visible >"$boat_narrow_snapshot"
     boat_narrow_column=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_narrow_snapshot")
     if [ -n "$boat_narrow_previous" ] && [ -n "$boat_narrow_column" ] &&
       [ "$boat_narrow_column" -ne "$boat_narrow_previous" ]; then
@@ -4020,21 +4099,21 @@ JS
   boat_hull_line=$(grep -F '╲▁▁▁╱' "$boat_narrow_snapshot" | head -1)
   [ "${#boat_hull_line}" -eq 12 ] \
     || fail "the narrow working-ship row was ${#boat_hull_line} cells instead of exactly 12"
-  tmux -L "$TMUX_SOCKET" resize-window -t "$TMUX_SESSION" -x 100 -y 30
+  calm_lab_resize 100 30
 
   # Typing still reaches the editor while the animation runs.
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "FOCUSPROBE"
+  calm_lab_send "FOCUSPROBE"
   wait_for_text "$boat_focus_snapshot" "FOCUSPROBE" \
     || fail "keyboard input did not reach the editor while the working ship animated"
   i=0
   while [ "$i" -lt 10 ]; do
-    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" BSpace
+    calm_lab_key BSpace
     i=$((i + 1))
   done
 
   # Capture the last on-screen column and sail before settling so the next working
   # period in this same Pi session can prove freeze/resume continuity.
-  tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_freeze_snapshot"
+  calm_lab_capture visible >"$boat_freeze_snapshot"
   boat_freeze_column=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_freeze_snapshot")
   boat_freeze_sail=$(grep -F '◿│◣' "$boat_freeze_snapshot" | tail -1 || true)
   case "$boat_freeze_sail" in
@@ -4047,16 +4126,16 @@ JS
   # Escape aborts the run, and the abort path removes the ship with no residue.
   # Escape can land while the just-started run is not yet abortable, so retry
   # until pi records the abort instead of assuming one keypress sufficed.
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
+  calm_lab_key Escape
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$boat_cleared_snapshot"
+    calm_lab_capture recent >"$boat_cleared_snapshot"
     if ! grep -Fq '╲▁▁▁╱' "$boat_cleared_snapshot" &&
       [ "$(grep -Fc 'Operation aborted' "$boat_cleared_snapshot" || true)" -ge 1 ]; then
       break
     fi
     if [ "$((active_screen_wait % 20))" -eq 19 ]; then
-      tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
+      calm_lab_key Escape
     fi
     sleep 0.05
     active_screen_wait=$((active_screen_wait + 1))
@@ -4068,13 +4147,13 @@ JS
   # A later working period in the same Pi process must resume the frozen column and
   # sail rather than recreating the boat at the left edge. Capture the first resumed
   # frames quickly so the slow boat cadence cannot advance before the assertion.
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-boat-e2e"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  calm_lab_send "/calm-boat-e2e"
+  calm_lab_key M-s
   boat_resume_column=""
   boat_resume_sail=""
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_resume_snapshot"
+    calm_lab_capture visible >"$boat_resume_snapshot"
     if grep -Fq '╲▁▁▁╱' "$boat_resume_snapshot"; then
       boat_resume_column=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_resume_snapshot")
       boat_resume_sail=$(grep -F '◿│◣' "$boat_resume_snapshot" | tail -1 || true)
@@ -4098,16 +4177,16 @@ JS
   # Clear the resumed run before the Calm-off stock-row probe, with the same
   # abort-recorded retry as the first boat so a swallowed Escape cannot leave
   # the long-delay run occupying the agent.
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
+  calm_lab_key Escape
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$boat_cleared_snapshot"
+    calm_lab_capture recent >"$boat_cleared_snapshot"
     if ! grep -Fq '╲▁▁▁╱' "$boat_cleared_snapshot" &&
       [ "$(grep -Fc 'Operation aborted' "$boat_cleared_snapshot" || true)" -ge 2 ]; then
       break
     fi
     if [ "$((active_screen_wait % 20))" -eq 19 ]; then
-      tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
+      calm_lab_key Escape
     fi
     sleep 0.05
     active_screen_wait=$((active_screen_wait + 1))
@@ -4115,8 +4194,8 @@ JS
   assert_not_contains "$(cat "$boat_cleared_snapshot")" '╲▁▁▁╱' "Escape did not remove the resumed working ship"
 
   # Calm off restores Pi's stock working row and never shows the ship.
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  calm_lab_send "/calm"
+  calm_lab_key M-s
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
     if [ "$(cat "$home/config/calm")" = off ]; then
@@ -4126,11 +4205,11 @@ JS
     active_screen_wait=$((active_screen_wait + 1))
   done
   [ "$(cat "$home/config/calm")" = off ] || fail "the Calm-off working-row probe did not turn Calm off"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-working-e2e"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  calm_lab_send "/calm-working-e2e"
+  calm_lab_key M-s
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$working_snapshot"
+    calm_lab_capture visible >"$working_snapshot"
     if grep -Eq "Working(\\.\\.\\.)?([[:space:]]|─|$)" "$working_snapshot"; then
       break
     fi
@@ -4143,12 +4222,12 @@ JS
     || fail "the deterministic provider did not settle after proving Pi's stock working row"
 
   # No blank-row residue: settling returns to the same layout Calm off started from.
-  tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_cleared_snapshot"
+  calm_lab_capture visible >"$boat_cleared_snapshot"
   assert_not_contains "$(cat "$boat_cleared_snapshot")" '╲▁▁▁╱' "a settled run left the working ship on screen"
 
   # Restore Calm for the persistence restart below.
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  calm_lab_send "/calm"
+  calm_lab_key M-s
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
     if [ "$(cat "$home/config/calm")" = on ]; then
@@ -4158,15 +4237,15 @@ JS
     active_screen_wait=$((active_screen_wait + 1))
   done
   [ "$(cat "$home/config/calm")" = on ] || fail "Calm was not restored before the persistence restart"
-  tmux -L "$TMUX_SOCKET" resize-window -t "$TMUX_SESSION" -x 180 -y 44
+  calm_lab_resize 180 44
 
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  calm_lab_send "/quit"
+  calm_lab_key M-s
   wait_for_text "$working_response_snapshot" "PI_EXIT=0" \
     || fail "Pi did not exit cleanly before the Calm persistence restart"
-  tmux -L "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+  calm_lab_close
 
-  tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 180 -y 44 \
+  calm_lab_start 180 44 \
     "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-skills --no-prompt-templates --no-context-files --session '$session_file'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 30"
   wait_for_text "$restarted_snapshot" "CALM_WORKING_E2E_RESPONSE" \
     || fail "Pi did not restore the persisted session after restart"
@@ -4187,26 +4266,30 @@ JS
   assert_contains "$(cat "$restarted_snapshot")" "CALM_WORKING_E2E_RESPONSE" "restart/resume removed a genuine assistant response"
   [ "$(cat "$home/config/calm")" = on ] || fail "restart/resume changed the persisted active choice"
 
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  calm_lab_send "/calm"
+  calm_lab_key M-s
   wait_for_text "$resumed_restored_snapshot" "CALM_E2E_OUTPUT" \
     || fail "/calm after restart did not restore ordinary transcript rows"
   [ "$(cat "$home/config/calm")" = off ] || fail "/calm after restart did not persist the inactive choice"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  calm_lab_send "/quit"
+  calm_lab_key M-s
   pass "Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior"
 }
 
-test_home_resolution
-test_pi_compat_no_upper_bound
-test_pi_compat_degraded_adapter
-test_pi_compat_missing_adapter_exports
-test_builtin_gate_load_time
-test_calm_activation_collision_and_regression_bound
-test_rendering_and_session_lifecycle
-test_calm_mid_turn_working_notes
-test_operational_followup_turn_e2e
-test_hidden_block_geometry_e2e
-test_working_ship_geometry_and_lifecycle
-test_export_dom_render_guard
-test_interactive_terminal_e2e
+# Portable rendering and real-terminal coverage have separate runner lanes.
+if [ "${FM_CALM_PI_LIVE_ONLY:-0}" = 1 ]; then
+  test_operational_followup_turn_e2e
+  test_hidden_block_geometry_e2e
+  test_interactive_terminal_e2e
+else
+  test_home_resolution
+  test_pi_compat_no_upper_bound
+  test_pi_compat_degraded_adapter
+  test_pi_compat_missing_adapter_exports
+  test_builtin_gate_load_time
+  test_calm_activation_collision_and_regression_bound
+  test_rendering_and_session_lifecycle
+  test_calm_mid_turn_working_notes
+  test_working_ship_geometry_and_lifecycle
+  test_export_dom_render_guard
+fi

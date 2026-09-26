@@ -12,29 +12,18 @@ LEASE="$ROOT/bin/fm-lease.sh"
 make_fake_backend() {  # <case-dir>
   local dir=$1 fakebin="$1/fakebin" command
   mkdir -p "$fakebin"
-  cat > "$fakebin/tmux" <<'SH'
+  cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
-set -u
-case "${1:-}" in
-  capture-pane) printf '╭────╮\n│    │\n╰────╯\n' ;;
-  display-message)
-    for arg in "$@"; do
-      case "$arg" in *cursor_y*) printf '1\n'; exit 0 ;; esac
-    done
-    printf 'fake-pane\n'
-    ;;
-  send-keys)
-    printf '%s\n' "$*" >> "${FM_TEST_SEND_LOG:-/dev/null}"
-    ;;
+case "$1 ${2:-}" in
+  'status --json') echo '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
+  'pane read') printf '╭────╮\n│    │\n╰────╯\n' ;;
+  'pane send-text') printf '%s\n' "$*" >> "${FM_TEST_SEND_LOG:-/dev/null}" ;;
+  *) echo '{}' ;;
 esac
-exit 0
 SH
-  chmod +x "$fakebin/tmux"
-  for command in herdr zellij orca cmux; do
-    cat > "$fakebin/$command" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
+  chmod +x "$fakebin/herdr"
+  for command in tmux zellij orca cmux; do
+    printf '#!/bin/sh\nexit 97\n' > "$fakebin/$command"
     chmod +x "$fakebin/$command"
   done
   printf '%s\n' "$fakebin"
@@ -47,11 +36,11 @@ make_home() {  # <case-dir> <task>...
   printf '%s\n' "$$" > "$home/state/.lock"
   for task in "$@"; do
     {
-      printf 'window=fm-%s\n' "$task"
+      printf 'window=fixture:w1:p-%s\n' "$task"
       printf 'endpoint_task_id=%s\n' "$task"
       printf 'harness=pi\n'
       printf 'kind=ship\n'
-      printf 'backend=tmux\n'
+      printf 'backend=herdr\n'
       printf 'spawn_gen=test-%s\n' "$task"
     } > "$home/state/$task.meta"
   done
@@ -144,7 +133,7 @@ test_sweep_without_handoffs_is_a_noop() {
 }
 
 test_local_runtime_backend_matrix_uses_one_durable_plane() {
-  local dir home fakebin backend endpoint id record count
+  local dir home fakebin backend endpoint id record count rc out
   for backend in tmux herdr zellij orca cmux; do
     dir="$TMP_ROOT/backend-$backend"
     fakebin=$(make_fake_backend "$dir")
@@ -163,9 +152,18 @@ test_local_runtime_backend_matrix_uses_one_durable_plane() {
       printf 'spawn_gen=test-target\n'
     } > "$home/state/target.meta"
     id="backend-$backend"
-    PATH="$fakebin:$PATH" FM_HOME="$home" "$HANDOFF" send source target --id "$id" \
-      "deliver independently of the $backend doorbell" >/dev/null \
-      || fail "$backend metadata did not reach the shared durable inbox"
+    rc=0
+    out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$HANDOFF" send source target --id "$id" \
+      "deliver independently of the $backend doorbell" 2>&1) || rc=$?
+    if [ "$backend" != herdr ]; then
+      [ "$rc" = 7 ] || fail "retired $backend handoff did not refuse: $out"
+      out=$(FM_HOME="$home" "$HANDOFF" inspect "$id")
+      assert_contains "$out" 'state=rejected' 'retired handoff rejection was not durable'
+      assert_contains "$out" "deliver independently of the $backend doorbell" 'retired handoff lost body'
+      [ ! -d "$home/state/target.inbox" ] || fail 'retired target received an instruction'
+      continue
+    fi
+    [ "$rc" = 0 ] || fail "Herdr handoff failed: $out"
     record=$(find "$home/state/target.inbox" -maxdepth 1 -name '*.msg' -print)
     [ -f "$record" ] || fail "$backend delivery did not create an inbox record"
     assert_contains "$(inbox_body "$record")" "deliver independently of the $backend doorbell" \
@@ -173,7 +171,7 @@ test_local_runtime_backend_matrix_uses_one_durable_plane() {
     count=$(find "$home/state/target.inbox" -name '*.msg' | wc -l | tr -d ' ')
     [ "$count" -eq 1 ] || fail "$backend delivery created $count inbox records"
   done
-  pass "task-handoff: every supported local runtime backend uses the same durable inbox plane"
+  pass "task-handoff: Herdr delivers durably; retired backends reject without losing the requested body"
 }
 
 test_terminal_refusal_is_durable() {
@@ -207,7 +205,7 @@ test_secondmate_routes_stay_with_pending_reply_owner() {
       printf 'window=fm-mate\n'
       printf 'harness=pi\n'
       printf 'kind=secondmate\n'
-      printf 'backend=tmux\n'
+      printf 'backend=herdr\n'
       [ "$scope" != remote ] || printf 'remote_host=secondmate.example\n'
       printf 'spawn_gen=test-mate\n'
     } > "$home/state/mate.meta"

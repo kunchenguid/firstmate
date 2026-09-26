@@ -41,7 +41,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-fm_live_gate opt-in FM_SESSIONSTART_HOOK_LIVE_E2E,FM_PI_SESSIONSTART_RACE_LIVE_E2E tmux
+fm_live_gate opt-in FM_SESSIONSTART_HOOK_LIVE_E2E,FM_PI_SESSIONSTART_RACE_LIVE_E2E herdr
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 unset NO_MISTAKES_GATE
@@ -57,17 +57,33 @@ note() { printf '# %s\n' "$1"; }
 # inside the checkout would show up as an embedded repository in a working tree
 # a maintainer may be committing from while this guard runs.
 LAB="${TMPDIR:-/tmp}/fm-sessionstart-hook-live-e2e.$$"
-SOCKET="fm-ss-hook-$$"
+. "$ROOT/tests/herdr-test-safety.sh"
+herdr_forget_inherited_pane
+HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+CLEAN_PATH=$PATH
+LAB_SESSION=$("$HELPER" name "${FM_HERDR_LAB_TASK:-sessionstart-hook}") || exit 1
 CHECKED=0
 ABSENT=
 
 cleanup() {
-  tmux -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+  PATH="$CLEAN_PATH" "$HELPER" teardown "$LAB_SESSION" || exit 1
   rm -rf "$LAB"
 }
 trap cleanup EXIT INT TERM
 
-capture() { tmux -L "$SOCKET" capture-pane -p -t "$1" -S -400 2>/dev/null || true; }
+"$HELPER" provision "$LAB_SESSION" || fail 'Herdr lab provision failed'
+herdr_test_guard_cli "$LAB_SESSION" "$LAB/guard" "$HELPER" || fail 'Herdr lab guard failed'
+export PATH="$LAB/guard:$PATH" HERDR_SESSION="$LAB_SESSION"
+
+new_pane() { # <cwd> <label> <quoted-command>
+  local result pane
+  result=$("$HELPER" run "$LAB_SESSION" workspace create --cwd "$1" --label "$2" --no-focus) || return 1
+  pane=$(printf '%s' "$result" | jq -er '.result.root_pane.pane_id') || return 1
+  "$HELPER" run "$LAB_SESSION" terminal session control "$pane" --cols 160 --rows 44 </dev/null >/dev/null || return 1
+  "$HELPER" run "$LAB_SESSION" pane run "$pane" "$3" >/dev/null || return 1
+  printf '%s' "$pane"
+}
+capture() { "$HELPER" run "$LAB_SESSION" pane read "$1" --source recent-unwrapped --format text 2>/dev/null || true; }
 
 wait_for_text() {  # <session> <text> [attempts]
   local session=$1 expected=$2 attempts=${3:-90} i=0
@@ -80,9 +96,9 @@ wait_for_text() {  # <session> <text> [attempts]
 }
 
 send_line() {  # <session> <text>
-  tmux -L "$SOCKET" send-keys -t "$1" -l "$2"
+  "$HELPER" run "$LAB_SESSION" pane send-text "$1" "$2" >/dev/null
   sleep 2
-  tmux -L "$SOCKET" send-keys -t "$1" Enter
+  "$HELPER" run "$LAB_SESSION" pane send-keys "$1" Enter >/dev/null
 }
 
 ASK='Reply with exactly the FMHOOKTOKEN value from your session-start context and nothing else.'
@@ -245,10 +261,9 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
   shift 4
   local record="$lab/record" session="fmss-$harness" reset n compact_seed compact_reply
   : > "$record"
-  tmux -L "$SOCKET" new-session -d -s "$session" -c "$lab" -x 200 -y 50 \
-    -e FM_LIVE_RECORD="$record" -e FM_ROOT_OVERRIDE="$lab" -e FM_HOME="$lab" \
-    -e FM_LIVE_NONCE="$LIVE_NONCE" \
-    "$*" \
+  local command
+  printf -v command '%q ' env "FM_LIVE_RECORD=$record" "FM_ROOT_OVERRIDE=$lab" "FM_HOME=$lab" "FM_LIVE_NONCE=$LIVE_NONCE" "$@"
+  session=$(new_pane "$lab" "$session" "$command") \
     || fail "$harness $version: could not start an interactive lab session"
 
   # Every run-tier TUI asks whether it trusts a folder it has not seen, and the
@@ -259,7 +274,7 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
   n=0
   while [ "$n" -lt 60 ] && ! grep -q . "$record" 2>/dev/null; do
     if capture "$session" | grep -qiE 'trust (this|the|parent)?[[:space:]]*(folder|project)'; then
-      tmux -L "$SOCKET" send-keys -t "$session" Enter
+      "$HELPER" run "$LAB_SESSION" pane send-keys "$session" Enter >/dev/null
       sleep 5
     fi
     sleep 2
@@ -317,7 +332,7 @@ probe_context_reset() {  # <harness> <version> <lab> <clear-command> <launch-arg
     note "$harness $version: compaction was NOT reached in this lab (recorded: $(tr '\n' ' ' < "$record")); its compact evidence was not refreshed"
   fi
 
-  tmux -L "$SOCKET" kill-session -t "$session" >/dev/null 2>&1 || true
+  "$HELPER" run "$LAB_SESSION" pane close "$session" >/dev/null || fail "lab pane close failed"
 }
 
 # --- real Pi provider prerequisite -------------------------------------------
@@ -496,8 +511,7 @@ TS
   git -C "$project" add -A
   git -C "$project" commit -q -m init
 
-  tmux -L "$SOCKET" new-session -d -s "$session" -c "$project" -x 180 -y 50 \
-    "env FM_HOME='$home' FM_ROOT_OVERRIDE='$project' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --session-dir '$sessions' --no-context-files --no-skills --no-prompt-templates --tools bash --model race-local/deterministic; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 60" \
+  session=$(new_pane "$project" "$session" "env FM_HOME='$home' FM_ROOT_OVERRIDE='$project' PI_CODING_AGENT_DIR='$config' PI_OFFLINE=1 pi --approve --session-dir '$sessions' --no-context-files --no-skills --no-prompt-templates --tools bash --model race-local/deterministic; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 60") \
     || fail "Pi $version: could not start the offline /new lab"
   i=0
   while [ "$i" -lt 200 ]; do
@@ -510,14 +524,14 @@ TS
   printf '%s\n' "$pane" | grep -Fq 'deterministic' \
     || { printf '%s\n' "$pane" >&2; fail "Pi $version: offline local provider did not reach the ready composer"; }
 
-  tmux -L "$SOCKET" send-keys -t "$session" -l /new
-  tmux -L "$SOCKET" send-keys -t "$session" Enter
+  "$HELPER" run "$LAB_SESSION" pane send-text "$session" /new
+  "$HELPER" run "$LAB_SESSION" pane send-keys "$session" Enter >/dev/null
   i=0
   while [ "$i" -lt 500 ] && [ ! -f "$home/state/native-started-1" ]; do sleep 0.01; i=$((i + 1)); done
   [ -f "$home/state/native-started-1" ] \
     || { capture "$session" >&2; fail "Pi $version: immediate /new native generation never started"; }
-  tmux -L "$SOCKET" send-keys -t "$session" -l IMMEDIATE_RACE_PROMPT
-  tmux -L "$SOCKET" send-keys -t "$session" Enter
+  "$HELPER" run "$LAB_SESSION" pane send-text "$session" IMMEDIATE_RACE_PROMPT
+  "$HELPER" run "$LAB_SESSION" pane send-keys "$session" Enter >/dev/null
   sleep 0.5
   [ ! -s "$home/state/provider-calls" ] \
     || fail "Pi $version: the immediate first provider call escaped before native startup settled"
@@ -532,7 +546,7 @@ TS
   grep -Fqx 'prompt=immediate native_count=1 manual=false' "$home/state/provider-calls" \
     || { capture "$session" >&2; fail "Pi $version: immediate first payload lacked exactly one native startup context"; }
   wait_for_text "$session" 'RACE_RESULT prompt=immediate native_count=1 manual=false' 60 \
-    || fail "Pi $version: immediate local-provider turn did not settle"
+    || { capture "$session" >&2; fail "Pi $version: immediate local-provider turn did not settle"; }
   session_file=$(find "$sessions" -type f -name '*.jsonl' -exec grep -l IMMEDIATE_RACE_PROMPT {} + 2>/dev/null | head -1 || true)
   [ -n "$session_file" ] || fail "Pi $version: immediate /new session file was not found"
   [ "$(grep -Fc 'RACE_NATIVE generation=1' "$session_file")" -eq 1 ] \
@@ -542,8 +556,8 @@ TS
   [ ! -f "$home/state/manual-started" ] \
     || fail "Pi $version: immediate fixed path still executed manual startup"
 
-  tmux -L "$SOCKET" send-keys -t "$session" -l /new
-  tmux -L "$SOCKET" send-keys -t "$session" Enter
+  "$HELPER" run "$LAB_SESSION" pane send-text "$session" /new
+  "$HELPER" run "$LAB_SESSION" pane send-keys "$session" Enter >/dev/null
   i=0
   while [ "$i" -lt 500 ] && [ ! -f "$home/state/native-started-2" ]; do sleep 0.01; i=$((i + 1)); done
   [ -f "$home/state/native-started-2" ] \
@@ -552,8 +566,8 @@ TS
   i=0
   while [ "$i" -lt 500 ] && [ ! -f "$home/state/native-completed-2" ]; do sleep 0.01; i=$((i + 1)); done
   [ -f "$home/state/native-completed-2" ] || fail "Pi $version: proven native generation did not complete"
-  tmux -L "$SOCKET" send-keys -t "$session" -l PROVEN_RACE_PROMPT
-  tmux -L "$SOCKET" send-keys -t "$session" Enter
+  "$HELPER" run "$LAB_SESSION" pane send-text "$session" PROVEN_RACE_PROMPT
+  "$HELPER" run "$LAB_SESSION" pane send-keys "$session" Enter >/dev/null
   wait_for_text "$session" 'RACE_RESULT prompt=proven native_count=1 manual=false' 60 \
     || fail "Pi $version: proven completed-before-prompt path lacked exactly one native context"
   first_line=$(sed -n '1p' "$home/state/provider-calls")
@@ -567,8 +581,8 @@ TS
   [ ! -f "$home/state/manual-started" ] \
     || fail "Pi $version: proven fixed path executed manual startup"
 
-  tmux -L "$SOCKET" send-keys -t "$session" -l /quit
-  tmux -L "$SOCKET" send-keys -t "$session" Enter
+  "$HELPER" run "$LAB_SESSION" pane send-text "$session" /quit
+  "$HELPER" run "$LAB_SESSION" pane send-keys "$session" Enter >/dev/null
   wait_for_text "$session" 'PI_EXIT=0' 30 || fail "Pi $version: offline /new lab did not exit cleanly"
   pass "Pi $version: immediate and completed-before-prompt /new paths each made one first provider call with exactly one native startup context and no manual execution"
 }

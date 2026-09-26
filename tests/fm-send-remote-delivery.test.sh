@@ -33,6 +33,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$ROOT/tests/fixtures.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$ROOT/bin/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-marker-lib.sh
@@ -48,7 +50,7 @@ TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 
 # Stub tmux for the local typed-plane legs: logs literal typed text to
 # FM_SEND_LOG. The default composer reads empty (clean submit);
-# FM_FAKE_TMUX_PENDING=1 keeps a proven pending composer with no busy footer,
+# FM_FAKE_HERDR_COMPOSER=pending keeps a proven pending composer with no busy footer,
 # so the real submit core exhausts its Enter budget and reports the pending
 # verdict. The ssh stub counts invocations, logs the wire line, and either
 # fails with FM_FAKE_SSH_RC (emitting FM_FAKE_SSH_STDERR as the remote
@@ -59,39 +61,7 @@ TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 make_stubs() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
-  cat > "$fb/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "${1:-}" in
-  send-keys)
-    shift
-    literal=0
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        -t) shift 2 ;;
-        -l) literal=1; shift ;;
-        *) break ;;
-      esac
-    done
-    if [ "$literal" = 1 ]; then
-      printf '%s' "${1:-}" >> "$FM_SEND_LOG"
-    fi
-    exit 0 ;;
-  display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
-    printf 'fakepane\n'; exit 0 ;;
-  capture-pane)
-    if [ "${FM_FAKE_TMUX_PENDING:-0}" = 1 ]; then
-      printf '╭────────────╮\n│ > steer    │\n╰────────────╯\n'
-    else
-      printf '╭────╮\n│    │\n╰────╯\n'
-    fi
-    exit 0 ;;
-  list-windows) exit 0 ;;
-esac
-exit 0
-SH
-  chmod +x "$fb/tmux"
+  fm_test_fake_herdr_send "$fb"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -156,7 +126,7 @@ setup_remote_secondmate_home() {  # <name> -> echoes remote home dir
   mkdir -p "$rh/state/parent-route" "$rh/bin"
   printf 'rsm\n' > "$rh/.fm-secondmate-home"
   printf '# remote secondmate home fixture\n' > "$rh/AGENTS.md"
-  fm_write_meta "$rh/state/parent-route/rsm.meta" \
+  fm_test_write_herdr_meta "$rh/state/parent-route/rsm.meta" \
     "window=fm-remote:p1" \
     "worktree=-" \
     "project=-" \
@@ -176,7 +146,7 @@ setup_remote_parent_home() {  # <name> <remote-home> -> echoes home dir
   local home
   home=$(setup_home "$1")
   mkdir -p "$home/data"
-  fm_write_meta "$home/state/rsm.meta" \
+  fm_test_write_herdr_meta "$home/state/rsm.meta" \
     "window=fm-remote:p1" \
     "endpoint_task_id=rsm" \
     "harness=pi" \
@@ -225,7 +195,7 @@ test_remote_steer_lands_in_remote_inbox() {
   home=$(setup_remote_parent_home remote-inbox "$rhome")
 
   rc=0
-  send_env "$fb" "$home" "$ssh_log" \
+  FM_FAKE_HERDR_SEND_FAIL=1 send_env "$fb" "$home" "$ssh_log" \
     "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
   err=$(cat "$dir/err")
   expect_code 0 "$rc" "a durably recorded remote steer must exit 0: $err"
@@ -244,7 +214,7 @@ test_remote_steer_lands_in_remote_inbox() {
     *"$FM_FROMFIRST_MARK"*) : ;;
     *) fail "the remote record must carry the from-firstmate marker: $body" ;;
   esac
-  # The doorbell could not reach the fixture pane (no herdr CLI here); that
+  # The fixture explicitly refuses the doorbell; that
   # never fails the send, and the notice still names the durable record.
   assert_contains "$err" "durably recorded" \
     "a failed doorbell must be reported as a notice on a durably sent steer"
@@ -712,14 +682,14 @@ test_local_secondmate_pending_keeps_expectation_armed() {
   dir="$TMP_ROOT/local-pending-expectation"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home local-pending-expectation)
-  fm_write_meta "$home/state/lsm.meta" \
+  fm_test_write_herdr_meta "$home/state/lsm.meta" \
     "window=sess:fm-lsm" "harness=pi" "kind=secondmate" "mode=secondmate" "home=$home/sm"
 
   # A harness-native slash invocation keeps the typed plane for a LOCAL marked
   # secondmate target, so this pins the kept armed-expectation semantics there.
   : > "$log"
   rc=0
-  env PATH="$fb:$PATH" FM_FAKE_TMUX_PENDING=1 \
+  env PATH="$fb:$PATH" FM_FAKE_HERDR_COMPOSER=pending \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" lsm "/audit the ledger" >/dev/null 2>&1 || rc=$?
   expect_code 3 "$rc" "an unconfirmed local secondmate submit must exit delivered-unconfirmed"
@@ -746,9 +716,9 @@ test_local_pending_reports_delivered_unconfirmed() {
   # governs it.
   : > "$log"
   rc=0
-  env PATH="$fb:$PATH" FM_FAKE_TMUX_PENDING=1 \
+  env PATH="$fb:$PATH" FM_FAKE_HERDR_COMPOSER=pending \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
-    "$SEND" sess:win "steer text" >"$dir/out" 2>"$dir/err" || rc=$?
+    "$SEND" sess:w1:p1 "steer text" >"$dir/out" 2>"$dir/err" || rc=$?
   err=$(cat "$dir/err")
   expect_code 3 "$rc" "an unconfirmed local submit must exit with the delivered-unconfirmed status"
   assert_contains "$err" "submission is unconfirmed" \
@@ -765,14 +735,14 @@ test_local_pending_does_not_close_resolve_key() {
   dir="$TMP_ROOT/local-pending-key"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home local-pending-key)
-  fm_write_meta "$home/state/t2.meta" "window=sess:fm-t2" "kind=ship"
+  fm_test_write_herdr_meta "$home/state/t2.meta" "window=sess:fm-t2" "kind=ship"
   printf 'blocked [key=creds]: need the deploy token\n' > "$home/state/t2.status"
 
   # A harness-native slash answer keeps the typed plane, so the unconfirmed
   # ladder still governs it; a plain-text answer would close at enqueue instead.
   : > "$log"
   rc=0
-  env PATH="$fb:$PATH" FM_FAKE_TMUX_PENDING=1 \
+  env PATH="$fb:$PATH" FM_FAKE_HERDR_COMPOSER=pending \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" t2 --resolve-key creds "/vault fetch deploy-token" >/dev/null 2>&1 || rc=$?
   expect_code 3 "$rc" "an unconfirmed local answer must exit with the delivered-unconfirmed status"

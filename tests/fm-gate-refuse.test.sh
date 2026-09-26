@@ -187,30 +187,7 @@ test_spawn_refuses_and_admits() {
 make_send_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "${1:-}" in
-  send-keys)
-    shift; literal=0; target=
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        -t) target=$2; shift 2 ;;
-        -l) literal=1; shift ;;
-        *) break ;;
-      esac
-    done
-    printf 'send-keys target=%s literal=%s arg=%s\n' "$target" "$literal" "${1:-}" >> "$FM_TMUX_LOG"
-    exit 0 ;;
-  display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
-    printf '%%1\n'; exit 0 ;;
-  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) printf 'fm-lane-ok\n'; exit 0 ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  fm_test_fake_herdr_send "$fakebin"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/sleep"
   chmod +x "$fakebin/sleep"
   printf '%s\n' "$fakebin"
@@ -221,7 +198,7 @@ run_send() {
   local cwd=$1 home=$2 fakebin=$3 log=$4 target=$5 text=$6; shift 6
   ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
       "PATH=$fakebin:$PATH" "FM_HOME=$home" "FM_ROOT_OVERRIDE=$home" \
-      "FM_TMUX_LOG=$log" "FM_SEND_SETTLE=0" "$@" \
+      "FM_SEND_LOG=$log" "FM_SEND_SETTLE=0" "$@" \
       "$SEND" "$target" "$text" ) 2>&1
 }
 
@@ -230,7 +207,7 @@ test_send_refuses_and_admits() {
   home="$TMP/send-home"; mkdir -p "$home/state"
   fakebin=$(make_send_fakebin "$TMP/send-fake")
   log="$TMP/send-tmux.log"
-  fm_write_meta "$home/state/lane-ok.meta" "window=sess:fm-lane-ok" "kind=ship" "harness=codex"
+  fm_write_meta "$home/state/lane-ok.meta" "window=fixture:w1:p-lane-ok" "kind=ship" "harness=codex" "backend=herdr" "herdr_session=fixture" "herdr_workspace_id=w1" "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p-lane-ok" "endpoint_task_id=lane-ok" "worktree=$home" "project=$home"
 
   # env-marker refuse.
   : > "$log"
@@ -257,7 +234,7 @@ test_send_refuses_and_admits() {
     || fail "send: normal steer was not durably enqueued"
   assert_not_contains "$(cat "$log")" "literal=1 arg=hello captain" \
     "send: normal steer payload must not be typed"
-  assert_contains "$(cat "$log")" "target=sess:fm-lane-ok literal=1 arg=: Firstmate instruction waiting" \
+  assert_contains "$(cat "$log")" "Firstmate instruction waiting" \
     "send: normal steer should ring the durable inbox doorbell"
   pass "fm-send: refuses on marker and gate-worktree backstop; a normal steer uses the inbox"
 }
@@ -268,13 +245,21 @@ test_send_refuses_and_admits() {
 # task (HEAD reachable from origin), so a normal teardown genuinely succeeds and a
 # refused one leaves the task untouched (mirrors tests/fm-teardown make_case).
 make_teardown_case() {
-  local name=$1 case_dir fakebin t
+  local name=$1 case_dir fakebin
   case_dir="$TMP/$name"; fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
-  for t in treehouse tmux; do
-    printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/$t"
-    chmod +x "$fakebin/$t"
-  done
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/treehouse"
+  chmod +x "$fakebin/treehouse"
+  cat > "$fakebin/herdr" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  'session list') echo '{"sessions":[{"name":"fixture","running":true,"socket_path":"$case_dir/herdr.sock"}]}' ;;
+  'status --json') echo '{"server":{"running":true}}' ;;
+  'pane get') echo '{"error":{"code":"pane_not_found"}}'; exit 1 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
@@ -304,7 +289,8 @@ SH
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
   fm_write_meta "$case_dir/state/task-x1.meta" \
-    "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
+    "window=fixture:w1:p1" "endpoint_task_id=task-x1" "backend=herdr" \
+    "herdr_session=fixture" "herdr_workspace_id=w1" "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p1" \
     "worktree=$case_dir/wt" "project=$case_dir/project" \
     "kind=ship" "mode=no-mistakes" "spawn_gen=spawn-gate-refuse-task-x1"
   touch "$case_dir/state/.last-watcher-beat"

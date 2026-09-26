@@ -43,8 +43,8 @@
 #      flags still win.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-ff-lib.sh"
 # shellcheck source=/dev/null
@@ -61,7 +61,8 @@ unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_IN
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-harness)
-export FM_BACKEND=tmux
+export FM_BACKEND=herdr HERDR_SESSION=fixture
+unset HERDR_ENV HERDR_PANE_ID HERDR_WORKSPACE_ID HERDR_TAB_ID
 
 # Every spawn pins a throwaway HOME for harness configuration discovery.
 # Dropping the ambient markers is only half the isolation: a structural ancestor
@@ -333,18 +334,9 @@ test_propagate_lib() {
 
 # A tmux stub that accepts every subcommand and prints nothing, so no window
 # pre-exists and the spawn proceeds to write its meta. Echoes the fakebin dir.
-make_noop_tmux() {
-  local dir=$1 fakebin="$1/fakebin"
-  mkdir -p "$fakebin"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" pi
-  # BASE_PATH deliberately omits the developer's node, which the trust
-  # registration below needs, so link the real one in rather than presenting a
-  # node-less spawn host no real fleet member looks like.
+make_noop_herdr() {
+  local fakebin
+  fakebin=$(fm_test_make_spawn_fakebin "$1" pi)
   ln -sf "$(command -v node)" "$fakebin/node"
   printf '%s\n' "$fakebin"
 }
@@ -368,7 +360,7 @@ make_seeded_home() {
 spawn_secondmate() {
   local world=$1 id=$2 home=$3 harness=${4:-} fakebin
   mkdir -p "$world/home/state" "$world/home/data"
-  fakebin=$(make_noop_tmux "$world/tmux-$id")
+  fakebin=$(make_noop_herdr "$world/tmux-$id")
   # An empty harness must contribute zero args, not an empty positional; build the
   # arg list explicitly so the optional harness is omitted cleanly.
   local spawn_args=("$id" "$home")
@@ -484,7 +476,7 @@ test_spawn_unverified_secondmate_harness_refused() {
   mkdir -p "$w/home/config" "$w/home/state"
   printf 'bogus\n' > "$w/home/config/secondmate-harness"
   make_seeded_home "$sm" sm
-  fakebin=$(make_noop_tmux "$w/tmux")
+  fakebin=$(make_noop_herdr "$w/tmux")
   err="$w/spawn.err"
   rc=0
   PATH="$fakebin:$BASE_PATH" TMUX='' PI_CODING_AGENT=true \
@@ -505,47 +497,24 @@ test_spawn_unverified_secondmate_harness_refused() {
 
 meta_field() { grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
 
-# A tmux stub that behaves like make_noop_tmux but also captures the literal
-# `send-keys -l <cmd>` launch command into FM_FAKE_LAUNCH_LOG, mirroring the
+# A tmux stub that behaves like make_noop_herdr but also captures the literal
+# `pane send-text <cmd>` launch command into FM_FAKE_LAUNCH_LOG, mirroring the
 # capture technique in fm-spawn-dispatch-profile.test.sh so the constructed
 # launch command (not just meta) can be asserted on. Also answers the
 # `#{pane_current_path}` probe from FM_FAKE_PANE_PATH so this same stub works
 # for a crew/scout (non-secondmate) spawn's treehouse-worktree wait loop.
-make_launch_capturing_tmux() {
-  local dir=$1 fakebin="$1/fakebin"
-  mkdir -p "$fakebin"
-  cat > "$fakebin/tmux" <<'SH'
+make_launch_capturing_herdr() {
+  local fakebin
+  fakebin=$(make_noop_herdr "$1")
+  mv "$fakebin/herdr" "$fakebin/herdr-fixture"
+  cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
-set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
-case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys)
-    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-      prev=
-      for a in "$@"; do
-        if [ "$prev" = "-l" ]; then
-          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
-        fi
-        prev=$a
-      done
-    fi
-    exit 0
-    ;;
-esac
-exit 0
+if [ "$1 ${2:-}" = 'pane run' ] && [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+  printf '%s\n' "${4:-}" >> "$FM_FAKE_LAUNCH_LOG"
+fi
+exec "$(dirname "$0")/herdr-fixture" "$@"
 SH
-  chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" pi
-  fm_fake_exit0 "$fakebin" pi
-  # BASE_PATH deliberately omits the developer's node, which the trust
-  # registration below needs, so link the real one in rather than presenting a
-  # node-less spawn host no real fleet member looks like.
-  ln -sf "$(command -v node)" "$fakebin/node"
+  chmod +x "$fakebin/herdr"
   printf '%s\n' "$fakebin"
 }
 
@@ -556,7 +525,7 @@ spawn_secondmate_capture() {
   local world=$1 id=$2 home=$3 launchlog=$4 fakebin
   shift 4
   mkdir -p "$world/home/state" "$world/home/data"
-  fakebin=$(make_launch_capturing_tmux "$world/tmux-$id")
+  fakebin=$(make_launch_capturing_herdr "$world/tmux-$id")
   : > "$launchlog"
   PATH="$fakebin:$BLIND_BIN:$BASE_PATH" TMUX='' PI_CODING_AGENT=true \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" HOME="$world/home/user-home" CLAUDE_CONFIG_DIR='' \
@@ -567,47 +536,29 @@ spawn_secondmate_capture() {
 }
 
 test_spawn_backend_precedence_over_inherited_config() {
-  local w sm meta launchlog out status
-  w="$TMP_ROOT/spawn-backend-env-precedence"
-  sm="$w/sm"
-  launchlog="$w/launch.log"
+  local w sm launchlog out status
+  w="$TMP_ROOT/spawn-backend-env-precedence"; sm="$w/sm"; launchlog="$w/launch.log"
   mkdir -p "$w/home/config"
-  printf 'herdr\n' > "$w/home/config/backend"
+  printf 'tmux\n' > "$w/home/config/backend"
   make_seeded_home "$sm" sm
-
-  out=$(FM_BACKEND=tmux spawn_secondmate_capture \
-    "$w" sm "$sm" "$launchlog" 2>&1); status=$?
-  expect_code 0 "$status" \
-    "FM_BACKEND=tmux should beat inherited config/backend=herdr"$'\n'"$out"
-
-  meta="$w/home/state/sm.meta"
-  [ "$(cat "$sm/config/backend")" = herdr ] \
-    || fail "backend precedence fixture did not inherit config/backend=herdr"
-  assert_no_grep '^backend=' "$meta" \
-    "FM_BACKEND=tmux did not beat inherited config/backend=herdr"
-  pass "B5b spawn: FM_BACKEND wins over inherited config/backend"
+  out=$(FM_BACKEND=herdr spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "explicit Herdr environment should win: $out"
+  assert_grep 'backend=herdr' "$w/home/state/sm.meta" 'selected backend must be explicit in new metadata'
+  [ "$(cat "$sm/config/backend")" = tmux ] || fail 'inheritance must preserve an explicit retired setting without migration'
+  pass 'B5b spawn: Herdr environment wins while inherited configuration remains literal'
 }
 
 test_spawn_explicit_backend_precedence_over_env_and_inherited_config() {
-  local w sm meta launchlog out status
-  w="$TMP_ROOT/spawn-backend-flag-precedence"
-  sm="$w/sm"
-  launchlog="$w/launch.log"
+  local w sm launchlog out status
+  w="$TMP_ROOT/spawn-backend-flag-precedence"; sm="$w/sm"; launchlog="$w/launch.log"
   mkdir -p "$w/home/config"
-  printf 'herdr\n' > "$w/home/config/backend"
+  printf 'tmux\n' > "$w/home/config/backend"
   make_seeded_home "$sm" sm
-
-  out=$(FM_BACKEND=zellij spawn_secondmate_capture \
-    "$w" sm "$sm" "$launchlog" --backend tmux 2>&1); status=$?
-  expect_code 0 "$status" \
-    "explicit --backend tmux should beat FM_BACKEND=zellij and inherited config/backend=herdr"$'\n'"$out"
-
-  meta="$w/home/state/sm.meta"
-  [ "$(cat "$sm/config/backend")" = herdr ] \
-    || fail "explicit backend precedence fixture did not inherit config/backend=herdr"
-  assert_no_grep '^backend=' "$meta" \
-    "explicit --backend tmux did not beat FM_BACKEND=zellij and inherited config/backend=herdr"
-  pass "B5c spawn: explicit --backend wins over FM_BACKEND and inherited config/backend"
+  out=$(FM_BACKEND=zellij spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --backend herdr 2>&1); status=$?
+  expect_code 0 "$status" "explicit Herdr flag should win: $out"
+  assert_grep 'backend=herdr' "$w/home/state/sm.meta" 'explicit Herdr selection must be recorded'
+  [ "$(cat "$sm/config/backend")" = tmux ] || fail 'inheritance must remain literal'
+  pass 'B5c spawn: explicit Herdr flag wins over retired environment and configuration'
 }
 
 # A bare "<harness>" secondmate-harness file (today's format) must launch with
@@ -844,7 +795,7 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   home="$w/home"
   proj="$w/crew-project"
   wt="$w/crew-wt"
-  fakebin=$(make_launch_capturing_tmux "$w/tmux-crew")
+  fakebin=$(make_launch_capturing_herdr "$w/tmux-crew")
   fm_git_worktree "$proj" "$wt" "wt-crew"
   mkdir -p "$home/data/$id" "$home/projects" "$home/state"
   cat > "$home/data/$id/brief.md" <<'EOF'
@@ -922,7 +873,7 @@ add_sm_worktree() {
   git -C "$w/main" worktree add -q --detach "$w/$id" "$commit"
   printf '%s\n' "$id" > "$w/$id/.fm-secondmate-home"
   {
-    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'window=fixture:w1:p-%s\nbackend=herdr\n' "$id"
     printf 'kind=secondmate\n'
     printf 'home=%s/%s\n' "$w" "$id"
   } > "$w/home/state/$id.meta"
@@ -943,34 +894,18 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/gh-axi"
-  # tmux fake supports fm-send's composer-verified submit path and optional
-  # FM_FAKE_TMUX_LOG / FM_FAKE_TMUX_FAIL_LITERAL for reread-nudge assertions.
-  cat > "$fakebin/tmux" <<'SH'
+  fm_test_fake_herdr_send "$fakebin"
+  mv "$fakebin/herdr" "$fakebin/herdr-send"
+  cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
-if [ -n "${FM_FAKE_TMUX_LOG:-}" ]; then
-  printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
-fi
-case "$*" in
-  list-windows*)
-    sed -n 's/^window=[^:]*://p' "${FM_HOME:?}"/state/*.meta
-    exit 0
-    ;;
-  *display-message*'#{pane_current_command}'*) printf '%s\n' codex; exit 0 ;;
-  *display-message*'#{pane_id}'*) printf '%s\n' '%1'; exit 0 ;;
-  *display-message*'#{cursor_y}'*) printf '%s\n' 0; exit 0 ;;
-  *capture-pane*) printf '❯\n'; exit 0 ;;
-  *'send-keys'*' -l '*)
-    [ "${FM_FAKE_TMUX_FAIL_LITERAL:-0}" = 1 ] && exit 1
-    exit 0
-    ;;
-  *send-keys*)
-    [ "${FM_FAKE_TMUX_FAIL_LITERAL:-0}" = 1 ] && exit 1
-    exit 0
-    ;;
+if [ -n "${FM_FAKE_HERDR_LOG:-}" ]; then printf '%s\n' "$*" >> "$FM_FAKE_HERDR_LOG"; fi
+case "$1 ${2:-}" in
+  'pane send-text'|'pane send-keys') [ "${FM_FAKE_HERDR_FAIL_LITERAL:-0}" != 1 ] || exit 1 ;;
+  'pane process-info') jq -n --arg p "${4:-}" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:101,foreground_processes:[{pid:102,name:"codex",argv0:"codex"}]}}}'; exit ;;
 esac
-exit 0
+exec "$(dirname "$0")/herdr-send" "$@"
 SH
-  chmod +x "$fakebin/tmux"
+  chmod +x "$fakebin/herdr"
   fm_fake_exit0 "$fakebin" pi
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
@@ -1021,7 +956,7 @@ run_bootstrap() {
   fakebin=$(make_fake_toolchain "$w")
   if [ -n "$log" ]; then
     PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-      FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+      FM_SEND_SETTLE=0 FM_FAKE_HERDR_LOG="$log" \
       "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
   else
     PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
@@ -1034,7 +969,7 @@ run_config_push() {
   fakebin=$(make_fake_toolchain "$w")
   if [ -n "$log" ]; then
     PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-      FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+      FM_SEND_SETTLE=0 FM_FAKE_HERDR_LOG="$log" \
       "$ROOT/bin/fm-config-push.sh"
   else
     PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
@@ -2017,43 +1952,43 @@ test_config_reread_serializes_concurrent_pushes() {
   printf 'one\n' > "$w/home/config/crew-harness"
 
   fakebin=$(make_fake_toolchain "$w")
-  mv "$fakebin/tmux" "$fakebin/tmux.real"
+  mv "$fakebin/herdr" "$fakebin/herdr.real"
   marker="$w/first-send.marker"
   entered="$w/first-send.entered"
   log="$w/config-reread-serialized.tmux.log"
-  cat > "$fakebin/tmux" <<SH
+  cat > "$fakebin/herdr" <<SH
 #!/usr/bin/env bash
 case "\$*" in
-  *send-keys*)
+  *pane\ send-text*)
     if (set -o noclobber; : > "$marker") 2>/dev/null; then
       : > "$entered"
       sleep 1
     fi
     ;;
 esac
-exec "$fakebin/tmux.real" "\$@"
+exec "$fakebin/herdr.real" "\$@"
 SH
-  chmod +x "$fakebin/tmux"
+  chmod +x "$fakebin/herdr"
   fm_fake_exit0 "$fakebin" pi
 
   first_out="$w/first-push.out"
   (
     PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-      FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+      FM_SEND_SETTLE=0 FM_FAKE_HERDR_LOG="$log" \
       "$ROOT/bin/fm-config-push.sh" > "$first_out" 2>&1
   ) &
   first_pid=$!
-  for _ in $(seq 1 100); do
+  for _ in $(seq 1 500); do
     [ -e "$entered" ] && break
     sleep 0.02
   done
-  [ -e "$entered" ] || fail "first config push did not reach pointer delivery"
+  [ -e "$entered" ] || { cat "$first_out" >&2; fail "first config push did not reach pointer delivery"; }
   first_instr=$(reread_instruction_path "$w/sm") \
     || fail "first concurrent push did not publish its generation"
   printf 'two\n' > "$w/home/config/crew-harness"
   second_out="$w/second-push.out"
   PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_FAKE_HERDR_LOG="$log" \
     "$ROOT/bin/fm-config-push.sh" > "$second_out" 2>&1
   second_status=$?
   wait "$first_pid"; first_status=$?
@@ -2091,7 +2026,7 @@ test_config_reread_full_retry_queue_drains_before_new_push() {
   fakebin=$(make_fake_toolchain "$w")
   log="$w/config-reread-full-queue.tmux.log"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_FAKE_HERDR_LOG="$log" \
     "$ROOT/bin/fm-config-push.sh" 2>&1); status=$?
   expect_code 0 "$status" "a full retry queue should drain before a new push"
   assert_contains "$out" "config-reread: sent" \
@@ -2174,21 +2109,21 @@ test_config_reread_stops_after_failed_generation() {
   fm_config_reread_mark_pending "$new" "$new.pending" \
     || fail "could not mark newer generation pending"
   fakebin=$(make_fake_toolchain "$w")
-  mv "$fakebin/tmux" "$fakebin/tmux.real"
-  cat > "$fakebin/tmux" <<SH
+  mv "$fakebin/herdr" "$fakebin/herdr.real"
+  cat > "$fakebin/herdr" <<SH
 #!/usr/bin/env bash
 case "\$*" in
-  *send-keys*'.0000-fail'*) exit 1 ;;
+  *pane\ send-text*'.0000-fail'*) exit 1 ;;
 esac
-exec "$fakebin/tmux.real" "\$@"
+exec "$fakebin/herdr.real" "\$@"
 SH
-  chmod +x "$fakebin/tmux"
+  chmod +x "$fakebin/herdr"
   fm_fake_exit0 "$fakebin" pi
   report="$w/empty-reread.report"
   : > "$report"
   log="$w/config-reread-order.tmux.log"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_FAKE_HERDR_LOG="$log" \
     fm_config_send_reread_nudge sm "$w/sm" "$report" 2>&1); status=$?
   expect_code 1 "$status" "an older failed generation should remain diagnostic"
   assert_contains "$out" "CONFIG_REREAD: secondmate sm: send failed" \
@@ -2289,7 +2224,7 @@ test_config_reread_bootstrap_path_and_spawn_flexibility() {
   fakebin=$(make_fake_toolchain "$w")
   log="$w/bootstrap-reread.tmux.log"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_FAKE_HERDR_LOG="$log" \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   [ "$(cat "$w/sm/config/crew-harness")" = codex ] || fail "bootstrap did not push harness"
   instr=$(reread_instruction_path "$w/sm") || fail "bootstrap reread instruction missing"
@@ -2352,21 +2287,19 @@ printf '%s\n' 7500 > '$w/sm/config/startup-memory-budget'
 SH
   chmod +x "$w/main/bin/fm-spawn.sh"
   fakebin=$(make_fake_toolchain "$w")
-  cat > "$fakebin/tmux" <<SH
+  mv "$fakebin/herdr" "$fakebin/herdr-live"
+  cat > "$fakebin/herdr" <<SH
 #!/usr/bin/env bash
-case "\$*" in
-  *display-message*'#{pane_current_command}'*) printf '%s' zsh ;;
-  *display-message*'#{pane_id}'*) printf '%s' '%1' ;;
-  *display-message*'#{cursor_y}'*) printf '%s' 0 ;;
-  *capture-pane*) printf '❯\n'
-    ;;
-  *send-keys*) printf '%s' send-keys >> '$log' ;;
+case "\$1 \${2:-}" in
+  'agent get') echo '{"error":{"code":"agent_not_found"}}'; exit ;;
+  'pane send-text') printf '%s' send-keys >> '$log' ;;
 esac
+exec "$fakebin/herdr-live" "\$@"
 SH
-  chmod +x "$fakebin/tmux"
+  chmod +x "$fakebin/herdr"
   fm_fake_exit0 "$fakebin" pi
   PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
-    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_FAKE_HERDR_LOG="$log" \
     "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
   assert_contains "$(cat "$log")" "spawn" \
     "bootstrap did not respawn the dead secondmate"
@@ -2404,7 +2337,7 @@ test_spawn_quarantines_pending_rereads_on_cleanup_failure() {
     printf 'old-quarantine-%s\n' "$n" > "$dir/snapshot"
     printf 'hidden-quarantine-%s\n' "$n" > "$dir/.hidden-snapshot"
   done
-  fakebin=$(make_launch_capturing_tmux "$w/tmux-spawn-quarantine")
+  fakebin=$(make_launch_capturing_herdr "$w/tmux-spawn-quarantine")
   real_rm=$(command -v rm)
   cat > "$fakebin/rm" <<SH
 #!/usr/bin/env bash

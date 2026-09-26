@@ -33,6 +33,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/secondmate-helpers.sh
+. "$ROOT/tests/secondmate-helpers.sh"
 # shellcheck source=bin/fm-marker-lib.sh
 . "$ROOT/bin/fm-marker-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
@@ -50,33 +52,7 @@ export FM_SEND_SETTLE=0
 make_stubs() {  # <dir> -> fakebin
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
-  cat > "$fb/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "${1:-}" in
-  send-keys)
-    shift
-    literal=0
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        -t) shift 2 ;;
-        -l) literal=1; shift ;;
-        *) break ;;
-      esac
-    done
-    if [ "$literal" = 1 ]; then
-      printf '%s' "${1:-}" >> "$FM_SEND_LOG"
-    fi
-    exit 0 ;;
-  display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
-    printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-esac
-exit 0
-SH
-  chmod +x "$fb/tmux"
+  fm_test_fake_herdr_send "$fb"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -577,7 +553,7 @@ test_undelivered_records_are_scan_immutable() {
     rec=$(fm_pending_reply_path "$state" "$corr")
     printf 'done [corr=%s]: arrived too early\n' "$corr" > "$state/hibit.status"
     printf 'done [corr=%s]: wrong home too early\n' "$corr" > "$sm_home/state/hibit.status"
-    fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "sess:fm-hibit"
+    fm_write_herdr_secondmate_meta "$state/hibit.meta" "$sm_home" "sess:fm-hibit"
     before=$(cat "$rec")
     if fm_pending_reply_try_resolve "$state" "$corr"; then
       fail "undelivered expectation must not resolve"
@@ -844,7 +820,7 @@ test_unmarked_captain_input_creates_no_expectation() {
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_parent unmarked)
   # Crewmate target stays unmarked and creates no pending-reply record.
-  fm_write_meta "$home/state/build.meta" \
+  fm_test_write_herdr_meta "$home/state/build.meta" \
     "window=sess:fm-build" "worktree=$home/wt" "project=$home/p" \
     "harness=echo" "kind=ship" "mode=no-mistakes" "yolo=off"
   run_send "$fb" "$home" "$log" "build" "captain says hello"; rc=$?
@@ -861,7 +837,7 @@ test_fm_send_marked_secondmate_creates_pending_and_embeds_corr() {
   dir="$TMP_ROOT/send-pending"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_parent send-pending)
-  fm_write_secondmate_meta "$home/state/hibit.meta" "$home/sm" "sess:fm-hibit"
+  fm_write_herdr_secondmate_meta "$home/state/hibit.meta" "$home/sm" "sess:fm-hibit"
   run_send "$fb" "$home" "$log" "hibit" "audit the build"; rc=$?
   expect_code 0 "$rc" "secondmate send should succeed"
   got=$(latest_record_body "$home" hibit)
@@ -950,7 +926,7 @@ test_unknown_backend_state_uses_capture_fallback() {
       export FM_PENDING_REPLY_NOW=10000
       corr=$(fm_pending_reply_create "$home" "$state" "hibit" "$backend fallback")
       fm_pending_reply_mark_delivered "$state" "$corr"
-      fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "session:fm-hibit" alpha pi
+      fm_write_herdr_secondmate_meta "$state/hibit.meta" "$sm_home" "session:fm-hibit" alpha pi
       [ "$backend" = tmux ] || printf 'backend=%s\n' "$backend" >> "$state/hibit.meta"
       fm_backend_busy_state() { printf 'unknown'; }
       fm_backend_capture() { printf '%s' "$FM_PENDING_TEST_CAPTURE"; }
@@ -1011,9 +987,9 @@ test_tick_skips_terminal_and_reuses_target_observation() {
     fm_pending_reply_set "$rec" phase escalated || fail "escalated fixture should transition"
     mkdir -p "$home/escalated/state"
     printf 'done [corr=%s]: wrong home\n' "$escalated" > "$home/escalated/state/child.status"
-    fm_write_secondmate_meta "$state/hibit.meta" "$home/hibit" "sess:fm-hibit"
-    fm_write_secondmate_meta "$state/resolved.meta" "$home/resolved" "sess:fm-resolved"
-    fm_write_secondmate_meta "$state/escalated.meta" "$home/escalated" "sess:fm-escalated"
+    fm_write_herdr_secondmate_meta "$state/hibit.meta" "$home/hibit" "sess:fm-hibit"
+    fm_write_herdr_secondmate_meta "$state/resolved.meta" "$home/resolved" "sess:fm-resolved"
+    fm_write_herdr_secondmate_meta "$state/escalated.meta" "$home/escalated" "sess:fm-escalated"
     # Runtime overrides called indirectly by the pending-reply tick.
     # shellcheck disable=SC2329
     fm_backend_busy_state() {
@@ -1062,8 +1038,8 @@ test_correlations_reuse_only_for_matching_open_task() {
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_parent corr-reuse)
   state="$home/state"
-  fm_write_secondmate_meta "$state/domain.meta" "$home/domain" "sess:fm-domain"
-  fm_write_secondmate_meta "$state/other.meta" "$home/other" "sess:fm-other"
+  fm_write_herdr_secondmate_meta "$state/domain.meta" "$home/domain" "sess:fm-domain"
+  fm_write_herdr_secondmate_meta "$state/other.meta" "$home/other" "sess:fm-other"
   run_send "$fb" "$home" "$log" domain "first request" || fail "first marked send failed"
   got=$(latest_record_body "$home" domain)
   corr1=$(fm_pending_reply_extract_corr "$got")
@@ -1116,7 +1092,7 @@ test_tick_end_to_end_missed_then_escalate() {
 
   corr=$(fm_pending_reply_create "$home" "$state" "hibit" "e2e miss")
   fm_pending_reply_mark_delivered "$state" "$corr"
-  fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "sess:fm-hibit"
+  fm_write_herdr_secondmate_meta "$state/hibit.meta" "$sm_home" "sess:fm-hibit"
   # Override backend busy via direct tick_one (backend may be unknown in hermetic home).
   fm_pending_reply_tick_one "$state" "$corr" busy "$sm_home"
   fm_pending_reply_tick_one "$state" "$corr" idle "$sm_home"
@@ -1152,7 +1128,7 @@ test_remote_repost_waits_for_the_reply_channel() {
   export -f remote_repost_hook
   export FM_PENDING_REPLY_SEND_HOOK=remote_repost_hook
 
-  fm_write_meta "$state/ios.meta" \
+  fm_test_write_herdr_meta "$state/ios.meta" \
     "window=fm-remote:w1:p1" "harness=pi" "kind=secondmate" "mode=secondmate" \
     "remote_host=remote-mac" "remote_root=/remote/root" "remote_backend=herdr"
   corr=$(fm_pending_reply_create "$home" "$state" "ios" "status of the iOS build")
@@ -1210,7 +1186,7 @@ test_mirrored_remote_reply_never_triggers_a_repost() {
   export -f mirrored_reply_hook
   export FM_PENDING_REPLY_SEND_HOOK=mirrored_reply_hook
 
-  fm_write_meta "$state/ios.meta" \
+  fm_test_write_herdr_meta "$state/ios.meta" \
     "window=fm-remote:w1:p1" "harness=pi" "kind=secondmate" "mode=secondmate" \
     "remote_host=remote-mac" "remote_root=/remote/root" "remote_backend=herdr"
   corr=$(fm_pending_reply_create "$home" "$state" "ios" "did the build go green")
@@ -1299,7 +1275,7 @@ test_same_basename_reply_resolves_after_recovery_failure() {
     || fail "fixture should reach recovery_failed"
   rec=$(fm_pending_reply_path "$state" "$corr")
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
-  fm_write_secondmate_meta "$state/mate.meta" "$sm_home"
+  fm_write_herdr_secondmate_meta "$state/mate.meta" "$sm_home"
   printf 'done [corr=%s]: answer landed after recovery failure\n' "$corr" \
     > "$sm_home/state/mate.status"
 

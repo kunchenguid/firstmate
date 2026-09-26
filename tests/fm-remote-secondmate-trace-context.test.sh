@@ -29,8 +29,6 @@ SECOND_HOME="$TMP_ROOT/remote-home-2"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
 HERDR_LOG="$TMP_ROOT/remote-herdr.log"
 HERDR_STATE="$TMP_ROOT/remote-herdr.state"
-TMUX_LOG="$TMP_ROOT/remote-tmux.log"
-TMUX_STATE="$TMP_ROOT/remote-tmux.state"
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
 trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true; if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
@@ -46,50 +44,8 @@ trap 'FM_HOME="$PARENT" FM_PROCEVENT_CLAIM_ROOT="$CLAIMS" "$ROOT/bin/fm-proceven
 # The remote host runs the Herdr fixture, whose every invocation is logged
 # verbatim, so the pre-launch `export TRACEPARENT=` line and the launch
 # literal's FM_TRACE_CONTEXT prefix are both observable exactly as the pane
-# received them. The tmux fixture below only keeps the remote home's own
+# received them. The Herdr fixture below keeps the remote home's own
 # non-second-mate tooling resolvable.
-cat > "$REMOTE_ROOT/bin/tmux" <<SH
-#!/usr/bin/env bash
-set -u
-log='$TMUX_LOG'
-state='$TMUX_STATE'
-printf '%s\n' "\$*" >> "\$log"
-case "\${1:-}" in
-  has-session|new-session|set-window-option) exit 0 ;;
-  list-windows)
-    [ -f "\$state" ] || exit 0
-    name=\$(cut -d'|' -f1 "\$state")
-    case "\$*" in *'#{session_name}:#{window_name}'*) printf 'firstmate:%s\n' "\$name" ;; *) printf '%s\n' "\$name" ;; esac
-    exit 0
-    ;;
-  new-window)
-    name=; cwd=
-    while [ "\$#" -gt 0 ]; do
-      case "\$1" in -n) shift; name=\$1 ;; -c) shift; cwd=\$1 ;; esac
-      shift
-    done
-    printf '%s|%s\n' "\$name" "\$cwd" > "\$state"
-    printf '@1\n'
-    exit 0
-    ;;
-  display-message)
-    case "\$*" in
-      *'#{pane_current_path}'*) cut -d'|' -f2- "\$state" ;;
-      *'#{pane_current_command}'*) printf 'codex\n' ;;
-      *'#{cursor_y}'*) printf '0\n' ;;
-      *'#S'*) printf 'firstmate\n' ;;
-      *) printf '%%1\n' ;;
-    esac
-    exit 0
-    ;;
-  capture-pane) printf '❯\n'; exit 0 ;;
-  send-keys) exit 0 ;;
-  kill-window) rm -f -- "\$state"; exit 0 ;;
-  list-panes) printf 'codex\n'; exit 0 ;;
-esac
-exit 0
-SH
-chmod +x "$REMOTE_ROOT/bin/tmux"
 install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
   "$TMP_ROOT/herdr-send-fail" "$TMP_ROOT/herdr.sock"
 git -C "$REMOTE_ROOT" init -q -b main
@@ -121,7 +77,7 @@ SH
 chmod +x "$FAKEBIN/fake-ssh"
 
 printf 'codex\n' > "$PARENT/config/secondmate-harness"
-printf 'tmux\n' > "$PARENT/config/backend"
+printf 'herdr\n' > "$PARENT/config/backend"
 printf 'codex\n' > "$PARENT/config/crew-harness"
 printf '## In flight\n\n## Queued\n\n## Done\n' > "$PARENT/data/backlog.md"
 
@@ -148,7 +104,7 @@ freeze_parent_session() {
   )
 }
 
-# What the remote pane actually received, read back from the remote tmux log.
+# What the remote pane actually received, read back from the remote Herdr log.
 remote_injected_traceparent() {
   sed -n 's/.*export TRACEPARENT=\([0-9a-f-]*\).*/\1/p' "$HERDR_LOG" | tail -1
 }

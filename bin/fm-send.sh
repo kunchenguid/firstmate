@@ -12,7 +12,7 @@
 # secondmate request delivers only marker and correlation bytes and leaves the
 # parent waiting on a reply to nothing.
 # Special keys instead of text: fm-send.sh <target> --key Enter
-# Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
+# Key support is backend-specific: Herdr supports Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
 # Two data planes:
@@ -73,8 +73,7 @@
 # pending-reply expectation stays armed because this outcome is not a proven
 # failure); any other nonzero = the send failed and nothing may be assumed
 # delivered. Submission dispatches through the target's recorded backend; the
-# tmux adapter shares its composer/submit core with the away-mode daemon via
-# bin/fm-tmux-lib.sh. Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4). Slash
+# Herdr shares the composer policy with the away-mode daemon. Tune with FM_SEND_RETRIES (default 3) / FM_SEND_SLEEP (0.4). Slash
 # commands, and codex `$...` skill invocations resolved through harness meta,
 # get a longer pre-Enter settle so completion popups do not swallow Enter.
 # A remote secondmate target has no typed text plane at all:
@@ -393,7 +392,8 @@ fm_send_resolve_target() { # <raw-target>
     if [ "$colons" -ge 2 ]; then
       assumed=herdr
     else
-      assumed=tmux
+      echo "error: legacy target '$raw' has no recorded Herdr identity; refusing to reinterpret it" >&2
+      return 1
     fi
     if ! fm_backend_target_exists "$assumed" "$raw"; then
       echo "error: explicit target '$raw' is not a live $assumed endpoint (tried meta=$STATE/$raw.meta; metadata window/terminal lookup; backend=$assumed). Use fm-<id> for a recorded task/lane, or pass a target whose backend endpoint can be verified." >&2

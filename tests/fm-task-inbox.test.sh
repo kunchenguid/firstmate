@@ -51,57 +51,41 @@ inbox_lib() {  # <state> <function> [args...]
   ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$@"
 }
 
-# A fake tmux for the watcher cases: capture-pane replays FM_FAKE_TMUX_CAPTURE,
-# display-message yields a numeric cursor row, and every literal send-keys is
-# logged to FM_SEND_LOG so a doorbell ring is observable. With
-# FM_FAKE_TMUX_AGENT set, the inventory lists window fm-t1 and its
-# #{pane_current_command} answers with that value, so `zsh` makes
-# fm_backend_tmux_agent_state read the pane as a dead bare shell.
+# Structured Herdr fixture for watcher/ring behavior, with no real endpoints.
 make_watch_stubs() {  # <dir> -> echoes fakebin dir
-  local dir=$1 fb="$1/fakebin"
+  local fb="$1/fakebin"
   mkdir -p "$fb"
-  cat > "$fb/tmux" <<'SH'
+  cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "${1:-}" in
-  send-keys)
-    shift
-    literal=0
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        -t) shift 2 ;;
-        -l) literal=1; shift ;;
-        *) break ;;
-      esac
-    done
-    if [ "$literal" = 1 ]; then
-      printf '%s\n' "${1:-}" >> "${FM_SEND_LOG:-/dev/null}"
-      if [ -n "${FM_ACK_RECORD:-}" ] && [ -f "$FM_ACK_RECORD" ]; then
-        mv "$FM_ACK_RECORD" "${FM_ACK_RECORD%/*}/handled/"
-      fi
-    fi
-    exit 0 ;;
-  display-message)
-    for a in "$@"; do
-      case "$a" in
-        *cursor_y*) printf '1\n'; exit 0 ;;
-        *pane_current_command*) [ -z "${FM_FAKE_TMUX_AGENT:-}" ] || { printf '%s\n' "$FM_FAKE_TMUX_AGENT"; exit 0; } ;;
-        *pane_tty*) [ -z "${FM_FAKE_TMUX_AGENT:-}" ] || { printf '\n'; exit 0; } ;;
-      esac
-    done
-    printf 'fakepane\n'; exit 0 ;;
-  capture-pane)
-    if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] && [ -f "$FM_FAKE_TMUX_CAPTURE" ]; then
-      cat "$FM_FAKE_TMUX_CAPTURE"
+case "$1 ${2:-}" in
+  'status --json') echo '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
+  'pane get')
+    if [ "${FM_FAKE_HERDR_MISSING:-0}" = 1 ]; then
+      echo '{"error":{"code":"pane_not_found"}}'
     else
-      printf '╭────╮\n│    │\n╰────╯\n'
-    fi
-    exit 0 ;;
-  list-windows) [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] || printf 'fm-t1\n'; exit 0 ;;
+      jq -n --arg p "$3" '{result:{pane:{pane_id:$p}}}'
+    fi ;;
+  'agent get')
+    if [ "${FM_FAKE_HERDR_AGENT:-}" = zsh ]; then
+      echo '{"error":{"code":"agent_not_found"}}'
+    elif [ -n "${FM_FAKE_HERDR_AGENT:-}" ]; then
+      echo '{"result":{"agent":{"agent_status":"idle"}}}'
+    else echo '{}'; fi ;;
+  'pane process-info')
+    jq -n --arg p "$4" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:999999,foreground_processes:[{pid:999998,name:"pi"}]}}}' ;;
+  'pane read')
+    if [ -n "${FM_FAKE_HERDR_CAPTURE:-}" ]; then cat "$FM_FAKE_HERDR_CAPTURE";
+    else printf '╭────╮\n│    │\n╰────╯\n'; fi ;;
+  'pane send-text')
+    printf '%s\n' "${4:-}" >> "${FM_SEND_LOG:-/dev/null}"
+    if [ -n "${FM_ACK_RECORD:-}" ] && [ -f "$FM_ACK_RECORD" ]; then
+      mv "$FM_ACK_RECORD" "${FM_ACK_RECORD%/*}/handled/"
+    fi ;;
+  *) : ;;
 esac
-exit 0
 SH
-  chmod +x "$fb/tmux"
+  chmod +x "$fb/herdr"
   make_fake_crew_state "$fb" >/dev/null
   printf '%s\n' "$fb"
 }
@@ -232,7 +216,7 @@ test_doorbell_rejects_terminal_controls() {
     log="$dir/$label.send.log"; : > "$log"
     rc=0
     PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" \
-      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+      inbox_lib "$state" fm_task_inbox_ring herdr sess:w1:p1 "$rec" fm-t1 || rc=$?
     [ "$rc" = 2 ] || fail "a rejected $label path should return send-failed status 2, got $rc"
     [ ! -s "$log" ] || fail "a $label path reached send-keys:"$'\n'"$(cat "$log")"
     [ ! -e "$marker" ] || fail "a $label path executed its crafted command"
@@ -254,26 +238,26 @@ test_ring_skips_dead_agent() {
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
   log="$dir/send.log"; : > "$log"
   rc=0
-  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=zsh \
-    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_HERDR_AGENT=zsh \
+    inbox_lib "$state" fm_task_inbox_ring herdr sess:w1:p1 "$rec" fm-t1 || rc=$?
   [ "$rc" = 3 ] || fail "a dead agent should return 3 from the ring, got $rc"
   [ ! -s "$log" ] || fail "a dead pane was typed into:"$'\n'"$(cat "$log")"
   [ -f "$rec" ] || fail "skipping the ring must leave the durable record in place"
   rc=0
-  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_MISSING=1 \
-    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_HERDR_MISSING=1 \
+    inbox_lib "$state" fm_task_inbox_ring herdr sess:w1:p1 "$rec" fm-t1 || rc=$?
   [ "$rc" = 3 ] || fail "a missing endpoint should return 3 from the ring, got $rc"
   [ ! -s "$log" ] || fail "a missing endpoint was typed into:"$'\n'"$(cat "$log")"
   [ -f "$rec" ] || fail "skipping a missing endpoint must leave the durable record in place"
   rc=0
-  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=pi \
-    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_HERDR_AGENT=pi \
+    inbox_lib "$state" fm_task_inbox_ring herdr sess:w1:p1 "$rec" fm-t1 || rc=$?
   [ "$rc" = 0 ] || fail "a live agent should still be rung, got $rc"
   grep -qF 'Firstmate instruction waiting' "$log" || fail "a live agent did not receive the doorbell"
   : > "$log"
   rc=0
   PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" \
-    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+    inbox_lib "$state" fm_task_inbox_ring herdr sess:w1:p1 "$rec" fm-t1 || rc=$?
   [ "$rc" = 0 ] || fail "an endpoint the classifier cannot see should still be rung, got $rc"
   grep -qF 'Firstmate instruction waiting' "$log" || fail "an unclassifiable endpoint did not receive the doorbell"
   pass "inbox: the ring skips dead or missing endpoints and still rings live or unclassifiable endpoints"
@@ -484,7 +468,7 @@ setup_watch_case() {  # <name> -> echoes case dir; state in <dir>/state
   dir="$TMP_ROOT/$name"
   mkdir -p "$dir/state"
   make_watch_stubs "$dir" >/dev/null
-  fm_write_meta "$dir/state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=pi"
+  fm_write_meta "$dir/state/t1.meta" "window=sess:w1:p1" "backend=herdr" "kind=ship" "harness=pi"
   printf '%s\n' "$dir"
 }
 
@@ -500,7 +484,7 @@ test_watcher_rerings_idle_pane_quietly() {
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
   age_path "$rec"
   watch_bg "$state" "$dir/fakebin" "$out" \
-    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_SEND_LOG="$log" FM_FAKE_HERDR_CAPTURE="$(idle_capture "$dir")" \
     FM_TASK_INBOX_RING_MAX=99
   pid=$!
   local i=0
@@ -537,7 +521,7 @@ test_watcher_waits_on_busy_pane() {
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
   age_path "$rec"
   watch_bg "$state" "$dir/fakebin" "$out" \
-    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/busy.capture" \
+    FM_SEND_LOG="$log" FM_FAKE_HERDR_CAPTURE="$dir/busy.capture" \
     FM_BUSY_REGEX=BUSYTOKEN FM_TASK_INBOX_RING_MAX=99
   pid=$!
   sleep 4
@@ -553,7 +537,7 @@ test_watcher_quiet_on_healthy_inbox() {
   state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
   mkdir -p "$state/t1.inbox/handled"
   watch_bg "$state" "$dir/fakebin" "$out" \
-    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_SEND_LOG="$log" FM_FAKE_HERDR_CAPTURE="$(idle_capture "$dir")" \
     FM_TASK_INBOX_RING_MAX=99
   pid=$!
   sleep 4
@@ -572,7 +556,7 @@ test_watcher_ack_silences_unwritable_ladder() {
   age_path "$rec"
   mkdir "$state/t1.inbox/.ring-state"
   watch_bg "$state" "$dir/fakebin" "$out" \
-    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_SEND_LOG="$log" FM_FAKE_HERDR_CAPTURE="$(idle_capture "$dir")" \
     FM_ACK_RECORD="$rec" FM_TASK_INBOX_RING_MAX=99
   pid=$!
   while [ "$i" -lt 100 ]; do
@@ -602,7 +586,7 @@ test_watcher_surfaces_unwritable_ladder() {
   age_path "$rec"
   mkdir "$state/t1.inbox/.ring-state"
   watch_bg "$state" "$dir/fakebin" "$out" \
-    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_SEND_LOG="$log" FM_FAKE_HERDR_CAPTURE="$(idle_capture "$dir")" \
     FM_TASK_INBOX_RING_MAX=99
   pid=$!
   wait_watcher_gone "$pid" \
@@ -627,7 +611,7 @@ test_watcher_escalates_once_after_budget() {
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
   age_path "$rec"
   watch_bg "$state" "$dir/fakebin" "$out" \
-    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_SEND_LOG="$log" FM_FAKE_HERDR_CAPTURE="$(idle_capture "$dir")" \
     FM_TASK_INBOX_RING_MAX=1
   pid=$!
   wait_watcher_gone "$pid" \
@@ -651,8 +635,8 @@ test_watcher_dead_pane_escalates_once_without_ringing() {
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
   age_path "$rec"
   watch_bg "$state" "$dir/fakebin" "$out" \
-    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
-    FM_FAKE_TMUX_AGENT=zsh FM_TASK_INBOX_RING_MAX=99
+    FM_SEND_LOG="$log" FM_FAKE_HERDR_CAPTURE="$(idle_capture "$dir")" \
+    FM_FAKE_HERDR_AGENT=zsh FM_TASK_INBOX_RING_MAX=99
   pid=$!
   wait_watcher_gone "$pid" \
     || { kill "$pid" 2>/dev/null; fail "the watcher never surfaced a dead pane's unhandled instruction"; }
@@ -684,8 +668,8 @@ test_watcher_dead_pane_ignores_stale_busy_state() {
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
   age_path "$rec"
   watch_bg "$state" "$dir/fakebin" "$out" \
-    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$dir/busy.capture" \
-    FM_FAKE_TMUX_AGENT=zsh FM_BUSY_REGEX=BUSYTOKEN FM_TASK_INBOX_RING_MAX=99
+    FM_SEND_LOG="$log" FM_FAKE_HERDR_CAPTURE="$dir/busy.capture" \
+    FM_FAKE_HERDR_AGENT=zsh FM_BUSY_REGEX=BUSYTOKEN FM_TASK_INBOX_RING_MAX=99
   pid=$!
   wait_watcher_gone "$pid" \
     || { kill "$pid" 2>/dev/null; fail "stale busy state hid a dead pane's unhandled instruction"; }

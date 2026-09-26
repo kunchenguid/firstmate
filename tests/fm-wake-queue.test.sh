@@ -96,7 +96,7 @@ test_stale_enqueue_before_suppressor() {
   capture_file="$dir/pane.txt"
   window="test:fm-stale"
   printf 'idle prompt' > "$capture_file"
-  printf 'window=%s\nkind=ship\n' "$window" > "$state/stale.meta"
+  printf 'backend=herdr\nwindow=%s\nkind=ship\n' "$window" > "$state/stale.meta"
   # A stale pane sitting on a captain-relevant status is actionable when the crew
   # is not provably working, so give the window one and prime the .seen-* marker
   # to its current signature so the per-poll signal scan does not pre-empt the
@@ -107,7 +107,7 @@ test_stale_enqueue_before_suppressor() {
   pane_hash=$(hash_text "idle prompt")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  PATH="$fakebin:$PATH" FM_FAKE_HERDR_WINDOW="$window" FM_FAKE_HERDR_CAPTURE="$capture_file" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not exit for stale pane"
   grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print stale wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after stale wake failed"
@@ -130,7 +130,7 @@ test_not_working_stale_enqueue_before_suppressor() {
   capture_file="$dir/pane.txt"
   window="test:fm-stopped"
   printf 'idle prompt, finished' > "$capture_file"
-  printf 'window=%s\nkind=ship\n' "$window" > "$state/stopped.meta"
+  printf 'backend=herdr\nwindow=%s\nkind=ship\n' "$window" > "$state/stopped.meta"
   # Non-terminal status (no captain-relevant verb); prime .seen-* so the per-poll
   # signal scan does not pre-empt the stale path.
   printf 'working: implementing\n' > "$state/stopped.status"
@@ -142,7 +142,7 @@ test_not_working_stale_enqueue_before_suppressor() {
   # NOT provably working: no running pipeline, idle pane. (make_case installed the
   # fake fm-crew-state.sh the watcher reads via FM_CREW_STATE_BIN.)
   export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+  PATH="$fakebin:$PATH" FM_FAKE_HERDR_WINDOW="$window" FM_FAKE_HERDR_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 40 || fail "watcher did not surface a not-provably-working stale"
@@ -240,7 +240,7 @@ test_secondmate_foreign_queue_stall_tracks_progress_and_alerts_once() {
   mkdir -p "$sub/state" "$sub/data" "$sub/bin"
   printf '# Firstmate\n' > "$sub/AGENTS.md"
   printf 'mate\n' > "$sub/.fm-secondmate-home"
-  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=pi\nbackend=tmux\nhome=%s\n' \
+  printf 'backend=herdr\nwindow=firstmate:fm-mate\nkind=secondmate\nharness=pi\nhome=%s\n' \
     "$sub" > "$state/mate.meta"
   fakebin="$dir/fakebin"
   real_date=$(command -v date)
@@ -259,7 +259,7 @@ SH
   printf '1000\n' > "$dir/now"
   printf '100\t7\tcheck\trouted\tcheck: routed row\n' > "$sub/state/.wake-queue"
   PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_HERDR_WINDOW='firstmate:fm-mate' \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-first.out" 2> "$dir/watch-first.err" || true
@@ -271,7 +271,7 @@ SH
   printf '1002\n' > "$dir/now"
   printf '100\t8\tcheck\thealthy\tcheck: healthy progress\n' > "$sub/state/.wake-queue"
   PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_HERDR_WINDOW='firstmate:fm-mate' \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-progress.out" 2> "$dir/watch-progress.err" || true
@@ -286,7 +286,7 @@ SH
   cp "$sub/state/.wake-queue" "$row_before"
   out="$dir/watch-stalled.out"
   PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_HERDR_WINDOW='firstmate:fm-mate' \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$out" 2> "$dir/watch-stalled.err" || true
@@ -306,7 +306,7 @@ SH
   printf '1010\n' > "$dir/now"
   printf '100\t9\tcheck\tnext\tcheck: next row\n' > "$sub/state/.wake-queue"
   PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_HERDR_WINDOW='firstmate:fm-mate' \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-next.out" 2> "$dir/watch-next.err" || true
@@ -319,7 +319,7 @@ SH
   # no-progress episode and must remain visible rather than being muted forever.
   printf '1012\n' > "$dir/now"
   PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_HERDR_WINDOW='firstmate:fm-mate' \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-refrozen.out" 2> "$dir/watch-refrozen.err" || true
@@ -337,7 +337,7 @@ test_secondmate_declared_pause_rows_do_not_feed_stall_escalation() {
   sub="$dir/secondmate"
   mkdir -p "$sub/state"
   printf 'mate\n' > "$sub/.fm-secondmate-home"
-  printf 'window=firstmate:fm-mate\nkind=secondmate\nhome=%s\n' "$sub" > "$state/mate.meta"
+  printf 'backend=herdr\nwindow=firstmate:fm-mate\nkind=secondmate\nhome=%s\n' "$sub" > "$state/mate.meta"
   fakebin="$dir/fakebin"
   real_date=$(command -v date)
   cat > "$fakebin/date" <<SH
@@ -355,13 +355,13 @@ SH
 EOF
   printf '1000\n' > "$dir/now"
   PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_HERDR_WINDOW='firstmate:fm-mate' \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-first.out" 2> "$dir/watch-first.err" || true
   printf '5000\n' > "$dir/now"
   PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_HERDR_WINDOW='firstmate:fm-mate' \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-second.out" 2> "$dir/watch-second.err" || true
@@ -385,7 +385,7 @@ test_secondmate_reprovisioned_queue_starts_a_fresh_interval() {
   sub="$dir/secondmate"
   mkdir -p "$sub/state"
   printf 'mate\n' > "$sub/.fm-secondmate-home"
-  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=pi\nbackend=tmux\nhome=%s\n' \
+  printf 'backend=herdr\nwindow=firstmate:fm-mate\nkind=secondmate\nharness=pi\nhome=%s\n' \
     "$sub" > "$state/mate.meta"
   fakebin="$dir/fakebin"
   real_date=$(command -v date)
@@ -403,7 +403,7 @@ SH
   printf '1000\n' > "$dir/now"
   printf '100\t9\tcheck\told\tcheck: retired generation row\n' > "$sub/state/.wake-queue"
   PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_HERDR_WINDOW='firstmate:fm-mate' \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-old.out" 2> "$dir/watch-old.err" || true
@@ -415,7 +415,7 @@ SH
   printf '1010\n' > "$dir/now"
   printf '200\t9\tcheck\tregen\tcheck: reprovisioned row\n' > "$sub/state/.wake-queue"
   PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_HERDR_WINDOW='firstmate:fm-mate' \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-regen.out" 2> "$dir/watch-regen.err" || true
@@ -425,7 +425,7 @@ SH
   # The restarted generation still earns its own honest no-progress episode.
   printf '1012\n' > "$dir/now"
   PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_HERDR_WINDOW='firstmate:fm-mate' \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-regen-frozen.out" 2> "$dir/watch-regen-frozen.err" || true
@@ -447,21 +447,18 @@ test_secondmate_active_turn_defers_stall_until_the_turn_ends() {
   sub="$dir/secondmate"
   mkdir -p "$sub/state"
   printf 'mate\n' > "$sub/.fm-secondmate-home"
-  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=pi\nbackend=tmux\nhome=%s\n' \
+  printf 'backend=herdr\nwindow=firstmate:fm-mate\nkind=secondmate\nharness=pi\nhome=%s\n' \
     "$sub" > "$state/mate.meta"
   printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 10 ))" \
     > "$sub/state/.wake-queue"
   fakebin="$dir/fakebin"
-  cat > "$fakebin/tmux" <<'SH'
+  mv "$fakebin/herdr" "$fakebin/herdr-read"
+  cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
-case "${1:-}" in
-  list-windows) printf '%s\n' 'firstmate:fm-mate' ;;
-  capture-pane) printf 'working\n' ;;
-  display-message) printf '0\n' ;;
-  *) exit 0 ;;
-esac
+if [ "$1 ${2:-}" = 'pane read' ]; then printf 'working\n'; exit; fi
+exec "$(dirname "$0")/herdr-read" "$@"
 SH
-  chmod +x "$fakebin/tmux"
+  chmod +x "$fakebin/herdr"
   "$ROOT/bin/fm-busy-event.sh" arm "$state" mate >/dev/null \
     || fail "could not arm the mate's busy contract"
 
@@ -497,7 +494,7 @@ test_secondmate_stall_marker_rejects_symlink() {
   sub="$dir/secondmate"
   mkdir -p "$sub/state"
   printf 'mate\n' > "$sub/.fm-secondmate-home"
-  printf 'window=firstmate:fm-mate\nkind=secondmate\nhome=%s\n' "$sub" > "$state/mate.meta"
+  printf 'backend=herdr\nwindow=firstmate:fm-mate\nkind=secondmate\nhome=%s\n' "$sub" > "$state/mate.meta"
   epoch=$(( $(date +%s) - 10 ))
   printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$epoch" > "$sub/state/.wake-queue"
   outside="$dir/outside"
@@ -507,16 +504,7 @@ test_secondmate_stall_marker_rejects_symlink() {
   printf '%s\t%s-7\n' "$(( $(date +%s) - 2 ))" "$epoch" > "$state/.secondmate-wake-progress-mate"
   ln -s "$outside" "$marker"
   fakebin="$dir/fakebin"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-case "${1:-}" in
-  list-windows) printf '%s\n' 'firstmate:fm-mate' ;;
-  capture-pane) : ;;
-  display-message) printf '0\n' ;;
-  *) exit 0 ;;
-esac
-SH
-  chmod +x "$fakebin/tmux"
+  make_wake_herdr "$fakebin"
 
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 \
@@ -536,7 +524,7 @@ test_acknowledged_stall_publication_survives_pre_marker_crash() {
   sub="$dir/secondmate"
   mkdir -p "$sub/state" "$sub/data"
   printf 'mate\n' > "$sub/.fm-secondmate-home"
-  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=pi\nbackend=tmux\nhome=%s\n' \
+  printf 'backend=herdr\nwindow=firstmate:fm-mate\nkind=secondmate\nharness=pi\nhome=%s\n' \
     "$sub" > "$state/mate.meta"
   epoch=$(( $(date +%s) - 10 ))
   printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$epoch" > "$sub/state/.wake-queue"
@@ -554,8 +542,8 @@ test_acknowledged_stall_publication_survives_pre_marker_crash() {
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
-    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_HERDR_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_HERDR_LOG="$dir/tmux.log" FM_FAKE_HERDR_CAPTURE="$dir/fake-tmux/pane.txt" \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$out" 2> "$dir/watch.err" || true
@@ -577,8 +565,8 @@ test_empty_prefix_mate_preserves_other_mate_receipt() {
   mkdir -p "$empty/state" "$stalled/state"
   printf 'ios\n' > "$empty/.fm-secondmate-home"
   printf 'ios-ui\n' > "$stalled/.fm-secondmate-home"
-  printf 'window=firstmate:fm-ios\nkind=secondmate\nhome=%s\n' "$empty" > "$state/ios.meta"
-  printf 'window=firstmate:fm-ios-ui\nkind=secondmate\nhome=%s\n' "$stalled" > "$state/ios-ui.meta"
+  printf 'backend=herdr\nwindow=firstmate:fm-ios\nkind=secondmate\nhome=%s\n' "$empty" > "$state/ios.meta"
+  printf 'backend=herdr\nwindow=firstmate:fm-ios-ui\nkind=secondmate\nhome=%s\n' "$stalled" > "$state/ios-ui.meta"
   : > "$empty/state/.wake-queue"
   epoch=$(( $(date +%s) - 10 ))
   printf '%s\t9\tcheck\trouted\tcheck: routed row\n' "$epoch" > "$stalled/state/.wake-queue"
@@ -597,8 +585,8 @@ test_empty_prefix_mate_preserves_other_mate_receipt() {
   round=1
   while [ "$round" -le 2 ]; do
     PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
-      FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='' \
-      FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+      FM_STATE_OVERRIDE="$state" FM_FAKE_HERDR_WINDOW='' \
+      FM_FAKE_HERDR_LOG="$dir/tmux.log" FM_FAKE_HERDR_CAPTURE="$dir/fake-tmux/pane.txt" \
       FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
       "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 \
@@ -619,7 +607,7 @@ test_drain_asserts_watcher_liveness() {
   dir=$(make_case drain-liveness)
   state="$dir/state"
   err="$dir/drain.err"
-  printf 'window=test:fm-x\nkind=ship\n' > "$state/x.meta"
+  printf 'backend=herdr\nwindow=test:fm-x\nkind=ship\n' > "$state/x.meta"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || fail "drain failed while asserting liveness"
   grep -F 'WATCHER DOWN' "$err" >/dev/null || fail "drain did not surface the watcher-down banner with work in flight and no live watcher"
   : > "$err"
@@ -893,7 +881,7 @@ test_main_is_never_told_to_drain_rows_only_the_branch_owns() {
   local dir state out err sequence generation
   dir=$(make_case main-not-told-to-drain-branch-rows)
   state="$dir/state"
-  printf 'window=test:fm-x\nkind=ship\n' > "$state/x.meta"
+  printf 'backend=herdr\nwindow=test:fm-x\nkind=ship\n' > "$state/x.meta"
 
   append_wake "$state" stale "fleet:w2:p3" "stale: fleet:w2:p3 (paused, awaiting external)" \
     || fail "stale append failed"
@@ -953,7 +941,7 @@ test_uncountable_queue_still_raises_the_pending_alarm() {
   state="$dir/state"
   awkbin="$dir/awkbin"
   mkdir -p "$awkbin"
-  printf 'window=test:fm-x\nkind=ship\n' > "$state/x.meta"
+  printf 'backend=herdr\nwindow=test:fm-x\nkind=ship\n' > "$state/x.meta"
 
   # An awk that still runs its END rule after failing to open its input: it
   # prints a 0 count and exits non-zero. Every other invocation is the real awk.
@@ -998,7 +986,7 @@ test_unconsumable_rows_are_retired_instead_of_wedging_the_queue() {
   local dir state out err sequence generation
   dir=$(make_case unconsumable-row-retirement)
   state="$dir/state"
-  printf 'window=test:fm-x\nkind=ship\n' > "$state/x.meta"
+  printf 'backend=herdr\nwindow=test:fm-x\nkind=ship\n' > "$state/x.meta"
 
   append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
   printf '1788792074\t574\tstale\tfleet:w2:p3\n' >> "$state/.wake-queue"

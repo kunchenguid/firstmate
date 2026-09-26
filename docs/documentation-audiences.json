@@ -27,11 +27,7 @@
     "docs/configuration.md",
     "docs/feishu-channel.md",
     "docs/wedge-alarm.md",
-    "docs/tmux-backend.md",
     "docs/herdr-backend.md",
-    "docs/zellij-backend.md",
-    "docs/orca-backend.md",
-    "docs/cmux-backend.md",
     "docs/remote-secondmates.md"
   ],
   "requiredOwnerPointers": [
@@ -80,23 +76,7 @@
       "target": "docs/verification/supervision.md"
     },
     {
-      "source": "docs/tmux-backend.md",
-      "target": "docs/verification/runtime-backends.md"
-    },
-    {
       "source": "docs/herdr-backend.md",
-      "target": "docs/verification/runtime-backends.md"
-    },
-    {
-      "source": "docs/zellij-backend.md",
-      "target": "docs/verification/runtime-backends.md"
-    },
-    {
-      "source": "docs/orca-backend.md",
-      "target": "docs/verification/runtime-backends.md"
-    },
-    {
-      "source": "docs/cmux-backend.md",
       "target": "docs/verification/runtime-backends.md"
     },
     {
@@ -155,10 +135,6 @@
     },
     {
       "path": ".agents/skills/firstmate-coding-guidelines/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
-      "path": ".agents/skills/firstmate-orca/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -286,10 +262,6 @@
       "audience": "maintainer-architecture"
     },
     {
-      "path": "docs/cmux-backend.md",
-      "audience": "operator-current"
-    },
-    {
       "path": "docs/codex-app-backend.md",
       "audience": "operator-current"
     },
@@ -354,10 +326,6 @@
       "audience": "operator-current"
     },
     {
-      "path": "docs/orca-backend.md",
-      "audience": "operator-current"
-    },
-    {
       "path": "docs/short-agents.md",
       "audience": "operator-current"
     },
@@ -392,10 +360,6 @@
     {
       "path": "docs/supervision-protocols/unknown.md",
       "audience": "agent-runtime"
-    },
-    {
-      "path": "docs/tmux-backend.md",
-      "audience": "operator-current"
     },
     {
       "path": "docs/trace-context.md",
@@ -454,19 +418,11 @@
       "audience": "maintainer-verification"
     },
     {
-      "path": "docs/voice-relay.md",
-      "audience": "operator-current"
-    },
-    {
       "path": "docs/watcher-continuity.md",
       "audience": "operator-current"
     },
     {
       "path": "docs/wedge-alarm.md",
-      "audience": "operator-current"
-    },
-    {
-      "path": "docs/zellij-backend.md",
       "audience": "operator-current"
     },
     {

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Opt-in real-Pi regression for a post-start AGENTS.md update followed by
-# compaction. It runs an isolated tmux server, throwaway Firstmate checkout,
+# compaction. It runs an isolated Herdr session, throwaway Firstmate checkout,
 # and scratch FM_HOME, so it never drives the caller's Pi session or fleet.
 #
 # The portable session-start tests own baseline and output logic. This guard
@@ -27,14 +27,20 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-fm_live_gate opt-in FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E pi tmux git
+fm_live_gate opt-in FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E pi herdr jq git
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMUX_SOCKET="fm-sessionstart-instruction-refresh-$$"
-TMUX_SESSION="instruction-refresh"
+# shellcheck source=tests/herdr-test-safety.sh
+. "$ROOT/tests/herdr-test-safety.sh"
+herdr_forget_inherited_pane
+HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+CLEAN_PATH=$PATH
+SESSION=$("$HELPER" name "${FM_HERDR_LAB_TASK:-instruction-refresh}") || exit 1
+PANE=
 LAB=${TMPDIR:-/tmp}
 LAB="${LAB%/}/fm-sessionstart-instruction-refresh-live-e2e.$$"
 PROJECT="$LAB/project"
+PI_SESSION="$LAB/pi-session.jsonl"
 HOME_DIR="$LAB/home"
 NONCE=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
 OLD_MARKER="AGENTS_MARKER=old-$NONCE"
@@ -61,7 +67,7 @@ pass() {
 }
 
 capture() {
-  tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -500 2>/dev/null || true
+  "$HELPER" run "$SESSION" pane read "$PANE" --source recent --lines 500 2>/dev/null || true
 }
 
 wait_for_text() {  # <text> [attempts]
@@ -84,10 +90,23 @@ wait_for_file() {  # <path> [attempts]
   return 1
 }
 
-wait_for_line_count() {  # <text> <minimum-count> [attempts]
-  local expected=$1 minimum=$2 attempts=${3:-90} attempt=0 count
+# Read completed assistant messages, not the echoed prompt or an in-flight
+# partial response. Compacting after a prompt echo can abort the very turn
+# intended to push the cached instruction out of the recent context window.
+answer_count() {  # <exact answer or response suffix>
+  [ -f "$PI_SESSION" ] || { printf '0'; return; }
+  jq -rs --arg expected "$1" '
+    [.[] | select(.type == "message") | .message
+      | select(.role == "assistant" and .stopReason == "stop")
+      | [.content[]? | select(.type == "text") | .text] | join("\n")
+      | select(endswith($expected))] | length
+  ' "$PI_SESSION" 2>/dev/null || printf '0'
+}
+
+wait_for_answer() {  # <answer> [attempts] [minimum-count]
+  local expected=$1 attempts=${2:-120} minimum=${3:-1} attempt=0 count
   while [ "$attempt" -lt "$attempts" ]; do
-    count=$(capture | grep -Fc "$expected" || true)
+    count=$(answer_count "$expected")
     [ "$count" -ge "$minimum" ] && return 0
     sleep 2
     attempt=$((attempt + 1))
@@ -96,13 +115,13 @@ wait_for_line_count() {  # <text> <minimum-count> [attempts]
 }
 
 send_line() {  # <text>
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "$1"
+  "$HELPER" run "$SESSION" pane send-text "$PANE" "$1"
   sleep 1
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+  "$HELPER" run "$SESSION" pane send-keys "$PANE" Enter
 }
 
 cleanup() {
-  tmux -L "$TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
+  PATH="$CLEAN_PATH" "$HELPER" teardown "$SESSION" || exit 1
   rm -rf "$LAB"
 }
 trap cleanup EXIT INT TERM
@@ -113,6 +132,9 @@ git -C "$PROJECT" checkout -q -B main "$TEST_COMMIT" \
   || fail "could not check out isolated test ref $TEST_REF ($TEST_COMMIT)"
 git -C "$PROJECT" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main \
   || fail "could not set the isolated checkout's default branch"
+if [ "$TEST_REF" = HEAD ]; then
+  git -C "$ROOT" diff --binary HEAD | git -C "$PROJECT" apply --allow-empty
+fi
 git -C "$PROJECT" config user.email fmtest@example.invalid
 git -C "$PROJECT" config user.name fmtest
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data" "$HOME_DIR/config"
@@ -137,23 +159,31 @@ git -C "$PROJECT" add AGENTS.md
 git -C "$PROJECT" commit -q -m "test: initial instruction contract" || fail "could not commit initial instruction contract"
 printf '%s\n' '{"compaction":{"keepRecentTokens":200}}' > "$PROJECT/.pi/settings.json"
 
-tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -c "$PROJECT" -x 220 -y 55 \
-  -e "FM_HOME=$HOME_DIR" -e "FM_ROOT_OVERRIDE=$PROJECT" -e "FM_GATE_REFUSE_BYPASS=1" \
-  pi --no-tools -e "$PROJECT/.pi/extensions/fm-primary-turnend-guard.ts" \
-  || fail "could not start isolated Pi session"
+"$HELPER" provision "$SESSION" || fail 'could not provision isolated Herdr lab'
+herdr_test_guard_cli "$SESSION" "$LAB/shim" "$HELPER" || fail 'lab guard failed'
+export PATH="$LAB/shim:$PATH" HERDR_SESSION="$SESSION"
+created=$("$HELPER" run "$SESSION" workspace create --cwd "$PROJECT" --label instruction-refresh --no-focus) \
+  || fail 'could not start isolated Pi session'
+PANE=$(printf '%s' "$created" | jq -r '.result.root_pane.pane_id // empty')
+[ -n "$PANE" ] || fail 'could not start isolated Pi session'
+"$HELPER" run "$SESSION" terminal session control "$PANE" --cols 160 --rows 44 </dev/null >/dev/null || fail 'could not size lab viewport'
+printf -v launch '%q ' env "FM_HOME=$HOME_DIR" "FM_ROOT_OVERRIDE=$PROJECT" FM_GATE_REFUSE_BYPASS=1 \
+  pi --approve --no-tools --session "$PI_SESSION" -e "$PROJECT/.pi/extensions/fm-primary-turnend-guard.ts"
+"$HELPER" run "$SESSION" pane run "$PANE" "$launch" || fail 'could not start isolated Pi session'
 
 # Pi may ask for project trust before project-local context files and extensions
 # take effect. Accept only the isolated lab's prompt, then wait for the old
 # instruction's observable behavior rather than assuming startup completed.
 for _ in $(seq 1 30); do
   if capture | grep -qiE 'trust (this|the|parent)?[[:space:]]*(folder|project)'; then
-    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
+    "$HELPER" run "$SESSION" pane send-keys "$PANE" Enter
   fi
   sleep 1
 done
 
+wait_for_text 'gpt-' 120 || fail 'Pi model footer did not become ready'
 send_line 'Which validation contract marker is active?'
-wait_for_text "$OLD_MARKER" 120 || {
+wait_for_answer "$OLD_MARKER" 120 || {
   capture >&2
   fail "Pi did not apply the initial AGENTS.md contract"
 }
@@ -161,7 +191,7 @@ wait_for_file "$HOME_DIR/state/.sessionstart-e2e-sources" 120 || {
   capture >&2
   fail "Pi extension did not invoke the real session-start wrapper"
 }
-grep -Fqx -- 'argv=--source startup pi=true root='"$PROJECT"' home='"$HOME_DIR" "$HOME_DIR/state/.sessionstart-e2e-sources" >/dev/null || {
+grep -Fqx -- 'argv=--source startup --pi-prerequisite pi=true root='"$PROJECT"' home='"$HOME_DIR" "$HOME_DIR/state/.sessionstart-e2e-sources" >/dev/null || {
   capture >&2
   printf '# Pi session-start sources:\n' >&2
   cat "$HOME_DIR/state/.sessionstart-e2e-sources" >&2
@@ -188,7 +218,7 @@ git -C "$PROJECT" add AGENTS.md
 git -C "$PROJECT" commit -q -m "test: updated instruction contract" || fail "could not commit updated instruction contract"
 
 send_line "Write at least 1800 words of varied prose about maintaining reliable session state. End with exactly $READY_MARKER."
-wait_for_text "$READY_MARKER" 360 || {
+wait_for_answer "$READY_MARKER" 360 || {
   capture >&2
   fail "Pi did not complete the substantial pre-compaction turn"
 }
@@ -201,7 +231,7 @@ wait_for_text 'Compacted from' 120 || {
 
 if [ "$EXPECTATION" = updated ]; then
   send_line 'Which validation contract marker is active?'
-  wait_for_text "$NEW_MARKER" 120 || {
+  wait_for_answer "$NEW_MARKER" 120 || {
     capture >&2
     printf '# compact delivery records:\n' >&2
     grep -F -A5 -B2 'CURRENT AGENTS.md - INSTRUCTION REFRESH' "$HOME_DIR/state/.sessionstart-e2e-output" >&2 || true
@@ -215,9 +245,9 @@ if [ "$EXPECTATION" = updated ]; then
     || fail "Pi compaction rewrote the true-start instruction baseline"
   pass "Pi $(pi --version 2>/dev/null | head -n 1) re-injects updated AGENTS.md after a real compact in an isolated session"
 else
-  old_reply_count=$(capture | grep -Fc "$OLD_MARKER" || true)
+  old_reply_count=$(answer_count "$OLD_MARKER")
   send_line 'Which validation contract marker is active?'
-  wait_for_line_count "$OLD_MARKER" "$((old_reply_count + 1))" 120 || {
+  wait_for_answer "$OLD_MARKER" 120 "$((old_reply_count + 1))" || {
     capture >&2
     fail "stale reference did not preserve the original AGENTS.md contract after compaction"
   }

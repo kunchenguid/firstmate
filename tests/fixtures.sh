@@ -23,6 +23,9 @@ if [ -n "${FM_TEST_FIXTURES_SOURCED:-}" ]; then
 fi
 FM_TEST_FIXTURES_SOURCED=1
 
+# Fixtures own their terminal identity; never inherit the invoking live pane.
+unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH HERDR_SESSION
+
 # Production floor lives in bin/fm-bootstrap.sh (NO_MISTAKES_MIN). Keep this
 # equal to that floor so a bump is one constant here plus that production pin.
 export FM_TEST_NO_MISTAKES_VERSION=1.46.0
@@ -89,100 +92,135 @@ fm_test_fake_gh_axi() {
   fm_fake_version_tool "$fakebin" gh-axi FM_FAKE_GH_AXI_VERSION "$FM_TEST_GH_AXI_VERSION"
 }
 
-# --- fake tmux / ssh / sleep ------------------------------------------------
+# --- fake Herdr -----------------------------------------------------------
 
-# fm_test_fake_tmux_spawn <fakebin>
-# Spawn-world tmux: pane_current_path from FM_FAKE_PANE_PATH, session named
-# firstmate, window ops succeed, send-keys succeed. When FM_FAKE_LAUNCH_LOG is
-# set, each send-keys -l payload is appended one per line. Optional
-# FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
-#
-# The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
-# cleanup and option operations are no-ops. Launch logging is env-gated, so
-# suites that do not set FM_FAKE_LAUNCH_LOG keep a silent send-keys.
-fm_test_fake_tmux_spawn() {
-  local fakebin=$1
-  cat > "$fakebin/tmux" <<'SH'
+fm_test_fake_herdr_spawn() {  # <dir> -> echoes fakebin dir; seeds an empty state file
+  local fb=$1 dir; dir=$(dirname "$fb")
+  mkdir -p "$fb"
+  printf '{"next":1,"workspaces":[],"tabs":[],"agent_status":{}}\n' > "$dir/state.json"
+  cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
-case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows)
-    if [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then
-      printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
-    fi
-    exit 0
+LOG="${FM_HERDR_LOG:-$(dirname "$0")/herdr.log}"
+STATE="${FM_FAKE_HERDR_STATE:-$(dirname "$(dirname "$0")")/state.json}"
+{
+  printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"
+  for a in "$@"; do printf '\x1f%s' "$a"; done
+  printf '\n'
+} >> "$LOG"
+
+jq_state() { jq "$@" "$STATE"; }
+save() { local tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
+
+cmd=${1:-}; sub=${2:-}
+ws=""; label=""
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  case "${args[$i]}" in
+    --workspace) ws=${args[$((i+1))]:-} ;;
+    --label) label=${args[$((i+1))]:-} ;;
+  esac
+done
+
+case "$cmd $sub" in
+  "session list")
+    jq -n --arg socket "$(dirname "$0")/api.sock" --arg configured "${HERDR_SESSION:-fixture}" '{sessions:([$configured,"fixture","firstmate","default"]|unique|map({name:.,running:true,socket_path:$socket}))}'
     ;;
-  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
-  send-keys)
-    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
-      prev=
-      for a in "$@"; do
-        if [ "$prev" = "-l" ]; then
-          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
-        fi
-        prev=$a
-      done
-    fi
-    exit 0
+  "status --json")
+    printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
     ;;
+  "terminal title")
+    printf '{"result":{"reason":"no_foreground_client"}}\n'
+    ;;
+  "workspace list")
+    jq_state '{result:{workspaces:.workspaces}}'
+    ;;
+  "workspace create")
+    n=$(jq_state -r '.next'); wsid="w$n"; dn=$((n + 1))
+    jq_state --arg wsid "$wsid" --arg wlabel "$label" \
+      --arg tabid "$wsid:t$dn" --arg paneid "$wsid:p$dn" \
+      '.workspaces += [{workspace_id:$wsid, label:$wlabel}]
+       | .tabs += [{tab_id:$tabid, label:"1", workspace_id:$wsid, pane_id:$paneid}]
+       | .next = (.next + 2)' | save
+    printf '{"result":{"workspace":{"workspace_id":"%s","label":"%s"},"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' \
+      "$wsid" "$label" "$wsid:t$dn" "$wsid:p$dn"
+    ;;
+  "tab list")
+    jq_state --arg w "$ws" '{result:{tabs:[.tabs[]|select(.workspace_id==$w)]}}'
+    ;;
+  "tab create")
+    n=$(jq_state -r '.next'); tabid="$ws:t$n"; paneid="$ws:p$n"
+    jq_state --arg w "$ws" --arg wlabel "$label" --arg tabid "$tabid" --arg paneid "$paneid" \
+      '.tabs += [{tab_id:$tabid, label:$wlabel, workspace_id:$w, pane_id:$paneid}]
+       | .next = (.next + 1)' | save
+    printf '{"result":{"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' "$tabid" "$paneid"
+    ;;
+  "pane get")
+    jq_state --arg p "${3:-}" --arg cwd "${FM_FAKE_PANE_PATH:-}" '([.tabs[]|select(.pane_id==$p)|{pane_id:.pane_id,tab_id:.tab_id,workspace_id:.workspace_id,foreground_cwd:$cwd}] | first) as $pane | if $pane == null then {error:{code:"pane_not_found"}} else {result:{pane:$pane}} end'
+    ;;
+  "pane process-info")
+    jq -n --arg cwd "${FM_FAKE_PANE_PATH:-}" '{result:{foreground_cwd:$cwd}}'
+    ;;
+  "pane read")
+    if [ -n "${FM_FAKE_CAPTURE_FILE:-}" ]; then cat "$FM_FAKE_CAPTURE_FILE"; else printf '╭────╮\n│    │\n╰────╯\n'; fi
+    ;;
+  "pane send-text")
+    [ -z "${FM_FAKE_LAUNCH_LOG:-}" ] || printf '%s\n' "${4:-}" >> "$FM_FAKE_LAUNCH_LOG"
+    ;;
+  "pane send-keys"|"pane run") : ;;
+  "pane list")
+    jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select($w=="" or .workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id}]}}'
+    ;;
+  "pane close")
+    pane=${3:-}
+    jq_state --arg p "$pane" '.tabs |= [.[]|select(.pane_id != $p)]' | save
+    ;;
+  "tab close")
+    tab=${3:-}
+    jq_state --arg t "$tab" '.tabs |= [.[]|select(.tab_id != $t)]' | save
+    ;;
+  "agent get")
+    pane=${3:-}
+    status=$(jq_state -r --arg p "$pane" '.agent_status[$p] // empty')
+    if [ -n "$status" ]; then
+      printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$status"
+    else
+      printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$pane"
+    fi
+    ;;
+  *) : ;;
 esac
 exit 0
 SH
-  chmod +x "$fakebin/tmux"
+  chmod +x "$fb/herdr"
 }
 
-# fm_test_fake_tmux_send <fakebin>
-# Send-world tmux: logs send-keys -l payloads to FM_SEND_LOG, reports a numeric
-# cursor_y, and renders an empty bordered composer so the submit path reads
-# empty. Env knobs:
-#   FM_FAKE_TMUX_SEND_FAIL=1  send-keys exits 1
-#   FM_FAKE_TMUX_COMPOSER=pending  capture-pane shows leftover composer text
-fm_test_fake_tmux_send() {
+# --- fake tmux / ssh / sleep ------------------------------------------------
+
+# Herdr send fixture; captures actual typed bytes and preserves failure knobs.
+fm_test_fake_herdr_send() {
   local fakebin=$1
-  cat > "$fakebin/tmux" <<'SH'
+  cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "${1:-}" in
-  send-keys)
-    [ "${FM_FAKE_TMUX_SEND_FAIL:-0}" = 1 ] && exit 1
-    shift
-    literal=0
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        -t) shift 2 ;;
-        -l) literal=1; shift ;;
-        *) break ;;
-      esac
-    done
-    if [ "$literal" = 1 ]; then
-      printf '%s' "${1:-}" >> "${FM_SEND_LOG:-/dev/null}"
-    fi
-    exit 0
-    ;;
-  display-message)
-    for a in "$@"; do
-      case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac
-    done
-    printf 'fakepane\n'
-    exit 0
-    ;;
-  capture-pane)
-    if [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
+[ -z "${FM_HERDR_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_HERDR_LOG"
+case "$1 ${2:-}" in
+  'status --json') echo '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
+  'pane get') jq -n --arg p "$3" '{result:{pane:{pane_id:$p}}}' ;;
+  'pane process-info') jq -n --arg p "${4:-}" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:101,foreground_processes:[{pid:102,name:"codex",argv0:"codex"}]}}}';;
+  'agent get') echo '{"result":{"agent":{"agent_status":"idle"}}}' ;;
+  'pane read')
+    if [ "${FM_FAKE_HERDR_COMPOSER:-}" = pending ]; then
       printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'
-    else
-      printf '╭────╮\n│    │\n╰────╯\n'
-    fi
-    exit 0
-    ;;
-  list-windows) exit 0 ;;
+    else printf '╭────╮\n│    │\n╰────╯\n'; fi ;;
+  'pane send-text')
+    [ "${FM_FAKE_HERDR_SEND_FAIL:-0}" != 1 ] || exit 1
+    printf '%s' "${4:-}" >> "${FM_SEND_LOG:-/dev/null}" ;;
+  'pane send-keys') [ "${FM_FAKE_HERDR_SEND_FAIL:-0}" != 1 ] || exit 1 ;;
+  *) echo '{}' ;;
 esac
-exit 0
 SH
-  chmod +x "$fakebin/tmux"
+  chmod +x "$fakebin/herdr"
 }
 
 # fm_test_fake_ssh <fakebin> [name]
@@ -257,7 +295,7 @@ fm_test_make_spawn_fakebin() {
   local dir=$1 fakebin
   shift
   fakebin=$(fm_fakebin "$dir")
-  fm_test_fake_tmux_spawn "$fakebin"
+  fm_test_fake_herdr_spawn "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse "$@"
   printf '%s\n' "$fakebin"
 }
@@ -280,7 +318,7 @@ fm_test_run_spawn() {
   FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="${TMUX:-fake,1,0}" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" FM_BACKEND=herdr HERDR_ENV='' HERDR_PANE_ID='' HERDR_SESSION=fixture \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$@" 2>&1
 }
@@ -288,13 +326,53 @@ fm_test_run_spawn() {
 # --- send-world stubs -------------------------------------------------------
 
 # make_stubs <dir>
-# Send-world fakebin: send tmux + no-op sleep. Echoes the fakebin path.
+# Send-world fakebin: Herdr send + no-op sleep. Echoes the fakebin path.
 # Suites that need recording sleep, herdr, or ssh add those on top of this
 # fakebin (or replace sleep via fm_test_fake_sleep_log).
 make_stubs() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
-  fm_test_fake_tmux_send "$fakebin"
+  fm_test_fake_herdr_send "$fakebin"
   fm_test_fake_sleep_noop "$fakebin"
   printf '%s\n' "$fakebin"
+}
+
+# Explicit normal-runtime metadata fixture. Callers requesting historical or
+# malformed records keep using fm_write_meta and never opt into this helper.
+fm_test_write_herdr_meta() {
+  local file=$1 arg window='' backend='' binding='' id session pane key value found
+  shift
+  id=${file##*/}; id=${id%.meta}
+  for arg in "$@"; do
+    case "$arg" in window=*) window=${arg#window=} ;; backend=*) backend=1 ;; endpoint_task_id=*) binding=1 ;; esac
+  done
+  session=${window%%:*}; pane=${window#*:}
+  local -a fields=()
+  [ -n "$backend" ] || fields+=(backend=herdr)
+  [ -n "$binding" ] || fields+=("endpoint_task_id=$id")
+  for value in "herdr_session=$session" "herdr_workspace_id=w1" "herdr_tab_id=w1:t1" "herdr_pane_id=$pane"; do
+    key=${value%%=*}; found=0
+    for arg in "$@"; do case "$arg" in "$key="*) found=1 ;; esac; done
+    [ "$found" = 1 ] || fields+=("$value")
+  done
+  fm_write_meta "$file" "${fields[@]}" "$@"
+}
+
+# Reachable private API with a structurally absent exact pane. Teardown can
+# retire a record without silently treating unreadable transport as absence.
+fm_test_fake_herdr_gone() {
+  local fakebin=$1
+  cat > "$fakebin/herdr" <<'SHIM'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_HERDR_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_HERDR_LOG"
+case "$1 ${2:-}" in
+  'session list')
+    jq -n --arg socket "$(dirname "$0")/api.sock" '{sessions:(["fixture","firstmate","session","default"]|map({name:.,running:true,socket_path:$socket}))}' ;;
+  'status --json') echo '{"server":{"running":true}}' ;;
+  'pane get') echo '{"error":{"code":"pane_not_found"}}'; exit 1 ;;
+  *) exit 1 ;;
+esac
+SHIM
+  chmod +x "$fakebin/herdr"
 }

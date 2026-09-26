@@ -3,8 +3,8 @@
 # accounting command, primary-to-secondmate convergence, and exact reread bytes.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-startup-memory-budget)
@@ -55,18 +55,7 @@ case "${1:-}:${2:-}" in
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
 esac
 SH
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-[ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
-case "$*" in
-  *display-message*'#{pane_current_command}'*) printf '%s\n' codex ;;
-  *display-message*'#{pane_id}'*) printf '%s\n' '%1' ;;
-  *display-message*'#{cursor_y}'*) printf '%s\n' 0 ;;
-  *list-windows*) printf '%s\n' fm-sm ;;
-  *capture-pane*) printf '❯\n' ;;
-esac
-exit 0
-SH
+  fm_test_fake_herdr_send "$fakebin"
   chmod +x "$fakebin"/*
   printf '%s\n' "$fakebin"
 }
@@ -89,7 +78,7 @@ new_bootstrap_world() {
 
 run_bootstrap() {
   local root=$1 home=$2 fakebin=$3
-  PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+  PATH="$fakebin:$BASE_PATH" FM_BACKEND=herdr FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     "$BOOTSTRAP"
 }
 
@@ -221,7 +210,7 @@ new_propagation_world() {
   printf '%s\n' sm > "$sm/.fm-secondmate-home"
   mkdir -p "$sm/config" "$sm/data" "$sm/state" "$sm/projects"
   {
-    printf 'window=firstmate:fm-sm\n'
+    printf 'window=fixture:w1:p-sm\nbackend=herdr\n'
     printf 'kind=secondmate\n'
     printf 'harness=codex\n'
     printf 'home=%s\n' "$sm"
@@ -248,7 +237,7 @@ inbox_record_body() {  # <record>
 run_config_push() {
   local root=$1 home=$2 fakebin=$3 log=$4
   PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SEND_SETTLE=0 \
-    FM_FAKE_TMUX_LOG="$log" "$CONFIG_PUSH"
+    FM_HERDR_LOG="$log" "$CONFIG_PUSH"
 }
 
 test_primary_budget_converges_with_exact_reread_and_safe_failures() {

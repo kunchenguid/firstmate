@@ -31,7 +31,7 @@ pi -p -e .pi/extensions/fm-primary-turnend-guard.ts \
 
 Observed result: `PI_SMOKE_DONE`, with one session-start execution.
 That cold positional-prompt check established eventual custom-message delivery, but it did not submit immediately after `/new` while native digest generation was still running, so its earlier race-free inference is superseded by the provider-prerequisite evidence below.
-[`runtime-backends.md`](runtime-backends.md#tmux) owns the shared-ancestry evidence and authoritative selection-marker boundary.
+[`runtime-backends.md`](runtime-backends.md#harness-detection-precedence) owns the shared-ancestry evidence and authoritative selection-marker boundary.
 
 ### Run-tier source vocabulary and context-reset injection
 

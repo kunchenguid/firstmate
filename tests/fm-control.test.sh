@@ -65,61 +65,46 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
 # stopped), and a literal carrying a launch brief flips it to the value in
 # `becomes` (a new agent came up). FM_FAKE_NEVER_DIES suppresses the first, so
 # a stubborn agent can be tested too.
-make_tmux_stub() {  # <dir> -> echoes fakebin dir
+make_herdr_stub() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
-  cat > "$fb/tmux" <<'SH'
+  cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
 D=$FM_FAKE_DIR
-case "${1:-}" in
-  send-keys)
-    shift
-    literal=0
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        -t) shift 2 ;;
-        -l) literal=1; shift ;;
-        *) break ;;
-      esac
-    done
-    payload=${1:-}
-    if [ "$literal" = 1 ]; then
-      printf '%s\n' "$payload" >> "$D/literal"
-      if [ -z "${FM_FAKE_NEVER_DIES:-}" ] \
-         && { [ "$payload" = /exit ] || [ "$payload" = /quit ]; }; then
-        printf 'zsh' > "$D/command"
-      fi
-      case "$payload" in
-        *'encode launch-brief'*) cat "$D/becomes" > "$D/command" ;;
-      esac
-    else
-      printf '%s\n' "$payload" >> "$D/keys"
-      if [ -n "${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" ] \
-         && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
-        printf 'zsh' > "$D/command"
-      fi
+case "$1 ${2:-}" in
+  'status --json') echo '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
+  'pane send-text'|'pane run')
+    payload=${4:-}
+    printf '%s\n' "$payload" >> "$D/literal"
+    if [ -z "${FM_FAKE_NEVER_DIES:-}" ] && { [ "$payload" = /exit ] || [ "$payload" = /quit ]; }; then
+      printf zsh > "$D/command"
     fi
-    exit 0 ;;
-  display-message)
-    for a in "$@"; do
-      case "$a" in
-        *cursor_y*) printf '1\n'; exit 0 ;;
-        *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
-        *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
-      esac
-    done
-    printf 'fakepane\n'; exit 0 ;;
-  capture-pane)
-    if [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi
-    exit 0 ;;
-  list-windows)
-    if [ -f "$D/windows" ]; then cat "$D/windows"; fi
-    exit 0 ;;
+    case "$payload" in *'encode launch-brief'*) cat "$D/becomes" > "$D/command" ;; esac ;;
+  'pane send-keys')
+    payload=${4:-}
+    case "$payload" in esc|escape) payload=Escape ;; enter) payload=Enter ;; ctrl+c) payload=C-c ;; ctrl+u) payload=C-u ;; esac
+    printf '%s\n' "$payload" >> "$D/keys"
+    if [ -n "${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" ] && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
+      printf zsh > "$D/command"
+    fi ;;
+  'pane get')
+    if [ ! -s "$D/windows" ]; then echo '{"error":{"code":"pane_not_found"}}';
+    else jq -n --arg p "$3" --arg cwd "$(cat "$D/cwd")" '{result:{pane:{pane_id:$p,foreground_cwd:$cwd}}}'; fi ;;
+  'agent get')
+    case "$(cat "$D/command")" in
+      zsh|bash) echo '{"error":{"code":"agent_not_found"}}' ;;
+      some-unrelated-process) echo '{}' ;;
+      *) echo '{"result":{"agent":{"agent_status":"idle"}}}' ;;
+    esac ;;
+  'pane process-info')
+    jq -n --arg p "$4" --arg cmd "$(cat "$D/command")" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:999999,foreground_processes:[{pid:999998,name:$cmd}]}}}' ;;
+  'pane read')
+    if [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi ;;
+  *) echo '{}' ;;
 esac
-exit 0
 SH
-  chmod +x "$fb/tmux"
+  chmod +x "$fb/herdr"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 
@@ -137,7 +122,7 @@ new_case() {
   : > "$dir/fake/keys"
   printf 'zsh' > "$dir/fake/command"
   printf 'pi' > "$dir/fake/becomes"
-  make_tmux_stub "$dir" >/dev/null
+  make_herdr_stub "$dir" >/dev/null
   printf '%s\n' "$dir"
 }
 
@@ -145,8 +130,8 @@ new_case() {
 # Builds the task's worktree (a real git worktree so the relaunch checkpoint
 # has something to account for), its brief, and its state/<id>.meta.
 add_task() {
-  local dir=$1 id=$2 harness=$3 kind=${4:-ship} backend=${5:-tmux}
-  local window=${6:-fmses:fm-$id}
+  local dir=$1 id=$2 harness=$3 kind=${4:-ship} backend=${5:-herdr}
+  local window=${6:-fmses:w1:p-$id}
   local home="$dir/home" proj="$dir/proj-$id" wt="$dir/wt-$id"
   fm_git_worktree "$proj" "$wt" "task-$id"
   mkdir -p "$home/data/$id"
@@ -162,7 +147,13 @@ add_task() {
     echo "yolo=off"
     echo "model=default"
     echo "effort=default"
-    [ "$backend" = tmux ] || echo "backend=$backend"
+    echo "backend=$backend"
+    if [ "$backend" = herdr ]; then
+      echo herdr_session=fmses
+      echo herdr_workspace_id=w1
+      echo "herdr_tab_id=w1:t-$id"
+      echo "herdr_pane_id=w1:p-$id"
+    fi
   } > "$home/state/$id.meta"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
@@ -262,20 +253,17 @@ test_unverified_harness_is_refused() {
 
 test_backend_key_capability_matrix() {
   local backend key
-  for backend in tmux herdr zellij cmux; do
-    # C-u is the composer clear muse's interrupt needs; every session provider
-    # but Orca normalizes it (bin/backends/*.sh).
-    for key in Escape Enter C-c C-u; do
-      fm_control_backend_supports_key "$backend" "$key" \
-        || fail "$backend should be able to deliver $key"
-    done
+  backend=herdr
+  for key in Escape Enter C-c C-u; do
+    fm_control_backend_supports_key "$backend" "$key" \
+      || fail "$backend should be able to deliver $key"
   done
   fm_control_backend_supports_key orca Escape \
     && fail "orca's terminal API has no Escape and must not claim it"
   fm_control_backend_supports_key orca C-u \
     && fail "orca's terminal API has no composer clear and must not claim one"
-  fm_control_backend_supports_key orca C-c || fail "orca should deliver C-c"
-  fm_control_backend_supports_key orca Enter || fail "orca should deliver Enter"
+  fm_control_backend_supports_key orca C-c && fail "retired Orca cannot deliver C-c"
+  fm_control_backend_supports_key orca Enter && fail "retired Orca cannot deliver Enter"
   pass "fm-control-lib: the backend key matrix matches each adapter's real send-key surface"
 }
 
@@ -316,7 +304,7 @@ test_orca_refuses_an_escape_harness_interrupt() {
   sed 's|^window=.*|window=fm-t1|' "$dir/home/state/t1.meta.new" > "$dir/home/state/t1.meta"
   out=$(run_control "$dir" t1 interrupt); rc=$?
   expect_code 1 "$rc" "an Escape harness on orca should refuse"
-  assert_contains "$out" "cannot deliver" "refusal should name the undeliverable key"
+  assert_contains "$out" "unsupported" "refusal should name the retired backend"
   pass "fm-control interrupt: a backend that cannot deliver the harness's key refuses instead of sending another"
 }
 
@@ -340,22 +328,21 @@ test_unverified_state_backends_refuse_stop_verbs() {
     fi
     out=$(run_control "$dir" t1 exit); rc=$?
     expect_code 1 "$rc" "exit on $backend should refuse"$'\n'"$out"
-    assert_contains "$out" "no recovery-grade agent-state classifier" \
+    assert_contains "$out" "unsupported" \
       "the $backend refusal should name the missing stop proof"
     [ -z "$(literals "$dir")" ] || fail "$backend must receive no exit command"
     out=$(run_control "$dir" t1 relaunch --note x); rc=$?
     expect_code 1 "$rc" "relaunch on $backend should refuse"$'\n'"$out"
-    assert_contains "$out" "no recovery-grade agent-state classifier" \
+    assert_contains "$out" "unsupported" \
       "the $backend relaunch refusal should name the missing stop proof"
   done
   pass "fm-control: a backend that cannot prove an agent stopped refuses exit and relaunch"
 }
 
-test_state_verified_backends_are_exactly_tmux_and_herdr() {
-  fm_control_backend_state_verified tmux || fail "tmux has a recovery-grade classifier"
+test_state_verified_backend_is_herdr() {
   fm_control_backend_state_verified herdr || fail "herdr has a recovery-grade classifier"
   local backend
-  for backend in zellij orca cmux; do
+  for backend in tmux zellij orca cmux; do
     fm_control_backend_state_verified "$backend" \
       && fail "$backend has no recovery-grade classifier and must not claim one"
   done
@@ -734,7 +721,7 @@ test_backend_key_capability_matrix
 test_harness_kind_capability
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
-test_state_verified_backends_are_exactly_tmux_and_herdr
+test_state_verified_backend_is_herdr
 test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused
 test_unknown_task_is_refused

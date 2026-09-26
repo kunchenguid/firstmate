@@ -3,7 +3,7 @@
 # session-provider adapter (bin/backends/herdr.sh), P2 of
 # data/fm-backend-design-d7 (herdr-addendum.md), extended for the P3
 # workspace-per-home pass (AGENTS.md task herdr-sm-spaces-k4). Mirrors
-# tests/fm-backend-tmux-smoke.test.sh's structure: every other suite fakes the
+# the shared backend contract: the portable suites fake the
 # CLI, this one talks to a REAL herdr server - but ALWAYS on a private, named,
 # throwaway HERDR_SESSION (never the default session), so it never touches a
 # captain's real herdr usage. Skips cleanly when herdr (or jq) is not

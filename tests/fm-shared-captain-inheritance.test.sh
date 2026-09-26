@@ -5,8 +5,8 @@
 # data/captain.md and data/learnings.md remain domain-local in every home.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-config-inherit-lib.sh"
@@ -208,11 +208,7 @@ make_fake_spawn_toolchain() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
   mkdir -p "$fakebin"
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
+  fm_test_fake_herdr_spawn "$fakebin" || return 1
   printf '%s\n' "$fakebin"
 }
 

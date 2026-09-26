@@ -28,6 +28,7 @@ trap cleanup EXIT
 
 mkdir -p "$LAB"
 git clone -q "$ROOT" "$PROJECT"
+git -C "$ROOT" diff --binary HEAD | git -C "$PROJECT" apply --allow-empty
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config"
 # shellcheck disable=SC2016 # Backticks are literal prompt markup.
 PROMPT='Run exactly `bin/fm-watch-checkpoint.sh --seconds 1` as one foreground shell call. Do not use a background task and do not run fm-watch-arm.sh. After the checkpoint returns, reply briefly.'

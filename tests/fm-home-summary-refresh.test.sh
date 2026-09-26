@@ -6,6 +6,8 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$ROOT/tests/fixtures.sh"
 
 WRITER="$ROOT/bin/fm-home-summary-refresh.sh"
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
@@ -43,14 +45,7 @@ trap 'cleanup; exit 143' TERM
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
-cat > "$FAKEBIN/tmux" <<'SH'
-#!/usr/bin/env bash
-case "${1:-}" in
-  display-message) printf '%%1\n' ;;
-  capture-pane) printf 'fixture pane\n> \n' ;;
-esac
-exit 0
-SH
+fm_test_fake_herdr_send "$FAKEBIN"
 cat > "$FAKEBIN/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 if [ -n "${FM_TEST_NM_MARKER:-}" ]; then
@@ -59,7 +54,7 @@ if [ -n "${FM_TEST_NM_MARKER:-}" ]; then
 fi
 exit 0
 SH
-chmod +x "$FAKEBIN/tmux" "$FAKEBIN/no-mistakes"
+chmod +x "$FAKEBIN/herdr" "$FAKEBIN/no-mistakes"
 
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data" "$HOME_DIR/config" \
   "$HOME_DIR/projects/task" "$HOME_DIR/bin"
@@ -76,7 +71,7 @@ cat > "$HOME_DIR/data/backlog.md" <<'EOF'
 
 ## Done
 EOF
-fm_write_meta "$HOME_DIR/state/ledger-task.meta" \
+fm_test_write_herdr_meta "$HOME_DIR/state/ledger-task.meta" \
   "window=fmtest:fm-ledger-task" \
   "worktree=$HOME_DIR/projects/task" \
   "project=firstmate" \
@@ -632,7 +627,7 @@ cat > "$COST_HOME/data/backlog.md" <<'EOF'
 
 ## Done
 EOF
-fm_write_meta "$COST_HOME/state/cost-task.meta" \
+fm_test_write_herdr_meta "$COST_HOME/state/cost-task.meta" \
   "window=fmtest:fm-cost-task" \
   "worktree=$COST_HOME/projects/task" \
   "project=firstmate" \
@@ -688,7 +683,7 @@ EOF
 cat > "$REMOTE_HOME/data/secondmates.md" <<'EOF'
 - rsm - remote test domain (host: remote-mac; root: /remote/root; home: /remote/home; scope: remote testing; projects: alpha; added 2026-08-02)
 EOF
-fm_write_meta "$REMOTE_HOME/state/rsm.meta" \
+fm_test_write_herdr_meta "$REMOTE_HOME/state/rsm.meta" \
   "window=remote:rsm" \
   "endpoint_task_id=rsm" \
   "worktree=/remote/home/never-locally-present" \
@@ -816,7 +811,7 @@ cat > "$RESTART_HOME/data/backlog.md" <<'EOF'
 
 ## Done
 EOF
-fm_write_meta "$RESTART_HOME/state/restart-task.meta" \
+fm_test_write_herdr_meta "$RESTART_HOME/state/restart-task.meta" \
   "window=fmtest:fm-restart-task" \
   "worktree=$RESTART_HOME/projects/task" \
   "project=firstmate" \

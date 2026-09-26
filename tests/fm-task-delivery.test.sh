@@ -10,7 +10,7 @@
 # standing posture, for the mechanical consumers and for one advisory notice.
 #
 # Every spawn case here stops before any endpoint exists: the delivery checks run
-# ahead of backend creation, and a fake `tmux` that exits non-zero backstops the
+# ahead of backend creation, and a fake `herdr` that exits non-zero backstops the
 # cases that are meant to get past them, so no window or worktree is ever created.
 set -u
 
@@ -23,7 +23,7 @@ PROMOTE="$ROOT/bin/fm-promote.sh"
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-delivery)
 
-# A home with one registered project, one project directory, and a fake tmux that
+# A home with one registered project, one project directory, and a fake herdr that
 # refuses, so a spawn that clears the delivery checks still creates nothing.
 # Echoes "<home>|<project-dir>|<fakebin>".
 make_home() {  # <name> [<registry-line>...]
@@ -34,8 +34,8 @@ make_home() {  # <name> [<registry-line>...]
   fakebin="$TMP_ROOT/$name/bin"
   mkdir -p "$home/data" "$home/state" "$home/config" "$projects/proj" "$fakebin"
   git -C "$projects/proj" init -q || fail "could not initialize project fixture"
-  printf '#!/bin/sh\nexit 1\n' > "$fakebin/tmux"
-  chmod +x "$fakebin/tmux"
+  printf '#!/bin/sh\nexit 1\n' > "$fakebin/herdr"
+  chmod +x "$fakebin/herdr"
   if [ "$#" -gt 0 ]; then
     printf '%s\n' "$@" > "$home/data/projects.md"
   fi
@@ -65,7 +65,7 @@ run_spawn() {  # <home> <fakebin> <spawn-args...>
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/projects-unused" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux PATH="$fakebin:$PATH" \
+    FM_SPAWN_NO_GUARD=1 FM_BACKEND=herdr PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -143,7 +143,7 @@ EOF
     "mismatch refusal did not show both sides of the disagreement"
   assert_absent "$home/state/delivery-mismatch-b1.meta" "mismatched spawn wrote task metadata"
 
-  # The agreeing case clears the check and only fails later, at the refusing tmux.
+  # The agreeing case clears the check and only fails later, at the refusing herdr.
   write_brief "$home" delivery-agree-b2 direct-PR
   out=$(run_spawn "$home" "$fakebin" delivery-agree-b2 "$proj" pi --mode direct-PR --yolo off)
   assert_not_contains "$out" "delivery mismatch" "an agreeing mode was reported as a mismatch"
@@ -433,7 +433,7 @@ EOF
 
 # Spawn and promotion refuse leftover Task-subsection placeholders through the
 # public brief/spawn/promote path. Filling both subsections lets the spawn
-# delivery checks proceed (the fake tmux still fails later).
+# delivery checks proceed (the fake herdr still fails later).
 test_spawn_and_promote_require_filled_task_subsections() {
   local rec home proj fakebin out status id brief meta intent_body spec_body authorized
   rec=$(make_home subsections)

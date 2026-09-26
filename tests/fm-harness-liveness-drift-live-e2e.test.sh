@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-harness-liveness-drift-live-e2e.test.sh - default-on drift guard proving
-# every INSTALLED harness is still classified `alive` by the tmux liveness
-# probe (bin/backends/tmux.sh) AND still identified by the harness-detection
+# every INSTALLED harness is still classified `alive` by the Herdr liveness
+# probe (bin/backends/herdr.sh) AND still identified by the harness-detection
 # ancestry walk (bin/fm-harness.sh).
 #
 # Why this file exists: both verdicts depend on how a harness names its own
@@ -34,48 +34,37 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-fm_live_gate default-on FM_HARNESS_LIVENESS_DRIFT tmux
-
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
-pass() { printf 'ok - %s\n' "$1"; }
-note() { printf '# %s\n' "$1"; }
-
-REAL_TMUX=$(command -v tmux)
-SOCKET="fm-liveness-drift-$$"
+fm_live_gate default-on FM_HARNESS_LIVENESS_DRIFT herdr jq
+# shellcheck source=tests/herdr-test-safety.sh
+. "$(dirname "${BASH_SOURCE[0]}")/herdr-test-safety.sh"
+herdr_forget_inherited_pane
+HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+CLEAN_PATH=$PATH
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-liveness-drift.XXXXXX")
-SESSION=drift
-
+SESSION=$("$HELPER" name "${FM_HERDR_LAB_TASK:-liveness-drift}") || exit 1
 cleanup_all() {
-  "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
-  [ -n "${LAB:-}" ] && rm -rf "$LAB"
+  PATH="$CLEAN_PATH" "$HELPER" teardown "$SESSION" || exit 1
+  rm -rf "$LAB"
 }
 trap cleanup_all EXIT
-
-mkdir -p "$LAB/shim" "$LAB/wt"
-cat > "$LAB/shim/tmux" <<SH
-#!/usr/bin/env bash
-exec "$REAL_TMUX" -L "$SOCKET" "\$@"
-SH
-chmod +x "$LAB/shim/tmux"
-PATH="$LAB/shim:$PATH"
-export PATH
-
-# shellcheck source=/dev/null
+"$HELPER" provision "$SESSION" || exit 1
+mkdir -p "$LAB/wt"
+herdr_test_guard_cli "$SESSION" "$LAB/shim" "$HELPER" || exit 1
+export PATH="$LAB/shim:$PATH" HERDR_SESSION="$SESSION"
+# shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
-fm_backend_source tmux || fail "fm_backend_source tmux failed"
-
-"$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n control -c "$LAB/wt" \
-  || fail "could not start the private tmux server"
+fm_backend_source herdr || fail 'could not source Herdr'
+CONTAINER_RAW=$(fm_backend_herdr_container_ensure "$LAB/wt") || fail 'could not create lab container'
+CONTAINER=${CONTAINER_RAW%%$'\t'*}
+note() { printf '# %s\n' "$1"; }
 
 resolve_harness_binary() { command -v "$1"; }
 
 CHECKED=0
 SKIPPED=
 
-# Retained tmux-capable adapters; TraeX is Herdr-only.
-for harness in codex pi; do
+# Every supported worker tool uses Herdr.
+for harness in codex pi traex; do
   if ! bin_path=$(resolve_harness_binary "$harness"); then
     SKIPPED="$SKIPPED $harness"
     note "skip: $harness is not installed on this machine, so its classification is unverified here"
@@ -85,24 +74,27 @@ for harness in codex pi; do
   version=$("$bin_path" --version 2>/dev/null | head -1 | tr -d '\r') || version=
   [ -n "$version" ] || version="unknown"
 
-  target="$SESSION:$harness"
-  # cursor blocks on a workspace-trust prompt in a directory it has never seen,
-  # which would hang this probe rather than classify anything; --trust is the
-  # same flag fm-spawn passes for the same reason.
-  launch_args=""
-  # shellcheck disable=SC2086  # deliberate: an empty value must add no argument
-  "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$harness" -c "$LAB/wt" -- "$bin_path" $launch_args \
-    || fail "$harness ($version): could not launch a window for the liveness probe"
+  ids=$(fm_backend_herdr_create_task "$CONTAINER" "fm-$harness" "$LAB/wt") || fail "$harness: create failed"
+  read -r _ pane <<< "$ids"
+  target="$SESSION:$pane"
+  printf -v launch '%q' "$bin_path"
+  if [ "$harness" = traex ]; then
+    printf -v launch 'export FM_TRAEX_HARNESS=traex; %q > %q; exec %q' "$ROOT/bin/fm-harness.sh" "$LAB/traex-detection" "$bin_path"
+  else
+    launch="exec $launch"
+  fi
+  fm_backend_herdr_send_text_line "$target" "$launch" || fail "$harness: launch failed"
 
   state=
   for _ in $(seq 1 300); do
-    state=$(fm_backend_agent_state tmux "$target")
+    state=$(fm_backend_agent_state herdr "$target")
     [ "$state" = alive ] && break
     sleep 0.2
   done
 
-  title=$(fm_backend_tmux_current_command "$target")
-  comms=$(fm_backend_tmux_foreground_comms "$target" | tr '\n' ' ')
+  info=$("$HELPER" run "$SESSION" pane process-info --pane "$pane")
+  title=$(printf '%s' "$info" | jq -r '.result.process_info.foreground_processes[0].name // empty')
+  comms=$(printf '%s' "$info" | jq -r '[.result.process_info.foreground_processes[]?.name] | join(" ")')
 
   [ "$state" = alive ] || fail \
     "LIVENESS DRIFT: $harness $version is running but classifies '$state', not 'alive'. Supervision and lifecycle control treat this endpoint as unattributable. Observed process title '$title'; observed foreground process names [$comms]. Teach bin/fm-agent-process-lib.sh's fm_agent_process_classify_name the identity this release actually reports."
@@ -111,11 +103,20 @@ for harness in codex pi; do
 
   pass "harness liveness: $harness $version classifies alive"
 
+  if [ "$harness" = traex ]; then
+    # TraeX is deliberately selected by the launch-boundary marker, not by
+    # generic ancestry (the adapter router owns this worker-only contract).
+    [ "$(cat "$LAB/traex-detection")" = traex ] || fail 'TraeX scoped detection marker failed'
+    pass "harness detection: TraeX keeps its scoped worker marker"
+    CHECKED=$((CHECKED + 1))
+    continue
+  fi
+
   # Detection: ask the ancestry walk what it makes of this real harness process.
   # Both Pi identities share one launcher name, so ancestry can only ever prove
   # the family; only the launch-boundary marker selects the signed identity.
   expect_harness=$harness
-  pane_pid=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$target" '#{pane_pid}' 2>/dev/null | tr -d ' ')
+  pane_pid=$(printf '%s' "$info" | jq -r '.result.process_info.shell_pid // empty')
   [ -n "$pane_pid" ] || fail "$harness ($version): could not read the pane pid for the detection probe"
   # Probe from BELOW the pane process, not the pane process alone. The shipped
   # guarantee is a strength claim: detect_own hands an args-strength verdict back
@@ -146,18 +147,10 @@ for harness in codex pi; do
   # because detect_own hands an args-strength verdict straight back to a retained
   # foreign marker.
   # The native binary can take a moment to appear, so poll for it.
-  pane_tty=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$target" '#{pane_tty}' 2>/dev/null | tr -d ' ')
   verdicts=
   for _ in $(seq 1 150); do
-    fg_pids=
-    if [ -n "$pane_tty" ]; then
-      fg_pids=$(LC_ALL=C ps -t "${pane_tty#/dev/}" -o pid=,pgid=,tpgid= 2>/dev/null \
-        | while read -r fg_pid fg_pgid fg_tpgid; do
-            [ -n "$fg_pid" ] || continue
-            [ "$fg_pgid" = "$fg_tpgid" ] || continue
-            printf '%s ' "$fg_pid"
-          done)
-    fi
+    info=$("$HELPER" run "$SESSION" pane process-info --pane "$pane")
+    fg_pids=$(printf '%s' "$info" | jq -r '.result.process_info.foreground_processes[]?.pid' | tr '\n' ' ')
     # shellcheck disable=SC2086  # deliberate: the foreground pids are separate arguments
     verdicts=$("$ROOT/bin/fm-harness.sh" ancestry-descent "$pane_pid" $fg_pids 2>/dev/null || true)
     case "$verdicts" in *"comm $expect_harness"*) break ;; esac
