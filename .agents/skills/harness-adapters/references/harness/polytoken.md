@@ -28,7 +28,7 @@ The router owns the crewmate/scout-only boundary; primary and secondmate integra
 Polytoken reads hooks only from `hooks.json` in the global config directory and in the project's `.polytoken/` directory, and `--config-dir` starts an isolated daemon that loads neither the global layer nor project hooks.
 `../../../bin/fm-polytoken-lib.sh` therefore writes a Firstmate-owned `.polytoken/hooks.json` and `.polytoken/config.yaml` into the task worktree, hidden through `info/exclude`, while the captain's global config, auth, and hooks load unchanged ahead of it.
 A project that tracks either file, already holds a different one, or holds another `.polytoken/config.*` file refuses the spawn rather than being edited.
-Relaunch retires the overlay through `../../../bin/fm-control-lib.sh`, and cleanup removes only files still carrying the overlay's marker.
+Relaunch retirement and cleanup both remove only overlay files still carrying the overlay's marker, so a project-owned `.polytoken/` file is never deleted.
 
 ## Detached daemon
 
