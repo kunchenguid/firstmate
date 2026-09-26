@@ -72,7 +72,7 @@ new_world() {
 make_fake_toolchain() {
   local fakebin=$1
   fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
-  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.77
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -137,7 +137,7 @@ list_help() {
 }
 case "${1:-}" in
   --version|-v|-V)
-    printf '%s\n' '0.2.4'
+    printf '%s\n' '0.2.6'
     exit 0
     ;;
   update)
@@ -562,6 +562,8 @@ EOF
   printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
   printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$mate/.gitignore"
+  git -C "$mate" init -q -b main
   printf '%s\n' pi > "$home/config/secondmate-harness"
   printf '%s\n' manual > "$home/config/backlog-backend"
   touch "$home/state/.last-watcher-beat"
@@ -603,6 +605,8 @@ EOF
   printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
   printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$mate/.gitignore"
+  git -C "$mate" init -q -b main
   printf '%s\n' herdr > "$home/config/backend"
   printf '%s\n' pi > "$home/config/secondmate-harness"
   printf '%s\n' manual > "$home/config/backlog-backend"
@@ -687,7 +691,7 @@ install_pi_watch_extension_fixture() {
 write_pi_watch_loaded_marker() {
   local home=$1 root=$2 pid=$3 version
   version=$(hash_file_for_test "$root/.pi/extensions/fm-primary-pi-watch.ts")
-  printf '%s\n%s\n' "$version" "$pid" > "$home/state/.pi-watch-extension-loaded"
+  printf '%s\n%s\ngeneration=1 phase=active\n' "$version" "$pid" > "$home/state/.pi-watch-extension-loaded"
 }
 
 write_pi_turnend_loaded_marker() {
@@ -1168,20 +1172,20 @@ EOF
   make_fake_ps_claude "$fakebin"
 
   printf 'kind=ship\n' > "$home/state/task-a.meta"
-  printf 'matched: surfaced once\n' > "$home/state/task-a.status"
-  printf 'orphan: step 1\norphan: step 2\norphan: step 3\norphan: step 4\norphan: step 5\norphan: step 6\n' \
+  printf 'working: surfaced once\n' > "$home/state/task-a.status"
+  printf 'working: orphan step 1\nworking: orphan step 2\nworking: orphan step 3\nworking: orphan step 4\nworking: orphan step 5\nworking: orphan step 6\n' \
     > "$home/state/task-orphan.status"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   assert_contains "$out" "Orphan status logs (state/*.status without matching .meta)" "digest did not label orphan status logs"
   assert_contains "$out" "--- task-orphan ---" "digest did not print the orphan status id"
-  assert_contains "$out" "orphan: step 6" "orphan status tail missing the newest line"
-  assert_not_contains "$out" "orphan: step 1" "orphan status tail was not bounded"
+  assert_contains "$out" "working: orphan step 6" "orphan status tail missing the newest line"
+  assert_not_contains "$out" "working: orphan step 1" "orphan status tail was not bounded"
   assert_contains "$out" "$home/state/task-orphan.status" "orphan status tail did not print the full log path"
 
-  matched_count=$(printf '%s\n' "$out" | grep -F -c 'matched: surfaced once')
-  orphan_count=$(printf '%s\n' "$out" | grep -F -c 'orphan: step 6')
+  matched_count=$(printf '%s\n' "$out" | grep -F -c 'working: surfaced once')
+  orphan_count=$(printf '%s\n' "$out" | grep -F -c 'working: orphan step 6')
   [ "$matched_count" -eq 1 ] || fail "matched status log was printed $matched_count times: $out"
   [ "$orphan_count" -eq 1 ] || fail "orphan status log was printed $orphan_count times: $out"
 
@@ -2548,6 +2552,35 @@ EOF
   pass "session start rejects stale Pi loaded markers"
 }
 
+test_pi_diagnostic_rejects_handoff_generation_marker() {
+  local rec root home fakebin out marker holder_pid
+  rec=$(new_world pi-handoff-generation-marker)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+
+  sleep 300 &
+  holder_pid=$!
+  make_fake_ps_pi_holder "$fakebin" "$holder_pid"
+  install_pi_turnend_extension_fixture "$root"
+  install_pi_watch_extension_fixture "$root"
+  write_pi_loaded_markers "$home" "$root" "$holder_pid"
+  marker="$home/state/.pi-watch-extension-loaded"
+  head -n 2 "$marker" > "$marker.tmp"
+  printf 'generation=1 phase=handoff\n' >> "$marker.tmp"
+  mv "$marker.tmp" "$marker"
+
+  out=$(FM_FAKE_HARNESS=pi run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$out" "PI_WATCH_EXTENSION: not loaded" \
+    "pi diagnostic trusted a handoff marker left by an absent replacement extension"
+
+  pass "session start rejects a Pi watcher generation left in handoff"
+}
+
 test_pi_diagnostic_accepts_prelock_loaded_marker() {
   local rec root home fakebin out holder_pid
   rec=$(new_world pi-prelock-loaded-marker)
@@ -2709,6 +2742,7 @@ test_next_step_afk_legacy_empty_flag_defaults_away
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_pi_diagnostic_rejects_stale_loaded_marker
+test_pi_diagnostic_rejects_handoff_generation_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_omp_supervision_block_and_diagnostic
 test_omp_diagnostic_accepts_prelock_loaded_marker

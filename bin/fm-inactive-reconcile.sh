@@ -15,8 +15,14 @@
 # bin/fm-parent-channel-lib.sh from this unstamped payload:
 #   <state> [key=child-outcome-<child>-<state>-<fp8>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md]
 # carrying the child's recorded PR, delivery mode, merge posture, and scout
-# report pointer, without consulting fm-crew-state.sh and without waiting for
-# the inactive cadence. A line still being appended (no trailing newline yet)
+# report pointer, without consulting fm-crew-state.sh. A ship `done:` is
+# published only when bin/fm-dod-lib.sh accepts the named head, so an
+# unpushed copy is not reported upstream as ready. The cadence path uses
+# fm-crew-state.sh, which applies the same gate: a no-mistakes
+# pre-validation `done: {summary}` still reads done (the pipeline handoff),
+# while a CI-ready or direct-PR/local-only done whose head lives only in the
+# disposable copy reads blocked and is not a terminal inactive outcome.
+# A line still being appended (no trailing newline yet)
 # is left for the next poll. This is what keeps a mate's PR-ready, finding,
 # and failure outcomes from depending on the mate model appending them
 # (docs/secondmate-parent-channel.md). A main home has no parent channel and
@@ -64,10 +70,12 @@
 # New fm-terminal-outcome.v1 receipts contain schema, fingerprint, task_id,
 # incarnation, state, outcome_key, origin, phase, pr, created_epoch, and
 # notice_emitted, plus optional status_head and ledger_claim fields. The
-# inactive-path fingerprint binds the spawn incarnation, task id, terminal
-# state, PR text, and sanitized last status; the ledger-path fingerprint instead
-# binds the incarnation, task id, terminal state, literal `ledger` origin, and
-# complete terminal ledger line.
+# inactive-path fingerprint binds only the spawn incarnation, task id, terminal
+# state, and PR text, never the child's last status line, so a child that keeps
+# appending routine prose after one terminal outcome yields at most one parent
+# event across scans and restarts; the last line is retained in status_head as
+# evidence. The ledger-path fingerprint instead binds the incarnation, task id,
+# terminal state, literal `ledger` origin, and complete terminal ledger line.
 # When a terminal ledger append races just after the inactive path's final read,
 # ledger_claim binds that one ledger fingerprint to the already-delivered
 # inactive receipt so the two publishers cannot report one completion twice.
@@ -96,6 +104,8 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 
 FM_INACTIVE_RECONCILE_SECS=${FM_INACTIVE_RECONCILE_SECS:-900}
 case "$FM_INACTIVE_RECONCILE_SECS" in
@@ -410,6 +420,13 @@ report_child_ledger_locked() { # <id> <meta>
   pr=$(pr_for_task "$meta" "$last")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
+  if [ "$state" = "done" ] && [ ! -f "$(record_path "$fingerprint" reported)" ] \
+    && [ ! -f "$(record_path "$fingerprint" pending)" ] \
+    && ! fm_dod_accept_ship_done "$(meta_field "$meta" kind)" "$(meta_field "$meta" mode)" \
+      "$(meta_field "$meta" worktree)" "$(meta_field "$meta" project)" "$last" \
+      "$STATE" "$id" "$meta" >/dev/null; then
+    return 0
+  fi
   outcome_key="child-outcome-$id-$state-${fingerprint:0:8}"
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct upstream "$pr" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
@@ -443,9 +460,10 @@ report_child_ledger_locked() { # <id> <meta>
   return 1
 }
 
-# Every direct child's ledger, under its meta lock. Cheap file reads only, so
-# it runs on every poll in a secondmate home; a delivery failure is already
-# queued as a notice and never fails the scan.
+# Every direct child's ledger, under its meta lock. File reads, plus a local
+# git reachability check for a ship done: with no delivery record yet, so it
+# runs on every poll in a secondmate home; a delivery failure is already queued as a
+# notice and never fails the scan.
 ledger_pass() {
   local meta id lock
   for meta in "$STATE"/*.meta; do
@@ -508,7 +526,11 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   esac
   pr=$(pr_for_task "$meta")
   incarnation=$(meta_incarnation "$meta")
-  fingerprint=$(sha256_text "$incarnation|$id|$state|$pr|$(clean_field "$last")")
+  # The receipt identity binds structured fields only: a persistent child that
+  # keeps appending routine prose after one terminal outcome must not mint a
+  # fresh parent event per sentence. The last line stays in the record as
+  # status_head evidence.
+  fingerprint=$(sha256_text "$incarnation|$id|$state|$pr")
   if [ -n "$self" ]; then
     outcome_key="inactive-outcome-$self-$id-$state"
   else

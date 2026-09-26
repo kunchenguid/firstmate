@@ -572,7 +572,7 @@ test_changed_mode_drops_external_sources_and_excludes_cross_file_codes() {
     "changed-mode local lint did not disclose dropped source following"
   assert_grep $'analysis_mode\tlocal' "$telemetry" \
     "telemetry did not record local analysis mode"
-  assert_grep $'source_directives\t4' "$telemetry" \
+  assert_grep $'source_directives\t5' "$telemetry" \
     "telemetry did not count the changed root's source directives"
   assert_grep $'source_followed_directives\t0' "$telemetry" \
     "telemetry reported followed sources in no-external-sources mode"
@@ -711,10 +711,16 @@ test_changed_mode_hides_cross_file_codes_that_ci_still_sees() {
     pass "SKIP (ShellCheck $REQUIRED not resolved): changed-mode exclusion behavior"
     return
   fi
-  local tmp fakebin diff_file fixture out rc
+  local tmp fakebin diff_file fixture out rc test_root lint
   tmp=$(fm_test_tmproot fm-lint-local-exclude-behavior)
-  fixture="$ROOT/tests/fm-lint-local-exclude-fixture.test.sh"
-  printf '%s\n' "$fixture" >> "$FM_TEST_CLEANUP_REGISTRY"
+  test_root="$tmp/repo"
+  mkdir -p "$test_root/bin/backends" "$test_root/tests" "$test_root/.github/workflows"
+  lint="$test_root/bin/fm-lint.sh"
+  cp "$LINT" "$lint"
+  cp "$ROOT/bin/fm-lint-workflows.sh" "$test_root/bin/"
+  cp "$ROOT"/.github/workflows/* "$test_root/.github/workflows/"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$test_root/bin/backends/noop.sh"
+  fixture="$test_root/tests/fm-lint-local-exclude-fixture.test.sh"
   cat > "$fixture" <<'SH'
 #!/usr/bin/env bash
 # Assigned here and only consumed by a library the local gate does not follow.
@@ -738,14 +744,14 @@ SH
   rc=0
   out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
     FM_TEST_GIT_BRANCH=feature \
-    FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" 2>&1) || rc=$?
+    FM_TEST_GIT_DIFF_FILE="$diff_file" "$lint" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] \
     || fail "changed-mode local lint failed a cross-file-only fixture"$'\n'"$out"
   assert_not_contains "$out" "SC2034" "changed-mode local lint still reported SC2034"
   assert_not_contains "$out" "SC2329" "changed-mode local lint still reported SC2329"
 
   rc=0
-  out=$("$LINT" "$fixture" 2>&1) || rc=$?
+  out=$("$lint" "$fixture" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "explicit-path lint passed a cross-file-only fixture"$'\n'"$out"
   assert_contains "$out" "SC2034" "explicit-path lint did not keep SC2034"
   assert_contains "$out" "SC2329" "explicit-path lint did not keep SC2329"
