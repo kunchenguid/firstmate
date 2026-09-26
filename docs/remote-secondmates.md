@@ -462,6 +462,8 @@ The [`fm-send.sh` header](../bin/fm-send.sh) owns the exact delivery-status cont
 A routed request is delivered as a durable record in the remote home's steering inbox plus a best-effort doorbell, a constant line rung into the terminal.
 It is never delivered by typing the payload into the pane.
 Exit 0 means the record durably exists.
+For a confirmed remote steer, `fm-send` prints `sent:` to state that delivery is complete.
+A later reply-tracking advisory concerns bookkeeping for that delivered steer; do not resend it.
 
 ### Retries and safe resends
 

@@ -40,9 +40,9 @@
 # id. A still-unconfirmed reply-bearing request keeps its reply expectation
 # preserved for the record that may have landed.
 # Pending-reply bookkeeping trouble after a durable enqueue NEVER exits
-# nonzero: with the recovery marker stored the watcher reconciles it silently,
-# and with both the commit and the marker lost the send prints a distinct
-# "reply-tracking-degraded (steer delivered, do not resend)" warning instead,
+# nonzero: with the recovery marker stored the watcher reconciles it,
+# and with both the commit and the marker lost the send reports
+# "reply-tracking-degraded" as a warning locally or a delivered advisory remotely,
 # because a resend-inviting status there would duplicate a delivered
 # instruction. There is no delivered-unconfirmed
 # outcome on this plane: "did the doorbell land" is no longer the question -
@@ -112,7 +112,7 @@
 # bookkeeping commit fails after its durable recovery marker is stored, the
 # send remains successful and watcher reconciliation owns the repair, and when
 # the commit and marker are BOTH lost the send still remains successful with a
-# reply-tracking-degraded warning naming the expectation an operator must
+# reply-tracking-degraded report naming the expectation an operator must
 # inspect (it can no longer reconcile or escalate on its own). Only a
 # failed enqueue discards the expectation. On the typed plane an unconfirmed submit (exit 3) keeps
 # it armed rather than dropping it, and only a proven send failure discards it.
@@ -150,6 +150,9 @@
 # FM_SEND_EXPECTED_REMOTE_HOST to require that sampled identity to still match
 # during the final locked remote-route validation; unset or empty guards do not
 # change ordinary sends.
+# A delivered remote steer prints a "sent:" confirmation from the remote leg's
+# successful exit status. Its reply-tracking advisory also names the delivered
+# steer so neither line invites a resend.
 #
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
 # before the message) when this send answers an open keyed needs-decision: or
@@ -987,15 +990,17 @@ else
       exit 1
     fi
     # The remote record is durable delivery, exactly as a local enqueue is.
+    printf 'sent: steer to remote secondmate %s durably recorded in its steering inbox - delivery is complete, do not resend\n' \
+      "$TARGET_REMOTE_ID" >&2
     if [ -n "$PENDING_REPLY_CORR" ]; then
       if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then
         :
       else
         delivery_commit_status=$?
         if [ "$delivery_commit_status" = 2 ]; then
-          echo "notice: the steer was durably recorded in the remote inbox, but its pending-reply delivery commit failed; a durable recovery marker was stored and the watcher will reconcile it. Do not resend." >&2
+          echo "advisory (steer delivered): the steer is durably recorded in the remote inbox, but its pending-reply delivery commit failed; a durable recovery marker was stored and the watcher will reconcile it; do not resend." >&2
         else
-          echo "warning: reply-tracking-degraded (steer delivered, do not resend): the steer was durably recorded in the remote inbox, but its pending-reply delivery commit and recovery marker both failed, so the reply expectation for this request may not reconcile on its own. Inspect $STATE." >&2
+          echo "advisory (steer delivered): reply-tracking-degraded - the steer is durably recorded in the remote inbox, but its pending-reply delivery commit and recovery marker both failed, so the reply expectation for this request may not reconcile on its own; inspect $STATE; do not resend." >&2
         fi
       fi
     fi
