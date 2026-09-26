@@ -11,7 +11,12 @@
 # before anything is marked, recorded, or typed, because an empty marked
 # secondmate request delivers only marker and correlation bytes and leaves the
 # parent waiting on a reply to nothing.
+# A token starting with "--" before the text that is not --resolve-key,
+# --fire-and-forget, or --key is refused as an unknown flag before anything is
+# recorded or typed, so message text cannot begin with "--" (a single leading
+# "-" is still plain text).
 # Special keys instead of text: fm-send.sh <target> --key Enter
+# --key takes exactly one key; any argument after it is refused unsent.
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
@@ -462,7 +467,8 @@ fi
 
 # Collect --resolve-key flags (answerer-closes; see the header contract). They
 # must precede --key or the message text; everything after the last flag is the
-# message exactly as before, so ordinary sends are byte-identical.
+# message exactly as before, so ordinary sends are byte-identical. An unknown
+# "--" token is refused here (see the header) rather than becoming the message.
 RESOLVE_KEYS=
 FIRE_AND_FORGET_ID=
 fm_send_add_resolve_key() { # <key>
@@ -514,6 +520,11 @@ while :; do
     }
     FIRE_AND_FORGET_ID=${1#--fire-and-forget=}
     shift
+    ;;
+  --key) break ;;
+  --*)
+    echo "error: unknown flag '$1'; fm-send accepts --resolve-key, --fire-and-forget, and --key. Nothing was sent." >&2
+    exit 1
     ;;
   *) break ;;
   esac
@@ -770,6 +781,24 @@ if [ "${1:-}" = "--key" ]; then
     exit 1
     ;;
   esac
+  # The option loop breaks at --key without consuming what follows it, and this
+  # path reads only the key, so a trailing argument would be discarded in
+  # silence while the key was still delivered and the exit code still reported
+  # success. Refuse it instead. --fire-and-forget is named on the way through
+  # because FIRE_AND_FORGET_ID is only set when the flag precedes --key, so the
+  # check above cannot see this ordering.
+  if [ "$#" -gt 2 ]; then
+    for key_extra in "${@:3}"; do
+      case "$key_extra" in
+      --fire-and-forget | --fire-and-forget=*)
+        echo "error: --fire-and-forget cannot accompany --key" >&2
+        exit 1
+        ;;
+      esac
+    done
+    echo "error: unexpected argument '$3' after '--key $2'; --key takes exactly one key and nothing else. Nothing was sent." >&2
+    exit 1
+  fi
   key=$2
   semantic_key=$(fm_send_normalize_key "$key")
   if [ "$TARGET_BACKEND" = remote ]; then
