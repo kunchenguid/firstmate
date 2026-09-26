@@ -34,13 +34,15 @@
 #   <PreToolUse JSON on stdin> | bin/fm-subagent-pretool-check.sh
 #   bin/fm-subagent-pretool-check.sh --tool '<tool-name>'
 #
-# Stdin mode extracts .tool_name for Claude and Codex, or .toolName for Grok.
+# Stdin mode extracts .tool_name for Claude and Codex, .toolName for Grok,
+# or .toolCall.name for Antigravity (agy).
 # CLI mode is for adapters that already hold the tool name (OpenCode, Pi).
 #
 # Exit/output contract (identical shape to bin/fm-cd-pretool-check.sh):
 #   ALLOW - exit 0 and no output.
-#   DENY - exit 2, a Claude-shaped deny object on stderr, and a Grok-shaped
-#          deny object on stdout unless --claude was supplied.
+#   DENY - exit 2 (exit 0 for agy stdout decision), a Claude-shaped deny object
+#          on stderr, and a Grok/agy-shaped deny object on stdout unless --claude
+#          was supplied.
 #   INERT - not a genuine primary home (a crewmate/scout task worktree or a
 #           non-firstmate repo): exit 0 with no output, exactly like ALLOW.
 #   ESCAPE - FM_ALLOW_SUBAGENT=1 in the environment allows deliberately.
@@ -49,6 +51,7 @@
 # Claude requires stdout to remain empty on deny.
 # Codex blocks on exit 2 and displays stderr.
 # Grok consumes the stdout decision object.
+# Antigravity consumes the stdout decision object on exit 0.
 # OpenCode and Pi consume exit 2 plus stderr.
 set -u
 
@@ -81,13 +84,14 @@ PLAN_ONLY_TOOLS='taskcreate taskupdate'
 TOOL=""
 TOOL_SET=0
 CLAUDE_MODE=0
+AGY_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-subagent-pretool-check.sh [--tool <tool-name>] [--claude]
+Usage: fm-subagent-pretool-check.sh [--tool <tool-name>] [--claude] [--agy]
 
 With no --tool, reads a PreToolUse-style JSON payload on stdin (Claude/Codex
-tool_name, or Grok toolName).
+tool_name, Grok toolName, or Antigravity toolCall.name).
 Denies a delegation-SHAPED tool name in a genuine primary home.
 Claude primaries may also add an untracked per-home permissions.deny list that
 removes known delegation tools from the model schema before this hook is needed.
@@ -98,7 +102,8 @@ outside any local fixed list.
 Fires only in a genuine firstmate primary home; it is a silent no-op in a
 crewmate/scout task worktree or any non-firstmate repo, where a worker using
 delegation tools is legitimate.
-Exits 0 to allow and 2 to deny, naming the real crewmate dispatch path instead.
+Exits 0 to allow and 2 to deny (exit 0 for agy stdout decision), naming the real
+crewmate dispatch path instead.
 Set FM_ALLOW_SUBAGENT=1 in the session environment to allow deliberately.
 Malformed transport fails open.
 EOF
@@ -121,6 +126,10 @@ while [ "$#" -gt 0 ]; do
       CLAUDE_MODE=1
       shift
       ;;
+    --agy)
+      AGY_MODE=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -137,10 +146,20 @@ if [ "$TOOL_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
   [ -n "$PAYLOAD" ] || exit 0
   command -v jq >/dev/null 2>&1 || exit 0
-  TOOL=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_name // .toolName // empty)' 2>/dev/null) || exit 0
+  TOOL=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_name // .toolName // .toolCall.name // empty)' 2>/dev/null) || exit 0
+  if [ "$AGY_MODE" -eq 0 ] && printf '%s' "$PAYLOAD" | jq -e 'has("toolCall")' >/dev/null 2>&1; then
+    AGY_MODE=1
+  fi
 fi
 
-[ -n "$TOOL" ] || exit 0
+agy_allow() {
+  if [ "$AGY_MODE" -eq 1 ]; then
+    printf '{"decision":"allow"}\n'
+  fi
+  exit 0
+}
+
+[ -n "$TOOL" ] || agy_allow
 
 LC_ALL=C NORMALIZED=$(printf '%s' "$TOOL" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
 
@@ -149,11 +168,11 @@ LC_ALL=C NORMALIZED=$(printf '%s' "$TOOL" | tr '[:upper:]' '[:lower:]' | tr -cd 
 # here: an MCP server with a task or agent noun in a tool name is common and
 # blocking it would be a false positive with no bearing on fleet dispatch.
 case "$TOOL" in
-  mcp__*) exit 0 ;;
+  mcp__*) agy_allow ;;
 esac
 
 for allowed in $OBSERVE_ONLY_TOOLS $PLAN_ONLY_TOOLS; do
-  [ "$NORMALIZED" != "$allowed" ] || exit 0
+  [ "$NORMALIZED" != "$allowed" ] || agy_allow
 done
 
 MATCHED=""
@@ -162,13 +181,13 @@ for stem in $DELEGATION_STEMS; do
     *"$stem"*) MATCHED=$stem; break ;;
   esac
 done
-[ -n "$MATCHED" ] || exit 0
+[ -n "$MATCHED" ] || agy_allow
 
 # The single deliberate escape hatch. It is an environment variable rather than
 # a flag or a state file so it must be set when the session is launched, which
 # makes a genuinely intended use possible and an accidental one impossible: no
 # in-session tool call can set it for the call that follows.
-[ "${FM_ALLOW_SUBAGENT:-}" != "1" ] || exit 0
+[ "${FM_ALLOW_SUBAGENT:-}" != "1" ] || agy_allow
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
 FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
@@ -184,7 +203,7 @@ STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 # inert (exit 0), never a block, so a broken environment never denies a call.
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
-fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+fm_primary_scope_matches "$FM_ROOT" "$STATE" || agy_allow
 
 # Name the dedicated scout entry point only when this home carries it; degrade
 # to the two-step brief-then-spawn path when it does not, rather than naming a
@@ -202,6 +221,10 @@ json_escape() {
 }
 
 ESCAPED=$(json_escape "$REASON")
+if [ "$AGY_MODE" -eq 1 ]; then
+  printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+  exit 0
+fi
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
 [ "$CLAUDE_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
 exit 2

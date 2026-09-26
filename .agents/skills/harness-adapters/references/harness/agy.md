@@ -22,6 +22,7 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 | Model | `--model <id>` with the bare catalog id from `agy models` (for example `gemini-3.8-flash-high`); `bin/fm-spawn.sh` refuses a requested id a reachable listing omits. The listing is a remote fetch, so the probe runs stdin-detached under the shared hard bound and an unreachable or hung listing launches unvalidated with a notice. |
 | Effort | `--effort low\|medium\|high`; `xhigh` and `max` stay in task metadata under the record-and-omit contract. |
 | Composer | Borderless bare `>` row, which the shared classifier reads as `unknown` under the dead-shell rule, never `empty`; steering confirms delivery through native agent-state and the delivery footer instead, the cursor precedent. |
+| Delegation | Built-in in-process tools (`invoke_subagent`, `define_subagent`, `send_message`, `manage_subagents`) are intercepted by `.agents/hooks.json` via `bin/fm-subagent-pretool-check.sh`; never use them for project delegation, and spawn exclusively via `bin/fm-spawn.sh`. |
 
 ## Trust, and where the decision persists
 
@@ -47,6 +48,13 @@ agy is deliberately absent from the session-lock name vocabulary in `../../../..
 `../../../../../bin/fm-spawn.sh` arms no busy generation for agy and writes no sidecar, exactly because no writer could ever clear a seeded record.
 `fm_busy_agy_tail_busy` matches the pinned `esc to cancel` status row alone, hardcoded with no environment override, and `fm_busy_classify` reports `unknown agy-regex` rather than idle when it is absent, because a long turn can scroll the marker out of the captured tail.
 Teardown removes nothing agy-specific because the spawn leaves nothing behind.
+
+## Delegation tools and PreToolUse guard
+
+Antigravity CLI exposes built-in in-process subagent tools (`invoke_subagent`, `define_subagent`, `send_message`, `manage_subagents`).
+Firstmate must never use these for project delegation because in-process subagents bypass Treehouse worktrees, Herdr/tmux panes, and fleet supervision records.
+Tracked `.agents/hooks.json` registers a `PreToolUse` hook running `bin/fm-subagent-pretool-check.sh`, which parses Antigravity's `.toolCall.name` payload and returns `{"decision":"deny","reason":"..."}` on stdout with exit 0 to block native subagent creation in primary homes.
+In linked task worktrees, the shared primary-scope check keeps the guard inert so legitimate worker tools remain allowed.
 
 ## Primary integration
 
