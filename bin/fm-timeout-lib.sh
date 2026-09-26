@@ -34,9 +34,9 @@
 #       fallback does not track the owner: it bounds the command only by its
 #       deadline and grace, so owner death alone does not stop the command.
 #       Exit status is the command's own, except 124 (the bound was hit) or
-#       137 (GNU timeout's
-#       status when its KILL had to fire); fm_timed_out accepts both. Both
-#       values must be positive integers (125 otherwise). The perl watchdog is
+#       137 (GNU timeout's status when its KILL had to fire); fm_timed_out
+#       accepts both. The seconds and grace values must be positive integers
+#       (125 otherwise). The perl watchdog is
 #       preferred: once termination has begun it also KILLs whatever the group
 #       left behind, so a descendant that outlives the command and holds its
 #       output cannot keep a capturing caller waiting, and GNU timeout, the

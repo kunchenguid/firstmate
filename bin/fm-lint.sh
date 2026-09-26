@@ -854,9 +854,9 @@ if [ -n "$TELEMETRY" ]; then
   }
 fi
 
-# Per-root bounded-execution envelope. Under FM_LINT_REQUIRE_BOUNDS=1 every
-# bound is exercised here before any root starts, and any bound the host
-# cannot enforce refuses the run with a named error; a required-bounds run
+# Per-root bounded-execution envelope. Under FM_LINT_REQUIRE_BOUNDS=1 the
+# watchdog is probed and the host's acceptance of ulimit -v is checked before
+# any root starts; failed checks refuse with a named error. A required-bounds run
 # never lints uncapped. Without it each root still runs alone in its own
 # ShellCheck process, unbounded, for local developer lint.
 ROOT_SECONDS=${FM_LINT_ROOT_SECONDS:-1200}
