@@ -893,6 +893,12 @@ for bad in \
   assert_contains "$err" "malformed rules file: $RULES - ${bad#*|}" "malformed rules are named: ${bad#*|}"
 done
 assert_absent "$LOG/argv" "configuration errors never reach the network"
+jq '.rules[3].use = {"harness":"codex","model":"gpt-6-astra","effort":"max"}' "$BASE_RULES" > "$RULES"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "codex max on a non-Luna model is a valid rule"
+assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-6-astra' --effort 'max'" "codex max reaches the profile for launch to check against the catalog"
 cp "$BASE_RULES" "$RULES"
 for removed in --json --rules --quota; do
   TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" "$removed"
