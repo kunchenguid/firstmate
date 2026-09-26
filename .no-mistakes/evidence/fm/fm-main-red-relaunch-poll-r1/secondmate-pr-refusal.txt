@@ -1,0 +1,3 @@
+error: ios is a secondmate, not a delivery lane - https://github.com/example/repo/pull/1 was reported on its status channel but belongs to a task in the mate's own home, which arms its own merge watch
+exit=1
+metadata unchanged; no PR poll watcher or sidecar created
