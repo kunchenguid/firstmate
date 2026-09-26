@@ -134,6 +134,9 @@ state/               runtime records and signals; gitignored
   x-watch.check.sh   generated Relay poll shim; present only when opted in (section 14)
   tool-updates.check.sh  generated watched-tool update poll shim and its .check-trust binding; present only after bin/fm-tool-update-check.sh arm; its report record .tool-updates is what keeps one pending update from being reported on every poll
   mail.check.sh      generated received-mail poll shim and its .check-trust binding; present only after bin/fm-mail-check.sh arm; report record .mail-check (mail schema: docs/configuration.md "Mail plane")
+  hold-reverify.check.sh  generated aged captain-hold re-verification shim and its .check-trust binding; present only after bin/fm-hold-reverify.sh arm; report record .hold-reverify keeps one finding set from being reported on every sweep
+  hold-reverify/     generated docket.json: the last sweep's per-hold dead/still_live/not_a_decision/unestablishable findings with their evidence; written only by bin/fm-hold-reverify.sh, which never closes a captain call (docs/configuration.md "Captain-hold re-verification")
+  .hold-reverify     re-verification sweep cadence epoch and finding-set digest; written only by bin/fm-hold-reverify.sh
   .mail-seen .mail-woken .mail-retry .mail-retry-pos .mail-turn .mail-seen.lock  mail-plane poll cursor, emission journal, transient-fetch retry set, retry-scan position, contended-slot turn flag, and overlapping-poll lock; written only by bin/fm-mail.sh (mail schema: docs/configuration.md "Mail plane")
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
   procevent/         registered process-to-event sources, one private record per canonical source id; written only by bin/fm-procevent.sh, and their presence alone keeps supervision required (section 13)

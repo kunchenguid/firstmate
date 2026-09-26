@@ -1354,6 +1354,29 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 - So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 - A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## Captain-hold re-verification
+
+A captain call is an ordinary backlog task held for the captain, and its list rots with age: hundreds of holds had never been re-checked, so the captain's list was mostly ghosts and every count of remaining work was wrong.
+`bin/fm-hold-reverify.sh` re-checks each aged hold against shipped reality and reports it in the reconciliation vocabulary `captain-hold-lifecycle` already owns: `dead`, `still_live`, `not_a_decision`, or `unestablishable`.
+It reports only.
+It never calls `answer` and never closes or annotates a call, so only the captain's own words or an explicit evidence-backed reconciliation can resolve one.
+A hold is `dead` when shipped reality resolves the subject - its recorded pull request is merged, or its row records a merged completion.
+It is `still_live` when the recorded pull request is open, `not_a_decision` when the row carries no live captain question (already Done, or no hold reason), and `unestablishable` otherwise.
+`dead` is never inferred from absence or from an unreadable source, and a closed-unmerged pull request stays `unestablishable` rather than reading as dead.
+Aged holds come from the canonical local backlog projection (`fm-fleet-snapshot.sh --contribution-input`), and a recorded pull request is read through `bin/fm-pr-lib.sh`; no second backlog parser and no redundant `origin/main` clone fetch are involved.
+
+`check` is a plain custom watcher check, so it stays in the check-fires-then-firstmate-decides flow that the process-event `when` adapter explicitly excludes for an action whose right form depends on what the condition finds.
+Arm it once per home with `bin/fm-hold-reverify.sh arm`, which writes `state/hold-reverify.check.sh` and binds its bytes with `bin/fm-check-register.sh` so the watcher dispatches it on its normal cadence and turns its one line into a `check:` wake.
+`disarm` removes the shim, its trust binding, and the report record.
+Each sweep writes `state/hold-reverify/docket.json` (schema `fm-hold-reverify-docket.v1`) with every examined hold's verdict, evidence, and reason, and prints one line only when the finding set changes.
+`state/.hold-reverify` records the sweep epoch and a digest of the `{id: verdict}` set, so a new or changed finding is reported once while an unchanged sweep stays silent.
+A sweep the watcher kills writes no record and is retried.
+
+`FM_HOLD_REVERIFY_AGE_DAYS` (default 14, matching `FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS`) sets the age at which a hold is re-verified.
+`FM_HOLD_REVERIFY_INTERVAL` (default 21600 seconds, `0` to sweep on every watcher cycle) gates how often a sweep actually runs.
+`FM_HOLD_REVERIFY_BUDGET_SECS` (default 20) bounds a whole sweep and is cut to fit `FM_CHECK_TIMEOUT`, with the cut reported in the wake line.
+`FM_HOLD_REVERIFY_PROBE_SECS` (default 8) bounds one forge read, and `FM_HOLD_REVERIFY_MAX_HOLDS` (default 12) caps the holds examined per sweep, deferring the rest and disclosing the count.
+
 ## Mail plane (.env)
 
 The mail plane (bin/fm-mail.sh) reads unseen IMAP messages and sends one SMTP message.
@@ -2254,6 +2277,12 @@ FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 pro
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
 FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
+FM_HOLD_REVERIFY_AGE_DAYS=14   # floored elapsed-day age at which a captain hold is re-verified against shipped reality; 0 re-verifies every hold with a non-negative age
+FM_HOLD_REVERIFY_INTERVAL=21600   # seconds between re-verification sweeps; 0 sweeps every watcher cycle, other values must be 60..604800
+FM_HOLD_REVERIFY_BUDGET_SECS=20   # 1..120 seconds allowed for a whole sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
+FM_HOLD_REVERIFY_PROBE_SECS=8   # 1..30 seconds allowed for one forge read
+FM_HOLD_REVERIFY_MAX_HOLDS=12   # whole holds examined per sweep; the remainder is deferred and its count disclosed
+FM_HOLD_REVERIFY_NOW=   # test override for the re-verification cadence clock; the sweep budget still uses real time
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_PROCEVENT_OWNER_LEASE_SECONDS=600    # how long a source runner keeps going with no activity in its owning home; 1..86400
