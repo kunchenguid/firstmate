@@ -248,7 +248,22 @@ async function run(home, id) {
     const prompt = JSON.stringify({ goal: request.input.goal, acceptance: request.input.acceptance,
       materials: request.materials.map(({ id, source, sha256 }) => ({ id, source, sha256 })), tools: ['read_material'], budget: request.input.budget });
     publish(path.join(dir, 'context.json'), { systemPrompt: session.systemPrompt, prompt, tools: session.getActiveToolNames(), parentMessages: session.messages.length });
+    let emittedBytes = 0, reportedOutputTokens = 0;
     session.subscribe(event => {
+      if (event.type === 'message_update') {
+        const update = event.assistantMessageEvent;
+        if (['text_delta', 'thinking_delta', 'toolcall_delta'].includes(update.type) && typeof update.delta === 'string') {
+          emittedBytes += Buffer.byteLength(update.delta);
+          // Some transports (including built-in Codex) omit maxTokens upstream.
+          // A UTF-8 byte allowance is deliberately stricter than a text-token
+          // allowance; stop locally rather than trusting provider compliance.
+          if (emittedBytes > request.input.budget.outputTokens) stop('budget');
+        }
+      }
+      if (event.type === 'message_end' && event.message.role === 'assistant') {
+        reportedOutputTokens += event.message.usage?.output ?? 0;
+        if (reportedOutputTokens > request.input.budget.outputTokens) stop('budget');
+      }
       if (event.type === 'message_end') fs.appendFileSync(path.join(dir, 'journal.jsonl'), JSON.stringify(event) + '\n', { mode: 0o600 });
     });
     await session.prompt(prompt);

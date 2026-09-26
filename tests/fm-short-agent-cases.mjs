@@ -28,6 +28,7 @@ export async function createAgentSession(o) {
  async prompt(prompt){
   const goal=JSON.parse(prompt).goal;
   if(goal==='crash') process.exit(19);
+  if(goal==='oversize') for(const cb of subscribers) cb({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'x'.repeat(100)}});
   if(goal==='wait') await new Promise(r=>setTimeout(r,10000));
   if(goal==='delayed') await new Promise(r=>setTimeout(r,1000));
   await o.modelRuntime.streamSimple({}, {}, {});
@@ -70,7 +71,7 @@ const link=path.join(tmp,'linked');fs.symlinkSync(fixture,link);assert.throws(()
 const hard=path.join(tmp,'hard');fs.linkSync(fixture,hard);assert.throws(()=>snapshot(hard), /single-link/);fs.unlinkSync(hard);
 assert.throws(()=>snapshot(tmp+'/sub/../evidence.txt'), /denied/);
 const secret=path.join(tmp,'innocent.txt');fs.writeFileSync(secret,'-----BEGIN PRIVATE KEY-----');assert.throws(()=>snapshot(secret), /credential/);
-for(const [goal,state,budget] of [['wait','cancelled',{}],['wait','timeout',{timeMs:1000}],['toolbudget','budget',{tools:1}],['modelbudget','budget',{outputTokens:64}]]) {
+for(const [goal,state,budget] of [['wait','cancelled',{}],['wait','timeout',{timeMs:1000}],['toolbudget','budget',{tools:1}],['modelbudget','budget',{outputTokens:64}],['oversize','budget',{outputTokens:64}]]) {
  const a=service.submit(request(goal+state,goal,budget));if(state==='cancelled')service.cancel(a.id);
  await until(a.id,state);service.finish(a.id,'completed','late success');assert.equal(service.status(a.id).state,state);
 }

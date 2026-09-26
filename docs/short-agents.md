@@ -66,6 +66,8 @@ The trusted Pi runtime retains provider authentication and network access; this 
 
 Wall time, tool calls, provider requests, and reserved output tokens are bounded.
 Output reservations are conservative: each request reserves up to 1024 tokens, and unused allowance is not refunded.
+Some transports ignore the upstream output limit, so the runner also stops when streamed text, reasoning, and tool-argument bytes exceed the output allowance; this deliberately conservative byte guard can stop before that many tokens.
+An abort cannot guarantee a precise upstream billing cap.
 Input is bounded by goal/material/read byte limits; the output allowance is not a total billed-token cap.
 The runner disables automatic provider retries, compaction, and cache warming.
 Exact request limits and persisted lifecycle mechanics are owned by [`bin/fm-short-agent.mjs`](../bin/fm-short-agent.mjs) and its `--help`.
