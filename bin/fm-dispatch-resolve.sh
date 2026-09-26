@@ -38,9 +38,9 @@
 # Never-send check: when the optional $FM_HOME/config/dispatch-never-send list
 #   exists, every string value of the built request is checked against it
 #   before the POST. Each non-blank, non-# line is a literal matched
-#   case-insensitively, or `re:<ERE>` matched as written with grep -E; entries
-#   are trimmed of surrounding whitespace. A match, or a list that is not a
-#   readable regular file or holds an empty or invalid pattern, prints one
+#   case-insensitively, with surrounding whitespace trimmed and every run of
+#   whitespace, on both sides, treated as one space. A match, or a list that
+#   is not a readable regular file, prints one
 #   "dispatch-resolve: off (...; nothing sent)" line on stderr naming at most
 #   the list line number, never its value, prints nothing on stdout, and exits
 #   0 with no network or quota call, exactly like the absent-key off path.
@@ -253,32 +253,30 @@ never_send_off() {
 # Checks every string the request carries, so no text reaches the network
 # unchecked. grep's own stderr is discarded because it can echo the pattern.
 never_send_check() {
-  local line value n=0 rc
+  local list value n=0 rc
   [ -e "$NEVER_SEND_PATH" ] || [ -L "$NEVER_SEND_PATH" ] || return 0
   { [ -f "$NEVER_SEND_PATH" ] && [ -r "$NEVER_SEND_PATH" ]; } \
     || never_send_off "$NEVER_SEND_PATH is not a readable regular file"
-  jq -r '.. | strings' <<<"$REQUEST" > "$SEND_TEXT" 2>/dev/null \
+  # Collapse whitespace runs on both sides so a value the brief wraps across
+  # lines or spaces differently still matches
+  jq -r '.. | strings | gsub("\\s+"; " ")' <<<"$REQUEST" > "$SEND_TEXT" 2>/dev/null \
     || never_send_off "could not extract the request text to check"
-  while IFS= read -r line || [ -n "$line" ]; do
+  list=$(jq -Rr 'gsub("\\s+"; " ")' "$NEVER_SEND_PATH" 2>/dev/null) \
+    || never_send_off "could not read $NEVER_SEND_PATH"
+  while IFS= read -r value; do
     n=$((n + 1))
-    value=${line%$'\r'}
-    value=${value#"${value%%[![:space:]]*}"}
-    value=${value%"${value##*[![:space:]]}"}
+    value=${value# }
+    value=${value% }
     case "$value" in
       ''|'#'*) continue ;;
-      're:')
-        never_send_off "$NEVER_SEND_PATH line $n is an empty pattern" ;;
-      're:'*)
-        grep -qE -e "${value#re:}" "$SEND_TEXT" 2>/dev/null; rc=$? ;;
-      *)
-        grep -qiF -e "$value" "$SEND_TEXT" 2>/dev/null; rc=$? ;;
     esac
+    grep -qiF -e "$value" "$SEND_TEXT" 2>/dev/null; rc=$?
     case "$rc" in
       0) never_send_off "brief text matches $NEVER_SEND_PATH line $n" ;;
       1) ;;
-      *) never_send_off "$NEVER_SEND_PATH line $n is not a valid pattern" ;;
+      *) never_send_off "could not check the request text against $NEVER_SEND_PATH line $n" ;;
     esac
-  done < "$NEVER_SEND_PATH" || never_send_off "could not read $NEVER_SEND_PATH"
+  done <<<"$list"
 }
 
 # Send Jev only the task-specific sections bin/fm-brief.sh scaffolds, plus a

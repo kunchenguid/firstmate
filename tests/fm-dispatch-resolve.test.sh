@@ -273,7 +273,7 @@ expect_withheld() {  # <label> <stderr fragment> [<value that must not print>...
   done
 }
 
-printf '%s\n' '# private values' '' '   ' 'Unlisted-Value' 're:never-[0-9]{9}' > "$NEVER_SEND"
+printf '%s\n' '# private values' '' '   ' 'Unlisted-Value' > "$NEVER_SEND"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
@@ -285,10 +285,17 @@ reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
 expect_withheld "a case-insensitive literal match" "brief text matches $NEVER_SEND line 3" 'acme-ledger' 'Acme-Ledger'
 
-printf '%s\n' 're:[0-9]{4}-[0-9]{4}' > "$NEVER_SEND"
+WRAPPED_BRIEF="$TMP_ROOT/wrapped-brief.md"
+printf '# Task\n## Captain'"'"'s intent\nFix the pager for Example Client\nLtd before\tthe\xc2\xa0release.\n' > "$WRAPPED_BRIEF"
+printf '%s\n' 'example  client ltd' > "$NEVER_SEND"
 reset_log
-TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
-expect_withheld "a regex match" "brief text matches $NEVER_SEND line 1" '4417-2290' '[0-9]{4}'
+TYPESAFE_API_KEY=$KEY run code out err "$WRAPPED_BRIEF" --project pager
+expect_withheld "a literal the brief wraps across lines" "brief text matches $NEVER_SEND line 1" 'example' 'Example'
+
+printf '%s\n' 'before the release' > "$NEVER_SEND"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$WRAPPED_BRIEF" --project pager
+expect_withheld "a literal the brief spaces with a tab and a no-break space" "brief text matches $NEVER_SEND line 1" 'release'
 
 printf '%s\n' 'orion-private' > "$NEVER_SEND"
 reset_log
@@ -299,16 +306,6 @@ printf '%s\n' 'stated root cause' > "$NEVER_SEND"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
 expect_withheld "a rule-criterion match" "brief text matches $NEVER_SEND line 1" 'stated root cause'
-
-printf '%s\n' 're:acme-(' > "$NEVER_SEND"
-reset_log
-TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
-expect_withheld "an invalid regex" "$NEVER_SEND line 1 is not a valid pattern" 'acme-('
-
-printf '%s\n' 're:  ' > "$NEVER_SEND"
-reset_log
-TYPESAFE_API_KEY=$KEY run code out err "$PRIVATE_BRIEF" --project pager
-expect_withheld "an empty regex" "$NEVER_SEND line 1 is an empty pattern"
 
 rm -f "$NEVER_SEND"
 mkdir "$NEVER_SEND"
