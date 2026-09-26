@@ -897,6 +897,55 @@ test_abandoned_owner_claim_is_reclaimed_and_rearms() {
   pass "auto-arm: an abandoned owner claim is reclaimed so a lapsed cycle re-arms"
 }
 
+# An interrupted reclaim leaves the abandoned-claim mutex linked to a dead
+# owner. The next reclaim must reap it directly, never by nesting another
+# .steal.steal mutex around it.
+test_abandoned_claim_reclaim_reaps_dead_steal_without_nesting() {
+  local dir out status pid holder lnbin lnlog i
+  dir=$(make_primary_dir "$TMP_ROOT/abandoned-claim-dead-steal")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  sleep 60 &
+  pid=$!
+  record_autoarm_owner "$dir" "$pid"
+  record_autoarm_epoch "$dir" 464 "$pid" rewake
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    fm_lock_try_create "$2" || exit 7
+    exec sleep 30
+  ' _ "$dir/bin/fm-wake-lib.sh" "$dir/state/.claude-autoarm.lock.steal" >/dev/null 2>&1 &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$dir/state/.claude-autoarm.lock.steal/pid" ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  kill -KILL "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  assert_present "$dir/state/.claude-autoarm.lock.steal" "fixture did not leave a dead-owner steal mutex"
+  lnbin="$dir/lnbin"
+  lnlog="$dir/ln.log"
+  mkdir -p "$lnbin"
+  cat > "$lnbin/ln" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg do last=$arg; done
+printf '%s\n' "$last" >> "$FM_TEST_LN_LOG"
+exec /bin/ln "$@"
+SH
+  chmod +x "$lnbin/ln"
+  : > "$lnlog"
+  out=$(PATH="$lnbin:$PATH" FM_TEST_LN_LOG="$lnlog" run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a dead-owner steal mutex must not keep an abandoned claim unrecoverable"
+  [ -e "$dir/state/arm-ran" ] || fail "dead-owner steal mutex left the home unarmed with work in flight"
+  ! grep -q '\.steal\.steal$' "$lnlog" \
+    || fail "reclaiming past a dead steal owner created a nested steal marker: $(tr '\n' ' ' < "$lnlog")"
+  assert_absent "$dir/state/.claude-autoarm.lock.steal" "reclaim left the dead steal mutex behind"
+  pass "auto-arm: an abandoned-claim reclaim reaps a dead steal mutex without nesting"
+}
+
 test_arming_claim_with_fresh_beacon_is_never_reclaimed() {
   local dir out status pid
   dir=$(make_primary_dir "$TMP_ROOT/arming-claim")
@@ -1526,6 +1575,7 @@ test_arms_for_registered_custom_check_without_inflight
 test_single_flight_admits_exactly_one_owner
 test_term_mid_arm_commits_failure_and_rewakes
 test_abandoned_owner_claim_is_reclaimed_and_rearms
+test_abandoned_claim_reclaim_reaps_dead_steal_without_nesting
 test_arming_claim_with_fresh_beacon_is_never_reclaimed
 test_fresh_arming_claim_with_stale_beacon_is_never_reclaimed
 test_claim_not_named_by_the_ledger_is_never_reclaimed
