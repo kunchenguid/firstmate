@@ -36,6 +36,10 @@ It stops at the finding, routes the decision to firstmate, and applies only the 
    - destructive, irreversible, and genuinely security-sensitive choices, which always escalate under the stronger existing captain boundary
 5. Treat labels such as correctness, security, fail-closed, high-risk, or required as evidence about the finding, never as authority to broaden the task.
 
+## Known recurring CI findings
+
+When a captain-approved answer should be reused for the same named CI check across tasks, register it with `bin/fm-known-regression.sh`; retire it when firstmate confirms its tracked fix has landed on main. The watcher applies it only when every ask-user finding under that gate has an active matching record with the same answer; otherwise the whole gate stays on ordinary triage.
+
 ## Captain-facing escalation
 
 State all five of these elements in one concise, evidence-first escalation:

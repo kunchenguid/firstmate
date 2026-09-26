@@ -2231,7 +2231,7 @@ signal_files_actionable() {  # <status-file> ...
 # worker status logs. Captain holds and local PR registration publish directly
 # at their durable mutation sites, where their identities are authoritative.
 signal_discord_decision_notifications() {  # <status-file> ...
-  local f start size chunk line task
+  local f start size chunk line task verb key
   for f in "$@"; do
     case "$f" in *.status) ;; *) continue ;; esac
     [ -f "$f" ] && [ ! -L "$f" ] || continue
@@ -2243,6 +2243,13 @@ signal_discord_decision_notifications() {  # <status-file> ...
     chunk=$(_fm_status_read_span "$f" "$start" "$((size - start))") || continue
     task=$(basename "$f"); task=${task%.status}
     while IFS= read -r line || [ -n "$line" ]; do
+      verb=$(status_line_verb "$line")
+      key=$(_fm_decision_key "$line" 2>/dev/null) || key=
+      case "$verb:$key" in
+        needs-decision:nm-*)
+          case "$FM_SIGNAL_AUTO_RESOLVED_KEYS" in *$'\n'"$f"$'\t'"$key"$'\n'*) continue ;; esac
+          ;;
+      esac
       "$SCRIPT_DIR/fm-discord-notify-status.sh" "$task" "$line" >/dev/null \
         || triage_log "Discord status notification failed for $task"
     done <<EOF
@@ -2947,9 +2954,45 @@ EOF
     # status span, and the capture only once the authoritative verdict comes up short.
     FM_SIGNAL_SURFACE_ENDPOINTS=''
     FM_SIGNAL_NEEDS_DECISION_FILES=''
+    FM_SIGNAL_AUTO_RESOLVED_KEYS=''
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
     signal_files_actionable $files
     signal_actionable=$?
+    # A firstmate-marked CI check failure may recur across task gates. Apply its
+    # recorded answer through fm-send's ordinary keyed-answer path before the
+    # supervisor handles this wake; misses and send failures continue through
+    # the normal ask-user wake unchanged.
+    if [ -n "$FM_SIGNAL_NEEDS_DECISION_FILES" ]; then
+      # shellcheck disable=SC2086 # validated status paths contain no spaces
+      for status_file in $FM_SIGNAL_NEEDS_DECISION_FILES; do
+        task_id=${status_file##*/}; task_id=${task_id%.status}
+        resolution=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+          "$SCRIPT_DIR/fm-known-regression.sh" apply "$task_id") || continue
+        while IFS= read -r resolved_line; do
+          case "$resolved_line" in
+            "auto-resolved $task_id ["*)
+              resolved_key=${resolved_line#* [}; resolved_key=${resolved_key%%]*}
+              FM_SIGNAL_AUTO_RESOLVED_KEYS="${FM_SIGNAL_AUTO_RESOLVED_KEYS}"$'\n'"$status_file"$'\t'"$resolved_key"$'\n'
+              ;;
+          esac
+        done <<EOF
+$resolution
+EOF
+        open_decisions=$(status_open_decisions "$status_file") || open_decisions=''
+        remaining_needs_decision=0
+        status_span_first_actionable_record "$status_file" \
+          "$(fm_wake_signal_seen_size "$STATE" "$status_file")" \
+          remaining_record remaining_needs_decision >/dev/null || :
+        if ! printf '%s\n' "$open_decisions" | awk -F '\t' '$2 == "needs-decision" { found=1 } END { exit found ? 0 : 1 }' \
+          && [ "$remaining_needs_decision" -eq 0 ]; then
+            remaining=''
+            for candidate in $FM_SIGNAL_NEEDS_DECISION_FILES; do
+              [ "$candidate" = "$status_file" ] || remaining="${remaining}${remaining:+ }${candidate}"
+            done
+            FM_SIGNAL_NEEDS_DECISION_FILES=$remaining
+        fi
+      done
+    fi
     # A decision-owned file's queued row payload is marked "needs-decision:"
     # instead of the ordinary "signal:" below (other files in the same batch
     # keep the ordinary payload). The wake reason line itself, and every
