@@ -8,7 +8,8 @@ This document stays the owner and the contract.
 Fleet supervision on the Pi primary harness runs on a second conversation - the supervision branch - inside the same `pi` process as the captain's chat.
 Supervision is default-on: once a Pi primary session owns this home's fleet lock, the branch handles eligible task-local rows from ordinary actionable wakes plus heartbeat scans that the cheap bash-level scan flags as possibly captain-relevant, then merges each outcome back into the captain conversation's transcript.
 Ordinary main-only rows remain on main even when eligible task-local rows share their queue, except that a fully identity-bound task-scoped iDA process-result check is branch-owned and a decision-owned signal or stale trigger keeps its entire coalesced trigger batch on main.
-A structurally valid signal or stale row whose task identity no longer resolves is retained as row-local main-only evidence: its own trigger stays on main, while unrelated resolvable rows remain branch-eligible. Malformed or unreadable queue data still makes the scan unsafe and returns the whole wake to main, and every watcher-failure alarm also stays on main.
+A structurally valid signal or stale row whose task identity no longer resolves is retained as row-local main-only evidence: its own trigger stays on main, while unrelated resolvable rows remain branch-eligible.
+Malformed or unreadable queue data still makes the scan unsafe and returns the whole wake to main, and every watcher-failure alarm also stays on main.
 Captain-relevant branch outcomes persist as exact, sequence-keyed visible transcript entries and then open one sequence-keyed processing turn on main, which stays open until main acknowledges that sequence.
 The design source is the captain-approved forked-supervision architecture board, a captain-private fleet record (a self-contained HTML explainer with the measured cache and judgment evidence); this document records the shape it landed as, and the delivering PR cites the board artifact itself.
 
@@ -60,7 +61,9 @@ The supervision branch itself is Pi-only by construction:
   It checks the current extension generation and `state/.lock` ownership before each guarded branch side effect so replacement or lock loss cannot let an old continuation mutate the new session.
   Those checks and the store calls around them are awaited rather than synchronous, and an explicit queue inside the extension is what keeps them serialized (see "Off-thread delivery" below).
   Every accepted path that cannot reach a working branch rejects its settlement to the watcher, which retains delivery ownership and routes the wake to main as a follow-up that counts as delivered once Pi accepts it; a broken branch declines later offers so they take that path directly.
-  Each watcher offer carries its exact eligible sequence-to-task snapshot. After asynchronous queueing and before publishing a grant, the branch rechecks the current extension generation, model/effort selection revision, fleet-lock ownership, trigger disposition, admitted sequences, and their resolved task identities. Retirement, endpoint reuse, a selection or generation change, or a competing main grant rejects settlement to watcher-owned fallback; an actually empty queue is the only already-consumed quiet no-op.
+  Each watcher offer carries its exact eligible sequence-to-task snapshot.
+  After asynchronous queueing and before publishing a grant, the branch rechecks the current extension generation, model/effort selection revision, fleet-lock ownership, trigger disposition, admitted sequences, and their resolved task identities.
+  Retirement, endpoint reuse, a selection or generation change, or a competing main grant rejects settlement to watcher-owned fallback; an actually empty queue is the only already-consumed quiet no-op.
   After wake rows are claimed, a branch prompt counts as handled only when `fm_branch_report` appends a durable outcome before that prompt settles; a settled provider error or a settled prompt with no report releases the grant and rejects delivery ownership back to the watcher.
   While a task-scoped prompt is open, `fm_branch_report` accepts only the tasks that prompt's claimed rows resolve to (a signal row by its status-log key, a stale row through the task record naming that endpoint, or an iDA result through its identity-bound remote-task record); a report for any other task id, `fleet` included, is refused before the store is touched, so a task remembered from an earlier wake cannot become a delivered outcome, while a heartbeat review is not scoped by task.
   The branch's guarded commands never tell it to drain queued rows mid-handling: for that actor `bin/fm-guard.sh` keeps the queued-wakes warning silent, and an acknowledgement that consumed nothing reports that plainly with the exact command for the current wake (`docs/watcher-continuity.md` "Per-actor acknowledgement").
@@ -68,7 +71,12 @@ The supervision branch itself is Pi-only by construction:
   Main keeps every wake during a five-minute cooldown, after which one wake may probe the branch while concurrent wakes still stay on main; each probe that settles with another provider error doubles the next cooldown up to one hour.
   A prompt from the current branch generation and model or effort selection that appends a durable `fm_branch_report` and then settles without a provider error clears both the latch and provider-error streak and surfaces a one-line recovery note; a provider error settled after that report wins instead, re-latches the branch, and extends the cooldown.
   A session replacement or branch model or effort change resets the recovery state immediately.
-  Outcome-reconciliation failures are a separate health class from construction and provider failures. A one-shot read or presentation failure may probe again at the next ordinary offer, turn boundary, or outcome-ready event; repeated failures use bounded exponential backoff without a new timer. Only a successful authoritative reconciliation in the same extension generation and selection revision clears that class. Mirror success does not clear it, and the probe path never clears provider cooldown or permanent construction/configuration failures. Because durable outcomes precede presentation, recovery re-presents or reconciles them without replaying branch execution.
+  Outcome-reconciliation failures are a separate health class from construction and provider failures.
+  A one-shot read or presentation failure may probe again at the next ordinary offer, turn boundary, or outcome-ready event.
+  After repeated failures, ordinary offers and turn boundaries use bounded exponential backoff without a new timer; an outcome-ready event still attempts reconciliation because it announces newly durable work.
+  Only a successful authoritative reconciliation in the same extension generation and selection revision clears that class.
+  Mirror success does not clear it, and the probe path never clears provider cooldown or permanent construction/configuration failures.
+  Because durable outcomes precede presentation, recovery re-presents or reconciles them without replaying branch execution.
 - Branch model and effort selection: the same extension registers `/supervision-model`, which picks the branch's model and then its reasoning effort, and applies both at the branch-session creation boundary; [configuration.md](configuration.md#pi-supervision-branch-model-and-effort-configsupervision-branch-model-configsupervision-branch-effort) owns the operator-facing schema and behavior.
 - Branch conversation reset: `/supervision-reset` closes branch admission, aborts and waits for any active branch turn through Pi's session API, releases row grants and branch-held leases, archives the old JSONL, clears its pointer, and re-anchors mirroring at main's current tail.
   It does not replace the main session or any Feishu binding, and it does not eagerly create a branch: the next eligible wake creates the fresh persistent conversation.
@@ -81,11 +89,13 @@ The supervision branch itself is Pi-only by construction:
 - Consistency: `bin/fm-lease-lib.sh` owns the per-task lease contract, the main-only role partition, and the deliberate CONFUSED-AGENT-GRADE threat model these guards target (captain-decided; adversarial-grade separation is out of scope and tracked as follow-up design work); `bin/fm-lease.sh` is the command surface.
   The guards are wired into `fm-send.sh`, `fm-control.sh`, and `fm-teardown.sh` (overlap, lease-checked, with claim serialization retained through the mutation) and `fm-pr-merge.sh`, `fm-merge-local.sh`, and `fm-spawn.sh` (main-owned, branch refused; a relaunch through `fm-control` stays branch-legal recovery).
 - Autonomy: supervision is default-on for every task once a Pi primary session owns the fleet lock (docs/configuration.md "Pi supervision branch"); no captain grant file is required.
-  A fleet-wide heartbeat is separately eligible when its safe subset contains a heartbeat row, a resolvable task-local signal or stale row, or an identity-bound iDA result check (see "Heartbeat routing" below). Main-owned checks, decision-owned signal/stale rows, and structurally valid unresolved task rows are excluded and remain queued; malformed or unreadable queue data and every watcher-failure alarm keep the whole wake on main.
+  A fleet-wide heartbeat is separately eligible when its safe subset contains a heartbeat row, a resolvable task-local signal or stale row, or an identity-bound iDA result check (see "Heartbeat routing" below).
+  Main-owned checks, decision-owned signal/stale rows, and structurally valid unresolved task rows are excluded and remain queued; malformed or unreadable queue data and every watcher-failure alarm keep the whole wake on main.
   The branch recomputes eligibility immediately before prompting the branch to drain and publishes the exact eligible row set to `state/.branch-eligible-rows` through `writeEligibleRowsSnapshot`.
   After an independently eligible wake has already been offered, a newly-arrived main-owned row observed at that pre-drain recheck does not revoke the offer: it is excluded from the eligible set, so whatever else is currently eligible still reaches the branch, and the main-owned row stays queued for main's own drain.
   [`watcher-continuity.md`](watcher-continuity.md#per-actor-acknowledgement) owns the consume-side guarantee that neither actor can present or acknowledge the other's claim.
-  Heartbeat keeps its own all-or-nothing recheck over the rows it can claim: it takes every branch-ownable unread row or none of them. A structurally valid unresolved task row is outside that claim and remains main-only; malformed or unreadable queue state still defers the whole review to main.
+  Heartbeat keeps its own all-or-nothing recheck over the rows it can claim: it takes every branch-ownable unread row or none of them.
+  A structurally valid unresolved task row is outside that claim and remains main-only; malformed or unreadable queue state still defers the whole review to main.
   A producer can still append a row in the instant between that final check and drain startup; this accepted residual follows the confused-agent-grade boundary above rather than claiming adversarial queue isolation.
   A legacy away daemon flag and a broken branch between its bounded recovery probes keep today's wake-to-main behavior; the away-posture record alone leaves the branch active.
 
@@ -164,17 +174,23 @@ Only a scan already flagged as possibly captain-relevant emits the bare `heartbe
 A heartbeat is never vetoed or ridden into main by a co-present main-owned check row or decision-owned signal/stale row.
 Those rows are permanently main-owned in every mode, while a valid identity-bound iDA result remains branch-owned: main-owned rows are excluded from what the branch may claim and left queued for main, which is woken for each on its own watcher cycle, so nothing starves by being left behind.
 Deferring the fleet review to main merely because some unrelated merge poll or Relay mention happened to be sitting unread put a routine review in the captain's chat for a reason that had nothing to do with the fleet, and that coupling is gone.
-What all-or-nothing guarantees is that the branch takes every branch-ownable unread row or none of them. A structurally valid unresolved task row is main-only and does not contaminate that safe subset; an unknown row kind or unreadable queue still defers the whole review to main.
+What all-or-nothing guarantees is that the branch takes every branch-ownable unread row or none of them.
+A structurally valid unresolved task row is main-only and does not contaminate that safe subset; an unknown row kind or unreadable queue still defers the whole review to main.
 The branch runs its normal operating procedure for the wake (`bin/fm-branch-prompt.sh` "Handling a wake") and performs the deeper fleet review that main previously performed.
 A review that found literally nothing worth reporting uses verdict `routine`, `task=fleet`, and `silent=true` so it has no rendered note, while a fleet-wide routine action omits `silent` and keeps its rendered sailboat note.
 Only a captain-worthy finding reports verdict `captain` and appends a visible captain outcome entry.
-The unresolved row's own signal or stale trigger and every other fleet-wide wake with no safe subset keep today's wake-to-main path. Watcher-failure alarms are never offered to the branch.
+The unresolved row's own signal or stale trigger and every other fleet-wide wake with no safe subset keep today's wake-to-main path.
+Watcher-failure alarms are never offered to the branch.
 
 ## Routing diagnostics
 
-The watcher and branch append best-effort causal records to `state/.supervision-routing.jsonl`. One bounded token connects classification, synchronous accept or decline, asynchronous recheck and grant, durable report or settlement, and watcher fallback or main delivery. Records contain only fixed reason categories, trigger kind, numeric queue sequences, generation/selection identity, and elapsed milliseconds; they never contain wake payloads, chat, model reasoning, credentials, arbitrary tool bodies, or provider payloads.
+The watcher and branch append best-effort causal records to `state/.supervision-routing.jsonl`.
+One bounded token connects classification, synchronous accept or decline, asynchronous recheck and grant, durable report or settlement, and watcher fallback or main delivery.
+To explain a particular Main notification, find its time-adjacent `main-delivery` record and follow that token backward: `declined` names a synchronous refusal, `fallback` names a failure after acceptance, and `classify` records the trigger kind plus any excluded numeric row sequences.
+Records contain only fixed reason categories, trigger kind, numeric queue sequences, generation/selection identity, and elapsed milliseconds; they never contain wake payloads, chat, model reasoning, credentials, arbitrary tool bodies, or provider payloads.
 
-The file is capped at 200 JSONL records and 256 KiB, rewritten atomically with mode `0600`. A diagnostic write failure is ignored by routing, and the file is never consulted as ownership or scheduling truth.
+The file is capped at 200 JSONL records and 256 KiB, rewritten atomically with mode `0600`.
+A diagnostic write failure is ignored by routing, and the file is never consulted as ownership or scheduling truth.
 
 ## Cost model and the byte-stable prefix
 
