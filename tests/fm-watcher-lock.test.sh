@@ -615,6 +615,264 @@ test_lock_live_steal_mutex_is_not_reclaimed() {
   pass "live steal mutex is not reclaimed"
 }
 
+test_lock_wait_survives_errexit_contention() {
+  local dir state lockdir holder_pid waiter_pid attempts
+  dir=$(make_case lock-wait-errexit)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+
+  FM_STATE_OVERRIDE="$state" bash -eu -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.01; done
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" "$dir/ready" "$dir/release" &
+  holder_pid=$!
+  attempts=0
+  while [ ! -e "$dir/ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  [ -e "$dir/ready" ] || fail "errexit lock holder did not start"
+
+  FM_STATE_OVERRIDE="$state" bash -eu -c '
+    . "$1"
+    fm_lock_acquire_wait "$2"
+    : > "$3"
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" "$dir/acquired" &
+  waiter_pid=$!
+  sleep 0.2
+  kill -0 "$waiter_pid" 2>/dev/null \
+    || fail "set -e exited instead of waiting for ordinary lock contention"
+  [ ! -e "$dir/acquired" ] || fail "contended waiter acquired before the holder released"
+
+  : > "$dir/release"
+  wait "$holder_pid" || fail "errexit lock holder failed"
+  wait "$waiter_pid" || fail "set -e waiter failed after the lock released"
+  [ -e "$dir/acquired" ] || fail "set -e waiter did not acquire after contention"
+  pass "ordinary lock waiting preserves contention semantics under set -e"
+}
+
+# Leave a real symlink-form lock whose holder process has exited.
+abandon_lock() {  # <state> <lockdir>
+  FM_STATE_OVERRIDE="$1" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+  ' _ "$LIB" "$2" || fail "could not seed abandoned lock $2"
+}
+
+test_lock_dead_recovery_holder_is_reclaimed() {
+  local dir state lockdir out me
+  dir=$(make_case lock-dead-recovery)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  abandon_lock "$state" "$lockdir"
+  abandon_lock "$state" "$lockdir.steal"
+  abandon_lock "$state" "$lockdir.steal.recovery"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    rc=$?
+    printf "rc=%s me=%s lockpid=%s\n" "$rc" "${BASHPID:-$$}" "$(cat "$2/pid" 2>/dev/null || true)"
+  ' _ "$LIB" "$lockdir" 2>&1)
+  case "$out" in
+    *"rc=0 "*) ;;
+    *) fail "dead recovery-mutex holder wedged the lock: $out" ;;
+  esac
+  me=${out#*me=}; me=${me%% *}
+  [ "$me" = "${out#*lockpid=}" ] || fail "reclaimed lock is not owned by the acquirer: $out"
+  [ ! -e "$lockdir.steal" ] && [ ! -L "$lockdir.steal" ] \
+    || fail "recovery left the steal mutex behind"
+  [ ! -e "$lockdir.steal.recovery" ] && [ ! -L "$lockdir.steal.recovery" ] \
+    || fail "dead recovery mutex was not reclaimed"
+  [ -z "$(find "$state" -maxdepth 1 -name '.contend.lock.steal.recovery.reclaim.*' -print -quit)" ] \
+    || fail "recovery-mutex reclaim left a quarantine directory behind"
+  pass "dead recovery-mutex holder is reclaimed without a nested mutex"
+}
+
+test_lock_stale_empty_recovery_holder_is_reclaimed() {
+  local dir state lockdir dead out me
+  dir=$(make_case lock-empty-recovery)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  mkdir "$lockdir" "$lockdir.steal" "$lockdir.steal.recovery"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal/pid"
+  touch -t 202001010000 "$lockdir.steal.recovery"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=$?; fi
+    printf "rc=%s me=%s lockpid=%s\n" "$rc" "${BASHPID:-$$}" "$(cat "$2/pid" 2>/dev/null || true)"
+  ' _ "$LIB" "$lockdir" 2>&1)
+  case "$out" in
+    *"rc=0 "*) ;;
+    *) fail "stale empty recovery mutex wedged the lock: $out" ;;
+  esac
+  me=${out#*me=}; me=${me%% *}
+  [ "$me" = "${out#*lockpid=}" ] || fail "lock after empty recovery reclaim is not owned by the acquirer: $out"
+  [ ! -e "$lockdir.steal.recovery" ] && [ ! -L "$lockdir.steal.recovery" ] \
+    || fail "stale empty recovery mutex was not reclaimed"
+  pass "stale empty recovery mutex is reclaimed after the minimum grace"
+}
+
+test_lock_live_recovery_holder_is_not_reclaimed() {
+  local dir state lockdir dead holder out
+  dir=$(make_case lock-live-recovery)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  sleep 300 &
+  holder=$!
+  mkdir "$lockdir" "$lockdir.steal" "$lockdir.steal.recovery"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal/pid"
+  printf '%s\n' "$holder" > "$lockdir.steal.recovery/pid"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    printf "rc=%s\n" "$?"
+  ' _ "$LIB" "$lockdir" 2>&1)
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$out" = "rc=1" ] || fail "live recovery-mutex holder was not waited on: $out"
+  [ "$(cat "$lockdir/pid")" = "$dead" ] || fail "primary lock evidence changed under a live recovery holder"
+  [ "$(cat "$lockdir.steal/pid")" = "$dead" ] || fail "steal mutex evidence changed under a live recovery holder"
+  [ "$(cat "$lockdir.steal.recovery/pid")" = "$holder" ] || fail "live recovery holder was reclaimed"
+  pass "live recovery-mutex holder is not reclaimed"
+}
+
+test_lock_recovery_with_live_process_group_is_waited_out() {
+  local dir state lockdir dead leader out waiter i
+  dir=$(make_case lock-recovery-group)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  set -m
+  ( sleep 300 & exit 0 ) &
+  leader=$!
+  set +m
+  wait "$leader" 2>/dev/null || true
+  kill -0 -"$leader" 2>/dev/null || fail "could not seed a leaderless process group"
+  mkdir "$lockdir" "$lockdir.steal" "$lockdir.steal.recovery"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal/pid"
+  printf '%s\n' "$leader" > "$lockdir.steal.recovery/pid"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    printf "try=%s\n" "$?"
+  ' _ "$LIB" "$lockdir" 2>&1)
+  if [ "$out" != "try=1" ]; then
+    kill -KILL -"$leader" 2>/dev/null || true
+    fail "recovery mutex with a live process group was not treated as held: $out"
+  fi
+  [ "$(cat "$lockdir.steal.recovery/pid")" = "$leader" ] \
+    || fail "held recovery mutex evidence changed"
+  [ "$(cat "$lockdir/pid")" = "$dead" ] || fail "primary lock evidence changed while waiting"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait_refusable "$2" 2>/dev/null
+    printf "%s\n" "$?" > "$3"
+  ' _ "$LIB" "$lockdir" "$dir/waited" &
+  waiter=$!
+  sleep 0.5
+  if ! kill -0 "$waiter" 2>/dev/null; then
+    kill -KILL -"$leader" 2>/dev/null || true
+    fail "refusable lock wait returned while the recovery holder group was alive: $(cat "$dir/waited" 2>/dev/null)"
+  fi
+  kill -KILL -"$leader" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 50 ] && kill -0 "$waiter" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$waiter" 2>/dev/null; then
+    kill "$waiter" 2>/dev/null || true
+    wait "$waiter" 2>/dev/null || true
+    fail "refusable lock wait did not resume after the holder group exited"
+  fi
+  wait "$waiter" 2>/dev/null || true
+  [ "$(cat "$dir/waited" 2>/dev/null)" = 0 ] || fail "refusable lock wait did not acquire after recovery"
+  pass "recovery mutex with a live process group is waited out, then recovered once it exits"
+}
+
+test_lock_legacy_nested_steal_does_not_wedge() {
+  local dir state lockdir dead out
+  dir=$(make_case lock-legacy-nested)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  mkdir "$lockdir" "$lockdir.steal.steal"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal.steal/pid"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    printf "rc=%s\n" "$?"
+  ' _ "$LIB" "$lockdir" 2>&1)
+  [ "$out" = "rc=0" ] || fail "legacy .steal.steal leftover wedged the lock: $out"
+  [ "$(cat "$lockdir.steal.steal/pid")" = "$dead" ] || fail "legacy nested mutex evidence changed"
+  pass "legacy nested steal leftover does not wedge the lock"
+}
+
+test_lock_self_held_recovery_is_reclaimed() {
+  local dir state lockdir dead out
+  dir=$(make_case lock-self-held-recovery)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_current_pid me
+    mkdir "$2.steal"
+    printf "%s\n" "$me" > "$2.steal/pid"
+    fm_lock_try_acquire "$2"
+    printf "steal=%s " "$?"
+    fm_lock_release "$2"
+    mkdir "$2" "$2.steal" "$2.steal.recovery"
+    printf "%s\n" "$3" > "$2/pid"
+    printf "%s\n" "$3" > "$2.steal/pid"
+    printf "%s\n" "$me" > "$2.steal.recovery/pid"
+    fm_lock_try_acquire "$2"
+    printf "recovery=%s\n" "$?"
+  ' _ "$LIB" "$lockdir" "$dead" 2>&1)
+  [ "$out" = "steal=0 recovery=0" ] || fail "self-held recovery state deadlocked the acquirer: $out"
+  pass "self-held steal and recovery mutexes are reclaimed by their own process"
+}
+
+test_lock_dangling_recovery_link_is_retried() {
+  local dir state lockdir dead out me
+  dir=$(make_case lock-dangling-recovery)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  mkdir "$lockdir" "$lockdir.steal"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal/pid"
+  ln -s "$state/.contend.lock.steal.recovery.owner.gone" "$lockdir.steal.recovery"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    printf "first=%s " "$?"
+    fm_lock_try_acquire "$2"
+    printf "second=%s me=%s lockpid=%s\n" "$?" "${BASHPID:-$$}" "$(cat "$2/pid" 2>/dev/null || true)"
+  ' _ "$LIB" "$lockdir" 2>&1)
+  case "$out" in
+    "first=1 second=0 "*) ;;
+    *) fail "dangling recovery link refused or wedged the lock: $out" ;;
+  esac
+  me=${out#*me=}; me=${me%% *}
+  [ "$me" = "${out#*lockpid=}" ] || fail "lock after dangling recovery link is not owned by the acquirer: $out"
+  [ ! -e "$lockdir.steal.recovery" ] && [ ! -L "$lockdir.steal.recovery" ] \
+    || fail "dangling recovery link was left behind"
+  pass "dangling recovery link is cleared and retried instead of refused"
+}
+
 test_lock_does_not_steal_live_lock() {
   local dir state lockdir live out lockpid
   dir=$(make_case lock-live-noop)
@@ -1549,6 +1807,14 @@ test_lock_steal_reap_cannot_remove_successor
 test_lock_reclaims_self_held_steal_mutex
 test_lock_resumes_own_interrupted_steal_reap
 test_lock_live_steal_mutex_is_not_reclaimed
+test_lock_wait_survives_errexit_contention
+test_lock_dead_recovery_holder_is_reclaimed
+test_lock_stale_empty_recovery_holder_is_reclaimed
+test_lock_live_recovery_holder_is_not_reclaimed
+test_lock_recovery_with_live_process_group_is_waited_out
+test_lock_legacy_nested_steal_does_not_wedge
+test_lock_self_held_recovery_is_reclaimed
+test_lock_dangling_recovery_link_is_retried
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate

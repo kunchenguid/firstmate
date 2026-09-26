@@ -661,6 +661,146 @@ assert_absent "$FM_PROCEVENT_CLAIM_ROOT/retire-fail-src.claim" \
   || fail "retirement recovery reran the terminal source"
 pass "failed terminal retirement is fail-closed and idempotently recoverable"
 
+# --- Lavish arm refuses a blocked recovery mutex without recursive locks -----
+# A stale process-event source lock needs its `.steal` recovery mutex. If that
+# mutex is also stale or cannot be created, the public arm command must fail
+# promptly without inventing `.steal.steal` paths or touching any durable board
+# state that was already present.
+HLOCK="$TMP_ROOT/hlock"; new_home "$HLOCK"
+LOCK_BIN=$(fm_fakebin "$TMP_ROOT/lavish-lock-stub")
+cat > "$LOCK_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod +x "$LOCK_BIN/lavish-axi"
+LOCK_ART="$TMP_ROOT/lock-board.html"
+printf '<h1>lock review</h1>\n' > "$LOCK_ART"
+lock_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LOCK_ART")
+LOCK_CLAIMS="$TMP_ROOT/lock-claims"
+mkdir -p "$LOCK_CLAIMS"
+PATH="$LOCK_BIN:$PATH" FM_HOME="$HLOCK" FM_PROCEVENT_CLAIM_ROOT="$LOCK_CLAIMS" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LOCK_ART" >/dev/null \
+  || fail "could not seed the Lavish registration for lock refusal"
+lock_registration="$HLOCK/state/procevent/$lock_id.source"
+lock_claim="$LOCK_CLAIMS/$lock_id.claim"
+lock_result="$HLOCK/state/procevent-inbox/$lock_id.1.result"
+mkdir -p "$(dirname "$lock_result")"
+printf 'claim-before-refusal\n' > "$lock_claim"
+printf 'captain comment before refusal\n' > "$lock_result"
+registration_before=$(shasum -a 256 "$lock_registration" | awk '{print $1}')
+claim_before=$(shasum -a 256 "$lock_claim" | awk '{print $1}')
+result_before=$(shasum -a 256 "$lock_result" | awk '{print $1}')
+lock_path="$LOCK_CLAIMS/$lock_id.lock"
+dead_lock_pid=99999999
+while kill -0 "$dead_lock_pid" 2>/dev/null; do
+  dead_lock_pid=$((dead_lock_pid + 1))
+done
+mkdir "$lock_path" "$lock_path.steal"
+printf '%s\n' "$dead_lock_pid" > "$lock_path/pid"
+printf 'primary-owner-before-refusal\n' > "$lock_path/pid-identity"
+printf '%s\n' "$dead_lock_pid" > "$lock_path.steal/pid"
+printf 'recovery-owner-before-refusal\n' > "$lock_path.steal/pid-identity"
+chmod 500 "$LOCK_CLAIMS"
+lock_arm_out="$TMP_ROOT/lock-arm.out"
+lock_arm_err="$TMP_ROOT/lock-arm.err"
+PATH="$LOCK_BIN:$PATH" FM_HOME="$HLOCK" FM_PROCEVENT_CLAIM_ROOT="$LOCK_CLAIMS" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LOCK_ART" \
+  > "$lock_arm_out" 2> "$lock_arm_err" &
+lock_arm_pid=$!
+for _ in $(seq 1 100); do
+  kill -0 "$lock_arm_pid" 2>/dev/null || break
+  sleep 0.02
+done
+lock_arm_status=0
+if kill -0 "$lock_arm_pid" 2>/dev/null; then
+  kill -TERM "$lock_arm_pid" 2>/dev/null || true
+  wait "$lock_arm_pid" 2>/dev/null || true
+  chmod 700 "$LOCK_CLAIMS"
+  fail "Lavish arm did not complete within the bounded lock-refusal window"
+else
+  wait "$lock_arm_pid" || lock_arm_status=$?
+  chmod 700 "$LOCK_CLAIMS"
+fi
+[ "$lock_arm_status" -ne 0 ] || fail "Lavish arm succeeded despite an unavailable recovery mutex"
+assert_contains "$(cat "$lock_arm_err")" \
+  "lock recovery refused: recovery mutex is stale or unavailable" \
+  "Lavish arm did not explain the bounded lock-recovery refusal"
+assert_not_contains "$(cat "$lock_arm_err")" ".steal.steal" \
+  "Lavish arm still derived a nested recovery-mutex path"
+[ -z "$(find "$LOCK_CLAIMS" -maxdepth 1 -name "$lock_id.lock.steal.steal*" -print -quit)" ] \
+  || fail "Lavish arm created a nested recovery-mutex path"
+[ "$(cat "$lock_path/pid")" = "$dead_lock_pid" ] \
+  || fail "Lavish arm changed the primary lock owner on refusal"
+[ "$(cat "$lock_path/pid-identity")" = primary-owner-before-refusal ] \
+  || fail "Lavish arm lost the primary lock identity on refusal"
+[ "$(cat "$lock_path.steal/pid")" = "$dead_lock_pid" ] \
+  || fail "Lavish arm changed the recovery-mutex owner on refusal"
+[ "$(cat "$lock_path.steal/pid-identity")" = recovery-owner-before-refusal ] \
+  || fail "Lavish arm lost the recovery-mutex identity on refusal"
+[ "$(shasum -a 256 "$lock_registration" | awk '{print $1}')" = "$registration_before" ] \
+  || fail "Lavish arm mutated the process-event registration on lock refusal"
+[ "$(shasum -a 256 "$lock_claim" | awk '{print $1}')" = "$claim_before" ] \
+  || fail "Lavish arm mutated the existing process claim on lock refusal"
+[ "$(shasum -a 256 "$lock_result" | awk '{print $1}')" = "$result_before" ] \
+  || fail "Lavish arm lost or changed an existing feedback capture on lock refusal"
+pass "Lavish arm bounds recovery-mutex refusal without suffix growth or durable-state mutation"
+
+# --- Lavish arm waits out a recovery holder's live descendant ----------------
+# A recovery-mutex holder killed as a process-group leader can leave a child
+# (a poll or sleep) running. Its absence is not yet provable, so the arm must
+# keep waiting instead of dying, and must finish once that group is gone.
+HGROUP="$TMP_ROOT/hgroup"; new_home "$HGROUP"
+GROUP_ART="$TMP_ROOT/group-board.html"
+printf '<h1>group review</h1>\n' > "$GROUP_ART"
+group_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$GROUP_ART")
+GROUP_CLAIMS="$TMP_ROOT/group-claims"
+mkdir -p "$GROUP_CLAIMS"
+PATH="$LOCK_BIN:$PATH" FM_HOME="$HGROUP" FM_PROCEVENT_CLAIM_ROOT="$GROUP_CLAIMS" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$GROUP_ART" >/dev/null \
+  || fail "could not seed the Lavish registration for group wait"
+group_lock="$GROUP_CLAIMS/$group_id.lock"
+set -m
+( sleep 300 & exit 0 ) &
+group_leader=$!
+set +m
+wait "$group_leader" 2>/dev/null || true
+kill -0 -"$group_leader" 2>/dev/null || fail "could not seed a leaderless recovery-holder group"
+mkdir "$group_lock" "$group_lock.steal" "$group_lock.steal.recovery"
+printf '%s\n' "$dead_lock_pid" > "$group_lock/pid"
+printf '%s\n' "$dead_lock_pid" > "$group_lock.steal/pid"
+printf '%s\n' "$group_leader" > "$group_lock.steal.recovery/pid"
+group_arm_err="$TMP_ROOT/group-arm.err"
+PATH="$LOCK_BIN:$PATH" FM_HOME="$HGROUP" FM_PROCEVENT_CLAIM_ROOT="$GROUP_CLAIMS" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$GROUP_ART" >/dev/null 2> "$group_arm_err" &
+group_arm_pid=$!
+sleep 0.5
+if ! kill -0 "$group_arm_pid" 2>/dev/null; then
+  kill -KILL -"$group_leader" 2>/dev/null || true
+  wait "$group_arm_pid" 2>/dev/null || true
+  fail "Lavish arm exited while the recovery holder's group was alive: $(cat "$group_arm_err")"
+fi
+[ "$(cat "$group_lock.steal.recovery/pid")" = "$group_leader" ] \
+  || fail "Lavish arm changed the live recovery holder's evidence while waiting"
+kill -KILL -"$group_leader" 2>/dev/null || true
+for _ in $(seq 1 100); do
+  kill -0 "$group_arm_pid" 2>/dev/null || break
+  sleep 0.05
+done
+if kill -0 "$group_arm_pid" 2>/dev/null; then
+  kill -TERM "$group_arm_pid" 2>/dev/null || true
+  wait "$group_arm_pid" 2>/dev/null || true
+  fail "Lavish arm did not resume after the recovery holder's group exited"
+fi
+group_arm_status=0
+wait "$group_arm_pid" || group_arm_status=$?
+[ "$group_arm_status" -eq 0 ] \
+  || fail "Lavish arm failed after the recovery holder's group exited: $(cat "$group_arm_err")"
+assert_not_contains "$(cat "$group_arm_err")" "lock recovery refused" \
+  "Lavish arm reported a refusal while only waiting on a live group"
+[ ! -e "$group_lock.steal.recovery" ] && [ ! -L "$group_lock.steal.recovery" ] \
+  || fail "Lavish arm left the reclaimed recovery mutex behind"
+pass "Lavish arm waits through a live recovery-holder group and resumes after it exits"
+
 # --- end-user-aligned regression: one Send & End, one captured result -------
 # The dogfood defect: a real armed Lavish source received one human `Send & End`
 # action, and the runner captured four results - the human's real feedback, then
