@@ -13,6 +13,7 @@ metadata:
 Sweep this session for durable knowledge and open-work record state that exist only in conversation, then leave the next session with a compact current operating map rather than an accumulating journal.
 Memory entries are tiered and decay between passes, and stale material retires to a cold archive instead of being deleted.
 This skill writes only through the existing Firstmate ownership and write boundaries.
+For Astra checkpoint timing and fresh-context replay, follow the [context continuity policy](../../../docs/context-continuity.md); this skill remains the memory-curation owner.
 
 ## Memory tiers and entry markers
 

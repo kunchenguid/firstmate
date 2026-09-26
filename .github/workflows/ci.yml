@@ -27,6 +27,20 @@ concurrency:
 # Each job comment identifies the tier implemented by its executable value.
 
 jobs:
+  context-continuity:
+    name: Rust context continuity
+    runs-on: ubuntu-latest
+    # Normal tier (see the timeout policy above).
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify Rust continuity behavior
+        run: cargo test --locked --manifest-path rust/context-continuity/Cargo.toml
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path rust/context-continuity/Cargo.toml --check
+      - name: Lint Rust continuity
+        run: cargo clippy --locked --manifest-path rust/context-continuity/Cargo.toml --all-targets -- -D warnings
+
   lint:
     name: Lint ${{ matrix.partition }}
     runs-on: ubuntu-latest
