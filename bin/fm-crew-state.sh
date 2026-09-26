@@ -933,31 +933,10 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         if [ "$(strip_quotes "$(nm_field branch)")" = "$CREW_BRANCH" ]; then
           known_run_id=$(strip_quotes "$(nm_field id)")
         fi
-        # The identity-aware same-branch inventory could not be read, but the
-        # bare `axi status` call above already reported this branch's last
-        # known run in full detail, still sitting unmodified in $RUN_OUT. This
-        # never asserts the crew's own state - only the detail text names what
-        # that run itself recorded, never RUN_STATE - so a hidden newer run the
-        # failed read could not see is a real but distinct risk: the failed
-        # read's own partial candidate-id evidence can already CONTRADICT the
-        # known run id: that list is newest-first, exactly as the awk selection
-        # above treats it, so a known run id that is not the FIRST (newest)
-        # same-branch candidate is a superseded record (the captured
-        # same-branch-inventory replay: bare `axi status` served a SUPERSEDED
-        # cancelled run while the visible candidate list named its live
-        # replacement ahead of it). An OLDER sibling can sit behind the known
-        # run without displacing it - the known run stays first, and an older
-        # row is history, never grounds to distrust the newest terminal record
-        # already in hand. An EMPTY candidate list contradicts nothing either -
-        # a run that finished many runs ago is exactly as knowable as one that
-        # finished two runs ago, it has simply aged out of the CLI's display
-        # window. So withhold the annotation unless the candidate list is empty
-        # or the known run id is the newest candidate; otherwise name what the
-        # known run itself recorded instead of a generic unknown that reads as
-        # if the task never ran (observed
-        # 2026-09-21: a task whose run completed long ago, with its PR finished
-        # and awaiting upstream, read as "run inventory unreadable" while its
-        # own completed run id sat right there).
+        # Keep this as detail about the recorded run, never as RUN_STATE: the
+        # unreadable inventory cannot prove that the crew is currently done or
+        # failed, and stale run details must not be presented as the crew's own.
+        # The candidate precedence contract is documented in docs/architecture.md.
         known_detail=""
         if [ -n "$known_run_id" ] && ! fm_nm_run_is_active "$RUN_OUT"; then
           ids_field=${run_choice##*run ids: }
