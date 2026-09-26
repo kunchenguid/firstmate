@@ -271,6 +271,11 @@ JSON
 # hasClaudeMdExternalIncludesWarningShown to true. So false/false is "never
 # asked", not "No, disable": it must be treated like an absent flag - trust
 # registered, no import consent manufactured - rather than refused.
+#
+# The uncorroborated approved===false case lives here too, so the flags are
+# pinned as PRESENT and exactly false rather than merely not-true: a cleanup
+# that deleted them satisfies assert_trust_only_no_import_consent while still
+# rewriting the human's consent state.
 test_project_root_entry_default_import_flags_are_not_a_decline() {
   local rec store out
   rec=$(make_case project-default-flags)
@@ -285,7 +290,16 @@ JSON
     "the worktree entry either lost trust or gained unearned import consent"
   assert_trust_only_no_import_consent "$store" "$PROJ" \
     "the project-root entry either lost trust or gained import consent it was never asked for"
-  pass "fm-claude-trust.sh: a never-asked default external-imports pair is not treated as a decline"
+  assert_store_value "$store" 'false' \
+    "the undecided approved flag was rewritten instead of left untouched" \
+    projects "$PROJ" hasClaudeMdExternalIncludesApproved
+  assert_store_value "$store" 'false' \
+    "the warning-shown flag was rewritten instead of left untouched" \
+    projects "$PROJ" hasClaudeMdExternalIncludesWarningShown
+  assert_store_value "$store" 'undefined' \
+    "import consent was manufactured on the worktree entry" \
+    projects "$WT" hasClaudeMdExternalIncludesApproved
+  pass "fm-claude-trust.sh: a never-asked default external-imports pair is not a decline and survives as exactly false"
 }
 
 test_registration_is_idempotent() {
