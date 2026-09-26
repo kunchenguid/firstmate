@@ -1200,6 +1200,7 @@ fm_busy_classify_meta() {  # <meta-file> <id> <state-dir> [tail40]
     printf 'unknown no-target'
     return 0
   fi
+  fm_backend_bind_task_record "$meta" "$target"
   fm_busy_classify "$backend" "$target" "$harness" "$id" "$state" "$tail40"
 }
 

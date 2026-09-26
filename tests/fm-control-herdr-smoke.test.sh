@@ -82,6 +82,8 @@ read -r TAB_ID PANE_ID <<EOF
 $TASK_IDS
 EOF
 [ -n "$TAB_ID" ] && [ -n "$PANE_ID" ] || fail "create_task did not return tab/pane ids"
+TERMINAL_ID=$(fm_backend_herdr_pane_terminal_id "$SESSION" "$PANE_ID") \
+  || fail "could not read the new pane's terminal identity"
 
 {
   echo "window=$SESSION:$PANE_ID"
@@ -99,6 +101,7 @@ EOF
   echo "herdr_workspace_id=$WORKSPACE_ID"
   echo "herdr_tab_id=$TAB_ID"
   echo "herdr_pane_id=$PANE_ID"
+  echo "herdr_terminal_id=$TERMINAL_ID"
 } > "$HOME_DIR/state/hsmoke.meta"
 
 run_control() {

@@ -2866,6 +2866,178 @@ test_projection_close_failed_removal_rolls_back_the_reposition() {
   pass "herdr presentation cleanup: every unconfirmed removal restores the exact original workspace order and reports failure"
 }
 
+# --- endpoint identity: a reissued pane id is never the task's endpoint ------
+
+# make_identity_fakebin: a stateless `herdr` whose `pane get` answers the JSON in
+# $FM_FAKE_PANE_GET and which logs every call, so a test can prove no close ran.
+make_identity_fakebin() {  # <dir> -> echoes fakebin dir
+  local fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "$FM_HERDR_LOG"
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.9.1","protocol":22},"server":{"running":true}}\n' ;;
+  "pane get") printf '%s\n' "$FM_FAKE_PANE_GET" ;;
+  "pane read") printf '%s\n' "${FM_FAKE_PANE_READ:-}" ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+identity_pane_json() {  # <pane> <terminal> <foreground-cwd>
+  printf '{"result":{"pane":{"pane_id":"%s","terminal_id":"%s","foreground_cwd":"%s"}}}' "$1" "$2" "$3"
+}
+
+identity_record() {  # <meta> <task-id> <pane> <worktree> [terminal]
+  fm_write_meta "$1" "window=default:$3" "endpoint_task_id=$2" "worktree=$4" \
+    "project=/nonexistent/project" "backend=herdr" "herdr_session=default" \
+    "herdr_workspace_id=${3%%:*}" "herdr_tab_id=${3%%:*}:t9" "herdr_pane_id=$3" \
+    ${5:+"herdr_terminal_id=$5"}
+}
+
+identity_verdict() {  # <fakebin> <state> <pane-get-json> <target> [pin]
+  PATH="$1:$PATH" FM_HERDR_LOG="$IDENTITY_LOG" FM_STATE_OVERRIDE="$2" \
+    FM_FAKE_PANE_GET="$3" FM_BACKEND_HERDR_IDENTITY_PIN="${5:-}" \
+    bash -c '. "$1/bin/backends/herdr.sh"; fm_backend_herdr_endpoint_identity "$2"' _ "$ROOT" "$4"
+}
+
+test_endpoint_identity_verdicts() {
+  local dir fb state wt got
+  dir="$TMP_ROOT/identity-verdicts"; state="$dir/state"; wt="$dir/wt"
+  mkdir -p "$state" "$wt"
+  IDENTITY_LOG="$dir/log"; : > "$IDENTITY_LOG"
+  fb=$(make_identity_fakebin "$dir")
+  identity_record "$state/bound.meta" bound w1:p2 "$wt" term-a
+
+  got=$(identity_verdict "$fb" "$state" "$(identity_pane_json w1:p2 term-a /elsewhere)" default:w1:p2)
+  [ "$got" = match ] || fail "identity: the recorded terminal should match, got '$got'"
+  got=$(identity_verdict "$fb" "$state" "$(identity_pane_json w1:p2 term-b "$wt")" default:w1:p2)
+  [ "$got" = mismatch ] || fail "identity: another terminal holding the pane id must be a mismatch even inside the worktree, got '$got'"
+  got=$(identity_verdict "$fb" "$state" '{"error":{"code":"pane_not_found"}}' default:w1:p2)
+  [ "$got" = absent ] || fail "identity: a gone pane should read absent, got '$got'"
+  got=$(identity_verdict "$fb" "$state" '{"error":{"code":"server_not_running"}}' default:w1:p2)
+  [ "$got" = unknown ] || fail "identity: an unreadable pane must stay unknown, got '$got'"
+  got=$(identity_verdict "$fb" "$state" "$(identity_pane_json w1:p9 term-a "$wt")" default:w1:p2)
+  [ "$got" = unknown ] || fail "identity: a response for a different pane must stay unknown, got '$got'"
+  got=$(identity_verdict "$fb" "$state" "$(identity_pane_json w1:p7 term-z /x)" default:w1:p7)
+  [ "$got" = unbound ] || fail "identity: a target no record binds should be unbound, got '$got'"
+  got=$(identity_verdict "$fb" "$state" "$(identity_pane_json w1:p2 term-b /x)" default:w1:p2 default:w1:p2)
+  [ "$got" = match ] || fail "identity: a pinned target should match without a read, got '$got'"
+
+  # Two records naming one pane: a target alone cannot say which is meant.
+  identity_record "$state/dup.meta" dup w1:p2 "$wt" term-b
+  got=$(identity_verdict "$fb" "$state" "$(identity_pane_json w1:p2 term-b "$wt")" default:w1:p2)
+  [ "$got" = unknown ] || fail "identity: two records binding one pane must stay unknown, got '$got'"
+  # ...unless the caller validated one exact record.
+  got=$(PATH="$fb:$PATH" FM_HERDR_LOG="$IDENTITY_LOG" FM_STATE_OVERRIDE="$state" \
+    FM_FAKE_PANE_GET="$(identity_pane_json w1:p2 term-b "$wt")" \
+    bash -c '. "$1/bin/fm-backend.sh"; fm_backend_source herdr
+      fm_backend_validate_task_endpoint "$2/bound.meta" bound || exit 9
+      fm_backend_herdr_endpoint_identity default:w1:p2' _ "$ROOT" "$state")
+  [ "$got" = mismatch ] || fail "identity: a validated record should be checked exactly, got '$got'"
+  rm -f "$state/dup.meta"
+
+  # Legacy records carry no terminal id: the pane must work inside the
+  # recorded worktree, and no other record may claim the live terminal.
+  identity_record "$state/legacy.meta" legacy w2:p2 "$wt"
+  got=$(identity_verdict "$fb" "$state" "$(identity_pane_json w2:p2 term-l "$wt/sub")" default:w2:p2)
+  [ "$got" = match ] || fail "identity: a legacy pane working inside its worktree should match, got '$got'"
+  got=$(identity_verdict "$fb" "$state" "$(identity_pane_json w2:p2 term-l /primary/home)" default:w2:p2)
+  [ "$got" = mismatch ] || fail "identity: a legacy pane working elsewhere must be a mismatch, got '$got'"
+  got=$(identity_verdict "$fb" "$state" "$(identity_pane_json w2:p2 term-l "$wt-other")" default:w2:p2)
+  [ "$got" = mismatch ] || fail "identity: a sibling path sharing the worktree prefix must be a mismatch, got '$got'"
+  got=$(identity_verdict "$fb" "$state" "$(identity_pane_json w2:p2 term-a "$wt")" default:w2:p2)
+  [ "$got" = mismatch ] || fail "identity: a legacy pane whose terminal another record owns must be a mismatch, got '$got'"
+  pass "herdr endpoint identity: terminal-bound, legacy, absent, unbound, ambiguous, and unreadable verdicts"
+}
+
+test_endpoint_identity_gates_reads_and_closes() {
+  local dir fb state wt got rc stranger
+  dir="$TMP_ROOT/identity-gates"; state="$dir/state"; wt="$dir/wt"
+  mkdir -p "$state" "$wt"
+  IDENTITY_LOG="$dir/log"; : > "$IDENTITY_LOG"
+  fb=$(make_identity_fakebin "$dir")
+  identity_record "$state/task.meta" task w1:p2 "$wt" term-a
+  stranger=$(identity_pane_json w1:p2 term-b /primary/home)
+  run_gate() {  # <pane-get-json> <snippet>
+    PATH="$fb:$PATH" FM_HERDR_LOG="$IDENTITY_LOG" FM_STATE_OVERRIDE="$state" FM_FAKE_PANE_GET="$1" \
+      bash -c '. "$1/bin/fm-backend.sh"; fm_backend_source herdr; eval "$2"' _ "$ROOT" "$2"
+  }
+
+  got=$(run_gate "$stranger" 'fm_backend_agent_state herdr default:w1:p2')
+  [ "$got" = missing ] || fail "gate: a reissued pane should read missing, got '$got'"
+  got=$(run_gate '{"error":{"code":"internal"}}' 'fm_backend_agent_state herdr default:w1:p2')
+  [ "$got" = unreadable ] || fail "gate: an unverifiable pane should read unreadable, got '$got'"
+  run_gate "$stranger" 'fm_backend_target_exists herdr default:w1:p2' \
+    && fail "gate: the existence read accepted a reissued pane"
+  run_gate "$stranger" 'fm_backend_herdr_target_ready default:w1:p2' \
+    && fail "gate: a reissued pane passed the read-and-act gate"
+  run_gate "$stranger" 'fm_backend_herdr_endpoint_confirmed_gone default:w1:p2' \
+    || fail "gate: a reissued pane should confirm this task's endpoint gone"
+
+  : > "$IDENTITY_LOG"
+  rc=0; run_gate "$stranger" 'fm_backend_herdr_kill_serialized default w1:p2' || rc=$?
+  [ "$rc" = 0 ] || fail "gate: closing an already-gone endpoint should succeed, got $rc"
+  rc=0; run_gate "$stranger" 'fm_backend_herdr_projection_close_pane_focus_preserving default w1:p2' || rc=$?
+  [ "$rc" = 0 ] || fail "gate: a projected close of an already-gone endpoint should succeed, got $rc"
+  rc=0; run_gate '{"error":{"code":"internal"}}' 'fm_backend_herdr_kill_serialized default w1:p2' 2>/dev/null || rc=$?
+  [ "$rc" = 1 ] || fail "gate: an unverifiable pane close must refuse, got $rc"
+  assert_not_contains "$(cat "$IDENTITY_LOG")" 'pane close' "gate: a close ran against a pane this task no longer owns"
+  pass "herdr endpoint identity gates liveness, existence, reads, actions, and every pane close"
+}
+
+# After a Herdr server restart, a new task's pane can take the pane id an old
+# record still names. Each per-task caller checks its own record: the old
+# record reads its endpoint gone, and the new record reads the live pane.
+test_endpoint_identity_reissued_pane_binds_each_task_record() {
+  local dir fb state wt got neutral live
+  dir="$TMP_ROOT/identity-reissued"; state="$dir/state"; wt="$dir/wt"
+  neutral="$dir/neutral-root"
+  mkdir -p "$state" "$wt" "$neutral"
+  IDENTITY_LOG="$dir/log"; : > "$IDENTITY_LOG"
+  fb=$(make_identity_fakebin "$dir")
+  live=$(identity_pane_json w1:p2 term-after-restart "$wt")
+  run_bound() {  # <snippet>
+    PATH="$fb:$PATH" FM_HERDR_LOG="$IDENTITY_LOG" FM_STATE_OVERRIDE="$state" FM_FAKE_PANE_GET="$live" \
+      bash -c '. "$1/bin/fm-backend.sh"; fm_backend_source herdr; eval "$2"' _ "$ROOT" "$1"
+  }
+  identity_record "$state/oldtask.meta" oldtask w1:p2 "$wt" term-before-restart
+  run_bound "fm_backend_herdr_target_ready default:w1:p2" \
+    && fail "reissue: the old record alone let its reissued pane pass the gate"
+  run_bound "FM_BACKEND_HERDR_IDENTITY_PIN=default:w1:p2; fm_backend_herdr_target_ready default:w1:p2" \
+    || fail "reissue: spawn's own new pane should pass the gate before its record exists"
+  identity_record "$state/newtask.meta" newtask w1:p2 "$wt" term-after-restart
+
+  run_bound "fm_backend_bind_task_record '$state/newtask.meta' default:w1:p2; fm_backend_target_exists herdr default:w1:p2" \
+    || fail "reissue: the new task's own record should read its live pane"
+  run_bound "fm_backend_bind_task_record '$state/oldtask.meta' default:w1:p2; fm_backend_target_exists herdr default:w1:p2" \
+    && fail "reissue: the old record read another task's pane as its endpoint"
+  run_bound "fm_backend_bind_task_record '$state/oldtask.meta' default:w1:p2; fm_backend_herdr_endpoint_confirmed_gone default:w1:p2" \
+    || fail "reissue: the old record's endpoint should be confirmed gone"
+  got=$(run_bound "fm_backend_bind_task_record '$state/oldtask.meta' default:w1:p2; fm_backend_agent_state herdr default:w1:p2")
+  [ "$got" = missing ] || fail "reissue: the old record should read its endpoint missing, got '$got'"
+  run_bound "fm_backend_herdr_target_ready default:w1:p2" \
+    && fail "reissue: a target no task record binds must not pick one of the two records"
+
+  : > "$IDENTITY_LOG"
+  got=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" \
+    FM_HERDR_LOG="$IDENTITY_LOG" FM_FAKE_PANE_GET="$live" FM_FAKE_PANE_READ="new task pane" \
+    "$ROOT/bin/fm-peek.sh" newtask 5 2>/dev/null) \
+    || fail "reissue: fm-peek could not read the new task through its own record"
+  [ "$got" = "new task pane" ] || fail "reissue: fm-peek read '$got' for the new task"
+  : > "$IDENTITY_LOG"
+  PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" \
+    FM_HERDR_LOG="$IDENTITY_LOG" FM_FAKE_PANE_GET="$live" FM_FAKE_PANE_READ="new task pane" \
+    "$ROOT/bin/fm-peek.sh" oldtask 5 >/dev/null 2>&1 \
+    && fail "reissue: fm-peek read another task's pane for the old record"
+  assert_not_contains "$(cat "$IDENTITY_LOG")" 'pane read' "reissue: the old record's peek read the new task's pane"
+  pass "herdr endpoint identity: after a restart reissues a pane id, each task reads through its own record"
+}
+
 test_kill_emptying_non_focused_uses_pane_death() {
   local dir log resp fb out status bgpid lock_log lock_held
   dir="$TMP_ROOT/kill-death"; mkdir -p "$dir/responses"
@@ -3516,10 +3688,17 @@ test_projection_reclaim_refusal_matrix_is_non_mutating() {
   pass "herdr presentation reclaim: legacy, cross-home, ambiguous, live/unknown, and focus-unknown cases refuse without mutation"
 }
 
+# <restarted>: when set, the task record still carries the terminal id from
+# before a Herdr server restart, so the restored husk no longer matches it.
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
+  local restarted=${1:-}
   local dir state home home_real log resp fb journal token label out calls create_line close_line agent_line boundary_mutations
-  dir="$TMP_ROOT/projection-reclaim-exact"; state="$dir/state"; home="$dir/home"
+  dir="$TMP_ROOT/projection-reclaim-exact${restarted:+-restarted}"; state="$dir/state"; home="$dir/home"
   mkdir -p "$dir/responses" "$state" "$home"
+  if [ -n "$restarted" ]; then
+    printf '%s\n' backend=herdr window=fmtest:w2:p2 herdr_terminal_id=term-before-restart \
+      worktree=/tmp/project > "$state/fm-hibit-r1.meta"
+  fi
   home_real=$(cd "$home" && pwd -P)
   log="$dir/log"; resp="$dir/responses"; : > "$log"
   token=$(bash -c '
@@ -3564,7 +3743,7 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t3","label":"fm-fm-hibit-r1"}]}}' > "$resp/27.out"
   printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p3","tab_id":"w2:t3"}]}}' > "$resp/28.out"
   fb=$(make_herdr_fakebin "$dir")
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_STATE_OVERRIDE="$state" \
     bash -c '
       . "$0/bin/backends/herdr.sh"
       fm_backend_herdr_projection_reclaim_task \
@@ -3591,6 +3770,15 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   assert_not_contains "$calls" $'workspace\x1frename' "reclaim renamed the projected workspace"
   assert_not_contains "$calls" $'tab\x1ffocus' "focus-preserving reclaim changed an already-stable focus snapshot"
   assert_not_contains "$calls" $'\x1fw0' "reclaim touched the same-labeled sibling parent"
+  if [ -n "$restarted" ]; then
+    IDENTITY_LOG="$dir/identity-log"; : > "$IDENTITY_LOG"
+    mkdir -p "$dir/identity"
+    [ "$(identity_verdict "$(make_identity_fakebin "$dir/identity")" "$state" \
+      "$(identity_pane_json w2:p2 term-after-restart /tmp/project)" fmtest:w2:p2)" = mismatch ] \
+      || fail "outside reclaim, the restored husk must still read as a changed terminal"
+    pass "herdr presentation reclaim: relaunch after a Herdr server restart replaces the exact restored husk despite its new terminal id"
+    return
+  fi
   pass "herdr presentation reclaim: exact agent-free husk survives duplicate parent labels while its sibling stays untouched"
 }
 
@@ -5125,9 +5313,12 @@ test_scripts_route_explicit_target_through_meta_backend() {
   dir="$TMP_ROOT/script-explicit-target"; state="$dir/state"; mkdir -p "$state" "$dir/responses"
   log="$dir/log"; resp="$dir/responses"; : > "$log"
   neutral="$dir/neutral-root"; mkdir -p "$neutral"
-  fm_write_meta "$state/herdr-stale.meta" "window=default:w1:p2" "backend=herdr"
+  fm_write_meta "$state/herdr-stale.meta" "window=default:w1:p2" "backend=herdr" "herdr_terminal_id=term-a"
   touch "$state/.last-watcher-beat"
-  printf 'captured herdr pane\n' > "$resp/1.out"
+  # Each routed call first proves the pane is still the recorded terminal.
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","terminal_id":"term-a"}}}' > "$resp/1.out"
+  printf 'captured herdr pane\n' > "$resp/2.out"
+  cp "$resp/1.out" "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -5784,6 +5975,9 @@ test_projection_close_death_still_restores_a_stolen_focus
 test_projection_close_death_never_sigkills_a_reused_pid
 test_projection_close_failed_removal_rolls_back_the_reposition
 test_kill_emptying_non_focused_uses_pane_death
+test_endpoint_identity_verdicts
+test_endpoint_identity_gates_reads_and_closes
+test_endpoint_identity_reissued_pane_binds_each_task_record
 test_kill_focused_workspace_stays_plain_close
 test_endpoint_confirmed_gone_gates_on_structured_presence
 test_kill_refuses_when_presentation_lock_is_unavailable
@@ -5804,6 +5998,7 @@ test_presentation_session_lock_path_rejects_malformed_socket
 test_projection_order_rejects_malformed_socket
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
+test_projection_reclaim_replaces_only_exact_husk_and_advances_binding restarted
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only

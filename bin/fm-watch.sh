@@ -794,6 +794,32 @@ recorded_windows() {
   done
 }
 
+# recorded_task_windows: one "<task>\t<target>\t<shared>" line per task record,
+# where <shared> is 1 when another record names the same target. A pane id Herdr
+# reissued can be named by a lingering old record and a live task at once, and
+# each of them is checked against its own record.
+recorded_task_windows() {
+  local meta w i j shared
+  local -a tasks=() windows=()
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    w=$(fm_backend_target_of_meta "$meta")
+    [ -n "$w" ] || continue
+    tasks+=("$(basename "$meta" .meta)")
+    windows+=("$w")
+  done
+  for ((i = 0; i < ${#tasks[@]}; i++)); do
+    shared=0
+    for ((j = 0; j < ${#windows[@]}; j++)); do
+      if [ "$i" -ne "$j" ] && [ "${windows[$j]}" = "${windows[$i]}" ]; then
+        shared=1
+        break
+      fi
+    done
+    printf '%s\t%s\t%s\n' "${tasks[$i]}" "${windows[$i]}" "$shared"
+  done
+}
+
 # Print the oldest structurally valid ACTIONABLE row in a local secondmate's
 # foreign queue. A stale recheck that explicitly identifies itself as a declared
 # external-wait pause is not evidence that the mate's wake loop is stuck: the
@@ -978,6 +1004,7 @@ EOF
     idle=$((now - observed_at))
     [ "$idle" -ge "$threshold" ] || continue
     w=$(fm_backend_target_of_meta "$meta")
+    fm_backend_bind_task_record "$meta" "$w"
     ! secondmate_in_active_turn "$w" "$idle" || continue
     already_rung=0
     if [ -e "$ring_marker" ] || [ -L "$ring_marker" ]; then
@@ -2952,9 +2979,18 @@ EOF
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
-  while IFS= read -r w; do
+  # The loop walks task records, and every read below goes through the record
+  # it binds. The per-window markers are shared, so a pane two records name is
+  # read only for a record whose endpoint it still is, and once per poll.
+  polled_windows='|'
+  while IFS=$'\t' read -r task w shared; do
+    case "$polled_windows" in *"|$w|"*) continue ;; esac
+    fm_backend_bind_task_record "$STATE/$task.meta" "$w"
+    if [ "$shared" = 1 ] && ! fm_backend_target_exists "$(window_backend "$w")" "$w" "fm-$task" >/dev/null 2>&1; then
+      continue
+    fi
+    polled_windows="$polled_windows$w|"
     kind=$(window_kind "$w")
-    task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale
     # exemption below, because a mate's steers land in an inbox too.
     [ -z "$task" ] || inbox_steer_check "$w" "$task"
@@ -3167,7 +3203,8 @@ EOF
         clear_pause_tracking "$key"
       fi
     fi
-  done < <(recorded_windows)
+  done < <(recorded_task_windows)
+  fm_backend_bind_task_record "" ""
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

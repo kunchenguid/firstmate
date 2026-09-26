@@ -1970,7 +1970,7 @@ fi
 case "${1:-} ${2:-}" in
   'pane get')
     if [ "${3:-}" = "$(cat "$D/herdr-pane")" ]; then
-      printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' \
+      printf '{"result":{"pane":{"pane_id":"%s","terminal_id":"term-survivor","foreground_cwd":"%s"}}}\n' \
         "${3:-}" "$(cat "$D/cwd")"
     else
       # Only the pane this case says survived can be read back. Any other pane

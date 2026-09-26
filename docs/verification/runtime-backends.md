@@ -1172,6 +1172,44 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: a restored no-agent tab was replaced create-before-close, while a registered live agent caused refusal.
 
+### Pane id reissue
+
+Measured 2026-09-23 on macOS aarch64 against Herdr 0.9.1 in an isolated `fm-lab-` session, with every call made through `bin/fm-herdr-lab.sh` and the restart made by the lab helper's `stop` followed by `fm_backend_herdr_server_ensure`.
+
+```sh
+herdr workspace create --cwd "$WT" --label home --no-focus --session "$LAB"
+herdr tab create --workspace w1 --cwd "$WT" --label survivor --no-focus --session "$LAB"
+herdr workspace create --cwd "$WT" --label task --no-focus --session "$LAB"
+herdr tab create --workspace w2 --cwd "$WT" --label fm-finished --no-focus --session "$LAB"
+herdr workspace close w2 --session "$LAB"
+# restart the lab server
+herdr pane get w1:p2 --session "$LAB"
+herdr workspace create --cwd "$WT" --label other --no-focus --session "$LAB"
+herdr tab create --workspace w2 --cwd "$WT" --label other-agent --no-focus --session "$LAB"
+```
+
+Each result reduced to its ids with `jq`:
+
+```text
+{"workspace":"w1"}
+{"pane_id":"w1:p2","terminal_id":"term_65c2640a5e4052"}
+{"workspace":"w2"}
+{"pane_id":"w2:p2","terminal_id":"term_65c2640a6ed4c4"}
+{"closed":"ok"}
+{"pane_id":"w1:p2","terminal_id":"term_65c2640aed6992"}
+{"workspace":"w2"}
+{"pane_id":"w2:p2","terminal_id":"term_65c2640b00d1e4"}
+```
+
+Observed guarantees: after a restart, a new workspace takes the id of a closed workspace, and its panes take that workspace's old pane ids; a pane that survives the restart keeps its pane id but gets a new terminal id; a terminal id is not reissued.
+This is why a Herdr task record binds `herdr_terminal_id=` and why a restored pane reads `missing` to that record ([Herdr runtime backend](../herdr-backend.md#endpoint-metadata)).
+
+The live regression, which reproduces the reissue and proves that liveness, capture, input, control, and cleanup leave the reissued pane alone for terminal-bound and legacy records, is:
+
+```sh
+tests/fm-backend-herdr-pane-reuse-e2e.test.sh
+```
+
 ### Launcher workspace placement
 
 Herdr exports its pane identity into every process it manages, checked on 2026-07-30 against Herdr 0.7.5 protocol 17 inside a guarded lab pane:

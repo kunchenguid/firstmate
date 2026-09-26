@@ -1010,8 +1010,15 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
   local session=$1 pane_id=$2 required_agent_state=${3:-}
   local before active_tab info target_pane target_tab target_ws close_status state plan plan_shell_pid plan_move_record workspace_presence
   local skip_restore=0
+  local authorized=0
   FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
   [ -n "$pane_id" ] || return 0
+  fm_backend_herdr_close_authorized "$session" "$pane_id" || authorized=$?
+  case "$authorized" in
+    0) ;;
+    2) return 0 ;;
+    *) return 1 ;;
+  esac
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
     echo "warning: herdr presentation cleanup could not capture exact active workspace and tab; refusing focus-unsafe pane close" >&2
     return 1
@@ -2065,6 +2072,163 @@ fm_backend_herdr_workspace_presence_state() {  # <session> <workspace_id>
   esac
 }
 
+# --- endpoint identity ------------------------------------------------------
+#
+# Herdr reissues ids: once a workspace is gone, a server restart hands its
+# workspace id, and so every pane id inside it, to the next new workspace
+# (verified on Herdr 0.9.1, docs/verification/runtime-backends.md "Pane id
+# reissue"). A task record that names only <session>:<pane> can therefore
+# point at an unrelated live pane long after its own pane closed. The pane's
+# terminal_id is Herdr's per-terminal identity: it is never reissued, it
+# follows the terminal through a pane move, and it changes when a restart
+# restores the pane with a fresh shell. fm-spawn records it as
+# herdr_terminal_id=, and this section is the single owner of the check that
+# every endpoint read and action runs before trusting a recorded pane id.
+
+# fm_backend_herdr_pane_terminal_id: the live terminal_id of <pane_id>, from
+# one `pane get` whose own pane id must round-trip. Fails on any other shape.
+fm_backend_herdr_pane_terminal_id() {  # <session> <pane_id>
+  local out
+  out=$(fm_backend_herdr_cli "$1" pane get "$2" 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -er --arg pane "$2" '
+    .result.pane | select(.pane_id == $pane) | .terminal_id
+    | select(type == "string" and length > 0)
+  ' 2>/dev/null
+}
+
+# fm_backend_herdr_endpoint_record: the task record that binds <target>, for
+# the identity check below. A caller acting for one task binds that task's own
+# record (bin/fm-backend.sh's fm_backend_bind_task_record), and only that
+# record is read, whatever other records name the same pane id. An unbound
+# target falls back to its exact window= line among this home's task records.
+# Prints the record path and returns 0, returns 1 when no record binds the
+# target (not a task endpoint of this home), and returns 2 when several
+# unbound records name it, because a target alone cannot say which task the
+# caller means.
+fm_backend_herdr_endpoint_record() {  # <target>
+  local target=$1 state matches
+  if [ -n "${FM_BACKEND_BOUND_META:-}" ] && [ "${FM_BACKEND_BOUND_TARGET:-}" = "$target" ]; then
+    printf '%s' "$FM_BACKEND_BOUND_META"
+    return 0
+  fi
+  state=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+  [ -d "$state" ] || return 1
+  matches=$(LC_ALL=C grep -lFx -- "window=$target" "$state"/*.meta 2>/dev/null) || return 1
+  case "$matches" in
+    '') return 1 ;;
+    *$'\n'*) return 2 ;;
+  esac
+  printf '%s' "$matches"
+}
+
+# fm_backend_herdr_record_field: the single value of <key> in <meta>; fails
+# when the key is absent, empty, or repeated.
+fm_backend_herdr_record_field() {  # <meta> <key>
+  local value
+  [ "$(LC_ALL=C grep -c "^$2=" "$1" 2>/dev/null)" = 1 ] || return 1
+  value=$(LC_ALL=C grep "^$2=" "$1" 2>/dev/null) || return 1
+  value=${value#*=}
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
+# fm_backend_herdr_path_within: whether <path> is <root> or lies below it,
+# comparing both the recorded spelling and the physical path of <root>.
+fm_backend_herdr_path_within() {  # <path> <root>
+  local path=$1 root=${2%/} physical
+  [ -n "$path" ] && [ -n "$root" ] || return 1
+  case "$path/" in "$root"/*) return 0 ;; esac
+  physical=$(cd "$root" 2>/dev/null && pwd -P) || return 1
+  case "$path/" in "$physical"/*) return 0 ;; esac
+  return 1
+}
+
+# fm_backend_herdr_endpoint_identity: whether the live pane <target> names is
+# still the endpoint its task record bound. Prints exactly one of:
+#   unbound  - no task record of this home binds the target, so there is no
+#              recorded identity to check (an ad hoc session:pane selector, the
+#              away-mode supervisor pane, a spawn's endpoint before its record
+#              exists). Callers keep their previous behavior.
+#   absent   - the recorded pane itself is structurally gone.
+#   match    - the live pane is the recorded endpoint.
+#   mismatch - another terminal now holds the recorded pane id. The task's own
+#              endpoint is gone, and the live pane belongs to someone else.
+#   unknown  - the pane or the record could not be read, or several records
+#              name an unbound target. Neither ownership nor absence is claimed.
+# A record carrying herdr_terminal_id= is decided by that terminal id alone.
+# A legacy record written before the field existed has only indirect
+# evidence, so it matches only while the pane's foreground working directory
+# lies inside the task's recorded worktree, and no other record of this home
+# claims the live terminal. A pane reissued to an unrelated session, such as a
+# primary firstmate or a different task's copy, therefore reads mismatch.
+# teardown pins one target it has already verified
+# (FM_BACKEND_HERDR_IDENTITY_PIN), because returning a legacy task's worktree
+# moves that pane's working directory before its close runs, restored
+# projection reclaim pins the husk its journal binding confirmed exactly, and
+# spawn pins the pane it has just created until that task's record exists.
+fm_backend_herdr_endpoint_identity() {  # <target>
+  local target=$1 meta rc expected count out code live worktree cwd other
+  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  if [ -n "${FM_BACKEND_HERDR_IDENTITY_PIN:-}" ] && [ "$FM_BACKEND_HERDR_IDENTITY_PIN" = "$target" ]; then
+    printf 'match'
+    return 0
+  fi
+  rc=0
+  meta=$(fm_backend_herdr_endpoint_record "$target") || rc=$?
+  case "$rc" in
+    0) ;;
+    1) printf 'unbound'; return 0 ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  count=$(LC_ALL=C grep -c '^herdr_terminal_id=' "$meta" 2>/dev/null) || count=0
+  expected=
+  case "$count" in
+    0) ;;
+    1) expected=$(fm_backend_herdr_record_field "$meta" herdr_terminal_id) \
+         || { printf 'unknown'; return 0; } ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>&1)
+  code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+  if [ -n "$code" ]; then
+    [ "$code" = pane_not_found ] && printf 'absent' || printf 'unknown'
+    return 0
+  fi
+  live=$(printf '%s' "$out" | jq -r --arg pane "$FM_BACKEND_HERDR_PANE" '
+    .result.pane | select(.pane_id == $pane) | .terminal_id // empty' 2>/dev/null)
+  [ -n "$live" ] || { printf 'unknown'; return 0; }
+  if [ -n "$expected" ]; then
+    [ "$live" = "$expected" ] && printf 'match' || printf 'mismatch'
+    return 0
+  fi
+  worktree=$(fm_backend_herdr_record_field "$meta" worktree) || { printf 'unknown'; return 0; }
+  cwd=$(printf '%s' "$out" | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null)
+  [ -n "$cwd" ] || { printf 'unknown'; return 0; }
+  fm_backend_herdr_path_within "$cwd" "$worktree" || { printf 'mismatch'; return 0; }
+  for other in "$(dirname "$meta")"/*.meta; do
+    [ -f "$other" ] && [ "$other" != "$meta" ] || continue
+    [ "$(fm_backend_herdr_record_field "$other" herdr_terminal_id 2>/dev/null)" = "$live" ] || continue
+    printf 'mismatch'
+    return 0
+  done
+  printf 'match'
+}
+
+# fm_backend_herdr_close_authorized: whether a close of <session>:<pane_id> may
+# run. Returns 0 when the pane is still its record's endpoint, is already
+# gone, or no record binds it; 2 when the recorded pane id now names another
+# terminal, so the task's own endpoint is already gone and nothing may be
+# closed; and 1, with a warning, when ownership cannot be verified.
+fm_backend_herdr_close_authorized() {  # <session> <pane_id>
+  case "$(fm_backend_herdr_endpoint_identity "$1:$2")" in
+    mismatch) return 2 ;;
+    unknown)
+      echo "warning: herdr pane $1:$2 could not be verified as its task's own endpoint; refusing to close it" >&2
+      return 1
+      ;;
+  esac
+}
+
 # fm_backend_herdr_explicit_close_pane_confirmed: issue one explicit close and
 # succeed only when a structured follow-up proves the exact pane is gone.
 fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
@@ -2396,9 +2560,25 @@ fm_backend_herdr_server_running_state() {  # <session>
 # on exactly the reads they refused on before. A server that is running, or
 # whose state cannot itself be read, still yields `unreadable` here too: absence
 # is claimed only from positive evidence of it.
+#
+# The recorded pane is classified only while it is still the task's own
+# endpoint (fm_backend_herdr_endpoint_identity). A pane id Herdr reissued to
+# another terminal is `missing`, because the task's endpoint is gone whatever
+# now runs there; an unverifiable identity is `unreadable`.
 fm_backend_herdr_agent_state() {  # <target>
-  local target=$1
+  local target=$1 identity
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
+  identity=$(fm_backend_herdr_endpoint_identity "$target")
+  case "$identity" in
+    mismatch) printf 'missing'; return 0 ;;
+    unknown)
+      case "$(fm_backend_herdr_server_running_state "$FM_BACKEND_HERDR_SESSION")" in
+        stopped) printf 'missing' ;;
+        *) printf 'unreadable' ;;
+      esac
+      return 0
+      ;;
+  esac
   case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
     dead) printf 'missing' ;;
     no-agent|stale-agent) printf 'dead' ;;
@@ -2773,6 +2953,11 @@ fm_backend_herdr_projection_reclaim_rollback() {  # <session> <new-pane>
 
 # fm_backend_herdr_projection_reclaim_task: replace one exact agent-free
 # restored projection husk inside its original workspace.
+# A Herdr server restart restores the husk with a fresh terminal id, so the
+# task record no longer matches it (fm_backend_herdr_endpoint_identity). The
+# husk close pins the pane as the task's own endpoint, because the journal
+# binding has already confirmed its exact workspace, tab, pane, and labels,
+# and the close itself requires the pane to be agent-free.
 # The caller holds the session presentation lock and has already established
 # that flat fallback is safe across every token match.
 # Return 0 means exact reclaim, 2 means non-mutating or exactly rolled-back
@@ -2877,7 +3062,8 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
       return 2
       ;;
   esac
-  if fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$meta_pane" no-agent; then
+  if FM_BACKEND_HERDR_IDENTITY_PIN="$session:$meta_pane" \
+    fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$meta_pane" no-agent; then
     close_status=0
   else
     close_status=$?
@@ -3011,9 +3197,16 @@ fm_backend_herdr_parse_target() {  # <target>
   [ -n "$FM_BACKEND_HERDR_SESSION" ] && [ -n "$FM_BACKEND_HERDR_PANE" ] && [ "$FM_BACKEND_HERDR_PANE" != "$target" ]
 }
 
+# fm_backend_herdr_target_ready: the gate every pane read and action passes.
+# Beyond a parsed target and a running server, the pane must still be the
+# endpoint its task record bound (fm_backend_herdr_endpoint_identity): a
+# reissued or unverifiable pane is never read, typed into, or signalled.
 fm_backend_herdr_target_ready() {  # <target>
   fm_backend_herdr_parse_target "$1" || return 1
   fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1
+  case "$(fm_backend_herdr_endpoint_identity "$1")" in
+    mismatch|unknown) return 1 ;;
+  esac
 }
 
 # fm_backend_herdr_current_path: the live FOREGROUND process's cwd, or empty on
@@ -3487,9 +3680,18 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
 # restore as the backstop. A close that empties the FOCUSED workspace moves
 # focus legitimately, and every in-lock planning ambiguity or failure falls
 # back to the plain close, matching the pre-hardening contract.
+# No close runs unless fm_backend_herdr_close_authorized allows it: a pane id
+# reissued to another terminal returns 0 with nothing closed, because the
+# task's endpoint is already gone, and an unverifiable one returns 1.
 fm_backend_herdr_kill_serialized() {  # <session> <pane>
-  local session=$1 pane=$2
+  local session=$1 pane=$2 authorized=0
   local before active_tab info target_pane target_tab target_ws plan shell_pid plan_move_record close_failed workspace_presence
+  fm_backend_herdr_close_authorized "$session" "$pane" || authorized=$?
+  case "$authorized" in
+    0) ;;
+    2) return 0 ;;
+    *) return 1 ;;
+  esac
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || before=
   if [ -n "$before" ]; then
     active_tab=${before#*$'\t'}
@@ -3537,9 +3739,11 @@ fm_backend_herdr_kill_serialized() {  # <session> <pane>
 }
 
 fm_backend_herdr_kill() {  # <target>
+  # A target that is unreachable, or whose pane is no longer its record's
+  # endpoint, closes nothing, exactly as an already-gone target always has.
   fm_backend_herdr_target_ready "$1" || return 0
   local session=$FM_BACKEND_HERDR_SESSION pane=$FM_BACKEND_HERDR_PANE
-  local lock_path attempt=0 lock_held=0
+  local lock_path attempt=0 lock_held=0 kill_rc=0
   if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
     # shellcheck source=bin/fm-wake-lib.sh
     . "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh"
@@ -3555,8 +3759,9 @@ fm_backend_herdr_kill() {  # <target>
     done
   fi
   if [ "$lock_held" = 1 ]; then
-    fm_backend_herdr_kill_serialized "$session" "$pane"
+    fm_backend_herdr_kill_serialized "$session" "$pane" || kill_rc=$?
     fm_lock_release "$lock_path" || true
+    return "$kill_rc"
   else
     echo "warning: herdr task kill could not acquire its session presentation lock; refusing an unlocked pane close" >&2
   fi
@@ -3569,9 +3774,13 @@ fm_backend_herdr_kill() {  # <target>
 # Only a structured pane_not_found proves the endpoint gone; present and
 # unknown presence refuse after every close path, and a missing or malformed
 # target identity is ambiguity that also refuses, never proof of a gone pane.
+# The one other proof is a recorded pane id that now names another terminal
+# (fm_backend_herdr_endpoint_identity mismatch): the task's own endpoint is
+# gone even though an unrelated pane holds the id.
 fm_backend_herdr_endpoint_confirmed_gone() {  # <target>
   local presence
   fm_backend_herdr_parse_target "$1" || return 1
+  [ "$(fm_backend_herdr_endpoint_identity "$1")" != mismatch ] || return 0
   presence=$(fm_backend_herdr_pane_presence_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   [ "$presence" = dead ]
 }

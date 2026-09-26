@@ -3479,6 +3479,7 @@ EOF
       exit 1
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
+    FM_BACKEND_HERDR_IDENTITY_PIN=$T
     SES=$HERDR_SES
     WT_TARGET=$T
   fi
@@ -3665,6 +3666,11 @@ EOF
       exit 1
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
+    # This spawn created the pane, so it is this task's own endpoint even when
+    # an older record names the same reissued pane id. The pin holds only
+    # until this task's record is published below.
+    # shellcheck disable=SC2034 # Read by the sourced Herdr adapter.
+    FM_BACKEND_HERDR_IDENTITY_PIN=$T
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
@@ -4706,6 +4712,18 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+# Herdr reissues pane ids, so the record also binds the pane's terminal id, the
+# identity every later endpoint read and action checks before trusting the
+# pane id (bin/backends/herdr.sh's fm_backend_herdr_endpoint_identity). An
+# unreadable id is recorded as absent rather than aborting a launched agent;
+# that record is verified by the legacy working-directory rule instead.
+HERDR_TERMINAL_ID=
+if [ "$BACKEND" = herdr ]; then
+  HERDR_TERMINAL_ID=$(fm_backend_herdr_pane_terminal_id "$HERDR_SES" "$HERDR_PANE_ID") || {
+    HERDR_TERMINAL_ID=
+    echo "warning: could not read the terminal identity of herdr pane $HERDR_SES:$HERDR_PANE_ID for $ID; recording the endpoint without it" >&2
+  }
+fi
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
@@ -4723,7 +4741,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id herdr_terminal_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4758,6 +4776,7 @@ preserve_relaunch_meta() {
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
+    [ -z "$HERDR_TERMINAL_ID" ] || echo "herdr_terminal_id=$HERDR_TERMINAL_ID"
   fi
   if [ "$BACKEND" = zellij ]; then
     echo "zellij_session=$ZELLIJ_SES"
@@ -4851,6 +4870,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
+fi
+# From here every read and action on the endpoint checks it against this
+# task's own published record and the terminal id it recorded.
+if [ "$BACKEND" = herdr ]; then
+  unset FM_BACKEND_HERDR_IDENTITY_PIN
+  fm_backend_bind_task_record "$STATE/$ID.meta" "$META_WINDOW"
 fi
 # A dispatch or relaunch keeps the per-task meta lock through launch delivery.
 # The backlog mutation is deliberately the final fallible commit below, so

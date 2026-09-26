@@ -3632,6 +3632,59 @@ test_gone_endpoint_reports_once_instead_of_escalating_forever() {
   pass "a record whose endpoint is dead or missing reports itself once and is never re-escalated"
 }
 
+# --- a reissued Herdr pane id named by two records ---------------------------
+# After a Herdr server restart, a live task's pane can take the pane id that a
+# lingering old record still names. The stale loop checks each record against
+# its own terminal identity: the old record reads its endpoint gone, and the live
+# task still gets stall detection whichever of the two records sorts first.
+test_reissued_pane_shared_by_two_records_keeps_live_task_stall_detection() {
+  local order old new dir state fakebin out pid window key text crew_log
+  window="default:w1:p2"; key=default_w1_p2; text='waiting at the gate'
+  for order in old-first live-first; do
+    case "$order" in
+      old-first) old=a-lingering; new=b-live ;;
+      live-first) old=b-lingering; new=a-live ;;
+    esac
+    dir=$(make_case "reissued-pane-$order"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; crew_log="$dir/crew-state.log"; : > "$crew_log"
+    printf '%s' "$text" > "$dir/pane.txt"
+    cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.9.1","protocol":22},"server":{"running":true}}\n' ;;
+  "pane get") printf '{"result":{"pane":{"pane_id":"w1:p2","terminal_id":"term-live","foreground_cwd":"/live"}}}\n' ;;
+  "pane read") cat "$FM_FAKE_HERDR_CAPTURE" ;;
+esac
+exit 0
+SH
+    chmod +x "$fakebin/herdr"
+    fm_write_meta "$state/$old.meta" "window=$window" "kind=ship" "harness=grok" "backend=herdr" \
+      "herdr_session=default" "herdr_pane_id=w1:p2" "herdr_terminal_id=term-before-restart"
+    fm_write_meta "$state/$new.meta" "window=$window" "kind=ship" "harness=grok" "backend=herdr" \
+      "herdr_session=default" "herdr_pane_id=w1:p2" "herdr_terminal_id=term-live"
+    printf 'working: still compiling\n' > "$state/$old.status"
+    printf 'working: still compiling\n' > "$state/$new.status"
+    prime_status_seen "$state" "$state/$old.status"
+    prime_status_seen "$state" "$state/$new.status"
+    printf '%s' "$(hash_text "$text")" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+
+    FM_FAKE_HERDR_CAPTURE="$dir/pane.txt" FM_FAKE_CREW_STATE_LOG="$crew_log" FM_WATCH_HANDLING_SUCCESSOR=1 \
+      watch_bg "$state" "$fakebin" "$out"
+    pid=$!
+    wait_for_exit "$pid" 100 \
+      || fail "[$order] the live task on a reissued pane got no stall detection: $(cat "$out")"
+    [ "$(wedge_stale_wakes "$state" "$window")" -eq 1 ] \
+      || fail "[$order] the stale pane queued $(wedge_stale_wakes "$state" "$window") wakes instead of one"
+    grep -Fx "$new" "$crew_log" >/dev/null \
+      || fail "[$order] the stall was not classified for the live task: $(cat "$crew_log")"
+    grep -Fx "$old" "$crew_log" >/dev/null \
+      && fail "[$order] the lingering record was read as the pane's task"
+  done
+  pass "a reissued Herdr pane shared by an old record and a live task keeps the live task's stall detection in either sort order"
+}
+
 # The load-bearing direction. A genuinely wedged LIVE agent must escalate exactly
 # as it did before, and so must every verdict short of proof: an unattributable
 # foreground process (`ambiguous`) and an unreadable endpoint keep the identical
@@ -6392,6 +6445,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_gone_endpoint_reports_once_instead_of_escalating_forever
 test_live_and_unproven_endpoints_still_wedge_escalate
+test_reissued_pane_shared_by_two_records_keeps_live_task_stall_detection
 test_gone_report_rearms_when_the_endpoint_comes_back
 test_second_death_after_a_same_window_relaunch_reports_in_full
 test_identical_dead_display_of_a_successor_still_reports

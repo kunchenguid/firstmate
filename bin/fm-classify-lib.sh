@@ -2072,6 +2072,12 @@ status_open_activities() {  # <status-file-or-dash>
 # "<session>:fm-<id>" form when no metadata state is available.
 window_to_task() {
   local w=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} meta mw mt t
+  if [ -n "${FM_BACKEND_BOUND_META:-}" ] && [ "${FM_BACKEND_BOUND_TARGET:-}" = "$w" ] \
+    && [ "${FM_BACKEND_BOUND_META%/*}" = "$state" ] && [ -f "$FM_BACKEND_BOUND_META" ]; then
+    t=${FM_BACKEND_BOUND_META##*/}
+    printf '%s' "${t%.meta}"
+    return 0
+  fi
   if [ -n "$state" ]; then
     for meta in "$state"/*.meta; do
       [ -e "$meta" ] || continue

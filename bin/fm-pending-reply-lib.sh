@@ -1525,6 +1525,7 @@ fm_pending_reply_tick() {  # <state-dir>
       remote_host=$(fm_meta_get "$meta" remote_host)
       backend=$(fm_backend_of_meta "$meta")
       target=$(fm_backend_target_of_meta "$meta")
+      fm_backend_bind_task_record "$meta" "$target"
       sm_home=$(fm_meta_get "$meta" home)
       harness=$(fm_meta_get "$meta" harness)
       if [ -n "$remote_host" ]; then

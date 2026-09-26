@@ -188,9 +188,24 @@
 #   missing-endpoint legacy record with or without --legacy-record; the shared
 #   endpoint validator is skipped so it cannot be read as the current window,
 #   kill is skipped, and a still-present worktree still faces the ordinary
-#   landed-work checks. Every other windowless record, including one with a
-#   spawn_gen, a non-tmux backend, or an ambiguous field, still faces the
-#   validator and refuses.
+#   landed-work checks. A Herdr record whose window was cleared is the one
+#   non-tmux windowless shape accepted, with or without a spawn_gen and whether
+#   or not backlog validation applies: Herdr reissues pane ids, so clearing the
+#   window is the supported way to retire a finished worker's endpoint so that
+#   nothing acts on a pane id another terminal now holds. It needs exactly one
+#   backend=herdr and one endpoint_task_id, may keep its herdr_* lines as
+#   history, and must carry no other backend's endpoint identity; its other
+#   identity fields face the same validator, kill is skipped, its presentation
+#   journal is dropped without workspace cleanup, and a still-present worktree
+#   faces the ordinary landed-work checks. Every other windowless record,
+#   including a tmux one with a spawn_gen, another non-tmux backend, or an
+#   ambiguous field, still faces the validator and refuses.
+#   A Herdr record that keeps its window is checked for endpoint identity
+#   before anything else reads or closes its pane
+#   (bin/backends/herdr.sh's fm_backend_herdr_endpoint_identity): a pane id now
+#   held by another terminal is treated as this task's endpoint already gone,
+#   so nothing is closed and the landed-work checks still decide the cleanup,
+#   and an identity that cannot be read refuses before any change.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -521,30 +536,48 @@ TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
 TEARDOWN_WINDOWLESS=0
 TEARDOWN_WINDOWLESS_SHAPE=0
+TEARDOWN_WINDOWLESS_BACKEND=
 TEARDOWN_WINDOW_COUNT=$(LC_ALL=C grep -c '^window=' "$META" 2>/dev/null || true)
 TEARDOWN_BACKEND_COUNT=$(LC_ALL=C grep -c '^backend=' "$META" 2>/dev/null || true)
 case "$TEARDOWN_WINDOW_COUNT:$(fm_meta_get "$META" window)" in
   0:|1:)
     case "$TEARDOWN_BACKEND_COUNT:$(fm_meta_get "$META" backend)" in
-      0:|1:tmux)
-        TEARDOWN_FOREIGN_ENDPOINT_KEYS='^terminal='
-        for TEARDOWN_FOREIGN_BACKEND in $FM_BACKEND_KNOWN; do
-          [ "$TEARDOWN_FOREIGN_BACKEND" = tmux ] \
-            || TEARDOWN_FOREIGN_ENDPOINT_KEYS="$TEARDOWN_FOREIGN_ENDPOINT_KEYS|^${TEARDOWN_FOREIGN_BACKEND}_"
-        done
-        if ! LC_ALL=C grep -Eq "$TEARDOWN_FOREIGN_ENDPOINT_KEYS" "$META" 2>/dev/null; then
-          TEARDOWN_SHAPE_META=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-teardown-shape.XXXXXX") || exit 1
-          { LC_ALL=C grep -v '^window=' "$META" || true; printf 'window=leftover:fm-%s\n' "$ID"; } \
-            > "$TEARDOWN_SHAPE_META"
-          if fm_backend_validate_task_endpoint "$TEARDOWN_SHAPE_META" "$ID" 2>/dev/null; then
-            TEARDOWN_WINDOWLESS_SHAPE=1
-          fi
-          rm -f "$TEARDOWN_SHAPE_META"
-        fi
+      0:|1:tmux) TEARDOWN_WINDOWLESS_BACKEND=tmux ;;
+      # A Herdr record whose window was cleared because its pane id no longer
+      # names its own endpoint; see the header's windowless exception.
+      1:herdr)
+        [ "$(LC_ALL=C grep -c '^endpoint_task_id=' "$META" 2>/dev/null || true)" = 1 ] \
+          && TEARDOWN_WINDOWLESS_BACKEND=herdr
         ;;
     esac
     ;;
 esac
+if [ -n "$TEARDOWN_WINDOWLESS_BACKEND" ]; then
+  TEARDOWN_FOREIGN_ENDPOINT_KEYS='^terminal='
+  for TEARDOWN_FOREIGN_BACKEND in $FM_BACKEND_KNOWN; do
+    [ "$TEARDOWN_FOREIGN_BACKEND" = tmux ] || [ "$TEARDOWN_FOREIGN_BACKEND" = "$TEARDOWN_WINDOWLESS_BACKEND" ] \
+      || TEARDOWN_FOREIGN_ENDPOINT_KEYS="$TEARDOWN_FOREIGN_ENDPOINT_KEYS|^${TEARDOWN_FOREIGN_BACKEND}_"
+  done
+  if ! LC_ALL=C grep -Eq "$TEARDOWN_FOREIGN_ENDPOINT_KEYS" "$META" 2>/dev/null; then
+    # Validate every remaining identity field as if the record named the
+    # task's own tmux window; a Herdr record's backend and herdr_* history
+    # lines name no endpoint once its window is cleared, so they are left out.
+    TEARDOWN_SHAPE_META=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-teardown-shape.XXXXXX") || exit 1
+    { LC_ALL=C grep -v -e '^window=' -e '^backend=' -e '^herdr_' "$META" || true; printf 'window=leftover:fm-%s\n' "$ID"; } \
+      > "$TEARDOWN_SHAPE_META"
+    if fm_backend_validate_task_endpoint "$TEARDOWN_SHAPE_META" "$ID" 2>/dev/null; then
+      TEARDOWN_WINDOWLESS_SHAPE=1
+    fi
+    rm -f "$TEARDOWN_SHAPE_META"
+  fi
+fi
+# A windowless Herdr record is accepted with or without a published spawn_gen,
+# because its endpoint is retired rather than lost: Herdr can reissue the pane
+# id it named (bin/backends/herdr.sh's fm_backend_herdr_endpoint_identity), so
+# clearing the window is the supported way to stop anything acting on it.
+if [ "$TEARDOWN_WINDOWLESS_SHAPE" = 1 ] && [ "$TEARDOWN_WINDOWLESS_BACKEND" = herdr ]; then
+  TEARDOWN_WINDOWLESS=1
+fi
 if [ "$TEARDOWN_CLEANUP_RECOVERY" != orca ]; then
   if fm_backlog_transition_applies "$CONFIG" "$DATA" "$TEARDOWN_META_KIND"; then
     TEARDOWN_BACKLOG_APPLIES=1
@@ -1089,9 +1122,11 @@ fi
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
 T_ORCA=
+TEARDOWN_ENDPOINT_RETIRED=0
 if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
   BACKEND=tmux
   T=
+  [ "$TEARDOWN_WINDOWLESS_BACKEND" != herdr ] || TEARDOWN_ENDPOINT_RETIRED=1
 else
   fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
@@ -1102,6 +1137,28 @@ fi
 # be readable before the first destructive step. --force does not override
 # this. A forced descendant is proved in validate_firstmate_home_children_removal.
 teardown_require_backend_prerequisites "$BACKEND" "$ID" || exit 1
+# Herdr reissues pane ids, so the recorded pane must still be this task's own
+# endpoint before anything below reads, closes, or reasons about it
+# (bin/backends/herdr.sh's fm_backend_herdr_endpoint_identity). A pane id now
+# held by another terminal means this task's endpoint is already gone: nothing
+# is closed and the landed-work checks still run. An identity that cannot be
+# read refuses while everything is intact. A verified identity is pinned for
+# this process, because returning a legacy task's worktree moves the working
+# directory its identity is read from before the close runs.
+if [ "$BACKEND" = herdr ]; then
+  case "$(fm_backend_herdr_endpoint_identity "$T")" in
+    mismatch)
+      TEARDOWN_ENDPOINT_RETIRED=1
+      echo "note: herdr pane $T for $ID now belongs to another terminal; its own endpoint is already gone, so no pane will be closed" >&2
+      ;;
+    match) FM_BACKEND_HERDR_IDENTITY_PIN=$T ;;
+    absent|unbound) ;;
+    *)
+      echo "error: herdr pane $T for $ID could not be verified as this task's own endpoint; nothing was changed - rerun teardown once the pane can be read" >&2
+      exit 1
+      ;;
+  esac
+fi
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
   "$FM_ROOT/bin/fm-guard.sh" || true
 fi
@@ -3200,6 +3257,10 @@ cleanup_firstmate_home_children() {
     fi
     if [ -n "$child_t" ]; then
       if [ "$child_backend" = herdr ]; then
+        # Bind this child's own record, so the close and the gone check below
+        # verify the pane against the child's recorded identity rather than
+        # this home's records (fm_backend_herdr_endpoint_record).
+        fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
         fm_backend_herdr_parse_target "$child_t" || return 1
         if ! teardown_herdr_session_lock_held "$FM_BACKEND_HERDR_SESSION"; then
           echo "error: herdr session presentation lock is not held for child $child_id; retaining that child's durable identity records and stopping forced cleanup" >&2
@@ -3599,7 +3660,11 @@ HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=
 HERDR_PRESENTATION_PANE=
-if [ "$BACKEND" = herdr ] \
+if [ "$TEARDOWN_ENDPOINT_RETIRED" = 1 ]; then
+  # The journal describes a projection whose pane is gone and whose ids may
+  # now name someone else's, so it is dropped without any workspace cleanup.
+  rm -f "$HERDR_PRESENTATION_JOURNAL"
+elif [ "$BACKEND" = herdr ] \
    && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   fm_backend_source herdr || true
   HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
@@ -3633,6 +3698,8 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   else
     echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
   fi
+elif [ "$BACKEND" = herdr ] && [ "$TEARDOWN_ENDPOINT_RETIRED" = 1 ]; then
+  :
 elif [ "$BACKEND" = herdr ]; then
   if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
     fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true

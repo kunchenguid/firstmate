@@ -245,7 +245,9 @@ case "${1:-}" in
           printf '{"error":{"code":"pane_not_found","message":"no such pane"}}\n'
           exit 1
         fi
-        printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}"
+        # Real Herdr always reports the pane's terminal identity; records below
+        # bind the same fake terminal (bin/backends/herdr.sh's endpoint identity).
+        printf '{"result":{"pane":{"pane_id":"%s","terminal_id":"term-fake"}}}\n' "${3:-}"
         exit 0 ;;
       process-info)
         # The process-level view a registration is verified against (#4115):
@@ -2292,7 +2294,7 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   make_repo_on_branch "$d/wt" fm/feat-herdr
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-herdr.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
-    "backend=herdr" "harness=claude"
+    "backend=herdr" "herdr_terminal_id=term-fake" "harness=claude"
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
@@ -2330,7 +2332,7 @@ exit 1
 SH
   chmod +x "$d/fakebin/herdr"
   fm_write_meta "$d/state/feat-herdr-cli.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
-    "backend=herdr" "harness=claude"
+    "backend=herdr" "herdr_terminal_id=term-fake" "harness=claude"
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
@@ -2352,7 +2354,7 @@ test_no_run_herdr_alive_with_failed_read_stays_live() {
   make_repo_on_branch "$d/wt" fm/feat-herdr-alive
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-herdr-alive.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
-    "backend=herdr" "harness=claude"
+    "backend=herdr" "herdr_terminal_id=term-fake" "harness=claude"
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
@@ -2378,7 +2380,7 @@ test_no_run_herdr_stale_registration_over_shell_reads_agent_gone() {
   make_repo_on_branch "$d/wt" fm/feat-herdr-stale
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-herdr-stale.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
-    "backend=herdr" "harness=pi"
+    "backend=herdr" "herdr_terminal_id=term-fake" "harness=pi"
   FM_FAKE_TMUX_MISSING=1
   FM_FAKE_HERDR_READ_FAIL=1
   FM_FAKE_HERDR_AGENT_STATUS=idle
@@ -2400,7 +2402,7 @@ test_no_run_herdr_stale_working_record_is_never_busy() {
   make_repo_on_branch "$d/wt" fm/feat-herdr-stale-working
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-herdr-stale-working.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
-    "backend=herdr" "harness=pi"
+    "backend=herdr" "herdr_terminal_id=term-fake" "harness=pi"
   FM_FAKE_TMUX_MISSING=1
   FM_FAKE_HERDR_AGENT_STATUS=working
   FM_FAKE_HERDR_PROCESS=shell
@@ -2424,7 +2426,7 @@ test_no_run_herdr_husk_dead_still_reads_gone() {
   make_repo_on_branch "$d/wt" fm/feat-herdr-husk
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-herdr-husk.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
-    "backend=herdr" "harness=claude"
+    "backend=herdr" "herdr_terminal_id=term-fake" "harness=claude"
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
@@ -2455,7 +2457,7 @@ test_no_run_herdr_idle_agent_status_outranked_by_record() {
   make_repo_on_branch "$d/wt" fm/feat-herdr-idle
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-herdr-idle.meta" "window=default:w1:p3" "worktree=$d/wt" "kind=ship" \
-    "backend=herdr" "harness=claude"
+    "backend=herdr" "herdr_terminal_id=term-fake" "harness=claude"
   # No run attributable (mirrors a no-mistakes run-step lookup that found no
   # matching row within the configured runs-list window): the crew's semantic
   # busy state is the only remaining signal.
@@ -2482,7 +2484,7 @@ test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle() {
   make_repo_on_branch "$d/wt" fm/feat-herdr-stopped
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-herdr-stopped.meta" "window=default:w1:p4" "worktree=$d/wt" "kind=ship" \
-    "backend=herdr" "harness=claude"
+    "backend=herdr" "herdr_terminal_id=term-fake" "harness=claude"
   printf 'working: implementing\n' > "$d/state/feat-herdr-stopped.status"
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""

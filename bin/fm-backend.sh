@@ -362,14 +362,30 @@ fm_backend_target_of_meta() {  # <meta-file>
   [ -n "$window" ] && printf '%s' "$window"
 }
 
+# fm_backend_bind_task_record: bind <target> to the task record <meta-file> for
+# this shell and its subshells. A backend identity check of that exact target
+# (bin/backends/herdr.sh's fm_backend_herdr_endpoint_identity) then reads this
+# record alone, even when another record names the same target. Every caller
+# that reads or acts on a target for one specific task binds that task's own
+# record first; binding another target replaces the previous binding.
+fm_backend_bind_task_record() {  # <meta-file> <target>
+  # shellcheck disable=SC2034 # Consumed by the sourced backend adapters.
+  FM_BACKEND_BOUND_META=$1
+  # shellcheck disable=SC2034 # Consumed by the sourced backend adapters.
+  FM_BACKEND_BOUND_TARGET=$2
+}
+
 # fm_backend_validate_task_endpoint: validate a task cleanup record entirely
 # from its durable metadata before any runtime command or cleanup mutation.
 # The validation binds the exact task id, selected backend, target, project,
 # and worktree. New non-tmux records carry endpoint_task_id because their
 # opaque runtime ids do not encode the task label. Legacy tmux records remain
 # valid only when their window name itself is exactly fm-<task-id>.
-# On success, sets FM_BACKEND_VALIDATED_BACKEND and
-# FM_BACKEND_VALIDATED_TARGET. On failure, prints one refusal and returns 1.
+# A Herdr record may also carry herdr_terminal_id, the pane's stable terminal
+# identity (bin/backends/herdr.sh's fm_backend_herdr_endpoint_identity).
+# On success, sets FM_BACKEND_VALIDATED_BACKEND and FM_BACKEND_VALIDATED_TARGET,
+# and binds that target to this record (fm_backend_bind_task_record). On
+# failure, prints one refusal, leaves no record bound, and returns 1.
 fm_backend_meta_exact_value() {  # <meta-file> <key>
   local meta=$1 key=$2 count value
   count=$(grep -c "^$key=" "$meta" 2>/dev/null || true)
@@ -406,9 +422,10 @@ fm_backend_orca_worktree_id_valid() {  # <value>
 
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
-  local session pane recorded_session workspace tab terminal worktree_id surface
+  local session pane recorded_session workspace tab terminal worktree_id surface terminal_count
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
+  fm_backend_bind_task_record "" ""
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
     echo "REFUSED: task $id has no regular endpoint metadata at $meta; preserving task state." >&2
     return 1
@@ -490,6 +507,16 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
         echo "REFUSED: Herdr endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
+      # herdr_terminal_id is optional only for legacy records written before
+      # spawn recorded it; when present it must name exactly one terminal.
+      terminal_count=$(grep -c '^herdr_terminal_id=' "$meta" 2>/dev/null || true)
+      if [ "$terminal_count" != 0 ]; then
+        terminal=$(fm_backend_meta_exact_value "$meta" herdr_terminal_id) || terminal=
+        if [ -z "$terminal" ] || ! fm_backend_endpoint_atom_valid "$terminal"; then
+          echo "REFUSED: Herdr endpoint metadata for task $id has a malformed or ambiguous terminal identity; preserving task state." >&2
+          return 1
+        fi
+      fi
       ;;
     zellij)
       [ "$binding" = "$id" ] || {
@@ -549,11 +576,17 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   FM_BACKEND_VALIDATED_BACKEND=$backend
   # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
   FM_BACKEND_VALIDATED_TARGET=$window
+  fm_backend_bind_task_record "$meta" "$window"
   return 0
 }
 
 fm_backend_meta_for_window() {  # <target> <state-dir>
   local target=$1 state=$2 meta window terminal
+  if [ -n "${FM_BACKEND_BOUND_META:-}" ] && [ "${FM_BACKEND_BOUND_TARGET:-}" = "$target" ] \
+    && [ "${FM_BACKEND_BOUND_META%/*}" = "$state" ] && [ -f "$FM_BACKEND_BOUND_META" ]; then
+    printf '%s' "$FM_BACKEND_BOUND_META"
+    return 0
+  fi
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     window=$(fm_meta_get "$meta" window)
@@ -921,8 +954,9 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
 # server as a side effect via fm_backend_herdr_server_ensure - fine for an
 # operation that is about to use the pane, wrong for a passive liveness
 # probe). A gone tmux window or an unqueryable herdr pane (server down, pane
-# closed), missing zellij pane, or unreadable Orca terminal simply fails, which
-# IS "does not exist" for this purpose.
+# closed, or its id reissued to another terminal), missing zellij pane, or
+# unreadable Orca terminal simply fails, which IS "does not exist" for this
+# purpose.
 # Mirrors fm-crew-state.sh's pane_readable check; exists here as one shared
 # primitive so callers that only need a fast alive/dead read (recovery
 # digests, the session-start fleet digest) do not re-derive it inline.
@@ -945,7 +979,12 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       # flag on top, so this check is correctly scoped even when the caller's
       # own ambient session (e.g. the primary firstmate's default session) is
       # a DIFFERENT one than the target's.
-      fm_backend_herdr_cli "$session" pane get "$pane" >/dev/null 2>&1
+      fm_backend_herdr_cli "$session" pane get "$pane" >/dev/null 2>&1 || return 1
+      # A pane id Herdr reissued to another terminal is not this record's
+      # endpoint (fm_backend_herdr_endpoint_identity).
+      case "$(fm_backend_herdr_endpoint_identity "$target")" in
+        mismatch|unknown|absent) return 1 ;;
+      esac
       ;;
     zellij)
       fm_backend_source zellij || return 1

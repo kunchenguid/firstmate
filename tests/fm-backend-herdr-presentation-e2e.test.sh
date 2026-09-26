@@ -462,6 +462,7 @@ normalize_meta() {  # <meta>
     -e 's|^herdr_workspace_id=.*$|herdr_workspace_id=<herdr-container-id>|' \
     -e 's|^herdr_tab_id=.*$|herdr_tab_id=<herdr-container-id>|' \
     -e 's|^herdr_pane_id=.*$|herdr_pane_id=<herdr-container-id>|' \
+    -e 's|^herdr_terminal_id=.*$|herdr_terminal_id=<herdr-container-id>|' \
     -e 's|^spawn_gen=.*$|spawn_gen=<spawn-incarnation>|' \
     "$1"
 }
@@ -607,6 +608,13 @@ else
     || fail "the below-floor fallback did not name herdr $FLOOR_VERSION: $(cat "$TMP_ROOT/default-on.err")"
   pass "real Herdr lab: a home that configured nothing falls back flat on below-floor herdr $FLOOR_VERSION with one naming warning"
 fi
+# Herdr reissues pane ids, so the spawned record binds the pane's own terminal id.
+DEFAULT_ON_PANE=$(grep '^herdr_pane_id=' "$DEFAULT_ON_META" | cut -d= -f2-)
+DEFAULT_ON_TERMINAL=$(grep '^herdr_terminal_id=' "$DEFAULT_ON_META" | cut -d= -f2-)
+[ -n "$DEFAULT_ON_TERMINAL" ] \
+  && [ "$DEFAULT_ON_TERMINAL" = "$(lab pane get "$DEFAULT_ON_PANE" | jq -r '.result.pane.terminal_id // empty')" ] \
+  || fail "the spawned record did not bind its pane's live terminal id (recorded '${DEFAULT_ON_TERMINAL:-<none>}')"
+pass "real Herdr lab: a spawned task record binds its pane's live Herdr terminal id"
 teardown_task default-on "$HOME_DIR" > "$TMP_ROOT/default-on-teardown.out" 2> "$TMP_ROOT/default-on-teardown.err" \
   || fail "default-on teardown failed: $(cat "$TMP_ROOT/default-on-teardown.err")"
 if [ "$FLOOR_VERDICT" = 0 ] && lab workspace get "$DEFAULT_ON_WSID" >/dev/null 2>&1; then

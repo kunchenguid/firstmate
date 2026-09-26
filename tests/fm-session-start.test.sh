@@ -458,9 +458,9 @@ case "${1:-} ${2:-}" in
   "pane get")
     pane=${3:-}
     if [ "$pane" = p-new ] && [ -e "$spawned" ]; then
-      printf '%s\n' '{"result":{"pane":{"pane_id":"p-new","tab_id":"t-new","workspace_id":"ws1"}}}'
+      printf '%s\n' '{"result":{"pane":{"pane_id":"p-new","terminal_id":"term-new","tab_id":"t-new","workspace_id":"ws1"}}}'
     elif [ "$pane" = p-old ] && [ ! -e "$killed" ]; then
-      printf '%s\n' '{"result":{"pane":{"pane_id":"p-old","tab_id":"t-old","workspace_id":"ws1"}}}'
+      printf '%s\n' '{"result":{"pane":{"pane_id":"p-old","terminal_id":"term-old","tab_id":"t-old","workspace_id":"ws1"}}}'
     else
       printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
       exit 1
@@ -488,17 +488,21 @@ SH
   chmod +x "$fakebin/herdr"
 }
 
-# make_fake_herdr <fakebin> <live-pane>: `herdr pane get <pane>` succeeds only
-# for the given pane id - the exact primitive fm_backend_target_exists uses
-# for a herdr endpoint liveness read. No version/server-start calls: a
-# liveness check must never auto-start a server (fm-backend.sh's contract).
+# make_fake_herdr <fakebin> <live-pane>...: `herdr pane get <pane>` succeeds
+# only for the given pane ids, each held by terminal term-<pane> - the exact
+# primitive fm_backend_target_exists uses for a herdr endpoint liveness and
+# identity read. No version/server-start calls: a liveness check must never
+# auto-start a server (fm-backend.sh's contract).
 make_fake_herdr() {
-  local fakebin=$1 live=$2
+  local fakebin=$1; shift
   cat > "$fakebin/herdr" <<SH
 #!/usr/bin/env bash
 set -u
 if [ "\${1:-}" = pane ] && [ "\${2:-}" = get ]; then
-  [ "\${3:-}" = "$live" ] && exit 0
+  case " $* " in
+    *" \${3:-} "*) printf '{"result":{"pane":{"pane_id":"%s","terminal_id":"term-%s"}}}\\n' "\$3" "\$3"; exit 0 ;;
+  esac
+  printf '%s\\n' '{"error":{"code":"pane_not_found"}}'
   exit 1
 fi
 exit 1
@@ -621,6 +625,7 @@ EOF
     printf 'herdr_workspace_id=ws1\n'
     printf 'herdr_tab_id=t-old\n'
     printf 'herdr_pane_id=p-old\n'
+    printf 'herdr_terminal_id=term-old\n'
   } > "$home/state/$id.meta"
   ln -s "$ROOT/bin" "$root/bin"
   make_fake_toolchain "$fakebin"
@@ -1326,6 +1331,8 @@ EOF
   assert_contains "$(cat "$log")" "tab create" "session start did not relaunch the Herdr secondmate"
   assert_grep 'herdr_pane_id=p-new' "$home/state/$SESSION_START_HERDR_SECOND_MATE_ID.meta" \
     "the real respawn path did not record the replacement Herdr pane"
+  assert_grep 'herdr_terminal_id=term-new' "$home/state/$SESSION_START_HERDR_SECOND_MATE_ID.meta" \
+    "the real respawn path did not record the replacement pane's terminal identity"
   pass "session start: a confirmed Herdr husk is closed and relaunched"
 }
 
@@ -1359,16 +1366,19 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  make_fake_herdr "$fakebin" "p-live"
+  make_fake_herdr "$fakebin" p-live p-reissued
 
-  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-live.meta"
+  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\nherdr_terminal_id=term-p-live\n' > "$home/state/task-live.meta"
   printf 'window=sess:p-dead\nkind=ship\nbackend=herdr\n' > "$home/state/task-dead.meta"
+  # Herdr reissued this finished task's pane id to another terminal.
+  printf 'window=sess:p-reissued\nkind=ship\nbackend=herdr\nherdr_terminal_id=term-gone\n' > "$home/state/task-reissued.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" "live herdr endpoint not reported alive"
   assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-dead)" "dead herdr endpoint not reported dead"
+  assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-reissued)" "a pane id reissued to another terminal was reported as the task's live endpoint"
 
-  pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
+  pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone or reissued one"
 }
 
 # --- composition: real scripts run, not reimplemented ------------------------

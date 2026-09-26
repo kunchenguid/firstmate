@@ -656,6 +656,7 @@ prefetch_task_observations() {  # <meta> <id>
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     if [ -n "$target" ]; then
+      fm_backend_bind_task_record "$meta" "$target"
       if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
         endpoint_exists=true
       else

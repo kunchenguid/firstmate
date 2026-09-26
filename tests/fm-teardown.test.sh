@@ -1385,6 +1385,68 @@ test_windowless_record_outside_the_leftover_class_still_refuses() {
   pass "a windowless record with a spawn_gen, a non-tmux backend or endpoint identity, no backlog validation, or ambiguous, foreign, or malformed identity still refuses"
 }
 
+write_windowless_herdr_meta() {  # <case-dir> [worktree]
+  write_windowless_legacy_meta "$1" no-mistakes ship "${2:-$1/missing-wt}"
+  printf '%s\n' 'backend=herdr' 'endpoint_task_id=task-x1' 'herdr_session=default' \
+    'herdr_workspace_id=w3H' 'herdr_tab_id=w3H:t1' 'herdr_pane_id=w3H:p6' \
+    >> "$1/state/task-x1.meta"
+  cat > "$1/fakebin/herdr" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> "$1/herdr.log"
+exit 1
+SH
+  chmod +x "$1/fakebin/herdr"
+}
+
+test_windowless_herdr_record_tears_down_without_touching_a_pane() {
+  local case_dir out
+  # A finished Herdr task whose pane binding was cleared: the herdr_* lines are
+  # history and name a pane id Herdr may have reissued, so cleanup accepts the
+  # record, never asks Herdr to close anything, and still runs landed-work checks.
+  case_dir=$(make_case windowless-herdr)
+  write_windowless_herdr_meta "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  out=$(run_teardown "$case_dir") \
+    || fail "windowless-herdr: teardown refused a finished Herdr record with its pane binding cleared"
+  printf '%s\n' "$out" | grep -Fq 'window none' \
+    || fail "windowless-herdr: the teardown line did not say there was no window: $out"
+  assert_absent "$case_dir/state/task-x1.meta" "windowless-herdr: teardown left the record"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "windowless-herdr: teardown returned success with its backlog item still open"
+  [ ! -s "$case_dir/herdr.log" ] \
+    || fail "windowless-herdr: cleanup called Herdr for a record that binds no pane: $(cat "$case_dir/herdr.log")"
+
+  case_dir=$(make_case windowless-herdr-gen)
+  write_windowless_herdr_meta "$case_dir"
+  printf '%s\n' 'spawn_gen=s1700000000.1.abc' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  run_teardown "$case_dir" >/dev/null \
+    || fail "windowless-herdr-gen: teardown refused a finished Herdr record that kept its spawn_gen"
+  assert_absent "$case_dir/state/task-x1.meta" "windowless-herdr-gen: teardown left the record"
+
+  case_dir=$(make_case windowless-herdr-unlanded)
+  write_windowless_herdr_meta "$case_dir" "$case_dir/wt"
+  seed_backlog_in_flight "$case_dir"
+  wt_commit_file "$case_dir" feature.txt unique-windowless-herdr "real unlanded work"
+  assert_windowless_record_refuses "$case_dir" windowless-herdr-unlanded "REFUSED"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "windowless-herdr-unlanded: the unlanded refusal closed the backlog item anyway"
+
+  case_dir=$(make_case windowless-herdr-cmux)
+  write_windowless_herdr_meta "$case_dir"
+  printf '%s\n' 'cmux_surface_id=surface-1' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  assert_windowless_record_refuses "$case_dir" windowless-herdr-cmux "no spawn_gen that identifies one exact incarnation"
+
+  case_dir=$(make_case windowless-herdr-foreign)
+  write_windowless_herdr_meta "$case_dir"
+  sed -i.bak 's/^endpoint_task_id=.*/endpoint_task_id=task-other/' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  seed_backlog_in_flight "$case_dir"
+  assert_windowless_record_refuses "$case_dir" windowless-herdr-foreign "no spawn_gen that identifies one exact incarnation"
+  pass "a finished Herdr record without a pane binding tears down without touching Herdr, while unlanded work, foreign identity, and another backend's lines still refuse"
+}
+
 test_windowless_leftover_retries_its_retained_legacy_stamp_without_the_flag() {
   local case_dir rc out
   case_dir=$(make_case windowless-retry)
@@ -2179,7 +2241,7 @@ configure_flat_herdr_teardown_case() {  # <case-dir>
     'herdr_session=default' \
     'herdr_workspace_id=wG' \
     'herdr_tab_id=wG:tQ' \
-    'herdr_pane_id=wG:pQ' >> "$case_dir/state/task-x1.meta"
+    'herdr_pane_id=wG:pQ' 'herdr_terminal_id=term-fixture' >> "$case_dir/state/task-x1.meta"
   cat > "$case_dir/fakebin/herdr" <<SH
 #!/usr/bin/env bash
 set -u
@@ -2220,7 +2282,7 @@ case "\${1:-} \${2:-}" in
       printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
       exit 1
     fi
-    printf '%s\n' '{"result":{"pane":{"pane_id":"wG:pQ","tab_id":"wG:tQ","workspace_id":"wG"}}}'
+    printf '{"result":{"pane":{"pane_id":"wG:pQ","terminal_id":"%s","tab_id":"wG:tQ","workspace_id":"wG"}}}\n' "\${FM_FAKE_HERDR_TERMINAL:-term-fixture}"
     ;;
   "agent get")
     printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
@@ -2306,6 +2368,38 @@ SH
   pass "herdr flat teardown refuses before returning the isolated copy under lock contention and the retry completes cleanly"
 }
 
+test_herdr_flat_teardown_leaves_a_reissued_pane_alone() {
+  local case_dir log closed rc wt_head
+  # Herdr reissued the recorded pane id to another terminal: this task's own
+  # endpoint is already gone, so cleanup closes nothing and still refuses while
+  # the task branch holds unlanded work.
+  case_dir=$(make_case herdr-reissued-pane)
+  write_meta "$case_dir" local-only ship
+  configure_flat_herdr_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; : > "$log"
+  closed="$case_dir/closed"
+  wt_commit_file "$case_dir" feature.txt unique-reissued-content "real unlanded work"
+  rc=0
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_TERMINAL=term-stranger \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "herdr-reissued-pane: unlanded work behind a reissued pane must still refuse"
+  assert_present "$case_dir/state/task-x1.meta" "herdr-reissued-pane: the unlanded refusal removed the record"
+  [ -d "$case_dir/wt" ] || fail "herdr-reissued-pane: the unlanded refusal removed the isolated copy"
+
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_TERMINAL=term-stranger \
+    run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || fail "herdr-reissued-pane: landed work behind a reissued pane refused cleanup: $(cat "$case_dir/stderr2")"
+  assert_grep "now belongs to another terminal" "$case_dir/stderr2" \
+    "herdr-reissued-pane: cleanup did not say the pane belongs to another terminal"
+  assert_absent "$case_dir/state/task-x1.meta" "herdr-reissued-pane: cleanup left the record"
+  if [ -e "$closed" ] || grep -q '^pane close' "$log"; then
+    fail "herdr-reissued-pane: cleanup closed a pane another terminal now holds: $(cat "$log")"
+  fi
+  pass "herdr flat teardown never closes a pane id reissued to another terminal and still runs its landed-work checks"
+}
+
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
   local case_dir log closed rc
   case_dir=$(make_case herdr-garbage-presence)
@@ -2324,7 +2418,7 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
     || fail "herdr-garbage-presence: ambiguous presence erased the durable endpoint metadata"
   [ -e "$case_dir/state/task-x1.status" ] \
     || fail "herdr-garbage-presence: ambiguous presence erased the task status record"
-  assert_grep "ambiguous structured presence" "$case_dir/stderr" \
+  assert_grep "could not be verified as this task's own endpoint" "$case_dir/stderr" \
     "herdr-garbage-presence: the ambiguity refusal was not explained visibly"
   pass "herdr flat teardown never erases records when pane presence is unparseable"
 }
@@ -2411,7 +2505,8 @@ configure_secondmate_with_herdr_child() {  # <case-dir>
     "herdr_session=childsession" \
     "herdr_workspace_id=wC" \
     "herdr_tab_id=wC:t1" \
-    "herdr_pane_id=wC:p1"
+    "herdr_pane_id=wC:p1" \
+    "herdr_terminal_id=term-fixture"
   : > "$home/state/child-herdr.status"
   : > "$home/state/child-herdr.turn-ended"
   cat > "$case_dir/fakebin/herdr" <<SH
@@ -2436,7 +2531,7 @@ case "\${1:-} \${2:-}" in
         exit 1
       fi
     else
-      printf '%s\n' '{"result":{"pane":{"pane_id":"wC:p1","tab_id":"wC:t1","workspace_id":"wC"}}}'
+      printf '%s\n' '{"result":{"pane":{"pane_id":"wC:p1","terminal_id":"term-fixture","tab_id":"wC:t1","workspace_id":"wC"}}}'
     fi
     ;;
   "pane close") : > "\${FM_FAKE_HERDR_CLOSED:?}" ;;
@@ -2615,7 +2710,8 @@ configure_nested_secondmate_with_herdr_grandchild() {  # <case-dir>
     "herdr_session=grandchildsession" \
     "herdr_workspace_id=wG" \
     "herdr_tab_id=wG:t1" \
-    "herdr_pane_id=wG:p1"
+    "herdr_pane_id=wG:p1" \
+    "herdr_terminal_id=term-fixture"
   : > "$nested_home/state/grandchild-herdr.status"
   : > "$nested_home/state/grandchild-herdr.turn-ended"
   cat > "$case_dir/fakebin/herdr" <<SH
@@ -2631,7 +2727,7 @@ case "\${1:-} \${2:-}" in
     if [ -e "\${FM_FAKE_HERDR_CLOSED:?}" ]; then
       printf '%s\n' 'not-json'
     else
-      printf '%s\n' '{"result":{"pane":{"pane_id":"wG:p1","tab_id":"wG:t1","workspace_id":"wG"}}}'
+      printf '%s\n' '{"result":{"pane":{"pane_id":"wG:p1","terminal_id":"term-fixture","tab_id":"wG:t1","workspace_id":"wG"}}}'
     fi
     ;;
   "pane close") : > "\${FM_FAKE_HERDR_CLOSED:?}" ;;
@@ -2676,7 +2772,7 @@ configure_herdr_projection_teardown_case() {  # <case-dir>
     'herdr_session=fmtest' \
     'herdr_workspace_id=w1' \
     'herdr_tab_id=w1:t2' \
-    'herdr_pane_id=w1:p2' >> "$case_dir/state/task-x1.meta"
+    'herdr_pane_id=w1:p2' 'herdr_terminal_id=term-fixture' >> "$case_dir/state/task-x1.meta"
   printf '%s\n' \
     'version=1' \
     'task_id=task-x1' \
@@ -2723,7 +2819,7 @@ case "${1:-} ${2:-}" in
       printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
       exit 1
     fi
-    printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1"}}}'
+    printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","terminal_id":"term-fixture","tab_id":"w1:t2","workspace_id":"w1"}}}'
     ;;
   "tab get")
     printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2"}}}'
@@ -4077,6 +4173,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
+test_herdr_flat_teardown_leaves_a_reissued_pane_alone
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
 test_herdr_flat_teardown_preflight_refuses_before_changes
 test_forced_secondmate_herdr_child_preflight_refuses_before_changes
@@ -4106,6 +4203,7 @@ test_windowless_legacy_record_with_gone_worktree_tears_down
 test_windowless_legacy_record_tears_down_with_the_legacy_flag
 test_windowless_legacy_record_still_refuses_unlanded_work
 test_windowless_record_outside_the_leftover_class_still_refuses
+test_windowless_herdr_record_tears_down_without_touching_a_pane
 test_windowless_leftover_retries_its_retained_legacy_stamp_without_the_flag
 test_legacy_record_teardown_completes_when_landed_and_endpoint_dead
 test_legacy_record_teardown_refuses_unlanded_work

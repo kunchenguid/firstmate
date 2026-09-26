@@ -39,6 +39,7 @@ if [ -n "$REMOTE_META" ] && [ -n "$(fm_meta_get "$REMOTE_META" remote_host)" ]; 
 fi
 
 T=$(fm_backend_resolve_selector "$RAW_TARGET" "$STATE")
+[ -z "$REMOTE_META" ] || fm_backend_bind_task_record "$REMOTE_META" "$T"
 
 BACKEND=$(fm_backend_of_selector "$RAW_TARGET" "$T" "$STATE")
 EXPECTED_LABEL=$(fm_backend_expected_label_of_selector "$RAW_TARGET" "$STATE")
