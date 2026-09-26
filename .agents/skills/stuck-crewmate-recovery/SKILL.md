@@ -79,6 +79,8 @@ A refused connection or missing socket from `daemon status` is positive daemon-d
 Otherwise, if the run is still running or fixing with recent activity, the claim is wrong: steer the crewmate to reattach with `no-mistakes axi run` from its own worktree, which is safe and idempotent while the run still matches its `HEAD`, and tell it a timeout is not daemon death.
 Nothing reaches the captain in that case.
 
+For `refusing to reconcile private mirror ref` errors that say at-risk commits are absent from `live head`, run `bin/fm-mirror-refusal-check.sh <task-id>` before manual Git forensics; the helper fails closed unless the cited head is absent from fetched refs, all at-risk commits are ancestors of both current tips, and those tips agree.
+
 Never restart, stop, or update the shared daemon on a crewmate's claim.
 It is one instance serving every lane and home, so a restart kills other lanes' in-flight runs.
 Only positive socket refusal or absence is a daemon-down finding; escalate that finding, or a failed run record that names a daemon error, to the captain.
