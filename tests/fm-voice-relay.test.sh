@@ -3757,7 +3757,27 @@ E2E_MODEL=amazon.nova-2-sonic-v1:0
 E2E_REQUEST="take the flaky sign-in test on alpha and open a pull request for it"
 mkdir -p "$E2E/bin" "$E2E/laptop" "$E2E/desktop-home" "$E2E/laptop-home" \
   "$E2E/fakesdk/aws_sdk_bedrock_runtime" \
+  "$E2E/fakesdk/smithy_http/aio" \
   "$E2E/home/data" "$E2E/home/state" "$E2E/home/config"
+
+# The production SDK needs its duplex CRT transport. Keep the offline fake at
+# that import boundary so the test exercises transport selection without a
+# network or the optional native dependency.
+cat > "$E2E/fakesdk/smithy_http/__init__.py" <<'PY'
+PY
+cat > "$E2E/fakesdk/smithy_http/aio/__init__.py" <<'PY'
+PY
+cat > "$E2E/fakesdk/smithy_http/aio/crt.py" <<'PY'
+import os
+
+
+class AWSCRTHTTPClient:
+    SUPPORTS_DUPLEX_STREAMING = True
+
+    async def close(self):
+        with open(os.environ["FM_FAKE_TRANSPORT_CLOSE"], "a", encoding="utf-8") as handle:
+            handle.write("closed\n")
+PY
 
 # The laptop holds the two files the guide says to copy, and nothing else.
 cp "$ROOT/bin/fm-voice-client.py" "$ROOT/bin/fm_voice_frame.py" "$E2E/laptop/"
@@ -3926,6 +3946,9 @@ class _Stream:
     """One bidirectional session, which is one turn the way the relay uses it."""
 
     def __init__(self, model_id, config):
+        transport = config.credentials.get("transport")
+        if getattr(transport, "SUPPORTS_DUPLEX_STREAMING", False) is not True:
+            raise RuntimeError("the relay did not select a duplex transport")
         self.kind, self.index = _turn_kind()
         self.out = asyncio.Queue()
         self.input_stream = _InputStream(self)
@@ -4068,7 +4091,6 @@ class _Stream:
         self._logged = True
         with open(LOG, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(self.record) + "\n")
-
     async def finish(self):
         self._write_log()
         self.out.put_nowait(None)
@@ -4088,10 +4110,13 @@ class AsyncBedrockRuntimeConfig:
 class AsyncBedrockRuntimeClient:
     def __init__(self, config=None):
         self.config = config
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
 
     async def invoke_model_with_bidirectional_stream(self, operation):
         return _Stream(operation.model_id, self.config)
-
 
 class InvokeModelWithBidirectionalStreamOperationInput:
     def __init__(self, model_id=None):
@@ -4139,6 +4164,7 @@ PYTHONDONTWRITEBYTECODE=1
 FM_HOME=$E2E/home
 FM_FAKE_STATE=$E2E/turn-counter
 FM_FAKE_LOG=$E2E/model-sessions.jsonl
+FM_FAKE_TRANSPORT_CLOSE=$E2E/transport-closes
 FM_FAKE_THINK=0.4
 FM_FAKE_REPLY_SECONDS=0.4
 FM_FAKE_SCRIPT=status,handover
@@ -4176,6 +4202,7 @@ PY
 
 printf '0\n' > "$E2E/turn-counter"
 : > "$E2E/model-sessions.jsonl"
+: > "$E2E/transport-closes"
 
 # env -i: the laptop has PATH and HOME and nothing else. No AWS variable, no
 # interpreter that can reach Bedrock, no firstmate home.
@@ -4223,12 +4250,15 @@ def read(name):
 
 runs = read("runs.jsonl")
 sessions = read("model-sessions.jsonl")
+transport_closes = open(os.path.join(root, "transport-closes"), encoding="utf-8").readlines()
 records = json.load(open(os.path.join(root, "independent.json"), encoding="utf-8"))
 transcript = open(os.path.join(root, "session.log"), encoding="utf-8").read()
 
 # Two turns asked, two turns answered with audio, neither of them lost.
 check(len(runs) == 2, "expected two turn records, got %d" % len(runs))
 check(len(sessions) == 2, "expected two model sessions, got %d" % len(sessions))
+check(len(transport_closes) == 2,
+      "expected two closed duplex transports, got %d" % len(transport_closes))
 for run in runs:
     check(run["answered"], "turn %s was not answered" % run["run"])
     check(run["relay_error"] is None,
