@@ -1135,6 +1135,20 @@ The refusal is a JSON error on stderr with exit 1 and empty stdout, and both cli
 
 ### Submit confirmation
 
+Verified 2026-09-26 with Herdr 0.9.1 and Claude Code 2.1.283 in a named lab session:
+
+```sh
+FM_AFK_INJECT_CLAUDE_LIVE=1 bin/fm-test-run.sh tests/fm-afk-inject-claude-live-e2e.test.sh
+```
+
+```text
+ok - Claude on named Herdr lab receives a long away digest as one turn; old statuses stay out
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
+```
+
+The guard starts a real Claude pane, forces the daemon's inherited harness identity to `unknown`, and confirms that the pane receives and reads one record-backed operational input.
+The same run proves that the fresh away scan excludes status bytes already presented to main while retaining newly appended completions.
+
 Measured 2026-08-19 against Herdr 0.8.0 and Claude Code 2.1.236 in an isolated `fm-lab-` session.
 
 `herdr agent get` reported `agent_status=idle` on every sample across a landed one-word turn and an 8-second `sleep` tool call, while the pane rendered `Pontificating…` then `Sock-hopping… (11s · ↓ 234 tokens)`.

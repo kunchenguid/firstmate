@@ -539,6 +539,7 @@ Typed-plane text is typed once; only Enter is retried.
 
 ### Claude composer proof
 
+The away daemon reads the captain pane's native agent identity before delivery, so a Claude target receives a short record-backed doorbell even if a native background job lost its Claude process ancestry.
 When native `agent get` identity is Claude, the adapter types only into an empty composer.
 A Claude composer that already holds text, or cannot be read, before the send is refused with nothing typed.
 Before that Enter, the adapter continues only when the selected composer shows the typed payload, or only Claude paste placeholders with no literal remainder.

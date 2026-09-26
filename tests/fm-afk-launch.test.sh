@@ -247,7 +247,7 @@ unit_stop_archives_the_record_last() {
 }
 
 # ---------------------------------------------------------------------------
-# UNIT 1: fm_afk_clear_stale_artifacts removes exactly the four stale artifacts.
+# UNIT 1: fm_afk_clear_stale_artifacts resets the away-session artifacts.
 # ---------------------------------------------------------------------------
 unit_clear_stale() {
   local st
@@ -257,6 +257,7 @@ unit_clear_stale() {
   : > "$st/state/.subsuper-escalations.since"
   : > "$st/state/.subsuper-inject-wedged"
   : > "$st/state/.subsuper-unknown-acked"
+  : > "$st/state/.subsuper-session-seeded"
   : > "$st/state/.wake-queue"          # durable queue must be untouched
   # Source fm-afk-start.sh inside a child bash (it sets `set -eu` and would
   # otherwise leak that into this test shell) and call the clear helper.
@@ -265,8 +266,9 @@ unit_clear_stale() {
   if [ ! -e "$st/state/.subsuper-escalations" ] \
      && [ ! -e "$st/state/.subsuper-escalations.since" ] \
      && [ ! -e "$st/state/.subsuper-inject-wedged" ] \
-     && [ ! -e "$st/state/.subsuper-unknown-acked" ]; then
-    pass "clear-stale: removes escalations buffer, sidecar, wedge marker, and unknown-wake acknowledgements"
+     && [ ! -e "$st/state/.subsuper-unknown-acked" ] \
+     && [ ! -e "$st/state/.subsuper-session-seeded" ]; then
+    pass "clear-stale: removes escalation state and the presented-status baseline"
   else
     fail "clear-stale: stale artifacts survived"
   fi

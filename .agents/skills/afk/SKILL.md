@@ -109,7 +109,7 @@ On the harnesses that still launch the daemon (every verified harness except Pi 
 The daemon constructs each current escalation as the `away-supervisor` kind owned by `bin/fm-operational-input.sh`; its envelope begins with `FM_OPERATIONAL_PREFIX`: `FM_INJECT_MARK` (U+2063 INVISIBLE SEPARATOR) followed by the stable `FIRSTMATE_OP: ` label.
 The bare `FM_INJECT_MARK` form remains accepted for legacy daemon escalations during rollout.
 U+2063 has no normal keyboard keystroke and survives terminal transport as UTF-8 text, but Claude Code (verified on 2.1.280) removes it, with every other invisible character, from each submitted prompt, whether typed, pasted, or passed as the launch prompt.
-For a primary harness the owner lists as stripping the marker (Claude Code), the daemon instead writes the envelope as a record in this home's `state/operational-inbox` and types only the owner's plain doorbell naming it.
+For a target harness the owner lists as stripping the marker (Claude Code), the daemon instead writes the envelope as a record in this home's `state/operational-inbox` and types only the owner's plain doorbell naming it.
 That doorbell is Firstmate's only when `open` verifies the record in this home, so the doorbell shape alone never counts; a verbatim copy of a live doorbell line, pasted back while its record still exists, is treated as Firstmate's, because the carrier does not track consumption.
 This is how firstmate tells a daemon escalation apart from a real message in the same pane.
 For other harnesses, the operational prefix travels with the message text; neither carrier relies on harness-level typed-vs-injected detection.
@@ -120,7 +120,8 @@ The daemon never injects into an in-use pane. Two checks run before every
 injection, dispatched through `bin/fm-backend.sh` for the supervisor's own
 backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
 
-- **Primary-pane busy guard** - `pane_is_busy` trusts Herdr native `busy` when available, otherwise matches rendered output against only the detected primary harness's signature.
+- **Primary-pane busy guard** - `pane_is_busy` trusts Herdr native `busy` when available, otherwise matches rendered output against only the target harness's signature.
+  On herdr the target harness is the pane's native agent identity, falling back to the detected primary harness; the same value selects the record-backed or typed carrier.
   This narrow delivery guard never classifies a recorded worker task and never uses a global union of vendor patterns.
 - **Composer-state guard** - `inject_msg` reads the full `empty`/`pending`/`pending-unproven`/`unknown` verdict from `fm_backend_composer_state` and injects only when it is affirmatively `empty`.
   Every other or future verdict defers, including an unreadable pane, ambiguous geometry, a blank unidentified row, and a bare shell prompt left after the agent exits.
@@ -199,7 +200,7 @@ The single-line format makes submission unambiguous across harnesses; the carrie
 - **Single-line digest** - embedded newlines are collapsed to a literal
   separator before injection, so submission is unambiguous regardless of
   harness.
-- **Busy and composer guards on the supervisor pane** - before injecting, the daemon runs the detected-primary-harness rendered busy guard and reads `fm_backend_composer_state` directly.
+- **Busy and composer guards on the supervisor pane** - before injecting, the daemon runs the target-harness rendered busy guard and reads `fm_backend_composer_state` directly.
   Only `empty` permits injection; `pending` protects half-typed or swallowed input, and `unknown` protects unreadable panes and bare dead-shell prompts.
   Every other result preserves the buffer for retry, so the daemon never merges its digest into the captain's half-typed line or types it into a shell.
 - The active backend passes its capture plus declarative styled, cursor, identity, and row capabilities to the shared screen classifier; all structural recognition and verdict logic remains in `bin/fm-composer-lib.sh`.
@@ -248,7 +249,7 @@ The single-line format makes submission unambiguous across harnesses; the carrie
 
 ### Stale-artifact lifecycle
 
-Treat `state/.subsuper-escalations`, its `.since` sidecar, `state/.subsuper-inject-wedged`, and `state/.subsuper-unknown-acked` as session-scoped delivery artifacts, not as the durable work record.
+Treat `state/.subsuper-escalations`, its `.since` sidecar, `state/.subsuper-inject-wedged`, `state/.subsuper-unknown-acked`, and the presented-status baseline marker `state/.subsuper-session-seeded` as session-scoped delivery artifacts, not as the durable work record.
 Always enter through `bin/fm-afk-launch.sh`, which clears prior-session artifacts only for a fresh entry and preserves the current session's buffer on refresh.
 Always exit through `bin/fm-afk-launch.sh stop`, which keeps `state/.afk` present through the daemon's shutdown flush, clears it, and archives the posture record last.
 `docs/herdr-backend.md` "Away-mode supervisor support" owns the current mechanism, and `docs/verification/runtime-backends.md` "Away-mode transport" owns active evidence.
