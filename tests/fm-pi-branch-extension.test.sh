@@ -1856,6 +1856,7 @@ test_away_email_failure_is_visible_and_retried() {
 case "${2:-}" in
   destination|configured) printf 'johnpoyser@gmail.com\n'; exit 0 ;;
 
+
   queue-unprocessed) printf 'queued 1 away-email item(s)\n'; exit 0 ;;
   flush)
     if [ "$(cat "$FM_TEST_MAIL_STATUS_FILE")" = sent ]; then

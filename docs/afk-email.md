@@ -16,6 +16,7 @@ Use a dedicated sending mailbox if practical, and create an app password for it 
 
 
 
+
 Add the following values to this Firstmate home's gitignored `.env`:
 
 ```sh
@@ -55,6 +56,7 @@ To answer an item, reply from exactly `johnpoyser@gmail.com` and make the first 
 Only inline `text/plain` content is parsed; attachments and embedded forwarded messages are excluded, and recognized quoted-history markers end answer extraction.
 The poller reads a message body only when its single `From` address is the owner and the topmost `Authentication-Results` field is the Gmail receiver's result (`mx.google.com`) showing DKIM or DMARC pass aligned with `gmail.com`; lower sender-supplied copies are ignored.
 Other senders and messages without that authenticated result are silently ignored without a body read or mail wake.
+
 
 If an away record is present but invalid or unreadable, AFK-email polling defers all incoming mail, including authenticated replies, until the record is valid. The separate `fm-mail.sh read` path continues to apply its own authenticated-body restriction during away mode.
 Each code is accepted only for its own sent item, once, and for seven days after sending. Correctly authenticated owner messages larger than 256 KiB total, including attachments, are not processed as away-mode replies, but receive an ordinary mail wake marked that the body exceeds the limit. Replies over 8,000 characters are rejected with a notice in the durable mail wake.
