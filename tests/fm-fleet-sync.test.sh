@@ -829,6 +829,38 @@ test_registered_local_only_symlink_retains_own_posture() {
   pass "registered local-only symlink and case aliases cannot fetch"
 }
 
+test_case_sensitive_case_only_symlink_keeps_its_posture() {
+  local home clone alias out before remote_before
+  home="$TMP_ROOT/case-sensitive-symlink-identity"
+  mkdir -p "$home/projects" "$home/data"
+  clone=$(build_pair "$home" clone)
+  alias="$home/projects/Clone"
+  if [ -e "$alias" ]; then
+    pass "case-only symlink identity (case-insensitive filesystem; skipped)"
+    return 0
+  fi
+  ln -s "$clone" "$alias"
+  printf -- '- Clone [local-only] - test project (added 2026-06-27)\n' > "$home/data/projects.md"
+  before=$(head_sha "$clone")
+  remote_before=$(git -C "$clone" rev-parse origin/main)
+  advance_origin "$home" clone C1
+
+  out=$(run_sync "$home" "$alias")
+  assert_contains "$out" "Clone: skipped: local-only project" \
+    "the exact symlink name must select its own registered posture: $out"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "case-only symlink fast-forwarded its target"
+  [ "$(git -C "$clone" rev-parse origin/main)" = "$remote_before" ] \
+    || fail "case-only symlink fetched its target"
+
+  out=$(run_sync "$home" "$clone")
+  assert_contains "$out" "clone: synced" \
+    "the exact physical clone name must select its own posture: $out"
+  [ "$(head_sha "$clone")" != "$before" ] || fail "physical clone did not fast-forward"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "physical clone did not reach origin/main"
+  pass "case-only symlink and physical clone keep separate postures"
+}
+
 test_unknown_clone_identity_never_fetches() {
   local home clone out before remote_before
   home="$TMP_ROOT/unknown-clone-identity"
@@ -937,6 +969,7 @@ test_case_variant_clone_root_still_syncs
 test_case_variant_local_only_clone_never_fetches
 test_hidden_local_only_clone_aliases_never_fetch
 test_registered_local_only_symlink_retains_own_posture
+test_case_sensitive_case_only_symlink_keeps_its_posture
 test_unknown_clone_identity_never_fetches
 test_ambiguous_symlink_aliases_never_fetch
 test_symlinked_clone_still_syncs

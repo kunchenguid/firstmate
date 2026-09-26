@@ -75,7 +75,7 @@ fi
 [ $# -le 1 ] || { usage; exit 1; }
 
 project_label() {
-  local entry matched= physical= named= matches=0 physical_matches=0 name=
+  local entry matched= physical= named= exact= matches=0 physical_matches=0 name=
   if [ "$(dirname "$PROJ")" -ef "$PROJECTS" ]; then
     name=$(basename "$PROJ")
     shopt -s nocasematch
@@ -84,8 +84,13 @@ project_label() {
     [ -d "$entry" ] && [ "$entry" -ef "$PROJ" ] || continue
     matches=$((matches + 1))
     matched=$entry
-    if [ -n "$name" ] && [[ "${entry##*/}" == "$name" ]]; then
-      named=$entry
+    if [ -n "$name" ]; then
+      if [ "${entry##*/}" = "$name" ]; then
+        exact=$entry
+        named=$entry
+      elif [ -z "$exact" ] && [[ "${entry##*/}" == "$name" ]]; then
+        named=$entry
+      fi
     fi
     if [ ! -L "$entry" ]; then
       physical_matches=$((physical_matches + 1))
@@ -94,6 +99,11 @@ project_label() {
   done
   if [ "$physical_matches" -eq 1 ]; then
     if [ "$matches" -gt 1 ]; then
+      if [ -n "$exact" ] && [ -L "$exact" ] \
+          && [[ "${exact##*/}" == "${physical##*/}" ]]; then
+        basename "$exact"
+        return 0
+      fi
       [ -n "$named" ] && [ ! -L "$named" ] || return 1
     fi
     basename "$physical"
