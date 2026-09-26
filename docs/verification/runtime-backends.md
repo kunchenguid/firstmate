@@ -2229,7 +2229,7 @@ The merge suite and the security suite dominate the wall time.
 
 Whether Calm's collapsed `fm_branch_outcomes` row disappears, and what is left on screen when it does not, is Pi's own rendering verdict, so it is proven against the real `pi` binary in a real terminal rather than against the importable SDK.
 
-Evidence produced 2026-08-24 on macOS 15.7.3 arm64, Node v26.5.0, tmux on a private socket:
+Evidence produced 2026-09-25 on macOS 15.7.3 arm64, Node v26.5.0, tmux on a private socket:
 
 ```sh
 FM_CALM_BRANCH_OUTCOMES_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-calm-branch-outcomes-live-e2e.test.sh
@@ -2238,10 +2238,10 @@ FM_CALM_BRANCH_OUTCOMES_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-calm-branch-outco
 Observed output:
 
 ```text
-ok - real Pi 0.84.3 keeps the complete upstream branch-outcome row and raw records while Calm is off
-ok - real Pi 0.84.3 collapses a branch-outcome read under Calm to one dim line per outcome that still needs the captain, and nothing else
-ok - real Pi 0.84.3 exports every branch-outcome record from a session where Calm collapsed that row on screen
-ok - real Pi 0.84.3 keeps a failed branch-outcome read visible under Calm instead of collapsing it to nothing
+ok - real Pi 0.87.1 keeps the upstream branch-outcome row and its raw records while Calm is off
+ok - real Pi 0.87.1 collapses a branch-outcome read of complete store records to nothing under Calm
+ok - real Pi 0.87.1 exports every branch-outcome record from a session where Calm collapsed that row on screen
+ok - real Pi 0.87.1 keeps a failed branch-outcome read visible under Calm instead of collapsing it to nothing
 ```
 
 The guard reads no credentials and makes no provider call: a local fixture provider answers the fixture model, and `PI_OFFLINE` is set.

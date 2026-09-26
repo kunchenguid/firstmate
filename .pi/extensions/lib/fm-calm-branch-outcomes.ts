@@ -5,7 +5,9 @@
 // this module adds no second hiding path: ./fm-calm-visibility.ts stays the one
 // owner of whether Calm hides a class. What lives here is the single exception
 // Calm makes inside that collapse - the part of a branch-outcome read that must
-// survive it, so a failure or a captain-relevant outcome is never hidden.
+// survive it, so a failed read or unrecognized output is never hidden.
+// Captain-verdict outcomes are not an exception here: the supervision branch
+// already delivers each one as its own visible transcript entry.
 //
 // Deliberately free of every Pi and pi-tui import: the collapse decision is a
 // pure function of the tool's own output text, which is what lets the portable
@@ -23,12 +25,6 @@ export type CalmBranchOutcomeLine = {
   text: string;
 };
 
-type BranchOutcomeRecord = {
-  task: string;
-  verdict: "routine" | "captain";
-  summary: string;
-};
-
 // The exact key sets the store's own validator accepts, oldest first.
 const OUTCOME_KEY_SETS = [
   ["epoch", "seq", "summary", "task", "verdict", "wake"],
@@ -40,42 +36,40 @@ function singleLineText(value: string): string {
   return value.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
 }
 
-function parseOutcomeRecord(line: string): BranchOutcomeRecord | undefined {
+function isOutcomeRecord(line: string): boolean {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
   } catch {
-    return undefined;
+    return false;
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
   const record = parsed as Record<string, unknown>;
   const hasSilent = Object.prototype.hasOwnProperty.call(record, "silent");
   const hasStatus = Object.prototype.hasOwnProperty.call(record, "statusEndpoint");
-  if (!OUTCOME_KEY_SETS.includes(Object.keys(record).sort().join(","))) return undefined;
-  if (typeof record.seq !== "number" || !Number.isInteger(record.seq) || record.seq < 1) return undefined;
-  if (typeof record.epoch !== "number" || !Number.isInteger(record.epoch) || record.epoch < 0) return undefined;
-  if (typeof record.task !== "string" || typeof record.wake !== "string") return undefined;
-  if (typeof record.summary !== "string") return undefined;
-  if (record.verdict !== "routine" && record.verdict !== "captain") return undefined;
-  if (hasSilent && typeof record.silent !== "boolean") return undefined;
+  if (!OUTCOME_KEY_SETS.includes(Object.keys(record).sort().join(","))) return false;
+  if (typeof record.seq !== "number" || !Number.isInteger(record.seq) || record.seq < 1) return false;
+  if (typeof record.epoch !== "number" || !Number.isInteger(record.epoch) || record.epoch < 0) return false;
+  if (typeof record.task !== "string" || typeof record.wake !== "string") return false;
+  if (typeof record.summary !== "string") return false;
+  if (record.verdict !== "routine" && record.verdict !== "captain") return false;
+  if (hasSilent && typeof record.silent !== "boolean") return false;
   if (hasStatus) {
     const endpoint = record.statusEndpoint;
-    if (typeof endpoint !== "number" || !Number.isInteger(endpoint) || endpoint < 0) return undefined;
-    if (typeof record.statusIdent !== "string" || /[\t\n]/.test(record.statusIdent)) return undefined;
+    if (typeof endpoint !== "number" || !Number.isInteger(endpoint) || endpoint < 0) return false;
+    if (typeof record.statusIdent !== "string" || /[\t\n]/.test(record.statusIdent)) return false;
   }
-  return { task: record.task, verdict: record.verdict, summary: record.summary };
+  return true;
 }
 
 // What must stay visible when Calm collapses one fm_branch_outcomes row.
 // An empty result means the row collapses to nothing, exactly like every other
 // tool row Calm hides. A non-empty result is what Calm shows instead.
 //
-// Three things are never collapsed away, in this order:
+// Two things are never collapsed away:
 //   1. A failed read, because a captain who cannot see the fleet must be told.
 //   2. Output Calm does not recognize as the store's records, carried through
 //      byte-for-byte rather than silently swallowed by a format change.
-//   3. A captain-verdict outcome, which is the store's own marker for an event
-//      that needs the captain; a routine outcome is one the branch handled.
 export function calmBranchOutcomeAttention(
   output: string,
   isError: boolean,
@@ -89,18 +83,8 @@ export function calmBranchOutcomeAttention(
   }
   if (!trimmedOutput || trimmedOutput === NO_OUTCOMES_TEXT) return [];
 
-  const lines: CalmBranchOutcomeLine[] = [];
-  for (const rawLine of trimmedOutput.split("\n")) {
-    const record = parseOutcomeRecord(rawLine.trim());
-    if (!record) {
-      lines.push({ glyph: true, text: rawLine });
-      continue;
-    }
-    if (record.verdict !== "captain") continue;
-    lines.push({
-      glyph: true,
-      text: `${singleLineText(record.task)}: ${singleLineText(record.summary)}`,
-    });
-  }
-  return lines;
+  return trimmedOutput
+    .split("\n")
+    .filter((rawLine) => !isOutcomeRecord(rawLine.trim()))
+    .map((rawLine) => ({ glyph: true, text: rawLine }));
 }

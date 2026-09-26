@@ -20,7 +20,7 @@ A fresh Pi session or new Calm extension lifetime starts at the normal initial p
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 Calm hides collapsed thinking labels, the mid-turn assistant working-note blocks governed by the shared preservation rule above, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` and `fm_branch_outcomes` tool shells, and canonically classified Firstmate operational user rows.
-A `fm_branch_outcomes` read is the one Calm-collapsed row that can leave something behind: an outcome the supervision branch already handled collapses with the row, while a failed read, an outcome the branch marked captain-relevant, and any output Calm does not recognize as the store's records each stay on screen as one dim line carrying the branch's own sailboat glyph.
+A `fm_branch_outcomes` read is the one Calm-collapsed row that can leave something behind: complete store records collapse with the row, including captain-verdict outcomes the supervision branch already shows as their own transcript entries, while a failed read and any output Calm does not recognize as the store's records each stay on screen as one dim line carrying the branch's own sailboat glyph.
 Pi applies that rule independently to each text block, so a short working note can hide beside preserved substantive content in the same message.
 A working note is briefly visible while it streams before its settled row collapses.
 The narration is hidden only from the live transcript presentation, and remains in the message, model context, session storage, and `/export` artifacts.

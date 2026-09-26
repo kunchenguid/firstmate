@@ -40,18 +40,18 @@ store_listing() { # <recent>
 }
 
 # Real records, written by the real store writer: two the branch handled itself
-# and two that name the captain.
+# and two that name the captain. The branch already delivers each captain
+# outcome as its own transcript entry, so a read of either kind collapses.
 outcome routine task-9 "worker healthy, no action needed"
 outcome captain task-12 "PR https://example.com/pr/12 checks green, ready for review"
 outcome routine task-14 "worker healthy, no action needed"
 outcome captain task-4 "blocked: cannot reach the forge, credentials rejected"
 
 routine_only="$TMP_ROOT/routine-only.txt"
-store_listing 1 > "$TMP_ROOT/latest.txt"
-grep -q '"verdict":"captain"' "$TMP_ROOT/latest.txt" \
-  || fail "the store fixture did not end on a captain record"
 store_listing 4 > "$TMP_ROOT/mixed.txt"
 [ "$(wc -l < "$TMP_ROOT/mixed.txt")" -eq 4 ] || fail "the store fixture did not produce 4 records"
+grep -q '"verdict":"captain"' "$TMP_ROOT/mixed.txt" \
+  || fail "the store fixture produced no captain records"
 grep '"verdict":"routine"' "$TMP_ROOT/mixed.txt" > "$routine_only" \
   || fail "the store fixture produced no routine records"
 outcome captain task-15 $'first line\nsecond\t  line\rthird'
@@ -84,15 +84,10 @@ check(
   [],
 );
 
-// A captain-verdict outcome survives the collapse as one line; the routine
-// records around it do not.
-check("mixed store", calmBranchOutcomeAttention(mixed, false), [
-  { glyph: true, text: "task-12: PR https://example.com/pr/12 checks green, ready for review" },
-  { glyph: true, text: "task-4: blocked: cannot reach the forge, credentials rejected" },
-]);
-check("multiline captain record", calmBranchOutcomeAttention(multiline, false), [
-  { glyph: true, text: "task-15: first line second line third" },
-]);
+// A captain-verdict outcome collapses too: the branch already delivered it as
+// its own visible transcript entry, so a store read must not repeat it.
+check("mixed store", calmBranchOutcomeAttention(mixed, false), []);
+check("multiline captain record", calmBranchOutcomeAttention(multiline, false), []);
 
 // A failed read is never collapsed away: the captain who cannot see the fleet
 // has to be told, and the tool's own message is what says why.
@@ -143,7 +138,7 @@ check(
     '{"seq":1,"epoch":1,"task":"task-3","wake":"stale: task-3","verdict":"captain","summary":"needs a decision"}',
     false,
   ),
-  [{ glyph: true, text: "task-3: needs a decision" }],
+  [],
 );
 check(
   "silent captain record",
@@ -151,7 +146,7 @@ check(
     '{"seq":2,"epoch":1,"task":"fleet","wake":"heartbeat","verdict":"captain","summary":"still needs a decision","silent":true}',
     false,
   ),
-  [{ glyph: true, text: "fleet: still needs a decision" }],
+  [],
 );
 
 // Unrecognized output mixed in with real records keeps both.
@@ -166,7 +161,7 @@ JS
   status=$?
   [ "$status" -eq 0 ] || fail "Calm branch-outcome collapse regression failed: $out"
   assert_contains "$out" "COLLAPSE_OK" "Calm branch-outcome collapse regression did not run to completion"
-  pass "Calm collapses a handled branch-outcome read to nothing and never swallows a failure, a captain-relevant outcome, or output it does not recognize"
+  pass "Calm collapses a branch-outcome read of complete store records to nothing and never swallows a failed read or output it does not recognize"
 }
 
 test_collapse_and_preserve

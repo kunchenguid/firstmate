@@ -48,13 +48,19 @@ cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$project/.pi/extensions/fm-b
 cp "$ROOT/.pi/extensions/fm-calm.ts" "$project/.pi/extensions/fm-calm.ts"
 # Named one by one rather than globbed so a change to any of them selects this
 # guard through bin/fm-test-run.sh's changed-path reference scan.
+cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$project/.pi/extensions/lib/fm-async-exec.ts"
 cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$project/.pi/extensions/lib/fm-branch-dispatch.ts"
+cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$project/.pi/extensions/lib/fm-branch-model-picker.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-branch-outcomes.ts" "$project/.pi/extensions/lib/fm-calm-branch-outcomes.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+cp "$ROOT/.pi/extensions/lib/fm-calm-pending-operational-layout.ts" "$project/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
+cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$project/.pi/extensions/lib/fm-native-contract.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$project/.pi/extensions/lib/fm-operational-input.ts"
+cp "$ROOT/.claude/mods/firstmate-calm/lib/fm-calm-preservation.ts" "$project/.pi/extensions/lib/fm-calm-preservation.ts"
+cp "$ROOT/.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts" "$project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
 printf '%s\n' '{"tui.input.submit":"alt+s"}' >"$config/keybindings.json"
 
 # One fixture model that calls a Calm-collapsed built-in first and the tool under
@@ -164,8 +170,9 @@ outcome() { # <verdict> <task> <summary>
     || fail "the real outcome writer refused a $1 record for $2"
 }
 
-# Enough records to make any accidental Calm-off filtering visible: the
-# upstream branch-outcomes renderer shows the complete sanitized store listing.
+# Enough records to run past Pi's stock collapsed preview, which the upstream
+# renderer follows while Calm is off, so only the leading records are on screen
+# there. Captain records bracket the routine ones because Calm collapses both.
 outcome captain task-12 "PR https://example.com/pr/12 checks green, ready for review"
 i=1
 while [ "$i" -le 14 ]; do
@@ -228,12 +235,12 @@ test_calm_off_keeps_the_stock_row() {
     "pi $PI_VERSION dropped the branch-outcome tool row while Calm was off"
   assert_grep '"verdict":"routine"' "$snapshot" \
     "pi $PI_VERSION no longer shows the raw branch-outcome records while Calm is off"
-  assert_grep 'CALM_OUTCOMES_ROUTINE_14' "$snapshot" \
-    "pi $PI_VERSION clipped or filtered the upstream branch-outcome renderer while Calm was off"
-  pass "real Pi $PI_VERSION keeps the complete upstream branch-outcome row and raw records while Calm is off"
+  assert_grep '"task":"task-12","wake":"signal: task-12","verdict":"captain"' "$snapshot" \
+    "pi $PI_VERSION filtered the leading captain record out of the upstream branch-outcome row while Calm was off"
+  pass "real Pi $PI_VERSION keeps the upstream branch-outcome row and its raw records while Calm is off"
 }
 
-test_calm_on_collapses_to_what_needs_attention() {
+test_calm_on_collapses_a_complete_store_read() {
   local snapshot="$TMP_ROOT/calm-on.txt"
   capture_turn on "$ROOT" "$snapshot" "$TMP_ROOT/calm-on-export.html"
   assert_no_grep 'CALM_OUTCOMES_E2E_BASH' "$snapshot" \
@@ -244,13 +251,11 @@ test_calm_on_collapses_to_what_needs_attention() {
     "pi $PI_VERSION still dumps the raw branch-outcome records into the transcript while Calm is on"
   assert_no_grep 'CALM_OUTCOMES_ROUTINE_' "$snapshot" \
     "Calm kept an outcome the supervision branch already handled on screen in pi $PI_VERSION"
-  assert_grep 'task-12: PR https://example.com/pr/12 checks green, ready for review' "$snapshot" \
-    "Calm collapsed away a captain-relevant branch outcome in pi $PI_VERSION"
-  assert_grep 'task-4: blocked: cannot reach the forge, credentials rejected' "$snapshot" \
-    "Calm collapsed away a branch outcome reporting a blocker in pi $PI_VERSION"
-  assert_grep '⛵' "$snapshot" \
-    "Calm dropped the supervision glyph from what it kept in pi $PI_VERSION"
-  pass "real Pi $PI_VERSION collapses a branch-outcome read under Calm to one dim line per outcome that still needs the captain, and nothing else"
+  assert_no_grep 'task-12' "$snapshot" \
+    "Calm repeated a captain outcome from a branch-outcome read in pi $PI_VERSION"
+  assert_no_grep 'task-4' "$snapshot" \
+    "Calm repeated a captain outcome from a branch-outcome read in pi $PI_VERSION"
+  pass "real Pi $PI_VERSION collapses a branch-outcome read of complete store records to nothing under Calm"
 }
 
 test_calm_on_export_keeps_every_record() {
@@ -306,10 +311,12 @@ test_calm_on_never_hides_a_failed_read() {
     "Calm was not actually collapsing tool rows in this pi $PI_VERSION session, so its branch-outcome result proves nothing"
   assert_grep 'could not read the outcome store' "$snapshot" \
     "Calm hid a failed branch-outcome read in pi $PI_VERSION, leaving the captain unable to see the fleet with no sign of it"
+  assert_grep '⛵' "$snapshot" \
+    "Calm dropped the supervision glyph from the failed read it kept in pi $PI_VERSION"
   pass "real Pi $PI_VERSION keeps a failed branch-outcome read visible under Calm instead of collapsing it to nothing"
 }
 
 test_calm_off_keeps_the_stock_row
-test_calm_on_collapses_to_what_needs_attention
+test_calm_on_collapses_a_complete_store_read
 test_calm_on_export_keeps_every_record
 test_calm_on_never_hides_a_failed_read
