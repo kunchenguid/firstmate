@@ -742,6 +742,27 @@ tests/fm-afk-return.test.sh
 tests/fm-branch-supervision.test.sh
 ```
 
+### Quiet mode
+
+This supports [Quiet mode](../supervision-host.md#quiet-mode): `/quiet` is a statement where the attended host runs, reports a paused session while the broken-session latch holds, names what is missing otherwise and then enters through the daemon, and is unchanged on a home without `config/supervision-host` and on Pi.
+It was measured on 2026-09-26 on macOS arm64 with Claude Code 2.1.283 as primary and engine (`sonnet`), Pi 0.82.0 as primary (`openai-codex/gpt-5.6-sol` medium) and for workers (`openai-codex/gpt-5.6-sol` low), in disposable lab homes on private tmux sockets; engine errors came from a lab wrapper around the real engine that exited 3 while a switch file existed.
+
+| Case | Observed |
+| --- | --- |
+| `/quiet` on a Claude home whose attended host runs | `quiet-check` exited 0 with `Quiet mode needs nothing on this home: ...`; no `state/.afk`, away record, or daemon; the mirror recorded `/quiet` and main's reply |
+| A routine wake after it | `handled ... posture=attended`, routine row 1, main's pane byte-identical before and after |
+| The gated worker's finish after it | `to-main branch-outcome: ... (store rows 2)`; main landed the branch and told the captain |
+| `/quiet` while the latch held (two engine errors, 300-second cooldown) | `Quiet mode starts nothing on this home, but its supervision session is paused after repeated engine errors: ..., and its next retry is due at 01:39.`; nothing entered; after the retry time and before a probe, `its next wake retries it`; after `recovered after a successful probe`, the ordinary statement again |
+| `/quiet` with `config/supervision-host` naming `codex` | `quiet-check` exited 1 naming `no supervision engine`, then the quiet daemon started (`state/.afk` first line `quiet`) and `/quiet off` stopped it |
+| `/quiet` on a Claude home without the file | `quiet-check` exited 1 printing nothing, then the quiet daemon started and `/quiet off` stopped it, as before |
+| `/quiet` on a Pi home with the file | nothing was entered and the reply said supervision is already quiet while the captain is present; `quiet-check` there exits 1 printing nothing |
+
+Deterministic entry point:
+
+```sh
+tests/fm-afk-launch.test.sh
+```
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.
