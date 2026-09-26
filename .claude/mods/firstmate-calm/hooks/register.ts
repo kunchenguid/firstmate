@@ -16,7 +16,7 @@
 // drawings and leaves the stored transcript, model context, and session storage alone.
 //
 // Presentation while Calm is on, sharing Pi Calm's goals where the mods API allows:
-// the stock working row (`Spinner`) becomes the two-row sailboat, repainted through
+// the stock working row (`Spinner`) becomes the three-row sailboat, repainted through
 // `$.ui.blit` on the sprite's own tick; `ToolUse`, `ToolResult`, and `ToolGroup` rows
 // draw as zero-height boxes; a `UserMessage` whose text the canonical operational-input
 // classifier recognizes, or a record-backed doorbell whose record holds a current
@@ -24,8 +24,11 @@
 // draws as zero height; an `AssistantMessage` block recorded as a mid-turn working note
 // draws as zero height. Calm off returns every drawing to the
 // engine. A toggle invalidates every hooked drawing, so rows already on screen redraw.
-// The boat is painted in Claude Code's own theme colors: the family is read from the
-// `theme` setting at load and re-read when a `config.set` changes it.
+// The sea and boat are shaded in the family that suits the theme's background: the
+// family is read from the `theme` setting at load and re-read when a `config.set`
+// changes it. The frame clock runs only while a boat is on screen, and a tick that
+// lands while the previous repaint is still in flight is dropped rather than queued,
+// so a slow surface never builds a backlog.
 //
 // Loading is lazy and cached within a session: a resumed transcript or a hot reload can
 // draw restored rows before `session.start`, so every hook awaits that session's load of
@@ -38,11 +41,10 @@ import {
 } from "../lib/fm-calm-working-ship-sprite.ts";
 import {
   CALM_SHIP_RASTER_KEY,
-  CALM_SHIP_RASTER_PALETTES,
   calmShipPaletteFamily,
   calmShipRasterColumns,
   packCalmShipRasterCells,
-  type CalmShipRasterPalette,
+  type CalmShipPaletteFamily,
 } from "../lib/fm-calm-ship-raster.ts";
 import {
   calmPreferencePath,
@@ -66,13 +68,14 @@ let preferencePath: string | undefined;
 let activation: Promise<boolean> | undefined;
 let loading: Promise<void> | undefined;
 let ticker: { cancel(): void } | undefined;
+let repainting = false;
 const workingNotes = new Set<string>();
 const finalReplies = new Set<string>();
 // Each doorbell's record verdict, by record path. Records are immutable once published
 // but pruned after seven days, so every invalidation drops the cache and rechecks.
 const doorbellVerdicts = new Map<string, Promise<boolean>>();
 const sprite = createCalmWorkingShipSprite();
-let palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.light;
+let family: CalmShipPaletteFamily = "light";
 // Every Spinner site currently drawing the boat, by its requestId, with the mounted
 // Raster size a blit must repeat exactly.
 const sites = new Map<string, { columns: number; rows: number }>();
@@ -114,18 +117,13 @@ async function load($: EngineInterface): Promise<void> {
     $.plugin.root,
   );
   calm = parseCalmPreference(await readText($, preferencePath));
-  palette = CALM_SHIP_RASTER_PALETTES[calmShipPaletteFamily(await readTheme($))];
+  family = calmShipPaletteFamily(await readTheme($));
   try {
     const restored = classifyRestoredTranscript(await $.session.messages());
     for (const note of restored.workingNotes) workingNotes.add(note);
     for (const reply of restored.finalReplies) finalReplies.add(reply);
   } catch {
     // A transcript that cannot be read leaves restored narration visible; nothing else changes.
-  }
-  if (ticker === undefined) {
-    ticker = $.clock.every(CALM_WORKING_SHIP_TICK_MS, () => {
-      void repaintShip($);
-    });
   }
   invalidateDrawings($);
 }
@@ -144,8 +142,9 @@ async function resetSession($: EngineInterface): Promise<void> {
   finalReplies.clear();
   doorbellVerdicts.clear();
   sites.clear();
+  stopTicker();
   sprite.reset();
-  palette = CALM_SHIP_RASTER_PALETTES.light;
+  family = "light";
   await ensureLoaded($);
 }
 
@@ -155,12 +154,33 @@ function invalidateDrawings($: EngineInterface): void {
   $.ui.invalidate("ui.render");
 }
 
+/** Start the frame clock once a boat is on screen. */
+function startTicker($: EngineInterface): void {
+  if (ticker !== undefined) return;
+  ticker = $.clock.every(CALM_WORKING_SHIP_TICK_MS, () => {
+    if (repainting) return;
+    repainting = true;
+    void repaintShip($).finally(() => {
+      repainting = false;
+    });
+  });
+}
+
+/** Stop the frame clock, so nothing wakes while no boat is drawn. */
+function stopTicker(): void {
+  ticker?.cancel();
+  ticker = undefined;
+}
+
 /** One scheduler tick: advance the sprite, then repaint every mounted boat in place. */
 async function repaintShip($: EngineInterface): Promise<void> {
-  if (!calm || sites.size === 0) return;
+  if (!calm || sites.size === 0) {
+    stopTicker();
+    return;
+  }
   sprite.tick();
   for (const [requestId, site] of sites) {
-    const packed = packCalmShipRasterCells(sprite.frame(site.columns), site.columns, palette);
+    const packed = packCalmShipRasterCells(sprite.frame(site.columns, family), site.columns);
     const result = await $.ui.blit({
       requestId,
       key: CALM_SHIP_RASTER_KEY,
@@ -217,7 +237,10 @@ export const register: Register = (on) => {
       return {};
     }
     calm = active;
-    if (!calm) sites.clear();
+    if (!calm) {
+      sites.clear();
+      stopTicker();
+    }
     invalidateDrawings($);
     $.ui.toast(active ? "Calm on" : "Calm off");
     // No `text`: the toggle leaves no output row in the transcript, as on Pi.
@@ -229,9 +252,9 @@ export const register: Register = (on) => {
     if (!(await isActivated($))) return next(e);
     const result = await next(e);
     if (result.deny === undefined) {
-      const chosen = CALM_SHIP_RASTER_PALETTES[calmShipPaletteFamily(result.value)];
-      if (chosen !== palette) {
-        palette = chosen;
+      const chosen = calmShipPaletteFamily(result.value);
+      if (chosen !== family) {
+        family = chosen;
         if (calm) invalidateDrawings($);
       }
     }
@@ -283,8 +306,9 @@ export const register: Register = (on) => {
       return next(e);
     }
     const columns = calmShipRasterColumns(e.viewport?.columns);
-    const packed = packCalmShipRasterCells(sprite.frame(columns), columns, palette);
+    const packed = packCalmShipRasterCells(sprite.frame(columns, family), columns);
     sites.set(e.requestId, { columns, rows: packed.rows });
+    startTicker($);
     const { Box, Raster } = $.ui.resolve(e);
     return Box({
       flexDirection: "column",

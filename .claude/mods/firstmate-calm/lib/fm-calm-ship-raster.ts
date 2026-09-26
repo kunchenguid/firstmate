@@ -4,18 +4,15 @@
 // `cells` prop is base64 of `columns * rows` little-endian u32 triplets
 // `[codePoint, foreground, background]`; `$.ui.blit` repaints a mounted Raster with a
 // new `cells` string without a render pass. This module owns that packing and the
-// sprite's palette on that surface; ../hooks/register.ts owns when it is drawn.
+// choice of shading family on that surface; ../hooks/register.ts owns when it is drawn.
 //
-// Raster colors are RGB, and the terminal paints them through a quantized 256-color
-// palette rather than the standard 16-color ANSI codes Pi's widget emits, which
-// docs/calm-mode-feasibility.md records as a bounded gap. The palette is Claude Code's
-// own: the water takes the theme's spinner blue and the whole boat takes the Claude
-// orange of the stock spinner, one set per theme family. The family follows the
-// `theme` setting's prefix (`dark*` or `light*`); `auto`, custom, missing, and
-// unreadable values use the light set as the both-readable fallback. The Pi extension
-// keeps its standard ANSI colors and is unaffected.
+// The shared sprite resolves every cell's colors as RGB, which the Raster takes as is;
+// the terminal paints them through its own palette, which paints 1024 distinct color
+// pairs at once, far more than the sprite's quantized shading uses in one frame. The
+// family follows the `theme` setting's prefix (`dark*` or `light*`); `auto`, custom,
+// missing, and unreadable values use the light family as the both-readable fallback.
 import type {
-  CalmWorkingShipColor,
+  CalmWorkingShipFamily,
   CalmWorkingShipFrame,
 } from "./fm-calm-working-ship-sprite.ts";
 
@@ -34,21 +31,8 @@ export const CALM_SHIP_RASTER_DEFAULT_VIEWPORT_COLUMNS = 80;
 /** `0x01000000` (bit 24 alone) asks for the terminal's default color. */
 export const CALM_SHIP_RASTER_DEFAULT_COLOR = 0x01000000;
 
-/** Foreground per sprite color class, as `0x00RRGGBB`, or the terminal default. */
-export type CalmShipRasterPalette = Readonly<Record<CalmWorkingShipColor, number>>;
-
 /** The two theme families Claude Code's built-in themes fall into. */
-export type CalmShipPaletteFamily = "dark" | "light";
-
-/**
- * Claude Code's own colors per theme family: the dark and light spinner blues for the
- * water and the Claude orange of the stock spinner for the boat, from the app's
- * built-in theme tables.
- */
-export const CALM_SHIP_RASTER_PALETTES: Readonly<Record<CalmShipPaletteFamily, CalmShipRasterPalette>> = {
-  dark: { plain: CALM_SHIP_RASTER_DEFAULT_COLOR, water: 0x93a5ff, boat: 0xd77757 },
-  light: { plain: CALM_SHIP_RASTER_DEFAULT_COLOR, water: 0x5769f7, boat: 0xd77757 },
-};
+export type CalmShipPaletteFamily = CalmWorkingShipFamily;
 
 /**
  * The palette family for a `theme` setting value: values starting with `dark` select
@@ -96,7 +80,7 @@ export function encodeBase64(bytes: Uint8Array): string {
 }
 
 export type CalmShipRasterCells = {
-  /** How many rows the packed grid has: the frame's, one or two. */
+  /** How many rows the packed grid has: the frame's, one or three. */
   rows: number;
   /** The packed `cells` string for a Raster of `columns` by `rows`. */
   cells: string;
@@ -105,31 +89,32 @@ export type CalmShipRasterCells = {
 /**
  * Pack a frame painted for exactly `columns` cells. Every row is padded with plain
  * spaces to the full width, so the sail row's short run still fills its Raster row,
- * and a row wider than the grid is clipped rather than wrapped.
+ * and a row wider than the grid is clipped rather than wrapped. A `null` color is the
+ * terminal's default.
  */
 export function packCalmShipRasterCells(
   frame: CalmWorkingShipFrame,
   columns: number,
-  palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.light,
 ): CalmShipRasterCells {
   const rows = Math.max(1, frame.length);
   const words = new Uint32Array(columns * rows * 3);
-  const put = (row: number, column: number, codePoint: number, foreground: number): void => {
+  const put = (row: number, column: number, codePoint: number, foreground: number, background: number): void => {
     if (column < 0 || column >= columns) return;
     const offset = (row * columns + column) * 3;
     words[offset] = codePoint;
     words[offset + 1] = foreground;
-    words[offset + 2] = CALM_SHIP_RASTER_DEFAULT_COLOR;
+    words[offset + 2] = background;
   };
   for (let row = 0; row < rows; row += 1) {
     for (let column = 0; column < columns; column += 1) {
-      put(row, column, 0x20, CALM_SHIP_RASTER_DEFAULT_COLOR);
+      put(row, column, 0x20, CALM_SHIP_RASTER_DEFAULT_COLOR, CALM_SHIP_RASTER_DEFAULT_COLOR);
     }
     let column = 0;
     for (const run of frame[row] ?? []) {
-      const foreground = palette[run.color];
+      const foreground = run.fg ?? CALM_SHIP_RASTER_DEFAULT_COLOR;
+      const background = run.bg ?? CALM_SHIP_RASTER_DEFAULT_COLOR;
       for (const glyph of Array.from(run.text)) {
-        put(row, column, glyph.codePointAt(0) ?? 0x20, foreground);
+        put(row, column, glyph.codePointAt(0) ?? 0x20, foreground, background);
         column += 1;
       }
     }

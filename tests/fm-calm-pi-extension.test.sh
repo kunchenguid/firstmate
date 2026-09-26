@@ -2966,460 +2966,209 @@ const ship = await import(
 const {
   CALM_WORKING_SHIP_WIDGET_KEY,
   CALM_WORKING_SHIP_TICK_MS,
-  CALM_WORKING_SHIP_TICKS_PER_MOVE,
+  calmWorkingShipAnsi256,
+  calmWorkingShipFamily,
+  calmWorkingShipPaint,
   createCalmWorkingShipAnimation,
   createCalmWorkingShipWidget,
 } = ship;
 
 const ESC = "\u001b";
-const BLUE = `${ESC}[34m`;
-const YELLOW = `${ESC}[33m`;
-const RESET = `${ESC}[39m`;
-const SAIL = "◿│◣";
-const HULL = "╲▁▁▁╱";
-const WAVE_BARS = "▁▂▃▄";
+const RESET = `${ESC}[39;49m`;
+const HULL_LEFT = "◥";
+const HULL_RIGHT = "◤";
+const RIG = /[◢◿][│╲╱][◺◣]/;
+const WAVE_BARS = "▁▂▃▄▅▆▇█";
+const TRUECOLOR = { family: "dark", mode: "truecolor" };
+const PALETTE_256 = { family: "light", mode: "256color" };
 const strip = (text) => text.replace(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");
 const check = (condition, message) => {
   if (!condition) throw new Error(message);
 };
-const sailOf = (frame) => strip(frame[0]).includes(SAIL) ? SAIL : "none";
+const rigOf = (frame) => (strip(frame[0]).match(RIG) ?? ["none"])[0];
+const hullAt = (frame) => strip(frame[1]).indexOf(HULL_LEFT);
+// About how long the calm boat takes to cross one column at cruise.
+const COLUMN_TICKS = Math.ceil(1000 / CALM_WORKING_SHIP_TICK_MS);
 
-// --- Calm cadence: the boat is materially slower than the water ------------------
+// --- About sixty frames a second, fitting the Pi render throttle -----------------
+check(CALM_WORKING_SHIP_TICK_MS >= 16 && CALM_WORKING_SHIP_TICK_MS <= 17, `frame period ${CALM_WORKING_SHIP_TICK_MS}ms is not about sixty frames a second`);
+
+// --- The paint follows the Pi theme: family by name, depth by color mode ---------
+check(calmWorkingShipFamily("light") === "light" && calmWorkingShipFamily("light-high") === "light", "a light theme did not choose the light family");
+for (const name of ["dark", "custom", undefined, 7]) check(calmWorkingShipFamily(name) === "dark", `theme ${String(name)} did not choose the dark family`);
 {
-  // The pre-revision boat moved one column every 140ms. The revised boat must be
-  // plainly slower in real use while the water keeps rippling between its steps.
-  const msPerColumn = CALM_WORKING_SHIP_TICK_MS * CALM_WORKING_SHIP_TICKS_PER_MOVE;
-  check(msPerColumn >= 700, `boat cadence ${msPerColumn}ms per column is not materially slower`);
-  check(
-    CALM_WORKING_SHIP_TICKS_PER_MOVE >= 2,
-    "the water cadence is not independent of and faster than the boat cadence",
-  );
-  check(
-    CALM_WORKING_SHIP_TICK_MS < msPerColumn,
-    "the water does not animate faster than the boat moves",
-  );
+  const paint = calmWorkingShipPaint(theme);
+  check(paint.family === "dark" && paint.mode === theme.getColorMode(), `the Pi dark theme painted as ${JSON.stringify(paint)}`);
+  check(JSON.stringify(calmWorkingShipPaint(undefined)) === JSON.stringify(TRUECOLOR), "a missing theme did not fall back to dark truecolor");
+  check(calmWorkingShipPaint({ name: "light", getColorMode: () => "256color" }).mode === "256color", "a 256-color theme did not paint in 256 colors");
+  check(calmWorkingShipPaint({ name: "x", getColorMode: () => { throw new Error("no"); } }).mode === "truecolor", "an unreadable color mode did not fall back to truecolor");
 }
+// The 256-color fallback lands on the nearest cube or grey entry.
+check(calmWorkingShipAnsi256(0x000000) === 16 && calmWorkingShipAnsi256(0xffffff) === 231, "cube corners");
+check(calmWorkingShipAnsi256(0x808080) >= 232, "a mid grey did not use the grey ramp");
+check(calmWorkingShipAnsi256(0x0087d7) === 16 + 36 * 0 + 6 * 2 + 4, "a cube color did not map exactly");
 
-// --- Water phases loop independently while the boat stays put --------------------
-{
-  const width = 40;
+// --- Shaded water, hull, and rig at both color depths, closed with a reset ----------
+for (const [paint, pattern] of [[TRUECOLOR, /^\u001b\[(?:39|49|[34]8;2;\d+;\d+;\d+)m$/], [PALETTE_256, /^\u001b\[(?:39|49|[34]8;5;\d+)m$/]]) {
   const animation = createCalmWorkingShipAnimation();
-  animation.render(width);
-  const startPosition = animation.position();
-  const waterRows = new Set();
-  const phases = new Set();
-  for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE - 1; step += 1) {
-    animation.tick();
-    check(
-      animation.position() === startPosition,
-      `the boat moved on tick ${step + 1} instead of waiting for its own cadence`,
-    );
-    waterRows.add(strip(animation.render(width)[1]));
-    phases.add(animation.waterPhase());
-  }
-  check(waterRows.size > 1, "the water did not animate while the boat was stationary");
-  check(phases.size > 1, "the water phase did not advance between boat movements");
-  // The boat then moves on its own cadence tick.
-  animation.tick();
-  check(
-    animation.position() !== startPosition,
-    "the boat never moved on its own cadence tick",
-  );
-  // Water motion alone must not change the hull column.
-  const beforeHull = strip(animation.render(width)[1]).indexOf(HULL);
-  animation.tick();
-  const afterHull = strip(animation.render(width)[1]).indexOf(HULL);
-  check(beforeHull === afterHull, "advancing only the water appeared to move the boat");
-}
-
-// --- Water phases are bounded, fixed-cell, and never change geometry -------------
-{
-  const width = 30;
-  const animation = createCalmWorkingShipAnimation();
-  const seenPhases = new Set();
-  for (let step = 0; step < 64; step += 1) {
-    const frame = animation.render(width);
-    seenPhases.add(animation.waterPhase());
-    check(frame.length === 2, `water phase ${animation.waterPhase()} changed the row count`);
-    check(
-      visibleWidth(frame[1]) === width,
-      `water phase ${animation.waterPhase()} changed the visible width`,
-    );
-    animation.tick();
-  }
-  check(seenPhases.size > 1 && seenPhases.size <= 8, `water phase set is not bounded: ${seenPhases.size}`);
-}
-
-// --- Long low waves are smooth, deterministic, and non-repeating -----------------
-{
-  const first = createCalmWorkingShipAnimation();
-  const second = createCalmWorkingShipAnimation();
-  for (let step = 0; step < 24; step += 1) {
-    const firstFrame = first.render(240);
-    const secondFrame = second.render(240);
-    check(
-      JSON.stringify(firstFrame) === JSON.stringify(secondFrame),
-      `deterministic animations diverged at step ${step}`,
-    );
-    const row = strip(firstFrame[1]).replace(HULL, "▁".repeat(5));
-    check(/^[▁▂▃▄]+$/.test(row), `wave left its low four-glyph scale: ${row}`);
-    const levels = [...row].map((cell) => WAVE_BARS.indexOf(cell));
-    for (let index = 1; index < levels.length; index += 1) {
-      check(
-        Math.abs(levels[index] - levels[index - 1]) <= 1,
-        `wave jumped from ${row[index - 1]} to ${row[index]} at column ${index}`,
-      );
-    }
-    const sample = row.slice(24);
-    for (let period = 1; period <= 18; period += 1) {
-      check(
-        sample.slice(0, -period) !== sample.slice(period),
-        `wave collapsed into a fixed ${period}-cell cycle`,
-      );
-    }
-    if (step === 0) {
-      const crestCenters = [];
-      let crestStart = -1;
-      for (let index = 0; index <= row.length; index += 1) {
-        if (row[index] === "▄" && crestStart < 0) crestStart = index;
-        if (row[index] !== "▄" && crestStart >= 0) {
-          crestCenters.push((crestStart + index - 1) / 2);
-          crestStart = -1;
-        }
-      }
-      const wavelengths = crestCenters.slice(1).map((center, index) => center - crestCenters[index]);
-      check(wavelengths.length >= 6, "wide render did not expose enough wave periods");
-      check(
-        wavelengths.every((length) => length >= 17.5 && length <= 26.5),
-        `visible wavelengths left their bounded long range: ${wavelengths.join(",")}`,
-      );
-      check(new Set(wavelengths).size > 1, "visible wavelengths lost deterministic variation");
-    }
-    first.tick();
-    second.tick();
-  }
-}
-
-// --- Standard ANSI colors, with resets that prevent bleed ------------------------
-{
-  const width = 24;
-  const animation = createCalmWorkingShipAnimation();
-  for (let step = 0; step < 12; step += 1) {
-    const [sailRow, waterRow] = animation.render(width);
-
-    // Standard codes only: no bright variants, no 256-color, no RGB.
-    for (const row of [sailRow, waterRow]) {
+  for (let step = 0; step < 90; step += 1) {
+    const [rigRow, seaRow, bodyRow] = animation.render(40, paint);
+    for (const row of [rigRow, seaRow, bodyRow]) {
       const codes = row.match(new RegExp(`${ESC}\\[[0-9;]*m`, "g")) ?? [];
-      for (const code of codes) {
-        check(
-          code === BLUE || code === YELLOW || code === RESET,
-          `non-standard ANSI escape ${JSON.stringify(code)} in ${JSON.stringify(row)}`,
-        );
-      }
       check(codes.length > 0, "a rendered row carried no color at all");
-      // Every colored run is closed, so nothing bleeds into padding or later frames.
-      check(
-        codes.filter((c) => c !== RESET).length === codes.filter((c) => c === RESET).length,
-        `unbalanced color/reset pairs in ${JSON.stringify(row)}`,
-      );
-      check(codes[codes.length - 1] === RESET, `row does not end color-reset: ${JSON.stringify(row)}`);
+      check(row.endsWith(RESET), `row does not end with a full color reset: ${JSON.stringify(row)}`);
+      for (const code of codes.slice(0, -1)) check(pattern.test(code), `unexpected escape ${JSON.stringify(code)} for ${paint.mode}`);
     }
-
-    // Sail-row padding must be plain spaces outside any color run.
-    const leading = sailRow.slice(0, sailRow.indexOf(ESC));
-    check(/^ *$/.test(leading), `sail row padding was colored: ${JSON.stringify(leading)}`);
-
-    // Both sail halves and the mast are one yellow run, so the sail never splits into
-    // mismatched colors, and the hull is one yellow run whose interior is not blue.
-    check(
-      sailRow.includes(`${YELLOW}◿│◣${RESET}`),
-      `sail was not painted as one unified yellow run: ${JSON.stringify(sailRow)}`,
-    );
-    check(
-      visibleWidth("◿") === 1 && visibleWidth(SAIL) === 3,
-      "the width-safe smaller sail broke the three-cell sprite",
-    );
-    check(
-      waterRow.includes(`${YELLOW}╲▁▁▁╱${RESET}`),
-      `hull was not painted as one unified yellow run: ${JSON.stringify(waterRow)}`,
-    );
-    // Every water cell outside the hull is blue whatever its height, so the swell
-    // reads through glyph height alone rather than a crest-versus-trough color split.
-    const waterCells = waterRow.replace(`${YELLOW}╲▁▁▁╱${RESET}`, "").match(/\u001b\[\d+m[▁▂▃▄]\u001b\[39m/g) ?? [];
-    check(waterCells.length > 0, "no colored water cells surrounded the hull");
-    check(
-      waterCells.every((cell) => cell.startsWith(BLUE)),
-      `water was not all blue: ${JSON.stringify(waterCells.filter((cell) => !cell.startsWith(BLUE)))}`,
-    );
-    check(
-      waterCells.some((cell) => cell.includes("▃") || cell.includes("▄")),
-      "the checked frame carried no crest cell, so the all-blue assertion proved nothing",
-    );
-    check(
-      /^[▁▂▃▄╲╱]+$/.test(strip(waterRow)),
-      `water row contained a non-wave glyph: ${JSON.stringify(strip(waterRow))}`,
-    );
+    // Rig padding stays uncolored, so nothing tints the transcript above.
+    const leading = rigRow.slice(0, rigRow.indexOf(ESC));
+    check(/^ *$/.test(leading), `rig padding was colored: ${JSON.stringify(leading)}`);
+    check(RIG.test(strip(rigRow)), `the rig was not drawn: ${JSON.stringify(strip(rigRow))}`);
+    const sea = strip(seaRow);
+    const at = sea.indexOf(HULL_LEFT);
+    check(at >= 0 && sea[at + 4] === HULL_RIGHT, `the hull was not drawn: ${JSON.stringify(sea)}`);
+    check([...(sea.slice(0, at) + sea.slice(at + 1, at + 4) + sea.slice(at + 5))].every((cell) => WAVE_BARS.includes(cell)), `a sea cell was not an eighth block: ${sea}`);
+    check(strip(bodyRow) === "█".repeat(40), "the water body did not fill the row");
+    // The waterline cells draw water over a hull-colored background.
+    check(new RegExp(`${ESC}\\[48;[25];`).test(seaRow), "the hull side carried no background");
     animation.tick();
   }
+  // The sea is shaded, not one flat color.
+  const seaCodes = new Set(animation.render(40, paint)[1].match(new RegExp(`${ESC}\\[38;[25];[0-9;]+m`, "g")));
+  check(seaCodes.size >= 5, `the sea used only ${seaCodes.size} colors`);
 }
 
-// --- ANSI-stripped visible width is exact at every width and phase ---------------
+// --- ANSI-stripped visible width is exact at every width, and nothing wraps --------
 for (let width = 1; width <= 120; width += 1) {
   const animation = createCalmWorkingShipAnimation();
-  animation.render(width);
-  for (let step = 0; step <= width + 8; step += 1) {
-    const frame = animation.render(width);
-    const expectedRows = width >= 5 ? 2 : 1;
+  for (let step = 0; step <= 40; step += 1) {
+    const frame = animation.render(width, step % 2 ? TRUECOLOR : PALETTE_256);
+    const expectedRows = width >= 5 ? 3 : 1;
     check(frame.length === expectedRows, `width ${width} rendered ${frame.length} rows`);
     for (const line of frame) {
-      check(
-        visibleWidth(line) <= width,
-        `width ${width} rendered a ${visibleWidth(line)}-cell line and would wrap`,
-      );
-      check(
-        visibleWidth(line) === strip(line).length,
-        `width ${width} let ANSI bytes affect the measured geometry`,
-      );
+      check(visibleWidth(line) <= width, `width ${width} rendered a ${visibleWidth(line)}-cell line and would wrap`);
+      check(visibleWidth(line) === strip(line).length, `width ${width} let ANSI bytes or a wide glyph affect the geometry`);
     }
-    // The water row always fills the complete usable width.
-    const waterRow = frame[frame.length - 1];
-    check(
-      visibleWidth(waterRow) === width,
-      `width ${width} water row was ${visibleWidth(waterRow)} cells instead of full width`,
-    );
+    check(visibleWidth(frame[frame.length - 1]) === width, `width ${width} last row did not fill the width`);
+    if (width >= 5) check(visibleWidth(frame[1]) === width, `width ${width} sea row did not fill the width`);
+    if (width >= 3) check(RIG.test(strip(frame[0])), `width ${width} lost its rig`);
+    else check(new RegExp(`^[${WAVE_BARS}]+$`).test(strip(frame[0])), `width ${width} fallback was not water`);
     animation.tick();
   }
 }
+check(JSON.stringify(createCalmWorkingShipAnimation().render(0)) === "[]", "zero width rendered a line");
 
-// --- Centered sail, broad trough, and exact bounce, including tiny spans ---------
-for (const width of [40, 16, 8, 6, 5, 4, 3, 2]) {
+// --- Calm travel: the rig stays centered, the boat bounces at both edges ------------
+for (const width of [40, 16, 8, 6, 5, 4, 3]) {
   const animation = createCalmWorkingShipAnimation();
-  animation.render(width);
-  const span = width >= 5 ? width - 5 : width >= 3 ? width - 3 : 0;
-  const frames = [];
-  for (let step = 0; step < span * CALM_WORKING_SHIP_TICKS_PER_MOVE * 3 + 16; step += 1) {
+  const span = width >= 5 ? width - 5 : width - 3;
+  const positions = new Set();
+  const directions = new Set();
+  for (let step = 0; step < COLUMN_TICKS * (span * 3 + 8); step += 1) {
     const frame = animation.render(width);
-    const bare = frame.map(strip);
-    frames.push({
-      position: animation.position(),
-      direction: animation.direction(),
-      sail: sailOf(frame),
-    });
+    positions.add(animation.position());
+    directions.add(animation.direction());
+    check(animation.position() >= 0 && animation.position() <= span, `width ${width} left the track`);
     if (width >= 5) {
-      const sailStart = bare[0].indexOf(SAIL);
-      const hullStart = bare[1].indexOf(HULL);
-      check(sailStart === hullStart + 1, `width ${width} sail and hull starts drifted`);
-      check(sailStart + 1 === hullStart + 2, `width ${width} centers were not aligned`);
-      const before = bare[1].slice(Math.max(0, hullStart - 3), hullStart);
-      const after = bare[1].slice(hullStart + 5, hullStart + 8);
-      check(/^[▁]*$/.test(before) && /^[▁]*$/.test(after), `width ${width} hull left its trough`);
+      check(hullAt(frame) === animation.position(), `width ${width} drew the hull away from its column`);
+      check(strip(frame[0]).search(RIG) === hullAt(frame) + 1, `width ${width} rig drifted off the hull center`);
     }
     animation.tick();
   }
-  for (const frame of frames) {
-    check(
-      frame.position >= 0 && frame.position <= span,
-      `width ${width} left the track at column ${frame.position}`,
-    );
-    if (width >= 3) check(frame.sail === SAIL, `width ${width} lost its fixed sail`);
-  }
   if (span > 0) {
-    const positions = frames.map((frame) => frame.position);
-    check(Math.min(...positions) === 0, `width ${width} never reached the left edge`);
-    check(Math.max(...positions) === span, `width ${width} never reached the right edge`);
-    const directions = new Set(frames.map((frame) => frame.direction));
+    check(positions.has(0) && positions.has(span), `width ${width} never reached both edges`);
     check(directions.has(1) && directions.has(-1), `width ${width} did not reverse both ways`);
   }
+}
+
+// --- The rig mirrors when the boat comes about -------------------------------------
+{
+  const animation = createCalmWorkingShipAnimation();
+  const rigs = new Set();
+  for (let step = 0; step < COLUMN_TICKS * 30; step += 1) {
+    rigs.add(rigOf(animation.render(12)).replace(/[╲╱]/, "│"));
+    animation.tick();
+  }
+  check(rigs.has("◢│◺") && rigs.has("◿│◣"), `the rig never mirrored: ${[...rigs].join(",")}`);
 }
 
 // --- Shrink and grow resize clamping ----------------------------------------------
 {
   const animation = createCalmWorkingShipAnimation();
   animation.render(80);
-  while (animation.position() < 75) animation.tick();
-  check(animation.position() === 75, `boat did not reach the wide right edge: ${animation.position()}`);
-
+  while (animation.position() < 75) {
+    animation.tick();
+    animation.render(80);
+  }
   const shrunk = animation.render(20);
   check(animation.position() === 15, `shrink did not clamp the track immediately: ${animation.position()}`);
-  check(visibleWidth(shrunk[1]) === 20, `shrunk water row was ${visibleWidth(shrunk[1])} cells instead of 20`);
-  check(visibleWidth(shrunk[0]) <= 20, "shrunk sail row would wrap");
+  check(visibleWidth(shrunk[1]) === 20 && visibleWidth(shrunk[0]) <= 20, "the shrunk frame did not fit");
   check(animation.direction() === -1, "the boat did not turn around after being clamped to the right edge");
-
-  for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) animation.tick();
-  const afterShrink = animation.render(20);
+  for (let step = 0; step < COLUMN_TICKS * 4; step += 1) animation.tick();
+  animation.render(20);
   check(animation.position() < 15, "the boat stalled at the edge after a shrink");
-  check(visibleWidth(afterShrink[1]) === 20, "motion after a shrink broke the water row width");
-
   const grown = animation.render(60);
-  check(visibleWidth(grown[1]) === 60, `grown water row was ${visibleWidth(grown[1])} cells`);
-  for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) animation.tick();
-  const afterGrow = animation.render(60);
-  check(
-    animation.position() >= 0 && animation.position() <= 55,
-    `motion left the grown track: ${animation.position()}`,
-  );
-  check(visibleWidth(afterGrow[1]) === 60, "motion after a grow broke the water row width");
-}
-
-// --- Deterministic narrow fallbacks ------------------------------------------------
-{
-  const animation = createCalmWorkingShipAnimation();
-  check(JSON.stringify(animation.render(0)) === "[]", "zero width rendered a line");
-  for (const width of [1, 2, 3, 4]) {
-    const fallback = createCalmWorkingShipAnimation();
-    for (let step = 0; step < 12; step += 1) {
-      const frame = fallback.render(width);
-      check(frame.length === 1, `width ${width} fallback was not a single row`);
-      check(visibleWidth(frame[0]) === width, `width ${width} fallback was not exactly ${width} cells`);
-      const bare = strip(frame[0]);
-      if (width < 3) {
-        check(new RegExp(`^[${WAVE_BARS}]+$`).test(bare), `width ${width} fallback was not low water: ${bare}`);
-      } else {
-        check(bare.includes(SAIL), `width ${width} fallback lost the sail: ${bare}`);
-      }
-      fallback.tick();
-    }
-  }
+  check(visibleWidth(grown[1]) === 60, `grown sea row was ${visibleWidth(grown[1])} cells`);
 }
 
 // --- Freeze/resume continuity on one shared animation instance ---------------------
-// Hiding the working presentation must freeze column and direction. The next widget
+// Hiding the working presentation must freeze the boat and the sea. The next widget
 // bound to the same animation resumes exactly there; hidden wall time must not jump.
 {
   const animation = createCalmWorkingShipAnimation();
   const tui = { requestRender() {} };
   animation.render(40);
-  for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE * 7; step += 1) animation.tick();
+  for (let step = 0; step < COLUMN_TICKS * 6; step += 1) animation.tick();
   animation.render(40);
-  const frozenColumn = animation.position();
-  const frozenDirection = animation.direction();
-  const frozenPhase = animation.waterPhase();
-  check(frozenColumn > 0, `continuity setup never left the left edge: ${frozenColumn}`);
+  const frozen = { column: animation.position(), direction: animation.direction(), time: animation.seaTime(), velocity: animation.velocity() };
+  check(frozen.column > 0, `continuity setup never left the left edge: ${frozen.column}`);
+  const frozenFrame = animation.render(40);
 
-  const first = createCalmWorkingShipWidget(tui, animation);
-  check(first.render(40) && animation.position() === frozenColumn, "binding a widget moved the frozen boat");
+  const first = createCalmWorkingShipWidget(tui, animation, theme);
   first.dispose();
-  // Dispose freezes; further wall time without ticks must not change logical state.
-  check(animation.position() === frozenColumn, "dispose changed the frozen column");
-  check(animation.direction() === frozenDirection, "dispose changed the frozen direction");
-  check(animation.waterPhase() === frozenPhase, "dispose changed the frozen water phase");
+  check(animation.position() === frozen.column && animation.direction() === frozen.direction, "dispose moved the frozen boat");
+  check(animation.seaTime() === frozen.time && animation.velocity() === frozen.velocity, "dispose advanced the frozen sea");
 
-  const resumed = createCalmWorkingShipWidget(tui, animation);
-  const firstFrame = resumed.render(40);
-  check(
-    animation.position() === frozenColumn && animation.direction() === frozenDirection,
-    `resume first frame left frozen state: col=${animation.position()} dir=${animation.direction()}`,
-  );
-  check(sailOf(firstFrame) === SAIL, "resume first frame lost its centered sail");
-  check(animation.waterPhase() === frozenPhase, "resume advanced water phase without a tick");
-  // After resume, motion continues from the frozen state rather than restarting.
-  for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) animation.tick();
-  check(
-    animation.position() === frozenColumn + frozenDirection,
-    `post-resume motion did not continue from frozen column: ${animation.position()}`,
-  );
+  const resumed = createCalmWorkingShipWidget(tui, animation, theme);
+  check(JSON.stringify(resumed.render(40)) === JSON.stringify(frozenFrame), "the resumed first frame differs from the frozen one");
+  for (let step = 0; step < COLUMN_TICKS * 2; step += 1) animation.tick();
+  check(animation.position() > frozen.column, `post-resume motion did not continue from the frozen column: ${animation.position()}`);
   resumed.dispose();
 
-  // Hidden resize clamps without needing a live widget, and preserves a valid heading.
+  // A hidden resize clamps without needing a live widget, and keeps a valid heading.
+  animation.reset();
   animation.render(80);
-  while (animation.position() < 75) animation.tick();
-  animation.render(80);
-  check(animation.position() === 75 && animation.direction() === -1, "endpoint setup failed before hidden resize");
-  const beforeHiddenResize = { column: animation.position(), direction: animation.direction(), phase: animation.waterPhase() };
-  animation.clampToWidth(20);
-  check(animation.position() === 15, `hidden shrink did not clamp: ${animation.position()}`);
-  check(animation.direction() === -1, "hidden shrink lost the leftward heading at the right edge");
-  check(animation.waterPhase() === beforeHiddenResize.phase, "hidden clamp advanced water phase");
-  // Growing while hidden must not invent motion either.
-  animation.clampToWidth(60);
-  check(animation.position() === 15, `hidden grow moved the boat: ${animation.position()}`);
-  check(animation.direction() === -1, "hidden grow changed direction without cause");
-
-  // Endpoint and bounce continuity: pause immediately before, at, and after each edge.
-  for (const scenario of [
-    { label: "before-right", setup(anim) {
-      anim.reset(); anim.render(12);
-      while (anim.position() < 6) anim.tick();
-      check(anim.position() === 6 && anim.direction() === 1, "before-right setup");
-    }},
-    { label: "at-right", setup(anim) {
-      anim.reset(); anim.render(12);
-      while (anim.position() < 7) anim.tick();
-      check(anim.position() === 7 && anim.direction() === -1, "at-right setup");
-    }},
-    { label: "after-right", setup(anim) {
-      anim.reset(); anim.render(12);
-      while (anim.position() < 7) anim.tick();
-      for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) anim.tick();
-      check(anim.position() === 6 && anim.direction() === -1, "after-right setup");
-    }},
-    { label: "before-left", setup(anim) {
-      anim.reset(); anim.render(12);
-      while (anim.position() < 7) anim.tick();
-      while (!(anim.position() === 1 && anim.direction() === -1)) anim.tick();
-    }},
-    { label: "at-left", setup(anim) {
-      anim.reset(); anim.render(12);
-      while (anim.position() < 7) anim.tick();
-      while (!(anim.position() === 0 && anim.direction() === 1)) anim.tick();
-    }},
-    { label: "after-left", setup(anim) {
-      anim.reset(); anim.render(12);
-      while (anim.position() < 7) anim.tick();
-      while (!(anim.position() === 0 && anim.direction() === 1)) anim.tick();
-      for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) anim.tick();
-      check(anim.position() === 1 && anim.direction() === 1, "after-left setup");
-    }},
-  ]) {
-    const edge = createCalmWorkingShipAnimation();
-    scenario.setup(edge);
-    edge.render(12);
-    const frozen = { column: edge.position(), direction: edge.direction(), phase: edge.waterPhase() };
-    const paused = createCalmWorkingShipWidget(tui, edge);
-    paused.dispose();
-    const again = createCalmWorkingShipWidget(tui, edge);
-    again.render(12);
-    check(
-      edge.position() === frozen.column && edge.direction() === frozen.direction && edge.waterPhase() === frozen.phase,
-      `${scenario.label} resume changed frozen edge state`,
-    );
-    for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) edge.tick();
-    const expectedColumn = Math.min(7, Math.max(0, frozen.column + frozen.direction));
-    let expectedDirection = frozen.direction;
-    if (expectedColumn >= 7) expectedDirection = -1;
-    else if (expectedColumn <= 0) expectedDirection = 1;
-    check(
-      edge.position() === expectedColumn && edge.direction() === expectedDirection,
-      `${scenario.label} post-resume bounce drifted: col=${edge.position()} dir=${edge.direction()}`,
-    );
-    again.dispose();
+  while (animation.position() < 75) {
+    animation.tick();
+    animation.render(80);
   }
+  const before = animation.seaTime();
+  animation.clampToWidth(20);
+  check(animation.position() === 15 && animation.direction() === -1, "a hidden shrink did not clamp and turn the boat");
+  check(animation.seaTime() === before, "a hidden clamp advanced the sea");
+  animation.clampToWidth(60);
+  check(animation.position() === 15 && animation.direction() === -1, "a hidden grow moved or turned the boat");
 
   // reset() returns a genuine fresh-session initial state.
   animation.reset();
-  check(
-    animation.position() === 0 && animation.direction() === 1 && animation.waterPhase() === 0,
-    "reset() did not restore the normal initial boat state",
-  );
-  animation.render(40);
-  check(sailOf(animation.render(40)) === SAIL, "reset() first frame lost the centered sail");
+  check(animation.position() === 0 && animation.direction() === 1 && animation.seaTime() === 0, "reset() did not restore the initial boat state");
 
   // Two controller instances never share motion state.
   const left = createCalmWorkingShipAnimation();
   const right = createCalmWorkingShipAnimation();
-  left.render(40);
-  right.render(40);
-  for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE * 3; step += 1) left.tick();
-  check(left.position() === 3 && right.position() === 0, "separate animations leaked motion state");
+  for (let step = 0; step < COLUMN_TICKS * 3; step += 1) left.tick();
+  check(left.seaTime() > 0 && right.seaTime() === 0 && right.position() === 0, "separate animations leaked motion state");
 }
 
+// --- The widget timer: unpainted ticks never leak past a dispose ------------------
 {
   const realSetInterval = globalThis.setInterval;
   const realClearInterval = globalThis.clearInterval;
   const callbacks = [];
   const handles = new Set();
-  globalThis.setInterval = (callback) => {
+  const periods = [];
+  globalThis.setInterval = (callback, period) => {
     callbacks.push(callback);
+    periods.push(period);
     const handle = { unref() {} };
     handles.add(handle);
     return handle;
@@ -3427,92 +3176,30 @@ for (const width of [40, 16, 8, 6, 5, 4, 3, 2]) {
   globalThis.clearInterval = (handle) => {
     handles.delete(handle);
   };
-
   try {
     const tui = { renderRequests: 0, requestRender() { this.renderRequests += 1; } };
     const animation = createCalmWorkingShipAnimation();
-    const first = createCalmWorkingShipWidget(tui, animation);
+    const first = createCalmWorkingShipWidget(tui, animation, theme);
+    check(periods.at(-1) === CALM_WORKING_SHIP_TICK_MS, "the widget timer does not run at the frame period");
     first.render(40);
-    callbacks[callbacks.length - 1]();
-    callbacks[callbacks.length - 1]();
-    check(tui.renderRequests === 2, "unpainted timer ticks did not request renders");
+    callbacks.at(-1)();
+    callbacks.at(-1)();
+    check(tui.renderRequests === 2, "timer ticks did not request renders");
     first.dispose();
-    check(handles.size === 0, "disposing the unpainted widget left its timer scheduled");
-    check(
-      animation.position() === 0 && animation.direction() === 1 && animation.waterPhase() === 0,
-      "dispose retained state from unpainted timer ticks",
-    );
+    check(handles.size === 0, "disposing the widget left its timer scheduled");
+    check(animation.seaTime() === 0 && animation.position() === 0, "dispose retained state from unpainted timer ticks");
 
-    const resumed = createCalmWorkingShipWidget(tui, animation);
+    const resumed = createCalmWorkingShipWidget(tui, animation, theme);
     resumed.render(40);
-    for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) {
-      callbacks[callbacks.length - 1]();
-    }
+    for (let step = 0; step < 5; step += 1) callbacks.at(-1)();
     resumed.render(40);
-    check(animation.position() === 1, "unpainted ticks leaked into the resumed cadence");
-    check(animation.waterPhase() === 0, "resumed cadence did not restore the rendered water phase");
+    const painted = animation.seaTime();
+    check(painted === 5 * CALM_WORKING_SHIP_TICK_MS, `painted ticks did not commit: ${painted}`);
+    callbacks.at(-1)();
+    callbacks.at(-1)();
     resumed.dispose();
-
-    const committed = createCalmWorkingShipAnimation();
-    const progressing = createCalmWorkingShipWidget(tui, committed);
-    progressing.render(40);
-    callbacks[callbacks.length - 1]();
-    progressing.render(40);
-    const renderedPhase = committed.waterPhase();
-    callbacks[callbacks.length - 1]();
-    progressing.dispose();
-    check(committed.position() === 0, "dispose changed the committed column after an unpainted tick");
-    check(committed.waterPhase() === renderedPhase, "dispose changed the committed phase after an unpainted tick");
-
-    const committedResume = createCalmWorkingShipWidget(tui, committed);
-    committedResume.render(40);
-    for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE - 2; step += 1) {
-      callbacks[callbacks.length - 1]();
-    }
-    check(committed.position() === 0, "serviced render did not preserve the committed cadence");
-    callbacks[callbacks.length - 1]();
-    committedResume.render(40);
-    check(committed.position() === 1, "serviced render did not commit progress for the next cadence");
-    committedResume.dispose();
-
-    const boundaryCases = [
-      [6, 1], [7, -1], [6, -1], [1, -1], [0, 1], [1, 1],
-    ];
-    for (const [targetPosition, targetDirection] of boundaryCases) {
-      const edge = createCalmWorkingShipAnimation();
-      edge.render(12);
-      let reached = false;
-      for (let step = 0; step < 160; step += 1) {
-        if (edge.position() === targetPosition && edge.direction() === targetDirection) {
-          edge.render(12);
-          reached = true;
-          break;
-        }
-        edge.tick();
-        edge.render(12);
-      }
-      check(reached, `could not prepare bounce state ${targetPosition}/${targetDirection}`);
-      const before = { position: edge.position(), direction: edge.direction(), phase: edge.waterPhase() };
-      const paused = createCalmWorkingShipWidget(tui, edge);
-      paused.render(12);
-      for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) {
-        callbacks[callbacks.length - 1]();
-      }
-      paused.dispose();
-      check(
-        edge.position() === before.position &&
-          edge.direction() === before.direction &&
-          edge.waterPhase() === before.phase,
-        `unpainted bounce tick escaped ${targetPosition}/${targetDirection}`,
-      );
-      const resumedEdge = createCalmWorkingShipWidget(tui, edge);
-      resumedEdge.render(12);
-      check(
-        edge.position() === before.position && edge.direction() === before.direction,
-        `bounce state ${targetPosition}/${targetDirection} changed on resume`,
-      );
-      resumedEdge.dispose();
-    }
+    check(animation.seaTime() === painted, "dispose kept ticks that were never painted");
+    check(JSON.stringify(resumed.render(40)) === "[]", "a disposed widget still rendered rows");
   } finally {
     globalThis.setInterval = realSetInterval;
     globalThis.clearInterval = realClearInterval;
@@ -3650,7 +3337,7 @@ check(typeof widget.dispose === "function", "working widget has no dispose()");
 // A focusable widget could steal input or swallow Escape; this one takes no keys.
 check(widget.handleInput === undefined, "working widget accepts keyboard input");
 check(widget.wantsKeyRelease === undefined, "working widget asked for key release events");
-check(widget.render(60).length === 2, "installed working widget did not render the two-row sprite");
+check(widget.render(60).length === 3, "installed working widget did not render the three-row sprite");
 check(
   widget.render(60).every((line) => visibleWidth(line) <= 60),
   "installed working widget rendered a line wider than its viewport",
@@ -3677,12 +3364,12 @@ check(shipWidget() === widget, "repeated starts replaced the running widget");
   const moving = shipWidget();
   check(!!moving, "continuity setup lost the live working widget");
   moving.render(40);
-  await new Promise((resolve) => setTimeout(resolve, CALM_WORKING_SHIP_TICK_MS * CALM_WORKING_SHIP_TICKS_PER_MOVE * 5 + 40));
+  await new Promise((resolve) => setTimeout(resolve, 2600));
   moving.render(40);
 }
-const hullColumn = (widget) => strip(widget.render(40)[1]).indexOf(HULL);
+const hullColumn = (widget) => strip(widget.render(40)[1]).indexOf(HULL_LEFT);
 const freezeColumn = hullColumn(shipWidget());
-const freezeSail = sailOf(shipWidget().render(40));
+const freezeSail = rigOf(shipWidget().render(40));
 check(freezeColumn > 0, `lifecycle continuity setup never left the left edge: ${freezeColumn}`);
 
 reset();
@@ -3702,7 +3389,7 @@ check(
 {
   // No stale rows survive the removal: the widget renders nothing once disposed.
   const renderRequestsAfterDispose = renderRequests;
-  await new Promise((resolve) => setTimeout(resolve, CALM_WORKING_SHIP_TICK_MS * CALM_WORKING_SHIP_TICKS_PER_MOVE * 3));
+  await new Promise((resolve) => setTimeout(resolve, CALM_WORKING_SHIP_TICK_MS * 12));
   check(
     renderRequests === renderRequestsAfterDispose,
     "the animation kept running after the widget was removed",
@@ -3716,7 +3403,7 @@ check(liveTimers === 1, `resume start left ${liveTimers} animation timers instea
 check(ui.widgets.size === 1, "resume start did not install exactly one working widget");
 const resumedWidget = shipWidget();
 const resumeColumn = hullColumn(resumedWidget);
-const resumeSail = sailOf(resumedWidget.render(40));
+const resumeSail = rigOf(resumedWidget.render(40));
 check(
   resumeColumn === freezeColumn && resumeSail === freezeSail,
   `resume reset the boat instead of continuing: froze ${freezeColumn}/${freezeSail}, resumed ${resumeColumn}/${resumeSail}`,
@@ -3743,7 +3430,7 @@ await fire("session_start", { reason: "new" });
 check(liveTimers === 0 && ui.widgets.size === 0, "fresh session left a stale boat");
 await fire("agent_start");
 check(hullColumn(shipWidget()) === 0, "fresh session did not restart at the left edge");
-check(sailOf(shipWidget().render(40)) === SAIL, "fresh session lost the centered sail");
+check(rigOf(shipWidget().render(40)).replace(/[╲╱]/, "│") === "◢│◺", "fresh session lost its rig heading right");
 await fire("agent_settled");
 
 // --- Abort and failure share Pi's agent_settled path ------------------------------
@@ -3827,7 +3514,7 @@ JS
   status=$?
   [ "$status" -eq 0 ] || fail "Pi Calm working-ship checks failed: $out"
   [ -z "$out" ] || fail "Pi Calm working-ship test printed output: $out"
-  pass "Pi Calm working ship keeps its centered two-row asymmetric Unicode boat inside a deterministic long-wave trough, paints all water standard blue and the whole boat standard yellow with balanced resets, keeps ANSI-stripped width exact, reverses cleanly at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and leaves Calm-off visibility untouched"
+  pass "Pi Calm working ship paints the shared shaded sea and floating boat at about sixty frames a second in the Pi theme family and color depth with closing resets, keeps ANSI-stripped width exact, keeps the rig centered over the hull, reverses and mirrors at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and leaves Calm-off visibility untouched"
 }
 
 # The rendered-DOM assertions below depend on a real browser, so the render step
@@ -4479,67 +4166,54 @@ JS
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$working_snapshot"
-    if grep -Fq '╲▁▁▁╱' "$working_snapshot"; then
+    if grep -Fq '◥' "$working_snapshot"; then
       break
     fi
     sleep 0.025
     active_screen_wait=$((active_screen_wait + 1))
   done
   cp "$working_snapshot" "$boat_frame_one"
-  assert_contains "$(cat "$boat_frame_one")" '╲▁▁▁╱' "Calm did not show the working ship during a real provider wait"
-  assert_contains "$(cat "$boat_frame_one")" '◿│◣' "the working ship lost its centered asymmetric sail"
+  assert_contains "$(cat "$boat_frame_one")" '◥' "Calm did not show the working ship during a real provider wait"
+  # Kept outside command substitutions: bash 3.2 misparses multibyte glyphs beside
+  # parentheses inside \$(...).
+  boat_rig_pattern='(◢|◿)(│|╲|╱)(◺|◣)'
+  grep -Eq "$boat_rig_pattern" "$boat_frame_one" || fail "the working ship lost its rig"
   assert_not_contains "$(cat "$boat_frame_one")" "Working" "Calm left Pi's stock working row visible while the ship was shown"
   assert_not_contains "$(cat "$boat_frame_one")" "calm transcript" "the real provider wait showed a persistent Calm status row"
   assert_not_contains "$(cat "$boat_frame_one")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "the real provider wait restored a hidden operational row"
-  boat_hull_line=$(grep -F '╲▁▁▁╱' "$boat_frame_one" | head -1)
-  boat_hull_column=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_frame_one")
-  boat_sail_column=$(awk 'index($0,"◿│◣"){print index($0,"◿│◣"); exit}' "$boat_frame_one")
+  boat_hull_line=$(grep -F '◥' "$boat_frame_one" | head -1)
+  boat_hull_column=$(awk 'index($0,"◥"){print index($0,"◥"); exit}' "$boat_frame_one")
+  boat_sail_column=$(awk '{ i = index($0, "◢"); j = index($0, "◿"); if (i || j) { print ((i && (!j || i < j)) ? i : j); exit } }' "$boat_frame_one")
   [ "$boat_sail_column" -eq $((boat_hull_column + 1)) ] \
-    || fail "the working ship sail was not centered over its five-cell hull"
+    || fail "the working ship rig was not centered over its five-cell hull"
   assert_not_contains "$boat_hull_line" "Working" "the ship row carried extra status copy"
-  printf '%s\n' "$boat_hull_line" | grep -Eq '[▁▂▃▄]' \
-    || fail "the working ship rendered no low waveform"
-  # Standard ANSI colors: all water blue at every height, the whole hull and sail
-  # yellow, no cyan crests or red sail half, and no RGB/256 escapes.
+  printf '%s\n' "$boat_hull_line" | grep -Eq '(▁|▂|▃|▄|▅|▆|▇|█)' \
+    || fail "the working ship rendered no sea surface"
+  # Shaded color at Pi's own depth: 24-bit or 256-color escapes, many distinct water
+  # shades on the sea row, and a hull side drawn as a background behind the waterline.
   tmux -L "$TMUX_SOCKET" capture-pane -p -e -t "$TMUX_SESSION" >"$boat_color_snapshot"
-  boat_color_line=$(grep -F '╲' "$boat_color_snapshot" | head -1)
-  boat_sail_line=$(grep -F '◿' "$boat_color_snapshot" | head -1)
+  boat_color_line=$(grep -F '◥' "$boat_color_snapshot" | head -1)
+  # Each rig cell carries its own shade, so escapes sit between the glyphs here.
+  boat_sail_line=$(grep -F -e '◢' -e '◿' "$boat_color_snapshot" | head -1)
   [ -n "$boat_color_line" ] || fail "could not capture a colored working-ship row"
-  [ -n "$boat_sail_line" ] || fail "could not capture a colored working-ship sail"
-  case "$boat_color_line" in
-    *'[34m'*) : ;;
-    *) fail "the trough was not rendered with standard ANSI blue" ;;
-  esac
-  case "$boat_color_line$boat_sail_line" in
-    *'[36m'*) fail "the wave crests were still rendered in a second water color (cyan)" ;;
-    *'[31m'*) fail "the right sail was still rendered in a second boat color (red)" ;;
-  esac
-  case "$boat_color_line" in
-    *'[33m'*) : ;;
-    *) fail "the hull was not rendered with standard ANSI yellow" ;;
-  esac
-  case "$boat_sail_line" in
-    *'[33m'*'◿│◣'*) : ;;
-    *) fail "the sail was not rendered as one standard ANSI yellow run" ;;
-  esac
-  case "$boat_color_line" in
-    *'[33m'*'╲▁▁▁╱'*) : ;;
-    *) fail "the hull was not rendered as one standard ANSI yellow run" ;;
-  esac
-  case "$boat_color_line$boat_sail_line" in
-    *'[38;2;'*|*'[38;5;'*|*'[9'[0-9]'m'*) fail "the working ship used a non-standard color escape" ;;
-    *) : ;;
-  esac
+  [ -n "$boat_sail_line" ] || fail "could not capture a colored working-ship rig"
+  printf '%s\n' "$boat_color_line" | grep -Eq '\[38;[25];' \
+    || fail "the sea was not shaded with Pi's 24-bit or 256-color escapes"
+  printf '%s\n' "$boat_color_line" | grep -Eq '\[48;[25];' \
+    || fail "the hull side was not drawn behind the waterline"
+  boat_shades=$(printf '%s\n' "$boat_color_line" | grep -oE '\[38;[25];[0-9;]+m' | sort -u | wc -l | tr -d ' ')
+  [ "$boat_shades" -ge 5 ] || fail "the sea used only $boat_shades shades"
+  printf '%s\n' "$boat_sail_line" | grep -Eq '\[38;[25];' || fail "the rig was not colored"
 
   # The water animates on its own faster cadence while the boat holds its column.
-  boat_column_one=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_frame_one")
+  boat_column_one=$(awk 'index($0,"◥"){print index($0,"◥"); exit}' "$boat_frame_one")
   boat_water_changed=0
-  boat_water_first=$(grep -F '╲▁▁▁╱' "$boat_frame_one" | head -1)
+  boat_water_first=$(grep -F '◥' "$boat_frame_one" | head -1)
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 60 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_water_snapshot"
-    boat_water_line=$(grep -F '╲▁▁▁╱' "$boat_water_snapshot" | head -1)
-    boat_column_two=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_water_snapshot")
+    boat_water_line=$(grep -F '◥' "$boat_water_snapshot" | head -1)
+    boat_column_two=$(awk 'index($0,"◥"){print index($0,"◥"); exit}' "$boat_water_snapshot")
     if [ -n "$boat_water_line" ] && [ "$boat_column_two" = "$boat_column_one" ] &&
       [ "$boat_water_line" != "$boat_water_first" ]; then
       boat_water_changed=1
@@ -4556,7 +4230,7 @@ JS
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_frame_two"
-    boat_column_two=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_frame_two")
+    boat_column_two=$(awk 'index($0,"◥"){print index($0,"◥"); exit}' "$boat_frame_two")
     if [ -n "$boat_column_two" ] && [ "$boat_column_two" != "$boat_column_one" ]; then
       break
     fi
@@ -4573,25 +4247,25 @@ JS
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_resized_snapshot"
-    boat_hull_line=$(grep -F '╲▁▁▁╱' "$boat_resized_snapshot" | head -1)
+    boat_hull_line=$(grep -F '◥' "$boat_resized_snapshot" | head -1)
     if [ -n "$boat_hull_line" ] && [ "${#boat_hull_line}" -eq 100 ]; then
       break
     fi
     sleep 0.05
     active_screen_wait=$((active_screen_wait + 1))
   done
-  assert_contains "$(cat "$boat_resized_snapshot")" '╲▁▁▁╱' "the working ship left the screen after a resize"
-  boat_hull_line=$(grep -F '╲▁▁▁╱' "$boat_resized_snapshot" | head -1)
+  assert_contains "$(cat "$boat_resized_snapshot")" '◥' "the working ship left the screen after a resize"
+  boat_hull_line=$(grep -F '◥' "$boat_resized_snapshot" | head -1)
   [ "${#boat_hull_line}" -eq 100 ] \
     || fail "after resizing to 100 columns the ship row was ${#boat_hull_line} cells instead of exactly 100"
-  # Exactly one wave row means the two-row sprite reflowed rather than wrapping.
-  [ "$(grep -c -F '╲▁▁▁╱' "$boat_resized_snapshot")" -eq 1 ] \
+  # Exactly one hull row means the three-row sprite reflowed rather than wrapping.
+  [ "$(grep -c -F '◥' "$boat_resized_snapshot")" -eq 1 ] \
     || fail "the working ship wrapped onto more than one water row after the resize"
   while IFS= read -r boat_line; do
     [ "${#boat_line}" -le 100 ] \
       || fail "a rendered line was ${#boat_line} cells after resizing to 100 columns"
   done <"$boat_resized_snapshot"
-  boat_column_one=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_resized_snapshot")
+  boat_column_one=$(awk 'index($0,"◥"){print index($0,"◥"); exit}' "$boat_resized_snapshot")
   [ "$boat_column_one" -le 96 ] \
     || fail "the working ship hull started at column $boat_column_one and cannot fit in 100 columns"
 
@@ -4600,7 +4274,7 @@ JS
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_resized_snapshot"
-    boat_column_two=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_resized_snapshot")
+    boat_column_two=$(awk 'index($0,"◥"){print index($0,"◥"); exit}' "$boat_resized_snapshot")
     if [ -n "$boat_column_two" ] && [ "$boat_column_two" != "$boat_column_one" ]; then
       break
     fi
@@ -4620,7 +4294,7 @@ JS
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 400 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_narrow_snapshot"
-    boat_narrow_column=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_narrow_snapshot")
+    boat_narrow_column=$(awk 'index($0,"◥"){print index($0,"◥"); exit}' "$boat_narrow_snapshot")
     if [ -n "$boat_narrow_previous" ] && [ -n "$boat_narrow_column" ] &&
       [ "$boat_narrow_column" -ne "$boat_narrow_previous" ]; then
       boat_narrow_next_direction=1
@@ -4638,7 +4312,7 @@ JS
   done
   [ "$boat_narrow_reversed" -eq 1 ] \
     || fail "the working ship never reversed direction on a narrow track"
-  boat_hull_line=$(grep -F '╲▁▁▁╱' "$boat_narrow_snapshot" | head -1)
+  boat_hull_line=$(grep -F '◥' "$boat_narrow_snapshot" | head -1)
   [ "${#boat_hull_line}" -eq 12 ] \
     || fail "the narrow working-ship row was ${#boat_hull_line} cells instead of exactly 12"
   tmux -L "$TMUX_SOCKET" resize-window -t "$TMUX_SESSION" -x 100 -y 30
@@ -4653,15 +4327,14 @@ JS
     i=$((i + 1))
   done
 
-  # Capture the last on-screen column and sail before settling so the next working
+  # Capture the last on-screen column and rig before settling so the next working
   # period in this same Pi session can prove freeze/resume continuity.
   tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_freeze_snapshot"
-  boat_freeze_column=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_freeze_snapshot")
-  boat_freeze_sail=$(grep -F '◿│◣' "$boat_freeze_snapshot" | tail -1 || true)
-  case "$boat_freeze_sail" in
-    *'◿│◣'*) boat_freeze_sail='◿│◣' ;;
-    *) fail "could not read the freeze-frame centered asymmetric sail" ;;
-  esac
+  boat_freeze_column=$(awk 'index($0,"◥"){print index($0,"◥"); exit}' "$boat_freeze_snapshot")
+  # The rig's heading, with the mast's pitch lean folded upright.
+  boat_freeze_sail=$(grep -oE "$boat_rig_pattern" "$boat_freeze_snapshot" | tail -1 | sed -e 's/╲/│/' -e 's/╱/│/' || true)
+  [ "$boat_freeze_sail" = '◢│◺' ] || [ "$boat_freeze_sail" = '◿│◣' ] \
+    || fail "could not read the freeze-frame rig"
   [ -n "$boat_freeze_column" ] && [ "$boat_freeze_column" -gt 1 ] \
     || fail "freeze frame never left the left edge (column '${boat_freeze_column:-empty}')"
 
@@ -4672,7 +4345,7 @@ JS
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$boat_cleared_snapshot"
-    if ! grep -Fq '╲▁▁▁╱' "$boat_cleared_snapshot" &&
+    if ! grep -Fq '◥' "$boat_cleared_snapshot" &&
       [ "$(grep -Fc 'Operation aborted' "$boat_cleared_snapshot" || true)" -ge 1 ]; then
       break
     fi
@@ -4682,7 +4355,7 @@ JS
     sleep 0.05
     active_screen_wait=$((active_screen_wait + 1))
   done
-  assert_not_contains "$(cat "$boat_cleared_snapshot")" '╲▁▁▁╱' "Escape did not remove the working ship"
+  assert_not_contains "$(cat "$boat_cleared_snapshot")" '◥' "Escape did not remove the working ship"
   assert_not_contains "$(cat "$boat_cleared_snapshot")" "CALM_WORKING_E2E_RESPONSE" "the long-delay fixture settled instead of aborting on Escape"
   assert_not_contains "$(cat "$boat_cleared_snapshot")" "FOCUSPROBE" "the editor kept the focus probe text after Escape"
 
@@ -4696,12 +4369,9 @@ JS
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_resume_snapshot"
-    if grep -Fq '╲▁▁▁╱' "$boat_resume_snapshot"; then
-      boat_resume_column=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_resume_snapshot")
-      boat_resume_sail=$(grep -F '◿│◣' "$boat_resume_snapshot" | tail -1 || true)
-      case "$boat_resume_sail" in
-        *'◿│◣'*) boat_resume_sail='◿│◣' ;;
-      esac
+    if grep -Fq '◥' "$boat_resume_snapshot"; then
+      boat_resume_column=$(awk 'index($0,"◥"){print index($0,"◥"); exit}' "$boat_resume_snapshot")
+      boat_resume_sail=$(grep -oE "$boat_rig_pattern" "$boat_resume_snapshot" | tail -1 | sed -e 's/╲/│/' -e 's/╱/│/' || true)
       break
     fi
     sleep 0.025
@@ -4712,7 +4382,7 @@ JS
   [ "$boat_resume_column" -eq "$boat_freeze_column" ] \
     || fail "the second working period reset the boat from column $boat_freeze_column to $boat_resume_column instead of resuming"
   [ "$boat_resume_sail" = "$boat_freeze_sail" ] \
-    || fail "the second working period changed sail from $boat_freeze_sail to $boat_resume_sail"
+    || fail "the second working period changed the rig from $boat_freeze_sail to $boat_resume_sail"
   assert_not_contains "$(cat "$boat_resume_snapshot")" "Working" \
     "the second working period left Pi's stock working row visible"
 
@@ -4723,7 +4393,7 @@ JS
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 200 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$boat_cleared_snapshot"
-    if ! grep -Fq '╲▁▁▁╱' "$boat_cleared_snapshot" &&
+    if ! grep -Fq '◥' "$boat_cleared_snapshot" &&
       [ "$(grep -Fc 'Operation aborted' "$boat_cleared_snapshot" || true)" -ge 2 ]; then
       break
     fi
@@ -4733,7 +4403,7 @@ JS
     sleep 0.05
     active_screen_wait=$((active_screen_wait + 1))
   done
-  assert_not_contains "$(cat "$boat_cleared_snapshot")" '╲▁▁▁╱' "Escape did not remove the resumed working ship"
+  assert_not_contains "$(cat "$boat_cleared_snapshot")" '◥' "Escape did not remove the resumed working ship"
 
   # Calm off restores Pi's stock working row and never shows the ship.
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
@@ -4759,13 +4429,13 @@ JS
     active_screen_wait=$((active_screen_wait + 1))
   done
   assert_contains "$(cat "$working_snapshot")" "Working" "Calm off did not keep Pi's stock working row"
-  assert_not_contains "$(cat "$working_snapshot")" '╲▁▁▁╱' "Calm off showed the working ship"
+  assert_not_contains "$(cat "$working_snapshot")" '◥' "Calm off showed the working ship"
   wait_for_text "$working_response_snapshot" "CALM_WORKING_E2E_RESPONSE" \
     || fail "the deterministic provider did not settle after proving Pi's stock working row"
 
   # No blank-row residue: settling returns to the same layout Calm off started from.
   tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_cleared_snapshot"
-  assert_not_contains "$(cat "$boat_cleared_snapshot")" '╲▁▁▁╱' "a settled run left the working ship on screen"
+  assert_not_contains "$(cat "$boat_cleared_snapshot")" '◥' "a settled run left the working ship on screen"
 
   # Restore Calm for the persistence restart below.
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"

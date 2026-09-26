@@ -152,7 +152,7 @@ export default function (pi: ExtensionAPI) {
       ui.setWidget(
         CALM_WORKING_SHIP_WIDGET_KEY,
         showShip
-          ? (tui) => createCalmWorkingShipWidget(tui, workingShipAnimation)
+          ? (tui, theme) => createCalmWorkingShipWidget(tui, workingShipAnimation, theme)
           : undefined,
       );
       ui.setWorkingVisible(!showShip);

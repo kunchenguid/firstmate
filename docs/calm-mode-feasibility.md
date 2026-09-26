@@ -160,20 +160,32 @@ Pi emits `agent_settled` from a `finally` block once a run will not continue aut
 Repeated `agent_start` events inside one run are idempotent, and Pi disposes the previous component before installing a replacement under the same key and when it clears extension widgets, so the frame timer cannot duplicate or outlive the widget.
 Pi's above-editor widget container reserves one spacer row whether or not a widget is present, so removing the boat leaves no residual blank row.
 
-The sprite is two rows when the usable width admits the complete hull: an asymmetric three-cell `◿│◣` sail centered over a five-cell `╲▁▁▁╱` hull that sits inside the water row rather than adding a third row.
-The sail is the same in both travel directions, and its one-cell quarter triangle keeps the left sail visibly smaller than the full right sail.
-The hull's three inner cells are zero-height water glyphs, so the swell reads as continuous beneath the boat instead of being interrupted by it.
-Direction reverses the moment the boat lands on an endpoint, so the endpoint frame itself already carries the new heading and the trough follows the next boat movement without a discontinuity.
-The water row fills the complete supplied width, the track is recomputed and clamped from that width on every frame so a resize cannot wrap or strand the boat offscreen, and widths too narrow for the hull fall back to a deterministic single row.
+The sprite is three rows when the usable width admits the complete hull: the rig, the sea surface with the hull riding in it, and the water body beneath.
+The rig is a three-cell jib, mast, and mainsail centered over a five-cell hull, `◢│◺` heading right and its mirror `◿│◣` heading left, so the boat visibly comes about at each edge; the mast leans `╲` or `╱` as the boat pitches.
+The hull is raked `◥` and `◤` ends around three waterline cells, each drawing the water in front of the hull as an eighth-block over a hull-colored background, so the waterline rises and falls along the hull instead of the hull interrupting the sea.
+Direction reverses the moment the boat lands on an endpoint, and the boat then eases through zero speed rather than snapping around.
+The sea rows fill the complete supplied width, the track is recomputed and clamped from that width on every frame so a resize cannot wrap or strand the boat offscreen, and widths too narrow for the hull fall back to a deterministic single row.
 
-One scheduler drives two linked cadences.
-Every tick advances the wave by one quarter-cell, and only every fourth tick moves the boat one whole cell, so at a 220ms tick the swell advances one cell per 880ms boat step and the boat stays phase-locked inside the same trough.
-Ticks rather than wall-clock timestamps drive every state change, so tests seek animation time exactly, and disposing the widget stops both cadences together.
-The water is the lower half of the bottom-aligned one-cell bars that Pi Dictation uses for its level history, `▁▂▃▄`, so advancing the phase never changes visible width, adds a row, or moves the hull column.
-The swell is a deterministic field of smoothstep half-waves whose lengths vary between nine and thirteen cells from a fixed hash, surrounding a broad zero-height trough five cells either side of the hull center, so the boat never rides a crest and the surface still avoids a mechanical fixed period.
+The surface is a sum of six second-order Stokes wave trains with mutually incommensurate wavelengths from about five to forty-four columns, one of them running against the swell as cross-sea chop.
+Each train's angular frequency follows the deep-water dispersion relation `omega = sqrt(g k)`, so long swells outrun short chop and the pattern never settles into a repeating cycle, and the second-order term sharpens crests and flattens troughs.
+A terminal cell is treated as twice as tall as it is wide, so slopes, the Stokes term, and the orbital velocity all use real length rather than cell counts.
+The surface row draws the height at eighth-cell resolution through the bottom-aligned block glyphs `▁▂▃▄▅▆▇█`, and every advance keeps the visible width and the hull column unchanged.
 
-Colors are standard ANSI foreground codes rather than theme lookups: every water cell is blue whatever its height, so the swell reads through glyph height alone rather than a crest-versus-trough color split, and the whole boat, both sail halves, the mast, and the complete hull including its zero-height interior, is one yellow, with no bright variant, 256-color, or RGB escape.
-Each colored run is closed with a default-foreground reset so styling cannot bleed into the sail row's padding, neighbouring UI, or a later frame, and geometry is always computed from visible cells rather than escape bytes.
+The boat floats.
+Heave and pitch are damped springs driven by the mean height and the slope of the water under the hull, and the view follows the heave the way a camera on a nearby boat would, so the sea stays level around the hull and only the residual the springs have not caught up with shows on the waterline.
+The boat cruises at about one column a second, surges forward on crests and back in troughs with the waves' orbital velocity, and eases off over the last three columns before an edge.
+
+Shading is per cell, from the surface normal under a sun high to the upper left: a height term for light passing through thin crests, a diffuse term for the flank facing the sun, a narrow specular lobe that twinkles as sun glitter on lit crests, patchy whitecaps where trains stack into high steep crests, and foam in the boat's wake and bow wave.
+The water body is a darker echo of the surface above it with the keel faintly showing through.
+Two shading families suit dark and light backgrounds, and every color comes from a small precomputed table, so equal neighbours merge into one run and a frame stays well inside a terminal palette.
+
+One scheduler drives everything at a fixed 16ms step, about sixty frames a second, which matches Pi's own 16ms render throttle and Claude Code's Raster blit rate.
+Ticks rather than wall-clock timestamps drive every state change, so tests seek animation time exactly and a slow frame never makes the physics jump, and disposing the widget stops the scheduler.
+The surface is sampled through per-train phase recurrences rather than fresh trigonometry per cell, so a frame costs well under a millisecond even at the Raster's 512-column limit.
+
+Pi paints the resolved colors the way its own theme does: 24-bit escapes when the theme's color mode is truecolor, and otherwise the perceptually nearest xterm 256-color entry, matched in Oklab so dark navy water stays blue rather than turning teal.
+The shading family follows the Pi theme name, light for a name starting with `light` and dark otherwise.
+Each painted row emits an escape only where a color changes and closes with a default foreground and background reset, so styling cannot bleed into the rig row's padding, neighbouring UI, or a later frame, and geometry is always computed from visible cells rather than escape bytes.
 
 The presentation is TUI-only and visual-only.
 It adds no session entry, transcript row, model context, or export or share content, and its widget takes no keyboard input, so editor focus and Escape abort are unchanged.
@@ -841,3 +853,25 @@ ok - Claude Code 2.1.282 (Claude Code) with the flag unset: no hooks module, no 
 ok - Claude Code 2.1.282 (Claude Code) with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, tool rows and the record-backed operational doorbell draw at zero height, /calm restores and re-hides them while persisting the shared preference
 ok - Claude Code 2.1.282 (Claude Code) resumes the transcript with Calm's hidden rows still hidden and the preference intact
 ```
+
+## 2026-09-26 Physically modelled sea on Claude Code 2.1.283 and Pi 0.87.1
+
+The working ship became a three-row scene: a rig, a sea surface drawn at eighth-cell height from dispersive Stokes wave trains with the floating hull in it, and a water body, shaded per cell and repainted every 16ms on both harnesses.
+Computing one frame took about 0.12ms at 80 columns and 0.24ms at 200 columns on the maintainer machine, and the sea row changed on almost every frame, so each frame sends one changed row's worth of color escapes rather than a whole screen.
+Through a private tmux socket the real Claude Code 2.1.283 pane showed the three rows in place of the stock working row, with the hull advancing about one column a second and the colors arriving as `38;5` and `48;5` escapes after tmux's own 256-color downsampling; the shading stops keep that downsampling on navy and steel blue.
+
+```text
+$ claude --version
+2.1.283 (Claude Code)
+
+$ FM_CLAUDE_CALM_LIVE_E2E=1 bash tests/fm-calm-claude-mod-live-e2e.test.sh
+ok - Claude Code 2.1.283 (Claude Code) with the flag unset: no hooks module, no /calm, stock working row, stock tool rows, preference on ignored
+ok - Claude Code 2.1.283 (Claude Code) with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, tool rows and the record-backed operational doorbell draw at zero height, /calm restores and re-hides them while persisting the shared preference
+ok - Claude Code 2.1.283 (Claude Code) resumes the transcript with Calm's hidden rows still hidden and the preference intact
+
+$ cd .claude/mods/firstmate-calm && CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .
+ 44 pass
+ 0 fail
+```
+
+The Pi interactive regression in `tests/fm-calm-pi-extension.test.sh` passed against Pi 0.87.1 in a real tmux terminal: the ship replaced the stock working row, moved, reflowed on resize, reversed on a 12-column track, froze and resumed across two working periods, and cleared on abort.

@@ -34,8 +34,10 @@ DEBUG_LOG_ON="$LAB/debug-on.log"
 DEBUG_LOG_RESUME="$LAB/debug-resume.log"
 SOCKET="fm-calm-claude-$$"
 SESSION="fm-calm-claude-e2e"
-HULL='╲▁▁▁╱'
-SAIL='◿│◣'
+# The hull's raked left end is unique to the boat; the rig is a jib, mast, and mainsail
+# mirrored by heading, with the mast leaning as the boat pitches.
+HULL='◥'
+RIG_PATTERN='(◢|◿)(│|╲|╱)(◺|◣)'
 
 cleanup() {
   local i=0
@@ -163,6 +165,10 @@ command_listed() {  # <command>
   return $((1 - listed))
 }
 
+rig_shown() {  # <screen text>
+  printf '%s\n' "$1" | grep -Eq "$RIG_PATTERN"
+}
+
 hull_column() {  # <screen text>
   printf '%s\n' "$1" | awk -v hull="$HULL" 'index($0, hull) { print index($0, hull); exit }'
 }
@@ -229,8 +235,12 @@ saw_working=0
 i=0
 while [ "$i" -lt 600 ]; do
   off_frame=$(screen)
+  if rig_shown "$off_frame"; then
+    printf '%s\n' "$off_frame" >&2
+    fail "the working ship appeared although the flag is unset"
+  fi
   case "$off_frame" in
-    *"$HULL"*|*"$SAIL"*)
+    *"$HULL"*)
       printf '%s\n' "$off_frame" >&2
       fail "the working ship appeared although the flag is unset"
       ;;
@@ -284,13 +294,10 @@ send "$PROMPT"
 enter
 wait_screen "$HULL" 'the working ship during a real turn' 200
 boat_one=$(screen)
-case "$boat_one" in
-  *"$SAIL"*) : ;;
-  *)
-    printf '%s\n' "$boat_one" >&2
-    fail "the working ship lost its sail"
-    ;;
-esac
+if ! rig_shown "$boat_one"; then
+  printf '%s\n' "$boat_one" >&2
+  fail "the working ship lost its rig"
+fi
 column_one=$(hull_column "$boat_one")
 column_two=$column_one
 i=0
@@ -307,8 +314,9 @@ done
   || fail "the working ship never moved (hull stayed at column $column_one)"
 wait_settled 'the turn with the flag on'
 on_settled=$(screen)
+rig_shown "$on_settled" && fail "the working ship stayed on screen after the turn settled"
 case "$on_settled" in
-  *"$HULL"*|*"$SAIL"*) fail "the working ship stayed on screen after the turn settled" ;;
+  *"$HULL"*) fail "the working ship stayed on screen after the turn settled" ;;
   *'Bash('*|*'shell command'*|*'notes.txt)'*)
     printf '%s\n' "$on_settled" >&2
     fail "a tool row drew while Calm was on"

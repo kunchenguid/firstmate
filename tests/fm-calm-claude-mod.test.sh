@@ -5,8 +5,8 @@
 #     project's .claude/skills auto-load path through the tracked symlink, so nothing
 #     of it can load while CLAUDE_CODE_ENABLE_FUNCTION_HOOKS is off;
 #   - the harness-neutral sprite core both harnesses share: the Pi widget's rendering
-#     is byte-for-byte the shared frame painted with standard ANSI codes, so extracting
-#     the core changed nothing Pi draws;
+#     is byte-for-byte the shared shaded frame painted at Pi's color depth, and the sea
+#     and boat physics behind it;
 #   - the Raster packing of that frame and its base64 encoder;
 #   - the pure presentation policy: home resolution, preference values, working notes;
 #   - the operational-input classifier's parity with bin/fm-operational-input.sh over
@@ -79,43 +79,66 @@ import { pathToFileURL } from "node:url";
 const pi = await import(pathToFileURL(${PI_SHIP@Q}).href);
 const core = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-working-ship-sprite.ts").href);
 const ESC = "\\u001b";
-const ANSI = { water: ESC + "[34m", boat: ESC + "[33m" };
-const RESET = ESC + "[39m";
-const paint = (row) => row.map((run) => (run.color === "plain" ? run.text : ANSI[run.color] + run.text + RESET)).join("");
-const cells = (row) => row.map((run) => run.text).join("");
 const check = (condition, message) => { if (!condition) throw new Error(message); };
+// An independent reference painter: 24-bit escapes, or xterm-256 indexes, on each color change.
+const escape = (layer, rgb, mode) => rgb === null
+  ? ESC + "[" + (layer === 38 ? 39 : 49) + "m"
+  : mode === "256color"
+    ? ESC + "[" + layer + ";5;" + pi.calmWorkingShipAnsi256(rgb) + "m"
+    : ESC + "[" + layer + ";2;" + ((rgb >> 16) & 255) + ";" + ((rgb >> 8) & 255) + ";" + (rgb & 255) + "m";
+const paint = (row, mode) => {
+  let out = "", fg = null, bg = null, colored = false;
+  for (const run of row) {
+    if (run.fg !== fg) out += escape(38, run.fg, mode);
+    if (run.bg !== bg) out += escape(48, run.bg, mode);
+    fg = run.fg; bg = run.bg;
+    if (fg !== null || bg !== null) colored = true;
+    out += run.text;
+  }
+  return colored ? out + ESC + "[39;49m" : out;
+};
+const cells = (row) => row.map((run) => run.text).join("");
+const RIGS = [core.CALM_WORKING_SHIP_SAIL_LEFT, core.CALM_WORKING_SHIP_SAIL_RIGHT];
+const rigOf = (text) => text.replace(/[╲╱]/, "│");
+const BARS = core.CALM_WORKING_SHIP_WAVE_BARS.join("");
 check(pi.CALM_WORKING_SHIP_TICK_MS === core.CALM_WORKING_SHIP_TICK_MS, "Pi re-exports a different tick");
-check(pi.CALM_WORKING_SHIP_TICKS_PER_MOVE === core.CALM_WORKING_SHIP_TICKS_PER_MOVE, "Pi re-exports a different move cadence");
+check(core.CALM_WORKING_SHIP_TICK_MS <= 17, "the frame clock is slower than about sixty frames a second");
 let frames = 0;
-for (const width of [0, 1, 2, 3, 4, 5, 6, 9, 12, 24, 40, 80, 121]) {
+for (const [family, mode] of [["dark", "truecolor"], ["light", "256color"]]) for (const width of [0, 1, 2, 3, 4, 5, 6, 9, 12, 24, 40, 80, 121]) {
   const animation = pi.createCalmWorkingShipAnimation();
   const sprite = core.createCalmWorkingShipSprite();
   for (let step = 0; step < 41; step += 1) {
-    const rendered = animation.render(width);
-    const frame = sprite.frame(width);
-    const expected = frame.map(paint);
-    check(JSON.stringify(rendered) === JSON.stringify(expected), \`Pi rendering diverged from the shared frame at width \${width} step \${step}: \${JSON.stringify(rendered)} vs \${JSON.stringify(expected)}\`);
-    check(animation.position() === sprite.position() && animation.direction() === sprite.direction() && animation.waterPhase() === sprite.waterPhase(), \`Pi animation state diverged at width \${width} step \${step}\`);
+    const rendered = animation.render(width, { family, mode });
+    const frame = sprite.frame(width, family);
+    const expected = frame.map((row) => paint(row, mode));
+    check(JSON.stringify(rendered) === JSON.stringify(expected), \`Pi rendering diverged from the shared frame at width \${width} step \${step}\`);
+    check(animation.position() === sprite.position() && animation.direction() === sprite.direction() && animation.seaTime() === sprite.seaTime(), \`Pi animation state diverged at width \${width} step \${step}\`);
     if (width === 0) check(frame.length === 0, "zero width painted a row");
     if (width > 0) {
-      const water = frame[frame.length - 1];
-      check(cells(water).length === width, \`water row is \${cells(water).length} cells at width \${width}\`);
       for (const row of frame) {
         check(cells(row).length <= width, \`a row overflowed width \${width}\`);
-        for (const run of row) check(["plain", "water", "boat"].includes(run.color), \`unknown color \${run.color}\`);
+        for (const run of row) {
+          check(["plain", "water", "hull", "sail", "mast"].includes(run.color), \`unknown cell kind \${run.color}\`);
+          for (const rgb of [run.fg, run.bg]) check(rgb === null || (Number.isInteger(rgb) && rgb >= 0 && rgb <= 0xffffff), \`bad color \${rgb}\`);
+          if (run.color === "plain") check(run.fg === null && run.bg === null && /^ +$/.test(run.text), "plain padding carried color or glyphs");
+        }
       }
       if (width >= 5) {
-        check(frame.length === 2, \`width \${width} did not paint two rows\`);
-        check(JSON.stringify(frame[0].slice(1)) === JSON.stringify([{ text: "◿│◣", color: "boat" }]), "the sail is not one boat-colored run");
-        check(frame[0][0].color === "plain" && /^ +$/.test(frame[0][0].text), "sail padding is not plain spaces");
-        const hullAt = frame[1].findIndex((run) => run.text === "╲▁▁▁╱");
-        check(hullAt >= 0, "the hull is not one run");
-        check(frame[1][hullAt].color === "boat", "the hull is not boat-colored");
-        check(frame[1].filter((_run, index) => index !== hullAt).every((run) => run.text.length === 1 && run.color === "water"), "water outside the hull is not one water-colored bar per cell");
+        check(frame.length === 3, \`width \${width} did not paint three rows\`);
+        const [rig, surface, body] = frame.map(cells);
+        const at = surface.indexOf(core.CALM_WORKING_SHIP_HULL_LEFT);
+        check(at === sprite.position(), \`the hull is drawn at \${at}, not column \${sprite.position()}\`);
+        check(surface[at + 4] === core.CALM_WORKING_SHIP_HULL_RIGHT, "the hull's far end is missing");
+        check(rig === " ".repeat(at + 1) + rig.slice(at + 1) && RIGS.includes(rigOf(rig.slice(at + 1))), \`the rig is not centered over the hull: \${JSON.stringify(rig)}\`);
+        check(surface.length === width && body === "█".repeat(width), "the sea rows do not fill the width");
+        check([...surface.slice(0, at) + surface.slice(at + 1, at + 4) + surface.slice(at + 5)].every((glyph) => BARS.includes(glyph)), "a sea cell is not an eighth block");
+        const waterline = frame[1].filter((run) => run.color === "hull" && run.bg !== null);
+        check(cells(waterline).length === 3 && waterline.every((run) => /^[▁▂▃▄▅]+$/.test(run.text)), "the hull's waterline left its draft range");
       } else if (width >= 3) {
-        check(frame.length === 1 && cells(frame[0]).includes("◿│◣"), \`width \${width} lost the sail-only fallback\`);
+        check(frame.length === 1 && RIGS.includes(rigOf(cells(frame[0]).slice(sprite.position(), sprite.position() + 3))), \`width \${width} lost the rig-only fallback\`);
+        check(cells(frame[0]).length === width, \`width \${width} fallback is not full width\`);
       } else {
-        check(frame.length === 1 && /^[▁▂▃▄]+$/.test(cells(frame[0])), \`width \${width} lost the water-only fallback\`);
+        check(frame.length === 1 && [...cells(frame[0])].every((glyph) => BARS.includes(glyph)) && cells(frame[0]).length === width, \`width \${width} lost the water-only fallback\`);
       }
     }
     animation.tick();
@@ -128,22 +151,116 @@ for (const width of [0, 1, 2, 3, 4, 5, 6, 9, 12, 24, 40, 80, 121]) {
   const animation = pi.createCalmWorkingShipAnimation();
   const sprite = core.createCalmWorkingShipSprite();
   animation.render(30); sprite.frame(30);
-  for (let step = 0; step < 9; step += 1) { animation.tick(); sprite.tick(); }
+  for (let step = 0; step < 90; step += 1) { animation.tick(); sprite.tick(); }
   animation.render(30); sprite.frame(30);
-  for (let step = 0; step < 6; step += 1) { animation.tick(); sprite.tick(); }
+  const frozen = { position: sprite.position(), velocity: sprite.velocity(), pitch: sprite.pitch(), time: sprite.seaTime() };
+  for (let step = 0; step < 60; step += 1) { animation.tick(); sprite.tick(); }
   animation.restoreLastRendered(); sprite.restoreLastRendered();
-  check(animation.position() === sprite.position() && animation.waterPhase() === sprite.waterPhase(), "restore diverged");
-  check(sprite.waterPhase() === 1 && sprite.position() === 2, \`restore landed at phase \${sprite.waterPhase()} column \${sprite.position()}\`);
+  check(animation.position() === sprite.position() && animation.seaTime() === sprite.seaTime(), "restore diverged");
+  check(sprite.seaTime() === 90 * core.CALM_WORKING_SHIP_TICK_MS && sprite.position() === frozen.position && sprite.velocity() === frozen.velocity && sprite.pitch() === frozen.pitch, "restore did not land on the last painted state");
   sprite.clampToWidth(6);
   check(sprite.position() === 1 && sprite.direction() === -1, "a hidden clamp did not turn the boat at the new edge");
+  check(sprite.seaTime() === frozen.time, "a hidden clamp advanced the sea");
   sprite.reset();
-  check(sprite.position() === 0 && sprite.direction() === 1 && sprite.waterPhase() === 0, "reset did not restore the initial state");
+  check(sprite.position() === 0 && sprite.direction() === 1 && sprite.seaTime() === 0, "reset did not restore the initial state");
 }
 console.log("sprite-ok frames=" + frames);
 JS
   out=$(run_node "$TMP_ROOT/sprite.mjs" 2>&1) || fail "shared sprite: $out"
-  assert_contains "$out" "sprite-ok frames=533" "the sprite parity sweep did not cover every width and step"
-  pass "the Pi working ship renders byte-for-byte the shared sprite core's frame painted in standard ANSI, at every width, cadence step, freeze, clamp, and reset"
+  assert_contains "$out" "sprite-ok frames=1066" "the sprite parity sweep did not cover every width and step"
+  pass "the Pi working ship renders byte-for-byte the shared sprite core's shaded frame at both color depths, at every width, step, freeze, clamp, and reset"
+}
+
+test_sea_and_boat_physics() {
+  local out
+  cat >"$TMP_ROOT/physics.mjs" <<JS
+import { pathToFileURL } from "node:url";
+const core = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-working-ship-sprite.ts").href);
+const check = (condition, message) => { if (!condition) throw new Error(message); };
+const trains = core.CALM_WORKING_SHIP_WAVE_TRAINS;
+// Deep-water dispersion: phase speed grows with the square root of wavelength, so long
+// swells outrun short chop.
+for (let index = 1; index < trains.length; index += 1) {
+  const long = core.calmWorkingShipPhaseSpeed(trains[index - 1].wavelength);
+  const short = core.calmWorkingShipPhaseSpeed(trains[index].wavelength);
+  check(long > short, "a longer train is not faster");
+  check(Math.abs(long / short - Math.sqrt(trains[index - 1].wavelength / trains[index].wavelength)) < 1e-9, "phase speed does not follow sqrt(g lambda / 2 pi)");
+}
+// The sampled surface agrees with its own analytic slope and stays bounded.
+let highest = -Infinity, lowest = Infinity;
+for (let seconds = 0; seconds < 60; seconds += 0.53) for (let x = 0; x < 160; x += 0.7) {
+  const here = core.calmWorkingShipSea(x, seconds);
+  const step = 1e-4;
+  const numeric = ((core.calmWorkingShipSea(x + step, seconds).height - core.calmWorkingShipSea(x - step, seconds).height) / (2 * step)) * 2;
+  check(Math.abs(numeric - here.slope) < 1e-5, \`slope disagrees with height at x=\${x} t=\${seconds}\`);
+  highest = Math.max(highest, here.height);
+  lowest = Math.min(lowest, here.height);
+}
+const amplitude = trains.reduce((sum, train) => sum + train.amplitude, 0);
+check(highest <= amplitude * 1.05 && lowest >= -amplitude * 1.05, "the surface left its amplitude envelope");
+// Second-order Stokes crests: a lone train peaks higher than it troughs.
+{
+  const sea = (x) => core.calmWorkingShipSea(x, 0).height;
+  let crest = -Infinity, trough = Infinity;
+  for (let x = 0; x < 400; x += 0.25) { crest = Math.max(crest, sea(x)); trough = Math.min(trough, sea(x)); }
+  check(crest > 0 && trough < 0, "the surface is one-sided");
+}
+// The surface travels: its pattern moves with time and never repeats inside a frame.
+{
+  const sprite = core.createCalmWorkingShipSprite();
+  const surfaces = new Set();
+  for (let step = 0; step < 240; step += 1) {
+    const surface = sprite.frame(200)[1].map((run) => run.text).join("");
+    surfaces.add(surface);
+    const sample = surface.slice(8);
+    for (let period = 1; period <= 40; period += 1) check(sample.slice(0, -period) !== sample.slice(period), \`the sea collapsed into a \${period}-cell cycle\`);
+    sprite.tick();
+  }
+  check(surfaces.size > 60, "the sea barely moved over four seconds");
+}
+// The boat: calm cruise, surges with the swell, eases into each edge, turns through zero
+// speed, never leaves its track, and pitches with the water.
+{
+  const sprite = core.createCalmWorkingShipSprite();
+  const width = 40, span = 35;
+  sprite.frame(width);
+  let lastVelocity = sprite.velocity(), speeds = [], positions = new Set(), directions = new Set(), pitches = new Set();
+  let lastPosition = sprite.position();
+  for (let step = 0; step < 60 * 90; step += 1) {
+    sprite.tick();
+    sprite.frame(width);
+    const position = sprite.position();
+    check(position >= 0 && position <= span, \`the boat left its track at \${position}\`);
+    check(Math.abs(position - lastPosition) <= 1, "the boat jumped more than one column in one frame");
+    check(Math.abs(sprite.velocity() - lastVelocity) < 0.05, "the boat's speed changed abruptly");
+    check(Math.abs(sprite.pitch()) < 0.4, "the boat pitched unrealistically far");
+    lastVelocity = sprite.velocity();
+    lastPosition = position;
+    speeds.push(Math.abs(sprite.velocity()));
+    positions.add(position);
+    directions.add(sprite.direction());
+    pitches.add(Math.sign(Math.round(sprite.pitch() * 100)));
+  }
+  const mean = speeds.reduce((sum, speed) => sum + speed, 0) / speeds.length;
+  check(mean > 0.6 && mean < 1.4, \`mean speed \${mean} columns a second is not a calm cruise\`);
+  check(positions.has(0) && positions.has(span), "the boat never reached both edges");
+  check(directions.has(1) && directions.has(-1), "the boat never came about");
+  check(pitches.has(1) && pitches.has(-1), "the boat never pitched both ways");
+}
+// Two sprites never share state, and equal histories paint identical frames.
+{
+  const left = core.createCalmWorkingShipSprite();
+  const right = core.createCalmWorkingShipSprite();
+  for (let step = 0; step < 120; step += 1) { left.tick(); left.frame(40); }
+  check(right.position() === 0 && right.seaTime() === 0, "separate sprites leaked state");
+  for (let step = 0; step < 120; step += 1) { right.tick(); right.frame(40); }
+  check(JSON.stringify(left.frame(40, "light")) === JSON.stringify(right.frame(40, "light")), "equal histories diverged");
+}
+console.log("physics-ok");
+JS
+  out=$(run_node "$TMP_ROOT/physics.mjs" 2>&1) || fail "sea physics: $out"
+  assert_contains "$out" "physics-ok" "the sea physics check did not complete"
+  pass "the shared sea follows deep-water dispersion with consistent slopes and non-repeating travel, and the boat cruises calmly, turns smoothly at both edges, and pitches with the water"
 }
 
 test_raster_packing() {
@@ -172,51 +289,46 @@ const decode = (cells, columns, rows) => {
   }
   return grid;
 };
-// Claude Code's own theme tables: spinner blue water per family, Claude orange boat.
-const palettes = raster.CALM_SHIP_RASTER_PALETTES;
-check(palettes.dark.water === 0x93a5ff && palettes.dark.boat === 0xd77757, "dark palette is not Claude Code's dark spinner blue and Claude orange");
-check(palettes.light.water === 0x5769f7 && palettes.light.boat === 0xd77757, "light palette is not Claude Code's light spinner blue and Claude orange");
-check(palettes.dark.plain === raster.CALM_SHIP_RASTER_DEFAULT_COLOR && palettes.light.plain === raster.CALM_SHIP_RASTER_DEFAULT_COLOR, "plain padding is not the terminal default");
+const DEFAULT = raster.CALM_SHIP_RASTER_DEFAULT_COLOR;
 for (const [theme, family] of [["dark", "dark"], ["dark-ansi", "dark"], ["dark-daltonized", "dark"], ["light", "light"], ["light-ansi", "light"], ["light-daltonized", "light"], ["auto", "light"], ["custom:rose", "light"], [undefined, "light"], [42, "light"], ["", "light"]]) {
   check(raster.calmShipPaletteFamily(theme) === family, \`theme \${JSON.stringify(theme)} chose \${raster.calmShipPaletteFamily(theme)}, not \${family}\`);
 }
-for (const [family, colors] of Object.entries(palettes)) for (const width of [1, 2, 3, 4, 5, 20, 77, 512]) {
+for (const family of ["dark", "light"]) for (const width of [1, 2, 3, 4, 5, 20, 77, 512]) {
   const sprite = core.createCalmWorkingShipSprite();
   for (let step = 0; step < 6; step += 1) {
-    const frame = sprite.frame(width);
-    const packed = raster.packCalmShipRasterCells(frame, width, colors);
+    const frame = sprite.frame(width, family);
+    const packed = raster.packCalmShipRasterCells(frame, width);
     check(packed.rows === frame.length, \`rows \${packed.rows} for a \${frame.length}-row frame\`);
     const grid = decode(packed.cells, width, packed.rows);
+    const pairs = new Set();
     for (let row = 0; row < frame.length; row += 1) {
       let column = 0;
       for (const run of frame[row]) {
         for (const glyph of Array.from(run.text)) {
           const cell = grid[row][column];
           check(cell.glyph === glyph, \`glyph mismatch at \${row},\${column}: \${cell.glyph} vs \${glyph}\`);
-          check(cell.fg === colors[run.color], \`\${family} color mismatch at \${row},\${column}\`);
+          check(cell.fg === (run.fg ?? DEFAULT) && cell.bg === (run.bg ?? DEFAULT), \`\${family} color mismatch at \${row},\${column}\`);
+          pairs.add(cell.fg + ":" + cell.bg);
           column += 1;
         }
       }
       for (; column < width; column += 1) {
-        check(grid[row][column].glyph === " " && grid[row][column].fg === colors.plain, \`padding at \${row},\${column} is not a plain space\`);
+        check(grid[row][column].glyph === " " && grid[row][column].fg === DEFAULT && grid[row][column].bg === DEFAULT, \`padding at \${row},\${column} is not a plain space\`);
       }
-      check(grid[row].every((cell) => cell.bg === raster.CALM_SHIP_RASTER_DEFAULT_COLOR), "a background was set");
       check(grid[row].every((cell) => cell.glyph.codePointAt(0) <= 0xffff), "a glyph left the BMP");
     }
+    // Claude Code's Raster palette paints 1024 distinct color pairs at once.
+    check(pairs.size <= 1024, \`a frame used \${pairs.size} color pairs\`);
     sprite.tick();
   }
 }
-// The packer's pre-load default is the both-readable light fallback.
-{
-  const packed = raster.packCalmShipRasterCells([[{ text: "▁", color: "water" }]], 1);
-  check(decode(packed.cells, 1, 1)[0][0].fg === palettes.light.water, "the default packing palette is not the light fallback");
-}
 // A run wider than the grid is clipped, never wrapped into the next row.
 {
-  const packed = raster.packCalmShipRasterCells([[{ text: "▁▁▁▁▁▁▁▁", color: "water" }], [{ text: "◿│◣", color: "boat" }]], 4);
+  const packed = raster.packCalmShipRasterCells([[{ text: "▁▁▁▁▁▁▁▁", color: "water", fg: 0x123456, bg: null }], [{ text: "◿│◣", color: "sail", fg: null, bg: 0x654321 }]], 4);
   check(packed.rows === 2, "clip changed the row count");
   const grid = decode(packed.cells, 4, 2);
   check(grid[0].map((c) => c.glyph).join("") === "▁▁▁▁" && grid[1].map((c) => c.glyph).join("") === "◿│◣ ", "clip wrapped or dropped cells");
+  check(grid[0][0].fg === 0x123456 && grid[0][0].bg === DEFAULT && grid[1][0].fg === DEFAULT && grid[1][0].bg === 0x654321, "null colors did not pack as the terminal default");
 }
 check(raster.packCalmShipRasterCells([], 3).rows === 1, "an empty frame did not pack one blank row");
 check(raster.calmShipRasterColumns(undefined) === 78, "unmeasured viewport width");
@@ -227,7 +339,7 @@ console.log("raster-ok");
 JS
   out=$(run_node "$TMP_ROOT/raster.mjs" 2>&1) || fail "raster packing: $out"
   assert_contains "$out" "raster-ok" "the raster packing check did not complete"
-  pass "the Raster packing lays the shared frame out row-major in Claude Code's dark or light theme palette, using light as the both-readable fallback, with plain padding, default backgrounds, BMP glyphs, clipping, and a standard base64 encoding"
+  pass "the Raster packing lays the shared shaded frame out row-major with its own colors, the terminal default for uncolored cells, dark or light by theme with light as the both-readable fallback, within the Raster's color-pair budget, with BMP glyphs, clipping, and a standard base64 encoding"
 }
 
 test_presentation_policy() {
@@ -497,6 +609,7 @@ JS
 
 test_plugin_shape
 test_shared_sprite_and_pi_rendering
+test_sea_and_boat_physics
 test_raster_packing
 test_presentation_policy
 test_classifier_parity_with_shell_owner
