@@ -1093,6 +1093,84 @@ test_verified_reclaim_keeps_new_sidecar() {
   pass "session-lock: a verified reclaim keeps the new sidecar beside the new pid"
 }
 
+# --- e2e layer: fm-lock.sh status against real orphaned/live process trees --
+
+# A firstmate session's own launched daemon/bg-pty-host child can outlive the
+# parent shell that spawned it: the parent exits, the child reparents to init
+# (ppid=1, no controlling tty), and keeps running indefinitely with nothing
+# left to stop it. fm-lock.sh status must flag that shape as suspect rather
+# than reporting it as an ordinary live holder.
+test_e2e_orphaned_daemon_child_is_flagged_suspect() {
+  local dir out pid ppid tty i
+  dir="$TMP_ROOT/e2e-orphan"
+  mkdir -p "$dir/state"
+  cat > "$dir/orphan.sh" <<'SH'
+#!/usr/bin/env bash
+i=0
+while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+  sleep 0.05
+  i=$((i + 1))
+done
+printf '%s\n' "$$" > "$FM_HOME/state/orphan-pid"
+sleep 30
+SH
+  chmod +x "$dir/orphan.sh"
+  # Detach the launcher immediately so the fixture reparents to init, exactly
+  # as a real daemon/bg-pty-host child does once its own parent session exits.
+  FM_HOME="$dir" bash -c '"$0" "$1" </dev/null >/dev/null 2>&1 &' "$NAMED_CLAUDE" "$dir/orphan.sh"
+  i=0
+  while [ "$i" -lt 400 ] && [ ! -s "$dir/state/orphan-pid" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/state/orphan-pid" ] || fail "the orphan fixture never recorded its own pid"
+  pid=$(tr -d '[:space:]' < "$dir/state/orphan-pid")
+  ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+  [ "$ppid" = 1 ] || fail "orphan fixture pid $pid did not reparent to init (ppid=$ppid)"
+  tty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
+  case "$tty" in
+    ''|'?'|'??') : ;;
+    *) fail "orphan fixture pid $pid unexpectedly kept a controlling tty ($tty)" ;;
+  esac
+
+  printf '%s\n' "$pid" > "$dir/state/.lock"
+  out=$(FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-lock.sh" status)
+  case "$out" in
+    *"suspect stale"*) : ;;
+    *) fail "an orphaned harness-shaped holder (ppid=1, no tty) was reported as an ordinary live holder instead of suspect: $out" ;;
+  esac
+  kill "$pid" 2>/dev/null || true
+  pass "session-lock e2e: fm-lock.sh status flags an orphaned daemon child (ppid=1, no tty) as suspect, not an ordinary live holder"
+}
+
+# Non-vacuity companion: an ordinary live harness holder with a normal parent
+# (never reparented to init) must keep reporting as a healthy live holder, so
+# the new suspect check cannot be flagging every live pid.
+test_e2e_ordinary_live_holder_with_normal_parent_stays_healthy() {
+  local dir pid ppid out
+  dir="$TMP_ROOT/e2e-ordinary-live"
+  mkdir -p "$dir/state"
+  cat > "$dir/sleeper.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 30
+SH
+  chmod +x "$dir/sleeper.sh"
+  "$NAMED_CLAUDE" "$dir/sleeper.sh" &
+  pid=$!
+  ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+  [ "$ppid" != 1 ] || fail "the ordinary-live fixture pid $pid unexpectedly reparented to init before the assertion ran"
+
+  printf '%s\n' "$pid" > "$dir/state/.lock"
+  out=$(FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-lock.sh" status)
+  case "$out" in
+    *"held by live harness pid $pid"*) : ;;
+    *) fail "an ordinary live harness holder with a normal parent was not reported as a healthy live holder: $out" ;;
+  esac
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "session-lock e2e: fm-lock.sh status still reports an ordinary live holder with a normal parent as healthy"
+}
+
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
@@ -1109,3 +1187,5 @@ test_same_session_confirmation_does_not_steal_after_wait
 test_failed_lock_write_restores_previous_sidecar
 test_failed_lock_write_removes_new_sidecar_when_none_existed
 test_verified_reclaim_keeps_new_sidecar
+test_e2e_orphaned_daemon_child_is_flagged_suspect
+test_e2e_ordinary_live_holder_with_normal_parent_stays_healthy

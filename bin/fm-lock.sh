@@ -25,6 +25,20 @@
 #                             A held lock is not proof the holder is consuming
 #                             wakes. Machine-readable lock fields live on
 #                             fm-inbox.sh ready, from the same inspect helper.
+#
+# A pid that is alive and harness-shaped is not necessarily still doing
+# session work: firstmate's own launched daemon/bg-pty-host children can
+# outlive the parent shell that spawned them, reparenting to init (ppid=1, no
+# controlling tty) and holding the lock indefinitely with no owner left to
+# clear it. `status` flags that shape as suspect (FM_LOCK_INSPECT_ORPHANED
+# from fm_session_lock_inspect in fm-session-lock-lib.sh) rather than
+# reporting it as an ordinary live holder, but flagging is all it does: this
+# script never reclaims a suspect lock on its own, in status or in acquire,
+# so a genuinely dead orphan still requires a human or firstmate decision to
+# remove state/.lock by hand before another session can acquire it. That
+# tell is not exhaustive - a stale holder can also keep a normal ppid and a
+# real tty - so an unflagged live holder is not proof the lock is healthy,
+# only that this one mechanical check did not fire.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,7 +63,13 @@ if [ "${1:-}" = "status" ]; then
   case "$FM_LOCK_INSPECT_STATE" in
     free) echo "lock: free" ;;
     unreadable) echo "lock: unreadable" ;;
-    held) echo "lock: held by live harness pid $FM_LOCK_INSPECT_PID" ;;
+    held)
+      if [ "$FM_LOCK_INSPECT_ORPHANED" = true ]; then
+        echo "lock: held by pid $FM_LOCK_INSPECT_PID (orphaned: ppid=1, no tty - suspect stale)"
+      else
+        echo "lock: held by live harness pid $FM_LOCK_INSPECT_PID"
+      fi
+      ;;
     *) echo "lock: stale (pid $FM_LOCK_INSPECT_PID dead or not a harness)" ;;
   esac
   exit 0
