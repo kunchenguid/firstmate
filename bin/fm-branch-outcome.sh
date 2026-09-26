@@ -79,8 +79,8 @@
 #     (raw JSONL, ascending seq, each with an added "unread" boolean). It
 #     moves nothing: off Pi that drain presentation is what the visible entry
 #     is, so the drain runs mark-read once it has presented the rows. The
-#     return (bin/fm-afk-return.sh) runs mark-read through the away window's
-#     rows once its brief has rendered, for the same reason. Prints nothing
+#     return (bin/fm-afk-return.sh) runs mark-read through the rows its brief
+#     presented once it has rendered, for the same reason. Prints nothing
 #     when nothing is unread or unprocessed.
 #   fm-branch-outcome.sh processed-init [--held-lock]
 #     Rebuild the bounded per-task outcome indexes, then create the processed

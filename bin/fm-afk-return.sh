@@ -156,11 +156,20 @@ window_start_epoch() {
 }
 
 # Reads the store through its owner so a malformed store refuses rather than
-# misleads.
+# misleads. STORE_ROWS is the away window's outcomes. Where main processes
+# outcomes through the drain's BRANCH OUTCOMES section (the supervision host
+# off Pi, fm_supervision_host_outcomes_drained), EARLIER_ROWS is every outcome
+# from before the window that no drain presented yet, and PRESENTED_THROUGH is
+# the newest seq of both, which the brief presents; on Pi the branch extension
+# owns the read cursor, so both stay empty.
 STORE_ROWS=
+EARLIER_ROWS=
+PRESENTED_THROUGH=0
 store_rows_load() {  # <since-epoch>
-  local since=$1 raw
+  local since=$1 raw unread
   STORE_ROWS=
+  EARLIER_ROWS=
+  PRESENTED_THROUGH=0
   [ -s "$STATE/branch-outcomes.jsonl" ] || return 0
   case "$since" in ''|*[!0-9]*) since=0 ;; esac
   raw=$("$SCRIPT_DIR/fm-branch-outcome.sh" list --recent 1000000 2>/dev/null) \
@@ -168,6 +177,16 @@ store_rows_load() {  # <since-epoch>
   STORE_ROWS=$(printf '%s\n' "$raw" | jq -r --argjson since "$since" \
     'select(.epoch >= $since) | [.seq, .task, .verdict, (.statusEndpoint // 0), (.summary // "")] | @tsv' 2>/dev/null) \
     || { STORE_ROWS=; return 1; }
+  # shellcheck source=bin/fm-supervision-engine-lib.sh
+  . "$SCRIPT_DIR/fm-supervision-engine-lib.sh" || return 0
+  fm_supervision_host_outcomes_drained "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" || return 0
+  unread=$("$SCRIPT_DIR/fm-branch-outcome.sh" unread 2>/dev/null) \
+    || { STORE_ROWS=; return 1; }
+  EARLIER_ROWS=$(printf '%s\n' "$unread" | jq -r --argjson since "$since" \
+    'select(.epoch < $since) | [.seq, .task, .verdict, (.statusEndpoint // 0), (.summary // "")] | @tsv' 2>/dev/null) \
+    || { STORE_ROWS=; EARLIER_ROWS=; return 1; }
+  PRESENTED_THROUGH=$(printf '%s\n%s\n' "$STORE_ROWS" "$EARLIER_ROWS" \
+    | awk -F '\t' '$1 ~ /^[0-9]+$/ && $1 + 0 > max { max = $1 + 0 } END { print max + 0 }')
 }
 
 STATUS_SCAN_ERROR=
@@ -557,6 +576,18 @@ EOF
     printf '  (no routine outcomes recorded in the store for this window)\n'
   fi
 
+  # 6b. unread from before the window, where the drain presents outcomes: the
+  # brief presents them so the read cursor it advances marks nothing unseen.
+  if [ -n "$EARLIER_ROWS" ]; then
+    count=$(printf '%s\n' "$EARLIER_ROWS" | awk -F '\t' '$3 == "routine" { n++ } END { print n + 0 }')
+    printf 'From before you left, not yet presented:\n'
+    printf '%s\n' "$EARLIER_ROWS" | awk -F '\t' '$3 == "captain" { printf "  - %s: %s (captain; the next drain presents it until acknowledged)\n", $2, $5 }'
+    if [ "$count" -gt 5 ]; then
+      printf '  %s routine outcome(s); the latest:\n' "$count"
+    fi
+    printf '%s\n' "$EARLIER_ROWS" | awk -F '\t' '$3 == "routine" { printf "  - %s: %s\n", $2, $5 }' | tail -5
+  fi
+
   # 7. cost.
   live=0
   for meta in "$STATE"/*.meta; do [ -f "$meta" ] && live=$((live + 1)); done
@@ -564,22 +595,15 @@ EOF
     "$((routine + captain))" "$routine" "$captain" "$live"
 }
 
-# The brief just presented the window's outcomes. Where main processes them
-# through the drain's BRANCH OUTCOMES section (the supervision host off Pi,
-# fm_supervision_host_outcomes_drained), advance the store's read cursor
-# through the window's rows, so the first drain after the return lists only
-# what arrived after the brief instead of replaying the window; every
-# unprocessed captain row still waits there for main's acknowledgement
-# (bin/fm-wake-drain.sh). On Pi the branch extension owns the cursor.
+# The brief just presented the window's outcomes and every earlier unread one.
+# Where main processes them through the drain's BRANCH OUTCOMES section,
+# advance the store's read cursor through exactly those rows, so the first
+# drain after the return lists only what arrived after the brief instead of
+# replaying the window; every unprocessed captain row still waits there for
+# main's acknowledgement (bin/fm-wake-drain.sh).
 mark_window_presented() {
-  local through
-  [ -n "$STORE_ROWS" ] || return 0
-  # shellcheck source=bin/fm-supervision-engine-lib.sh
-  . "$SCRIPT_DIR/fm-supervision-engine-lib.sh" || return 0
-  fm_supervision_host_outcomes_drained "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" || return 0
-  through=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$1 ~ /^[0-9]+$/ && $1 + 0 > max { max = $1 + 0 } END { print max + 0 }')
-  [ "$through" -gt 0 ] || return 0
-  "$SCRIPT_DIR/fm-branch-outcome.sh" mark-read --through "$through" >/dev/null 2>&1 || true
+  [ "$PRESENTED_THROUGH" -gt 0 ] || return 0
+  "$SCRIPT_DIR/fm-branch-outcome.sh" mark-read --through "$PRESENTED_THROUGH" >/dev/null 2>&1 || true
 }
 
 return_reconcile() {

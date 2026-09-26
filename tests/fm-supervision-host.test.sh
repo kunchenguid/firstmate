@@ -411,10 +411,12 @@ test_branch_outcomes_put_captain_first_and_collapse_routine_overflow() {
 }
 
 # Repeated captain outcomes for one task collapse to its newest, one line per
-# task; when the byte cap holds tasks back, the printed acknowledgement never
-# covers a row the section did not show, and the next drain shows the rest.
+# task; when the byte cap holds rows back, the section shows only the oldest
+# contiguous run its acknowledgement covers - a shown task's newer row that
+# follows a held-back one waits too, so no presented situation repeats - and
+# the next drain shows the rest.
 test_branch_outcomes_collapse_repeated_captain_outcomes_per_task() {
-  local home drained pad n task target
+  local home drained pad n task
   home="$TMP_ROOT/drain-collapse"
   mkdir -p "$home/state" "$home/config"
   : > "$home/config/supervision-host"
@@ -440,15 +442,22 @@ test_branch_outcomes_collapse_repeated_captain_outcomes_per_task() {
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task task-1 --verdict captain --summary 'task-1 changed again' >/dev/null \
     || fail "fixture: could not record the later task-1 outcome"
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
-  assert_contains "$drained" "task(s) with captain outcomes are held back (byte cap)" "the fixture must exceed the captain cap"
-  assert_contains "$drained" "task-1: task-1 changed again" "the first task must show its newest outcome"
-  target=$(printf '%s\n' "$drained" | sed -n 's/.*mark-processed --through \([0-9]*\);.*/\1/p')
-  [ -n "$target" ] || fail "the section printed no acknowledgement: $drained"
-  [ "$target" -lt 13 ] || fail "the acknowledgement covers a held-back task's row: $target"
-  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through "$target" >/dev/null 2>&1 || fail "the acknowledgement was refused"
+  assert_contains "$drained" "BRANCH OUTCOMES: 3 newer captain outcome(s) are held back (byte cap); they follow on the next drain once these are acknowledged" \
+    "the section must count every held-back captain row"
+  assert_contains "$drained" "[seq 5] task-1: task-1 $pad" "the first task must show its newest outcome the acknowledgement covers"
+  assert_not_contains "$drained" "task-1 changed again" "a row after a held-back one must wait, since the acknowledgement cannot cover it"
+  assert_not_contains "$drained" "task-7:" "the cap must hold back the rows past the contiguous run"
+  assert_contains "$drained" "mark-processed --through 10;" "the acknowledgement must cover exactly the presented run"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 10 >/dev/null 2>&1 || fail "the acknowledgement was refused"
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
   assert_contains "$drained" "task-8: task-8" "a held-back task must follow once the shown tasks are acknowledged"
-  pass "drain: repeated captain outcomes collapse per task, and a held-back task is never acknowledged unseen"
+  assert_contains "$drained" "[seq 13] task-1: task-1 changed again" "the held-back row of a shown task must follow once the run is acknowledged"
+  assert_not_contains "$drained" "held back" "the rest must fit once the run is acknowledged"
+  assert_contains "$drained" "mark-processed --through 13;" "the acknowledgement must cover the rest"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-processed --through 13 >/dev/null 2>&1 || fail "the acknowledgement was refused"
+  drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  assert_not_contains "$drained" "BRANCH OUTCOMES" "an acknowledged situation must not be presented again"
+  pass "drain: repeated captain outcomes collapse per task, and the byte cap presents only the run its acknowledgement covers"
 }
 
 # A drain that cannot print the section, because its output is already

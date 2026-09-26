@@ -507,6 +507,38 @@ test_return_marks_the_window_read_on_a_host_home_only() {
   pass "the return marks the away window read where the drain presents outcomes off Pi, and leaves Pi's cursor alone"
 }
 
+# The return advances the read cursor only through what its brief presented:
+# an attended outcome no drain presented before the captain left is presented
+# too, labelled as from before the window, rather than silently marked read.
+test_return_presents_unread_outcomes_from_before_the_window() {
+  local dir fakebin out cursor
+  dir="$TMP_ROOT/window-earlier"
+  install_runner "$dir"
+  for f in fm-supervision-engine-lib.sh fm-harness.sh fm-cursor-lib.sh fm-gemini-lib.sh; do
+    cp "$ROOT/bin/$f" "$dir/bin/"
+  done
+  : > "$dir/home/config/supervision-host"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  ln -s /bin/bash "$fakebin/claude"
+  outcome_in "$dir" append --task early --verdict routine --summary 'merged the attended docs fix' >/dev/null \
+    || fail "could not seed the attended routine row"
+  sleep 1
+  contract_in "$dir" enter --words 'watch the fleet' >/dev/null 2>&1 || fail "could not record the away posture"
+  outcome_in "$dir" append --task demo --verdict routine --summary 'rebased while away' >/dev/null || fail "could not seed the away row"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  # shellcheck disable=SC2016 # the single-quoted script expands in the harness shell
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
+    "$fakebin/claude" -c '"$0" begin 2>&1' "$dir/bin/fm-afk-return.sh") || fail "the return did not clear: $out"
+  assert_contains "$out" 'From before you left, not yet presented:' "the brief must label the unread rows from before the window"
+  assert_contains "$out" '  - early: merged the attended docs fix' "the brief must present the unread attended routine row"
+  assert_contains "$out" '1 outcome(s) handled by the away session (1 routine, 0 escalated above)' "the earlier row must not count as handled while away"
+  cursor=$(cat "$dir/home/state/.branch-outcomes-cursor" 2>/dev/null || true)
+  [ "$cursor" = 2 ] || fail "the return must mark read exactly the rows its brief presented, got '${cursor:-none}'"
+  pass "the return presents unread outcomes from before the away window before marking them read"
+}
+
 test_return_brief_lists_landed_work_awaiting_cleanup() {
   local dir out landed_line failed_line handled_line
   dir="$TMP_ROOT/brief-landed"
@@ -929,6 +961,7 @@ test_missing_final_archive_keeps_retained_contract_gated
 test_return_brief_composes_from_record_store_and_held_set
 test_return_brief_lists_landed_work_awaiting_cleanup
 test_return_marks_the_window_read_on_a_host_home_only
+test_return_presents_unread_outcomes_from_before_the_window
 test_return_brief_keeps_refresh_history
 test_malformed_posture_record_keeps_catchup_gated
 test_missing_epoch_record_stays_required_after_disappearing

@@ -564,13 +564,14 @@ EOF
 #   - Captain outcomes come first and never wait behind routine ones. Every
 #     unprocessed captain row is presented on every drain until main
 #     acknowledges it, collapsed to one line per task: the task's newest
-#     summary, naming how many earlier unprocessed captain outcomes it
-#     carries. Tasks run by their oldest unprocessed row, so the byte cap can
-#     only hold back newer tasks, and the printed bin/fm-branch-outcome.sh
-#     mark-processed target is the newest captain row below every held-back
-#     row, which acknowledges nothing unpresented and always acknowledges the
-#     first task. An unprocessed captain row is never adopted as processed, so
-#     a home that opts in mid-session cannot lose its first captain outcome.
+#     presented summary, naming how many unprocessed captain outcomes it
+#     carries, with tasks in order of their oldest unprocessed row. The byte
+#     cap presents only the oldest contiguous run of captain rows and counts
+#     the newer ones it holds back, so the printed bin/fm-branch-outcome.sh
+#     mark-processed target, the newest presented row, acknowledges exactly
+#     what was presented and always at least the oldest row. An unprocessed
+#     captain row is never adopted as processed, so a home that opts in
+#     mid-session cannot lose its first captain outcome.
 #   - Routine outcomes are listed once, for awareness, the way the Pi branch's
 #     routine notes reach main's transcript without a turn; silent fleet
 #     reviews never appear. The newest that fit a byte cap are listed, and the
@@ -581,9 +582,10 @@ EOF
 # acknowledgement and keeps a routine row from repeating; a drain stopped
 # before it prints leaves every row unread.
 print_branch_outcomes_section() {
-  local config rows through captain routine line seq first seqs task_line target omitted_min
-  local output='' text='' used=0 shown=0 omitted=0 bytes item_bytes=600 captain_bytes=4000 routine_bytes=2000
-  local shown_seqs='' routine_lines='' routine_count=0 routine_shown=0
+  local config rows through captain routine line seq task task_line target i
+  local text='' used=0 shown=0 held=0 bytes item_bytes=600 captain_bytes=4000 routine_bytes=2000
+  local routine_lines='' routine_count=0 routine_shown=0
+  local -a captain_tasks=() captain_lines=()
   [ "$ACTOR" = main ] || return 0
   config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
   fm_supervision_host_outcomes_drained "$config" || return 0
@@ -599,38 +601,44 @@ print_branch_outcomes_section() {
   case "$through" in ''|*[!0-9]*) through=0 ;; esac
 
   captain=$(printf '%s\n' "$rows" | jq -rs '
-    map(select(.verdict == "captain")) | group_by(.task)
-    | map(sort_by(.seq)) | sort_by(.[0].seq) | .[]
-    | "\(.[0].seq)\t\(map(.seq | tostring) | join(" "))\t[seq \(.[-1].seq)\(if length > 1 then ", newest of \(length) for this task" else "" end)] \(.[-1].task): \(.[-1].summary | gsub("[\t\n\r]"; " "))"' 2>/dev/null)
-  omitted_min=
-  while IFS=$(printf '\t') read -r first seqs task_line; do
-    case "$first" in ''|*[!0-9]*) continue ;; esac
-    fm_cap_line_var "$task_line" $((item_bytes - 1))
-    line=$FM_LINE_CAP_LINE
-    bytes=$(( ${#line} + 1 ))
-    if [ "$omitted" -gt 0 ] || [ $((used + bytes)) -gt "$captain_bytes" ]; then
-      omitted=$((omitted + 1))
-      [ -n "$omitted_min" ] || omitted_min=$first
+    map(select(.verdict == "captain")) | sort_by(.seq)
+    | reduce .[] as $r ({count: {}, lines: []};
+        .count[$r.task] += 1
+        | .lines += ["\($r.seq)\t\($r.task)\t[seq \($r.seq)\(if .count[$r.task] > 1 then ", newest of \(.count[$r.task]) for this task" else "" end)] \($r.task): \($r.summary | gsub("[\t\n\r]"; " "))"])
+    | .lines[]' 2>/dev/null)
+  target=0
+  while IFS=$(printf '\t') read -r seq task task_line; do
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    if [ "$held" -gt 0 ]; then
+      held=$((held + 1))
       continue
     fi
-    output="$output$line
-"
-    used=$((used + bytes))
-    shown=$((shown + 1))
-    shown_seqs="$shown_seqs $seqs"
+    fm_cap_line_var "$task_line" $((item_bytes - 1))
+    line=$FM_LINE_CAP_LINE
+    i=0
+    while [ "$i" -lt "$shown" ] && [ "${captain_tasks[$i]}" != "$task" ]; do i=$((i + 1)); done
+    bytes=$(( used + ${#line} + 1 ))
+    [ "$i" -eq "$shown" ] || bytes=$(( bytes - ${#captain_lines[$i]} - 1 ))
+    if [ "$bytes" -gt "$captain_bytes" ]; then
+      held=1
+      continue
+    fi
+    captain_tasks[i]=$task
+    captain_lines[i]=$line
+    [ "$i" -lt "$shown" ] || shown=$((shown + 1))
+    used=$bytes
+    target=$seq
   done <<ROWS
 $captain
 ROWS
   if [ "$shown" -gt 0 ]; then
-    target=0
-    for seq in $shown_seqs; do
-      if [ "$seq" -gt "$target" ] && { [ -z "$omitted_min" ] || [ "$seq" -lt "$omitted_min" ]; }; then
-        target=$seq
-      fi
-    done
     text="BRANCH OUTCOMES (captain outcomes the supervision session recorded for you, one line per task, oldest first - process each as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker):
-$output"
-    [ "$omitted" -eq 0 ] || text="${text}BRANCH OUTCOMES: $omitted more task(s) with captain outcomes are held back (byte cap); they follow once these are acknowledged
+"
+    for line in "${captain_lines[@]}"; do
+      text="$text$line
+"
+    done
+    [ "$held" -eq 0 ] || text="${text}BRANCH OUTCOMES: $held newer captain outcome(s) are held back (byte cap); they follow on the next drain once these are acknowledged
 "
     text="${text}BRANCH OUTCOMES: after processing them run bin/fm-branch-outcome.sh mark-processed --through $target; until then every drain presents them again
 "

@@ -190,11 +190,11 @@ The drain's header owns the section's bounds; these rules keep it bounded and in
 
 - Captain outcomes come first and never wait behind routine ones.
 - Repeated captain outcomes for one task collapse to that task's newest, naming how many it carries, and one acknowledgement covers them.
-- A task the byte cap holds back follows once the tasks shown are acknowledged, and the printed acknowledgement never covers a row the section did not show.
+- The byte cap shows only the oldest contiguous run of captain outcomes, so the printed acknowledgement covers exactly the rows shown, and it counts the newer ones it holds back, which follow once the run is acknowledged.
 - Routine outcomes never open a main turn: the next drain lists the newest of them once, for awareness and with nothing to acknowledge, and collapses the rest into a count, while silent fleet reviews never appear.
 
 The section runs only for main on an opted-in home whose primary is not Pi, and never while the away record exists.
-The return brief presents the away window's outcomes, so the return advances the read cursor through the window's rows once the brief has rendered.
+The return brief presents the away window's outcomes and, labelled as from before the captain left, every earlier outcome no drain presented yet, so the return advances the read cursor through exactly those rows once the brief has rendered.
 The first drain after the return therefore lists only what arrived after the brief, plus each task's unacknowledged captain outcomes, one line per task.
 An unprocessed captain outcome is never adopted as processed, so a home that opts in mid-session cannot lose its first one.
 Anything main must act on while attended to move the work forward, such as a local-only branch to land or a pull request to merge, is a captain outcome on the host even when the captain asked not to hear about that work, reported once per unchanged situation (`bin/fm-branch-prompt.sh` "Verdict: routine or captain"), because a routine outcome opens no main turn.
