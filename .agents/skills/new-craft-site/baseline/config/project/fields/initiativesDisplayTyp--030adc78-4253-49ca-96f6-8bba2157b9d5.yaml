@@ -1,0 +1,33 @@
+columnSuffix: cugtpzjo
+handle: initiativesDisplayTyp
+instructions: null
+name: 'Initiatives Display Type'
+searchable: false
+settings:
+  customOptions: false
+  options:
+    -
+      __assoc__:
+        -
+          - label
+          - Grid
+        -
+          - value
+          - grid
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - 'Horizontal Scrolling'
+        -
+          - value
+          - horizontalScrolling
+        -
+          - default
+          - ''
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Dropdown

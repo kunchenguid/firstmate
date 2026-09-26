@@ -1,0 +1,33 @@
+columnSuffix: ypxiezck
+handle: displayOption
+instructions: null
+name: 'Display Option'
+searchable: false
+settings:
+  customOptions: false
+  options:
+    -
+      __assoc__:
+        -
+          - label
+          - Grid
+        -
+          - value
+          - grid
+        -
+          - default
+          - '1'
+    -
+      __assoc__:
+        -
+          - label
+          - Banner
+        -
+          - value
+          - banner
+        -
+          - default
+          - ''
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Dropdown

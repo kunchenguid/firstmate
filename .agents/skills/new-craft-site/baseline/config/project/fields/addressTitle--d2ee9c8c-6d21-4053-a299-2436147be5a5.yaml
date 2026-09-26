@@ -1,0 +1,16 @@
+columnSuffix: null
+handle: addressTitle
+instructions: null
+name: 'Address - Address - Address Title'
+searchable: false
+settings:
+  byteLimit: null
+  charLimit: null
+  code: false
+  initialRows: 4
+  multiline: false
+  placeholder: null
+  uiMode: normal
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\PlainText

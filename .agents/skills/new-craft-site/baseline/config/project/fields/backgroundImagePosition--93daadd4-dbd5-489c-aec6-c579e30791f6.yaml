@@ -1,0 +1,128 @@
+columnSuffix: null
+handle: backgroundImagePosition
+instructions: 'Defaults to Center:Center'
+name: 'Header Content Builder - Header Builder Content - Background Image Position'
+searchable: false
+settings:
+  addRowLabel: 'Add a row'
+  columns:
+    __assoc__:
+      -
+        - col1
+        -
+          __assoc__:
+            -
+              - heading
+              - 'Horizontal Axis'
+            -
+              - handle
+              - horizontalAxis
+            -
+              - width
+              - ''
+            -
+              - type
+              - select
+            -
+              - options
+              -
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Left
+                    -
+                      - value
+                      - left
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Center
+                    -
+                      - value
+                      - center
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Right
+                    -
+                      - value
+                      - right
+                    -
+                      - default
+                      - false
+      -
+        - col2
+        -
+          __assoc__:
+            -
+              - heading
+              - 'Vertical Axis'
+            -
+              - handle
+              - verticalAxis
+            -
+              - width
+              - ''
+            -
+              - type
+              - select
+            -
+              - options
+              -
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Top
+                    -
+                      - value
+                      - top
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Center
+                    -
+                      - value
+                      - center
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Bottom
+                    -
+                      - value
+                      - bottom
+                    -
+                      - default
+                      - false
+  defaults:
+    -
+      __assoc__:
+        -
+          - col1
+          - center
+        -
+          - col2
+          - center
+  maxRows: 1
+  minRows: null
+  staticRows: false
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Table

@@ -1,0 +1,64 @@
+childBlocks: null
+color: null
+conditions: null
+description: ''
+enabled: true
+entryType: null
+field: 1bbafb5d-c8cf-4079-bc77-d7454f822431 # Content Builder
+fieldLayouts:
+  811d2bc1-8333-41c9-a5c7-f172b4071045:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 0da09cff-7ad7-4db1-8e3a-6fe76ddf6f39 # Image
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 2bf7682b-3da8-4b97-8abf-e3b3920425bf
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 56e4d199-12f7-453f-af17-b79dc615088f # Rich Text
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: cfcbf9ad-e820-4be3-bd57-3881cde34380
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: ff5ff1d5-5ff4-4b99-a150-9851711229e5
+        userCondition: null
+group: 9546349b-883f-4682-b6b5-419da3c477e7 # Content
+groupChildBlockTypes: true
+handle: card
+icon: null
+iconFilename: ''
+ignorePermissions: true
+maxBlocks: 0
+maxChildBlocks: 0
+maxSiblingBlocks: 0
+minBlocks: 0
+minChildBlocks: 0
+minSiblingBlocks: 0
+name: Card
+topLevel: false

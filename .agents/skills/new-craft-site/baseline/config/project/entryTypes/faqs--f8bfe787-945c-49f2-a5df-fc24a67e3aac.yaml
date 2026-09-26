@@ -1,0 +1,102 @@
+color: null
+fieldLayouts:
+  93afa294-ab8b-45d2-b135-a296b6d43aae:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            autocapitalize: true
+            autocomplete: false
+            autocorrect: true
+            class: null
+            dateAdded: '2024-11-15T16:43:15+00:00'
+            disabled: false
+            elementCondition: null
+            id: null
+            includeInCards: false
+            inputType: null
+            instructions: null
+            label: Question
+            max: null
+            min: null
+            name: null
+            orientation: null
+            placeholder: null
+            providesThumbs: false
+            readonly: false
+            required: true
+            size: null
+            step: null
+            tip: null
+            title: null
+            type: craft\fieldlayoutelements\entries\EntryTitleField
+            uid: 965c10e5-0e1e-4751-8dfd-263171bea012
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-11-15T16:46:03+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 56e4d199-12f7-453f-af17-b79dc615088f # Rich Text
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: Answer
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 0fbda68d-c77a-4cae-88fc-b792d96601a7
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-11-15T16:46:03+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 7fc0bcb4-7f7c-4e74-94ae-34e06259e497 # Services
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 22ea0264-75cb-46e1-aefb-38d4b615167d
+            userCondition: null
+            warning: null
+            width: 25
+          -
+            dateAdded: '2024-11-15T16:46:03+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: edd37bc0-8175-4202-87e5-9d88565f998c # Resource Category
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: afa79ef4-4f1a-4fc9-9f0a-c97cb7608c08
+            userCondition: null
+            warning: null
+            width: 25
+        name: Content
+        uid: 0cc5a079-189e-4f44-9a9b-52f5428cea80
+        userCondition: null
+handle: faqs
+hasTitleField: true
+icon: question
+name: FAQs
+showSlugField: true
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

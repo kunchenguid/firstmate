@@ -1,0 +1,10 @@
+columnSuffix: null
+handle: footerLinkColor
+instructions: null
+name: 'Footer Link Color'
+searchable: true
+settings:
+  allowCustomColors: true
+translationKeyFormat: null
+translationMethod: site
+type: craft\fields\Color

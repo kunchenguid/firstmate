@@ -1,0 +1,55 @@
+color: null
+fieldLayouts:
+  33065280-ba0b-4991-bda1-6e26300cbcf7:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 095ef52d-b2d2-4dfb-8b3f-333c6896bf30 # Overlay Background Properties - Background Color - Color
+            handle: color
+            includeInCards: true
+            instructions: null
+            label: Color
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 83b2b530-9544-428e-ab26-1c19b64469a9
+            userCondition: null
+            warning: null
+            width: 50
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 9aae4571-61b1-4cd0-b662-cbc0746a5b0f # Overlay Background Properties - Background Color - Opacity
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: Opacity
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: ae27999a-f7fc-430d-abb7-46bebf5c48ad
+            userCondition: null
+            warning: null
+            width: 50
+        name: Content
+        uid: c9571284-e26b-41bb-9ac7-115f4eb55620
+        userCondition: null
+handle: backgroundColor2
+hasTitleField: false
+icon: null
+name: 'Background Color 2'
+showSlugField: false
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

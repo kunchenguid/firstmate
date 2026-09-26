@@ -1,0 +1,66 @@
+columnSuffix: null
+handle: contentVerticalAlignment
+instructions: null
+name: 'Content Vertical Alignment'
+searchable: true
+settings:
+  customOptions: false
+  options:
+    -
+      __assoc__:
+        -
+          - label
+          - Top
+        -
+          - value
+          - align-items-start
+        -
+          - default
+          - 1
+    -
+      __assoc__:
+        -
+          - label
+          - Middle
+        -
+          - value
+          - align-items-center
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - Bottom
+        -
+          - value
+          - align-items-end
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - None
+        -
+          - value
+          - ''
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - 'Full Height'
+        -
+          - value
+          - fullHeight
+        -
+          - default
+          - ''
+translationKeyFormat: null
+translationMethod: site
+type: craft\fields\Dropdown

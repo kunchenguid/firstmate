@@ -1,0 +1,121 @@
+childBlocks: null
+color: null
+conditions: null
+description: ''
+enabled: true
+entryType: null
+field: 1bbafb5d-c8cf-4079-bc77-d7454f822431 # Content Builder
+fieldLayouts:
+  9d109e0c-b0c4-45b5-9d2b-9bd0244c33ce:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: b8b2fcd0-49a9-4451-a589-8fada0fa4032 # Multi Column
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: f6f93397-ab5d-4c76-a9e9-62e649bfbfd4
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 5b6f08a9-5e86-463a-b035-6b4089e0373f
+        userCondition: null
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 0aaedf49-0dd2-4544-b6f2-6cf353afee31 # Section Properties
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: bc5c3920-2f71-48ea-89b5-7871da5595da
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 294ed368-67f1-40ad-9751-544925dd1965 # Background Properties
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 93a87ff2-7e2d-483c-aa1b-bc1055f1fa8a
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: b00286b4-3957-4f3b-bd3c-a6dd5aa6bf30 # Overlay Background Properties
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 429dc291-69d8-4f8d-a1a2-f395eb838371
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 4ec5cb85-8f1f-48d3-8408-3de272d3fb6b # Custom CSS
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: ca324616-f815-4e16-851b-0d3bd7a9e00b
+            userCondition: null
+            warning: null
+            width: 100
+        name: Properties
+        uid: effc3a58-2f04-4fab-99f7-c42593de8bfd
+        userCondition: null
+group: 9546349b-883f-4682-b6b5-419da3c477e7 # Content
+groupChildBlockTypes: true
+handle: headerBuilder
+icon: null
+iconFilename: ''
+ignorePermissions: true
+maxBlocks: 0
+maxChildBlocks: 0
+maxSiblingBlocks: 0
+minBlocks: 0
+minChildBlocks: 0
+minSiblingBlocks: 0
+name: 'Header Builder'
+topLevel: true

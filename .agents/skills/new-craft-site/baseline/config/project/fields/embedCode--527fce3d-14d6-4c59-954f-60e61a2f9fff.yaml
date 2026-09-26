@@ -1,0 +1,16 @@
+columnSuffix: kcrnsdbn
+handle: embedCode
+instructions: null
+name: 'Embed Code'
+searchable: false
+settings:
+  byteLimit: null
+  charLimit: null
+  code: false
+  initialRows: 4
+  multiline: true
+  placeholder: null
+  uiMode: normal
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\PlainText

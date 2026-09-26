@@ -1,0 +1,159 @@
+color: null
+fieldLayouts:
+  6bc3bb60-936e-47d8-b140-db22159fd98a:
+    cardView:
+      - 'layoutElement:020e16e6-8abe-4dad-8768-eceefc0255b7'
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: bcce6b68-ce4d-4564-9e4c-01900af2e557 # Typography Colors - Heading Color
+            handle: null
+            includeInCards: true
+            instructions: null
+            label: 'Heading Color'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 020e16e6-8abe-4dad-8768-eceefc0255b7
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: c24259ac-146f-4e8a-a265-c785f790187c # Typography Colors - Body Color
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: 'Body Color'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 085cc278-024a-4000-8736-b190604d252f
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 59788e83-ef75-4fcf-88ad-3b0108839c42 # Typography Colors - Text Link Color
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: 'Text Link Color'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: f650f7da-1129-4ce8-8d39-6e50f24f3b92
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: ee7bd147-5b62-4ff0-b8c6-3515562980fd # Typography Colors - Text Link Hover Color
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: 'Text Link Hover Color'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: d1cf032f-0600-4cb0-beb5-2f28662df97d
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: ae525453-1bd6-49f6-85c0-7702c9ab718b # Typography Colors - Button Background Color
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: 'Button Background Color'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 2b60ae56-f081-4989-9d85-f53eda5ba3b5
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 97ba5471-e388-4dde-91c5-85254c563c08 # Typography Colors - Button Text Color
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: 'Button Text Color'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 0a30bf68-7b4e-47f9-8a00-0fd2fc1611f8
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 287b4fce-6919-4a44-a6f8-fbd6babd24f2 # Typography Colors - Button Hover Color
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: 'Button Hover Color'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 214626af-1d01-4868-a9b4-8569968bf975
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 6fdff510-bc34-49d5-8ab7-56885408e4e6 # Typography Colors - Button Background Hover Color
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: 'Button Background Hover Color'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 48da6fe5-a1ae-4178-b495-9773d8496bf7
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 5091e20e-f763-43a0-8ec9-f213f299fa6d
+        userCondition: null
+handle: typographyColorsBlock
+hasTitleField: false
+icon: eye-dropper
+name: 'Typography Colors Block'
+showSlugField: true
+showStatusField: false
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

@@ -1,0 +1,46 @@
+columnSuffix: null
+handle: testMatrix
+instructions: null
+name: 'Test Matrix'
+searchable: false
+settings:
+  createButtonLabel: null
+  defaultIndexViewMode: cards
+  enableVersioning: false
+  entryTypes:
+    -
+      __assoc__:
+        -
+          - uid
+          - d89afe87-68a3-4fbf-bd5e-dd1869ca520a # Column Item
+    -
+      __assoc__:
+        -
+          - uid
+          - 22ad42db-0272-43fe-821a-8906deaf9a9e # Articles - Default
+    -
+      __assoc__:
+        -
+          - uid
+          - b8f46513-412e-428f-8c96-79e0e1a40e74 # Contests - Default
+    -
+      __assoc__:
+        -
+          - uid
+          - fbb0b339-78a1-4e99-bf1d-892da3385a5e # External
+    -
+      __assoc__:
+        -
+          - uid
+          - 90e3ee03-c906-4321-a1b0-efdf0e796c98 # Call-to-action
+  includeTableView: false
+  maxEntries: null
+  minEntries: null
+  pageSize: 50
+  propagationKeyFormat: null
+  propagationMethod: all
+  showCardsInGrid: false
+  viewMode: cards
+translationKeyFormat: null
+translationMethod: site
+type: craft\fields\Matrix

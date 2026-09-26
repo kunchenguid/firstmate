@@ -1,0 +1,12 @@
+columnSuffix: iudyzeik
+handle: cloudEnabled
+instructions: null
+name: 'Cloud Enabled'
+searchable: false
+settings:
+  default: false
+  offLabel: 'Not Enabled'
+  onLabel: Enabled
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Lightswitch

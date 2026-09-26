@@ -1,0 +1,116 @@
+childBlocks:
+  - multiColumn
+  - text
+  - image
+  - plainText
+  - card
+  - testimonial
+  - statistic
+  - cta
+  - faqs
+  - gallery
+  - staffItem
+  - article
+  - calculatorCta
+  - location
+  - formItem
+  - segmintZone
+color: null
+conditions: null
+description: ''
+enabled: true
+entryType: null
+field: 1bbafb5d-c8cf-4079-bc77-d7454f822431 # Content Builder
+fieldLayouts:
+  26c0d418-eb05-499c-88da-49103e788e15:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            elementCondition: null
+            heading: Column
+            type: craft\fieldlayoutelements\Heading
+            uid: eacee9a8-24fc-451c-b6b4-5980496bac20
+            userCondition: null
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            elementCondition: null
+            type: benf\neo\fieldlayoutelements\ChildBlocksUiElement
+            uid: 0c5e13ff-bb24-4192-a8bf-6be33bd8dcf9
+            userCondition: null
+        name: Content
+        uid: 2fbfe659-3f3c-49d5-9adb-1e73bb720393
+        userCondition: null
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: f0d89773-feb1-4f6f-aec6-c08dfca08121 # Column Properties
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 15eed5f4-b25e-4484-8e38-959d63af7a24
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 294ed368-67f1-40ad-9751-544925dd1965 # Background Properties
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 6cf11852-771a-4f89-a578-b0c2288f564a
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: b988cbc8-5121-4c5b-b5cd-3ad1ba9f3818 # Extra Classes
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: d0dee1f7-2c0a-43ae-ac93-58d95e142e09
+            userCondition: null
+            warning: null
+            width: 100
+        name: 'Column Properties'
+        uid: 0be3b28f-2cb9-4896-a560-0fd63ec50fd9
+        userCondition: null
+group: 9546349b-883f-4682-b6b5-419da3c477e7 # Content
+groupChildBlockTypes: true
+handle: columnItem
+icon: null
+iconFilename: ''
+ignorePermissions: true
+maxBlocks: 0
+maxChildBlocks: 0
+maxSiblingBlocks: 0
+minBlocks: 0
+minChildBlocks: 0
+minSiblingBlocks: 0
+name: 'Column Item'
+topLevel: false

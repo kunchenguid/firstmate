@@ -1,0 +1,123 @@
+fieldLayouts:
+  c31b50fc-c2ff-4e49-8be3-18b3142d4825:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: cd7aab3c-8b3d-48fb-95d1-b67ad18fe68e # Logo
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 4c321c8c-c2ed-47a4-b070-77eb8b27defa
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 8516741a-16f6-49c4-bff1-beee618444bf # Logo Width
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: bd9e56ed-c5e6-4ea6-b1be-8f6cf2074e53
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 0266f508-b6b9-4a52-aa1f-185709f937a9 # Footer Logo
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: fb945db7-0f83-4043-bf55-0fad34d19928
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 7bf74d61-dbe8-4dce-b6d0-2d3ccb919341 # Favicon
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 2e19c654-45ef-4c78-a061-92c4f61f5f8e
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2025-01-28T10:20:32+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: a34d82b1-a6a5-4e77-a78f-d3e52ae6a6a4 # Pre-Footer Graphic
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: ac052ae6-8abc-47d5-aa47-6afbe914d6fa
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2025-05-29T14:58:26+00:00'
+            elementCondition: null
+            type: craft\fieldlayoutelements\HorizontalRule
+            uid: 265a33d8-3b41-4ba5-8800-77a3b316977b
+            userCondition: null
+          -
+            dateAdded: '2025-05-29T14:58:26+00:00'
+            elementCondition: null
+            heading: 'Calculator Scripts'
+            type: craft\fieldlayoutelements\Heading
+            uid: a994786a-ac8d-472b-a195-0a09d4edafb7
+            userCondition: null
+          -
+            dateAdded: '2025-06-10T14:47:04+00:00'
+            elementCondition: null
+            type: craft\fieldlayoutelements\HorizontalRule
+            uid: c7f5c101-2e8c-4dda-99f6-3316c066237a
+            userCondition: null
+          -
+            dateAdded: '2025-06-10T14:47:04+00:00'
+            elementCondition: null
+            heading: 'Speedbump Settings'
+            type: craft\fieldlayoutelements\Heading
+            uid: 79dfdffa-48a3-476a-b6f2-2a13b4c56cdc
+            userCondition: null
+        name: Settings
+        uid: d825ee5e-266f-4ec4-9ae2-4aa319c2e260
+        userCondition: null
+handle: siteControls
+name: 'Site Controls'
+sortOrder: 1

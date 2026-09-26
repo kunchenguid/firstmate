@@ -1,0 +1,27 @@
+columnSuffix: null
+handle: typographyColors
+instructions: null
+name: 'Typography Colors'
+searchable: false
+settings:
+  contentTable: ''
+  createButtonLabel: null
+  defaultIndexViewMode: cards
+  enableVersioning: false
+  entryTypes:
+    -
+      __assoc__:
+        -
+          - uid
+          - f3e05f7b-5da8-45aa-91d8-5e2a4b35cbf4 # Typography Colors Block
+  includeTableView: false
+  maxEntries: 1
+  minEntries: null
+  pageSize: null
+  propagationKeyFormat: null
+  propagationMethod: all
+  showCardsInGrid: false
+  viewMode: blocks
+translationKeyFormat: null
+translationMethod: site
+type: verbb\supertable\fields\SuperTableField

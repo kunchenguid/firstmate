@@ -1,0 +1,44 @@
+columnSuffix: null
+handle: headlineStyles
+instructions: null
+name: 'Headline Styles'
+searchable: true
+settings:
+  customOptions: false
+  options:
+    -
+      __assoc__:
+        -
+          - label
+          - Normal
+        -
+          - value
+          - capitalize
+        -
+          - default
+          - 1
+    -
+      __assoc__:
+        -
+          - label
+          - Uppercase
+        -
+          - value
+          - uppercase
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - Lowercase
+        -
+          - value
+          - lowercase
+        -
+          - default
+          - ''
+translationKeyFormat: null
+translationMethod: site
+type: craft\fields\Dropdown

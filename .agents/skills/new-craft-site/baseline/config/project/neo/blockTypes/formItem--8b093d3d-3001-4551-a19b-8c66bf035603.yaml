@@ -1,0 +1,47 @@
+childBlocks: null
+color: null
+conditions: null
+description: ''
+enabled: true
+entryType: null
+field: 1bbafb5d-c8cf-4079-bc77-d7454f822431 # Content Builder
+fieldLayouts:
+  1073e996-4761-4681-b865-a26db5c71e44:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: c2223f75-0a39-4d4e-a8b8-7769a27e8721 # Form Select
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: edda9b8d-3794-4287-84a1-0f6c45f0e24d
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 7fce577f-2080-4a4e-b052-450f96cc2704
+        userCondition: null
+group: 230477d5-e406-4e81-a36c-a0641dac2924 # Forms
+groupChildBlockTypes: true
+handle: formItem
+icon: null
+iconFilename: ''
+ignorePermissions: true
+maxBlocks: 0
+maxChildBlocks: 0
+maxSiblingBlocks: 0
+minBlocks: 0
+minChildBlocks: 0
+minSiblingBlocks: 0
+name: 'Form Item'
+topLevel: false

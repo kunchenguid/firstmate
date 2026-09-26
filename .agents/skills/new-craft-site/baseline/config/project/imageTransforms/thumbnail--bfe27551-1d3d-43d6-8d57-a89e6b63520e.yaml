@@ -1,0 +1,11 @@
+fill: null
+format: jpg
+handle: thumbnail
+height: 450
+interlace: none
+mode: crop
+name: Thumbnail
+position: center-center
+quality: 60
+upscale: true
+width: 600

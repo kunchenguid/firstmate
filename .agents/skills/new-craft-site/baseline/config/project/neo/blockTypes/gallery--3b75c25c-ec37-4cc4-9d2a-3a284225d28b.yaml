@@ -1,0 +1,87 @@
+childBlocks: null
+color: null
+conditions: null
+description: ''
+enabled: true
+entryType: null
+field: 0949e5db-99d8-44db-99cf-becde5273d27 # Simple Content Builder
+fieldLayouts:
+  8692e6ae-67e1-4637-b953-e1ba73b33623:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 0da09cff-7ad7-4db1-8e3a-6fe76ddf6f39 # Image
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: Images
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 0adb109e-1dde-46e2-a126-8847a084cb76
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 0e5fe790-2e09-4c7b-8fc2-be52efc8b548
+        userCondition: null
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 0aaedf49-0dd2-4544-b6f2-6cf353afee31 # Section Properties
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: c2367ae4-1a00-4a7e-b777-438f2d20299a
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 294ed368-67f1-40ad-9751-544925dd1965 # Background Properties
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 7feabb9c-a50d-4781-8053-36022b997c0a
+            userCondition: null
+            warning: null
+            width: 100
+        name: 'Section Properties'
+        uid: 2d015c28-f244-493e-b609-eb440f42bef5
+        userCondition: null
+group: null
+groupChildBlockTypes: true
+handle: gallery
+icon: null
+iconFilename: ''
+ignorePermissions: true
+maxBlocks: 0
+maxChildBlocks: 0
+maxSiblingBlocks: 0
+minBlocks: 0
+minChildBlocks: 0
+minSiblingBlocks: 0
+name: Gallery
+topLevel: false

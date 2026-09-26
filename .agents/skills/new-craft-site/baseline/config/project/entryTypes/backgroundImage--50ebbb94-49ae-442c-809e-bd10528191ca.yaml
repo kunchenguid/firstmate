@@ -1,0 +1,89 @@
+color: null
+fieldLayouts:
+  def0d004-88d3-451c-9546-f548ab185590:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 9a101138-70db-4208-bac8-4887cec95313 # Background Properties - Background Image - Image
+            handle: image
+            includeInCards: false
+            instructions: null
+            label: Image
+            providesThumbs: true
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 489f3e54-4968-498d-b2bb-66a70aa1f8b0
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: fb3cd3e3-63ab-4611-9704-bdef1f0de3ca # Background Properties - Background Image - Background Repeat
+            handle: null
+            includeInCards: true
+            instructions: null
+            label: 'Background Repeat'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: fdadc7c5-6405-4c49-9d8c-ec8498457320
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 9bf78202-6424-4ebb-b9f4-47784f571c8d # Background Properties - Background Image - Background Position
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: 'Background Position'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: f95d4677-91f1-4334-bffe-829a9bfec61f
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 9a89de6b-00c3-4108-b9c5-3ba1bbc51316 # Background Properties - Background Image - Background Size
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: 'Background Size'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 8de46aa8-d37e-497c-9642-0d2502cc840e
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 16e017ad-df48-4753-8ac4-0c02ce3583d2
+        userCondition: null
+handle: backgroundImage
+hasTitleField: false
+icon: null
+name: 'Background Image'
+showSlugField: false
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

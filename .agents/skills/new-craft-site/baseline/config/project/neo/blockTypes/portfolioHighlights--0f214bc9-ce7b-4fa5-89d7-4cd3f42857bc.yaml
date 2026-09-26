@@ -1,0 +1,121 @@
+childBlocks: null
+color: null
+conditions: null
+description: ''
+enabled: false
+entryType: null
+field: 0949e5db-99d8-44db-99cf-becde5273d27 # Simple Content Builder
+fieldLayouts:
+  8749b91c-e783-44d2-9dbc-94359e9a6f02:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: c682d018-d71c-48ff-be57-57d691130eb5 # Portfolio Display Type
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 35bde06f-94b7-451e-8f3f-2f02da1bcd17
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 153f7226-921a-4b1b-b6ea-704e4e1ad51b # Headline
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 13367e03-96ae-40a8-abda-0cb1581bc8de
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: d200b130-8a43-4fcd-887b-a00e830e2817 # Portfolio Pieces
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: b4b65cc5-2264-4545-b35a-41cb2bd4287f
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 318baf35-17bb-4b75-84e5-5a53ff819601
+        userCondition: null
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 0aaedf49-0dd2-4544-b6f2-6cf353afee31 # Section Properties
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: cd4b241e-1b27-410d-95be-2e82ee65a936
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 294ed368-67f1-40ad-9751-544925dd1965 # Background Properties
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 7e1b2990-f088-4252-a216-39e8deedcd38
+            userCondition: null
+            warning: null
+            width: 100
+        name: 'Section Properties'
+        uid: ed0a3690-20e0-4e0b-9e83-015033291293
+        userCondition: null
+group: null
+groupChildBlockTypes: true
+handle: portfolioHighlights
+icon: null
+iconFilename: ''
+ignorePermissions: true
+maxBlocks: 0
+maxChildBlocks: 0
+maxSiblingBlocks: 0
+minBlocks: 0
+minChildBlocks: 0
+minSiblingBlocks: 0
+name: 'Portfolio Highlights'
+topLevel: false

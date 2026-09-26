@@ -1,0 +1,55 @@
+color: null
+fieldLayouts:
+  10082ea8-375d-4772-99c6-343f38896941:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 684a939f-60bb-4e0d-b052-e9e39b6bb486 # Header Content - Call-to-action - CTA Text
+            handle: ctaText
+            includeInCards: true
+            instructions: null
+            label: 'CTA Text'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 1cc4bb7b-1c10-463f-b3c2-afe52ceeb74b
+            userCondition: null
+            warning: null
+            width: 50
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 693ab154-069b-48db-ae49-12ebc6c0da7a # Header Content - Call-to-action - CTA Link
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: 'CTA Link'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: f354e333-211c-4348-95cd-bf1059dada85
+            userCondition: null
+            warning: null
+            width: 50
+        name: Content
+        uid: 15854e78-5fea-4d9a-a289-def1d66b5206
+        userCondition: null
+handle: cta
+hasTitleField: false
+icon: null
+name: Call-to-action
+showSlugField: false
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

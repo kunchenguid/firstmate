@@ -1,0 +1,55 @@
+color: null
+fieldLayouts:
+  760cefd6-2b41-4ad9-afd0-32fce1ccdb49:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 205f5b23-ebae-462d-b970-eaac80ef928e # Content Lead-in - Lead-in Content - Headline (optional)
+            handle: headlineOptional
+            includeInCards: true
+            instructions: null
+            label: 'Headline (optional)'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 32d283ba-a9b7-499f-a887-f65d47bab5a9
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: ce6ff2d6-2940-4e2a-94c4-48f6a4de4d4a # Content Lead-in - Lead-in Content - Lead-in Content
+            handle: leadInContent
+            includeInCards: false
+            instructions: null
+            label: 'Lead-in Content'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 91815b5e-b3a6-4525-bf42-5cea3eec9b7a
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 142a849f-be4c-481e-8ecc-e4f5e6e6f864
+        userCondition: null
+handle: leadInContent2
+hasTitleField: false
+icon: null
+name: 'Lead-in Content 2'
+showSlugField: false
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

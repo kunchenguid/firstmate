@@ -1,0 +1,22 @@
+columnSuffix: null
+handle: sponsorshipLevel
+instructions: null
+name: 'Sponsorship Level'
+searchable: true
+settings:
+  allowSelfRelations: false
+  branchLimit: 1
+  defaultPlacement: end
+  maintainHierarchy: true
+  maxRelations: null
+  minRelations: null
+  selectionLabel: null
+  showCardsInGrid: false
+  showSiteMenu: true
+  source: 'group:977ff8bb-0d2c-46df-9ffd-bce52f7ea7be'
+  targetSiteId: null
+  validateRelatedElements: false
+  viewMode: null
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Categories

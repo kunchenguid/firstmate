@@ -1,0 +1,91 @@
+color: null
+fieldLayouts:
+  015c8f69-7c91-4205-b608-a528aa41ba0f:
+    cardView:
+      - 'layoutElement:82ed0f6f-b3ce-4fb0-acba-6c7e7fea162d'
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: e9fb1e5f-ff5d-4ee4-83a2-b5170c8b3d05 # CTA - Internal - Text
+            handle: null
+            includeInCards: true
+            instructions: null
+            label: Text
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 82ed0f6f-b3ce-4fb0-acba-6c7e7fea162d
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 7045a77c-b496-4d65-a637-cbb55a0f360b # CTA - Internal - Entry
+            handle: entry
+            includeInCards: false
+            instructions: null
+            label: Entry
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 2f635b6d-17d8-48ab-92a7-438c6d1a5213
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: f0b85837-67d5-46c7-ab9c-c662de250796 # CTA - Internal - Button Style
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: 'Button Style'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: b35b5ae4-b47b-47d1-aae6-dc5f90efc028
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2025-08-19T10:45:50+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 6df9eae6-a3ee-40e7-a01d-82706df88b3e # Speedbump
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 97ae0a85-a0cb-4a39-b197-8c10df0ddab8
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 43f7bf23-0136-4ad7-87ea-55ea7c7c4845
+        userCondition: null
+handle: internal
+hasTitleField: false
+icon: null
+name: Internal
+showSlugField: false
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

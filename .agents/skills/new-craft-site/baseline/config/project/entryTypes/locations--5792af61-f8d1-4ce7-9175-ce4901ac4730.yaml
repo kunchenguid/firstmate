@@ -1,0 +1,275 @@
+color: null
+fieldLayouts:
+  7f895b08-8a54-424f-b79f-2881500732d8:
+    cardView:
+      - 'layoutElement:f23bcd7e-c913-4735-8197-6c1832fdf99e'
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            autocapitalize: true
+            autocomplete: false
+            autocorrect: true
+            class: null
+            dateAdded: '2024-11-15T14:38:38+00:00'
+            disabled: false
+            elementCondition: null
+            id: null
+            includeInCards: false
+            inputType: null
+            instructions: null
+            label: null
+            max: null
+            min: null
+            name: null
+            orientation: null
+            placeholder: null
+            providesThumbs: false
+            readonly: false
+            required: true
+            size: null
+            step: null
+            tip: null
+            title: null
+            type: craft\fieldlayoutelements\entries\EntryTitleField
+            uid: df3b88cc-9b97-450a-867f-70f3ebbbb3e3
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-11-15T15:50:38+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 7fc0bcb4-7f7c-4e74-94ae-34e06259e497 # Services
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 15abdd73-0901-4d2f-a4f0-0db800b9bbd8
+            userCondition: null
+            warning: null
+            width: 50
+          -
+            dateAdded: '2024-11-15T15:55:18+00:00'
+            elementCondition: null
+            type: craft\fieldlayoutelements\HorizontalRule
+            uid: eb9a284f-55c7-46ca-899f-e142fb9a959a
+            userCondition: null
+          -
+            dateAdded: '2024-11-15T15:55:18+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 294ed368-67f1-40ad-9751-544925dd1965 # Background Properties
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: 'Location Header'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 2b900c00-88f8-4bd1-a52e-b5b867c83919
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-11-15T15:46:54+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 56e4d199-12f7-453f-af17-b79dc615088f # Rich Text
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: 'Location Content'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 1ddb8c67-ec11-44bf-9245-5387aabc2775
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 763a4722-4bbc-498f-824d-ad1e2946d1f9
+        userCondition: null
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-11-15T17:35:24+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: e301ab29-4583-471d-a040-df53ce147816 # Google Maps Link
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 9eaeeb06-5f4c-4e52-b168-f243082ddf40
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-11-15T15:46:54+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 27e629c4-98f9-49e8-8862-cad0ef893622 # Address
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 3e3a45bf-07b6-4a0d-b5d4-baffc084aa2a
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-11-15T15:46:54+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: d7625746-583a-4de7-8eea-844315fb714c # Phone Number
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 651c9fdb-df04-4d8c-ab06-4560bc54b346
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-11-15T15:46:54+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 66c89fbe-2e61-4fd4-a734-5bd957473470 # Location Properties
+            handle: null
+            includeInCards: true
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: f23bcd7e-c913-4735-8197-6c1832fdf99e
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-11-26T14:29:52+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: e59e9f52-a025-4d3e-876f-e6973f928f0e # Office Disclaimer
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 94bdd8ce-3992-45e8-9c32-592d90bdbc89
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2025-04-09T16:39:05+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 95bf5180-7891-4134-ab33-919a2d90a90f # Latitude
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 5dd62f59-5cb6-4c12-a9ed-5ffe19178bda
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2025-04-09T16:39:05+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 238a5db2-744e-4df2-8f93-c6f4d2092f13 # Longitude
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: cf8faacf-983e-452c-ab0d-3b50f2130308
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2025-04-22T14:18:42+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: f1b15bc6-0acd-41bb-b6e1-72e31f8c6d3b # FDIC Logo Toggle
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: b0f351fe-441d-4f86-bc0e-28a32e68be20
+            userCondition: null
+            warning: null
+            width: 100
+        name: 'Location Meta'
+        uid: e9176a9a-e549-4091-87de-0e8676a8e62c
+        userCondition: null
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-11-15T15:46:54+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 08071a9d-05fe-4df1-acbe-09fcc54b9d2a # SEO
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 7c1ff658-8ba2-47d1-b18d-2cd9da45ab9a
+            userCondition: null
+            warning: null
+            width: 100
+        name: SEO
+        uid: 9d5065a6-035d-4ba1-ab4d-288575541c5e
+        userCondition: null
+handle: locations
+hasTitleField: true
+icon: building-columns
+name: Locations
+showSlugField: true
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

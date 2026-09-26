@@ -1,0 +1,87 @@
+css: ".ck.ck-content h1{\r\n\r\n    font-size:26px;\r\n\r\n}\r\n\r\n.ck.ck-content h2{\r\n\r\n    font-size:22px;\r\n\r\n}\r\n\r\n.ck.ck-content h3{\r\n\r\n    font-size:20px;\r\n\r\n}\r\n\r\n.ck.ck-content h4{\r\n\r\n    font-size:18px;\r\n\r\n}\r\n\r\n.ck.ck-content h5{\r\n\r\n    font-size:16px;\r\n\r\n}\r\n\r\n.ck.ck-content a.text-link {\r\n    font-weight: bold;\r\n    text-decoration: underline;\r\n}\r\n\r\n.ck.ck-content p.button-tertiary a {\r\n    font-weight: bold;\r\n    color: black;\r\n    padding: 1em 2em;\r\n    background-color:#f9c714;\r\n    display:inline-block;\r\n}\r\n\r\n.ck.ck-content span.disclaimer {\r\n    font-size: 80%;\r\n    text-transform:italic;\r\n}\r\n\r\n.ck.ck-content span.sm-text {\r\n    font-size: 80%;\r\n}\r\n\r\n.ck.ck-content h3.large-headline {\r\n    text-transform:uppercase;\r\n    font-weight:800;\r\n    font-size:22px;\r\n}\r\n\r\n.ck.ck-content p.button-secondary a {\r\n    font-weight: bold;\r\n    color: white;\r\n    padding: 1em 2em;\r\n    background-color:#38cbe4;\r\n    display:inline-block;\r\n}\r\n\r\n.ck.ck-content p.button-primary a {\r\n    font-weight: bold;\r\n    color: white;\r\n    padding: 1em 2em;\r\n    background-color:#1814e3;\r\n    display:inline-block;\r\n}\r\n\r\n.ck.ck-content p.button{\r\n\r\n    margin: 1em 0;\r\n\r\n}\r\n\r\n.ck.ck-content .styled-headline {\r\n  \ttext-transform:uppercase;\r\n    font-weight:800;\r\n    letter-spacing:2px;\r\n}"
+headingLevels:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+name: Standard
+options:
+  alignment:
+    options:
+      - left
+      - right
+      - center
+  code:
+    indentSequence: '  '
+  link:
+    decorators:
+      isExternal:
+        attributes:
+          rel: 'noopener noreferrer'
+          target: _blank
+        defaultValue: false
+        label: 'Open in a new tab'
+        mode: manual
+      isSpeedbump:
+        attributes:
+          data-speedbump: 'true'
+        defaultValue: false
+        label: 'Add Speedbump'
+        mode: manual
+  style:
+    definitions:
+      -
+        classes:
+          - large-headline
+        element: span
+        name: 'Large Headline'
+      -
+        classes:
+          - sm-text
+        element: span
+        name: 'Small Font'
+      -
+        classes:
+          - disclaimer
+        element: span
+        name: Disclaimer
+      -
+        classes:
+          - text-link
+        element: a
+        name: 'Text Link'
+      -
+        classes:
+          - button
+          - button-primary
+        element: p
+        name: 'Button Primary'
+      -
+        classes:
+          - button
+          - button-secondary
+        element: p
+        name: 'Button Secondary'
+      -
+        classes:
+          - button
+          - button-tertiary
+        element: p
+        name: 'Button Tertiary'
+toolbar:
+  - sourceEditing
+  - '|'
+  - heading
+  - '|'
+  - style
+  - '|'
+  - bold
+  - italic
+  - bulletedList
+  - numberedList
+  - link
+  - insertImage
+  - horizontalLine
+  - htmlEmbed
+  - alignment

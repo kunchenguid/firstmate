@@ -1,0 +1,22 @@
+columnSuffix: null
+handle: siteColors
+instructions: null
+name: 'Site Colors'
+searchable: false
+settings:
+  allowSelfRelations: true
+  branchLimit: 1
+  defaultPlacement: end
+  maintainHierarchy: true
+  maxRelations: null
+  minRelations: null
+  selectionLabel: null
+  showCardsInGrid: false
+  showSiteMenu: true
+  source: 'group:670ffd71-25be-4ec2-9d16-631c452c5c85' # Site Colors
+  targetSiteId: null
+  validateRelatedElements: false
+  viewMode: list
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Categories

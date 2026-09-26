@@ -1,0 +1,67 @@
+defaultPlacement: end
+fieldLayouts:
+  75ec5eb7-da89-4e11-b280-d7ecced317f0:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            autocapitalize: true
+            autocomplete: false
+            autocorrect: true
+            class: null
+            dateAdded: '2024-11-15T15:47:29+00:00'
+            disabled: false
+            elementCondition: null
+            id: null
+            includeInCards: false
+            inputType: null
+            instructions: null
+            label: null
+            max: null
+            min: null
+            name: null
+            orientation: null
+            placeholder: null
+            providesThumbs: false
+            readonly: false
+            requirable: false
+            size: null
+            step: null
+            tip: null
+            title: null
+            type: craft\fieldlayoutelements\TitleField
+            uid: 41d0fdac-e0fe-461f-a2b0-ad1201079f04
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-11-15T15:48:50+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 9b9d3c09-8292-458c-8a34-e3e2265b824a # Icon
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 81070fed-59bc-4763-ab88-e4f85a10cbd0
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 5dd8ef0c-3cd7-4f57-8c3f-00579df43089
+        userCondition: null
+handle: services
+name: Services
+siteSettings:
+  a57193b9-dd25-415d-a670-e4b6a0c7b8cb: # $SYSTEM_NAME
+    hasUrls: false
+    template: null
+    uriFormat: null
+structure:
+  maxLevels: null
+  uid: 91dfe250-4228-4e82-8d1e-87386e28412e

@@ -1,0 +1,165 @@
+color: null
+fieldLayouts:
+  eaa36ae4-311a-48f5-a8ab-167ab028060c:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            autocapitalize: true
+            autocomplete: false
+            autocorrect: true
+            class: null
+            dateAdded: '2024-11-15T14:45:43+00:00'
+            disabled: false
+            elementCondition: null
+            id: null
+            includeInCards: false
+            inputType: null
+            instructions: null
+            label: null
+            max: null
+            min: null
+            name: null
+            orientation: null
+            placeholder: null
+            providesThumbs: false
+            readonly: false
+            required: true
+            size: null
+            step: null
+            tip: null
+            title: null
+            type: craft\fieldlayoutelements\entries\EntryTitleField
+            uid: c71c6d4f-c13e-43da-b928-4d9cd04fb6c2
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2025-01-30T15:41:57+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 1bbafb5d-c8cf-4079-bc77-d7454f822431 # Content Builder
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 18d73a6f-003f-4542-b84e-f5678ac816c0
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 927e91f8-8309-4a95-aa28-65b8723928f6
+        userCondition: null
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2025-04-17T13:46:49+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: f1b15bc6-0acd-41bb-b6e1-72e31f8c6d3b # FDIC Logo Toggle
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 44562e1f-04f4-4930-9c0e-df3908e8e590
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2025-01-30T16:08:39+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: c4e44d1c-9533-4fbe-9ddd-ca4161c9f389 # Description
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: bb8e1cee-cfd3-4806-8d17-ecd748a82d42
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2025-06-06T11:58:12+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 7a3594ba-bd8f-4302-be23-39176e3df1f6 # Active
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: 'Business/Ag Product'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 1e5ad998-5e7a-48bf-ba92-bbd3a4ad8db2
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2025-01-30T15:41:57+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: e8d9a1d3-750b-4cd8-9d22-58accdc84154 # Checking Product Table
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: b274558b-f332-4d4a-941b-34671a7aba36
+            userCondition: null
+            warning: null
+            width: 100
+        name: 'Product Information'
+        uid: 95757f9c-0170-488c-9c85-909509183f18
+        userCondition: null
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2025-01-30T15:41:57+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 08071a9d-05fe-4df1-acbe-09fcc54b9d2a # SEO
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: d1b8abc9-4e81-45c8-8414-37bb75de9135
+            userCondition: null
+            warning: null
+            width: 100
+        name: SEO
+        uid: 17540cda-13a6-4c7e-b995-10d551e04cd9
+        userCondition: null
+handle: products
+hasTitleField: true
+icon: null
+name: Product
+showSlugField: true
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

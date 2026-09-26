@@ -1,0 +1,47 @@
+childBlocks: null
+color: null
+conditions: null
+description: ''
+enabled: false
+entryType: null
+field: 0949e5db-99d8-44db-99cf-becde5273d27 # Simple Content Builder
+fieldLayouts:
+  e056ab70-0f1e-4d28-aed4-b498243b541c:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 3be2efb3-51e3-45ee-ab5e-85863895d494 # Testimonials
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 2f240d30-dd5c-4e70-8bd8-2418290aeece
+            userCondition: null
+            warning: null
+            width: 100
+        name: Testimonial
+        uid: e77051c0-5aae-4e7b-9cec-19e48b6aa538
+        userCondition: null
+group: null
+groupChildBlockTypes: true
+handle: testimonial
+icon: null
+iconFilename: ''
+ignorePermissions: true
+maxBlocks: 0
+maxChildBlocks: 0
+maxSiblingBlocks: 0
+minBlocks: 0
+minChildBlocks: 0
+minSiblingBlocks: 0
+name: Testimonial
+topLevel: false

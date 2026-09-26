@@ -1,0 +1,12 @@
+columnSuffix: null
+handle: disableAuthor
+instructions: null
+name: 'Disable Author'
+searchable: false
+settings:
+  default: false
+  offLabel: null
+  onLabel: null
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Lightswitch

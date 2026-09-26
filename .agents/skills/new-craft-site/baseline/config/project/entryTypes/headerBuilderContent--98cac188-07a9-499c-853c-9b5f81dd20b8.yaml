@@ -1,0 +1,106 @@
+color: null
+fieldLayouts:
+  62a15810-db08-47ec-99b9-cafbe706c71a:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 9c58c555-0c03-4a82-9e31-ed3d8adc2657 # Header Content Builder - Header Builder Content - Background Image
+            handle: backgroundImage
+            includeInCards: false
+            instructions: null
+            label: 'Background Image'
+            providesThumbs: true
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 40091d22-ed6b-41e7-8209-690b06429e21
+            userCondition: null
+            warning: null
+            width: 50
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 0b250c8d-f1e5-4c50-877f-ce989ddbf7a9 # Header Content Builder - Header Builder Content - Foreground Image
+            handle: null
+            includeInCards: true
+            instructions: null
+            label: 'Foreground Image'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 9a1c4b35-cded-439b-b68a-d4ada297c277
+            userCondition: null
+            warning: null
+            width: 50
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 93daadd4-dbd5-489c-aec6-c579e30791f6 # Header Content Builder - Header Builder Content - Background Image Position
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: 'Background Image Position'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: c3af132d-f839-47cd-8a91-e8d12d23e6de
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: fbd4e816-5b0d-40d6-aebf-a20ece1681d8 # Header Content Builder - Header Builder Content - Subhead (optional
+            handle: subhead
+            includeInCards: false
+            instructions: null
+            label: 'Subhead (optional'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: b1195266-80bd-4336-8a64-5dcf805fa99c
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 9df95f8a-0db0-4ca3-b7f0-9cc5d1e82eed # Header Content Builder - Header Builder Content - Headline
+            handle: headline
+            includeInCards: false
+            instructions: null
+            label: Headline
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 19bd6b6d-41f0-435c-9f28-77b1c8822245
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 54280d52-c9d2-4f22-bb0b-eb3d05a6c50a
+        userCondition: null
+handle: headerBuilderContent
+hasTitleField: false
+icon: null
+name: 'Header Builder Content'
+showSlugField: false
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

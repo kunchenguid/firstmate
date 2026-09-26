@@ -1,0 +1,33 @@
+columnSuffix: null
+handle: linkType
+instructions: 'Select if this is an internal or external link.'
+name: 'Link Type'
+searchable: true
+settings:
+  customOptions: false
+  options:
+    -
+      __assoc__:
+        -
+          - label
+          - Internal
+        -
+          - value
+          - internal
+        -
+          - default
+          - '1'
+    -
+      __assoc__:
+        -
+          - label
+          - External
+        -
+          - value
+          - external
+        -
+          - default
+          - ''
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Dropdown

@@ -1,0 +1,44 @@
+columnSuffix: null
+handle: contentHorizontalAlignment
+instructions: null
+name: 'Content Horizontal Alignment'
+searchable: false
+settings:
+  customOptions: false
+  options:
+    -
+      __assoc__:
+        -
+          - label
+          - Left
+        -
+          - value
+          - justify-content-start
+        -
+          - default
+          - 1
+    -
+      __assoc__:
+        -
+          - label
+          - Center
+        -
+          - value
+          - justify-content-center
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - Right
+        -
+          - value
+          - justify-content-end
+        -
+          - default
+          - ''
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Dropdown

@@ -1,0 +1,56 @@
+columnSuffix: vjslfuho
+handle: backgroundSize2
+instructions: null
+name: 'Overlay Background Properties - Background Image - Background Size'
+searchable: false
+settings:
+  addRowLabel: 'Add a row'
+  columns:
+    __assoc__:
+      -
+        - col1
+        -
+          __assoc__:
+            -
+              - heading
+              - Width
+            -
+              - handle
+              - width
+            -
+              - width
+              - ''
+            -
+              - type
+              - singleline
+      -
+        - col2
+        -
+          __assoc__:
+            -
+              - heading
+              - Height
+            -
+              - handle
+              - height
+            -
+              - width
+              - ''
+            -
+              - type
+              - singleline
+  defaults:
+    -
+      __assoc__:
+        -
+          - col1
+          - Cover
+        -
+          - col2
+          - Cover
+  maxRows: 1
+  minRows: 1
+  staticRows: false
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Table

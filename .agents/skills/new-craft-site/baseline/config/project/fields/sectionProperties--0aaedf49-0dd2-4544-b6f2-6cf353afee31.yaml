@@ -1,0 +1,556 @@
+columnSuffix: null
+handle: sectionProperties
+instructions: null
+name: 'Section Properties'
+searchable: true
+settings:
+  addRowLabel: 'Add a row'
+  columns:
+    __assoc__:
+      -
+        - col3
+        -
+          __assoc__:
+            -
+              - heading
+              - 'Section ID'
+            -
+              - handle
+              - sectionId
+            -
+              - width
+              - 10%
+            -
+              - type
+              - singleline
+      -
+        - col8
+        -
+          __assoc__:
+            -
+              - heading
+              - 'Container Width'
+            -
+              - handle
+              - containerWidth
+            -
+              - width
+              - ''
+            -
+              - type
+              - select
+            -
+              - options
+              -
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Small
+                    -
+                      - value
+                      - container-sm
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Medium
+                    -
+                      - value
+                      - container-md
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Default
+                    -
+                      - value
+                      - container
+                    -
+                      - default
+                      - true
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Large
+                    -
+                      - value
+                      - container-lg
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - X-Large
+                    -
+                      - value
+                      - container-xl
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - 'FUll Width'
+                    -
+                      - value
+                      - container-fluid
+                    -
+                      - default
+                      - false
+      -
+        - col1
+        -
+          __assoc__:
+            -
+              - heading
+              - 'Vertical Alignment'
+            -
+              - handle
+              - verticalAlignment
+            -
+              - width
+              - ''
+            -
+              - type
+              - select
+            -
+              - options
+              -
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Top
+                    -
+                      - value
+                      - align-items-start
+                    -
+                      - default
+                      - true
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Middle
+                    -
+                      - value
+                      - align-items-center
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Bottom
+                    -
+                      - value
+                      - align-items-end
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - 'Full Height'
+                    -
+                      - value
+                      - fullHeight
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Default
+                    -
+                      - value
+                      - ''
+                    -
+                      - default
+                      - false
+      -
+        - col2
+        -
+          __assoc__:
+            -
+              - heading
+              - 'Horizontal Alignment'
+            -
+              - handle
+              - horizontalAlignment
+            -
+              - width
+              - ''
+            -
+              - type
+              - select
+            -
+              - options
+              -
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Left
+                    -
+                      - value
+                      - justify-content-start
+                    -
+                      - default
+                      - true
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Center
+                    -
+                      - value
+                      - justify-content-center
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Right
+                    -
+                      - value
+                      - justify-content-end
+                    -
+                      - default
+                      - false
+      -
+        - col4
+        -
+          __assoc__:
+            -
+              - heading
+              - 'Section Padding Top'
+            -
+              - handle
+              - sectionPaddingTop
+            -
+              - width
+              - ''
+            -
+              - type
+              - select
+            -
+              - options
+              -
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - None
+                    -
+                      - value
+                      - section-padding-top-none
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - XS
+                    -
+                      - value
+                      - section-padding-top-xs
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - SM
+                    -
+                      - value
+                      - section-padding-top-sm
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Default
+                    -
+                      - value
+                      - section-padding-top-default
+                    -
+                      - default
+                      - true
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - MD
+                    -
+                      - value
+                      - section-padding-top-md
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - LG
+                    -
+                      - value
+                      - section-padding-top-lg
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - XL
+                    -
+                      - value
+                      - section-padding-top-xl
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - XXL
+                    -
+                      - value
+                      - section-padding-top-xxl
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Massive
+                    -
+                      - value
+                      - section-padding-top-massive
+                    -
+                      - default
+                      - false
+      -
+        - col5
+        -
+          __assoc__:
+            -
+              - heading
+              - 'Section Padding Bottom'
+            -
+              - handle
+              - sectionPaddingBottom
+            -
+              - width
+              - ''
+            -
+              - type
+              - select
+            -
+              - options
+              -
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - None
+                    -
+                      - value
+                      - section-padding-bottom-none
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - XS
+                    -
+                      - value
+                      - section-padding-bottom-xs
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - SM
+                    -
+                      - value
+                      - section-padding-bottom-sm
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Default
+                    -
+                      - value
+                      - section-padding-bottom-default
+                    -
+                      - default
+                      - true
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - MD
+                    -
+                      - value
+                      - section-padding-bottom-md
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - LG
+                    -
+                      - value
+                      - section-padding-bottom-lg
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - XL
+                    -
+                      - value
+                      - section-padding-bottom-xl
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - 'XXL '
+                    -
+                      - value
+                      - section-padding-bottom-xxl
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Massive
+                    -
+                      - value
+                      - section-padding-bottom-massive
+                    -
+                      - default
+                      - false
+      -
+        - col6
+        -
+          __assoc__:
+            -
+              - heading
+              - 'Margin Top'
+            -
+              - handle
+              - marginTop
+            -
+              - width
+              - 10%
+            -
+              - type
+              - singleline
+      -
+        - col7
+        -
+          __assoc__:
+            -
+              - heading
+              - 'Margin Bottom'
+            -
+              - handle
+              - marginBottom
+            -
+              - width
+              - 10%
+            -
+              - type
+              - singleline
+      -
+        - col9
+        -
+          __assoc__:
+            -
+              - heading
+              - Z-Index
+            -
+              - handle
+              - zIndex
+            -
+              - width
+              - ''
+            -
+              - type
+              - number
+  defaults:
+    -
+      __assoc__:
+        -
+          - col3
+          - ''
+        -
+          - col8
+          - container
+        -
+          - col1
+          - align-items-start
+        -
+          - col2
+          - justify-content-start
+        -
+          - col4
+          - section-padding-top-default
+        -
+          - col5
+          - section-padding-bottom-default
+        -
+          - col6
+          - ''
+        -
+          - col7
+          - ''
+        -
+          - col9
+          - '1'
+  maxRows: 1
+  minRows: 1
+  staticRows: false
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Table

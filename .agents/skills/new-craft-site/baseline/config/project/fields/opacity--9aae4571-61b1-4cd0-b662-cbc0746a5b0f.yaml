@@ -1,0 +1,19 @@
+columnSuffix: lstlmfyu
+handle: opacity
+instructions: null
+name: 'Overlay Background Properties - Background Color - Opacity'
+searchable: false
+settings:
+  decimals: 2
+  defaultValue: 0.8
+  max: 1
+  min: 0.01
+  prefix: null
+  previewCurrency: null
+  previewFormat: decimal
+  size: null
+  step: null
+  suffix: null
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Number

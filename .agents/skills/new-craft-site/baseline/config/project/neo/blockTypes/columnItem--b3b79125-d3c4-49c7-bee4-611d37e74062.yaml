@@ -1,0 +1,78 @@
+childBlocks:
+  - image
+  - text
+color: null
+conditions: null
+description: ''
+enabled: true
+entryType: null
+field: 0949e5db-99d8-44db-99cf-becde5273d27 # Simple Content Builder
+fieldLayouts:
+  e8342d56-09aa-4cb1-97ff-20eae2a41fd9:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            elementCondition: null
+            type: craft\fieldlayoutelements\HorizontalRule
+            uid: 8bdd2212-c512-4296-8782-58d752674015
+            userCondition: null
+        name: Content
+        uid: 37cae530-2f7b-4a0a-82f6-5f3fdbceda5e
+        userCondition: null
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: f0d89773-feb1-4f6f-aec6-c08dfca08121 # Column Properties
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: c26acb38-f4e5-417c-9f48-a5654872e6c3
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 294ed368-67f1-40ad-9751-544925dd1965 # Background Properties
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 66a7d215-4729-43b6-8146-046b53d9dc4f
+            userCondition: null
+            warning: null
+            width: 100
+        name: 'Column Properties'
+        uid: ab8f432f-9678-4ee4-a743-748af87d183e
+        userCondition: null
+group: null
+groupChildBlockTypes: true
+handle: columnItem
+icon: null
+iconFilename: ''
+ignorePermissions: true
+maxBlocks: 0
+maxChildBlocks: 0
+maxSiblingBlocks: 0
+minBlocks: 0
+minChildBlocks: 0
+minSiblingBlocks: 0
+name: 'Column Item'
+topLevel: false

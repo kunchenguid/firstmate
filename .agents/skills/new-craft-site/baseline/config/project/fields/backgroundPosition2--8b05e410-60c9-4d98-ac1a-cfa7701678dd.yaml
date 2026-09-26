@@ -1,0 +1,56 @@
+columnSuffix: smrvczll
+handle: backgroundPosition2
+instructions: null
+name: 'Overlay Background Properties - Background Image - Background Position'
+searchable: false
+settings:
+  addRowLabel: 'Add a row'
+  columns:
+    __assoc__:
+      -
+        - col3
+        -
+          __assoc__:
+            -
+              - heading
+              - 'X Axis'
+            -
+              - handle
+              - xCustom
+            -
+              - width
+              - ''
+            -
+              - type
+              - singleline
+      -
+        - col4
+        -
+          __assoc__:
+            -
+              - heading
+              - 'Y Axis'
+            -
+              - handle
+              - yCustom
+            -
+              - width
+              - ''
+            -
+              - type
+              - singleline
+  defaults:
+    -
+      __assoc__:
+        -
+          - col3
+          - ''
+        -
+          - col4
+          - ''
+  maxRows: 1
+  minRows: 1
+  staticRows: false
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Table

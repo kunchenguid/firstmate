@@ -1,0 +1,36 @@
+columnSuffix: null
+handle: backgroundProperties
+instructions: null
+name: 'Background Properties'
+searchable: true
+settings:
+  createButtonLabel: 'New Property'
+  defaultIndexViewMode: cards
+  enableVersioning: false
+  entryTypes:
+    -
+      __assoc__:
+        -
+          - uid
+          - 50ebbb94-49ae-442c-809e-bd10528191ca # Background Image
+    -
+      __assoc__:
+        -
+          - uid
+          - 6960792b-2bf0-4495-bac5-8bc396d34628 # Background Video
+    -
+      __assoc__:
+        -
+          - uid
+          - b6eb62cc-e4c3-49e1-9824-1178275be1da # Background Color
+  includeTableView: false
+  maxEntries: null
+  minEntries: null
+  pageSize: null
+  propagationKeyFormat: null
+  propagationMethod: all
+  showCardsInGrid: false
+  viewMode: blocks
+translationKeyFormat: null
+translationMethod: site
+type: craft\fields\Matrix

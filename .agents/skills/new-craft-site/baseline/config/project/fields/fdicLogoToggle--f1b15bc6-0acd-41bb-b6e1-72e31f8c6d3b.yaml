@@ -1,0 +1,12 @@
+columnSuffix: null
+handle: fdicLogoToggle
+instructions: null
+name: 'FDIC Logo Toggle'
+searchable: false
+settings:
+  default: true
+  offLabel: null
+  onLabel: null
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Lightswitch

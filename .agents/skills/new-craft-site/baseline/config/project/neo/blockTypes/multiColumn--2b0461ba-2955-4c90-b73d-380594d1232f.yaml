@@ -1,0 +1,125 @@
+childBlocks:
+  - columnItem
+color: null
+conditions: null
+description: ''
+enabled: true
+entryType: null
+field: 1bbafb5d-c8cf-4079-bc77-d7454f822431 # Content Builder
+fieldLayouts:
+  084f3052-7b72-459e-8085-9dc2fe8978d9:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            elementCondition: null
+            heading: Section
+            type: craft\fieldlayoutelements\Heading
+            uid: 9e45da32-64fa-43b9-9818-b08c7285be3a
+            userCondition: null
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            elementCondition: null
+            type: benf\neo\fieldlayoutelements\ChildBlocksUiElement
+            uid: faab55c4-b13e-4b1b-98b1-02783508bec7
+            userCondition: null
+        name: Content
+        uid: e166473c-5b03-499c-bd70-760c2eb14e02
+        userCondition: null
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            elementCondition: null
+            heading: Properties
+            type: craft\fieldlayoutelements\Heading
+            uid: 1dea7034-9e85-4d07-b128-c83f912ea118
+            userCondition: null
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 0aaedf49-0dd2-4544-b6f2-6cf353afee31 # Section Properties
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 9c94c832-8f2a-4c69-8c8b-959233a872c6
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 294ed368-67f1-40ad-9751-544925dd1965 # Background Properties
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: b1cfdad8-5a7b-4f1e-94d6-7dd49b254eea
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 4ec5cb85-8f1f-48d3-8408-3de272d3fb6b # Custom CSS
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: ac36d6df-0770-48dd-b1cf-1b14e2e953a4
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: b988cbc8-5121-4c5b-b5cd-3ad1ba9f3818 # Extra Classes
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 50f0672f-8ef1-4553-8371-b0afbd746b30
+            userCondition: null
+            warning: null
+            width: 100
+        name: 'Section Options'
+        uid: 6e93b3bb-f9e9-4d9c-aa66-446003f2012a
+        userCondition: null
+group: 9546349b-883f-4682-b6b5-419da3c477e7 # Content
+groupChildBlockTypes: false
+handle: multiColumn
+icon: null
+iconFilename: ''
+ignorePermissions: true
+maxBlocks: 0
+maxChildBlocks: 0
+maxSiblingBlocks: 0
+minBlocks: 0
+minChildBlocks: 0
+minSiblingBlocks: 0
+name: 'Multi Column'
+topLevel: true

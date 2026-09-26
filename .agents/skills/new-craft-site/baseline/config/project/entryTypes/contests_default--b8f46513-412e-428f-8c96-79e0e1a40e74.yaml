@@ -1,0 +1,91 @@
+color: null
+fieldLayouts:
+  224a4a2e-c0d3-42b6-a0c1-b2b5eec3c62f:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            autocapitalize: true
+            autocomplete: false
+            autocorrect: true
+            class: null
+            dateAdded: '2024-10-10T19:06:49+00:00'
+            disabled: false
+            elementCondition: null
+            id: null
+            includeInCards: false
+            inputType: null
+            instructions: null
+            label: null
+            max: null
+            min: null
+            name: null
+            orientation: null
+            placeholder: null
+            providesThumbs: false
+            readonly: false
+            required: true
+            size: null
+            step: null
+            tip: null
+            title: null
+            type: craft\fieldlayoutelements\entries\EntryTitleField
+            uid: ce504785-2f65-4360-a9c6-7bcc423309b4
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:49+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 1bbafb5d-c8cf-4079-bc77-d7454f822431 # Content Builder
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 3829cb05-c745-4bd2-9a62-f986a87b29e6
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 49157398-1d4d-40b2-afdf-e4ed90866d52
+        userCondition: null
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:49+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 08071a9d-05fe-4df1-acbe-09fcc54b9d2a # SEO
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 0021426f-2403-4536-a3e4-c5e9cda1941b
+            userCondition: null
+            warning: null
+            width: 100
+        name: SEO
+        uid: b8b65149-554f-4187-852f-d1c854990e35
+        userCondition: null
+handle: contests_default
+hasTitleField: true
+icon: null
+name: 'Contests - Default'
+showSlugField: true
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

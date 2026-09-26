@@ -1,0 +1,33 @@
+columnSuffix: ownstpag
+handle: displayType
+instructions: null
+name: 'Display Type'
+searchable: false
+settings:
+  customOptions: false
+  options:
+    -
+      __assoc__:
+        -
+          - label
+          - Simplified
+        -
+          - value
+          - simplified
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - 'Full Preview'
+        -
+          - value
+          - fullPreview
+        -
+          - default
+          - '1'
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Dropdown

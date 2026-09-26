@@ -1,0 +1,11 @@
+fill: '#ffffff'
+format: null
+handle: showCard
+height: 600
+interlace: none
+mode: letterbox
+name: 'Show Card'
+position: center-center
+quality: null
+upscale: true
+width: 600

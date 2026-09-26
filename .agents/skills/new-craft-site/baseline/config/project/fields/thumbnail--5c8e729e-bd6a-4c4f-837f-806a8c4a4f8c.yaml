@@ -1,0 +1,26 @@
+columnSuffix: null
+handle: thumbnail
+instructions: null
+name: Thumbnail
+searchable: true
+settings:
+  createButtonLabel: null
+  defaultIndexViewMode: cards
+  enableVersioning: false
+  entryTypes:
+    -
+      __assoc__:
+        -
+          - uid
+          - 4fb31c2b-59b6-4fd4-b2bd-d2c60a3b0d64 # Thumbnail
+  includeTableView: false
+  maxEntries: null
+  minEntries: null
+  pageSize: null
+  propagationKeyFormat: null
+  propagationMethod: all
+  showCardsInGrid: false
+  viewMode: blocks
+translationKeyFormat: null
+translationMethod: site
+type: craft\fields\Matrix

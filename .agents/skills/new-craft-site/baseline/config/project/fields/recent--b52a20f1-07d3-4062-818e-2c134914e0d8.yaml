@@ -1,0 +1,12 @@
+columnSuffix: null
+handle: recent
+instructions: null
+name: Recent
+searchable: false
+settings:
+  default: false
+  offLabel: 'Cherry Pick'
+  onLabel: 'Recent Episodes'
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Lightswitch

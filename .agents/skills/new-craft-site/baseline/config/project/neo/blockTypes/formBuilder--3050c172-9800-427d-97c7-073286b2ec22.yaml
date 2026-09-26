@@ -1,0 +1,122 @@
+childBlocks:
+  - formItem
+color: null
+conditions: null
+description: ''
+enabled: false
+entryType: null
+field: 1bbafb5d-c8cf-4079-bc77-d7454f822431 # Content Builder
+fieldLayouts:
+  236cbce9-ebe8-4850-91ae-6d596a6bf0be:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 42c584fe-c18f-4638-9870-26dd109cb2b5 # Column Width
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: da5a6467-93f1-4e02-af5e-b234cfecd38a
+            userCondition: null
+            warning: null
+            width: 50
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 9cf81c55-3173-4bc8-82bf-1a82e09cd6dd # Column Offset
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 4d2263f4-f1fa-4d7c-9bd4-f3485c536b29
+            userCondition: null
+            warning: null
+            width: 50
+        name: 'Form Select'
+        uid: c84fd1c1-ffb9-4491-935c-31b5a039bf79
+        userCondition: null
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 0aaedf49-0dd2-4544-b6f2-6cf353afee31 # Section Properties
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: eeaa7e69-09ef-48ec-b452-788c9558926b
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 294ed368-67f1-40ad-9751-544925dd1965 # Background Properties
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: b7657d4b-76a1-4f25-8c2d-fd830b186319
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 4ec5cb85-8f1f-48d3-8408-3de272d3fb6b # Custom CSS
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 2135a741-5cbe-438d-89a9-9a0c5768d6ce
+            userCondition: null
+            warning: null
+            width: 100
+        name: 'Section Options'
+        uid: 7180408e-601b-4713-91b9-1817f77bfef3
+        userCondition: null
+group: 230477d5-e406-4e81-a36c-a0641dac2924 # Forms
+groupChildBlockTypes: true
+handle: formBuilder
+icon: null
+iconFilename: ''
+ignorePermissions: true
+maxBlocks: 0
+maxChildBlocks: 1
+maxSiblingBlocks: 0
+minBlocks: 0
+minChildBlocks: 0
+minSiblingBlocks: 0
+name: 'Form Select'
+topLevel: true

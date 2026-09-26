@@ -1,0 +1,53 @@
+color: null
+fieldLayouts:
+  07c417ab-250e-4396-a44c-165d130357bd:
+    cardView:
+      - 'layoutElement:272a9dc6-82b3-4cab-9335-637d9de6403c'
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            autocapitalize: true
+            autocomplete: false
+            autocorrect: true
+            class: null
+            dateAdded: '2024-12-03T15:10:19+00:00'
+            disabled: false
+            elementCondition: null
+            id: null
+            includeInCards: false
+            inputType: null
+            instructions: null
+            label: null
+            max: null
+            min: null
+            name: null
+            orientation: null
+            placeholder: null
+            providesThumbs: false
+            readonly: false
+            required: true
+            size: null
+            step: null
+            tip: null
+            title: null
+            type: craft\fieldlayoutelements\entries\EntryTitleField
+            uid: 8e2591d9-528b-4425-8fcd-cedfc39d6078
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: f00e6fb7-4123-4ee1-bb69-a3a20b900f9d
+        userCondition: null
+handle: closure
+hasTitleField: true
+icon: null
+name: Closure
+showSlugField: false
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

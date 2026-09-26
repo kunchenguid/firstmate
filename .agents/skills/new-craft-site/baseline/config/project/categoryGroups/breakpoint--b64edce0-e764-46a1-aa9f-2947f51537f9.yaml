@@ -1,0 +1,50 @@
+defaultPlacement: end
+fieldLayouts:
+  6430d8e0-aa3e-4bb2-8ca8-36ca36769c44:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            autocapitalize: true
+            autocomplete: false
+            autocorrect: true
+            class: null
+            dateAdded: '2024-11-26T13:46:35+00:00'
+            disabled: false
+            elementCondition: null
+            id: null
+            includeInCards: false
+            inputType: null
+            instructions: null
+            label: null
+            max: null
+            min: null
+            name: null
+            orientation: null
+            placeholder: null
+            providesThumbs: false
+            readonly: false
+            requirable: false
+            size: null
+            step: null
+            tip: null
+            title: null
+            type: craft\fieldlayoutelements\TitleField
+            uid: 8dfc02f5-9925-4729-8fb0-cd9e92c1a1ac
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 2de47aca-169e-4e01-affe-43313cfebaae
+        userCondition: null
+handle: breakpoint
+name: Breakpoint
+siteSettings:
+  a57193b9-dd25-415d-a670-e4b6a0c7b8cb: # $SYSTEM_NAME
+    hasUrls: false
+    template: null
+    uriFormat: null
+structure:
+  maxLevels: null
+  uid: e2eeaea0-fa97-4596-b600-d2b4ccc31b0c

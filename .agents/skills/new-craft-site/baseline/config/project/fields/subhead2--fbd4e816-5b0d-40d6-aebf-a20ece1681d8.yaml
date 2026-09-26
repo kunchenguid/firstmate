@@ -1,0 +1,16 @@
+columnSuffix: null
+handle: subhead2
+instructions: 'This is brief text displayed above the headline'
+name: 'Header Content Builder - Header Builder Content - Subhead (optional'
+searchable: false
+settings:
+  byteLimit: null
+  charLimit: null
+  code: false
+  initialRows: 4
+  multiline: false
+  placeholder: null
+  uiMode: normal
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\PlainText

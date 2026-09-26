@@ -1,0 +1,114 @@
+fieldLayouts:
+  dc4176fb-cfdd-4dba-8a4b-823365c486bc:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 80cf905f-e0a8-4146-b282-fec0037bd123 # Font Stack
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 17a4c020-0a69-4378-a082-e4cc8e9b603f
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 51fcc584-8fd1-4c8f-b527-cb97c60962ca # Headline Styles
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 372a71eb-25b1-48dc-9a37-fb7bbb8e6734
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 31e64f0a-67a8-4338-b59d-a338067c95b7 # Heading Font
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 07c5f3f8-bc93-42ad-b95c-b1afc413c48c
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: f08a9a36-b7c5-42fc-8fab-02ec8df974fe # Body Font
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: ff846080-50ba-413d-839f-25fbc255d894
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 30085f3c-656d-4350-9c0e-2816a45a8376 # Typography Colors
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 1a5a6e3d-f457-4ab8-9965-e0a91f2e3a21
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2025-01-28T10:20:08+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: a34d82b1-a6a5-4e77-a78f-d3e52ae6a6a4 # Pre-Footer Graphic
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 73e38cfa-513f-40f7-b173-0d7ee9735e85
+            userCondition: null
+            warning: null
+            width: 100
+        name: Typography
+        uid: 0585742c-cb6e-4cff-8b71-3bc31e76b137
+        userCondition: null
+handle: siteStyles
+name: 'Site Styles'
+sortOrder: 2

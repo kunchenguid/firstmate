@@ -1,0 +1,41 @@
+columnSuffix: null
+handle: headerContent
+instructions: null
+name: 'Header Content'
+searchable: false
+settings:
+  createButtonLabel: null
+  defaultIndexViewMode: cards
+  enableVersioning: false
+  entryTypes:
+    -
+      __assoc__:
+        -
+          - uid
+          - 35b4763c-529e-4aed-987b-fb5d7d592b9e # Header Content
+    -
+      __assoc__:
+        -
+          - uid
+          - 90e3ee03-c906-4321-a1b0-efdf0e796c98 # Call-to-action
+    -
+      __assoc__:
+        -
+          - uid
+          - 595cd54d-698b-4cbf-82bf-486d6bd7ee5f # Headline
+    -
+      __assoc__:
+        -
+          - uid
+          - e0f34fa0-a509-4c4e-9231-078884cf6504 # Lead-in Content
+  includeTableView: false
+  maxEntries: null
+  minEntries: null
+  pageSize: null
+  propagationKeyFormat: null
+  propagationMethod: all
+  showCardsInGrid: false
+  viewMode: blocks
+translationKeyFormat: null
+translationMethod: site
+type: craft\fields\Matrix

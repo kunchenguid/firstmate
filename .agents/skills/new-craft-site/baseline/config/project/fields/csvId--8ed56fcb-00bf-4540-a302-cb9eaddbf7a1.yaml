@@ -1,0 +1,16 @@
+columnSuffix: ctxbtvpn
+handle: csvId
+instructions: null
+name: 'CSV ID'
+searchable: false
+settings:
+  byteLimit: null
+  charLimit: null
+  code: false
+  initialRows: 4
+  multiline: false
+  placeholder: null
+  uiMode: normal
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\PlainText

@@ -1,0 +1,10 @@
+columnSuffix: null
+handle: footerBackgroundColor
+instructions: null
+name: 'Footer Background Color'
+searchable: true
+settings:
+  allowCustomColors: true
+translationKeyFormat: null
+translationMethod: site
+type: craft\fields\Color

@@ -1,0 +1,11 @@
+fill: null
+format: jpg
+handle: halfWidth
+height: 1080
+interlace: none
+mode: crop
+name: 'Half Width'
+position: center-center
+quality: 60
+upscale: true
+width: 1000

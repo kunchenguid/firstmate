@@ -1,0 +1,50 @@
+defaultPlacement: end
+fieldLayouts:
+  47e86f78-2745-47d1-81d4-2c10cd4ceabe:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            autocapitalize: true
+            autocomplete: false
+            autocorrect: true
+            class: null
+            dateAdded: '2024-11-26T13:46:35+00:00'
+            disabled: false
+            elementCondition: null
+            id: null
+            includeInCards: false
+            inputType: null
+            instructions: null
+            label: null
+            max: null
+            min: null
+            name: null
+            orientation: null
+            placeholder: null
+            providesThumbs: false
+            readonly: false
+            requirable: false
+            size: null
+            step: null
+            tip: null
+            title: null
+            type: craft\fieldlayoutelements\TitleField
+            uid: 21b6544e-e97c-4f31-b263-176d5ad60878
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 2d2730ba-0f33-401f-80eb-aad3c30c0138
+        userCondition: null
+handle: columnDirection
+name: 'Column Direction'
+siteSettings:
+  a57193b9-dd25-415d-a670-e4b6a0c7b8cb: # $SYSTEM_NAME
+    hasUrls: false
+    template: null
+    uriFormat: null
+structure:
+  maxLevels: null
+  uid: 2d77c9b9-9afc-48ce-8dc7-dbc2cd1b06bc

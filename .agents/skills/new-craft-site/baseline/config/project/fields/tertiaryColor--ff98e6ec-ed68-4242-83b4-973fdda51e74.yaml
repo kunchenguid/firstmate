@@ -1,0 +1,10 @@
+columnSuffix: null
+handle: tertiaryColor
+instructions: null
+name: 'Tertiary Color'
+searchable: true
+settings:
+  allowCustomColors: true
+translationKeyFormat: null
+translationMethod: site
+type: craft\fields\Color

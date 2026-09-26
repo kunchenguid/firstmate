@@ -1,0 +1,10 @@
+columnSuffix: null
+handle: topNavigationLinkColor
+instructions: null
+name: 'Top Navigation Link Color'
+searchable: true
+settings:
+  allowCustomColors: true
+translationKeyFormat: null
+translationMethod: site
+type: craft\fields\Color

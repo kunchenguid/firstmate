@@ -1,0 +1,16 @@
+columnSuffix: null
+handle: officeDisclaimer
+instructions: null
+name: 'Office Disclaimer'
+searchable: false
+settings:
+  byteLimit: null
+  charLimit: null
+  code: false
+  initialRows: 10
+  multiline: true
+  placeholder: null
+  uiMode: normal
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\PlainText

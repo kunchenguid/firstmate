@@ -1,0 +1,64 @@
+css: ".ck.ck-content h1{\r\n\r\n    font-size:26px;\r\n\r\n}\r\n\r\n.ck.ck-content h2{\r\n\r\n    font-size:22px;\r\n\r\n}\r\n\r\n.ck.ck-content h3{\r\n\r\n    font-size:20px;\r\n\r\n}\r\n\r\n.ck.ck-content h4{\r\n\r\n    font-size:18px;\r\n\r\n}\r\n\r\n.ck.ck-content h5{\r\n\r\n    font-size:16px;\r\n\r\n}\r\n\r\n.ck.ck-content p.button-tertiary a {\r\n    font-weight: bold;\r\n    color: white;\r\n    padding: 1em 2em;\r\n    background-color:#767676;\r\n    display:inline-block;\r\n}\r\n\r\n.ck.ck-content p.button-secondary a {\r\n    font-weight: bold;\r\n    color: white;\r\n    padding: 1em 2em;\r\n    background-color:#434141;\r\n    display:inline-block;\r\n}\r\n\r\n.ck.ck-content p.button{\r\n\r\n    margin: 1em 0;\r\n\r\n}\r\n\r\n.ck.ck-content .styled-headline {\r\n  \ttext-transform:uppercase;\r\n    font-weight:800;\r\n    letter-spacing:2px;\r\n}"
+headingLevels:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+name: Default
+options:
+  alignment:
+    options:
+      - left
+      - right
+      - center
+  code:
+    indentSequence: '  '
+  link:
+    decorators:
+      isExternal:
+        attributes:
+          rel: 'noopener noreferrer'
+          target: _blank
+        defaultValue: false
+        label: 'Open in a new tab'
+        mode: manual
+  style:
+    definitions:
+      -
+        classes:
+          - sm-text
+        element: span
+        name: 'Small Font'
+      -
+        classes:
+          - font-white
+        element: span
+        name: 'White Text'
+      -
+        classes:
+          - button
+          - button-tertiary
+        element: p
+        name: 'Button Internal'
+      -
+        classes:
+          - button
+          - button-secondary
+        element: p
+        name: 'Button External'
+toolbar:
+  - sourceEditing
+  - '|'
+  - heading
+  - '|'
+  - blockQuote
+  - codeBlock
+  - bold
+  - italic
+  - strikethrough
+  - bulletedList
+  - numberedList
+  - insertImage
+  - link

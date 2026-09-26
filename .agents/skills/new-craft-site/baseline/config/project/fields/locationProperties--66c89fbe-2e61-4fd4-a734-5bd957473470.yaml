@@ -1,0 +1,33 @@
+columnSuffix: null
+handle: locationProperties
+instructions: null
+name: 'Location Properties'
+searchable: false
+settings:
+  customOptions: false
+  options:
+    -
+      __assoc__:
+        -
+          - label
+          - ATM
+        -
+          - value
+          - atm
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - 'Drive Up'
+        -
+          - value
+          - driveUp
+        -
+          - default
+          - ''
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Checkboxes
