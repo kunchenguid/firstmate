@@ -22,7 +22,9 @@
 # runs the away session; `enter` there adds one line when the host has no
 # engine, because every away wake then reaches main. Every other harness still
 # runs the daemon for now, so `start` and `start-native` require the record
-# `enter` wrote before they launch the daemon.
+# `enter` wrote before they launch the away daemon. Quiet mode never needs or
+# writes the record: it is attended supervision, so its entry and a refresh of
+# a running quiet daemon launch without one (fm_afk_launch_record_require).
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/.
 #
@@ -215,6 +217,16 @@ fm_afk_launch_host_primary() {  # <harness>
   return 1
 }
 
+# The mode this entry runs the daemon in: FM_AFK_MODE when it names one,
+# otherwise the mode already on disk, exactly as fm_afk_launch_flag_write will
+# record it (bin/fm-afk-start.sh fm_afk_flag_write).
+fm_afk_launch_requested_mode() {
+  case "${FM_AFK_MODE:-}" in
+    away|quiet) printf '%s\n' "$FM_AFK_MODE" ;;
+    *) fm_afk_mode "$FM_AFK_LAUNCH_STATE" ;;
+  esac
+}
+
 # The away daemon is no longer launched on Pi, nor for away mode on a primary
 # whose home opted into the supervision host (config/supervision-host,
 # docs/supervision-host.md): the posture record is the whole entry there and
@@ -222,7 +234,7 @@ fm_afk_launch_host_primary() {  # <harness>
 # runs the daemon on that home, so a quiet entry or a refresh of a running
 # quiet daemon is allowed.
 fm_afk_launch_daemon_allowed() {
-  local harness mode
+  local harness
   harness=$(fm_afk_launch_primary_harness)
   case "$harness" in
     pi|pi-signed)
@@ -231,11 +243,7 @@ fm_afk_launch_daemon_allowed() {
   esac
   fm_afk_launch_host_primary "$harness" || return 0
   [ -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/supervision-host" ] || return 0
-  mode=${FM_AFK_MODE:-}
-  if [ -z "$mode" ] && [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
-    mode=$(head -n 1 "$FM_AFK_LAUNCH_STATE/.afk" 2>/dev/null || true)
-  fi
-  [ "$mode" != quiet ] || return 0
+  [ "$(fm_afk_launch_requested_mode)" != quiet ] || return 0
   fm_afk_launch_log "the away daemon is not launched on this $harness home, which runs the supervision host (config/supervision-host); the away-posture record is the posture here (run bin/fm-afk-launch.sh enter and stop)"
   return 1
 }
@@ -266,8 +274,14 @@ fm_afk_launch_catchup_pending() {
   return 1
 }
 
+# Only away mode needs the away-posture record. Quiet mode is attended
+# supervision: a record would make the away posture live while the captain is
+# present (away merge authority, captain-held items left unchecked, and the next
+# unmarked message read as the return), so a quiet entry or a refresh of a
+# running quiet daemon never requires or creates one.
 fm_afk_launch_record_require() {
   local record
+  [ "$(fm_afk_launch_requested_mode)" != quiet ] || return 0
   record=$(fm_afk_contract_path "$FM_AFK_LAUNCH_STATE")
   if ! fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
     fm_afk_launch_log "an away-posture record is required; run enter before starting the daemon"
@@ -717,7 +731,7 @@ fm_afk_launch_start_native() {
 }
 
 fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result archived closed_daemon_terminal=0
+  local pid pid_identity current_identity result=0 read_result archived closed_daemon_terminal=0 record_note=""
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
@@ -772,6 +786,7 @@ fm_afk_launch_stop() {
   if [ "$result" -eq 0 ] && fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
     if archived=$("$FM_AFK_CONTRACT_CMD" archive); then
       fm_afk_launch_log "away-posture record archived at $archived"
+      record_note=", and the posture record archived"
     else
       fm_afk_launch_log "failed to archive the away-posture record; it still stands"
       result=1
@@ -779,9 +794,9 @@ fm_afk_launch_stop() {
   fi
   if [ "$result" -eq 0 ]; then
     if [ "$closed_daemon_terminal" -eq 1 ]; then
-      fm_afk_launch_log "away mode stopped; daemon terminal torn down, .afk cleared, and the posture record archived"
+      fm_afk_launch_log "away mode stopped; daemon terminal torn down and .afk cleared$record_note"
     else
-      fm_afk_launch_log "away mode stopped; no daemon terminal was running, .afk cleared, and the posture record archived"
+      fm_afk_launch_log "away mode stopped; no daemon terminal was running and .afk cleared$record_note"
     fi
   else
     fm_afk_launch_log "away mode stopped; terminal teardown or the record archive remains recorded for retry"

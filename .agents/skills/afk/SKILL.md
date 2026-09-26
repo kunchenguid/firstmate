@@ -41,7 +41,7 @@ Hold-for-return is the default and the only reach profile this release records: 
      Do not wrap it in `nohup ... &` (Codex/herdr can reap fire-and-forget shell children after a tool call returns).
    - **Every other harness** (codex, opencode, omp, and cursor without the supervision host, and kimi): run `bin/fm-afk-launch.sh start`.
      It is the single owner of the daemon terminal: it creates a NON-VISIBLE tracked terminal for the current backend and passes the captain pane in as `FM_SUPERVISOR_TARGET` so the daemon injects into the captain, not its own new pane (docs/herdr-backend.md "Away-mode supervisor support").
-   Both daemon paths require the record `enter` wrote and share `bin/fm-afk-start.sh` as the daemon entry.
+   Both daemon paths require the record `enter` wrote for away mode (quiet mode runs without one) and share `bin/fm-afk-start.sh` as the daemon entry.
    The daemon is **presence-gated**: it injects escalations only while `state/.afk` exists, and stays quiet otherwise.
 3. **Announce, then read back after entry.**
    Relay the announcement in spirit: hold-for-return only, no phone channel, your instructions are recorded and the away session will carry them out where it can, anything it is unsure of, or that needs you, waits for your return, and destructive, irreversible, and security-sensitive actions are never pre-authorizable whatever the words say.

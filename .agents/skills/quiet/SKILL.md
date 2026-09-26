@@ -23,19 +23,24 @@ exits it.
 
 ## What it does
 
-1. **Enter the lifecycle through `bin/fm-afk-launch.sh`, exactly as `/afk`
-   does, with `FM_AFK_MODE=quiet` set first.**
-   Follow the `afk` skill's "What it does" steps 1-3 verbatim (terminal-
-   backed vs harness-native entry, daemon-already-running refresh, never
-   arming a separate `fm-watch.sh`) with one addition: export
-   `FM_AFK_MODE=quiet` in the shell that invokes `bin/fm-afk-launch.sh start`
-   (or `start-native`), so `state/.afk`'s first line reads `quiet` instead of
-   `away`.
+1. **Enter the lifecycle through `bin/fm-afk-launch.sh` with
+   `FM_AFK_MODE=quiet` set first, and never write an away-posture record.**
+   Skip the `afk` skill's step 1 (`enter`) and its step 3 announcement:
+   quiet mode is attended supervision, and a `state/.afk-contract` record
+   would make the away posture live while the captain is present - away
+   merge authority, captain-held items no longer rechecked, and the next
+   unmarked message treated as the captain's return.
+   Follow the `afk` skill's steps 2 and 4 (per-harness daemon launch,
+   daemon-already-running refresh, never arming a separate `fm-watch.sh`)
+   with one addition: export `FM_AFK_MODE=quiet` in the shell that invokes
+   `bin/fm-afk-launch.sh start` (or `start-native`), so `state/.afk`'s first
+   line reads `quiet` instead of `away`; both start paths run quiet mode
+   without the record away mode requires.
    Leaving `FM_AFK_MODE` unset on a bare refresh of an already-running quiet
-   daemon is also correct and does nothing wrong: `fm_afk_flag_write`
-   preserves the on-disk mode when no explicit mode is given, so a plain
-   `/afk`-shaped refresh call never resets quiet back to away underneath the
-   captain.
+   daemon is also correct and does nothing wrong: the launcher and
+   `fm_afk_flag_write` both take the on-disk mode when no explicit mode is
+   given, so a plain refresh call neither requires a record nor resets quiet
+   back to away underneath the captain.
 
 2. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, quiet mode is
    active; I will batch routine updates and surface only decisions, failures,

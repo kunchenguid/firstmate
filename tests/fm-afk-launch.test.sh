@@ -214,6 +214,93 @@ unit_daemon_entry_requires_the_record() {
   rm -rf "$st"
 }
 
+# Quiet mode is attended supervision, not the away posture: it starts, refreshes,
+# and stops with no away-posture record, and creating one would hand away merge
+# authority to a present captain. Away mode still refuses without the record,
+# including an away request over a running quiet daemon.
+merge_authority() {  # <home>
+  bash -c '. "$1"; fm_merge_authority_resolve "$2" "$2/state" "$2/state/task.meta" task; printf "%s" "$FM_MERGE_AUTHORITY"' \
+    _ "$ROOT/bin/fm-merge-authority-lib.sh" "$1"
+}
+
+unit_quiet_entry_needs_no_away_record() {
+  local st out rc sleep_pid lock
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-quiet-record.XXXXXX")
+  mkdir -p "$st/state"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ "$(head -n 1 "$st/state/.afk" 2>/dev/null)" = quiet ] \
+    && [ ! -e "$st/state/.afk-contract" ] && [ "$(merge_authority "$st")" = attended ]; then
+    pass "quiet entry: start-native starts without an away-posture record and creates none, so merge authority stays attended"
+  else
+    fail "quiet entry: start-native refused or created an away record (rc=$rc, authority=$(merge_authority "$st")): $out"
+  fi
+
+  sleep 600 &
+  sleep_pid=$!
+  lock="$st/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$sleep_pid" > "$lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$lock/pid-identity" 2>/dev/null ) || true
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ "$(head -n 1 "$st/state/.afk")" = quiet ] && [ ! -e "$st/state/.afk-contract" ]; then
+    pass "quiet entry: a bare refresh of a running quiet daemon needs no away-posture record"
+  else
+    fail "quiet entry: bare refresh of a running quiet daemon refused (rc=$rc): $out"
+  fi
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=away "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ "$(head -n 1 "$st/state/.afk")" = quiet ] && [ ! -e "$st/state/.afk-contract" ] \
+    && printf '%s' "$out" | grep -F 'an away-posture record is required; run enter' >/dev/null; then
+    pass "quiet entry: an away request over a running quiet daemon still requires the away-posture record"
+  else
+    fail "quiet entry: away request over quiet ran without a record (rc=$rc): $out"
+  fi
+  kill "$sleep_pid" 2>/dev/null || true
+  wait "$sleep_pid" 2>/dev/null || true
+  rm -rf "$lock"
+
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] \
+    && [ ! -e "$st/state/.afk-contract" ] && [ ! -e "$st/state/afk-contracts" ] \
+    && ! printf '%s' "$out" | grep -F 'record archived' >/dev/null; then
+    pass "quiet exit: stop shuts quiet mode down cleanly with no away-posture record and claims no archive"
+  else
+    fail "quiet exit: stop failed or claimed an archive with no record (rc=$rc): $out"
+  fi
+  rm -rf "$st"
+}
+
+# The terminal-launch `start` path shares the gate: a quiet start with no record
+# reaches the backend launch (refused here only for its unsupported backend),
+# while an away start without the record never gets that far.
+unit_quiet_start_needs_no_away_record() {
+  local st out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-quiet-start.XXXXXX")
+  mkdir -p "$st/state"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet FM_SUPERVISOR_TARGET=unused \
+    FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F "no non-visible daemon-launch primitive for backend 'unsupported'" >/dev/null \
+    && ! printf '%s' "$out" | grep -F 'away-posture record' >/dev/null && [ ! -e "$st/state/.afk-contract" ]; then
+    pass "quiet start: the terminal launch path passes the record gate without an away-posture record"
+  else
+    fail "quiet start: the terminal launch path refused quiet mode on the record gate (rc=$rc): $out"
+  fi
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
+    FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F 'an away-posture record is required; run enter' >/dev/null \
+    && [ ! -e "$st/state/.afk" ]; then
+    pass "away start: the terminal launch path still refuses without the away-posture record"
+  else
+    fail "away start: the terminal launch path ran without the record (rc=$rc): $out"
+  fi
+  rm -rf "$st"
+}
+
 unit_failed_daemon_launch_preserves_the_record() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-failed-record.XXXXXX")
@@ -1386,6 +1473,8 @@ unit_pi_never_launches_the_daemon
 unit_test_harness_seam_requires_the_marker
 unit_pi_enter_stop_does_not_claim_a_daemon_terminal
 unit_daemon_entry_requires_the_record
+unit_quiet_entry_needs_no_away_record
+unit_quiet_start_needs_no_away_record
 unit_failed_daemon_launch_preserves_the_record
 unit_stop_archives_the_record_last
 unit_relative_paths_are_absolute_before_daemon_launch
