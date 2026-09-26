@@ -784,11 +784,13 @@ test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine ou
   out=$(poll_at 2026-09-16T09:00:00Z)
   [ "$out" = "$line" ] || fail "the first failure of an episode did not wake: $out"
   first_cycle_calls=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
+  # Every call fails instantly here, so one cycle always spends both attempts.
+  [ "$first_cycle_calls" = 2 ] || fail "a failing cycle spent $first_cycle_calls attempts, not 2"
   out=$(poll_at 2026-09-16T10:00:00Z)
   [ -z "$out" ] || fail "an unchanged read failure woke again on the next cycle: $out"
   jq -e --argjson error "$error" '.records[0] | .checked_at == "2026-09-16T10:00:00Z" and .error == $error' \
     "$home/data/delivery/contributions.json" >/dev/null || fail 'a repeated read failure stopped recording its error'
-  [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" -gt "$first_cycle_calls" ] \
+  [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = "$((first_cycle_calls * 2))" ] \
     || fail 'a failing open PR stopped being observed'
   : > "$home/forge/fault"
   out=$(poll_at 2026-09-16T11:00:00Z)
